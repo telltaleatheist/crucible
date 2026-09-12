@@ -9,9 +9,10 @@ never knows what an audiobook or a cleanup pass is.
 
 See `docs/DESIGN.md` for the architecture and `docs/PLAN.md` for the build order.
 
-**Status: phase 1 (A1).** The handshake is real — config, token, backend detection, API
-v1, the job queue, provenance sidecars, and the `echo` test job type. No model has been
-loaded by this code yet; `llm`, `tts`, `vlm-pages`, `align` and `rvc` arrive in phases 2-4.
+**Status: phase 1 (A1-A3).** The handshake is real — config, token, backend detection,
+API v1, the job queue, provenance sidecars, the `echo` test job type, and the TypeScript
+client that speaks to all of it. No model has been loaded by this code yet; `llm`, `tts`,
+`vlm-pages`, `align` and `rvc` arrive in phases 2-4.
 
 ## Hosts
 
@@ -139,6 +140,41 @@ Cancellation is cooperative: a queued job is cancelled immediately, a running on
 told to stop and ends `cancelled` at its next checkpoint (`DELETE` answers
 `{"status": "cancelling"}` in that case).
 
+## The client
+
+`sdk/ts/` is `@crucible/client`, the TypeScript client for this API: ESM and CommonJS
+builds, `.d.ts` for both, and **no runtime dependencies** — Node 20+, bun and the
+Electron main process all have `fetch`, `ReadableStream`, `FormData` and `Blob`.
+
+```bash
+npm install https://github.com/telltaleatheist/crucible/releases/download/v0.1.0/crucible-client-0.1.0.tgz
+```
+
+```ts
+const crucible = new CrucibleClient({ url: 'http://127.0.0.1:7100', token, clientName: 'bookforge' });
+const jobId = await crucible.submit({ type: 'echo', params: {}, inputs: { 'note.txt': { inline: bytes } } });
+for await (const event of crucible.events(jobId)) console.log(event.event, event.data);
+```
+
+See `sdk/ts/README.md` for the whole surface and the error types. There is no npm
+registry publish: the tarball on the release is the distribution.
+
+## Releases
+
+One version, one tag, one release. `v<ver>` carries all three artefacts —
+`crucible-<ver>.tar.gz`, `crucible-<ver>-py3-none-any.whl` and
+`crucible-client-<ver>.tgz` — because the server and the client that speaks to it share
+a version, so a client can never be paired with a server nobody tested it against.
+
+```bash
+./scripts/release.sh --dry-run   # build and check, create nothing
+./scripts/release.sh             # cut v<ver> from main
+```
+
+The version is read from `crucible/__init__.py`, `sdk/ts/package.json` and
+`sdk/ts/src/version.ts`; a disagreement between any two of them is a refusal. So is a
+dirty tree, an unpushed HEAD, and a tag that already exists.
+
 ## Tests
 
 ```bash
@@ -153,5 +189,18 @@ never touches a real `~/.crucible`: every test gets a `CRUCIBLE_HOME` under pyte
 The live keeper is not: it runs `crucible init`/`serve`/`doctor` for real and asserts
 that `/info` reports one of the two real backends.
 
-Run both on Linux or macOS. On Windows the CLI refuses by design, so the suite must run
-inside WSL2.
+The SDK has its own two:
+
+```bash
+cd sdk/ts && npm ci && npm run test:unit   # the error map, in-process http fixture
+./scripts/e2e.sh                           # Linux/macOS: real server, real client
+./scripts/e2e-from-windows.sh              # Windows (Git Bash): server in WSL2, client native
+```
+
+The e2e needs `CRUCIBLE_URL` and `CRUCIBLE_TOKEN` and **fails by name** if either is
+missing — it never skips. Both scripts set them up around a throwaway server on a free
+port and stop it with SIGTERM.
+
+Run the Python suites on Linux or macOS. On Windows the CLI refuses by design, so they
+must run inside WSL2 — which is exactly what `scripts/e2e-from-windows.sh` arranges,
+with the client staying native so the Windows -> WSL2 seam is what gets tested.

@@ -18,19 +18,32 @@ the seam without touching the app UI).
 - verified on the PC's WSL (reports `cuda-linux`) and the Mac (reports `mlx-darwin`)
 
 **A2. SDK** (`sdk/ts/`, `@crucible/client`)
-- `CrucibleClient({url, token})`: `ping`, `info`, `health`, `upload`, `submit`,
-  `events(jobId)` async iterator, `artifact`, `cancel`; `X-Crucible-Api: 1` on every call
-- typed errors: `CrucibleAuthError`, `CrucibleVersionError`, `CrucibleRefused` (with the
-  server's named reason), `CrucibleUnreachable`
+- `CrucibleClient({url, token, clientName})`: `ping`, `info`, `health`, `upload`,
+  `submit`, `job`, `events(jobId)` async iterator, `artifact`, `provenance`, `cancel`;
+  `X-Crucible-Api: 1` and the bearer token on every call except `ping`
+- typed errors: `CrucibleConfigError`, `CrucibleUnreachable`, `CrucibleNotACrucible`,
+  `CrucibleAuthError`, `CrucibleVersionError`, `CrucibleRefused` (with the server's named
+  reason), `CrucibleServerError`, `CrucibleProtocolError`
 - runtime deps: none (fetch + ReadableStream; Node 20+, bun, Electron)
-- tests spawn the Python server (A1) and run the echo job end to end
-- `npm pack` → `crucible-client-<ver>.tgz` uploaded to a GitHub Release tagged `sdk-v<ver>`
+- ESM and CJS builds with `.d.ts` for both, so all three runtimes can import it
+- `scripts/e2e.sh` starts a real server and runs the echo job end to end;
+  `scripts/e2e-from-windows.sh` does it with the server in WSL2 and the client native
+- `npm pack` → `crucible-client-<ver>.tgz`, released with the server (see A3)
 
 **A3. Release plumbing** (`scripts/release.sh`)
-- builds sdist/wheel + SDK tgz, `gh release create v<ver>` with both attached
+- **one release per version, tagged `v<ver>`**, carrying all three artefacts:
+  `crucible-<ver>.tar.gz`, `crucible-<ver>-py3-none-any.whl` and
+  `crucible-client-<ver>.tgz`. The SDK is not released separately; the server and the
+  client that speaks to it share a version so a client can never be paired with a server
+  nobody tested it against.
+- the version is read from `crucible/__init__.py`, `sdk/ts/package.json` and
+  `sdk/ts/src/version.ts`, and a disagreement is a refusal
+- `gh release create v<ver>` with the three assets and generated notes; an existing tag
+  is refused rather than re-cut
 
 **B. BookForge handshake** (after A2's tarball exists)
 - `package.json` pins `@crucible/client` to the release tarball URL
+  (`https://github.com/telltaleatheist/crucible/releases/download/v<ver>/crucible-client-<ver>.tgz`)
 - `electron/crucible/servers.ts`: server registry in `<userData>/crucible-servers.json`
   (`{name, url, token}`), no UI yet
 - `cli/bookforge-tts.py`: `--crucible-ping`, `--crucible-info`, `--crucible-echo <file>`
