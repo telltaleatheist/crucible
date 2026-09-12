@@ -1,0 +1,50 @@
+{
+  "name": "@crucible/client",
+  "version": "0.1.0",
+  "description": "TypeScript client for a Crucible inference server. Zero runtime dependencies.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Owen Morgan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/telltaleatheist/crucible.git",
+    "directory": "sdk/ts"
+  },
+  "homepage": "https://github.com/telltaleatheist/crucible/tree/main/sdk/ts",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && node scripts/stamp-module-type.mjs",
+    "build:test": "tsc -p tsconfig.test.json",
+    "test:unit": "npm run build && npm run build:test && node --test build/test/unit.test.js",
+    "test:e2e": "npm run build && npm run build:test && node --test build/test/e2e.test.js",
+    "test": "npm run test:unit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4"
+  }
+}
