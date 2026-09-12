@@ -130,7 +130,13 @@ fi
 
 # 5. wrong api version is 426 naming both
 CODE="$(curl -sS -o "$WORK/426b.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H "X-Crucible-Api: 99" "$BASE/info")"
-if [ "$CODE" = "426" ] && grep -q '"client_api_version": 99' "$WORK/426b.json"; then
+if [ "$CODE" = "426" ] && python3 - "$WORK/426b.json" <<'PY'
+import json, sys
+error = json.load(open(sys.argv[1]))["error"]
+assert error["code"] == "api_version_mismatch", error
+assert error["details"] == {"server_api_version": 1, "client_api_version": 99}, error
+PY
+then
   ok "api version 99 is 426 naming both versions"
 else
   bad "api version 99 returned $CODE: $(cat "$WORK/426b.json")"
