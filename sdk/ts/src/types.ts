@@ -135,12 +135,13 @@ export interface QueuedData {
 }
 
 /**
- * A model is being loaded for this job. DESIGN.md names the event but not its
- * payload, and the phase-1 server never emits it (nothing loads a model yet), so
- * the payload is left open rather than invented.
+ * A model is being loaded for this job: one line of the engine's own readiness,
+ * streamed as it happens. PHASE2-LLM.md section 5 pins the payload to
+ * `{message}`; a `warming` frame without one is a protocol error, not an empty
+ * message.
  */
 export interface WarmingData {
-  readonly [key: string]: unknown;
+  readonly message: string;
 }
 
 export interface ProgressData {
@@ -152,8 +153,25 @@ export interface ArtifactData {
   readonly name: string;
 }
 
+/**
+ * The terminal `done` event's payload.
+ *
+ * Different job types finish with different news: a producing job (`echo`,
+ * later `tts`, `vlm-pages`) reports the artifacts it wrote, and `load-model`
+ * reports the model that is now resident (PHASE2-LLM.md section 5). There is no
+ * discriminant inside the frame — the caller already knows which job it
+ * submitted — so this is one record with both fields optional rather than a
+ * union the caller would have to narrow before reading `artifacts`.
+ *
+ * It is still checked, not loose: `artifacts` must be an array of strings and
+ * `resident` a string wherever either appears, and a `done` frame carrying
+ * *neither* is a {@link CrucibleProtocolError}.
+ */
 export interface DoneData {
-  readonly artifacts: readonly string[];
+  /** What a producing job wrote. Fetch each with `artifact(jobId, name)`. */
+  readonly artifacts?: readonly string[];
+  /** The model now resident, on a `load-model` job. */
+  readonly resident?: string;
 }
 
 export interface FailedData {
@@ -183,4 +201,82 @@ export interface Provenance {
   readonly params: Readonly<Record<string, unknown>>;
   readonly started: string | null;
   readonly finished: string;
+}
+
+// --------------------------------------------------------------------- llm
+
+/**
+ * One model this server knows about, as `GET /v1/models` describes it
+ * (PHASE2-LLM.md section 5).
+ *
+ * The four booleans are four different facts and none of them implies another:
+ * `backendSupported` is "the manifest has a block for this host's backend",
+ * `installed` is "the weights are on disk", `resident` is "an engine is serving
+ * it right now", and `loadable` is "asking for it now would succeed" — which
+ * also depends on the accelerator guard (section 4), so a model can be
+ * installed and supported and still not loadable because someone else's process
+ * holds the card.
+ */
+export interface ModelInfo {
+  /** Crucible's id, stable across backends, e.g. `qwen3.5-9b`. */
+  readonly id: string;
+  readonly family: string;
+  readonly paramsB: number;
+  readonly backendSupported: boolean;
+  readonly installed: boolean;
+  readonly resident: boolean;
+  readonly loadable: boolean;
+  /**
+   * Why it is not loadable, in the server's words. Always present when
+   * `loadable` is false — a refusal with no reason is a protocol error — and
+   * absent when it is true.
+   */
+  readonly reason?: string;
+  /** Weights plus KV at `contextDefault`, measured on the host, not guessed. */
+  readonly memoryBytesEstimate: number;
+  readonly contextDefault: number;
+}
+
+/** One turn of a chat. `content` is text; this client sends no other part types. */
+export interface ChatMessage {
+  readonly role: 'system' | 'user' | 'assistant';
+  readonly content: string;
+}
+
+/** What {@link CrucibleClient.chat} and {@link CrucibleClient.chatStream} take. */
+export interface ChatOptions {
+  /**
+   * The model to talk to. Must be the resident one: the server never loads
+   * implicitly, and answers 409 `model_not_resident` naming what is resident
+   * instead (PHASE2-LLM.md section 5).
+   */
+  readonly model: string;
+  readonly messages: readonly ChatMessage[];
+  readonly temperature?: number;
+  readonly topP?: number;
+  readonly maxTokens?: number;
+  readonly stop?: readonly string[];
+  /** Aborts the request. See the README: the abort surfaces as a DOM `AbortError`. */
+  readonly signal?: AbortSignal;
+}
+
+/** The tokens a completion cost, as the engine counted them. */
+export interface ChatUsage {
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly totalTokens: number;
+}
+
+/**
+ * One non-streamed completion: OpenAI's `chat.completion` read down to the part
+ * a caller actually uses. The first choice is the only one — this client never
+ * asks for `n > 1`.
+ */
+export interface ChatResponse {
+  readonly id: string;
+  readonly model: string;
+  readonly content: string;
+  /** `stop`, `length`, ... — the engine's own word for why it stopped. */
+  readonly finishReason: string;
+  readonly usage: ChatUsage;
 }
