@@ -231,14 +231,19 @@ API server process never imports torch or mlx.
 Before any engine starts, Crucible looks at the card and **refuses rather than
 competing**. It never evicts anything.
 
+They are checked in this order — what can never be fixed, then what an install or a pull
+would fix, then what the accelerator says right now — so a 27B on a 24 GB card is refused
+for being a 27B on a 24 GB card rather than for needing a 55 GB download first:
+
 | Refusal | When |
 |---|---|
-| `accelerator_busy` (409) | a process that is not Crucible's holds more than 1 GiB — named, with its pid |
-| `insufficient_memory` (409) | free memory is below the manifest's estimate — both numbers named |
+| `unknown_model` (400) | no manifest with that id |
+| `backend_unsupported` (400) | the manifest has no block for this host |
+| `insufficient_memory` (409) | the estimate exceeds the accelerator's **total** — never loadable here |
 | `env_missing` (409) | `~/.crucible/envs/llm` is not installed |
 | `model_not_installed` (409) | no weights at the manifest's pinned revision |
-| `backend_unsupported` (400) | the manifest has no block for this host |
-| `unknown_model` (400) | no manifest with that id |
+| `accelerator_busy` (409) | a process that is not Crucible's holds more than 1 GiB — named, with its pid |
+| `insufficient_memory` (409) | not enough **free** memory right now — both numbers named |
 
 All of these happen **before the job is queued**, so a client is told by name instead of
 watching a job fail a minute later.
