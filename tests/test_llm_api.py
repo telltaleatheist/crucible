@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -535,9 +536,11 @@ def test_health_says_warming_while_a_load_is_in_flight(
     assert response.status_code == 202
     job_id = response.json()["job_id"]
     try:
-        for _ in range(100):
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
             if built and built[0].warming_started.wait(timeout=0.1):
                 break
+            time.sleep(0.05)  # the engine is not built yet; let the lane run
         assert built and built[0].warming_started.is_set(), "the lane never started"
 
         health = llm_client.get("/v1/health", headers=auth).json()
