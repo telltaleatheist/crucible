@@ -62,10 +62,11 @@ PY
 }
 
 engine_rss() {
-  # The engine subprocess and everything it forked, by the weights path on its
-  # command line — there is exactly one such process, the one we started.
-  local total=0
-  for pid in $(pgrep -f "crucible/models/$MODEL/$BACKEND" || true); do
+  # The engine subprocess and everything it forked, found by the weights path on
+  # its command line. That path is under this run's throwaway CRUCIBLE_HOME, so
+  # it cannot match anything else on the machine.
+  local total=0 rss
+  for pid in $(pgrep -f "models/$MODEL/$BACKEND" || true); do
     rss="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')"
     [ -n "$rss" ] && total=$((total + rss * 1024))
   done
@@ -97,23 +98,37 @@ sleep 5
 REST="$(card)"; REST_RSS="$(engine_rss)"
 echo "  at rest:      card $((REST / 1024 / 1024)) MiB (+$(( (REST - BEFORE) / 1024 / 1024 )) MiB), engine rss $((REST_RSS / 1024 / 1024)) MiB"
 
-# A prompt long enough to fill context_default tokens of KV. "word " is one token
-# for this tokenizer's purposes at worst two, so over-supply and let max_tokens
-# keep the answer short: what is being measured is the KV the prompt allocates.
-python3 - "$MODEL" "$CONTEXT" "$WORK/big.json" <<'PY'
+# A prompt that fills context_default tokens of KV — sized with the model's OWN
+# tokenizer, out of the llm env, so the reading is for the context the manifest
+# promises and not for whatever a word-count guess happened to produce.
+"$REAL_HOME/envs/llm/bin/python" - \
+  "$MODEL" "$CONTEXT" "$REAL_HOME/models/$MODEL/$BACKEND" "$WORK/big.json" <<'PY'
 import json, sys
-model, context, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-filler = " ".join(f"item{n}" for n in range(context))
-body = {
-    "model": model,
-    "messages": [
-        {"role": "user",
-         "content": "Here is a list. Reply with only the word OK.\n" + filler},
-    ],
-    "max_tokens": 16,
-    "temperature": 0,
-}
-json.dump(body, open(out, "w"))
+from transformers import AutoTokenizer
+
+model, context, weights, out = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+tokenizer = AutoTokenizer.from_pretrained(weights)
+lead = "Here is a list. Reply with only the word OK.\n"
+# Leave room for the chat template's own tokens and the 16-token answer.
+budget = context - 96
+words, filler = [], ""
+while True:
+    candidate = filler + ("" if not filler else " ") + f"item{len(words)}"
+    if len(tokenizer(lead + candidate)["input_ids"]) > budget:
+        break
+    words.append(len(words))
+    filler = candidate
+total = len(tokenizer(lead + filler)["input_ids"])
+print(f"  prompt sized to {total} tokens of a {context}-token context", flush=True)
+json.dump(
+    {
+        "model": model,
+        "messages": [{"role": "user", "content": lead + filler}],
+        "max_tokens": 16,
+        "temperature": 0,
+    },
+    open(out, "w"),
+)
 PY
 echo "  running a completion that fills $CONTEXT tokens of context..."
 curl -sS --max-time 1800 "${AUTH[@]}" --data-binary "@$WORK/big.json" \
