@@ -231,19 +231,30 @@ fi
 
 # --------------------------------------------------- 5. a non-streamed chat
 
+# Qwen3.5 is a reasoning model: it emits a `reasoning` field first and only then
+# `content`. A 32-token ceiling finishes inside the reasoning and comes back with
+# no `content` at all — which is the model working, not the proxy failing. So the
+# ceiling is high enough to reach an answer, and the check is that the completion
+# ran to `stop` with text in `content`.
 cat >"$WORK/chat.json" <<JSON
 {"model": "$MODEL",
- "messages": [{"role": "user", "content": "Reply with exactly: Crucible is running."}],
- "temperature": 0, "max_tokens": 32}
+ "messages": [{"role": "user", "content": "Reply with exactly this and nothing else: Crucible is running."}],
+ "temperature": 0, "max_tokens": 512}
 JSON
 CODE="$(curl -sS -o "$WORK/chat.out.json" -w '%{http_code}' --max-time 600 \
   "${AUTH[@]}" "${JSON[@]}" --data-binary "@$WORK/chat.json" "$BASE/openai/chat/completions")"
 if [ "$CODE" = "200" ] && python3 - "$WORK/chat.out.json" "$MODEL" <<'PY'
 import json, sys
 body = json.load(open(sys.argv[1]))
-assert body["choices"][0]["message"]["content"].strip(), body
+choice = body["choices"][0]
+assert choice["finish_reason"] == "stop", choice["finish_reason"]
+content = choice["message"].get("content") or ""
+assert content.strip(), f"no content in {choice['message'].keys()}"
 assert body["usage"]["completion_tokens"] > 0, body
-print("    content:", repr(body["choices"][0]["message"]["content"]))
+reasoning = choice["message"].get("reasoning") or ""
+print("    content:", repr(content))
+if reasoning:
+    print(f"    reasoning: {len(reasoning)} chars (Qwen3.5 thinks first)")
 print("    usage:", body["usage"])
 PY
 then
@@ -256,8 +267,8 @@ fi
 
 cat >"$WORK/chatstream.json" <<JSON
 {"model": "$MODEL",
- "messages": [{"role": "user", "content": "Count from one to five."}],
- "temperature": 0, "max_tokens": 48, "stream": true}
+ "messages": [{"role": "user", "content": "Count from one to five, digits only, separated by spaces."}],
+ "temperature": 0, "max_tokens": 512, "stream": true}
 JSON
 curl -sS -N --max-time 600 "${AUTH[@]}" "${JSON[@]}" \
   --data-binary "@$WORK/chatstream.json" "$BASE/openai/chat/completions" >"$WORK/chat.sse"
@@ -267,14 +278,17 @@ raw = open(sys.argv[1], encoding="utf-8").read()
 frames = [line for line in raw.split("\n") if line.startswith("data: ")]
 assert frames, "no SSE frames came back"
 assert frames[-1].strip() == "data: [DONE]", frames[-1]
-pieces = []
+content, reasoning = [], []
 for frame in frames[:-1]:
-    chunk = json.loads(frame[len("data: "):])
-    pieces.append(chunk["choices"][0]["delta"].get("content", ""))
-assert len(pieces) > 1, f"only {len(pieces)} deltas — that is not a stream"
-assert "".join(pieces).strip(), "the stream carried no text"
-print("    deltas:", len(pieces))
-print("    content:", repr("".join(pieces)))
+    delta = json.loads(frame[len("data: "):])["choices"][0]["delta"]
+    content.append(delta.get("content") or "")
+    reasoning.append(delta.get("reasoning") or "")
+assert len(frames) > 2, f"only {len(frames)} frames — that is not a stream"
+assert "".join(content).strip(), "the stream carried no content"
+print("    frames:", len(frames), "(including [DONE])")
+if "".join(reasoning).strip():
+    print(f"    reasoning: {len(''.join(reasoning))} chars streamed before the answer")
+print("    content:", repr("".join(content)))
 PY
 then
   ok "streamed chat completion, SSE framing intact, terminated by [DONE]"

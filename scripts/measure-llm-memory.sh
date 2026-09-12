@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Measure what a resident model actually costs, so the manifest's
+# `memory_bytes_estimate` is a number somebody read off a machine.
+#
+#   ./scripts/measure-llm-memory.sh [model-id]
+#
+# Two readings, both with the model resident:
+#   at rest        — the engine has answered /v1/models and generated one token
+#   under context  — after a completion that has filled `context_default` tokens
+#
+# On cuda-linux the figure is `nvidia-smi memory.used` minus what was on the card
+# before the engine started, which is the engine's share of the card and nothing
+# else. On mlx-darwin it is the engine process's resident set: unified memory
+# "available" moves by much less than the model's size because macOS reclaims
+# inactive pages to make room, so a delta in available memory would understate it.
+#
+# Needs the host ready (env installed, model pulled) and refuses by name if not.
+
+set -euo pipefail
+
+MODEL="${1:-qwen3.5-9b}"
+SERVER_PID=""
+ROOT=""
+
+cleanup() {
+  if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill -TERM "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+  [ -n "$ROOT" ] && [ -d "$ROOT" ] && rm -rf "$ROOT"
+}
+trap cleanup EXIT
+
+REAL_HOME="${CRUCIBLE_HOME:-$HOME/.crucible}"
+[ -d "$REAL_HOME/envs/llm" ] || { echo "no llm env at $REAL_HOME/envs/llm" >&2; exit 2; }
+
+BACKEND="$(python3 -c 'from crucible.backend import detect_backend; print(detect_backend().kind)')"
+[ -d "$REAL_HOME/models/$MODEL/$BACKEND" ] || {
+  echo "$MODEL is not pulled for $BACKEND" >&2; exit 2; }
+
+CONTEXT="$(python3 - "$MODEL" <<'PY'
+import sys
+from crucible.manifests import load_manifest
+print(load_manifest(sys.argv[1]).context_default)
+PY
+)"
+
+ROOT="$(mktemp -d "${TMPDIR:-/tmp}/crucible-measure.XXXXXX")"
+export CRUCIBLE_HOME="$ROOT/home"
+WORK="$ROOT/work"; mkdir -p "$CRUCIBLE_HOME" "$WORK"
+ln -s "$REAL_HOME/envs" "$CRUCIBLE_HOME/envs"
+ln -s "$REAL_HOME/models" "$CRUCIBLE_HOME/models"
+PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
+
+card() {
+  python3 - "$BACKEND" <<'PY'
+import sys
+from crucible.accelerator import read_state
+state = read_state(sys.argv[1], 0)
+print(state.used_bytes)
+PY
+}
+
+engine_rss() {
+  # The engine subprocess and everything it forked, by the weights path on its
+  # command line — there is exactly one such process, the one we started.
+  local total=0
+  for pid in $(pgrep -f "crucible/models/$MODEL/$BACKEND" || true); do
+    rss="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')"
+    [ -n "$rss" ] && total=$((total + rss * 1024))
+  done
+  echo "$total"
+}
+
+echo "measuring $MODEL on $BACKEND, context $CONTEXT"
+BEFORE="$(card)"
+echo "  card before:  $((BEFORE / 1024 / 1024)) MiB in use"
+
+crucible init --enable-llm --host 127.0.0.1 --port "$PORT" --name "crucible@measure" >/dev/null
+TOKEN="$(crucible token --show)"
+BASE="http://127.0.0.1:$PORT/v1"
+crucible serve --host 127.0.0.1 --port "$PORT" --log-level warning >"$WORK/serve.log" 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 120); do
+  curl -fsS --max-time 2 "$BASE/ping" -o /dev/null 2>/dev/null && break
+  sleep 0.25
+done
+
+AUTH=(-H "Authorization: Bearer $TOKEN" -H "X-Crucible-Api: 1" -H 'Content-Type: application/json')
+
+JOB="$(curl -sS "${AUTH[@]}" -d "{\"type\":\"load-model\",\"model\":\"$MODEL\",\"params\":{\"timeout_s\":1800}}" \
+  "$BASE/jobs" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')"
+curl -sS -N --max-time 2000 "${AUTH[@]}" "$BASE/jobs/$JOB/events" >"$WORK/load.sse"
+grep -q 'event: done' "$WORK/load.sse" || { echo "the load failed:"; tail -5 "$WORK/load.sse"; exit 1; }
+
+sleep 5
+REST="$(card)"; REST_RSS="$(engine_rss)"
+echo "  at rest:      card $((REST / 1024 / 1024)) MiB (+$(( (REST - BEFORE) / 1024 / 1024 )) MiB), engine rss $((REST_RSS / 1024 / 1024)) MiB"
+
+# A prompt long enough to fill context_default tokens of KV. "word " is one token
+# for this tokenizer's purposes at worst two, so over-supply and let max_tokens
+# keep the answer short: what is being measured is the KV the prompt allocates.
+python3 - "$MODEL" "$CONTEXT" "$WORK/big.json" <<'PY'
+import json, sys
+model, context, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+filler = " ".join(f"item{n}" for n in range(context))
+body = {
+    "model": model,
+    "messages": [
+        {"role": "user",
+         "content": "Here is a list. Reply with only the word OK.\n" + filler},
+    ],
+    "max_tokens": 16,
+    "temperature": 0,
+}
+json.dump(body, open(out, "w"))
+PY
+echo "  running a completion that fills $CONTEXT tokens of context..."
+curl -sS --max-time 1800 "${AUTH[@]}" --data-binary "@$WORK/big.json" \
+  "$BASE/openai/chat/completions" >"$WORK/big.out.json" || true
+python3 - "$WORK/big.out.json" <<'PY'
+import json, sys
+body = json.load(open(sys.argv[1]))
+if "usage" in body:
+    print("  prompt tokens:", body["usage"]["prompt_tokens"])
+else:
+    print("  the engine refused the long prompt:", json.dumps(body)[:300])
+PY
+
+LOADED="$(card)"; LOADED_RSS="$(engine_rss)"
+echo "  under context: card $((LOADED / 1024 / 1024)) MiB (+$(( (LOADED - BEFORE) / 1024 / 1024 )) MiB), engine rss $((LOADED_RSS / 1024 / 1024)) MiB"
+
+if [ "$BACKEND" = "cuda-linux" ]; then
+  MEASURED=$((LOADED - BEFORE))
+else
+  MEASURED="$LOADED_RSS"
+fi
+echo
+echo "memory_bytes_estimate = $MEASURED   # $((MEASURED / 1024 / 1024)) MiB, $(python3 -c "print(f'{$MEASURED/1e9:.2f}')") GB"
+
+curl -sS "${AUTH[@]}" -d "{\"type\":\"unload-model\",\"model\":\"$MODEL\"}" "$BASE/jobs" \
+  | python3 -c 'import json,sys; print("  unload job", json.load(sys.stdin)["job_id"])'
+sleep 8
+AFTER="$(card)"
+echo "  card after:   $((AFTER / 1024 / 1024)) MiB in use (started at $((BEFORE / 1024 / 1024)) MiB)"
