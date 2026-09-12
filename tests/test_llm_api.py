@@ -508,7 +508,13 @@ def test_health_says_warming_while_a_load_is_in_flight(
     idle_card: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PHASE2-LLM.md section 5: `/health` reports `warming` while a load runs."""
+    """PHASE2-LLM.md section 5: `/health` reports `warming` while a load runs.
+
+    The engine is held inside `ready()` so the server is looked at with a load
+    genuinely in flight, rather than racing a sleep. The job's event stream is
+    deliberately NOT open while `/health` is read: nesting a request inside a
+    TestClient stream answers from a stale view of the store.
+    """
     hold = threading.Event()
     built: list[FakeEngine] = []
 
@@ -528,25 +534,26 @@ def test_health_says_warming_while_a_load_is_in_flight(
     response = submit(llm_client, auth, type="load-model", model=MODEL)
     assert response.status_code == 202
     job_id = response.json()["job_id"]
-
-    # Wait for the lane to actually reach the engine, then look at the server
-    # while the load is genuinely in flight.
-    with llm_client.stream("GET", f"/v1/jobs/{job_id}/events", headers=auth) as stream:
-        events = stream.iter_lines()
-        assert built or next(events) is not None
-        for _ in range(40):
-            if built and built[0].warming_started.wait(timeout=0.25):
+    try:
+        for _ in range(100):
+            if built and built[0].warming_started.wait(timeout=0.1):
                 break
-        assert built and built[0].warming_started.is_set()
+        assert built and built[0].warming_started.is_set(), "the lane never started"
 
         health = llm_client.get("/v1/health", headers=auth).json()
         assert health["status"] == "warming", health
+        assert health["queue_depth"] == 1, health
         assert health["resident_models"] == [], health
-
+        assert (
+            llm_client.get(f"/v1/jobs/{job_id}", headers=auth).json()["status"]
+            == "running"
+        )
+    finally:
         hold.set()
-        for _ in stream.iter_lines():
-            pass
 
+    with llm_client.stream("GET", f"/v1/jobs/{job_id}/events", headers=auth) as stream:
+        events = parse_sse(line for line in stream.iter_lines())
+    assert events[-1]["event"] == "done"
     assert llm_client.get("/v1/health", headers=auth).json() == {
         "status": "ok",
         "queue_depth": 0,
