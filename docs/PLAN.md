@@ -50,6 +50,8 @@ the seam without touching the app UI).
   driving the compiled dist. Nothing else in the app changes.
 
 ## Phase 2: `llm`
+Contract: `docs/PHASE2-LLM.md` (manifests, env recipes, managed engines, accelerator guard,
+API/SDK additions, the BookForge `crucible` provider, verification).
 vLLM on `cuda-linux`, mlx-lm on `mlx-darwin`, behind `/v1/openai`. First real consumer:
 BookForge clean-text (`qwen3.5:9b-bf16` today via Ollama) through the CLI. Then Foundry
 cleanup / translate / simplify (27B fits the Mac Studio, not a 24 GB card; capability
