@@ -11,6 +11,7 @@ proxy are exactly what runs on the PC.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -87,11 +88,26 @@ def idle_card(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(accelerator, "probe_vram", lambda: (22 * GIB, 24 * GIB))
 
 
+#: A card big enough for the 27B, so residency can be tested with two real
+#: manifests rather than a contrived pair.
+ROOMY_BACKEND = replace(
+    FAKE_BACKEND,
+    gpu=replace(FAKE_BACKEND.gpu, name="NVIDIA H100 80GB HBM3", vram_bytes=80 * GIB),
+)
+
+
 @pytest.fixture
 def roomy_card(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A card big enough for the 27B, so residency can be tested with two models."""
     monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
     monkeypatch.setattr(accelerator, "probe_vram", lambda: (80 * GIB, 80 * GIB))
+
+
+@pytest.fixture
+def roomy_client(
+    make_client: Callable[..., TestClient], fake_env: Path
+) -> Iterator[TestClient]:
+    with make_client(enable_llm=True, backend=ROOMY_BACKEND) as client:
+        yield client
 
 
 @pytest.fixture
@@ -422,13 +438,14 @@ def test_health_and_models_see_the_resident_model(
 
 
 def test_loading_a_second_model_unloads_the_first(
-    llm_client: TestClient,
+    roomy_client: TestClient,
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     roomy_card: None,
     engines: list[FakeEngine],
 ) -> None:
     """Phase 2 residency rule: one resident model at a time (section 3)."""
+    llm_client = roomy_client
     fake_weights(MODEL)
     fake_weights(BIG_MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
