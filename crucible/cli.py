@@ -278,7 +278,7 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
 
 
 def _job_type_reports(config: Config, backend: Backend) -> list[dict[str, Any]]:
-    registry = build_registry(config)
+    registry = build_registry(config, backend)
     reports: list[dict[str, Any]] = []
     for name in sorted(ALL_JOB_TYPES):
         plugin = registry.get(name)

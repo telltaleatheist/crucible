@@ -140,7 +140,7 @@ def require_api_version(request: Request) -> None:
 def create_app(config: Config, backend: Backend) -> FastAPI:
     """Build the ASGI app for one server instance."""
     residency = Residency(config)
-    registry = build_registry(config, residency)
+    registry = build_registry(config, backend, residency)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -252,7 +252,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             capabilities.append(
                 {
                     "job_type": "llm",
-                    "models": model_rows(config, backend.kind, residency),
+                    "models": model_rows(config, backend, residency),
                 }
             )
         return {
@@ -301,7 +301,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 "job type 'llm' is not enabled on this server "
                 "(set [jobs] enable_llm = true in config.toml)",
             )
-        return model_rows(config, backend.kind, residency)
+        return model_rows(config, backend, residency)
 
     # --------------------------------------------------------------- uploads
 

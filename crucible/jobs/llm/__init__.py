@@ -124,7 +124,7 @@ def _descriptors(
 
 
 def model_rows(
-    config: Config, backend_kind: str, residency: Residency
+    config: Config, backend: Any, residency: Residency
 ) -> list[dict[str, Any]]:
     """`GET /v1/models` — PHASE2-LLM.md section 5.
 
@@ -134,6 +134,7 @@ def model_rows(
     and refuses there. A row that says `loadable: true` can still be refused with
     `accelerator_busy`.
     """
+    backend_kind = backend.kind
     env = llmenv.env_status(config.home, backend_kind)
     rows: list[dict[str, Any]] = []
     for manifest in _manifests().values():
@@ -150,7 +151,15 @@ def model_rows(
             spec = manifest.spec(backend_kind)
             estimate = spec.memory_bytes_estimate
             is_installed = weights.installed(config, manifest, spec) is not None
-            if not env.installed:
+            if estimate > backend.gpu.vram_bytes:
+                # Not loadable here at all, so say so instead of asking for a
+                # 55 GB download first.
+                reason = (
+                    f"needs {estimate / 1024 ** 3:.1f} GiB and "
+                    f"{backend.gpu.name} has {backend.gpu.vram_bytes / 1024 ** 3:.1f}"
+                    " GiB in total"
+                )
+            elif not env.installed:
                 reason = f"the llm env is not ready: {env.detail}"
             elif not is_installed:
                 reason = (
@@ -175,9 +184,16 @@ def model_rows(
 
 
 def _require_loadable(
-    config: Config, backend_kind: str, model_id: str
+    config: Config, backend: Any, model_id: str
 ) -> tuple[ModelManifest, Any, Any]:
-    """Manifest, backend spec and installed weights, or the named refusal."""
+    """Manifest, backend spec and installed weights, or the named refusal.
+
+    The order is deliberate: what can never be fixed, then what an install or a
+    pull would fix, then what the live accelerator says. So a 27B on a 24 GB card
+    is refused for being a 27B on a 24 GB card, not for needing a 55 GB download
+    first.
+    """
+    backend_kind = backend.kind
     manifest = _known(model_id)
     if not manifest.supports(backend_kind):
         raise ApiError(
@@ -189,6 +205,12 @@ def _require_loadable(
              "declared": sorted(manifest.backends)},
         )
     spec = manifest.spec(backend_kind)
+    accelerator.refuse_if_larger_than_host(
+        model_id=model_id,
+        need_bytes=spec.memory_bytes_estimate,
+        host_total_bytes=backend.gpu.vram_bytes,
+        host_name=backend.gpu.name,
+    )
     try:
         python = llmenv.require_env(config.home, backend_kind)
     except llmenv.EnvError as exc:
@@ -218,8 +240,11 @@ class LoadModelJobType:
 
     name = "load-model"
 
-    def __init__(self, config: Config, residency: Residency) -> None:
+    def __init__(
+        self, config: Config, backend: Any, residency: Residency
+    ) -> None:
         self._config = config
+        self._backend = backend
         self._residency = residency
 
     @property
@@ -241,7 +266,7 @@ class LoadModelJobType:
         env = llmenv.env_status(self._config.home, backend.kind)
         if not env.installed:
             return JobTypeStatus(ready=False, detail=env.detail)
-        rows = model_rows(self._config, backend.kind, self._residency)
+        rows = model_rows(self._config, backend, self._residency)
         ready = [row["id"] for row in rows if row["loadable"]]
         if not ready:
             return JobTypeStatus(
@@ -257,9 +282,7 @@ class LoadModelJobType:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs a model")
         _params(LoadParams, params, self.name)
-        manifest, spec, _ = _require_loadable(
-            self._config, self._config.backend_kind, model
-        )
+        manifest, spec, _ = _require_loadable(self._config, self._backend, model)
         accelerator.guard(
             self._config.backend_kind,
             model_id=model,
@@ -276,7 +299,7 @@ class LoadModelJobType:
             raise JobError("model_required", f"{self.name} needs a model")
         try:
             manifest, spec, (python, installed) = _require_loadable(
-                self._config, self._config.backend_kind, model
+                self._config, self._backend, model
             )
         except ApiError as exc:
             raise JobError(exc.code, exc.message) from None
@@ -321,8 +344,11 @@ class UnloadModelJobType:
 
     name = "unload-model"
 
-    def __init__(self, config: Config, residency: Residency) -> None:
+    def __init__(
+        self, config: Config, backend: Any, residency: Residency
+    ) -> None:
         self._config = config
+        self._backend = backend
         self._residency = residency
 
     @property

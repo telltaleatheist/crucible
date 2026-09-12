@@ -280,6 +280,34 @@ def unattributed_bytes(
 # -------------------------------------------------------------------- guard
 
 
+def refuse_if_larger_than_host(
+    *, model_id: str, need_bytes: int, host_total_bytes: int, host_name: str
+) -> None:
+    """Refuse a model this host could never hold, whatever else is going on.
+
+    This runs **before** the env and weights checks, because it is the one
+    refusal that no amount of installing or pulling can fix. Telling somebody to
+    download 55 GB of weights for a model that will never fit their card, and
+    only then telling them it will never fit, would be a worse answer than the
+    truth up front.
+    """
+    if need_bytes <= host_total_bytes:
+        return
+    raise ApiError(
+        409,
+        "insufficient_memory",
+        f"cannot load {model_id!r} on this host, ever: it needs "
+        f"{need_bytes / GIB:.1f} GiB and {host_name} has "
+        f"{host_total_bytes / GIB:.1f} GiB in total",
+        {
+            "model": model_id,
+            "needed_bytes": need_bytes,
+            "total_bytes": host_total_bytes,
+            "free_bytes": None,
+        },
+    )
+
+
 def guard(
     backend_kind: str,
     *,

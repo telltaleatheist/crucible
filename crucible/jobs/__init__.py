@@ -31,7 +31,9 @@ ALL_JOB_TYPES: dict[str, str] = {
 }
 
 
-def build_registry(config: Any, residency: Residency | None = None) -> dict[str, JobType]:
+def build_registry(
+    config: Any, backend: Any, residency: Residency | None = None
+) -> dict[str, JobType]:
     """Instantiate the job types this config enables.
 
     `residency` is the server instance's one-resident-model holder. `crucible
@@ -43,8 +45,8 @@ def build_registry(config: Any, residency: Residency | None = None) -> dict[str,
         registry[EchoJobType.name] = EchoJobType()
     if config.enable_llm:
         holder = residency if residency is not None else Residency(config)
-        registry[LoadModelJobType.name] = LoadModelJobType(config, holder)
-        registry[UnloadModelJobType.name] = UnloadModelJobType(config, holder)
+        registry[LoadModelJobType.name] = LoadModelJobType(config, backend, holder)
+        registry[UnloadModelJobType.name] = UnloadModelJobType(config, backend, holder)
     return registry
 
 

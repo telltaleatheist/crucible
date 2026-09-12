@@ -321,7 +321,35 @@ def test_the_27b_on_this_card_is_insufficient_memory(
     error = response.json()["error"]
     assert error["code"] == "insufficient_memory"
     assert error["details"]["needed_bytes"] == 56_368_328_800
-    assert error["details"]["free_bytes"] == 22 * GIB
+    assert error["details"]["total_bytes"] == FAKE_BACKEND.gpu.vram_bytes
+
+
+def test_a_model_too_big_for_the_card_is_refused_before_the_download(
+    llm_client: TestClient, auth: dict[str, str], idle_card: None
+) -> None:
+    """52.5 GiB on a 24 GiB card is not a "pull 55 GB first" problem.
+
+    The weights are deliberately NOT stamped here: a refusal that says
+    `model_not_installed` would send somebody off to download 55 GB for a model
+    that can never load on this host.
+    """
+    response = submit(llm_client, auth, type="load-model", model=BIG_MODEL)
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["code"] == "insufficient_memory"
+    assert "ever" in error["message"]
+    assert "52.5 GiB" in error["message"]
+    assert "24.0 GiB in total" in error["message"]
+    assert "NVIDIA GeForce RTX 3090 Ti" in error["message"]
+
+
+def test_models_says_why_the_27b_is_not_loadable_here(
+    llm_client: TestClient, auth: dict[str, str]
+) -> None:
+    rows = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
+    assert rows[BIG_MODEL]["loadable"] is False
+    assert "52.5 GiB" in rows[BIG_MODEL]["reason"]
+    assert "24.0 GiB in total" in rows[BIG_MODEL]["reason"]
 
 
 def test_unknown_params_are_refused(
