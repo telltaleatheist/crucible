@@ -69,7 +69,7 @@ build version.
 | `POST /uploads` | yes | multipart → `{blob_id, bytes, sha256}`. For inputs too big to inline. |
 | `POST /jobs` | yes | `{type, model?, params, inputs: {name: blob_id or inline}}` → `{job_id}` (202). Refuses unknown type / model by name (400). |
 | `GET /jobs/{id}` | yes | `{status: queued / running / done / failed / cancelled, progress, position, error?, artifacts: [name]}` |
-| `GET /jobs/{id}/events` | yes | SSE: `queued`, `warming`, `progress {fraction, message}`, `artifact {name}`, `done`, `failed {error}`. Resumable with `Last-Event-ID`. |
+| `GET /jobs/{id}/events` | yes | SSE: `queued`, `warming`, `progress {fraction, message}`, `artifact {name}`, `done`, `failed {error}`, `cancelled`. Resumable with `Last-Event-ID`. |
 | `GET /jobs/{id}/artifacts/{name}` | yes | bytes. `.../{name}.provenance.json` always exists (see section 7). |
 | `DELETE /jobs/{id}` | yes | cancel. |
 | `/openai/*` | yes | OpenAI-compatible passthrough for `llm` (phase 2). |
