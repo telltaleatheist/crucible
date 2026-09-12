@@ -45,6 +45,14 @@ class EchoJobType:
             detail="enabled; copies inputs to artifacts, uses no accelerator",
         )
 
+    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
+        """Echo needs no host state, so there is nothing to refuse up front.
+
+        Its params are validated in `run()`, where a bad `delay_ms` becomes a
+        failed job — the phase-1 behaviour, unchanged.
+        """
+        return None
+
     def run(self, job: Job, ctx: JobContext) -> None:
         params = EchoParams.model_validate(job.params)
         inputs = ctx.inputs()

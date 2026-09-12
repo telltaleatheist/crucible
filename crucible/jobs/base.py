@@ -72,6 +72,9 @@ class Job:
     artifacts: list[str] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     cancel_requested: bool = False
+    #: Extra keys a job type adds to its own `done` event. `load-model` puts
+    #: `resident` here (PHASE2-LLM.md section 5); `artifacts` is always present.
+    done_extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def inputs_dir(self) -> Path:
@@ -96,6 +99,14 @@ class JobType(Protocol):
 
     def check(self, backend: Any) -> JobTypeStatus:
         """Whether this type can run here right now, and why not if it cannot."""
+
+    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
+        """Refuse, by name, before the job is queued.
+
+        Raises ApiError so the client gets an HTTP error naming the thing rather
+        than a job that fails a minute later. A type with nothing to check here
+        does nothing.
+        """
 
     def run(self, job: Job, ctx: "JobContext") -> None:
         """Do the work. Blocking; the queue runs it on a worker thread."""
@@ -148,6 +159,23 @@ class JobContext:
             "progress",
             {"fraction": float(fraction), "message": message},
         )
+
+    def warming(self, message: str) -> None:
+        """Emit a `warming {message}` event (PHASE2-LLM.md section 5).
+
+        What a load job reports while an engine reads weights and captures CUDA
+        graphs. Distinct from `progress`, which carries a fraction: nothing can
+        honestly say how far through a model load it is.
+        """
+        if not isinstance(message, str):
+            raise TypeError(f"a warming message must be a string, got {message!r}")
+        self._loop.call_soon_threadsafe(
+            self._store.append_event, self._job, "warming", {"message": message}
+        )
+
+    def done_extra(self, **keys: Any) -> None:
+        """Add keys to this job's `done` event, e.g. `resident` on a load."""
+        self._job.done_extra.update(keys)
 
     def artifact(self, name: str, path: Path) -> Path:
         """Publish `path` as artifact `name`, with its provenance sidecar.

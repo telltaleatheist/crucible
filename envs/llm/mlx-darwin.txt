@@ -1,0 +1,11 @@
+# crucible `llm` env — mlx-darwin (mlx-lm on Apple Silicon).
+#
+# Installed by `crucible install llm` into ~/.crucible/envs/llm/ as a venv built
+# from the server's own interpreter. Everything here comes from PyPI.
+#
+# The top line is the pin that matters. The rest are the exact versions mlx-lm
+# 0.31.3 resolved to on Owen's Mac Studio (python 3.11), recorded so a later
+# install cannot drift. Regenerate after any deliberate bump with:
+#     ~/.crucible/envs/llm/bin/pip freeze
+
+mlx-lm==0.31.3

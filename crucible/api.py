@@ -17,10 +17,12 @@ import secrets
 import shutil
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, Depends, FastAPI, Request, UploadFile
+import httpx
+from fastapi import APIRouter, Depends, FastAPI, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -30,7 +32,7 @@ from . import API_VERSION, VERSION
 from .backend import Backend
 from .config import Config
 from .errors import ApiError
-from .jobs import build_registry, resolve, resolve_model
+from .jobs import Residency, build_registry, model_rows, resolve, resolve_model
 from .jobs.base import Job, validate_member_name
 from .jobs.queue import JobStore
 
@@ -38,6 +40,13 @@ API_HEADER = "X-Crucible-Api"
 TERMINAL_EVENTS = frozenset({"done", "failed", "cancelled"})
 KEEPALIVE_SECONDS = 15.0
 UPLOAD_CHUNK = 1024 * 1024
+
+#: The proxy waits on the engine, not on a clock it invented. A streamed
+#: completion has no read timeout at all (the engine emits a token at a time and
+#: may think for a while before the first one); a non-streamed one gets a long
+#: but finite ceiling so a wedged engine surfaces as an error rather than a hang.
+PROXY_CONNECT_TIMEOUT = 10.0
+PROXY_READ_TIMEOUT = 900.0
 
 
 # --------------------------------------------------------------------- schemas
@@ -130,16 +139,30 @@ def require_api_version(request: Request) -> None:
 
 def create_app(config: Config, backend: Backend) -> FastAPI:
     """Build the ASGI app for one server instance."""
-    registry = build_registry(config)
+    residency = Residency(config)
+    registry = build_registry(config, residency)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store: JobStore = app.state.store
         store.start()
+        app.state.http = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=PROXY_CONNECT_TIMEOUT,
+                read=PROXY_READ_TIMEOUT,
+                write=60.0,
+                pool=10.0,
+            )
+        )
         try:
             yield
         finally:
             await store.stop()
+            await app.state.http.aclose()
+            # A resident engine is this process's child. Leaving one holding the
+            # card after the server exits would be exactly the thing the guard
+            # refuses to do to somebody else.
+            await asyncio.to_thread(residency.shutdown)
 
     app = FastAPI(
         title="Crucible",
@@ -151,6 +174,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     )
     app.state.config = config
     app.state.backend = backend
+    app.state.residency = residency
     app.state.store = JobStore(config, backend, registry)
 
     Path(config.jobs_dir).mkdir(parents=True, exist_ok=True)
@@ -221,6 +245,16 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             }
             for name, plugin in sorted(store.registry.items())
         ]
+        if config.enable_llm:
+            # PHASE2-LLM.md section 5: `/info` gains an `llm` capability whose
+            # models are the `/v1/models` rows. `load-model` and `unload-model`
+            # are listed above as themselves, because they are what you POST.
+            capabilities.append(
+                {
+                    "job_type": "llm",
+                    "models": model_rows(config, backend.kind, residency),
+                }
+            )
         return {
             "server": {
                 "name": config.name,
@@ -243,12 +277,31 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     @private.get("/health")
     async def health(request: Request) -> dict[str, Any]:
         store: JobStore = request.app.state.store
-        # Phase 1 loads no models, so nothing is ever resident and nothing warms.
+        if residency.warming is not None:
+            status = "warming"
+        elif store.running_id is not None:
+            status = "busy"
+        else:
+            status = "ok"
         return {
-            "status": "busy" if store.running_id is not None else "ok",
+            "status": status,
             "queue_depth": store.queue_depth,
-            "resident_models": [],
+            "resident_models": residency.ids(),
         }
+
+    # ---------------------------------------------------------------- models
+
+    @private.get("/models")
+    async def models(request: Request) -> list[dict[str, Any]]:
+        """Every model this build has a manifest for, and where it stands here."""
+        if not config.enable_llm:
+            raise ApiError(
+                400,
+                "job_type_disabled",
+                "job type 'llm' is not enabled on this server "
+                "(set [jobs] enable_llm = true in config.toml)",
+            )
+        return model_rows(config, backend.kind, residency)
 
     # --------------------------------------------------------------- uploads
 
@@ -284,6 +337,10 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         store: JobStore = request.app.state.store
         plugin = resolve(store.registry, body.type)
         model = resolve_model(plugin, body.model)
+        # Every refusal a job type can make about host state happens here, before
+        # the job exists, so the client is told by name instead of watching a job
+        # fail (PHASE2-LLM.md section 5).
+        plugin.preflight(model, body.params)
 
         job = store.create(body.type, model, body.params)
         try:
@@ -340,9 +397,160 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         )
         return FileResponse(path, media_type=media_type, filename=name)
 
+    # --------------------------------------------------------------- openai
+
+    @private.get("/openai/models")
+    async def openai_models(request: Request) -> dict[str, Any]:
+        """The resident model in OpenAI's list shape, or an empty list."""
+        resident = residency.resident
+        if resident is None:
+            return {"object": "list", "data": []}
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": resident.model_id,
+                    "object": "model",
+                    "created": int(
+                        datetime.fromisoformat(resident.loaded_at).timestamp()
+                    ),
+                    "owned_by": config.name,
+                    # Crucible's id is the contract; this is the name the engine
+                    # itself answers to. They differ on mlx-lm, which has no
+                    # --served-model-name (crucible/engines/mlx_lm.py).
+                    "engine_model_name": resident.engine_model_name,
+                }
+            ],
+        }
+
+    @private.post("/openai/chat/completions")
+    async def openai_chat_completions(request: Request) -> Response:
+        """Proxied to the resident engine. Never loads one (section 5)."""
+        body = _chat_body(await request.body())
+        requested = body.get("model")
+        if not isinstance(requested, str) or requested == "":
+            raise ApiError(
+                400,
+                "model_required",
+                "a chat request must name a model; this server proxies only to the "
+                "model that is resident",
+            )
+        resident = residency.resident
+        if resident is None or resident.model_id != requested:
+            raise ApiError(
+                409,
+                "model_not_resident",
+                f"{requested!r} is not resident on this server; "
+                + (
+                    f"{resident.model_id!r} is. "
+                    if resident is not None
+                    else "no model is. "
+                )
+                + "Crucible never loads a model to answer a chat request — submit "
+                'a {"type": "load-model"} job first.',
+                {"requested": requested, "resident": None if resident is None
+                 else resident.model_id},
+            )
+
+        forwarded = dict(body)
+        forwarded["model"] = resident.engine_model_name
+        url = f"{resident.base_url}/v1/chat/completions"
+        client: httpx.AsyncClient = request.app.state.http
+
+        if body.get("stream") is True:
+            return await _proxy_stream(client, url, forwarded, resident.log_path)
+        try:
+            upstream = await client.post(url, json=forwarded)
+        except httpx.HTTPError as exc:
+            raise _engine_unreachable(resident, exc) from None
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type", "application/json"),
+        )
+
     app.include_router(public)
     app.include_router(private)
     return app
+
+
+def _chat_body(raw: bytes) -> dict[str, Any]:
+    try:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ApiError(
+            400, "invalid_request", f"the chat request body is not JSON: {exc}"
+        ) from None
+    if not isinstance(body, dict):
+        raise ApiError(
+            400,
+            "invalid_request",
+            f"the chat request body must be a JSON object, got "
+            f"{type(body).__name__}",
+        )
+    return body
+
+
+def _engine_unreachable(resident: Any, exc: Exception) -> ApiError:
+    return ApiError(
+        502,
+        "engine_unreachable",
+        f"the engine serving {resident.model_id!r} at {resident.base_url} did not "
+        f"answer: {type(exc).__name__}: {exc}. Its log is {resident.log_path}",
+    )
+
+
+async def _proxy_stream(
+    client: httpx.AsyncClient, url: str, body: dict[str, Any], log_path: Any
+) -> Response:
+    """Forward a streamed completion byte for byte, SSE framing intact.
+
+    The upstream response is opened before anything is returned, so a refusal
+    from the engine comes back with the engine's own status code and body rather
+    than as a 200 whose stream turns out to be an error.
+    """
+    request = client.build_request(
+        "POST",
+        url,
+        json=body,
+        # A streamed completion emits a token at a time and may think for a long
+        # while before the first one; there is no honest read deadline here.
+        timeout=httpx.Timeout(
+            connect=PROXY_CONNECT_TIMEOUT, read=None, write=60.0, pool=10.0
+        ),
+    )
+    try:
+        upstream = await client.send(request, stream=True)
+    except httpx.HTTPError as exc:
+        raise ApiError(
+            502,
+            "engine_unreachable",
+            f"the resident engine at {url} did not answer: {type(exc).__name__}: "
+            f"{exc}. Its log is {log_path}",
+        ) from None
+
+    if upstream.status_code != 200:
+        payload = await upstream.aread()
+        await upstream.aclose()
+        return Response(
+            content=payload,
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type", "application/json"),
+        )
+
+    async def relay() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+
+    return StreamingResponse(
+        relay(),
+        status_code=200,
+        media_type=upstream.headers.get("content-type", "text/event-stream"),
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 # ------------------------------------------------------------------- helpers

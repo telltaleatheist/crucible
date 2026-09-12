@@ -1,0 +1,13 @@
+# crucible `llm` env — cuda-linux (vLLM on an NVIDIA card, Linux or WSL2).
+#
+# Installed by `crucible install llm` into ~/.crucible/envs/llm/ as a venv built
+# from the server's own interpreter. Everything here comes from PyPI; heavy wheels
+# are never hosted on GitHub Releases (DESIGN.md section 5).
+#
+# The top line is the pin that matters. The rest are the exact versions vLLM
+# 0.29.0 resolved to on Owen's PC (WSL2 Ubuntu, python 3.11), recorded so a later
+# install cannot drift into a different torch and a different numerical result.
+# Regenerate after any deliberate bump with:
+#     ~/.crucible/envs/llm/bin/pip freeze
+
+vllm==0.29.0

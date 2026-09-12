@@ -28,6 +28,14 @@ FAKE_BACKEND = Backend(
     detail="test double",
 )
 
+FAKE_MAC_BACKEND = Backend(
+    kind="mlx-darwin",
+    platform="darwin",
+    arch="arm64",
+    gpu=Gpu(vendor="apple", name="Apple M2 Ultra", vram_bytes=68_719_476_736),
+    detail="test double",
+)
+
 TOKEN = "test-token-not-minted"
 
 
@@ -40,18 +48,27 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def make_client(home: Path) -> Callable[..., TestClient]:
-    def factory(*, enable_echo: bool = True, token: str = TOKEN) -> TestClient:
+    def factory(
+        *,
+        enable_echo: bool = True,
+        enable_llm: bool = False,
+        token: str = TOKEN,
+        backend: Backend = FAKE_BACKEND,
+        desktop_allowance_bytes: int = 3 * 1024 ** 3,
+    ) -> TestClient:
         write_config(
             home,
             name="crucible@test",
             host="127.0.0.1",
             port=7100,
             token=token,
-            backend_kind=FAKE_BACKEND.kind,
+            backend_kind=backend.kind,
             enable_echo=enable_echo,
+            enable_llm=enable_llm,
+            desktop_allowance_bytes=desktop_allowance_bytes,
         )
         config = load_config(home)
-        return TestClient(create_app(config, FAKE_BACKEND))
+        return TestClient(create_app(config, backend))
 
     return factory
 
@@ -95,4 +112,10 @@ def parse_sse(lines: Iterator[str]) -> list[dict[str, Any]]:
     return events
 
 
-__all__ = ["FAKE_BACKEND", "TOKEN", "parse_sse", "mint_token"]
+__all__ = [
+    "FAKE_BACKEND",
+    "FAKE_MAC_BACKEND",
+    "TOKEN",
+    "parse_sse",
+    "mint_token",
+]

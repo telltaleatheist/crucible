@@ -13,12 +13,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from typing import Any
 
-from . import API_VERSION, VERSION
+from . import API_VERSION, VERSION, llmenv, weights
 from .backend import WINDOWS_REFUSAL, Backend, detect_backend
 from .config import (
     CRUCIBLE_HOME_ENV,
+    DEFAULT_DESKTOP_ALLOWANCE_BYTES,
     DEFAULT_HOST,
     DEFAULT_PORT,
     Config,
@@ -32,6 +34,7 @@ from .config import (
 )
 from .errors import ConfigError, NoViableBackend
 from .jobs import ALL_JOB_TYPES, build_registry
+from .manifests import ManifestError, load_all_manifests, load_manifest
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -69,11 +72,18 @@ def cmd_init(args: argparse.Namespace) -> int:
         token=token,
         backend_kind=backend.kind,
         enable_echo=args.enable_echo,
+        enable_llm=args.enable_llm,
+        desktop_allowance_bytes=args.desktop_allowance_bytes,
     )
     print(f"backend:  {backend.kind} ({backend.gpu.name}, {backend.detail})")
     print(f"config:   {written} (mode {config_mode(written)})")
     print(f"serving:  http://{args.host}:{args.port}/v1")
     print(f"echo job: {'enabled' if args.enable_echo else 'disabled'}")
+    print(f"llm job:  {'enabled' if args.enable_llm else 'disabled'}")
+    print(
+        f"desktop:  {args.desktop_allowance_bytes / 1024 ** 3:.1f} GiB of VRAM "
+        "treated as this host's own desktop, not somebody's job"
+    )
     print("token:    minted; print it with `crucible token --show`")
     return EXIT_OK
 
@@ -121,6 +131,149 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# ------------------------------------------------------------------ install
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    if args.job_type != "llm":
+        return _fail(
+            f"there is no installer for job type {args.job_type!r}; this build "
+            "installs 'llm'"
+        )
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        return _fail(str(exc))
+    try:
+        backend = detect_backend()
+    except NoViableBackend as exc:
+        return _fail(f"no viable backend: {exc.reason}")
+    if backend.kind != config.backend_kind:
+        return _fail(
+            f"this host detects backend {backend.kind}, but {config.path} was "
+            f"initialised for {config.backend_kind}; re-run `crucible init --force`"
+        )
+
+    try:
+        recipe = llmenv.recipe_for(backend.kind)
+    except llmenv.EnvError as exc:
+        return _fail(str(exc))
+    print(f"backend: {backend.kind}")
+    print(f"recipe:  {recipe}")
+    print(f"target:  {llmenv.llm_env_dir(config.home)}")
+    started = time.monotonic()
+    try:
+        status = llmenv.install_llm_env(
+            config.home,
+            backend.kind,
+            force=args.force,
+            on_line=(lambda line: print(f"  {line}")) if args.verbose else None,
+        )
+    except llmenv.EnvError as exc:
+        return _fail(str(exc))
+    elapsed = time.monotonic() - started
+    if not status.installed:
+        return _fail(f"the env did not come out installed: {status.detail}")
+    print(f"installed in {elapsed:.0f}s: {status.detail}")
+    headline = llmenv.BACKEND_HEADLINE_PACKAGE[backend.kind]
+    for name in sorted(status.packages):
+        if name in (headline, "torch", "numpy", "transformers", "mlx"):
+            print(f"  {name}=={status.packages[name]}")
+    return EXIT_OK
+
+
+# ------------------------------------------------------------------- models
+
+
+def _models_config() -> tuple[Config, Backend] | int:
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        return _fail(str(exc))
+    try:
+        backend = detect_backend()
+    except NoViableBackend as exc:
+        return _fail(f"no viable backend: {exc.reason}")
+    return config, backend
+
+
+def cmd_models_list(args: argparse.Namespace) -> int:
+    resolved = _models_config()
+    if isinstance(resolved, int):
+        return resolved
+    config, backend = resolved
+    try:
+        manifests = load_all_manifests()
+    except ManifestError as exc:
+        return _fail(str(exc))
+    rows = []
+    for manifest in manifests.values():
+        if not manifest.supports(backend.kind):
+            rows.append(
+                {
+                    "id": manifest.id,
+                    "backend_supported": False,
+                    "installed": False,
+                    "detail": f"no {backend.kind} block; declares "
+                    f"{sorted(manifest.backends)}",
+                }
+            )
+            continue
+        spec = manifest.spec(backend.kind)
+        found = weights.installed(config, manifest, spec)
+        rows.append(
+            {
+                "id": manifest.id,
+                "backend_supported": True,
+                "installed": found is not None,
+                "hf_repo": spec.hf_repo,
+                "revision": spec.revision,
+                "memory_bytes_estimate": spec.memory_bytes_estimate,
+                "context_default": manifest.context_default,
+                "detail": (
+                    f"{found.bytes / 1e9:.2f} GB at {found.path}"
+                    if found is not None
+                    else f"not pulled — `crucible models pull {manifest.id}`"
+                ),
+            }
+        )
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return EXIT_OK
+    for row in rows:
+        mark = "installed" if row["installed"] else (
+            "unsupported" if not row["backend_supported"] else "not pulled"
+        )
+        print(f"{row['id']:<16} {mark:<12} {row['detail']}")
+    return EXIT_OK
+
+
+def cmd_models_pull(args: argparse.Namespace) -> int:
+    resolved = _models_config()
+    if isinstance(resolved, int):
+        return resolved
+    config, backend = resolved
+    try:
+        manifest = load_manifest(args.model)
+    except ManifestError as exc:
+        return _fail(str(exc))
+    if not manifest.supports(backend.kind):
+        return _fail(
+            f"model {args.model!r} has no {backend.kind} block; "
+            f"{manifest.path.name} declares {sorted(manifest.backends)}"
+        )
+    spec = manifest.spec(backend.kind)
+    print(f"{manifest.id}: {spec.hf_repo}@{spec.revision[:12]} for {backend.kind}")
+    try:
+        result = weights.pull(
+            config, manifest, spec, force=args.force, on_line=lambda line: print(f"  {line}")
+        )
+    except weights.WeightsError as exc:
+        return _fail(str(exc))
+    print(f"{manifest.id}: {result.bytes / 1e9:.2f} GB at {result.path}")
+    return EXIT_OK
+
+
 # ------------------------------------------------------------------- doctor
 
 
@@ -162,6 +315,7 @@ def _doctor_report() -> dict[str, Any]:
         "config": None,
         "backend": None,
         "job_types": [],
+        "llm_env": None,
         "problems": [],
     }
 
@@ -187,6 +341,8 @@ def _doctor_report() -> dict[str, Any]:
             "host": config.host,
             "port": config.port,
             "enable_echo": config.enable_echo,
+            "enable_llm": config.enable_llm,
+            "desktop_allowance_bytes": config.desktop_allowance_bytes,
             "backend_kind": config.backend_kind,
         }
         if mode != "0o600":
@@ -201,6 +357,15 @@ def _doctor_report() -> dict[str, Any]:
             )
 
     if config is not None and backend is not None:
+        if config.enable_llm:
+            try:
+                env = llmenv.env_status(config.home, backend.kind)
+                report["llm_env"] = env.to_dict()
+                if not env.installed:
+                    report["problems"].append(f"llm_env: {env.detail}")
+            except llmenv.EnvError as exc:
+                report["llm_env"] = {"installed": False, "detail": str(exc)}
+                report["problems"].append(f"llm_env: {exc}")
         report["job_types"] = _job_type_reports(config, backend)
         for entry in report["job_types"]:
             if entry["enabled"] and not entry["ready"]:
@@ -237,6 +402,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         else:
             print(f"config:  {config['path']} (mode {config['mode']})")
             print(f"serves:  {config['name']} on {config['host']}:{config['port']}")
+        env = report["llm_env"]
+        if env is not None:
+            mark = "ready" if env["installed"] else "NOT READY"
+            print(f"llm env: {mark} — {env['detail']}")
         for entry in report["job_types"]:
             mark = "ready" if entry["ready"] else ("off" if not entry["enabled"] else "NOT READY")
             print(f"job {entry['name']}: {mark} — {entry['detail']}")
@@ -287,7 +456,53 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="register the echo test job type ([jobs] enable_echo)",
     )
+    init.add_argument(
+        "--enable-llm",
+        action="store_true",
+        help="register the load-model / unload-model job types and the OpenAI "
+        "proxy ([jobs] enable_llm)",
+    )
+    init.add_argument(
+        "--desktop-allowance-bytes",
+        type=int,
+        default=DEFAULT_DESKTOP_ALLOWANCE_BYTES,
+        help=(
+            "VRAM this host's own desktop holds, which the accelerator guard does "
+            f"not count as somebody's job (default {DEFAULT_DESKTOP_ALLOWANCE_BYTES}"
+            " = 3 GiB; use 0 on a headless box)"
+        ),
+    )
     init.set_defaults(func=cmd_init)
+
+    install = subparsers.add_parser(
+        "install", help="create a job type's env and install its recipe"
+    )
+    install.add_argument("job_type", choices=["llm"], help="the job type to install")
+    install.add_argument(
+        "--force", action="store_true", help="rebuild the env from scratch"
+    )
+    install.add_argument(
+        "--verbose", action="store_true", help="echo pip's output line by line"
+    )
+    install.set_defaults(func=cmd_install)
+
+    models = subparsers.add_parser("models", help="list and pull model weights")
+    model_commands = models.add_subparsers(dest="models_command", required=True)
+
+    models_list = model_commands.add_parser(
+        "list", help="every manifest this build ships and where it stands here"
+    )
+    models_list.add_argument("--json", action="store_true", help="machine-readable")
+    models_list.set_defaults(func=cmd_models_list)
+
+    models_pull = model_commands.add_parser(
+        "pull", help="fetch a model's weights at the manifest's pinned revision"
+    )
+    models_pull.add_argument("model", help="the Crucible model id, e.g. qwen3.5-9b")
+    models_pull.add_argument(
+        "--force", action="store_true", help="re-pull even if it is already installed"
+    )
+    models_pull.set_defaults(func=cmd_models_pull)
 
     serve = subparsers.add_parser("serve", help="run the API in the foreground")
     serve.add_argument("--host", default=None, help="bind host (default from config)")

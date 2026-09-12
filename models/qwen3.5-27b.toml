@@ -1,0 +1,38 @@
+# Qwen3.5 27B.
+#
+# Both estimates here are COMPUTED, not measured: weights at bfloat16 as they sit
+# on disk plus the KV cache at context_default. Nothing on Owen's PC can hold this
+# model, which is the point — `load-model qwen3.5-27b` on a 24 GB card is refused
+# by name with `insufficient_memory`, naming this number against the card's free
+# VRAM (docs/PHASE2-LLM.md section 4).
+#
+# The KV arithmetic, from the repo's config.json:
+#   Qwen3.5 is a hybrid stack — `full_attention` every `full_attention_interval`
+#   layers, the rest linear (recurrent) attention whose state is per-sequence, not
+#   per-token. 64 layers / interval 4 = 16 full-attention layers.
+#   per token per full layer = 2 (K and V) x 4 kv heads x 256 head_dim x 2 bytes
+#                            = 4096 B
+#   per token                = 4096 x 16 = 65_536 B
+#   at 12288 tokens          = 805_306_368 B
+# cuda-linux: 55_563_022_432 (weights) + 805_306_368 (KV) = 56_368_328_800
+# mlx-darwin: 54_713_610_987 (weights) + 805_306_368 (KV) = 55_518_917_355
+
+[model]
+id = "qwen3.5-27b"
+family = "qwen3.5"
+params_b = 27
+context_default = 12288
+
+[backends.cuda-linux]
+engine = "vllm"
+hf_repo = "Qwen/Qwen3.5-27B"
+revision = "fc05daec18b0a78c049392ed2e771dde82bdf654"
+memory_bytes_estimate = 56_368_328_800
+engine_args = ["--dtype", "bfloat16", "--gpu-memory-utilization", "0.85"]
+
+[backends.mlx-darwin]
+engine = "mlx-lm"
+hf_repo = "mlx-community/Qwen3.5-27B-bf16"
+revision = "5ad6b65ac842d2d023621f1e892c49df478f2dce"
+memory_bytes_estimate = 55_518_917_355
+engine_args = []

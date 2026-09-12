@@ -20,17 +20,31 @@ from .base import (
     validate_member_name,
 )
 from .echo import EchoJobType
+from .llm import LoadModelJobType, Residency, UnloadModelJobType, model_rows
 
-ALL_JOB_TYPES: dict[str, Callable[[], JobType]] = {
-    EchoJobType.name: EchoJobType,
+#: The vocabulary this build knows, and which config flag turns each one on.
+#: `resolve()` tells "that type does not exist" from "it exists but is off".
+ALL_JOB_TYPES: dict[str, str] = {
+    EchoJobType.name: "echo",
+    LoadModelJobType.name: "llm",
+    UnloadModelJobType.name: "llm",
 }
 
 
-def build_registry(config: Any) -> dict[str, JobType]:
-    """Instantiate the job types this config enables."""
+def build_registry(config: Any, residency: Residency | None = None) -> dict[str, JobType]:
+    """Instantiate the job types this config enables.
+
+    `residency` is the server instance's one-resident-model holder. `crucible
+    doctor` has no server, so it passes none and gets a fresh (empty) one — which
+    is honest: a doctor run cannot see another process's resident model.
+    """
     registry: dict[str, JobType] = {}
     if config.enable_echo:
         registry[EchoJobType.name] = EchoJobType()
+    if config.enable_llm:
+        holder = residency if residency is not None else Residency(config)
+        registry[LoadModelJobType.name] = LoadModelJobType(config, holder)
+        registry[UnloadModelJobType.name] = UnloadModelJobType(config, holder)
     return registry
 
 
@@ -44,7 +58,7 @@ def resolve(registry: dict[str, JobType], job_type: str) -> JobType:
             400,
             "job_type_disabled",
             f"job type {job_type!r} is not enabled on this server "
-            f"(set [jobs] enable_{job_type} = true in config.toml)",
+            f"(set [jobs] enable_{ALL_JOB_TYPES[job_type]} = true in config.toml)",
         )
     raise ApiError(
         400,
@@ -83,8 +97,12 @@ __all__ = [
     "JobContext",
     "JobType",
     "JobTypeStatus",
+    "LoadModelJobType",
     "ModelDescriptor",
+    "Residency",
+    "UnloadModelJobType",
     "build_registry",
+    "model_rows",
     "resolve",
     "resolve_model",
     "validate_member_name",

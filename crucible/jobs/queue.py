@@ -231,7 +231,9 @@ class JobStore:
         if status == DONE:
             job.progress = 1.0
             self._restamp_provenance(job)
-            self.append_event(job, "done", {"artifacts": list(job.artifacts)})
+            self.append_event(
+                job, "done", {"artifacts": list(job.artifacts), **job.done_extra}
+            )
         elif status == FAILED:
             self._restamp_provenance(job)
             self.append_event(job, "failed", {"error": error})
