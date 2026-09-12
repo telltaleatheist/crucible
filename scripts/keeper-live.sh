@@ -22,10 +22,8 @@ bad()  { FAILED=$((FAILED + 1)); printf 'FAIL  %s\n' "$*" >&2; }
 cleanup() {
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill -TERM "$SERVER_PID" 2>/dev/null || true
-    for _ in $(seq 1 50); do
-      kill -0 "$SERVER_PID" 2>/dev/null || break
-      sleep 0.1
-    done
+    # `wait` both reaps the server and suppresses bash's async "Terminated" notice.
+    wait "$SERVER_PID" 2>/dev/null || true
   fi
   if [ -n "$ROOT" ] && [ -d "$ROOT" ]; then
     rm -rf "$ROOT"
