@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -254,8 +255,6 @@ def install_llm_env(
     started = time.monotonic()
     directory.parent.mkdir(parents=True, exist_ok=True)
     if directory.exists():
-        import shutil
-
         shutil.rmtree(directory)
 
     _run(

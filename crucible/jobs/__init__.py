@@ -1,6 +1,6 @@
 """The job-type registry.
 
-`ALL_JOB_TYPES` is the vocabulary this build knows. `build_registry(config)` is the
+`ALL_JOB_TYPES` is the vocabulary this build knows. `build_registry()` is the
 subset this server is configured to offer. Asking for a type that exists but is not
 enabled is refused differently from asking for one that does not exist — the client
 is told which of the two it is.
@@ -8,7 +8,7 @@ is told which of the two it is.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
 
 from ..errors import ApiError
 from .base import (
