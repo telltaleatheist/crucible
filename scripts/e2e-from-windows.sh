@@ -19,6 +19,13 @@
 
 set -euo pipefail
 
+# Git Bash rewrites any argument that looks like a Unix path into a Windows one
+# before handing it to a native .exe, so `/home/telltale/crucible` reaches
+# wsl.exe as `C:/Program Files/Git/home/telltale/crucible`. Every path in this
+# script is a path inside the guest; none of them may be translated.
+export MSYS2_ARG_CONV_EXCL='*'
+export MSYS_NO_PATHCONV=1
+
 DISTRO="${CRUCIBLE_WSL_DISTRO:-Ubuntu}"
 WSL_REPO="${CRUCIBLE_WSL_REPO:-/home/telltale/crucible}"
 WSL_ENV="${CRUCIBLE_WSL_ENV:-/home/telltale/anaconda3/envs/crucible}"
@@ -74,7 +81,10 @@ echo "e2e: wsl home=$WSL_HOME port=$PORT windows node=$(node --version)"
 BASE="http://127.0.0.1:$PORT"
 UP=0
 for _ in $(seq 1 160); do
-  if curl -fsS --max-time 2 "$BASE/v1/ping" -o /dev/null 2>/dev/null; then
+  # `>/dev/null` is a bash redirect, not a curl argument: with path conversion
+  # off, curl -o /dev/null would try to write a Windows file of that name and
+  # fail the check even though the server answered.
+  if curl -fsS --max-time 2 "$BASE/v1/ping" >/dev/null 2>&1; then
     UP=1
     break
   fi
