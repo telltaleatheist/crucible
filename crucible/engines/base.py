@@ -116,6 +116,16 @@ class SubprocessEngine:
         """Extra environment for the engine process. Merged over os.environ."""
         return {}
 
+    def confirm(
+        self, deadline: float, on_progress: Callable[[str], None] | None
+    ) -> None:
+        """Prove readiness beyond `/v1/models`, if this engine needs it.
+
+        vLLM does not: it binds its OpenAI routes only once the engine core is
+        up, so a 200 from `/v1/models` means the weights are on the card.
+        """
+        return None
+
     # ------------------------------------------------------------- lifecycle
 
     @property
@@ -200,6 +210,11 @@ class SubprocessEngine:
                     )
                 if on_progress is not None:
                     on_progress(f"{self.name} is serving {self._served_name!r}")
+                # Answering /v1/models does not always mean the weights are in
+                # memory (mlx-lm's list route is served by a thread that does
+                # not wait for the load). An engine that needs more proof than
+                # that says so here.
+                self.confirm(deadline, on_progress)
                 return
             if time.monotonic() >= deadline:
                 raise EngineError(

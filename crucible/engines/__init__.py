@@ -50,7 +50,9 @@ def engine_model_name(engine_name: str, model_dir: Path, model_id: str) -> str:
     if engine_name == VllmEngine.name:
         return model_id
     if engine_name == MlxLmEngine.name:
-        return str(model_dir)
+        # mlx-lm's /v1/models reports `str(Path(--model).resolve())`, so this must
+        # be resolved too or readiness would compare two spellings of one path.
+        return str(Path(model_dir).resolve())
     raise EngineError(
         f"unknown engine {engine_name!r}; this build has {sorted(ENGINES)}"
     )

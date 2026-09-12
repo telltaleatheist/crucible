@@ -9,10 +9,12 @@ never knows what an audiobook or a cleanup pass is.
 
 See `docs/DESIGN.md` for the architecture and `docs/PLAN.md` for the build order.
 
-**Status: phase 1 (A1-A3).** The handshake is real — config, token, backend detection,
+**Status: phase 2 (`llm`).** The handshake is real — config, token, backend detection,
 API v1, the job queue, provenance sidecars, the `echo` test job type, and the TypeScript
-client that speaks to all of it. No model has been loaded by this code yet; `llm`, `tts`,
-`vlm-pages`, `align` and `rvc` arrive in phases 2-4.
+client that speaks to all of it. Phase 2 adds the first real capability: model manifests,
+a per-job-type env, managed vLLM / mlx-lm engines, the accelerator guard, and an
+OpenAI-compatible proxy to one resident model. `tts`, `vlm-pages`, `align` and `rvc`
+arrive in phases 3-4.
 
 ## Hosts
 
@@ -44,6 +46,9 @@ crucible doctor                 # probe the host; exit 0 only when healthy
 crucible doctor --json          # the same report, machine-readable
 crucible token --show           # print the bearer token
 crucible serve                  # foreground; 127.0.0.1:7100 by default
+crucible install llm            # build the llm env for this host's backend
+crucible models list            # model manifests and their standing here
+crucible models pull <id>       # fetch a model's weights at its pinned revision
 ```
 
 `crucible init` refuses if a config already exists (`--force` replaces it and mints a
@@ -72,6 +77,9 @@ config.toml        mode 0600 — server name, bind defaults, backend, and the to
 jobs/<id>/inputs/  the job's inputs, materialised before it is queued
 jobs/<id>/artifacts/   its outputs and their .provenance.json sidecars
 uploads/<blob_id>  blobs from POST /v1/uploads
+envs/llm/          the llm job type's venv, built by `crucible install llm`
+models/<id>/<backend>/  weights, stamped with the revision they were pulled at
+logs/engine-<id>.log    one engine's stdout and stderr, command line first
 ```
 
 `CRUCIBLE_HOME` is read on every call, so a second server (or a test, or the live
@@ -140,6 +148,122 @@ Cancellation is cooperative: a queued job is cancelled immediately, a running on
 told to stop and ends `cancelled` at its next checkpoint (`DELETE` answers
 `{"status": "cancelling"}` in that case).
 
+### `llm`
+
+The first capability that touches the accelerator. Crucible runs one language model at a
+time and puts an OpenAI-compatible surface in front of it; the prompts, the chunking and
+the rubrics stay in the app.
+
+```bash
+crucible init --enable-llm        # or add [jobs] enable_llm = true to an existing config
+crucible install llm              # build ~/.crucible/envs/llm and install the host recipe
+crucible models list              # what this build ships and where each one stands here
+crucible models pull qwen3.5-9b   # ~19 GB from HuggingFace at the manifest's pinned sha
+crucible doctor                   # reports the env's presence and the versions installed
+```
+
+Then, over the API (`AUTH` is the two headers every route needs):
+
+```bash
+# load it — a normal job, on the same exclusive lane as everything else
+curl "${AUTH[@]}" -H 'Content-Type: application/json' \
+  -d '{"type": "load-model", "model": "qwen3.5-9b"}' "$BASE/jobs"
+curl -N "${AUTH[@]}" "$BASE/jobs/$JOB_ID/events"    # queued, warming..., done {resident}
+
+# chat — proxied verbatim to the engine, streaming or not
+curl "${AUTH[@]}" -H 'Content-Type: application/json' \
+  -d '{"model": "qwen3.5-9b", "messages": [{"role": "user", "content": "hello"}]}' \
+  "$BASE/openai/chat/completions"
+
+# unload — the card comes back
+curl "${AUTH[@]}" -H 'Content-Type: application/json' \
+  -d '{"type": "unload-model", "model": "qwen3.5-9b"}' "$BASE/jobs"
+```
+
+| Route | Notes |
+|---|---|
+| `GET /v1/models` | every manifest, with `backend_supported`, `installed`, `resident`, `loadable`, `reason`, `memory_bytes_estimate`, `context_default` |
+| `POST /v1/jobs {type: "load-model", model}` | events `queued`, `warming {message}` (several, from the engine's readiness), `done {resident}` |
+| `POST /v1/jobs {type: "unload-model", model}` | a normal job; `done {resident: null}` |
+| `POST /v1/openai/chat/completions` | proxied to the resident engine, `stream` honoured |
+| `GET /v1/openai/models` | the resident model in OpenAI's list shape, or an empty list |
+
+`GET /v1/info` gains an `llm` capability carrying the `/v1/models` rows, and
+`GET /v1/health` reports `warming` while a load runs plus `resident_models`.
+
+#### One resident model at a time
+
+Phase 2 holds exactly one model on the accelerator. Loading a second **unloads the
+first** — you see that in the load job's `warming` stream. LRU across several comes
+later.
+
+The chat proxy never loads a model. If the body's `model` is not the resident one the
+answer is **409 `model_not_resident`**, naming what is resident (or that nothing is):
+
+```json
+{"error": {"code": "model_not_resident",
+           "message": "'gpt-4' is not resident on this server; 'qwen3.5-9b' is. Crucible never loads a model to answer a chat request — submit a {\"type\": \"load-model\"} job first.",
+           "details": {"requested": "gpt-4", "resident": "qwen3.5-9b"}}}
+```
+
+#### Models are manifests
+
+`models/<id>.toml` in this repo is the whole definition of a model: its id, family,
+default context, and one block per backend naming the engine, the HuggingFace repo, the
+**pinned commit sha**, a memory estimate and the engine's args. Validation is strict —
+an unknown key is refused, every listed key is required, and a branch name is not a pin.
+Weights land in `~/.crucible/models/<id>/<backend>/` and are only considered installed
+once the pull has stamped `crucible-pull.json` there at the revision the manifest names.
+
+The HF token for a private repo comes from `$HF_TOKEN` or `[hf] token` in `config.toml`;
+without one, a private repo is refused by name.
+
+#### Envs are recipes
+
+`envs/llm/cuda-linux.txt` (vLLM) and `envs/llm/mlx-darwin.txt` (mlx-lm) are pinned pip
+requirements. `crucible install llm` builds `~/.crucible/envs/llm/` as a venv from the
+server's own interpreter and installs the recipe for this host's backend from PyPI —
+heavy wheels never come from GitHub Releases. Engines are spawned from that venv, so the
+API server process never imports torch or mlx.
+
+#### The accelerator guard
+
+Before any engine starts, Crucible looks at the card and **refuses rather than
+competing**. It never evicts anything.
+
+| Refusal | When |
+|---|---|
+| `accelerator_busy` (409) | a process that is not Crucible's holds more than 1 GiB — named, with its pid |
+| `insufficient_memory` (409) | free memory is below the manifest's estimate — both numbers named |
+| `env_missing` (409) | `~/.crucible/envs/llm` is not installed |
+| `model_not_installed` (409) | no weights at the manifest's pinned revision |
+| `backend_unsupported` (400) | the manifest has no block for this host |
+| `unknown_model` (400) | no manifest with that id |
+
+All of these happen **before the job is queued**, so a client is told by name instead of
+watching a job fail a minute later.
+
+> **Measured limitation, WSL2.** The driver shim inside WSL2 answers
+> `nvidia-smi --query-compute-apps` with an **empty list** even while a process in that
+> same VM holds 17 GB of the card. `memory.free` under WSL2 *is* accurate for the whole
+> card, so Crucible also refuses when VRAM is in use that no listed compute app accounts
+> for, past `[accelerator] desktop_allowance_bytes` — the host desktop's own graphics
+> memory, a declared fact in `config.toml` (3 GiB by default; use `0` on a headless box).
+> On Apple Silicon that rule does not apply: "used" unified memory is the OS and the
+> user's apps, so the free figure is the whole check.
+
+#### Logs
+
+Each engine's stdout and stderr go to `~/.crucible/logs/engine-<model id>.log`, starting
+with the exact command line that was run. That is where a failed load's reason is, and
+the `engine_failed` error quotes its last 40 lines.
+
+#### Engines stop with SIGTERM
+
+`stop()` signals the engine's process group and waits. Crucible **never** SIGKILLs a
+process holding CUDA — that wedges WSL2 until Windows reboots. If an engine will not go
+within 180 s, the refusal says so and names the log rather than escalating.
+
 ## The client
 
 `sdk/ts/` is `@crucible/client`, the TypeScript client for this API: ESM and CommonJS
@@ -179,8 +303,9 @@ dirty tree, an unpushed HEAD, and a tag that already exists.
 
 ```bash
 pip install -e '.[test]'
-pytest                      # in-process, FastAPI TestClient, temp CRUCIBLE_HOME
-./scripts/keeper-live.sh    # a real server on a free port, driven with curl
+pytest                       # in-process, FastAPI TestClient, temp CRUCIBLE_HOME
+./scripts/keeper-live.sh     # a real server on a free port, driven with curl
+./scripts/keeper-llm-live.sh # a real server, a real engine, a real model
 ```
 
 Both exit non-zero on any failure — trust the exit code, not the log. The pytest suite
@@ -188,6 +313,15 @@ never touches a real `~/.crucible`: every test gets a `CRUCIBLE_HOME` under pyte
 `tmp_path`, and backend detection is monkeypatched, so the suite is host-independent.
 The live keeper is not: it runs `crucible init`/`serve`/`doctor` for real and asserts
 that `/info` reports one of the two real backends.
+
+`keeper-llm-live.sh` goes one further and loads a model. It needs the host ready — the
+llm env installed and the model pulled — and **refuses by name** if either is missing
+rather than skipping. It checks the card is idle first, loads `qwen3.5-9b` (override with
+`CRUCIBLE_LLM_MODEL`), reads the `warming` stream, runs a non-streamed and a streamed
+chat through the proxy, asserts the 409 for a wrong model name, unloads, and confirms the
+accelerator returned to the figure it started at. The unit suite proves the same refusals
+with monkeypatched probes and an in-process `Engine`, so a machine with no GPU still runs
+every rule.
 
 The SDK has its own two:
 
