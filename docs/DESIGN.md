@@ -67,11 +67,11 @@ build version.
 | `GET /info` | yes | server `{name, version, api_version}`, host `{platform, arch, backend, gpu: {vendor, name, vram_bytes}}`, `capabilities: [{job_type, models: [{id, revision, source, resident, vram_bytes}]}]` |
 | `GET /health` | yes | `{status: ok / warming / busy, queue_depth, resident_models}` |
 | `POST /uploads` | yes | multipart → `{blob_id, bytes, sha256}`. For inputs too big to inline. |
-| `POST /jobs` | yes | `{type, model?, params, inputs: {name: blob_id or inline}}` → `{job_id}` (202). Refuses unknown type / model by name (400). |
-| `GET /jobs/{id}` | yes | `{status: queued / running / done / failed / cancelled, progress, position, error?, artifacts: [name]}` |
-| `GET /jobs/{id}/events` | yes | SSE: `queued`, `warming`, `progress {fraction, message}`, `artifact {name}`, `done`, `failed {error}`, `cancelled`. Resumable with `Last-Event-ID`. |
+| `POST /jobs` | yes | `{type, model?, params, inputs: {name: {blob_id} or {inline_base64}}}` (exactly one per input, unknown keys refused) → `{job_id}` (202). Refuses unknown type / model by name (400). |
+| `GET /jobs/{id}` | yes | `{job_id, type, model, status: queued / running / done / failed / cancelled, progress, position, error (null when none), artifacts: [name], created, started, finished}` |
+| `GET /jobs/{id}/events` | yes | SSE, ids strictly increasing from 1: `queued {position}`, `warming` (phase 2, payload TBD), `progress {fraction, message}` (the first, `fraction 0`, marks the job running), `artifact {name}`, `done {artifacts}`, `failed {error}`, `cancelled {status}`. Resumable with `Last-Event-ID`. |
 | `GET /jobs/{id}/artifacts/{name}` | yes | bytes. `.../{name}.provenance.json` always exists (see section 7). |
-| `DELETE /jobs/{id}` | yes | cancel. |
+| `DELETE /jobs/{id}` | yes | cancel: 200 `{status: "cancelling"}` on a running job (cooperative), 200 `{status: "cancelled"}` on a queued one, 409 `job_not_cancellable` on a terminal one. |
 | `/openai/*` | yes | OpenAI-compatible passthrough for `llm` (phase 2). |
 
 Errors are JSON `{error: {code, message}}`. No route ever degrades to a different
@@ -119,7 +119,7 @@ are two different voices).
 ## 7. Provenance
 
 Every artifact has a sibling `<name>.provenance.json`:
-`{server: {name, version}, backend, job_type, model: {id, revision}, params, started, finished}`.
+`{server: {name, version}, backend, job_type, model: {id, revision} or null for a model-less type, params, started, finished}`. Keys stay snake_case in every client; the sidecar is persisted verbatim.
 Clients must persist it with the output. A finished audiobook says which server rendered it.
 
 ## 8. Versioning and updates
