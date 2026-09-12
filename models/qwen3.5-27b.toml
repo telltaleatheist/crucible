@@ -16,6 +16,11 @@
 #   at 12288 tokens          = 805_306_368 B
 # cuda-linux: 55_563_022_432 (weights) + 805_306_368 (KV) = 56_368_328_800
 # mlx-darwin: 54_713_610_987 (weights) + 805_306_368 (KV) = 55_518_917_355
+#
+# How good is that arithmetic? On the 9B, where both exist, it came out 19.22 GB
+# against a measured peak of 20.38 GB — about 6% under. So treat these two as a
+# floor, not a ceiling; both are already far past what either of Owen's machines
+# can give, which is the only question they are asked.
 
 [model]
 id = "qwen3.5-27b"

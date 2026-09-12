@@ -26,7 +26,14 @@ engine_args = ["--dtype", "bfloat16", "--gpu-memory-utilization", "0.85"]
 engine = "mlx-lm"
 hf_repo = "mlx-community/Qwen3.5-9B-bf16"
 revision = "27cdb77d9381d508abfe5d4e06bcb95471e312ac"
-# COMPUTED pending the measurement in docs/PHASE2-LLM.md section 8:
-#   weights 18_819_722_691 B on disk + KV at 12288 = 402_653_184 B.
-memory_bytes_estimate = 19_222_375_875
+# MEASURED on Owen's Mac Studio (M1 Ultra, 64 GB), mlx-lm 0.31.3 / mlx 0.32.2,
+# 2026-09-12, via mlx's own allocator:
+#   after load                      active 17.91 GB, peak 17.91 GB
+#   after a 12198-token completion  active 17.91 GB, PEAK 20.38 GB
+# The peak is the figure: it is what the machine must be able to give while a
+# full-context request is in flight. (The engine process's RSS reads lower,
+# 17.86 GB, because MLX memory-maps the weights and not every page stays
+# resident — RSS is a floor, not the requirement. Computed weights + KV would
+# have said 19.22 GB, 6% under the truth.)
+memory_bytes_estimate = 20_378_749_158
 engine_args = []
