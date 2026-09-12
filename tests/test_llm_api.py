@@ -88,6 +88,13 @@ def idle_card(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def roomy_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A card big enough for the 27B, so residency can be tested with two models."""
+    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
+    monkeypatch.setattr(accelerator, "probe_vram", lambda: (80 * GIB, 80 * GIB))
+
+
+@pytest.fixture
 def engines(monkeypatch: pytest.MonkeyPatch) -> list[FakeEngine]:
     """Every engine the residency builds, in order, so a test can inspect them."""
     built: list[FakeEngine] = []
@@ -390,7 +397,7 @@ def test_loading_a_second_model_unloads_the_first(
     llm_client: TestClient,
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
-    idle_card: None,
+    roomy_card: None,
     engines: list[FakeEngine],
 ) -> None:
     """Phase 2 residency rule: one resident model at a time (section 3)."""

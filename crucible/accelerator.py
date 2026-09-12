@@ -325,7 +325,15 @@ def guard(
             },
         )
 
-    stray = unattributed_bytes(state, desktop_allowance_bytes, reclaimable_bytes)
+    # Only on a discrete card. On Apple Silicon "used unified memory" is the OS,
+    # the browser and the editor — the machine doing its job, not a compute
+    # process squatting on an accelerator. There the free figure is the whole
+    # check, which is what section 4 asks for on mlx-darwin.
+    stray = (
+        unattributed_bytes(state, desktop_allowance_bytes, reclaimable_bytes)
+        if backend_kind == CUDA_LINUX
+        else 0
+    )
     if stray > FOREIGN_PROCESS_FLOOR_BYTES:
         raise ApiError(
             409,

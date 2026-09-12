@@ -205,6 +205,20 @@ def test_unified_memory_is_checked_the_same_way(
     assert "30.0 GiB free" in caught.value.message
 
 
+def test_used_unified_memory_is_not_treated_as_a_squatting_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a Mac, 34 GiB "in use" is Chrome and Xcode, not somebody's GPU job.
+
+    The unattributed-VRAM rule exists for a discrete card under WSL2; applying it
+    to unified memory would refuse every load on a machine anyone actually uses.
+    """
+    fake_mac(monkeypatch, available=30 * GIB, total=64 * GIB)
+    state = read_state("mlx-darwin", 0)
+    assert state.used_bytes == 34 * GIB
+    guard("mlx-darwin", model_id="qwen3.5-9b", need_bytes=19 * GIB)
+
+
 def test_a_probe_that_cannot_answer_never_means_the_card_is_free(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
