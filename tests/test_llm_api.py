@@ -11,6 +11,7 @@ proxy are exactly what runs on the PC.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -498,6 +499,59 @@ def test_unloading_a_model_that_is_not_resident_is_refused(
     response = submit(llm_client, auth, type="unload-model", model=BIG_MODEL)
     assert response.status_code == 409
     assert response.json()["error"]["details"]["resident"] == MODEL
+
+
+def test_health_says_warming_while_a_load_is_in_flight(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PHASE2-LLM.md section 5: `/health` reports `warming` while a load runs."""
+    hold = threading.Event()
+    built: list[FakeEngine] = []
+
+    def build(engine_name: str, python: Path, log_path: Path) -> FakeEngine:
+        engine = FakeEngine(python, log_path, hold=hold)
+        built.append(engine)
+        return engine
+
+    monkeypatch.setattr(residency_module, "build_engine", build)
+    monkeypatch.setattr(
+        residency_module,
+        "engine_model_name",
+        lambda engine_name, model_dir, model_id: model_id,
+    )
+    fake_weights(MODEL)
+
+    response = submit(llm_client, auth, type="load-model", model=MODEL)
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+
+    # Wait for the lane to actually reach the engine, then look at the server
+    # while the load is genuinely in flight.
+    with llm_client.stream("GET", f"/v1/jobs/{job_id}/events", headers=auth) as stream:
+        events = stream.iter_lines()
+        assert built or next(events) is not None
+        for _ in range(40):
+            if built and built[0].warming_started.wait(timeout=0.25):
+                break
+        assert built and built[0].warming_started.is_set()
+
+        health = llm_client.get("/v1/health", headers=auth).json()
+        assert health["status"] == "warming", health
+        assert health["resident_models"] == [], health
+
+        hold.set()
+        for _ in stream.iter_lines():
+            pass
+
+    assert llm_client.get("/v1/health", headers=auth).json() == {
+        "status": "ok",
+        "queue_depth": 0,
+        "resident_models": [MODEL],
+    }
 
 
 def test_an_engine_that_never_becomes_ready_fails_the_job(

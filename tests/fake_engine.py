@@ -131,6 +131,7 @@ class FakeEngine:
         *,
         warmings: int = 3,
         fail_ready: str | None = None,
+        hold: threading.Event | None = None,
     ) -> None:
         self._python = Path(python)
         self._log_path = Path(log_path)
@@ -139,6 +140,12 @@ class FakeEngine:
         self._port: int | None = None
         self._warmings = warmings
         self._fail_ready = fail_ready
+        #: When given, `ready()` blocks on it, so a test can look at the server
+        #: while a load is genuinely in flight.
+        self._hold = hold
+        #: Set once `ready()` has been entered, so a test knows the lane has
+        #: reached the engine without polling on a sleep.
+        self.warming_started = threading.Event()
         self.stopped = False
 
     @property
@@ -178,11 +185,14 @@ class FakeEngine:
     ) -> None:
         from crucible.engines import EngineError
 
+        self.warming_started.set()
         if self._fail_ready is not None:
             raise EngineError(self._fail_ready)
         for step in range(self._warmings):
             if on_progress is not None:
                 on_progress(f"fake engine warming, step {step + 1}/{self._warmings}")
+        if self._hold is not None and not self._hold.wait(timeout=30):
+            raise EngineError("the test never released the hold on ready()")
 
     def stop(self) -> None:
         self.stopped = True

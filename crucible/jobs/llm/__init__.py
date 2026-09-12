@@ -297,6 +297,16 @@ class LoadModelJobType:
         model = job.model
         if model is None:  # unreachable: resolve_model requires one
             raise JobError("model_required", f"{self.name} needs a model")
+        # `/v1/health` says `warming` for the whole job, not only while the
+        # engine's readiness is being polled: from the client's side this server
+        # is warming a model from the moment the lane picks the job up.
+        self._residency.begin_warming(model)
+        try:
+            self._load(ctx, model, params)
+        finally:
+            self._residency.end_warming()
+
+    def _load(self, ctx: JobContext, model: str, params: LoadParams) -> None:
         try:
             manifest, spec, (python, installed) = _require_loadable(
                 self._config, self._backend, model

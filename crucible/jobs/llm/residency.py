@@ -92,6 +92,18 @@ class Residency:
     def ids(self) -> list[str]:
         return [] if self._resident is None else [self._resident.model_id]
 
+    def begin_warming(self, model_id: str) -> None:
+        """Mark a load as in progress, so `/v1/health` says `warming`.
+
+        Set for the whole load job, not just the engine's readiness poll: from
+        the client's side, "this server is warming a model" is true from the
+        moment the lane picks the job up.
+        """
+        self._warming = model_id
+
+    def end_warming(self) -> None:
+        self._warming = None
+
     def owned_pids(self) -> frozenset[int]:
         return frozenset() if self._engine is None else self._engine.pids
 
@@ -133,7 +145,7 @@ class Residency:
         served = engine_model_name(spec.engine, weights_dir, manifest.id)
         port = find_free_port()
 
-        self._warming = manifest.id
+        self.begin_warming(manifest.id)
         say(
             f"starting {spec.engine} for {manifest.id} on 127.0.0.1:{port} "
             f"(context {manifest.context_default}); log {log_path}"
@@ -158,7 +170,7 @@ class Residency:
                 ) from start_failure
             raise
         finally:
-            self._warming = None
+            self.end_warming()
 
         self._engine = engine
         self._resident = ResidentModel(
