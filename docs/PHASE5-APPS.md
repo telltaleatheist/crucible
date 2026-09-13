@@ -80,6 +80,31 @@ Crucible does not repoint rows already queued. That is correct behaviour and it 
 like a bug on the first migration, so the migration says it out loud and the row shows
 which server it was enqueued against.
 
+## 3.1 Two consequences of a server being somewhere else
+
+Both of these are small, both are already decided by code that exists, and both will look
+like bugs on the first migration if they are not written down first.
+
+**A remote Crucible is a `cpu` step.** `resourceForProvider` (`queue-steps/runtime.ts:37`)
+routes an AI pass to `cpu` when the provider is `claude` or `openai` and to `gpu` when it is
+`ollama` or `local`, on the stated ground that "a hosted API is network latency and nothing
+else". A Crucible is whichever of those it happens to be: a server in this machine's WSL is
+using **this** card and must hold the single `gpu` slot; a server on the Mac or a droplet is
+network latency and must not. So the resource is a property of the **registry entry**, not
+of the provider name — and a registry entry needs to say which it is. Resolving it from the
+URL (loopback means local) is a guess that is wrong for a tailnet address pointing at this
+same box. Ask the server: `/v1/info` already reports the host, so an entry can record
+whether that host is this one, at the moment it is added.
+
+**Admission becomes a network call, so it needs a deadline and a memory.** Today a GPU step
+holds while `external-gpu-job.lock` exists and while the in-process arbiter reports a
+foreign holder — both local reads, both instant. `GET /v1/accelerator` is neither. The
+admission check has to cache its answer for the length of its recheck interval (15 s today)
+and, crucially, **decide what an unreachable server means**. It means the step does not
+start and the row says why: a queue that proceeds when it cannot see the card has
+reinvented `gpu-arbiter.ts:88`'s `timeoutMs` path, which proceeds **without** the lock and
+is the single worst line in the app's arbitration.
+
 ## 4. The 8766 relay, which is how Sunday keeps working
 
 BookForge's TTS WebSocket on 8766 is what the browser extension talks to, and Owen uses it
