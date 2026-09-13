@@ -431,6 +431,14 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     # itself answers to. They differ on mlx-lm, which has no
                     # --served-model-name (crucible/engines/mlx_lm.py).
                     "engine_model_name": resident.engine_model_name,
+                    # This entry describes the ENGINE, not the manifest, so both
+                    # of these are what was actually loaded. `/v1/models`' row
+                    # for the same model reports the manifest's pin, and the two
+                    # differ only if somebody edited the manifest while the
+                    # engine was up — in which case a client recording what it
+                    # talked to wants this one.
+                    "revision": resident.revision,
+                    "fingerprint": resident.fingerprint,
                     # The context this engine was started with, under OpenAI's
                     # own field name. This is the door Foundry reads — it asks
                     # the OpenAI-shaped listing, not `/v1/models` — and it is the

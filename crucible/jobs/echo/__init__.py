@@ -39,6 +39,12 @@ class EchoJobType:
             raise JobError("unknown_model", f"echo serves no models, got {model!r}")
         return 0
 
+    def model_provenance(self, model: str | None) -> dict[str, Any] | None:
+        """Echo serves no models, so its artifacts name none."""
+        if model is not None:
+            raise JobError("unknown_model", f"echo serves no models, got {model!r}")
+        return None
+
     def check(self, backend: Any) -> JobTypeStatus:
         return JobTypeStatus(
             ready=True,

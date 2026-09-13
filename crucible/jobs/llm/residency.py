@@ -25,7 +25,7 @@ from ...engines import (
     engine_model_name,
     find_free_port,
 )
-from ...manifests import BackendSpec, ModelManifest
+from ...manifests import BackendSpec, ModelManifest, fingerprint
 
 #: How long a load waits for the engine to answer `/v1/models`. vLLM on a 19 GB
 #: model spends most of it reading weights and capturing CUDA graphs.
@@ -51,6 +51,11 @@ class ResidentModel:
     log_path: Path
     loaded_at: str
 
+    @property
+    def fingerprint(self) -> str:
+        """`<id>@<revision>` for the weights this engine actually read."""
+        return fingerprint(self.model_id, self.revision)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "model": self.model_id,
@@ -59,6 +64,7 @@ class ResidentModel:
             "engine_model_name": self.engine_model_name,
             "base_url": self.base_url,
             "revision": self.revision,
+            "fingerprint": self.fingerprint,
             "max_model_len": self.max_model_len,
             "memory_bytes_estimate": self.memory_bytes_estimate,
             "log_path": str(self.log_path),

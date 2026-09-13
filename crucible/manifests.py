@@ -61,6 +61,18 @@ _BACKEND_OPTIONAL: dict[str, type] = {
     "context_default": int,
 }
 
+def fingerprint(model_id: str, revision: str) -> str:
+    """`qwen3.5-9b@<sha>` — how a model's identity is written down.
+
+    The bare id is not enough to identify bytes. Foundry hashes the served model
+    id into its cleanup cache key and BookForge stamps it into a book's OPF
+    (CLIENT-SURFACES.md section 6.5), so "what cleaned this book" has to name the
+    pin as well as the model, or a manifest that moves to a new revision goes on
+    answering from a cache built by the old one.
+    """
+    return f"{model_id}@{revision}"
+
+
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _HF_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
@@ -119,6 +131,16 @@ class ModelManifest:
         if found is None or found.context_default is None:
             return self.context_default
         return found.context_default
+
+    def fingerprint_for(self, backend_kind: str) -> str | None:
+        """`<id>@<revision>` for this backend, or None where there is no block.
+
+        None rather than the bare id: a host with no block for this model has no
+        revision to name here, and an unpinned fingerprint would be a worse
+        record than no fingerprint — it would look like one.
+        """
+        found = self.backends.get(backend_kind)
+        return None if found is None else fingerprint(self.id, found.revision)
 
     def spec(self, backend_kind: str) -> BackendSpec:
         """The block for `backend_kind`, or a named refusal."""

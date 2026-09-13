@@ -26,7 +26,7 @@ from crucible.accelerator import GIB, ComputeApp
 from crucible.jobs.llm import residency as residency_module
 from crucible.manifests import load_manifest
 
-from .conftest import FAKE_BACKEND, parse_sse
+from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
 from .fake_engine import ANSWER, DELTAS, TOOL_CALL, FakeEngine
 
 MODEL = "qwen3.5-9b"
@@ -231,6 +231,126 @@ memory_bytes_estimate = 3000000000
     assert rows[0]["context_default"] == 4096
     by_type = {entry["job_type"]: entry for entry in capabilities}
     assert by_type["llm"]["models"] == rows
+
+
+# ---------------------------------------------------------------- fingerprint
+
+
+def test_every_row_carries_the_fingerprint_a_client_records(
+    llm_client: TestClient, auth: dict[str, str]
+) -> None:
+    """`<id>@<revision>` — the id alone does not identify bytes.
+
+    Foundry hashes the served model id into its cleanup cache key and BookForge
+    stamps it into a book's OPF (CLIENT-SURFACES.md section 6.5). The server
+    spells the fingerprint out rather than leaving each client to assemble one,
+    because two clients inventing two spellings is two names for one set of
+    weights.
+    """
+    rows = llm_client.get("/v1/models", headers=auth).json()
+    for row in rows:
+        assert row["fingerprint"] == f"{row['id']}@{row['revision']}"
+    assert rows[0]["fingerprint"] == (
+        f"{MODEL}@{load_manifest(MODEL).spec(FAKE_BACKEND.kind).revision}"
+    )
+
+
+def test_a_model_this_backend_cannot_serve_has_no_fingerprint(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Null, not the bare id: an unpinned fingerprint would look like a pin."""
+    fixture = tmp_path / "models"
+    fixture.mkdir()
+    (fixture / "mac-only.toml").write_text(
+        """
+[model]
+id = "mac-only"
+family = "demo"
+params_b = 1
+context_default = 4096
+
+[backends.mlx-darwin]
+engine = "mlx-lm"
+hf_repo = "demo/Demo-1B"
+revision = "0123456789abcdef0123456789abcdef01234567"
+memory_bytes_estimate = 3000000000
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CRUCIBLE_MODELS_DIR", str(fixture))
+    with make_client(enable_llm=True) as client:
+        row = client.get("/v1/models", headers=auth).json()[0]
+    assert row["revision"] is None
+    assert row["fingerprint"] is None
+
+
+def test_the_openai_listing_names_the_weights_the_engine_actually_read(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """That entry describes the engine, so its pin is the loaded one."""
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    entry = llm_client.get("/v1/openai/models", headers=auth).json()["data"][0]
+    revision = load_manifest(MODEL).spec(FAKE_BACKEND.kind).revision
+    assert entry["revision"] == revision
+    assert entry["fingerprint"] == f"{MODEL}@{revision}"
+
+
+def test_a_provenance_sidecar_names_the_revision_it_was_served_at(
+    make_app: Callable[..., Any],
+    fake_env: Path,
+) -> None:
+    """The bug: `revision: null` on every artifact Crucible had ever written.
+
+    The queue holds a model id and nothing that could turn it into a revision, so
+    it wrote null and a sidecar named a model while declining to say which one.
+    The job type knows; it is asked.
+
+    No `llm` job produces artifacts today, so this reads the document the way the
+    artifact writer does rather than fetching a file. That is the point of fixing
+    it now: `tts` and `vlm-pages` are the ones that will write it into a book.
+    """
+    store = make_app(enable_llm=True).state.store
+    spec = load_manifest(MODEL).spec(FAKE_BACKEND.kind)
+
+    job = store.create("load-model", MODEL, {})
+    assert store.provenance(job)["model"] == {
+        "id": MODEL,
+        "revision": spec.revision,
+        "fingerprint": f"{MODEL}@{spec.revision}",
+    }
+
+    # A model-less job type still says `model: null`, which is the honest shape.
+    assert store.provenance(store.create("echo", None, {}))["model"] is None
+
+
+def test_a_provenance_sidecar_names_THIS_host_s_pin(
+    make_app: Callable[..., Any],
+    fake_env: Path,
+) -> None:
+    """The same model at two shas, because the weights differ per backend.
+
+    `qwen3.5-9b` is one Crucible id over two HuggingFace repos — Qwen's own on
+    cuda-linux, the bf16 conversion on mlx-darwin. A record that named the id
+    without the host's pin would say the same thing about two different sets of
+    bytes, which is exactly what the fingerprint exists to prevent.
+    """
+    mac_store = make_app(enable_llm=True, backend=FAKE_MAC_BACKEND).state.store
+    mac = mac_store.provenance(mac_store.create("load-model", MODEL, {}))["model"]
+    pc_store = make_app(enable_llm=True).state.store
+    pc = pc_store.provenance(pc_store.create("load-model", MODEL, {}))["model"]
+
+    assert mac["id"] == pc["id"] == MODEL
+    assert mac["revision"] == load_manifest(MODEL).spec(FAKE_MAC_BACKEND.kind).revision
+    assert pc["revision"] == load_manifest(MODEL).spec(FAKE_BACKEND.kind).revision
+    assert mac["fingerprint"] != pc["fingerprint"]
 
 
 # ------------------------------------------------------------- max_model_len

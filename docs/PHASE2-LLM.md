@@ -83,11 +83,11 @@ eviction of other people's processes, ever.
 
 | Route | Auth | Returns |
 |---|---|---|
-| `GET /v1/models` | yes | `[{id, family, params_b, revision, backend_supported, installed, resident, loadable, reason (when not loadable), memory_bytes_estimate, context_default, max_model_len}]` |
+| `GET /v1/models` | yes | `[{id, family, params_b, revision, fingerprint, backend_supported, installed, resident, loadable, reason (when not loadable), memory_bytes_estimate, context_default, max_model_len}]` |
 | `POST /v1/jobs {type: "load-model", model}` | yes | a normal job. Events: `queued`, `warming {message}` streamed from the engine's readiness (several), `done {resident: id}`. Refusals by name before queuing: `unknown_model`, `model_not_installed`, `backend_unsupported`, `accelerator_busy`, `insufficient_memory`, `env_missing`. |
 | `POST /v1/jobs {type: "unload-model", model}` | yes | a normal job; `done {resident: null}` — the same field the load reports, saying what is resident *now*, which after an unload is nothing. `model_not_resident` if it isn't. |
 | `POST /v1/openai/chat/completions` | yes | proxied to the resident engine, streaming or not, verbatim but for `model` (see below). `model` in the body must equal the resident id, else **409 `model_not_resident`** naming the resident model (or none). Never loads implicitly. |
-| `GET /v1/openai/models` | yes | the resident model in OpenAI's list shape (`{id, object, created, owned_by, engine_model_name, max_model_len}`), or an empty list. |
+| `GET /v1/openai/models` | yes | the resident model in OpenAI's list shape (`{id, object, created, owned_by, engine_model_name, revision, fingerprint, max_model_len}`), or an empty list. |
 
 `revision` is the pin in **this host's** backend block, so a client records the same sha
 the puller used; it is `null` — not `""` — when `backend_supported` is false, because a
@@ -112,6 +112,41 @@ that is the door that matters: Foundry reads the OpenAI-shaped listing rather th
 `max_model_len − (⌈chars/2.5⌉ + 256)` — **with no clamp at all when the server does not
 report the field** (CLIENT-SURFACES.md section 6.1). An unclamped request is a 400 from
 the engine, so the field being absent costs a whole call.
+
+### The served name, and what a client writes down
+
+**`fingerprint` is `<id>@<revision>`, and it is what belongs in a record — never the bare
+id.** A client does not merely display the model it talked to; Foundry hashes the served
+model id into its cleanup cache key and its translate bank, and BookForge stamps it into a
+book's OPF (CLIENT-SURFACES.md section 6.5). Two consequences follow, and they pull in
+opposite directions, which is why the rule has two halves:
+
+- **The id is stable, so a cache stays warm.** Changing the name Crucible reports for the
+  same weights re-asks every block of every book. `qwen3.5-9b` is that name on both
+  backends, and the proxy puts it back on the way out precisely so that a book cleaned on
+  the Mac and a book cleaned on the PC are filed under one name.
+- **The revision travels with it, so a record is not a lie.** The same id serves different
+  bytes on different hosts — `qwen3.5-9b` is Qwen's own repo on `cuda-linux` and the bf16
+  conversion on `mlx-darwin`, at two different shas — and a manifest can be re-pinned. A
+  record that says only `qwen3.5-9b` cannot tell those apart afterwards.
+
+On `/v1/models`, `fingerprint` is `id` and `revision` from that same row joined, so it can
+never disagree with them, and it is `null` wherever `revision` is — an unpinned fingerprint
+would be worse than none, because it would look like a pin. On `/v1/openai/models` both
+come off the resident engine, because that entry describes what is **running**. The
+provenance sidecar (DESIGN.md section 7) carries all three — `{id, revision, fingerprint}`
+— and its `revision` is this host's backend pin, which is a statement about bytes and not
+about a file: a load refuses weights pulled at any other revision, so the pin the manifest
+names is the pin the engine read.
+
+**A Crucible id carries its dtype when the dtype is not bf16.** That is why
+`qwen3.8-27b-4bit` is a separate id from `qwen3.8-27b` rather than a flag on it: a server
+reports one served name, so two books cleaned at two precisions would otherwise be
+indistinguishable in their records, and the int4 and bf16 answers to the same prompt are
+not the same answer. bf16 is the unmarked case and takes no suffix. The precision is part
+of the *id* and not of the revision because it is a choice about which weights to serve,
+which the client may legitimately care about; the revision is which commit of those
+weights, which it only records.
 
 `GET /v1/info` gains `capabilities: [{job_type: "llm", models: [...]}]` whose rows are the
 `/v1/models` rows **verbatim**, produced by the same function. That is the one exception to

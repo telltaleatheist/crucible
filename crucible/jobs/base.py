@@ -97,6 +97,17 @@ class JobType(Protocol):
     def vram_estimate(self, model: str | None) -> int:
         """Bytes of accelerator memory a run of `model` needs."""
 
+    def model_provenance(self, model: str | None) -> dict[str, Any] | None:
+        """The `model` block of this job's provenance sidecar, or None.
+
+        DESIGN.md section 7: `{id, revision}` — and, since phase 3a, the
+        `fingerprint` that joins them, because that is the string a client
+        records (PHASE2-LLM.md section 5). It lives here rather than in the queue
+        because the queue holds a model id and nothing that could turn it into a
+        revision. A type that serves no models answers None, and the sidecar says
+        `model: null`.
+        """
+
     def check(self, backend: Any) -> JobTypeStatus:
         """Whether this type can run here right now, and why not if it cannot."""
 
