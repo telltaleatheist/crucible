@@ -31,13 +31,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .errors import CrucibleError
 
@@ -197,21 +198,100 @@ def recipe_for(spec: EnvSpec) -> Path:
     return path
 
 
-def recipe_pins(path: Path) -> dict[str, str]:
-    """The `name==version` pins in a recipe, by lower-cased name."""
-    pins: dict[str, str] = {}
+#: A PEP 508 direct reference — `name @ url`, optionally with extras. This is how
+#: `envs/tts/` pins narrator, which is not on PyPI: it lives in the BookForge
+#: repo and is versioned with the app (PHASE3-TTS.md section 4 calls extracting
+#: it an owed ruling for Owen). A `name==version` pin cannot express a git sha,
+#: and `narrator==0.1.0` would be a pin that lets any commit through.
+_DIRECT_REFERENCE = re.compile(
+    r"^(?P<name>[A-Za-z0-9._-]+)(?:\[[^\]]*\])?\s*@\s*(?P<url>\S+)\s*$"
+)
+
+#: The commit a direct reference names, taken from the `@<sha>` a pip VCS URL
+#: puts after the repository and before any `#fragment`.
+_VCS_COMMIT = re.compile(r"@(?P<sha>[0-9a-f]{40})(?:#|$)")
+
+
+def _requirement_lines(path: Path) -> Iterator[str]:
     for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or stripped.startswith("-"):
             continue
+        yield stripped
+
+
+def recipe_pins(path: Path) -> dict[str, str]:
+    """The `name==version` pins in a recipe, by lower-cased name.
+
+    Direct references are **skipped here and checked by
+    `recipe_direct_references`** rather than refused: they are exact pins too,
+    just of a commit rather than a version, and `pip list` reports the package's
+    own metadata version for one, which would never match the sha. A line that is
+    neither shape is still refused — every requirement in a recipe is pinned.
+    """
+    pins: dict[str, str] = {}
+    for stripped in _requirement_lines(path):
+        if _DIRECT_REFERENCE.match(stripped):
+            continue
         name, separator, version = stripped.partition("==")
         if separator != "==":
             raise EnvError(
-                f"{path.name}: {stripped!r} is not a `name==version` pin; every "
-                "requirement in a recipe is pinned exactly"
+                f"{path.name}: {stripped!r} is not a `name==version` pin or a "
+                "`name @ url` direct reference; every requirement in a recipe is "
+                "pinned exactly"
             )
         pins[name.strip().lower().replace("_", "-")] = version.strip()
     return pins
+
+
+def recipe_direct_references(path: Path) -> dict[str, str]:
+    """The commit each `name @ url` line pins, by lower-cased name.
+
+    A direct reference whose URL carries no 40-character commit is refused: a
+    branch or a tag is a moving target, and an env built from one cannot be said
+    to match the recipe that built it.
+    """
+    references: dict[str, str] = {}
+    for stripped in _requirement_lines(path):
+        match = _DIRECT_REFERENCE.match(stripped)
+        if match is None:
+            continue
+        commit = _VCS_COMMIT.search(match.group("url"))
+        if commit is None:
+            raise EnvError(
+                f"{path.name}: {stripped!r} names no commit. A direct reference "
+                "is pinned by `@<40-character sha>` before any `#fragment`; a "
+                "branch name is not a pin"
+            )
+        name = match.group("name").strip().lower().replace("_", "-")
+        references[name] = commit.group("sha")
+    return references
+
+
+def installed_direct_references(home: Path, spec: EnvSpec) -> dict[str, str]:
+    """What commit each VCS-installed package in this venv actually came from.
+
+    PEP 610: pip writes `direct_url.json` beside a distribution's metadata when
+    it was installed from a URL rather than an index, and for a VCS install that
+    file carries `vcs_info.commit_id` — the commit pip actually resolved. That is
+    the only place the sha survives; `pip list` reports the package's declared
+    version, which does not move when the commit does.
+    """
+    root = env_dir(home, spec) / "lib"
+    found: dict[str, str] = {}
+    if not root.is_dir():
+        return found
+    for record in root.glob("python*/site-packages/*.dist-info/direct_url.json"):
+        try:
+            document = json.loads(record.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise EnvError(f"could not read {record}: {exc}") from None
+        commit = document.get("vcs_info", {}).get("commit_id")
+        if not commit:
+            continue
+        name = record.parent.name.split("-")[0].lower().replace("_", "-")
+        found[name] = commit
+    return found
 
 
 # ------------------------------------------------------------------- status
@@ -284,6 +364,17 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
         f"{name} is {present.get(name, 'absent')}, recipe pins {version}"
         for name, version in pins.items()
         if present.get(name) != version
+    )
+    # A direct reference is checked against the COMMIT pip recorded, not against
+    # a version: `narrator` is installed from a git sha and its metadata version
+    # does not move when the sha does, so a version check here would call an env
+    # built from last month's commit a match.
+    built_from = installed_direct_references(home, spec)
+    wrong += sorted(
+        f"{name} was installed from "
+        f"{built_from.get(name, 'no recorded commit')}, recipe pins {commit}"
+        for name, commit in recipe_direct_references(recipe).items()
+        if built_from.get(name) != commit
     )
     if wrong:
         return EnvStatus(

@@ -170,3 +170,115 @@ def test_require_env_refuses_rather_than_guessing_an_interpreter(home: Path) -> 
     with pytest.raises(EnvError) as caught:
         require_env(home, llm_env("cuda-linux"), "cuda-linux")
     assert "crucible install llm" in str(caught.value)
+
+
+# ------------------------------------------------- pinning what is not on PyPI
+
+
+def _recipe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> Path:
+    root = tmp_path / "recipes"
+    (root / "tts").mkdir(parents=True)
+    path = root / "tts" / "higgs-v3-cuda-linux.txt"
+    path.write_text(body, encoding="utf-8")
+    monkeypatch.setenv("CRUCIBLE_RECIPES_DIR", str(root))
+    return path
+
+
+SHA = "4ebc529f30cfa205b820cf494e48fcb76ac12977"
+REFERENCE = f"narrator[higgs-v3-server] @ git+https://example.invalid/x@{SHA}#subdirectory=python"
+
+
+def test_a_direct_reference_is_a_pin_and_is_not_read_as_a_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """narrator is not on PyPI, so it cannot be `name==version`.
+
+    `pip list` reports its declared version, which does not move when the commit
+    does — so a version check here would call an env built from last month's
+    commit a match. The two shapes are therefore read by two functions, and
+    `recipe_pins` must not report the reference as a version pin.
+    """
+    path = _recipe(tmp_path, monkeypatch, f"{REFERENCE}\ntorch==2.13.0\n")
+    assert recipe_pins(path) == {"torch": "2.13.0"}
+    assert jobenv.recipe_direct_references(path) == {"narrator": SHA}
+
+
+def test_a_direct_reference_without_a_commit_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A branch is a moving target; an env built from one cannot be said to
+    match the recipe that built it."""
+    path = _recipe(
+        tmp_path, monkeypatch, "narrator @ git+https://example.invalid/x@main\n"
+    )
+    with pytest.raises(EnvError) as caught:
+        jobenv.recipe_direct_references(path)
+    assert "names no commit" in str(caught.value)
+    assert "a branch name is not a pin" in str(caught.value)
+
+
+def test_a_line_that_is_neither_shape_is_still_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _recipe(tmp_path, monkeypatch, "torch>=2.13\n")
+    with pytest.raises(EnvError) as caught:
+        recipe_pins(path)
+    assert "every requirement in a recipe is pinned exactly" in str(caught.value)
+
+
+def test_the_commit_an_env_was_built_from_is_read_off_pips_own_record(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PEP 610: pip writes `direct_url.json` beside a distribution installed from
+    a URL, and for a VCS install it carries the commit pip actually resolved."""
+    spec = tts_env("higgs-v3", "cuda-linux")
+    packages = env_dir(home, spec) / "lib" / "python3.11" / "site-packages"
+    dist = packages / "narrator-0.1.0.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "direct_url.json").write_text(
+        json.dumps(
+            {
+                "url": "https://example.invalid/x",
+                "vcs_info": {"vcs": "git", "commit_id": SHA},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # A package installed from an index has no such file and is not reported.
+    (packages / "torch-2.13.0.dist-info").mkdir()
+    assert jobenv.installed_direct_references(home, spec) == {"narrator": SHA}
+
+
+def test_an_env_built_from_another_commit_is_not_ready(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = tts_env("higgs-v3", "cuda-linux")
+    directory = env_dir(home, spec)
+    (directory / "bin").mkdir(parents=True)
+    (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    (directory / "crucible-env.json").write_text(
+        json.dumps(
+            {
+                "backend": "cuda-linux",
+                "recipe": "higgs-v3-cuda-linux.txt",
+                "python_version": "3.11.16",
+                "seconds": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _recipe(tmp_path, monkeypatch, f"{REFERENCE}\ntorch==2.13.0\n")
+    monkeypatch.setattr(
+        jobenv, "installed_packages", lambda _home, _spec: {"torch": "2.13.0"}
+    )
+    packages = directory / "lib" / "python3.11" / "site-packages"
+    dist = packages / "narrator-0.1.0.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "direct_url.json").write_text(
+        json.dumps({"vcs_info": {"vcs": "git", "commit_id": "0" * 40}}),
+        encoding="utf-8",
+    )
+    status = env_status(home, spec, "cuda-linux")
+    assert status.installed is False
+    assert "narrator was installed from 0000000" in status.detail
+    assert SHA in status.detail
