@@ -37,6 +37,7 @@
 #   +849_398_784 B  15 `mtp.*` tensors cyankiwi carries and avyukth does not
 #   +1_600_184_320 B the cost of group-32 asymmetric over group-128 symmetric —
 #                    finer scales, plus zero-points, on 24.4 billion int4 weights
+#   -1_552 B         int64 index tensors, which is the whole remainder
 # Neither is a flaw; they are just 2.45 GB this card does not have. avyukth is
 # tagged `vllm`, `compressed-tensors`, `w4a16`, has 100k downloads, ships no
 # separate MTP shard, and every byte of its one file is a byte vLLM loads — so
@@ -116,5 +117,9 @@ engine_args = ["--gpu-memory-utilization", "0.85"]
 engine = "mlx-lm"
 hf_repo = "mlx-community/Qwen3.8-27B-4bit"
 revision = "3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
+# COMPUTED, pending the measurement on the Mac Studio: the repo's safetensors at
+# the pinned sha (16_054_541_349 B) plus the same KV at 98304 (6_442_450_944 B).
+# Replace with `mx.get_peak_memory()` after a full-context completion, the way
+# the 9B's mlx figure was taken.
 memory_bytes_estimate = 22_496_992_293
 engine_args = []
