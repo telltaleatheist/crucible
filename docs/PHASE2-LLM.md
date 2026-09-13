@@ -29,9 +29,13 @@ revision = "<pinned>"
 memory_bytes_estimate = 21000000000
 ```
 
-Phase 2 ships two manifests: `qwen3.5-9b` and `qwen3.8-27b`. The 27B has a cuda-linux
-block too; the server will refuse to load it on a 24 GB card by name (see 4), which is
-the point: the manifest says what the model needs, the host says what it has.
+Phase 2 ships three manifests: `qwen3.5-9b`, `qwen3.8-27b` and `qwen3.8-27b-4bit`. The
+bf16 27B has a cuda-linux block too; the server will refuse to load it on a 24 GB card by
+name (see 4), which is the point: the manifest says what the model needs, the host says
+what it has. `qwen3.8-27b-4bit` is the same 27B at int4 — the one that does fit 24 GB —
+and carries the 98304-token context of Owen's Ollama tag `qwen3.8:27b-24g`, so
+`context_default` is a per-model number and not a constant. Nothing else about a model's
+*use* belongs here: sampling is the client's, sent per request.
 
 Weights live under `~/.crucible/models/<id>/<backend>/`, pulled by `crucible models pull
 <id>` with `huggingface_hub` at the pinned revision. Never from GitHub Releases. The HF
