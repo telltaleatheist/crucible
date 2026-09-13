@@ -249,6 +249,7 @@ id = "mac-only"
 family = "demo"
 params_b = 1
 context_default = 4096
+modalities = ["text"]
 
 [backends.mlx-darwin]
 engine = "mlx-lm"
@@ -296,6 +297,7 @@ id = "mac-only"
 family = "demo"
 params_b = 1
 context_default = 4096
+modalities = ["text"]
 
 [backends.mlx-darwin]
 engine = "mlx-lm"

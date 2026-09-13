@@ -181,6 +181,13 @@ def model_rows(
             # backend has no revision here at all, and says so with null rather
             # than with an empty string that would read as a real pin.
             "revision": revision,
+            # What a client may put in a chat request's content parts. Unlike
+            # `revision` and `memory_bytes_estimate` this is not a per-host fact
+            # and is never null: it says what the model is offered FOR, which is
+            # the same answer on a host that cannot serve it at all. A page
+            # reader picks an image-capable model from this rather than knowing
+            # one by name (PHASE3-VLM.md section 2).
+            "modalities": list(manifest.modalities),
             "backend_supported": supported,
             "installed": is_installed,
             "resident": residency.resident_id == manifest.id,

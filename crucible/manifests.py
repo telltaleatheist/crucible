@@ -37,11 +37,37 @@ BACKEND_ENGINES: dict[str, str] = {
     MLX_DARWIN: "mlx-lm",
 }
 
+#: What a client may put in a chat request's content parts for this model
+#: (PHASE3-VLM.md section 2). It is a statement about what Crucible OFFERS on
+#: this server, not about what the checkpoint could theoretically do:
+#: `qwen3.5-9b` has a vision tower and is served text-only here, and says
+#: `["text"]` because a client that sends it a page gets an engine error rather
+#: than a reading.
+MODALITIES: frozenset[str] = frozenset({"text", "image"})
+
+#: vLLM's flag for "do not budget for an image while profiling". It does not make
+#: an engine text-only; it only stops it RESERVING for one image of the maximum
+#: feature size, which on `qwen3.5-9b` was MEASURED at 1.90 GiB of the budget and
+#: is the difference between a KV pool and no KV pool at all
+#: (models/qwen3.5-9b.toml). That manifest's comment has always carried the
+#: condition — "if the `llm` proxy is ever given image input, this line must come
+#: out and the utilisation be measured again" — and `modalities` is the first
+#: thing in the repo that can say when that day has arrived. So the loader now
+#: refuses the pair rather than trusting a reviewer to remember, because the
+#: failure it prevents is silent: an image-capable model started with this flag
+#: loads, serves, and then meets a real page with no reservation behind it.
+SKIP_MM_PROFILING = "--skip-mm-profiling"
+
 _MODEL_REQUIRED: dict[str, type] = {
     "id": str,
     "family": str,
     "params_b": int,
     "context_default": int,
+    # Required, not defaulted to `["text"]`, for the reason every other key in
+    # this table is required: a manifest that forgets it must not quietly load as
+    # text-only and have a page reader refused at request time with an error
+    # about content parts, several layers away from the file that was wrong.
+    "modalities": list,
 }
 _BACKEND_REQUIRED: dict[str, type] = {
     "engine": str,
@@ -101,6 +127,8 @@ class ModelManifest:
     family: str
     params_b: int
     context_default: int
+    #: In the order the manifest wrote them, so a row reads the way the file does.
+    modalities: tuple[str, ...]
     backends: dict[str, BackendSpec]
     path: Path
 
@@ -136,6 +164,7 @@ class ModelManifest:
             "family": self.family,
             "params_b": self.params_b,
             "context_default": self.context_default,
+            "modalities": list(self.modalities),
             "backends": {k: v.to_dict() for k, v in sorted(self.backends.items())},
         }
 
@@ -236,6 +265,29 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             f"{model['context_default']}"
         )
 
+    modalities = model["modalities"]
+    if not modalities:
+        raise ManifestError(
+            f"{path.name}: model.modalities is empty; a model that accepts no "
+            f"input at all is not a model. It takes one or more of "
+            f"{sorted(MODALITIES)}"
+        )
+    for index, entry in enumerate(modalities):
+        if not isinstance(entry, str):
+            raise ManifestError(
+                f"{path.name}: model.modalities[{index}] must be a string, got "
+                f"{type(entry).__name__}"
+            )
+        if entry not in MODALITIES:
+            raise ManifestError(
+                f"{path.name}: model.modalities[{index}] is {entry!r}; Crucible "
+                f"knows {sorted(MODALITIES)}"
+            )
+    if len(set(modalities)) != len(modalities):
+        raise ManifestError(
+            f"{path.name}: model.modalities lists a modality twice: {modalities}"
+        )
+
     backends_table = document["backends"]
     if not isinstance(backends_table, dict):
         raise ManifestError(f"{path.name}: [backends] must hold one table per backend")
@@ -284,6 +336,22 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
                     f"{where}: engine_args[{index}] must be a string, got "
                     f"{type(argument).__name__}"
                 )
+        if "image" in modalities and SKIP_MM_PROFILING in engine_args:
+            # The one rule that crosses the two tables, and it crosses them
+            # because the fact and the flag live apart: what a model is offered
+            # for is `[model]`, how its engine is started is `[backends.<kind>]`.
+            # A model advertised for images whose engine was told not to profile
+            # for one starts, serves, and then meets a real page with nothing
+            # reserved behind it — the kind of failure that arrives as an OOM in
+            # the middle of somebody's book rather than at load.
+            raise ManifestError(
+                f"{where}: engine_args carries {SKIP_MM_PROFILING!r} while "
+                f"[model] modalities declares 'image'. That flag stops vLLM "
+                f"reserving for an image, so it belongs only to a model this "
+                f"server serves text-only; take it out and measure "
+                f"--gpu-memory-utilization again with the image profiled in "
+                f"(PHASE3-VLM.md section 3)"
+            )
         backend_context = block.get("context_default")
         if backend_context is not None and backend_context <= 0:
             raise ManifestError(
@@ -304,6 +372,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
         family=model["family"],
         params_b=model["params_b"],
         context_default=model["context_default"],
+        modalities=tuple(modalities),
         backends=backends,
         path=path,
     )

@@ -10,6 +10,14 @@ id = "qwen3.5-9b"
 family = "qwen3.5"
 params_b = 9
 context_default = 12288
+# Text, and that is a fact about this server rather than about the weights.
+# Qwen3.5-9B has a vision tower; the cuda-linux block below starts vLLM with
+# `--skip-mm-profiling`, so nothing on the card is reserved for an image, and the
+# mlx-darwin block is served by mlx-lm, which serves text. A client that put a
+# page in a content part would reach an engine with no reservation behind it, so
+# `image` is not on offer — and the loader refuses the pair rather than leaving
+# that to a reviewer (crucible/manifests.py, PHASE3-VLM.md section 3).
+modalities = ["text"]
 
 [backends.cuda-linux]
 engine = "vllm"

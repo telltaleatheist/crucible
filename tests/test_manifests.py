@@ -26,6 +26,7 @@ id = "demo-1b"
 family = "demo"
 params_b = 1
 context_default = 4096
+modalities = ["text"]
 
 [backends.cuda-linux]
 engine = "vllm"
@@ -126,7 +127,7 @@ def test_an_unknown_top_level_table_is_refused() -> None:
 
 
 @pytest.mark.parametrize(
-    "key", sorted({"id", "family", "params_b", "context_default"})
+    "key", sorted({"id", "family", "params_b", "context_default", "modalities"})
 )
 def test_every_model_key_is_required(key: str) -> None:
     lines = [line for line in GOOD.splitlines() if not line.startswith(f"{key} ")]
@@ -249,7 +250,11 @@ SHIPPED = ["qwen3.5-9b", "qwen3.8-27b", "qwen3.8-27b-4bit"]
 #: Each model's `context_default`. The two bf16 manifests carry Owen's pinned
 #: cleanup context; the 4-bit 27B carries the 98304 of his `qwen3.8:27b-24g`
 #: Ollama tag, which is the context he actually runs on the 3090 Ti.
-CONTEXTS = {"qwen3.5-9b": 12288, "qwen3.8-27b": 12288, "qwen3.8-27b-4bit": 98304}
+CONTEXTS = {
+    "qwen3.5-9b": 12288,
+    "qwen3.8-27b": 12288,
+    "qwen3.8-27b-4bit": 98304,
+}
 
 #: Where a backend serves a context of its own. `qwen3.8-27b-4bit` wants 98304
 #: and gets it on the Mac; on a 24 GB card 98304 of its KV is 7.9 GiB that is not
