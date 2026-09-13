@@ -301,3 +301,41 @@ def test_doctor_reports_the_two_site_packages_patches_by_name(
         assert entry["status"] == "no_env"
     assert any("HTTP 400" in problem for problem in report["problems"])
     assert any("240 ms of audible garbage" in problem for problem in report["problems"])
+
+
+def test_doctor_runs_with_every_job_type_enabled(
+    home: Path, viable: None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every enabled type's env row, on one report, without raising.
+
+    This is the test that was missing. `crucible doctor` crashed with a
+    `TypeError` on any config with `enable_llm` on, for the whole time the
+    `tts` merge was on main, and the suite stayed green because every existing
+    doctor test enables `echo` alone — the one job type with no env at all. A
+    command whose entire job is "tell the operator what is wrong here" was the
+    one command nobody could run.
+
+    It asserts the report is *complete and unhealthy*, not that it is healthy:
+    no env is installed in a test home, so every row should be naming what is
+    missing and the command that fixes it.
+    """
+    monkeypatch.setattr("crucible.cli.detect_backend", lambda: FAKE_BACKEND)
+    assert cli.main(
+        ["init", "--enable-echo", "--enable-llm", "--enable-tts", "--enable-asr"]
+    ) == 0
+    capsys.readouterr()
+
+    assert cli.main(["doctor", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["healthy"] is False
+
+    assert report["llm_env"]["installed"] is False
+    assert "crucible install llm" in report["llm_env"]["detail"]
+    assert set(report["tts_envs"]) == {"higgs-v3", "orpheus"}
+    assert [row["job_type"] for row in report["worker_envs"]] == ["asr"]
+
+    enabled = {e["name"] for e in report["job_types"] if e["enabled"]}
+    assert {"echo", "load-model", "load-voice", "tts", "asr"} <= enabled
+    for problem in report["problems"]:
+        assert problem, "a problem with no text is a problem nobody can act on"

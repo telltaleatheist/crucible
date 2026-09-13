@@ -611,14 +611,13 @@ def _doctor_report() -> dict[str, Any]:
 
     if config is not None and backend is not None:
         if config.enable_llm:
-            try:
-                env = jobenv.env_status(config.home, backend.kind)
-                report["llm_env"] = env.to_dict()
-                if not env.installed:
-                    report["problems"].append(f"llm_env: {env.detail}")
-            except jobenv.EnvError as exc:
-                report["llm_env"] = {"installed": False, "detail": str(exc)}
-                report["problems"].append(f"llm_env: {exc}")
+            report["llm_env"] = _env_report(
+                report,
+                "llm_env",
+                config.home,
+                jobenv.llm_env(backend.kind),
+                backend.kind,
+            )
         for job_type in workerenv.WORKER_JOB_TYPES:
             if not getattr(config, f"enable_{job_type}"):
                 continue
@@ -632,13 +631,6 @@ def _doctor_report() -> dict[str, Any]:
                     {"job_type": job_type, "installed": False, "detail": str(exc)}
                 )
                 report["problems"].append(f"{job_type}_env: {exc}")
-            report["llm_env"] = _env_report(
-                report,
-                "llm_env",
-                config.home,
-                jobenv.llm_env(backend.kind),
-                backend.kind,
-            )
         if config.enable_tts:
             # One row per narrator engine, because on cuda-linux they are two
             # separate venvs and a voice load picks by its manifest's
