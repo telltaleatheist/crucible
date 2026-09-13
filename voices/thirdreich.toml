@@ -22,13 +22,38 @@ sample_rate = 24000
 pace_chars_per_sec = 15.29
 max_chars_per_sec = 19.88
 min_chars_per_sec = 11.76
-# MEASURED 2026-09-09, and these two fields ARE the measurement rather than a
-# corpus estimate: runs/base_len swept 20 rungs x 16 renders on tr_v3_prod and the
-# best contiguous band is 600-1000, at 4/80 early stops = 5.0% [2.0-12.2] against
-# 18.8% below 600 and 20.3% above 1000. A full live book packed inside the band
-# ran 4 failures in about 320 chunks = 1.25%.
-safe_min_chars = 600
-safe_max_chars = 1000
+# MEASURED 2026-09-09 and CORRECTED 2026-09-13. These two fields ARE a
+# measurement rather than a corpus estimate, and they are BookForge's
+# `electron/data/higgs-safe-bands.json` - the OVERLAY, which is authoritative for
+# every safe band and which this manifest did not know existed until an audit
+# found the two disagreeing.
+#
+# WHAT THIS FILE SAID UNTIL TODAY, AND WHY IT WAS WRONG. It said 600-1000, from
+# runs/base_len: 20 rungs x 16 renders, best contiguous band 600-1000 at 4/80
+# early stops = 5.0%. That sweep was superseded the SAME MORNING by
+# runs/tr_ladder_full - 4 seeds, 620 renders, n=32/rung - on two grounds the
+# overlay states and this file could not see:
+#
+#   * POOLING. band.py pooled by RUNG LABEL, and a rung is a target +/-12%, so
+#     its "rung 800" prompts actually span 712-823 and straddle the cliff.
+#     Pooled by the character count the packer really emits, the numbers move:
+#     500-600 8.3%, 600-700 0.0%, 700-800 12.5%, 800-900 18.8%.
+#   * SAMPLE. the 6.2% at 900/1000 that justified raising the cap was the NOISE
+#     FLOOR at n=16. At n=32 those same rungs measure 16%.
+#
+# So a client packing to the band this file used to advertise put chunks into a
+# measured 12.5% zone and a measured 18.8% zone. Crucible does not pack - it
+# states the shape and the client packs to it (PHASE3-TTS.md section 2) - which
+# is exactly why a wrong band here is a defect in somebody else's output.
+#
+# OWEN'S 800->1000 RULING IS NOT OVERTURNED BY THIS. He ruled on `max_chars`,
+# the CAP, and that stays 1000 below. The overlay says it plainly: "maxChars
+# stays 1000; a cap above the band is legal and the band is what the packer
+# uses." Band and cap are different fields answering different questions.
+#
+# Full curve and column glossary: BookForge's higgs-safe-bands-evidence.md.
+safe_min_chars = 500
+safe_max_chars = 700
 
 [voice.backends.cuda-linux]
 hf_repo = "owenmorgan/thirdreich-higgs-v3"
