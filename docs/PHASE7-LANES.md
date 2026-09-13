@@ -46,7 +46,79 @@ meant. Admission is local for the same reason: `queue-engine.ts` checks
 > is the most useful thing in this document. The correction is section 2.5. Read that
 > first; what follows is the draft it replaces.
 
-## 2.5. The correction: BookForge does not model the server's capacity
+## 2.4. RESTORED, with one correction: a slot set PER SERVER
+
+**Owen, 2026-09-13:** *"if it's set to any, bookforge will send the queue items to any open
+gpu. which means bookforge will need one set of slots for each server. one gpu and two cpu
+slots for mac, one gpu and two cpu for pc, etc."*
+
+**He is right, and section 2.5 below — which superseded exactly this shape — broke something
+I did not notice at the time.** With a single global `gpu` slot, BookForge can only ever
+have one GPU step running, so **two books can never render on two machines at once**, which
+is the entire purpose of registering a second server. A `wait`-holding remote step avoids
+starving local work, but it does not give the queue a way to *decide how many books to have
+in flight*, and without that the answer is either one (useless) or all fifteen (fifteen rows
+retrying against a server that wants one).
+
+So the slot sets come back:
+
+```
+this-pc      [ gpu ] [ cpu ] [ cpu ]
+mac-studio   [ gpu ] [ cpu ] [ cpu ]
+droplet      [ gpu ] [ cpu ] [ cpu ]
+local        [ cpu ] [ cpu ]            ← work BookForge does ITSELF (assembly, muxing)
+```
+
+### The correction, and it is the whole of what 2.5 was right about
+
+> **A server's slots count what BOOKFORGE has in flight there. They are not a model of the
+> server's capacity, and they are never read to decide whether the server is free.**
+
+That distinction is what makes this safe, and it is worth being exact about because the two
+readings look identical in a UI:
+
+- **"The PC's GPU slot is occupied"** means *I have a GPU step running on the PC.* That is
+  BookForge's own bookkeeping about its own work. It is local knowledge, it is never stale,
+  and no poll produces it.
+- It does **not** mean the PC's card is free when the slot is empty. Foundry may have it.
+  Another BookForge on the Mac may have it. **The 409 remains the only authority**, exactly
+  as section 2.5 insists.
+
+So a free slot licenses an *attempt*, never an assumption. BookForge submits; the server
+either takes the job or refuses by name; and a refusal leaves the slot free because nothing
+of BookForge's is running there. **Nothing is decided from a cache, because nothing is
+cached** — the count is of BookForge's own outstanding work, which it cannot be wrong
+about.
+
+### What each part is for
+
+| slot set | bounds | why that number |
+|---|---|---|
+| a server's `gpu` | 1 | Crucible admits one job at a time (section 3.1). More would be rows guaranteed a 409. |
+| a server's `cpu` | 2 | anticipates Crucible's ancillary lane (section 3). **Zero today** — no CPU work is sent to a server yet, and the slots exist so the bench and the model do not change when it is. |
+| `local` `cpu` | 2 | assembly, muxing, the coverage gate. This is work BookForge does ITSELF and never sends anywhere — `RESOURCE_SLOTS.cpu` as it is today, unchanged. |
+
+**There is no `local gpu` row**, and its absence is the point of phase 7: a GPU step goes to
+a *server*, and "this PC" is a server like any other. The local Crucible is a service
+(PHASE5-APPS.md section 6.0), so work for the 3090 Ti occupies `this-pc`'s slot rather than
+a special local one.
+
+### How `any` uses them
+
+A book set to `any` takes the first server whose GPU slot is free **in rank order**, and
+submits. If that server refuses, the slot it never occupied stays free and the book tries
+the next. With two servers and fifteen books, two are in flight and thirteen are queued
+locally — which is the behaviour Owen described and the reason the slots have to be
+per-server rather than global.
+
+---
+
+## 2.5. What section 2.5 got right, and still does
+
+*(This section superseded the per-machine slot model above. Section 2.4 restores the shape
+and keeps this section's principle, which was never about the shape.)*
+
+
 
 Owen, 2026-09-13: *"maybe we should have a system that queues jobs from foundry,
 bookforge, or wherever else… that way we dont have to build a queue for crucible as well
@@ -78,9 +150,10 @@ document rather than on the server.
 > `crucible/jobs/queue.py` keeps the lane, the deque, `position`, `queue_depth`, cancel,
 > events and provenance. `queue_depth` is honestly 0 or 1.
 
-### What section 2 got wrong
+### What section 2 got wrong — and it was NOT the slot sets
 
-It had each connected machine contributing `1 GPU + 2 CPU` to **BookForge's** queue, with
+**The shape was fine; section 2.4 restores it.** What was wrong was one word in the middle
+of it: the slots were described as **BookForge modelling the SERVER's capacity**, with
 `/v1/activity` polled to decide whether a remote slot was free. That is BookForge keeping a
 **stale replica of Crucible's authority and making admission decisions from it** — two
 schedulers, one deciding from a cache of the other, with a poll interval's worth of wrongness
@@ -99,15 +172,21 @@ a real render behind it.
 
 ### The rule
 
-**A step running on a remote machine holds `wait`, not `gpu`.** While the Mac renders, this
-PC's card is free. That is not a modelling preference; it is a fact, and the existing
-resource vocabulary already expresses it.
+**A step running on a remote machine does not hold the LOCAL card's slot.** While the Mac
+renders, this PC's card is free. That is not a modelling preference; it is a fact.
 
-Consequences, all of them simplifications:
+Section 2.4 expresses it by giving each server its own slot set, so a step on the Mac
+occupies `mac-studio`'s GPU slot and leaves `this-pc`'s alone. An earlier version of this
+section expressed it by having a remote step hold `wait` under one global `RESOURCE_SLOTS`
+— which kept the local card free but left the queue no way to decide how many books to have
+in flight, so two books could never render on two machines at once. **2.4's shape is the
+right one; this section's PRINCIPLE is what survives, and it is the bullet below.**
 
-- **No per-machine slot arithmetic and no remote admission.** `RESOURCE_SLOTS` stays the
-  compile-time constant it is. The local queue keeps describing the local machine, which is
-  the only machine it can speak for.
+Consequences:
+
+- **Nothing is read to decide whether a server is free.** A slot set counts BookForge's own
+  outstanding work there (2.4), never the server's state. The local queue speaks only for
+  what it has itself submitted, which is the only thing it can speak for without a poll.
 - **The protocol is submit-and-be-answered.** Crucible answers the only question that
   matters — *is there room now* — authoritatively, because it is the one holding the card.
   Since the admission ruling that answer is a 202 or a `409 server_busy` naming the
