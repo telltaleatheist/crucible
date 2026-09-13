@@ -101,6 +101,10 @@ echo "  at rest:      card $((REST / 1024 / 1024)) MiB (+$(( (REST - BEFORE) / 1
 # A prompt that fills context_default tokens of KV — sized with the model's OWN
 # tokenizer, out of the llm env, so the reading is for the context the manifest
 # promises and not for whatever a word-count guess happened to produce.
+#
+# ONE encode and a slice. Growing a string and re-encoding it once per word is
+# O(n^2) in the token count: seconds at 12288, minutes of pure tokenizer at the
+# 98304 of `qwen3.8-27b-4bit`, with nothing on the accelerator to show for it.
 "$REAL_HOME/envs/llm/bin/python" - \
   "$MODEL" "$CONTEXT" "$REAL_HOME/models/$MODEL/$BACKEND" "$WORK/big.json" <<'PY'
 import json, sys
@@ -111,19 +115,14 @@ tokenizer = AutoTokenizer.from_pretrained(weights)
 lead = "Here is a list. Reply with only the word OK.\n"
 # Leave room for the chat template's own tokens and the 16-token answer.
 budget = context - 96
-words, filler = [], ""
-while True:
-    candidate = filler + ("" if not filler else " ") + f"item{len(words)}"
-    if len(tokenizer(lead + candidate)["input_ids"]) > budget:
-        break
-    words.append(len(words))
-    filler = candidate
-total = len(tokenizer(lead + filler)["input_ids"])
+filler = " ".join(f"item{index}" for index in range(budget))
+content = tokenizer.decode(tokenizer(lead + filler)["input_ids"][:budget])
+total = len(tokenizer(content)["input_ids"])
 print(f"  prompt sized to {total} tokens of a {context}-token context", flush=True)
 json.dump(
     {
         "model": model,
-        "messages": [{"role": "user", "content": lead + filler}],
+        "messages": [{"role": "user", "content": content}],
         "max_tokens": 16,
         "temperature": 0,
     },
