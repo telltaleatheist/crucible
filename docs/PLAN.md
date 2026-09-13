@@ -49,23 +49,94 @@ the seam without touching the app UI).
 - `cli/bookforge-tts.py`: `--crucible-ping`, `--crucible-info`, `--crucible-echo <file>`
   driving the compiled dist. Nothing else in the app changes.
 
-## Phase 2: `llm`
-Contract: `docs/PHASE2-LLM.md` (manifests, env recipes, managed engines, accelerator guard,
-API/SDK additions, the BookForge `crucible` provider, verification).
-vLLM on `cuda-linux`, mlx-lm on `mlx-darwin`, behind `/v1/openai`. First real consumer:
-BookForge clean-text (`qwen3.5:9b-bf16` today via Ollama) through the CLI. Then Foundry
-cleanup / translate / simplify (27B fits the Mac Studio, not a 24 GB card; capability
-advertisement does the routing).
+## Phase 2: `llm` (DONE 2026-09-13)
+Contract: `docs/PHASE2-LLM.md`. vLLM on `cuda-linux`, mlx-lm on `mlx-darwin`, behind
+`/v1/openai`. Verified live on both backends: `qwen3.5-9b`, `qwen3.8-27b` (Mac only, by
+size), `qwen3.8-27b-4bit`, every estimate measured on the card it names. BookForge's
+`crucible` provider runs cleanup and simplify through the CLI (`--ai-cleanup --provider
+crucible --server <name> --model <id>`); the app UI is unchanged.
 
-## Phase 3: `tts` and `vlm-pages`
-Higgs via narrator (SGLang on cuda-linux, MLX on darwin, cap certificate per pair).
-dots 3B page reading for Foundry. This is where the WSL path-rewriting layer in
-BookForge is deleted, not patched.
+Owed inside phase 2, small: a `qwen3.8-27b-8bit` manifest for the Mac; a decision on the
+9B's edit-list prompt (its few-shot block makes the model think out loud as `content`).
 
-## Phase 4: `align`, `rvc`, bootstrapper, friends
-Aligner and RVC job types. The in-app bootstrapper (detect host, install local server).
-Docker image for `cuda-linux`. First friend gets the client + a tailnet invite against
-Owen's server.
+## What phases 3 and 4 are built from
+
+`docs/CLIENT-SURFACES.md` section 10 is the ranked list of everything BookForge and
+Foundry actually send a model. It is the source for the scope below, not DESIGN.md's
+sketches. Two rulings from Owen shape it:
+
+- **Division of knowledge** (DESIGN.md section 3.1): the client knows the order and the
+  server; the server knows the engine. Engine tuning is Crucible config, never a wire
+  field. Every tier-3 row in the audit is a server requirement.
+- **Voices come from the server.** Crucible advertises a `tts` capability whose rows are
+  voices (id, backend, caps); the order names the voice id the server returned. Voice
+  catalogs and checkpoints move behind Crucible the way models did, pulled from
+  HuggingFace by manifest.
+
+## Phase 3a: `llm` finishing touches (small, first)
+- `/v1/models` and `/v1/openai/models` report `max_model_len`, so Foundry's `capFor`
+  clamps requests instead of getting a 400.
+- Prove `response_format: {type: "json_schema", strict: true}` survives the proxy on
+  both engines (Foundry's analyze and tag calls depend on it). `finish_reason` is never
+  touched.
+- A dropped client connection aborts the engine request; the proxy never lets a
+  request run on after its caller is gone.
+- The served name rule: Crucible's id plus the pinned revision is what a client records
+  (`qwen3.5-9b@<sha>`); dtype is part of the id only when it is not bf16.
+- With these, Foundry's clean / translate / simplify point at Crucible by URL with no
+  client change, and BookForge's `text-server.ts` (1,364 lines, already a small
+  Crucible) is retired.
+
+## Phase 3b: `tts`
+The largest job type and the one that deletes the most: BookForge's WSL spawn, path
+rewriting, per-engine sampling tables and VRAM arithmetic for TTS all go.
+- **Two doors on the server.** *Render* is a job: text chunks + voice id + take number
+  in, FLAC per chunk out as artifacts, resumable, progress per chunk. *Streaming* is a
+  persistent connection returning PCM16 as it is generated, fast-start, out-of-order
+  retirement within a batch, cancel mid-batch. BookForge's TTS WebSocket on 8766 (the
+  browser extension's door) becomes a relay to the chosen server.
+- **Voices.** Three shapes behind one id: an Orpheus prompt token, a Higgs fine-tune
+  checkpoint directory, and Higgs zero-shot reference clips (audio + transcript inline
+  in the job inputs). Per-voice config on the server holds sampling per backend, cap
+  certificates per (model, backend), token-budget formulas, and Orpheus's EOS controls
+  (logit surgery in the sampler, the hardest single item).
+- **Backends.** Higgs via SGLang on `cuda-linux`, Higgs via MLX on `mlx-darwin`;
+  Orpheus via vLLM on `cuda-linux`, MLX on `mlx-darwin`.
+- **Batch writer, client side.** No shared mount. The SDK streams chunk artifacts and
+  BookForge writes them where assembly and resume already look.
+- **Stays in the app:** chunking, text normalization, the pace guard's judgment, the
+  retake decision, assembly, the session layout. The ladder's *steps* are server config;
+  the client asks for take N.
+
+## Phase 3c: `vlm-pages`
+The `llm` proxy plus image content parts. Foundry already rasterises locally and sends
+one page per chat completion, so the server receives pictures, never PDFs (DESIGN.md's
+"send the PDF" is a later, larger job). Requirements: dots.ocr served under exactly the
+id the client names, 12 or more concurrent pages, 32k context, per-page results as
+they land. Deletes `vlm-page-server.ts` and the unarbitrated port-8000 route; keeps
+`mlx-local` until the Mac backend serves it.
+
+## Phase 4: `align`, `asr`, `rvc`, the app, friends
+- `align` (Qwen3-ForcedAligner): the easiest job type; model resident across a book,
+  per-chunk failures reported without stopping the run. Unblocks whole-m4b alignment
+  on Windows, which cannot run today.
+- `asr` (faster-whisper): a new job type; six sizes, windows with overlap, VAD and word
+  timestamps, progress by position. Feeds the align door.
+- `rvc` (ultimate-rvc): per-sentence and whole-file, same filesystem coupling as the
+  `tts` batch door, decided together with it.
+- **A "who holds the accelerator" probe** on the server, replacing BookForge's three
+  arbitration schemes and the `external-gpu-job.lock` convention.
+- **The app:** a Servers settings row over the registry, a server column on queue rows
+  (the operator or the queue picks the server), the `crucible` provider wired into book
+  analysis and translation, the bootstrapper (detect host, install a local server), a
+  Docker image for `cuda-linux`. Then a friend gets the client and a tailnet invite.
+
+## Open questions (decided by default unless Owen says otherwise)
+- Owen's Ollama-built LoRA adapters (footnotes, OCR, headline, blocks): served as
+  adapters over the base from HuggingFace when Foundry needs them; Ollama builds are
+  not a source.
+- LLM cancel through the proxy: dropping the fetch is the client's move; the server
+  rule above makes it sufficient.
 
 ## Conventions
 - Worktrees for agents: `C:\Users\tellt\Projects\crucible-worktrees\<branch>` (PC),
