@@ -39,6 +39,35 @@ class VllmEngine(SubprocessEngine):
         ]
 
     def environment(self) -> dict[str, str]:
-        # vLLM's usage-stats ping is an outbound call Crucible never makes on the
-        # operator's behalf.
-        return {"VLLM_NO_USAGE_STATS": "1", "DO_NOT_TRACK": "1"}
+        return {
+            # vLLM's usage-stats ping is an outbound call Crucible never makes
+            # on the operator's behalf.
+            "VLLM_NO_USAGE_STATS": "1",
+            "DO_NOT_TRACK": "1",
+            # Without this, no model loads under WSL2 at all.
+            #
+            # vLLM 0.29.0's V2 model runner (`Using V2 Model Runner`, the
+            # default on this build) keeps its request state in a UVA buffer —
+            # page-locked host memory the GPU addresses directly — and raises
+            # `RuntimeError: UVA is not available` in `UvaBuffer.__init__` if it
+            # cannot have one. Under WSL, `CudaPlatformBase.is_pin_memory_available`
+            # returns `envs.VLLM_WSL2_ENABLE_PIN_MEMORY`, which defaults to 0. So
+            # on Owen's PC the 9B died 45 s into its first load, with the reason
+            # 60 lines above the 40 the failure quotes (measured 2026-09-12).
+            #
+            # This is not a workaround for a broken host: pinned memory works
+            # here. Measured in the pinned llm env on WSL2 kernel 6.6.87.1,
+            # driver 591.86 — `torch.zeros(..., pin_memory=True).is_pinned()` is
+            # True, `get_accelerator_view_from_cpu_tensor` returns a cuda:0 view
+            # that reads back what the host wrote, and a non_blocking copy
+            # arrives. vLLM's default is conservative for WSL2 in general, not
+            # true of this one.
+            #
+            # It is also not a blanket claim about every host: vLLM reads this
+            # variable only under WSL, and only after its own kernel gate
+            # (>= 4.19.121). On bare-metal Linux nothing reads it; on a WSL2
+            # kernel too old to pin, the gate refuses before it is consulted; and
+            # on a host where pinning is somehow unavailable anyway, the engine
+            # fails to start and says so rather than running degraded.
+            "VLLM_WSL2_ENABLE_PIN_MEMORY": "1",
+        }
