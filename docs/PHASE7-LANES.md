@@ -215,7 +215,35 @@ A pin naming a machine that is disabled, unreachable or stale **holds the step a
 by name**. It never silently falls back to another machine: a pin is an instruction, and
 quietly doing something else with Owen's book is the failure this rule exists to prevent.
 
-### 4.3 A chain STICKS to the machine its first step ran on
+### 4.3 A JOB IS ATOMIC (Owen's ruling, 2026-09-13)
+
+*"I'd be fine with the premise that a single job must be atomic in that if it starts on
+one server, it finishes on one server. We could split later but it would simplify the
+pipeline right now."*
+
+**Ruled, and it removes a whole class of design from this phase.** A job that started on a
+machine finishes on that machine or fails. There is no migration, no partial hand-off, no
+"the Mac died at chunk 300 so the PC picks up at 301" inside one job. Everything section 6
+says about a machine going away stays true and gets *simpler*: the step fails by name and
+the ordinary resume re-submits it, rather than the scheduler attempting a live transfer
+whose half-states nobody could enumerate.
+
+Three things this buys immediately:
+
+- **The pace state has one owner for a job's lifetime.** Phase 6 section 4 carries the
+  guard's running median chapter to chapter; atomicity means it never has to be carried
+  mid-chapter, which is the case that would have needed the tracker to be serialisable at
+  an arbitrary point rather than at a boundary.
+- **Artifacts have one home.** Phase 6 section 6.1's fetcher reads one server per job. A
+  split job would mean chunk 1-299 on one server's artifact store and 300+ on another's,
+  and a resume that had to know which.
+- **The failure is one word.** A job either ran on a machine or it did not.
+
+"We could split later" is the right framing and is why this is recorded as a ruling rather
+than a constraint: nothing here forecloses it. A future job that wants to split can do it
+by being **two jobs**, which the chain already expresses.
+
+### 4.4 A chain STICKS to the machine its first step ran on
 
 This is the part that is not a preference, and it is the reason a per-row pin alone is not
 enough.
