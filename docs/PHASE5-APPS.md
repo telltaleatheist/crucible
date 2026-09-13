@@ -110,7 +110,8 @@ is the single worst line in the app's arbitration.
 BookForge's TTS WebSocket on 8766 is what the browser extension talks to, and Owen uses it
 every Sunday. It **stays exactly where it is.** What changes is what is behind it: instead
 of `orpheus-worker-pool.ts` spawning `python -m narrator.serve` and speaking JSON-lines to
-it over a pipe, the pool becomes a relay to `GET /v1/tts/stream` on the chosen server.
+it over a pipe, the pool becomes a relay to the streaming session on the chosen server —
+`POST /v1/tts/stream`, its SSE event stream, and posted ops.
 
 The extension's protocol does not change, the port does not change, and the failure mode
 if the relay is wrong is immediate and obvious rather than subtle. That is the whole reason
@@ -118,8 +119,10 @@ to keep the port rather than point the extension at Crucible: the extension is t
 client Owen uses without looking at it.
 
 `PHASE3-TTS.md` section 7's frames were shaped to make this relay thin — client-assigned
-row ids, binary audio frames, out-of-order retirement — because a relay that has to
-re-window or re-order audio is a relay that will drift.
+row ids, base64 PCM per row, out-of-order retirement — because a relay that has to re-window
+or re-order audio is a relay that will drift. The base64 is not a cost here at all: the pool
+already hands the extension base64 PCM16, so the relay forwards the encoding it is given
+rather than decoding and re-encoding it.
 
 ## 5. What retires, in the order it is safe to retire it
 
