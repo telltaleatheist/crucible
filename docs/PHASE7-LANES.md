@@ -583,6 +583,43 @@ to come back and argue with.
 
 ## 8. Foundry
 
+### 8.0 The contract, BUILT 2026-09-13 (Foundry `2d5d411`)
+
+**What BookForge must set on the Foundry engine process it spawns:**
+
+```
+FOUNDRY_ENDPOINT_HEADERS={"Authorization":"Bearer <token>","X-Crucible-Api":"1"}
+```
+
+A JSON **object** of header name to string value. Every request on both of Foundry's
+doors — the VLM page read and the four text acts — carries every pair. **Absent or empty
+means send none**, which is today's behaviour exactly, so a server wanting no headers is
+unaffected and nothing changes until BookForge starts setting it.
+
+Note what is NOT in that name: Crucible. The header map was chosen so Foundry's engine
+learns only *"this endpoint wants these headers"* — the word for this product appears
+nowhere in its `src/`, and the day it points at something else nothing there changes.
+
+Verified by them through the compiled `dist/foundry-windows-x64.exe`, not at source: both
+headers observed on the wire from the binary BookForge actually spawns, and a malformed
+map refused before the network with a sentence naming the variable and never quoting the
+value.
+
+What they built alongside it, all of it agreed here first: malformed refuses the run rather
+than dropping headers; `content-type`, `content-length` and `host` refused by name; a
+settings fallback that the environment overrides and that is never echoed into a run log;
+an explicit `env` at all three Python spawns with the map **stripped, not allowlisted**;
+and a distinct sentence for 426, 401, 403, 404 and `model_not_resident` — the last one
+saying that the server will not load a model to answer a request and that nothing on their
+side can, which is section 9.2's cliff stated where a person meets it.
+
+The port-8000 collision is fixed by **refusal rather than by moving a default**, so the
+clamp set mirrored on this side needs no change.
+
+### 8.1 What is still unbuilt
+
+
+
 Foundry enqueues into this queue (`electron/foundry-host-queue.ts`) and its VLM page
 reading is a `gpu` step that spawns a WSL python env. Under section 4's default it is
 `local` and keeps working untouched, which is the correct first state.
