@@ -39,7 +39,87 @@ meant. Admission is local for the same reason: `queue-engine.ts` checks
 
 ---
 
-## 2. What it becomes: capacity is per machine
+## 2. SUPERSEDED — capacity is not per machine; a remote step waits
+
+> **This section is superseded, 2026-09-13, later the same day.** It is kept because the
+> refuted idea is the one somebody will think of next, and because the reason it is wrong
+> is the most useful thing in this document. The correction is section 2.5. Read that
+> first; what follows is the draft it replaces.
+
+## 2.5. The correction: BookForge does not model the server's capacity
+
+Owen, 2026-09-13: *"maybe we should have a system that queues jobs from foundry,
+bookforge, or wherever else… that way we dont have to build a queue for crucible as well
+and we can rely on the client to not be an idiot and do two jobs at once on the same
+server."*
+
+**The premise is already satisfied: Crucible has had a queue since v0.3.0.**
+`crucible/jobs/queue.py` is one exclusive lane draining in submission order, reporting
+`position` (0 running, 1..n in line) and `queue_depth`. So there is no second queue to
+build, and there is no onus on anyone not to submit twice — two clients submit, the second
+waits. Since Foundry is hosted inside BookForge, two clients against one server is the
+NORMAL case, and a design that asked the user to avoid it would have been a design against
+Owen's own setup.
+
+But his instinct — **there must not be two arbitrators** — was right, and it lands on this
+document rather than on the server.
+
+### What section 2 got wrong
+
+It had each connected machine contributing `1 GPU + 2 CPU` to **BookForge's** queue, with
+`/v1/activity` polled to decide whether a remote slot was free. That is BookForge keeping a
+**stale replica of Crucible's authority and making admission decisions from it** — two
+schedulers, one deciding from a cache of the other, with a poll interval's worth of wrongness
+built in. Every hard question it created (how stale is too stale, who wins a race, what
+happens when the poll and the submit disagree) was self-inflicted.
+
+It also contradicts a ruling Owen had already made. `shared/queue/engine-types.ts`:
+
+> `gpu` is the exclusive **local** resource […] `wait` is not a worker and does not belong
+> on the bench. A step declares it when its whole job is to sit until something outside
+> this queue happens.
+
+Owen created `wait` on 2026-09-08, watching an export step hold a CPU slot: *"its sitting
+in the cpu slot doing nothing for two minutes now."* Holding a worker while waiting starves
+a real render behind it.
+
+### The rule
+
+**A step running on a remote machine holds `wait`, not `gpu`.** While the Mac renders, this
+PC's card is free. That is not a modelling preference; it is a fact, and the existing
+resource vocabulary already expresses it.
+
+Consequences, all of them simplifications:
+
+- **No per-machine slot arithmetic and no remote admission.** `RESOURCE_SLOTS` stays the
+  compile-time constant it is. The local queue keeps describing the local machine, which is
+  the only machine it can speak for.
+- **The protocol is submit-and-read-`position`.** Crucible answers the only question that
+  matters, authoritatively, because it is the one holding the card.
+- **Distribution stays emergent and gets better.** Four books pinned to four servers all run
+  at once because none of them occupies a local worker — and the local card goes on
+  rendering a fifth.
+- **Contention surfaces honestly instead of being prevented.** A step behind someone else's
+  job reports `position: 3`, and the `client` recorded on each job (section 5) lets the
+  message name who is ahead: *"waiting behind owens-mac-studio's job"*.
+- **`/v1/activity` changes role, not shape.** It is a **bench display** and a **preflight**
+  (reachable, API version matches, job type enabled). It is never admission. Display and
+  admission are different questions, and only one of them may be answered from a poll.
+
+### What survives from the superseded draft
+
+The pin (4.2), chain stickiness (4.3), atomicity (4.3) and the guarantees (9) all stand
+unchanged. Every one of them is about **routing** — which machine a job is for — and
+routing is the single scheduling decision anybody makes here. It is the user's, it is made
+once, and it is made at the row. Nothing above turns it into a scheduler.
+
+Crucible's ancillary lane (section 3) also stands, but is now plainly independent of this
+phase: it is worth doing because a book's FLAC encoding should not occupy the card's lane,
+not because BookForge needs to count it.
+
+---
+
+## 2.9. The superseded draft: capacity is per machine
 
 The unit is not a slot. It is a **machine**, and a machine brings its own slot set:
 
