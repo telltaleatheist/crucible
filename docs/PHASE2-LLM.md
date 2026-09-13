@@ -29,7 +29,7 @@ revision = "<pinned>"
 memory_bytes_estimate = 21000000000
 ```
 
-Phase 2 ships two manifests: `qwen3.5-9b` and `qwen3.5-27b`. The 27B has a cuda-linux
+Phase 2 ships two manifests: `qwen3.5-9b` and `qwen3.8-27b`. The 27B has a cuda-linux
 block too; the server will refuse to load it on a 24 GB card by name (see 4), which is
 the point: the manifest says what the model needs, the host says what it has.
 
@@ -145,6 +145,6 @@ run is refused; Owen's other work on the card is never evicted. On the PC: insta
 env in WSL, pull `qwen3.5-9b`, load it (measure the real VRAM and record it in the
 manifest), run a chat completion through the proxy and a streamed one, unload, and
 confirm the card returns to the desktop-only figure. On the Mac: the same with mlx-lm
-and the bf16 conversion; then load `qwen3.5-27b` there to prove the 27B routing story.
-On the PC, `load-model qwen3.5-27b` must be refused with `insufficient_memory` naming
+and the bf16 conversion; then load `qwen3.8-27b` there to prove the 27B routing story.
+On the PC, `load-model qwen3.8-27b` must be refused with `insufficient_memory` naming
 54 GB against 24 GB. Everything through the CLI and the SDK, nothing hand-rolled.

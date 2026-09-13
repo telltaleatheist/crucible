@@ -7,7 +7,7 @@
 # keeper's job — but it refuses BY NAME if they are missing rather than skipping.
 #
 #   ./scripts/keeper-llm-live.sh
-#   CRUCIBLE_LLM_MODEL=qwen3.5-27b ./scripts/keeper-llm-live.sh
+#   CRUCIBLE_LLM_MODEL=qwen3.8-27b ./scripts/keeper-llm-live.sh
 #
 # REMOTE MODE. Set both CRUCIBLE_URL and CRUCIBLE_TOKEN and the keeper drives a
 # server already running somewhere else, starting nothing of its own:

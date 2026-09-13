@@ -200,7 +200,7 @@ answer must never look the same.
 
 ```ts
 try {
-  await crucible.chat({ model: 'qwen3.5-27b', messages });
+  await crucible.chat({ model: 'qwen3.8-27b', messages });
 } catch (error) {
   if (error instanceof CrucibleRefused && error.code === 'model_not_resident') {
     // load it first, or go to the host that has it. Never retried, never auto-loaded.

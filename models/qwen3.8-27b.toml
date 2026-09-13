@@ -1,0 +1,52 @@
+# Qwen3.8 27B.
+#
+# The 27B slot is Qwen3.8, not Qwen3.5: Qwen/Qwen3.5-27B (Feb 2026) and
+# Qwen/Qwen3.8-27B (Aug 2026) both exist on the hub and are the same size, and the
+# manifest used to pin the older one. 3.8 is the release Owen means by "the 27B".
+# The stack is still `qwen3_5` (`Qwen3_5ForConditionalGeneration`) — the family
+# name below is the model's, not the architecture's.
+#
+# Both estimates here are COMPUTED, not measured: weights at bfloat16 as they sit
+# on disk plus the KV cache at context_default. Nothing on Owen's PC can hold this
+# model, which is the point — `load-model qwen3.8-27b` on a 24 GB card is refused
+# by name with `insufficient_memory`, naming this number against the card's free
+# VRAM (docs/PHASE2-LLM.md section 4).
+#
+# The KV arithmetic, from the repo's config.json (`text_config`; unchanged from
+# the 3.5 block this replaces, because the two have the same attention shape):
+#   Qwen3.5/3.8 is a hybrid stack — `full_attention` every `full_attention_interval`
+#   layers, the rest linear (recurrent) attention whose state is per-sequence, not
+#   per-token. 64 layers / interval 4 = 16 full-attention layers.
+#   per token per full layer = 2 (K and V) x 4 kv heads x 256 head_dim x 2 bytes
+#                            = 4096 B
+#   per token                = 4096 x 16 = 65_536 B
+#   at 12288 tokens          = 805_306_368 B
+# The weight totals are the sums of each repo's .safetensors at the pinned sha,
+# read from the hub's tree API on 2026-09-12:
+# cuda-linux: 55_563_006_776 (weights) + 805_306_368 (KV) = 56_368_313_144
+# mlx-darwin: 54_713_606_485 (weights) + 805_306_368 (KV) = 55_518_912_853
+#
+# How good is that arithmetic? On the 9B, where both exist, it came out 19.22 GB
+# against a measured peak of 20.38 GB — about 6% under. So treat these two as a
+# floor, not a ceiling; both are already far past what either of Owen's machines
+# can give, which is the only question they are asked.
+
+[model]
+id = "qwen3.8-27b"
+family = "qwen3.8"
+params_b = 27
+context_default = 12288
+
+[backends.cuda-linux]
+engine = "vllm"
+hf_repo = "Qwen/Qwen3.8-27B"
+revision = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+memory_bytes_estimate = 56_368_313_144
+engine_args = ["--dtype", "bfloat16", "--gpu-memory-utilization", "0.85"]
+
+[backends.mlx-darwin]
+engine = "mlx-lm"
+hf_repo = "mlx-community/Qwen3.8-27B-bf16"
+revision = "6f265714824f3c38d4452baa1628aef3d9b9aae9"
+memory_bytes_estimate = 55_518_912_853
+engine_args = []

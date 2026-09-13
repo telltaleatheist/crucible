@@ -210,10 +210,10 @@ def test_an_unknown_model_id_names_what_is_shipped(tmp_path: Path) -> None:
 
 def test_this_build_ships_the_two_phase_two_manifests() -> None:
     manifests = load_all_manifests()
-    assert sorted(manifests) == ["qwen3.5-27b", "qwen3.5-9b"]
+    assert sorted(manifests) == ["qwen3.5-9b", "qwen3.8-27b"]
 
 
-@pytest.mark.parametrize("model_id", ["qwen3.5-9b", "qwen3.5-27b"])
+@pytest.mark.parametrize("model_id", ["qwen3.5-9b", "qwen3.8-27b"])
 def test_each_shipped_manifest_declares_both_backends(model_id: str) -> None:
     manifest = load_manifest(model_id)
     assert sorted(manifest.backends) == ["cuda-linux", "mlx-darwin"]
@@ -226,7 +226,7 @@ def test_each_shipped_manifest_declares_both_backends(model_id: str) -> None:
 
 def test_the_27b_does_not_fit_a_24_gib_card() -> None:
     """The refusal the PC must make is arithmetic in the manifest, not a mood."""
-    spec = load_manifest("qwen3.5-27b").spec("cuda-linux")
+    spec = load_manifest("qwen3.8-27b").spec("cuda-linux")
     assert spec.memory_bytes_estimate > 24 * 1024 ** 3
 
 
