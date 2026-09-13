@@ -741,8 +741,9 @@ one env row per narrator engine under `tts_envs`.
 ## 9. SDK additions (`@crucible/client`)
 
 - `voices()` → `VoiceInfo[]`, `loadVoice(id)` / `unloadVoice(id)` → job ids.
-- `render({voice, language, take, chunks, signal})` → a job handle whose events are typed,
-  `chunk` included, plus `writeArtifactsTo(dir)` — the batch writer of section 6.
+- `render({voice, language, take, chunks, signal})` → **a job id**, not a handle; `chunk` is
+  in the event vocabulary, and `writeArtifactsTo(jobId, dir)` is the batch writer of section
+  6. See "What the render client deviated from, and why" below for the handle.
 - `stream({voice, language})` → a session: `say(id, text, take?)`, `cancel(id)`, `close()`,
   and an `AsyncIterable` of `{id, seq, pcm: Int16Array}` interleaved with `{id, done}`.
   Still zero runtime dependencies, and now genuinely so: it is `fetch` and the same SSE
@@ -762,6 +763,100 @@ that may still move is how the two halves end up disagreeing, and the disagreeme
 silent. They are a follow-up, and `chunk` is deliberately **not** in the SDK's event
 vocabulary until then: a `chunk` frame today is a `CrucibleProtocolError` naming it, which is
 the correct answer from a client that does not yet speak it.
+
+### The render client, 2026-09-13 (later the same day)
+
+The render door landed on `main`, so `render()`, the `chunk` event and the batch writer are
+built against the bytes `crucible/jobs/tts/render.py` actually sends. The SDK's unit suite
+goes from 84 tests to 123, still none of which needs a live server: a `node:http` fixture
+answers the event stream and the artifact route, and a temporary directory takes the files.
+`stream()` remains unbuilt and is another builder's.
+
+Two of those tests are timing proofs rather than shape proofs, and they are the ones that
+matter. "Fetches each artifact as its event lands" **gates the SSE stream on the artifact GET
+arriving**, so a writer that waited for `done` deadlocks it rather than failing an assertion
+— which is the honest shape of "this turned a streaming server back into a batch one". It
+carries a timeout for exactly that reason. Both it and the concurrency ceiling were
+mutation-tested: breaking the behaviour fails the test.
+
+**What the render client deviated from, and why**
+
+- **`render()` returns a job id, not "a job handle".** Every other queueing call in this
+  client returns an id and `events()` is how a job is watched; a handle with its own iterator
+  would be a second way to watch one job, and two clocks on one stream is how they disagree.
+  `writeArtifactsTo(jobId, dir)` is a method beside `events()` rather than a method on a
+  handle, and it *is* `events()` — it yields the job's own events unchanged, interleaved with
+  the files it has written. That is the "without swallowing the job's own events" requirement
+  answered in the type rather than in a second callback channel.
+- **`submit()` grew an options bag** (`submit(request, {signal})`), because a `tts` body can
+  be a whole book's text and the caller needs a handle on that POST. The signal aborts the
+  submit and nothing else: once the server has answered with an id the job exists, and
+  `cancel(id)` is what stops it.
+- **`writeArtifactsTo` bounds its fetches** (default 4, `concurrency` to change it).
+  `events()` replays a job's whole history before it follows live, so attaching to a
+  nearly-finished 1,400-chunk render delivers 1,400 `artifact` frames in one burst;
+  unbounded, that is 2,800 sockets in a tick, against the server that is still rendering.
+- **It writes the provenance sidecar first, then the artifact.** DESIGN.md section 7 says a
+  client must persist provenance beside the output; this order makes the existence of
+  `<index>.flac` imply the existence of `<index>.flac.provenance.json`. The other order can
+  leave a finished chunk that cannot say which voice, which revision or which server made it
+  — and resume, which only looks at the FLAC, would never ask for it again. The sidecar's
+  **bytes** are the server's own, not a re-serialisation: the document is meant to be
+  persisted, and round-tripping it through this client's reader would rewrite whitespace it
+  did not author. It is still parsed, so a sidecar that is not a provenance document is a
+  protocol error and nothing lands.
+- **Resuming with `lastEventId` writes only what arrives after it.** With the whole history
+  replayed, `done`'s `artifacts` list is reconciled against what was seen, so a name there
+  that produced no `artifact` frame is still written. With a `lastEventId`, it is not: the
+  prefix the caller chose not to replay is what they already had when they recorded that id,
+  and re-fetching a finished book's worth of FLACs on every reconnect is a worse bug than the
+  one it would guard against. **This is a judgement call and it is the one worth arguing
+  with.**
+- **`node:fs/promises` and `node:path` are loaded from a specifier assembled at run time,**
+  inside the one method that writes files. Node's builtins are not a dependency in the sense
+  the zero-dependency rule means — nothing is installed to get them — but a *static* import
+  would put fs into the module graph of `import {CrucibleClient}` itself, which a bundler
+  targeting a browser-ish runtime resolves at build time and fails on. Hiding the specifier
+  costs the import's types, so the four fs calls and the one path call the writer makes are
+  declared as an interface and checked at the seam; a runtime without them gets a
+  `CrucibleError` saying what is missing, not a `TypeError` about `undefined`.
+- **`maxChars` is not re-checked client-side.** The cap is per (voice, backend), it rides on
+  the voice row, and a copy of it here would be a second thing to drift — the same reasoning
+  that keeps faster-whisper's language list out of `asr()`. What *is* checked client-side is
+  what is a fact about the request rather than about the server: a duplicate index (an index
+  is an artifact name, and two would also be two writes racing for one path in the caller's
+  library), a blank chunk, a non-integer take.
+- **`capped: boolean | null` rather than a wrapper that forces narrowing.** A shape like
+  `{said: false} | {said: true, capped: boolean}` would make the compiler refuse
+  `if (chunk.capped)`, and it was rejected: it deviates from the wire, and
+  `AcceleratorHolder.bytes` already models the identical hazard — a null that must never be
+  read as zero — as `number | null`. One hazard, one shape. What the type *does* enforce is
+  the other half: the reader refuses a `chunk` frame that **omits** `capped`, because "narrator
+  did not say" has to be something the server said rather than something the client inferred
+  from an absence.
+
+**One gap this found, and fixed.** `done` is built by the queue as
+`{"artifacts": [...], **job.done_extra}`, and the client read the two keys it modelled and
+**silently dropped the rest**. That lost `tts`'s `failed: [{index, message}]` — which section
+6 says in as many words is how a client reading only the terminal event learns which indices
+to ask for again, and it never arrived — along with `rendered`, `take`, `sample_rate`, and
+`load-voice`'s `fingerprint` beside its `resident`. `DoneData.extra` now carries every other
+key verbatim, exactly as `ProgressData.extra` already carried a progress frame's own
+measurements, and `readRenderResult(done)` reads a render's terminal news strictly out of it.
+It is the same class of bug as `info()` breaking on `enable_tts`: a shape the document
+described and the client did not read.
+
+**One contradiction found and left for a ruling.** Section 6 says "The SDK yields unknown
+event kinds through rather than dropping them, so that stays true for the next one too." **It
+does not, and never has.** `readEvent` narrows the event name against a closed list and
+raises `CrucibleProtocolError` on anything else, and `sdk/ts/src/errors.ts` states the
+opposite doctrine in as many words: "A new event kind is a breaking change and would come with
+a new `api_version`, so this is never absorbed quietly." Both cannot be true, and the cost of
+the code's version is concrete: `chunk` was added without moving `api_version`, so an
+0.2.0 client watching any job on a server that has learned a new event kind loses the whole
+stream — a bug waiting for the Mac, and for phase 4's `align` and `rvc`. It is deliberately
+**not** changed here: it is a doctrine call, not a bug fix, and `readEvent` is shared with the
+builder adding `stream()`.
 
 Four things this section did not say, each found by reading the bytes the server actually
 sends rather than the prose:

@@ -68,6 +68,8 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `voices()` | `GET /v1/voices` | `VoiceInfo[]` |
 | `loadVoice(id)` | `POST /v1/jobs {type: "load-voice"}` | the job id |
 | `unloadVoice(id)` | `POST /v1/jobs {type: "unload-voice"}` | the job id |
+| `render(options)` | `POST /v1/jobs {type: "tts"}` | the job id |
+| `writeArtifactsTo(id, dir, {...})` | `events()` + the artifact route | `AsyncIterable<ArtifactWrite>` |
 | `accelerator()` | `GET /v1/accelerator` | `AcceleratorState` |
 | `asr(options)` | `POST /v1/jobs {type: "asr"}` | the job id |
 
@@ -87,8 +89,9 @@ capabilities.
 
 `events()` yields typed events with the server's monotonic `id`:
 `queued {position}`, `warming {message}`, `progress {fraction, message, extra}`,
-`artifact {name}`, `done`, `failed {error}`, `cancelled {status}`. The iterator ends after
-the first terminal event (`done`, `failed`, `cancelled`).
+`chunk {index, seconds, chars, charsPerSec, tokens, capped, take}`, `artifact {name}`,
+`done`, `failed {error}`, `cancelled {status}`. The iterator ends after the first terminal
+event (`done`, `failed`, `cancelled`).
 
 `progress.extra` is every other key the job type put on that frame, verbatim — server
 spelling, server types. A job type may send its own measurements beside the fraction
@@ -98,13 +101,22 @@ an eighteen-hour book while the percentage is still rounding to zero. Those keys
 type's vocabulary rather than the API's, so they are carried rather than modelled, and
 `extra` is `{}` on a frame that had none.
 
-`done` is one record with two optional fields, `{artifacts?, resident?}`: a producing job
-(`echo`, later `tts`) reports the artifacts it wrote, and `load-model` reports the model
-that is now resident. It is a record rather than a union because there is no discriminant
-inside the frame — the caller already knows which job it submitted — and a union would
-force every existing caller to narrow before reading `artifacts`. It is still checked, not
-loose: `artifacts` must be an array of strings and `resident` a string wherever either
-appears, and a `done` frame carrying **neither** is a `CrucibleProtocolError`.
+`done` is one record with two optional fields and one that is always there,
+`{artifacts?, resident?, extra}`: a producing job (`echo`, `tts`) reports the artifacts it
+wrote, and `load-model` reports the model that is now resident. It is a record rather than a
+union because there is no discriminant inside the frame — the caller already knows which job
+it submitted — and a union would force every existing caller to narrow before reading
+`artifacts`. It is still checked, not loose: `artifacts` must be an array of strings and
+`resident` a string wherever either appears, and a `done` frame carrying **neither** is a
+`CrucibleProtocolError`.
+
+`done.extra` is every other key the job type put on the frame, verbatim, exactly like
+`progress.extra` and for the same reason. The server builds the frame as
+`{"artifacts": [...], **job.done_extra}` and a job type puts its own terminal news there:
+`tts` sends `{rendered, failed: [{index, message}], take, sample_rate}` and `load-voice` sends
+a `fingerprint` beside its `resident`. Until 2026-09-13 this client read the two modelled
+keys and dropped the rest, which lost a render's authoritative list of which chunks to ask
+for again. `readRenderResult(done)` reads a `tts` job's out of it.
 
 To resume after a dropped connection, pass the last id you saw — the server replays
 everything after it, so nothing is lost and nothing is repeated:
@@ -343,6 +355,106 @@ loads a voice implicitly anywhere else, and a load is refused by name before it 
 for every reason a model load is, plus `env_missing` when the tts env for that voice's
 narrator engine is not installed.
 
+### `render()`
+
+`POST /v1/jobs {type: "tts"}` — text in, one `<index>.flac` per chunk out. It returns a job
+id, like every other queueing call, and `events()` is how you watch it.
+
+```ts
+const jobId = await crucible.render({
+  voice: 'deathstalker',
+  language: 'en',
+  take: 0,
+  chunks: [
+    { index: 41, text: 'He had been walking for some time.' },
+    { index: 42, text: 'The road did not appear to end.' },
+  ],
+});
+```
+
+**The voice need not be resident.** A render job owns the exclusive lane for its whole
+duration and is an operator's explicit order, so it loads its own voice if it has to,
+emitting `warming` as `loadVoice()` does. That is the one asymmetry with `llm`, where a
+fine-grained unattended chat never loads.
+
+**Chunking is yours.** Pack to the voice's `pace` and `maxChars` before you get here: a chunk
+over the cap is refused (`chunk_too_long`) and never re-split, because a server that quietly
+cut a chunk in half would return two files where one was asked for. The client keeps no copy
+of `maxChars` — it is per (voice, backend) and it is on the row you already read.
+
+The `index` is yours too, and nothing renumbers it. It goes out, comes back on the retiring
+row, and becomes the artifact's name.
+
+### The `chunk` event, and the null that is load-bearing
+
+```ts
+for await (const event of crucible.events(jobId)) {
+  if (event.event !== 'chunk') continue;
+  const { index, seconds, chars, charsPerSec, tokens, capped, take } = event.data;
+  if (capped === true) retake(index);                 // a runaway
+  else if (capped === null) judgeOnDurationAlone(index); // narrator did not say
+}
+```
+
+This is the whole guard interface. The server measures and reports; it decides nothing, never
+retakes and never re-splits — your PaceTracker is the thing that judges.
+
+**`capped` and `tokens` are `boolean | null` and `number | null`, and `null` means "narrator
+did not say" — never `false`, never `0`.** narrator does not put the frame cap on its wire at
+the pinned sha, so against a current server `capped` is `null` on *every* chunk. A client
+that read that as `false` would report every runaway as a long sentence, which is precisely
+the distinction this event exists to carry. Compare against `true` and `false` explicitly;
+never write `if (chunk.capped)`.
+
+A `chunk` frame that *omits* `capped` is a `CrucibleProtocolError`, not a null: "narrator did
+not say" has to be something the server said.
+
+No `chunk` event and no artifact is produced for a row that rendered nothing. **A failed
+chunk is reported and the run continues** — one bad sentence never sinks the other 1,399 —
+so a job can finish `done` with failures in it:
+
+```ts
+const result = readRenderResult(doneEvent.data);
+for (const { index, message } of result.failed) askAgainFor(index, message);
+```
+
+### `writeArtifactsTo()`
+
+`events()`, plus the batch writer: every artifact the job publishes is fetched and written
+into `dir`, with its provenance sidecar beside it, while the job is still running.
+
+```ts
+for await (const entry of crucible.writeArtifactsTo(jobId, 'Z:\\books\\mutineer\\sentences')) {
+  if (entry.kind === 'event') watch(entry.event);          // nothing is swallowed
+  else console.log('wrote', entry.written.path, entry.written.bytes);
+}
+```
+
+It exists because **there is no shared mount, ever.** The library lives on `Z:`, WSL cannot
+mount a network drive, and that single fact is why whole-m4b alignment cannot run on Owen's
+PC today. So Crucible writes on its own host, the client fetches over HTTP — even from a
+server on localhost — and writes where assembly and resume already look.
+
+- Each artifact is fetched **as its `artifact` event lands**, overlapped with the next chunk
+  still generating. A writer that waited for `done` would turn a streaming server back into a
+  batch one.
+- Each file lands **atomically**: bytes to a sibling temporary, then a rename. BookForge's
+  resume test is "the file exists and exceeds 1024 bytes", so a half-written FLAC reads as a
+  finished chunk and that sentence is silently missing from the book.
+- The **sidecar is written first**, so the existence of `<index>.flac` implies the existence
+  of `<index>.flac.provenance.json`. Its bytes are the server's own, not a re-serialisation.
+- Fetches are bounded (default 4, `concurrency` to change it). `events()` replays a job's
+  whole history first, so attaching to a nearly-finished 1,400-chunk render would otherwise
+  open 2,800 sockets in a tick.
+- A **write** that fails throws out of the iterator. A failed *chunk* is the job's ordinary
+  news; a failed *write* means this client cannot do the one thing it was asked to do.
+- Resuming with `lastEventId` writes only what arrives after it. Without one, the whole
+  history replays and `done`'s `artifacts` list is reconciled against what was seen.
+
+It needs a Node-like runtime and loads `node:fs/promises` lazily, from a specifier assembled
+at run time — see "TypeScript note" below. Nothing else in this client touches the
+filesystem.
+
 ## `accelerator()`
 
 `GET /v1/accelerator` — what is on the card right now, and which of it is Crucible's own.
@@ -438,7 +550,16 @@ The unit suite needs **no server**. It answers each route from a `node:http` fix
 is how it covers the cases a healthy Crucible never produces on a good day: a 503 that must
 not read as an idle card, a holder whose memory the driver would not report, a voice row
 that refuses to load and does not say why, an SSE stream that stops without a terminal
-event, and every option this client refuses by name before it sends anything.
+event, a `chunk` frame whose `capped` is `null` (which is what the pinned narrator sends for
+every chunk), an artifact fetch that fails after its sidecar arrived, and every option this
+client refuses by name before it sends anything.
+
+Two of the render tests are timing proofs rather than shape proofs. "Fetches each artifact as
+its event lands" **gates the SSE stream on the artifact GET arriving**, so a writer that
+waited for `done` deadlocks it rather than failing an assertion — the honest shape of that
+failure — which is why it carries a timeout. The concurrency-ceiling test holds each artifact
+response open for a few milliseconds so that overlap is measured rather than inferred. Both
+were mutation-tested: breaking the behaviour fails the test.
 
 The test that matters is the end-to-end run against a real server, from the repo root:
 
@@ -467,3 +588,22 @@ with `accelerator_busy` — the contract working, not the test failing.
 The emitted `.d.ts` refers to the `Blob` global (the `upload` parameter). Node's
 `@types/node`, `bun-types` and the DOM lib all provide it; a project with none of the
 three will need one.
+
+### Bundler note: the one place this touches `node:fs`
+
+`writeArtifactsTo()` writes files, and it loads `node:fs/promises` and `node:path` from a
+specifier **assembled at run time**, inside that method, the first time it is called.
+
+Node's builtins are not a dependency in the sense the zero-dependency rule means — nothing is
+installed to get them — but a *static* `import ... from 'node:fs/promises'` would put fs into
+the module graph of `import {CrucibleClient}` itself, and a bundler targeting a browser-ish
+runtime resolves that specifier at build time and fails on it. Building it at run time keeps
+it out of static analysis, so a bundle that never calls `writeArtifactsTo()` never resolves
+it. webpack will warn about an expression as a dependency; that warning is the mechanism
+working, and `/* webpackIgnore: true */` is on the import for it.
+
+The cost is that a dynamic `import()` of a non-literal hands back `any`, so the four fs calls
+and the one path call the writer makes are declared as an interface and checked at the seam.
+A runtime that has neither module gets a `CrucibleError` naming what is missing and what to
+do instead (fetch each artifact with `artifact(jobId, name)`), not a `TypeError` about
+`undefined`.
