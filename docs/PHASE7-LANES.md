@@ -501,8 +501,6 @@ proved each seam without moving the app. But a server registry Owen edits by han
 JSON file under `<userData>` is not a feature, so this is where the line is deliberately
 crossed, for a reason, and the reason is written down here.
 
----
-
 ### 7.1 The token, ruled 2026-09-13
 
 Owen ruled on the whole shape at once rather than piecemeal. Three questions had been
@@ -581,6 +579,7 @@ cross-platform work against no threat that exists here. If the threat model chan
 shared machine, a token that reaches something Owen does not own — this is the paragraph
 to come back and argue with.
 
+---
 
 ## 8. Foundry
 
