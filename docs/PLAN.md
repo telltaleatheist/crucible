@@ -11,6 +11,17 @@ real cards with measured numbers in their manifests. The other four were built a
 fake engines on a night when both of Owen's cards were busy, and say so: every voice,
 aligner and whisper manifest carries `estimate_basis = "declared"`.
 
+**Superseded in part, 2026-09-13 (later the same day).** Owen ruled that the guard belongs
+to the model and that a connected server is queue capacity, which opened two more phases:
+
+- **`PHASE6-REMOTE-RENDER.md`** — the guard moves into the engine and the chunks travel
+  back over the wire. Its section 0 is a finding that reorders everything below: narrator
+  has two rendering worlds and **Crucible drives the unguarded one**, so owed item 2 is not
+  "`capped` is missing from the wire", it is "the render door has no guard at all".
+- **`PHASE7-LANES.md`** — a server is a machine and a machine is a set of slots;
+  `GET /v1/activity`; routing, affinity, and the ruling that a job is atomic. Owed ruling 5
+  (the take ladder) is CLOSED by phase 6: the retake decision goes with the guard.
+
 So what is left is not code. It is **a card, and Owen's rulings on the six things below.**
 
 ### Owed, and only a free card discharges it
