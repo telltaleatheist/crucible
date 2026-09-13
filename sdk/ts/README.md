@@ -65,6 +65,11 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `unloadModel(id)` | `POST /v1/jobs {type: "unload-model"}` | the job id |
 | `chat(options)` | `POST /v1/openai/chat/completions` | `ChatResponse` |
 | `chatStream(options)` | the same, streamed | `AsyncIterable<string>` of content deltas |
+| `voices()` | `GET /v1/voices` | `VoiceInfo[]` |
+| `loadVoice(id)` | `POST /v1/jobs {type: "load-voice"}` | the job id |
+| `unloadVoice(id)` | `POST /v1/jobs {type: "unload-voice"}` | the job id |
+| `accelerator()` | `GET /v1/accelerator` | `AcceleratorState` |
+| `asr(options)` | `POST /v1/jobs {type: "asr"}` | the job id |
 
 Every authenticated call sends `Authorization: Bearer <token>` and `X-Crucible-Api: 1`.
 `ping()` deliberately sends neither, so it can tell "wrong token" from "not a Crucible".
@@ -72,12 +77,26 @@ Every authenticated call sends `Authorization: Bearer <token>` and `X-Crucible-A
 Each job input is either `{ blobId }` (from `upload`) or `{ inline: Uint8Array }` (the
 client base64-encodes it for the wire). Use `upload` for anything large.
 
+`info()` answers two different questions with two different lists. `capabilities` is what the
+server can **serve** — one entry per capability, each model or voice described once, in one
+shape. `jobTypes` is what you may **post**, and it is not the same list: `llm` is a capability
+and is not a job type, while `load-model` and `unload-model` are job types and are not
+capabilities.
+
 ### Events
 
 `events()` yields typed events with the server's monotonic `id`:
-`queued {position}`, `warming {message}`, `progress {fraction, message}`, `artifact {name}`,
-`done`, `failed {error}`, `cancelled {status}`. The iterator ends after the first terminal
-event (`done`, `failed`, `cancelled`).
+`queued {position}`, `warming {message}`, `progress {fraction, message, extra}`,
+`artifact {name}`, `done`, `failed {error}`, `cancelled {status}`. The iterator ends after
+the first terminal event (`done`, `failed`, `cancelled`).
+
+`progress.extra` is every other key the job type put on that frame, verbatim — server
+spelling, server types. A job type may send its own measurements beside the fraction
+because a fraction is not always the useful number: `asr` sends
+`{stage, processed_s, total_s, cues}`, so a client shows a moving position six minutes into
+an eighteen-hour book while the percentage is still rounding to zero. Those keys are one job
+type's vocabulary rather than the API's, so they are carried rather than modelled, and
+`extra` is `{}` on a frame that had none.
 
 `done` is one record with two optional fields, `{artifacts?, resident?}`: a producing job
 (`echo`, later `tts`) reports the artifacts it wrote, and `load-model` reports the model
@@ -176,6 +195,11 @@ output. The server assembles the string so every client files the same weights u
 same name. `fingerprint`, `revision`, `memoryBytesEstimate` and `maxModelLen` are all
 `null` together on a model this host's backend cannot serve.
 
+`modalities` is the exception to that: it is **never null, on any host**. It says what a
+client may put in a chat request's content parts (`text`, `image`) — what the model is
+offered *for*, which is the same answer on a host whose backend cannot serve it at all. A
+page reader picks an image-capable model off this rather than knowing one by name.
+
 ### `loadModel()` and `unloadModel()`
 
 Both return a job id; watch it with `events()` like any other job. A load streams
@@ -263,6 +287,126 @@ thrown straight through — out of `chat()`, and out of the `for await` in `chat
 never wrapped in `CrucibleUnreachable`: your own cancellation is not a dead server and is
 not reported as one. Deltas already yielded before the abort stay yielded.
 
+## tts
+
+A voice is to `tts` what a model is to `llm`, and the shape of the surface is the same:
+list them, load one, unload it. One card holds one thing, and since phase 3 that thing may
+be a voice or a model — `health().residentKind` is `"llm"`, `"tts"` or `null`, and it is
+what tells you which door to knock on.
+
+### `voices()`
+
+`GET /v1/voices`. The same rows the `tts` capability carries in `info()`, from the same
+producer, so a voice has one description wherever you find it (narrow with
+`isTtsCapability`).
+
+```ts
+for (const voice of await crucible.voices()) {
+  if (!voice.loadable) {
+    console.log(`${voice.id}: ${voice.reason}`);   // always present when it cannot load
+    continue;
+  }
+  console.log(voice.id, voice.fingerprint, voice.maxChars, voice.pace);
+}
+```
+
+`revision`, `fingerprint`, `memoryBytesEstimate`, `estimateBasis` and `maxChars` are `null`
+together when `backendSupported` is false: all five live in the backend block this host does
+not have, and `0` would read as "needs nothing" where `""` would read as a pin. `sampleRate`,
+`takes` and `pace` are facts about the voice and are never null.
+
+Two things differ from a `ModelInfo` row and both are deliberate:
+
+- **`reason` is always present**, `null` when the voice is loadable — where a model row omits
+  the key. The client reads each route as it is rather than making the two look alike. The
+  rule that does not differ: a voice that cannot load and does not say why is a
+  `CrucibleProtocolError`.
+- **`maxChars` is characters, not tokens.** It is *the* cap certificate for this
+  (voice, backend): the most text the voice may be handed in one chunk. Nothing in `tts`
+  carries a token cap on the wire — the engine derives its frame budget per chunk from the
+  text it is actually given.
+
+`pace` is the whole block, because a client that is going to pack needs all of it. The three
+rates are always there; the packing shape is one of three arrangements, told apart by which
+of the other three are null — a band (`safeMinChars`/`safeMaxChars`), a single `targetChars`,
+or neither, which means pack to `maxChars`.
+
+What is **not** on the row is not an omission. Sampling, the EOS levers, the token-budget
+formula and the engine flags are engine tuning, they are the server's, and publishing them
+would invite a client to send them back.
+
+### `loadVoice()` and `unloadVoice()`
+
+Job ids, watched with `events()` exactly like `loadModel()`: `queued`, a `warming {message}`
+per line of the engine's readiness, then `done {resident}` — `null` after an unload. Nothing
+loads a voice implicitly anywhere else, and a load is refused by name before it is queued
+for every reason a model load is, plus `env_missing` when the tts env for that voice's
+narrator engine is not installed.
+
+## `accelerator()`
+
+`GET /v1/accelerator` — what is on the card right now, and which of it is Crucible's own.
+It is the `nvidia-smi --query-compute-apps` the load guard runs, plus the free and total
+figures, plus what Crucible has resident, plus a flag per holder saying whether that pid is
+one of this server's engines. **It reports and it never evicts.**
+
+```ts
+const state = await crucible.accelerator();
+```
+
+Three things to read carefully before concluding the card is free:
+
+- **`holders[].bytes` is `number | null`,** and the null is the driver declining to answer
+  (WDDM, permissions) — *not zero*. Render it as 0 and a queue is told a process holding
+  8 GB is holding none.
+- **an empty `holders` is not an idle card either.** Under WSL2 the driver shim answers the
+  compute-app query with an empty list while a process inside that VM holds 17 GB, which is
+  why `unattributedBytes` exists: VRAM in use that no listed holder accounts for, past the
+  declared desktop allowance. It is `null` on `mlx-darwin`, where the question cannot be
+  asked, and never negative — the server clamps it, because "VRAM nothing accounts for" cannot
+  be less than none.
+- **a probe that cannot read the card throws** `CrucibleAcceleratorUnreadable` (503
+  `accelerator_unreadable`) rather than returning zeroes. That distinction is the whole point
+  of the route: a client polling for a free GPU reads it as *ask again*, never as *it is
+  free*. It extends `CrucibleServerError`, so an existing 5xx handler still catches it.
+
+## `asr()`
+
+One audio file in, one transcript out. Returns a job id; the transcript arrives as the
+artifact `transcript.json`.
+
+```ts
+const { blobId } = await crucible.upload(bytes, { filename: 'book.m4b' });
+const jobId = await crucible.asr({
+  model: 'faster-whisper-base',
+  audio: { blobId },
+  filename: 'book.m4b',
+  language: 'en',
+  vadFilter: true,
+  wordTimestamps: true,
+});
+```
+
+**Every field is required and this client supplies none of them.** There is no default model
+— an ASR pass at the wrong size is a transcript that looks fine, is worse, and has nothing in
+it to say so — and no default for either switch, because a transcript quietly produced under
+rules the caller did not choose looks exactly like one produced under the rules they did.
+
+`language` is a faster-whisper code or the literal `"auto"`, which is a *value* meaning
+"detect it" rather than an absence. The client does not keep its own copy of the code list:
+the server checks against the tokenizer's own and refuses naming the code, before the job is
+queued.
+
+`filename` names the file on the server's disk, and **the extension is load-bearing** —
+ffmpeg reads the container from it.
+
+Progress arrives as `progress {fraction, message, extra}` with
+`extra = {stage, processed_s, total_s, cues}`. The decode drives no fraction at all: it is
+real work with a real position, but none of the transcript exists yet.
+
+A failed window fails the job, naming every bad stretch, and publishes nothing — a
+fifteen-minute hole in the middle of a transcript looks exactly like a transcript without one.
+
 ## Errors
 
 No call ever returns a degraded result, and nothing is retried. Each failure has its own
@@ -277,6 +421,7 @@ type, carrying the server's own `code` and `message` where the server sent one:
 | `CrucibleVersionError` | 426 — carries `serverApiVersion` and `clientApiVersion` |
 | `CrucibleRefused` | any other 4xx — carries the named reason (`unknown_job_type`, `unknown_model`, `unknown_blob`, ...) |
 | `CrucibleServerError` | 5xx |
+| `CrucibleAcceleratorUnreadable` | 503 `accelerator_unreadable` — a `CrucibleServerError` with a narrower name, because "I cannot see the card" must never be read as "the card is free" |
 | `CrucibleProtocolError` | a response API v1 does not describe: a missing field, an unknown SSE event name |
 
 All of them extend `CrucibleError`.
@@ -286,8 +431,14 @@ All of them extend `CrucibleError`.
 ```bash
 npm ci
 npm run build        # dist/esm + dist/cjs + the .d.ts for both
-npm run test:unit    # the error map, against a tiny in-process http fixture
+npm run test:unit    # every reader and every refusal, against in-process http fixtures
 ```
+
+The unit suite needs **no server**. It answers each route from a `node:http` fixture, which
+is how it covers the cases a healthy Crucible never produces on a good day: a 503 that must
+not read as an idle card, a holder whose memory the driver would not report, a voice row
+that refuses to load and does not say why, an SSE stream that stops without a terminal
+event, and every option this client refuses by name before it sends anything.
 
 The test that matters is the end-to-end run against a real server, from the repo root:
 

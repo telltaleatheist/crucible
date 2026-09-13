@@ -9,6 +9,8 @@
 
 import { encodeBase64 } from './base64.js';
 import {
+  ACCELERATOR_UNREADABLE,
+  CrucibleAcceleratorUnreadable,
   CrucibleAuthError,
   CrucibleConfigError,
   CrucibleError,
@@ -37,12 +39,17 @@ import { readSseFrames } from './sse.js';
 import {
   API_VERSION,
   TERMINAL_EVENTS,
+  type AcceleratorHolder,
+  type AcceleratorResident,
+  type AcceleratorState,
+  type AsrOptions,
   type CancelResult,
   type Capability,
   type ChatMessage,
   type ChatOptions,
   type ChatResponse,
   type DoneData,
+  type EstimateBasis,
   type Health,
   type JobEvent,
   type JobFailure,
@@ -52,9 +59,13 @@ import {
   type ModelDescriptor,
   type ModelInfo,
   type Ping,
+  type ProgressData,
   type Provenance,
   type ServerInfo,
   type UploadResult,
+  type VoiceInfo,
+  type VoiceKind,
+  type VoicePace,
 } from './types.js';
 import { SDK_VERSION } from './version.js';
 
@@ -62,6 +73,10 @@ const API_HEADER = 'X-Crucible-Api';
 const JOB_STATES: readonly JobState[] = ['queued', 'running', 'done', 'failed', 'cancelled'];
 const HEALTH_STATES = ['ok', 'warming', 'busy'] as const;
 const CHAT_ROLES = ['system', 'user', 'assistant'] as const;
+/** PHASE3-TTS.md section 2. The voice loader refuses any other word. */
+const VOICE_KINDS: readonly VoiceKind[] = ['checkpoint', 'zeroshot', 'token'];
+/** PHASE3-TTS.md section 2, difference 4. Also closed by the voice loader. */
+const ESTIMATE_BASES: readonly EstimateBasis[] = ['measured', 'declared'];
 /** OpenAI's stream terminator, sent as a bare `data:` line with no JSON. */
 const DONE_SENTINEL = '[DONE]';
 const EVENT_NAMES = [
@@ -181,6 +196,10 @@ export class CrucibleClient {
           vramBytes: num(gpu, 'vram_bytes', 'info.host.gpu'),
         },
       },
+      // What to POST, which is a different list from what the server can serve:
+      // `llm` is a capability, `load-model` and `unload-model` are the job types
+      // that operate it.
+      jobTypes: strArray(body, 'job_types', 'info'),
       capabilities: capabilities.map((entry, index) =>
         readCapability(asObject(entry, `info.capabilities[${index}]`), index),
       ),
@@ -194,6 +213,11 @@ export class CrucibleClient {
       status: oneOf(str(body, 'status', 'health'), HEALTH_STATES, 'health.status'),
       queueDepth: num(body, 'queue_depth', 'health'),
       residentModels: strArray(body, 'resident_models', 'health'),
+      // Read as a plain nullable string, not narrowed to `llm | tts`: the set of
+      // kinds grows with the job types (PHASE4's aligner is next), and a client
+      // that threw a protocol error on a kind it had not heard of would be
+      // broken by the server that added one.
+      residentKind: nullableStr(body, 'resident_kind', 'health'),
     };
   }
 
@@ -580,6 +604,159 @@ export class CrucibleClient {
     return init;
   }
 
+  // -------------------------------------------------------------------- tts
+
+  /**
+   * `GET /v1/voices` — every voice this server has a manifest for, and the four
+   * separate facts about each, exactly as {@link models} reports them for a
+   * model: backend support, installation, residency, and whether it could be
+   * loaded right now.
+   *
+   * These are the same rows the `tts` capability carries in {@link info}, from
+   * the same producer, so a voice has one description wherever you find it.
+   *
+   * A voice that is not loadable always carries the server's `reason`. Unlike a
+   * model row, a *loadable* voice row carries `reason: null` rather than omitting
+   * the key — the two routes differ there, and this client reads each as it is
+   * rather than making them look alike.
+   *
+   * Refused with `job_type_disabled` on a server where `[jobs] enable_tts` is
+   * false, the same way `/v1/models` is for `llm`.
+   */
+  async voices(): Promise<VoiceInfo[]> {
+    const body = await this.#jsonValue('/v1/voices', { method: 'GET' }, 'voices');
+    const entries = asArray(body, 'voices');
+    return entries.map((entry, index) =>
+      readVoiceInfo(asObject(entry, `voices[${index}]`), `voices[${index}]`),
+    );
+  }
+
+  /**
+   * Queue a `load-voice` job and return its id. Watch it with {@link events},
+   * exactly as you watch {@link loadModel}: `queued`, then a `warming {message}`
+   * per line of narrator's readiness, then `done {resident}`.
+   *
+   * One card holds one thing, and since PHASE3-TTS.md section 5 that thing may
+   * be a voice or a model (see {@link Health.residentKind}). So loading a voice
+   * is refused for the same reasons loading a model is — unknown, not installed,
+   * unsupported on this backend, too big for the free VRAM, the card busy with
+   * someone else's work — plus one of its own: the tts env for this voice's
+   * narrator engine is not installed (`env_missing`).
+   *
+   * Nothing loads a voice implicitly anywhere else.
+   */
+  async loadVoice(voice: string): Promise<string> {
+    return this.submit({
+      type: 'load-voice',
+      model: requireText(voice, 'voice'),
+      params: {},
+      inputs: {},
+    });
+  }
+
+  /**
+   * Queue an `unload-voice` job and return its id. `done {resident: null}` when
+   * narrator has exited and the card is back. `voice_not_resident` if it was not
+   * loaded — including when a *model* holds the card, which is a different
+   * refusal than "nothing is loaded" and says so.
+   */
+  async unloadVoice(voice: string): Promise<string> {
+    return this.submit({
+      type: 'unload-voice',
+      model: requireText(voice, 'voice'),
+      params: {},
+      inputs: {},
+    });
+  }
+
+  // ------------------------------------------------------------ accelerator
+
+  /**
+   * `GET /v1/accelerator` — what is on the card right now, and which of it is
+   * Crucible's own (PHASE4-AUDIO.md section 5).
+   *
+   * This is the `nvidia-smi --query-compute-apps` the load guard runs, plus the
+   * free and total figures, plus what Crucible has resident, plus a flag per
+   * holder saying whether that pid is one of this server's engines. It is the
+   * one call that answers what a client's own GPU arbitration is otherwise
+   * guessing at.
+   *
+   * **It reports and it never evicts.** Nothing here asks anybody to leave.
+   *
+   * Three things to read carefully before deciding the card is free:
+   *
+   * - {@link AcceleratorHolder.bytes} is `number | null`, and the null is the
+   *   driver declining to say (WDDM, permissions) — **not zero**. A queue shown
+   *   0 for a process holding 8 GB concludes the card is idle.
+   * - an **empty** `holders` is not an idle card either. Under WSL2 the driver
+   *   shim answers the compute-app query with an empty list while a process
+   *   inside that VM holds 17 GB, which is why
+   *   {@link AcceleratorState.unattributedBytes} exists.
+   * - a probe that cannot read the card throws
+   *   {@link CrucibleAcceleratorUnreadable} (503 `accelerator_unreadable`) rather
+   *   than returning zeroes. That is the distinction the whole route is for:
+   *   "ask again", never "it is free".
+   */
+  async accelerator(): Promise<AcceleratorState> {
+    const body = await this.#json('/v1/accelerator', { method: 'GET' }, 'accelerator');
+    return readAcceleratorState(body);
+  }
+
+  // -------------------------------------------------------------------- asr
+
+  /**
+   * Queue an `asr` job — one audio file in, one transcript out — and return its
+   * id. Watch it with {@link events}; the transcript arrives as the artifact
+   * `transcript.json`, which you fetch with {@link artifact}.
+   *
+   * Every one of `model`, `language`, `vadFilter` and `wordTimestamps` is
+   * required, and this client supplies none of them. The server refuses a
+   * missing one, and papering over that would be worse than the refusal: a
+   * transcript produced under rules the caller did not choose looks exactly like
+   * one produced under the rules they did. **There is no default model** for the
+   * same reason — an ASR pass at the wrong size is a transcript that looks fine,
+   * is worse, and has nothing in it to say so.
+   *
+   * `progress` events carry `{stage, processed_s, total_s, cues}` in
+   * {@link ProgressData.extra} alongside the fraction, because the decode drives
+   * no fraction at all and an eighteen-hour book spends its first minutes with
+   * the percentage rounding to zero.
+   *
+   * The job fails, naming every bad window, rather than publishing a transcript
+   * with a hole in it.
+   */
+  async asr(options: AsrOptions): Promise<string> {
+    const given = options as Partial<AsrOptions> | undefined;
+    if (given === undefined || given === null) {
+      throw new CrucibleConfigError(
+        'options',
+        'asr(...) needs {model, audio, filename, language, vadFilter, wordTimestamps}',
+      );
+    }
+    const audio = given.audio;
+    if (audio === undefined || audio === null) {
+      throw new CrucibleConfigError('audio', 'is required and was not given');
+    }
+    return this.submit({
+      type: 'asr',
+      model: requireText(given.model, 'model'),
+      params: {
+        // Sent as the server names them. `language` is not checked against a
+        // code list here: faster-whisper's own list is the authority, the server
+        // checks against it before the job is queued and refuses naming the
+        // code, and a second copy of a hundred codes in this file is a second
+        // thing to drift.
+        language: requireText(given.language, 'language'),
+        vad_filter: requireBool(given.vadFilter, 'vadFilter'),
+        word_timestamps: requireBool(given.wordTimestamps, 'wordTimestamps'),
+      },
+      // The input's NAME becomes the file's name on the server's disk, and
+      // ffmpeg reads the container off the extension — so the caller names the
+      // file and this client does not invent one.
+      inputs: { [requireText(given.filename, 'filename')]: audio },
+    });
+  }
+
   // ---------------------------------------------------------------- plumbing
 
   async #json(path: string, init: RequestInit, where: string): Promise<Json> {
@@ -645,7 +822,16 @@ export class CrucibleClient {
       const serverApiVersion = nullableNum(details, 'server_api_version', 'error.details');
       return new CrucibleVersionError(code, message, serverApiVersion, API_VERSION);
     }
-    if (response.status >= 500) return new CrucibleServerError(response.status, code, message);
+    if (response.status >= 500) {
+      // One 5xx gets its own type, and only because one conclusion must never
+      // be drawn from it: an unreadable accelerator probe is not an idle card
+      // (PHASE4-AUDIO.md section 5). The subclass is still a
+      // CrucibleServerError, so nothing that already handles 5xx changes.
+      if (code === ACCELERATOR_UNREADABLE) {
+        return new CrucibleAcceleratorUnreadable(response.status, code, message);
+      }
+      return new CrucibleServerError(response.status, code, message);
+    }
     if (response.status >= 400) {
       const details = 'details' in envelope ? envelope['details'] : null;
       return new CrucibleRefused(response.status, code, message, details);
@@ -659,10 +845,14 @@ export class CrucibleClient {
 // ------------------------------------------------------------------ readers
 
 /**
- * One capability from `info()`. The `llm` capability's rows are `GET
- * /v1/models`' rows — the contract says the same shape from the same producer
- * (PHASE2-LLM.md section 5) — so they are read with the `/models` reader, not
- * DESIGN.md section 4's. Every other capability keeps that one.
+ * One capability from `info()`.
+ *
+ * Two capabilities carry the rows of the route that lists them rather than
+ * DESIGN.md section 4's descriptor, because the contract says the same shape
+ * from the same producer: `llm`'s rows are `GET /v1/models`' (PHASE2-LLM.md
+ * section 5) and `tts`'s are `GET /v1/voices`' (PHASE3-TTS.md section 8). So
+ * each is read with that route's reader. Every other capability keeps the
+ * descriptor.
  */
 function readCapability(entry: Json, index: number): Capability {
   const where = `info.capabilities[${index}]`;
@@ -673,6 +863,14 @@ function readCapability(entry: Json, index: number): Capability {
       jobType,
       models: models.map((model, at) =>
         readModelInfo(asObject(model, `${where}.models[${at}]`), `${where}.models[${at}]`),
+      ),
+    };
+  }
+  if (jobType === 'tts') {
+    return {
+      jobType,
+      models: models.map((voice, at) =>
+        readVoiceInfo(asObject(voice, `${where}.models[${at}]`), `${where}.models[${at}]`),
       ),
     };
   }
@@ -764,11 +962,7 @@ function readEvent(rawId: string | null, rawName: string | null, rawData: string
     case 'warming':
       return { id, event: 'warming', data: { message: str(data, 'message', where) } };
     case 'progress':
-      return {
-        id,
-        event: 'progress',
-        data: { fraction: num(data, 'fraction', where), message: str(data, 'message', where) },
-      };
+      return { id, event: 'progress', data: readProgress(data, where) };
     case 'artifact':
       return { id, event: 'artifact', data: { name: str(data, 'name', where) } };
     case 'done':
@@ -782,6 +976,28 @@ function readEvent(rawId: string | null, rawName: string | null, rawData: string
         data: { status: oneOf(str(data, 'status', where), ['cancelled'], `${where}.status`) },
       };
   }
+}
+
+/**
+ * A `progress` frame: the two fields API v1 pins, plus everything else the job
+ * type put on it, carried rather than dropped.
+ *
+ * `JobContext.progress(fraction, message, **extra)` is open on purpose — `asr`
+ * sends `{stage, processed_s, total_s, cues}` so a client can show a moving
+ * position while the percentage still rounds to zero (PHASE4-AUDIO.md section
+ * 3). Those keys are that job type's vocabulary rather than the API's, so they
+ * travel verbatim in `extra` instead of being modelled here, where a second job
+ * type's measurements would collide with them.
+ */
+function readProgress(data: Json, where: string): ProgressData {
+  const fraction = num(data, 'fraction', where);
+  const message = str(data, 'message', where);
+  const extra: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (key === 'fraction' || key === 'message') continue;
+    extra[key] = value;
+  }
+  return { fraction, message, extra };
 }
 
 /**
@@ -817,6 +1033,10 @@ function readModelInfo(entry: Json, where: string): ModelInfo {
     // `<id>@<revision>`, assembled by the server so that every client records
     // one spelling of it. Null exactly where `revision` is.
     fingerprint: nullableStr(entry, 'fingerprint', where),
+    // Never null, on any host: unlike `revision` this is not a per-host fact but
+    // a statement of what the model is offered FOR, and it is the same answer on
+    // a host whose backend cannot serve it (PHASE3-VLM.md section 2).
+    modalities: strArray(entry, 'modalities', where),
     backendSupported: bool(entry, 'backend_supported', where),
     installed: bool(entry, 'installed', where),
     resident: bool(entry, 'resident', where),
@@ -843,6 +1063,135 @@ function readModelInfo(entry: Json, where: string): ModelInfo {
     );
   }
   return { ...common, reason };
+}
+
+/**
+ * One `/v1/voices` row.
+ *
+ * The nullability differs from {@link readModelInfo} in exactly one place and it
+ * is deliberate on the server's side: a voice row always carries `reason`, null
+ * when the voice is loadable, where a model row omits the key. So this reads it
+ * as a nullable field and keeps the rule that matters — a voice that cannot be
+ * loaded and does not say why is unusable, because the operator cannot tell
+ * whether to pull weights, install an env, free the card, or go to the other
+ * host.
+ */
+function readVoiceInfo(entry: Json, where: string): VoiceInfo {
+  const loadable = bool(entry, 'loadable', where);
+  const reason = nullableStr(entry, 'reason', where);
+  if (!loadable && reason === null) {
+    throw new CrucibleProtocolError(
+      `${where} is not loadable and its "reason" is null; a refusal with no ` +
+        'reason does not say whether to pull weights, install an env or free the card',
+    );
+  }
+  const basis = nullableStr(entry, 'estimate_basis', where);
+  return {
+    id: str(entry, 'id', where),
+    display: str(entry, 'display', where),
+    kind: oneOf(str(entry, 'kind', where), VOICE_KINDS, `${where}.kind`),
+    language: str(entry, 'language', where),
+    narratorEngine: str(entry, 'narrator_engine', where),
+    backendSupported: bool(entry, 'backend_supported', where),
+    installed: bool(entry, 'installed', where),
+    resident: bool(entry, 'resident', where),
+    loadable,
+    reason,
+    // These five live in the backend block this host may not have, and are null
+    // together when `backend_supported` is false — never 0, which would read as
+    // "needs nothing", and never "", which would read as a pin.
+    revision: nullableStr(entry, 'revision', where),
+    fingerprint: nullableStr(entry, 'fingerprint', where),
+    memoryBytesEstimate: nullableNum(entry, 'memory_bytes_estimate', where),
+    estimateBasis:
+      basis === null ? null : oneOf(basis, ESTIMATE_BASES, `${where}.estimate_basis`),
+    maxChars: nullableNum(entry, 'max_chars', where),
+    // These three are facts about the voice rather than about this host, and are
+    // never null: a client writing FLACs cannot be handed a null sample rate,
+    // and a client that packs cannot be handed half a pace block.
+    sampleRate: num(entry, 'sample_rate', where),
+    takes: num(entry, 'takes', where),
+    pace: readVoicePace(objectField(entry, 'pace', where), `${where}.pace`),
+  };
+}
+
+/**
+ * A voice's pace block. The three rates are required; the three that describe
+ * the packing shape are nullable, and *which* of them are null is how a client
+ * tells a band from a target from neither.
+ *
+ * The manifest's own invariants — `min < pace < max`, and never both a band and
+ * a target — are the loader's to enforce and are not re-checked here. This
+ * client reads the wire; it does not keep a second copy of the server's schema
+ * rules to disagree with it.
+ */
+function readVoicePace(entry: Json, where: string): VoicePace {
+  return {
+    paceCharsPerSec: num(entry, 'pace_chars_per_sec', where),
+    maxCharsPerSec: num(entry, 'max_chars_per_sec', where),
+    minCharsPerSec: num(entry, 'min_chars_per_sec', where),
+    targetChars: nullableNum(entry, 'target_chars', where),
+    safeMinChars: nullableNum(entry, 'safe_min_chars', where),
+    safeMaxChars: nullableNum(entry, 'safe_max_chars', where),
+  };
+}
+
+/** `GET /v1/accelerator`, read strictly — see {@link CrucibleClient.accelerator}. */
+function readAcceleratorState(body: Json): AcceleratorState {
+  const where = 'accelerator';
+  const gpu = objectField(body, 'gpu', where);
+  const resident = field(body, 'resident', where);
+  const holders = asArray(field(body, 'holders', where), 'accelerator.holders');
+  return {
+    backend: str(body, 'backend', where),
+    gpu: {
+      vendor: str(gpu, 'vendor', 'accelerator.gpu'),
+      name: str(gpu, 'name', 'accelerator.gpu'),
+      totalBytes: num(gpu, 'total_bytes', 'accelerator.gpu'),
+    },
+    freeBytes: num(body, 'free_bytes', where),
+    usedBytes: num(body, 'used_bytes', where),
+    desktopAllowanceBytes: num(body, 'desktop_allowance_bytes', where),
+    // Null on mlx-darwin, where the question cannot be asked. Not defaulted to
+    // zero: "nobody unaccounted for" and "unanswerable" are different answers.
+    unattributedBytes: nullableNum(body, 'unattributed_bytes', where),
+    resident:
+      resident === null
+        ? null
+        : readAcceleratorResident(asObject(resident, 'accelerator.resident')),
+    holders: holders.map((holder, index) =>
+      readAcceleratorHolder(
+        asObject(holder, `accelerator.holders[${index}]`),
+        `accelerator.holders[${index}]`,
+      ),
+    ),
+    detail: str(body, 'detail', where),
+  };
+}
+
+function readAcceleratorResident(entry: Json): AcceleratorResident {
+  const where = 'accelerator.resident';
+  return {
+    // A plain string, not narrowed: the kinds grow with the job types, and this
+    // client must not be the thing that breaks when one is added.
+    kind: str(entry, 'kind', where),
+    id: str(entry, 'id', where),
+    since: str(entry, 'since', where),
+    memoryBytesEstimate: num(entry, 'memory_bytes_estimate', where),
+  };
+}
+
+function readAcceleratorHolder(entry: Json, where: string): AcceleratorHolder {
+  return {
+    pid: num(entry, 'pid', where),
+    name: str(entry, 'name', where),
+    // `null` is the driver refusing to say, and it stays null all the way to the
+    // caller. Substituting 0 here would turn "I do not know what this process
+    // holds" into "this process holds nothing", which is how a queue decides a
+    // busy card is free.
+    bytes: nullableNum(entry, 'bytes', where),
+    ownedByCrucible: bool(entry, 'owned_by_crucible', where),
+  };
 }
 
 function readChatMessages(messages: unknown): Array<{ role: string; content: string }> {
@@ -972,6 +1321,22 @@ function requireText(value: unknown, option: string): string {
   }
   if (value.trim() === '') {
     throw new CrucibleConfigError(option, 'is required and was empty');
+  }
+  return value;
+}
+
+/**
+ * A boolean the caller must state. There is no coercion and no default: `asr`'s
+ * two switches change what whisper is asked for, and a client that turned an
+ * absent one into `true` would be choosing the rules a transcript was made
+ * under on the caller's behalf.
+ */
+function requireBool(value: unknown, option: string): boolean {
+  if (value === undefined || value === null) {
+    throw new CrucibleConfigError(option, 'is required and was not given');
+  }
+  if (typeof value !== 'boolean') {
+    throw new CrucibleConfigError(option, `must be a boolean, got ${typeof value}`);
   }
   return value;
 }

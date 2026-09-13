@@ -142,6 +142,30 @@ export class CrucibleServerError extends CrucibleError {
 }
 
 /**
+ * The server's code for "I cannot see my own accelerator at the moment".
+ * Exported because the mapping below turns exactly this code into a type, and a
+ * caller comparing `error.code` should compare against one spelling of it.
+ */
+export const ACCELERATOR_UNREADABLE = 'accelerator_unreadable';
+
+/**
+ * 503 `accelerator_unreadable`: the probe ran and could not read the card —
+ * nvidia-smi missing, refusing, or timing out.
+ *
+ * Its own type because of the one conclusion it must never be confused with.
+ * `GET /v1/accelerator` exists so a client can tell "the card is busy" from "the
+ * card is free", and the server raises rather than returning zeroes precisely so
+ * that an unreadable probe cannot be read as an idle card. A caller polling for
+ * a free GPU treats this as **ask again**: it is not a refusal of anything it
+ * asked for, and it is not an answer about the card.
+ *
+ * It is a {@link CrucibleServerError} — the status really is a 5xx and every
+ * phase-2 handler that catches one still catches this — with a narrower name for
+ * the callers that need to act differently.
+ */
+export class CrucibleAcceleratorUnreadable extends CrucibleServerError {}
+
+/**
  * The server answered with a status the client accepts, but the payload is not
  * the shape API v1 promises: unparseable JSON, a missing field, or an SSE event
  * name that is not in the v1 vocabulary. A new event kind is a breaking change

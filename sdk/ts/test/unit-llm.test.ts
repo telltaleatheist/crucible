@@ -86,6 +86,7 @@ const MODEL_ROW = {
   params_b: 9,
   revision: REVISION,
   fingerprint: `qwen3.5-9b@${REVISION}`,
+  modalities: ['text'],
   backend_supported: true,
   installed: true,
   resident: true,
@@ -144,6 +145,7 @@ test('models() reads every field /v1/models promises', async () => {
         params_b: 27,
         revision: 'b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
         fingerprint: 'qwen3.8-27b@b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
+        modalities: ['text', 'image'],
         backend_supported: true,
         installed: false,
         resident: false,
@@ -162,6 +164,9 @@ test('models() reads every field /v1/models promises', async () => {
         params_b: 1,
         revision: null,
         fingerprint: null,
+        // Never null, even here: what a model is offered FOR is the same answer
+        // on a host that cannot serve it at all.
+        modalities: ['text'],
         backend_supported: false,
         installed: false,
         resident: false,
@@ -186,6 +191,7 @@ test('models() reads every field /v1/models promises', async () => {
       paramsB: 9,
       revision: REVISION,
       fingerprint: `qwen3.5-9b@${REVISION}`,
+      modalities: ['text'],
       backendSupported: true,
       installed: true,
       resident: true,
@@ -200,6 +206,7 @@ test('models() reads every field /v1/models promises', async () => {
       paramsB: 27,
       revision: 'b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
       fingerprint: 'qwen3.8-27b@b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
+      modalities: ['text', 'image'],
       backendSupported: true,
       installed: false,
       resident: false,
@@ -215,6 +222,7 @@ test('models() reads every field /v1/models promises', async () => {
       paramsB: 1,
       revision: null,
       fingerprint: null,
+      modalities: ['text'],
       backendSupported: false,
       installed: false,
       resident: false,
@@ -285,21 +293,25 @@ const INFO = {
     backend: 'cuda-linux',
     gpu: { vendor: 'nvidia', name: 'NVIDIA GeForce RTX 3090 Ti', vram_bytes: 25757220864 },
   },
+  // What to POST, which is not the capability list: `llm` is a capability and
+  // `load-model` / `unload-model` are the job types that operate it.
+  job_types: ['asr', 'echo', 'load-model', 'unload-model'],
   capabilities: [
-    { job_type: 'echo', models: [] },
     {
-      job_type: 'load-model',
-      // DESIGN.md section 4's row, which every capability but `llm` uses.
+      job_type: 'asr',
+      // DESIGN.md section 4's row, which every capability but `llm` and `tts`
+      // still uses.
       models: [
         {
-          id: 'qwen3.5-9b',
-          revision: REVISION,
-          source: 'Qwen/Qwen3.5-9B',
-          resident: true,
-          vram_bytes: 21000000000,
+          id: 'faster-whisper-base',
+          revision: 'ebe41f70d5b6a1f3c2e9d8a7b6c5d4e3f2a1b0c9',
+          source: 'Systran/faster-whisper-base',
+          resident: false,
+          vram_bytes: 1685651456,
         },
       ],
     },
+    { job_type: 'echo', models: [] },
     { job_type: 'llm', models: [MODEL_ROW] },
   ],
 };
@@ -319,6 +331,7 @@ test("info() reads the llm capability's rows with the /models reader", async () 
       paramsB: 9,
       revision: REVISION,
       fingerprint: `qwen3.5-9b@${REVISION}`,
+      modalities: ['text'],
       backendSupported: true,
       installed: true,
       resident: true,
@@ -330,15 +343,15 @@ test("info() reads the llm capability's rows with the /models reader", async () 
   ]);
 
   // The other capabilities keep DESIGN.md section 4's row, unchanged.
-  const load = info.capabilities.find((capability) => capability.jobType === 'load-model');
-  assert.ok(load !== undefined && !isLlmCapability(load));
-  assert.deepEqual(load.models, [
+  const asr = info.capabilities.find((capability) => capability.jobType === 'asr');
+  assert.ok(asr !== undefined && !isLlmCapability(asr));
+  assert.deepEqual(asr.models, [
     {
-      id: 'qwen3.5-9b',
-      revision: REVISION,
-      source: 'Qwen/Qwen3.5-9B',
-      resident: true,
-      vramBytes: 21000000000,
+      id: 'faster-whisper-base',
+      revision: 'ebe41f70d5b6a1f3c2e9d8a7b6c5d4e3f2a1b0c9',
+      source: 'Systran/faster-whisper-base',
+      resident: false,
+      vramBytes: 1685651456,
     },
   ]);
 
@@ -346,6 +359,27 @@ test("info() reads the llm capability's rows with the /models reader", async () 
   const echo = info.capabilities.find((capability) => capability.jobType === 'echo');
   assert.ok(echo !== undefined);
   assert.deepEqual(echo.models, []);
+
+  // `job_types` is what to POST, and is deliberately not the capability list:
+  // `llm` is a capability and is not a job type; `load-model` is a job type and
+  // is not a capability. One model id appears in exactly one capability.
+  assert.deepEqual(info.jobTypes, ['asr', 'echo', 'load-model', 'unload-model']);
+  const ids = info.capabilities.flatMap((capability) =>
+    capability.models.map((model) => model.id),
+  );
+  assert.equal(new Set(ids).size, ids.length, 'a model is described in exactly one place');
+});
+
+test('an info body without job_types is a protocol error, not an empty list', async () => {
+  // A client that cannot see what to POST would discover an unknown job type by
+  // being refused one, which is what `job_types` exists to replace.
+  const { job_types: _types, ...withoutTypes } = INFO;
+  handle = (_request, response) => json(response, 200, withoutTypes);
+  await assert.rejects(client().info(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+    assert.match(error.message, /info has no field "job_types"/);
+    return true;
+  });
 });
 
 test('an llm capability row shaped like the phase-1 row is a protocol error', async () => {

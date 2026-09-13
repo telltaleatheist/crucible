@@ -554,6 +554,51 @@ one env row per narrator engine under `tts_envs`.
   reader `events()` already uses, on a runtime that has no `WebSocket` (section 7).
 - Typed refusals for every named code in this document.
 
+### What is built, 2026-09-13
+
+The lifecycle half, matching the server's: `voices()`, `loadVoice(id)`, `unloadVoice(id)`,
+and the type `VoiceInfo` / `VoicePace` read strictly from the section 2 row. The SDK's unit
+suite goes from 52 tests to 84, none of which needs a live server.
+
+**`render()` and `stream()` are deliberately not built.** Sections 6 and 7 are still being
+written in Python — `crucible/engines/narrator.py` does not exist and `load-voice` reports
+`engine_not_implemented` — so their wire is not settled. A client written against a contract
+that may still move is how the two halves end up disagreeing, and the disagreement would be
+silent. They are a follow-up, and `chunk` is deliberately **not** in the SDK's event
+vocabulary until then: a `chunk` frame today is a `CrucibleProtocolError` naming it, which is
+the correct answer from a client that does not yet speak it.
+
+Four things this section did not say, each found by reading the bytes the server actually
+sends rather than the prose:
+
+- **`info()` was broken on any server with `enable_tts`.** Section 8 says the `tts`
+  capability's rows are `/v1/voices`' rows verbatim, and the client was reading every
+  capability but `llm` with DESIGN.md section 4's descriptor — which demands a `source` and
+  a `vram_bytes` a voice row does not carry. `Capability` is now a three-way union with
+  `isTtsCapability` beside `isLlmCapability`, on the same rule: the capability whose rows
+  come from a listing route is read with that route's reader.
+- **A voice row's `reason` is always present, `null` when loadable**, where a model row omits
+  the key entirely (`voice_rows` writes `"reason": reason` unconditionally; `model_rows`
+  writes it only `if reason is not None`). The client reads each as it is rather than tidying
+  the difference away. The rule that does not differ is the one that matters: not loadable
+  and no reason is a protocol error.
+- **`kind` and `estimate_basis` are narrowed to their manifest vocabularies**
+  (`checkpoint | zeroshot | token`, `measured | declared`), because the loader refuses any
+  other word — so a third value is a contract change, not a value to pass through.
+  `resident_kind` is **not** narrowed, for the opposite reason: section 8 says the set grows,
+  and phase 4's aligner lands at the same key.
+- **`sample_rate`, `takes` and `pace` survive a missing backend block.** They are facts about
+  the voice, not about this host, and `voice_rows` sends them on an unsupported row too; only
+  the five backend-block fields go null together.
+
+One thing the server sends that this document does not describe, found the same way and left
+for the Python side: **`GET /v1/accelerator`'s `resident` block hard-codes `"kind": "llm"`
+and reads `resident.model_id`** (`crucible/api.py`), which `ResidentVoice` does not have. With
+a voice on the card that route raises rather than reporting it. The probe's own contract
+(PHASE4-AUDIO.md section 5) already says the kind is the family of the resident thing and
+that voices land there, so this is the route not having caught up with section 5's
+generalised residency.
+
 ## 10. Verification
 
 No new number is written into a manifest without the accelerator it was measured on, and
