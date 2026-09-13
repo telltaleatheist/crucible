@@ -18,6 +18,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 
 import {
+  CrucibleAcceleratorUnreadable,
   CrucibleAuthError,
   CrucibleClient,
   CrucibleRefused,
@@ -79,11 +80,56 @@ test('info reports a real backend and offers echo', async () => {
   assert.deepEqual(echo.models, [], 'echo serves no models');
 });
 
-test('health reports the lane', async () => {
+test('health reports the lane, and says what kind of thing holds the card', async () => {
   const health = await crucible.health();
   assert.ok(['ok', 'warming', 'busy'].includes(health.status));
   assert.ok(Number.isInteger(health.queueDepth));
   assert.deepEqual(health.residentModels, []);
+  // Nothing is loaded on an echo-only server, so the kind is the null it reports
+  // when nothing holds the card. Reading it at all is the cross-check: the
+  // client demands the field, so a server that stopped sending it fails here.
+  assert.equal(health.residentKind, null);
+});
+
+test('the accelerator probe answers a state, or refuses by name — never zeroes', async () => {
+  // The one route whose failure mode is the point: a host with no readable card
+  // (no nvidia-smi, a CI box, a Mac where the query cannot be asked) must
+  // REFUSE, because a client polling for a free GPU would read zeroes as "it is
+  // free". Both outcomes are contract; a resolved value full of zeroes is not.
+  let state: Awaited<ReturnType<typeof crucible.accelerator>> | null = null;
+  try {
+    state = await crucible.accelerator();
+  } catch (error) {
+    assert.ok(
+      error instanceof CrucibleAcceleratorUnreadable,
+      `an unreadable probe must be accelerator_unreadable, got ${String(error)}`,
+    );
+    assert.equal(error.code, 'accelerator_unreadable');
+    return;
+  }
+  assert.ok(['cuda-linux', 'mlx-darwin'].includes(state.backend));
+  assert.ok(state.gpu.totalBytes > 0, 'a readable probe names a real card');
+  assert.ok(state.freeBytes >= 0);
+  // Never negative and never a substitute for one: the server clamps at zero.
+  assert.ok(state.unattributedBytes === null || state.unattributedBytes >= 0);
+  assert.equal(state.resident, null, 'an echo-only server holds nothing');
+  for (const holder of state.holders) {
+    assert.ok(Number.isInteger(holder.pid));
+    // Null is the driver declining to say and is a legal answer; a string or a
+    // missing key is not, and the reader would already have thrown.
+    assert.ok(holder.bytes === null || holder.bytes >= 0);
+  }
+});
+
+test('voices is refused by name on a server with tts disabled', async () => {
+  // `scripts/e2e.sh` initialises with `--enable-echo` and nothing else, so this
+  // exercises the route and the refusal that guards it rather than needing a
+  // voice on disk.
+  await assert.rejects(crucible.voices(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleRefused, `got ${String(error)}`);
+    assert.equal(error.code, 'job_type_disabled');
+    return true;
+  });
 });
 
 test('a wrong token is an auth error, not a refusal', async () => {

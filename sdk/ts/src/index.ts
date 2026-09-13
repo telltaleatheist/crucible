@@ -18,6 +18,8 @@ export { CrucibleClient } from './client.js';
 export type { CrucibleClientOptions, EventsOptions } from './client.js';
 
 export {
+  ACCELERATOR_UNREADABLE,
+  CrucibleAcceleratorUnreadable,
   CrucibleAuthError,
   CrucibleConfigError,
   CrucibleError,
@@ -29,9 +31,14 @@ export {
   CrucibleVersionError,
 } from './errors.js';
 
-export { API_VERSION, TERMINAL_EVENTS, isLlmCapability } from './types.js';
+export { API_VERSION, TERMINAL_EVENTS, isLlmCapability, isTtsCapability } from './types.js';
 export type {
+  AcceleratorGpu,
+  AcceleratorHolder,
+  AcceleratorResident,
+  AcceleratorState,
   ArtifactData,
+  AsrOptions,
   CancelResult,
   CancelledData,
   Capability,
@@ -40,6 +47,7 @@ export type {
   ChatResponse,
   ChatUsage,
   DoneData,
+  EstimateBasis,
   FailedData,
   GpuInfo,
   Health,
@@ -60,7 +68,11 @@ export type {
   ResponseFormat,
   ServerInfo,
   TerminalEventName,
+  TtsCapability,
   UploadResult,
+  VoiceInfo,
+  VoiceKind,
+  VoicePace,
   WarmingData,
 } from './types.js';
 

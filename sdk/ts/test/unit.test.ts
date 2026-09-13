@@ -215,7 +215,7 @@ test('a url that already carries /v1 is refused rather than doubled', () => {
 // ------------------------------------------------------------------ headers
 
 test('authed calls carry the token, the api header and the client name', async () => {
-  answer(200, { status: 'ok', queue_depth: 0, resident_models: [] });
+  answer(200, { status: 'ok', queue_depth: 0, resident_models: [], resident_kind: null });
   await client().health();
   assert.equal(lastHeaders['authorization'], 'Bearer the-token');
   assert.equal(lastHeaders['x-crucible-api'], '1');

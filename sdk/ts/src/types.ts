@@ -31,15 +31,17 @@ export interface ModelDescriptor {
 /**
  * One job type this server offers, with the models it can serve.
  *
- * Most capabilities describe their models with DESIGN.md section 4's row. The
- * `llm` capability is the exception the contract makes on purpose: its rows are
- * `GET /v1/models`' rows, the same shape from the same producer, so a model has
- * one description wherever a client finds it (PHASE2-LLM.md section 5). Narrow
- * with {@link isLlmCapability} before reading a row.
+ * Most capabilities describe their models with DESIGN.md section 4's row. Two
+ * are exceptions the contract makes on purpose, both for the same reason: their
+ * rows are the rows of the route that lists them — `GET /v1/models` for `llm`
+ * (PHASE2-LLM.md section 5), `GET /v1/voices` for `tts` (PHASE3-TTS.md section
+ * 8) — the same shape from the same producer, so a model or a voice has one
+ * description wherever a client finds it. Narrow with {@link isLlmCapability} or
+ * {@link isTtsCapability} before reading a row.
  */
-export type Capability = LlmCapability | JobCapability;
+export type Capability = LlmCapability | TtsCapability | JobCapability;
 
-/** Any capability other than `llm`. */
+/** Any capability other than `llm` and `tts`. */
 export interface JobCapability {
   readonly jobType: string;
   readonly models: readonly ModelDescriptor[];
@@ -51,9 +53,26 @@ export interface LlmCapability {
   readonly models: readonly ModelInfo[];
 }
 
+/**
+ * The `tts` capability: `GET /v1/voices`' rows, carried inside `info()`.
+ *
+ * The member is still called `models` — that is the key on the wire, and a
+ * capability's models are whatever that job type serves. For `tts` the thing
+ * served is a voice.
+ */
+export interface TtsCapability {
+  readonly jobType: 'tts';
+  readonly models: readonly VoiceInfo[];
+}
+
 /** Narrow a capability to the `llm` one, whose rows are {@link ModelInfo}. */
 export function isLlmCapability(capability: Capability): capability is LlmCapability {
   return capability.jobType === 'llm';
+}
+
+/** Narrow a capability to the `tts` one, whose rows are {@link VoiceInfo}. */
+export function isTtsCapability(capability: Capability): capability is TtsCapability {
+  return capability.jobType === 'tts';
 }
 
 /** The accelerator the server owns. */
@@ -77,6 +96,22 @@ export interface ServerInfo {
     readonly backend: string;
     readonly gpu: GpuInfo;
   };
+  /**
+   * What this server will accept as a `type` in `POST /v1/jobs`.
+   *
+   * Not the same list as {@link ServerInfo.capabilities}, and deliberately so: a
+   * capability says what the server can *serve*, this says what to *ask it
+   * with*, and one capability can be operated by several job types. `llm` is a
+   * capability; `load-model` and `unload-model` are what you post, and neither
+   * is a capability of its own.
+   */
+  readonly jobTypes: readonly string[];
+  /**
+   * One entry per capability, not one per postable job type. A model or a voice
+   * appears in exactly one of them, in exactly one shape — `load-model`,
+   * `unload-model` and `llm` listed `qwen3.5-9b` three times in two shapes until
+   * 2026-09-13, which is the thing PHASE2-LLM.md section 5 exists to forbid.
+   */
   readonly capabilities: readonly Capability[];
 }
 
@@ -84,7 +119,25 @@ export interface ServerInfo {
 export interface Health {
   readonly status: 'ok' | 'warming' | 'busy';
   readonly queueDepth: number;
+  /**
+   * The ids of whatever is on the card. Keeps its phase-2 name and its phase-2
+   * shape — a list of ids — because every phase-2 client reads it and one id is
+   * one id whatever kind of thing it names. What kind it is, is
+   * {@link Health.residentKind}.
+   */
   readonly residentModels: readonly string[];
+  /**
+   * What *sort* of thing holds the card: `"llm"`, `"tts"`, or `null` when
+   * nothing does (PHASE3-TTS.md section 8). Since one card holds one thing and
+   * that thing may now be a voice, this is which door to knock on — `chat()` on
+   * a server with a voice resident is `model_not_resident`, and the id in
+   * `residentModels` does not say so on its own.
+   *
+   * It is a plain string and not a union on purpose. The set grows: PHASE4's
+   * aligner lands here beside the other two, and a client that throws a protocol
+   * error on a kind it has not heard of would break on the server that added it.
+   */
+  readonly residentKind: string | null;
 }
 
 /** `POST /v1/uploads`. */
@@ -169,6 +222,24 @@ export interface WarmingData {
 export interface ProgressData {
   readonly fraction: number;
   readonly message: string;
+  /**
+   * Every other key the job type put on this frame, verbatim — server spelling,
+   * server types, nothing invented and nothing dropped.
+   *
+   * `JobContext.progress(fraction, message, **extra)` lets a job type send its
+   * own measurements beside the fraction, because a fraction is not always the
+   * useful number: `asr` sends `{stage, processed_s, total_s, cues}` so that a
+   * client shows a moving position six minutes into an eighteen-hour book while
+   * the percentage is still rounding to zero (PHASE4-AUDIO.md section 3). Those
+   * keys are one job type's vocabulary, not API v1's, so they are carried rather
+   * than modelled — the same decision, for the same reason, as {@link Provenance}
+   * keeping the server's key names.
+   *
+   * `{}` when the frame carried only `fraction` and `message`, which is every
+   * frame from a job type that sends no measurements of its own. That is not a
+   * substituted default: it is the true answer to "what else was on the frame".
+   */
+  readonly extra: Readonly<Record<string, unknown>>;
 }
 
 export interface ArtifactData {
@@ -272,6 +343,16 @@ export interface ModelInfo {
    * pin.
    */
   readonly fingerprint: string | null;
+  /**
+   * What a client may put in a chat request's content parts — `"text"`,
+   * `"image"` (PHASE3-VLM.md section 2).
+   *
+   * Unlike {@link ModelInfo.revision} and its nullable siblings this is **never
+   * null**, on any host: it says what the model is offered *for*, which is the
+   * same answer on a host whose backend cannot serve it at all. A page reader
+   * picks an image-capable model off this rather than knowing one by name.
+   */
+  readonly modalities: readonly string[];
   readonly backendSupported: boolean;
   readonly installed: boolean;
   readonly resident: boolean;
@@ -421,4 +502,280 @@ export interface ChatResponse {
    */
   readonly finishReason: string;
   readonly usage: ChatUsage;
+}
+
+// --------------------------------------------------------------------- tts
+
+/**
+ * The band a client packs its chunks to, as the voice's manifest declares it
+ * (PHASE3-TTS.md section 2).
+ *
+ * The server states the shape and the client does the packing — Crucible does no
+ * chunking and no text normalisation, and a voice handed text outside its band
+ * is a voice reading at the wrong speed. The three rates are always there and
+ * always satisfy `min < pace < max`; the packing shape is one of three
+ * arrangements, told apart by which of the other three are null:
+ *
+ * - a **band**: `safeMinChars` and `safeMaxChars` set, `targetChars` null — what
+ *   the five fine-tunes declare, their training corpus's interquartile range;
+ * - a **target**: `targetChars` set, the other two null — what the zero-shot
+ *   voices declare;
+ * - **neither**, all three null, which means pack to this backend's
+ *   {@link VoiceInfo.maxChars}.
+ *
+ * The two shapes are never both set: the loader refuses a manifest declaring
+ * both.
+ */
+export interface VoicePace {
+  /** The measured pace this voice reads at. */
+  readonly paceCharsPerSec: number;
+  readonly maxCharsPerSec: number;
+  readonly minCharsPerSec: number;
+  readonly targetChars: number | null;
+  readonly safeMinChars: number | null;
+  readonly safeMaxChars: number | null;
+}
+
+/** How a voice is conditioned. The loader refuses any other word. */
+export type VoiceKind = 'checkpoint' | 'zeroshot' | 'token';
+
+/**
+ * Where a voice's `memoryBytesEstimate` came from (PHASE3-TTS.md section 2,
+ * difference 4).
+ *
+ * `measured` means somebody watched the card. `declared` means the number came
+ * off the engine's own configured reservation, or off a sibling voice's
+ * certificate — true enough to load against, not a measurement, and it rides on
+ * the row precisely so that nothing downstream can mistake one for the other.
+ * Every voice this build ships says `declared`.
+ */
+export type EstimateBasis = 'measured' | 'declared';
+
+/**
+ * One voice this server knows about, as `GET /v1/voices` describes it
+ * (PHASE3-TTS.md section 2). These same rows are the `tts` capability's rows in
+ * {@link CrucibleClient.info}.
+ *
+ * A voice is to `tts` what a {@link ModelInfo} is to `llm`, and the four
+ * booleans mean exactly what they mean there: `backendSupported` is "the
+ * manifest has a block for this host's backend", `installed` is "the weights are
+ * on disk", `resident` is "narrator is serving it right now", `loadable` is
+ * "everything this host needs is in place". `loadable` is a fact about the disk
+ * and deliberately does not run nvidia-smi, so a row saying `loadable: true` can
+ * still be refused at load time with `accelerator_busy`.
+ *
+ * **What is not here is not an omission.** `sampling`, the EOS levers, the
+ * token-budget formula and the engine flags are engine tuning, they are the
+ * server's, and publishing them would invite a client to send them back. What a
+ * client gets is the shape it must pack to ({@link VoiceInfo.pace},
+ * {@link VoiceInfo.maxChars}) and the identity it must record
+ * ({@link VoiceInfo.fingerprint}).
+ */
+export interface VoiceInfo {
+  /** Crucible's voice id, stable across backends, e.g. `deathstalker`. */
+  readonly id: string;
+  /** The name to put in front of a person. */
+  readonly display: string;
+  readonly kind: VoiceKind;
+  /** The manifest's language tag, e.g. `en`. */
+  readonly language: string;
+  /**
+   * Which of narrator's engines serves this voice, e.g. `higgs-v3`. On the row
+   * because it decides which env a load needs, and therefore what a
+   * {@link VoiceInfo.reason} about a missing env is talking about.
+   */
+  readonly narratorEngine: string;
+  readonly backendSupported: boolean;
+  readonly installed: boolean;
+  readonly resident: boolean;
+  readonly loadable: boolean;
+  /**
+   * Why it is not loadable, in the server's words; `null` when it is loadable.
+   *
+   * Unlike {@link ModelInfo.reason} this key is always present on the row — the
+   * voice row carries `"reason": null` where the model row omits the key — and
+   * the client reads it that way rather than tidying the difference away. What
+   * does not differ is the rule: a row that is not loadable and does not say why
+   * is a protocol error, because the operator cannot tell whether to pull
+   * weights, install an env, free the card, or go to the other host.
+   */
+  readonly reason: string | null;
+  /**
+   * The commit this host's backend block pins. `null` when `backendSupported` is
+   * false, together with {@link VoiceInfo.fingerprint},
+   * {@link VoiceInfo.memoryBytesEstimate}, {@link VoiceInfo.estimateBasis} and
+   * {@link VoiceInfo.maxChars}: all five live in the backend block this host
+   * does not have, and `0` would read as "needs nothing" where an empty string
+   * would read as a pin.
+   */
+  readonly revision: string | null;
+  /** `<id>@<revision>`, joined by the server. What a render records. */
+  readonly fingerprint: string | null;
+  /** Null when `backendSupported` is false. Never `0`. */
+  readonly memoryBytesEstimate: number | null;
+  /** Null when `backendSupported` is false. */
+  readonly estimateBasis: EstimateBasis | null;
+  /**
+   * **The** cap certificate for this (voice, backend): the most characters this
+   * voice may be handed in one chunk. Per backend and staying per backend — that
+   * every voice's two blocks carry the same number today is a coincidence of the
+   * current catalog, not a property of the world.
+   *
+   * These are CHARACTERS, not tokens. Nothing in `tts` carries a token cap on
+   * the wire: narrator derives the frame budget per chunk from the text it is
+   * actually given. Null when `backendSupported` is false.
+   */
+  readonly maxChars: number | null;
+  /**
+   * The sample rate of the audio this voice produces. Never null — a client
+   * writing FLACs cannot be handed one — and per voice rather than a constant,
+   * because 24000 everywhere in today's catalog is exactly the kind of
+   * coincidence that becomes a hard-coded number if it is not written down.
+   */
+  readonly sampleRate: number;
+  /** How many rungs this voice's take ladder has. Never null. */
+  readonly takes: number;
+  /** Never null: the whole block, because a client that packs needs all of it. */
+  readonly pace: VoicePace;
+}
+
+// ------------------------------------------------------------- accelerator
+
+/** One process the driver says is holding accelerator memory. */
+export interface AcceleratorHolder {
+  readonly pid: number;
+  readonly name: string;
+  /**
+   * What this process holds — **`null` where the driver will not say**, which is
+   * what happens under WDDM and wherever permissions withhold per-process
+   * figures.
+   *
+   * That null is a refusal to answer and it is **not zero**. Rendering it as 0
+   * tells a queue that a process holding several gigabytes is holding none,
+   * which reads as "the card is free" — the one conclusion this whole route
+   * exists to stop a caller drawing. Sum these only over the holders that
+   * answered and treat the rest as unknown; {@link AcceleratorState.usedBytes}
+   * and {@link AcceleratorState.unattributedBytes} are the figures that do not
+   * depend on every process being willing to talk.
+   */
+  readonly bytes: number | null;
+  /** Whether this pid is one of Crucible's own engine processes. */
+  readonly ownedByCrucible: boolean;
+}
+
+/** What Crucible itself has on the card, from {@link AcceleratorState}. */
+export interface AcceleratorResident {
+  /**
+   * The family of the resident thing, not the job type that put it there:
+   * `"llm"` for an engine, `"tts"` for a voice. A plain string, like
+   * {@link Health.residentKind} and for the same reason — PHASE4's aligner lands
+   * here beside the other two.
+   */
+  readonly kind: string;
+  readonly id: string;
+  /** When it was loaded, ISO-8601. */
+  readonly since: string;
+  readonly memoryBytesEstimate: number;
+}
+
+/** The accelerator, at the moment it was probed. */
+export interface AcceleratorGpu {
+  readonly vendor: string;
+  readonly name: string;
+  /**
+   * The live total from the probe, not the figure detection recorded at
+   * start-up. On a real host they agree; where they would not, this is the one a
+   * caller is about to make a decision on.
+   */
+  readonly totalBytes: number;
+}
+
+/**
+ * `GET /v1/accelerator` — what is on the card right now, and which of it is
+ * Crucible's (PHASE4-AUDIO.md section 5).
+ *
+ * **It reports; it never evicts.** Nothing here asks anybody to leave, and that
+ * rule does not soften because more job types depend on the answer.
+ */
+export interface AcceleratorState {
+  readonly backend: string;
+  readonly gpu: AcceleratorGpu;
+  readonly freeBytes: number;
+  readonly usedBytes: number;
+  /** What this server holds back for the desktop, from its own config. */
+  readonly desktopAllowanceBytes: number;
+  /**
+   * VRAM in use that no listed holder accounts for, past the declared desktop
+   * allowance — and the number that matters most on the host BookForge runs on.
+   *
+   * Under WSL2 the driver shim answers the compute-app query with an **empty
+   * list** while a process inside that same VM holds 17 GB (measured on Owen's
+   * PC, 2026-09-12). On that host {@link AcceleratorState.holders} is
+   * misleadingly empty and this is the only honest report that the card is busy.
+   *
+   * `null` on `mlx-darwin`, where "used unified memory" is the OS doing its job
+   * and attributing it to compute processes is not a question `vm_stat` can
+   * answer.
+   *
+   * Never negative: the server clamps it at zero, because "VRAM that nothing
+   * accounts for, past the allowance" cannot be less than none, and the negative
+   * it used to publish on an idle card (−1.5 GiB on Owen's 3090 Ti) is headroom
+   * a client would size a load against and not find. A negative here is an
+   * older server's bug; it is surfaced as it arrived rather than corrected, so
+   * that the bug is visible where it is rather than hidden in this client.
+   */
+  readonly unattributedBytes: number | null;
+  /** What Crucible has loaded, or `null` when it has nothing loaded. */
+  readonly resident: AcceleratorResident | null;
+  /**
+   * Every compute process the driver listed. Empty means the driver listed none
+   * — which is not the same as the card being idle; see
+   * {@link AcceleratorState.unattributedBytes}.
+   */
+  readonly holders: readonly AcceleratorHolder[];
+  /** The probe's own one-line summary, for a log. */
+  readonly detail: string;
+}
+
+// --------------------------------------------------------------------- asr
+
+/**
+ * What {@link CrucibleClient.asr} takes. Every field is required: the server
+ * refuses a missing one, and a client that filled it in would be producing a
+ * transcript under rules the caller never chose.
+ */
+export interface AsrOptions {
+  /**
+   * Which whisper. **There is no default and there will not be one** — an ASR
+   * pass at the wrong size is a transcript that looks fine, is worse, and has
+   * nothing in it to say so. `faster-whisper-tiny` through
+   * `faster-whisper-large-v3`; {@link CrucibleClient.info}'s `asr` capability
+   * lists what this build ships.
+   */
+  readonly model: string;
+  /** The audio, as an uploaded blob or bytes carried inline. Exactly one file. */
+  readonly audio: JobInput;
+  /**
+   * What to call that file on the server. **The extension is load-bearing**: the
+   * input name becomes the file's name on disk and ffmpeg reads the container
+   * from it, so send `book.m4b`, not `book`.
+   */
+  readonly filename: string;
+  /**
+   * A faster-whisper language code (`en`, `de`, …), or the literal `"auto"` to
+   * have it detected — which is a *value* meaning "detect it", not an absence.
+   *
+   * Checked by the server against the tokenizer's own list, which is where that
+   * list lives; this client does not keep a second copy of it to drift out of
+   * date. An unknown code is a 400 naming the code, before the job is queued.
+   */
+  readonly language: string;
+  /**
+   * Whether whisper's voice-activity filter runs. Required, not defaulted: it is
+   * `true` in BookForge, and a default here would mean a transcript quietly
+   * produced under different rules than the caller assumed.
+   */
+  readonly vadFilter: boolean;
+  /** Whether whisper emits per-word timestamps. Required, for the same reason. */
+  readonly wordTimestamps: boolean;
 }
