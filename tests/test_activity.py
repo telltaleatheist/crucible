@@ -11,6 +11,7 @@ and the failure message says what it was waiting for.
 
 from __future__ import annotations
 
+import base64
 import time
 from typing import Any, Callable
 
@@ -20,10 +21,23 @@ from fastapi.testclient import TestClient
 from crucible import API_VERSION, VERSION
 
 
+#: `echo` refuses `no_inputs`, so every submission here carries one. It is not
+#: what any of these tests are about — they are about what the bench sees — but
+#: a job that fails in its first millisecond is never observed running, which is
+#: exactly the shape of failure this cost an hour to.
+PAYLOAD = {"x.bin": base64.b64encode(b"activity").decode("ascii")}
+
+
+def job_body(**params: Any) -> dict[str, Any]:
+    return {
+        "type": "echo",
+        "params": params,
+        "inputs": {name: {"inline_base64": data} for name, data in PAYLOAD.items()},
+    }
+
+
 def submit(client: TestClient, auth: dict[str, str], **params: Any) -> str:
-    response = client.post(
-        "/v1/jobs", json={"type": "echo", "params": params}, headers=auth
-    )
+    response = client.post("/v1/jobs", json=job_body(**params), headers=auth)
     assert response.status_code == 202, response.text
     return response.json()["job_id"]
 
@@ -165,9 +179,8 @@ def test_the_job_records_who_submitted_it(
     foreign render as its own would offer a cancel button for the other
     machine's chapter. PHASE7-LANES.md section 5."""
     headers = {**auth, "User-Agent": "bookforge/owens-pc crucible-client/0.4.0"}
-    response = client.post(
-        "/v1/jobs", json={"type": "echo", "params": {"delay_ms": 4_000}}, headers=headers
-    )
+    response = client.post("/v1/jobs", json=job_body(delay_ms=4_000), headers=headers)
+    assert response.status_code == 202, response.text
     job_id = response.json()["job_id"]
     try:
         body = wait_until(client, auth, lambda a: a["running"], "the job running")
@@ -185,10 +198,9 @@ def test_a_client_that_sends_no_user_agent_is_null_and_not_a_guess(
     # httpx drops a header whose value is None.
     with TestClient(make_app()) as client:
         response = client.post(
-            "/v1/jobs",
-            json={"type": "echo", "params": {"delay_ms": 4_000}},
-            headers={**auth, "User-Agent": ""},
+            "/v1/jobs", json=job_body(delay_ms=4_000), headers={**auth, "User-Agent": ""}
         )
+        assert response.status_code == 202, response.text
         job_id = response.json()["job_id"]
         try:
             body = wait_until(client, auth, lambda a: a["running"], "the job running")
