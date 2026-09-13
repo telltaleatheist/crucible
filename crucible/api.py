@@ -48,6 +48,10 @@ UPLOAD_CHUNK = 1024 * 1024
 PROXY_CONNECT_TIMEOUT = 10.0
 PROXY_READ_TIMEOUT = 900.0
 
+#: The proxy sends the client's own bytes, so it declares the type itself rather
+#: than letting httpx serialise a document and label it.
+JSON_HEADERS = {"Content-Type": "application/json"}
+
 
 # --------------------------------------------------------------------- schemas
 
@@ -435,7 +439,8 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     @private.post("/openai/chat/completions")
     async def openai_chat_completions(request: Request) -> Response:
         """Proxied to the resident engine. Never loads one (section 5)."""
-        body = _chat_body(await request.body())
+        raw = await request.body()
+        body = _chat_body(raw)
         requested = body.get("model")
         if not isinstance(requested, str) or requested == "":
             raise ApiError(
@@ -461,15 +466,14 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                  else resident.model_id},
             )
 
-        forwarded = dict(body)
-        forwarded["model"] = resident.engine_model_name
+        forwarded = _forward_body(raw, body, resident)
         url = f"{resident.base_url}/v1/chat/completions"
         client: httpx.AsyncClient = request.app.state.http
 
         if body.get("stream") is True:
             return await _proxy_stream(client, url, forwarded, resident)
         try:
-            upstream = await client.post(url, json=forwarded)
+            upstream = await client.post(url, content=forwarded, headers=JSON_HEADERS)
         except httpx.HTTPError as exc:
             raise _engine_unreachable(resident, exc) from None
         content = upstream.content
@@ -501,6 +505,27 @@ def _chat_body(raw: bytes) -> dict[str, Any]:
             f"{type(body).__name__}",
         )
     return body
+
+
+def _forward_body(raw: bytes, body: dict[str, Any], resident: Any) -> bytes:
+    """The client's chat body on its way to the engine.
+
+    The proxy owns exactly one field (PHASE2-LLM.md section 5), so where the
+    engine already answers to the Crucible id — vLLM, which takes
+    `--served-model-name` — there is nothing to substitute and the bytes the
+    client sent are the bytes the engine reads. That is worth more than
+    tidiness: `response_format.json_schema.schema` is a grammar Foundry hands to
+    the guided-decoding backend (CLIENT-SURFACES.md section 6.2), and
+    re-encoding somebody else's grammar on the way past is not the proxy's job.
+
+    Where the two names differ — mlx-lm has no `--served-model-name` and answers
+    to the resolved weights directory — one field has to change, so the document
+    is re-serialised with `model` replaced in the position it already held.
+    Nothing else is added, removed or reordered.
+    """
+    if resident.engine_model_name == resident.model_id:
+        return raw
+    return json.dumps({**body, "model": resident.engine_model_name}).encode("utf-8")
 
 
 def _engine_unreachable(resident: Any, exc: Exception) -> ApiError:
@@ -580,7 +605,7 @@ def _restore_model_id_in_frame(frame: bytes, resident: Any) -> bytes:
 
 
 async def _proxy_stream(
-    client: httpx.AsyncClient, url: str, body: dict[str, Any], resident: Any
+    client: httpx.AsyncClient, url: str, body: bytes, resident: Any
 ) -> Response:
     """Forward a streamed completion, SSE framing intact.
 
@@ -597,7 +622,8 @@ async def _proxy_stream(
     request = client.build_request(
         "POST",
         url,
-        json=body,
+        content=body,
+        headers=JSON_HEADERS,
         # A streamed completion emits a token at a time and may think for a long
         # while before the first one; there is no honest read deadline here.
         timeout=httpx.Timeout(

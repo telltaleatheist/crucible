@@ -21,10 +21,30 @@ from crucible.engines import find_free_port
 ANSWER = "Crucible is a server."
 DELTAS = ["Crucible ", "is ", "a ", "server."]
 
+#: The call a `finish_reason: "tool_calls"` completion says the model wants. Its
+#: `content` is null, which is the part worth proxying correctly: a body whose
+#: answer is not text at all still has to come back as the engine wrote it.
+TOOL_CALL = {
+    "id": "call_fake",
+    "type": "function",
+    "function": {"name": "light_the_forge", "arguments": '{"heat":"white"}'},
+}
+
 
 class _Handler(BaseHTTPRequestHandler):
     served_name: str = "unset"
     last_request: dict[str, Any] | None = None
+    #: The request body exactly as it arrived on the wire. `last_request` says
+    #: what the engine understood; this says what Crucible actually sent, which
+    #: is the only way to ask whether the proxy is verbatim.
+    last_request_bytes: bytes | None = None
+    #: What the completion stops for. A real engine's own word, which the proxy
+    #: must hand back untouched: Foundry turns `length` into a degradation rather
+    #: than a wrong answer (CLIENT-SURFACES.md section 6.2).
+    finish_reason: str = "stop"
+    #: Answer any body carrying `response_format` with a 400 in the engine's own
+    #: shape — what vLLM does with a schema it cannot compile.
+    reject_response_format: bool = False
 
     def log_message(self, *args: Any) -> None:  # keep pytest output clean
         return
@@ -54,8 +74,27 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
             return
         length = int(self.headers.get("Content-Length", "0"))
-        body = json.loads(self.rfile.read(length) or b"{}")
+        raw = self.rfile.read(length)
+        body = json.loads(raw or b"{}")
+        type(self).last_request_bytes = raw
         type(self).last_request = body
+
+        if type(self).reject_response_format and "response_format" in body:
+            # vLLM's own refusal shape for a schema it will not compile. The
+            # proxy has to relay this as it stands: rewritten into a Crucible
+            # error, the client would be told the server refused when the engine
+            # did, and the schema it must fix would be gone.
+            self._json(
+                400,
+                {
+                    "object": "error",
+                    "message": "unsupported json_schema: 'prefixItems' is not "
+                    "supported by the guided-decoding backend",
+                    "type": "BadRequestError",
+                    "code": 400,
+                },
+            )
+            return
 
         if body.get("model") != type(self).served_name:
             # What a real engine does with a name it is not serving. Crucible's
@@ -72,43 +111,39 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             for index, delta in enumerate(DELTAS):
-                chunk = {
-                    "id": "chatcmpl-fake",
-                    "object": "chat.completion.chunk",
-                    "model": type(self).served_name,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": (
-                                {"role": "assistant", "content": delta}
-                                if index == 0
-                                else {"content": delta}
-                            ),
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                self.wfile.write(
-                    f"data: {json.dumps(chunk)}\n\n".encode("utf-8")
+                self._frame(
+                    {
+                        "index": 0,
+                        "delta": (
+                            {"role": "assistant", "content": delta}
+                            if index == 0
+                            else {"content": delta}
+                        ),
+                        "finish_reason": None,
+                    }
                 )
-                self.wfile.flush()
+            # The closing frame, which is where a streamed completion says why it
+            # stopped. Every OpenAI engine sends one; the fake used to skip it,
+            # which left "the proxy never touches finish_reason" untestable on
+            # the streaming half.
+            self._frame({"index": 0, "delta": {}, "finish_reason": type(self).finish_reason})
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
             return
 
+        reason = type(self).finish_reason
+        message: dict[str, Any] = (
+            {"role": "assistant", "content": None, "tool_calls": [TOOL_CALL]}
+            if reason == "tool_calls"
+            else {"role": "assistant", "content": ANSWER}
+        )
         self._json(
             200,
             {
                 "id": "chatcmpl-fake",
                 "object": "chat.completion",
                 "model": type(self).served_name,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": ANSWER},
-                        "finish_reason": "stop",
-                    }
-                ],
+                "choices": [{"index": 0, "message": message, "finish_reason": reason}],
                 "usage": {
                     "prompt_tokens": 7,
                     "completion_tokens": 5,
@@ -116,6 +151,17 @@ class _Handler(BaseHTTPRequestHandler):
                 },
             },
         )
+
+    def _frame(self, choice: dict[str, Any]) -> None:
+        """One `chat.completion.chunk` SSE frame, flushed as a real engine does."""
+        chunk = {
+            "id": "chatcmpl-fake",
+            "object": "chat.completion.chunk",
+            "model": type(self).served_name,
+            "choices": [choice],
+        }
+        self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode("utf-8"))
+        self.wfile.flush()
 
 
 class FakeEngine:
@@ -132,9 +178,13 @@ class FakeEngine:
         warmings: int = 3,
         fail_ready: str | None = None,
         hold: threading.Event | None = None,
+        finish_reason: str = "stop",
+        reject_response_format: bool = False,
     ) -> None:
         self._python = Path(python)
         self._log_path = Path(log_path)
+        self._finish_reason = finish_reason
+        self._reject_response_format = reject_response_format
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._port: int | None = None
@@ -169,7 +219,15 @@ class FakeEngine:
     def start(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> None:
-        handler = type("BoundHandler", (_Handler,), {"served_name": served_name})
+        handler = type(
+            "BoundHandler",
+            (_Handler,),
+            {
+                "served_name": served_name,
+                "finish_reason": self._finish_reason,
+                "reject_response_format": self._reject_response_format,
+            },
+        )
         self._handler = handler
         self.args = list(args)
         # The port the caller found may have been taken; the fake binds its own
@@ -213,3 +271,8 @@ class FakeEngine:
     @property
     def last_request(self) -> dict[str, Any] | None:
         return getattr(self, "_handler", _Handler).last_request
+
+    @property
+    def last_request_bytes(self) -> bytes | None:
+        """The last chat body as it arrived, before anything parsed it."""
+        return getattr(self, "_handler", _Handler).last_request_bytes

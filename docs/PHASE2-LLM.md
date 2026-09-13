@@ -132,6 +132,30 @@ on the server's disk on `mlx-darwin` and the Crucible id on `cuda-linux`, where 
 take a served name. One id, both directions, both backends. (On a backend where the two
 names already agree there is nothing to undo and the stream is relayed byte for byte.)
 
+That holds on the way **in** as well, and literally: where the engine answers to the
+Crucible id there is nothing to substitute, so the bytes the client sent are the bytes the
+engine reads — the proxy does not parse-and-re-serialise a body it has no field to change
+in. Two things in particular ride on that and are tested (`tests/test_llm_api.py`):
+
+- **`response_format: {type: "json_schema", json_schema: {...}, strict: true}`** is the only
+  structured-output mechanism either app uses — Foundry's analyze verdicts and both tag
+  calls (CLIENT-SURFACES.md section 6.2) — and its `schema` is a grammar the engine's
+  guided-decoding backend compiles. Re-encoding somebody else's grammar in transit is not
+  the proxy's job. The same applies to every other field the OpenAI dialect defines and
+  Crucible has never been taught about: `logprobs`, `top_logprobs`, `seed`, `stop`,
+  `logit_bias`.
+- **`finish_reason` is never touched**, streamed or not, including `tool_calls`, whose
+  `content` is `null`. Foundry turns `length` into a degradation rather than a wrong answer
+  and BookForge's audiobook analysis throws by name on it; a proxy that normalised the
+  field would turn a caught truncation into silent corruption.
+
+An engine's own refusal is relayed with the engine's status code and body, not rewrapped in
+Crucible's `{"error": {code, message}}` envelope. A schema vLLM will not compile is a 400
+the *engine* made, and the message naming the part of the grammar to fix is the useful half
+of it. A streamed request is no different: the upstream response is opened before anything
+is returned, so a refusal arrives as a refusal and never as a 200 whose stream turns out to
+be an error.
+
 A load job runs on the exclusive lane like everything else, so it waits behind a running
 job and a chat request never races a load.
 

@@ -26,7 +26,7 @@ from crucible.jobs.llm import residency as residency_module
 from crucible.manifests import load_manifest
 
 from .conftest import FAKE_BACKEND, parse_sse
-from .fake_engine import ANSWER, DELTAS, FakeEngine
+from .fake_engine import ANSWER, DELTAS, TOOL_CALL, FakeEngine
 
 MODEL = "qwen3.5-9b"
 BIG_MODEL = "qwen3.8-27b"
@@ -134,6 +134,36 @@ def engines(monkeypatch: pytest.MonkeyPatch) -> list[FakeEngine]:
 
 
 @pytest.fixture
+def engine_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[..., list[FakeEngine]]:
+    """`engines`, for a test that needs the engine configured.
+
+    Returns the same list of built engines; the keyword arguments go to every
+    `FakeEngine` the residency builds, so a test can say what the engine stops
+    for or what it refuses without writing its own `build_engine` patch.
+    """
+
+    def install(**options: Any) -> list[FakeEngine]:
+        built: list[FakeEngine] = []
+
+        def build(engine_name: str, python: Path, log_path: Path) -> FakeEngine:
+            engine = FakeEngine(python, log_path, **options)
+            built.append(engine)
+            return engine
+
+        monkeypatch.setattr(residency_module, "build_engine", build)
+        monkeypatch.setattr(
+            residency_module,
+            "engine_model_name",
+            lambda engine_name, model_dir, model_id: model_id,
+        )
+        return built
+
+    return install
+
+
+@pytest.fixture
 def llm_client(
     make_client: Callable[..., TestClient], fake_env: Path
 ) -> Iterator[TestClient]:
@@ -143,6 +173,17 @@ def llm_client(
 
 def submit(client: TestClient, auth: dict[str, str], **body: Any):
     return client.post("/v1/jobs", headers=auth, json=body)
+
+
+def _stream_chunks(text: str) -> list[dict[str, Any]]:
+    """Every `chat.completion.chunk` of a streamed completion, in order.
+
+    Asserts the stream ended on OpenAI's terminator on the way past, because a
+    chunk list read out of a truncated stream would quietly be a shorter one.
+    """
+    lines = [line for line in text.split("\n") if line.startswith("data: ")]
+    assert lines[-1] == "data: [DONE]", lines[-3:]
+    return [json.loads(line[len("data: ") :]) for line in lines[:-1]]
 
 
 def run_job(client: TestClient, auth: dict[str, str], **body: Any) -> list[dict]:
@@ -942,14 +983,16 @@ def test_a_streamed_completion_keeps_its_sse_framing(
         assert response.headers["content-type"].startswith("text/event-stream")
         text = "".join(response.iter_text())
 
-    lines = [line for line in text.split("\n") if line.startswith("data: ")]
-    assert lines[-1] == "data: [DONE]"
+    chunks = _stream_chunks(text)
     deltas = [
-        json.loads(line[len("data: ") :])["choices"][0]["delta"].get("content", "")
-        for line in lines[:-1]
+        chunk["choices"][0]["delta"]["content"]
+        for chunk in chunks
+        if "content" in chunk["choices"][0]["delta"]
     ]
     assert deltas == DELTAS
     assert "".join(deltas) == ANSWER
+    # The closing frame carries no delta, only the reason the engine stopped.
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
     # Every frame is terminated by a blank line, as SSE requires.
     assert text.endswith("data: [DONE]\n\n")
 
@@ -1026,13 +1069,227 @@ def test_every_streamed_chunk_names_crucible_s_id(
         assert response.status_code == 200
         text = "".join(response.iter_text())
 
-    lines = [line for line in text.split("\n") if line.startswith("data: ")]
-    assert lines[-1] == "data: [DONE]"
-    chunks = [json.loads(line[len("data: ") :]) for line in lines[:-1]]
-    assert [chunk["model"] for chunk in chunks] == [MODEL] * len(DELTAS)
+    chunks = _stream_chunks(text)
+    # Every frame, the closing one included — the relabelling reaches all of them.
+    assert [chunk["model"] for chunk in chunks] == [MODEL] * (len(DELTAS) + 1)
     # The framing and the content survived the relabelling.
-    assert [chunk["choices"][0]["delta"].get("content", "") for chunk in chunks] == DELTAS
+    assert [
+        chunk["choices"][0]["delta"]["content"]
+        for chunk in chunks
+        if "content" in chunk["choices"][0]["delta"]
+    ] == DELTAS
     assert text.endswith("data: [DONE]\n\n")
+
+
+# ------------------------------------------- the constrained transport survives
+
+#: A Foundry analyze verdict, as `askConstrained` builds it (CLIENT-SURFACES.md
+#: section 6.2), plus every other knob the OpenAI dialect defines that a client
+#: might one day send. The point of the extra fields is that "verbatim" is a rule
+#: about the whole body and not about the four keys Crucible happens to know:
+#: `logit_bias` and `top_logprobs` are here precisely because nothing in either
+#: app sends them today, so nothing in the proxy has ever been taught about them.
+CONSTRAINED_BODY: dict[str, Any] = {
+    "model": MODEL,
+    "messages": [{"role": "user", "content": "Does the passage support the claim?"}],
+    "temperature": 0,
+    "max_tokens": 128,
+    "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "verdict",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "supported": {"type": "boolean"},
+                    "quote": {"type": "string", "maxLength": 200},
+                },
+                "required": ["supported", "quote"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+    },
+    "chat_template_kwargs": {"enable_thinking": False},
+    "logprobs": True,
+    "top_logprobs": 5,
+    "seed": 1729,
+    "stop": ["\n\n", "</answer>"],
+    "logit_bias": {"15496": -100},
+}
+
+
+def _post_raw(
+    client: TestClient, auth: dict[str, str], body: dict[str, Any]
+) -> tuple[bytes, Any]:
+    """POST a chat body as exact bytes, so byte identity is a question you can ask."""
+    payload = json.dumps(body).encode("utf-8")
+    response = client.post(
+        "/v1/openai/chat/completions",
+        headers={**auth, "Content-Type": "application/json"},
+        content=payload,
+    )
+    return payload, response
+
+
+def test_a_constrained_body_reaches_the_engine_byte_for_byte(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """On vLLM there is nothing to substitute, so nothing is re-encoded.
+
+    `response_format.json_schema.schema` is a grammar the guided-decoding backend
+    compiles. Crucible round-tripping it through `json.loads`/`json.dumps` would
+    be a re-encoding of somebody else's document on the way past — harmless until
+    the day it is not. Here the engine reads the client's own bytes.
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    payload, response = _post_raw(llm_client, auth, CONSTRAINED_BODY)
+
+    assert response.status_code == 200, response.text
+    assert engines[0].last_request_bytes == payload
+
+
+def test_only_the_model_field_changes_when_the_engine_answers_to_a_path(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines_under_a_path_name: list[FakeEngine],
+) -> None:
+    """The other backend's shape: one field substituted, nothing else touched.
+
+    mlx-lm has no `--served-model-name`, so `model` has to change and the
+    document is re-serialised. Everything else — the schema, `strict`, the
+    template kwargs, the knobs Crucible has never heard of — arrives with the
+    same value in the same position.
+    """
+    weights = fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    _, response = _post_raw(llm_client, auth, CONSTRAINED_BODY)
+    assert response.status_code == 200, response.text
+
+    sent = engines_under_a_path_name[0].last_request
+    assert sent == {**CONSTRAINED_BODY, "model": str(weights.resolve())}
+    # Order too: `model` keeps the place it held, so nothing is appended or
+    # shuffled on the way through.
+    assert list(sent) == list(CONSTRAINED_BODY)
+
+
+@pytest.mark.parametrize("reason", ["stop", "length", "tool_calls"])
+def test_finish_reason_comes_back_untouched(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engine_factory: Callable[..., list[FakeEngine]],
+    reason: str,
+) -> None:
+    """Foundry turns `length` into a degradation rather than a wrong answer.
+
+    A proxy that normalised or dropped the field would turn a caught truncation
+    into silent corruption (CLIENT-SURFACES.md section 6.2), so the engine's own
+    word is what comes back — including on a `tool_calls` completion, whose
+    `content` is null and whose answer is not text at all.
+    """
+    engine_factory(finish_reason=reason)
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    response = llm_client.post(
+        "/v1/openai/chat/completions",
+        headers=auth,
+        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == reason
+    if reason == "tool_calls":
+        assert choice["message"]["content"] is None
+        assert choice["message"]["tool_calls"] == [TOOL_CALL]
+
+
+@pytest.mark.parametrize("reason", ["stop", "length", "tool_calls"])
+def test_a_streamed_finish_reason_comes_back_untouched(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engine_factory: Callable[..., list[FakeEngine]],
+    reason: str,
+) -> None:
+    """The same rule on the streaming half, where it lives in the closing frame."""
+    engine_factory(finish_reason=reason)
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    with llm_client.stream(
+        "POST",
+        "/v1/openai/chat/completions",
+        headers=auth,
+        json={
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        text = "".join(response.iter_text())
+
+    chunks = _stream_chunks(text)
+    assert chunks[-1]["choices"][0]["finish_reason"] == reason
+    # And it is the ONLY frame that names one: the deltas keep their null.
+    assert [chunk["choices"][0]["finish_reason"] for chunk in chunks[:-1]] == [
+        None
+    ] * len(DELTAS)
+
+
+def test_an_engine_s_own_400_is_relayed_rather_than_rewritten(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engine_factory: Callable[..., list[FakeEngine]],
+) -> None:
+    """A schema the engine will not compile is the engine's refusal to explain.
+
+    Rewrapped in Crucible's `{"error": {"code", "message"}}` envelope it would
+    read as the server refusing, and the message naming the part of the grammar
+    to fix would be gone.
+    """
+    engine_factory(reject_response_format=True)
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    _, response = _post_raw(llm_client, auth, CONSTRAINED_BODY)
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["type"] == "BadRequestError"
+    assert "prefixItems" in body["message"]
+    # Not Crucible's envelope: this refusal is not Crucible's to make.
+    assert "error" not in body
+
+
+def test_an_engine_s_own_400_is_relayed_on_a_streamed_request_too(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engine_factory: Callable[..., list[FakeEngine]],
+) -> None:
+    """The stream is opened before anything is returned, so a refusal is a refusal.
+
+    It must never come back as a 200 whose stream turns out to be an error.
+    """
+    engine_factory(reject_response_format=True)
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    _, response = _post_raw(llm_client, auth, {**CONSTRAINED_BODY, "stream": True})
+
+    assert response.status_code == 400
+    assert response.json()["type"] == "BadRequestError"
 
 
 def test_the_proxy_requires_a_model(
