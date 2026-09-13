@@ -1,0 +1,501 @@
+"""narrator — the managed subprocess that is to `tts` what vLLM is to `llm`.
+
+PHASE3-TTS.md section 4. Crucible does not reimplement Orpheus's EOS surgery,
+Higgs's frame budget or either engine's codec arithmetic; it runs the code that
+already has them. `python/narrator` in the BookForge repo is an installable
+package whose `serve` entry point loads a voice once and answers sentence
+requests over stdin and stdout, and this file is the client for that wire.
+
+Three things make it unlike every engine before it, and each one is a seam
+somewhere else in this package rather than a special case here:
+
+- **Readiness is a line, not a route.** narrator prints
+  `{"type": "ready", "device", "backend"}` on stdout when the process is up.
+  `SubprocessEngine.announced_ready()` is the seam; the default `/v1/models`
+  poll is untouched and neither HTTP engine overrides it.
+- **The wire is the pipes.** `SubprocessEngine.stdio()` is the seam: narrator
+  keeps stdin and stdout as text-mode pipes and sends only stderr to
+  `~/.crucible/logs/engine-<voice>.log`. Everything the HTTP engines do is
+  unchanged.
+- **Nothing else can reach it.** vLLM binds a loopback port and the proxy talks
+  to it; narrator binds nothing, so this object *is* the channel. Hence
+  `base_url` refuses rather than returning a port nothing is listening on.
+
+The correlation problem, and why this file does not solve it
+------------------------------------------------------------
+`generate_batch` retires rows **out of order** — a short row finishes while a
+long one is still generating, and `tests/fake_narrator.py` retires in reverse on
+purpose so that a consumer relying on arrival order fails in the suite rather
+than on a book. The row's identity is the `i` narrator echoes back, and it is the
+*caller's* number: the render door sends its chunk indices as `i` and reads them
+straight off each `batch_item`.
+
+So `converse()` yields every line as it lands and **reorders nothing**. Buffering
+into caller order here would defeat the two things the shape exists for: the
+render door writes each FLAC as its row retires, overlapped with the next row's
+generation, and the streaming door (section 7) needs `batch_chunk` lines out of
+the same iterator *while* a row is still generating. One reader, one iterator,
+and the consumer keys on `i`.
+
+What the reader thread does and does not swallow
+------------------------------------------------
+fd 1 is the wire and nothing else — the same rule, learned from the same
+incident, as `crucible/workers.py`: narrator's aligner once had a library log to
+stdout on a 401-chunk book and corrupt the result stream. A line on stdout that
+is not a JSON object carrying a `type` is therefore a **refusal naming the
+line**, never something skipped. narrator's own diagnostics go to stderr and
+into the log, which is where a reader should look for them.
+"""
+
+from __future__ import annotations
+
+import json
+import queue
+import subprocess
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Iterator
+
+from ..errors import JobCancelled
+from .base import LOG_TAIL_LINES, EngineError, SubprocessEngine
+
+#: How narrator is started. It takes no configuration on the command line — its
+#: whole interface is the protocol on stdin and stdout plus the environment — so
+#: the argv is this and nothing else. Which engine it serves is `NARRATOR_ENGINE`
+#: below, which is the variable narrator's own `engine_id()` reads.
+MODULE = "narrator.serve"
+
+#: The environment variable that decides which of narrator's engines a process
+#: serves. narrator refuses an unknown value by name at start-up rather than
+#: defaulting, which is why Crucible may set it and then trust the `ready` line.
+ENGINE_VARIABLE = "NARRATOR_ENGINE"
+
+#: How long `stop()` gives the `quit` action before falling back on SIGTERM.
+#: narrator's teardown releases CUDA from inside the process, and on a loaded
+#: SGLang-Omni that takes seconds rather than milliseconds.
+QUIT_GRACE_SECONDS = 30.0
+
+#: How often the conversation loop wakes to notice a cancel, a dead process or a
+#: missed deadline. Not a timeout on anything: a row that takes ninety seconds is
+#: a row that is being generated.
+POLL_SECONDS = 0.5
+
+#: How long a `load` may go without narrator saying anything at all. It is a
+#: SILENCE timeout and any line resets it, the same discipline `crucible/
+#: workers.py` uses: narrator on `cuda-linux` starts SGLang-Omni underneath
+#: itself, which is minutes of weight reading before the `loaded` line.
+LOAD_SILENCE_TIMEOUT_SECONDS = 900.0
+
+
+@dataclass(frozen=True)
+class _Garbled:
+    """A line on stdout that is not a message. Carried, not dropped."""
+
+    line: str
+
+
+class _Ended:
+    """narrator's stdout reached end of file."""
+
+
+_ENDED = _Ended()
+
+
+class NarratorEngine(SubprocessEngine):
+    """`python -m narrator.serve`, and the JSON-lines channel to it.
+
+    One instance per resident voice, built by `build_voice_engine()` from the
+    voice manifest's `narrator_engine`. The name carries the engine id, so a log
+    line, a timeout and a refusal all say `narrator (higgs-v3)` rather than
+    `narrator` — on `cuda-linux` there are two envs and two engines and the
+    question a reader has is always which.
+    """
+
+    def __init__(self, narrator_engine: str, python: Path, log_path: Path) -> None:
+        super().__init__(python=python, log_path=log_path)
+        self._narrator_engine = narrator_engine
+        #: One writer at a time. narrator holds a lock over its own stdout for
+        #: the mirror-image reason (two half-written lines are not two messages);
+        #: the render door and a cancel arriving from the queue thread are two
+        #: writers, and an interleaved write would be the same corruption in the
+        #: other direction.
+        self._writer = threading.Lock()
+        self._inbox: queue.Queue[dict[str, Any] | _Garbled | _Ended] = queue.Queue()
+        self._reader: threading.Thread | None = None
+        self._ready_message: dict[str, Any] | None = None
+
+    # ------------------------------------------------------------- the spawn
+
+    @property
+    def name(self) -> str:  # type: ignore[override]
+        return f"narrator ({self._narrator_engine})"
+
+    @property
+    def narrator_engine(self) -> str:
+        return self._narrator_engine
+
+    @property
+    def base_url(self) -> str:
+        """There is none, and saying so is the point.
+
+        Every other engine answers OpenAI routes on a loopback port and the proxy
+        forwards to them. narrator answers no HTTP at all, so a `base_url` here
+        would be a port nothing is listening on, published on a `/v1/health` row
+        and eventually fetched by something. `ResidentVoice` deliberately carries
+        no such field either.
+        """
+        raise EngineError(
+            f"{self.name} has no base url: its wire is newline-delimited JSON "
+            "over stdin and stdout, not HTTP. Talk to it through this engine "
+            "object (PHASE3-TTS.md section 4)"
+        )
+
+    def command(
+        self, model_dir: Path, served_name: str, port: int, args: list[str]
+    ) -> list[str]:
+        """`<tts env python> -m narrator.serve`, and nothing else.
+
+        `model_dir`, `served_name` and `port` are not on it. The first two travel
+        on the `load` message instead, because narrator is a resident server that
+        switches voices without respawning; the port is not used at all, and
+        `Residency` finds one anyway for the reason it says there.
+        """
+        return [str(self._python), "-m", MODULE]
+
+    def environment(self) -> dict[str, str]:
+        return {
+            ENGINE_VARIABLE: self._narrator_engine,
+            # narrator writes its progress to stderr and its protocol to stdout.
+            # Without this, a pipe makes CPython block-buffer both, and a `ready`
+            # line can sit in a 4 KB buffer for the whole of a load — which reads
+            # from here as a readiness timeout on an engine that was up.
+            "PYTHONUNBUFFERED": "1",
+        }
+
+    def stdio(self, log_handle: Any) -> dict[str, Any]:
+        """stdin and stdout stay pipes; only stderr goes to the log.
+
+        The seam PHASE3-TTS.md section 4 said `start()` would need. UTF-8 is
+        stated rather than inherited: the text on these pipes is a book, and the
+        locale of whatever shell started the server has no business deciding how
+        an em-dash crosses it.
+        """
+        return {
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": log_handle,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "strict",
+            "bufsize": 1,
+        }
+
+    # ------------------------------------------------------------ the reader
+
+    def attach(self, process: subprocess.Popen[Any]) -> None:
+        self._ready_message = None
+        self._reader = threading.Thread(
+            target=self._pump,
+            args=(process.stdout,),
+            name=f"narrator-stdout-{self._narrator_engine}",
+            daemon=True,
+        )
+        self._reader.start()
+
+    def _pump(self, stream: Any) -> None:
+        """Every line of narrator's stdout, classified once, on one thread.
+
+        `ready` is taken out here rather than queued, because it is a lifecycle
+        announcement and not an answer to anything: `ready()` polls for it while
+        `converse()` has not been called yet, and putting it in the same queue
+        would make the two compete for it. A SECOND `ready` is a protocol error —
+        narrator prints exactly one, and two would mean the process restarted
+        underneath a conversation.
+        """
+        try:
+            for line in stream:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    message = json.loads(text)
+                except json.JSONDecodeError:
+                    self._inbox.put(_Garbled(text))
+                    continue
+                if not isinstance(message, dict) or not isinstance(
+                    message.get("type"), str
+                ):
+                    self._inbox.put(_Garbled(text))
+                    continue
+                if message["type"] == "ready" and self._ready_message is None:
+                    self._ready_message = message
+                    continue
+                self._inbox.put(message)
+        except (ValueError, OSError):
+            # The stream was closed under the reader — `detach()` does exactly
+            # that when the engine is stopped. End of file is end of file.
+            pass
+        finally:
+            self._inbox.put(_ENDED)
+
+    def detach(self) -> None:
+        """Close the pipes and let the reader go. Order matters here.
+
+        stdin is closed first and unconditionally: Crucible owns the write end
+        and nothing else touches it, and closing it is what turns a worker
+        blocked on a read it will never satisfy into one that sees EOF.
+
+        **stdout is closed only once the reader has finished**, and that is not
+        tidiness. `BufferedReader.close()` takes the object's own lock, which the
+        reader thread is holding for as long as it is blocked inside `read()` —
+        so closing a pipe another thread is reading deadlocks, and it deadlocks
+        exactly in the case this method exists for: a worker that ignored SIGTERM
+        and is still alive with its stdout open (measured 2026-09-13, in the test
+        that proves `stop()` reports a timeout rather than escalating). When the
+        process really is gone the reader is at end of file and joins at once, so
+        the ordinary path closes the pipe as it always did; when it is not, the
+        fd is left to the daemon thread and the caller has just been told, by
+        name, that a process is still running.
+        """
+        process = self._process
+        if process is not None and process.stdin is not None:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+        reader = self._reader
+        if reader is not None:
+            reader.join(timeout=POLL_SECONDS * 4)
+        if (
+            process is not None
+            and process.stdout is not None
+            and (reader is None or not reader.is_alive())
+        ):
+            try:
+                process.stdout.close()
+            except OSError:
+                pass
+        self._reader = None
+        self._ready_message = None
+        while True:
+            try:
+                self._inbox.get_nowait()
+            except queue.Empty:
+                break
+
+    # ---------------------------------------------------------- readiness
+
+    def announced_ready(self) -> str | None:
+        message = self._ready_message
+        if message is None:
+            return None
+        return (
+            f"{self.name} is ready on {message.get('device')} "
+            f"(backend {message.get('backend')})"
+        )
+
+    def readiness_description(self) -> str:
+        return "print a ready line on stdout"
+
+    # ------------------------------------------------------------- the wire
+
+    def send(self, message: dict[str, Any]) -> None:
+        """One JSON object, one line, flushed."""
+        process = self._process
+        if process is None or process.stdin is None:
+            raise EngineError(
+                f"{self.name} is not running, so there is nothing to send to it"
+            )
+        line = json.dumps(message, ensure_ascii=False) + "\n"
+        with self._writer:
+            try:
+                process.stdin.write(line)
+                process.stdin.flush()
+            except (BrokenPipeError, ValueError, OSError) as exc:
+                code = process.poll()
+                if code is not None:
+                    raise EngineError(
+                        f"{self.name} exited {code} and could not be sent a "
+                        f"{message.get('action')!r}. Last {LOG_TAIL_LINES} lines "
+                        f"of {self.log_path}:\n" + self.log_tail()
+                    ) from None
+                raise EngineError(
+                    f"could not write to {self.name}: {exc}. Last "
+                    f"{LOG_TAIL_LINES} lines of {self.log_path}:\n" + self.log_tail()
+                ) from None
+
+    def converse(
+        self,
+        message: dict[str, Any],
+        *,
+        terminal: frozenset[str],
+        silence_timeout: float,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Send one message and yield narrator's answer, line by line.
+
+        The iterator ends when a message of one of the `terminal` types has been
+        yielded. It is a **stream in arrival order and nothing is reordered** —
+        see the module docstring on why.
+
+        `cancelled`, when it goes true, sends narrator one `{"action": "cancel"}`
+        and then keeps reading. That is narrator's own contract: a cancel aborts
+        what is in flight, the rows that will not be rendered come back as
+        ordinary per-row failures, and `batch_done` arrives as always. Hanging up
+        instead would leave the engine generating into nothing, and killing it
+        would take the voice off the card for the next job. `JobCancelled` is
+        raised once the terminal message has been seen, so the caller learns the
+        run was cancelled rather than that it finished short.
+        """
+        self.send(message)
+        return self._until(terminal, silence_timeout, cancelled)
+
+    def _until(
+        self,
+        terminal: frozenset[str],
+        silence_timeout: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> Iterator[dict[str, Any]]:
+        process = self._process
+        if process is None:
+            raise EngineError(f"{self.name} is not running")
+        deadline = time.monotonic() + silence_timeout
+        cancel_sent = False
+        while True:
+            if cancelled is not None and cancelled() and not cancel_sent:
+                self.send({"action": "cancel"})
+                cancel_sent = True
+            try:
+                item = self._inbox.get(timeout=POLL_SECONDS)
+            except queue.Empty:
+                code = process.poll()
+                if code is not None:
+                    raise EngineError(
+                        f"{self.name} exited {code} in the middle of a request. "
+                        f"Last {LOG_TAIL_LINES} lines of {self.log_path}:\n"
+                        + self.log_tail()
+                    )
+                if time.monotonic() >= deadline:
+                    raise EngineError(
+                        f"{self.name} said nothing at all for "
+                        f"{silence_timeout:.0f}s. Last {LOG_TAIL_LINES} lines of "
+                        f"{self.log_path}:\n" + self.log_tail()
+                    )
+                continue
+
+            # Any line is proof of life, so the silence clock starts again.
+            deadline = time.monotonic() + silence_timeout
+
+            if isinstance(item, _Ended):
+                raise EngineError(
+                    f"{self.name} closed its stdout in the middle of a request "
+                    f"(exit {process.poll()}). Last {LOG_TAIL_LINES} lines of "
+                    f"{self.log_path}:\n" + self.log_tail()
+                )
+            if isinstance(item, _Garbled):
+                raise EngineError(
+                    f"{self.name} wrote a line to stdout that is not a protocol "
+                    f"message: {item.line[:300]!r}. stdout carries the wire and "
+                    "nothing else; narrator's own diagnostics belong on stderr, "
+                    f"which is {self.log_path}"
+                )
+            if item["type"] == "error":
+                # narrator's whole-request refusal: an unknown action, a voice it
+                # cannot serve, a load that failed. A per-ROW failure is not this
+                # — it is a `batch_item` carrying a `message` — so this ends the
+                # conversation rather than being reported alongside the rows.
+                raise EngineError(
+                    f"{self.name} refused the request: "
+                    f"{item.get('message', '(no message)')}"
+                )
+            yield item
+            if item["type"] in terminal:
+                if cancel_sent:
+                    raise JobCancelled(f"{self.name} was cancelled mid-request")
+                return
+
+    # ---------------------------------------------------------------- load
+
+    def load(
+        self,
+        *,
+        voice: str,
+        model_dir: Path,
+        warm: bool,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Put a voice on the card and return narrator's own `loaded` line.
+
+        This is what makes `load-voice` mean the weights are resident rather than
+        only that a process is up: `ready` says narrator is listening, `loaded`
+        says the engine underneath it has a voice in memory.
+
+        **No `caps` are sent, and that is a decision rather than an omission.**
+        narrator's caps channel is `register_voice_caps`, whose key vocabulary is
+        Orpheus's (`temperature`, `topP`, `minP`, `repPenalty`, the four `eos*`
+        levers, `maxCharsPerSec`) and which **raises on a key it does not know**.
+        Every voice this build ships renders at its narrator engine's own default
+        sampling — `crucible/voices.py` refuses a deviation that carries no
+        written reason, and not one manifest carries either — so take 0 *is* the
+        engine default, and the honest way to ask for the engine default is to
+        register nothing. When a voice does deviate, `crucible/jobs/tts/render.py`
+        refuses it by name instead of sending a payload narrator would reject or,
+        worse, silently translate; PHASE3-TTS.md section 4 records what narrator
+        owes before that can change.
+        """
+        loaded: dict[str, Any] | None = None
+        for message in self.converse(
+            {
+                "action": "load",
+                "voice": voice,
+                "modelDir": str(model_dir),
+                # Explicit, though narrator's own default is true: a first load
+                # may spend time on discarded warm-up renders, and a load-voice
+                # job is an operator's explicit order that would rather pay it
+                # here than in the first chunk of a book.
+                "warm": warm,
+            },
+            terminal=frozenset({"loaded"}),
+            silence_timeout=LOAD_SILENCE_TIMEOUT_SECONDS,
+        ):
+            if message["type"] == "loaded":
+                loaded = message
+            elif on_progress is not None:
+                on_progress(f"{self.name}: {message['type']} {message}")
+        if loaded is None:  # unreachable: `loaded` is the terminal type
+            raise EngineError(f"{self.name} ended its load without a loaded line")
+        return loaded
+
+    # ---------------------------------------------------------------- stop
+
+    def stop(self) -> None:
+        """`quit` on stdin first, then SIGTERM. Never SIGKILL.
+
+        narrator's own module docstring calls the stdin `quit` action its primary
+        teardown: it unwinds the stdin loop from inside the process, runs the
+        atexit hooks and releases the GPU. SIGTERM reaches the same place through
+        a handler that raises `SystemExit(143)`, and it is the backstop for a
+        worker that has stopped reading its stdin. Both are here because the
+        first is cleaner and the second always arrives. Neither is SIGKILL —
+        force-killing a process stuck in a WSL dxg GPU wait wedges the whole WSL
+        VM until Windows reboots, which is why `SubprocessEngine.stop()` reports
+        a timeout instead of escalating.
+        """
+        process = self._process
+        if process is not None and process.poll() is None:
+            try:
+                self.send({"action": "quit"})
+            except EngineError:
+                # The pipe is gone, so the worker is already on its way out and
+                # SIGTERM below is the only thing left to send — which is what
+                # would have been sent anyway. Not swallowed silently: whatever
+                # killed it wrote to stderr, and that is this engine's log.
+                pass
+            else:
+                try:
+                    process.wait(timeout=QUIT_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass
+        super().stop()

@@ -1,0 +1,556 @@
+"""`crucible/engines/narrator.py` — the managed subprocess and its channel.
+
+PHASE3-TTS.md section 4. Everything here drives `tests/fake_narrator.py`, which
+speaks narrator's real JSON-lines wire, through the **real** engine: the only
+thing the double replaces is the argv (`tests/fake_narrator_engine.py`).
+
+Nothing here needs an accelerator, and nothing here is a mock of the engine. The
+pipes, the reader thread, the correlation, the refusals and `stop()` are the code
+that will run on the PC.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+from typing import Iterator
+
+import pytest
+
+from crucible.engines import (
+    NARRATOR_ENGINES,
+    EngineError,
+    NarratorEngine,
+    build_voice_engine,
+)
+from crucible.engines import base as engine_base
+from crucible.engines.base import SubprocessEngine as BaseEngine
+from crucible.engines.mlx_lm import MlxLmEngine
+from crucible.engines.narrator import ENGINE_VARIABLE, MODULE
+from crucible.engines.vllm import VllmEngine
+from crucible.errors import JobCancelled
+from crucible.voices import NARRATOR_ENGINE_SAMPLING
+
+from .fake_narrator_engine import FAKE_NARRATOR, FakeNarratorEngine
+
+BATCH_TERMINAL = frozenset({"batch_done"})
+
+
+@pytest.fixture(autouse=True)
+def brief_quit_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shorten the wait `stop()` gives `quit` before it signals.
+
+    Thirty seconds is right for a loaded SGLang-Omni releasing CUDA from inside
+    itself. Several tests here deliberately leave a worker that is not reading
+    its stdin at all, and paying that wait for each of them would put minutes on
+    the suite for a number none of them is about.
+    """
+    monkeypatch.setattr("crucible.engines.narrator.QUIT_GRACE_SECONDS", 1.0)
+    # And the readiness poll, which is two seconds because a vLLM load takes
+    # minutes and polling it harder buys nothing. Every test here is up in
+    # milliseconds, so the interval is the whole of its runtime.
+    monkeypatch.setattr("crucible.engines.base.READY_POLL_SECONDS", 0.05)
+
+
+@pytest.fixture
+def weights(tmp_path: Path) -> Path:
+    directory = tmp_path / "weights"
+    directory.mkdir()
+    return directory
+
+
+@pytest.fixture
+def engine(tmp_path: Path) -> Iterator[FakeNarratorEngine]:
+    built = FakeNarratorEngine(
+        narrator_engine="higgs-v3",
+        python=Path(sys.executable),
+        log_path=tmp_path / "engine-deathstalker.log",
+    )
+    yield built
+    try:
+        built.stop()
+    except EngineError:
+        pass
+
+
+def up(engine: FakeNarratorEngine, weights: Path) -> FakeNarratorEngine:
+    engine.start(weights, "deathstalker", 0, [])
+    engine.ready(30.0)
+    return engine
+
+
+# --------------------------------------------------------------- the spawn
+
+
+def test_the_argv_is_narrator_serve_and_nothing_else() -> None:
+    """narrator takes no configuration on the command line, so neither does this."""
+    built = NarratorEngine(
+        narrator_engine="orpheus",
+        python=Path("/opt/env/bin/python"),
+        log_path=Path("/tmp/x.log"),
+    )
+    assert built.command(Path("/weights"), "owen", 7100, []) == [
+        "/opt/env/bin/python",
+        "-m",
+        MODULE,
+    ]
+    # The voice, the weights directory and the port are deliberately absent: the
+    # first two ride the `load` message, and narrator binds nothing.
+    assert "owen" not in built.command(Path("/weights"), "owen", 7100, [])
+    assert built.environment()[ENGINE_VARIABLE] == "orpheus"
+
+
+def test_the_engine_id_is_in_the_name_so_a_refusal_says_which() -> None:
+    built = build_voice_engine("higgs-v3", Path(sys.executable), Path("/tmp/x.log"))
+    assert built.name == "narrator (higgs-v3)"
+    assert built.narrator_engine == "higgs-v3"
+
+
+def test_an_engine_this_build_cannot_start_is_refused_by_name() -> None:
+    with pytest.raises(EngineError) as caught:
+        build_voice_engine("higgs-v2", Path(sys.executable), Path("/tmp/x.log"))
+    assert "unknown narrator engine 'higgs-v2'" in str(caught.value)
+    assert "['higgs-v3', 'orpheus']" in str(caught.value)
+
+
+def test_every_engine_a_manifest_may_name_is_one_this_build_can_start() -> None:
+    """The two tables are written in two files and must not drift.
+
+    `crucible/voices.py` decides what a manifest's `narrator_engine` may say;
+    this file decides what `build_voice_engine` will start. A voice naming an
+    engine the second table lacks would pass every manifest check and fail at the
+    spawn, which is the worst possible place to find out.
+    """
+    assert set(NARRATOR_ENGINE_SAMPLING) == set(NARRATOR_ENGINES)
+
+
+def test_there_is_no_base_url_and_saying_so_is_the_point(
+    engine: FakeNarratorEngine, weights: Path
+) -> None:
+    up(engine, weights)
+    with pytest.raises(EngineError) as caught:
+        engine.base_url
+    assert "has no base url" in str(caught.value)
+
+
+def test_the_http_engines_kept_both_seams(
+    engine: FakeNarratorEngine, weights: Path
+) -> None:
+    """`stdio()` and `attach()` are override points, not a rewrite.
+
+    The readiness seam has this assertion in `test_engine_readiness.py`; this is
+    the same claim for the second seam PHASE3-TTS.md section 4 said `start()`
+    would need. vLLM and mlx-lm still get `stdin=DEVNULL` and both output streams
+    in the log, byte for byte what they had.
+    """
+    for cls in (VllmEngine, MlxLmEngine):
+        assert cls.stdio is BaseEngine.stdio
+        assert cls.attach is BaseEngine.attach
+        assert cls.detach is BaseEngine.detach
+    plain = BaseEngine(python=Path(sys.executable), log_path=Path("/tmp/x.log"))
+    assert BaseEngine.stdio(plain, "handle") == {
+        "stdin": engine_base.subprocess.DEVNULL,
+        "stdout": "handle",
+        "stderr": engine_base.subprocess.STDOUT,
+    }
+    # And narrator's own wiring keeps both pipes, in UTF-8.
+    wiring = engine.stdio("handle")
+    assert wiring["stdin"] is engine_base.subprocess.PIPE
+    assert wiring["stdout"] is engine_base.subprocess.PIPE
+    assert wiring["stderr"] == "handle"
+    assert wiring["encoding"] == "utf-8"
+
+
+# ------------------------------------------------------------- readiness
+
+
+def test_a_stdout_ready_line_is_readiness(
+    engine: FakeNarratorEngine, weights: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_READY_DELAY_S", "0")
+    said: list[str] = []
+    engine.start(weights, "deathstalker", 0, [])
+    engine.ready(30.0, on_progress=said.append)
+    assert any("is ready on fake" in message for message in said), said
+    # No HTTP route was ever polled, and the engine's own description says so.
+    assert engine.readiness_description() == "print a ready line on stdout"
+
+
+def test_a_ready_line_that_never_comes_times_out_by_name(
+    engine: FakeNarratorEngine, weights: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_READY_NEVER", "1")
+    engine.start(weights, "deathstalker", 0, [])
+    with pytest.raises(EngineError) as caught:
+        engine.ready(3.0)
+    message = str(caught.value)
+    assert "did not print a ready line on stdout within 3s" in message
+    assert "/v1/models" not in message
+
+
+def test_an_engine_that_dies_before_it_is_ready_says_so(
+    engine: FakeNarratorEngine, weights: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commonest real failure on cuda-linux, and the reason the stderr tail
+    is quoted into the error rather than pointed at."""
+    monkeypatch.setenv("CRUCIBLE_FAKE_EXIT_CODE", "3")
+    engine.start(weights, "deathstalker", 0, [])
+    with pytest.raises(EngineError) as caught:
+        engine.ready(30.0)
+    message = str(caught.value)
+    assert "exited 3 before it was ready" in message
+    # The worker's own stderr, which is what explains it. This is the second seam
+    # paying for itself: stderr goes to the log while stdout stays a pipe.
+    assert "told to exit before becoming ready" in message
+
+
+# ------------------------------------------------------------- the channel
+
+
+def test_a_load_sends_narrators_own_message_and_returns_its_answer(
+    engine: FakeNarratorEngine,
+    weights: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_TRANSCRIPT", str(transcript))
+    up(engine, weights)
+    loaded = engine.load(voice="deathstalker", model_dir=weights, warm=True)
+    assert loaded["type"] == "loaded"
+    assert loaded["sampleRate"] == 24_000
+
+    sent = transcript.read_text(encoding="utf-8").splitlines()
+    assert len(sent) == 1
+    message = json.loads(sent[0])
+    assert message == {
+        "action": "load",
+        "voice": "deathstalker",
+        "modelDir": str(weights),
+        "warm": True,
+    }
+    # No `caps`. See `NarratorEngine.load` on why that is a decision: narrator's
+    # caps channel raises on a key it does not know, and take 0 IS the engine
+    # default, which is what registering nothing asks for.
+    assert "caps" not in message
+
+
+def test_rows_retire_out_of_order_and_nothing_reorders_them(
+    engine: FakeNarratorEngine, weights: Path
+) -> None:
+    """The fake retires a batch in reverse on purpose, and so does a real one.
+
+    A consumer that relies on arrival order is wrong, so the engine must not
+    quietly make it right: the iterator is arrival order, and `i` is the identity.
+    """
+    up(engine, weights)
+    engine.load(voice="deathstalker", model_dir=weights, warm=True)
+    indices = [
+        message["i"]
+        for message in engine.converse(
+            {
+                "action": "generate_batch",
+                "language": "en",
+                "items": [{"i": 7, "text": "one"}, {"i": 8, "text": "two"},
+                          {"i": 9, "text": "three"}],
+            },
+            terminal=BATCH_TERMINAL,
+            silence_timeout=30.0,
+        )
+        if message["type"] == "batch_item"
+    ]
+    assert indices == [9, 8, 7]
+
+
+def test_a_failed_row_arrives_beside_its_successful_neighbours(
+    engine: FakeNarratorEngine, weights: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_FAIL_ROW", "1")
+    up(engine, weights)
+    engine.load(voice="deathstalker", model_dir=weights, warm=True)
+    rows = {
+        message["i"]: message
+        for message in engine.converse(
+            {
+                "action": "generate_batch",
+                "language": "en",
+                "items": [{"i": i, "text": "a sentence"} for i in (0, 1, 2)],
+            },
+            terminal=BATCH_TERMINAL,
+            silence_timeout=30.0,
+        )
+        if message["type"] == "batch_item"
+    }
+    assert sorted(rows) == [0, 1, 2]
+    # A failure is `message` and no `data`; that is how the two are told apart.
+    assert "data" not in rows[1] and "message" in rows[1]
+    assert "data" in rows[0] and "data" in rows[2]
+
+
+def test_a_whole_request_refusal_ends_the_conversation(
+    engine: FakeNarratorEngine, weights: Path
+) -> None:
+    """A top-level `error` is not a per-row failure and is not reported as one."""
+    up(engine, weights)
+    with pytest.raises(EngineError) as caught:
+        list(
+            engine.converse(
+                {"action": "nonsense"},
+                terminal=BATCH_TERMINAL,
+                silence_timeout=30.0,
+            )
+        )
+    assert "refused the request" in str(caught.value)
+    assert "does not know action" in str(caught.value)
+
+
+def test_a_cancel_is_sent_and_the_run_is_reported_as_cancelled(
+    engine: FakeNarratorEngine,
+    weights: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Crucible asks narrator to stop rather than hanging up or killing it.
+
+    Hanging up would leave the engine generating into nothing; killing it would
+    take the voice off the card for the next job. The fake reads its stdin on the
+    main thread, so it finishes the batch it is in before it sees the cancel —
+    the real worker has a reader thread and aborts in flight. What this proves is
+    the two things that are Crucible's: the cancel is SENT, and the run ends as
+    cancelled rather than as a short success.
+    """
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_TRANSCRIPT", str(transcript))
+    up(engine, weights)
+    engine.load(voice="deathstalker", model_dir=weights, warm=True)
+    with pytest.raises(JobCancelled):
+        for _ in engine.converse(
+            {
+                "action": "generate_batch",
+                "language": "en",
+                "items": [{"i": 0, "text": "a sentence"}],
+            },
+            terminal=BATCH_TERMINAL,
+            silence_timeout=30.0,
+            cancelled=lambda: True,
+        ):
+            pass
+    assert '"action": "cancel"' in transcript.read_text(encoding="utf-8")
+
+
+def test_a_line_on_stdout_that_is_not_a_message_is_a_refusal_naming_it(
+    tmp_path: Path, weights: Path
+) -> None:
+    """fd 1 carries the wire and nothing else — `crucible/workers.py`'s rule.
+
+    A library that logs to stdout corrupted narrator's aligner on a 401-chunk
+    book. Skipping the line would make the next protocol change a silent
+    behaviour change, so it is a refusal that quotes what appeared.
+    """
+
+    class ChattyEngine(NarratorEngine):
+        def command(
+            self, model_dir: Path, served_name: str, port: int, args: list[str]
+        ) -> list[str]:
+            return [
+                sys.executable,
+                "-c",
+                "import sys, time\n"
+                'print(\'{"type": "ready", "device": "fake"}\', flush=True)\n'
+                "sys.stdin.readline()\n"
+                "print('Loading checkpoint shards:  42%', flush=True)\n"
+                "time.sleep(30)\n",
+            ]
+
+    built = ChattyEngine(
+        narrator_engine="higgs-v3",
+        python=Path(sys.executable),
+        log_path=tmp_path / "chatty.log",
+    )
+    try:
+        built.start(weights, "deathstalker", 0, [])
+        built.ready(30.0)
+        with pytest.raises(EngineError) as caught:
+            list(
+                built.converse(
+                    {"action": "load", "voice": "deathstalker"},
+                    terminal=frozenset({"loaded"}),
+                    silence_timeout=30.0,
+                )
+            )
+    finally:
+        try:
+            built.stop()
+        except EngineError:
+            pass
+    message = str(caught.value)
+    assert "not a protocol message" in message
+    assert "Loading checkpoint shards:  42%" in message
+
+
+def test_silence_during_a_request_is_reported_as_silence(
+    engine: FakeNarratorEngine, weights: Path
+) -> None:
+    up(engine, weights)
+    with pytest.raises(EngineError) as caught:
+        list(
+            engine.converse(
+                # `stop` answers `stopped`, which is not the terminal below, so
+                # the conversation waits for something that will never come.
+                {"action": "stop"},
+                terminal=frozenset({"batch_done"}),
+                silence_timeout=1.0,
+            )
+        )
+    assert "said nothing at all for 1s" in str(caught.value)
+
+
+def test_an_engine_that_dies_mid_request_says_so(
+    engine: FakeNarratorEngine, weights: Path
+) -> None:
+    up(engine, weights)
+    conversation = engine.converse(
+        {"action": "quit"},
+        terminal=frozenset({"batch_done"}),
+        silence_timeout=30.0,
+    )
+    with pytest.raises(EngineError) as caught:
+        list(conversation)
+    text = str(caught.value)
+    assert "in the middle of a request" in text or "closed its stdout" in text
+
+
+# ---------------------------------------------------------------- stopping
+
+
+def test_stop_asks_narrator_to_quit_before_it_signals(
+    engine: FakeNarratorEngine,
+    weights: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`quit` is narrator's own primary teardown: it unwinds the stdin loop from
+    inside the process and releases the GPU through the atexit hooks."""
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_TRANSCRIPT", str(transcript))
+    up(engine, weights)
+    assert engine.pids
+    engine.stop()
+    assert engine.pids == frozenset()
+    assert '{"action": "quit"}' in transcript.read_text(encoding="utf-8")
+
+
+def test_a_worker_that_will_not_go_is_reported_and_never_sigkilled(
+    tmp_path: Path, weights: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owen's hardest rule in this file: a killed CUDA process wedges WSL2 until
+    Windows reboots, so `stop()` gives up and says so rather than escalating."""
+    monkeypatch.setattr(engine_base, "STOP_TIMEOUT_SECONDS", 1.0)
+
+    class DeafEngine(NarratorEngine):
+        def command(
+            self, model_dir: Path, served_name: str, port: int, args: list[str]
+        ) -> list[str]:
+            # Ignores SIGTERM AND never reads its stdin, so neither the `quit`
+            # nor the signal gets it — which is the state a worker wedged in a
+            # WSL dxg GPU wait is actually in.
+            return [
+                sys.executable,
+                "-c",
+                "import signal, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                'print(\'{"type": "ready", "device": "fake"}\', flush=True)\n'
+                "time.sleep(120)\n",
+            ]
+
+    built = DeafEngine(
+        narrator_engine="higgs-v3",
+        python=Path(sys.executable),
+        log_path=tmp_path / "deaf.log",
+    )
+    built.start(weights, "deathstalker", 0, [])
+    built.ready(30.0)
+    pid = next(iter(built.pids))
+    try:
+        with pytest.raises(EngineError) as caught:
+            built.stop()
+        message = str(caught.value)
+        assert "did not exit within 1s of SIGTERM" in message
+        assert "does not SIGKILL" in message
+    finally:
+        # This test made the mess, so this test cleans it up. Nothing on this
+        # process is holding CUDA, which is the only reason a SIGKILL is allowed
+        # anywhere in this repository.
+        os.kill(pid, signal.SIGKILL)
+
+
+def test_stopping_a_worker_that_ignores_sigterm_does_not_wedge_the_server(
+    tmp_path: Path, weights: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal above must be a refusal and not a hang.
+
+    `detach()` used to close stdout unconditionally, and closing a pipe another
+    thread is blocked reading deadlocks on the buffered reader's own lock — in
+    exactly the case that matters, a worker still alive with its stdout open. So
+    `stop()` raised nothing and the server stopped instead. Measured 2026-09-13;
+    this test is the one that found it.
+    """
+    monkeypatch.setattr(engine_base, "STOP_TIMEOUT_SECONDS", 1.0)
+
+    class DeafEngine(NarratorEngine):
+        def command(
+            self, model_dir: Path, served_name: str, port: int, args: list[str]
+        ) -> list[str]:
+            return [
+                sys.executable,
+                "-c",
+                "import signal, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                'print(\'{"type": "ready", "device": "fake"}\', flush=True)\n'
+                "time.sleep(120)\n",
+            ]
+
+    built = DeafEngine(
+        narrator_engine="higgs-v3",
+        python=Path(sys.executable),
+        log_path=tmp_path / "deaf2.log",
+    )
+    built.start(weights, "deathstalker", 0, [])
+    built.ready(30.0)
+    pid = next(iter(built.pids))
+    started = time.monotonic()
+    try:
+        with pytest.raises(EngineError):
+            built.stop()
+        # quit grace (1s) + SIGTERM wait (1s) + the reader join, and nothing else.
+        assert time.monotonic() - started < 10.0
+    finally:
+        os.kill(pid, signal.SIGKILL)
+
+
+def test_the_reader_thread_is_gone_once_the_engine_is_stopped(
+    engine: FakeNarratorEngine, weights: Path
+) -> None:
+    up(engine, weights)
+    engine.stop()
+    assert engine._reader is None  # noqa: SLF001 — the thread is the thing tested
+
+
+def test_a_started_engine_refuses_to_be_started_twice(
+    engine: FakeNarratorEngine, weights: Path
+) -> None:
+    up(engine, weights)
+    with pytest.raises(EngineError) as caught:
+        engine.start(weights, "deathstalker", 0, [])
+    assert "is already running" in str(caught.value)
+
+
+def test_the_fake_worker_is_the_one_the_readiness_tests_use() -> None:
+    """One fake, driven by two builders. If this file grew its own, the render
+    door and the streaming door would be built against two wires."""
+    assert FAKE_NARRATOR.is_file()
+    assert FAKE_NARRATOR.name == "fake_narrator.py"

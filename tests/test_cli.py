@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from crucible import cli
+from crucible import cli, jobenv
 from crucible.config import config_path, load_config
 from crucible.errors import NoViableBackend
 
@@ -222,13 +222,82 @@ def test_installing_llm_refuses_a_narrator_engine(
     assert "means nothing for 'llm'" in capsys.readouterr().err
 
 
-def test_installing_tts_says_which_recipe_is_missing(
+def test_this_build_ships_a_tts_recipe_for_every_env_a_voice_can_need(
+    home: Path, viable: None
+) -> None:
+    """One recipe per (narrator engine, backend), which is not one per backend.
+
+    Orpheus pins `vllm==0.7.3` for its per-request logits processors and Higgs v3
+    needs `vllm-omni` against a far later torch, so on cuda-linux the two cannot
+    share a venv. On mlx-darwin they genuinely do, and both names resolve to the
+    one `mlx-darwin` recipe.
+    """
+    for engine in ("higgs-v3", "orpheus"):
+        assert jobenv.recipe_for(jobenv.tts_env(engine, "cuda-linux")).is_file()
+    mac = {
+        jobenv.recipe_for(jobenv.tts_env(engine, "mlx-darwin"))
+        for engine in ("higgs-v3", "orpheus")
+    }
+    assert len(mac) == 1
+
+
+def test_every_tts_recipe_pins_narrator_by_a_commit(home: Path, viable: None) -> None:
+    """A branch name is not a pin, and `narrator==0.1.0` would let any commit in.
+
+    narrator is not on PyPI — it is `python/narrator` in the BookForge repo,
+    versioned with the app — so it is pinned by a direct reference carrying a
+    40-character sha, and `crucible doctor` checks it against the commit pip
+    recorded in PEP 610's direct_url.json rather than against a version.
+    """
+    for spec in (
+        jobenv.tts_env("higgs-v3", "cuda-linux"),
+        jobenv.tts_env("orpheus", "cuda-linux"),
+        jobenv.tts_env("higgs-v3", "mlx-darwin"),
+    ):
+        recipe = jobenv.recipe_for(spec)
+        references = jobenv.recipe_direct_references(recipe)
+        assert list(references) == ["narrator"]
+        assert len(references["narrator"]) == 40
+
+
+def test_the_orpheus_recipe_pins_the_last_vllm_that_takes_a_logits_processor(
+    home: Path, viable: None
+) -> None:
+    """0.7.3 is a hard pin, not a floor: above it the EOS boost silently stops
+    applying, because V1 has no per-request logits processor at all."""
+    pins = jobenv.recipe_pins(
+        jobenv.recipe_for(jobenv.tts_env("orpheus", "cuda-linux"))
+    )
+    assert pins["vllm"] == "0.7.3"
+    assert pins["torch"] == "2.5.1"
+    higgs = jobenv.recipe_pins(
+        jobenv.recipe_for(jobenv.tts_env("higgs-v3", "cuda-linux"))
+    )
+    assert higgs["vllm"] == "0.28.0"
+    assert higgs["vllm-omni"] == "0.28.0"
+    # And the Mac's one version of mlx-audio that can render Orpheus at all.
+    mac = jobenv.recipe_pins(jobenv.recipe_for(jobenv.tts_env("orpheus", "mlx-darwin")))
+    assert mac["mlx-audio"] == "0.4.8"
+    assert mac["mlx-lm"] == "0.31.3"
+
+
+def test_doctor_reports_the_two_site_packages_patches_by_name(
     home: Path, viable: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """This build ships no envs/tts recipes — narrator is pinned by git sha and
-    that is the next builder's file. The refusal names the directory, which is
-    better than pretending the job type has no installer."""
+    """pip cannot express an edit to somebody else's installed package.
+
+    An env whose pins all match is reported ready, and a reader has no way to
+    tell that from an env that will render every chunk with 240 ms of garbage on
+    the end — so the patches are their own rows and their own problems.
+    """
     assert cli.main(["init", "--enable-tts"]) == 0
     capsys.readouterr()
-    assert cli.main(["install", "tts", "--narrator-engine", "higgs-v3"]) == 1
-    assert "tts env recipes at" in capsys.readouterr().err
+    assert cli.main(["doctor", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    rows = {entry["id"]: entry for entry in report["narrator_patches"]}
+    assert sorted(rows) == ["higgs-sentinel-filter", "vllm-negative-token-id"]
+    for entry in rows.values():
+        assert entry["applied"] is False
+        assert entry["status"] == "no_env"
+    assert any("HTTP 400" in problem for problem in report["problems"])
+    assert any("240 ms of audible garbage" in problem for problem in report["problems"])

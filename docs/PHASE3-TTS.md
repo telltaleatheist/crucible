@@ -224,7 +224,7 @@ reads the manifest, and a row is not a place to argue.
 **`sampling` is deliberately not on that row.** It is engine tuning, it is the server's, and
 publishing it invites a client to send it back. The same goes for the EOS levers, the
 `max_new_tokens` formula and the engine flags. What a client gets is the shape it must pack
-to (`pace`, `cap_tokens`) and the identity it must record (`fingerprint`).
+to (`pace`, `max_chars`) and the identity it must record (`fingerprint`).
 
 ## 3. The take ladder is the server's steps and the client's judgment
 
@@ -279,11 +279,19 @@ Two consequences, both named rather than hidden:
   `/v1/models` poll, byte for byte what vLLM and mlx-lm had before; neither overrides either
   method, and a test asserts that. `tests/test_engine_readiness.py` drives the seam with
   `tests/fake_narrator.py`.
-- **`start()` will need a second seam, and it does not have one.** It gives every engine
-  `stdin=DEVNULL` and sends stdout to the log file, which is right for an engine whose wire is
-  HTTP and wrong for narrator, whose wire *is* those two pipes. Whoever writes
-  `crucible/engines/narrator.py` opens that seam; the readiness one above is deliberately
-  independent of it, so the two can be done in either order.
+- **`start()` needed a second seam. Done, 2026-09-13.** It gave every engine
+  `stdin=DEVNULL` and sent stdout to the log file, which is right for an engine whose wire is
+  HTTP and wrong for narrator, whose wire *is* those two pipes. The seam is `stdio()`,
+  returning the Popen keyword arguments that describe how the three standard streams are
+  wired — keyword arguments rather than three streams, because the text and buffering modes
+  belong to the same decision: a pipe Crucible writes JSON lines to is a text-mode,
+  line-buffered, **UTF-8** pipe (stated rather than inherited — the text on it is a book and
+  the locale of whatever shell started the server has no business deciding how an em-dash
+  crosses it), while a log file taking an engine's raw output is not. Two smaller hooks came
+  with it: `attach(process)`, called once the process exists, where narrator starts reading;
+  and `detach()`, called at the end of `stop()`, where the reader is joined and the pipes are
+  closed. The default of all three is what vLLM and mlx-lm had, neither overrides any of
+  them, and a test asserts that alongside the readiness one.
 - **Crucible ends up depending on a package that lives in an app's repo.** narrator's
   `engine/` and `serve/` know nothing about audiobooks, but `compat/` and `assemble/` do,
   and the whole thing is versioned with BookForge. The env recipe pins it by git sha so a
@@ -300,10 +308,97 @@ the voice manifest's `narrator_engine` picks which one a load uses. On `mlx-darw
 engines share one env, because on the Mac they genuinely do.
 
 Two site-packages patches must be re-applied after any upgrade of the `higgs-v3-server`
-group — `work/patch_vllm.py`, without which every voice-clone request is HTTP 400, and
-`work/patch_tail_trim.py`, without which every chunk ends in about 240 ms of audible
-garbage. pip cannot express that. `crucible doctor` checks for both and reports them by
-name.
+group. pip cannot express that. `crucible doctor` checks for both and reports them by name,
+as their own rows and their own problems rather than folded into the env row — an env whose
+pins all match is otherwise reported ready, and a reader has no way to tell that from an env
+that will render every chunk with 240 ms of garbage on the end.
+
+**One of the two names in this document was stale, and building the checker found it.** The
+second patch is `patch_sentinel_filter.py`, not `work/patch_tail_trim.py`; narrator's own
+`pyproject.toml` still says the old name too. The difference is not cosmetic. The retired
+script wrote the helper `_trim_trailing_sentinel_frames`, and so does the live one, so a
+checker grepping for that helper would certify a band-aided env as patched. The markers
+Crucible uses are BookForge's own measured ones, mirrored into
+`crucible/narratorpatches.py` (the duplication is deliberate for the reason
+`electron/tool-paths.ts` gives about its own: a Crucible server must not need a BookForge
+checkout to answer "is this env sound"):
+
+| patch | file | present | absent | what breaks without it |
+|---|---|---|---|---|
+| `vllm-negative-token-id` | `vllm/v1/engine/input_processor.py` | `min_input_id != -100` | — | every voice-clone request is HTTP 400, so only the default voice serves |
+| `higgs-sentinel-filter` | `vllm_omni/.../higgs_audio_v3.py` | `_filter_sentinel_frames` | `[:, :-1]` | every chunk ends in ~240 ms of audible garbage |
+
+`higgs-sentinel-filter` additionally reports **stale** rather than applied when the marker is
+there but `final=%s, window=%d frames` is not: that is v1 of the patch, which substituted
+sentinels before the identity trim so the trim found nothing, and it looks patched to any
+marker grep.
+
+### What `crucible/engines/narrator.py` is, and what it is not (2026-09-13)
+
+It is one class for both narrator engines, because from Crucible's side they differ only in
+which env the interpreter comes from and what `NARRATOR_ENGINE` says; what runs underneath is
+narrator's business and Crucible learns which it got from the `ready` line. The argv is
+`<tts env python> -m narrator.serve` and nothing else — the voice and the weights directory
+ride the `load` message, and the port is not used at all, so **`base_url` refuses** rather
+than returning a port nothing is listening on.
+
+Four things about it that are decisions rather than details:
+
+- **`converse()` yields lines in arrival order and reorders nothing.** Rows retire out of
+  order — a short row finishes while a long one is still going, and `tests/fake_narrator.py`
+  retires a batch in reverse on purpose — so the row's identity is the `i` narrator echoes
+  back, which is the *caller's* number. Buffering into caller order here would defeat both
+  doors: the render door writes each FLAC as its row retires, overlapped with the next row's
+  generation, and the streaming door needs `batch_chunk` lines out of the same iterator while
+  a row is still generating. One reader thread, one iterator, and the consumer keys on `i`.
+- **A line on stdout that is not a protocol message is a refusal naming the line.** The same
+  rule, from the same incident, as `crucible/workers.py`: narrator's own aligner had a library
+  log to stdout on a 401-chunk book and corrupt the result stream.
+- **`stop()` sends `{"action": "quit"}` before it signals.** narrator's own docstring calls
+  the stdin `quit` its primary teardown — it unwinds the stdin loop from inside the process
+  and releases the GPU through the atexit hooks. SIGTERM reaches the same place through a
+  handler that raises `SystemExit(143)` and is the backstop for a worker that has stopped
+  reading its stdin. Neither is SIGKILL.
+- **`load-voice` now means the weights are in memory, not that a process is up.** `ready` says
+  narrator is listening; `loaded` says the engine underneath it has a voice. So the `load`
+  message is part of the load: `Residency._start` grew a `confirm` argument (a model's engine
+  has nothing there — a 200 from `/v1/models` means the weights are on the card), and a
+  failure in it tears the engine down exactly as a readiness failure does.
+
+**The sample rate is narrator's, and a disagreement is a refusal.** `/v1/voices` publishes
+`sample_rate` off the manifest and a client writes FLACs at it; narrator reports on its
+`loaded` line the rate the engine it actually built renders at. The two are compared at load
+time and a mismatch names both numbers. It is deliberately not a resample: audio resampled to
+match a manifest is audio that no longer matches the engine, and nothing downstream would say
+so.
+
+### Sampling does not reach narrator yet, and nothing pretends it does
+
+**No `caps` are sent on the `load` message.** narrator's sampling channel is
+`register_voice_caps`, whose key vocabulary is Orpheus's — `temperature`, `topP`, `minP`,
+`repPenalty`, the four `eos*` levers, `maxCharsPerSec` — with **no `topK` at all**, and which
+*raises* on a key it does not know. A manifest's `sampling = {temperature, top_p, top_k}`
+therefore cannot be handed over: `top_p` alone would raise. (The Higgs engine class has no
+`register_voice_caps` method at all, while `serve/worker.py` calls it unconditionally; that
+is narrator's business rather than Crucible's, but it is a second reason not to send a
+payload here.)
+
+That costs nothing today and it is checked rather than assumed:
+
+- Every voice in this build renders at its narrator engine's own default sampling —
+  `crucible/voices.py` refuses a deviation carrying no written reason, and not one manifest
+  carries either. So take 0 *is* the engine default, and the honest way to ask for the engine
+  default is to register nothing.
+- Every voice in this build declares exactly one take. `unknown_take` already refuses
+  anything else.
+- A voice that DID deviate, or a take above 0 on a voice that declares a ladder, is refused
+  by name as **`sampling_not_wired`** rather than rendered at the default. That refusal is
+  live and tested; it is simply unreachable with the manifests that ship.
+
+**Owed on narrator's side before the ladder can climb:** a sampling channel on `generate` and
+`generate_batch`, or a caps vocabulary that takes the manifest's own key names. Until then
+the retake ladder is a design that is written down and refused, which is the state this
+document already describes for zero-shot clips.
 
 ## 5. Residency holds one thing, whatever kind it is
 
@@ -381,7 +476,35 @@ with no new vocabulary invented for it.
 
 **Artifacts: `<index>.flac`, one per chunk**, mono 24 kHz PCM_16 — byte for byte the format
 BookForge's assembly and resume already expect, so nothing downstream changes. Each carries
-its provenance sidecar, as every artifact does.
+its provenance sidecar, as every artifact does. The index is the **client's** and is never
+assigned or renumbered here: it travels out as narrator's batch `i`, back on the retiring
+row, and into the artifact's name.
+
+**ffmpeg encodes the FLAC, and that was a real decision.** narrator hands back base64 PCM16
+and something has to turn it into a file. Not `soundfile`: `libsndfile` is a compiled
+dependency on every platform Crucible installs on, and growing the server's own interpreter a
+compiled audio library so it can re-encode audio it did not decode is the wrong shape — this
+process deliberately imports no torch, no vLLM and no narrator, and that would be the first
+crack in it. ffmpeg is already a hard requirement (`asr` refuses `ffmpeg_missing` before it
+queues a job), so `tts` refuses **the same way, by the same name, through the same probe**,
+with its own reason in the message.
+
+    ffmpeg -f s16le -ar <rate> -ac 1 -i pipe:0 -c:a flac <index>.flac
+
+**`<rate>` is not a constant.** It is the rate narrator reported on its `loaded` line, which
+the load already compared against the manifest and refused on a disagreement — so it is both
+the engine's truth and the manifest's, which is the only state in which writing a header is
+honest. Every retiring row also carries a `sampleRate`, and a row whose rate is not the
+loaded one is a **failed row**, not a resample: the bytes would be at one rate and the header
+would claim the other.
+
+**The whole job is one `generate_batch`**, with no `stream` flag anywhere in the item list —
+narrator's own docstring: "A generate_batch with no `stream` flag anywhere takes the
+pre-existing code path, byte for byte." How many rows run at once is engine tuning and belongs
+to the server, and "the server" in that sentence is narrator rather than Crucible:
+`generate_batch` does its own scheduling, grouping consecutive rows on MLX and dispatching
+singly on vLLM, and cutting the list up here would be second-guessing a read-ahead window
+Crucible cannot see.
 
 **A render job may load its voice; a stream may not.** This is the one asymmetry with `llm`,
 and it is deliberate. A chat request is fine-grained and unattended — two clients alternating
@@ -400,15 +523,76 @@ chunk {index, seconds, chars, chars_per_sec, tokens, capped, take}
 ```
 
 That is the whole guard interface. `capped` is true when generation stopped because it hit
-`cap_tokens` rather than because the model finished — the difference between "a long
+the frame cap rather than because the model finished — the difference between "a long
 sentence" and "a runaway", which BookForge's PaceTracker needs and cannot infer from a
 duration. The server measures and reports; **it decides nothing**, and it never retakes on
 its own.
+
+Three of those seven fields are the server's own arithmetic and three come off the wire, and
+the split matters:
+
+- `index` and `take` are the request's. `chars` is **Crucible's own count of the text it
+  sent**, not a number read off the reply — the rule `crucible/workers.py` states about
+  positional results: a number a subprocess echoes back is a number a subprocess can get
+  wrong, and this one is already known exactly.
+- `seconds` is measured from the PCM that actually arrived (`len(pcm) / 2 / sample_rate`) and
+  then **compared** with the duration narrator reported. A disagreement of more than 50 ms —
+  one Higgs frame is 40 ms at 25 fps, so this is not rounding — fails that row: a reply
+  describing audio other than the audio attached to it is not a measurement.
+  `chars_per_sec` is those two divided.
+- `tokens` and `capped` come off the wire, and **narrator does not put them there.**
+
+**`capped` and `tokens` are `null` against the pinned narrator, and `null` means "narrator
+did not say".** `serve/worker.py` sends `{i, format, data, duration, sampleRate}` for a
+retiring row and nothing else; the frame cap it computed (`HiggsBudget.cap_frames`, clamped
+by `sgl_served.frame_cap`) never leaves the engine, and there is no token count on the wire
+at all. Crucible cannot derive either — the cap is narrator's own arithmetic over the text,
+and the server never sees a frame count. So both are nullable, and **`null` is never to be
+read as `false`**: a runaway reported as "not capped" is exactly the failure the field exists
+to prevent. `tests/fake_narrator.py` does send them, which is how the reporting path is
+tested, and its docstring now says in as many words that a test asserting `capped is True` is
+asserting about that file rather than about narrator.
+
+**Owed on narrator's side:** `capped` and `tokens` on each `batch_item` (and on `done` for a
+streamed row). It is a few lines where `cap_frames` is already in scope, and until it lands
+BookForge's PaceTracker gets a duration and a `null` where it wants a flag.
 
 `chunk` is an addition to DESIGN.md section 4's event vocabulary. It is additive and
 `api_version` does not move: a client that does not know the kind still sees every
 `progress`, `artifact` and `done` it saw before. The SDK yields unknown event kinds through
 rather than dropping them, so that stays true for the next one too.
+
+**A failed chunk is reported and the run continues** — the same rule `align` and `rvc` have,
+and the opposite of `asr`'s own, for a stated reason: a transcript with a fifteen-minute hole
+in the middle is invisible in the output, while a missing `<index>.flac` is a file that is not
+there and resume already knows how to ask for it again. So one bad sentence never sinks the
+other 1,399. A failure is named in a `progress` line the moment it happens — so a client
+watching the stream learns which index to re-ask for without waiting for the end — and again
+in `done`, which carries `rendered`, `failed: [{index, message}]`, `take` and `sample_rate`.
+No `chunk` event is emitted for a row that produced no audio, and no artifact is invented for
+it.
+
+A **short batch**, on the other hand, fails the job (`narrator_protocol`). One answer per row
+is narrator's own guarantee — its comment on why is that "a row with no message hangs its
+sentence until the 180s timeout taints the worker" — so a `batch_done` with rows unanswered
+is a protocol failure and not a partial answer. So is a row answered twice, or a row answered
+for an index nobody asked for.
+
+**Refusals, all before the job is queued.** `unknown_model` (via `resolve_model`, section 5's
+note), `invalid_params`, `ffmpeg_missing`, `backend_unsupported`, `env_missing`,
+`voice_not_installed`, `accelerator_busy`, `insufficient_memory`, and four this door adds:
+
+| code | what it means |
+|---|---|
+| `voice_kind_unsupported` | the voice is `kind = "zeroshot"`, and narrator's `load` message carries `voice`, `modelDir`, `adapterDir`, `baseDir`, `caps` and `warm` — **and no reference clips**. There is no channel on this wire for the thing a zero-shot voice *is*, and rendering one would mean conditioning on nothing: a whole book in the base model's voice, reported as success. |
+| `sampling_not_wired` | the voice deviates from its engine's default sampling, or the take does. Section 4. |
+| `unknown_take` | a take past the end of the ladder. Never clamped. |
+| `chunk_too_long` | a chunk longer than the (voice, backend) `max_chars`. **Refused, not re-split**: chunking is the client's (section 1), and a server that quietly cut a chunk in half would return two files where one was asked for. |
+
+`invalid_params` also covers two shapes worth naming: a blank `text` (narrator answers an
+empty generate with a whole-request `error`, which would take the other rows with it) and two
+chunks sharing an index (an index is an artifact name, so two would be one FLAC overwriting
+another).
 
 **Resume stays client-side.** BookForge already knows which `<index>.flac` files exist and
 exceed 1024 bytes; it sends the chunks it still needs. The server has no session, no project
@@ -533,6 +717,17 @@ working.
 `GET /v1/info` gains a `tts` capability whose rows are `/v1/voices`' rows verbatim.
 `GET /v1/health` gains `resident_kind`.
 
+One consequence of the render door that `llm` does not have: **`tts` is both a capability name
+and a job type name.** `llm` is only a capability name — the types you POST are `load-model`
+and `unload-model` — so appending its capability could not collide with anything. The render
+door's type is literally `tts`, so `/v1/info`'s registry loop already produces a `tts`
+capability from `describe_models()`. The voice rows **replace** it rather than being appended
+beside it: two capabilities under one name describing one set of voices in two shapes is
+exactly the reconciliation this rule exists to prevent.
+
+`crucible doctor` gains `narrator_patches` — one row per site-packages patch, with its
+status, the file it edits and what breaks without it (section 4).
+
 `GET /v1/voices` is refused with `job_type_disabled` when `[jobs] enable_tts` is false, the
 same way `/v1/models` is for `llm`, and `/v1/info` simply carries no `tts` capability there.
 
@@ -623,6 +818,35 @@ goes from 155 to 280. Sections 6 and 7 — the render door and the streaming doo
 built, and `crucible/engines/narrator.py` does not exist: `build_voice_engine()` raises
 `NotImplementedError` naming that file, `load-voice` reports it as
 `engine_not_implemented`, and a test asserts that it refuses rather than pretending.
+
+### What is built, later on 2026-09-13: the engine and the render door
+
+`crucible/engines/narrator.py` (section 4), `crucible/jobs/tts/render.py` (section 6), the
+`stdio()`/`attach()`/`detach()` seam in `SubprocessEngine.start()`, the three `envs/tts/`
+recipes, `crucible/narratorpatches.py` and the `narrator_patches` row in `crucible doctor`.
+The helpers `load-voice` and the render door share moved to `crucible/jobs/tts/common.py`;
+nothing about their behaviour changed in the move. `python -m pytest` goes from 406 at the branch point to 469 — 61 of those are this
+branch's, and `origin/main` gained the rest while it was being built.
+
+Section 7, the streaming door, is still unbuilt. What the engine seam **gives** it: the
+process lifetime, `send()` for an out-of-band op while a request is in flight, and
+`converse()` yielding `batch_chunk` lines in arrival order as they land, which is exactly the
+sub-sentence stream it needs. What the seam does **not** give it: any session, any id
+allocation, any `Last-Event-ID` replay buffer, any `cancel` scoped to one row rather than the
+whole engine (narrator's `cancel` aborts what is in flight, and there is no per-row cancel on
+its wire), and no route — all four of those are section 7's own work.
+
+`envs/tts/` also settled how a recipe pins something that is not on PyPI. narrator is a **PEP
+508 direct reference** carrying a 40-character sha; `jobenv.recipe_pins` skips those (they
+are exact pins, just of a commit) and `jobenv.recipe_direct_references` checks them against
+the commit pip actually recorded in **PEP 610's `direct_url.json`**, because `pip list`
+reports narrator's declared version and that does not move when the sha does. A direct
+reference naming a branch instead of a sha is refused: a branch is not a pin. The sha this
+build carries is BookForge `4ebc529f30cfa205b820cf494e48fcb76ac12977`.
+
+Three deliberate gaps, each refused by name rather than worked around, and each with what is
+owed on narrator's side written beside it: sampling and the take ladder (section 4), zero-shot
+clips (section 6), and `capped`/`tokens` on the `chunk` event (section 6).
 
 **A second owed item, and it is about the pins rather than the numbers.** A voice manifest
 pins the HuggingFace revision a `crucible voices pull` will actually fetch. For three of the

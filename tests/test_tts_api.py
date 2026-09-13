@@ -6,11 +6,10 @@ monkeypatched nvidia-smi probes. What is *not* faked is any of the server's own
 logic: the preflight refusals, the exclusive lane, the event stream and the row
 producer are exactly what will run on the PC.
 
-The engine is the one thing that cannot be exercised end to end, because
-`crucible/engines/narrator.py` does not exist yet. So there are two kinds of test
-here: the ones that never reach the spawn (every refusal, every row), which are
-complete; and the ones that do, which assert that the seam refuses BY NAME rather
-than returning something that looks like a loaded voice.
+Nothing here reaches the spawn. `crucible/engines/narrator.py` exists now and
+`tests/test_tts_render.py` drives it against `tests/fake_narrator.py`; this file
+keeps the half that never needed it — every refusal, every `/v1/voices` row, and
+the shared residency's behaviour across both kinds.
 """
 
 from __future__ import annotations
@@ -385,44 +384,13 @@ def test_unknown_params_are_refused(
     assert response.json()["error"]["code"] == "invalid_params"
 
 
-# ---------------------------------------------------------------- the seam
-
-
-def test_the_engine_seam_refuses_by_name_rather_than_faking_a_load(
-    tts_client: TestClient,
-    auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
-) -> None:
-    """Everything up to the spawn is in place, and the spawn says so.
-
-    A stub engine that answered `load-voice` successfully and produced no audio
-    would go green here and surface as a silent book. So the job FAILS, by name,
-    naming the file that will fill the seam.
-    """
-    fake_weights(VOICE)
-    events = run_job(tts_client, auth, type="load-voice", model=VOICE)
-    assert events[-1]["event"] == "failed"
-    error = events[-1]["data"]["error"]
-    assert error["code"] == "engine_not_implemented"
-    assert "crucible/engines/narrator.py is not written yet" in error["message"]
-    # And it got all the way there: the guard ran and reported the card.
-    warmings = [e["data"]["message"] for e in events if e["event"] == "warming"]
-    assert any("checking the accelerator for deathstalker" in m for m in warmings)
-
-
-def test_nothing_is_resident_after_the_seam_refuses(
-    tts_client: TestClient,
-    auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
-) -> None:
-    fake_weights(VOICE)
-    run_job(tts_client, auth, type="load-voice", model=VOICE)
-    health = tts_client.get("/v1/health", headers=auth).json()
-    assert health["resident_models"] == []
-    assert health["resident_kind"] is None
-    assert rows(tts_client, auth)[VOICE]["resident"] is False
+# ---------------------------------------------------------------- the spawn
+#
+# The engine seam is FILLED (`crucible/engines/narrator.py`), so what used to be
+# two tests asserting that a load refuses by name now lives in
+# `tests/test_tts_render.py`, which drives the real engine against the real wire:
+# a load that reaches narrator, one that dies before it is ready, and one whose
+# engine renders at a sample rate the manifest does not declare.
 
 
 # ---------------------------------------------------------------- unloading

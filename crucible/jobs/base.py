@@ -198,6 +198,54 @@ class JobContext:
             self._store.append_event, self._job, "warming", {"message": message}
         )
 
+    def chunk(
+        self,
+        *,
+        index: int,
+        seconds: float,
+        chars: int,
+        chars_per_sec: float,
+        tokens: int | None,
+        capped: bool | None,
+        take: int,
+    ) -> None:
+        """Emit `chunk {index, seconds, chars, chars_per_sec, tokens, capped, take}`.
+
+        PHASE3-TTS.md section 6: the whole guard interface, and the whole of what
+        the server has to say about a rendered chunk. **It measures and reports;
+        it decides nothing and it never retakes.** BookForge's PaceTracker is the
+        thing that judges, and `capped` is the input it cannot derive for itself
+        — the difference between a long sentence and a runaway is invisible in a
+        duration.
+
+        Every argument is keyword-only and none has a default, because each one
+        is a measurement and a measurement that defaulted would be a number
+        nobody took. `tokens` and `capped` are `None`-able for the reason
+        PHASE3-TTS.md section 6 gives: narrator does not report either on its
+        wire at the pinned sha, and `None` means *narrator did not say*. It is
+        never to be read as `false`.
+
+        `chunk` is an addition to DESIGN.md section 4's event vocabulary and
+        `api_version` does not move: a client that does not know the kind still
+        sees every `progress`, `artifact` and `done` it saw before.
+        """
+        if capped is not None and not isinstance(capped, bool):
+            raise TypeError(f"capped must be a bool or None, got {capped!r}")
+        self._loop.call_soon_threadsafe(
+            self._store.append_event,
+            self._job,
+            "chunk",
+            {
+                "index": index,
+                "seconds": seconds,
+                "chars": chars,
+                "chars_per_sec": chars_per_sec,
+                "tokens": tokens,
+                "capped": capped,
+                "take": take,
+            },
+        )
+
     def done_extra(self, **keys: Any) -> None:
         """Add keys to this job's `done` event, e.g. `resident` on a load."""
         self._job.done_extra.update(keys)

@@ -105,6 +105,12 @@ server advertises; engine tuning never crosses the wire. narrator is the managed
 subprocess, the way vLLM is, because it already holds the EOS logit surgery the audit calls
 the hardest single item in the contract.
 
+**Built as of 2026-09-13:** the voice manifests and the lifecycle pair, then
+`crucible/engines/narrator.py`, the render door (`{"type": "tts"}`) and the `envs/tts/`
+recipes. The streaming door is the remaining half, and the note above about it being a
+WebSocket is superseded by PHASE3-TTS.md section 7: it is SSE plus posts, because Electron 33
+bundles Node 20 and there is no global `WebSocket` in the main process.
+
 ## Phase 3c: page reading — contract in `docs/PHASE3-VLM.md`
 Much smaller than it looked. Both apps rasterise locally and send a chat completion with an
 image content part, so this is the `llm` proxy plus `modalities` on a model row, a rule that

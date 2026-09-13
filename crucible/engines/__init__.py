@@ -17,12 +17,25 @@ from .base import (
     logs_dir,
 )
 from .mlx_lm import MlxLmEngine
+from .narrator import NarratorEngine
 from .vllm import VllmEngine
 
 ENGINES: dict[str, type[SubprocessEngine]] = {
     VllmEngine.name: VllmEngine,
     MlxLmEngine.name: MlxLmEngine,
 }
+
+#: The narrator engines this build can start. The keys are narrator's OWN engine
+#: ids — what `NARRATOR_ENGINE` takes and what a voice manifest's
+#: `narrator_engine` names — rather than Crucible engine names, because there is
+#: one class here and the id is a parameter to it: narrator decides which stack
+#: it runs underneath itself, and Crucible's business is only which env and which
+#: value of that variable.
+#:
+#: It is a set rather than a `dict[str, type]` for that reason, and it is checked
+#: against `crucible/voices.py`'s own table by a test, so a manifest can never
+#: name an engine this file cannot start.
+NARRATOR_ENGINES: frozenset[str] = frozenset({"higgs-v3", "orpheus"})
 
 
 def engine_log_path(home: Path, model_id: str) -> Path:
@@ -41,29 +54,22 @@ def build_engine(engine_name: str, python: Path, log_path: Path) -> SubprocessEn
 
 def build_voice_engine(
     narrator_engine: str, python: Path, log_path: Path
-) -> SubprocessEngine:
-    """The engine that serves a voice — **not written yet**.
+) -> NarratorEngine:
+    """The engine that serves a voice. Refuses an engine this build cannot run.
 
-    `crucible/engines/narrator.py` is the next builder's file and is where this
-    becomes a real construction: a `SubprocessEngine` subclass that runs
-    `python -m narrator.serve` from the tts env for `narrator_engine`, proves
-    readiness from the `ready{device,backend}` line narrator prints on stdout
-    (which is what `SubprocessEngine.announced_ready()` is the seam for), speaks
-    newline-delimited JSON over its pipes, and tears down its SGLang-Omni or MLX
-    engine on SIGTERM. `ENGINES` above gains an entry then, and this function
-    becomes a lookup in it exactly as `build_engine` is.
-
-    It refuses here rather than returning a stub that appears to work. A fake
-    engine that answers `load-voice` successfully and produces no audio is
-    exactly the kind of thing that ships: every test above it goes green and the
-    failure surfaces as a silent book.
+    One class for both narrator engines, because from Crucible's side they differ
+    only in which env the interpreter comes from and what `NARRATOR_ENGINE` says.
+    What runs underneath — SGLang-Omni on `cuda-linux`, mlx-audio in process on
+    `mlx-darwin` — is narrator's business, and Crucible learns which it got from
+    the `ready` line rather than deciding it here.
     """
-    raise NotImplementedError(
-        f"crucible cannot start narrator for the {narrator_engine!r} engine: "
-        "crucible/engines/narrator.py is not written yet (PHASE3-TTS.md section "
-        "4). Everything up to the spawn — the voice manifests, the refusals, the "
-        "residency and the two lifecycle jobs — is in place and tested; this is "
-        "the seam it stops at."
+    if narrator_engine not in NARRATOR_ENGINES:
+        raise EngineError(
+            f"unknown narrator engine {narrator_engine!r}; this build can start "
+            f"{sorted(NARRATOR_ENGINES)}"
+        )
+    return NarratorEngine(
+        narrator_engine=narrator_engine, python=python, log_path=log_path
     )
 
 
@@ -88,9 +94,11 @@ def engine_model_name(engine_name: str, model_dir: Path, model_id: str) -> str:
 
 __all__ = [
     "ENGINES",
+    "NARRATOR_ENGINES",
     "Engine",
     "EngineError",
     "MlxLmEngine",
+    "NarratorEngine",
     "SubprocessEngine",
     "VllmEngine",
     "build_engine",

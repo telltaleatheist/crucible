@@ -29,6 +29,16 @@ a fake that is generous is a fake that lets a real bug through.
             {"type": "error", "message"}
             {"type": "stopped"}
 
+TWO FIELDS HERE ARE AHEAD OF THE REAL WIRE, and this is the honest place to say
+so. `chars` and `capped` ride the retiring row below; `serve/worker.py` sends
+neither, and the frame cap it computed (`HiggsBudget.cap_frames`, clamped by
+`sgl_served.frame_cap`) never leaves the engine. They are here because
+PHASE3-TTS.md section 6 puts `capped` on the `chunk` event and calls it the
+difference between a long sentence and a runaway — so the render door reads them
+when they are there and publishes `null` when they are not, which is what it will
+do against the real narrator until narrator grows them. A test that asserts
+`capped is True` is asserting about THIS file, not about narrator.
+
 Run it exactly as Crucible will run the real thing — as an argv, from a subprocess:
 
     [sys.executable, str(FAKE_NARRATOR), "--engine", "higgs-v3"]
@@ -59,6 +69,10 @@ must not be bent into passing test fixtures through it:
                                   failure. Its neighbours must still succeed: "a failed
                                   chunk is reported and the run continues" is a rule in
                                   every one of these contracts and it needs a test.
+                                  The failure shape is `{i, message}` — narrator's own
+                                  (`serve/worker.py`), where a row that failed is told
+                                  apart from one that worked by having a `message` and
+                                  no `data`.
     CRUCIBLE_FAKE_CHUNK_MS        milliseconds of audio per streamed sub-sentence
                                   chunk. Default 200.
     CRUCIBLE_FAKE_IGNORE_SIGTERM  ignore SIGTERM, so `stop()`'s refusal to escalate to
@@ -171,7 +185,17 @@ def _emit_row(text: str, streamed: bool, row: int | None) -> None:
         if row is None:
             send("error", message=f"fake narrator was told to fail row {position}")
         else:
-            send("batch_item", i=row, error=f"fake narrator was told to fail row {row}")
+            # `message`, not `error`. Corrected 2026-09-13 while the render door
+            # was being built against this file: `serve/worker.py` reports a
+            # per-row failure as `{'i': ..., 'message': ...}` in all five of the
+            # places it can happen ('No audio generated', 'cancelled',
+            # 'Model not loaded', the row's own exception text, and 'Batch
+            # generation failed'), and it is the ABSENCE of `data` plus the
+            # PRESENCE of `message` that tells a consumer a row failed. A fake
+            # sending a key narrator never sends is a fake that lets a real bug
+            # through, which is this file's own rule.
+            send("batch_item", i=row,
+                 message=f"fake narrator was told to fail row {row}")
         return
 
     seconds, capped, chars = _duration_for(text)
@@ -258,7 +282,7 @@ def _handle(message: dict) -> bool:
         # be wrong the first time it meets a real one.
         for item in reversed(items):
             if _cancelled.is_set():
-                send("batch_item", i=item.get("i"), error="cancelled")
+                send("batch_item", i=item.get("i"), message="cancelled")
                 continue
             _emit_row(item.get("text", ""), bool(item.get("stream")), item.get("i"))
         send("batch_done")

@@ -163,6 +163,46 @@ class SubprocessEngine:
         """
         return None
 
+    def stdio(self, log_handle: Any) -> dict[str, Any]:
+        """How this engine's three standard streams are wired, as Popen kwargs.
+
+        **The second seam PHASE3-TTS.md section 4 said `start()` would need.**
+        Every engine before narrator talks HTTP, so its pipes carry nothing but
+        diagnostics: stdin is `DEVNULL` and both output streams go to
+        `~/.crucible/logs/engine-<id>.log`, which is the default below and is
+        byte for byte what vLLM and mlx-lm had. narrator's wire **is** those two
+        pipes — newline-delimited JSON in and out — so `crucible/engines/
+        narrator.py` overrides this to keep stdin and stdout as pipes and send
+        only stderr to the log.
+
+        It returns keyword arguments rather than three streams because the text
+        and buffering modes belong to the same decision: a pipe Crucible writes
+        JSON lines to is a text-mode, line-buffered pipe, and a log file taking
+        an engine's raw output is not.
+        """
+        return {
+            "stdin": subprocess.DEVNULL,
+            "stdout": log_handle,
+            "stderr": subprocess.STDOUT,
+        }
+
+    def attach(self, process: subprocess.Popen[Any]) -> None:
+        """Called once the process exists, before `start()` returns.
+
+        Where an engine whose wire is its own pipes starts reading them. The
+        HTTP engines have nothing to do here and do not override it.
+        """
+        return None
+
+    def detach(self) -> None:
+        """Called once the process is gone, at the end of `stop()`.
+
+        The counterpart to `attach()`: where a reader thread is joined and pipes
+        are closed. Runs whether the engine stopped cleanly or not, so the
+        engine does not leave a thread holding a dead pipe.
+        """
+        return None
+
     # ------------------------------------------------------------- lifecycle
 
     @property
@@ -210,17 +250,29 @@ class SubprocessEngine:
         try:
             self._process = subprocess.Popen(
                 command,
-                stdout=self._log_handle,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
                 start_new_session=True,
                 env=environment,
+                **self.stdio(self._log_handle),
             )
         except OSError as exc:
             self._close_log()
             raise EngineError(f"could not spawn {command[0]}: {exc}") from exc
         self._port = port
         self._served_name = served_name
+        try:
+            self.attach(self._process)
+        except Exception as exc:
+            # A process exists and nothing is reading it. Tidy it up rather than
+            # leaving an engine running that Crucible has no channel to, and
+            # report the attach failure, which is the one that explains this.
+            try:
+                self.stop()
+            except EngineError:
+                pass
+            raise EngineError(
+                f"{self.name} started as pid {self._process.pid if self._process else '?'} "
+                f"but Crucible could not attach to it: {exc}"
+            ) from exc
 
     def ready(
         self, timeout: float, on_progress: Callable[[str], None] | None = None
@@ -299,6 +351,7 @@ class SubprocessEngine:
             try:
                 process.wait(timeout=STOP_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
+                self.detach()
                 self._close_log()
                 raise EngineError(
                     f"{self.name} (pid {process.pid}) did not exit within "
@@ -306,6 +359,7 @@ class SubprocessEngine:
                     "SIGKILL a process holding CUDA — that wedges WSL2 until "
                     f"Windows reboots. Kill it by hand if you must: {self._log_path}"
                 ) from None
+        self.detach()
         self._close_log()
         self._process = None
         self._port = None

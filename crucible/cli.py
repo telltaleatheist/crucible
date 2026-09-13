@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import API_VERSION, VERSION, jobenv, weights, workerenv
+from . import API_VERSION, VERSION, jobenv, narratorpatches, weights, workerenv
 from .asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
 from .backend import WINDOWS_REFUSAL, Backend, detect_backend
 from .config import (
@@ -566,6 +566,7 @@ def _doctor_report() -> dict[str, Any]:
         "llm_env": None,
         "worker_envs": [],
         "tts_envs": {},
+        "narrator_patches": [],
         "problems": [],
     }
 
@@ -653,6 +654,23 @@ def _doctor_report() -> dict[str, Any]:
                 )
                 for engine in sorted(NARRATOR_ENGINE_SAMPLING)
             }
+            # The two site-packages edits pip cannot express (PHASE3-TTS.md
+            # section 4). They are reported SEPARATELY from the env row and not
+            # folded into it, because an env whose pins all match is otherwise
+            # reported ready — and a reader has no way to tell that from an env
+            # that will render every chunk with 240 ms of garbage on the end.
+            report["narrator_patches"] = narratorpatches.check(
+                jobenv.env_dir(
+                    config.home,
+                    jobenv.tts_env(narratorpatches.PATCHED_ENGINE, backend.kind),
+                )
+            )
+            for entry in report["narrator_patches"]:
+                if not entry["applied"]:
+                    report["problems"].append(
+                        f"narrator_patch[{entry['id']}]: {entry['status']} — "
+                        f"{entry['detail']}. {entry['why']}"
+                    )
         report["job_types"] = _job_type_reports(config, backend)
         for entry in report["job_types"]:
             if entry["enabled"] and not entry["ready"]:
@@ -701,6 +719,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         for engine, entry in sorted(report["tts_envs"].items()):
             mark = "ready" if entry["installed"] else "NOT READY"
             print(f"tts env ({engine}): {mark} — {entry['detail']}")
+        for entry in report["narrator_patches"]:
+            mark = "applied" if entry["applied"] else entry["status"].upper()
+            print(f"narrator patch ({entry['id']}): {mark} — {entry['detail']}")
         for entry in report["job_types"]:
             mark = "ready" if entry["ready"] else ("off" if not entry["enabled"] else "NOT READY")
             print(f"job {entry['name']}: {mark} — {entry['detail']}")
