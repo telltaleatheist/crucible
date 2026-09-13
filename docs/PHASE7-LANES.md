@@ -807,6 +807,53 @@ because "the second job queues". It no longer queues — it is refused with the 
 rule the paragraph exists for, that display and admission are different questions and only
 one may be answered from a poll, is unchanged and is now literally enforced.)*
 
+### 5.1 The work that has no percentage, and the one that looks like it but does
+
+Owen, 2026-09-13: *"a few other places where bookforge touches rendering — there's a
+streaming page on bookforge that streams audio. there's also the correct sentences/re-roll
+page. and of course the browser extension that streams audio. those places are independent
+of a queue but claim a server while they run and need to be accounted for logically in
+crucible. that means crucible wont always have a percent complete to hand back."*
+
+He is right about the accounting, and the reading of BookForge that followed found the
+three are **not three of a kind**. They fall into two families, and the families want two
+different Crucible doors.
+
+**Family A — the streaming scheduler. No denominator, ever.**
+`electron/stream-scheduler.ts` is the single owner of every sentence queue for listening,
+and three surfaces drive it:
+
+| surface | front door |
+|---|---|
+| the in-app Play tab | direct, in process |
+| **the browser extension** and LAN clients | `electron/tts-api-server.ts`, ws `:8766` |
+| the Bookshelf Reader on a phone | `electron/reader-stream-bridge.ts`, riding `:8765` |
+
+All three speak a deliberate subset of one protocol to one scheduler. **So the Crucible
+integration is ONE seam, not three** — a scheduler that can dispatch a sentence to a
+Crucible streaming session instead of a local worker makes all three work at once, which is
+what *"everything above it should be identical"* asked for.
+
+These have no total. Rows arrive one `say` at a time for as long as somebody keeps reading.
+`GET /v1/activity`'s `streaming.progress` is therefore **null**, permanently and by
+construction, and what it reports instead is counts — `said`, `finished`, `in_flight`,
+`seconds`, `chars`. BUILT 2026-09-13, along with the `claim` field, because until then a
+bench polling this route read `busy: 0` and drew an idle machine **while the extension was
+streaming from it**.
+
+**Family B — correct-sentences / re-roll. It DOES have a percentage.**
+`electron/correct-sentences-bridge.ts` does not touch the scheduler at all. It goes through
+`parallel-tts-bridge.regenerateSentenceIndices` — the render path — over a **known,
+finite set of sentence indices** chosen by the user before the work starts. That is a
+denominator. It is a Crucible **`tts` render job**, it gets a real `progress`, and it
+belongs in the lane like any other render.
+
+So the rule is not "streaming surfaces have no percentage". It is: **a percentage exists
+exactly when the client handed over the whole of the work up front.** A render job did; a
+reader has not and never will. Sorting the three surfaces by *which door they already use
+in BookForge* gets this right for free, and sorting them by "does it feel like streaming"
+gets correct-sentences wrong.
+
 ---
 
 ## 6. Admission across the seam
