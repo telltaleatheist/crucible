@@ -427,19 +427,36 @@ The endpoint Owen asked for. One cheap read, the whole server, no job id needed.
   "server":   {"name": "owens-mac-studio", "version": "0.5.0", "backend": "mlx-darwin",
                "api_version": 1, "uptime_s": 48213},
   "resident": {"kind": "tts", "id": "sigma", "since": "2026-09-13T18:02:11Z",
-               "vram_bytes": 9126805504, "estimate_basis": "measured"},
-  "slots":    {"accelerated": {"busy": 1, "of": 1, "queue_depth": 2},
+               "memory_bytes_estimate": 9126805504},
+  "slots":    {"accelerated": {"busy": 1, "of": 1, "queue_depth": 1},
                "ancillary":   {"busy": 0, "of": 2}},
-  "running":  [{"job_id": "j_01H…", "type": "tts", "model": "sigma", "lane": "accelerated",
+  "running":  [{"job_id": "j_01H…", "type": "tts", "model": "sigma",
+                "status": "running", "position": 0,
                 "progress": 0.421, "message": "rendering 118 of 280 chunk(s)",
                 "created": "2026-09-13T18:04:02Z", "started": "2026-09-13T18:04:03Z",
                 "client": "bookforge/owens-pc"}],
-  "queued":   [{"job_id": "j_01H…", "type": "tts", "model": "sigma", "position": 1,
-                "created": "…", "client": "bookforge/owens-mac-studio"}],
+  "queued":   [],
   "accelerator": {"total_bytes": …, "used_bytes": …, "free_bytes": …,
                   "unattributed_bytes": …}
 }
 ```
+
+`queued` is **all but always empty** since the admission ruling, and `queue_depth` is 0 or
+1: a second submission is refused rather than appended, so the only thing that can be in
+that array is a job admitted microseconds ago that the lane has not picked up yet. The key
+and the `position` field are kept — they are still correct, every phase-2 client reads
+them, and the window they describe is real. This example used to show a second client's job
+at `position: 1` with `queue_depth: 2`, which is now a shape no client will see.
+
+**THE BLOCK ABOVE IS THE ROUTE'S, CHECKED AGAINST IT.** Two fields in an earlier draft
+were invented and are corrected here: `resident` carries `memory_bytes_estimate` (not
+`vram_bytes` plus `estimate_basis` — `estimate_basis` is a MANIFEST field describing where
+a number came from, and a resident thing has no such provenance), and a `running` row
+carries `status` and `position` rather than a `lane` key the route has never emitted. Both
+were spotted by the agent that built section 3.1, which declined to guess which side was
+meant to be right. **The code is: it is what ships, and a document that disagrees with it
+is a trap for whoever writes the next consumer** — the same mistake PHASE6 section 3 made
+with the guard verdict, found the same day.
 
 Nearly all of it is assembly of state `JobStore` already holds — `running_id`,
 `queue_depth`, `position`, `job.progress`, `Residency`, and the `/v1/accelerator` probe.
