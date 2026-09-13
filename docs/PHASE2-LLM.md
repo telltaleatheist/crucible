@@ -74,7 +74,7 @@ eviction of other people's processes, ever.
 | `GET /v1/models` | yes | `[{id, family, params_b, revision, backend_supported, installed, resident, loadable, reason (when not loadable), memory_bytes_estimate, context_default}]` |
 | `POST /v1/jobs {type: "load-model", model}` | yes | a normal job. Events: `queued`, `warming {message}` streamed from the engine's readiness (several), `done {resident: id}`. Refusals by name before queuing: `unknown_model`, `model_not_installed`, `backend_unsupported`, `accelerator_busy`, `insufficient_memory`, `env_missing`. |
 | `POST /v1/jobs {type: "unload-model", model}` | yes | a normal job; `done {resident: null}` — the same field the load reports, saying what is resident *now*, which after an unload is nothing. `model_not_resident` if it isn't. |
-| `POST /v1/openai/chat/completions` | yes | proxied verbatim to the resident engine, streaming or not. `model` in the body must equal the resident id, else **409 `model_not_resident`** naming the resident model (or none). Never loads implicitly. |
+| `POST /v1/openai/chat/completions` | yes | proxied to the resident engine, streaming or not, verbatim but for `model` (see below). `model` in the body must equal the resident id, else **409 `model_not_resident`** naming the resident model (or none). Never loads implicitly. |
 | `GET /v1/openai/models` | yes | the resident model in OpenAI's list shape, or an empty list. |
 
 `revision` is the pin in **this host's** backend block, so a client records the same sha
@@ -89,10 +89,18 @@ DESIGN.md section 4's capability row shape, and it is deliberate: two descriptio
 model is how a client ends up reconciling them.
 `GET /v1/health` reports `warming` while a load job runs and `resident_models: [id]`.
 
-The proxy is verbatim in both directions. A reasoning model's `reasoning` field comes back
-untouched, and per-request template controls the client sends — `chat_template_kwargs`,
-which mlx-lm reads per request and vLLM honours by the same name — are forwarded as they
-arrive. The server neither adds them nor strips them.
+The proxy is verbatim in both directions **except for the one field it owns**, `model`. A
+reasoning model's `reasoning` comes back untouched, and per-request template controls the
+client sends — `chat_template_kwargs`, which mlx-lm reads per request and vLLM honours by
+the same name — are forwarded as they arrive; the server neither adds them nor strips
+them. `model` is different because the proxy already substitutes it on the way in: mlx-lm
+has no `--served-model-name` and answers to the resolved weights directory, so a request
+for `qwen3.5-9b` reaches the engine naming a path. OpenAI engines echo the name they were
+asked for, so Crucible puts its own id back on the way out — in the completion and in
+every streamed chunk. Without it the answer to "what did I just talk to" would be a path
+on the server's disk on `mlx-darwin` and the Crucible id on `cuda-linux`, where vLLM does
+take a served name. One id, both directions, both backends. (On a backend where the two
+names already agree there is nothing to undo and the stream is relayed byte for byte.)
 
 A load job runs on the exclusive lane like everything else, so it waits behind a running
 job and a chat request never races a load.

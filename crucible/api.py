@@ -459,13 +459,16 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         client: httpx.AsyncClient = request.app.state.http
 
         if body.get("stream") is True:
-            return await _proxy_stream(client, url, forwarded, resident.log_path)
+            return await _proxy_stream(client, url, forwarded, resident)
         try:
             upstream = await client.post(url, json=forwarded)
         except httpx.HTTPError as exc:
             raise _engine_unreachable(resident, exc) from None
+        content = upstream.content
+        if upstream.status_code == 200:
+            content = _restore_model_id(content, resident)
         return Response(
-            content=upstream.content,
+            content=content,
             status_code=upstream.status_code,
             media_type=upstream.headers.get("content-type", "application/json"),
         )
@@ -501,15 +504,88 @@ def _engine_unreachable(resident: Any, exc: Exception) -> ApiError:
     )
 
 
+def _restore_model_id(raw: bytes, resident: Any) -> bytes:
+    """Put Crucible's id back where the proxy substituted the engine's name.
+
+    The request's `model` is rewritten on the way in to the name the engine
+    answers to, because mlx-lm has no `--served-model-name` and answers to the
+    resolved weights directory (`crucible/engines/mlx_lm.py`). OpenAI engines
+    echo the name they were asked for, so without this the completion would come
+    back naming a directory on the server's disk — and would name the Crucible id
+    on vLLM, which *does* take a served name, so the answer to "what did I just
+    talk to" would depend on the backend. Crucible's id is the contract in both
+    directions; this is the second half of the one substitution the proxy makes,
+    and nothing else in the body is touched.
+
+    A backend whose engine already answers to the id (vLLM) is relayed byte for
+    byte, as before.
+    """
+    if resident.engine_model_name == resident.model_id:
+        return raw
+    try:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ApiError(
+            502,
+            "engine_response_unreadable",
+            f"the engine serving {resident.model_id!r} answered 200 with a body "
+            f"that is not JSON: {exc}. Its log is {resident.log_path}",
+        ) from None
+    if not isinstance(body, dict):
+        raise ApiError(
+            502,
+            "engine_response_unreadable",
+            f"the engine serving {resident.model_id!r} answered 200 with a JSON "
+            f"{type(body).__name__}, not a completion object. Its log is "
+            f"{resident.log_path}",
+        )
+    body["model"] = resident.model_id
+    return json.dumps(body).encode("utf-8")
+
+
+def _restore_model_id_in_frame(frame: bytes, resident: Any) -> bytes:
+    """The same substitution inside one SSE frame of a streamed completion.
+
+    Only `data:` lines carrying a JSON chunk are touched, and only their `model`
+    field. `data: [DONE]`, comments, and any line the engine frames some other
+    way are passed through as they arrived: mid-stream there is no way to raise,
+    and a frame Crucible does not recognise is the engine's to explain.
+    """
+    lines = frame.split(b"\n")
+    changed = False
+    for index, line in enumerate(lines):
+        if not line.startswith(b"data: "):
+            continue
+        payload = line[len(b"data: "):]
+        if payload.strip() == b"[DONE]":
+            continue
+        try:
+            chunk = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(chunk, dict) or "model" not in chunk:
+            continue
+        chunk["model"] = resident.model_id
+        lines[index] = b"data: " + json.dumps(chunk).encode("utf-8")
+        changed = True
+    return b"\n".join(lines) if changed else frame
+
+
 async def _proxy_stream(
-    client: httpx.AsyncClient, url: str, body: dict[str, Any], log_path: Any
+    client: httpx.AsyncClient, url: str, body: dict[str, Any], resident: Any
 ) -> Response:
-    """Forward a streamed completion byte for byte, SSE framing intact.
+    """Forward a streamed completion, SSE framing intact.
 
     The upstream response is opened before anything is returned, so a refusal
     from the engine comes back with the engine's own status code and body rather
     than as a 200 whose stream turns out to be an error.
+
+    The bytes are relayed unchanged except for the one field the proxy
+    substituted on the way in (see `_restore_model_id`); on a backend whose
+    engine answers to the Crucible id there is nothing to undo and the relay is
+    byte for byte.
     """
+    log_path = resident.log_path
     request = client.build_request(
         "POST",
         url,
@@ -541,8 +617,21 @@ async def _proxy_stream(
 
     async def relay() -> AsyncIterator[bytes]:
         try:
+            if resident.engine_model_name == resident.model_id:
+                async for chunk in upstream.aiter_bytes():
+                    yield chunk
+                return
+            # SSE frames end at a blank line, so the relay holds a partial frame
+            # until it has one. Whatever is left when the engine stops is
+            # forwarded as it stands rather than swallowed.
+            buffer = b""
             async for chunk in upstream.aiter_bytes():
-                yield chunk
+                buffer += chunk
+                while b"\n\n" in buffer:
+                    frame, buffer = buffer.split(b"\n\n", 1)
+                    yield _restore_model_id_in_frame(frame, resident) + b"\n\n"
+            if buffer:
+                yield _restore_model_id_in_frame(buffer, resident)
         finally:
             await upstream.aclose()
 

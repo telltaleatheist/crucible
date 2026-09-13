@@ -759,6 +759,87 @@ def test_a_streamed_completion_keeps_its_sse_framing(
     assert text.endswith("data: [DONE]\n\n")
 
 
+@pytest.fixture
+def engines_under_a_path_name(
+    monkeypatch: pytest.MonkeyPatch, home: Path
+) -> list[FakeEngine]:
+    """Engines that answer to the weights directory, the way mlx-lm does.
+
+    The other `engines` fixture makes the engine's name and the Crucible id the
+    same string, which is true of vLLM (`--served-model-name`) and hides the
+    substitution entirely. This is the other backend's shape.
+    """
+    built: list[FakeEngine] = []
+
+    def build(engine_name: str, python: Path, log_path: Path) -> FakeEngine:
+        engine = FakeEngine(python, log_path)
+        built.append(engine)
+        return engine
+
+    monkeypatch.setattr(residency_module, "build_engine", build)
+    monkeypatch.setattr(
+        residency_module,
+        "engine_model_name",
+        lambda engine_name, model_dir, model_id: str(Path(model_dir).resolve()),
+    )
+    return built
+
+
+def test_a_completion_comes_back_naming_crucible_s_id_not_the_engine_s(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines_under_a_path_name: list[FakeEngine],
+) -> None:
+    """The proxy substitutes `model` on the way in; it undoes it on the way out."""
+    weights = fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    response = llm_client.post(
+        "/v1/openai/chat/completions",
+        headers=auth,
+        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 200
+    # The engine was asked by the name it answers to...
+    assert engines_under_a_path_name[0].last_request["model"] == str(weights.resolve())
+    # ...and the client is answered by the name it asked with.
+    assert response.json()["model"] == MODEL
+    # Everything else is the engine's own body, untouched.
+    assert response.json()["choices"][0]["message"]["content"] == ANSWER
+
+
+def test_every_streamed_chunk_names_crucible_s_id(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines_under_a_path_name: list[FakeEngine],
+) -> None:
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    with llm_client.stream(
+        "POST",
+        "/v1/openai/chat/completions",
+        headers=auth,
+        json={
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        text = "".join(response.iter_text())
+
+    lines = [line for line in text.split("\n") if line.startswith("data: ")]
+    assert lines[-1] == "data: [DONE]"
+    chunks = [json.loads(line[len("data: ") :]) for line in lines[:-1]]
+    assert [chunk["model"] for chunk in chunks] == [MODEL] * len(DELTAS)
+    # The framing and the content survived the relabelling.
+    assert [chunk["choices"][0]["delta"].get("content", "") for chunk in chunks] == DELTAS
+    assert text.endswith("data: [DONE]\n\n")
+
+
 def test_the_proxy_requires_a_model(
     llm_client: TestClient, auth: dict[str, str]
 ) -> None:

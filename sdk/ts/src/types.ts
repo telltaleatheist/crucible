@@ -326,6 +326,11 @@ export interface ChatUsage {
  */
 export interface ChatResponse {
   readonly id: string;
+  /**
+   * Crucible's model id — the one you asked for. The engine underneath may
+   * answer to a different name (mlx-lm answers to the weights directory); the
+   * server puts its own id back, so this is the same string on every backend.
+   */
   readonly model: string;
   readonly content: string;
   /** `stop`, `length`, ... — the engine's own word for why it stopped. */
