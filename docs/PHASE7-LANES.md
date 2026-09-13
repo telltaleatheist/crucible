@@ -433,7 +433,61 @@ still moving. The Foundry session has been told exactly that.
 
 ---
 
-## 9. Order, and what depends on what
+## 9. Two guarantees a multi-server client can rely on
+
+Both promised to the Foundry session on 2026-09-13 and written here because a promise in
+a message is not a contract.
+
+### 9.1 The Crucible id is stable across machines. `engine_model_name` is not.
+
+**A client may persist the Crucible id. It must never persist a name discovery handed
+back.**
+
+The reason is not style, it is that the two backends cannot be made to agree:
+
+- `crucible/engines/vllm.py` always launches with `--served-model-name <crucible id>`, so
+  on `cuda-linux` the engine answers to the Crucible id.
+- `crucible/engines/mlx_lm.py` **has no `--served-model-name`**. mlx-lm lists every
+  mlx-looking repo it can see, and `engines.engine_model_name()` therefore returns the
+  resolved **weights directory path** — machine-specific, and unfixable by any launcher
+  rule.
+
+So two Crucibles serving byte-identical weights at identical precision report different
+`engine_model_name`s forever. What is stable is the id, because it comes from a manifest
+in this repo. `GET /v1/openai/models` reports `engine_model_name` *beside* the id
+precisely so the difference is visible rather than surprising.
+
+**Why this matters more with four servers than with two.** Foundry hashes the served model
+name into `cleanKey`, the translate bank, the analyze verdict key and the EPUB narration
+stamp, and ruled in September that those keys stay verbatim and are never canonicalised —
+correctly, but ruled when the cost of a mismatch was one re-clean. Across four registered
+servers a name that varies per machine is a standing tax: a book cleaned on the Mac and
+finished on a droplet re-asks every block and stamps different provenance, for no reason
+but two engines spelling the same weights differently. Keying on the id removes the tax
+without touching that ruling.
+
+### 9.2 A long read loads its own model; chat still does not
+
+`model_not_resident` on the chat door is deliberate (PHASE2-LLM.md section 5): chat is
+fine-grained and unattended, so two clients alternating would thrash the card. That rule
+stands and is not softening.
+
+But it creates a cliff for anyone whose first act is a conversion: install Crucible for
+speed, point a reader at it, and get refused on page one because nobody made the vision
+model resident. **A page read is a render, not a chat** — long, attended, one operator's
+explicit order — and `tts` render already has exactly this asymmetry for exactly this
+reason: it may load its own model and emits `warming` while it does.
+
+So the answer is the scheduler's, not the reader's: **whoever owns the queue submits
+`load-model` before it queues the reads.** One load, the whole book, one unload. The
+machinery exists (`crucible/jobs/llm/` provides `load-model` and `unload-model`); nothing
+new is needed but the ordering. A client must still render the refusal well, because it is
+what somebody gets when they point at a server nobody loaded — but a good sentence is not
+an onboarding, and the cliff belongs to the install story rather than to the transport.
+
+---
+
+## 10. Order, and what depends on what
 
 1. **`/v1/activity` + the recorded client** — server-side, small, independently useful,
    and nothing else can be built without it. **Start here.** *(Built 2026-09-13, branch
