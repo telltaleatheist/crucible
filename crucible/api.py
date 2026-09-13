@@ -32,7 +32,14 @@ from . import API_VERSION, VERSION, accelerator
 from .backend import CUDA_LINUX, Backend
 from .config import Config
 from .errors import ApiError
-from .jobs import build_registry, model_rows, resolve, resolve_model, voice_rows
+from .jobs import (
+    ALL_JOB_TYPES,
+    build_registry,
+    model_rows,
+    resolve,
+    resolve_model,
+    voice_rows,
+)
 from .jobs.base import Job, validate_member_name
 from .jobs.queue import JobStore
 from .residency import Residency
@@ -250,36 +257,42 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     @private.get("/info")
     async def info(request: Request) -> dict[str, Any]:
         store: JobStore = request.app.state.store
-        capabilities = [
-            {
-                "job_type": name,
-                "models": [m.to_dict() for m in plugin.describe_models()],
-            }
-            for name, plugin in sorted(store.registry.items())
-        ]
+
+        # ONE CAPABILITY PER CAPABILITY, not one per POSTable job type.
+        #
+        # This listed every registered job type as its own capability until
+        # 2026-09-13, when running the merged server and reading its answer
+        # showed `qwen3.5-9b` appearing three times — under `load-model`, under
+        # `unload-model`, and under `llm` — in TWO different shapes, because the
+        # lifecycle types describe a model with `ModelDescriptor.to_dict()` and
+        # the `llm` capability uses the far richer `/v1/models` row. That is
+        # exactly the thing PHASE2-LLM.md section 5 was written to forbid: "One
+        # model, one description: a client reads a model's standing in one shape
+        # wherever it finds it, and never reconciles two."
+        #
+        # `ALL_JOB_TYPES` already maps a job type to the capability it operates
+        # (`load-model` and `unload-model` both to `llm`), so the grouping is not
+        # a new table anybody has to keep in step — it is the one the registry is
+        # already built from. What you can POST is answered by `job_types`, which
+        # is what the lifecycle rows were really there to tell anyone.
+        rows_for: dict[str, list[dict[str, Any]]] = {}
+        for name, plugin in sorted(store.registry.items()):
+            capability = ALL_JOB_TYPES[name]
+            if capability in rows_for:
+                continue
+            rows_for[capability] = [m.to_dict() for m in plugin.describe_models()]
         if config.enable_llm:
-            # PHASE2-LLM.md section 5: `/info` gains an `llm` capability whose
-            # models are the `/v1/models` rows — the same shape from the same
-            # producer, revision included. `load-model` and `unload-model` are
-            # listed above as themselves, because they are what you POST.
-            capabilities.append(
-                {
-                    "job_type": "llm",
-                    "models": model_rows(config, backend, residency),
-                }
-            )
+            # PHASE2-LLM.md section 5: the `llm` rows are `/v1/models`' rows,
+            # from the same producer, revision included.
+            rows_for["llm"] = model_rows(config, backend, residency)
         if config.enable_tts:
-            # PHASE3-TTS.md section 8: `/info` gains a `tts` capability whose
-            # rows are `/v1/voices`' rows VERBATIM — the same shape from the same
-            # producer, for the same reason `llm`'s are. `load-voice` and
-            # `unload-voice` are listed above as themselves, because they are
-            # what you POST.
-            capabilities.append(
-                {
-                    "job_type": "tts",
-                    "models": voice_rows(config, backend, residency),
-                }
-            )
+            # PHASE3-TTS.md section 8: the `tts` rows are `/v1/voices`' rows
+            # VERBATIM, for the same reason `llm`'s are.
+            rows_for["tts"] = voice_rows(config, backend, residency)
+        capabilities = [
+            {"job_type": capability, "models": rows}
+            for capability, rows in sorted(rows_for.items())
+        ]
         return {
             "server": {
                 "name": config.name,
@@ -296,6 +309,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     "vram_bytes": backend.gpu.vram_bytes,
                 },
             },
+            # What this server will accept in `POST /v1/jobs`. A capability
+            # above says what it can serve; this says what to ask it with, and
+            # the two are not the same list: `llm` is served through
+            # `load-model` and `unload-model`, neither of which is a capability.
+            "job_types": sorted(store.registry),
             "capabilities": capabilities,
         }
 

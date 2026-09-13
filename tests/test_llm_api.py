@@ -230,9 +230,20 @@ def test_info_gains_an_llm_capability(
     assert [row["id"] for row in by_type["llm"]["models"]] == [
         PAGE_MODEL, MODEL, BIG_MODEL, SMALL_BIG_MODEL,
     ]
-    # The two things you can actually POST are listed as themselves.
-    assert "load-model" in by_type
-    assert "unload-model" in by_type
+    # The two things you can actually POST are in `job_types`, NOT in
+    # `capabilities`. They were capabilities of their own until 2026-09-13, and
+    # the effect was that one model appeared three times — under `load-model`,
+    # under `unload-model` and under `llm` — in two different shapes, which is
+    # the thing PHASE2-LLM.md section 5 forbids in as many words.
+    info = llm_client.get("/v1/info", headers=auth).json()
+    assert "load-model" in info["job_types"]
+    assert "unload-model" in info["job_types"]
+    assert "load-model" not in by_type
+    assert "unload-model" not in by_type
+    ids = [row["id"] for entry in capabilities for row in entry["models"]]
+    assert len(ids) == len(set(ids)), (
+        "a model is described once, in one shape, wherever a client finds it"
+    )
 
 
 def test_the_llm_capability_rows_are_the_models_rows(
