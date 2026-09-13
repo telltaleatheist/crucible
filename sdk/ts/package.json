@@ -40,7 +40,7 @@
     "clean": "node scripts/clean.mjs",
     "build": "npm run clean && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && node scripts/stamp-module-type.mjs",
     "build:test": "tsc -p tsconfig.test.json",
-    "test:unit": "npm run build && npm run build:test && node --test build/test/unit.test.js build/test/unit-llm.test.js build/test/unit-voices.test.js build/test/unit-render.test.js",
+    "test:unit": "npm run build && npm run build:test && node scripts/unit.mjs",
     "test:e2e": "npm run build && npm run build:test && node --test build/test/e2e.test.js",
     "test:e2e-llm": "npm run build && npm run build:test && node --test build/test/e2e-llm.test.js",
     "test": "npm run test:unit"

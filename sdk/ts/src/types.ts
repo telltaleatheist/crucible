@@ -204,7 +204,36 @@ export type JobEvent =
   | { readonly id: number; readonly event: 'artifact'; readonly data: ArtifactData }
   | { readonly id: number; readonly event: 'done'; readonly data: DoneData }
   | { readonly id: number; readonly event: 'failed'; readonly data: FailedData }
-  | { readonly id: number; readonly event: 'cancelled'; readonly data: CancelledData };
+  | { readonly id: number; readonly event: 'cancelled'; readonly data: CancelledData }
+  | UnknownEvent;
+
+/**
+ * An event kind this build of the client does not know.
+ *
+ * The server's event vocabulary GROWS — `chunk` was added for `tts` without
+ * moving `api_version`, on the stated ground that a client which does not know
+ * the kind still sees every `progress`, `artifact` and `done` it saw before
+ * (PHASE3-TTS.md section 6). That argument is only true if the client actually
+ * survives the unknown frame, and until 2026-09-13 it did not: `readEvent`
+ * narrowed against a closed list and threw, so an older client watching ANY job
+ * on a newer server lost the whole stream at the first `chunk`.
+ *
+ * So an unknown kind arrives here instead, with its name and its parsed data
+ * intact, and is **never terminal** — the stream runs on to its real ending.
+ *
+ * This is not a softening of the no-fallbacks rule, and the line is worth
+ * stating: the client stays strict about every kind it CLAIMS to understand — a
+ * `chunk` missing `capped` is still a protocol error — and tolerant only of
+ * kinds it makes no claim about at all. Refusing to parse is honest; refusing to
+ * continue is not.
+ */
+export interface UnknownEvent {
+  readonly id: number;
+  readonly event: 'unknown';
+  /** The name the server actually sent. */
+  readonly kind: string;
+  readonly data: Readonly<Record<string, unknown>>;
+}
 
 export interface QueuedData {
   readonly position: number | null;

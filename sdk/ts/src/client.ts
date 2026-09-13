@@ -1251,7 +1251,7 @@ function readEvent(rawId: string | null, rawName: string | null, rawData: string
   if (rawName === null) {
     throw new CrucibleProtocolError(`SSE frame ${id} carried no event name`);
   }
-  const name = oneOf(rawName, EVENT_NAMES, `SSE frame ${id} event name`);
+  const name = rawName;
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawData);
@@ -1261,7 +1261,27 @@ function readEvent(rawId: string | null, rawName: string | null, rawData: string
   const data = asObject(parsed, `event ${id} (${name}) data`);
   const where = `event ${id} (${name})`;
 
-  switch (name) {
+  // A kind this build does not know is CARRIED, not refused. The server's event
+  // vocabulary grows without moving `api_version` — `chunk` arrived for `tts` on
+  // the stated ground that a client which does not know it still sees every
+  // `progress`, `artifact` and `done` it saw before — and that argument only
+  // holds if the client survives the frame. It did not: this narrowed against a
+  // closed list and threw, so an 0.2.0 client watching ANY job on a newer server
+  // lost the whole stream at the first `chunk`.
+  //
+  // Strict about what it claims to understand, tolerant of what it makes no
+  // claim about. A `chunk` missing `capped` is still a protocol error below;
+  // this is the other case entirely.
+  if (!(EVENT_NAMES as readonly string[]).includes(name)) {
+    return { id, event: 'unknown', kind: name, data };
+  }
+  // Narrowed by the check above, and narrowed rather than left a string so the
+  // switch below stays exhaustive: adding a kind to EVENT_NAMES without giving
+  // it a case is then a compile error, which is the half of the old strictness
+  // worth keeping.
+  const known = name as (typeof EVENT_NAMES)[number];
+
+  switch (known) {
     case 'queued':
       return { id, event: 'queued', data: { position: nullableNum(data, 'position', where) } };
     case 'warming':
