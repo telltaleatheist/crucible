@@ -35,6 +35,25 @@ export {
   CrucibleVersionError,
 } from './errors.js';
 
+export {
+  isStreamAudio,
+  isStreamDone,
+  isStreamRestart,
+  isStreamRowError,
+  openTtsStream,
+} from './stream.js';
+export type {
+  CancelOutcome,
+  StreamAudio,
+  StreamEvent,
+  StreamOptions,
+  StreamRestart,
+  StreamRowDone,
+  StreamRowError,
+  StreamTransport,
+  TtsStreamSession,
+} from './stream.js';
+
 export { API_VERSION, TERMINAL_EVENTS, isLlmCapability, isTtsCapability } from './types.js';
 export type {
   AcceleratorGpu,
