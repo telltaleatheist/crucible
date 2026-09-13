@@ -4,7 +4,40 @@ Rule for every phase: BookForge changes little or nothing until Crucible is read
 first BookForge consumer is `bookforge-cli` (it drives the compiled pipeline, so it proves
 the seam without touching the app UI).
 
-## Phase 1: handshake (now)
+**Where this stands, 2026-09-13.** Phases 1 through 4 are built and merged: every job type
+in DESIGN.md's table exists, is tested, is documented in its own contract file, and is
+reachable from `@crucible/client`. Two of them — `llm` and page reading — are verified on
+real cards with measured numbers in their manifests. The other four were built against
+fake engines on a night when both of Owen's cards were busy, and say so: every voice,
+aligner and whisper manifest carries `estimate_basis = "declared"`.
+
+So what is left is not code. It is **a card, and Owen's rulings on the six things below.**
+
+### Owed, and only a free card discharges it
+- `scripts/keeper-tts-live.sh` on the PC and the Mac: render a chapter, measure the peak,
+  paste the printed lines into the voice manifest. Same for the aligner and a whisper size.
+- dots.ocr: pull it, read one real page, compare the markup to what the `dots` env
+  produces today, and measure the utilisation with multimodal profiling ON.
+- The tts envs have never been installed anywhere, so their recipes are pins read off
+  narrator's own `pyproject.toml` rather than a resolved set.
+
+### Owed from Owen, and each blocks something
+1. **Extract `narrator` into its own repo?** `telltaleatheist/bookforge` is private, so
+   `crucible install tts` needs credentials for a repo that has nothing to do with
+   inference. This is the single most load-bearing open question.
+2. **`capped` on narrator's wire.** The frame cap never leaves the engine, so the `chunk`
+   event cannot tell a long sentence from a runaway — the one thing it exists to tell.
+   Not a two-line change: it touches the generation loop that renders his books.
+3. **Where do urvc's base assets live?** `rvc` refuses by name rather than fetching them
+   from a GitHub release, which DESIGN.md section 5 forbids as a source for weights.
+4. **Publish the promoted fine-tune merges.** The HF revisions are older merges than the
+   arms the catalog measured; the caps survive that gap, the pace bands do not.
+5. **The take ladder.** Its steps are server config and its judgment is the client's — the
+   one place the division of knowledge had a genuinely arguable alternative.
+6. **Does a resident model ever unload itself?** Proposed: no, and the Servers row shows
+   what is resident and for how long (PHASE5-APPS.md section 7).
+
+## Phase 1: handshake (DONE)
 
 **A1. Server skeleton** (`crucible/`, Python)
 - package + `pyproject.toml`, CLI (`init`, `serve`, `doctor`, `token --show`)
