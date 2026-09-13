@@ -29,6 +29,7 @@ from typing import Any, Callable
 from .config import Config
 from .engines import (
     EngineError,
+    NarratorEngine,
     SubprocessEngine,
     build_engine,
     build_voice_engine,
@@ -211,6 +212,27 @@ class Residency:
         return self._resident if isinstance(self._resident, ResidentVoice) else None
 
     @property
+    def voice_engine(self) -> NarratorEngine | None:
+        """The narrator process serving the resident voice, or None.
+
+        `resident_model` carries a `base_url` and that is all the proxy needs;
+        there is no such string for a voice, because narrator answers no HTTP
+        route. So the render door is handed the engine OBJECT — it is the
+        channel — and it is published only while a voice is resident, which is
+        exactly the window in which sending narrator a `generate_batch` means
+        anything.
+        """
+        if not isinstance(self._resident, ResidentVoice):
+            return None
+        engine = self._engine
+        if not isinstance(engine, NarratorEngine):  # unreachable
+            raise EngineError(
+                f"a voice is resident but the engine holding the card is "
+                f"{type(engine).__name__}, not a narrator"
+            )
+        return engine
+
+    @property
     def warming(self) -> str | None:
         """The id a load job is currently warming, or None."""
         return self._warming
@@ -366,7 +388,25 @@ class Residency:
             f"on {spec.backend}; log {log_path}"
         )
         try:
-            self._start(engine, weights_dir, manifest.id, port, [], say, timeout)
+            # `ready` says narrator is listening; it does not say a voice is in
+            # memory. A `load-voice` job that stopped at `ready` would report a
+            # resident voice while the card was empty, and the first render would
+            # be the thing that found out. So the load message is part of the
+            # load, and a failure in it tears the engine down exactly as a
+            # readiness failure does — which is what `_start`'s `confirm`
+            # argument is: the proof that comes after the announcement.
+            self._start(
+                engine,
+                weights_dir,
+                manifest.id,
+                port,
+                [],
+                say,
+                timeout,
+                confirm=lambda: self._load_the_voice(
+                    engine, manifest, weights_dir, say
+                ),
+            )
         finally:
             self.end_warming()
 
@@ -387,6 +427,50 @@ class Residency:
         return self._resident
 
     @staticmethod
+    def _load_the_voice(
+        engine: NarratorEngine,
+        manifest: VoiceManifest,
+        weights_dir: Path,
+        say: Callable[[str], None],
+    ) -> dict[str, Any]:
+        """Send narrator its `load`, and refuse a sample rate that disagrees.
+
+        **The sample rate is narrator's, not Crucible's.** `/v1/voices` publishes
+        `sample_rate` off the manifest and a client writes FLACs at it; narrator
+        reports on its `loaded` line the rate the engine it actually built
+        renders at. Those two being 24000 for every voice in the catalog is the
+        kind of coincidence that becomes a hard-coded constant, so they are
+        compared, and a disagreement is a **refusal naming both numbers**. It is
+        deliberately not a resample: audio resampled to match a manifest is audio
+        that no longer matches the engine, and nothing downstream would say so.
+        """
+        say(f"loading {manifest.id} into narrator from {weights_dir}")
+        loaded = engine.load(
+            voice=manifest.id, model_dir=weights_dir, warm=True, on_progress=say
+        )
+        reported = loaded.get("sampleRate")
+        if not isinstance(reported, int) or isinstance(reported, bool):
+            raise EngineError(
+                f"{engine.name} loaded {manifest.id} and reported sampleRate "
+                f"{reported!r}, which is not a sample rate. Every duration and "
+                "every byte count downstream is derived from it"
+            )
+        if reported != manifest.sample_rate:
+            raise EngineError(
+                f"{engine.name} renders {manifest.id} at {reported} Hz, but "
+                f"{manifest.path.name} declares {manifest.sample_rate}. Crucible "
+                "refuses rather than resampling: a FLAC written at the manifest's "
+                "rate from bytes generated at the engine's is a chunk of the "
+                "wrong length, and nothing in the file would say so. Fix the "
+                "manifest, or find out why the engine changed"
+            )
+        say(
+            f"narrator loaded {manifest.id}: engine {loaded.get('engine')!r}, "
+            f"backend {loaded.get('backend')!r}, {reported} Hz"
+        )
+        return loaded
+
+    @staticmethod
     def _start(
         engine: SubprocessEngine,
         weights_dir: Path,
@@ -395,11 +479,20 @@ class Residency:
         args: list[str],
         say: Callable[[str], None],
         timeout: float,
+        confirm: Callable[[], Any] | None = None,
     ) -> None:
-        """Spawn and wait, tidying up a half-started engine without hiding why."""
+        """Spawn and wait, tidying up a half-started engine without hiding why.
+
+        `confirm` is whatever else must be true before this engine counts as
+        loaded. A model's engine has nothing there — a 200 from `/v1/models`
+        means the weights are on the card. A voice's has narrator's own `load`,
+        because `ready` only means the process is listening.
+        """
         try:
             engine.start(weights_dir, served, port, args)
             engine.ready(timeout, on_progress=say)
+            if confirm is not None:
+                confirm()
         except EngineError as start_failure:
             # Tidy up the half-started engine, but report the *start* failure —
             # that is the one that explains the load. A stop failure on top of it
