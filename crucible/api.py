@@ -288,6 +288,14 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         if config.enable_tts:
             # PHASE3-TTS.md section 8: the `tts` rows are `/v1/voices`' rows
             # VERBATIM, for the same reason `llm`'s are.
+            #
+            # This assignment REPLACES whatever the loop above produced, and for
+            # `tts` that is not a no-op the way it is for `llm`. `llm` is a
+            # capability name and nothing else — the types you POST are
+            # `load-model` and `unload-model` — while `tts` is both: the render
+            # door's job type is literally `tts`, so the loop has already filled
+            # this key from its `describe_models()`. The richer row wins, which
+            # is the same rule applied one level down.
             rows_for["tts"] = voice_rows(config, backend, residency)
         capabilities = [
             {"job_type": capability, "models": rows}

@@ -23,7 +23,7 @@ from .base import (
 from .asr import AsrJobType
 from .echo import EchoJobType
 from .llm import LoadModelJobType, UnloadModelJobType, model_rows
-from .tts import LoadVoiceJobType, UnloadVoiceJobType, voice_rows
+from .tts import LoadVoiceJobType, TtsJobType, UnloadVoiceJobType, voice_rows
 
 #: The vocabulary this build knows, and which config flag turns each one on.
 #: `resolve()` tells "that type does not exist" from "it exists but is off".
@@ -33,6 +33,7 @@ ALL_JOB_TYPES: dict[str, str] = {
     LoadModelJobType.name: "llm",
     UnloadModelJobType.name: "llm",
     LoadVoiceJobType.name: "tts",
+    TtsJobType.name: "tts",
     UnloadVoiceJobType.name: "tts",
 }
 
@@ -63,6 +64,7 @@ def build_registry(
     if config.enable_tts:
         registry[LoadVoiceJobType.name] = LoadVoiceJobType(config, backend, holder)
         registry[UnloadVoiceJobType.name] = UnloadVoiceJobType(config, backend, holder)
+        registry[TtsJobType.name] = TtsJobType(config, backend, holder)
     if config.enable_asr:
         registry[AsrJobType.name] = AsrJobType(config, backend, holder.owned_pids)
     _assert_every_type_implements_the_protocol(registry)
@@ -170,6 +172,7 @@ __all__ = [
     "LoadModelJobType",
     "LoadVoiceJobType",
     "ModelDescriptor",
+    "TtsJobType",
     "Residency",
     "UnloadModelJobType",
     "UnloadVoiceJobType",
