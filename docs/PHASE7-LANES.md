@@ -202,7 +202,11 @@ hours later, in an order he did not choose. It also cannot express "these three 
 on the Mac, those three on the PC", which is the case that motivated the question.
 
 **So: a per-row pin, defaulting to Any.** `Run on: [ Any | This PC | Mac Studio ]`, set when
-the row is created and editable while it is still queued. The decision is recorded at the
+the row is created and editable while it is still queued. **`Any` means "the first eligible
+machine", never "spread across machines"** — and that gloss belongs next to the option in
+the UI, because "Any" reads like load-balancing to anyone who has not read this section.
+Distribution here is an emergent property of several servers being configured and several
+jobs being pinned, not something the queue performs. The decision is recorded at the
 moment the intent exists — when Owen makes the row — instead of being inferred from global
 state at an unpredictable later time. It costs almost nothing, because section 4 already
 requires an eligibility function; a pin is one more input to it:
@@ -440,10 +444,28 @@ a message is not a contract.
 
 ### 9.1 The Crucible id is stable across machines. `engine_model_name` is not.
 
-**A client may persist the Crucible id. It must never persist a name discovery handed
-back.**
+**THE GUARANTEE, stated as the field a client actually reads:**
 
-The reason is not style, it is that the two backends cannot be made to agree:
+> The `id` in `GET /v1/openai/models` is the **Crucible id** — a constant in this repo,
+> identical on every machine serving that manifest. `engine_model_name` is reported
+> **beside** it as a diagnostic and **never appears in `id`**.
+>
+> So: **persist the listing's `id`. Never persist `engine_model_name`.**
+
+Verified rather than asserted: `crucible/api.py`'s `openai_models` sets `"id":
+resident.model_id` and `"engine_model_name": resident.engine_model_name` as separate keys,
+and nothing merges them.
+
+**This deliberately permits discovery.** An earlier draft of this section said "key on the
+id you asked for, never the name discovery hands back", and the Foundry session was right
+to reject it: read literally it outlaws asking a server what it serves, which is a
+deliberate feature — `requireServedModel` with no `--model` returns the single served row
+and persists its `id`, which is how a friend avoids typing a model name at all and how
+Owen's measured 9B run proved the discovery path end to end. The rule above forbids the
+thing that actually breaks and permits the thing that works, and it holds whether or not
+the client knows what it asked for.
+
+The reason the second half is needed is that the two backends cannot be made to agree:
 
 - `crucible/engines/vllm.py` always launches with `--served-model-name <crucible id>`, so
   on `cuda-linux` the engine answers to the Crucible id.
