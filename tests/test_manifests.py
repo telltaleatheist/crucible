@@ -1,4 +1,4 @@
-"""Model manifests: the two this build ships, and what the loader refuses.
+"""Model manifests: the three this build ships, and what the loader refuses.
 
 Strict validation is the point (PHASE2-LLM.md section 1). A manifest with a typo
 in `memory_bytes_estimate` must not load with no estimate and let the guard wave a
@@ -208,16 +208,53 @@ def test_an_unknown_model_id_names_what_is_shipped(tmp_path: Path) -> None:
 # ------------------------------------------------------- the shipped manifests
 
 
-def test_this_build_ships_the_two_phase_two_manifests() -> None:
+#: Every manifest this build ships, in the order `load_all_manifests` returns
+#: them — which is id order, and the order `/v1/models` lists them in. The 4-bit
+#: 27B sorts after the bf16 one because its id extends it.
+SHIPPED = ["qwen3.5-9b", "qwen3.8-27b", "qwen3.8-27b-4bit"]
+
+#: Each model's `context_default`. The two bf16 manifests carry Owen's pinned
+#: cleanup context; the 4-bit 27B carries the 98304 of his `qwen3.8:27b-24g`
+#: Ollama tag, which is the context he actually runs on the 3090 Ti.
+CONTEXTS = {"qwen3.5-9b": 12288, "qwen3.8-27b": 12288, "qwen3.8-27b-4bit": 98304}
+
+
+def test_this_build_ships_the_phase_two_manifests() -> None:
     manifests = load_all_manifests()
-    assert sorted(manifests) == ["qwen3.5-9b", "qwen3.8-27b"]
+    assert sorted(manifests) == SHIPPED
 
 
-@pytest.mark.parametrize("model_id", ["qwen3.5-9b", "qwen3.8-27b"])
+def test_the_ids_sort_the_way_the_listing_shows_them() -> None:
+    """`qwen3.8-27b-4bit` sits after `qwen3.8-27b`, not before it."""
+    assert sorted(SHIPPED) == SHIPPED
+    assert list(load_all_manifests()) == SHIPPED
+
+
+def test_an_id_that_is_a_prefix_of_another_still_lists_in_id_order(
+    tmp_path: Path,
+) -> None:
+    """The order is the ids', not the filenames'.
+
+    As whole paths `demo-1b-4bit.toml` sorts BEFORE `demo-1b.toml` — '-' is 0x2D
+    and '.' is 0x2E — while as ids `demo-1b` comes first. `load_all_manifests`
+    documents id order and `/v1/models` lists in exactly this order, so the
+    difference is not cosmetic.
+    """
+    (tmp_path / "demo-1b.toml").write_text(GOOD, encoding="utf-8")
+    (tmp_path / "demo-1b-4bit.toml").write_text(
+        GOOD.replace('id = "demo-1b"', 'id = "demo-1b-4bit"'), encoding="utf-8"
+    )
+    (tmp_path / "demo-9b.toml").write_text(
+        GOOD.replace('id = "demo-1b"', 'id = "demo-9b"'), encoding="utf-8"
+    )
+    assert list(load_all_manifests(tmp_path)) == ["demo-1b", "demo-1b-4bit", "demo-9b"]
+
+
+@pytest.mark.parametrize("model_id", SHIPPED)
 def test_each_shipped_manifest_declares_both_backends(model_id: str) -> None:
     manifest = load_manifest(model_id)
     assert sorted(manifest.backends) == ["cuda-linux", "mlx-darwin"]
-    assert manifest.context_default == 12288
+    assert manifest.context_default == CONTEXTS[model_id]
     for kind, spec in manifest.backends.items():
         assert spec.engine == BACKEND_ENGINES[kind]
         assert len(spec.revision) == 40
@@ -233,6 +270,28 @@ def test_the_27b_does_not_fit_a_24_gib_card() -> None:
 def test_the_9b_does_fit_a_24_gib_card() -> None:
     spec = load_manifest("qwen3.5-9b").spec("cuda-linux")
     assert spec.memory_bytes_estimate < 24 * 1024 ** 3
+
+
+def test_the_4bit_27b_fits_a_24_gib_card_and_the_bf16_one_does_not() -> None:
+    """The whole reason the 4-bit manifest exists, as arithmetic.
+
+    Same model, same family, same params_b; the only difference is the weights
+    each backend block points at. One is refused on Owen's card by name and the
+    other is not.
+    """
+    small = load_manifest("qwen3.8-27b-4bit")
+    big = load_manifest("qwen3.8-27b")
+    assert small.family == big.family == "qwen3.8"
+    assert small.params_b == big.params_b == 27
+    assert small.spec("cuda-linux").memory_bytes_estimate < 24 * 1024 ** 3
+    assert big.spec("cuda-linux").memory_bytes_estimate > 24 * 1024 ** 3
+
+
+def test_the_4bit_27b_does_not_force_a_dtype() -> None:
+    """W4A16 carries its own weight dtype; `--dtype bfloat16` would override it."""
+    args = load_manifest("qwen3.8-27b-4bit").spec("cuda-linux").engine_args
+    assert "--dtype" not in args
+    assert args == ("--gpu-memory-utilization", "0.85")
 
 
 def test_the_manifests_directory_is_beside_the_package() -> None:

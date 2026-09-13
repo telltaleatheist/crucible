@@ -1,0 +1,144 @@
+# Qwen3.8 27B, 4-bit — the 27B that fits a 24 GB card.
+#
+# Same model as `qwen3.8-27b`, quantized. That manifest exists to be refused on a
+# 24 GB card; this one exists to be loaded on one. It is Crucible's equivalent of
+# Owen's Ollama tag `qwen3.8:27b-24g` — `qwen3.8:27b` (architecture qwen35,
+# 27.3B, Q4_K_M, 17 GB) with `num_ctx 98304`, `temperature 0.6`, `top_k 20`,
+# `min_p 0`, `repeat_penalty 1`, `presence_penalty 0` baked into a Modelfile. It
+# is the 27B he actually runs on the 3090 Ti.
+#
+# Crucible carries the context here and nothing else: a manifest says what a model
+# needs, not how to sample it. Owen's sampling numbers are a client's to send per
+# request, and the proxy forwards them verbatim (PHASE2-LLM.md section 5).
+#
+# context_default = 98304 is Owen's 24 GB working context, from that tag. On
+# cuda-linux it is also what vLLM is started with: `--max-model-len 98304`,
+# which engines/vllm.py always passes from `context_default`. The model's own
+# `max_position_embeddings` is 262144, so 98304 is a choice about the card, not a
+# limit of the weights — and at 98304 the KV cache alone is 6.00 GiB of the 24.
+#
+# ------------------------------------------------------------------ the repo
+#
+# The cuda-linux repo is NOT the one this manifest was first asked for.
+# `cyankiwi/Qwen3.8-27B-AWQ-INT4` (1.6M downloads) is a real, correctly formed
+# int4 repo — verified on the hub at its sha 6e134bae: `quant_method =
+# "compressed-tensors"`, `format = "pack-quantized"`, 4 bits, group 32,
+# asymmetric, architecture `Qwen3_5ForConditionalGeneration`, the same
+# architecture the bf16 manifest pins. It simply does not fit. Its safetensors
+# come to 21_018_000_928 B, and 21.02 + 6.44 of KV = 27.46 GB is 1.6 GiB PAST a
+# 24 GB card. A manifest whose whole purpose is fitting cannot point at it.
+#
+# `avyukth/Qwen3.8-27B-AWQ-INT4` is the same model converted with llm-compressor
+# 0.18.0 — `AWQModifier` + `QuantizationModifier`, scheme W4A16, group 128,
+# symmetric; its recipe.yaml is in the repo — and comes to 18_568_390_152 B in
+# ONE safetensors file. Both repos leave the same things in bf16 (the embeddings,
+# lm_head, the 48 linear-attention layers, the 333 vision tensors); read out of
+# the two safetensors headers, the entire 2.45 GB between them is:
+#   +849_398_784 B  15 `mtp.*` tensors cyankiwi carries and avyukth does not
+#   +1_600_184_320 B the cost of group-32 asymmetric over group-128 symmetric —
+#                    finer scales, plus zero-points, on 24.4 billion int4 weights
+#   -1_552 B         int64 index tensors, which is the whole remainder
+# Neither is a flaw; they are just 2.45 GB this card does not have. avyukth is
+# tagged `vllm`, `compressed-tensors`, `w4a16`, has 100k downloads, ships no
+# separate MTP shard, and every byte of its one file is a byte vLLM loads — so
+# "the weights" here is a single unambiguous number.
+#
+# Verified in the pinned vLLM 0.29.0 env on the PC, by reading it and not by
+# running it: `registry.py` maps `Qwen3_5ForConditionalGeneration`,
+# `compressed-tensors` is a registered quantization method, `pack_quantized` is
+# handled, and `CompressedTensorsWNA16.get_min_capability()` is 75 — Turing and
+# up, so Ampere sm_86 is in range.
+#
+# Sizes of the other candidates at their current shas, for the record:
+#   avyukth/...-AWQ-INT4              18_568_390_152   (this one)
+#   RedHatAI/Qwen3.8-27B-INT4         18_603_387_656 + 849_400_392 MTP shard
+#   mattbucci/Qwen3.8-27B-AWQ         18_698_408_384   (classic AutoAWQ)
+#   philbert440/...-W4A16-AWQ         18_698_467_264 + 849_400_424 MTP shard
+#   nicosuter/Qwen3.8-27B-AWQ         21_545_387_960
+#   cyankiwi/...-AWQ-INT4             21_018_000_928   (asked for; too big)
+#   barrydeen/Qwen3.8-27B-AWQ-4bit    27_744_391_352
+#   cyankiwi/...-AWQ-BF16-INT4        28_845_394_920
+# NVFP4 repos are out on principle: the 3090 Ti is Ampere and NVFP4 needs
+# Blackwell. `Qwen/Qwen3.8-27B-FP8` is ~27 GB of weights and never fits.
+#
+# ------------------------------------------------------------ the arithmetic
+#
+# cuda-linux's estimate is COMPUTED, not measured, and it has to be: the RTX
+# 3090 Ti was off limits for this whole build (Owen's ladder owns the card, and
+# Crucible never evicts). See README's TODO(cuda-linux verification).
+#
+# The KV figure is the bf16 manifest's, unchanged, because the quantized repo's
+# config.json carries the same attention shape (read at the pinned sha):
+#   64 layers, full_attention_interval 4 => 16 full-attention layers; the other
+#   48 are linear (recurrent) attention whose state is per-sequence, not
+#   per-token, and is not counted here.
+#   per token per full layer = 2 (K and V) x 4 kv heads x 256 head_dim x 2 bytes
+#                            = 4096 B
+#   per token                = 4096 x 16 = 65_536 B
+#   at 98304 tokens          = 6_442_450_944 B  (6.00 GiB exactly)
+# cuda-linux: 18_568_390_152 (weights) + 6_442_450_944 (KV) = 25_010_841_096
+#             = 23.29 GiB, against a 24 GB card's 23.99 GiB.
+#
+# That is 0.70 GiB of headroom on a number the 9B showed to run about 6% UNDER
+# the truth (computed 19.22 GB against a measured 20.38 GB). So this row is a
+# floor, and `loadable: true` on a 24 GB card means only that the card is big
+# enough — `/v1/models` compares the estimate against the card's TOTAL. Whether
+# it fits alongside the Windows desktop's ~2.3 GB is the load-time guard's
+# question, against free VRAM, and on this card the honest expectation is that it
+# will be close. Measure it (`./scripts/measure-llm-memory.sh qwen3.8-27b-4bit`)
+# the first time the card is free, and if it is refused, lower context_default
+# rather than raising the estimate: KV is 6.00 GiB of this budget and Owen's
+# 98304 is a working choice, not a property of the model.
+
+[model]
+id = "qwen3.8-27b-4bit"
+family = "qwen3.8"
+params_b = 27
+context_default = 98304
+
+[backends.cuda-linux]
+engine = "vllm"
+hf_repo = "avyukth/Qwen3.8-27B-AWQ-INT4"
+revision = "5a2ee524cbc9f3ac5df12729ecf0c4b57f311192"
+memory_bytes_estimate = 25_010_841_096
+# No `--dtype`: compressed-tensors W4A16 carries its own weight dtype and the
+# activation dtype comes from the config, so `dtype auto` is what this wants;
+# forcing bfloat16 the way the bf16 manifests do would be overriding a decision
+# the checkpoint already made.
+#
+# `--gpu-memory-utilization 0.85` is carried over from the 9B, and carries the
+# 9B's caveat with it: it is the contract's example value and has never been
+# exercised on Owen's card. On a 24 GB card holding 18.6 GB of weights alongside
+# the Windows desktop it may well be too low to leave room for the KV cache;
+# expect to raise it, and record the measured reason when you do.
+engine_args = ["--gpu-memory-utilization", "0.85"]
+
+[backends.mlx-darwin]
+engine = "mlx-lm"
+hf_repo = "mlx-community/Qwen3.8-27B-4bit"
+revision = "3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
+# MEASURED on Owen's Mac Studio (M1 Ultra, 64 GB), mlx-lm 0.31.3 / mlx 0.32.2,
+# 2026-09-12, via mlx's own allocator — the same method as the 9B:
+#   after load                       active 14.09 GiB, peak 14.09 GiB
+#   after a 98220-token completion   active 14.09 GiB, PEAK 31.55 GiB
+# and independently, as the whole engine's share of unified memory measured from
+# outside by `scripts/measure-llm-memory.sh`:
+#   at rest                          +15_829 MiB   (15.46 GiB)
+#   under a 98257-token completion   +32_116 MiB   (31.36 GiB)
+# Two methods, 0.6% apart. The peak is the figure: it is what the machine must be
+# able to give while a full-context request is in flight.
+#
+# COMPUTED would have said 22_496_992_293 — weights 16_054_541_349 + KV
+# 6_442_450_944 — and that is 34% UNDER. The gap is not KV and it is not the
+# weights: it is what mlx-lm's prefill holds at once. It processes the prompt in
+# 2048-token steps and takes logits over the whole step, and this model's vocab
+# is 248320, so one step's logits alone are 2048 x 248320 x 4 B = 2.03 GB before
+# any temporary. On the 9B, at 12288 tokens and the same vocab, that overhead was
+# small enough to read as "about 6% under"; at 98304 it is the largest single
+# term after the weights. Do not compute this number for a long-context model.
+#
+# (`measure-llm-memory.sh` printed 15_355_101_184 for this run, which is the
+# engine process's RSS — MLX memory-maps the weights, so RSS is a floor and here
+# it is 2.2x low. That script now reports the unified-memory delta instead.)
+memory_bytes_estimate = 33_873_484_870
+engine_args = []

@@ -147,6 +147,10 @@ class FakeEngine:
         #: reached the engine without polling on a sleep.
         self.warming_started = threading.Event()
         self.stopped = False
+        #: Exactly the argument list `start()` was handed — the manifest's
+        #: `engine_args` plus what Crucible always adds. A test that cares what
+        #: the engine was told reads this rather than guessing.
+        self.args: list[str] = []
 
     @property
     def log_path(self) -> Path:
@@ -167,6 +171,7 @@ class FakeEngine:
     ) -> None:
         handler = type("BoundHandler", (_Handler,), {"served_name": served_name})
         self._handler = handler
+        self.args = list(args)
         # The port the caller found may have been taken; the fake binds its own
         # and reports it, which is all the proxy reads.
         self._port = port if port else find_free_port()
