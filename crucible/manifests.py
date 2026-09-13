@@ -51,6 +51,14 @@ _BACKEND_REQUIRED: dict[str, type] = {
 }
 _BACKEND_OPTIONAL: dict[str, type] = {
     "engine_args": list,
+    # A context this backend can actually hold, when the model's own number is
+    # not one it can. `[model] context_default` is what the model is FOR; this is
+    # what a particular accelerator has room for, and the two are allowed to
+    # disagree — `qwen3.8-27b-4bit` wants Owen's 98304 and gets it on 64 GB of
+    # unified memory, while 98304 of its KV is 7.9 GiB the 3090 Ti does not have
+    # once the weights are down. Absent means "the model's number"; it is never
+    # a silent default.
+    "context_default": int,
 }
 
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
@@ -72,6 +80,8 @@ class BackendSpec:
     revision: str
     memory_bytes_estimate: int
     engine_args: tuple[str, ...]
+    #: This backend's own context, or None to use the model's.
+    context_default: int | None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,6 +91,7 @@ class BackendSpec:
             "revision": self.revision,
             "memory_bytes_estimate": self.memory_bytes_estimate,
             "engine_args": list(self.engine_args),
+            "context_default": self.context_default,
         }
 
 
@@ -95,6 +106,19 @@ class ModelManifest:
 
     def supports(self, backend_kind: str) -> bool:
         return backend_kind in self.backends
+
+    def context_for(self, backend_kind: str) -> int:
+        """The context THIS backend serves: its own, or the model's.
+
+        Everything that names a context — vLLM's `--max-model-len`, the resident
+        model's row, `/v1/models` — must ask this and not read
+        `self.context_default` directly, or a backend's override would be
+        reported by one and ignored by the other.
+        """
+        found = self.backends.get(backend_kind)
+        if found is None or found.context_default is None:
+            return self.context_default
+        return found.context_default
 
     def spec(self, backend_kind: str) -> BackendSpec:
         """The block for `backend_kind`, or a named refusal."""
@@ -260,6 +284,11 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
                     f"{where}: engine_args[{index}] must be a string, got "
                     f"{type(argument).__name__}"
                 )
+        backend_context = block.get("context_default")
+        if backend_context is not None and backend_context <= 0:
+            raise ManifestError(
+                f"{where}: context_default must be positive, got {backend_context}"
+            )
         backends[kind] = BackendSpec(
             backend=kind,
             engine=engine,
@@ -267,6 +296,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             revision=block["revision"],
             memory_bytes_estimate=block["memory_bytes_estimate"],
             engine_args=tuple(engine_args),
+            context_default=backend_context,
         )
 
     return ModelManifest(

@@ -4,8 +4,9 @@ Started as `python -m vllm.entrypoints.openai.api_server` from the llm venv, so
 the server process itself never imports torch. The args are the manifest's
 `engine_args` plus the two Crucible always sets: `--served-model-name <id>`, so
 the engine answers to Crucible's model id rather than a filesystem path, and
-`--max-model-len <context_default>`, so the context the manifest promises is the
-context the engine actually allows.
+`--max-model-len <context>`, so the context the manifest promises is the context
+the engine actually allows. That context is `ModelManifest.context_for(backend)`
+— this backend's own number when it declares one, the model's otherwise.
 """
 
 from __future__ import annotations

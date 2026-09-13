@@ -56,6 +56,39 @@ def test_a_complete_manifest_parses() -> None:
     assert spec.engine_args == ("--dtype", "bfloat16")
 
 
+def test_a_backend_without_its_own_context_serves_the_models() -> None:
+    manifest = parse(GOOD)
+    assert manifest.spec("cuda-linux").context_default is None
+    assert manifest.context_for("cuda-linux") == 4096
+
+
+def test_a_backend_may_carry_its_own_context() -> None:
+    """What the model is FOR and what an accelerator has room for can differ.
+
+    `qwen3.8-27b-4bit` is the live case: 98304 on 64 GB of unified memory, less
+    on a 24 GB card once 18.6 GB of weights are down.
+    """
+    manifest = parse(GOOD + "context_default = 1024\n")
+    assert manifest.context_default == 4096
+    assert manifest.spec("cuda-linux").context_default == 1024
+    assert manifest.context_for("cuda-linux") == 1024
+    # A backend this manifest does not declare falls back to the model's number
+    # rather than raising: the caller asked what context that host would serve.
+    assert manifest.context_for("mlx-darwin") == 4096
+
+
+def test_a_backend_context_must_be_positive() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(GOOD + "context_default = 0\n")
+    assert "context_default must be positive, got 0" in str(caught.value)
+
+
+def test_a_backend_context_must_be_an_int() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(GOOD + 'context_default = "big"\n')
+    assert "context_default must be int, got str" in str(caught.value)
+
+
 def test_engine_args_is_optional() -> None:
     manifest = parse(GOOD.replace('engine_args = ["--dtype", "bfloat16"]\n', ""))
     assert manifest.spec("cuda-linux").engine_args == ()
@@ -218,6 +251,11 @@ SHIPPED = ["qwen3.5-9b", "qwen3.8-27b", "qwen3.8-27b-4bit"]
 #: Ollama tag, which is the context he actually runs on the 3090 Ti.
 CONTEXTS = {"qwen3.5-9b": 12288, "qwen3.8-27b": 12288, "qwen3.8-27b-4bit": 98304}
 
+#: Where a backend serves a context of its own. `qwen3.8-27b-4bit` wants 98304
+#: and gets it on the Mac; on a 24 GB card 98304 of its KV is 7.9 GiB that is not
+#: there, MEASURED 2026-09-12, so its cuda-linux block carries 16384.
+BACKEND_CONTEXTS = {("qwen3.8-27b-4bit", "cuda-linux"): 16384}
+
 
 def test_this_build_ships_the_phase_two_manifests() -> None:
     manifests = load_all_manifests()
@@ -258,6 +296,8 @@ def test_each_shipped_manifest_declares_both_backends(model_id: str) -> None:
     for kind, spec in manifest.backends.items():
         assert spec.engine == BACKEND_ENGINES[kind]
         assert len(spec.revision) == 40
+        expected = BACKEND_CONTEXTS.get((model_id, kind), CONTEXTS[model_id])
+        assert manifest.context_for(kind) == expected
         assert spec.memory_bytes_estimate > 0
 
 
@@ -291,7 +331,11 @@ def test_the_4bit_27b_does_not_force_a_dtype() -> None:
     """W4A16 carries its own weight dtype; `--dtype bfloat16` would override it."""
     args = load_manifest("qwen3.8-27b-4bit").spec("cuda-linux").engine_args
     assert "--dtype" not in args
-    assert args == ("--gpu-memory-utilization", "0.85")
+    assert args == (
+        "--gpu-memory-utilization", "0.86",
+        "--max-num-seqs", "16",
+        "--skip-mm-profiling",
+    )
 
 
 def test_the_manifests_directory_is_beside_the_package() -> None:

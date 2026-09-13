@@ -145,10 +145,11 @@ class Residency:
         served = engine_model_name(spec.engine, weights_dir, manifest.id)
         port = find_free_port()
 
+        context = manifest.context_for(spec.backend)
         self.begin_warming(manifest.id)
         say(
             f"starting {spec.engine} for {manifest.id} on 127.0.0.1:{port} "
-            f"(context {manifest.context_default}); log {log_path}"
+            f"(context {context}); log {log_path}"
         )
         try:
             engine.start(
@@ -181,7 +182,7 @@ class Residency:
             base_url=engine.base_url,
             port=port,
             revision=spec.revision,
-            context_default=manifest.context_default,
+            context_default=context,
             memory_bytes_estimate=spec.memory_bytes_estimate,
             log_path=log_path,
             loaded_at=_now(),
@@ -198,7 +199,7 @@ class Residency:
         """
         args = list(spec.engine_args)
         if spec.engine == "vllm":
-            args += ["--max-model-len", str(manifest.context_default)]
+            args += ["--max-model-len", str(manifest.context_for(spec.backend))]
         return args
 
     def unload(self, model_id: str) -> ResidentModel:

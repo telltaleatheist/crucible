@@ -61,34 +61,58 @@
 # NVFP4 repos are out on principle: the 3090 Ti is Ampere and NVFP4 needs
 # Blackwell. `Qwen/Qwen3.8-27B-FP8` is ~27 GB of weights and never fits.
 #
-# ------------------------------------------------------------ the arithmetic
+# ------------------------------------------------------- what 98304 cost here
 #
-# cuda-linux's estimate is COMPUTED, not measured, and it has to be: the RTX
-# 3090 Ti was off limits for this whole build (Owen's ladder owns the card, and
-# Crucible never evicts). See README's TODO(cuda-linux verification).
-#
-# The KV figure is the bf16 manifest's, unchanged, because the quantized repo's
-# config.json carries the same attention shape (read at the pinned sha):
+# The arithmetic this block used to carry, kept because it is what got refused:
 #   64 layers, full_attention_interval 4 => 16 full-attention layers; the other
 #   48 are linear (recurrent) attention whose state is per-sequence, not
-#   per-token, and is not counted here.
+#   per-token, and was not counted.
 #   per token per full layer = 2 (K and V) x 4 kv heads x 256 head_dim x 2 bytes
-#                            = 4096 B
-#   per token                = 4096 x 16 = 65_536 B
-#   at 98304 tokens          = 6_442_450_944 B  (6.00 GiB exactly)
-# cuda-linux: 18_568_390_152 (weights) + 6_442_450_944 (KV) = 25_010_841_096
-#             = 23.29 GiB, against a 24 GB card's 23.99 GiB.
+#                            = 4096 B;  per token = 65_536 B
+#   at 98304 tokens          = 6_442_450_944 B  (6.00 GiB)
+#   18_568_390_152 (weights) + 6_442_450_944 (KV) = 25_010_841_096 = 23.29 GiB
 #
-# That is 0.70 GiB of headroom on a number the 9B showed to run about 6% UNDER
-# the truth (computed 19.22 GB against a measured 20.38 GB). So this row is a
-# floor, and `loadable: true` on a 24 GB card means only that the card is big
-# enough — `/v1/models` compares the estimate against the card's TOTAL. Whether
-# it fits alongside the Windows desktop's ~2.3 GB is the load-time guard's
-# question, against free VRAM, and on this card the honest expectation is that it
-# will be close. Measure it (`./scripts/measure-llm-memory.sh qwen3.8-27b-4bit`)
-# the first time the card is free, and if it is refused, lower context_default
-# rather than raising the estimate: KV is 6.00 GiB of this budget and Owen's
-# 98304 is a working choice, not a property of the model.
+# MEASURED 2026-09-12 on Owen's PC, and the card's first answer was no:
+#
+#   $ bookforge-tts --crucible-load --server wsl --model qwen3.8-27b-4bit
+#   409 insufficient_memory: cannot load 'qwen3.8-27b-4bit': it needs 23.3 GiB
+#   and this host has 22.6 GiB free of 24.0 GiB
+#
+# The guard refused before an engine started, naming both numbers — the design
+# working. Per this comment's own instruction, the context came down rather than
+# the estimate going up.
+#
+# ------------------------------------------------------------- what does fit
+#
+# MEASURED with the engine_args below at this backend's own context_default of
+# 16384, vLLM 0.29.0 inside WSL2, nvidia-smi sampled every 2 s:
+#   card before the engine started      1_188 MiB
+#   weights on the card                 17.68 GiB
+#   non-KV demand                       19.12 GiB
+#   KV pool at util 0.86                 1.51 GiB = 18,811 tokens, so 1.15
+#                                                   requests of 16384 in flight
+#   card at rest, model resident       21_502 MiB (2_810 MiB free)
+#   card PEAK, during a 15,380-token completion
+#                                      21_819 MiB (2_493 MiB free)
+#   => the engine's share at that peak 20_631 MiB = 20.15 GiB = 21.63 GB
+#
+# So KV really costs 86_251 B per token, not the 65_536 B computed above: vLLM
+# pads the attention page up to the linear layers' recurrent state, and the
+# arithmetic that left those 48 layers out was 24% light. At the measured rate:
+#   16384 -> 1.32 GiB of KV   engine 20.15 GiB   MEASURED, 2.4 GiB spare
+#   32768 -> 2.63 GiB of KV   engine ~21.5 GiB   needs util 0.91, and the card
+#                                                would be full against the 3 GiB
+#                                                desktop allowance — not taken
+#   98304 -> 7.89 GiB of KV   engine ~26.8 GiB   never, on a 24 GB card
+# The 32768 line is arithmetic from the measured rate and not a load: Owen's rule
+# that day was to leave clear headroom rather than hunt the largest context that
+# survives. 16384 is also what BookForge's own text server runs this model at on
+# this card (electron/text-server.ts, `qwen38-27b-awq-int4`).
+#
+# `[model] context_default` stays 98304 — Owen's `qwen3.8:27b-24g` working
+# context, which `mlx-darwin` serves on 64 GB of unified memory. The 16384 below
+# is the cuda-linux block's own, because what a model is FOR and what an
+# accelerator has room for are two different facts (PHASE2-LLM.md section 1).
 
 [model]
 id = "qwen3.8-27b-4bit"
@@ -100,18 +124,31 @@ context_default = 98304
 engine = "vllm"
 hf_repo = "avyukth/Qwen3.8-27B-AWQ-INT4"
 revision = "5a2ee524cbc9f3ac5df12729ecf0c4b57f311192"
-memory_bytes_estimate = 25_010_841_096
+memory_bytes_estimate = 21_633_171_456
+context_default = 16384
 # No `--dtype`: compressed-tensors W4A16 carries its own weight dtype and the
 # activation dtype comes from the config, so `dtype auto` is what this wants;
 # forcing bfloat16 the way the bf16 manifests do would be overriding a decision
 # the checkpoint already made.
 #
-# `--gpu-memory-utilization 0.85` is carried over from the 9B, and carries the
-# 9B's caveat with it: it is the contract's example value and has never been
-# exercised on Owen's card. On a 24 GB card holding 18.6 GB of weights alongside
-# the Windows desktop it may well be too low to leave room for the KV cache;
-# expect to raise it, and record the measured reason when you do.
-engine_args = ["--gpu-memory-utilization", "0.85"]
+# `--gpu-memory-utilization 0.86`: the smallest that starts at 16384, near enough.
+# The flag is a fraction of the card's TOTAL and a budget rather than a demand,
+# and vLLM spends what is left of it on KV — see models/qwen3.5-9b.toml, which
+# explains the same arithmetic at length. Non-KV here is 19.12 GiB, so 0.86 buys
+# a 1.51 GiB pool and 0.85 would buy 1.27 GiB, which is under the 1.32 GiB one
+# 16384-token sequence needs; vLLM would refuse with `No available memory for the
+# cache blocks`. Lower is not safer here, it is a refusal.
+#
+# `--max-num-seqs 16` and `--skip-mm-profiling` are the 9B's, for the 9B's
+# measured reasons: the first decides how many CUDA graphs get captured (at the
+# default the 9B captured 51 of them and paged at 87 s each), the second stops
+# vLLM budgeting for an image on a multimodal checkpoint the `llm` lane never
+# sends one to.
+engine_args = [
+    "--gpu-memory-utilization", "0.86",
+    "--max-num-seqs", "16",
+    "--skip-mm-profiling",
+]
 
 [backends.mlx-darwin]
 engine = "mlx-lm"
