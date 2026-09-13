@@ -1,0 +1,38 @@
+# faster-distil-whisper large-v3 — near-large accuracy at about twice the speed.
+#
+# 756M parameters, English-focused: distillation kept large-v3's encoder and cut
+# the decoder to two layers, which is where both the speed and the English bias
+# come from. BookForge offers it as "Distil Large v3 (fast)".
+#
+# The HF repo breaks the `Systran/faster-whisper-*` pattern the other five
+# follow: the distilled models are published as `Systran/faster-distil-whisper-*`.
+# The Crucible id keeps the family prefix (`faster-whisper-distil-large-v3`) so
+# all six sort together and read as one family, and the repo name is the repo
+# name. PHASE4-AUDIO.md section 3 said "from Systran/faster-whisper-*", which is
+# true of five of the six; the doc has been corrected.
+#
+# revision: the repo's `main` sha read from
+# https://huggingface.co/api/models/Systran/faster-distil-whisper-large-v3 on
+# 2026-09-13.
+#
+# memory_bytes_estimate is COMPUTED, NOT MEASURED — see the note at the bottom.
+
+[model]
+id = "faster-whisper-distil-large-v3"
+family = "faster-whisper"
+parameters_m = 756
+
+[backends.cuda-linux]
+engine = "faster-whisper"
+hf_repo = "Systran/faster-distil-whisper-large-v3"
+revision = "c3058b475261292e64a0412df1d2681c06260fab"
+# COMPUTED, not measured: model.bin is 1_512_927_867 bytes of float16 CTranslate2
+# weights (the exact size the HF tree API reports for this revision), plus the
+# declared 1.5 GiB runtime allowance every one of these six manifests carries.
+#
+# Note that this lands within 15 MB of medium's estimate while being roughly
+# large-v3 accurate, which is the whole argument for the model — and which also
+# means the guard cannot tell the two apart, so do not read a refusal on one as
+# advice to use the other. Replace with a MEASURED figure on the first real book;
+# asr/faster-whisper-tiny.toml carries the long version of this note.
+memory_bytes_estimate = 3_123_540_603

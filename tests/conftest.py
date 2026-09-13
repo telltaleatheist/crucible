@@ -52,6 +52,7 @@ def make_client(home: Path) -> Callable[..., TestClient]:
         *,
         enable_echo: bool = True,
         enable_llm: bool = False,
+        enable_asr: bool = False,
         token: str = TOKEN,
         backend: Backend = FAKE_BACKEND,
         desktop_allowance_bytes: int = 3 * 1024 ** 3,
@@ -65,6 +66,7 @@ def make_client(home: Path) -> Callable[..., TestClient]:
             backend_kind=backend.kind,
             enable_echo=enable_echo,
             enable_llm=enable_llm,
+            enable_asr=enable_asr,
             desktop_allowance_bytes=desktop_allowance_bytes,
         )
         config = load_config(home)

@@ -1,0 +1,56 @@
+# crucible `asr` env — cuda-linux (faster-whisper on an NVIDIA card, Linux or WSL2).
+#
+# Installed by `crucible install asr` into ~/.crucible/envs/asr/ as a venv built
+# from the server's own interpreter. Everything here comes from PyPI; heavy
+# wheels are never hosted on GitHub Releases (DESIGN.md section 5).
+#
+# THIS FILE IS NOT YET A RESOLVED SET, AND THAT IS DELIBERATE.
+# ------------------------------------------------------------
+# `envs/llm/cuda-linux.txt` lists every package pip resolved on Owen's PC,
+# recorded exactly, because it was written after a real install. This one was
+# not: it was written on a machine with no free accelerator (the 3090 Ti was on
+# an overnight fine-tune) and nothing here has been installed anywhere. So what
+# follows is the set that was CHOSEN — the direct requirements and their declared
+# dependencies, each at the version PyPI served on 2026-09-13 — and not a
+# `pip freeze`.
+#
+# The consequence is benign and self-announcing: `crucible doctor` calls the env
+# NOT READY if any pin here is absent or at another version, so the first person
+# to run `crucible install asr` on a real host finds out immediately whether pip
+# agreed. When it does, regenerate this file from the truth and delete this
+# notice:
+#
+#     ~/.crucible/envs/asr/bin/python -m pip freeze
+#
+# The CUDA libraries
+# ------------------
+# CTranslate2 4.x needs cuBLAS 12 and cuDNN 9 at runtime and does not vendor
+# them. They are listed here as wheels rather than left to the host's CUDA
+# install because the env must be self-contained: BookForge's own whisper overlay
+# has hit the other arrangement — a system cuDNN of the wrong major version — and
+# the failure is an unresolved-symbol abort inside CTranslate2, not a message
+# anybody can read.
+#
+# Do not add torch. faster-whisper does not use it (that is the whole point of
+# CTranslate2), and the one thing that must never happen in this env is torch and
+# CTranslate2 in the same process: BookForge runs transcription in a process of
+# its own precisely because faster-whisper beside a torch TTS worker corrupts
+# CUDA state.
+
+faster-whisper==1.2.1
+
+# --- what faster-whisper declares, pinned ---
+ctranslate2==4.8.2
+huggingface_hub==1.31.0
+tokenizers==0.23.2
+onnxruntime==1.30.0
+av==18.1.0
+tqdm==4.70.1
+
+# --- what ctranslate2 declares, pinned ---
+numpy==2.5.3
+PyYAML==6.0.3
+
+# --- the CUDA runtime CTranslate2 loads and does not ship ---
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.26.0.51

@@ -16,7 +16,8 @@ import sys
 import time
 from typing import Any
 
-from . import API_VERSION, VERSION, llmenv, weights
+from . import API_VERSION, VERSION, llmenv, weights, workerenv
+from .asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
 from .backend import WINDOWS_REFUSAL, Backend, detect_backend
 from .config import (
     CRUCIBLE_HOME_ENV,
@@ -34,7 +35,7 @@ from .config import (
 )
 from .errors import ConfigError, NoViableBackend
 from .jobs import ALL_JOB_TYPES, build_registry
-from .manifests import ManifestError, load_all_manifests, load_manifest
+from .manifests import ManifestError, ModelManifest, load_all_manifests
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -73,6 +74,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         backend_kind=backend.kind,
         enable_echo=args.enable_echo,
         enable_llm=args.enable_llm,
+        enable_asr=args.enable_asr,
         desktop_allowance_bytes=args.desktop_allowance_bytes,
     )
     print(f"backend:  {backend.kind} ({backend.gpu.name}, {backend.detail})")
@@ -80,6 +82,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"serving:  http://{args.host}:{args.port}/v1")
     print(f"echo job: {'enabled' if args.enable_echo else 'disabled'}")
     print(f"llm job:  {'enabled' if args.enable_llm else 'disabled'}")
+    print(f"asr job:  {'enabled' if args.enable_asr else 'disabled'}")
     print(
         f"desktop:  {args.desktop_allowance_bytes / 1024 ** 3:.1f} GiB of VRAM "
         "treated as this host's own desktop, not somebody's job"
@@ -134,11 +137,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------ install
 
 
+INSTALLABLE_JOB_TYPES = ("llm", *workerenv.WORKER_JOB_TYPES)
+
+
 def cmd_install(args: argparse.Namespace) -> int:
-    if args.job_type != "llm":
+    if args.job_type not in INSTALLABLE_JOB_TYPES:
         return _fail(
             f"there is no installer for job type {args.job_type!r}; this build "
-            "installs 'llm'"
+            f"installs {sorted(INSTALLABLE_JOB_TYPES)}"
         )
     try:
         config = load_config()
@@ -153,6 +159,8 @@ def cmd_install(args: argparse.Namespace) -> int:
             f"this host detects backend {backend.kind}, but {config.path} was "
             f"initialised for {config.backend_kind}; re-run `crucible init --force`"
         )
+    if args.job_type != "llm":
+        return _install_worker_env(config, backend, args)
 
     try:
         recipe = llmenv.recipe_for(backend.kind)
@@ -182,7 +190,68 @@ def cmd_install(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _install_worker_env(
+    config: Config, backend: Backend, args: argparse.Namespace
+) -> int:
+    """`crucible install <type>` for a type whose work runs in its own venv.
+
+    PHASE4-AUDIO.md section 0: the phase 4 types are libraries rather than
+    servers, so each gets an env of its own and a worker script run with that
+    env's python. The `llm` branch above does the same job through `llmenv`; the
+    two modules are one module's worth of code twice over, and merging them is a
+    follow-up (crucible/workerenv.py says so at the top).
+    """
+    try:
+        recipe = workerenv.recipe_for(args.job_type, backend.kind)
+    except workerenv.WorkerEnvError as exc:
+        return _fail(str(exc))
+    print(f"backend: {backend.kind}")
+    print(f"recipe:  {recipe}")
+    print(f"target:  {workerenv.worker_env_dir(config.home, args.job_type)}")
+    started = time.monotonic()
+    try:
+        status = workerenv.install_worker_env(
+            config.home,
+            args.job_type,
+            backend.kind,
+            force=args.force,
+            on_line=(lambda line: print(f"  {line}")) if args.verbose else None,
+        )
+    except workerenv.WorkerEnvError as exc:
+        return _fail(str(exc))
+    elapsed = time.monotonic() - started
+    if not status.installed:
+        return _fail(f"the env did not come out installed: {status.detail}")
+    print(f"installed in {elapsed:.0f}s: {status.detail}")
+    headline = workerenv.HEADLINE_PACKAGE[args.job_type]
+    for name in sorted(status.packages):
+        if name in (headline, "ctranslate2", "numpy", "onnxruntime"):
+            print(f"  {name}=={status.packages[name]}")
+    return EXIT_OK
+
+
 # ------------------------------------------------------------------- models
+
+
+def _all_manifests() -> dict[str, "ModelManifest | AsrManifest"]:
+    """Every model this build ships, from both manifest directories, by id.
+
+    `models/` and `asr/` are two directories with two loaders (crucible/
+    asrmodels.py explains why they are not one yet), but from the command line
+    there is a single namespace of model ids, because `crucible models pull <id>`
+    is a single question. A collision between the two would make that question
+    ambiguous, so it is refused rather than settled by which directory was read
+    first.
+    """
+    merged: dict[str, "ModelManifest | AsrManifest"] = dict(load_all_manifests())
+    for model_id, manifest in load_all_asr_manifests().items():
+        if model_id in merged:
+            raise ManifestError(
+                f"{model_id!r} is declared by both {merged[model_id].path} and "
+                f"{manifest.path}; a model id names one model"
+            )
+        merged[model_id] = manifest
+    return merged
 
 
 def _models_config() -> tuple[Config, Backend] | int:
@@ -203,8 +272,8 @@ def cmd_models_list(args: argparse.Namespace) -> int:
         return resolved
     config, backend = resolved
     try:
-        manifests = load_all_manifests()
-    except ManifestError as exc:
+        manifests = _all_manifests()
+    except (ManifestError, AsrManifestError) as exc:
         return _fail(str(exc))
     rows = []
     for manifest in manifests.values():
@@ -229,7 +298,14 @@ def cmd_models_list(args: argparse.Namespace) -> int:
                 "hf_repo": spec.hf_repo,
                 "revision": spec.revision,
                 "memory_bytes_estimate": spec.memory_bytes_estimate,
-                "context_default": manifest.context_for(backend.kind),
+                # An ASR manifest carries no context. Whisper's window is 30
+                # seconds of audio and is not a number anybody sets, so null
+                # here means "this model has no such knob", not "unknown".
+                "context_default": (
+                    manifest.context_for(backend.kind)
+                    if isinstance(manifest, ModelManifest)
+                    else None
+                ),
                 "detail": (
                     f"{found.bytes / 1e9:.2f} GB at {found.path}"
                     if found is not None
@@ -254,9 +330,15 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
         return resolved
     config, backend = resolved
     try:
-        manifest = load_manifest(args.model)
-    except ManifestError as exc:
+        manifests = _all_manifests()
+    except (ManifestError, AsrManifestError) as exc:
         return _fail(str(exc))
+    manifest = manifests.get(args.model)
+    if manifest is None:
+        return _fail(
+            f"no manifest for model {args.model!r}; this build ships "
+            f"{sorted(manifests)}"
+        )
     if not manifest.supports(backend.kind):
         return _fail(
             f"model {args.model!r} has no {backend.kind} block; "
@@ -316,6 +398,7 @@ def _doctor_report() -> dict[str, Any]:
         "backend": None,
         "job_types": [],
         "llm_env": None,
+        "worker_envs": [],
         "problems": [],
     }
 
@@ -342,6 +425,7 @@ def _doctor_report() -> dict[str, Any]:
             "port": config.port,
             "enable_echo": config.enable_echo,
             "enable_llm": config.enable_llm,
+            "enable_asr": config.enable_asr,
             "desktop_allowance_bytes": config.desktop_allowance_bytes,
             "backend_kind": config.backend_kind,
         }
@@ -366,6 +450,19 @@ def _doctor_report() -> dict[str, Any]:
             except llmenv.EnvError as exc:
                 report["llm_env"] = {"installed": False, "detail": str(exc)}
                 report["problems"].append(f"llm_env: {exc}")
+        for job_type in workerenv.WORKER_JOB_TYPES:
+            if not getattr(config, f"enable_{job_type}"):
+                continue
+            try:
+                worker_env = workerenv.env_status(config.home, job_type, backend.kind)
+                report["worker_envs"].append(worker_env.to_dict())
+                if not worker_env.installed:
+                    report["problems"].append(f"{job_type}_env: {worker_env.detail}")
+            except workerenv.WorkerEnvError as exc:
+                report["worker_envs"].append(
+                    {"job_type": job_type, "installed": False, "detail": str(exc)}
+                )
+                report["problems"].append(f"{job_type}_env: {exc}")
         report["job_types"] = _job_type_reports(config, backend)
         for entry in report["job_types"]:
             if entry["enabled"] and not entry["ready"]:
@@ -406,6 +503,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if env is not None:
             mark = "ready" if env["installed"] else "NOT READY"
             print(f"llm env: {mark} — {env['detail']}")
+        for worker_env in report["worker_envs"]:
+            mark = "ready" if worker_env["installed"] else "NOT READY"
+            print(
+                f"{worker_env['job_type']} env: {mark} — {worker_env['detail']}"
+            )
         for entry in report["job_types"]:
             mark = "ready" if entry["ready"] else ("off" if not entry["enabled"] else "NOT READY")
             print(f"job {entry['name']}: {mark} — {entry['detail']}")
@@ -463,6 +565,12 @@ def build_parser() -> argparse.ArgumentParser:
         "proxy ([jobs] enable_llm)",
     )
     init.add_argument(
+        "--enable-asr",
+        action="store_true",
+        help="register the asr (faster-whisper transcription) job type "
+        "([jobs] enable_asr)",
+    )
+    init.add_argument(
         "--desktop-allowance-bytes",
         type=int,
         default=DEFAULT_DESKTOP_ALLOWANCE_BYTES,
@@ -477,7 +585,11 @@ def build_parser() -> argparse.ArgumentParser:
     install = subparsers.add_parser(
         "install", help="create a job type's env and install its recipe"
     )
-    install.add_argument("job_type", choices=["llm"], help="the job type to install")
+    install.add_argument(
+        "job_type",
+        choices=sorted(INSTALLABLE_JOB_TYPES),
+        help="the job type to install",
+    )
     install.add_argument(
         "--force", action="store_true", help="rebuild the env from scratch"
     )
