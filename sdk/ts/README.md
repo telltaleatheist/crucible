@@ -70,6 +70,7 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `unloadVoice(id)` | `POST /v1/jobs {type: "unload-voice"}` | the job id |
 | `render(options)` | `POST /v1/jobs {type: "tts"}` | the job id |
 | `writeArtifactsTo(id, dir, {...})` | `events()` + the artifact route | `AsyncIterable<ArtifactWrite>` |
+| `stream(options)` | `POST /v1/tts/stream` and its three companions | a `TtsStreamSession` |
 | `accelerator()` | `GET /v1/accelerator` | `AcceleratorState` |
 | `asr(options)` | `POST /v1/jobs {type: "asr"}` | the job id |
 
@@ -454,6 +455,67 @@ server on localhost — and writes where assembly and resume already look.
 It needs a Node-like runtime and loads `node:fs/promises` lazily, from a specifier assembled
 at run time — see "TypeScript note" below. Nothing else in this client touches the
 filesystem.
+
+### `stream()` — the live session
+
+`render()` is the book; this is the Listen path, the Play button and the browser extension.
+They are different in kind rather than in buffer size: sub-sentence audio emitted while a row
+is still generating, rows retiring out of order, and a cancel that aborts work in flight.
+
+```ts
+const session = await crucible.stream({ voice: 'deathstalker', language: 'en' });
+
+void session.say('r1', 'He had been walking for some time.');
+void session.say('r2', 'The road did not appear to end.');
+
+for await (const event of session) {
+  if (event.kind === 'audio') speaker.write(event.pcm);        // Int16Array, mono, 24 kHz
+  else if (event.kind === 'restart') discardBelow(event.id, event.fromSeq);
+  else if (event.kind === 'done') console.log(event.id, event.seconds, event.cancelled);
+  else if (event.kind === 'error') askAgainFor(event.id);
+}
+```
+
+**The voice must already be resident.** This door never loads one — it behaves like chat, not
+like a render job — and refuses `voice_not_resident` naming what *is* resident. Call
+`loadVoice()` first.
+
+**One session per server.** A second is refused `stream_session_open`, and a `render()`
+submitted while one is open is refused `engine_in_use`: narrator has one stdin and one
+stdout, and two conversations on it read each other's replies.
+
+**`say` answers with the row's id, not the audio.** The audio comes out of the iterator, and
+a `say` on a session whose stream has never been iterated is refused `stream_not_attached`
+rather than generating into nothing.
+
+**`cancel(id)` tells you what it cost.** `dropped` — the row had not reached the engine, so
+nothing was lost. `aborting_batch` — the engine is generating it, and narrator has no per-row
+cancel, so its whole batch is thrown away to stop it. `already_finished` — it retired first,
+which is the ordinary race on a live connection and not an error.
+
+The rows that die alongside a cancelled one come back on their own, behind a **`restart`**:
+
+```ts
+if (event.kind === 'restart') {
+  // Everything already received for event.id below event.fromSeq is void.
+  // seq never restarts, so the good audio is everything at or above it.
+}
+```
+
+On a `higgs-v3` voice — which is every voice that ships — the batch width is 1, the in-flight
+row *is* the batch, and `restart` never fires. On Orpheus the ramp dispatches eight, so up to
+seven rows regenerate.
+
+**A dropped connection is reattached for you**, with `Last-Event-ID`, for as long as the
+server's 15-second grace window could still be open. That is the one thing this SDK does that
+`events()` deliberately does not, and the reason is the difference between the two: a job runs
+on whether anybody is watching, while a session that misses its window loses the rows in
+flight and the listener's place in the paragraph. A **refusal** is never retried —
+`unknown_session` and `replay_unavailable` are the server saying the window closed, or that
+replaying would hand you audio with a hole in it, and both are yours to see.
+
+`close()` ends the session and frees the voice; the iterator ends on the server's `closed`
+frame either way.
 
 ## `accelerator()`
 

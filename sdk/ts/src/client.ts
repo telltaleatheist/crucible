@@ -37,6 +37,7 @@ import {
   type Json,
 } from './shape.js';
 import { readSseFrames } from './sse.js';
+import { openTtsStream, type StreamOptions, type TtsStreamSession } from './stream.js';
 import {
   API_VERSION,
   TERMINAL_EVENTS,
@@ -1143,6 +1144,53 @@ export class CrucibleClient {
     }
     return new CrucibleProtocolError(
       `HTTP ${response.status} from ${this.url} is neither a success nor a refusal`,
+    );
+  }
+
+  // -------------------------------------------------------- tts streaming
+
+  /**
+   * `POST /v1/tts/stream` — open a live TTS session. PHASE3-TTS.md section 7.
+   *
+   * The Listen path and the browser extension, as against {@link render}, which
+   * is the book. The two are different in kind rather than in buffer size:
+   * sub-sentence audio emitted while a row is still generating, rows retiring
+   * out of order, and a cancel that aborts work in flight.
+   *
+   * ```ts
+   * const session = await crucible.stream({ voice: 'deathstalker', language: 'en' });
+   * void session.say('r1', 'He had been walking for some time.');
+   * for await (const event of session) {
+   *   if (event.kind === 'audio') speaker.write(event.pcm);
+   * }
+   * ```
+   *
+   * **The voice must already be resident.** This door never loads one — it
+   * behaves like chat, not like a render job, and refuses `voice_not_resident`
+   * naming what is resident instead. Post a `load-voice` job first
+   * ({@link loadVoice}).
+   *
+   * **One session at a time, per server.** A session holds the resident voice's
+   * whole attention; a second is refused as `stream_session_open`, and a `tts`
+   * render job submitted while one is open is refused as `engine_in_use`.
+   *
+   * The session is its own `AsyncIterable` and it reattaches across a dropped
+   * connection on its own — see `src/stream.ts` for why that differs from
+   * {@link events}, which never reconnects.
+   */
+  async stream(options: StreamOptions): Promise<TtsStreamSession> {
+    // The session is handed exactly the four things it needs and nothing else.
+    // Arrow functions rather than bound methods because `#fetch`, `#failure`
+    // and `#json` are private to this class and stay that way: the streaming
+    // module is a consumer of this client, not a second one.
+    return openTtsStream(
+      {
+        url: this.url,
+        fetch: (path, init, authenticated) => this.#fetch(path, init, authenticated),
+        failure: (response) => this.#failure(response),
+        json: (path, init, where) => this.#json(path, init, where),
+      },
+      options,
     );
   }
 }

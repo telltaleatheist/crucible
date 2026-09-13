@@ -514,6 +514,10 @@ class TtsJobType:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs a voice")
         checked = validated_params(TtsParams, params, self.name)
+        # Before anything else about this host: a streaming session holds
+        # narrator's one wire, and a render that queued behind it would fail in
+        # the lane instead of being refused here (PHASE3-TTS.md section 7).
+        self._residency.refuse_if_claimed("a tts render")
         _require_ffmpeg()
         _, spec, _ = _require_renderable(self._config, self._backend, model, checked)
         accelerator.guard(
@@ -545,15 +549,22 @@ class TtsJobType:
         except ApiError as exc:
             raise JobError(exc.code, exc.message) from None
 
-        engine = self._make_resident(ctx, manifest, spec, installed.path, python)
-        resident = self._residency.resident_voice
-        if resident is None:  # unreachable: the load above either worked or raised
-            raise JobError(
-                "voice_not_resident",
-                f"{voice_id!r} was loaded but nothing is resident; "
-                + describe_resident(self._residency, KIND_TTS, "no voice is"),
-            )
-        self._render(ctx, params, engine, resident.sample_rate, ffmpeg)
+        # The card and narrator's wire, held for the whole job. `preflight`
+        # already refused a session that was open when this was submitted; this
+        # is the half that matters when one opened while the job sat in the
+        # queue. Two conversations on one stdin do not collide loudly — they read
+        # each other's `batch_item` lines — so this is a claim rather than a
+        # check (PHASE3-TTS.md section 7, `crucible/residency.py`).
+        with self._residency.claimed(f"tts job {job.id}", may_mutate=True):
+            engine = self._make_resident(ctx, manifest, spec, installed.path, python)
+            resident = self._residency.resident_voice
+            if resident is None:  # unreachable: the load above worked or raised
+                raise JobError(
+                    "voice_not_resident",
+                    f"{voice_id!r} was loaded but nothing is resident; "
+                    + describe_resident(self._residency, KIND_TTS, "no voice is"),
+                )
+            self._render(ctx, params, engine, resident.sample_rate, ffmpeg)
 
     def _make_resident(
         self,

@@ -463,6 +463,44 @@ FLACs are encoded through **ffmpeg**, which this server already requires for `as
 `soundfile` would mean a compiled audio dependency in a process that deliberately imports
 no engine at all.
 
+#### The streaming door
+
+The render door is a job. The **streaming** door is a live session, and its requirements are
+different in kind rather than in degree: sub-sentence audio while a row is still generating,
+rows retired out of order, and a cancel that aborts work in flight. It is what BookForge's
+Listen path and the browser extension use.
+
+```
+POST   /v1/tts/stream            -> 201 {session_id, voice, fingerprint, sample_rate, backend}
+GET    /v1/tts/stream/{id}/events   SSE: ready, audio, done, restart, error, closed
+POST   /v1/tts/stream/{id}       -> 202  {"op": "say" | "cancel" | "cancel_all" | "close", ...}
+DELETE /v1/tts/stream/{id}       -> 200
+```
+
+**It is not a WebSocket, and that was measured rather than preferred.** Node 20 has no global
+`WebSocket` (it is behind a flag until 22) and Electron 33 bundles Node 20.18, with the SDK
+running in the main process where the renderer's browser `WebSocket` is out of scope. The
+three ways to have one all cost something: raising the floor does not help, because Electron's
+Node is Electron's; `ws` breaks the SDK's zero-dependency rule; and hand-writing RFC 6455 is
+two hundred lines of masking and close codes inside a client whose whole job is to be boring.
+
+The cost of SSE is base64 PCM, 33% over the wire — nothing at 48 KB/s, and not even a
+regression, since narrator already base64s its PCM over its own pipe. The gain is that
+**`Last-Event-ID` already works**, so a Listen connection that drops in a tunnel reattaches
+mid-sentence instead of losing the row. A dropped stream opens a 15-second grace window
+rather than cancelling on the spot.
+
+**`restart {id, from_seq, reason}` is the frame the contract did not anticipate.** narrator's
+`cancel` aborts everything in flight, so a per-row cancel drops the rows not yet started,
+aborts the batch, and resubmits the survivors — and a resubmitted row would otherwise have
+its first seconds concatenated twice with nothing saying so. On `higgs-v3` this costs
+nothing, because its measured batch width is 1 and the in-flight row *is* the batch; on
+Orpheus, up to seven other rows regenerate.
+
+**One session at a time** (`stream_session_open`), and a render job and a session cannot both
+hold the card (`engine_in_use`). That is not tidiness: narrator has one stdin, and two
+conversations on it do not fail loudly — they read each other's replies.
+
 ### `asr`
 
 Transcription with faster-whisper (PHASE4-AUDIO.md section 3). One audio file in, one
