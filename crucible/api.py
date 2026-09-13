@@ -423,11 +423,22 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 if resident is None
                 else {
                     # `kind` is the family of thing that is resident, not the job
-                    # type that put it there. Today the only resident thing is an
-                    # LLM engine; phase 3's generalised residency adds tts voices
-                    # and phase 4's aligner, and they land here beside it.
-                    "kind": "llm",
-                    "id": resident.model_id,
+                    # type that put it there — and it is ASKED rather than
+                    # assumed. This said `"llm"` and read `resident.model_id`
+                    # until 2026-09-13, which was true while a model was the only
+                    # thing a card could hold and became a 500 the moment
+                    # PHASE3-TTS.md section 5's generalised residency landed: a
+                    # `ResidentVoice` has a `voice_id` and an `id`, and no
+                    # `model_id` at all. `model_rows()` had already learned to ask
+                    # for `resident_model`; this route had not caught up, so the
+                    # route whose whole job is to say what is on the card was the
+                    # one that could not say a voice was.
+                    #
+                    # `id` and `kind` are what every Resident has in common, by
+                    # design: phase 4's aligner is a third kind and needs no
+                    # change here.
+                    "kind": resident.kind,
+                    "id": resident.id,
                     "since": resident.loaded_at,
                     "memory_bytes_estimate": resident.memory_bytes_estimate,
                 }

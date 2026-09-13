@@ -275,3 +275,47 @@ def test_crucible_s_own_engine_is_named_as_its_own(
     by_pid = {holder["pid"]: holder for holder in body["holders"]}
     assert by_pid[OURS]["owned_by_crucible"] is True
     assert by_pid[44503]["owned_by_crucible"] is False
+
+
+def test_a_resident_voice_is_reported_as_a_voice(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The route that says what is on the card must be able to say "a voice".
+
+    It could not, until 2026-09-13. The `resident` block hard-coded
+    `"kind": "llm"` and read `resident.model_id`, which was true while a model
+    was the only thing a card could hold and became a 500 the moment
+    PHASE3-TTS.md section 5's generalised residency landed — a `ResidentVoice`
+    has a `voice_id` and an `id`, and no `model_id` at all. `model_rows()` had
+    already learned to ask for `resident_model`; this route had not caught up.
+
+    Asserted through the residency rather than through a real load, because a
+    load needs an engine and the point here is the *reporting*, not the loading.
+    Phase 4's aligner will be a third kind and this test should keep passing
+    without being touched, which is why it asserts `kind` echoes the resident
+    rather than that it equals any particular word.
+    """
+    from crucible import residency as residency_module
+
+    cuda(monkeypatch, apps=[], free_bytes=22 * GIB)
+    with make_client(enable_tts=True) as client:
+        held = residency_module.ResidentVoice(
+            voice_id="deathstalker",
+            backend="cuda-linux",
+            narrator_engine="higgs-v3",
+            revision="0" * 40,
+            fingerprint="deathstalker@" + "0" * 40,
+            sample_rate=24_000,
+            max_chars=800,
+            memory_bytes_estimate=19 * GIB,
+            log_path=Path("/tmp/engine-deathstalker.log"),
+            loaded_at="2026-09-13T04:00:00+00:00",
+        )
+        client.app.state.residency._resident = held  # type: ignore[attr-defined]
+        body = client.get("/v1/accelerator", headers=auth).json()
+
+    assert body["resident"]["kind"] == held.kind == "tts"
+    assert body["resident"]["id"] == "deathstalker"
+    assert body["resident"]["memory_bytes_estimate"] == 19 * GIB
