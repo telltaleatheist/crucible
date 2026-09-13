@@ -42,7 +42,14 @@ from .jobs import (
 )
 from .jobs.base import Job, validate_member_name
 from .jobs.queue import JobStore
+from .jobs.tts.common import known_voice
 from .residency import Residency
+from .ttsstream import (
+    StreamManager,
+    StreamSession,
+    require_sayable,
+    require_streamable,
+)
 
 API_HEADER = "X-Crucible-Api"
 TERMINAL_EVENTS = frozenset({"done", "failed", "cancelled"})
@@ -99,6 +106,69 @@ class JobCreate(BaseModel):
     model: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
     inputs: dict[str, JobInput] = Field(default_factory=dict)
+
+
+class StreamOpen(BaseModel):
+    """`POST /v1/tts/stream` — PHASE3-TTS.md section 7.
+
+    Nothing has a default, for the render door's reason: a session opened in the
+    wrong language, or on a voice the client did not choose, is a silent
+    substitution and a whole afternoon of listening in the wrong accent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    voice: str = Field(min_length=1)
+    language: str = Field(min_length=1)
+
+
+class StreamOp(BaseModel):
+    """`POST /v1/tts/stream/{id}` — one op.
+
+        {"op": "say",    "id": "r12", "text": "...", "take": 0}
+        {"op": "cancel", "id": "r12"}
+        {"op": "cancel_all"}
+        {"op": "close"}
+
+    `take` is **required** on `say` and has no default here, even though every
+    voice in this build declares exactly one take and anything above 0 is refused
+    as `sampling_not_wired`. The SDK's `say(id, text, take?)` defaults it to 0 in
+    the caller's own code, which is a client choosing; a default on the wire would
+    be the server choosing, and the day a ladder is wired that becomes a render at
+    a take nobody asked for.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: str
+    id: str | None = None
+    text: str | None = None
+    take: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def the_op_carries_what_it_needs(self) -> "StreamOp":
+        allowed = ("say", "cancel", "cancel_all", "close")
+        if self.op not in allowed:
+            raise ValueError(f"op must be one of {list(allowed)}, got {self.op!r}")
+        if self.op == "say":
+            if not (self.id or "").strip():
+                raise ValueError("say needs an id; it is how every frame names its row")
+            if not (self.text or "").strip():
+                # narrator answers an empty generate with a whole-request error,
+                # which would take the rest of the batch with it. Refused here.
+                raise ValueError(
+                    "say needs text that is not blank; narrator refuses an empty "
+                    "generate with a whole-request error, which would end the batch"
+                )
+            if self.take is None:
+                raise ValueError("say needs a take; there is no default on the wire")
+        elif self.op == "cancel":
+            if not (self.id or "").strip():
+                raise ValueError("cancel needs the id of the row to cancel")
+        else:
+            if self.id is not None or self.text is not None or self.take is not None:
+                raise ValueError(f"{self.op} takes no id, text or take")
+        return self
 
 
 # ------------------------------------------------------------------ app wiring
@@ -178,6 +248,12 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         finally:
             await store.stop()
             await app.state.http.aclose()
+            # Before the residency, and that order is load-bearing: a streaming
+            # session holds the resident engine's exclusive claim, and
+            # `Residency.unload` refuses by name while somebody holds it. Closing
+            # the sessions first is what makes the shutdown below able to reach
+            # the card at all.
+            await asyncio.to_thread(app.state.streams.shutdown)
             # A resident engine is this process's child. Leaving one holding the
             # card after the server exits would be exactly the thing the guard
             # refuses to do to somebody else.
@@ -195,6 +271,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.state.backend = backend
     app.state.residency = residency
     app.state.store = JobStore(config, backend, registry)
+    app.state.streams = StreamManager(residency)
 
     Path(config.jobs_dir).mkdir(parents=True, exist_ok=True)
     Path(config.uploads_dir).mkdir(parents=True, exist_ok=True)
@@ -482,6 +559,117 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 "(set [jobs] enable_tts = true in config.toml)",
             )
         return voice_rows(config, backend, residency)
+
+    # -------------------------------------------------------- tts streaming
+    #
+    # PHASE3-TTS.md section 7. Four routes and no socket: the Listen path, the
+    # in-app Play button and the browser extension, built out of the two things
+    # this server already does well. The session's own machinery — the rows, the
+    # replay buffer, the grace window, the per-row cancel — is
+    # `crucible/ttsstream.py`; what is here is the wire.
+
+    def _streaming_voice(voice: str) -> Any:
+        """The manifest for a voice this server may be asked to stream."""
+        if not config.enable_tts:
+            raise ApiError(
+                400,
+                "job_type_disabled",
+                "job type 'tts' is not enabled on this server "
+                "(set [jobs] enable_tts = true in config.toml)",
+            )
+        manifest = known_voice(voice)
+        require_streamable(manifest, config.backend_kind)
+        return manifest
+
+    @private.post("/tts/stream", status_code=201)
+    async def open_stream(request: Request, body: StreamOpen) -> dict[str, Any]:
+        """Open the one streaming session this server will hold at a time."""
+        streams: StreamManager = request.app.state.streams
+        manifest = _streaming_voice(body.voice)
+        session = streams.open(
+            voice=body.voice,
+            language=body.language,
+            manifest=manifest,
+            loop=asyncio.get_running_loop(),
+        )
+        return {
+            "session_id": session.id,
+            "voice": session.voice,
+            "fingerprint": session.fingerprint,
+            "sample_rate": session.sample_rate,
+            "backend": session.backend,
+        }
+
+    @private.get("/tts/stream/{session_id}/events")
+    async def stream_events(request: Request, session_id: str) -> StreamingResponse:
+        """The session's SSE stream — everything it has to say, audio included.
+
+        `Last-Event-ID` is the reattach: a connection that dropped in a tunnel
+        comes back here inside the grace window, is replayed what it missed and
+        follows live from there. It is the one behaviour a WebSocket could not
+        have given for free, which is why this door is not one.
+        """
+        streams: StreamManager = request.app.state.streams
+        session = streams.get(session_id)
+        delivered = _last_event_id(request)
+        # Asked before the response is built, so an unreplayable resume is a 409
+        # with a body rather than a 200 that ends at once.
+        session.check_replayable(delivered)
+        return StreamingResponse(
+            _session_event_stream(request, session, delivered),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
+    @private.post("/tts/stream/{session_id}", status_code=202)
+    async def stream_op(
+        request: Request, session_id: str, body: StreamOp
+    ) -> dict[str, Any]:
+        """One op: `say`, `cancel`, `cancel_all` or `close`.
+
+        **`say` answers with the row's id and not the audio.** A client that
+        wants the audio reads the stream; a client that never opened one is
+        refused by name rather than generating into nothing.
+        """
+        streams: StreamManager = request.app.state.streams
+        session = streams.get(session_id)
+        if body.op == "say":
+            manifest = known_voice(session.voice)
+            require_sayable(session, manifest, body.take)
+            if len(body.text) > session.max_chars:
+                # The cap certificate, refused rather than re-split: chunking is
+                # the client's (PHASE3-TTS.md section 1), and a server that
+                # quietly cut a sentence in half would stream two rows where one
+                # was asked for and retire an id the client never sees again.
+                raise ApiError(
+                    400,
+                    "chunk_too_long",
+                    f"this row is {len(body.text)} characters and the cap for "
+                    f"{session.voice!r} on {session.backend} is "
+                    f"{session.max_chars}. Chunking is the client's, so this is "
+                    "a refusal and not a re-split",
+                    {"voice": session.voice, "max_chars": session.max_chars},
+                )
+            return {"id": session.say(body.id, body.text, body.take)}
+        if body.op == "cancel":
+            return {"id": body.id, "outcome": session.cancel(body.id)}
+        if body.op == "cancel_all":
+            return {"cancelled": session.cancel_all()}
+        # `close`, which the validator has already proved is the only one left.
+        closed = await asyncio.to_thread(
+            streams.close, session, "the client closed the session"
+        )
+        return {"session_id": session.id, "closed": closed}
+
+    @private.delete("/tts/stream/{session_id}")
+    async def close_stream(request: Request, session_id: str) -> dict[str, Any]:
+        """The same as `{"op": "close"}`, for a client that only has verbs."""
+        streams: StreamManager = request.app.state.streams
+        session = streams.get(session_id)
+        closed = await asyncio.to_thread(
+            streams.close, session, "the client closed the session"
+        )
+        return {"session_id": session.id, "closed": closed}
 
     # --------------------------------------------------------------- uploads
 
@@ -1057,6 +1245,52 @@ def _format_event(event: dict[str, Any]) -> str:
         f"event: {event['event']}\n"
         f"data: {json.dumps(event['data'], separators=(',', ':'))}\n\n"
     )
+
+
+async def _session_event_stream(
+    request: Request, session: StreamSession, last_event_id: int
+) -> AsyncIterator[str]:
+    """The job stream's shape, over a session's log instead of a job's events.
+
+    Deliberately a second function rather than a parameterised one. The two look
+    alike and are not the same: a job's events end at a terminal status and its
+    log lives as long as the job does, while a session's end at `closed` and its
+    log is pruned behind the readers (`StreamSession._prune`), so the cursor here
+    has to be written back onto the reader rather than kept local. Folding them
+    together would mean one of the two behaviours becoming a flag.
+    """
+    reader = session.attach(last_event_id)
+    try:
+        while True:
+            for event in session.frames_after(reader.delivered):
+                reader.delivered = event.id
+                yield _format_event(
+                    {"id": event.id, "event": event.event, "data": event.data}
+                )
+                if event.event == "closed":
+                    return
+            reader.waiter.clear()
+            if session.frames_after(reader.delivered):
+                continue
+            try:
+                await asyncio.wait_for(reader.waiter.wait(), timeout=KEEPALIVE_SECONDS)
+            except asyncio.TimeoutError:
+                # The job stream's shape, byte for byte, and measured on
+                # 2026-09-13 to be enough rather than assumed to be. A real
+                # socket close cancels this generator through starlette's
+                # disconnect listener in about 0.17 s, so this poll is for the
+                # OTHER kind of departure: a tunnel that died without closing
+                # anything, where nothing but a write that fails can discover
+                # it. A shorter `is_disconnected()` tick was written, measured
+                # to change neither case, and taken back out.
+                if await request.is_disconnected():
+                    return
+                yield ": keepalive\n\n"
+    finally:
+        # Detaching is what starts the grace window. A dropped stream does not
+        # cancel immediately — that is the whole reason this door is SSE — so
+        # this marks the session unattended and the watchdog does the rest.
+        session.detach(reader)
 
 
 async def _event_stream(

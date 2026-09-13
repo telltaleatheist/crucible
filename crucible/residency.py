@@ -17,17 +17,26 @@ Only the exclusive job lane mutates this (the `load-model` / `unload-model` and
 `load-voice` / `unload-voice` jobs), so the proxy, `/v1/health` and `/v1/voices`
 read a value that is never half-written: an engine is published as resident only
 once it has proved it is up, and it is unpublished before it is signalled.
+
+**Since PHASE3-TTS.md section 7 that is no longer the whole story**, and the
+claim below is the part that is new. A streaming session is a connection rather
+than a job, so it does not queue behind the lane; it holds the resident engine
+directly, for as long as somebody is listening. So the card now has a named
+owner, and the mutators refuse by name while somebody else has it.
 """
 
 from __future__ import annotations
 
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from .alignmodels import AlignBackendSpec, AlignManifest
 from .config import Config
+from .errors import ApiError, JobError
 from .engines import (
     EngineError,
     NarratorEngine,
@@ -256,6 +265,122 @@ class Residency:
         # `WorkerError`, and each caller catches the one its own door raises.
         self._session: WorkerSession | None = None
         self._warming: str | None = None
+        self._claim: str | None = None
+        #: The thread a mutating claimant took the card on, or None when the
+        #: claimant declared it will not mutate. See `claim`.
+        self._claim_thread: int | None = None
+        self._claim_lock = threading.Lock()
+
+    # ------------------------------------------------- the exclusive claim
+    #
+    # PHASE3-TTS.md section 7 put a second user on the card. Until it, every
+    # user of the resident engine was a job, the exclusive lane serialised them,
+    # and "one at a time" needed no mechanism. A streaming session is **not a
+    # job** — it is a connection that lives for as long as somebody is listening
+    # — so it runs beside the lane, and narrator has exactly one stdin, one
+    # stdout and one `_inbox`. Two conversations on that wire do not collide
+    # loudly; they steal each other's `batch_item` lines, and the symptom is a
+    # row of audio delivered under another row's id. Worse, `load_voice` would
+    # SIGTERM the engine out from under a session mid-sentence.
+    #
+    # So the card has a named owner. A streaming session claims it for its
+    # lifetime; the render door claims it for the duration of its batch; and
+    # everything that mutates residency refuses by name while somebody else
+    # holds it, rather than proceeding and corrupting the wire.
+
+    @property
+    def claimed_by(self) -> str | None:
+        """Who holds the resident engine's exclusive attention, or None."""
+        return self._claim
+
+    @contextmanager
+    def claimed(self, holder: str, *, may_mutate: bool) -> Iterator[None]:
+        """Hold the card for the duration of the block, or refuse by name.
+
+        Deliberately **not** blocking. A second claimant is told who has it and
+        goes away; a claimant that waited would turn "the card is busy" into a
+        hang with no event to explain it, which is the one thing DESIGN.md
+        section 10 will not have.
+        """
+        self.claim(holder, may_mutate=may_mutate)
+        try:
+            yield
+        finally:
+            self.release(holder)
+
+    def claim(self, holder: str, *, may_mutate: bool) -> None:
+        """Take the card. `may_mutate` is a promise about what will be done to it.
+
+        The two claimants are not alike, and the flag is what keeps the guard
+        honest for both rather than being loosened until it fits the looser one:
+
+        - A **render job** claims with `may_mutate=True`, because loading its own
+          voice is the first thing it does (PHASE3-TTS.md section 6's one
+          asymmetry with `llm`). So the thread it claimed on may load and unload,
+          and every other thread is still refused.
+        - A **streaming session** claims with `may_mutate=False`. It never loads
+          — the streaming door never loads, exactly as chat never loads — so no
+          thread is exempted and every mutation there is refuses by name,
+          including one from whichever thread happened to open the session.
+
+        An exemption is a thread identity rather than a name, because the thing
+        being prevented is a *second conversation*, and the claimant's own thread
+        is by definition not one.
+        """
+        with self._claim_lock:
+            if self._claim is not None:
+                raise JobError(
+                    "engine_in_use",
+                    f"the resident engine is held by {self._claim!r} and "
+                    f"{holder!r} cannot have it at the same time. narrator has "
+                    "one stdin and one stdout, so two conversations on it read "
+                    "each other's replies",
+                )
+            self._claim = holder
+            self._claim_thread = threading.get_ident() if may_mutate else None
+
+    def release(self, holder: str) -> None:
+        with self._claim_lock:
+            if self._claim != holder:
+                # Not a silent no-op: releasing somebody else's claim would free
+                # the wire under a conversation that is still on it.
+                raise JobError(
+                    "engine_in_use",
+                    f"{holder!r} tried to release the card, which is held by "
+                    f"{self._claim!r}",
+                )
+            self._claim = None
+            self._claim_thread = None
+
+    def refuse_if_claimed(self, what: str) -> None:
+        """The same refusal as an HTTP 409, for a preflight to make before queuing."""
+        holder = self._claim
+        if holder is None:
+            return
+        raise ApiError(
+            409,
+            "engine_in_use",
+            f"{what} needs the resident engine, which is held by {holder!r}. "
+            "narrator has one stdin and one stdout, so a streaming session and "
+            "a job cannot converse with it at the same time",
+            {"held_by": holder},
+        )
+
+    def _refuse_mutation_if_claimed(self, what: str) -> None:
+        """The backstop, at the three places that actually move the weights.
+
+        `refuse_if_claimed` answers the client before a job is queued; this
+        answers the lane if a session opened in between. Both say
+        `engine_in_use`, because it is the same fact.
+        """
+        holder = self._claim
+        if holder is not None and self._claim_thread != threading.get_ident():
+            raise JobError(
+                "engine_in_use",
+                f"cannot {what}: the resident engine is held by {holder!r}. "
+                "Taking it off the card now would end that conversation "
+                "mid-sentence",
+            )
 
     # -------------------------------------------------------------- reading
 
@@ -409,6 +534,7 @@ class Residency:
         on_progress: Callable[[str], None] | None = None,
     ) -> ResidentModel:
         """Make this model the resident one, unloading whatever was there."""
+        self._refuse_mutation_if_claimed(f"load {manifest.id}")
 
         def say(message: str) -> None:
             if on_progress is not None:
@@ -473,6 +599,7 @@ class Residency:
         checkpoint the engine was started on — so there is no cheaper path here
         than the one a model takes, and none is pretended at.
         """
+        self._refuse_mutation_if_claimed(f"load {manifest.id}")
 
         def say(message: str) -> None:
             if on_progress is not None:
@@ -555,6 +682,7 @@ class Residency:
         same bar `engine.ready()` sets for vLLM, met the way this worker can meet
         it.
         """
+        self._refuse_mutation_if_claimed(f"load {manifest.id}")
 
         def say(message: str) -> None:
             if on_progress is not None:
@@ -714,6 +842,7 @@ class Residency:
         thing that would not stop is the one fact a caller must not be told a
         soothing version of.
         """
+        self._refuse_mutation_if_claimed(f"unload {subject_id}")
         resident = self._resident
         if resident is None or resident.id != subject_id:
             raise KeyError(subject_id)

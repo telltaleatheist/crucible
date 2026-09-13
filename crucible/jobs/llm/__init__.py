@@ -395,6 +395,11 @@ class LoadModelJobType:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs a model")
         _params(LoadParams, params, self.name)
+        # One card, one resident engine, and now one more thing that can hold it:
+        # a `tts` streaming session is not a job and does not queue behind this
+        # lane, so loading a model over it would end somebody's sentence
+        # (PHASE3-TTS.md section 7).
+        self._residency.refuse_if_claimed(f"loading {model!r}")
         manifest, spec, _ = _require_loadable(self._config, self._backend, model)
         accelerator.guard(
             self._config.backend_kind,
@@ -500,6 +505,7 @@ class UnloadModelJobType:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs a model")
         _params(UnloadParams, params, self.name)
+        self._residency.refuse_if_claimed(f"unloading {model!r}")
         if not self._residency.is_resident(KIND_LLM, model):
             raise ApiError(
                 409,

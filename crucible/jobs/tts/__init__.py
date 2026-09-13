@@ -130,6 +130,9 @@ class LoadVoiceJobType:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs a voice")
         validated_params(LoadVoiceParams, params, self.name)
+        # A streaming session holds the resident engine, and loading over it
+        # would SIGTERM narrator mid-sentence (PHASE3-TTS.md section 7).
+        self._residency.refuse_if_claimed(f"loading {model!r}")
         _, spec, _ = require_loadable(self._config, self._backend, model)
         accelerator.guard(
             self._config.backend_kind,
@@ -233,6 +236,7 @@ class UnloadVoiceJobType:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs a voice")
         validated_params(UnloadVoiceParams, params, self.name)
+        self._residency.refuse_if_claimed(f"unloading {model!r}")
         if not self._residency.is_resident(KIND_TTS, model):
             raise ApiError(
                 409,

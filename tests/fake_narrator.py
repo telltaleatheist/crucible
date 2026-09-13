@@ -29,6 +29,28 @@ a fake that is generous is a fake that lets a real bug through.
             {"type": "error", "message"}
             {"type": "stopped"}
 
+STDIN IS READ ON THE MAIN THREAD AND GENERATION RUNS ON ANOTHER, and that is not
+an implementation detail — it is the property the streaming door is built on.
+`electron/orpheus-worker-pool.ts` cancels mid-generation today, which means the
+real worker acts on a `cancel` line **while a `generate_batch` is in flight**, so
+its stdin loop cannot be the thing doing the generating. This file read and
+generated on one thread until 2026-09-13, which made `{"action": "cancel"}` a
+line that sat unread until the batch it was meant to abort had already finished:
+a fake that could not be cancelled, testing a door whose whole subject is
+cancelling. One generation runs at a time (narrator is one engine); a second
+arriving while one is in flight is answered with an `error` rather than queued,
+because Crucible converses once at a time and a fake that quietly tolerated two
+would hide the day it stopped doing so.
+
+A STREAMED BATCH INTERLEAVES ITS ROWS, one sub-sentence chunk each per turn. The
+real engine emits `batch_chunk` lines from several rows at once — PHASE3-TTS.md
+section 7 calls out "sub-sentence audio emitted *while a row is still
+generating*" and "`done` for one row may arrive while another is still emitting"
+as requirements — so a fake that finished each row before starting the next would
+let a consumer that keys on arrival order alone pass. Rows are stepped in reverse
+list order, which keeps the reverse-retirement property a non-streamed batch has
+had since this file was written.
+
 TWO FIELDS HERE ARE AHEAD OF THE REAL WIRE, and this is the honest place to say
 so. `chars` and `capped` ride the retiring row below; `serve/worker.py` sends
 neither, and the frame cap it computed (`HiggsBudget.cap_frames`, clamped by
@@ -75,6 +97,14 @@ must not be bent into passing test fixtures through it:
                                   no `data`.
     CRUCIBLE_FAKE_CHUNK_MS        milliseconds of audio per streamed sub-sentence
                                   chunk. Default 200.
+    CRUCIBLE_FAKE_CHUNK_DELAY_MS  milliseconds of REAL time to spend on each of
+                                  them. Default 0, because a fake that is slow by
+                                  default makes every suite slow. Non-zero is how
+                                  a row gets to still be generating while a test
+                                  cancels it or drops its connection — the two
+                                  things PHASE3-TTS.md section 7 exists for, and
+                                  neither is reachable against an engine that
+                                  finishes a paragraph in microseconds.
     CRUCIBLE_FAKE_IGNORE_SIGTERM  ignore SIGTERM, so `stop()`'s refusal to escalate to
                                   SIGKILL can be tested. Crucible never SIGKILLs a
                                   process holding CUDA — that wedges WSL until Windows
@@ -102,6 +132,7 @@ import struct
 import sys
 import threading
 import time
+from typing import Callable, Iterator
 
 SAMPLE_RATE = 24_000
 TONE_HZ = 440.0
@@ -114,6 +145,10 @@ LOADED_EDGE_FADE_MS = {"in": 5, "out": 5}
 
 _stdout_lock = threading.Lock()
 _cancelled = threading.Event()
+
+#: The one generation in flight, if any. narrator is one engine, so there is
+#: never a second — see `_start_work`, which refuses rather than queues.
+_worker: threading.Thread | None = None
 
 
 def _env_float(name: str, default: float) -> float:
@@ -172,51 +207,60 @@ def _duration_for(text: str) -> tuple[float, bool, int]:
     return spoken / _env_float("CRUCIBLE_FAKE_CHARS_PER_SEC", 15.0), capped, chars
 
 
-def _emit_row(text: str, streamed: bool, row: int | None) -> None:
-    """One row of work: either streamed sub-sentence chunks, or one whole answer.
-
-    `row` is the batch position, or None for a bare `generate`. It decides the message
-    names (`batch_chunk`/`batch_item` against `chunk`/`done`) exactly as the real
-    worker does, and nothing else about the work differs between the two shapes.
-    """
+def _told_to_fail(row: int | None) -> bool:
+    """Answer `CRUCIBLE_FAKE_FAIL_ROW` for this row, and say whether it did."""
     fail_row = _env_int("CRUCIBLE_FAKE_FAIL_ROW")
     position = 0 if row is None else row
-    if fail_row is not None and fail_row == position:
-        if row is None:
-            send("error", message=f"fake narrator was told to fail row {position}")
-        else:
-            # `message`, not `error`. Corrected 2026-09-13 while the render door
-            # was being built against this file: `serve/worker.py` reports a
-            # per-row failure as `{'i': ..., 'message': ...}` in all five of the
-            # places it can happen ('No audio generated', 'cancelled',
-            # 'Model not loaded', the row's own exception text, and 'Batch
-            # generation failed'), and it is the ABSENCE of `data` plus the
-            # PRESENCE of `message` that tells a consumer a row failed. A fake
-            # sending a key narrator never sends is a fake that lets a real bug
-            # through, which is this file's own rule.
-            send("batch_item", i=row,
-                 message=f"fake narrator was told to fail row {row}")
+    if fail_row is None or fail_row != position:
+        return False
+    if row is None:
+        send("error", message=f"fake narrator was told to fail row {position}")
+    else:
+        # `message`, not `error`. Corrected 2026-09-13 while the render door
+        # was being built against this file: `serve/worker.py` reports a
+        # per-row failure as `{'i': ..., 'message': ...}` in all five of the
+        # places it can happen ('No audio generated', 'cancelled',
+        # 'Model not loaded', the row's own exception text, and 'Batch
+        # generation failed'), and it is the ABSENCE of `data` plus the
+        # PRESENCE of `message` that tells a consumer a row failed. A fake
+        # sending a key narrator never sends is a fake that lets a real bug
+        # through, which is this file's own rule.
+        send("batch_item", i=row, message=f"fake narrator was told to fail row {row}")
+    return True
+
+
+def _emit_whole_row(text: str, row: int | None) -> None:
+    """One row answered in a single message — the render door's shape."""
+    if _told_to_fail(row):
+        return
+    seconds, capped, chars = _duration_for(text)
+    payload, _ = tone(seconds)
+    fields = {
+        "format": "pcm16",
+        "data": base64.b64encode(payload).decode("ascii"),
+        "duration": seconds,
+        "sampleRate": SAMPLE_RATE,
+        "chars": chars,
+        "capped": capped,
+    }
+    if row is None:
+        send("audio", **fields)
+    else:
+        send("batch_item", i=row, **fields)
+
+
+def _stream_row(text: str, row: int | None) -> Iterator[None]:
+    """One streamed row, advanced **one sub-sentence chunk per `next()`**.
+
+    A generator rather than a loop so that a batch can interleave its rows; the
+    retirement message is sent as the generator finishes, which is what makes a
+    short row retire while a long one is still emitting.
+    """
+    if _told_to_fail(row):
         return
 
     seconds, capped, chars = _duration_for(text)
     chunk_seconds = _env_float("CRUCIBLE_FAKE_CHUNK_MS", 200.0) / 1000.0
-
-    if not streamed:
-        payload, _ = tone(seconds)
-        fields = {
-            "format": "pcm16",
-            "data": base64.b64encode(payload).decode("ascii"),
-            "duration": seconds,
-            "sampleRate": SAMPLE_RATE,
-            "chars": chars,
-            "capped": capped,
-        }
-        if row is None:
-            send("audio", **fields)
-        else:
-            send("batch_item", i=row, **fields)
-        return
-
     phase = 0.0
     seq = 0
     remaining = seconds
@@ -241,6 +285,10 @@ def _emit_row(text: str, streamed: bool, row: int | None) -> None:
             send("batch_chunk", i=row, **fields)
         seq += 1
         remaining -= span
+        delay = _env_float("CRUCIBLE_FAKE_CHUNK_DELAY_MS", 0.0) / 1000.0
+        if delay > 0:
+            time.sleep(delay)
+        yield
 
     cancelled = _cancelled.is_set()
     emitted = seconds - max(0.0, remaining)
@@ -252,8 +300,57 @@ def _emit_row(text: str, streamed: bool, row: int | None) -> None:
              cancelled=cancelled, chars=chars, capped=capped and not cancelled)
 
 
+def _interleave(rows: list[Iterator[None]]) -> None:
+    """Step every live row once per turn, until none is left."""
+    live = list(rows)
+    while live:
+        still: list[Iterator[None]] = []
+        for row in live:
+            try:
+                next(row)
+            except StopIteration:
+                continue
+            still.append(row)
+        live = still
+
+
+def _run_generate(message: dict) -> None:
+    text = message.get("text", "")
+    if message.get("stream"):
+        _interleave([_stream_row(text, None)])
+    else:
+        _emit_whole_row(text, None)
+
+
+def _run_batch(message: dict) -> None:
+    items = message.get("items") or []
+    # Reversed, deliberately. Rows come back out of order within a batch on the
+    # real engine (a short row finishes while a long one is still going), and a
+    # consumer that quietly relies on arrival order is a consumer that will be
+    # wrong the first time it meets a real one. For a streamed batch reversal
+    # decides only which row wins a tie, because the rows are interleaved.
+    ordered = list(reversed(items))
+    streamed = [item for item in ordered if item.get("stream")]
+    whole = [item for item in ordered if not item.get("stream")]
+
+    for item in whole:
+        if _cancelled.is_set():
+            send("batch_item", i=item.get("i"), message="cancelled")
+            continue
+        _emit_whole_row(item.get("text", ""), item.get("i"))
+
+    if streamed:
+        _interleave([_stream_row(i.get("text", ""), i.get("i")) for i in streamed])
+    send("batch_done")
+
+
 def _handle(message: dict) -> bool:
-    """Act on one line. Returns False when the process should exit."""
+    """Act on one line. Returns False when the process should exit.
+
+    Runs on the **stdin thread**, so everything here must be prompt: the whole
+    point of this file's shape is that a `cancel` is acted on while a batch is
+    still generating on the worker thread.
+    """
     action = message.get("action")
 
     if action == "load":
@@ -269,23 +366,11 @@ def _handle(message: dict) -> bool:
         return True
 
     if action == "generate":
-        _cancelled.clear()
-        _emit_row(message.get("text", ""), bool(message.get("stream")), None)
+        _start_work(_run_generate, message)
         return True
 
     if action == "generate_batch":
-        _cancelled.clear()
-        items = message.get("items") or []
-        # Retired in reverse, deliberately. Rows come back out of order within a batch
-        # on the real engine (a short row finishes while a long one is still going),
-        # and a consumer that quietly relies on arrival order is a consumer that will
-        # be wrong the first time it meets a real one.
-        for item in reversed(items):
-            if _cancelled.is_set():
-                send("batch_item", i=item.get("i"), message="cancelled")
-                continue
-            _emit_row(item.get("text", ""), bool(item.get("stream")), item.get("i"))
-        send("batch_done")
+        _start_work(_run_batch, message)
         return True
 
     if action in ("cancel", "stop"):
@@ -298,6 +383,31 @@ def _handle(message: dict) -> bool:
 
     send("error", message=f"fake narrator does not know action {action!r}")
     return True
+
+
+def _start_work(target: Callable[[dict], None], message: dict) -> None:
+    """Hand one generation to the worker thread, refusing a second in flight.
+
+    `_cancelled` is cleared **here**, on the stdin thread, before the worker
+    starts — so a `cancel` that arrives after this line can never be cleared by
+    the generation it was sent to abort.
+    """
+    global _worker
+    if _worker is not None and _worker.is_alive():
+        send(
+            "error",
+            message=(
+                "fake narrator was sent a second generation while one was in "
+                "flight; narrator is one engine and Crucible converses once at "
+                "a time"
+            ),
+        )
+        return
+    _cancelled.clear()
+    _worker = threading.Thread(
+        target=target, args=(message,), name="fake-narrator-work", daemon=True
+    )
+    _worker.start()
 
 
 def main() -> int:
