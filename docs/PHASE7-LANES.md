@@ -344,13 +344,52 @@ slower. With it on, a refusal sends the row to the next machine down the rank.
 That is the whole of it, and it maps to his sentence exactly: *the ability* to overflow is
 a thing you turn on when you are queueing a night's work, and off the rest of the time.
 
-**What a 409 means therefore depends on one flag, and both behaviours fall out of it:**
+**THE ROW'S STATE IS TWO FIELDS, AND THE DEFAULT STORES NOTHING.**
 
-| the row says | a `server_busy` means |
-|---|---|
-| overflow **off** (default) | **wait.** This machine or none. |
-| overflow **on** | try the next machine down the rank; wait when the list runs out |
-| pinned to a NAMED machine | **wait**, always — a pin is an instruction, and overflow does not override it |
+```ts
+machine:  string | null     // null = no choice made; use the rank
+overflow: boolean           // may this row use a lower-ranked machine when its first is BUSY
+```
+
+A first draft of this section said a new row "defaults to the highest-ranked machine", and
+the Foundry session caught the contradiction that creates: if defaulting POPULATES the
+field, then every row names a machine, and the rule "a named machine always waits" makes
+the overflow flag dead on every row. The distinction that was actually meant is **chosen
+versus inherited** — Owen typing *run this on the Mac* is an instruction; a row silently
+landing on rank 1 is not — and as a third boolean that is real but ugly.
+
+**It does not need to be a third field. It needs the default to store nothing.**
+`machine: null` IS "nobody chose", so "chosen explicitly" is exactly `machine !== null`.
+Two fields, and every case falls out:
+
+| `machine` | `overflow` | behaviour |
+|---|---|---|
+| `null` | `false` | **the default, and Owen's 90%.** Top-ranked ELIGIBLE machine; if it is busy, **wait** for it. |
+| `null` | `true` | top-ranked eligible; on `server_busy`, try the next rank down; wait when the list runs out |
+| `"mac"` | either | **that machine.** Busy or unreachable, it **holds and names the reason** — a pin is an instruction, and `overflow` does not override it |
+
+### Three things this settles that the three-state version could not
+
+**Resolution happens at START, not at queue time — for free.** Overflow is inherently a
+start-time decision because it depends on who is busy *now*. With the default stored as a
+machine name, a row queued this morning would wait for a machine chosen under this
+morning's ranking, and a later re-rank would not move it — so "highest-ranked eligible"
+would quietly mean "highest-ranked at the moment somebody pressed a button". With the
+default stored as `null` there is nothing to resolve early: the rank is read when the row
+starts. The Foundry session raised this and its own instinct — *"have the row store
+'default' until then"* — is precisely `null`.
+
+**DOWN is not BUSY, and the two get different answers.** A machine that is unreachable is
+not a candidate at all, so a `null` row skips it and runs on the next rank — which is not
+disobedience, because nobody asked for that machine. A row that NAMED it holds and says so.
+The earlier shape could not express that difference without a third field either; this one
+gets it from the same `machine !== null`.
+
+**"The Mac, but overflow if it is busy" stays inexpressible, deliberately.** That was the
+cost of the Foundry session's option 2 and it is worth paying here too: overflow exists to
+escape the DEFAULT, and a named machine is the one case where the operator has said which
+hardware they want. If that turns out to be wanted, it is `overflow` gaining meaning for a
+named row — an additive change to one line of this table, not a reshape.
 
 **Distribution is still emergent and still not a scheduler.** Nothing measures throughput,
 predicts a finish time, or balances anything. It is a ranked list, a flag, and a refusal
