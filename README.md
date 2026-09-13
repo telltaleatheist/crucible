@@ -269,7 +269,8 @@ What *did* run on the PC, for real:
 - `crucible models pull qwen3.5-9b` — 19.33 GB at the pinned sha in 154 s
 - `crucible doctor` — healthy, the 194-pin recipe verified against the built env
 - the guard refusing, live, against that busy card: `accelerator_busy`
-- `load-model qwen3.5-27b` refused `insufficient_memory` (52.5 GiB against 24.0 GiB)
+- `load-model qwen3.5-27b` refused `insufficient_memory` (52.5 GiB against 24.0 GiB) —
+  that id is now `qwen3.8-27b`; same size, same arithmetic, same refusal
 - `pytest` — 127 passed
 
 What did **not**: loading `qwen3.5-9b` into vLLM, the chat completions through it, the

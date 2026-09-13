@@ -137,7 +137,7 @@ test('models() reads every field /v1/models promises', async () => {
     json(response, 200, [
       MODEL_ROW,
       {
-        id: 'qwen3.5-27b',
+        id: 'qwen3.8-27b',
         family: 'qwen3.5',
         params_b: 27,
         revision: 'b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
@@ -145,7 +145,7 @@ test('models() reads every field /v1/models promises', async () => {
         installed: false,
         resident: false,
         loadable: false,
-        reason: 'not installed: run `crucible models pull qwen3.5-27b`',
+        reason: 'not installed: run `crucible models pull qwen3.8-27b`',
         memory_bytes_estimate: 54000000000,
         context_default: 12288,
       },
@@ -186,7 +186,7 @@ test('models() reads every field /v1/models promises', async () => {
       contextDefault: 12288,
     },
     {
-      id: 'qwen3.5-27b',
+      id: 'qwen3.8-27b',
       family: 'qwen3.5',
       paramsB: 27,
       revision: 'b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
@@ -194,7 +194,7 @@ test('models() reads every field /v1/models promises', async () => {
       installed: false,
       resident: false,
       loadable: false,
-      reason: 'not installed: run `crucible models pull qwen3.5-27b`',
+      reason: 'not installed: run `crucible models pull qwen3.8-27b`',
       memoryBytesEstimate: 54000000000,
       contextDefault: 12288,
     },
@@ -622,19 +622,19 @@ test('409 model_not_resident is a CrucibleRefused naming the resident model', as
     json(response, 409, {
       error: {
         code: 'model_not_resident',
-        message: "qwen3.5-27b is not resident; qwen3.5-9b is. Load it first.",
-        details: { requested: 'qwen3.5-27b', resident: 'qwen3.5-9b' },
+        message: "qwen3.8-27b is not resident; qwen3.5-9b is. Load it first.",
+        details: { requested: 'qwen3.8-27b', resident: 'qwen3.5-9b' },
       },
     });
 
   await assert.rejects(
-    client().chat({ model: 'qwen3.5-27b', messages: [{ role: 'user', content: 'hi' }] }),
+    client().chat({ model: 'qwen3.8-27b', messages: [{ role: 'user', content: 'hi' }] }),
     (error: unknown) => {
       assert.ok(error instanceof CrucibleRefused, `got ${String(error)}`);
       assert.equal(error.status, 409);
       assert.equal(error.code, 'model_not_resident');
       assert.match(error.serverMessage, /qwen3\.5-9b is\./);
-      assert.deepEqual(error.details, { requested: 'qwen3.5-27b', resident: 'qwen3.5-9b' });
+      assert.deepEqual(error.details, { requested: 'qwen3.8-27b', resident: 'qwen3.5-9b' });
       return true;
     },
   );

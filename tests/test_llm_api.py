@@ -29,7 +29,7 @@ from .conftest import FAKE_BACKEND, parse_sse
 from .fake_engine import ANSWER, DELTAS, FakeEngine
 
 MODEL = "qwen3.5-9b"
-BIG_MODEL = "qwen3.5-27b"
+BIG_MODEL = "qwen3.8-27b"
 
 
 # ------------------------------------------------------------------ fixtures
@@ -163,7 +163,7 @@ def test_models_lists_every_manifest_with_its_standing(
     response = llm_client.get("/v1/models", headers=auth)
     assert response.status_code == 200
     rows = {row["id"]: row for row in response.json()}
-    assert sorted(rows) == [BIG_MODEL, MODEL]
+    assert sorted(rows) == [MODEL, BIG_MODEL]
     row = rows[MODEL]
     assert row["family"] == "qwen3.5"
     assert row["params_b"] == 9
@@ -394,7 +394,7 @@ def test_the_27b_on_this_card_is_insufficient_memory(
     assert response.status_code == 409
     error = response.json()["error"]
     assert error["code"] == "insufficient_memory"
-    assert error["details"]["needed_bytes"] == 56_368_328_800
+    assert error["details"]["needed_bytes"] == 56_368_313_144
     assert error["details"]["total_bytes"] == FAKE_BACKEND.gpu.vram_bytes
 
 

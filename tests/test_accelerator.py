@@ -180,8 +180,8 @@ def test_the_27b_on_a_24_gib_card_is_insufficient_memory(
     with pytest.raises(ApiError) as caught:
         guard(
             "cuda-linux",
-            model_id="qwen3.5-27b",
-            need_bytes=56_368_328_800,
+            model_id="qwen3.8-27b",
+            need_bytes=56_368_313_144,
             desktop_allowance_bytes=3 * GIB,
         )
     error = caught.value
@@ -190,7 +190,7 @@ def test_the_27b_on_a_24_gib_card_is_insufficient_memory(
     # It names both numbers, as section 4 requires.
     assert "needs 52.5 GiB" in error.message
     assert "22.0 GiB free" in error.message
-    assert error.details["needed_bytes"] == 56_368_328_800
+    assert error.details["needed_bytes"] == 56_368_313_144
     assert error.details["free_bytes"] == 22 * GIB
 
 
@@ -200,7 +200,7 @@ def test_unified_memory_is_checked_the_same_way(
     fake_mac(monkeypatch, available=30 * GIB)
     guard("mlx-darwin", model_id="qwen3.5-9b", need_bytes=19 * GIB)
     with pytest.raises(ApiError) as caught:
-        guard("mlx-darwin", model_id="qwen3.5-27b", need_bytes=55_518_917_355)
+        guard("mlx-darwin", model_id="qwen3.8-27b", need_bytes=55_518_912_853)
     assert caught.value.code == "insufficient_memory"
     assert "30.0 GiB free" in caught.value.message
 
