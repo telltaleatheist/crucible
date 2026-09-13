@@ -1,6 +1,13 @@
 # Crucible — design
 
-Status: v1 API, phase 1 (handshake). Decided with Owen 2026-09-12.
+Status: v1 API. Phases 1 and 2 are built and verified live on both backends; phases 3 and 4
+are contracted in the files named in section 3 and built against them.
+
+This file is the shape of the whole thing. Each job type's exact wire contract lives in its
+own file and **wins over this one where they disagree**, because this one was written before
+any of them had met an accelerator: `PHASE2-LLM.md`, `PHASE3-TTS.md`, `PHASE3-VLM.md`,
+`PHASE4-AUDIO.md`. `CLIENT-SURFACES.md` is the audit of every model call the client apps
+actually make, and is what all four were written from. Decided with Owen 2026-09-12.
 
 ## 1. What it is
 
@@ -45,12 +52,20 @@ declaring: the env it needs, the models it can serve, a VRAM estimate per model,
 
 | Type | In | Out | Notes |
 |---|---|---|---|
-| `llm` | chat messages, model id, sampling | text | OpenAI-compatible endpoint (`/v1/openai/...`), so vLLM / SGLang / mlx-lm batching comes for free. Phase 2. |
-| `vlm-pages` | PDF or page images | per-page structured markup | dots 3B. Send the PDF; the server rasterises. Phase 3. |
-| `tts` | text chunks, voice id, sampling, cap | audio (FLAC per chunk) + progress | Higgs via narrator. Cap certificate is per (model, backend). Phase 3. |
-| `align` | audio + text | VTT/JSON cues | Qwen3-ForcedAligner. Phase 4. |
-| `rvc` | audio, model id, params | audio | Phase 4. |
+| `llm` | chat messages, model id, sampling | text | OpenAI-compatible endpoint (`/v1/openai/...`), so vLLM / SGLang / mlx-lm batching comes for free. Phase 2, `PHASE2-LLM.md`. |
+| `tts` | text chunks, voice id, take | audio (FLAC per chunk) + measurements | Higgs and Orpheus through narrator. Two doors: a render job and a streaming connection. Voices are the server's, and so is every knob that tunes an engine to one. Phase 3b, `PHASE3-TTS.md`. |
+| `align` | audio + text | timestamped items | Qwen3-ForcedAligner-0.6B, resident across a whole book. Phase 4, `PHASE4-AUDIO.md`. |
+| `asr` | one audio file | transcript with word timestamps | faster-whisper, six sizes, no default. Phase 4, `PHASE4-AUDIO.md`. |
+| `rvc` | audio + model id + params | audio | ultimate-rvc. Phase 4, `PHASE4-AUDIO.md`. |
 | `echo` | any blob | the same blob, with progress events | Test-only, enabled by config flag. Proves the stream and artifact path. Phase 1. |
+
+There is **no `vlm-pages` type**, and the reason is the one piece of this table that research
+overturned. Both apps rasterise locally at a pinned 200 dpi and send an ordinary chat
+completion whose first content part is a data-URI PNG, so a server receives pictures and
+never PDFs, and page reading is the `llm` proxy plus a model whose manifest says it takes
+images. `PHASE3-VLM.md` has the whole argument. Sending the PDF and rasterising server-side
+is a real and larger job type; it is simply not the one either app needs, and building it
+would have been a second residency and a second proxy for a chat completion.
 
 Prompts, chunking, rubrics, edit lists, retake ladders: **app logic, stays in the app.**
 

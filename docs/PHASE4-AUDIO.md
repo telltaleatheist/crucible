@@ -4,11 +4,13 @@ Contract for the three remaining audio job types and the one server feature that
 most of BookForge's GPU plumbing. Extends DESIGN.md. Written 2026-09-13 from
 `docs/CLIENT-SURFACES.md` sections 4 and 10 (tier 4).
 
-A correction to DESIGN.md section 3 first, because it is load-bearing and the table is
-wrong: **`align` is not WhisperX.** The app's aligner is Qwen3-ForcedAligner-0.6B,
-everywhere, with no fallback. WhisperX survives only as a CPU env supplying faster-whisper
-for the rough-transcript stage of whole-m4b alignment, which is why `asr` is a separate job
-type below and not a mode of `align`.
+One thing the audit had to correct in BookForge's own plan documents is worth restating
+here, because it decides the shape of section 3: **`align` is not WhisperX.** The app's
+aligner is Qwen3-ForcedAligner-0.6B, everywhere, with no fallback — DESIGN.md's table
+already says so. WhisperX survives only as a CPU env supplying faster-whisper for the
+rough-transcript stage of whole-m4b alignment. That stage is a different model doing a
+different thing, which is why `asr` below is a job type of its own and not a mode of
+`align`.
 
 ## 1. One rule decides three designs: no shared mount, ever
 

@@ -80,56 +80,47 @@ sketches. Two rulings from Owen shape it:
   both engines (Foundry's analyze and tag calls depend on it). `finish_reason` is never
   touched.
 - A dropped client connection aborts the engine request; the proxy never lets a
-  request run on after its caller is gone.
+  request run on after its caller is gone. This is the only cancel either app has for a
+  chat, so it is the cancel path and not a nicety.
 - The served name rule: Crucible's id plus the pinned revision is what a client records
-  (`qwen3.5-9b@<sha>`); dtype is part of the id only when it is not bf16.
+  (`qwen3.5-9b@<sha>`); dtype is part of the id only when it is not bf16. Provenance
+  carries the revision, which until now it did not.
 - With these, Foundry's clean / translate / simplify point at Crucible by URL with no
   client change, and BookForge's `text-server.ts` (1,364 lines, already a small
   Crucible) is retired.
 
-## Phase 3b: `tts`
+## Phase 3b: `tts` — contract in `docs/PHASE3-TTS.md`
 The largest job type and the one that deletes the most: BookForge's WSL spawn, path
-rewriting, per-engine sampling tables and VRAM arithmetic for TTS all go.
-- **Two doors on the server.** *Render* is a job: text chunks + voice id + take number
-  in, FLAC per chunk out as artifacts, resumable, progress per chunk. *Streaming* is a
-  persistent connection returning PCM16 as it is generated, fast-start, out-of-order
-  retirement within a batch, cancel mid-batch. BookForge's TTS WebSocket on 8766 (the
-  browser extension's door) becomes a relay to the chosen server.
-- **Voices.** Three shapes behind one id: an Orpheus prompt token, a Higgs fine-tune
-  checkpoint directory, and Higgs zero-shot reference clips (audio + transcript inline
-  in the job inputs). Per-voice config on the server holds sampling per backend, cap
-  certificates per (model, backend), token-budget formulas, and Orpheus's EOS controls
-  (logit surgery in the sampler, the hardest single item).
-- **Backends.** Higgs via SGLang on `cuda-linux`, Higgs via MLX on `mlx-darwin`;
-  Orpheus via vLLM on `cuda-linux`, MLX on `mlx-darwin`.
-- **Batch writer, client side.** No shared mount. The SDK streams chunk artifacts and
-  BookForge writes them where assembly and resume already look.
-- **Stays in the app:** chunking, text normalization, the pace guard's judgment, the
-  retake decision, assembly, the session layout. The ladder's *steps* are server config;
-  the client asks for take N.
+rewriting, per-engine sampling tables and VRAM arithmetic for TTS all go. Two doors — a
+render job and a streaming WebSocket — because the extension's streaming is what Owen uses
+every Sunday and it is not the render door with a smaller buffer. Voices are manifests the
+server advertises; engine tuning never crosses the wire. narrator is the managed
+subprocess, the way vLLM is, because it already holds the EOS logit surgery the audit calls
+the hardest single item in the contract.
 
-## Phase 3c: `vlm-pages`
-The `llm` proxy plus image content parts. Foundry already rasterises locally and sends
-one page per chat completion, so the server receives pictures, never PDFs (DESIGN.md's
-"send the PDF" is a later, larger job). Requirements: dots.ocr served under exactly the
-id the client names, 12 or more concurrent pages, 32k context, per-page results as
-they land. Deletes `vlm-page-server.ts` and the unarbitrated port-8000 route; keeps
-`mlx-local` until the Mac backend serves it.
+## Phase 3c: page reading — contract in `docs/PHASE3-VLM.md`
+Much smaller than it looked. Both apps rasterise locally and send a chat completion with an
+image content part, so this is the `llm` proxy plus `modalities` on a model row, a rule that
+refuses `--skip-mm-profiling` on an image-capable manifest, and a dots.ocr manifest. Deletes
+`vlm-page-server.ts` and the unarbitrated port-8000 route; keeps `mlx-local` until the Mac
+backend serves it.
 
-## Phase 4: `align`, `asr`, `rvc`, the app, friends
-- `align` (Qwen3-ForcedAligner): the easiest job type; model resident across a book,
-  per-chunk failures reported without stopping the run. Unblocks whole-m4b alignment
-  on Windows, which cannot run today.
-- `asr` (faster-whisper): a new job type; six sizes, windows with overlap, VAD and word
-  timestamps, progress by position. Feeds the align door.
-- `rvc` (ultimate-rvc): per-sentence and whole-file, same filesystem coupling as the
-  `tts` batch door, decided together with it.
-- **A "who holds the accelerator" probe** on the server, replacing BookForge's three
-  arbitration schemes and the `external-gpu-job.lock` convention.
-- **The app:** a Servers settings row over the registry, a server column on queue rows
-  (the operator or the queue picks the server), the `crucible` provider wired into book
-  analysis and translation, the bootstrapper (detect host, install a local server), a
-  Docker image for `cuda-linux`. Then a friend gets the client and a tailnet invite.
+## Phase 4: `align`, `asr`, `rvc`, the probe — contract in `docs/PHASE4-AUDIO.md`
+`align` (Qwen3-ForcedAligner, resident across a book), `asr` (faster-whisper, six sizes, no
+default), `rvc` (ultimate-rvc, model identity becomes a manifest), and the
+"who holds the accelerator" probe that replaces BookForge's three arbitration schemes and
+the `external-gpu-job.lock` convention. Denoise, separation and Resemble are named and
+deferred there, with the reason: their contract is sample-exact and cannot be asserted
+against a fake engine.
+
+## Phase 5: the apps, the bootstrapper, and friends
+- A Servers settings row over the registry, a server column on queue rows (the operator or
+  the queue picks the server), the `crucible` provider wired into book analysis and
+  translation.
+- BookForge's TTS WebSocket on 8766 becomes a relay to the chosen server, which is what
+  keeps the browser extension working unchanged.
+- The bootstrapper: detect the host, install a local server, start/stop it, report health.
+  A Docker image for `cuda-linux`. Then a friend gets the client and a tailnet invite.
 
 ## Open questions (decided by default unless Owen says otherwise)
 - Owen's Ollama-built LoRA adapters (footnotes, OCR, headline, blocks): served as
