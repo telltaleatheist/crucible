@@ -23,7 +23,7 @@ Three roles, kept distinct even when they ship together:
 | Role | Lives in | Knows about |
 |---|---|---|
 | **Client SDK** | each app (`@crucible/client`, TypeScript) | servers, jobs, artifacts. Zero GPU or platform code. |
-| **Bootstrapper** | each app's settings UI (later) | how to detect the host, install a local server, start/stop it, report health. |
+| **Bootstrapper** | THIS REPO (`@crucible/bootstrap`, TypeScript), consumed by each app's settings UI | detect the host, install a local server, ensure the SERVICE is running, report health. Owen ruled 2026-09-13 that a local Crucible is a service and not an app's child process, and that one bootstrapper ships with the server rather than one per app — PHASE5-APPS.md section 6.0. |
 | **Server** | this repo (`crucible`, Python) | backends, envs, models, VRAM, the queue. |
 
 The client speaks HTTP to the server **even when it just spawned that server on

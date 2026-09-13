@@ -145,15 +145,79 @@ Crucible is not one.
 
 ## 6. The bootstrapper
 
-The third role in DESIGN.md section 1, and the only one still unbuilt. It lives in the app,
-not in the server, and it knows how to: detect the host, install a local server, start and
-stop it, and report health.
+### 6.0 THE RULING: a local Crucible is a SERVICE, and the bootstrapper ships with Crucible
+
+**Owen, 2026-09-13, asked whether a local Crucible is a machine service or an app's child
+process: "service".** Two consequences he left to me, both recorded here.
+
+**A local Crucible is a service on the machine. No app owns it.** `crucible serve` becomes
+a systemd unit on `cuda-linux` (inside WSL2 on a Windows host) and a launchd agent on
+`mlx-darwin`, and an app's job shrinks to *make sure this machine has one, and make sure it
+is running*. Everything below follows from that one word, and most of it is a deletion:
+
+- **Nobody owns it, so nobody has to be chosen as the owner.** The question that produced
+  this ruling — when Foundry is hosted inside BookForge, which of them installs and starts
+  the server — simply stops existing. Both call an idempotent `ensureRunning()` and connect.
+  Two apps racing is a no-op rather than a conflict.
+- **It survives the app.** A Crucible holding a 19 GB model must not die because somebody
+  closed a window, and a render must not die with it. As a child process it would.
+- **The orphaned-CUDA hazard goes away by construction.** Foundry's `mount.ts:988` names it:
+  a crash leaves a guest process holding the card with nothing to SIGTERM it. Nothing can be
+  orphaned that was never anyone's child.
+- **Section 7's second question is answered, and it was already leaning this way.**
+  "Does BookForge ever start a server it did not install?" — the ordinary case is that it
+  *never* starts one: it asks the service. A registry entry whose URL answers `ping` is a
+  server, whoever started it.
+
+**The bootstrapper ships WITH Crucible, as `@crucible/bootstrap`** — a sibling of
+`@crucible/client`, zero runtime dependencies, released from this repo at the same version
+by the same `release.sh`. It does **not** live in each app, which is what DESIGN.md section
+1 said until today and what this supersedes.
+
+The reason is the lesson of 2026-09-13, stated in ARCHITECTURE.md as R1. Two apps each
+writing "detect the host, install a server, start it, stop it, report health, make a model
+resident" is one fact with two owners, and it would be the largest instance yet — because
+it is the piece that has to work on a machine nobody has ever logged into. Shipping it with
+the server also inherits the property `release.sh` already enforces for the client: **a
+bootstrapper can never be paired with a server nobody tested it against.**
+
+Its surface is small, and every verb is idempotent:
+
+```
+install()            # this host has a Crucible, at a version this build knows
+ensureRunning()      # the service is up; a no-op when it already is
+ensureResident(id)   # that model is on the card (PHASE7-LANES.md section 9.2)
+health()             # what /v1/activity says, or why it cannot be reached
+```
+
+**What consumes it, and what must not.** The app half of an Electron product consumes it.
+An *engine* — Foundry's single compiled binary, which runs on machines with no app, no
+Electron and no `node_modules` — must never touch it, and that is already Foundry's own
+written rule: *"foundry uses a vLLM server and never starts one — launch it with `vllm
+serve <model>`, or name the machine that has it."* The engine consumes an endpoint. It does
+not stand anything up, and it does not learn what a Crucible is.
+
+**The vendored Foundry app needs none of it.** Hosted inside BookForge it consumes an
+endpoint like any other client, so it declares no dependency on `@crucible/bootstrap` and
+the drift surface of two declarations over one runtime — which the Foundry session raised —
+never opens. Only a standalone Foundry would depend on it, and only to reach the same
+service.
+
+### 6.1 What it still has to do
+
+It lives in the app layer, not the server, and it knows how to: detect the host, install a
+local server, ensure the service is running, and report health.
 
 On Windows that means **inside WSL2**, driven by `wsl.exe -d <distro> --exec bash -c ...`
 and never the implicit shell, which pre-expands `$var`. The app already has every piece of
 that machinery — it is what `text-server.ts` and `vlm-page-server.ts` do — so the
 bootstrapper is largely those two files' *good* half, kept while their model-serving half
 is deleted.
+
+**Starting is `systemctl --user start` / `launchctl kickstart`, not a spawn.** That is the
+whole difference in code, and it is why the app half of this is small: the machinery
+`text-server.ts` and `vlm-page-server.ts` carry for spawning, supervising, ring-buffering
+and tearing down a model server is exactly the half that is being deleted, not kept.
 
 A Docker image for `cuda-linux` is the alternative worth having for a friend, because
 "install WSL2, then conda, then an env" is not an onboarding path. The image is the server
