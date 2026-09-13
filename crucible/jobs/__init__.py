@@ -54,7 +54,56 @@ def build_registry(
         registry[UnloadModelJobType.name] = UnloadModelJobType(config, backend, holder)
     if config.enable_asr:
         registry[AsrJobType.name] = AsrJobType(config, backend, holder.owned_pids)
+    _assert_every_type_implements_the_protocol(registry)
     return registry
+
+
+#: What `JobType` asks of a plugin. Read off the Protocol rather than typed out,
+#: so adding a member there extends this on its own — which is the whole point,
+#: since the bug this guards against was a member added in one branch and a type
+#: written in another. `name` is excluded: every type sets its own, and it is the
+#: key the registry is built from, so a type without one never gets this far.
+#:
+#: `typing.Protocol` exposes `__protocol_attrs__` only from 3.12, and this server
+#: supports 3.11, so the members are taken from the class body: methods live in
+#: `vars()`, annotated attributes in `__annotations__`, and a Protocol has no
+#: other kind of member.
+_JOB_TYPE_MEMBERS: tuple[str, ...] = tuple(
+    sorted(
+        {
+            name
+            for name in list(vars(JobType)) + list(getattr(JobType, "__annotations__", {}))
+            if not name.startswith("_") and name != "name"
+        }
+    )
+)
+
+
+def _assert_every_type_implements_the_protocol(registry: dict[str, JobType]) -> None:
+    """Refuse to serve a job type that does not implement all of `JobType`.
+
+    `Protocol` is a static claim, and nothing was checking it: `asr` was written
+    against a `JobType` that had six methods, `llm` added a seventh
+    (`model_provenance`) in the same week, and the two met in a merge. Nothing
+    complained at import, at startup, or when a job was accepted. The failure
+    arrived where it could do the most damage — inside `JobStore._finish`, while
+    writing a finished job's provenance, on the event loop, so the job emitted no
+    terminal event and every client reading its stream waited forever.
+
+    A missing member is a build-time fact, so it is refused at build time, by
+    name, before the server answers anything. `runtime_checkable` would only
+    check the members that `isinstance` knows about on the instance; this asks
+    the Protocol what it declares.
+    """
+    for job_type, plugin in sorted(registry.items()):
+        missing = [m for m in _JOB_TYPE_MEMBERS if not hasattr(plugin, m)]
+        if missing:
+            raise TypeError(
+                f"job type {job_type!r} ({type(plugin).__name__}) does not "
+                f"implement JobType: missing {sorted(missing)}. Every member of "
+                "the protocol is called by the queue or the API; a type that is "
+                "missing one fails somewhere far from here."
+            )
 
 
 def resolve(registry: dict[str, JobType], job_type: str) -> JobType:

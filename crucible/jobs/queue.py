@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import uuid
 from collections import deque
 from pathlib import Path
@@ -59,6 +60,18 @@ class JobStore:
             await self._worker
         except asyncio.CancelledError:
             pass
+        except Exception as exc:
+            # The lane died on its own before shutdown reached it. `_run_lane`
+            # guards against every way that can happen today, so this is the
+            # backstop behind a backstop — but re-raising here would turn one
+            # dead worker into a server that cannot shut down, which is how a
+            # WSL2 guest ends up with a CUDA process nobody can SIGTERM. Say it
+            # loudly on the way out instead.
+            print(
+                f"crucible: the job lane had already died: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
         self._worker = None
 
     # ------------------------------------------------------------------- state
@@ -199,10 +212,30 @@ class JobStore:
                 continue
             job_id = self._pending.popleft()
             job = self._jobs[job_id]
-            if job.cancel_requested:
-                self._finish(job, CANCELLED)
-                continue
-            await self._execute(job)
+            try:
+                if job.cancel_requested:
+                    self._finish(job, CANCELLED)
+                    continue
+                await self._execute(job)
+            except asyncio.CancelledError:
+                # The server is shutting the lane down. Nothing to salvage.
+                raise
+            except Exception as exc:
+                # `_execute` already turns anything the PLUGIN raises into a
+                # failed job. Reaching here means the queue's own bookkeeping
+                # raised — writing a provenance sidecar, appending an event —
+                # and the damage of letting it out is out of all proportion to
+                # the bug: this coroutine IS the lane, so an escape kills the
+                # worker, every later job sits at `queued` forever, and the
+                # server goes on answering 200 to submissions it will never run.
+                #
+                # That is not hypothetical. A job type written against a
+                # six-method `JobType` met a seventh added in another branch;
+                # the AttributeError surfaced inside `_finish`, the job emitted
+                # no terminal event, and the SSE stream its client was reading
+                # never ended. `build_registry` now refuses that mismatch at
+                # startup, and this keeps any future one to a single failed job.
+                self._fail_out_of_band(job, exc)
 
     async def _execute(self, job: Job) -> None:
         plugin = self._registry[job.type]
@@ -231,6 +264,33 @@ class JobStore:
                 self._finish(job, DONE)
         finally:
             self._running_id = None
+
+    def _fail_out_of_band(self, job: Job, exc: BaseException) -> None:
+        """Mark a job failed when the queue's own machinery is what broke.
+
+        Deliberately does not go through `_finish`: whatever raised is most
+        likely still there (provenance, or the event append itself), and a
+        second attempt down the same path would take the lane with it. So this
+        sets the terminal state directly, appends the one event a client is
+        waiting for, and treats a failure even to do that as survivable — the
+        lane matters more than the message.
+        """
+        job.status = FAILED
+        job.finished = utcnow()
+        job.error = {
+            "code": "queue_failed",
+            "message": (
+                f"the job lane could not finish this job: {type(exc).__name__}: "
+                f"{exc}. This is a bug in Crucible, not in the request."
+            ),
+        }
+        try:
+            self.append_event(job, "failed", {"error": job.error})
+        except Exception:
+            # Nothing further can be told to the client, whose stream will end
+            # when it disconnects. The lane lives, which is the point.
+            pass
+        self._running_id = None
 
     def _finish(self, job: Job, status: str, error: dict[str, str] | None = None) -> None:
         job.status = status

@@ -71,6 +71,9 @@ from ... import accelerator, weights, workerenv, workers
 from ...asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
 from ...config import Config
 from ...errors import ApiError, JobError
+# The one place `<id>@<revision>` is spelled. Two spellings of a fingerprint
+# is two names for one set of weights, which is the thing it exists to stop.
+from ...manifests import fingerprint
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 
 __all__ = ["AsrJobType", "AsrParams"]
@@ -269,6 +272,32 @@ class AsrJobType:
                 )
             )
         return rows
+
+    def model_provenance(self, model: str | None) -> dict[str, Any] | None:
+        """The `model` block of a transcript's provenance sidecar.
+
+        A transcript is an artifact like any other and has to say which weights
+        produced it: `faster-whisper-base` and `faster-whisper-large-v3` disagree
+        about a hard passage, and a cue list that does not name its model is a
+        cue list nobody can re-derive. The revision is this host's backend pin,
+        which is a statement about bytes — `weights.require_installed` refuses
+        weights pulled at any other one.
+        """
+        if model is None:
+            raise JobError("model_required", f"{self.name} needs a model")
+        manifest = _known(model)
+        spec = manifest.backends.get(self._config.backend_kind)
+        if spec is None:
+            # Unreachable through the API: `preflight` refuses
+            # `backend_unsupported` before a job exists. A sidecar still has to
+            # say something true if it is reached another way, and inventing a
+            # revision is not it.
+            return {"id": model, "revision": None, "fingerprint": None}
+        return {
+            "id": model,
+            "revision": spec.revision,
+            "fingerprint": fingerprint(model, spec.revision),
+        }
 
     def vram_estimate(self, model: str | None) -> int:
         if model is None:
