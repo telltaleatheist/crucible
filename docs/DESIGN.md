@@ -54,6 +54,25 @@ declaring: the env it needs, the models it can serve, a VRAM estimate per model,
 
 Prompts, chunking, rubrics, edit lists, retake ladders: **app logic, stays in the app.**
 
+### 3.1 The division of knowledge (ruled by Owen, 2026-09-12)
+
+BookForge is being split into two pieces, and the line is this: **the client knows what
+the operator ordered and which server to send it to; the server knows how to run it.**
+BookForge never learns whether a server is running SGLang, vLLM, vllm-omni or MLX. It
+knows it has an order to narrate this book, that it has three servers registered, and
+that the operator (or the queue) said "server 2".
+
+Everything that tunes an engine to a model lives in **Crucible's own configuration**, not
+on the wire: sampling defaults per backend, Orpheus's EOS controls, cap certificates,
+token-budget formulas, dtype, engine flags. A `tts` request carries the text chunks, a
+voice id and the take number; the server's voice config decides the rest. Where the app
+genuinely needs to steer a knob (a temperature the operator set, a cap override), the
+job contract names that knob explicitly, one at a time, with a reason. The default is
+that it does not cross the seam.
+
+This is the reading of `docs/CLIENT-SURFACES.md` section 10, tier 3: those rows describe
+what the *server* must implement, not what the *client* must send.
+
 ## 4. API v1
 
 Base: `http://<host>:<port>/v1`. Auth: `Authorization: Bearer <token>` on every route
