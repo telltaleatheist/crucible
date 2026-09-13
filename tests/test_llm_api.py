@@ -30,6 +30,8 @@ from .fake_engine import ANSWER, DELTAS, FakeEngine
 
 MODEL = "qwen3.5-9b"
 BIG_MODEL = "qwen3.8-27b"
+#: The same 27B at 4 bits: the one that does fit Owen's card.
+SMALL_BIG_MODEL = "qwen3.8-27b-4bit"
 
 
 # ------------------------------------------------------------------ fixtures
@@ -163,7 +165,7 @@ def test_models_lists_every_manifest_with_its_standing(
     response = llm_client.get("/v1/models", headers=auth)
     assert response.status_code == 200
     rows = {row["id"]: row for row in response.json()}
-    assert sorted(rows) == [MODEL, BIG_MODEL]
+    assert [row["id"] for row in response.json()] == [MODEL, BIG_MODEL, SMALL_BIG_MODEL]
     row = rows[MODEL]
     assert row["family"] == "qwen3.5"
     assert row["params_b"] == 9
@@ -424,6 +426,80 @@ def test_models_says_why_the_27b_is_not_loadable_here(
     assert rows[BIG_MODEL]["loadable"] is False
     assert "52.5 GiB" in rows[BIG_MODEL]["reason"]
     assert "24.0 GiB in total" in rows[BIG_MODEL]["reason"]
+
+
+def test_the_4bit_27b_is_loadable_on_this_card_where_the_bf16_27b_is_not(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+) -> None:
+    """The whole point of the third manifest, on Owen's own card.
+
+    `llm_client` is the RTX 3090 Ti: 24 GiB in total. Two manifests for the same
+    27B — same family, same params_b — and the host answers differently about
+    each, because the answer is arithmetic about the weights each one points at
+    and not about the model's name.
+    """
+    fake_weights(SMALL_BIG_MODEL)
+    fake_weights(BIG_MODEL)
+    rows = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
+
+    small = rows[SMALL_BIG_MODEL]
+    assert small["family"] == rows[BIG_MODEL]["family"] == "qwen3.8"
+    assert small["params_b"] == rows[BIG_MODEL]["params_b"] == 27
+    assert small["backend_supported"] is True
+    assert small["installed"] is True
+    assert small["loadable"] is True
+    assert "reason" not in small
+    # Owen's `qwen3.8:27b-24g` context, and what vLLM is given as --max-model-len.
+    assert small["context_default"] == 98304
+    assert small["memory_bytes_estimate"] == 25_010_841_096
+    assert small["revision"] == (
+        load_manifest(SMALL_BIG_MODEL).spec(FAKE_BACKEND.kind).revision
+    )
+
+    assert rows[BIG_MODEL]["loadable"] is False
+    assert "52.5 GiB" in rows[BIG_MODEL]["reason"]
+
+    # And the refusal the listing predicts is the refusal the load makes.
+    response = submit(llm_client, auth, type="load-model", model=BIG_MODEL)
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "insufficient_memory"
+
+
+def test_the_4bit_27b_actually_loads_on_a_free_24_gib_card(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    engines: list[FakeEngine],
+) -> None:
+    """Not merely "the card is big enough" — the guard lets it through.
+
+    `loadable` in `/v1/models` compares the estimate against the card's TOTAL, so
+    it cannot answer "right now". This does: an empty 24 GiB card, and the live
+    guard passes the 23.3 GiB estimate. The margin is 0.7 GiB, which is why the
+    `idle_card` fixture — 22 GiB free, the Windows desktop holding the rest — is
+    deliberately not used here. On Owen's real card, with his desktop up, this
+    load is expected to be tight; see the manifest's comment.
+    """
+    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
+    monkeypatch.setattr(
+        accelerator,
+        "probe_vram",
+        lambda: (FAKE_BACKEND.gpu.vram_bytes, FAKE_BACKEND.gpu.vram_bytes),
+    )
+    fake_weights(SMALL_BIG_MODEL)
+    events = run_job(llm_client, auth, type="load-model", model=SMALL_BIG_MODEL)
+    assert events[-1]["event"] == "done"
+    assert events[-1]["data"]["resident"] == SMALL_BIG_MODEL
+    assert len(engines) == 1
+    # vLLM is told the context the manifest promises, and nothing forces a dtype:
+    # compressed-tensors W4A16 carries its own, and `dtype auto` is what it wants.
+    assert engines[0].args == [
+        "--gpu-memory-utilization", "0.85", "--max-model-len", "98304",
+    ]
 
 
 def test_unknown_params_are_refused(

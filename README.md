@@ -154,6 +154,20 @@ The first capability that touches the accelerator. Crucible runs one language mo
 time and puts an OpenAI-compatible surface in front of it; the prompts, the chunking and
 the rubrics stay in the app.
 
+Three models ship. **`qwen3.5-9b`** is Owen's cleanup model and the only one that fits a
+24 GB card comfortably — about 19.7 GB at its 12288-token context, and the model both
+machines have actually run. **`qwen3.8-27b`** is the same 27B the Mac Studio runs at
+bf16: roughly 56 GB with KV, so it loads on 64 GB of unified memory and is refused on the
+3090 Ti by name, which is the point of carrying a `cuda-linux` block it can never satisfy.
+**`qwen3.8-27b-4bit`** is that 27B quantized to int4 — Crucible's equivalent of Owen's
+Ollama tag `qwen3.8:27b-24g`, the 27B he actually runs on the 3090 Ti — and it carries
+that tag's 98304-token context, which is also the `--max-model-len` vLLM is started with.
+At 4 bits the weights are 18.6 GB on `cuda-linux` and 16.1 GB on `mlx-darwin`, so it fits
+a 24 GB card on paper with about 0.7 GiB to spare once the 6.00 GiB of KV at 98304 tokens
+is counted. On paper is the operative phrase: its `cuda-linux` estimate is computed, never
+measured, for the reason in TODO(cuda-linux verification) below, and the margin is thinner
+than the 9B's computed figure turned out to be wrong by.
+
 ```bash
 crucible init --enable-llm        # or add [jobs] enable_llm = true to an existing config
 crucible install llm              # build ~/.crucible/envs/llm and install the host recipe
@@ -283,6 +297,18 @@ VRAM measurement, and `keeper-llm-live.sh` in local mode on that host. Consequen
   example value and has never been exercised. On a 24 GB card holding a 19.3 GB model
   alongside the Windows desktop it may well be too low to leave room for the KV cache;
   expect to raise it, and record the measured reason when you do.
+- **`models/qwen3.8-27b-4bit.toml` has never been near the card either**, and it is the
+  manifest where that matters most, because it is the one whose whole claim is that it
+  fits. The card was still off limits when it was written — Owen's ladder owns it, and
+  Crucible never evicts — so its `cuda-linux` block is arithmetic and unit tests: weights
+  summed from the hub's tree API at the pinned sha, plus KV at 98304 tokens. 25.0 GB
+  against a 24 GB card leaves 0.7 GiB, and on the 9B the same arithmetic came out about
+  6% under a measured figure. So `load-model qwen3.8-27b-4bit` on the PC may well be
+  refused `insufficient_memory` the first time it is tried, especially with the Windows
+  desktop's ~2.3 GB on the card. When the card is free: pull it, measure it
+  (`./scripts/measure-llm-memory.sh qwen3.8-27b-4bit`), and if it does not fit, lower
+  `context_default` rather than raising the estimate — KV is 6.00 GiB of that budget.
+  Its `mlx-darwin` block, by contrast, is measured on the Mac Studio.
 
 The `mlx-darwin` half is fully verified — locally on the Mac Studio, and **from a Windows
 client over the tailnet**, which is the shape the apps actually use:
