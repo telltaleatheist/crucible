@@ -33,8 +33,19 @@ PRISTINE_INPUT_PROCESSOR = "if min_input_id < 0:\n    raise ValueError('oov')\n"
 PATCHED_INPUT_PROCESSOR = "if min_input_id < 0 and min_input_id != -100:\n"
 
 #: A stage processor with the filter in and upstream's one-frame trim gone, plus
-#: the field only v2 of the patch logs.
+#: the env var only v3 of the patch reads. v2 logged `final=%s, window=%d frames`
+#: and wrote no records; an env carrying that is STALE, because narrator now reads
+#: the RECORDS rather than running regexes over the server's log file
+#: (ARCHITECTURE.md R4 — a log line is never load-bearing).
 PATCHED_STAGE = (
+    "def _filter_sentinel_frames(frames):\n"
+    "    ...\n"
+    "    path = os.environ.get('HIGGS_SENTINEL_REPORT')\n"
+)
+
+#: What v2 left in site-packages: the filter in, the trim gone, and no report.
+#: It passes every marker grep an env could be given, and narrator cannot read it.
+V2_STAGE = (
     "def _filter_sentinel_frames(frames):\n"
     "    ...\n"
     "logger.warning('final=%s, window=%d frames', final, window)\n"
@@ -220,3 +231,20 @@ def test_every_patch_says_what_breaks_without_it(patch) -> None:
     assert patch.why.strip()
     assert patch.rel_path.endswith(".py")
     assert patch.marker.strip()
+
+
+def test_a_v2_env_is_reported_stale_rather_than_applied(tmp_path: Path) -> None:
+    """The generation that logged instead of reporting.
+
+    v2 carries `_filter_sentinel_frames` and has upstream's one-frame trim gone,
+    so it passes every marker grep an env could be given — and narrator can no
+    longer read it, because the proof now reads RECORDS rather than running three
+    regexes over the server's log file. An env like this renders a book that
+    cannot be proven clean, so `applied` would be a lie and `stale` is the answer.
+
+    Every v1 and v2 env on every machine reports this until the installer
+    re-applies the patch. That is intended and loud.
+    """
+    found = rows(env_with(tmp_path, **{"higgs-sentinel-filter": V2_STAGE}))
+    assert found["higgs-sentinel-filter"]["status"] == STALE
+    assert not found["higgs-sentinel-filter"]["applied"]

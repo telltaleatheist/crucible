@@ -34,6 +34,26 @@ not in that recipe is `not_applicable`, and says so by name rather than being
 silently skipped. Add `vllm-omni` to the Mac recipe one day and the check starts
 running there on its own, with nothing here to remember to change.
 
+THE STALE MARKER MOVED TO v3 ON 2026-09-13, AND WHY IT IS THAT STRING
+---------------------------------------------------------------------
+The sentinel patch gained a third generation: it now appends one machine-readable
+record per invocation to `$HIGGS_SENTINEL_REPORT`, and narrator reads those
+records instead of running three regexes over the server's LOG FILE to decide
+whether a 19 GB model may render a book (ARCHITECTURE.md R4 — a log line is never
+load-bearing). The `stale_marker` therefore moved from v2's log format string
+`"final=%s, window=%d frames"` to `"HIGGS_SENTINEL_REPORT"`.
+
+The choice between that and the helper name `_sentinel_report` is not arbitrary.
+Both are unique to v3. The ENV VAR is the interface — the patched file reads it,
+narrator exports it and reads the file back — so it is the one string that
+genuinely must not drift, and renaming it SHOULD invalidate every doctor's table,
+which is exactly what a stale marker is for. A helper could be renamed harmlessly
+and this check would then lie.
+
+**Every v1 and v2 env now reports `stale` until the installer re-applies the
+patch.** That is intended and loud rather than a regression: those envs really are
+carrying a patch whose records narrator can no longer read.
+
 A NAME IN THE SPEC IS STALE, AND THIS IS WHERE IT SHOWS
 -------------------------------------------------------
 PHASE3-TTS.md section 4 and narrator's own `pyproject.toml` both name
@@ -115,7 +135,7 @@ NARRATOR_PATCHES: tuple[NarratorPatch, ...] = (
         ),
         marker="_filter_sentinel_frames",
         absent_marker="[:, :-1]",
-        stale_marker="final=%s, window=%d frames",
+        stale_marker="HIGGS_SENTINEL_REPORT",
         why=(
             "without it every rendered chunk ends with ~240 ms of audible garbage "
             "— the ramp-down sentinels are substituted with codec code 0, which is "
