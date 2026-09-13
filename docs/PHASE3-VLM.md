@@ -76,15 +76,52 @@ modalities = ["text", "image"]
 
 [backends.cuda-linux]
 engine = "vllm"
-hf_repo = "rednote-hilab/dots.ocr"
-revision = "<40 hex, pinned by reading the repo>"
+hf_repo = "dots-studio/dots.ocr"
+revision = "c0111ce6bc07803dbc267932ffef0ae3a51dc951"
+memory_bytes_estimate = 12_878_610_432   # DECLARED, not measured — see below
 engine_args = [
   "--trust-remote-code",
   "--max-model-len", "32768",
-  "--gpu-memory-utilization", "<measured>",
+  "--gpu-memory-utilization", "0.5",     # DECLARED, not measured — see below
   "--max-num-seqs", "16",
 ]
 ```
+
+**The repo has been renamed, and this file had the old name.** As of 2026-09-13
+`GET /api/models/rednote-hilab/dots.ocr` answers **307 to
+`/api/models/dots-studio/dots.ocr`**, and `?author=rednote-hilab` lists nothing at all —
+the org was renamed with its weights and history intact. Both names report `main` at
+`c0111ce6bc07803dbc267932ffef0ae3a51dc951`, which is the pin. `hf_repo` names the repo as
+it is named now: pinning the redirect would work today and would be a fallback, a name that
+resolves only because somebody else's server is still forwarding it. What both apps *send*
+is a separate question and unaffected — section 5 already rules that the client sets
+`--vlm-endpoint-model dots-ocr`.
+
+**The two numbers that could not be measured are labelled DECLARED in the manifest itself,
+at length.** The 3090 Ti was on an overnight fine-tune and the Mac on an audio job, so the
+choice was between a number with its derivation shown and no manifest at all. The
+derivation, in brief:
+
+- `0.5` is not invented. Both apps that serve this model on this card converge on it for
+  the same stated, incident-backed reason: BookForge's `RESERVE_CAP_MB = 12_288`
+  (`electron/vlm-page-server.ts`; set after a ~20 GiB reservation held the machine at 93%
+  commit on 2026-08-11 and OOM-killed bun, ffmpeg and python, because under WSL's dxg layer
+  every reserved GiB is also committed host RAM), and Foundry's flat `GPU_UTIL = 0.5`
+  (`app/electron/vllm-server.ts`). 12_288 MiB of a 24_564 MiB card *is* 0.5.
+- `memory_bytes_estimate` is that budget, because `--gpu-memory-utilization` is a budget
+  and vLLM spends whatever the weights, the activation peak and the graphs leave of it on
+  KV. Against the two blocks where both figures exist, the budget over-states the measured
+  peak by 0.6 and 0.5 GiB — the safe direction for a guard. The floor it must clear is
+  COMPUTED from `config.json` at the pinned sha: 6_078_431_736 B of bf16 safetensors plus
+  28 layers x 2 KV heads x 128 head_dim x 2 x 2 B x 32768 tokens = 7_017_955_832 B.
+
+Both are replaced by a measured peak the first time a card is free; the manifest says so in
+the comment that carries them.
+
+Two smaller findings while writing it. Neither app passes `--max-num-seqs` at all today, so
+twelve in flight is served by vLLM's default rather than by anything anyone chose; 16 is set
+here for the 9B's measured CUDA-graph reason. And no `--dtype` is passed: the checkpoint's
+config already says `bfloat16` and neither working launch line overrides it.
 
 Four requirements, all exact, all from CLIENT-SURFACES.md section 10 row 9:
 
@@ -133,9 +170,36 @@ Against a fake engine, in pytest:
 - A manifest with `image` in `modalities` and `--skip-mm-profiling` in `engine_args` is
   refused, naming both.
 
+All four are proved, in `tests/test_vlm_pages.py`, and the suite went from 155 to 176. Three
+things the list above did not know:
+
+**"Verbatim" is not "byte for byte", and now it is written down.** The proxy decodes the
+request (`_chat_body`) and httpx re-encodes it, so the body on the second hop is the same
+JSON with compact separators. On Foundry's exact body that is MEASURED at **18 bytes** out
+of 10_986_363 — one per `", "` and one per `": "`, every separator in it and nothing else.
+The test asserts against the compact encoding rather than a tolerance, so it is a statement
+about whitespace and not about roughly the right size. Every value, the whole data URI
+included, is identical; the base64 still decodes to the same PNG byte for byte.
+
+**Yes, the request body is buffered more than once — four times over.** MEASURED on the
+11.0 MB body by counting full-size materialisations inside the server: `Request.body()`
+(bytes, and Starlette caches it on the request for the rest of the handler), `json.loads`
+(a str), then httpx's `json_dumps` (a str) and its `.encode()` (bytes). All four are live
+at the moment of the second hop, so one page in flight peaks at roughly **4x its own
+size** — and the ceiling is twelve of them at once. `tracemalloc` around one request read a
+peak of 76.98 MB, 7.0x the body, though that figure includes the in-process fake engine
+reading and parsing it again, which a real out-of-process engine would not charge to
+Crucible's heap. **Reported, not fixed**: another builder is in `api.py` tonight, and a
+streaming pass-through of the body is a change to the proxy's shape rather than a patch.
+
+**A required key is a claim on every manifest, including ones not written yet.** `modalities`
+is now required in `[model]`, so any manifest a later phase adds to `models/` must declare
+it or the loader refuses the build's whole model list by name.
+
 Live, on the card, and **owed**: pull dots.ocr, load it, read one real page through the
 proxy, compare the markup to what the `dots` env produces today for the same page, and write
-the measured utilisation into the manifest.
+the measured utilisation and the measured peak into the manifest in place of the two
+DECLARED numbers.
 
 ## 7. What this deletes, once it is live
 
