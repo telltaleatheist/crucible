@@ -127,7 +127,7 @@ Consequences, all of them simplifications:
 
 ### What survives from the superseded draft
 
-The pin (4.2), chain stickiness (4.3), atomicity (4.3) and the guarantees (9) all stand
+`waitFor` (4.2), chain stickiness (4.4), atomicity (4.3) and the guarantees (9) all stand
 unchanged. Every one of them is about **routing** — which machine a job is for — and
 routing is the single scheduling decision anybody makes here. It is the user's, it is made
 once, and it is made at the row. Nothing above turns it into a scheduler.
@@ -314,140 +314,85 @@ global toggle the machine a job lands on is decided by whatever the toggle happe
 hours later, in an order he did not choose. It also cannot express "these three chapters
 on the Mac, those three on the PC", which is the case that motivated the question.
 
-**So: a per-row pin — and `Any` is NOT the default, because the machines are not equal.**
+**So: two levels, and each is ONE field.**
 
-Owen, 2026-09-13: *"the mac is significantly slower than the pc. 90% of the time im going
-to want to use the pc, hands down. but if im doing lots of jobs at the same time, im going
-to want the ability to overflow the queued items to the mac. so its not a situation where
-all gpus are equal and will be picked equally."*
+Owen, 2026-09-13, after three drafts of this section: *"i think the solution is giving the
+user the ability to choose which GPUs the queue uses, or which GPU the queue ITEMS use.
+which registered crucible server should this job wait for? any can be an option."*
 
-An earlier draft of this section had the pin default to `Any`, meaning "the first eligible
-machine". **That was wrong, and the name was the tell.** "Any" says the machines are
-interchangeable. They are not: `cuda-linux` on the 3090 Ti and `mlx-darwin` on the M1 Ultra
-differ by enough that sending a job to the slower one when the faster one is merely BUSY
-can finish later than waiting would have. A scheduler that treats them as equal is not
-being neutral — it is being wrong about the hardware, silently, in the direction that costs
-wall-clock.
+**The middle sentence is the design.** *Which registered server should this job wait for?*
+is a single question, and a single question takes a single answer. Every earlier draft of
+this section answered it with a machine **plus a modifier** — first `Any` with a hidden
+preference, then `machine: string | null` with an `overflow: boolean` — and both were the
+same answer said in two fields.
 
-**The correction is two independent facts, because Owen's sentence contains two.**
-
-**1. Machines are RANKED, once, in the registry** — not per row. Rank is the server's
-**position in the registry array** (this PC first, the Mac second), ordered in settings
-where a person thinks about hardware rather than while queueing a book. See "rank needs no
-field" below for why it is a position and not a number. The default for any new row is
-**the highest-ranked eligible machine**, which is the 90% case with nothing to click.
-
-**2. Overflow is OPT-IN, per row, and defaults to OFF.** `May overflow if busy`. With it
-off — the default — a row waits for its machine, which is what "90% of the time I want the
-PC, hands down" means: the PC being busy is a reason to wait, not a reason to go somewhere
-slower. With it on, a refusal sends the row to the next machine down the rank.
-
-That is the whole of it, and it maps to his sentence exactly: *the ability* to overflow is
-a thing you turn on when you are queueing a night's work, and off the rest of the time.
-
-**THE ROW'S STATE IS TWO FIELDS, AND THE DEFAULT STORES NOTHING.**
+### 4.2.1 Per item: which server should this job wait for?
 
 ```ts
-machine:  string | null     // null = no choice made; use the rank
-overflow: boolean           // may this row use a lower-ranked machine when its first is BUSY
+waitFor: string | 'any'      // a registered server's name, or 'any'
 ```
 
-A first draft of this section said a new row "defaults to the highest-ranked machine", and
-the Foundry session caught the contradiction that creates: if defaulting POPULATES the
-field, then every row names a machine, and the rule "a named machine always waits" makes
-the overflow flag dead on every row. The distinction that was actually meant is **chosen
-versus inherited** — Owen typing *run this on the Mac* is an instruction; a row silently
-landing on rank 1 is not — and as a third boolean that is real but ugly.
+| the row says | behaviour |
+|---|---|
+| **`"this-pc"`** — the default, and Owen's 90% | run on it; if it is busy, **wait**; if it is unreachable, **hold and say so** |
+| **`"mac-studio"`**, or any named server | the same, for that one |
+| **`"any"`** | the first server that will take it, **preferring rank order**; unreachable servers are simply not candidates |
 
-**It does not need to be a third field. It needs the default to store nothing.**
-`machine: null` IS "nobody chose", so "chosen explicitly" is exactly `machine !== null`.
-Two fields, and every case falls out:
+That is the whole per-item model. Note what it does NOT contain, because each was a real
+thing in a previous draft and each is now impossible rather than merely discouraged:
 
-| `machine` | `overflow` | behaviour |
-|---|---|---|
-| `null` | `false` | **the default, and Owen's 90%.** Top-ranked ELIGIBLE machine; if it is busy, **wait** for it. |
-| `null` | `true` | top-ranked eligible; on `server_busy`, try the next rank down; wait when the list runs out |
-| `"mac"` | either | **that machine.** Busy or unreachable, it **holds and names the reason** — a pin is an instruction, and `overflow` does not override it |
+- **No `overflow` boolean.** "May this travel when busy" is not a modifier on a machine; it
+  is the difference between naming a machine and naming `any`. Folding it in removes the
+  state `{machine: "mac", overflow: true}`, which was storable and meant nothing — the
+  defect the Foundry session raised, gone by construction rather than by a UI rule and a
+  normalise-on-write.
+- **No `null`, and no chosen-versus-inherited distinction.** The default is a real value the
+  row displays and the operator can see and change. There is no silent inheritance to
+  distinguish from a choice, so the third piece of state that distinction needed — and the
+  two rounds spent avoiding it — is not required.
+- **No tie-break rule.** Rank is still the registry array's order (section 4.2.2), and
+  `any` is the only value that consults it.
 
-### The two states the model must not admit
+**`any` is not "the machines are equal".** It is *"I do not mind which, and I would rather
+start than wait."* It still prefers rank, so a free 3090 Ti beats a free M1 every time; it
+differs from naming the PC only when the PC is busy. The machines being unequal is why the
+DEFAULT is the top-ranked server by name rather than `any` — which was the correction that
+started this — and `any` is the opt-in for a night's work.
 
-**`{machine: "mac", overflow: true}` is storable and means nothing.** The table says a named
-machine holds either way, so the flag is dead there — and *a state the model admits while
-the behaviour ignores it is where the last contradiction came from*. Something
-representable that means nothing eventually has a meaning invented for it by whoever reads
-the type next. Raised by the Foundry session, and the phrasing is theirs because it is the
-general rule, not a note about this field.
+### 4.2.2 Per queue: which servers may the queue use at all?
 
-Two mechanisms, neither of which is a type change:
+The second half of Owen's sentence, and a different question from the first. A server is
+**enabled or disabled for the whole queue**, in settings, alongside the drag-order that
+defines rank.
 
-- **The UI disables the overflow control while a machine is named**, visibly, rather than
-  leaving a live checkbox that does nothing. The operator cannot express the state, which
-  matches the ruling instead of merely permitting it.
-- **Choosing a machine clears the flag on write.** So the app cannot produce the state
-  either, and a hand-edited registry that contains it is normalised on read rather than
-  obeyed.
+This is the capacity switch he described much earlier — *"the Mac is fine-tuning tonight,
+keep the queue off it"* — and it is standing state about hardware, not a routing decision
+about one book. Keeping it out of the per-item field is what stops it being modal: turning
+the Mac off does not silently re-route work that was already queued for it.
 
-The type stays flat (`string | null` and `boolean`) rather than becoming a discriminated
-union, deliberately: the row is persisted JSON that migrations have to read, and a union
-across that boundary costs more than it saves here. It also keeps *"one line of this table
-gaining meaning"* available as an additive edit if Mac-with-overflow is ever wanted.
+**The two compose, and the composition has one rule worth stating.** A row that names a
+disabled server **holds and says which**, exactly as it would for one that is unreachable.
+It is not re-routed, because a named server is an instruction and the queue-level switch is
+about availability rather than about overriding what a person asked for. A row set to `any`
+simply never considers a disabled server.
 
-**`rank` needs no field, no uniqueness rule and no tie-break: it is the ARRAY ORDER.**
-The Foundry session pointed out that a person-typed integer collides the moment somebody
-adds a third server without re-numbering, and that undefined order there means the machine
-is chosen nondeterministically — the same class of silent wrongness section 4.2 exists to
-remove. They offered enforcing uniqueness or defining a tie-break; the registry makes both
-unnecessary, because `crucible-servers.json` is **already** `{servers: CrucibleServerEntry[]}`
-and an array has an order.
+### 4.2.3 Why this is the third rewrite of one section
 
-So rank is position, re-ranking is a reorder, the settings UI is a drag-list rather than
-spin boxes, and there is no invalid state to validate because there is no number to get
-wrong. A rank that cannot collide needs no rule.
+Recorded because the sequence is more useful than the answer.
 
-### Three things this settles that the three-state version could not
+1. **`Any` as the default**, meaning "first eligible". Wrong: it asserts the machines are
+   interchangeable, and sending a job to the M1 because the 3090 Ti is merely BUSY can
+   finish later than waiting would have.
+2. **`machine: string | null` + `overflow: boolean`.** Fixed the default, but a named
+   machine made `overflow` dead — a representable state that meant nothing — and the
+   chosen-versus-inherited distinction it needed wanted a third field.
+3. **One field per level**, above. Both residues vanish, because they were artifacts of
+   splitting one answer across two fields rather than defects in the rules.
 
-**Resolution happens at START, not at queue time — for free.** Overflow is inherently a
-start-time decision because it depends on who is busy *now*. With the default stored as a
-machine name, a row queued this morning would wait for a machine chosen under this
-morning's ranking, and a later re-rank would not move it — so "highest-ranked eligible"
-would quietly mean "highest-ranked at the moment somebody pressed a button". With the
-default stored as `null` there is nothing to resolve early: the rank is read when the row
-starts. The Foundry session raised this and its own instinct — *"have the row store
-'default' until then"* — is precisely `null`.
-
-**DOWN is not BUSY, and the two get different answers.** A machine that is unreachable is
-not a candidate at all, so a `null` row skips it and runs on the next rank — which is not
-disobedience, because nobody asked for that machine. A row that NAMED it holds and says so.
-The earlier shape could not express that difference without a third field either; this one
-gets it from the same `machine !== null`.
-
-**"The Mac, but overflow if it is busy" stays inexpressible, deliberately.** That was the
-cost of the Foundry session's option 2 and it is worth paying here too: overflow exists to
-escape the DEFAULT, and a named machine is the one case where the operator has said which
-hardware they want. If that turns out to be wanted, it is `overflow` gaining meaning for a
-named row — an additive change to one line of this table, not a reshape.
-
-**Distribution is still emergent and still not a scheduler.** Nothing measures throughput,
-predicts a finish time, or balances anything. It is a ranked list, a flag, and a refusal
-that arrives fast enough to act on.
-
-**What is NOT proposed, and why.** The genuinely optimal answer to "should this job wait for
-the fast machine or run now on the slow one" needs how long the current job has left and how
-much slower the other machine is for THIS job type. Crucible reports progress but nothing
-estimates a finish, and the MLX/CUDA ratio is per workload rather than a constant. A
-scheduler that guessed would be wrong in a way nobody could see. A flag the operator sets is
-right in a way they can. The decision is recorded at the
-moment the intent exists — when Owen makes the row — instead of being inferred from global
-state at an unpredictable later time. It costs almost nothing, because section 4 already
-requires an eligibility function; a pin is one more input to it:
-
-```
-eligible(step) = step.machines() ∩ enabled(machine) ∩ (step.pin ?? any)
-```
-
-A pin naming a machine that is disabled, unreachable or stale **holds the step and says so
-by name**. It never silently falls back to another machine: a pin is an instruction, and
-quietly doing something else with Owen's book is the failure this rule exists to prevent.
+The lesson is the Foundry session's, generalised: when the options all feel slightly wrong,
+the shared assumption is usually the thing to question. Here every draft assumed the row
+stores *a machine*, and modelled "may it travel" separately. It stores **an answer to a
+question**, and `any` is one of the answers.
 
 ### 4.3 A JOB IS ATOMIC (Owen's ruling, 2026-09-13)
 
@@ -510,7 +455,7 @@ a correctness or cost property that lives in a different repo.
 
 ### 4.4 A chain STICKS to the machine its first step ran on
 
-This is the part that is not a preference, and it is the reason a per-row pin alone is not
+This is the part that is not a preference, and it is the reason a per-row `waitFor` alone is not
 enough.
 
 The two backends are different implementations of the same model. `cuda-linux` renders
@@ -529,7 +474,7 @@ Spreading one book across machines breaks that in two ways at once:
    chunks — which is exactly the failure raising the short factor to 1.3 was meant to stop.
 
 So **machine affinity is inherited down a chain**: the first step to be assigned fixes the
-machine, and every step chained behind it inherits the pin unless Owen overrides it
+machine, and every step chained behind it inherits that RESOLVED server unless Owen overrides it
 explicitly. A book is a chain. That gets the parallelism where it is safe — two *different*
 books on two machines at once — and refuses it where it is not.
 
