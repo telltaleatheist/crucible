@@ -67,6 +67,26 @@ export function nullableStr(object: Json, key: string, where: string): string | 
   return value;
 }
 
+/**
+ * A boolean that the server may honestly answer `null` to.
+ *
+ * The key still has to be present. `null` is a statement — on a `chunk` event it
+ * is "narrator did not say whether this chunk hit the frame cap" — and a missing
+ * key is not that statement, so the two are not collapsed. Nothing here turns
+ * either one into `false`: the whole reason `capped` is nullable is that
+ * `false` would mean "this was a long sentence, not a runaway".
+ */
+export function nullableBool(object: Json, key: string, where: string): boolean | null {
+  const value = field(object, key, where);
+  if (value === null) return null;
+  if (typeof value !== 'boolean') {
+    throw new CrucibleProtocolError(
+      `${where}.${key} is neither a boolean nor null (got ${describe(value)})`,
+    );
+  }
+  return value;
+}
+
 export function nullableNum(object: Json, key: string, where: string): number | null {
   const value = field(object, key, where);
   if (value === null) return null;
