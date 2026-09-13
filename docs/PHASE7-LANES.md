@@ -127,7 +127,7 @@ Consequences, all of them simplifications:
 
 ### What survives from the superseded draft
 
-`waitFor` (4.2), the TTS cohesion rule (4.4.1), atomicity (4.3) and the guarantees (9) all stand
+`waitFor` (4.2), one-book-one-GPU (4.4), atomicity (4.3) and the guarantees (9) all stand
 unchanged. Every one of them is about **routing** — which machine a job is for — and
 routing is the single scheduling decision anybody makes here. It is the user's, it is made
 once, and it is made at the row. Nothing above turns it into a scheduler.
@@ -522,100 +522,83 @@ that looks principled while destroying hours of GPU per book. It is the same sha
 section 4.1's twelve: a reasonable-sounding improvement to the slot model silently breaking
 a correctness or cost property that lives in a different repo.
 
-### 4.4 Three levels, and the one thing that may NOT be split
+### 4.4 ONE BOOK = ONE GPU
 
-Owen, 2026-09-13: *"we should still be able to pick the server queue-wide or for individual
-items. individual item settings supersede queue items… and actually, this shouldnt just be a
-book-level decision, we should be able to send specific tasks to specific servers. cleanup
-uses a gpu. so does tts, and so does text alignment."*
+**Owen, 2026-09-13, after reading the per-step design:** *"i guess we could say if one job
+depends on the previous one, we keep the task list on the same GPU until the job is done.
+maybe serialized jobs get a single GPU choice. one book = one gpu. i dont think theres a
+speed benefit to splitting jobs like that. and it might overcomplicate the system."*
 
-**`waitFor` exists at three levels, each superseding the one above:**
+**Ruled, and he is right on both counts — but the speed argument is stronger than "no
+benefit". Step-type routing, which this section recommended an hour earlier, would have
+been actively SLOWER for his workload. That recommendation was wrong and the arithmetic
+below is why.**
 
-| level | set where | applies to |
+> **A dependency chain gets ONE machine choice. Every step of one book runs on the machine
+> the book was assigned.**
+
+`waitFor` therefore exists at two levels, not three: the **queue default** (a setting) and
+**the book** (its row). There is no per-step override, because there is nothing for it to
+buy.
+
+### 4.4.1 The arithmetic that killed per-step routing
+
+An earlier draft argued that since the machines' speed ratio varies by step type, the best
+plan is to put the step with the biggest ratio — `tts` — on the fast machine and let the
+rest overflow. **That is exactly backwards when the step you are hoarding is the one that
+dominates the runtime, and for a book it dominates by an order of magnitude.**
+
+Take 15 books; on the PC each is roughly `cleanup 10 min → tts 3 h → align 10 min`, and
+call the Mac 2x slower.
+
+| plan | what happens | wall clock |
 |---|---|---|
-| **queue default** | settings, per STEP TYPE (below) | any step that says nothing |
-| **book** | the book's row | every step of that book |
-| **step** | one step's row | that step alone |
+| **all `tts` on the PC** (step-type routing) | 15 x 3 h of TTS through one machine, serialised. The Mac does 15 cleanups — about 5 h of work — then sits idle. | **~45 h**, Mac idle for ~40 of them |
+| **one book = one GPU** | both machines render books end to end in parallel; the PC gets through them faster and takes more of them | **~15-20 h**, both machines busy throughout |
 
-So book 12 of 15 goes to the Mac by setting it on book 12; and *"cleanup anywhere, TTS on
-the PC"* is set once in settings and never touched again.
+Hoarding the dominant step on the fast machine does not exploit the fast machine — it
+**serialises the whole queue through it** and leaves the other one doing trivia. Splitting
+by book uses both cards for the thing that actually takes the time.
 
-### 4.4.1 THE CONSTRAINT: one book's TTS steps must share a machine
+Step-type routing wins only when the steps have comparable durations and very different
+speed ratios. A book is not that shape and never will be: TTS is hours and everything else
+is minutes.
 
-**This supersedes an earlier draft of this section, which said a whole CHAIN sticks to the
-machine its first step ran on. That was too broad, and re-reading its own two reasons is
-what shows it:**
+### 4.4.2 The other two reasons, both of which also hold
 
-1. *"The book acquires a seam"* — `cuda-linux` renders Higgs through SGLang and
-   `mlx-darwin` through mlx-audio: different samplers, different RNG, different batching.
-   **They do not produce the same audio.** Chapters 1-4 in one engine's voice and 5-8 in
-   another's is audible in a way no test asserts.
-2. *"The guard's pace state is carried across a rate change"* — phase 6 has the running
-   median travelling chapter to chapter, so chapter 5 would start centred on chapter 4's
-   machine and fire on healthy chunks.
-
-**Both reasons are about AUDIO.** Neither touches a cleanup pass, which emits text through a
-validator, or an alignment, which emits timestamps. So the rule is not "a chain sticks". It
-is:
-
-> **Every `tts` step of one book runs on one machine. Refused, not silently corrected.**
-
-Everything else in the chain travels freely. `cleanup` on the Mac, `tts` on the PC, `align`
-on whichever is free is a legal and sensible plan; `tts` for chapters 1-4 on the PC and 5-8
-on the Mac is refused by name, because the cost lands in the audio and no test would catch
-it.
-
-### 4.4.2 Does splitting actually go faster? Partly — and the part that does is not the
-obvious one
-
-Owen: *"if cleanup goes to the mac, which is significantly slower, TTS cant go to the pc
-until the mac finishes. something else fills the pc GPU slot while it waits for the mac to
-finish. but if we split tasks across GPUs, i think it would still be faster."*
-
-He is right about the mechanism and worth being precise about where the win comes from,
-because two different things are being called "splitting".
-
-**Within one book, splitting buys nothing and costs something.** `cleanup → tts → align` is
-a dependency chain: the steps cannot overlap, whichever machines they are on. Sending
+**Within one book there is nothing to overlap.** `cleanup → tts → align` is a dependency
+chain, so the steps cannot run at the same time whatever machines they are on. Sending
 `cleanup` to the slower machine makes that step slower, delays everything behind it, and
-adds a transfer. For a single book in isolation, whole-book-on-the-fast-machine wins.
+adds a transfer between steps. For a single book, splitting is strictly worse.
 
-**Across books, filling both machines is the whole win — and it does not require splitting
-any book.** While book 1's `tts` holds the PC, book 2's `cleanup` runs on the Mac. That is
-exactly the "something else fills the pc GPU slot" Owen describes, and with 15 books and 2
-machines there is more than enough book-level parallelism to keep both busy. Step-level
-freedom adds little here; it matters when books are FEWER than machines.
+**The audio seam is satisfied for free.** `cuda-linux` renders Higgs through SGLang and
+`mlx-darwin` through mlx-audio — different samplers, different RNG, different batching, and
+**they do not produce the same audio**. Chapters 1-4 in one engine's voice and 5-8 in
+another's is audible in a way no test asserts, and phase 6's guard would carry its running
+median across a rate change on top of it. Under one-book-one-GPU that cannot happen, so it
+needs no rule of its own. It was the whole justification in an earlier draft; it is now a
+consequence.
 
-**But there is a real step-level win, and it is the one worth building for.** The two
-machines are not uniformly different — the ratio varies by step type. If `tts` is much
-faster on the 3090 Ti while `cleanup` is only somewhat faster, then the best plan is not
-"whole books on whichever machine is free" but **put the step with the biggest speed ratio
-on the fast machine and let the others overflow.** That is what the per-STEP-TYPE queue
-default expresses, in one setting:
+### 4.4.3 And the simplicity argument is not a tiebreaker, it is a reason
 
-```
-Cleanup   wait for: ( Any ▾ )
-TTS       wait for: ( This PC ▾ )
-Align     wait for: ( Any ▾ )
-```
+*"it might overcomplicate the system."* Three levels of override is three places to look
+when a book renders somewhere surprising, three states to show in a UI, and a per-step
+field on every row that would be `null` for the entire life of almost every queue. Paying
+that for a plan the arithmetic says is slower would have been the worst kind of
+flexibility: expensive, visible, and wrong.
 
-Owen's instinct that splitting helps is right; the mechanism is routing by **step type**
-rather than by book, and it wants no per-book decisions at all in the common case.
+### 4.4.4 What this keeps, and what his two modes become
 
-### 4.4.3 The two modes, in his words
+**Kept:** the queue default (section 4.2.1a) and per-book `waitFor` (section 4.2.1). Book 12
+of 15 goes to the Mac by setting it on book 12 — every step of book 12 follows.
 
-*"there could be an option to set an entire book (every task in the list) to one gpu, or
-just fill empty slots until the whole queue is complete."*
+**Dropped:** per-step `waitFor`, and the per-step-type queue default.
 
-Both fall out of the levels above rather than needing a mode switch:
+His two modes still fall out of the levels rather than needing a toggle:
 
-- **Whole book on one GPU** = set `waitFor` on the book. Every step inherits it.
-- **Fill empty slots** = leave everything at the queue default with `Any`. Steps take
-  whatever is free, subject only to 4.4.1.
-
-The second is the throughput mode and the first is the predictability mode, and the reason
-to keep them as the same mechanism rather than a toggle is that a toggle would have to mean
-something for a book that is half-done when it flips.
+- **Whole book on one GPU** — now the only behaviour, so this is simply what a book does.
+- **Fill empty slots until the queue is complete** — the queue default at `Any`. Each book
+  takes the first server that will have it, so both machines stay busy and no book is split.
 
 ## 5. `GET /v1/activity` — what is on this server and how far along
 
