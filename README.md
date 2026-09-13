@@ -77,7 +77,8 @@ config.toml        mode 0600 — server name, bind defaults, backend, and the to
 jobs/<id>/inputs/  the job's inputs, materialised before it is queued
 jobs/<id>/artifacts/   its outputs and their .provenance.json sidecars
 uploads/<blob_id>  blobs from POST /v1/uploads
-envs/llm/          the llm job type's venv, built by `crucible install llm`
+envs/<type>/       a job type's venv, built by `crucible install <type>`
+                   (`llm`, `asr`)
 models/<id>/<backend>/  weights, stamped with the revision they were pulled at
 logs/engine-<id>.log    one engine's stdout and stderr, command line first
 ```
@@ -110,6 +111,7 @@ request with neither is answered 401.
 | `GET /ping` | no | `{crucible, name, api_version}` — tells "wrong token" from "not a Crucible" |
 | `GET /info` | yes | server, host (platform/arch/backend/gpu), capabilities |
 | `GET /health` | yes | `{status, queue_depth, resident_models}` |
+| `GET /accelerator` | yes | what is on the card right now, who is holding it, and which of them are Crucible's. It **reports and never evicts** |
 | `POST /uploads` | yes | multipart `file=@...` → `{blob_id, bytes, sha256}` |
 | `POST /jobs` | yes | `{type, model?, params, inputs}` → 202 `{job_id}` |
 | `GET /jobs/{id}` | yes | status, progress, position, error, artifacts |
@@ -130,10 +132,13 @@ Inputs come either inline or by blob:
             "note.txt": {"inline_base64": "aGVsbG8="}}}
 ```
 
-SSE events are `queued`, `progress {fraction, message}`, `artifact {name}`, `done`,
+SSE events are `queued`, `progress {fraction, message, ...}`, `artifact {name}`, `done`,
 `failed {error}`, `cancelled {status}`, each with an integer `id`. Reconnect with
 `Last-Event-ID: <n>` to get everything after `n`, including the replay of a job that has
-already finished.
+already finished. A job type may add its own measurements to a `progress` event beside
+the fraction and the message — `asr` sends `stage`, `processed_s`, `total_s` and `cues`,
+because a percentage that is still rounding to zero six minutes into an eighteen-hour
+book is not the useful number.
 
 ### `echo`
 
@@ -348,6 +353,59 @@ the `engine_failed` error quotes its last 40 lines.
 `stop()` signals the engine's process group and waits. Crucible **never** SIGKILLs a
 process holding CUDA — that wedges WSL2 until Windows reboots. If an engine will not go
 within 180 s, the refusal says so and names the log rather than escalating.
+
+### `asr`
+
+Transcription with faster-whisper (PHASE4-AUDIO.md section 3). One audio file in, one
+`transcript.json` out, on the same exclusive lane as everything else.
+
+```bash
+crucible init --enable-asr          # or add [jobs] enable_asr = true to an existing config
+crucible install asr                # build ~/.crucible/envs/asr from envs/asr/<backend>.txt
+crucible models pull faster-whisper-base
+```
+
+```json
+{"type": "asr",
+ "model": "faster-whisper-base",
+ "params": {"language": "en", "vad_filter": true, "word_timestamps": true},
+ "inputs": {"audio.m4b": {"blob_id": "…"}}}
+```
+
+**There is no default model.** A job names one or it is refused: an ASR pass at the wrong
+size is a transcript that looks fine, is worse, and says nothing about it. Six are shipped
+— `faster-whisper-{tiny,base,small,medium,large-v3,distil-large-v3}` — as manifests in
+`asr/<id>.toml`, pinned to a commit sha like every other model.
+
+All three params are required. `language` is a faster-whisper code or the literal `"auto"`,
+which means "detect it" — a choice, not an absence.
+
+Everything about *how* it runs is the server's and is nowhere on the wire: `float16` (there
+is no CPU backend, and the app's one-shot CPU fallback deliberately does not come across —
+a transcript that quietly ran at `int8` on a CPU is a different transcript), 900-second
+windows each reaching 15 s past their own boundary, and a single decode to 16 kHz mono
+through **ffmpeg**, which is required and refused by name if it is missing.
+
+`cuda-linux` only. faster-whisper is CTranslate2 and CTranslate2 has no Metal backend, so
+there is no `mlx-darwin` recipe and no `mlx-darwin` manifest block; `envs/asr/mlx-darwin.md`
+says why, and what the Mac would need instead.
+
+#### Workers
+
+`asr` is the first job type whose work is a **library** rather than a server, so it cannot
+be talked to over HTTP the way vLLM and mlx-lm are. Crucible runs it instead:
+`crucible/jobs/asr/worker.py` is a standalone script — stdlib plus faster-whisper, importing
+nothing from `crucible` — spawned with the `asr` env's python, handed its parameters on
+stdin, and answering newline-delimited JSON on fd 1 with everything else on stderr and into
+`~/.crucible/logs/asr-<job id>.log`.
+
+fd 1 carries results and nothing else, and a line on it that is not a message Crucible knows
+is a refusal quoting the line. That rule is not tidiness: a library's logger writing to
+stdout is what corrupted narrator's aligner stream on a 401-chunk book. Results are matched
+to work **by position** and carry no index, for the same reason from the same incident.
+
+`crucible/workers.py` is that plumbing, shared with the `align` and `rvc` types when they
+land.
 
 ## The client
 
