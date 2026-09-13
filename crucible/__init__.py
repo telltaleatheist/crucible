@@ -5,7 +5,7 @@ bumped only on a breaking change to the HTTP surface. The two are deliberately
 separate (DESIGN.md section 8).
 """
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 API_VERSION = 1
 
 __all__ = ["VERSION", "API_VERSION"]
