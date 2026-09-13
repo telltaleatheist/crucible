@@ -9,12 +9,14 @@ never knows what an audiobook or a cleanup pass is.
 
 See `docs/DESIGN.md` for the architecture and `docs/PLAN.md` for the build order.
 
-**Status: phase 2 (`llm`).** The handshake is real — config, token, backend detection,
-API v1, the job queue, provenance sidecars, the `echo` test job type, and the TypeScript
-client that speaks to all of it. Phase 2 adds the first real capability: model manifests,
-a per-job-type env, managed vLLM / mlx-lm engines, the accelerator guard, and an
-OpenAI-compatible proxy to one resident model. `tts`, `vlm-pages`, `align` and `rvc`
-arrive in phases 3-4.
+**Status: phase 4.** The handshake is real — config, token, backend detection, API v1,
+the job queue, provenance sidecars, the `echo` test job type, and the TypeScript client
+that speaks to all of it. Phase 2 added the first real capability: model manifests, a
+per-job-type env, managed vLLM / mlx-lm engines, the accelerator guard, and an
+OpenAI-compatible proxy to one resident model. Phase 4 adds the audio types — `asr`
+(faster-whisper), `align` (Qwen3-ForcedAligner, held resident across a book) and `rvc`
+(ultimate-rvc) — each a library in an env of its own, run as a worker rather than talked
+to over HTTP.
 
 ## Hosts
 
@@ -52,6 +54,8 @@ crucible models list            # model manifests and their standing here
 crucible models pull <id>       # fetch a model's weights at its pinned revision
 crucible voices list            # voice manifests and their standing here
 crucible voices pull <id>       # fetch a voice's weights at its pinned revision
+crucible rvc list               # RVC voice-conversion manifests and their standing
+crucible rvc pull <id>          # fetch and unpack one RVC model's archive
 ```
 
 `crucible init` refuses if a config already exists (`--force` replaces it and mints a
@@ -80,14 +84,23 @@ config.toml        mode 0600 — server name, bind defaults, backend, and the to
 jobs/<id>/inputs/  the job's inputs, materialised before it is queued
 jobs/<id>/artifacts/   its outputs and their .provenance.json sidecars
 uploads/<blob_id>  blobs from POST /v1/uploads
-envs/<type>/       a job type's venv, built by `crucible install <type>`
-                   (`llm`, `asr`)
 envs/llm/          the llm job type's venv, built by `crucible install llm`
 envs/tts-<engine>/ the tts job type's venv, one per narrator engine on cuda-linux
                    (one shared `envs/tts/` on mlx-darwin, where they can share)
+envs/<type>/       a worker job type's venv — `asr`, `align`, `rvc` — built by
+                   `crucible install <type>` from `envs/<type>/<backend>.txt`
 models/<id>/<backend>/  weights, stamped with the revision they were pulled at
 voices/<id>/<backend>/  the same for voices — a separate namespace on purpose
+rvc/<id>/<backend>/     the same for RVC models — a third namespace, because
+                        `sigma` is both a voice id and an RVC model id
+rvc-base/          urvc's shared contentvec and rmvpe assets. The one thing
+                   Crucible does NOT fetch; `rvc` refuses by name without them
+                   (PHASE4-AUDIO.md section 4.1)
 logs/engine-<id>.log    one engine's stdout and stderr, command line first
+logs/<type>-<job id>.log  one worker's stderr, for `asr` and `rvc` — one file per
+                        job, because their workers live and die with one. The
+                        resident aligner's is `engine-<id>.log`, like any other
+                        thing that holds the card across jobs
 ```
 
 `CRUCIBLE_HOME` is read on every call, so a second server (or a test, or the live
@@ -411,8 +424,91 @@ is a refusal quoting the line. That rule is not tidiness: a library's logger wri
 stdout is what corrupted narrator's aligner stream on a 401-chunk book. Results are matched
 to work **by position** and carry no index, for the same reason from the same incident.
 
-`crucible/workers.py` is that plumbing, shared with the `align` and `rvc` types when they
-land.
+`crucible/workers.py` is that plumbing, and `align` and `rvc` share it.
+
+### `align`
+
+Forced alignment with Qwen3-ForcedAligner-0.6B (PHASE4-AUDIO.md section 2). Chunks of audio
+and the text they speak go in; one timestamped item per the model's own token comes out.
+
+```bash
+crucible init --enable-align        # or add [jobs] enable_align = true
+crucible install align              # build ~/.crucible/envs/align
+crucible models pull qwen3-aligner  # 1.7 GB from HuggingFace at the manifest's sha
+```
+
+```json
+{"type": "align",
+ "model": "qwen3-aligner",
+ "params": {"language": "en",
+            "chunks": [{"index": 41, "text": "He had been walking for some time."}]},
+ "inputs": {"41.flac": {"blob_id": "…"}}}
+```
+
+One input per chunk, named `<index>.<ext>`; a chunk with no audio or an input with no chunk
+is refused, because a book aligned with 1,399 of its 1,400 chunks reads as a complete
+answer. Out comes one `alignment.json`, plus a **`cue` event per chunk as it lands**, so a
+killed run costs only the chunks it had not reached.
+
+**This is the first model that stays resident across jobs.** A book is hundreds of chunks
+and the checkpoint is 1.7 GB, so the worker is held open — `workers.WorkerSession`, in
+`Residency` beside a model and a voice. One card holds one thing, whatever kind it is, so
+loading an aligner unloads a voice and vice versa. The load happens inside the first `align`
+job; `{"type": "unload-aligner"}` takes it off.
+
+**No retries and no second backend, ever.** A failed chunk is named in the artifact and the
+run continues; nothing else is tried. A chunk over **300 seconds** is refused rather than
+split, because splitting it would silently change the alignment.
+
+What stays in the client, and it is most of the value: the item-to-word mapping, the check
+that refuses a model which rewrote the text, every derived score, and the coverage report.
+Crucible returns what the model said and asserts nothing about words.
+
+`cuda-linux` only — not because the Mac cannot (this is torch, and torch has MPS) but
+because **nobody has measured it**. `envs/align/mlx-darwin.md` says what would settle it.
+
+### `rvc`
+
+Voice conversion with ultimate-rvc (PHASE4-AUDIO.md section 4). A directory of sentence
+audio in, the same sentences in another voice out, one artifact per input under the same
+name.
+
+```bash
+crucible init --enable-rvc          # or add [jobs] enable_rvc = true
+crucible install rvc                # build ~/.crucible/envs/rvc
+crucible rvc list                   # the seven published models and their standing here
+crucible rvc pull deathstalker-rvc-v1
+```
+
+```json
+{"type": "rvc",
+ "model": "deathstalker-rvc-v1",
+ "params": {"index_rate": 0.3, "protect_rate": 0.1, "n_semitones": -2,
+            "f0_method": "rmvpe"},
+ "inputs": {"41.flac": {"blob_id": "…"}, "42.flac": {"blob_id": "…"}}}
+```
+
+**Model identity is a manifest, not a folder name.** `rvc/<id>.toml` names the repo, the
+revision, the archive inside it and its SHA-256, and declares `has_index` — which is what
+BookForge infers from a missing `.index` file. RVC models get their own `crucible rvc`
+command and their own subtree, because `sigma` is also a narrator voice id.
+
+Three things worth knowing before you send params:
+
+- **`protect_rate` reads backwards.** Lower protects more, 0.5 is protection OFF, and it
+  does nothing at all at index rate 0. The bound is [0, 0.5] and the name is urvc's.
+- **An absent `f0_method` or `hop_length` means the flag is omitted**, so urvc keeps its own
+  tuned default. The one place in this server where absence is a value rather than a refusal.
+- **Every input must produce an output.** A missing one fails the job and publishes nothing:
+  a book with one sentence in the wrong voice looks exactly like a book without one.
+
+Batching — 96 files per recycled process — is the server's and never crosses the wire. It is
+a **memory** bound, not a throughput choice: proven necessary on a 64 GB Mac.
+
+One thing it will tell you it needs: urvc's shared base assets (a contentvec embedder and an
+rmvpe predictor) under `~/.crucible/rvc-base/`. They are the engine's rather than any
+model's and Crucible does not fetch them; a job without them is refused by name with the
+paths it wanted.
 
 ## The client
 

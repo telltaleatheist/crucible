@@ -126,6 +126,15 @@ the `external-gpu-job.lock` convention. Denoise, separation and Resemble are nam
 deferred there, with the reason: their contract is sample-exact and cannot be asserted
 against a fake engine.
 
+**All three job types and the probe are built.** What is left of this phase, written down in
+PHASE4-AUDIO.md where it belongs: **urvc's base assets have no source Crucible will pull
+from** (BookForge hosts them on a GitHub release, which DESIGN.md section 5 refuses, and
+urvc's own first-run downloader is what `URVC_SKIP_INIT` turns off), so `rvc` refuses by
+name until somebody puts a models tree at `~/.crucible/rvc-base/`. Everything else is
+measurement rather than construction: every `memory_bytes_estimate` in `align/` and `rvc/`
+is COMPUTED and says so in the file, `envs/rvc/*.txt` are chosen rather than resolved sets,
+and `envs/align/mlx-darwin.md` says exactly what would earn the Mac an align backend.
+
 ## Phase 5: the apps, the bootstrapper, and friends — contract in `docs/PHASE5-APPS.md`
 Where "the app changes little or nothing" ends, one deletion at a time and each with a way
 back. A Servers settings row over the registry (and the ability to pull, load and unload

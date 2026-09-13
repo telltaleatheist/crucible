@@ -4,6 +4,16 @@ Contract for the three remaining audio job types and the one server feature that
 most of BookForge's GPU plumbing. Extends DESIGN.md. Written 2026-09-13 from
 `docs/CLIENT-SURFACES.md` sections 4 and 10 (tier 4).
 
+**All three are built.** `asr` landed first and established the worker envelope; `align` and
+`rvc` followed and are what sections 0.2, 2 and 4 now describe. Everywhere this document
+turned out to be wrong about something real — the aligner's size, where the RVC models are
+actually published, which fork of ultimate-rvc has the command this depends on — the
+correction is written in place and says what it corrects, because the next person to read
+this will be reading it *instead of* the code.
+
+Each type is off unless its flag says otherwise: `[jobs] enable_asr`, `enable_align`,
+`enable_rvc`, set by `crucible init --enable-asr --enable-align --enable-rvc`.
+
 One thing the audit had to correct in BookForge's own plan documents is worth restating
 here, because it decides the shape of section 3: **`align` is not WhisperX.** The app's
 aligner is Qwen3-ForcedAligner-0.6B, everywhere, with no fallback — DESIGN.md's table
@@ -85,6 +95,28 @@ Two things the contract did not say and that the first build had to decide:
 Stopping a worker is SIGTERM, a wait, and a named refusal if it will not go. Crucible does
 not SIGKILL a process that may hold CUDA; that wedges WSL2 until Windows reboots.
 
+### 0.2 The worker that outlives a job, as built
+
+`workers.py`'s docstring promised the split to make was `start`/`send`/`stop` with
+`run_worker` as the three in a row, and that is what `align` needed and what is now there.
+An **exchange** is one request in, one `ready`, N results, one `done`; `_Conversation` runs
+one over a process's two pipes; `run_worker` is one exchange with stdin closed afterwards,
+and `WorkerSession` is a process that outlives them. The only difference between the two is
+what happens to stdin: a one-shot worker gets it CLOSED, because a process blocked on a read
+it will never satisfy is a hang with no error, and a session's stays open because the next
+request goes down it.
+
+`stop()` is **close stdin, wait, then SIGTERM** — the polite door first, so the worker's own
+read loop sees EOF and releases CUDA the way its own code expects to. There is still no
+third step.
+
+**`rvc` deliberately does NOT take a session**, and that is a correction to what this
+section implied. Its 96-file recycle is a memory bound that wants the process to *die* so
+the OS reclaims everything it leaked; a worker held open across jobs would be the one thing
+that bound exists to prevent. The recycling happens one level down, inside
+`jobs/rvc/worker.py`, where each batch is its own urvc process. So `rvc` is a `run_worker`
+type exactly like `asr`, and `align` is the only session.
+
 ## 1. One rule decides three designs: no shared mount, ever
 
 `tts` batch, `rvc` and whole-m4b `align` all read and write the same thing today — a
@@ -109,12 +141,58 @@ feature working on every machine instead of one.
 
 The easiest job type in the list, and it unblocks a feature that cannot run at all today.
 
-**Model:** `Qwen/Qwen3-ForcedAligner-0.6B`, about 1.2 GB, `bfloat16` on an accelerator and
-`float32` on CPU. It gets a manifest like any other model, with `job_type = "align"`.
+**Model:** `Qwen/Qwen3-ForcedAligner-0.6B`, `bfloat16` on an accelerator and `float32` on
+CPU. Two corrections from the build:
+
+- It is **1.7 GB, not 1.2**: `model.safetensors` is 1,835,544,544 bytes exactly, read from
+  the HuggingFace API on 2026-09-13 (about 918M parameters including the audio tower; the
+  name counts the text side). The pinned revision is `c7cbfc2048c4…`.
+- **There is no `job_type` key and there cannot be one.** The manifest lives in
+  `align/<id>.toml` with its own loader, `crucible/alignmodels.py`, because
+  `crucible/manifests.py` requires `params_b`, `context_default` and `modalities` on every
+  `[model]` table and permits only `vllm` and `mlx-lm` as engines — those manifests describe
+  what an OpenAI-compatible engine serves. A forced aligner has none of those. **The
+  DIRECTORY is the job type**, which is how `asr/` already works and is the better
+  arrangement anyway: nothing can declare `job_type = "llm"` inside `align/` and be
+  half-believed by two loaders. The weights still pull through `crucible models pull`, so
+  there is one command to learn rather than three.
+
+**There is no `mlx-darwin` block, and the reason is NOT `asr`'s.** `asr` cannot have one:
+CTranslate2 has no Metal backend. This one could — the aligner is plain torch, torch has an
+MPS backend, and BookForge's own aligner already accepts `mps` as a device. It is missing
+because **nobody has measured it**: the bake-off that chose this aligner ran in WSL2 on the
+3090 Ti, `bfloat16` on MPS is a different numerical path, and a recipe is not the place to
+assert a result nobody has. `envs/align/mlx-darwin.md` says so at length, in the place
+somebody looking for the missing `.txt` will find it, and says exactly what would settle it:
+align a chapter on a Mac that has already been aligned on the PC and compare the timestamps.
 
 **Residency:** the model is resident **across a whole book** — hundreds of chunks, one load.
-That is what the generalised `Residency` (PHASE3-TTS.md section 5) is for; an aligner is a
-third kind of resident thing and needs no new mechanism.
+That is what the generalised `Residency` (PHASE3-TTS.md section 5) is for, and what it
+needed to hold a third kind was:
+
+- a third `KIND_ALIGN` and a `ResidentAligner` row (no `base_url`, no `engine`, and `device`
+  / `dtype` / `max_audio_s` on it instead, because those are what it was actually loaded
+  with);
+- a **second holder slot**, `_session`, beside `_engine`. An LLM and a voice are servers
+  behind `SubprocessEngine`; the aligner is a `workers.WorkerSession`. They are stopped
+  differently and raise different errors, so one `_held` of a union type would have put a
+  `hasattr` in charge of which. `owned_pids()` unions both slots — reading only the engine
+  slot was the bug waiting to happen the moment a second shape existed — and `unload()`
+  stops whichever is there;
+- `KIND_NOUNS`, because `describe_resident` had a two-way conditional that would have called
+  an aligner "the resident model" and sent its reader to `unload-model`.
+
+**The load happens inside the `align` job; the unload is a job of its own.** `llm` and `tts`
+are loaded by an explicit job because a client chooses *when* to spend 200 s of warm-up
+against what else is queued. An aligner load is seconds and is always immediately followed
+by the work it was loaded for, so making a client send two jobs to align one book would be
+ceremony. Taking it OFF the card is a decision about somebody else's next job, so
+`unload-aligner` exists — without it an aligner could only be evicted by loading something
+else, which would make "one card, one thing" a rule you can only obey by breaking it.
+
+The session's first exchange is a `{"op": "load"}` request the worker answers with `ready`
+once the checkpoint is on the device. A load is a real exchange and not a bare spawn on
+purpose: a process that has started has proved only that python runs.
 
 **The job:**
 
@@ -139,9 +217,30 @@ not a policy, and splitting it would silently change the alignment.
 `language` must be one of the eleven codes the aligner supports; an unknown one is refused
 before the job is queued.
 
+One input per chunk means **both directions are checked**: a chunk with no audio and an
+input with no chunk are each a named `invalid_inputs` refusal, because a book aligned with
+1,399 of its 1,400 chunks reads as a complete answer. The client's `index` never reaches the
+worker — a chunk on the wire to it carries `{audio, text}` and nothing else, and a result
+carries no index either, so position is the identity in both directions.
+
+`language` crosses the wire as the ISO code and reaches the model as its own English NAME
+("English", "Cantonese"), which is what `model.align` takes. The mapping is the server's.
+
 **Out:** one `alignment.json` artifact, plus a `cue` event per chunk as it lands
 (`cue {index, items: [...]}`), so a killed run costs the chunks it had not reached and not
-the ones it had.
+the ones it had. `JobContext.cue` is new and takes a dict rather than `**keys`, because the
+payload is a *row of the answer* and its shape is the job type's.
+
+Two details the contract did not settle:
+
+- **A failed chunk gets a cue too**, carrying `error` instead of `items`. A client watching
+  the stream should learn about a failure at the same moment as the successes around it.
+- **A failed chunk does not fail the job.** It is named, in the artifact, per chunk, and the
+  `done` event carries `failed: [indexes]`. This is the opposite of `asr`'s ruling and the
+  difference is not inconsistency: a hole in a transcript is *invisible* in the transcript,
+  while a chunk that carries `error` instead of `items` is visible in every consumer of the
+  document. Section 2 already said "a failed chunk is reported, the run continues", and this
+  is what that costs to keep true.
 
 **What stays in BookForge, and it is most of the value:** the item-to-word mapping, the
 `_normalized` letter-sequence equality check that refuses a model which rewrote the text
@@ -268,9 +367,47 @@ between them is refused rather than settled by which directory was read first.
 `<userData>/runtime/rvc-models/rvc/voice_models/<Name>`, discovered by looking for a `.pth`,
 with `forceIndexRate0` derived from the **absence** of a `.index` file. That is a filesystem
 convention standing in for an identity, and it does not survive the trip to another machine.
-`rvc/<id>.toml` names an HF repo and a revision the way every other manifest does —
-`owenmorgan/deathstalker_rvc_v1` is already published, so this is a translation and not an
-invention — and declares `has_index`, which is what `forceIndexRate0` was inferring.
+`rvc/<id>.toml` fixes that, and declares `has_index`, which is what `forceIndexRate0` was
+inferring.
+
+**Correction: there is no `owenmorgan/deathstalker_rvc_v1` repo.** Every RVC model Owen has
+published is a `.tar.gz` under `rvc/` in ONE repo, `owenmorgan/owen-morgan-bookforge`,
+alongside six others and the XTTS weights (`electron/data/rvc-voice-assets.json`). So this
+manifest cannot be "an HF repo and a revision the way every other manifest does", and it has
+three keys no other manifest in the repo has:
+
+- **`archive`** — the path inside the repo. `snapshot_download` would fetch about 800 MB to
+  get at 80, so `weights.pull_archive` fetches that one file with `hf_hub_download` and
+  unpacks it. The tarballs unpack to `rvc/voice_models/<name>/`, which is a whole
+  `URVC_MODELS_DIR` root — verified against every published tarball on 2026-09-13, not
+  assumed.
+- **`archive_sha256`** — a snapshot download is verified by the hub client against the
+  revision; a single file fetched by path deserves the same. The app's catalog already
+  carries the digest for all seven, so it is a translation. The digest is checked **before
+  anything is unpacked** and a mismatch refuses without writing a byte, and the unpack
+  refuses any member that would land outside the target or that is a link (python 3.11 has
+  no `filter="data"`, so the rule is written out).
+- **`model_name`** — the folder inside the archive, which is the argument urvc is given. It
+  is not derivable from the id: `sigma` is `Sigma Male Narrator`, `us-female-1` is
+  `US_Female_1`, `owen-morgan` is `Owen Morgan`.
+
+`rvc` gets its **own weights family and its own command** (`crucible rvc list` / `crucible
+rvc pull`, under `~/.crucible/rvc/`) rather than joining `crucible models pull`. Two
+reasons: `models pull` snapshot-downloads a repo and could not serve an archive at all, and
+`sigma` is *also* a narrator voice id — one tree for both is how one pull overwrites the
+other and leaves a stamp that reads as installed to either.
+
+**Seven manifests ship, and all seven have a `.index`** — so `forceIndexRate0` fires for
+none of them. It is still declared rather than assumed, and a non-zero `index_rate` against
+a model that says `has_index = false` is refused by name (`model_has_no_index`) rather than
+clamped: BookForge clamps, and a caller who asked for 0.5 and silently got 0 has an output
+that sounds wrong for a reason nothing in it explains.
+
+**The models with no manifest**, because they have never been published anywhere a manifest
+could point at: `deathstalker_rvc_v2`, `mistborn_rvc_v2`, `mistborn_rvc_v3_aol`, and the
+training-only checkpoints (`mistborn_rvc_v3_refinegan`, `_rg32`, `_rg40`,
+`owen_morgan_rvc_v1`, `third_reich_rvc_v1`). A manifest naming a repo path that does not
+exist would be worse than no manifest: it would list as a model and refuse at pull time.
 
 **The job:**
 
@@ -309,6 +446,38 @@ OpenMP runtimes SIGSEGV without the third.
 **Never `urvc.exe`**: pip's Windows console script bakes a stale shebang. Crucible runs
 `python -m ultimate_rvc.cli.main`, which is what the app already does, and the comment says
 why so nobody simplifies it back.
+
+### 4.1 Three things the build had to decide
+
+**The engine is Owen's FORK, pinned to a commit.** `generate convert-dir` — the warm-model
+batch command this whole job type is built on — exists only in
+`telltaleatheist/ultimate-rvc@bookforge` and not in the `ultimate-rvc` on PyPI, which has
+`generate convert`, one file per process, i.e. 1,400 model loads for a book. Both call
+themselves **version 0.5.11**, so the version is not an identity here and the commit is. The
+recipes therefore carry the repo's first PEP 508 direct reference,
+`ultimate-rvc @ git+…@05cc3f1ba921…`, and `workerenv` gained `recipe_direct_refs` /
+`installed_direct_refs` to check it against `pip freeze` — `pip list` reports the declared
+version and says nothing about the commit, so checking it there would compare a sha against
+`0.5.11` and call every correctly built env broken. `crucible doctor` names the commit, not
+the version, for the same reason.
+
+**The base assets have no manifest, and Crucible does not fetch them.** urvc needs a
+contentvec embedder and an rmvpe pitch predictor — about 540 MB, the engine's rather than
+any model's — before it can convert anything. BookForge ships them on a **GitHub release**,
+which DESIGN.md section 5 refuses as a weights source, and urvc's own first-run downloader
+is exactly what `URVC_SKIP_INIT=1` turns off. Rather than invent a source or run an
+initialiser nobody has tested, the job type looks under `~/.crucible/rvc-base/` and refuses
+by name (`rvc_base_models_missing`) naming the two files it wanted. **This is the one open
+gap in phase 4**, and closing it is a decision about where Owen publishes them, not one this
+code can make.
+
+Each job composes its own `URVC_MODELS_DIR` out of symlinks — the shared base assets plus
+**one** model — under the job's scratch. One model and not all seven, because urvc resolves
+a model by NAME and a root holding seven is a root where a name can resolve to the wrong one.
+
+**One extension per job.** `convert-dir` takes a single `--input-glob` and a single
+`--output-ext`, and "one artifact per input, same name" is only true when the output keeps
+the input's extension. A mixed-format job is refused by name rather than half converted.
 
 ## 5. The accelerator probe — `GET /v1/accelerator`
 
@@ -359,8 +528,11 @@ wrong conclusion:
 - **`holders[].bytes` may be `null`**, where the driver will not say (WDDM, permissions).
   That is a refusal to answer and it is not zero.
 - **`resident.kind`** is the family of the resident thing, not the job type that put it
-  there. Today the only resident thing is an LLM engine, so it is `"llm"`; phase 3's
-  generalised residency adds tts voices and phase 4's aligner beside it, at the same key.
+  there. It was **the literal string `"llm"` beside `resident.model_id`** until phase 4 — an
+  AttributeError the moment a voice or an aligner was resident, since neither has a
+  `model_id`, and unreachable until `align` gave the route a third kind to meet. Both are
+  now read off the resident itself (`resident.kind`, `resident.id`), so nothing here has to
+  be remembered when a fourth kind lands.
 
 A probe that cannot answer is **`503 accelerator_unreadable`**, never zeroes and never "the
 card is free". A client polling for a free GPU must read it as "ask again".
@@ -383,6 +555,19 @@ Crucible already tails the engine log into `EngineError` on a failed start. Exte
 courtesy to a failed *job*: when a job fails because its engine died, the `failed {error}`
 event carries the last lines of that engine's log in `details`, not a pointer to a file on a
 machine the client may not be able to read.
+
+**As built, the tail is in the error MESSAGE and not in a `details` field**, and that is
+`asr`'s shape rather than a phase 4 decision: `workers._log_tail` appends the last 40 lines
+to every `WorkerError`, and the job types turn that into a `JobError` whose message carries
+it. A client reading `error.message` gets the engine's own last words with no second
+request; a client that wanted them structured does not. Splitting them out is a change to
+the error envelope and therefore to every job type at once, so it is a follow-up rather than
+something `align` and `rvc` should do alone. The obligation the audit actually asked for —
+*do not hand back a pointer to a file on another machine* — is met.
+
+One addition phase 4 needed: a **session's** worker that dies mid-request is reported the
+same way, naming the exit code and quoting the log, and the residency stops advertising it
+rather than letting the next job write into a closed pipe.
 
 ## 6a. SDK additions (`@crucible/client`)
 

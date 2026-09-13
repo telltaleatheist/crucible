@@ -20,14 +20,18 @@ from .base import (
     ModelDescriptor,
     validate_member_name,
 )
+from .align import AlignJobType, UnloadAlignerJobType
 from .asr import AsrJobType
 from .echo import EchoJobType
 from .llm import LoadModelJobType, UnloadModelJobType, model_rows
+from .rvc import RvcJobType
 from .tts import LoadVoiceJobType, TtsJobType, UnloadVoiceJobType, voice_rows
 
 #: The vocabulary this build knows, and which config flag turns each one on.
 #: `resolve()` tells "that type does not exist" from "it exists but is off".
 ALL_JOB_TYPES: dict[str, str] = {
+    AlignJobType.name: "align",
+    UnloadAlignerJobType.name: "align",
     AsrJobType.name: "asr",
     EchoJobType.name: "echo",
     LoadModelJobType.name: "llm",
@@ -35,6 +39,7 @@ ALL_JOB_TYPES: dict[str, str] = {
     LoadVoiceJobType.name: "tts",
     TtsJobType.name: "tts",
     UnloadVoiceJobType.name: "tts",
+    RvcJobType.name: "rvc",
 }
 
 
@@ -67,6 +72,18 @@ def build_registry(
         registry[TtsJobType.name] = TtsJobType(config, backend, holder)
     if config.enable_asr:
         registry[AsrJobType.name] = AsrJobType(config, backend, holder.owned_pids)
+    if config.enable_align:
+        # The SAME holder: an aligner is a third kind of resident thing, so
+        # loading one unloads a model or a voice exactly as those unload each
+        # other (PHASE4-AUDIO.md section 2, crucible/residency.py).
+        registry[AlignJobType.name] = AlignJobType(config, backend, holder)
+        registry[UnloadAlignerJobType.name] = UnloadAlignerJobType(
+            config, backend, holder
+        )
+    if config.enable_rvc:
+        # Only the owned-pid set, like `asr`: nothing is ever resident for
+        # `rvc`, whose whole design is a process that exits every 96 files.
+        registry[RvcJobType.name] = RvcJobType(config, backend, holder.owned_pids)
     _assert_every_type_implements_the_protocol(registry)
     return registry
 
@@ -163,6 +180,7 @@ def resolve_model(plugin: JobType, model: str | None) -> str | None:
 
 __all__ = [
     "ALL_JOB_TYPES",
+    "AlignJobType",
     "AsrJobType",
     "EchoJobType",
     "Job",
@@ -174,6 +192,8 @@ __all__ = [
     "ModelDescriptor",
     "TtsJobType",
     "Residency",
+    "RvcJobType",
+    "UnloadAlignerJobType",
     "UnloadModelJobType",
     "UnloadVoiceJobType",
     "build_registry",

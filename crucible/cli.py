@@ -20,6 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from . import API_VERSION, VERSION, jobenv, narratorpatches, weights, workerenv
+from .alignmodels import (
+    AlignManifest,
+    AlignManifestError,
+    load_all_align_manifests,
+)
 from .asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
 from .backend import WINDOWS_REFUSAL, Backend, detect_backend
 from .config import (
@@ -38,6 +43,7 @@ from .config import (
 )
 from .errors import ConfigError, NoViableBackend
 from .jobs import ALL_JOB_TYPES, build_registry
+from .rvcmodels import RvcManifestError, load_all_rvc_manifests, load_rvc_manifest
 from .manifests import (
     ManifestError,
     ModelManifest,
@@ -90,6 +96,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         enable_llm=args.enable_llm,
         enable_asr=args.enable_asr,
         enable_tts=args.enable_tts,
+        enable_align=args.enable_align,
+        enable_rvc=args.enable_rvc,
         desktop_allowance_bytes=args.desktop_allowance_bytes,
     )
     print(f"backend:  {backend.kind} ({backend.gpu.name}, {backend.detail})")
@@ -99,6 +107,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"llm job:  {'enabled' if args.enable_llm else 'disabled'}")
     print(f"asr job:  {'enabled' if args.enable_asr else 'disabled'}")
     print(f"tts job:  {'enabled' if args.enable_tts else 'disabled'}")
+    print(f"align:    {'enabled' if args.enable_align else 'disabled'}")
+    print(f"rvc job:  {'enabled' if args.enable_rvc else 'disabled'}")
     print(
         f"desktop:  {args.desktop_allowance_bytes / 1024 ** 3:.1f} GiB of VRAM "
         "treated as this host's own desktop, not somebody's job"
@@ -291,24 +301,33 @@ def _env_spec(
 # ------------------------------------------------------------------- models
 
 
-def _all_manifests() -> dict[str, "ModelManifest | AsrManifest"]:
-    """Every model this build ships, from both manifest directories, by id.
+def _all_manifests() -> dict[str, "ModelManifest | AsrManifest | AlignManifest"]:
+    """Every model this build ships, from all three manifest directories, by id.
 
-    `models/` and `asr/` are two directories with two loaders (crucible/
-    asrmodels.py explains why they are not one yet), but from the command line
-    there is a single namespace of model ids, because `crucible models pull <id>`
-    is a single question. A collision between the two would make that question
-    ambiguous, so it is refused rather than settled by which directory was read
-    first.
+    `models/`, `asr/` and `align/` are three directories with three loaders
+    (crucible/asrmodels.py explains why they are not one yet), but from the
+    command line there is a single namespace of model ids, because `crucible
+    models pull <id>` is a single question. A collision between any two would
+    make that question ambiguous, so it is refused rather than settled by which
+    directory was read first.
+
+    `rvc/` is deliberately NOT in here. Its weights are a single archive fetched
+    by name and unpacked rather than a repo snapshot, so `crucible models pull`
+    could not serve one; they live under their own `crucible rvc` command and
+    their own subtree of `~/.crucible`, which is also what keeps an RVC model
+    named `sigma` from colliding with a narrator voice of the same name.
     """
-    merged: dict[str, "ModelManifest | AsrManifest"] = dict(load_all_manifests())
-    for model_id, manifest in load_all_asr_manifests().items():
-        if model_id in merged:
-            raise ManifestError(
-                f"{model_id!r} is declared by both {merged[model_id].path} and "
-                f"{manifest.path}; a model id names one model"
-            )
-        merged[model_id] = manifest
+    merged: dict[str, "ModelManifest | AsrManifest | AlignManifest"] = dict(
+        load_all_manifests()
+    )
+    for extra in (load_all_asr_manifests(), load_all_align_manifests()):
+        for model_id, manifest in extra.items():
+            if model_id in merged:
+                raise ManifestError(
+                    f"{model_id!r} is declared by both {merged[model_id].path} and "
+                    f"{manifest.path}; a model id names one model"
+                )
+            merged[model_id] = manifest
     return merged
 
 
@@ -331,7 +350,7 @@ def cmd_models_list(args: argparse.Namespace) -> int:
     config, backend = resolved
     try:
         manifests = _all_manifests()
-    except (ManifestError, AsrManifestError) as exc:
+    except (ManifestError, AsrManifestError, AlignManifestError) as exc:
         return _fail(str(exc))
     rows = []
     for manifest in manifests.values():
@@ -389,7 +408,7 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
     config, backend = resolved
     try:
         manifests = _all_manifests()
-    except (ManifestError, AsrManifestError) as exc:
+    except (ManifestError, AsrManifestError, AlignManifestError) as exc:
         return _fail(str(exc))
     manifest = manifests.get(args.model)
     if manifest is None:
@@ -507,6 +526,102 @@ def cmd_voices_pull(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# ---------------------------------------------------------------------- rvc
+
+
+def cmd_rvc_list(args: argparse.Namespace) -> int:
+    """Every RVC manifest this build ships and where it stands on this host.
+
+    Its own command rather than a row in `crucible models list`, for the reason
+    `_all_manifests` gives: an RVC model's weights are one archive fetched by
+    name, not a repo snapshot, so `models pull` could not fetch one — and the ids
+    are a separate namespace, which is what stops an RVC model called `sigma`
+    from colliding with the narrator voice of the same name.
+    """
+    resolved = _models_config()
+    if isinstance(resolved, int):
+        return resolved
+    config, backend = resolved
+    try:
+        manifests = load_all_rvc_manifests()
+    except RvcManifestError as exc:
+        return _fail(str(exc))
+    rows = []
+    for manifest in manifests.values():
+        if not manifest.supports(backend.kind):
+            rows.append(
+                {
+                    "id": manifest.id,
+                    "backend_supported": False,
+                    "installed": False,
+                    "detail": f"no {backend.kind} block; declares "
+                    f"{sorted(manifest.backends)}",
+                }
+            )
+            continue
+        spec = manifest.spec(backend.kind)
+        found = weights.installed(config, manifest, spec)
+        rows.append(
+            {
+                "id": manifest.id,
+                "display": manifest.display,
+                "model_name": manifest.model_name,
+                "has_index": manifest.has_index,
+                "backend_supported": True,
+                "installed": found is not None,
+                "hf_repo": spec.hf_repo,
+                "archive": spec.archive,
+                "revision": spec.revision,
+                "archive_bytes": spec.archive_bytes,
+                "memory_bytes_estimate": spec.memory_bytes_estimate,
+                "detail": (
+                    f"{found.bytes / 1e9:.2f} GB at {found.path}"
+                    if found is not None
+                    else f"not pulled — `crucible rvc pull {manifest.id}`"
+                ),
+            }
+        )
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return EXIT_OK
+    for row in rows:
+        mark = "installed" if row["installed"] else (
+            "unsupported" if not row["backend_supported"] else "not pulled"
+        )
+        print(f"{row['id']:<22} {mark:<12} {row['detail']}")
+    return EXIT_OK
+
+
+def cmd_rvc_pull(args: argparse.Namespace) -> int:
+    resolved = _models_config()
+    if isinstance(resolved, int):
+        return resolved
+    config, backend = resolved
+    try:
+        manifest = load_rvc_manifest(args.model)
+    except RvcManifestError as exc:
+        return _fail(str(exc))
+    if not manifest.supports(backend.kind):
+        return _fail(
+            f"RVC model {args.model!r} has no {backend.kind} block; "
+            f"{manifest.path.name} declares {sorted(manifest.backends)}"
+        )
+    spec = manifest.spec(backend.kind)
+    print(
+        f"{manifest.id}: {spec.hf_repo}@{spec.revision[:12]}:{spec.archive} "
+        f"for {backend.kind}"
+    )
+    try:
+        result = weights.pull_archive(
+            config, manifest, spec, force=args.force,
+            on_line=lambda line: print(f"  {line}"),
+        )
+    except weights.WeightsError as exc:
+        return _fail(str(exc))
+    print(f"{manifest.id}: {result.bytes / 1e9:.2f} GB at {result.path}")
+    return EXIT_OK
+
+
 # ------------------------------------------------------------------- doctor
 
 
@@ -595,6 +710,8 @@ def _doctor_report() -> dict[str, Any]:
             "enable_llm": config.enable_llm,
             "enable_asr": config.enable_asr,
             "enable_tts": config.enable_tts,
+            "enable_align": config.enable_align,
+            "enable_rvc": config.enable_rvc,
             "desktop_allowance_bytes": config.desktop_allowance_bytes,
             "backend_kind": config.backend_kind,
         }
@@ -783,6 +900,18 @@ def build_parser() -> argparse.ArgumentParser:
         "([jobs] enable_tts)",
     )
     init.add_argument(
+        "--enable-align",
+        action="store_true",
+        help="register the align (Qwen3-ForcedAligner) and unload-aligner job "
+        "types ([jobs] enable_align)",
+    )
+    init.add_argument(
+        "--enable-rvc",
+        action="store_true",
+        help="register the rvc (ultimate-rvc voice conversion) job type "
+        "([jobs] enable_rvc)",
+    )
+    init.add_argument(
         "--desktop-allowance-bytes",
         type=int,
         default=DEFAULT_DESKTOP_ALLOWANCE_BYTES,
@@ -854,6 +983,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="re-pull even if it is already installed"
     )
     voices_pull.set_defaults(func=cmd_voices_pull)
+
+    rvc = subparsers.add_parser("rvc", help="list and pull RVC voice-conversion models")
+    rvc_commands = rvc.add_subparsers(dest="rvc_command", required=True)
+
+    rvc_list = rvc_commands.add_parser(
+        "list", help="every RVC manifest this build ships and where it stands here"
+    )
+    rvc_list.add_argument("--json", action="store_true", help="machine-readable")
+    rvc_list.set_defaults(func=cmd_rvc_list)
+
+    rvc_pull = rvc_commands.add_parser(
+        "pull", help="fetch and unpack an RVC model at the manifest's pinned revision"
+    )
+    rvc_pull.add_argument("model", help="the Crucible RVC id, e.g. deathstalker-rvc-v1")
+    rvc_pull.add_argument(
+        "--force", action="store_true", help="re-pull even if it is already installed"
+    )
+    rvc_pull.set_defaults(func=cmd_rvc_pull)
 
     serve = subparsers.add_parser("serve", help="run the API in the foreground")
     serve.add_argument("--host", default=None, help="bind host (default from config)")
