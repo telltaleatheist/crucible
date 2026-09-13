@@ -1,0 +1,77 @@
+# Mistborn — a merged Higgs v3 fine-tune. Translated from BookForge's
+# electron/data/higgs-models.json (`mistborn`); the shared reasoning behind the
+# pace derivation, the character cap and the declared memory estimate is written
+# once, in voices/deathstalker.toml, and not repeated here.
+#
+# THE PIN AND THE MEASUREMENTS ARE NOT THE SAME WEIGHTS, and this is the widest
+# gap of the five. The HuggingFace repo was last written on 2026-09-08 with the
+# mb_h2lm merge; the catalog's arms now point at mb_full_rvc1_5947_prod, promoted
+# 2026-09-12 22:27 on Owen's go, and BOTH numbers below — the pace and the safe
+# band — were measured on THAT directory on 2026-09-12. Crucible pulls published
+# bytes at a pinned revision (PHASE3-TTS.md section 11) and cannot see a directory
+# inside the guest, so the pin names what a pull will fetch and the numbers name
+# what was measured. The cap survives (it is a ruling over every fine-tune); the
+# pace and the band do not, and re-measuring them here is owed before this voice
+# renders a book through Crucible. The alternative — shipping no manifest for
+# Owen's second production narrator — would hide the gap rather than state it.
+
+[voice]
+id = "mistborn"
+display = "Mistborn"
+kind = "checkpoint"
+narrator_engine = "higgs-v3"
+language = "en"
+sample_rate = 24000
+
+# MEASURED 2026-09-12 on the served arm at temperature 0.8, on
+# mb_full_rvc1_5947: 512 renders, 461 clean by the documented rule. median 13.29,
+# p05 10.15, p95 15.93. This narrator is genuinely slower than the others, which
+# is why BookForge's band.py was fixed the same day: a fixed 14.5 chars/s long
+# edge had been mislabelling healthy Mistborn takes as run-ons (13.4% -> 8.2%).
+# Edges = median x 1.3 and median / 1.3, rounded to two places.
+[voice.pace]
+pace_chars_per_sec = 13.29
+max_chars_per_sec = 17.28
+min_chars_per_sec = 10.22
+# MEASURED 2026-09-12 22:04 by the length ladder (rungs 100-1600, 8 prompts x 4
+# seeds, temperature 0.8), scored at this model's OWN 13.3 chars/s: band 200-800,
+# 17/208 = 8.2% failures (95% hi 12.7%). The chart's wider 200-1200 (8.9%) is
+# capped at 800 by Owen's ruling. The 200 floor is this voice's own and not a
+# typo for the others' 600.
+safe_min_chars = 200
+safe_max_chars = 800
+
+[voice.backends.cuda-linux]
+hf_repo = "owenmorgan/mistborn-higgs-v3"
+# The repo's head, read from the HF API 2026-09-13 with Owen's token (private
+# repo): the 2026-09-08 re-upload carrying the mb_h2lm weights. See the header.
+revision = "d13914e5d9433fe8f19333f2c4d1244b12588fe5"
+memory_bytes_estimate = 19_000_000_000
+estimate_basis = "declared"
+estimate_note = """SGLang-Omni's configured reservation on this arm, not a watched \
+card: `--mem-fraction-static 0.60 holds ~19 GB at 16 in flight` (higgs-models.json \
+serving.sglang._memFractionStaticNote, owens-pc RTX 3090 Ti, 2026-09-05). It is the \
+SERVER's footprint rather than this checkpoint's, so every Higgs v3 voice on this \
+arm carries it. Owed: a real reading on the 3090 Ti."""
+# 800, Owen's ruling of 2026-09-09 over every fine-tune. This voice also has an
+# empirical ceiling under it: mb_h2lm's longest training row is 2268 characters,
+# but the checkpoint ENDS ITSELF at ~1,980 frames (~79-82 s) whatever the server
+# allows — a 2,173-character render on the Mac came back at 79 s with the middle
+# skipped, coverage 0.306 (measured 2026-09-05). At 13.29 chars/s, 82 s is about
+# 1,090 characters, so 800 is well inside it. Characters, not tokens.
+max_chars = 800
+sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+[voice.backends.mlx-darwin]
+hf_repo = "owenmorgan/mistborn-higgs-v3"
+revision = "d13914e5d9433fe8f19333f2c4d1244b12588fe5"
+memory_bytes_estimate = 12_133_000_000
+estimate_basis = "declared"
+estimate_note = """The one recorded MLX figure for a Higgs v3 merged checkpoint — \
+11.3 GiB peak at a 900-character chunk, from deathstalker's MLX cap certificate \
+(mlx-audio 0.4.8 / mlx 0.32.0 on owens-mac-studio, 2026-09-05). Every v3 fine-tune \
+is the same 4B merge, so it is carried here rather than left out; it is a sibling \
+voice's reading, which is exactly what 'declared' means. Owed: watch the Mac's own \
+allocator on this checkpoint."""
+max_chars = 800
+sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }

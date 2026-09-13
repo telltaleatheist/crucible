@@ -14,12 +14,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from crucible import API_VERSION, accelerator, llmenv
+from crucible import API_VERSION, accelerator, jobenv
 from crucible.accelerator import GIB
 from crucible.api import create_app
 from crucible.backend import Backend, Gpu
 from crucible.config import load_config, mint_token, write_config
-from crucible.jobs.llm import residency as residency_module
+from crucible import residency as residency_module
 from crucible.manifests import load_manifest
 
 from .fake_engine import FakeEngine
@@ -66,6 +66,7 @@ def make_app(home: Path) -> Callable[..., FastAPI]:
         enable_echo: bool = True,
         enable_llm: bool = False,
         enable_asr: bool = False,
+        enable_tts: bool = False,
         token: str = TOKEN,
         backend: Backend = FAKE_BACKEND,
         desktop_allowance_bytes: int = 3 * 1024 ** 3,
@@ -80,6 +81,7 @@ def make_app(home: Path) -> Callable[..., FastAPI]:
             enable_echo=enable_echo,
             enable_llm=enable_llm,
             enable_asr=enable_asr,
+            enable_tts=enable_tts,
             desktop_allowance_bytes=desktop_allowance_bytes,
         )
         return create_app(load_config(home), backend)
@@ -122,7 +124,8 @@ def auth() -> dict[str, str]:
 @pytest.fixture
 def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A stamped `~/.crucible/envs/llm` that `env_status` accepts."""
-    directory = llmenv.llm_env_dir(home)
+    spec = jobenv.llm_env(FAKE_BACKEND.kind)
+    directory = jobenv.env_dir(home, spec)
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
     (directory / "crucible-env.json").write_text(
@@ -136,8 +139,8 @@ def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ),
         encoding="utf-8",
     )
-    pins = llmenv.recipe_pins(llmenv.recipe_for(FAKE_BACKEND.kind))
-    monkeypatch.setattr(llmenv, "installed_packages", lambda _home: dict(pins))
+    pins = jobenv.recipe_pins(jobenv.recipe_for(spec))
+    monkeypatch.setattr(jobenv, "installed_packages", lambda _home, _spec: dict(pins))
     return directory
 
 

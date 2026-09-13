@@ -39,6 +39,34 @@ def build_engine(engine_name: str, python: Path, log_path: Path) -> SubprocessEn
     return cls(python=python, log_path=log_path)
 
 
+def build_voice_engine(
+    narrator_engine: str, python: Path, log_path: Path
+) -> SubprocessEngine:
+    """The engine that serves a voice — **not written yet**.
+
+    `crucible/engines/narrator.py` is the next builder's file and is where this
+    becomes a real construction: a `SubprocessEngine` subclass that runs
+    `python -m narrator.serve` from the tts env for `narrator_engine`, proves
+    readiness from the `ready{device,backend}` line narrator prints on stdout
+    (which is what `SubprocessEngine.announced_ready()` is the seam for), speaks
+    newline-delimited JSON over its pipes, and tears down its SGLang-Omni or MLX
+    engine on SIGTERM. `ENGINES` above gains an entry then, and this function
+    becomes a lookup in it exactly as `build_engine` is.
+
+    It refuses here rather than returning a stub that appears to work. A fake
+    engine that answers `load-voice` successfully and produces no audio is
+    exactly the kind of thing that ships: every test above it goes green and the
+    failure surfaces as a silent book.
+    """
+    raise NotImplementedError(
+        f"crucible cannot start narrator for the {narrator_engine!r} engine: "
+        "crucible/engines/narrator.py is not written yet (PHASE3-TTS.md section "
+        "4). Everything up to the spawn — the voice manifests, the refusals, the "
+        "residency and the two lifecycle jobs — is in place and tested; this is "
+        "the seam it stops at."
+    )
+
+
 def engine_model_name(engine_name: str, model_dir: Path, model_id: str) -> str:
     """The name *the engine* will answer to for this model.
 
@@ -66,6 +94,7 @@ __all__ = [
     "SubprocessEngine",
     "VllmEngine",
     "build_engine",
+    "build_voice_engine",
     "engine_log_path",
     "engine_model_name",
     "find_free_port",

@@ -1,0 +1,79 @@
+# The Higgs v3 base model's own built-in speaker: no fine-tune, no reference
+# clips. Translated from BookForge's electron/data/higgs-models.json (`default`).
+#
+# `kind = "token"` in Crucible's vocabulary — the voice is the engine's and is
+# selected without conditioning on anything. BookForge calls this kind `default`
+# and narrator calls the object a `DefaultVoice`; PHASE3-TTS.md section 2's three
+# kinds are checkpoint / zeroshot / token, and this is the third.
+#
+# IT IS NOT A PRODUCTION NARRATION VOICE and is not meant to become one. Owen
+# ruled on 2026-09-04 that production narration is fine-tuned voices only; this
+# exists so a server can prove it can start narrator and make a sound without
+# 8.5 GB of somebody's private checkpoint, which is exactly what the first run on
+# a new machine needs.
+#
+# LICENCE: Higgs TTS 3 ships under Boson AI's RESEARCH AND NON-COMMERCIAL licence,
+# and so does every fine-tune of it. That is a fact about all six Higgs voices in
+# this directory and it is recorded here because this is the one whose repo is
+# public and therefore the one somebody will reach for first.
+
+[voice]
+id = "higgs-default"
+display = "Higgs v3 built-in voice"
+kind = "token"
+narrator_engine = "higgs-v3"
+language = "en"
+sample_rate = 24000
+
+# NO MEASURED PACE EXISTS FOR THIS VOICE — the catalog's entry carries no `pace`
+# block, and a voice with none renders at narrator's own default band. These three
+# are that band, read off the code rather than invented here:
+#   pace  HiggsDefaults.CHARS_PER_SEC   = 15.0, "the narration rate the cap is
+#         sized against", and the divisor inside cap_frames().
+#   max   HiggsV3Defaults.MAX_CHARS_PER_SEC = 20.0 — above it a take is too SHORT
+#         (an early stop). Advisory: the audition measured 11.9-18.0 chars/s
+#         across nine chunks and 20.0 is that ceiling with headroom.
+#   min   HiggsV3Defaults.MIN_CHARS_PER_SEC = 14.5 — below it a take RAN ON.
+# (`narrator/engine/higgs/config.py` and `v3_engine.py`.)
+[voice.pace]
+pace_chars_per_sec = 15.0
+max_chars_per_sec = 20.0
+min_chars_per_sec = 14.5
+# No target_chars and no safe band: the catalog declares neither for this voice,
+# so a client packs to the backend's max_chars. That is what BookForge does today.
+
+[voice.backends.cuda-linux]
+# The canonical repo id. higgs-models.json names it `bosonai/higgs-audio-v3-tts-4b`,
+# which HuggingFace 307-redirects to this; the pin below was read from the API on
+# 2026-09-13 and is the same sha the fine-tunes' merge manifests record as their
+# base snapshot (`base snapshot 239f63fb...`), which is what confirms the two
+# names are one repo.
+hf_repo = "bosonai/higgs-tts-3-4b"
+revision = "239f63fb7b02b1aa085f98d9efae5e35cc5523e8"
+memory_bytes_estimate = 19_000_000_000
+estimate_basis = "declared"
+estimate_note = """SGLang-Omni's configured reservation, not a watched card: \
+`--mem-fraction-static 0.60 holds ~19 GB at 16 in flight, healthy in ~110 s` \
+(higgs-models.json serving.sglang._memFractionStaticNote, owens-pc RTX 3090 Ti \
+24.5 GB, 2026-09-05). The reservation is the SERVER's and does not vary with which \
+v3 weights it was started on, so the base model carries the same number as the \
+fine-tunes. Owed: a real reading."""
+# 600, and the catalog marks its source `placeholder` — an explicitly-declared
+# non-measurement, which for a zero-shot or base voice is legitimate (for a
+# fine-tune it would be a refusal). 600 rather than 900 because Higgs v3 drops the
+# tail reproducibly at 900 without cloning to hold it. Characters, not tokens.
+max_chars = 600
+sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+[voice.backends.mlx-darwin]
+hf_repo = "bosonai/higgs-tts-3-4b"
+revision = "239f63fb7b02b1aa085f98d9efae5e35cc5523e8"
+memory_bytes_estimate = 12_133_000_000
+estimate_basis = "declared"
+estimate_note = """The one recorded MLX figure for Higgs v3 weights of this shape — \
+11.3 GiB peak at a 900-character chunk, from deathstalker's MLX cap certificate \
+(mlx-audio 0.4.8 / mlx 0.32.0 on owens-mac-studio, 2026-09-05). A merged fine-tune \
+is the base model's architecture with the same parameter count, so the figure \
+carries; it is still somebody else's reading, which is what 'declared' means."""
+max_chars = 600
+sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }

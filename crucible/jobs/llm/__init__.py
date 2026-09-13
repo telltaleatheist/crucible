@@ -25,7 +25,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ... import accelerator, llmenv, weights
+from ... import accelerator, jobenv, weights
 from ...config import Config
 from ...engines import EngineError
 from ...errors import ApiError, JobError
@@ -35,14 +35,18 @@ from ...manifests import (
     fingerprint,
     load_all_manifests,
 )
+from ...residency import (
+    DEFAULT_READY_TIMEOUT_SECONDS,
+    KIND_LLM,
+    Residency,
+    describe_resident,
+)
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
-from .residency import DEFAULT_READY_TIMEOUT_SECONDS, Residency, ResidentModel
 
 __all__ = [
     "LoadModelJobType",
     "LoadParams",
     "Residency",
-    "ResidentModel",
     "UnloadModelJobType",
     "model_rows",
 ]
@@ -113,7 +117,9 @@ def _descriptors(
     for manifest in _manifests().values():
         if manifest.supports(backend_kind):
             spec = manifest.spec(backend_kind)
-            revision, source, estimate = spec.revision, spec.hf_repo, spec.memory_bytes_estimate
+            revision = spec.revision
+            source = spec.hf_repo
+            estimate = spec.memory_bytes_estimate
         else:
             revision, source, estimate = "", "", 0
         rows.append(
@@ -121,7 +127,7 @@ def _descriptors(
                 id=manifest.id,
                 revision=revision,
                 source=source,
-                resident=residency.resident_id == manifest.id,
+                resident=residency.is_resident(KIND_LLM, manifest.id),
                 vram_bytes=estimate,
             )
         )
@@ -144,8 +150,12 @@ def model_rows(
     `accelerator_busy`.
     """
     backend_kind = backend.kind
-    env = llmenv.env_status(config.home, backend_kind)
-    resident = residency.resident
+    env = jobenv.env_status(config.home, jobenv.llm_env(backend_kind), backend_kind)
+    # `resident_model`, not `resident`: one card holds one thing and that thing
+    # may be a voice (PHASE3-TTS.md section 5). A voice on the card means no
+    # model is resident, which is exactly what these rows should say — reading
+    # `resident` here would ask a `ResidentVoice` for a `model_id`.
+    resident = residency.resident_model
     rows: list[dict[str, Any]] = []
     for manifest in _manifests().values():
         supported = manifest.supports(backend_kind)
@@ -186,8 +196,11 @@ def model_rows(
             elif not env.installed:
                 reason = f"the llm env is not ready: {env.detail}"
             elif not is_installed:
+                directory = weights.weights_dir(
+                    config, manifest.weights_family, manifest.id, backend_kind
+                )
                 reason = (
-                    f"no weights at {weights.model_dir(config, manifest.id, backend_kind)}"
+                    f"no weights at {directory}"
                     f" — run `crucible models pull {manifest.id}`"
                 )
         row: dict[str, Any] = {
@@ -219,7 +232,7 @@ def model_rows(
             "modalities": list(manifest.modalities),
             "backend_supported": supported,
             "installed": is_installed,
-            "resident": residency.resident_id == manifest.id,
+            "resident": residency.is_resident(KIND_LLM, manifest.id),
             "loadable": reason is None,
             "memory_bytes_estimate": estimate,
             # The manifest's INTENT: the context THIS host would serve, the same
@@ -303,13 +316,17 @@ def _require_loadable(
         host_name=backend.gpu.name,
     )
     try:
-        python = llmenv.require_env(config.home, backend_kind)
-    except llmenv.EnvError as exc:
+        env_spec = jobenv.llm_env(backend_kind)
+        python = jobenv.require_env(config.home, env_spec, backend_kind)
+    except jobenv.EnvError as exc:
         raise ApiError(
             409,
             "env_missing",
             f"cannot load {model_id!r}: {exc}",
-            {"model": model_id, "env": str(llmenv.llm_env_dir(config.home))},
+            {
+                "model": model_id,
+                "env": str(jobenv.env_dir(config.home, jobenv.llm_env(backend_kind))),
+            },
         ) from None
     try:
         installed = weights.require_installed(config, manifest, spec)
@@ -357,7 +374,9 @@ class LoadModelJobType:
         return _model_provenance(self._config.backend_kind, model)
 
     def check(self, backend: Any) -> JobTypeStatus:
-        env = llmenv.env_status(self._config.home, backend.kind)
+        env = jobenv.env_status(
+            self._config.home, jobenv.llm_env(backend.kind), backend.kind
+        )
         if not env.installed:
             return JobTypeStatus(ready=False, detail=env.detail)
         rows = model_rows(self._config, backend, self._residency)
@@ -481,14 +500,13 @@ class UnloadModelJobType:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs a model")
         _params(UnloadParams, params, self.name)
-        resident = self._residency.resident_id
-        if resident != model:
+        if not self._residency.is_resident(KIND_LLM, model):
             raise ApiError(
                 409,
                 "model_not_resident",
                 f"{model!r} is not resident on this server; "
-                + (f"{resident!r} is" if resident else "no model is"),
-                {"requested": model, "resident": resident},
+                + describe_resident(self._residency, KIND_LLM, "no model is"),
+                {"requested": model, "resident": self._residency.resident_id},
             )
 
     def run(self, job: Job, ctx: JobContext) -> None:
@@ -497,17 +515,22 @@ class UnloadModelJobType:
         if model is None:  # unreachable: resolve_model requires one
             raise JobError("model_required", f"{self.name} needs a model")
         ctx.progress(0.0, f"unloading {model}")
-        try:
-            self._residency.unload(model)
-        except KeyError:
+        if not self._residency.is_resident(KIND_LLM, model):
+            # Checked before `unload()` rather than caught from it: the holder
+            # unloads by id alone, and a voice sharing a model's id would be
+            # taken off the card by `unload-model`.
             raise JobError(
                 "model_not_resident",
                 f"{model!r} is not resident on this server; "
-                + (
-                    f"{self._residency.resident_id!r} is"
-                    if self._residency.resident_id
-                    else "no model is"
-                ),
+                + describe_resident(self._residency, KIND_LLM, "no model is"),
+            )
+        try:
+            self._residency.unload(model)
+        except KeyError:  # pragma: no cover - is_resident just said it is
+            raise JobError(
+                "model_not_resident",
+                f"{model!r} is not resident on this server; "
+                + describe_resident(self._residency, KIND_LLM, "no model is"),
             ) from None
         except EngineError as exc:
             raise JobError("engine_failed", str(exc)) from None

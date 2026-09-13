@@ -105,6 +105,15 @@ class AsrBackendSpec:
 
 @dataclass(frozen=True)
 class AsrManifest:
+    #: Which tree under `~/.crucible/` these weights live in, and therefore which
+    #: `pull` command a refusal tells the reader to run (`crucible/weights.py`).
+    #: `models`, with the llm manifests: an ASR model is a model, `crucible models
+    #: list` shows both directories, and giving it a third tree of its own would
+    #: mean a third command to learn for no difference anyone can see. Not a
+    #: dataclass field — a class attribute, the way `ModelManifest` declares it —
+    #: because it is a property of the kind, not of the file.
+    weights_family = "models"
+
     id: str
     family: str
     parameters_m: int

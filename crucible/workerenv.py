@@ -12,12 +12,12 @@ pinned exactly, every line of it, for the reason `envs/llm/cuda-linux.txt` gives
 a later install must not drift into a different torch and a different numerical
 result.
 
-Why this is not `crucible/llmenv.py`
+Why this is not `crucible/jobenv.py`
 ------------------------------------
-It should be. `llmenv` is this module with `job_type` hardcoded to `"llm"`, and
+It should be. `jobenv` is this module with `job_type` hardcoded to `"llm"`, and
 the two share almost every line. They are apart because phase 4 was built beside
-phases 2 and 3 in one tree and `llmenv.py` was live under another builder's feet
-while this was written. Folding `llmenv` into this module — `llm_env_dir(home)`
+phases 2 and 3 in one tree and `jobenv.py` was live under another builder's feet
+while this was written. Folding `jobenv` into this module — `llm_env_dir(home)`
 becomes `worker_env_dir(home, "llm")` and the `EnvStatus` shape is already
 identical — is a follow-up, and a mechanical one.
 """
@@ -46,7 +46,7 @@ HEADLINE_PACKAGE: dict[str, str] = {
 }
 
 #: Job types that have a worker env at all. `llm` is deliberately absent: it is
-#: `llmenv`'s, until the two modules are merged.
+#: `jobenv`'s, until the two modules are merged.
 WORKER_JOB_TYPES: tuple[str, ...] = ("asr",)
 
 

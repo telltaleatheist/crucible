@@ -1,0 +1,176 @@
+"""How an engine says it is up is the engine's business.
+
+PHASE3-TTS.md section 4: every engine Crucible has today proves readiness by
+polling its own HTTP `/v1/models`; `narrator.serve` instead prints a
+`ready{device,backend}` line on stdout. `SubprocessEngine.ready()` grew a seam for
+that — `announced_ready()` and `readiness_description()` — and these tests drive
+it with `tests/fake_narrator.py`, which speaks narrator's real wire, rather than
+with a stub that would only prove the seam calls something.
+
+`crucible/engines/narrator.py` is not written yet. The engine below is a TEST
+DOUBLE and not a preview of it: it reads the ready line out of the engine log
+because `SubprocessEngine.start()` sends stdout there, while the real one will
+need stdout as a pipe (narrator's protocol is newline-delimited JSON over stdin
+and stdout, and Crucible has to write to it as well as read it). That is a second
+seam in `start()`, and it is deliberately not invented here.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+from crucible.engines import EngineError, SubprocessEngine
+from crucible.engines.base import SubprocessEngine as BaseEngine
+from crucible.engines.mlx_lm import MlxLmEngine
+from crucible.engines.vllm import VllmEngine
+
+FAKE_NARRATOR = Path(__file__).resolve().parent / "fake_narrator.py"
+
+
+class ReadyLineEngine(SubprocessEngine):
+    """An engine that is up when it has printed `{"type": "ready"}` on stdout."""
+
+    name = "fake-narrator"
+
+    #: Whether to keep the process's stdin open — see `command()`. A test that is
+    #: about the engine DYING turns it off, so that what exits is the script and
+    #: not a shell wrapper still waiting on a pipe.
+    hold_stdin = True
+
+    def command(
+        self, model_dir: Path, served_name: str, port: int, args: list[str]
+    ) -> list[str]:
+        run = f"{sys.executable} {FAKE_NARRATOR} --engine higgs-v3"
+        if not self.hold_stdin:
+            # `exec`, so the shell is REPLACED and `poll()` reads the script's own
+            # exit code rather than the wrapper's.
+            return ["sh", "-c", f"exec {run}"]
+        # `sleep 60 |` holds stdin open. `start()` gives an engine
+        # `stdin=DEVNULL`, on which this script's `for line in sys.stdin` reaches
+        # EOF and the process exits cleanly the instant it is ready — and
+        # `ready()` checks `poll()` before it checks the announcement, so a
+        # process that has already exited is an exit and not a readiness. The real
+        # narrator engine holds a live pipe there and has no such problem, which
+        # is the second seam `start()` will need.
+        return ["sh", "-c", f"sleep 60 | {run}"]
+
+    def announced_ready(self) -> str | None:
+        for line in self.log_tail(200).splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if message.get("type") == "ready":
+                return (
+                    f"{self.name} is ready on {message.get('device')} "
+                    f"({message.get('backend')})"
+                )
+        return None
+
+    def readiness_description(self) -> str:
+        return "print a ready line on stdout"
+
+
+@pytest.fixture
+def engine(tmp_path: Path) -> ReadyLineEngine:
+    built = ReadyLineEngine(
+        python=Path(sys.executable), log_path=tmp_path / "engine-probe.log"
+    )
+    yield built
+    try:
+        built.stop()
+    except EngineError:
+        pass
+
+
+@pytest.fixture
+def weights(tmp_path: Path) -> Path:
+    directory = tmp_path / "weights"
+    directory.mkdir()
+    return directory
+
+
+def test_a_stdout_ready_line_is_readiness(
+    engine: ReadyLineEngine, weights: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No HTTP route is ever polled, and the engine still comes up."""
+    monkeypatch.setenv("CRUCIBLE_FAKE_READY_DELAY_S", "0")
+    said: list[str] = []
+    engine.start(weights, "deathstalker", 0, [])
+    engine.ready(30.0, on_progress=said.append)
+    assert any("is ready on fake" in message for message in said)
+
+
+def test_a_slow_start_streams_warming_messages(
+    engine: ReadyLineEngine, weights: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """narrator on cuda-linux takes about 110 s; the lane must say something."""
+    monkeypatch.setenv("CRUCIBLE_FAKE_READY_DELAY_S", "3")
+    said: list[str] = []
+    engine.start(weights, "deathstalker", 0, [])
+    engine.ready(60.0, on_progress=said.append)
+    assert any("loading" in message for message in said), said
+    assert any("is ready on fake" in message for message in said), said
+
+
+def test_a_ready_line_that_never_comes_times_out_by_name(
+    engine: ReadyLineEngine, weights: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_READY_NEVER", "1")
+    engine.start(weights, "deathstalker", 0, [])
+    with pytest.raises(EngineError) as caught:
+        engine.ready(3.0)
+    message = str(caught.value)
+    # The engine's own description of what it was waiting for, not /v1/models.
+    assert "did not print a ready line on stdout within 3s" in message
+    assert "/v1/models" not in message
+
+
+def test_an_engine_that_dies_before_it_is_ready_says_so(
+    engine: ReadyLineEngine, weights: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commonest real failure on cuda-linux: an environment fact kills the
+    engine seconds in."""
+    monkeypatch.setenv("CRUCIBLE_FAKE_EXIT_CODE", "3")
+    engine.hold_stdin = False
+    engine.start(weights, "deathstalker", 0, [])
+    with pytest.raises(EngineError) as caught:
+        engine.ready(30.0)
+    message = str(caught.value)
+    assert "exited 3 before it was ready" in message
+    assert "told to exit before becoming ready" in message
+
+
+def test_sigterm_stops_it(
+    engine: ReadyLineEngine, weights: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_READY_DELAY_S", "0")
+    engine.start(weights, "deathstalker", 0, [])
+    engine.ready(30.0)
+    assert engine.pids
+    engine.stop()
+    assert engine.pids == frozenset()
+
+
+def test_the_http_engines_did_not_change(
+    engine: ReadyLineEngine, weights: Path
+) -> None:
+    """The seam is an override point, not a rewrite: vLLM and mlx-lm still prove
+    readiness exactly as PHASE2-LLM.md section 3 specifies, through the base
+    class's own `/v1/models` poll."""
+    for cls in (VllmEngine, MlxLmEngine):
+        assert cls.announced_ready is BaseEngine.announced_ready
+        assert cls.readiness_description is BaseEngine.readiness_description
+    # And the default description still names the route, so a vLLM timeout reads
+    # the way it always did.
+    engine.start(weights, "deathstalker", 7654, [])
+    assert BaseEngine.readiness_description(engine) == (
+        "answer http://127.0.0.1:7654/v1/models"
+    )

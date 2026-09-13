@@ -73,6 +73,7 @@ class Config:
     enable_echo: bool
     enable_llm: bool
     enable_asr: bool
+    enable_tts: bool
     desktop_allowance_bytes: int
 
     @property
@@ -135,6 +136,7 @@ def load_config(home: Path | None = None) -> Config:
         enable_echo=_require(table, "jobs", "enable_echo", bool),
         enable_llm=_require(table, "jobs", "enable_llm", bool),
         enable_asr=_require(table, "jobs", "enable_asr", bool),
+        enable_tts=_require(table, "jobs", "enable_tts", bool),
         desktop_allowance_bytes=_require(
             table, "accelerator", "desktop_allowance_bytes", int
         ),
@@ -152,6 +154,7 @@ def write_config(
     enable_echo: bool,
     enable_llm: bool,
     enable_asr: bool,
+    enable_tts: bool,
     desktop_allowance_bytes: int,
 ) -> Path:
     """Write config.toml at mode 0600 under a 0700 home. Returns the path."""
@@ -166,6 +169,7 @@ def write_config(
             "enable_echo": enable_echo,
             "enable_llm": enable_llm,
             "enable_asr": enable_asr,
+            "enable_tts": enable_tts,
         },
         "accelerator": {"desktop_allowance_bytes": desktop_allowance_bytes},
     }

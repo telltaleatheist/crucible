@@ -33,7 +33,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible.jobs.llm import residency as residency_module
+from crucible import residency as residency_module
 from crucible.manifests import (
     MODALITIES,
     SKIP_MM_PROFILING,

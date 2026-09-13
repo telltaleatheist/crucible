@@ -17,9 +17,9 @@ from typing import Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, llmenv
+from crucible import accelerator, jobenv
 from crucible.accelerator import GIB, ComputeApp, ProbeError
-from crucible.jobs.llm import residency as residency_module
+from crucible import residency as residency_module
 from crucible.manifests import load_manifest
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
@@ -42,7 +42,8 @@ class OwnedEngine(FakeEngine):
 
 @pytest.fixture
 def llm_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    directory = llmenv.llm_env_dir(home)
+    spec = jobenv.llm_env(FAKE_BACKEND.kind)
+    directory = jobenv.env_dir(home, spec)
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
     (directory / "crucible-env.json").write_text(
@@ -56,8 +57,8 @@ def llm_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ),
         encoding="utf-8",
     )
-    pins = llmenv.recipe_pins(llmenv.recipe_for(FAKE_BACKEND.kind))
-    monkeypatch.setattr(llmenv, "installed_packages", lambda _home: dict(pins))
+    pins = jobenv.recipe_pins(jobenv.recipe_for(spec))
+    monkeypatch.setattr(jobenv, "installed_packages", lambda _home, _spec: dict(pins))
     return directory
 
 

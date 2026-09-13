@@ -46,42 +46,84 @@ display = "Deathstalker"
 kind = "checkpoint"           # checkpoint | zeroshot | token
 narrator_engine = "higgs-v3"  # which of narrator's engines serves it
 language = "en"
+sample_rate = 24000
 
 # The band the chunk packer works to. Advertised so a client can pack to it; the
 # client does the packing, the server states the shape. These are the numbers that
 # live in BookForge's higgs-models.json voice document today.
 [voice.pace]
-target_chars = 300
-max_chars = 800
-safe_min_chars = 120
-safe_max_chars = 700
-pace_chars_per_sec = 15.0
-max_chars_per_sec = 19.0
-min_chars_per_sec = 9.0
+pace_chars_per_sec = 16.64      # required
+max_chars_per_sec = 21.63       # required
+min_chars_per_sec = 12.80       # required; min < pace < max
+safe_min_chars = 600            # this voice's packing shape: a band...
+safe_max_chars = 800
+# target_chars = 600            # ...or a single target. Never both; neither is
+                                # also legal and means "pack to max_chars".
 
 [voice.backends.cuda-linux]
 hf_repo = "owenmorgan/deathstalker-higgs-v3"
 revision = "<40 hex>"
-memory_bytes_estimate = 0        # MEASURED on the card it names, never computed
-cap_tokens = 800                 # THE cap certificate for (voice, cuda-linux)
+memory_bytes_estimate = 19_000_000_000
+estimate_basis = "declared"      # measured | declared
+estimate_note = "SGLang's --mem-fraction-static 0.6 …"   # required when declared
+max_chars = 800                  # THE cap certificate for (voice, cuda-linux)
 sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+# sampling_reason = "…"          # required when `sampling` is not the engine's
 
 [voice.backends.mlx-darwin]
 hf_repo = "owenmorgan/deathstalker-higgs-v3"
 revision = "<40 hex>"
-memory_bytes_estimate = 0
-cap_tokens = 800
+memory_bytes_estimate = 12_133_000_000
+estimate_basis = "declared"
+estimate_note = "deathstalker's MLX certificate, 11.3 GiB peak at 900 chars"
+max_chars = 800
 sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
 ```
 
-Four things in that file are load-bearing.
+That schema is what `crucible/voices.py` loads, and it differs from this section's first
+draft in four places. Each difference is there because the file as drafted could not be
+filled in truthfully from BookForge's catalog; each is marked below.
 
-**`cap_tokens` is per backend and must stay per backend.** Every voice's two blocks carry
+Five things in that file are load-bearing.
+
+**The cap is per backend and must stay per backend.** Every voice's two blocks carry
 identical numbers today — 600/600, 800/800, 1000/1000, 1100/1100 (CLIENT-SURFACES.md section
 3.1). That is a coincidence of the current catalog, not a property of the world, and
 DESIGN.md section 3 already promises a cap certificate per (model, backend). One number
 shared between two accelerators is how a cap measured on one card silently governs the
 other.
+
+**DIFFERENCE 1 — it is `max_chars`, and this document used to call it `cap_tokens`.**
+Corrected 2026-09-13, while the loader was being written. Those four numbers are
+**characters**: in BookForge they are `backends.<arm>.maxChars`, the length of text a voice
+may be handed. The token cap is a different quantity and narrator derives it per chunk from
+the text it is actually given — `HiggsBudget.cap_frames`, `int(len(text) / 15.0 * 25 * 1.8)
++ 100`, clamped against the stack's context window by `sgl_served.frame_cap`. Writing 800
+into a field named `cap_tokens` would have handed the engine a frame ceiling roughly eight
+times too small and cut every chunk mid-sentence while the request reported success. The
+manifest carries the catalog's name and the catalog's meaning; the token budget stays where
+it is computed. **Nothing in `tts` carries a token cap on the wire**, and the `chunk` event's
+`capped` (section 6) is therefore about the frame cap narrator computed, not about this.
+
+**DIFFERENCE 2 — the pace block is three required rates plus an OPTIONAL packing shape.**
+As drafted it required all seven numbers, and no voice in the catalog declares all seven.
+The three rates (`pace_chars_per_sec`, `max_chars_per_sec`, `min_chars_per_sec`) are
+required of every voice and must satisfy `min < pace < max`, which is narrator's own rule in
+`engine/higgs/config.py`'s `_length_band` — the band is the measured pace and the two edges
+derived from it, and narrator keeps only the RATIOS and re-centres them on the book's own
+running median. A voice with no measurement of its own carries the narrator engine's default
+band, which is still a recorded number (Higgs v3: 15.0 / 20.0 / 14.5, read off
+`HiggsDefaults` and `HiggsV3Defaults`). What the client packs to is then EITHER a
+`safe_min_chars`/`safe_max_chars` band (what the five fine-tunes declare — their training
+corpus's interquartile range, measured 2026-09-09) OR a single `target_chars` (what the
+zero-shot voices declare), never both, and a voice declaring neither packs to the backend's
+`max_chars`, which is what BookForge does today. The loader refuses a band whose ceiling
+exceeds the arm's `max_chars`, the same rule BookForge and narrator both refuse on.
+
+**DIFFERENCE 3 — `sample_rate` is required in `[voice]`.** The `/v1/voices` row carries it
+and a client writing FLACs cannot be handed a null. It is 24000 for every voice in the
+catalog, which is exactly the kind of coincidence that becomes a hard-coded constant if it is
+not written down per voice.
 
 **`sampling` is the engine-level default, and a deviation owes a reason.** Owen's rule, in
 memory as `higgs-sampling-default-no-deviation`: 0.8 / 0.95 / 50 is *the boson default*, one
@@ -96,6 +138,21 @@ here, and the manifest is where the numbers have to be.
 manifests learned the hard way: a computed estimate came out 34% light on `mlx-darwin` and
 6% light on `cuda-linux`. A voice that has not been measured on a backend carries no block
 for that backend, and the server refuses to load it there by name rather than guessing.
+
+**DIFFERENCE 4 — `estimate_basis`, because that rule made every voice unloadable.** Neither
+of Owen's accelerators was free the night the manifests were written (section 10 says as
+much), so under the rule above not one voice could carry a block and the whole job type would
+have been untestable. So every block states where its number came from: `"measured"` — 
+somebody watched the card — or `"declared"`, which means it came from the engine's own
+configured reservation (Higgs v3 on SGLang runs at `--mem-fraction-static 0.6`, and the
+catalog records that as "0.60 holds ~19 GB at 16 in flight") or from a sibling voice's
+certificate. `"declared"` additionally requires `estimate_note`, and `"measured"` refuses
+one — a note beside a measured number reads as an excuse for it. **The basis rides on the
+`/v1/voices` row**, so nothing downstream can mistake one for the other, and every voice this
+build ships says `declared`. The model manifests have the same problem and do **not** have
+this field: `models/qwen3.5-9b.toml` carries the word MEASURED in a comment no protocol
+reads. That asymmetry is deliberate for now — those numbers really were measured — but it is
+why a reader finds provenance in two shapes.
 
 **Zero-shot clips belong to the voice, not to the request.** A `kind = "zeroshot"` voice
 carries its reference clips the way a checkpoint carries its weights:
@@ -129,6 +186,7 @@ function — the same rule, and for the same reason, as `llm`'s models (PHASE2-L
   "display": "Deathstalker",
   "kind": "checkpoint",
   "language": "en",
+  "narrator_engine": "higgs-v3",
   "backend_supported": true,
   "installed": true,
   "resident": false,
@@ -136,17 +194,32 @@ function — the same rule, and for the same reason, as `llm`'s models (PHASE2-L
   "reason": null,
   "revision": "<40 hex>",
   "fingerprint": "deathstalker@<40 hex>",
-  "memory_bytes_estimate": 0,
-  "cap_tokens": 800,
+  "memory_bytes_estimate": 19000000000,
+  "estimate_basis": "declared",
+  "max_chars": 800,
   "sample_rate": 24000,
-  "takes": 3,
-  "pace": { "target_chars": 300 }
+  "takes": 1,
+  "pace": {
+    "pace_chars_per_sec": 16.64,
+    "max_chars_per_sec": 21.63,
+    "min_chars_per_sec": 12.8,
+    "target_chars": null,
+    "safe_min_chars": 600,
+    "safe_max_chars": 800
+  }
 }
 ```
 
-`revision`, `fingerprint`, `memory_bytes_estimate` and `cap_tokens` are `null` when
-`backend_supported` is false, because they live in the backend block this host does not
-have — and `0` would read as "needs nothing".
+`revision`, `fingerprint`, `memory_bytes_estimate`, `estimate_basis` and `max_chars` are
+`null` when `backend_supported` is false, because they live in the backend block this host
+does not have — and `0` would read as "needs nothing".
+
+`pace` is the whole block and not the one key the draft showed: a client that is going to
+pack has to see all of it, and the two shapes (a band, a target) are told apart by which keys
+are null. `narrator_engine` is on the row because it is what decides which env a load needs
+and therefore what a `reason` is talking about; `estimate_basis` is on it for the reason in
+difference 4. Neither `estimate_note` nor `sampling_reason` is — they are prose for whoever
+reads the manifest, and a row is not a place to argue.
 
 **`sampling` is deliberately not on that row.** It is engine tuning, it is the server's, and
 publishing it invites a client to send it back. The same goes for the EOS levers, the
@@ -200,7 +273,17 @@ Two consequences, both named rather than hidden:
 - **The readiness probe is not HTTP.** Every other engine answers `/v1/models`;
   `narrator.serve` answers a `ready{device,backend}` line on stdout. `SubprocessEngine` has
   to grow a seam for that, rather than the narrator engine faking an HTTP server to fit the
-  one that exists.
+  one that exists. **Done, 2026-09-13**: `ready()` now calls `announced_ready()`, which
+  returns the message when the engine is up and `None` while it is not, and names what it was
+  waiting for in `readiness_description()` so a timeout reads truthfully. The default is the
+  `/v1/models` poll, byte for byte what vLLM and mlx-lm had before; neither overrides either
+  method, and a test asserts that. `tests/test_engine_readiness.py` drives the seam with
+  `tests/fake_narrator.py`.
+- **`start()` will need a second seam, and it does not have one.** It gives every engine
+  `stdin=DEVNULL` and sends stdout to the log file, which is right for an engine whose wire is
+  HTTP and wrong for narrator, whose wire *is* those two pipes. Whoever writes
+  `crucible/engines/narrator.py` opens that seam; the readiness one above is deliberately
+  independent of it, so the two can be done in either order.
 - **Crucible ends up depending on a package that lives in an app's repo.** narrator's
   `engine/` and `serve/` know nothing about audiobooks, but `compat/` and `assemble/` do,
   and the whole thing is versioned with BookForge. The env recipe pins it by git sha so a
@@ -224,7 +307,7 @@ name.
 
 ## 5. Residency holds one thing, whatever kind it is
 
-`crucible/jobs/llm/residency.py` today holds at most one resident *model*. The accelerator
+`crucible/jobs/llm/residency.py` held at most one resident *model*. The accelerator
 does not care what kind of thing is on it, and a card holding a Higgs checkpoint has no room
 for a 9B. So `Residency` generalises: **at most one resident engine, of either kind**, and
 loading a voice unloads a model exactly as loading a model unloads a voice.
@@ -232,12 +315,42 @@ loading a voice unloads a model exactly as loading a model unloads a voice.
 `GET /v1/health`'s `resident_models` keeps its name and its shape (a list of ids) and gains
 `resident_kind: "llm" | "tts" | null`, so a client can tell which door to knock on.
 
-New job types, mirroring the model pair exactly:
+**Done, 2026-09-13.** The holder moved to `crucible/residency.py` — it is no longer the
+llm's, and a `tts` job reaching into another job type's package for the thing that owns the
+card would make the one-at-a-time rule look like a courtesy between two modules rather than a
+property of the server. `build_registry()` hands the SAME holder to every job type that
+touches the card, which is what makes the rule true rather than aspirational, and a test
+asserts it.
+
+Two things fell out of the generalisation that the draft did not anticipate, and both are
+about ids:
+
+- **Model ids and voice ids are separate namespaces**, and nothing stops a voice being called
+  `qwen3.5-9b`. So residency is asked `is_resident(kind, id)` and never `resident_id == id`,
+  or a resident voice would light up a model's `/v1/models` row; and `unload-model` /
+  `unload-voice` each check the kind before asking the holder, which unloads by id alone.
+- **The OpenAI proxy asks for `resident_model`, not `resident`.** With a voice on the card
+  there is no `base_url` to forward a chat request to, and narrator answers no OpenAI route,
+  so that door's honest answer is the same `model_not_resident` it gives for an empty card.
+
+Their weights are separate on disk too: `~/.crucible/voices/<id>/<backend>/` beside
+`~/.crucible/models/<id>/<backend>/`, so a `crucible voices pull` can never overwrite a model
+and leave a stamp that reads as installed to either.
+
+New job types, mirroring the model pair exactly, and enabled by `[jobs] enable_tts` in
+`config.toml` (`crucible init --enable-tts`) the way `enable_llm` enables the model pair:
 
 | Type | Refusals, all before queuing |
 |---|---|
 | `load-voice` | `unknown_voice`, `voice_not_installed`, `backend_unsupported`, `env_missing`, `accelerator_busy`, `insufficient_memory` |
 | `unload-voice` | `voice_not_resident` |
+
+One note on the first of those: an unknown id is refused as **`unknown_model`** rather than
+`unknown_voice`, because `jobs.resolve_model()` gets there first — it checks the requested
+model against what the job type advertises, for every job type, before `preflight()` runs.
+`unknown_voice` exists and is what `crucible/jobs/tts/` raises from its own lookup; it is
+simply not the code a client sees on this path. Changing that means changing `resolve_model`
+for every type, which is a decision about the whole API rather than about `tts`.
 
 ## 6. The render door — job type `tts`
 
@@ -420,6 +533,16 @@ working.
 `GET /v1/info` gains a `tts` capability whose rows are `/v1/voices`' rows verbatim.
 `GET /v1/health` gains `resident_kind`.
 
+`GET /v1/voices` is refused with `job_type_disabled` when `[jobs] enable_tts` is false, the
+same way `/v1/models` is for `llm`, and `/v1/info` simply carries no `tts` capability there.
+
+The CLI gains `crucible voices list` and `crucible voices pull <id>` beside `crucible models`
+(the same rows, answering "what is on this disk" rather than "what can this server be asked
+for"), and `crucible install tts --narrator-engine <higgs-v3|orpheus>`. The flag is required
+for `tts` and refused for `llm`: `cuda-linux` has one venv per narrator engine and
+`mlx-darwin` has one for both, so the command may not pick for you. `crucible doctor` reports
+one env row per narrator engine under `tts_envs`.
+
 ## 9. SDK additions (`@crucible/client`)
 
 - `voices()` → `VoiceInfo[]`, `loadVoice(id)` / `unloadVoice(id)` → job ids.
@@ -445,6 +568,28 @@ the manifest, and confirm the audio is identical in format to what
 `narrator.compat.worker` produces today. On the Mac, the same through MLX. Then the
 streaming door with the browser extension pointed at BookForge's relay — the Sunday test,
 and the only one that matters to Owen personally.
+
+### What is built, 2026-09-13
+
+Sections 2, 5 and 8's lifecycle half: `crucible/voices.py`, `voices/*.toml`,
+`crucible/residency.py`, `crucible/jobs/tts/`, `GET /v1/voices`, the `tts` capability,
+`resident_kind`, and the CLI. 125 tests, every refusal path among them; `python -m pytest`
+goes from 155 to 280. Sections 6 and 7 — the render door and the streaming door — are not
+built, and `crucible/engines/narrator.py` does not exist: `build_voice_engine()` raises
+`NotImplementedError` naming that file, `load-voice` reports it as
+`engine_not_implemented`, and a test asserts that it refuses rather than pretending.
+
+**A second owed item, and it is about the pins rather than the numbers.** A voice manifest
+pins the HuggingFace revision a `crucible voices pull` will actually fetch. For three of the
+five fine-tunes that is NOT the merge BookForge's catalog measured its pace and band against,
+because those merges live in the WSL guest and were never uploaded — deathstalker's repo
+holds the 2026-09-06 `ds_ad4lm_prod_ckpt1080` while the PC serves `ds_v7_930_prod`;
+mistborn's holds `mb_h2lm` from 2026-09-08 while the pace and band were measured on
+`mb_full_rvc1_5947_prod` on 2026-09-12; owen's holds the 2026-09-07 upload while the arms
+serve `ow_v7_prod`. `sigma` and `thirdreich` agree. The caps survive the gap because they are
+rulings over the whole family rather than certificates bound to one directory; the **pace
+bands do not**, and each manifest says so in a comment. Either push the current merges (the
+catalog's notes say Owen has not given the green light) or re-measure against the pins.
 
 ## 11. What this deliberately does not do
 

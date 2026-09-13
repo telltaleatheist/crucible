@@ -22,8 +22,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import accelerator
+from crucible import accelerator, jobenv
 from crucible.accelerator import GIB, ComputeApp
-from crucible.jobs.llm import residency as residency_module
+from crucible import residency as residency_module
 from crucible.manifests import load_manifest
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
@@ -38,6 +39,62 @@ SMALL_BIG_MODEL = "qwen3.8-27b-4bit"
 
 
 # ------------------------------------------------------------------ fixtures
+
+
+@pytest.fixture
+def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A stamped `~/.crucible/envs/llm` that `env_status` accepts."""
+    spec = jobenv.llm_env(FAKE_BACKEND.kind)
+    directory = jobenv.env_dir(home, spec)
+    (directory / "bin").mkdir(parents=True)
+    (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    (directory / "crucible-env.json").write_text(
+        json.dumps(
+            {
+                "backend": FAKE_BACKEND.kind,
+                "recipe": f"{FAKE_BACKEND.kind}.txt",
+                "python_version": "3.11.16",
+                "seconds": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    pins = jobenv.recipe_pins(jobenv.recipe_for(spec))
+    monkeypatch.setattr(jobenv, "installed_packages", lambda _home, _spec: dict(pins))
+    return directory
+
+
+@pytest.fixture
+def fake_weights(home: Path) -> Callable[[str], Path]:
+    """Stamp a model as pulled at exactly the revision its manifest pins."""
+
+    def stamp(model_id: str) -> Path:
+        spec = load_manifest(model_id).spec(FAKE_BACKEND.kind)
+        directory = home / "models" / model_id / FAKE_BACKEND.kind
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "crucible-pull.json").write_text(
+            json.dumps(
+                {
+                    "model": model_id,
+                    "backend": FAKE_BACKEND.kind,
+                    "hf_repo": spec.hf_repo,
+                    "revision": spec.revision,
+                    "bytes": 19_306_310_880,
+                    "seconds": 300.0,
+                    "pulled": "2026-09-12T19:00:00+0000",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return directory
+
+    return stamp
+
+
+@pytest.fixture
+def idle_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
+    monkeypatch.setattr(accelerator, "probe_vram", lambda: (22 * GIB, 24 * GIB))
 
 
 #: A card big enough for the 27B, so residency can be tested with two real
@@ -901,6 +958,7 @@ def test_health_says_warming_while_a_load_is_in_flight(
         "status": "ok",
         "queue_depth": 0,
         "resident_models": [MODEL],
+        "resident_kind": "llm",
     }
 
 

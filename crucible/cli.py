@@ -2,6 +2,8 @@
 
     crucible init      mint the token, write the config, record the backend
     crucible serve     run the API in the foreground
+    crucible models    list and pull model weights
+    crucible voices    list and pull voice weights
     crucible doctor    probe the host and every job type; exit 0 only when healthy
     crucible token     print the bearer token (needs --show)
 
@@ -14,9 +16,10 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
-from . import API_VERSION, VERSION, llmenv, weights, workerenv
+from . import API_VERSION, VERSION, jobenv, weights, workerenv
 from .asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
 from .backend import WINDOWS_REFUSAL, Backend, detect_backend
 from .config import (
@@ -35,7 +38,18 @@ from .config import (
 )
 from .errors import ConfigError, NoViableBackend
 from .jobs import ALL_JOB_TYPES, build_registry
-from .manifests import ManifestError, ModelManifest, load_all_manifests
+from .manifests import (
+    ManifestError,
+    ModelManifest,
+    load_all_manifests,
+    load_manifest,
+)
+from .voices import (
+    NARRATOR_ENGINE_SAMPLING,
+    VoiceError,
+    load_all_voices,
+    load_voice,
+)
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -75,6 +89,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         enable_echo=args.enable_echo,
         enable_llm=args.enable_llm,
         enable_asr=args.enable_asr,
+        enable_tts=args.enable_tts,
         desktop_allowance_bytes=args.desktop_allowance_bytes,
     )
     print(f"backend:  {backend.kind} ({backend.gpu.name}, {backend.detail})")
@@ -83,6 +98,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"echo job: {'enabled' if args.enable_echo else 'disabled'}")
     print(f"llm job:  {'enabled' if args.enable_llm else 'disabled'}")
     print(f"asr job:  {'enabled' if args.enable_asr else 'disabled'}")
+    print(f"tts job:  {'enabled' if args.enable_tts else 'disabled'}")
     print(
         f"desktop:  {args.desktop_allowance_bytes / 1024 ** 3:.1f} GiB of VRAM "
         "treated as this host's own desktop, not somebody's job"
@@ -137,7 +153,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------ install
 
 
-INSTALLABLE_JOB_TYPES = ("llm", *workerenv.WORKER_JOB_TYPES)
+#: Every job type `crucible install` can build an env for. Two shapes of env
+#: sit behind it — `jobenv` for the types whose work is an engine SERVER
+#: (llm, tts) and `workerenv` for the types whose work is a library in its
+#: own venv (asr, and align and rvc after it). The two modules are one
+#: module's worth of code twice over and merging them is a named follow-up;
+#: this tuple is the one place the difference does not leak.
+INSTALLABLE_JOB_TYPES = ("llm", "tts", *workerenv.WORKER_JOB_TYPES)
 
 
 def cmd_install(args: argparse.Namespace) -> int:
@@ -159,33 +181,40 @@ def cmd_install(args: argparse.Namespace) -> int:
             f"this host detects backend {backend.kind}, but {config.path} was "
             f"initialised for {config.backend_kind}; re-run `crucible init --force`"
         )
-    if args.job_type != "llm":
+    # Which installer a type uses is a fact about the SHAPE of its work, not
+    # about its name: `llm` and `tts` run an engine server and get a `jobenv`;
+    # `asr`, and `align` and `rvc` after it, run a library in its own venv and
+    # get a `workerenv` (PHASE4-AUDIO.md section 0). `workerenv.WORKER_JOB_TYPES`
+    # is the list of the second kind, so asking it is the question, rather than
+    # testing for one name and assuming everything else is the other.
+    if args.job_type in workerenv.WORKER_JOB_TYPES:
         return _install_worker_env(config, backend, args)
 
     try:
-        recipe = llmenv.recipe_for(backend.kind)
-    except llmenv.EnvError as exc:
+        spec = _env_spec(args.job_type, args.narrator_engine, backend.kind)
+        recipe = jobenv.recipe_for(spec)
+    except jobenv.EnvError as exc:
         return _fail(str(exc))
     print(f"backend: {backend.kind}")
     print(f"recipe:  {recipe}")
-    print(f"target:  {llmenv.llm_env_dir(config.home)}")
+    print(f"target:  {jobenv.env_dir(config.home, spec)}")
     started = time.monotonic()
     try:
-        status = llmenv.install_llm_env(
+        status = jobenv.install_env(
             config.home,
+            spec,
             backend.kind,
             force=args.force,
             on_line=(lambda line: print(f"  {line}")) if args.verbose else None,
         )
-    except llmenv.EnvError as exc:
+    except jobenv.EnvError as exc:
         return _fail(str(exc))
     elapsed = time.monotonic() - started
     if not status.installed:
         return _fail(f"the env did not come out installed: {status.detail}")
     print(f"installed in {elapsed:.0f}s: {status.detail}")
-    headline = llmenv.BACKEND_HEADLINE_PACKAGE[backend.kind]
     for name in sorted(status.packages):
-        if name in (headline, "torch", "numpy", "transformers", "mlx"):
+        if name in (spec.headline, "torch", "numpy", "transformers", "mlx"):
             print(f"  {name}=={status.packages[name]}")
     return EXIT_OK
 
@@ -197,7 +226,7 @@ def _install_worker_env(
 
     PHASE4-AUDIO.md section 0: the phase 4 types are libraries rather than
     servers, so each gets an env of its own and a worker script run with that
-    env's python. The `llm` branch above does the same job through `llmenv`; the
+    env's python. The `llm` branch above does the same job through `jobenv`; the
     two modules are one module's worth of code twice over, and merging them is a
     follow-up (crucible/workerenv.py says so at the top).
     """
@@ -228,6 +257,35 @@ def _install_worker_env(
         if name in (headline, "ctranslate2", "numpy", "onnxruntime"):
             print(f"  {name}=={status.packages[name]}")
     return EXIT_OK
+def _env_spec(
+    job_type: str, narrator_engine: str | None, backend_kind: str
+) -> jobenv.EnvSpec:
+    """The env `crucible install <job type>` builds on this host.
+
+    `tts` needs a second word on `cuda-linux` — there are two envs there, one
+    per narrator engine — so the flag is required for it and refused for `llm`,
+    rather than quietly ignored on the type that has only one env.
+    """
+    if job_type == "llm":
+        if narrator_engine is not None:
+            raise jobenv.EnvError(
+                "--narrator-engine names which tts env to build and means nothing "
+                "for 'llm', which has exactly one env per host"
+            )
+        return jobenv.llm_env(backend_kind)
+    if narrator_engine is None:
+        raise jobenv.EnvError(
+            "`crucible install tts` needs --narrator-engine (higgs-v3 or orpheus): "
+            "on cuda-linux the two cannot share a venv, because Orpheus pins "
+            "vllm 0.7.3 for its per-request logits processors and Higgs v3 needs a "
+            "far later torch"
+        )
+    if narrator_engine not in NARRATOR_ENGINE_SAMPLING:
+        raise jobenv.EnvError(
+            f"{narrator_engine!r} is not one of narrator's engines; they are "
+            f"{sorted(NARRATOR_ENGINE_SAMPLING)}"
+        )
+    return jobenv.tts_env(narrator_engine, backend_kind)
 
 
 # ------------------------------------------------------------------- models
@@ -348,7 +406,100 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
     print(f"{manifest.id}: {spec.hf_repo}@{spec.revision[:12]} for {backend.kind}")
     try:
         result = weights.pull(
-            config, manifest, spec, force=args.force, on_line=lambda line: print(f"  {line}")
+            config, manifest, spec, force=args.force,
+            on_line=lambda line: print(f"  {line}"),
+        )
+    except weights.WeightsError as exc:
+        return _fail(str(exc))
+    print(f"{manifest.id}: {result.bytes / 1e9:.2f} GB at {result.path}")
+    return EXIT_OK
+
+
+# ------------------------------------------------------------------- voices
+
+
+def cmd_voices_list(args: argparse.Namespace) -> int:
+    """Every voice manifest this build ships and where it stands on this host.
+
+    The same shape as `crucible models list`, and deliberately not the
+    `/v1/voices` row: this command answers "what is on this disk", which a person
+    runs before a load, while the row answers "what can this server be asked for",
+    which a client reads.
+    """
+    resolved = _models_config()
+    if isinstance(resolved, int):
+        return resolved
+    config, backend = resolved
+    try:
+        manifests = load_all_voices()
+    except VoiceError as exc:
+        return _fail(str(exc))
+    rows = []
+    for manifest in manifests.values():
+        if not manifest.supports(backend.kind):
+            rows.append(
+                {
+                    "id": manifest.id,
+                    "backend_supported": False,
+                    "installed": False,
+                    "detail": f"no {backend.kind} block; declares "
+                    f"{sorted(manifest.backends)}",
+                }
+            )
+            continue
+        spec = manifest.spec(backend.kind)
+        found = weights.installed(config, manifest, spec)
+        rows.append(
+            {
+                "id": manifest.id,
+                "display": manifest.display,
+                "kind": manifest.kind,
+                "narrator_engine": manifest.narrator_engine,
+                "backend_supported": True,
+                "installed": found is not None,
+                "hf_repo": spec.hf_repo,
+                "revision": spec.revision,
+                "memory_bytes_estimate": spec.memory_bytes_estimate,
+                "estimate_basis": spec.estimate_basis,
+                "max_chars": spec.max_chars,
+                "detail": (
+                    f"{found.bytes / 1e9:.2f} GB at {found.path}"
+                    if found is not None
+                    else f"not pulled — `crucible voices pull {manifest.id}`"
+                ),
+            }
+        )
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return EXIT_OK
+    for row in rows:
+        mark = "installed" if row["installed"] else (
+            "unsupported" if not row["backend_supported"] else "not pulled"
+        )
+        print(f"{row['id']:<22} {mark:<12} {row['detail']}")
+    return EXIT_OK
+
+
+def cmd_voices_pull(args: argparse.Namespace) -> int:
+    resolved = _models_config()
+    if isinstance(resolved, int):
+        return resolved
+    config, backend = resolved
+    try:
+        manifest = load_voice(args.voice)
+    except VoiceError as exc:
+        return _fail(str(exc))
+    if not manifest.supports(backend.kind):
+        return _fail(
+            f"voice {args.voice!r} has no {backend.kind} block; "
+            f"{manifest.path.name} declares {sorted(manifest.backends)}"
+        )
+    spec = manifest.spec(backend.kind)
+    print(f"{manifest.id}: {spec.hf_repo}@{spec.revision[:12]} for {backend.kind}")
+    try:
+        result = weights.pull(
+            config, manifest, spec, force=args.force,
+            on_line=lambda line: print(f"  {line}"),
         )
     except weights.WeightsError as exc:
         return _fail(str(exc))
@@ -388,6 +539,21 @@ def _job_type_reports(config: Config, backend: Backend) -> list[dict[str, Any]]:
     return reports
 
 
+def _env_report(
+    report: dict[str, Any], label: str, home: Path, spec: jobenv.EnvSpec,
+    backend_kind: str,
+) -> dict[str, Any]:
+    """One env's status, appending a problem to the report when it is not ready."""
+    try:
+        status = jobenv.env_status(home, spec, backend_kind)
+    except jobenv.EnvError as exc:
+        report["problems"].append(f"{label}: {exc}")
+        return {"installed": False, "detail": str(exc)}
+    if not status.installed:
+        report["problems"].append(f"{label}: {status.detail}")
+    return status.to_dict()
+
+
 def _doctor_report() -> dict[str, Any]:
     home = crucible_home()
     report: dict[str, Any] = {
@@ -399,6 +565,7 @@ def _doctor_report() -> dict[str, Any]:
         "job_types": [],
         "llm_env": None,
         "worker_envs": [],
+        "tts_envs": {},
         "problems": [],
     }
 
@@ -426,6 +593,7 @@ def _doctor_report() -> dict[str, Any]:
             "enable_echo": config.enable_echo,
             "enable_llm": config.enable_llm,
             "enable_asr": config.enable_asr,
+            "enable_tts": config.enable_tts,
             "desktop_allowance_bytes": config.desktop_allowance_bytes,
             "backend_kind": config.backend_kind,
         }
@@ -443,11 +611,11 @@ def _doctor_report() -> dict[str, Any]:
     if config is not None and backend is not None:
         if config.enable_llm:
             try:
-                env = llmenv.env_status(config.home, backend.kind)
+                env = jobenv.env_status(config.home, backend.kind)
                 report["llm_env"] = env.to_dict()
                 if not env.installed:
                     report["problems"].append(f"llm_env: {env.detail}")
-            except llmenv.EnvError as exc:
+            except jobenv.EnvError as exc:
                 report["llm_env"] = {"installed": False, "detail": str(exc)}
                 report["problems"].append(f"llm_env: {exc}")
         for job_type in workerenv.WORKER_JOB_TYPES:
@@ -463,6 +631,28 @@ def _doctor_report() -> dict[str, Any]:
                     {"job_type": job_type, "installed": False, "detail": str(exc)}
                 )
                 report["problems"].append(f"{job_type}_env: {exc}")
+            report["llm_env"] = _env_report(
+                report,
+                "llm_env",
+                config.home,
+                jobenv.llm_env(backend.kind),
+                backend.kind,
+            )
+        if config.enable_tts:
+            # One row per narrator engine, because on cuda-linux they are two
+            # separate venvs and a voice load picks by its manifest's
+            # `narrator_engine`. On mlx-darwin both names resolve to the same
+            # env, and the two rows say so by carrying the same path.
+            report["tts_envs"] = {
+                engine: _env_report(
+                    report,
+                    f"tts_env[{engine}]",
+                    config.home,
+                    jobenv.tts_env(engine, backend.kind),
+                    backend.kind,
+                )
+                for engine in sorted(NARRATOR_ENGINE_SAMPLING)
+            }
         report["job_types"] = _job_type_reports(config, backend)
         for entry in report["job_types"]:
             if entry["enabled"] and not entry["ready"]:
@@ -508,6 +698,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(
                 f"{worker_env['job_type']} env: {mark} — {worker_env['detail']}"
             )
+        for engine, entry in sorted(report["tts_envs"].items()):
+            mark = "ready" if entry["installed"] else "NOT READY"
+            print(f"tts env ({engine}): {mark} — {entry['detail']}")
         for entry in report["job_types"]:
             mark = "ready" if entry["ready"] else ("off" if not entry["enabled"] else "NOT READY")
             print(f"job {entry['name']}: {mark} — {entry['detail']}")
@@ -571,6 +764,12 @@ def build_parser() -> argparse.ArgumentParser:
         "([jobs] enable_asr)",
     )
     init.add_argument(
+        "--enable-tts",
+        action="store_true",
+        help="register the load-voice / unload-voice job types and /v1/voices "
+        "([jobs] enable_tts)",
+    )
+    init.add_argument(
         "--desktop-allowance-bytes",
         type=int,
         default=DEFAULT_DESKTOP_ALLOWANCE_BYTES,
@@ -589,6 +788,15 @@ def build_parser() -> argparse.ArgumentParser:
         "job_type",
         choices=sorted(INSTALLABLE_JOB_TYPES),
         help="the job type to install",
+    )
+    install.add_argument(
+        "--narrator-engine",
+        default=None,
+        choices=sorted(NARRATOR_ENGINE_SAMPLING),
+        help=(
+            "which tts env to build; required for 'tts' because cuda-linux has "
+            "one venv per narrator engine, and refused for 'llm'"
+        ),
     )
     install.add_argument(
         "--force", action="store_true", help="rebuild the env from scratch"
@@ -615,6 +823,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="re-pull even if it is already installed"
     )
     models_pull.set_defaults(func=cmd_models_pull)
+
+    voices = subparsers.add_parser("voices", help="list and pull voice weights")
+    voice_commands = voices.add_subparsers(dest="voices_command", required=True)
+
+    voices_list = voice_commands.add_parser(
+        "list", help="every voice manifest this build ships and where it stands here"
+    )
+    voices_list.add_argument("--json", action="store_true", help="machine-readable")
+    voices_list.set_defaults(func=cmd_voices_list)
+
+    voices_pull = voice_commands.add_parser(
+        "pull", help="fetch a voice's weights at the manifest's pinned revision"
+    )
+    voices_pull.add_argument("voice", help="the Crucible voice id, e.g. deathstalker")
+    voices_pull.add_argument(
+        "--force", action="store_true", help="re-pull even if it is already installed"
+    )
+    voices_pull.set_defaults(func=cmd_voices_pull)
 
     serve = subparsers.add_parser("serve", help="run the API in the foreground")
     serve.add_argument("--host", default=None, help="bind host (default from config)")
