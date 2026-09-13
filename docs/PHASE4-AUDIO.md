@@ -12,6 +12,43 @@ rough-transcript stage of whole-m4b alignment. That stage is a different model d
 different thing, which is why `asr` below is a job type of its own and not a mode of
 `align`.
 
+## 0. How a job runs code that is not in the server's interpreter
+
+`llm` never had this problem: vLLM and mlx-lm are *servers*, so Crucible starts one and
+talks HTTP to it. `tts` does not have it either, because narrator is a server too. The
+three types here are **libraries** — faster-whisper, ultimate-rvc and the Qwen3 aligner are
+imported, not connected to — and they live in their own venvs, because each one's torch pin
+is incompatible with the others and with the server's.
+
+Crucible cannot import them. It runs them, the same way it runs everything else:
+
+**Each job type ships a worker script, and the server spawns it with that type's
+interpreter.** `crucible/jobs/<type>/worker.py` is a **standalone module** — stdlib plus
+the one library its env has, importing nothing from `crucible` — invoked as
+`<env python> <path to worker.py>` and speaking newline-delimited JSON on stdout, one
+object per line, with the job's parameters handed over on stdin. It is the narrator wire
+with a different vocabulary, and it is that on purpose: one protocol shape for every
+subprocess this server owns.
+
+Three rules fall out of that, and each of them is a bug that has already happened
+somewhere in BookForge:
+
+- **The worker imports nothing from `crucible`.** Its env has no `crucible` installed and
+  never will; an `from ...errors import` in a worker is an ImportError at the first real
+  job and a green test suite right up until then. The test for each worker runs it as a
+  subprocess, exactly as the server does, rather than importing it.
+- **Results go on a stream nothing else writes to.** narrator's aligner learned this the
+  expensive way: a library's logger wrote to stdout and corrupted the result stream on a
+  401-chunk book, and the fix was to dup fd 1 for results and point the original at stderr
+  (`align/worker.py:56`). Crucible's workers do the same — **fd 1 is results, stderr is
+  everything else, and a library that prints is expected to print.**
+- **A result is matched to its job by position, never by an index the worker echoes back.**
+  Same source, same reason: an index a worker reports is an index a worker can get wrong.
+
+`crucible install <type>` builds the env from `envs/<type>/<backend>.txt`, `crucible doctor`
+reports its presence and its pins, and a job whose env is missing is refused by name
+(`env_missing`) before it is queued, exactly as `llm` already does.
+
 ## 1. One rule decides three designs: no shared mount, ever
 
 `tts` batch, `rvc` and whole-m4b `align` all read and write the same thing today — a
