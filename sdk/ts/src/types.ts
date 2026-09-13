@@ -200,6 +200,7 @@ export type JobEvent =
   | { readonly id: number; readonly event: 'queued'; readonly data: QueuedData }
   | { readonly id: number; readonly event: 'warming'; readonly data: WarmingData }
   | { readonly id: number; readonly event: 'progress'; readonly data: ProgressData }
+  | { readonly id: number; readonly event: 'chunk'; readonly data: ChunkData }
   | { readonly id: number; readonly event: 'artifact'; readonly data: ArtifactData }
   | { readonly id: number; readonly event: 'done'; readonly data: DoneData }
   | { readonly id: number; readonly event: 'failed'; readonly data: FailedData }
@@ -242,6 +243,71 @@ export interface ProgressData {
   readonly extra: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * One rendered chunk of a `tts` job, measured (PHASE3-TTS.md section 6).
+ *
+ * This is the **whole guard interface**. Crucible measures and reports; it
+ * decides nothing, never retakes, never re-splits and never substitutes.
+ * BookForge's PaceTracker is the thing that judges, and this event carries
+ * everything it has to judge with. One arrives per chunk that produced audio,
+ * and none at all for a row that failed — that row is named in a `progress` line
+ * when it happens and again in `done`'s `failed` list.
+ *
+ * Three of the seven fields are the request's or the server's own arithmetic and
+ * two come off narrator's wire, and the split is why two of them are nullable:
+ *
+ * - `index` and `take` are the request's, unchanged.
+ * - `chars` is **Crucible's own count of the text it sent**, not a number read
+ *   off the reply: a number a subprocess echoes back is a number a subprocess
+ *   can get wrong, and this one is already known exactly.
+ * - `seconds` is measured from the PCM that actually arrived and then compared
+ *   with the duration narrator reported; a disagreement over 50 ms fails the row
+ *   rather than being reported. `charsPerSec` is those two divided.
+ */
+export interface ChunkData {
+  /** The client's own chunk index, and the name of its artifact (`<index>.flac`). */
+  readonly index: number;
+  /** The duration of the audio that arrived, measured from its bytes. */
+  readonly seconds: number;
+  /** How many characters were sent, counted by the server. */
+  readonly chars: number;
+  /** `chars / seconds`. The pace this chunk was actually read at. */
+  readonly charsPerSec: number;
+  /**
+   * How many tokens the engine spent, or **`null` meaning "narrator did not
+   * say"** — see {@link ChunkData.capped}, which is null for the same reason and
+   * must be read with the same care.
+   */
+  readonly tokens: number | null;
+  /**
+   * Whether generation stopped because it hit the frame cap rather than because
+   * the model finished — the difference between **a long sentence and a
+   * runaway**, which a duration cannot tell you and which is the reason this
+   * event exists at all.
+   *
+   * **`null` means "narrator did not say", and is never to be read as `false`.**
+   * narrator does not put the frame cap on its wire at the pinned sha:
+   * `serve/worker.py` sends `{i, format, data, duration, sampleRate}` for a
+   * retiring row and the cap it computed never leaves the engine, so Crucible
+   * publishes `null` — explicitly, as a key that is present — rather than
+   * guessing. A client that treated that null as `false` would read **every
+   * runaway as a long sentence**, which is precisely the failure this field
+   * exists to prevent, and it would do it silently.
+   *
+   * So the null is in the type, and the reader refuses a `chunk` frame that
+   * omits the key altogether: "narrator did not say" has to be something the
+   * server said, not something the client inferred from an absence. Narrow it
+   * explicitly — `capped === true` is a runaway, `capped === false` is a
+   * finished sentence, `capped === null` is no measurement and must be handled
+   * as one — never `if (chunk.capped)`.
+   *
+   * PHASE3-TTS.md section 6 records the owed change on narrator's side.
+   */
+  readonly capped: boolean | null;
+  /** Which rung of the voice's take ladder this render asked for. */
+  readonly take: number;
+}
+
 export interface ArtifactData {
   readonly name: string;
 }
@@ -270,6 +336,28 @@ export interface DoneData {
    * this is the whole story, not one entry of it.
    */
   readonly resident?: string | null;
+  /**
+   * Every other key the job type put on its `done` frame, verbatim — server
+   * spelling, server types, nothing invented and nothing dropped. Exactly
+   * {@link ProgressData.extra}, for exactly the same reason.
+   *
+   * The server builds this frame as `{"artifacts": [...], **job.done_extra}`
+   * (`crucible/jobs/queue.py`), and a job type puts its own terminal news in
+   * `done_extra`. Until 2026-09-13 this client read the two keys it modelled and
+   * **silently dropped the rest**, which lost:
+   *
+   * - `tts`'s `failed: [{index, message}]`, `rendered`, `take` and
+   *   `sample_rate`. PHASE3-TTS.md section 6 says in as many words that a client
+   *   reading only the terminal event still learns exactly which indices it has
+   *   to ask for again — and it could not, because the list never arrived.
+   *   {@link readRenderResult} is the reader for it.
+   * - `load-voice`'s `fingerprint` beside its `resident`, which is the string
+   *   that says *which merge* of a fine-tune is on the card.
+   *
+   * `{}` when the frame carried only the modelled keys. That is not a
+   * substituted default: it is the true answer to "what else was on the frame".
+   */
+  readonly extra: Readonly<Record<string, unknown>>;
 }
 
 export interface FailedData {
@@ -638,6 +726,129 @@ export interface VoiceInfo {
   /** Never null: the whole block, because a client that packs needs all of it. */
   readonly pace: VoicePace;
 }
+
+/**
+ * One unit of work for {@link CrucibleClient.render}: the client's own index,
+ * and the text to speak.
+ *
+ * **Chunking is the client's and stays the client's** (PHASE3-TTS.md section 1).
+ * Crucible does no packing and no text normalisation; pack to the voice's own
+ * {@link VoicePace} and {@link VoiceInfo.maxChars} before you get here, because
+ * a chunk over the cap is refused (`chunk_too_long`) and never re-split — a
+ * server that quietly cut a chunk in half would return two files where one was
+ * asked for.
+ */
+export interface RenderChunk {
+  /**
+   * The client's number for this chunk, and the name of the artifact it
+   * produces (`<index>.flac`). Crucible neither assigns it nor renumbers it: it
+   * travels out as narrator's batch `i`, back on the retiring row, and into the
+   * file name BookForge's assembly and resume already look for.
+   */
+  readonly index: number;
+  readonly text: string;
+}
+
+/**
+ * What {@link CrucibleClient.render} takes (PHASE3-TTS.md section 6).
+ *
+ * Nothing has a default. `language` and `take` are both decisions — a book
+ * rendered in the wrong language, or at a rung the client did not choose, is a
+ * silent substitution — and the server refuses a missing one rather than
+ * picking.
+ */
+export interface RenderOptions {
+  /**
+   * The voice id, which is what `model` means for `tts`: a Higgs v3 voice *is*
+   * the merged checkpoint the engine was started on, so the wire's word for "the
+   * thing that produces the bytes" needs no second vocabulary here.
+   *
+   * Unlike {@link ChatOptions.model} this need **not** already be resident. A
+   * render job is an operator's explicit order and owns the exclusive lane for
+   * its whole duration, so if the wrong voice (or none) is on the card when the
+   * job reaches the front of the lane, the job loads it and emits `warming`
+   * events exactly as `loadVoice` does. That is the one asymmetry with `llm`,
+   * and it is deliberate.
+   */
+  readonly voice: string;
+  /** The manifest's language tag for this text, e.g. `en`. */
+  readonly language: string;
+  /**
+   * Which rung of the voice's take ladder to render at. `0` is the engine's own
+   * sampling, which is what asking for nothing gets. A rung past the end of the
+   * ladder is `unknown_take` and is **never clamped**: a silent clamp is a
+   * ladder that stops climbing without telling anyone.
+   */
+  readonly take: number;
+  /** At least one. Two chunks may not share an index — an index is a file name. */
+  readonly chunks: readonly RenderChunk[];
+  /**
+   * Aborts the submit itself. A 1,400-chunk book is a large POST, and this is
+   * the caller's handle on it. It does **not** cancel a job that was already
+   * queued — {@link CrucibleClient.cancel} does that, because by then the job
+   * exists on the server and abandoning the socket would leave it running.
+   */
+  readonly signal?: AbortSignal;
+}
+
+/** One chunk of a render that produced no audio, as `done` names it. */
+export interface RenderFailure {
+  readonly index: number;
+  /** narrator's own words: `No audio generated`, `cancelled`, an exception. */
+  readonly message: string;
+}
+
+/**
+ * A finished `tts` job's terminal news, read out of {@link DoneData.extra} by
+ * {@link readRenderResult}.
+ *
+ * **A failed chunk is reported and the run continues** — one bad sentence never
+ * sinks the other 1,399 — so a successful job can still have failures, and this
+ * is the authoritative list of them. A missing `<index>.flac` is a file that is
+ * not there, and BookForge's resume already knows how to ask for it again.
+ */
+export interface RenderResult {
+  /** How many chunks produced audio. */
+  readonly rendered: number;
+  /** Every chunk that did not, and why. Empty on a clean run. */
+  readonly failed: readonly RenderFailure[];
+  /** The rung this render actually ran at. */
+  readonly take: number;
+  /** The rate the voice was loaded at, and the rate every FLAC was written at. */
+  readonly sampleRate: number;
+  /** The artifacts the job published — one `<index>.flac` per rendered chunk. */
+  readonly artifacts: readonly string[];
+}
+
+/**
+ * One artifact {@link CrucibleClient.writeArtifactsTo} has finished writing,
+ * with its provenance sidecar already on disk beside it.
+ */
+export interface WrittenArtifact {
+  /** The artifact's name on the server, e.g. `41.flac`. */
+  readonly name: string;
+  /** Where it was written, e.g. `Z:\books\the-mutineer\41.flac`. */
+  readonly path: string;
+  readonly bytes: number;
+  /** Where its sidecar was written: `<path>.provenance.json`. */
+  readonly provenancePath: string;
+  /** The sidecar, parsed. The bytes on disk are the server's own, verbatim. */
+  readonly provenance: Provenance;
+}
+
+/**
+ * What {@link CrucibleClient.writeArtifactsTo} yields: the job's own events,
+ * unchanged, interleaved with the files it has written.
+ *
+ * A union rather than a callback, because the writer must report its progress
+ * **without swallowing the job's own events** — a caller still needs every
+ * `chunk`, every `progress` and the terminal frame, and getting them through a
+ * second channel while the events came through a first would be two clocks.
+ * Narrow on `kind`, the same way you narrow a {@link JobEvent} on `event`.
+ */
+export type ArtifactWrite =
+  | { readonly kind: 'event'; readonly event: JobEvent }
+  | { readonly kind: 'written'; readonly written: WrittenArtifact };
 
 // ------------------------------------------------------------- accelerator
 

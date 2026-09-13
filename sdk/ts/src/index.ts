@@ -14,8 +14,12 @@
  * Zero runtime dependencies. Node 20+, bun, and the Electron main process.
  */
 
-export { CrucibleClient } from './client.js';
-export type { CrucibleClientOptions, EventsOptions } from './client.js';
+export { CrucibleClient, readRenderResult } from './client.js';
+export type {
+  CrucibleClientOptions,
+  EventsOptions,
+  WriteArtifactsOptions,
+} from './client.js';
 
 export {
   ACCELERATOR_UNREADABLE,
@@ -38,6 +42,7 @@ export type {
   AcceleratorResident,
   AcceleratorState,
   ArtifactData,
+  ArtifactWrite,
   AsrOptions,
   CancelResult,
   CancelledData,
@@ -46,6 +51,7 @@ export type {
   ChatOptions,
   ChatResponse,
   ChatUsage,
+  ChunkData,
   DoneData,
   EstimateBasis,
   FailedData,
@@ -65,6 +71,10 @@ export type {
   ProgressData,
   Provenance,
   QueuedData,
+  RenderChunk,
+  RenderFailure,
+  RenderOptions,
+  RenderResult,
   ResponseFormat,
   ServerInfo,
   TerminalEventName,
@@ -74,6 +84,7 @@ export type {
   VoiceKind,
   VoicePace,
   WarmingData,
+  WrittenArtifact,
 } from './types.js';
 
 export { SDK_VERSION } from './version.js';

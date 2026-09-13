@@ -27,6 +27,7 @@ import {
   bool,
   field,
   num,
+  nullableBool,
   nullableNum,
   nullableStr,
   objectField,
@@ -42,12 +43,14 @@ import {
   type AcceleratorHolder,
   type AcceleratorResident,
   type AcceleratorState,
+  type ArtifactWrite,
   type AsrOptions,
   type CancelResult,
   type Capability,
   type ChatMessage,
   type ChatOptions,
   type ChatResponse,
+  type ChunkData,
   type DoneData,
   type EstimateBasis,
   type Health,
@@ -61,11 +64,16 @@ import {
   type Ping,
   type ProgressData,
   type Provenance,
+  type RenderChunk,
+  type RenderFailure,
+  type RenderOptions,
+  type RenderResult,
   type ServerInfo,
   type UploadResult,
   type VoiceInfo,
   type VoiceKind,
   type VoicePace,
+  type WrittenArtifact,
 } from './types.js';
 import { SDK_VERSION } from './version.js';
 
@@ -83,11 +91,28 @@ const EVENT_NAMES = [
   'queued',
   'warming',
   'progress',
+  // PHASE3-TTS.md section 6's addition, and the reason `api_version` did not
+  // move for it: a client that does not know the kind still sees every
+  // `progress`, `artifact` and `done` it saw before. This client now knows it.
+  'chunk',
   'artifact',
   'done',
   'failed',
   'cancelled',
 ] as const;
+
+/**
+ * How many artifacts {@link CrucibleClient.writeArtifactsTo} fetches at once.
+ *
+ * Not a throughput knob — a ceiling. `events()` replays a job's whole history
+ * before it follows live, so attaching to a nearly-finished 1,400-chunk render
+ * delivers 1,400 `artifact` frames in one burst; unbounded, that is 2,800
+ * sockets opened in a tick (each artifact has a sidecar). Four keeps the fetch
+ * of one chunk overlapped with the generation of the next, which is the whole
+ * point, without turning a reconnect into a denial of service against the
+ * server that is still rendering.
+ */
+const DEFAULT_ARTIFACT_CONCURRENCY = 4;
 
 /** Everything `new CrucibleClient(...)` needs. There are no optional fields. */
 export interface CrucibleClientOptions {
@@ -114,6 +139,16 @@ export interface EventsOptions {
    * and then follows live. Omit to start from the beginning of the job.
    */
   lastEventId?: number;
+}
+
+/** Options for {@link CrucibleClient.writeArtifactsTo}. */
+export interface WriteArtifactsOptions extends EventsOptions {
+  /**
+   * How many artifacts to fetch at once. Defaults to
+   * {@link DEFAULT_ARTIFACT_CONCURRENCY}; see there for why there is a ceiling
+   * at all. A value below 1 is refused rather than rounded up.
+   */
+  concurrency?: number;
 }
 
 export class CrucibleClient {
@@ -247,8 +282,14 @@ export class CrucibleClient {
   /**
    * `POST /v1/jobs` — queue a job. Returns its id. The server refuses an unknown
    * type, a disabled type, or a model the type does not serve, by name.
+   *
+   * `options.signal` aborts the POST itself and nothing else. Once the server
+   * has answered with a job id the job exists and is queued, and abandoning the
+   * socket would not stop it — {@link cancel} is what stops a job. The
+   * distinction matters here more than on a chat because a `tts` body can be a
+   * whole book's text.
    */
-  async submit(request: JobRequest): Promise<string> {
+  async submit(request: JobRequest, options: { signal?: AbortSignal } = {}): Promise<string> {
     const type = requireText(request?.type, 'type');
     const inputs: Record<string, { blob_id: string } | { inline_base64: string }> = {};
     for (const [name, input] of Object.entries(request.inputs)) {
@@ -277,15 +318,15 @@ export class CrucibleClient {
     };
     if (request.model !== undefined) payload['model'] = request.model;
 
-    const body = await this.#json(
-      '/v1/jobs',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      },
-      'submit',
-    );
+    const init: RequestInit = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    };
+    // `exactOptionalPropertyTypes` forbids writing `signal: undefined`, and
+    // fetch would reject it anyway. Same shape as `#chatRequest`.
+    if (options.signal !== undefined) init.signal = options.signal;
+    const body = await this.#json('/v1/jobs', init, 'submit');
     return str(body, 'job_id', 'submit');
   }
 
@@ -669,6 +710,270 @@ export class CrucibleClient {
     });
   }
 
+  /**
+   * Queue a `tts` render job — text in, one `<index>.flac` per chunk out — and
+   * return its id (PHASE3-TTS.md section 6).
+   *
+   * It returns a job id and nothing else, because that is what every other
+   * queueing call in this client returns and because there is only one way to
+   * watch a job. Drive it with {@link events} exactly as you drive
+   * {@link loadModel}, or with {@link writeArtifactsTo}, which is
+   * {@link events} plus the batch writer:
+   *
+   * ```ts
+   * const jobId = await crucible.render({voice, language: 'en', take: 0, chunks});
+   * for await (const event of crucible.events(jobId)) {
+   *   if (event.event === 'chunk' && event.data.capped === true) retake(event.data.index);
+   * }
+   * ```
+   *
+   * **The voice need not be resident.** A render job owns the exclusive lane for
+   * its whole duration and is an operator's explicit order, so it loads its own
+   * voice if it has to, emitting `warming` as `loadVoice` does. That is the one
+   * asymmetry with `llm`, where a fine-grained unattended chat never loads.
+   *
+   * **A failed chunk is reported and the run continues.** One bad sentence never
+   * sinks the other 1,399: the failure is named in a `progress` line when it
+   * happens and again in `done`, where {@link readRenderResult} reads the
+   * authoritative list. No `chunk` event and no artifact is produced for a row
+   * that rendered nothing.
+   *
+   * Refused before the job is queued, by name: `unknown_model`,
+   * `invalid_params`, `ffmpeg_missing`, `backend_unsupported`, `env_missing`,
+   * `voice_not_installed`, `accelerator_busy`, `insufficient_memory`,
+   * `voice_kind_unsupported` (a zero-shot voice, whose reference clips have no
+   * channel on narrator's load message), `sampling_not_wired`, `unknown_take`,
+   * and `chunk_too_long`.
+   *
+   * The `chunk_too_long` cap is **not** re-checked here. It is per (voice,
+   * backend) and it lives on the voice row ({@link VoiceInfo.maxChars}); a
+   * second copy of it in this file would be a second thing to drift, exactly as
+   * {@link asr} keeps no copy of faster-whisper's language list. Pack against
+   * the row you read from {@link voices}.
+   */
+  async render(options: RenderOptions): Promise<string> {
+    const given = options as Partial<RenderOptions> | undefined;
+    if (given === undefined || given === null) {
+      throw new CrucibleConfigError(
+        'options',
+        'render(...) needs {voice, language, take, chunks}',
+      );
+    }
+    const submission: { signal?: AbortSignal } = {};
+    if (given.signal !== undefined) submission.signal = given.signal;
+    return this.submit(
+      {
+        type: 'tts',
+        // For `tts` the model IS the voice: a Higgs v3 voice is the merged
+        // checkpoint the engine runs, so the wire needs no second word for it.
+        model: requireText(given.voice, 'voice'),
+        params: {
+          language: requireText(given.language, 'language'),
+          take: requireIndex(given.take, 'take'),
+          chunks: readRenderChunks(given.chunks),
+        },
+        inputs: {},
+      },
+      submission,
+    );
+  }
+
+  /**
+   * {@link events}, plus the batch writer: every artifact this job publishes is
+   * fetched and written into `dir` as `<name>`, with its provenance sidecar
+   * beside it, while the job is still running.
+   *
+   * **Why the bytes cross the wire at all.** There is no shared mount, ever. The
+   * library lives on `Z:` (`\\TITAN\iO`), WSL cannot mount a network drive, and
+   * that single fact is why whole-m4b alignment cannot run on Owen's PC today.
+   * So Crucible writes files on its own host, the client fetches them over HTTP
+   * — even from a server on localhost — and writes them where assembly and
+   * resume already look.
+   *
+   * Three properties, each of which is the point rather than a nicety:
+   *
+   * - **Each artifact is fetched as its `artifact` event lands**, overlapped with
+   *   the next chunk still generating. A writer that waited for `done` would turn
+   *   a streaming server back into a batch one — an hour of finished FLACs
+   *   sitting on the server while the last sentence renders.
+   * - **Each file is written atomically**: bytes to a temporary name in the same
+   *   directory, then a rename. BookForge's resume test is "the file exists and
+   *   exceeds 1024 bytes", so a half-written FLAC left behind by a killed run
+   *   reads as a finished chunk and that sentence is silently missing from the
+   *   book. A rename within one directory is atomic on NTFS and on ext4, so
+   *   `<index>.flac` only ever exists complete.
+   * - **The sidecar is written first**, then the artifact. DESIGN.md section 7
+   *   says clients must persist provenance beside the output, and doing it in
+   *   this order means the existence of `<index>.flac` implies the existence of
+   *   `<index>.flac.provenance.json`. The other order can leave a finished
+   *   chunk that cannot say which voice, which revision or which server made it,
+   *   and resume would never ask for it again.
+   *
+   * It yields the job's own events unchanged, interleaved with what it has
+   * written ({@link ArtifactWrite}) — the writer reports progress without
+   * swallowing anything. The iterator ends after the terminal event and after
+   * every outstanding write has landed, so when it returns, the directory is
+   * complete.
+   *
+   * A write that fails throws out of the iterator. It is not reported as a
+   * `kind` and the run does not continue: a failed *chunk* is the job's ordinary
+   * news and the server already reports it, but a failed *write* means this
+   * client cannot do the one thing it was asked to do, and a caller that learned
+   * about it from a yielded value would be free to ignore it.
+   *
+   * **Resuming with `lastEventId` writes only what arrives after it.** The
+   * server replays events above that id and no further back, so artifacts
+   * announced before it are the caller's own — they are what the caller already
+   * had when it recorded that id. Omit it and the whole history replays, and
+   * this reconciles against `done`'s authoritative `artifacts` list as well, so
+   * an artifact whose event was somehow missed is still written.
+   *
+   * It needs a Node-like runtime, and gets one lazily; see
+   * {@link loadNodeFileApis} for how that is kept inside the SDK's
+   * zero-dependency rule.
+   */
+  async *writeArtifactsTo(
+    jobId: string,
+    dir: string,
+    options: WriteArtifactsOptions = {},
+  ): AsyncGenerator<ArtifactWrite, void, undefined> {
+    const id = requireText(jobId, 'jobId');
+    const directory = requireText(dir, 'dir');
+    const limit = options.concurrency === undefined
+      ? DEFAULT_ARTIFACT_CONCURRENCY
+      : requireIndex(options.concurrency, 'concurrency');
+    if (limit < 1) {
+      throw new CrucibleConfigError('concurrency', `must be at least 1, got ${limit}`);
+    }
+    const node = await loadNodeFileApis();
+    await node.fs.mkdir(directory, { recursive: true });
+
+    /** Writes still in flight, by artifact name. None of these ever rejects. */
+    const active = new Map<string, Promise<void>>();
+    /** Landed writes waiting to be yielded at the next boundary. */
+    const landed: WrittenArtifact[] = [];
+    /** Names already started, so a replayed event never writes a file twice. */
+    const started = new Set<string>();
+    let failure: unknown = null;
+
+    const begin = (name: string): void => {
+      if (started.has(name)) return;
+      started.add(name);
+      // The task deletes itself from `active` in its own `finally`, before the
+      // promise settles, so a `Promise.race` over `active.values()` can never
+      // observe an entry that has already finished.
+      const task = (async () => {
+        try {
+          landed.push(await this.#writeArtifact(node, id, name, directory));
+        } catch (error) {
+          // The first failure is the one that explains the rest; a full disk
+          // fails every write after it and the ninth message says nothing.
+          if (failure === null) failure = error;
+        } finally {
+          active.delete(name);
+        }
+      })();
+      active.set(name, task);
+    };
+
+    /** Yield-ready writes, taken as a batch so the array is never mutated mid-loop. */
+    const taken = (): WrittenArtifact[] => landed.splice(0, landed.length);
+
+    let announced: readonly string[] | undefined;
+    const events = options.lastEventId === undefined
+      ? this.events(id)
+      : this.events(id, { lastEventId: options.lastEventId });
+
+    try {
+      for await (const event of events) {
+        if (event.event === 'artifact') {
+          while (active.size >= limit) await Promise.race(active.values());
+          begin(event.data.name);
+        }
+        if (event.event === 'done') announced = event.data.artifacts;
+        yield { kind: 'event', event };
+        for (const written of taken()) yield { kind: 'written', written };
+        if (failure !== null) throw failure;
+      }
+
+      // `done` lists what the job published, and it is the authority. With the
+      // whole history replayed, a name here that produced no `artifact` frame is
+      // a gap, and writing it is the difference between a complete directory and
+      // a book with a hole in it. Skipped when the caller resumed from an id:
+      // the prefix they chose not to replay is theirs, and re-fetching a
+      // finished book's worth of FLACs on every reconnect would be a worse bug
+      // than the one it guards against.
+      if (announced !== undefined && options.lastEventId === undefined) {
+        for (const name of announced) {
+          while (active.size >= limit) await Promise.race(active.values());
+          begin(name);
+          for (const written of taken()) yield { kind: 'written', written };
+          if (failure !== null) throw failure;
+        }
+      }
+
+      while (active.size > 0) {
+        await Promise.race(active.values());
+        for (const written of taken()) yield { kind: 'written', written };
+        if (failure !== null) throw failure;
+      }
+    } finally {
+      // A caller that breaks out early, and any throw above, leaves writes in
+      // flight. Settling them is cleanup: it keeps a half-written temporary from
+      // outliving this call, and because no task ever rejects it cannot mask the
+      // error that is already on its way out.
+      await Promise.all(active.values());
+    }
+  }
+
+  /**
+   * One artifact and its sidecar: fetched together, checked, then written
+   * sidecar-first so that the artifact's existence implies the sidecar's.
+   */
+  async #writeArtifact(
+    node: NodeFileApis,
+    jobId: string,
+    name: string,
+    dir: string,
+  ): Promise<WrittenArtifact> {
+    // The name comes off the wire and is about to become a path on the caller's
+    // disk. The server validates it as a single member and would not send a
+    // traversal — but "the server would not" is not a property of this machine's
+    // filesystem, and the whole point of the batch writer is that it writes into
+    // a real library directory.
+    refuseUnsafeMemberName(name);
+    const sidecarName = `${name}.provenance.json`;
+    const [bytes, sidecarBytes] = await Promise.all([
+      this.artifact(jobId, name),
+      this.artifact(jobId, sidecarName),
+    ]);
+    if (bytes.length === 0) {
+      throw new CrucibleProtocolError(
+        `artifact ${name} of job ${jobId} is zero bytes; the server announced a ` +
+          'file it did not write',
+      );
+    }
+
+    // Parsed to prove it is the document DESIGN.md section 7 describes — but the
+    // BYTES that go to disk are the server's own, not a re-serialisation of this
+    // reading. `Provenance` keeps the server's key spelling precisely so the
+    // file round-trips, and writing back what was read is stronger still.
+    const text = new TextDecoder('utf-8').decode(sidecarBytes);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new CrucibleProtocolError(`${sidecarName} is not JSON: ${excerpt(text)}`);
+    }
+    const provenance = readProvenance(asObject(parsed, sidecarName), name);
+
+    const path = node.path.join(dir, name);
+    const provenancePath = node.path.join(dir, sidecarName);
+    await writeAtomically(node, provenancePath, sidecarBytes);
+    await writeAtomically(node, path, bytes);
+    return { name, path, bytes: bytes.length, provenancePath, provenance };
+  }
+
   // ------------------------------------------------------------ accelerator
 
   /**
@@ -963,6 +1268,8 @@ function readEvent(rawId: string | null, rawName: string | null, rawData: string
       return { id, event: 'warming', data: { message: str(data, 'message', where) } };
     case 'progress':
       return { id, event: 'progress', data: readProgress(data, where) };
+    case 'chunk':
+      return { id, event: 'chunk', data: readChunk(data, where) };
     case 'artifact':
       return { id, event: 'artifact', data: { name: str(data, 'name', where) } };
     case 'done':
@@ -1001,10 +1308,42 @@ function readProgress(data: Json, where: string): ProgressData {
 }
 
 /**
+ * One `chunk` frame (PHASE3-TTS.md section 6): a measurement of one rendered
+ * chunk, and the whole of what the server has to say about it.
+ *
+ * `tokens` and `capped` are read with the nullable readers and **the key must be
+ * there**. That is the load-bearing part: `null` on this wire means "narrator did
+ * not say", and an absent key would mean "this server does not speak the field
+ * at all" — two different pieces of news, and only one of them is something the
+ * server stated. A `chunk` frame that omits `capped` is therefore a protocol
+ * error rather than a null, and the null that does arrive travels to the caller
+ * as a null, never softened into `false`. A client that read it as `false` would
+ * report every runaway as a long sentence.
+ */
+function readChunk(data: Json, where: string): ChunkData {
+  return {
+    index: num(data, 'index', where),
+    seconds: num(data, 'seconds', where),
+    chars: num(data, 'chars', where),
+    charsPerSec: num(data, 'chars_per_sec', where),
+    tokens: nullableNum(data, 'tokens', where),
+    capped: nullableBool(data, 'capped', where),
+    take: num(data, 'take', where),
+  };
+}
+
+/**
  * A `done` frame says what finished, and what that means depends on the job:
  * artifacts for a producing job, the resident model for `load-model`. One of
  * the two must be there — a `done` that says nothing is a protocol error, not
  * an empty result.
+ *
+ * Everything else on the frame is carried in `extra`, verbatim, for the reason
+ * {@link readProgress} carries a progress frame's own measurements: the server
+ * builds `done` as `{"artifacts": [...], **job.done_extra}`, and `done_extra` is
+ * a job type's own terminal news. Reading only the two modelled keys threw away
+ * `tts`'s `failed` list — the authoritative answer to "which indices do I have to
+ * ask for again" — and `load-voice`'s `fingerprint`.
  */
 function readDone(data: Json, where: string): DoneData {
   const hasArtifacts = 'artifacts' in data;
@@ -1015,11 +1354,74 @@ function readDone(data: Json, where: string): DoneData {
         'say what finished',
     );
   }
-  const done: { artifacts?: readonly string[]; resident?: string | null } = {};
+  const extra: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (key === 'artifacts' || key === 'resident') continue;
+    extra[key] = value;
+  }
+  const done: {
+    artifacts?: readonly string[];
+    resident?: string | null;
+    extra: Readonly<Record<string, unknown>>;
+  } = { extra };
   if (hasArtifacts) done.artifacts = strArray(data, 'artifacts', where);
   // `null` is the answer an unload gives: nothing is resident now.
   if (hasResident) done.resident = nullableStr(data, 'resident', where);
   return done;
+}
+
+/**
+ * A finished `tts` job's terminal news, read strictly out of its `done` frame.
+ *
+ * This exists because a successful render can still have failed chunks. **A
+ * failed chunk is reported and the run continues** (PHASE3-TTS.md section 6) —
+ * one bad sentence never sinks the other 1,399, and a missing `<index>.flac` is
+ * a file that is not there, which BookForge's resume already knows how to ask
+ * for again. The `progress` line at the moment of each failure says the same
+ * thing, so a client watching live already knows; this is for the one reading
+ * only the terminal event, and it is the authoritative list.
+ *
+ * Nothing here is optional and nothing is defaulted. A `done` frame from a `tts`
+ * job carries all four keys — `crucible/jobs/tts/render.py` writes them
+ * unconditionally — so a missing one is a server that changed, and a `failed: []`
+ * substituted for an absent key would read as a clean render.
+ *
+ * Pass it the `done` event of a `tts` job. Handing it any other job type's
+ * `done` throws, naming the field that is not there, which is the correct answer
+ * to asking a `load-model` how many chunks it rendered.
+ */
+export function readRenderResult(done: DoneData): RenderResult {
+  const where = 'the tts done event';
+  const extra = done.extra as Json;
+  const artifacts = done.artifacts;
+  if (artifacts === undefined) {
+    throw new CrucibleProtocolError(
+      `${where} carries no "artifacts"; a render publishes one <index>.flac per ` +
+        'rendered chunk, so the list is how a caller knows what to collect',
+    );
+  }
+  const failed = asArray(field(extra, 'failed', where), `${where}.failed`);
+  return {
+    rendered: num(extra, 'rendered', where),
+    failed: failed.map((entry, index) =>
+      readRenderFailure(asObject(entry, `${where}.failed[${index}]`), `${where}.failed[${index}]`),
+    ),
+    take: num(extra, 'take', where),
+    // The rate the voice was loaded at, which the load already reconciled
+    // against the manifest — so it is both the engine's truth and the
+    // manifest's, and the FLAC headers on disk say the same thing.
+    sampleRate: num(extra, 'sample_rate', where),
+    artifacts,
+  };
+}
+
+function readRenderFailure(entry: Json, where: string): RenderFailure {
+  return {
+    index: num(entry, 'index', where),
+    // narrator's own words for why. Surfaced, never summarised: 'No audio
+    // generated' and 'cancelled' call for different responses from the caller.
+    message: str(entry, 'message', where),
+  };
 }
 
 function readModelInfo(entry: Json, where: string): ModelInfo {
@@ -1310,7 +1712,249 @@ function readChatDelta(raw: string): string | null {
   return content;
 }
 
+// ------------------------------------------------------- the batch writer's fs
+
+/**
+ * The four filesystem calls and the one path call the batch writer makes.
+ *
+ * Declared here rather than imported from `node:fs/promises`, and that is the
+ * whole trick — see {@link loadNodeFileApis} for why the module cannot be named
+ * in an import statement, and what that costs.
+ */
+interface NodeFileApis {
+  readonly fs: {
+    mkdir(path: string, options: { recursive: true }): Promise<string | undefined>;
+    writeFile(path: string, data: Uint8Array): Promise<void>;
+    rename(from: string, to: string): Promise<void>;
+    rm(path: string, options: { force: true }): Promise<void>;
+  };
+  readonly path: {
+    join(...parts: string[]): string;
+  };
+}
+
+let nodeFileApis: Promise<NodeFileApis> | null = null;
+
+/**
+ * `node:fs/promises` and `node:path`, loaded the first time the batch writer
+ * needs them and never before.
+ *
+ * **The SDK's one hard rule since phase 1 is zero runtime dependencies**, so
+ * that Node 20, bun and the Electron main process can all import it. Node's own
+ * builtins are not a dependency in that sense — nothing is installed to get them
+ * — but a *static* `import ... from 'node:fs/promises'` at the top of this file
+ * would still break the rule in practice, because it puts fs into the module
+ * graph of `import {CrucibleClient} from '@crucible/client'` itself. A bundler
+ * targeting a browser-ish runtime resolves that specifier at build time and
+ * fails on it, and every caller pays for a method most of them never call.
+ *
+ * So the specifier is assembled at run time, out of reach of static analysis,
+ * and the import happens inside the one method that writes files. `ping`,
+ * `info`, `chat`, `render`, `events` — none of them loads fs at all, and a
+ * browser bundle that never calls {@link CrucibleClient.writeArtifactsTo} never
+ * resolves it. (webpack will warn about an expression as a dependency; that
+ * warning is the mechanism working.)
+ *
+ * The cost of hiding the specifier is that `import()` hands back `any`, so
+ * {@link NodeFileApis} declares the shapes and they are checked here, at the
+ * seam, rather than trusted. A runtime with no `node:fs/promises` — a browser —
+ * gets a {@link CrucibleError} that says what it is missing and why, not a
+ * `TypeError` about `undefined`.
+ */
+async function loadNodeFileApis(): Promise<NodeFileApis> {
+  if (nodeFileApis === null) {
+    nodeFileApis = (async () => {
+      // Built from parts so that no bundler can see a literal module specifier
+      // here. This is the point of the function; do not inline it.
+      const scheme = 'node:';
+      let fs: unknown;
+      let path: unknown;
+      try {
+        fs = await import(/* webpackIgnore: true */ `${scheme}fs/promises`);
+        path = await import(/* webpackIgnore: true */ `${scheme}path`);
+      } catch (cause) {
+        throw new CrucibleError(
+          "writeArtifactsTo needs node:fs/promises and node:path, and this " +
+            'runtime has neither. It writes the artifacts to disk itself because ' +
+            'there is no shared mount between a Crucible host and its client; in ' +
+            'a browser, fetch each artifact with artifact(jobId, name) and put ' +
+            'the bytes wherever that runtime keeps bytes.',
+          { cause },
+        );
+      }
+      return { fs: checkedFs(fs), path: checkedPath(path) };
+    })();
+  }
+  return nodeFileApis;
+}
+
+/** Every call the writer makes, proven to exist before the writer makes it. */
+function checkedFs(module: unknown): NodeFileApis['fs'] {
+  const found = module as Record<string, unknown> | null;
+  for (const name of ['mkdir', 'writeFile', 'rename', 'rm']) {
+    if (found === null || typeof found[name] !== 'function') {
+      throw new CrucibleError(
+        `node:fs/promises on this runtime has no ${name}(); writeArtifactsTo ` +
+          'cannot write files atomically without it',
+      );
+    }
+  }
+  return found as unknown as NodeFileApis['fs'];
+}
+
+function checkedPath(module: unknown): NodeFileApis['path'] {
+  const found = module as Record<string, unknown> | null;
+  if (found === null || typeof found['join'] !== 'function') {
+    throw new CrucibleError('node:path on this runtime has no join()');
+  }
+  return found as unknown as NodeFileApis['path'];
+}
+
+/** Distinguishes two temporaries in one directory. Not a secret; no crypto needed. */
+let temporaryCounter = 0;
+
+/**
+ * Bytes to `target`, via a temporary in the **same directory**, then a rename.
+ *
+ * BookForge's resume test is "the file exists and exceeds 1024 bytes". A FLAC
+ * written in place and interrupted — a killed run, a full disk, a pulled plug —
+ * passes that test while being half a sentence, so resume never asks for it
+ * again and the book is quietly missing audio. A rename within one directory is
+ * atomic on NTFS and on ext4, so `<index>.flac` either does not exist or is
+ * whole. The temporary must be a sibling: a rename across filesystems is a copy,
+ * and a copy is the thing being avoided.
+ *
+ * The `.part` suffix keeps a temporary from ever matching `<index>.flac`, so a
+ * crash cannot leave something resume would count.
+ *
+ * Node's `rename` replaces an existing destination on Windows as well as on
+ * POSIX (it passes `MOVEFILE_REPLACE_EXISTING`), so re-writing an artifact — a
+ * retake, a resumed run — does not need an unlink first, which would be a window
+ * where neither file exists.
+ */
+async function writeAtomically(
+  node: NodeFileApis,
+  target: string,
+  bytes: Uint8Array,
+): Promise<void> {
+  temporaryCounter += 1;
+  const temporary = `${target}.${Date.now().toString(36)}-${temporaryCounter}.part`;
+  try {
+    await node.fs.writeFile(temporary, bytes);
+    await node.fs.rename(temporary, target);
+  } catch (error) {
+    // Cleanup, so a failed write does not leave a temporary behind. A failure to
+    // clean up does not change what went wrong and must not replace it — the
+    // same rule `events()` applies to closing its socket.
+    await node.fs.rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * An artifact name is about to become a path on the caller's disk, so it is
+ * checked here as well as on the server.
+ *
+ * The server validates artifact names as single members already
+ * (`validate_member_name`), and this is not a guard against that server. It is a
+ * guard against a *path* being built from a string this process did not choose,
+ * in a method whose whole purpose is to write into a real library directory —
+ * `Z:\books\...`, where a `..` would land somewhere nobody was looking.
+ */
+function refuseUnsafeMemberName(name: string): void {
+  const bad =
+    name === '' ||
+    name === '.' ||
+    name === '..' ||
+    name.startsWith('.') ||
+    name.includes('/') ||
+    name.includes('\\') ||
+    name.includes('\0');
+  if (bad) {
+    throw new CrucibleProtocolError(
+      `the server announced an artifact named ${JSON.stringify(name)}, which is ` +
+        'not a single path member; writeArtifactsTo will not turn it into a path',
+    );
+  }
+}
+
 // ------------------------------------------------------------------ helpers
+
+/**
+ * A render's chunks, checked for the things that are facts about the request
+ * rather than facts about the server.
+ *
+ * Deliberately **not** checked here: `maxChars`. That cap is per (voice,
+ * backend), it is published on the voice row, and a copy of it in this file
+ * would be a second thing to drift — the same reasoning that keeps
+ * faster-whisper's language list out of {@link CrucibleClient.asr}.
+ *
+ * Deliberately checked here: duplicate indices. An index is an artifact name, so
+ * two chunks sharing one are two renders writing the same FLAC with one of them
+ * winning silently — and on this side of the wire they would also be two writes
+ * racing for the same path in the caller's library.
+ */
+function readRenderChunks(chunks: unknown): Array<{ index: number; text: string }> {
+  if (chunks === undefined || chunks === null) {
+    throw new CrucibleConfigError('chunks', 'is required and was not given');
+  }
+  if (!Array.isArray(chunks)) {
+    throw new CrucibleConfigError('chunks', `must be an array, got ${typeof chunks}`);
+  }
+  if (chunks.length === 0) {
+    throw new CrucibleConfigError('chunks', 'is required and was empty');
+  }
+  const seen = new Map<number, number>();
+  return chunks.map((entry, at) => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new CrucibleConfigError(`chunks[${at}]`, 'must be {index, text}');
+    }
+    const chunk = entry as Partial<RenderChunk>;
+    const index = requireIndex(chunk.index, `chunks[${at}].index`);
+    const first = seen.get(index);
+    if (first !== undefined) {
+      throw new CrucibleConfigError(
+        `chunks[${at}].index`,
+        `is ${index}, which chunks[${first}] already claimed. An index is an ` +
+          'artifact name, so two chunks sharing one would be two renders writing ' +
+          'the same <index>.flac',
+      );
+    }
+    seen.set(index, at);
+    const text = chunk.text;
+    if (typeof text !== 'string') {
+      throw new CrucibleConfigError(`chunks[${at}].text`, `must be a string, got ${typeof text}`);
+    }
+    if (text.trim() === '') {
+      // narrator answers an empty generate with a WHOLE-REQUEST error, which
+      // would take the other 1,399 rows with it. The server refuses this too;
+      // refusing it here names the chunk before a book's worth of text is sent.
+      throw new CrucibleConfigError(
+        `chunks[${at}].text`,
+        'is blank, and narrator refuses an empty generate with a whole-request ' +
+          'error that would end the batch',
+      );
+    }
+    // Spelled `index`, which is the key `TtsChunk` declares and the only one it
+    // accepts — the model forbids extras. narrator's own batch key is `i`, and
+    // translating between the two is the server's business, not this client's.
+    return { index, text };
+  });
+}
+
+/** A non-negative integer the caller must state: an index, a take, a ceiling. */
+function requireIndex(value: unknown, option: string): number {
+  if (value === undefined || value === null) {
+    throw new CrucibleConfigError(option, 'is required and was not given');
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new CrucibleConfigError(
+      option,
+      `must be a non-negative integer, got ${String(value)}`,
+    );
+  }
+  return value;
+}
 
 function requireText(value: unknown, option: string): string {
   if (value === undefined || value === null) {
