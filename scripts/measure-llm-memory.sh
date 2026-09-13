@@ -8,11 +8,12 @@
 #   at rest        — the engine has answered /v1/models and generated one token
 #   under context  — after a completion that has filled `context_default` tokens
 #
-# On cuda-linux the figure is `nvidia-smi memory.used` minus what was on the card
-# before the engine started, which is the engine's share of the card and nothing
-# else. On mlx-darwin it is the engine process's resident set: unified memory
-# "available" moves by much less than the model's size because macOS reclaims
-# inactive pages to make room, so a delta in available memory would understate it.
+# On both backends the figure is memory **used** minus what was in use before the
+# engine started — `nvidia-smi memory.used` on cuda-linux, unified memory in use
+# on mlx-darwin — which is the engine's share of the accelerator and nothing
+# else. (Not memory *available*: macOS reclaims inactive pages to make room, so a
+# delta in available memory understates it. Not the engine process's RSS either;
+# see the note by the figure at the bottom.)
 #
 # Needs the host ready (env installed, model pulled) and refuses by name if not.
 
@@ -144,13 +145,20 @@ PY
 LOADED="$(card)"; LOADED_RSS="$(engine_rss)"
 echo "  under context: card $((LOADED / 1024 / 1024)) MiB (+$(( (LOADED - BEFORE) / 1024 / 1024 )) MiB), engine rss $((LOADED_RSS / 1024 / 1024)) MiB"
 
-if [ "$BACKEND" = "cuda-linux" ]; then
-  MEASURED=$((LOADED - BEFORE))
-else
-  MEASURED="$LOADED_RSS"
-fi
+# The engine's share of the machine, on both backends: what was in use with the
+# model resident and a full-context request in flight, minus what was in use
+# before it started.
+#
+# On mlx-darwin this used to report the engine process's RSS instead. RSS is a
+# FLOOR, not the requirement — MLX memory-maps the weights and not every page
+# stays resident — and on `qwen3.8-27b-4bit` the gap is not small: RSS read
+# 14_643 MiB where mlx's own allocator peaked at 31.55 GiB and this delta read
+# 32_116 MiB. Writing the RSS into a manifest would have understated that model
+# by 2.2x. The delta is printed with the RSS beside it so both are on the record.
+MEASURED=$((LOADED - BEFORE))
 echo
 echo "memory_bytes_estimate = $MEASURED   # $((MEASURED / 1024 / 1024)) MiB, $(python3 -c "print(f'{$MEASURED/1e9:.2f}')") GB"
+echo "  (engine rss was $((LOADED_RSS / 1024 / 1024)) MiB — a floor, not the figure)"
 
 curl -sS "${AUTH[@]}" -d "{\"type\":\"unload-model\",\"model\":\"$MODEL\"}" "$BASE/jobs" \
   | python3 -c 'import json,sys; print("  unload job", json.load(sys.stdin)["job_id"])'

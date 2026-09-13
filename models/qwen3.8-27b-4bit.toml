@@ -117,9 +117,28 @@ engine_args = ["--gpu-memory-utilization", "0.85"]
 engine = "mlx-lm"
 hf_repo = "mlx-community/Qwen3.8-27B-4bit"
 revision = "3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
-# COMPUTED, pending the measurement on the Mac Studio: the repo's safetensors at
-# the pinned sha (16_054_541_349 B) plus the same KV at 98304 (6_442_450_944 B).
-# Replace with `mx.get_peak_memory()` after a full-context completion, the way
-# the 9B's mlx figure was taken.
-memory_bytes_estimate = 22_496_992_293
+# MEASURED on Owen's Mac Studio (M1 Ultra, 64 GB), mlx-lm 0.31.3 / mlx 0.32.2,
+# 2026-09-12, via mlx's own allocator — the same method as the 9B:
+#   after load                       active 14.09 GiB, peak 14.09 GiB
+#   after a 98220-token completion   active 14.09 GiB, PEAK 31.55 GiB
+# and independently, as the whole engine's share of unified memory measured from
+# outside by `scripts/measure-llm-memory.sh`:
+#   at rest                          +15_829 MiB   (15.46 GiB)
+#   under a 98257-token completion   +32_116 MiB   (31.36 GiB)
+# Two methods, 0.6% apart. The peak is the figure: it is what the machine must be
+# able to give while a full-context request is in flight.
+#
+# COMPUTED would have said 22_496_992_293 — weights 16_054_541_349 + KV
+# 6_442_450_944 — and that is 34% UNDER. The gap is not KV and it is not the
+# weights: it is what mlx-lm's prefill holds at once. It processes the prompt in
+# 2048-token steps and takes logits over the whole step, and this model's vocab
+# is 248320, so one step's logits alone are 2048 x 248320 x 4 B = 2.03 GB before
+# any temporary. On the 9B, at 12288 tokens and the same vocab, that overhead was
+# small enough to read as "about 6% under"; at 98304 it is the largest single
+# term after the weights. Do not compute this number for a long-context model.
+#
+# (`measure-llm-memory.sh` printed 15_355_101_184 for this run, which is the
+# engine process's RSS — MLX memory-maps the weights, so RSS is a floor and here
+# it is 2.2x low. That script now reports the unified-memory delta instead.)
+memory_bytes_estimate = 33_873_484_870
 engine_args = []
