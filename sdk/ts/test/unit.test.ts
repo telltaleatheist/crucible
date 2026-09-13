@@ -386,6 +386,7 @@ const ACTIVITY_WITH_SESSION = {
     seconds: 41.2,
     chars: 903,
   },
+  chat: { in_flight: 0, rows: [] },
   slots: { accelerated: { busy: 0, of: 1, queue_depth: 0, accepts_work: false } },
   running: [],
   queued: [],
@@ -449,4 +450,37 @@ test('an idle machine reports both nulls, and both keys are required', async () 
     assert.match(error.message, /claim/);
     return true;
   });
+});
+
+
+test('a chat in flight is named as the act it IS, and does not gate work', async () => {
+  // Before Crucible everything ran under "translate". A simplify must never be
+  // reported as one — Owen, 2026-09-13 — and the server refuses an unknown act
+  // at the door rather than recording a name nothing knows.
+  answer(200, {
+    ...ACTIVITY_WITH_SESSION,
+    claim: null,
+    streaming: null,
+    chat: {
+      in_flight: 2,
+      rows: [
+        { id: 1, act: 'simplify', model: 'qwen3.8-27b-4bit', client: 'foundry/0.9.0', since: '2026-09-13T19:00:00Z' },
+        { id: 2, act: null, model: 'qwen3.8-27b-4bit', client: null, since: '2026-09-13T19:00:04Z' },
+      ],
+    },
+    slots: { accelerated: { busy: 0, of: 1, queue_depth: 0, accepts_work: true } },
+  });
+  const seen = await client().activity();
+  assert.equal(seen.chat.inFlight, 2);
+  const [named, anonymous] = seen.chat.rows;
+  assert.ok(named !== undefined && anonymous !== undefined, 'both rows are read');
+  assert.equal(named.act, 'simplify');
+  assert.equal(named.client, 'foundry/0.9.0');
+  // Null is "the client did not say", never an inferred act.
+  assert.equal(anonymous.act, null);
+  assert.equal(anonymous.client, null);
+  // Counted, never gating: the engine batches, so the server really will take
+  // more. The lane is what `accepts_work` is about, and it is free.
+  assert.equal(seen.slots.accelerated.acceptsWork, true);
+  assert.equal(seen.slots.accelerated.busy, 0);
 });

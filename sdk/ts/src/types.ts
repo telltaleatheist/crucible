@@ -220,6 +220,35 @@ export interface ActivityStreaming {
   readonly chars: number;
 }
 
+/**
+ * One chat completion, while it is happening.
+ *
+ * A chat takes no lane and makes no job, so until 2026-09-13 a server grinding
+ * through a 27B translation reported `running: []` and read as idle. These rows
+ * are what it says instead — and they still gate nothing: `acceptsWork` stays
+ * true while chats are in flight, because a vLLM engine batches and the server
+ * really will take more.
+ */
+export interface ActivityChat {
+  readonly id: number;
+  /**
+   * What this completion IS — a capability class name, from the client's
+   * `X-Crucible-Act` header.
+   *
+   * **Null means the client did not say, and is never a guess.** Crucible cannot
+   * tell a simplify from a translate: both are a chat against the same 27B and
+   * the only difference is a prompt it does not own. Owen ruled on 2026-09-13
+   * that a job must be named as what it is — *"before crucible, everything ran
+   * under translate"* — so a wrong name here would be the defect, and an unknown
+   * act is refused at the door rather than recorded.
+   */
+  readonly act: string | null;
+  readonly model: string;
+  /** The calling User-Agent. Null = it did not say. */
+  readonly client: string | null;
+  readonly since: string;
+}
+
 /** `GET /v1/activity` — what is on this server and how far along. */
 export interface Activity {
   readonly server: {
@@ -248,6 +277,11 @@ export interface Activity {
   readonly claim: { readonly heldBy: string } | null;
   /** The open streaming session, or null. */
   readonly streaming: ActivityStreaming | null;
+  /** Chat completions open right now. Counted, never gating. */
+  readonly chat: {
+    readonly inFlight: number;
+    readonly rows: readonly ActivityChat[];
+  };
   readonly slots: { readonly accelerated: ActivitySlot };
   readonly running: readonly ActivityJob[];
   readonly queued: readonly ActivityJob[];

@@ -45,6 +45,7 @@ from .jobs import (
 from .jobs.base import Job, validate_member_name
 from .jobs.queue import JobStore
 from .jobs.tts.common import known_voice
+from .inflight import InFlight, read_act
 from .residency import Residency
 from .ttsstream import (
     StreamManager,
@@ -278,6 +279,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.state.residency = residency
     app.state.store = JobStore(config, backend, registry)
     app.state.streams = StreamManager(residency)
+    app.state.inflight = InFlight()
 
     Path(config.jobs_dir).mkdir(parents=True, exist_ok=True)
     Path(config.uploads_dir).mkdir(parents=True, exist_ok=True)
@@ -658,6 +660,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         """
         store: JobStore = request.app.state.store
         streams: StreamManager = request.app.state.streams
+        inflight: InFlight = request.app.state.inflight
         running = store.running
         queued = store.queued()
         resident = residency.resident
@@ -726,6 +729,20 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     **session.progress_report(),
                 }
             ),
+            # THE THIRD KIND OF WORK, and the one that was invisible longest. A
+            # chat completion takes no lane, makes no job and left no record, so
+            # a server grinding through a 27B translation reported `running: []`
+            # and read as idle. It is counted here and it still gates nothing:
+            # a vLLM engine BATCHES, so two passes on one resident model really
+            # do run at once, and taking the lane to fix a reporting bug would
+            # have serialised work the engine exists to overlap.
+            #
+            # `act` is the client's word (the `X-Crucible-Act` header, validated
+            # against the capability classes). Null means it did not say, and
+            # this server never guesses one: it cannot tell a simplify from a
+            # translate, since both are a chat against the same 27B and the only
+            # difference is a prompt it does not own.
+            "chat": {"in_flight": len(inflight), "rows": inflight.rows()},
             "slots": {
                 # ONE LANE TODAY, and it is named rather than counted so the
                 # ancillary lane (PHASE7-LANES.md section 3) can appear beside it
@@ -746,6 +763,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     # that reads true and submits is racing every other client,
                     # and that race is settled at the door. See this route's
                     # "IT REPORTS AND NOTHING ELSE" note.
+                    #
+                    # `chat` is deliberately NOT a term here. A chat in flight
+                    # does not stop this server taking a job, because the engine
+                    # batches — adding it would turn an honest display into a
+                    # false refusal and serialise work that overlaps today.
                     "accepts_work": running is None and residency.claimed_by is None,
                 },
             },
@@ -1115,25 +1137,37 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         forwarded = _forward_body(raw, body, resident)
         url = f"{resident.base_url}/v1/chat/completions"
         client: httpx.AsyncClient = request.app.state.http
+        inflight: InFlight = request.app.state.inflight
+        # Read BEFORE the work starts, so an unknown act is a 400 instead of a
+        # completion that ran and was then reported under a name nobody knows.
+        act = read_act(request.headers)
 
-        if body.get("stream") is True:
-            return await _proxy_stream(client, url, forwarded, resident)
-        try:
-            upstream = await _post_unless_the_caller_leaves(
-                client, url, forwarded, request
+        # A chat is the one piece of accelerator work that took the lane, made a
+        # job row and left a record NOWHERE. Tracked here so `/v1/activity` can
+        # say what this machine is doing; it still gates nothing — see
+        # crucible/inflight.py for why taking the lane would have been the wrong
+        # fix for the right bug.
+        with inflight.tracked(
+            act=act, model=resident.model_id, client=_client_agent(request)
+        ):
+            if body.get("stream") is True:
+                return await _proxy_stream(client, url, forwarded, resident)
+            try:
+                upstream = await _post_unless_the_caller_leaves(
+                    client, url, forwarded, request
+                )
+            except httpx.HTTPError as exc:
+                raise _engine_unreachable(resident, exc) from None
+            if upstream is None:
+                return _caller_gone(resident)
+            content = upstream.content
+            if upstream.status_code == 200:
+                content = _restore_model_id(content, resident)
+            return Response(
+                content=content,
+                status_code=upstream.status_code,
+                media_type=upstream.headers.get("content-type", "application/json"),
             )
-        except httpx.HTTPError as exc:
-            raise _engine_unreachable(resident, exc) from None
-        if upstream is None:
-            return _caller_gone(resident)
-        content = upstream.content
-        if upstream.status_code == 200:
-            content = _restore_model_id(content, resident)
-        return Response(
-            content=content,
-            status_code=upstream.status_code,
-            media_type=upstream.headers.get("content-type", "application/json"),
-        )
 
     app.include_router(public)
     app.include_router(private)

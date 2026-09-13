@@ -1440,3 +1440,104 @@ def test_a_body_that_is_not_json_is_refused(
     )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_request"
+
+
+# ------------------------------------- a chat is work, and work must be visible
+
+
+def test_an_unknown_act_is_refused_BEFORE_the_work_rather_than_mislabelled(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """A wrong act name on a bench is worse than no act name.
+
+    Owen, 2026-09-13: *"they can't lie to the user and say a translate job is
+    running when it's actually a simplify job."* A silently-accepted typo would
+    do exactly that, so the header is validated against the capability classes
+    and refused by name — and refused BEFORE the completion runs, so nobody pays
+    for a 27B pass that is then reported under a name nothing knows.
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    response = llm_client.post(
+        "/v1/openai/chat/completions",
+        headers={**auth, "X-Crucible-Act": "translat"},
+        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["code"] == "unknown_act"
+    assert "'translat'" in error["message"]
+    # The refusal names the vocabulary rather than leaving a caller to guess it.
+    assert "simplify" in error["message"] and "translate" in error["message"]
+
+
+def test_a_chat_with_no_act_header_records_null_rather_than_a_guess(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """This door is OpenAI-shaped and a generic client cannot know Crucible's
+    vocabulary, so the header is optional. What is NOT optional is honesty about
+    its absence: the server cannot tell a simplify from a translate — both are a
+    chat against the same model, differing only in a prompt it does not own — so
+    an absent header is `null`, never an inferred act."""
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    response = llm_client.post(
+        "/v1/openai/chat/completions",
+        headers=auth,
+        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 200, response.text
+    # And the entry is GONE once the completion is over: an entry that outlived
+    # its request would make this server look permanently busy with work that
+    # stopped.
+    body = llm_client.get("/v1/activity", headers=auth).json()
+    assert body["chat"] == {"in_flight": 0, "rows": []}
+
+
+def test_a_chat_in_flight_is_visible_and_still_does_not_take_the_lane(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """The defect, and the shape of the fix.
+
+    A chat took no lane, made no job and left no record, so a server grinding
+    through a 27B translation reported `running: []` and read as idle to every
+    bench polling it. It is counted now — and it still gates nothing, because a
+    vLLM engine BATCHES: two passes on one resident model genuinely run at once,
+    and taking the lane to fix a reporting bug would serialise work the engine
+    exists to overlap.
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    inflight = llm_client.app.state.inflight
+
+    seen: dict[str, object] = {}
+    with inflight.tracked(act="simplify", model=MODEL, client="foundry/0.9.0"):
+        body = llm_client.get("/v1/activity", headers=auth).json()
+        seen.update(body)
+
+    assert seen["chat"]["in_flight"] == 1
+    row = seen["chat"]["rows"][0]
+    # The act is named as what it IS. Before Crucible everything ran under
+    # "translate"; nothing may report a simplify as one.
+    assert row["act"] == "simplify"
+    assert row["model"] == MODEL
+    assert row["client"] == "foundry/0.9.0"
+    assert row["since"]
+
+    # THE OTHER HALF. The lane is free and says so, and the machine still
+    # accepts work — because it really does.
+    assert seen["slots"]["accelerated"]["busy"] == 0
+    assert seen["slots"]["accelerated"]["accepts_work"] is True
+    assert seen["running"] == []

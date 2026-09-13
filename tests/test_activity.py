@@ -87,6 +87,7 @@ def test_an_idle_server_reports_itself_and_nothing_else(
     # field", which is a different piece of news from "nothing is happening".
     assert body["claim"] is None
     assert body["streaming"] is None
+    assert body["chat"] == {"in_flight": 0, "rows": []}
     assert body["slots"]["accelerated"] == {
         "busy": 0,
         "of": 1,

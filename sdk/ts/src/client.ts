@@ -48,6 +48,7 @@ import {
   type AcceleratorResident,
   type AcceleratorState,
   type Activity,
+  type ActivityChat,
   type ActivityJob,
   type ActivityStreaming,
   type ArtifactWrite,
@@ -288,6 +289,7 @@ export class CrucibleClient {
     const resident = nullableObject(body, 'resident', 'activity');
     const claim = nullableObject(body, 'claim', 'activity');
     const streaming = nullableObject(body, 'streaming', 'activity');
+    const chat = objectField(body, 'chat', 'activity');
     const slot = objectField(objectField(body, 'slots', 'activity'), 'accelerated', 'activity.slots');
     return {
       server: {
@@ -313,6 +315,22 @@ export class CrucibleClient {
       warming: nullableStr(body, 'warming', 'activity'),
       claim: claim === null ? null : { heldBy: str(claim, 'held_by', 'activity.claim') },
       streaming: streaming === null ? null : readStreaming(streaming),
+      chat: {
+        inFlight: num(chat, 'in_flight', 'activity.chat'),
+        rows: asArray(field(chat, 'rows', 'activity.chat'), 'activity.chat.rows').map(
+          (entry, index) => {
+            const where = `activity.chat.rows[${index}]`;
+            const row = asObject(entry, where);
+            return {
+              id: num(row, 'id', where),
+              act: nullableStr(row, 'act', where),
+              model: str(row, 'model', where),
+              client: nullableStr(row, 'client', where),
+              since: str(row, 'since', where),
+            };
+          },
+        ),
+      },
       slots: {
         accelerated: {
           busy: num(slot, 'busy', 'activity.slots.accelerated'),

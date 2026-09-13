@@ -61,6 +61,7 @@ export { API_VERSION, TERMINAL_EVENTS, isLlmCapability, isTtsCapability } from '
 export type {
   AcceleratorGpu,
   Activity,
+  ActivityChat,
   ActivityJob,
   ActivitySlot,
   ActivityStreaming,
