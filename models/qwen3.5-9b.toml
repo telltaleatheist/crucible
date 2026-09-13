@@ -15,12 +15,71 @@ context_default = 12288
 engine = "vllm"
 hf_repo = "Qwen/Qwen3.5-9B"
 revision = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
-# COMPUTED pending the measurement in docs/PHASE2-LLM.md section 8:
-#   weights 19_306_310_880 B on disk + KV at 12288 = 402_653_184 B.
-#   32 layers / full_attention_interval 4 = 8 full-attention layers;
-#   2 x 4 kv heads x 256 head_dim x 2 bytes = 4096 B per token per full layer.
-memory_bytes_estimate = 19_708_964_064
-engine_args = ["--dtype", "bfloat16", "--gpu-memory-utilization", "0.85"]
+# MEASURED on Owen's PC (RTX 3090 Ti, 24564 MiB = 23.99 GiB) inside WSL2,
+# vLLM 0.29.0 / torch 2.13.0+cu130, 2026-09-12, with the engine_args below.
+# nvidia-smi sampled every 2 s across the whole run:
+#   card before the engine started      1_192 MiB
+#   weights on the card                 17.66 GiB  (vLLM's "Model loading took")
+#   non-KV demand                       19.02 GiB  (weights + non-torch + the
+#                                                   profiled activation peak +
+#                                                   0.09 GiB of CUDA graphs)
+#   KV pool at util 0.84                 1.09 GiB  = 27,443 tokens, so 2.23
+#                                                   requests of 12288 in flight
+#   card at rest, model resident       20_986 MiB
+#   card PEAK, during an 11,622-token completion
+#                                      21_172 MiB  (3_140 MiB still free)
+#   => the engine's share at that peak 19_980 MiB  = 19.52 GiB = 20.95 GB
+# The figure below is that last line: the engine's share of the card with the
+# desktop excluded, which is what the guard must be able to give it. It is 6.3%
+# above the number this line used to compute — the same direction and nearly the
+# same size as the mlx block's 6%.
+#
+# Read `--gpu-memory-utilization` before changing it. It is a fraction of the
+# card's TOTAL, it is a BUDGET rather than a demand, and vLLM sizes the KV pool
+# to fill whatever is left of it: KV = util x 23.99 GiB - 19.02 GiB. So a bigger
+# number does not make the model fit better, it makes the KV pool bigger and the
+# card fuller. vLLM also does NOT subtract the Windows desktop — it only checks
+# that free >= requested at startup — so the desktop's 1-3 GiB is spent on top
+# of this budget, not inside it.
+#
+# 0.85 is what this line used to say, unexercised. Measured, it is the wrong
+# shape twice over: at 0.85 with vLLM's default `--max-num-seqs` the card went to
+# 24_173 MiB of 24_564 with 139 MiB free and CUDA-graph capture paged at 87 s for
+# ONE of 51 graphs (Owen felt it as the machine thrashing). 0.84 with
+# `--max-num-seqs 16` leaves 3_140 MiB free at the measured peak, and would still
+# leave about 1 GiB against the 3 GiB desktop the config declares an allowance
+# for. Going the other way, 0.79 does not start at all: the KV pool comes out at
+# -0.07 GiB and vLLM refuses with `No available memory for the cache blocks`.
+# The whole usable window on this card is roughly 0.80 to 0.88.
+#
+# Owen's ruling, 2026-09-12: "we dont need a big kv cache ... just dont fill the
+# card to the top with kv cache." Smaller util is the lever; `context_default`
+# stays 12288, which is the cleanup context BookForge asks for.
+memory_bytes_estimate = 20_950_548_480
+# `--max-num-seqs 16`: the number of CUDA graphs vLLM captures follows it. At the
+# default the 9B captured 51 graphs; at 16 it captures 7 piecewise + 2 full, in
+# 5 s and 0.09 GiB. Sixteen concurrent requests is also more than this one-model
+# lane will see, and it is the number BookForge's own text server runs on this
+# card (electron/text-server.ts, measured 2026-09-08).
+#
+# `--skip-mm-profiling`: Qwen3.5-9B is multimodal, and vLLM's memory profile
+# otherwise budgets for one image of the maximum feature size — a capability the
+# `llm` job type does not offer at all (images are phase 3's `vlm-pages`, a
+# different model on a different lane). MEASURED as an A/B at util 0.79, the same
+# run either way: with multimodal profiling the KV pool came out at -1.97 GiB and
+# the profiling run took 60.78 s; with `--skip-mm-profiling`, -0.07 GiB and
+# 0.86 s. So it is worth 1.90 GiB of the budget, and without it NO utilisation
+# that leaves the card headroom has a KV pool at all.
+#
+# It does not make the engine text-only, it only stops it RESERVING for an image.
+# Nothing in Crucible sends one today. If the `llm` proxy is ever given image
+# input, this line must come out and the utilisation be measured again.
+engine_args = [
+    "--dtype", "bfloat16",
+    "--gpu-memory-utilization", "0.84",
+    "--max-num-seqs", "16",
+    "--skip-mm-profiling",
+]
 
 [backends.mlx-darwin]
 engine = "mlx-lm"

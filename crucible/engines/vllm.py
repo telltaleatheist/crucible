@@ -70,4 +70,24 @@ class VllmEngine(SubprocessEngine):
             # on a host where pinning is somehow unavailable anyway, the engine
             # fails to start and says so rather than running degraded.
             "VLLM_WSL2_ENABLE_PIN_MEMORY": "1",
+            # The llm env has no CUDA compiler, and FlashInfer's sampler wants one.
+            #
+            # vLLM defaults `VLLM_USE_FLASHINFER_SAMPLER` to True and reaches
+            # FlashInfer's top-k/top-p kernel during warm-up. That kernel is not
+            # in the wheel: FlashInfer JIT-builds it on first use, and the build
+            # ends `RuntimeError: Could not find nvcc and default
+            # cuda_home='/usr/local/cuda' doesn't exist` — measured on Owen's PC
+            # 2026-09-12, after the KV cache had already been allocated, so the
+            # engine died two minutes into an otherwise healthy load.
+            #
+            # That is a property of the env, not of the host: `crucible install
+            # llm` builds `~/.crucible/envs/llm` from pinned pip wheels
+            # (PHASE2-LLM.md section 2), and a CUDA toolkit is not one of them.
+            # A WSL2 CUDA install ships the driver shim and no nvcc at all.
+            #
+            # So Crucible asks for the sampler that needs no compiler. If the
+            # recipe ever gains a CUDA compiler, delete this line and measure
+            # what FlashInfer's sampler is worth; do not delete it before, because
+            # the failure it prevents is a load that dies at the last step.
+            "VLLM_USE_FLASHINFER_SAMPLER": "0",
         }
