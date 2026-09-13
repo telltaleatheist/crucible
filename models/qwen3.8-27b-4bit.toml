@@ -21,23 +21,32 @@
 #
 # The cuda-linux repo is NOT the one this manifest was first asked for.
 # `cyankiwi/Qwen3.8-27B-AWQ-INT4` (1.6M downloads) is a real, correctly formed
-# int4 repo — verified on the hub: `quant_method = "compressed-tensors"`,
-# `format = "pack-quantized"`, 4-bit group-32 asymmetric, architecture
-# `Qwen3_5ForConditionalGeneration`, the same architecture the bf16 manifest
-# pins. But its safetensors come to 21_018_000_928 B, because it leaves lm_head
-# (248320 x 5120 bf16 = 2.54 GB) and the MTP block unquantized in-file on top of
-# the embeddings, the 48 linear-attention layers and the vision tower that every
-# W4A16 conversion of this model leaves in bf16. 21.02 GB of weights + 6.44 GB of
-# KV = 27.46 GB, which is 1.6 GiB PAST a 24 GB card. It does not fit, so it is
-# not the repo for a manifest whose whole purpose is fitting.
+# int4 repo — verified on the hub at its sha 6e134bae: `quant_method =
+# "compressed-tensors"`, `format = "pack-quantized"`, 4 bits, group 32,
+# asymmetric, architecture `Qwen3_5ForConditionalGeneration`, the same
+# architecture the bf16 manifest pins. It simply does not fit. Its safetensors
+# come to 21_018_000_928 B, and 21.02 + 6.44 of KV = 27.46 GB is 1.6 GiB PAST a
+# 24 GB card. A manifest whose whole purpose is fitting cannot point at it.
 #
-# `avyukth/Qwen3.8-27B-AWQ-INT4` is the same conversion done with lm_head, the
-# vision tower and MTP left out of the quantized save entirely (llm-compressor
-# 0.18.0, `AWQModifier` + `QuantizationModifier` scheme W4A16, group_size 128
-# symmetric — its recipe.yaml is in the repo). One 18_568_390_152 B safetensors
-# file, no separate MTP shard, so "the weights" is an unambiguous number and
-# every byte of it is a byte vLLM loads. Tagged `vllm`, `compressed-tensors`,
-# `w4a16`; 100k downloads.
+# `avyukth/Qwen3.8-27B-AWQ-INT4` is the same model converted with llm-compressor
+# 0.18.0 — `AWQModifier` + `QuantizationModifier`, scheme W4A16, group 128,
+# symmetric; its recipe.yaml is in the repo — and comes to 18_568_390_152 B in
+# ONE safetensors file. Both repos leave the same things in bf16 (the embeddings,
+# lm_head, the 48 linear-attention layers, the 333 vision tensors); read out of
+# the two safetensors headers, the entire 2.45 GB between them is:
+#   +849_398_784 B  15 `mtp.*` tensors cyankiwi carries and avyukth does not
+#   +1_600_184_320 B the cost of group-32 asymmetric over group-128 symmetric —
+#                    finer scales, plus zero-points, on 24.4 billion int4 weights
+# Neither is a flaw; they are just 2.45 GB this card does not have. avyukth is
+# tagged `vllm`, `compressed-tensors`, `w4a16`, has 100k downloads, ships no
+# separate MTP shard, and every byte of its one file is a byte vLLM loads — so
+# "the weights" here is a single unambiguous number.
+#
+# Verified in the pinned vLLM 0.29.0 env on the PC, by reading it and not by
+# running it: `registry.py` maps `Qwen3_5ForConditionalGeneration`,
+# `compressed-tensors` is a registered quantization method, `pack_quantized` is
+# handled, and `CompressedTensorsWNA16.get_min_capability()` is 75 — Turing and
+# up, so Ampere sm_86 is in range.
 #
 # Sizes of the other candidates at their current shas, for the record:
 #   avyukth/...-AWQ-INT4              18_568_390_152   (this one)
