@@ -147,7 +147,7 @@ request with neither is answered 401.
 | `POST /openai/chat/completions` | yes | proxied to the resident engine, streaming or not; **never loads one** |
 | `GET /accelerator` | yes | what is on the card right now, who is holding it, and which of them are Crucible's. It **reports and never evicts** |
 | `POST /uploads` | yes | multipart `file=@...` → `{blob_id, bytes, sha256}` |
-| `POST /jobs` | yes | `{type, model?, params, inputs}` → 202 `{job_id}` |
+| `POST /jobs` | yes | `{type, model?, params, inputs}` → 202 `{job_id}`, or **409 `server_busy`** naming who has the card — one job at a time, and the server does not queue |
 | `GET /jobs/{id}` | yes | status, progress, position, error, artifacts |
 | `GET /jobs/{id}/events` | yes | SSE, resumable with `Last-Event-ID` |
 | `GET /jobs/{id}/artifacts/{name}` | yes | bytes; `{name}.provenance.json` always exists |
@@ -174,6 +174,27 @@ old client talks to.**
 Errors are always `{"error": {"code", "message", "details"?}}`. Refusals name the thing
 refused: `unauthorized`, `api_version_mismatch` (426, naming both versions),
 `unknown_job_type`, `job_type_disabled`, `unknown_model`, `unknown_blob`, `unknown_job`.
+
+**`server_busy` (409) is the one to build a client around.** Crucible runs one job at a
+time and **refuses a second rather than queueing it** — queues belong to clients, admission
+belongs to the server (Owen, 2026-09-13; `docs/ARCHITECTURE.md` section 3), and the
+streaming door has always answered this way. The refusal carries the facts a client needs
+to explain itself and to back off, so it never has to poll blind:
+
+```json
+{"error": {"code": "server_busy",
+  "message": "this server is busy with job 51e14d2c… (tts 'sigma'), running since …",
+  "details": {"holder": "bookforge/owens-pc crucible-client/0.4.0",
+              "job_id": "51e14d2c…", "type": "tts", "model": "sigma",
+              "status": "running", "since": "2026-09-13T18:02:11Z",
+              "progress": 0.42, "message": "rendering 118 of 280"}}}
+```
+
+`holder` is the recorded User-Agent, and is `null` when the client sent none — **null means
+it did not say**, never "nobody". `status` is what dates `since`: `running` from `started`,
+`queued` from `created`. A streaming session busies the card without busying the lane, so
+the job types that talk to the resident engine or move it are additionally refused
+`engine_in_use`, naming the holder.
 
 Inputs come either inline or by blob:
 

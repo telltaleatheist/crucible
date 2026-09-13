@@ -441,6 +441,21 @@ class AlignJobType:
         _params(AlignParams, params, self.name)
         _require_ffmpeg()
         _, spec, _, _ = self._require_runnable(model)
+        # A streaming session holds the resident engine without occupying the
+        # lane, so a free lane is not a free card (crucible/residency.py). An
+        # align job that finds a voice resident LOADS OVER IT — `reclaimable_bytes`
+        # below counts that voice as free memory, exactly as an llm load does —
+        # and `Residency._refuse_mutation_if_claimed` is what stops it taking a
+        # session's voice off the card mid-sentence.
+        #
+        # That backstop turns the job into a `failed` a minute later, which is the
+        # shape this method exists to avoid: "refuse, by name, before the job is
+        # queued" (`JobType.preflight`). `llm` and `tts` have asked this question
+        # here since PHASE3-TTS.md section 7; `align` became a third mutator of
+        # residency in phase 4 and did not inherit it. Admission is the server's
+        # one scheduling answer (ARCHITECTURE.md section 3), so it is given here,
+        # in full, in one place.
+        self._residency.refuse_if_claimed(f"aligning with {model!r}")
         if self._residency.is_resident(KIND_ALIGN, model):
             # Already on the card and about to be reused. Running the guard would
             # refuse the job for memory the resident aligner is itself holding.
@@ -759,6 +774,11 @@ class UnloadAlignerJobType:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs an aligner")
         _params(UnloadAlignerParams, params, self.name)
+        # The same refusal `unload-model` and `unload-voice` already make: taking
+        # anything off the card while somebody holds it ends their conversation
+        # mid-sentence, and `Residency.unload` refuses it anyway — from inside the
+        # job, where it is a `failed` rather than an answer to the request.
+        self._residency.refuse_if_claimed(f"unloading {model!r}")
         if not self._residency.is_resident(KIND_ALIGN, model):
             raise ApiError(
                 409,

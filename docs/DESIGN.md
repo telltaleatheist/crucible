@@ -104,7 +104,7 @@ build version.
 | `GET /info` | yes | server `{name, version, api_version}`, host `{platform, arch, backend, gpu: {vendor, name, vram_bytes}}`, `job_types: [...]` (what this server accepts in `POST /jobs`), `capabilities: [{job_type, models}]` — **one row per capability, not one per postable type**: `llm` is operated through `load-model` and `unload-model`, neither of which is a capability, and listing them as such made one model appear three times in two shapes. A capability's model rows are `{id, revision, source, resident, vram_bytes}` — **except `llm`**, whose rows are `GET /v1/models`' rows verbatim (PHASE2-LLM.md section 5). One model, one description: a client reads a model's standing in one shape wherever it finds it, and never reconciles two. |
 | `GET /health` | yes | `{status: ok / warming / busy, queue_depth, resident_models}` |
 | `POST /uploads` | yes | multipart → `{blob_id, bytes, sha256}`. For inputs too big to inline. |
-| `POST /jobs` | yes | `{type, model?, params, inputs: {name: {blob_id} or {inline_base64}}}` (exactly one per input, unknown keys refused) → `{job_id}` (202). Refuses unknown type / model by name (400). |
+| `POST /jobs` | yes | `{type, model?, params, inputs: {name: {blob_id} or {inline_base64}}}` (exactly one per input, unknown keys refused) → `{job_id}` (202). Refuses unknown type / model by name (400). **Refuses `409 server_busy` when the lane is occupied** — the server admits one job at a time and does not queue (section 6). The refusal carries `details: {holder, job_id, type, model, status, since, progress, message}`, where `holder` is the recorded User-Agent (null when the client sent none), so a client can say *"GPU busy: foundry, 42% through a sigma render"* instead of polling blind. |
 | `GET /jobs/{id}` | yes | `{job_id, type, model, status: queued / running / done / failed / cancelled, progress, position, error (null when none), artifacts: [name], created, started, finished}` |
 | `GET /jobs/{id}/events` | yes | SSE, ids strictly increasing from 1: `queued {position}`, `warming` (phase 2, payload TBD), `progress {fraction, message}` (the first, `fraction 0`, marks the job running), `artifact {name}`, `done {artifacts}`, `failed {error}`, `cancelled {status}`. Resumable with `Last-Event-ID`. |
 | `GET /jobs/{id}/artifacts/{name}` | yes | bytes. `.../{name}.provenance.json` always exists (see section 7). |
@@ -141,7 +141,7 @@ HuggingFace (`owenmorgan/...`, private ones need the HF token on the server). Ne
 GitHub Releases. A model manifest (`models/<id>.toml`) names source, revision, files,
 per-backend caps.
 
-## 6. Residency and the queue
+## 6. Residency, admission, and the queue
 
 The server owns the accelerator. One exclusive lease per GPU: `tts`, `rvc`, `align`
 jobs run one at a time; `llm`/`vlm-pages` run through the engine's own continuous
@@ -149,9 +149,35 @@ batching. Models load on demand and are evicted least-recently-used when a job n
 VRAM the resident set can't give. Clients never see a lock file; they see `position`
 and `warming`.
 
-Two clients, one server: the queue is the arbiter. Two servers, one client: **one job,
-one server**. A book is never split across backends (an MLX render and an SGLang render
-are two different voices).
+**Queues belong to clients; admission belongs to the server** (Owen, 2026-09-13;
+ARCHITECTURE.md section 3). *"if the server is busy, it cant receive a new job. if its
+not busy, it receives the next job requested."* So `POST /jobs` **refuses `409
+server_busy`** while a job is on the lane, rather than appending behind it — the same
+policy the streaming door has always had (`409 stream_session_open`), applied to the
+door that disagreed with it. The reason is not simplicity: the client is the only thing
+that knows the chain, the pin, the priority and which book is being watched, so a
+server-side FIFO can only be a dumb queue that the smart client queue then has to model.
+Two arbitrators, one strictly less informed.
+
+The refusal is informative or it is useless — a bare "busy" makes clients poll, and
+polling is a *worse* queue than FIFO, since the winner becomes whoever polls at the
+luckiest moment rather than whoever asked first. So it names the holder and what it is
+doing (section 4).
+
+**The lane is not the only way to be busy.** A streaming session holds the resident
+engine without occupying the lane, so the job types that would talk to it or move it —
+`load-model`, `unload-model`, `load-voice`, `unload-voice`, `tts`, `align`,
+`unload-aligner` — additionally refuse `409 engine_in_use`, naming the holder. `asr` and
+`rvc` do not: they never touch the resident engine, and what they contend for is memory,
+which `accelerator.guard` already refuses by name.
+
+`crucible/jobs/queue.py` keeps the lane, the deque, `position`, `queue_depth`, cancel,
+events and provenance. One policy decision changed, at admission; `queue_depth` is now
+honestly 0 or 1, and restoring queueing is the same one line.
+
+Two clients, one server: the first to ask gets it and the second is told who has it.
+Two servers, one client: **one job, one server**. A book is never split across backends
+(an MLX render and an SGLang render are two different voices).
 
 ## 7. Provenance
 

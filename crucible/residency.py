@@ -353,16 +353,46 @@ class Residency:
             self._claim_thread = None
 
     def refuse_if_claimed(self, what: str) -> None:
-        """The same refusal as an HTTP 409, for a preflight to make before queuing."""
+        """The same refusal as an HTTP 409, for a preflight to make before queuing.
+
+        WHICH JOB TYPES ASK THIS, AND WHY THE REST DO NOT. Admission is the
+        server's one scheduling answer (ARCHITECTURE.md section 3) and the lane
+        is only half of it: a streaming session holds the resident engine
+        *without* occupying the lane, so `JobStore.refuse_if_busy` can say the
+        server is free while the card is not. This is the other half, and it is
+        asked by each type rather than centrally because the claim is about
+        **narrator's one stdin and one stdout**, not about VRAM in general — so
+        the answer genuinely differs per type:
+
+        - `load-model`, `unload-model`, `load-voice`, `unload-voice`,
+          `unload-aligner` **ask**: they move what is on the card, and doing that
+          under a session ends its conversation mid-sentence.
+        - `tts` (render) **asks**: it talks to the resident narrator directly, and
+          two conversations on that one pipe read each other's replies.
+        - `align` **asks** (added with the admission ruling): it is the third
+          mutator of residency, and without this it was accepted and then failed a
+          minute later at `_refuse_mutation_if_claimed`.
+        - `asr` and `rvc` **do not, deliberately**. Neither touches the resident
+          engine — they spawn their own worker and are handed only `owned_pids` —
+          so what they contend for is memory, not the wire. That contention is
+          already answered, by name, by `accelerator.guard` in their preflights,
+          which counts a resident engine's bytes as taken. Making them ask here
+          would quietly redefine the claim from "narrator's wire" to "the card",
+          which is a different rule and would need to be ruled as one.
+        - `echo` **does not**: it takes no accelerator at all. The lane is the
+          only thing it can be busy with.
+        """
         holder = self._claim
         if holder is None:
             return
         raise ApiError(
             409,
             "engine_in_use",
-            f"{what} needs the resident engine, which is held by {holder!r}. "
-            "narrator has one stdin and one stdout, so a streaming session and "
-            "a job cannot converse with it at the same time",
+            f"{what} needs the card, which is held by {holder!r}. The card has "
+            "one holder at a time, and both ways past that are damage: narrator "
+            "has one stdin and one stdout, so a second conversation reads the "
+            "first one's replies, and a job that loads or unloads would take the "
+            "engine off the card mid-sentence",
             {"held_by": holder},
         )
 

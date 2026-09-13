@@ -288,23 +288,43 @@ def test_artifact_traversal_is_refused(client: TestClient, auth: dict[str, str])
     assert response.json()["error"]["code"] == "invalid_artifact_name"
 
 
-def test_queue_runs_one_at_a_time(client: TestClient, auth: dict[str, str]) -> None:
-    first = submit(client, auth, {"alpha.bin": ALPHA}, delay_ms=200)
-    second = submit(client, auth, {"beta.bin": BETA}, delay_ms=0)
+def test_the_lane_takes_one_job_at_a_time(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    """One job on the lane, and the second is REFUSED rather than queued behind it.
 
-    # While the first runs, the second must be queued behind it with a position.
+    This test used to submit two and watch the second sit at `position: 1`. Owen
+    ruled that policy out on 2026-09-13 (ARCHITECTURE.md section 3): the client
+    owns the queue, the server owns admission. What it was really guarding — that
+    two jobs never share the lane — is unchanged and is what it still asserts;
+    only the shape of the server's answer has moved from a place in line to a
+    named refusal. The refusal's own body is `tests/test_admission.py`.
+    """
+    first = submit(client, auth, {"alpha.bin": ALPHA}, delay_ms=400)
+
     deadline = time.monotonic() + 10.0
-    saw_queued_behind = False
     while time.monotonic() < deadline:
-        second_state = client.get(f"/v1/jobs/{second}", headers=auth).json()
-        if second_state["status"] == "queued" and second_state["position"] == 1:
-            saw_queued_behind = True
-        if second_state["status"] != "queued":
+        if client.get(f"/v1/jobs/{first}", headers=auth).json()["status"] == "running":
             break
         time.sleep(0.01)
-    assert saw_queued_behind, "the second job never queued behind the first"
+    else:
+        raise AssertionError("the first job never started running")
+
+    refused = client.post(
+        "/v1/jobs",
+        json={"type": "echo", "params": {"delay_ms": 0},
+              "inputs": {"beta.bin": {"inline_base64":
+                                      base64.b64encode(BETA).decode("ascii")}}},
+        headers=auth,
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["error"]["code"] == "server_busy"
+    assert refused.json()["error"]["details"]["job_id"] == first
 
     assert wait_for_terminal(client, auth, first)["status"] == "done"
+    # And the lane takes the next one the moment it is free, which is the second
+    # half of the ruling and the half a stuck `_running_id` would break.
+    second = submit(client, auth, {"beta.bin": BETA}, delay_ms=0)
     assert wait_for_terminal(client, auth, second)["status"] == "done"
 
 

@@ -133,25 +133,41 @@ def test_a_running_job_fills_the_slot_and_says_what_it_is_doing(
         client.delete(f"/v1/jobs/{job_id}", headers=auth)
 
 
-def test_a_queued_job_reports_its_place_in_line(
+def test_the_bench_shows_one_job_and_nothing_waiting_behind_it(
     client: TestClient, auth: dict[str, str]
 ) -> None:
-    first = submit(client, auth, delay_ms=4_000)
-    second = submit(client, auth, delay_ms=4_000)
-    try:
-        body = wait_until(
-            client, auth, lambda a: a["queued"], f"job {second} queued behind {first}"
-        )
+    """Nothing queues, so the bench never draws a line.
 
+    This test used to submit two jobs and assert the second appeared in `queued`
+    at `position: 1` with `queue_depth: 2`. Owen ruled that policy out on
+    2026-09-13 (ARCHITECTURE.md section 3): the second submission is refused
+    `server_busy`, so there is no second row for this route to draw and the
+    intent behind the old assertion — *the bench shows contention honestly* — is
+    now served by the running row plus the refusal the other client got.
+
+    `queued` and `position` are NOT removed and are still rendered: the window
+    between admission and the lane picking a job up is real, if sub-millisecond.
+    It is exercised where it can be held still, on a store with no lane running
+    (`tests/test_admission.py`).
+    """
+    first = submit(client, auth, delay_ms=4_000)
+    try:
+        body = wait_until(client, auth, lambda a: a["running"], f"job {first} running")
         assert [row["job_id"] for row in body["running"]] == [first]
-        assert [row["job_id"] for row in body["queued"]] == [second]
-        assert body["queued"][0]["position"] == 1
-        assert body["queued"][0]["started"] is None
-        # running + queued, which is what a client sizing a wait wants.
-        assert body["slots"]["accelerated"]["queue_depth"] == 2
+        assert body["queued"] == []
+        assert body["slots"]["accelerated"] == {"busy": 1, "of": 1, "queue_depth": 1}
+
+        refused = client.post("/v1/jobs", json=job_body(delay_ms=0), headers=auth)
+        assert refused.status_code == 409, refused.text
+        # The bench and the refusal agree about who has the card — one fact, and
+        # the refusal is what a client that never polls this route still learns.
+        assert refused.json()["error"]["details"]["job_id"] == first
+
+        after = activity(client, auth)
+        assert after["queued"] == []
+        assert after["slots"]["accelerated"]["queue_depth"] == 1
     finally:
-        for job_id in (first, second):
-            client.delete(f"/v1/jobs/{job_id}", headers=auth)
+        client.delete(f"/v1/jobs/{first}", headers=auth)
 
 
 def test_a_finished_job_leaves_the_bench(

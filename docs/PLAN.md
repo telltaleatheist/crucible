@@ -22,6 +22,19 @@ to the model and that a connected server is queue capacity, which opened two mor
   `GET /v1/activity`; routing, affinity, and the ruling that a job is atomic. Owed ruling 5
   (the take ladder) is CLOSED by phase 6: the retake decision goes with the guard.
 
+**Superseded again, 2026-09-13 (same day, later still).** *"a connected server is queue
+capacity"* did not survive contact: Owen ruled that **queues belong to clients and
+admission belongs to the server** — *"if the server is busy, it cant receive a new job"* —
+and `docs/ARCHITECTURE.md` section 3 is the ruling, with 3.1 recording what shipped.
+`POST /v1/jobs` now answers `409 server_busy` naming the holder instead of appending to
+the deque. The lane, `position`, `queue_depth`, cancel and events are untouched; a server
+is capacity for exactly one job, and which job is the client's decision to make.
+
+**Not built, and deliberately (3.2): the "card is free" edge signal.** A lane-free signal
+would lie while a streaming session holds the card, the claim is released off the event
+loop with no publisher, and the consumer is the SDK. Clients poll `GET /v1/activity` until
+those three are settled.
+
 So what is left is not code. It is **a card, and Owen's rulings on the six things below.**
 
 ### Owed, and only a free card discharges it

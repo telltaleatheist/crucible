@@ -336,6 +336,58 @@ def test_somebody_else_on_the_card_refuses_by_name(
     assert response.json()["error"]["code"] == "accelerator_busy"
 
 
+def test_a_held_card_refuses_align_before_the_job_is_queued(
+    ready: TestClient, auth: dict[str, str]
+) -> None:
+    """A streaming session holds the card without occupying the lane.
+
+    So a free lane is not a free card, and `JobStore.refuse_if_busy` would have
+    let this job in. An align load UNLOADS whatever is resident to make room —
+    `reclaimable_bytes` counts a session's voice as free memory, exactly as an
+    `llm` load does — and until the admission ruling the only thing stopping it
+    was `Residency._refuse_mutation_if_claimed`, firing inside the lane and
+    turning the job into a `failed` a minute later.
+
+    `llm` and `tts` have asked this question in their preflights since
+    PHASE3-TTS.md section 7; `align` became the third mutator of residency in
+    phase 4 and did not inherit it. The claim is taken directly here rather than
+    through a real session: what is under test is the preflight, and a session is
+    a great deal of machinery to stand up to set one string.
+    """
+    residency = ready.app.state.residency
+    residency.claim("a tts stream on sigma", may_mutate=False)
+    try:
+        response = submit(ready, auth)
+        assert response.status_code == 409, response.text
+        error = response.json()["error"]
+        assert error["code"] == "engine_in_use"
+        assert error["details"]["held_by"] == "a tts stream on sigma"
+        assert "qwen3-aligner" in error["message"]
+
+        unload = ready.post(
+            "/v1/jobs",
+            headers=auth,
+            json={"type": "unload-aligner", "model": MODEL, "params": {}},
+        )
+        assert unload.status_code == 409, unload.text
+        assert unload.json()["error"]["code"] == "engine_in_use"
+    finally:
+        residency.release("a tts stream on sigma")
+
+    # Released, and the proof is that the refusal MOVED rather than vanished: the
+    # same `unload-aligner` is now answered `aligner_not_resident`, which is the
+    # honest complaint about an empty card and is reached only past the claim.
+    # Asserted this way rather than by running a render, so no worker subprocess
+    # is left mid-job at teardown on any platform.
+    after = ready.post(
+        "/v1/jobs",
+        headers=auth,
+        json={"type": "unload-aligner", "model": MODEL, "params": {}},
+    )
+    assert after.status_code == 409, after.text
+    assert after.json()["error"]["code"] == "aligner_not_resident"
+
+
 def test_a_chunk_with_no_audio_is_refused_rather_than_dropped(
     ready: TestClient, auth: dict[str, str]
 ) -> None:

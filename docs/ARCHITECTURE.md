@@ -130,9 +130,10 @@ One server, two policies, no reason.
   nameable.
 - **A "card is free" edge signal** so clients need not poll at all. Two clients waking
   together is a millisecond race, which is fine: this is one person with three machines, not
-  a multi-tenant system.
+  a multi-tenant system. *(Deferred, with reasons — see 3.2. A lane-free signal would lie
+  while a streaming session holds the card.)*
 - **The retry lives in the SDK**, written once, so BookForge and Foundry inherit it and
-  cannot drift.
+  cannot drift. *(Still owed; the 409 now carries everything it needs.)*
 
 ### What it costs: a policy change, not a removal
 
@@ -142,6 +143,88 @@ instead of appending to the deque. `queue_depth` becomes honestly 0 or 1.
 
 Ripping out 340 tested lines to get behaviour a policy flag gives you is the expensive
 version of the right idea — and if queueing is ever wanted back, it is the same one line.
+
+---
+
+### 3.1 BUILT, 2026-09-13 — what shipped, and the three questions it had to answer
+
+`JobStore.refuse_if_busy()` is the whole of it. `POST /v1/jobs` calls it; `enqueue` calls
+it again and is the authority. The lane, the deque, `position`, `queue_depth`, cancel,
+events and provenance are untouched.
+
+```json
+409 {"error": {"code": "server_busy", "message": "…", "details": {
+  "holder":  "bookforge/owens-pc crucible-client/0.4.0",
+  "job_id":  "51e14d2c…", "type": "tts", "model": "sigma",
+  "status":  "running", "since": "2026-09-13T18:02:11Z",
+  "progress": 0.42, "message": "rendering 118 of 280"}}}
+```
+
+Two fields beyond the sketch above, both earning their place. **`status`** makes `since`
+unambiguous — "running" dates from `started`, "queued" from `created` — and without it a
+client cannot tell a render that has been going an hour from one admitted two milliseconds
+ago. **`message`** is the holder's last progress line, which is what turns *"GPU busy"*
+into *"GPU busy: rendering 118 of 280"*. `holder` is null when the client sent no
+User-Agent: **null means it did not say**, and a name invented here would make a bench
+confidently wrong about whose render is on the card.
+
+**What counts as busy — the lane, and separately the card.** Admission is about **the
+lane**, uniformly, `echo` included. Exempting the types that need no accelerator would put
+them straight back on a deque, because the lane is exclusive whatever a job wants from it,
+and the server would be queueing again for exactly the jobs it claimed not to queue for.
+
+`Residency.warming` needs no check of its own: it is only ever set from inside a load job,
+which is on the lane, so it is strictly a sub-state of "a job is running". Adding a second
+test for it would be a guard against a bug rather than against a state.
+
+**A streaming session is the other way to be busy**, and it does not occupy the lane — so
+`refuse_if_busy` can truthfully say the server is free while the card is not. That half
+stays per-job-type in `preflight`, through `Residency.refuse_if_claimed`, because the claim
+is about *narrator's one stdin and one stdout* rather than VRAM in general, and the honest
+answer differs by type. `align` and `unload-aligner` were **added** to the askers: they are
+the third mutator of residency and were being accepted and then failed a minute later at
+`_refuse_mutation_if_claimed`. `asr` and `rvc` were deliberately **not** added — they never
+touch the resident engine, and what they contend for is memory, which `accelerator.guard`
+already refuses by name in their preflights. Making them ask would quietly redefine the
+claim from "the wire" to "the card", which is a different rule and would need ruling as one.
+
+**The race.** `enqueue` appends and sets `_wake`; the lane is a task on the same event loop
+and does not resume until the current one yields, so a job can be admitted with nothing yet
+running. A check that read only `_running_id` would let a second job in and `_pending` would
+reach 2 — the queue, back, reachable by two clients a millisecond apart. So admission reads
+**the deque**, in the store, where the lane's state is authoritative; the check and the
+append then happen in one synchronous stretch on the event loop, with no lock and no HTTP-
+layer coordination. A job admitted but not yet started is reported as the holder, with
+`status: "queued"` and `since` its `created`.
+
+### 3.2 DEFERRED: the "card is free" edge signal
+
+**Described, not built.** Crucible's SSE machinery is per-resource — a job's event log, a
+session's frame log — and a server-wide lane-edge stream is a new shape with three
+decisions in it, not a wiring job:
+
+1. **A lane-free signal would lie.** "The lane is free" is not "your job will be admitted":
+   with a streaming session open, `tts`, `align` and every load/unload are still refused
+   `engine_in_use`. A signal that fires and is then followed by a refusal is worse than
+   polling, because a client will build a retry on it. An honest signal must carry the
+   claim as well as the lane — or be per-job-type, which is a different endpoint again.
+2. **The claim is released off the event loop.** `Residency.release` runs on a worker
+   thread, and the stream watchdog closes sessions from another; neither has a loop
+   reference or any notification path. Making the claim observable as an edge means giving
+   `Residency` a thread-safe publisher, which is a real addition to the one file in this
+   server that must not be made subtle.
+3. **Connect-time level, then edges.** A client that subscribes while the server is already
+   free must be told so immediately or it waits for an edge that has passed. That is a
+   cursor-and-replay question, and both existing SSE doors answer it differently.
+
+And the consumer is the SDK, which is a separate package: a server-side edge stream with no
+client half is a feature nobody can use, with a wire to keep compatible forever.
+
+**Until it exists, clients poll `GET /v1/activity`** — which is cheap by design (the
+`nvidia-smi` probe is opt-in), already reports `running`, `progress` and `client`, and is
+now explicitly documented as a display and a preflight, never admission. The refusal itself
+carries `progress`, which is enough to back off for roughly as long as the holder has left,
+so the polling this avoids is the tight kind rather than the periodic kind.
 
 ---
 
@@ -179,9 +262,10 @@ Sequenced by what unblocks what, not by severity.
    in the audit.
 
 **Then — R5, the queue policy.**
-5. Crucible's job door refuses when busy, with an informative 409.
-6. The SDK carries the retry and the free-signal subscription.
-7. BookForge shows "GPU busy: <client>".
+5. ~~Crucible's job door refuses when busy, with an informative 409.~~ **done** (3.1),
+   with the card half extended to `align` and the free-signal deferred with reasons (3.2).
+6. The SDK carries the retry. The free-signal subscription waits on 3.2's three decisions.
+7. BookForge shows "GPU busy: <client>" — every field it needs is on the 409 already.
 
 **Then — R4, the log contracts.** Phase 6 removes the guard-event scrape. The remaining 38
 are each "promote the fact to an event", sized by the audit's table and done as their

@@ -755,8 +755,20 @@ from under a sentence. So the card now has a named owner: `Residency.claim(holde
 may_mutate=)`. A session claims it for its lifetime and promises never to load; the render
 door claims it for its batch and may load its own voice, on the thread it claimed on;
 `load`, `load_voice`, `load_aligner` and `unload` refuse **`engine_in_use`** to anybody else.
-All five card-touching job types make the same refusal in `preflight`, so a client is told
+The card-touching job types make the same refusal in `preflight`, so a client is told
 before its job is queued rather than watching it fail in the lane.
+
+> **Amended 2026-09-13 (ARCHITECTURE.md section 3.1).** This said "all five", counting
+> `load-model`, `unload-model`, `load-voice`, `unload-voice` and `tts`. It is **seven**:
+> `align` and `unload-aligner` were added with the admission ruling, having been the third
+> mutator of residency since phase 4 without ever asking — so an align job submitted under
+> an open session was accepted and then failed a minute later at
+> `_refuse_mutation_if_claimed`, which is the exact thing this paragraph says does not
+> happen. `asr` and `rvc` still do not ask, deliberately: they never touch the resident
+> engine, and their contention is memory, which `accelerator.guard` refuses by name.
+>
+> A count in prose is a fact with two owners (ARCHITECTURE.md rule R1), which is why it is
+> now stated as a list rather than a number.
 
 **DIFFERENCE 4 — the replay buffer is bounded by the window, not by a count, and a resume it
 cannot serve is refused.** A frame is dropped when it is older than the grace window **and**

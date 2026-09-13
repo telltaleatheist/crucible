@@ -573,9 +573,16 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
 
         IT REPORTS AND NOTHING ELSE. It does not admit, reserve, claim or lock. A
         client that reads "free" and submits is racing every other client, and
-        that race is ALREADY handled correctly by the lane: the second job
-        queues. Crucible owning a queue is precisely what makes admission not the
-        client's problem, and a reservation here would hand it back.
+        that race is settled at the door: `POST /v1/jobs` admits one and refuses
+        the other `server_busy`, naming the winner (ARCHITECTURE.md section 3).
+        The loser has lost nothing but a round trip, because it never gave up
+        ownership of its own queue — which is the point of the ruling. A
+        reservation here would be a second place to arbitrate, and a stale one.
+
+        **So this route is a bench display and a preflight, never admission.** It
+        is the honest answer to "how long until that finishes"; it is not
+        permission to submit, and a client must be able to be refused after
+        reading it. Only `POST /v1/jobs` can say yes.
 
         THE PROBE IS OPT-IN, and that is the one design decision in this route.
         `nvidia-smi` is a subprocess costing tens of milliseconds, and a bench
@@ -826,12 +833,38 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
 
     @private.post("/jobs", status_code=202)
     async def create_job(request: Request, body: JobCreate) -> dict[str, str]:
+        """Admit one job, or refuse with the facts about the one already here.
+
+        **This door refuses when the lane is busy (ARCHITECTURE.md section 3).**
+        It used to queue, which made Crucible answer the same question two ways:
+        the streaming door has always refused with `409 stream_session_open`
+        naming the holder, while this one accepted and appended. Same server,
+        same card, two policies. Now both refuse and both name who has it.
+
+        The order of the checks is the order of their cost and their specificity,
+        and it is deliberate. The type and model are resolved first, because
+        `unknown_job_type` is true whether or not anything is running and a client
+        with a typo should be told about the typo rather than about somebody
+        else's render. Admission comes next, before `preflight` — preflight
+        shells out (`ffmpeg -version`), reads manifests and probes the card with
+        `nvidia-smi`, and spending that on a request that cannot be admitted is
+        work done for a 409. It also comes before `store.create`, so a refused
+        submission never makes a directory, and before the inputs are
+        materialised, so it never writes a client's megabytes to disk to delete
+        them again.
+        """
         store: JobStore = request.app.state.store
         plugin = resolve(store.registry, body.type)
         model = resolve_model(plugin, body.model)
+        # Is there room right now? The one question the server answers about
+        # scheduling; the queue is the client's (ARCHITECTURE.md section 3).
+        store.refuse_if_busy()
         # Every refusal a job type can make about host state happens here, before
         # the job exists, so the client is told by name instead of watching a job
-        # fail (PHASE2-LLM.md section 5).
+        # fail (PHASE2-LLM.md section 5). The lane being free is not the only way
+        # to be busy: a streaming session holds the resident engine without
+        # occupying the lane, and the job types that would talk to it or move it
+        # refuse `engine_in_use` from here (crucible/residency.py).
         plugin.preflight(model, body.params)
 
         # The SDK sends `<clientName> crucible-client/<version>`; anything else
@@ -842,10 +875,14 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         job = store.create(body.type, model, body.params, client=agent)
         try:
             _materialise_inputs(config, job, body.inputs)
+            # `enqueue` asks admission again and is the authority on it; nothing
+            # awaits between here and the check above, so the two are one atomic
+            # stretch on the event loop. Inside the same `try` so that a refusal
+            # from either leaves no half-built job behind.
+            store.enqueue(job)
         except ApiError:
-            shutil.rmtree(job.dir, ignore_errors=True)
+            store.discard(job)
             raise
-        store.enqueue(job)
         return {"job_id": job.id}
 
     @private.get("/jobs/{job_id}")

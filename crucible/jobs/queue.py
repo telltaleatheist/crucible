@@ -1,14 +1,36 @@
 """The job store and the single exclusive lane that drains it.
 
-The server owns the accelerator (DESIGN.md section 6): one job runs at a time, in
-submission order, on one worker task. Clients never see a lock; they see `position`
-and the event stream.
+The server owns the accelerator (DESIGN.md section 6): one job runs at a time, on
+one worker task. Clients never see a lock; they see `position` and the event
+stream.
+
+**ADMISSION, NOT QUEUEING (Owen, 2026-09-13; ARCHITECTURE.md section 3).** *"i
+think all queuing logic should exist in the clients, not the server. if the
+server is busy, it cant receive a new job. if its not busy, it receives the next
+job requested."* So a submission arriving while the lane is occupied is
+**refused** — `refuse_if_busy` — rather than appended behind the running job.
+
+The reason is not simplicity. The client is the only thing that knows what the
+user wants: the chain, the pin, the priority, which book is being watched. A
+server-side FIFO can only ever be a dumb queue, and having one forces the smart
+client queue to *model* it — two arbitrators, one strictly less informed. It also
+ends an inconsistency that was already here: the streaming door has always
+refused (`ttsstream.py`, `409 stream_session_open`, naming the holder) while this
+door queued. One server, two policies, no reason.
+
+**The lane, the deque, `position`, `queue_depth`, cancel, events and provenance
+all stay exactly as they were.** What changed is one policy decision at
+admission, so `_pending` never grows past the job the lane is about to pick up —
+and if queueing is ever wanted back it is the same one line. Ripping out tested
+machinery to get behaviour a policy gives you is the expensive version of the
+right idea.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sys
 import uuid
 from collections import deque
@@ -82,6 +104,14 @@ class JobStore:
 
     @property
     def queue_depth(self) -> int:
+        """Jobs on the lane: running plus waiting.
+
+        Keeps its name, its shape and its arithmetic. Under the admission policy
+        it is honestly 0 or 1 — the only way it reads 1 with nothing running is
+        the sub-millisecond window between a submission being admitted and the
+        lane task waking to pick it up. Every phase-2 client reads this field;
+        nothing about it needed to change for the number to become truthful.
+        """
         return len(self._pending) + (1 if self._running_id is not None else 0)
 
     @property
@@ -109,12 +139,94 @@ class JobStore:
         return job
 
     def position(self, job: Job) -> int | None:
-        """0 while running, 1-based place in line while queued, null once terminal."""
+        """0 while running, 1-based place in line while queued, null once terminal.
+
+        Unchanged by the admission ruling, and deliberately so: `position` is
+        still what a client reads, it still means the same thing, and under the
+        ruling the only value it can take besides 0 and null is 1 — "admitted,
+        the lane has not picked it up yet". A client that already understands
+        `position` needs to learn nothing.
+        """
         if job.status == RUNNING:
             return 0
         if job.status == QUEUED:
             return self._pending.index(job.id) + 1
         return None
+
+    # --------------------------------------------------------------- admission
+
+    def refuse_if_busy(self) -> None:
+        """Refuse, by name and with the facts, when the lane is occupied.
+
+        Owen's ruling (ARCHITECTURE.md section 3): the server answers *"is there
+        room now"* and nothing else. This is that answer, and it lives here
+        rather than in the HTTP layer because **the lane's own state is the only
+        authority on it** — an admission check written against a snapshot taken
+        somewhere else is the two-arbitrators problem in miniature.
+
+        IT READS `_pending` AND NOT ONLY `_running_id`, which is the whole of the
+        race handling. `enqueue` appends and sets `_wake`; the lane is a task on
+        the same event loop and does not resume until the current one yields, so
+        for a moment there is an admitted job that nothing is running yet. A
+        check that asked only "is something running" would admit a second job in
+        that window and `_pending` would reach 2 — precisely the queue the ruling
+        removes, reachable by two clients submitting a millisecond apart. Reading
+        the deque closes it without a lock: the check and the append happen in one
+        synchronous stretch on the event loop (see `enqueue`).
+
+        THE REFUSAL CARRIES FACTS BECAUSE A BARE "BUSY" IS USELESS. It forces
+        clients to poll, and polling is a *worse* queue than FIFO — the winner
+        becomes whoever polls at the luckiest moment rather than whoever asked
+        first. So the body names the holder, the job, what it is doing and how far
+        along it is: enough for a client to back off intelligently, and exactly
+        the *"GPU busy: foundry"* line BookForge wants, for free.
+
+        `holder` is `Job.client`, the recorded User-Agent. It is null when
+        something spoke to this server without one — **null means "it did not
+        say"**, and inventing a name here would make a bench confidently wrong
+        about whose render is on the card (PHASE7-LANES.md section 5).
+        """
+        holder = self.running
+        if holder is None:
+            if not self._pending:
+                return
+            # Admitted, not yet picked up. Reported as the holder because it is:
+            # the lane is spoken for, and saying otherwise would be the polite
+            # lie that lets the second client in.
+            holder = self._jobs[self._pending[0]]
+
+        who = "an unnamed client" if holder.client is None else repr(holder.client)
+        what = holder.type if holder.model is None else f"{holder.type} {holder.model!r}"
+        # `started` for a running job, `created` for one the lane has not reached:
+        # both answer "since when", and a null `started` reported as `since` would
+        # read as "it has been busy since never".
+        since = holder.started if holder.started is not None else holder.created
+        doing = "" if not holder.message else f" — {holder.message}"
+        raise ApiError(
+            409,
+            "server_busy",
+            f"this server is busy with job {holder.id} ({what}), {holder.status} "
+            f"since {since}, submitted by {who}, {holder.progress:.0%} done"
+            f"{doing}. Crucible admits one job at a time and does not queue: the "
+            "client owns the queue, the server owns admission (ARCHITECTURE.md "
+            "section 3). Read GET /v1/activity to see when it is finished.",
+            {
+                "holder": holder.client,
+                "job_id": holder.id,
+                "type": holder.type,
+                "model": holder.model,
+                # Named so `since` is unambiguous: "running" dates from `started`,
+                # "queued" from `created`. Without it a client cannot tell a job
+                # that has been rendering for an hour from one admitted 2 ms ago.
+                "status": holder.status,
+                "since": since,
+                "progress": holder.progress,
+                # The holder's latest progress line, which is what turns "busy"
+                # into "rendering 118 of 280" on somebody else's bench. Null until
+                # the job has said anything.
+                "message": holder.message,
+            },
+        )
 
     # ------------------------------------------------------------------ submit
 
@@ -142,9 +254,39 @@ class JobStore:
         return job
 
     def enqueue(self, job: Job) -> None:
+        """Put an admitted job on the lane, or refuse if the lane took one first.
+
+        `refuse_if_busy` again, and not as a belt-and-braces repeat of the
+        caller's: this is where the append happens, so this is where the decision
+        has to be final. The two calls are one implementation of one fact — the
+        caller's is an early exit that avoids building a job directory and
+        materialising inputs for a submission that will be refused anyway.
+
+        Today nothing can slip between them: `POST /v1/jobs` runs from its check
+        to this call without an `await`, so it is one atomic stretch on the event
+        loop. This makes that a property of the queue rather than of a handler
+        somebody may later add an `await` to.
+        """
+        self.refuse_if_busy()
         self._pending.append(job.id)
         self.append_event(job, "queued", {"position": self.position(job)})
         self._wake.set()
+
+    def discard(self, job: Job) -> None:
+        """Forget a job that was never admitted, and delete its scratch.
+
+        A job exists from `create()`, which is before its inputs are written and
+        before `enqueue`. Anything refused in between must leave nothing behind:
+        a record left in `_jobs` would sit at `queued` forever without being on
+        the lane, and `position()` would raise `ValueError` off `deque.index` for
+        anyone who asked about it.
+        """
+        if job.id in self._pending:  # unreachable: only `enqueue` appends
+            raise RuntimeError(
+                f"job {job.id} is on the lane and cannot be discarded; cancel it"
+            )
+        self._jobs.pop(job.id, None)
+        shutil.rmtree(job.dir, ignore_errors=True)
 
     # ------------------------------------------------------------------ events
 

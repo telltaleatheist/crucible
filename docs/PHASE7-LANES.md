@@ -64,6 +64,20 @@ Owen's own setup.
 But his instinct — **there must not be two arbitrators** — was right, and it lands on this
 document rather than on the server.
 
+> **SUPERSEDED IN ONE DETAIL, 2026-09-13 (ARCHITECTURE.md section 3).** Owen went
+> further: *"i think all queuing logic should exist in the clients, not the server. if the
+> server is busy, it cant receive a new job."* So the second client **no longer waits —
+> it is refused `409 server_busy`, told who has the card and how far along they are.**
+>
+> The paragraph above is otherwise unchanged and its conclusion is strengthened, not
+> weakened: there is still no second queue to build, because the queue that exists is the
+> client's, which is the only one that knows the chain, the pin and the priority. What
+> changes for this document is one sentence in section 6 and one in section 5 — both
+> flagged there — and nothing at all in 2.5's rule below, which is about *routing*.
+>
+> `crucible/jobs/queue.py` keeps the lane, the deque, `position`, `queue_depth`, cancel,
+> events and provenance. `queue_depth` is honestly 0 or 1.
+
 ### What section 2 got wrong
 
 It had each connected machine contributing `1 GPU + 2 CPU` to **BookForge's** queue, with
@@ -94,14 +108,19 @@ Consequences, all of them simplifications:
 - **No per-machine slot arithmetic and no remote admission.** `RESOURCE_SLOTS` stays the
   compile-time constant it is. The local queue keeps describing the local machine, which is
   the only machine it can speak for.
-- **The protocol is submit-and-read-`position`.** Crucible answers the only question that
-  matters, authoritatively, because it is the one holding the card.
+- **The protocol is submit-and-be-answered.** Crucible answers the only question that
+  matters — *is there room now* — authoritatively, because it is the one holding the card.
+  Since the admission ruling that answer is a 202 or a `409 server_busy` naming the
+  holder, rather than a 202 and a `position`. The client keeps its own queue either way;
+  the difference is that it no longer has a copy of its row inside the server too.
 - **Distribution stays emergent and gets better.** Four books pinned to four servers all run
   at once because none of them occupies a local worker — and the local card goes on
   rendering a fifth.
-- **Contention surfaces honestly instead of being prevented.** A step behind someone else's
-  job reports `position: 3`, and the `client` recorded on each job (section 5) lets the
-  message name who is ahead: *"waiting behind owens-mac-studio's job"*.
+- **Contention surfaces honestly instead of being prevented.** A step that cannot get in
+  is refused `server_busy`, and the `client` recorded on each job (section 5) is on the
+  refusal, so the message names who is ahead: *"waiting behind owens-mac-studio's job"*.
+  (Before the admission ruling this read `position: 3`; the sentence it supports is the
+  same one.)
 - **`/v1/activity` changes role, not shape.** It is a **bench display** and a **preflight**
   (reachable, API version matches, job type enabled). It is never admission. Display and
   admission are different questions, and only one of them may be answered from a poll.
@@ -161,6 +180,20 @@ software. Three facts, stated plainly:
 `tts`, `asr`, `align`, `rvc`, `echo` — is serialised through it. That design is right for
 the reason it was chosen: **the card is exclusive**, so two jobs that both want it must
 not run at once.
+
+> Since the admission ruling (ARCHITECTURE.md section 3) the lane is also what *admission*
+> is about: a submission arriving while the lane is occupied is refused, not queued. That
+> is the reason `echo` is refused too even though it needs no card — exempting the types
+> that want no accelerator would put them straight back on a deque, because the lane is
+> exclusive whatever a job wants from it, and the server would be queueing again for
+> exactly the jobs it claimed not to queue for.
+>
+> **When the ancillary lane below is built it gets its own admission answer**, because it
+> has its own occupancy — two at a time, not one. `server_busy` will then have to name
+> *which* lane is full, and a job type's declaration of which lane it belongs to becomes
+> load-bearing at the door rather than only at the scheduler. Nothing about that is
+> decided here; it is recorded so the second lane is not built as if admission were still
+> a single global fact.
 
 **That reason does not apply to work that does not touch the card.** So a second,
 non-exclusive lane in Crucible for CPU work is architecturally *consistent* with the
@@ -442,10 +475,19 @@ It is an identification, and it is described as one.
 ### What it must not become
 
 `/v1/activity` reports. It does not admit, reserve, claim or lock. A client reading "slot
-free" and submitting is racing every other client, and **that race is already correctly
-handled** by the server's own lane: the second job queues. The whole point of Crucible
-owning a queue is that admission is not the client's problem, and an endpoint that let a
-client reserve a slot would put it back.
+free" and submitting is racing every other client, and **that race is settled at the
+door**: `POST /v1/jobs` admits one and refuses the other `409 server_busy`, naming the
+winner. An endpoint that let a client reserve a slot would be a second place to arbitrate,
+and a stale one.
+
+So this route is a **bench display** and a **preflight**, never admission. It is the
+honest answer to *"how long until that finishes"*; it is not permission to submit, and a
+client must be built to be refused after reading it. Only `POST /v1/jobs` can say yes.
+
+*(Before the admission ruling of 2026-09-13 this paragraph said the race was handled
+because "the second job queues". It no longer queues — it is refused with the facts. The
+rule the paragraph exists for, that display and admission are different questions and only
+one may be answered from a poll, is unchanged and is now literally enforced.)*
 
 ---
 
@@ -457,7 +499,18 @@ this machine.
 **Remote admission is the absence of a reason not to, and it is cheap:** the machine's
 last `/v1/activity` poll succeeded, its `api_version` matches, and the job type this step
 needs is enabled there (`/v1/info`'s `job_types`). It is explicitly **not** "the slot is
-idle" — the server queues, so submitting into a busy server is legal and often right.
+idle", because a poll cannot know that — the authoritative answer comes back from the
+submission itself.
+
+**Since the admission ruling (ARCHITECTURE.md section 3) a busy server refuses**, so
+submitting into one is legal but no longer *lands*. The client's own queue holds the row
+and retries; it has lost a round trip and nothing else, because it never handed ownership
+of that row to the server. What it must not do is treat `409 server_busy` as a failure —
+it is the one answer that is never the step's fault, it names the holder and it carries
+`progress`, which is enough to back off for about as long as the holder has left.
+
+**The retry belongs in the SDK**, written once, so BookForge and Foundry inherit it and
+cannot drift into two different back-off policies against one server.
 
 The failure that needs naming is **the machine that goes away mid-step**. A remote render
 is minutes to hours, and a closed laptop lid or a tailnet hiccup must not fail a chapter
