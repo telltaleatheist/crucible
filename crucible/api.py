@@ -420,6 +420,14 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     # itself answers to. They differ on mlx-lm, which has no
                     # --served-model-name (crucible/engines/mlx_lm.py).
                     "engine_model_name": resident.engine_model_name,
+                    # The context this engine was started with, under OpenAI's
+                    # own field name. This is the door Foundry reads — it asks
+                    # the OpenAI-shaped listing, not `/v1/models` — and it is the
+                    # one that must not lie, because `capFor` subtracts the
+                    # prompt from this number to size `max_tokens` and skips the
+                    # clamp entirely when it is absent (CLIENT-SURFACES.md
+                    # section 6.1).
+                    "max_model_len": resident.max_model_len,
                 }
             ],
         }

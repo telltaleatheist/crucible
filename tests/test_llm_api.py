@@ -177,6 +177,7 @@ def test_models_lists_every_manifest_with_its_standing(
     assert row["resident"] is False
     assert row["loadable"] is False
     assert row["context_default"] == 12288
+    assert row["max_model_len"] == 12288
     assert row["memory_bytes_estimate"] > 0
     assert "no weights at" in row["reason"]
 
@@ -265,8 +266,112 @@ memory_bytes_estimate = 3000000000
     assert [row["id"] for row in rows] == ["mac-only"]
     assert rows[0]["backend_supported"] is False
     assert rows[0]["revision"] is None
+    assert rows[0]["memory_bytes_estimate"] is None
+    # And no max_model_len either: this host would not serve it at any context.
+    # `context_default` still answers, because the model's own number is a fact
+    # about the model rather than about a backend block that is not there.
+    assert rows[0]["max_model_len"] is None
+    assert rows[0]["context_default"] == 4096
     by_type = {entry["job_type"]: entry for entry in capabilities}
     assert by_type["llm"]["models"] == rows
+
+
+# ------------------------------------------------------------- max_model_len
+
+
+def test_the_openai_listing_reports_the_context_the_engine_was_started_with(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """`/v1/openai/models` is the door Foundry reads, so it carries the number.
+
+    Without it `capFor` has no clamp at all and the request goes out unsized
+    (CLIENT-SURFACES.md section 6.1).
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    entry = llm_client.get("/v1/openai/models", headers=auth).json()["data"][0]
+    assert entry["id"] == MODEL
+    assert entry["max_model_len"] == 12288
+    # The same number vLLM was handed as --max-model-len.
+    assert engines[0].args[-2:] == ["--max-model-len", "12288"]
+
+
+def test_max_model_len_follows_the_engine_and_context_default_follows_the_manifest(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    fake_env: Path,
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """The one moment the two fields disagree, and which one is which.
+
+    A manifest edited while its engine is up: `context_default` is the manifest's
+    intent and moves with the file, `max_model_len` is what is being served and
+    stays with the engine. Re-deriving `max_model_len` from the manifest would
+    have this row promise a 32768-token context to a client talking to an engine
+    that was started at 8192 — and the client would size a request against it and
+    be refused by the engine.
+    """
+    fixture = tmp_path / "models"
+    fixture.mkdir()
+    manifest = fixture / "shifty.toml"
+
+    def write(context: int) -> None:
+        manifest.write_text(
+            f"""
+[model]
+id = "shifty"
+family = "demo"
+params_b = 1
+context_default = {context}
+
+[backends.cuda-linux]
+engine = "vllm"
+hf_repo = "demo/Demo-1B"
+revision = "0123456789abcdef0123456789abcdef01234567"
+memory_bytes_estimate = 3000000000
+""",
+            encoding="utf-8",
+        )
+
+    write(8192)
+    monkeypatch.setenv("CRUCIBLE_MODELS_DIR", str(fixture))
+    with make_client(enable_llm=True) as client:
+        spec = load_manifest("shifty", fixture).spec(FAKE_BACKEND.kind)
+        weights_dir = home / "models" / "shifty" / FAKE_BACKEND.kind
+        weights_dir.mkdir(parents=True)
+        (weights_dir / "crucible-pull.json").write_text(
+            json.dumps(
+                {
+                    "model": "shifty",
+                    "backend": FAKE_BACKEND.kind,
+                    "hf_repo": spec.hf_repo,
+                    "revision": spec.revision,
+                    "bytes": 3_000_000_000,
+                    "seconds": 1.0,
+                    "pulled": "2026-09-12T19:00:00+0000",
+                }
+            ),
+            encoding="utf-8",
+        )
+        events = run_job(client, auth, type="load-model", model="shifty")
+        assert events[-1]["event"] == "done", events[-1]
+        assert engines[0].args == ["--max-model-len", "8192"]
+
+        write(32768)  # somebody edits the manifest with the engine still up
+        row = client.get("/v1/models", headers=auth).json()[0]
+        assert row["resident"] is True
+        assert row["context_default"] == 32768, "the manifest's intent moved"
+        assert row["max_model_len"] == 8192, "what is being served did not"
+        entry = client.get("/v1/openai/models", headers=auth).json()["data"][0]
+        assert entry["max_model_len"] == 8192
 
 
 # -------------------------------------------------- the refusals before queuing
@@ -460,6 +565,9 @@ def test_the_4bit_27b_is_loadable_on_this_card_where_the_bf16_27b_is_not(
     # own 16384 and that is what vLLM is given as --max-model-len.
     assert load_manifest(SMALL_BIG_MODEL).context_default == 98304
     assert small["context_default"] == 16384
+    # Nothing is resident, so what this host WOULD serve it at is the whole
+    # answer, and the two fields agree.
+    assert small["max_model_len"] == 16384
     assert small["memory_bytes_estimate"] == 21_633_171_456
     assert small["revision"] == (
         load_manifest(SMALL_BIG_MODEL).spec(FAKE_BACKEND.kind).revision

@@ -83,17 +83,35 @@ eviction of other people's processes, ever.
 
 | Route | Auth | Returns |
 |---|---|---|
-| `GET /v1/models` | yes | `[{id, family, params_b, revision, backend_supported, installed, resident, loadable, reason (when not loadable), memory_bytes_estimate, context_default}]` |
+| `GET /v1/models` | yes | `[{id, family, params_b, revision, backend_supported, installed, resident, loadable, reason (when not loadable), memory_bytes_estimate, context_default, max_model_len}]` |
 | `POST /v1/jobs {type: "load-model", model}` | yes | a normal job. Events: `queued`, `warming {message}` streamed from the engine's readiness (several), `done {resident: id}`. Refusals by name before queuing: `unknown_model`, `model_not_installed`, `backend_unsupported`, `accelerator_busy`, `insufficient_memory`, `env_missing`. |
 | `POST /v1/jobs {type: "unload-model", model}` | yes | a normal job; `done {resident: null}` — the same field the load reports, saying what is resident *now*, which after an unload is nothing. `model_not_resident` if it isn't. |
 | `POST /v1/openai/chat/completions` | yes | proxied to the resident engine, streaming or not, verbatim but for `model` (see below). `model` in the body must equal the resident id, else **409 `model_not_resident`** naming the resident model (or none). Never loads implicitly. |
-| `GET /v1/openai/models` | yes | the resident model in OpenAI's list shape, or an empty list. |
+| `GET /v1/openai/models` | yes | the resident model in OpenAI's list shape (`{id, object, created, owned_by, engine_model_name, max_model_len}`), or an empty list. |
 
 `revision` is the pin in **this host's** backend block, so a client records the same sha
 the puller used; it is `null` — not `""` — when `backend_supported` is false, because a
 model this host cannot serve has no revision here to name. `memory_bytes_estimate` is
 `null` in that same case and for the same reason: both figures live in the backend block
 this manifest does not have, and `0` would read as "needs nothing".
+
+`context_default` and `max_model_len` are two fields because they answer two questions.
+`context_default` is the **manifest's intent**: what this host would serve this model at,
+its backend block's own number where it has one (section 1). `max_model_len` is **what is
+being served right now**: for the resident model it is the number the engine was actually
+started with, read off the engine's record and not re-derived from the manifest, so a
+manifest edited under a running engine cannot make this row promise a context nothing is
+serving; for every other model it is what this host would start it with. They agree on a
+server nobody has edited underneath, and the one moment they disagree is the moment a
+client needs to be able to tell them apart. `max_model_len` is `null` when
+`backend_supported` is false, alongside `revision` and `memory_bytes_estimate`.
+
+`GET /v1/openai/models` carries `max_model_len` too, under OpenAI's own field name, and
+that is the door that matters: Foundry reads the OpenAI-shaped listing rather than
+`/v1/models`, and its `capFor` (`vllm.ts:208`) sizes `max_tokens` as
+`max_model_len − (⌈chars/2.5⌉ + 256)` — **with no clamp at all when the server does not
+report the field** (CLIENT-SURFACES.md section 6.1). An unclamped request is a 400 from
+the engine, so the field being absent costs a whole call.
 
 `GET /v1/info` gains `capabilities: [{job_type: "llm", models: [...]}]` whose rows are the
 `/v1/models` rows **verbatim**, produced by the same function. That is the one exception to
