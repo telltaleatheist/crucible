@@ -1,0 +1,214 @@
+/**
+ * End to end against a real Crucible server with the `llm` job type, a real
+ * engine, and a real card. This is the test that proves phase 2.
+ *
+ * It needs three environment variables and refuses to run without them — a
+ * skipped e2e is a green run that proved nothing:
+ *
+ *   CRUCIBLE_URL        e.g. http://127.0.0.1:7100  (no /v1)
+ *   CRUCIBLE_TOKEN      the token `crucible token --show` prints
+ *   CRUCIBLE_LLM_MODEL  the model id to exercise, e.g. qwen3.5-9b
+ *
+ * The tests run in file order and depend on each other: the model is loaded
+ * once at the top and unloaded at the bottom, because loading it is the
+ * expensive part and because phase 2 keeps exactly one model resident.
+ *
+ * It touches the GPU. Before running it, `nvidia-smi` must show only the
+ * desktop: Crucible never evicts anyone else's work, so a busy card makes the
+ * load refuse with `accelerator_busy`, which is the contract working, not a
+ * test failure.
+ */
+
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+
+import {
+  CrucibleClient,
+  CrucibleRefused,
+  type JobEvent,
+  type ModelInfo,
+} from '../src/index.js';
+
+function required(name: string): string {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === '') {
+    throw new Error(
+      `${name} is not set. The crucible llm e2e runs against a real server with a ` +
+        `real engine and will not pretend otherwise: set CRUCIBLE_URL, ` +
+        `CRUCIBLE_TOKEN and CRUCIBLE_LLM_MODEL.`,
+    );
+  }
+  return value;
+}
+
+const URL_ = required('CRUCIBLE_URL');
+const TOKEN = required('CRUCIBLE_TOKEN');
+const MODEL = required('CRUCIBLE_LLM_MODEL');
+
+const crucible = new CrucibleClient({
+  url: URL_,
+  token: TOKEN,
+  clientName: 'crucible-e2e-llm',
+});
+
+/** The row for the model under test, or a failure naming what the server does offer. */
+async function row(): Promise<ModelInfo> {
+  const models = await crucible.models();
+  const found = models.find((model) => model.id === MODEL);
+  assert.ok(
+    found !== undefined,
+    `CRUCIBLE_LLM_MODEL=${MODEL} is not one of the server's models ` +
+      `(${models.map((model) => model.id).join(', ') || 'none'})`,
+  );
+  return found;
+}
+
+/** Drain a job's whole event stream. */
+async function collect(jobId: string): Promise<JobEvent[]> {
+  const events: JobEvent[] = [];
+  for await (const event of crucible.events(jobId)) events.push(event);
+  return events;
+}
+
+// ------------------------------------------------------------------- models
+
+test('the server offers the llm capability and lists the model', async () => {
+  const info = await crucible.info();
+  const llm = info.capabilities.find((capability) => capability.jobType === 'llm');
+  assert.ok(llm !== undefined, 'the phase-2 server must offer the llm job type');
+
+  const model = await row();
+  assert.equal(model.family.length > 0, true, 'the manifest must name a family');
+  assert.ok(model.paramsB > 0, 'the manifest must give a parameter count');
+  assert.ok(model.memoryBytesEstimate > 0, 'the manifest must give a measured memory estimate');
+  assert.ok(model.contextDefault > 0, 'the manifest must give a default context');
+  assert.equal(model.backendSupported, true, `${MODEL} has no block for this host's backend`);
+  assert.equal(model.installed, true, `${MODEL} is not installed: crucible models pull ${MODEL}`);
+  if (!model.loadable) {
+    // `reason` is guaranteed present when `loadable` is false; the client
+    // refuses a row that omits it, so this never prints "undefined".
+    assert.fail(`${MODEL} is not loadable: ${model.reason}`);
+  }
+  assert.ok(!('reason' in model), 'a loadable model carries no reason');
+});
+
+// --------------------------------------------------------------------- load
+
+test('load-model warms the engine and finishes naming the resident model', async () => {
+  const jobId = await crucible.loadModel(MODEL);
+  const events = await collect(jobId);
+
+  const names = events.map((event) => event.event);
+  assert.equal(names[0], 'queued', `the stream began with ${String(names[0])}`);
+  assert.equal(names.at(-1), 'done', `the load ended ${String(names.at(-1))}: ${JSON.stringify(events.at(-1))}`);
+  assert.ok(
+    names.includes('warming'),
+    'loading an engine must stream its readiness as warming events',
+  );
+  for (const event of events) {
+    if (event.event === 'warming') {
+      assert.equal(typeof event.data.message, 'string');
+      assert.ok(event.data.message.length > 0, 'a warming event must say something');
+    }
+  }
+
+  const done = events.at(-1)!;
+  assert.equal(done.event, 'done');
+  assert.equal(done.event === 'done' ? done.data.resident : null, MODEL);
+
+  const health = await crucible.health();
+  assert.deepEqual(health.residentModels, [MODEL]);
+
+  const model = await row();
+  assert.equal(model.resident, true, `${MODEL} finished loading but does not read as resident`);
+});
+
+// --------------------------------------------------------------------- chat
+
+test('chat returns a non-empty completion from the resident engine', async () => {
+  const answer = await crucible.chat({
+    model: MODEL,
+    messages: [
+      { role: 'system', content: 'Answer in one short sentence.' },
+      { role: 'user', content: 'Name one colour.' },
+    ],
+    temperature: 0,
+    maxTokens: 64,
+  });
+
+  assert.ok(answer.id.length > 0, 'the completion must carry an id');
+  assert.equal(answer.model, MODEL);
+  assert.ok(answer.content.trim().length > 0, 'the completion must carry text');
+  assert.ok(answer.finishReason.length > 0, 'the engine must say why it stopped');
+  assert.ok(answer.usage.promptTokens > 0, 'the engine must count the prompt');
+  assert.ok(answer.usage.completionTokens > 0, 'the engine must count the completion');
+  assert.equal(
+    answer.usage.totalTokens,
+    answer.usage.promptTokens + answer.usage.completionTokens,
+    'the totals must add up',
+  );
+});
+
+test('chatStream yields deltas that concatenate to the answer', async () => {
+  const deltas: string[] = [];
+  for await (const delta of crucible.chatStream({
+    model: MODEL,
+    messages: [
+      { role: 'system', content: 'Answer in one short sentence.' },
+      { role: 'user', content: 'Name one colour.' },
+    ],
+    temperature: 0,
+    maxTokens: 64,
+  })) {
+    deltas.push(delta);
+  }
+
+  assert.ok(deltas.length > 0, 'a streamed completion must yield at least one delta');
+  assert.ok(deltas.join('').trim().length > 0, 'the deltas must concatenate to text');
+});
+
+test('chat on a model that is not resident is refused by name, never loaded implicitly', async () => {
+  const wrong = `${MODEL}-not-a-real-model`;
+  await assert.rejects(
+    crucible.chat({ model: wrong, messages: [{ role: 'user', content: 'hello' }] }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleRefused, `got ${String(error)}`);
+      assert.equal(error.status, 409);
+      assert.equal(error.code, 'model_not_resident');
+      assert.match(
+        error.serverMessage,
+        new RegExp(MODEL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+        'the refusal must name the model that IS resident',
+      );
+      return true;
+    },
+  );
+
+  // The refusal must not have changed what is resident.
+  assert.deepEqual((await crucible.health()).residentModels, [MODEL]);
+});
+
+// ------------------------------------------------------------------- unload
+
+test('unload-model frees the card and the model stops reading as resident', async () => {
+  const jobId = await crucible.unloadModel(MODEL);
+  const events = await collect(jobId);
+  assert.equal(
+    events.at(-1)?.event,
+    'done',
+    `the unload ended ${String(events.at(-1)?.event)}: ${JSON.stringify(events.at(-1))}`,
+  );
+
+  const model = await row();
+  assert.equal(model.resident, false, `${MODEL} unloaded but still reads as resident`);
+  assert.deepEqual((await crucible.health()).residentModels, []);
+
+  await assert.rejects(
+    crucible.chat({ model: MODEL, messages: [{ role: 'user', content: 'hello' }] }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleRefused, `got ${String(error)}`);
+      assert.equal(error.code, 'model_not_resident');
+      return true;
+    },
+  );
+});
