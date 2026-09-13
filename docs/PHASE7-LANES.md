@@ -314,12 +314,54 @@ global toggle the machine a job lands on is decided by whatever the toggle happe
 hours later, in an order he did not choose. It also cannot express "these three chapters
 on the Mac, those three on the PC", which is the case that motivated the question.
 
-**So: a per-row pin, defaulting to Any.** `Run on: [ Any | This PC | Mac Studio ]`, set when
-the row is created and editable while it is still queued. **`Any` means "the first eligible
-machine", never "spread across machines"** — and that gloss belongs next to the option in
-the UI, because "Any" reads like load-balancing to anyone who has not read this section.
-Distribution here is an emergent property of several servers being configured and several
-jobs being pinned, not something the queue performs. The decision is recorded at the
+**So: a per-row pin — and `Any` is NOT the default, because the machines are not equal.**
+
+Owen, 2026-09-13: *"the mac is significantly slower than the pc. 90% of the time im going
+to want to use the pc, hands down. but if im doing lots of jobs at the same time, im going
+to want the ability to overflow the queued items to the mac. so its not a situation where
+all gpus are equal and will be picked equally."*
+
+An earlier draft of this section had the pin default to `Any`, meaning "the first eligible
+machine". **That was wrong, and the name was the tell.** "Any" says the machines are
+interchangeable. They are not: `cuda-linux` on the 3090 Ti and `mlx-darwin` on the M1 Ultra
+differ by enough that sending a job to the slower one when the faster one is merely BUSY
+can finish later than waiting would have. A scheduler that treats them as equal is not
+being neutral — it is being wrong about the hardware, silently, in the direction that costs
+wall-clock.
+
+**The correction is two independent facts, because Owen's sentence contains two.**
+
+**1. Machines are RANKED, once, in the registry** — not per row. `rank` is a property of a
+server entry (this PC 1, the Mac 2), set in settings where a person thinks about hardware
+rather than while queueing a book. The default pin for any new row is **the highest-ranked
+eligible machine**, which is the 90% case with nothing to click.
+
+**2. Overflow is OPT-IN, per row, and defaults to OFF.** `May overflow if busy`. With it
+off — the default — a row waits for its machine, which is what "90% of the time I want the
+PC, hands down" means: the PC being busy is a reason to wait, not a reason to go somewhere
+slower. With it on, a refusal sends the row to the next machine down the rank.
+
+That is the whole of it, and it maps to his sentence exactly: *the ability* to overflow is
+a thing you turn on when you are queueing a night's work, and off the rest of the time.
+
+**What a 409 means therefore depends on one flag, and both behaviours fall out of it:**
+
+| the row says | a `server_busy` means |
+|---|---|
+| overflow **off** (default) | **wait.** This machine or none. |
+| overflow **on** | try the next machine down the rank; wait when the list runs out |
+| pinned to a NAMED machine | **wait**, always — a pin is an instruction, and overflow does not override it |
+
+**Distribution is still emergent and still not a scheduler.** Nothing measures throughput,
+predicts a finish time, or balances anything. It is a ranked list, a flag, and a refusal
+that arrives fast enough to act on.
+
+**What is NOT proposed, and why.** The genuinely optimal answer to "should this job wait for
+the fast machine or run now on the slow one" needs how long the current job has left and how
+much slower the other machine is for THIS job type. Crucible reports progress but nothing
+estimates a finish, and the MLX/CUDA ratio is per workload rather than a constant. A
+scheduler that guessed would be wrong in a way nobody could see. A flag the operator sets is
+right in a way they can. The decision is recorded at the
 moment the intent exists — when Owen makes the row — instead of being inferred from global
 state at an unpredictable later time. It costs almost nothing, because section 4 already
 requires an eligibility function; a pin is one more input to it:
