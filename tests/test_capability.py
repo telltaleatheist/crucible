@@ -590,3 +590,60 @@ def test_doctor_calls_an_unbuilt_but_fitting_type_a_note_not_a_problem(
     report = json.loads(capsys.readouterr().out)
     assert report["healthy"] is True
     assert "tts" in report["capability"]["could_enable"]
+
+
+# ------------------------------------------------------------- the route
+
+def test_the_capability_route_answers_every_class_and_its_reason(
+    make_client, auth
+) -> None:
+    """The read Foundry and BookForge decide what to ask for from.
+
+    PHASE 9 made the act-to-model mapping a per-host fact, so a client that was
+    handed a model id by configuration would be carrying a model this server may
+    have refused.
+    """
+    total, allowance = 26 * 1024 ** 3, 3 * 1024 ** 3
+    decided = capability.record(
+        "cuda-linux",
+        total_bytes=total,
+        desktop_allowance_bytes=allowance,
+        decisions=capability.decide_all(
+            "cuda-linux", total_bytes=total, desktop_allowance_bytes=allowance
+        ),
+    )
+    with make_client(capability=decided) as instance:
+        body = instance.get("/v1/capability", headers=auth)
+    assert body.status_code == 200, body.text
+    record = body.json()
+    assert record["backend_kind"]
+    assert record["total_bytes"] > 0
+    names = {row["capability"] for row in record["classes"]}
+    # The eight classes. `simplify` and `analysis` are deliberately NOT here:
+    # they select the model `translate` selects, and a capability axis nothing
+    # selects on is a field that will drift (Owen, 2026-09-13).
+    # translate / simplify / analysis are SEPARATE, and share a selected model.
+    # Owen, 2026-09-13: a job must never be named as a different job.
+    assert names == {
+        "align", "analysis", "asr", "clean", "echo", "pages", "rvc",
+        "simplify", "translate", "tts",
+    }
+    picked = {row["capability"]: row["selected"] for row in record["classes"]}
+    assert picked["translate"] == picked["simplify"] == picked["analysis"], picked
+    for row in record["classes"]:
+        # Every row answers with a reason whichever way it went — a class turned
+        # off records the number that turned it off.
+        assert row["reason"], row["capability"]
+        assert isinstance(row["enabled"], bool)
+        if row["enabled"]:
+            assert row["selected"] or row["capability"] == "echo"
+
+
+def test_a_server_that_has_decided_nothing_says_so_rather_than_answering_empty(
+    client, auth
+) -> None:
+    """Absent is its own answer. Empty rows would read as "probed, nothing fit",
+    which is the opposite piece of news."""
+    body = client.get("/v1/capability", headers=auth)
+    assert body.status_code == 503, body.text
+    assert body.json()["error"]["code"] == "capability_undecided"

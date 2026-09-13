@@ -335,6 +335,53 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         """Unauthenticated. Lets a client tell "wrong token" from "not a Crucible"."""
         return {"crucible": True, "name": config.name, "api_version": API_VERSION}
 
+    # ------------------------------------------------------------ capability
+
+    @private.get("/capability")
+    async def capability(request: Request) -> dict[str, Any]:
+        """What this server can hold, per capability class, and why not.
+
+        The read a client needs before it decides what to ask for. PHASE 9 made
+        the act-to-model mapping a PER-HOST fact — `crucible install` probes the
+        card and picks the largest candidate that fits, so a 24 GB box serves
+        `translate` with a 4-bit 27B, a bigger one serves it with something else,
+        and a 12 GB box does not serve it at all. A client that was handed a model
+        id by configuration would be carrying a model this server may have
+        refused.
+
+        WHY A CLASS AND NOT A JOB TYPE. `enable_llm` is one boolean and Owen
+        ruled translation binary per server, so `clean` and `translate` have to be
+        able to disagree. They are separate classes here for that reason and no
+        other; `simplify` and `analysis` are NOT classes, because they select the
+        same model `translate` does and a capability axis that nothing selects on
+        is a field that will drift (Owen, 2026-09-13).
+
+        `enabled: false` IS AN ANSWER, not an error. A server that cannot
+        translate says so with the number that decided it, and a client should be
+        able to render "this machine cannot do that" without it looking like a
+        fault.
+
+        THIS IS A RECORD, NOT AN AUTHORITY. `[jobs] enable_*` remains the single
+        owner of what this server offers; this says what the numbers were when
+        somebody decided. `total_bytes` is the card the decision was made on, so a
+        reader can tell a stale record from a current one — which is how a swapped
+        GPU is noticed without anybody writing down a date.
+        """
+        record = config.capability
+        if record is None:
+            # Absent is its own answer and must not be dressed up as an empty
+            # decision: a config written before `crucible capability` ran, or by a
+            # build that predates it, has DECIDED NOTHING. Returning empty rows
+            # would read as "probed, and nothing fit", which is the opposite news.
+            raise ApiError(
+                503,
+                "capability_undecided",
+                "this server has no capability record; nothing has probed the card "
+                "on this host yet. Run `crucible capability --write` (or reinstall) "
+                "to decide, and read `GET /v1/info` for what it offers meanwhile",
+            )
+        return record.to_dict()
+
     # ------------------------------------------------------------------ info
 
     @private.get("/info")

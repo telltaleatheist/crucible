@@ -213,6 +213,50 @@ CLASSES: tuple[CapabilityClass, ...] = (
             "this build ships is already 4-bit, so this host cannot translate."
         ),
     ),
+    # THREE ACTS, ONE MODEL, THREE CLASSES. `simplify` and `analysis` select the
+    # same 27B `translate` does and will answer identically on every card this
+    # build knows — and they are still separate classes, on Owen's ruling of
+    # 2026-09-13: *"they can't lie to the user and say a translate job is running
+    # when it's actually a simplify job. It must accurately represent the job
+    # that's running. Previously, before crucible, everything ran under
+    # translate."*
+    #
+    # That is the naming half, and it is the half that decides this table.
+    # Folding them into one class would have made a client ask about `translate`
+    # in order to learn whether it may simplify, which puts the old lie back at
+    # the API boundary — and naming an umbrella after one of its members is
+    # exactly how "everything ran under translate" happened in the first place.
+    #
+    # The usual objection to a duplicated axis — that a field nothing selects on
+    # differently is a field that will drift — does not hold here, twice over.
+    # These are three DIFFERENT facts that share an answer today, not one fact
+    # with three owners; nothing can disagree with anything. And they can already
+    # be seen to diverge: `analysis` needs guided decoding (a `response_format`
+    # schema) and `pages` needs vision, neither of which is a memory question, so
+    # the day a backend serves the 27B without guided decoding this table has
+    # somewhere to say so.
+    CapabilityClass(
+        name="simplify",
+        job_type="llm",
+        purpose="simplification, which runs on the same 27B translation needs",
+        noun="qwen3.8 variants",
+        candidates=_from_catalog(load_all_manifests, family="qwen3.8"),
+        binary_note=(
+            "Simplification is binary per server for translation's reason: it "
+            "needs a 27B and the smallest this build ships is already 4-bit."
+        ),
+    ),
+    CapabilityClass(
+        name="analysis",
+        job_type="llm",
+        purpose="structured analysis answers, on the same 27B",
+        noun="qwen3.8 variants",
+        candidates=_from_catalog(load_all_manifests, family="qwen3.8"),
+        binary_note=(
+            "Analysis is binary per server for translation's reason: it needs a "
+            "27B and the smallest this build ships is already 4-bit."
+        ),
+    ),
     CapabilityClass(
         name="pages",
         job_type="llm",

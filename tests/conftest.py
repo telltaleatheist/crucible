@@ -72,6 +72,10 @@ def make_app(home: Path) -> Callable[..., FastAPI]:
         token: str = TOKEN,
         backend: Backend = FAKE_BACKEND,
         desktop_allowance_bytes: int = 3 * 1024 ** 3,
+        # None means this host has DECIDED NOTHING, which is the honest default
+        # for a fixture: a config written before anything probed the card. Pass a
+        # record to test a server that has decided.
+        capability: Any = None,
     ) -> FastAPI:
         write_config(
             home,
@@ -87,6 +91,7 @@ def make_app(home: Path) -> Callable[..., FastAPI]:
             enable_align=enable_align,
             enable_rvc=enable_rvc,
             desktop_allowance_bytes=desktop_allowance_bytes,
+            capability=capability,
         )
         return create_app(load_config(home), backend)
 
