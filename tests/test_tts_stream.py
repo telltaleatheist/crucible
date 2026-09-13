@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
+import socket
 import threading
 import time
 from contextlib import contextmanager
@@ -66,6 +68,13 @@ LONG_TEXT = (
 #: How long a test waits for a frame it expects. Generous against a fake that
 #: answers in microseconds; it is a wedge detector, not a budget.
 WAIT = 20.0
+
+#: How long a dropped listener's reader thread may take to unwind. It is end of
+#: file on a socket that has just been shut down, so this is a wedge detector
+#: too — and one that earns its name: when the drop was `close()` rather than
+#: `shutdown()`, every test in this file silently paid this in full on macOS
+#: (measured 2026-09-14: 20.3 s each, against well under a second on Linux).
+DROP_UNWIND_SECONDS = 10.0
 
 
 # ------------------------------------------------------------------ fixtures
@@ -151,29 +160,67 @@ class Listener:
         self._lock = threading.Lock()
         self._response = response
         self._socket = response.extensions["network_stream"].get_extra_info("socket")
+        self._dropped = False
         self._thread = threading.Thread(target=self._pump, daemon=True)
         self._thread.start()
 
     def drop(self) -> None:
-        """Close the TCP socket under the reader. **Measured, not assumed.**
+        """Half-close the TCP socket under the reader. **Measured, not assumed.**
 
         `httpx.Response.close()` from this thread while the pump thread is
         blocked inside `iter_lines()` does **not** close the socket, and the
         server goes on holding the connection until its next write fails — 15 s
         later, at the keepalive. A test that called it and then reconnected was
         not testing a reattach at all; it was opening a second reader beside a
-        first that had never left. Measured on 2026-09-13 by timing the server's
+        first that had never left. Measured 2026-09-13 by timing the server's
         shutdown, which waits for its open connections.
 
-        So the drop is a real `shutdown(SHUT_RDWR)` on the real socket, which is
-        what a tunnel collapsing does.
+        So the drop is a real `shutdown(SHUT_RDWR)`, which is what a tunnel
+        collapsing does: the peer gets a FIN, the reader gets end of file.
+
+        **And it is `shutdown` ALONE — never `close()`.** The first version of
+        this helper closed the socket straight afterwards, which is closing a
+        file descriptor another thread is blocked reading, and that is undefined
+        behaviour rather than a strong way to hang up. Linux and Windows
+        tolerate it; macOS does not, and on 2026-09-14 it was the whole of why
+        this file failed on both macOS CI jobs. Measured there rather than
+        guessed at: `faulthandler` put the reader in `httpcore`'s `recv`, and a
+        standalone probe on the same box gave
+
+            shutdown : reader exited after 0.00s
+            close    : reader STILL BLOCKED after 10.01s
+            both     : reader exited after 0.00s
+
+        — so `shutdown` is what wakes it, `close` is what never does, and "both"
+        only looks safe: `close()` frees the descriptor number, uvicorn and
+        httpx are opening sockets constantly in this process, and a reader that
+        had not yet been scheduled woke up armed on somebody else's connection.
+        Which is worse than a hang. It reproduced only sometimes, and only on
+        macOS, for exactly that reason.
+
+        The consequence for the rest of the file is that the socket is closed by
+        `httpx.stream`'s own context manager, after the reader has unwound —
+        which is the only thread allowed to be reading it.
+
+        Waiting for that unwind is deliberate and is checked rather than hoped
+        for: a test reads `last_id()` immediately after a drop, and a reader
+        still appending frames would make that cursor a moving target.
         """
+        if self._dropped:
+            return
+        self._dropped = True
         try:
-            self._socket.shutdown(2)
+            self._socket.shutdown(socket.SHUT_RDWR)
         except OSError:
+            # Already gone — the server hung up first. Nothing to half-close,
+            # and the reader is on its way out for the same reason.
             pass
-        self._socket.close()
-        self.ended.wait(WAIT)
+        if not self.ended.wait(DROP_UNWIND_SECONDS):
+            raise AssertionError(
+                "the event stream's reader did not unwind "
+                f"{DROP_UNWIND_SECONDS:.0f}s after the socket was shut down, so "
+                "this drop did not happen and nothing after it means anything"
+            )
 
     def _pump(self) -> None:
         current: dict[str, Any] = {}
@@ -198,8 +245,10 @@ class Listener:
                 elif field == "data":
                     current["data"] = json.loads(value)
         except (httpx.HTTPError, OSError, RuntimeError, ValueError):
-            # The test closed the socket under this thread. A dropped stream is
-            # the subject of half this file, so it is an outcome and not an error.
+            # The test shut the socket down under this thread. A dropped stream
+            # is the subject of half this file, so it is an outcome and not an
+            # error. (After a clean `shutdown` the usual arrival is end of file
+            # rather than an exception; both end the same way.)
             pass
         finally:
             self.ended.set()
@@ -516,12 +565,38 @@ def test_the_card_is_free_again_once_the_session_closes(
         )
         assert closed.status_code == 200, closed.text
         assert closed.json()["closed"] is True
-        # The render door works again, which is the only proof that matters.
-        run_job(
-            base, auth, type="tts", model=VOICE,
-            params={"language": "en", "take": 0,
-                    "chunks": [{"index": 0, "text": "Rain."}]},
-        )
+
+        # The render door is no longer refused for the CLAIM, which is the
+        # proof — and it is available on every host, including the ones with no
+        # ffmpeg. `TtsJobType.preflight` asks `refuse_if_claimed` BEFORE it
+        # probes for ffmpeg, so a refusal that has moved from `engine_in_use` to
+        # `ffmpeg_missing` has got past the claim and says so by name. Where
+        # ffmpeg is there, the job simply runs, which is better still.
+        #
+        # This is not a concession to the runner. The first version ran the
+        # render unconditionally and failed on both macOS CI jobs for a second
+        # reason entirely — macOS runners carry no ffmpeg by design
+        # (.github/workflows/ci.yml), which is why `test_tts_render.py` skips
+        # there wholesale. Skipping this test there would have thrown away the
+        # residency claim's release, which has nothing to do with ffmpeg.
+        render = {
+            "type": "tts",
+            "model": VOICE,
+            "params": {"language": "en", "take": 0,
+                       "chunks": [{"index": 0, "text": "Rain."}]},
+        }
+        if shutil.which("ffmpeg") is not None:
+            run_job(base, auth, **render)
+        else:
+            refused = httpx.post(
+                f"{base}/v1/jobs", headers=auth, json=render, timeout=30.0
+            )
+            assert refused.status_code == 409, refused.text
+            assert refused.json()["error"]["code"] == "ffmpeg_missing", refused.text
+
+        # And the job that was refused `engine_in_use` a moment ago in the test
+        # above now runs to completion. No ffmpeg anywhere in it.
+        run_job(base, auth, type="load-voice", model=OTHER_VOICE)
 
 
 # ------------------------------------------------------------ per-row cancel
@@ -730,9 +805,11 @@ def test_a_dropped_stream_reattaches_and_is_replayed_what_it_missed(
             delivered = first.last_id()
             # The socket goes down HERE, for real, while r1 is still generating
             # — not at the end of the block, so the drop and the reattach are
-            # two things this test does rather than one it hopes for.
+            # two things this test does rather than one it hopes for. `drop()`
+            # itself refuses to return until the reader has unwound, so the
+            # cursor just read is final and every drop in this file is checked
+            # rather than only this one.
             first.drop()
-        assert first.ended.is_set()
 
         # Inside the grace window, and carrying the id of the last frame seen.
         with listen(base, auth, sid, after=delivered) as second:
