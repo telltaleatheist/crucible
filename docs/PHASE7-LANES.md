@@ -331,10 +331,11 @@ wall-clock.
 
 **The correction is two independent facts, because Owen's sentence contains two.**
 
-**1. Machines are RANKED, once, in the registry** — not per row. `rank` is a property of a
-server entry (this PC 1, the Mac 2), set in settings where a person thinks about hardware
-rather than while queueing a book. The default pin for any new row is **the highest-ranked
-eligible machine**, which is the 90% case with nothing to click.
+**1. Machines are RANKED, once, in the registry** — not per row. Rank is the server's
+**position in the registry array** (this PC first, the Mac second), ordered in settings
+where a person thinks about hardware rather than while queueing a book. See "rank needs no
+field" below for why it is a position and not a number. The default for any new row is
+**the highest-ranked eligible machine**, which is the 90% case with nothing to click.
 
 **2. Overflow is OPT-IN, per row, and defaults to OFF.** `May overflow if busy`. With it
 off — the default — a row waits for its machine, which is what "90% of the time I want the
