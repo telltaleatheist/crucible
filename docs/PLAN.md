@@ -113,14 +113,14 @@ the `external-gpu-job.lock` convention. Denoise, separation and Resemble are nam
 deferred there, with the reason: their contract is sample-exact and cannot be asserted
 against a fake engine.
 
-## Phase 5: the apps, the bootstrapper, and friends
-- A Servers settings row over the registry, a server column on queue rows (the operator or
-  the queue picks the server), the `crucible` provider wired into book analysis and
-  translation.
-- BookForge's TTS WebSocket on 8766 becomes a relay to the chosen server, which is what
-  keeps the browser extension working unchanged.
-- The bootstrapper: detect the host, install a local server, start/stop it, report health.
-  A Docker image for `cuda-linux`. Then a friend gets the client and a tailnet invite.
+## Phase 5: the apps, the bootstrapper, and friends — contract in `docs/PHASE5-APPS.md`
+Where "the app changes little or nothing" ends, one deletion at a time and each with a way
+back. A Servers settings row over the registry (and the ability to pull, load and unload
+from it, which no UI offers today), a server column on queue rows, BookForge's TTS
+WebSocket on 8766 kept exactly where it is and turned into a relay so the extension never
+notices, and the bootstrapper. The contract carries the retirement order, the two
+behaviours of `text-server.ts` that Crucible deliberately does not have (yielding, and
+adoption), and two decisions to make before building rather than during.
 
 ## Open questions (decided by default unless Owen says otherwise)
 - Owen's Ollama-built LoRA adapters (footnotes, OCR, headline, blocks): served as
