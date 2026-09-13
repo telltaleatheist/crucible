@@ -407,7 +407,18 @@ keep the queue off it"* — and it is standing state about hardware, not a routi
 about one book. Keeping it out of the per-item field is what stops it being modal: turning
 the Mac off does not silently re-route work that was already queued for it.
 
-**The two compose, and the composition has one rule worth stating.** A row that names a
+****The Servers settings row, as Owen described it 2026-09-13:** an *Add Crucible server*
+button, and each connected server a line item that **drag-and-drops to set the priority
+order** — *"if 1 is free, use it."* That is the whole UI for both this section and rank:
+one list, dragged to order, with an enable switch per row. No rank numbers, because the
+list's order IS the rank (section 4.2's "rank needs no field").
+
+**A newly added server lands at the BOTTOM of the order.** Adding a machine must never
+silently demote the one every existing row defaults to — a person adding a droplet at
+midnight is not thereby saying it should outrank their 3090 Ti. Promotion is a drag, which
+is a deliberate act; demotion by side effect is not available.
+
+The two compose, and the composition has one rule worth stating.** A row that names a
 disabled server **holds and says which**, exactly as it would for one that is unreachable.
 It is not re-routed, because a named server is an instruction and the queue-level switch is
 about availability rather than about overriding what a person asked for. A row set to `any`
