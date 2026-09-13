@@ -224,7 +224,7 @@ reads the manifest, and a row is not a place to argue.
 **`sampling` is deliberately not on that row.** It is engine tuning, it is the server's, and
 publishing it invites a client to send it back. The same goes for the EOS levers, the
 `max_new_tokens` formula and the engine flags. What a client gets is the shape it must pack
-to (`pace`, `cap_tokens`) and the identity it must record (`fingerprint`).
+to (`pace`, `max_chars`) and the identity it must record (`fingerprint`).
 
 ## 3. The take ladder is the server's steps and the client's judgment
 
