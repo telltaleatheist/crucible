@@ -272,8 +272,16 @@ def unattributed_bytes(
     accounted = sum(
         app.used_bytes for app in state.compute_apps if app.used_bytes is not None
     )
-    return (
-        state.used_bytes - accounted - desktop_allowance_bytes - reclaimable_bytes
+    # Never below zero. The subtraction goes negative whenever the allowance is
+    # larger than what is actually on the card — an idle 3090 Ti holding 1.7 GiB
+    # of desktop against a 3.0 GiB allowance reads as -1.5 GiB — and "minus one
+    # and a half gigabytes are unaccounted for" is not a fact about anything. The
+    # guard never noticed because it only asks whether this exceeds a floor, but
+    # `GET /v1/accelerator` publishes the number, and a client sizing a load
+    # against a negative would be reading headroom that is not there. Zero is the
+    # truth: the allowance covers everything the driver can see.
+    return max(
+        0, state.used_bytes - accounted - desktop_allowance_bytes - reclaimable_bytes
     )
 
 

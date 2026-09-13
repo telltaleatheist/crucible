@@ -265,3 +265,24 @@ def test_read_state_reports_what_it_saw(monkeypatch: pytest.MonkeyPatch) -> None
     assert state.used_bytes == 4 * GIB
     assert "20.0 GiB free of 24.0 GiB" in state.detail
     assert state.to_dict()["compute_apps"][0]["pid"] == 1
+
+
+def test_unattributed_never_goes_below_zero() -> None:
+    """An idle card with a generous desktop allowance is not owed VRAM.
+
+    Measured on Owen's PC, 2026-09-13: the 3090 Ti held 1.71 GB with no compute
+    app listed, against the configured 3.0 GiB desktop allowance, and the probe
+    published `unattributed_bytes: -1509949440`. The guard never saw it because
+    it only asks whether the figure clears a floor — but `GET /v1/accelerator`
+    publishes it, and a client sizing a load against a negative number is reading
+    headroom that does not exist.
+    """
+    state = accelerator.AcceleratorState(
+        backend=accelerator.CUDA_LINUX,
+        total_bytes=24 * GIB,
+        free_bytes=24 * GIB - 1_711_276_032,
+        compute_apps=(),
+        detail="idle card, desktop only",
+    )
+    assert state.used_bytes == 1_711_276_032
+    assert accelerator.unattributed_bytes(state, 3 * GIB) == 0
