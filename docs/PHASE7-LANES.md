@@ -698,15 +698,58 @@ reason: it may load its own model and emits `warming` while it does.
 So the answer is the scheduler's, not the reader's: **whoever owns the queue submits
 `load-model` before it queues the reads.**
 
-**AND THE CONDITION INVERTS — this is the part a naive port gets wrong.** Foundry already
-has a call in exactly the right place (`app/electron/job-queue.ts:3638`), but it is gated
-on `isLocalVllmEndpoint`, which is **loopback AND port 8000** — a question about the
-ADDRESS. Residency is a question about the SERVER'S KIND: a Crucible on a droplet needs a
-model made resident exactly as much as one on loopback, because the chat door never loads
-wherever it is running. So the branch that must now call `ensureResident` is precisely the
-branch today's condition EXCLUDES, and a same-shape port would leave every remote read
-refused with `model_not_resident` on page one. Raised by the Foundry session, verified in
-their code. One load, the whole book, one unload. The
+**RESIDENCY IS IMPLIED BY NOTHING.** Not by the endpoint being local, not by the app
+having started the server, not by the port answering. It is asked for explicitly, on every
+path, before the first page.
+
+That is stronger than the rule this section carried an hour ago, and the Foundry session
+widened it twice — the second time against their own earlier correction, which is why it is
+worth recording how it moved:
+
+1. First draft: *the scheduler submits `load-model` before it queues the reads.* True, and
+   silent about where.
+2. Their first correction: *the gate inverts.* Their call sits in the right place
+   (`app/electron/job-queue.ts:3638`) but is gated on `isLocalVllmEndpoint` — loopback AND
+   port 8000, a question about the ADDRESS — while residency is a question about the
+   server's KIND. So the branch that must call `ensureResident` is the one that gate
+   EXCLUDES. True, and incomplete.
+3. **The rule.** It must run on the branch that gate INCLUDES as well, because of an
+   assumption nobody had stated: when the app starts a server itself it passes the model on
+   the command line (`deriveLaunch` emits `vllm serve <model>`), so *"I started it"* has
+   always implied *"the model is on the card"* and nothing ever had to ask.
+
+**An adopted server voids that implication**, and adoption is about to become the ordinary
+case rather than the edge. `ensureServer` already probes before it spawns and, finding a
+port that answers, says *"Using it as it is; this app will not stop it"* — which is what
+makes the transition to a service safe in whatever order it happens, and it is also what
+means **no path has asked whether the model this run needs is resident.**
+
+So `ensureResident` is not a renamed `ensureServer`. **`ensureServer` was a question about
+a PROCESS; `ensureResident` is a question about a CARD**, and the only thing that ever let
+one stand in for the other was a command-line argument.
+
+### 9.3 What an idle service holds: nothing on the card
+
+Owen ruled on 2026-09-13 that a local Crucible is a service (PHASE5-APPS.md section 6.0),
+which raises a question the Foundry session asked before it could bite: if `crucible serve`
+is always up, has the card been spoken for?
+
+**No. An idle Crucible holds zero VRAM, and this is verified rather than asserted:**
+
+- `Residency.__init__` sets `self._resident = None`. Nothing is resident at boot.
+- The app's `lifespan` starts the job lane and nothing else — no engine, no model, no probe.
+- An engine subprocess exists **only** while something is resident. It is spawned by
+  `load` / `load_voice` / `load_aligner` and torn down by `unload` / `_evict` /
+  `shutdown`, each of which calls `engine.stop()`.
+
+So a running-but-idle service is a Python process holding tens of megabytes of RAM and
+**nothing at all on the accelerator**. "The service is running" must never come to mean
+"the card is spoken for", and it does not.
+
+This matters beyond tidiness: the reason Foundry's own manager reserved a flat half the
+card (`GPU_UTIL = 0.5`) was that it could not ask anything how much was free. A service that
+idles at zero and answers `GET /v1/accelerator` is what makes that reservation unnecessary
+rather than merely inherited. One load, the whole book, one unload. The
 machinery exists (`crucible/jobs/llm/` provides `load-model` and `unload-model`); nothing
 new is needed but the ordering. A client must still render the refusal well, because it is
 what somebody gets when they point at a server nobody loaded — but a good sentence is not
