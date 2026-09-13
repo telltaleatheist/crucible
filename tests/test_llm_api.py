@@ -208,7 +208,9 @@ def test_info_gains_an_llm_capability(
     capabilities = llm_client.get("/v1/info", headers=auth).json()["capabilities"]
     by_type = {entry["job_type"]: entry for entry in capabilities}
     assert "llm" in by_type
-    assert {row["id"] for row in by_type["llm"]["models"]} == {MODEL, BIG_MODEL}
+    assert [row["id"] for row in by_type["llm"]["models"]] == [
+        MODEL, BIG_MODEL, SMALL_BIG_MODEL,
+    ]
     # The two things you can actually POST are listed as themselves.
     assert "load-model" in by_type
     assert "unload-model" in by_type
