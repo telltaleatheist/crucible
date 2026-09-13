@@ -128,6 +128,10 @@ def model_rows(
 ) -> list[dict[str, Any]]:
     """`GET /v1/models` — PHASE2-LLM.md section 5.
 
+    These same rows are the `llm` capability's rows in `GET /v1/info`: one shape,
+    one producer, so a client that has called `info()` never has to ask twice or
+    reconcile two descriptions of the same model.
+
     `loadable` answers "is everything this host needs in place", which is a fact
     about the disk. It deliberately does **not** run nvidia-smi: the accelerator's
     state changes between a listing and a request, so the guard runs at load time
@@ -140,6 +144,7 @@ def model_rows(
     for manifest in _manifests().values():
         supported = manifest.supports(backend_kind)
         estimate: int | None = None
+        revision: str | None = None
         is_installed = False
         reason: str | None = None
         if not supported:
@@ -150,6 +155,7 @@ def model_rows(
         else:
             spec = manifest.spec(backend_kind)
             estimate = spec.memory_bytes_estimate
+            revision = spec.revision
             is_installed = weights.installed(config, manifest, spec) is not None
             if estimate > backend.gpu.vram_bytes:
                 # Not loadable here at all, so say so instead of asking for a
@@ -170,6 +176,11 @@ def model_rows(
             "id": manifest.id,
             "family": manifest.family,
             "params_b": manifest.params_b,
+            # The revision this host would serve: the pin in *this* backend's
+            # block, not the model's "version". A model with no block for this
+            # backend has no revision here at all, and says so with null rather
+            # than with an empty string that would read as a real pin.
+            "revision": revision,
             "backend_supported": supported,
             "installed": is_installed,
             "resident": residency.resident_id == manifest.id,

@@ -247,8 +247,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         ]
         if config.enable_llm:
             # PHASE2-LLM.md section 5: `/info` gains an `llm` capability whose
-            # models are the `/v1/models` rows. `load-model` and `unload-model`
-            # are listed above as themselves, because they are what you POST.
+            # models are the `/v1/models` rows — the same shape from the same
+            # producer, revision included. `load-model` and `unload-model` are
+            # listed above as themselves, because they are what you POST.
             capabilities.append(
                 {
                     "job_type": "llm",

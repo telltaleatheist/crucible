@@ -25,6 +25,7 @@ import { test } from 'node:test';
 import {
   CrucibleClient,
   CrucibleRefused,
+  isLlmCapability,
   type JobEvent,
   type ModelInfo,
 } from '../src/index.js';
@@ -76,20 +77,31 @@ test('the server offers the llm capability and lists the model', async () => {
   const info = await crucible.info();
   const llm = info.capabilities.find((capability) => capability.jobType === 'llm');
   assert.ok(llm !== undefined, 'the phase-2 server must offer the llm job type');
+  assert.ok(isLlmCapability(llm), 'the llm capability carries /v1/models rows');
 
   const model = await row();
   assert.equal(model.family.length > 0, true, 'the manifest must name a family');
   assert.ok(model.paramsB > 0, 'the manifest must give a parameter count');
-  assert.ok(model.memoryBytesEstimate > 0, 'the manifest must give a measured memory estimate');
+  assert.ok(model.memoryBytesEstimate !== null && model.memoryBytesEstimate > 0,
+    'the manifest must give a measured memory estimate');
   assert.ok(model.contextDefault > 0, 'the manifest must give a default context');
   assert.equal(model.backendSupported, true, `${MODEL} has no block for this host's backend`);
   assert.equal(model.installed, true, `${MODEL} is not installed: crucible models pull ${MODEL}`);
+  assert.ok(
+    model.revision !== null && /^[0-9a-f]{40}$/.test(model.revision),
+    `${MODEL} must name the commit it is pinned to, got ${String(model.revision)}`,
+  );
   if (!model.loadable) {
     // `reason` is guaranteed present when `loadable` is false; the client
     // refuses a row that omits it, so this never prints "undefined".
     assert.fail(`${MODEL} is not loadable: ${model.reason}`);
   }
   assert.ok(!('reason' in model), 'a loadable model carries no reason');
+
+  // One model, one description: what /info says and what /models says are the
+  // same rows, not two accounts a client would have to reconcile.
+  assert.deepEqual(llm.models, await crucible.models());
+  console.log(`    ${MODEL} @ ${model.revision} — ${info.host.backend} on ${info.host.gpu.name}`);
 });
 
 // --------------------------------------------------------------------- load
@@ -126,6 +138,9 @@ test('load-model warms the engine and finishes naming the resident model', async
 // --------------------------------------------------------------------- chat
 
 test('chat returns a non-empty completion from the resident engine', async () => {
+  // `thinking: false` is what makes a 64-token ceiling honest against a
+  // reasoning model: without it Qwen3.5 spends the whole budget in `reasoning`
+  // and the message comes back with no `content` at all.
   const answer = await crucible.chat({
     model: MODEL,
     messages: [
@@ -134,7 +149,10 @@ test('chat returns a non-empty completion from the resident engine', async () =>
     ],
     temperature: 0,
     maxTokens: 64,
+    thinking: false,
   });
+  console.log(`    content: ${JSON.stringify(answer.content)}`);
+  console.log(`    finish_reason: ${answer.finishReason}, usage: ${JSON.stringify(answer.usage)}`);
 
   assert.ok(answer.id.length > 0, 'the completion must carry an id');
   assert.equal(answer.model, MODEL);
@@ -159,12 +177,14 @@ test('chatStream yields deltas that concatenate to the answer', async () => {
     ],
     temperature: 0,
     maxTokens: 64,
+    thinking: false,
   })) {
     deltas.push(delta);
   }
 
   assert.ok(deltas.length > 0, 'a streamed completion must yield at least one delta');
   assert.ok(deltas.join('').trim().length > 0, 'the deltas must concatenate to text');
+  console.log(`    ${deltas.length} deltas: ${JSON.stringify(deltas.join(''))}`);
 });
 
 test('chat on a model that is not resident is refused by name, never loaded implicitly', async () => {
@@ -193,11 +213,15 @@ test('chat on a model that is not resident is refused by name, never loaded impl
 test('unload-model frees the card and the model stops reading as resident', async () => {
   const jobId = await crucible.unloadModel(MODEL);
   const events = await collect(jobId);
+  const done = events.at(-1)!;
   assert.equal(
-    events.at(-1)?.event,
+    done.event,
     'done',
-    `the unload ended ${String(events.at(-1)?.event)}: ${JSON.stringify(events.at(-1))}`,
+    `the unload ended ${String(done.event)}: ${JSON.stringify(done)}`,
   );
+  // An unload reports what is resident now, and after an unload that is
+  // nothing: the field is answered with null, never left out (PHASE2 section 5).
+  assert.equal(done.event === 'done' ? done.data.resident : 'x', null);
 
   const model = await row();
   assert.equal(model.resident, false, `${MODEL} unloaded but still reads as resident`);

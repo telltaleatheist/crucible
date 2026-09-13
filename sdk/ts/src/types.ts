@@ -28,10 +28,32 @@ export interface ModelDescriptor {
   readonly vramBytes: number;
 }
 
-/** One job type this server offers, with the models it can serve. */
-export interface Capability {
+/**
+ * One job type this server offers, with the models it can serve.
+ *
+ * Most capabilities describe their models with DESIGN.md section 4's row. The
+ * `llm` capability is the exception the contract makes on purpose: its rows are
+ * `GET /v1/models`' rows, the same shape from the same producer, so a model has
+ * one description wherever a client finds it (PHASE2-LLM.md section 5). Narrow
+ * with {@link isLlmCapability} before reading a row.
+ */
+export type Capability = LlmCapability | JobCapability;
+
+/** Any capability other than `llm`. */
+export interface JobCapability {
   readonly jobType: string;
   readonly models: readonly ModelDescriptor[];
+}
+
+/** The `llm` capability: `GET /v1/models`' rows, carried inside `info()`. */
+export interface LlmCapability {
+  readonly jobType: 'llm';
+  readonly models: readonly ModelInfo[];
+}
+
+/** Narrow a capability to the `llm` one, whose rows are {@link ModelInfo}. */
+export function isLlmCapability(capability: Capability): capability is LlmCapability {
+  return capability.jobType === 'llm';
 }
 
 /** The accelerator the server owns. */
@@ -164,14 +186,19 @@ export interface ArtifactData {
  * union the caller would have to narrow before reading `artifacts`.
  *
  * It is still checked, not loose: `artifacts` must be an array of strings and
- * `resident` a string wherever either appears, and a `done` frame carrying
- * *neither* is a {@link CrucibleProtocolError}.
+ * `resident` a string or `null` wherever either appears, and a `done` frame
+ * carrying *neither* is a {@link CrucibleProtocolError}.
  */
 export interface DoneData {
   /** What a producing job wrote. Fetch each with `artifact(jobId, name)`. */
   readonly artifacts?: readonly string[];
-  /** The model now resident, on a `load-model` job. */
-  readonly resident?: string;
+  /**
+   * What is resident **now**, on a `load-model` or `unload-model` job: the
+   * model that was loaded, or `null` after an unload, when nothing is
+   * (PHASE2-LLM.md section 5). Phase 2 keeps one model resident at a time, so
+   * this is the whole story, not one entry of it.
+   */
+  readonly resident?: string | null;
 }
 
 export interface FailedData {
@@ -222,6 +249,13 @@ export interface ModelInfo {
   readonly id: string;
   readonly family: string;
   readonly paramsB: number;
+  /**
+   * The commit the manifest pins for **this host's** backend — the same sha the
+   * weights were pulled at, so a client can record what it talked to. `null`
+   * when `backendSupported` is false: a model this host cannot serve has no
+   * revision here to name.
+   */
+  readonly revision: string | null;
   readonly backendSupported: boolean;
   readonly installed: boolean;
   readonly resident: boolean;
@@ -232,8 +266,13 @@ export interface ModelInfo {
    * absent when it is true.
    */
   readonly reason?: string;
-  /** Weights plus KV at `contextDefault`, measured on the host, not guessed. */
-  readonly memoryBytesEstimate: number;
+  /**
+   * Weights plus KV at `contextDefault`, measured on the host, not guessed.
+   * `null` when `backendSupported` is false, for the same reason
+   * {@link ModelInfo.revision} is: the figure lives in this backend's block,
+   * and there is no block. Never `0` — a zero would read as "needs nothing".
+   */
+  readonly memoryBytesEstimate: number | null;
   readonly contextDefault: number;
 }
 
@@ -256,6 +295,19 @@ export interface ChatOptions {
   readonly topP?: number;
   readonly maxTokens?: number;
   readonly stop?: readonly string[];
+  /**
+   * Whether a reasoning model thinks before it answers.
+   *
+   * Qwen3.5 and its kind emit `reasoning` first and `content` after, so a short
+   * `maxTokens` spends the whole budget thinking and returns a message with no
+   * `content` at all. `false` sends `chat_template_kwargs: {enable_thinking:
+   * false}` — read per request by mlx-lm's server and honoured by vLLM under
+   * the same name — and `true` sends the same field set to `true`. Omit it and
+   * nothing is sent: the model's own default stands.
+   *
+   * A model whose chat template does not know `enable_thinking` ignores it.
+   */
+  readonly thinking?: boolean;
   /** Aborts the request. See the README: the abort surfaces as a DOM `AbortError`. */
   readonly signal?: AbortSignal;
 }

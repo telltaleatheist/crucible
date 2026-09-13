@@ -64,7 +64,7 @@ build version.
 | Route | Auth | Returns |
 |---|---|---|
 | `GET /ping` | no | `{crucible: true, name, api_version}`. Lets a client tell "wrong token" from "not a Crucible". |
-| `GET /info` | yes | server `{name, version, api_version}`, host `{platform, arch, backend, gpu: {vendor, name, vram_bytes}}`, `capabilities: [{job_type, models: [{id, revision, source, resident, vram_bytes}]}]` |
+| `GET /info` | yes | server `{name, version, api_version}`, host `{platform, arch, backend, gpu: {vendor, name, vram_bytes}}`, `capabilities: [{job_type, models}]`. A capability's model rows are `{id, revision, source, resident, vram_bytes}` — **except `llm`**, whose rows are `GET /v1/models`' rows verbatim (PHASE2-LLM.md section 5). One model, one description: a client reads a model's standing in one shape wherever it finds it, and never reconciles two. |
 | `GET /health` | yes | `{status: ok / warming / busy, queue_depth, resident_models}` |
 | `POST /uploads` | yes | multipart → `{blob_id, bytes, sha256}`. For inputs too big to inline. |
 | `POST /jobs` | yes | `{type, model?, params, inputs: {name: {blob_id} or {inline_base64}}}` (exactly one per input, unknown keys refused) → `{job_id}` (202). Refuses unknown type / model by name (400). |

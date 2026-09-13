@@ -536,6 +536,19 @@ export class CrucibleClient {
       payload['max_tokens'] = maxTokens;
     }
     if (given.stop !== undefined) payload['stop'] = requireStrings(given.stop, 'stop');
+    if (given.thinking !== undefined) {
+      if (typeof given.thinking !== 'boolean') {
+        throw new CrucibleConfigError(
+          'thinking',
+          `must be a boolean, got ${typeof given.thinking}`,
+        );
+      }
+      // The engines take this per request: mlx-lm reads `chat_template_kwargs`
+      // off the body and merges it into the template arguments, and vLLM
+      // honours the same field. Crucible proxies the body verbatim, so it
+      // reaches the engine as written.
+      payload['chat_template_kwargs'] = { enable_thinking: given.thinking };
+    }
 
     const init: RequestInit = {
       method: 'POST',
@@ -626,11 +639,26 @@ export class CrucibleClient {
 
 // ------------------------------------------------------------------ readers
 
+/**
+ * One capability from `info()`. The `llm` capability's rows are `GET
+ * /v1/models`' rows — the contract says the same shape from the same producer
+ * (PHASE2-LLM.md section 5) — so they are read with the `/models` reader, not
+ * DESIGN.md section 4's. Every other capability keeps that one.
+ */
 function readCapability(entry: Json, index: number): Capability {
   const where = `info.capabilities[${index}]`;
+  const jobType = str(entry, 'job_type', where);
   const models = asArray(field(entry, 'models', where), `${where}.models`);
+  if (jobType === 'llm') {
+    return {
+      jobType,
+      models: models.map((model, at) =>
+        readModelInfo(asObject(model, `${where}.models[${at}]`), `${where}.models[${at}]`),
+      ),
+    };
+  }
   return {
-    jobType: str(entry, 'job_type', where),
+    jobType,
     models: models.map((model, at) =>
       readModel(asObject(model, `${where}.models[${at}]`), `${where}.models[${at}]`),
     ),
@@ -742,9 +770,10 @@ function readDone(data: Json, where: string): DoneData {
         'say what finished',
     );
   }
-  const done: { artifacts?: readonly string[]; resident?: string } = {};
+  const done: { artifacts?: readonly string[]; resident?: string | null } = {};
   if (hasArtifacts) done.artifacts = strArray(data, 'artifacts', where);
-  if (hasResident) done.resident = str(data, 'resident', where);
+  // `null` is the answer an unload gives: nothing is resident now.
+  if (hasResident) done.resident = nullableStr(data, 'resident', where);
   return done;
 }
 
@@ -754,11 +783,15 @@ function readModelInfo(entry: Json, where: string): ModelInfo {
     id: str(entry, 'id', where),
     family: str(entry, 'family', where),
     paramsB: num(entry, 'params_b', where),
+    // Null on a model this backend cannot serve; a string everywhere else.
+    revision: nullableStr(entry, 'revision', where),
     backendSupported: bool(entry, 'backend_supported', where),
     installed: bool(entry, 'installed', where),
     resident: bool(entry, 'resident', where),
     loadable,
-    memoryBytesEstimate: num(entry, 'memory_bytes_estimate', where),
+    // Null on a model this backend cannot serve, exactly like `revision`: both
+    // figures live in the backend block this manifest does not have.
+    memoryBytesEstimate: nullableNum(entry, 'memory_bytes_estimate', where),
     contextDefault: num(entry, 'context_default', where),
   };
   if (!loadable) {
@@ -820,17 +853,46 @@ function readChatResponse(body: Json): ChatResponse {
   const choice = asObject(first, 'chat.choices[0]');
   const message = objectField(choice, 'message', 'chat.choices[0]');
   const usage = objectField(body, 'usage', where);
+  const finishReason = str(choice, 'finish_reason', 'chat.choices[0]');
+  refuseReasoningWithoutContent(message, finishReason);
   return {
     id: str(body, 'id', where),
     model: str(body, 'model', where),
     content: str(message, 'content', 'chat.choices[0].message'),
-    finishReason: str(choice, 'finish_reason', 'chat.choices[0]'),
+    finishReason,
     usage: {
       promptTokens: num(usage, 'prompt_tokens', 'chat.usage'),
       completionTokens: num(usage, 'completion_tokens', 'chat.usage'),
       totalTokens: num(usage, 'total_tokens', 'chat.usage'),
     },
   };
+}
+
+/**
+ * A reasoning model that runs out of budget mid-thought answers with
+ * `reasoning` and no `content` at all.
+ *
+ * That is still a protocol error — this client promises a completion carries
+ * text, and an answer that is not there must never read as an empty one — but
+ * the *cause* belongs in the message, because the remedy is the caller's: raise
+ * `maxTokens`, or pass `thinking: false`. Nothing is substituted; the strict
+ * `content` rule below still runs for every other shape.
+ */
+function refuseReasoningWithoutContent(message: Json, finishReason: string): void {
+  const content = 'content' in message ? message['content'] : null;
+  if (typeof content === 'string') return;
+  const reasoning = 'reasoning' in message ? message['reasoning'] : null;
+  if (typeof reasoning !== 'string' || reasoning === '') return;
+  const stopped =
+    finishReason === 'length'
+      ? 'and hit the token ceiling before it began the answer'
+      : `and stopped with finish_reason ${JSON.stringify(finishReason)}`;
+  throw new CrucibleProtocolError(
+    'chat.choices[0].message has no "content": the model emitted ' +
+      `${reasoning.length} characters of "reasoning" ${stopped}. This is a ` +
+      'reasoning model thinking before it answers — raise maxTokens, or pass ' +
+      'thinking: false to turn the thinking off.',
+  );
 }
 
 /**

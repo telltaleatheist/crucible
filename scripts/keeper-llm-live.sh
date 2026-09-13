@@ -25,7 +25,8 @@
 #
 # What it proves, end to end:
 #   1. the server is reachable and says what it is
-#   2. the model is installed and loadable there
+#   2. the model is installed and loadable there, pinned to a revision, and
+#      /info's llm capability carries exactly the same rows as /models
 #   3. a chat before any load is 409 model_not_resident — never an implicit load
 #   4. load-model streams `warming` and ends `done {resident}`
 #   5. a non-streamed chat comes back through the proxy
@@ -212,11 +213,32 @@ assert row["installed"], row
 assert row["loadable"], row
 assert row["resident"] is False, row
 assert row["memory_bytes_estimate"] > 0, row
+# The pin this host would serve, and the same row shape /info carries.
+revision = row["revision"]
+assert isinstance(revision, str) and len(revision) == 40, row
+print("    revision:", revision)
 PYCODE
 then
   ok "GET /models is a bare array and says $MODEL is installed and loadable"
 else
   bad "GET /models returned $CODE: $(cat "$WORK/models.json")"
+fi
+
+# The llm capability in /info is the same rows from the same producer, so a
+# client that has called /info never asks twice and never reconciles two
+# descriptions of one model.
+if "$PY" - "$WORK/info.json" "$WORK/models.json" <<'PYCODE'
+import json, sys
+info = json.load(open(sys.argv[1]))
+models = json.load(open(sys.argv[2]))
+capabilities = {entry["job_type"]: entry for entry in info["capabilities"]}
+assert "llm" in capabilities, sorted(capabilities)
+assert capabilities["llm"]["models"] == models, "the llm capability rows are not /models' rows"
+PYCODE
+then
+  ok "/info's llm capability carries exactly the /models rows"
+else
+  bad "/info's llm capability differs from /models"
 fi
 
 # ------------------------------------- 3. the proxy refuses before anything loads
@@ -290,15 +312,17 @@ fi
 # --------------------------------------------------- 5. a non-streamed chat
 #
 # Qwen3.5 is a reasoning model: it emits a `reasoning` field first and only then
-# `content`. A 32-token ceiling finishes inside the reasoning and comes back with
-# no `content` at all — which is the model working, not the proxy failing. So the
-# ceiling is high enough to reach an answer, and the check is that the completion
-# ran to `stop` with text in `content`.
+# `content`, so a small token ceiling finishes inside the reasoning and comes back
+# with no `content` at all. The fix is to say so rather than to buy the answer with
+# a generous budget: `chat_template_kwargs: {"enable_thinking": false}` is read per
+# request by mlx-lm and honoured by vLLM, and the SDK sends it as `thinking: false`.
+# The proxy forwards it verbatim, which is the other half of what this checks.
 
 cat >"$WORK/chat.json" <<JSON
 {"model": "$MODEL",
  "messages": [{"role": "user", "content": "Reply with exactly this and nothing else: Crucible is running."}],
- "temperature": 0, "max_tokens": 512}
+ "temperature": 0, "max_tokens": 64,
+ "chat_template_kwargs": {"enable_thinking": false}}
 JSON
 CODE="$(curl -sS -o "$WORK/chat.out.json" -w '%{http_code}' --max-time 900 \
   "${AUTH[@]}" "${JSON[@]}" --data-binary "@$WORK/chat.json" "$BASE/openai/chat/completions")"
@@ -327,7 +351,8 @@ fi
 cat >"$WORK/chatstream.json" <<JSON
 {"model": "$MODEL",
  "messages": [{"role": "user", "content": "Count from one to five, digits only, separated by spaces."}],
- "temperature": 0, "max_tokens": 512, "stream": true}
+ "temperature": 0, "max_tokens": 64, "stream": true,
+ "chat_template_kwargs": {"enable_thinking": false}}
 JSON
 curl -sS -N --max-time 900 "${AUTH[@]}" "${JSON[@]}" \
   --data-binary "@$WORK/chatstream.json" "$BASE/openai/chat/completions" >"$WORK/chat.sse"

@@ -29,7 +29,7 @@ export {
   CrucibleVersionError,
 } from './errors.js';
 
-export { API_VERSION, TERMINAL_EVENTS } from './types.js';
+export { API_VERSION, TERMINAL_EVENTS, isLlmCapability } from './types.js';
 export type {
   ArtifactData,
   CancelResult,
@@ -43,12 +43,14 @@ export type {
   FailedData,
   GpuInfo,
   Health,
+  JobCapability,
   JobEvent,
   JobFailure,
   JobInput,
   JobRequest,
   JobState,
   JobStatus,
+  LlmCapability,
   ModelDescriptor,
   ModelInfo,
   Ping,

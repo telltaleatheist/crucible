@@ -167,6 +167,9 @@ def test_models_lists_every_manifest_with_its_standing(
     row = rows[MODEL]
     assert row["family"] == "qwen3.5"
     assert row["params_b"] == 9
+    # The pin for *this* host's backend, verbatim from the manifest: a client
+    # that records what it talked to records the same sha the puller used.
+    assert row["revision"] == load_manifest(MODEL).spec(FAKE_BACKEND.kind).revision
     assert row["backend_supported"] is True
     assert row["installed"] is False
     assert row["resident"] is False
@@ -207,6 +210,59 @@ def test_info_gains_an_llm_capability(
     # The two things you can actually POST are listed as themselves.
     assert "load-model" in by_type
     assert "unload-model" in by_type
+
+
+def test_the_llm_capability_rows_are_the_models_rows(
+    llm_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path]
+) -> None:
+    """One shape, one producer: `/info`'s llm rows *are* `/v1/models`' rows."""
+    fake_weights(MODEL)
+    models = llm_client.get("/v1/models", headers=auth).json()
+    capabilities = llm_client.get("/v1/info", headers=auth).json()["capabilities"]
+    by_type = {entry["job_type"]: entry for entry in capabilities}
+    assert by_type["llm"]["models"] == models
+    for row in models:
+        assert row["revision"] == load_manifest(row["id"]).spec(
+            FAKE_BACKEND.kind
+        ).revision
+
+
+def test_a_model_this_backend_cannot_serve_has_no_revision(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`revision` is the pin for *this* backend, so a model with no block here
+    reports null — never the other backend's sha, and never an empty string that
+    would read as a pin."""
+    fixture = tmp_path / "models"
+    fixture.mkdir()
+    (fixture / "mac-only.toml").write_text(
+        """
+[model]
+id = "mac-only"
+family = "demo"
+params_b = 1
+context_default = 4096
+
+[backends.mlx-darwin]
+engine = "mlx-lm"
+hf_repo = "demo/Demo-1B"
+revision = "0123456789abcdef0123456789abcdef01234567"
+memory_bytes_estimate = 3000000000
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CRUCIBLE_MODELS_DIR", str(fixture))
+    with make_client(enable_llm=True) as client:
+        rows = client.get("/v1/models", headers=auth).json()
+        capabilities = client.get("/v1/info", headers=auth).json()["capabilities"]
+    assert [row["id"] for row in rows] == ["mac-only"]
+    assert rows[0]["backend_supported"] is False
+    assert rows[0]["revision"] is None
+    by_type = {entry["job_type"]: entry for entry in capabilities}
+    assert by_type["llm"]["models"] == rows
 
 
 # -------------------------------------------------- the refusals before queuing

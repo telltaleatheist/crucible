@@ -22,6 +22,7 @@ import {
   CrucibleProtocolError,
   CrucibleRefused,
   CrucibleUnreachable,
+  isLlmCapability,
   type JobEvent,
 } from '../src/index.js';
 
@@ -77,10 +78,13 @@ function contentChunk(content: string): string {
   });
 }
 
+const REVISION = '4d1b2f0c9e8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c';
+
 const MODEL_ROW = {
   id: 'qwen3.5-9b',
   family: 'qwen3.5',
   params_b: 9,
+  revision: REVISION,
   backend_supported: true,
   installed: true,
   resident: true,
@@ -136,6 +140,7 @@ test('models() reads every field /v1/models promises', async () => {
         id: 'qwen3.5-27b',
         family: 'qwen3.5',
         params_b: 27,
+        revision: 'b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
         backend_supported: true,
         installed: false,
         resident: false,
@@ -143,6 +148,21 @@ test('models() reads every field /v1/models promises', async () => {
         reason: 'not installed: run `crucible models pull qwen3.5-27b`',
         memory_bytes_estimate: 54000000000,
         context_default: 12288,
+      },
+      {
+        // A model this host's backend cannot serve has no revision here to
+        // name: the server sends null, never the other backend's sha.
+        id: 'mac-only',
+        family: 'demo',
+        params_b: 1,
+        revision: null,
+        backend_supported: false,
+        installed: false,
+        resident: false,
+        loadable: false,
+        reason: 'mac-only.toml has no cuda-linux block; it declares [mlx-darwin]',
+        memory_bytes_estimate: null,
+        context_default: 4096,
       },
     ]);
 
@@ -157,6 +177,7 @@ test('models() reads every field /v1/models promises', async () => {
       id: 'qwen3.5-9b',
       family: 'qwen3.5',
       paramsB: 9,
+      revision: REVISION,
       backendSupported: true,
       installed: true,
       resident: true,
@@ -168,6 +189,7 @@ test('models() reads every field /v1/models promises', async () => {
       id: 'qwen3.5-27b',
       family: 'qwen3.5',
       paramsB: 27,
+      revision: 'b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
       backendSupported: true,
       installed: false,
       resident: false,
@@ -175,6 +197,19 @@ test('models() reads every field /v1/models promises', async () => {
       reason: 'not installed: run `crucible models pull qwen3.5-27b`',
       memoryBytesEstimate: 54000000000,
       contextDefault: 12288,
+    },
+    {
+      id: 'mac-only',
+      family: 'demo',
+      paramsB: 1,
+      revision: null,
+      backendSupported: false,
+      installed: false,
+      resident: false,
+      loadable: false,
+      reason: 'mac-only.toml has no cuda-linux block; it declares [mlx-darwin]',
+      memoryBytesEstimate: null,
+      contextDefault: 4096,
     },
   ]);
   assert.ok(!('reason' in models[0]!), 'a loadable model carries no reason');
@@ -192,6 +227,114 @@ test('a model that is not loadable and does not say why is a protocol error', as
 test('a /v1/models body that is not an array is a protocol error, not an empty list', async () => {
   handle = (_request, response) => json(response, 200, { models: [MODEL_ROW] });
   await assert.rejects(client().models(), CrucibleProtocolError);
+});
+
+test('a model row without a revision is a protocol error, not an unpinned model', async () => {
+  const { revision: _revision, ...withoutRevision } = MODEL_ROW;
+  handle = (_request, response) => json(response, 200, [withoutRevision]);
+  await assert.rejects(client().models(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+    assert.match(error.message, /models\[0\] has no field "revision"/);
+    return true;
+  });
+});
+
+// ---------------------------------------------------- info's llm capability
+
+/** `GET /v1/info` as a phase-2 server answers it. */
+const INFO = {
+  server: { name: 'crucible@test', version: '0.1.0', api_version: 1 },
+  host: {
+    platform: 'linux',
+    arch: 'x86_64',
+    backend: 'cuda-linux',
+    gpu: { vendor: 'nvidia', name: 'NVIDIA GeForce RTX 3090 Ti', vram_bytes: 25757220864 },
+  },
+  capabilities: [
+    { job_type: 'echo', models: [] },
+    {
+      job_type: 'load-model',
+      // DESIGN.md section 4's row, which every capability but `llm` uses.
+      models: [
+        {
+          id: 'qwen3.5-9b',
+          revision: REVISION,
+          source: 'Qwen/Qwen3.5-9B',
+          resident: true,
+          vram_bytes: 21000000000,
+        },
+      ],
+    },
+    { job_type: 'llm', models: [MODEL_ROW] },
+  ],
+};
+
+test("info() reads the llm capability's rows with the /models reader", async () => {
+  handle = (_request, response) => json(response, 200, INFO);
+  const info = await client().info();
+  assert.equal(lastPath, '/v1/info');
+
+  const llm = info.capabilities.find((capability) => capability.jobType === 'llm');
+  assert.ok(llm !== undefined, 'a phase-2 server offers the llm capability');
+  assert.ok(isLlmCapability(llm), 'the llm capability narrows to the /models rows');
+  assert.deepEqual(llm.models, [
+    {
+      id: 'qwen3.5-9b',
+      family: 'qwen3.5',
+      paramsB: 9,
+      revision: REVISION,
+      backendSupported: true,
+      installed: true,
+      resident: true,
+      loadable: true,
+      memoryBytesEstimate: 21000000000,
+      contextDefault: 12288,
+    },
+  ]);
+
+  // The other capabilities keep DESIGN.md section 4's row, unchanged.
+  const load = info.capabilities.find((capability) => capability.jobType === 'load-model');
+  assert.ok(load !== undefined && !isLlmCapability(load));
+  assert.deepEqual(load.models, [
+    {
+      id: 'qwen3.5-9b',
+      revision: REVISION,
+      source: 'Qwen/Qwen3.5-9B',
+      resident: true,
+      vramBytes: 21000000000,
+    },
+  ]);
+
+  // And the phase-1 capability that serves no models still reads.
+  const echo = info.capabilities.find((capability) => capability.jobType === 'echo');
+  assert.ok(echo !== undefined);
+  assert.deepEqual(echo.models, []);
+});
+
+test('an llm capability row shaped like the phase-1 row is a protocol error', async () => {
+  handle = (_request, response) =>
+    json(response, 200, {
+      ...INFO,
+      capabilities: [
+        {
+          job_type: 'llm',
+          models: [
+            {
+              id: 'qwen3.5-9b',
+              revision: REVISION,
+              source: 'Qwen/Qwen3.5-9B',
+              resident: true,
+              vram_bytes: 21000000000,
+            },
+          ],
+        },
+      ],
+    });
+  await assert.rejects(client().info(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+    assert.match(error.message, /info\.capabilities\[0\]\.models\[0\] has no field "loadable"/);
+    return true;
+  });
 });
 
 // -------------------------------------------------------- load and unload
@@ -252,6 +395,38 @@ test("a load job's events carry warming {message} and done {resident}", async ()
   const done = events[2]!;
   assert.equal(done.event === 'done' ? done.data.resident : null, 'qwen3.5-9b');
   assert.equal(done.event === 'done' ? done.data.artifacts : 'x', undefined);
+});
+
+test("an unload's done event says resident: null — nothing is resident now", async () => {
+  handle = (_request, response) => {
+    openSse(response);
+    response.write('id: 1\nevent: queued\ndata: {"position": 1}\n\n');
+    response.write('id: 2\nevent: progress\ndata: {"fraction": 0.0, "message": "unloading"}\n\n');
+    response.write('id: 3\nevent: done\ndata: {"artifacts": [], "resident": null}\n\n');
+    response.end();
+  };
+
+  const events: JobEvent[] = [];
+  for await (const event of client().events('job-unload-1')) events.push(event);
+
+  const done = events.at(-1)!;
+  assert.equal(done.event, 'done');
+  // Present and null: the field is answered, and the answer is "nothing".
+  assert.equal(done.event === 'done' ? done.data.resident : 'x', null);
+  assert.deepEqual(done.event === 'done' ? done.data.artifacts : null, []);
+});
+
+test('a done event whose resident is neither a string nor null is a protocol error', async () => {
+  handle = (_request, response) => {
+    openSse(response);
+    response.write('id: 1\nevent: done\ndata: {"resident": 7}\n\n');
+    response.end();
+  };
+  await assert.rejects(async () => {
+    for await (const _event of client().events('job-bad-done')) {
+      // drain
+    }
+  }, CrucibleProtocolError);
 });
 
 test('a done event that says neither artifacts nor resident is a protocol error', async () => {
@@ -318,6 +493,106 @@ test('the optional sampling knobs are omitted entirely when not given', async ()
     messages: [{ role: 'user', content: 'hi' }],
     stream: false,
   });
+});
+
+test('thinking: false sends the template kwarg that turns a reasoning model off', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  await client().chat({
+    model: 'qwen3.5-9b',
+    messages: [{ role: 'user', content: 'hi' }],
+    maxTokens: 64,
+    thinking: false,
+  });
+  assert.deepEqual(JSON.parse(lastBody), {
+    model: 'qwen3.5-9b',
+    messages: [{ role: 'user', content: 'hi' }],
+    stream: false,
+    max_tokens: 64,
+    chat_template_kwargs: { enable_thinking: false },
+  });
+});
+
+test('thinking: true sends the same field set to true', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  await client().chat({
+    model: 'qwen3.5-9b',
+    messages: [{ role: 'user', content: 'hi' }],
+    thinking: true,
+  });
+  assert.deepEqual(JSON.parse(lastBody)['chat_template_kwargs'], { enable_thinking: true });
+});
+
+test('omitting thinking sends nothing, leaving the model its own default', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  await client().chat({ model: 'qwen3.5-9b', messages: [{ role: 'user', content: 'hi' }] });
+  assert.ok(
+    !('chat_template_kwargs' in JSON.parse(lastBody)),
+    'an omitted option must not be sent as a value',
+  );
+});
+
+test('thinking must be a boolean and is refused by name when it is not', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  await assert.rejects(
+    client().chat({
+      model: 'qwen3.5-9b',
+      messages: [{ role: 'user', content: 'hi' }],
+      thinking: 'no' as never,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleConfigError, `got ${String(error)}`);
+      assert.equal(error.option, 'thinking');
+      return true;
+    },
+  );
+});
+
+test('a completion that is all reasoning and no content says why, and how to fix it', async () => {
+  // What mlx-lm returns for Qwen3.5 when the ceiling lands inside the thinking:
+  // a message with `reasoning` and no `content` key at all.
+  handle = (_request, response) =>
+    json(response, 200, {
+      ...COMPLETION,
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', reasoning: 'The user wants a colour. Let me think' },
+          finish_reason: 'length',
+        },
+      ],
+    });
+
+  await assert.rejects(
+    client().chat({
+      model: 'qwen3.5-9b',
+      messages: [{ role: 'user', content: 'Name one colour.' }],
+      maxTokens: 8,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+      assert.match(error.message, /has no "content"/);
+      assert.match(error.message, /reasoning/);
+      assert.match(error.message, /token ceiling/);
+      assert.match(error.message, /raise maxTokens, or pass thinking: false/);
+      return true;
+    },
+  );
+});
+
+test('a completion with no content and no reasoning is still the plain missing-field error', async () => {
+  handle = (_request, response) =>
+    json(response, 200, {
+      ...COMPLETION,
+      choices: [{ index: 0, message: { role: 'assistant' }, finish_reason: 'stop' }],
+    });
+  await assert.rejects(
+    client().chat({ model: 'qwen3.5-9b', messages: [{ role: 'user', content: 'hi' }] }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+      assert.match(error.message, /chat\.choices\[0\]\.message has no field "content"/);
+      return true;
+    },
+  );
 });
 
 test('chat requires model and messages, and names the one that is missing', async () => {
