@@ -73,19 +73,28 @@ sketches. Two rulings from Owen shape it:
   catalogs and checkpoints move behind Crucible the way models did, pulled from
   HuggingFace by manifest.
 
-## Phase 3a: `llm` finishing touches (small, first)
+## Phase 3a: `llm` finishing touches (server side DONE 2026-09-13)
+Contract: `docs/PHASE2-LLM.md` section 5, amended for all four. Proved without an
+accelerator, against `tests/fake_engine.py` and — for the disconnect half, which
+`TestClient` cannot reach — a real uvicorn on a real socket (`tests/live_server.py`).
 - `/v1/models` and `/v1/openai/models` report `max_model_len`, so Foundry's `capFor`
-  clamps requests instead of getting a 400.
-- Prove `response_format: {type: "json_schema", strict: true}` survives the proxy on
-  both engines (Foundry's analyze and tag calls depend on it). `finish_reason` is never
-  touched.
-- A dropped client connection aborts the engine request; the proxy never lets a
-  request run on after its caller is gone.
-- The served name rule: Crucible's id plus the pinned revision is what a client records
-  (`qwen3.5-9b@<sha>`); dtype is part of the id only when it is not bf16.
-- With these, Foundry's clean / translate / simplify point at Crucible by URL with no
-  client change, and BookForge's `text-server.ts` (1,364 lines, already a small
-  Crucible) is retired.
+  clamps requests instead of getting a 400. It is a separate field from
+  `context_default`, which stays the manifest's intent.
+- `response_format: {type: "json_schema", strict: true}` survives the proxy, and is
+  tested rather than assumed — along with `finish_reason` on `stop`, `length` and
+  `tool_calls`, streamed and not, and an engine's own 400 being relayed rather than
+  rewrapped. The request body is now literally verbatim where the engine answers to the
+  Crucible id: it was being parsed and re-serialised, which is not the proxy's business
+  to do to somebody else's grammar.
+- A dropped client connection aborts the engine request. Streamed already worked by
+  accident of which ASGI branch Starlette takes and now works on purpose; non-streamed
+  did not work at all and now races the POST against the caller's socket.
+- The served name rule is written down, and `fingerprint` (`<id>@<revision>`) is on both
+  listings and in the provenance sidecar — whose `revision` was `null` on every artifact
+  Crucible had ever written, which is fixed.
+- **Still owed, client side:** Foundry's clean / translate / simplify pointed at Crucible
+  by URL, and BookForge's `text-server.ts` (1,364 lines, already a small Crucible)
+  retired. Nothing on the server blocks either now.
 
 ## Phase 3b: `tts`
 The largest job type and the one that deletes the most: BookForge's WSL spawn, path
