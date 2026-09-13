@@ -109,7 +109,12 @@ def test_info_without_echo_advertises_nothing(
 
 def test_health(client: TestClient, auth: dict[str, str]) -> None:
     body = client.get("/v1/health", headers=auth).json()
-    assert body == {"status": "ok", "queue_depth": 0, "resident_models": []}
+    assert body == {
+        "status": "ok",
+        "queue_depth": 0,
+        "resident_models": [],
+        "resident_kind": None,
+    }
 
 
 def test_unknown_route_is_json_error(client: TestClient, auth: dict[str, str]) -> None:

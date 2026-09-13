@@ -32,9 +32,10 @@ from . import API_VERSION, VERSION
 from .backend import Backend
 from .config import Config
 from .errors import ApiError
-from .jobs import Residency, build_registry, model_rows, resolve, resolve_model
+from .jobs import build_registry, model_rows, resolve, resolve_model, voice_rows
 from .jobs.base import Job, validate_member_name
 from .jobs.queue import JobStore
+from .residency import Residency
 
 API_HEADER = "X-Crucible-Api"
 TERMINAL_EVENTS = frozenset({"done", "failed", "cancelled"})
@@ -256,6 +257,18 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     "models": model_rows(config, backend, residency),
                 }
             )
+        if config.enable_tts:
+            # PHASE3-TTS.md section 8: `/info` gains a `tts` capability whose
+            # rows are `/v1/voices`' rows VERBATIM — the same shape from the same
+            # producer, for the same reason `llm`'s are. `load-voice` and
+            # `unload-voice` are listed above as themselves, because they are
+            # what you POST.
+            capabilities.append(
+                {
+                    "job_type": "tts",
+                    "models": voice_rows(config, backend, residency),
+                }
+            )
         return {
             "server": {
                 "name": config.name,
@@ -287,7 +300,13 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         return {
             "status": status,
             "queue_depth": store.queue_depth,
+            # Keeps its name and its shape — a list of ids — and gains the kind
+            # beside it, because since PHASE3-TTS.md section 5 the one thing on
+            # the card may be a voice, and a client has to know which door to
+            # knock on. `resident_models` is not renamed: every phase-2 client
+            # reads it, and one id is one id whatever kind of thing it names.
             "resident_models": residency.ids(),
+            "resident_kind": residency.resident_kind,
         }
 
     # ---------------------------------------------------------------- models
@@ -303,6 +322,20 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 "(set [jobs] enable_llm = true in config.toml)",
             )
         return model_rows(config, backend, residency)
+
+    # ---------------------------------------------------------------- voices
+
+    @private.get("/voices")
+    async def voices(request: Request) -> list[dict[str, Any]]:
+        """Every voice this build has a manifest for, and where it stands here."""
+        if not config.enable_tts:
+            raise ApiError(
+                400,
+                "job_type_disabled",
+                "job type 'tts' is not enabled on this server "
+                "(set [jobs] enable_tts = true in config.toml)",
+            )
+        return voice_rows(config, backend, residency)
 
     # --------------------------------------------------------------- uploads
 
@@ -402,8 +435,12 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
 
     @private.get("/openai/models")
     async def openai_models(request: Request) -> dict[str, Any]:
-        """The resident model in OpenAI's list shape, or an empty list."""
-        resident = residency.resident
+        """The resident model in OpenAI's list shape, or an empty list.
+
+        `resident_model` rather than `resident`: with a voice on the card there
+        is no model to list, and narrator answers no OpenAI route.
+        """
+        resident = residency.resident_model
         if resident is None:
             return {"object": "list", "data": []}
         return {
@@ -436,7 +473,10 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 "a chat request must name a model; this server proxies only to the "
                 "model that is resident",
             )
-        resident = residency.resident
+        # The resident MODEL: a voice on the card is not something a chat
+        # request can be proxied to, so this door's honest answer is the same
+        # `model_not_resident` it gives for an empty card.
+        resident = residency.resident_model
         if resident is None or resident.model_id != requested:
             raise ApiError(
                 409,

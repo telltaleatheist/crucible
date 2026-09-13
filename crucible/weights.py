@@ -1,10 +1,17 @@
-"""Model weights on disk — `~/.crucible/models/<id>/<backend>/`.
+"""Weights on disk — `~/.crucible/<family>/<id>/<backend>/`.
 
-Pulled by `crucible models pull <id>` with `huggingface_hub` at the manifest's
-pinned revision, never from GitHub Releases (PHASE2-LLM.md section 1). A pull
-that finishes writes `crucible-pull.json` beside the weights; nothing downstream
-treats a directory without that stamp as installed, so an interrupted 19 GB
-download can never be handed to an engine as if it were a model.
+Pulled by `crucible models pull <id>` (or `crucible voices pull <id>`) with
+`huggingface_hub` at the manifest's pinned revision, never from GitHub Releases
+(PHASE2-LLM.md section 1). A pull that finishes writes `crucible-pull.json`
+beside the weights; nothing downstream treats a directory without that stamp as
+installed, so an interrupted 19 GB download can never be handed to an engine as
+if it were a model.
+
+`family` is `models` or `voices`, and it comes off the manifest
+(`weights_family`) rather than being passed around. Model ids and voice ids are
+separate namespaces — nothing stops a voice being called `qwen3.5-9b` — and one
+directory holding both would let a `crucible voices pull` overwrite a 19 GB model
+with a 8.5 GB checkpoint and leave a stamp that reads as installed to either.
 """
 
 from __future__ import annotations
@@ -16,14 +23,45 @@ import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from .config import Config
 from .errors import CrucibleError
-from .manifests import BackendSpec, ModelManifest
 
 HF_TOKEN_ENV = "HF_TOKEN"
 STAMP_NAME = "crucible-pull.json"
+
+#: What to call the thing, and which command pulls it, per weights family. A
+#: refusal that says "run `crucible models pull deathstalker`" for a voice sends
+#: its reader to a command that will tell them there is no such model.
+_FAMILY_WORDS: dict[str, tuple[str, str]] = {
+    "models": ("model", "crucible models pull"),
+    "voices": ("voice", "crucible voices pull"),
+}
+
+
+@runtime_checkable
+class WeightsSubject(Protocol):
+    """What this module needs from a manifest, model or voice alike.
+
+    Structural rather than a base class: `ModelManifest` and `VoiceManifest`
+    describe different things and share no fields beyond these, and inventing a
+    parent for them would put the id and the path somewhere neither schema's
+    reader would look for them.
+    """
+
+    id: str
+    path: Path
+    weights_family: str
+
+
+@runtime_checkable
+class WeightsSource(Protocol):
+    """What this module needs from a backend block."""
+
+    backend: str
+    hf_repo: str
+    revision: str
 
 
 class WeightsError(CrucibleError):
@@ -48,35 +86,40 @@ class InstalledWeights:
         }
 
 
-def models_root(config: Config) -> Path:
-    return config.home / "models"
+def weights_root(config: Config, family: str) -> Path:
+    return config.home / family
 
 
-def model_dir(config: Config, model_id: str, backend_kind: str) -> Path:
-    return models_root(config) / model_id / backend_kind
+def weights_dir(
+    config: Config, family: str, subject_id: str, backend_kind: str
+) -> Path:
+    return weights_root(config, family) / subject_id / backend_kind
 
 
-def stamp_path(config: Config, model_id: str, backend_kind: str) -> Path:
-    return model_dir(config, model_id, backend_kind) / STAMP_NAME
+def stamp_path(
+    config: Config, family: str, subject_id: str, backend_kind: str
+) -> Path:
+    return weights_dir(config, family, subject_id, backend_kind) / STAMP_NAME
 
 
 def installed(
-    config: Config, manifest: ModelManifest, spec: BackendSpec
+    config: Config, manifest: WeightsSubject, spec: WeightsSource
 ) -> InstalledWeights | None:
-    """The installed weights for this (model, backend), or None.
+    """The installed weights for this (model or voice, backend), or None.
 
     A stamp naming a different revision than the manifest pins is *not* installed:
     the manifest moved, and serving the old bytes under the new id would be a
     silent substitution.
     """
-    stamp = stamp_path(config, manifest.id, spec.backend)
+    family = manifest.weights_family
+    stamp = stamp_path(config, family, manifest.id, spec.backend)
     if not stamp.is_file():
         return None
     record = json.loads(stamp.read_text(encoding="utf-8"))
     if record["revision"] != spec.revision or record["hf_repo"] != spec.hf_repo:
         return None
     return InstalledWeights(
-        path=model_dir(config, manifest.id, spec.backend),
+        path=weights_dir(config, family, manifest.id, spec.backend),
         hf_repo=record["hf_repo"],
         revision=record["revision"],
         bytes=record["bytes"],
@@ -85,24 +128,26 @@ def installed(
 
 
 def require_installed(
-    config: Config, manifest: ModelManifest, spec: BackendSpec
+    config: Config, manifest: WeightsSubject, spec: WeightsSource
 ) -> InstalledWeights:
-    """Installed weights, or `model_not_installed` by name."""
+    """Installed weights, or `model_not_installed` / `voice_not_installed`."""
     found = installed(config, manifest, spec)
     if found is not None:
         return found
-    directory = model_dir(config, manifest.id, spec.backend)
-    stamp = stamp_path(config, manifest.id, spec.backend)
+    family = manifest.weights_family
+    noun, command = _FAMILY_WORDS[family]
+    directory = weights_dir(config, family, manifest.id, spec.backend)
+    stamp = stamp_path(config, family, manifest.id, spec.backend)
     if stamp.is_file():
         record = json.loads(stamp.read_text(encoding="utf-8"))
         raise WeightsError(
             f"{directory} holds {record['hf_repo']}@{record['revision'][:12]}, but "
             f"{manifest.path.name} now pins {spec.hf_repo}@{spec.revision[:12]} — "
-            f"run `crucible models pull {manifest.id}`"
+            f"run `{command} {manifest.id}`"
         )
     raise WeightsError(
-        f"model {manifest.id!r} is not installed for {spec.backend}; there are no "
-        f"weights at {directory} — run `crucible models pull {manifest.id}`"
+        f"{noun} {manifest.id!r} is not installed for {spec.backend}; there are no "
+        f"weights at {directory} — run `{command} {manifest.id}`"
     )
 
 
@@ -135,13 +180,13 @@ def directory_bytes(path: Path) -> int:
 
 def pull(
     config: Config,
-    manifest: ModelManifest,
-    spec: BackendSpec,
+    manifest: WeightsSubject,
+    spec: WeightsSource,
     *,
     force: bool = False,
     on_line: Callable[[str], None] | None = None,
 ) -> InstalledWeights:
-    """Fetch this model's weights for this backend at the pinned revision."""
+    """Fetch this model's or voice's weights for this backend at its pin."""
     try:
         from huggingface_hub import snapshot_download
         from huggingface_hub.errors import (
@@ -154,7 +199,7 @@ def pull(
             f"huggingface_hub is not importable in {config.name}'s interpreter: {exc}"
         ) from exc
 
-    target = model_dir(config, manifest.id, spec.backend)
+    target = weights_dir(config, manifest.weights_family, manifest.id, spec.backend)
     existing = installed(config, manifest, spec)
     if existing is not None and not force:
         return existing
@@ -204,7 +249,8 @@ def pull(
     elapsed = time.monotonic() - started
     size = directory_bytes(target)
     record = {
-        "model": manifest.id,
+        "family": manifest.weights_family,
+        "id": manifest.id,
         "backend": spec.backend,
         "hf_repo": spec.hf_repo,
         "revision": spec.revision,

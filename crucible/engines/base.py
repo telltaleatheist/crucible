@@ -55,7 +55,11 @@ class Engine(Protocol):
         timeout: float,
         on_progress: Callable[[str], None] | None = None,
     ) -> None:
-        """Block until the engine answers /v1/models, or raise EngineError."""
+        """Block until the engine says it is up, or raise EngineError.
+
+        HOW it says so is the engine's: vLLM and mlx-lm answer `/v1/models`,
+        narrator prints a `ready` line on stdout.
+        """
 
     def stop(self) -> None:
         """SIGTERM and wait. Never SIGKILL."""
@@ -115,6 +119,39 @@ class SubprocessEngine:
     def environment(self) -> dict[str, str]:
         """Extra environment for the engine process. Merged over os.environ."""
         return {}
+
+    def announced_ready(self) -> str | None:
+        """Has this engine said it is up? The message if so, None if not yet.
+
+        **How an engine announces itself is the subclass's business.** vLLM and
+        mlx-lm both answer their own OpenAI `/v1/models`, which is what this
+        default does and what PHASE2-LLM.md section 3 specifies. narrator does
+        not: its wire is newline-delimited JSON over stdin and stdout and it
+        prints a `ready{device,backend}` line (PHASE3-TTS.md section 4), so
+        `crucible/engines/narrator.py` overrides this rather than standing up a
+        fake HTTP server to fit a probe that assumed one.
+
+        Raising from here is how an engine reports that it is up and serving the
+        WRONG thing, which is not a "not yet" and must not be polled through.
+        """
+        served = self._probe_models(f"{self.base_url}/v1/models")
+        if served is None:
+            return None
+        if self._served_name is not None and self._served_name not in served:
+            raise EngineError(
+                f"{self.name} is serving {served}, not "
+                f"{self._served_name!r}; Crucible will not proxy a model it "
+                "did not ask for"
+            )
+        return f"{self.name} is serving {self._served_name!r}"
+
+    def readiness_description(self) -> str:
+        """What `ready()` says the engine failed to do, in a timeout message.
+
+        Reads as "<name> did not <this> within 900s", so it is a verb phrase and
+        it names whatever `announced_ready()` was actually watching.
+        """
+        return f"answer {self.base_url}/v1/models"
 
     def confirm(
         self, deadline: float, on_progress: Callable[[str], None] | None
@@ -191,7 +228,6 @@ class SubprocessEngine:
         if self._process is None or self._port is None:
             raise EngineError(f"{self.name} has not been started")
         deadline = time.monotonic() + timeout
-        url = f"{self.base_url}/v1/models"
         attempt = 0
         while True:
             code = self._process.poll()
@@ -200,25 +236,20 @@ class SubprocessEngine:
                     f"{self.name} exited {code} before it was ready. Last "
                     f"{LOG_TAIL_LINES} lines of {self._log_path}:\n" + self.log_tail()
                 )
-            served = self._probe_models(url)
-            if served is not None:
-                if self._served_name is not None and self._served_name not in served:
-                    raise EngineError(
-                        f"{self.name} is serving {served}, not "
-                        f"{self._served_name!r}; Crucible will not proxy a model it "
-                        "did not ask for"
-                    )
+            announcement = self.announced_ready()
+            if announcement is not None:
                 if on_progress is not None:
-                    on_progress(f"{self.name} is serving {self._served_name!r}")
-                # Answering /v1/models does not always mean the weights are in
-                # memory (mlx-lm's list route is served by a thread that does
-                # not wait for the load). An engine that needs more proof than
-                # that says so here.
+                    on_progress(announcement)
+                # Announcing does not always mean the weights are in memory
+                # (mlx-lm's list route is served by a thread that does not wait
+                # for the load). An engine that needs more proof than that says
+                # so here.
                 self.confirm(deadline, on_progress)
                 return
             if time.monotonic() >= deadline:
                 raise EngineError(
-                    f"{self.name} did not answer {url} within {timeout:.0f}s. Last "
+                    f"{self.name} did not {self.readiness_description()} within "
+                    f"{timeout:.0f}s. Last "
                     f"{LOG_TAIL_LINES} lines of {self._log_path}:\n" + self.log_tail()
                 )
             attempt += 1

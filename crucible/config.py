@@ -72,6 +72,7 @@ class Config:
     backend_kind: str
     enable_echo: bool
     enable_llm: bool
+    enable_tts: bool
     desktop_allowance_bytes: int
 
     @property
@@ -133,6 +134,7 @@ def load_config(home: Path | None = None) -> Config:
         backend_kind=_require(table, "backend", "kind", str),
         enable_echo=_require(table, "jobs", "enable_echo", bool),
         enable_llm=_require(table, "jobs", "enable_llm", bool),
+        enable_tts=_require(table, "jobs", "enable_tts", bool),
         desktop_allowance_bytes=_require(
             table, "accelerator", "desktop_allowance_bytes", int
         ),
@@ -149,6 +151,7 @@ def write_config(
     backend_kind: str,
     enable_echo: bool,
     enable_llm: bool,
+    enable_tts: bool,
     desktop_allowance_bytes: int,
 ) -> Path:
     """Write config.toml at mode 0600 under a 0700 home. Returns the path."""
@@ -159,7 +162,11 @@ def write_config(
         "server": {"name": name, "host": host, "port": port},
         "auth": {"token": token},
         "backend": {"kind": backend_kind},
-        "jobs": {"enable_echo": enable_echo, "enable_llm": enable_llm},
+        "jobs": {
+            "enable_echo": enable_echo,
+            "enable_llm": enable_llm,
+            "enable_tts": enable_tts,
+        },
         "accelerator": {"desktop_allowance_bytes": desktop_allowance_bytes},
     }
     # Create with 0600 from the outset so the token is never briefly world-readable.

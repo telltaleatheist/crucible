@@ -20,9 +20,9 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, llmenv
+from crucible import accelerator, jobenv
 from crucible.accelerator import GIB, ComputeApp
-from crucible.jobs.llm import residency as residency_module
+from crucible import residency as residency_module
 from crucible.manifests import load_manifest
 
 from .conftest import FAKE_BACKEND, parse_sse
@@ -40,7 +40,8 @@ SMALL_BIG_MODEL = "qwen3.8-27b-4bit"
 @pytest.fixture
 def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A stamped `~/.crucible/envs/llm` that `env_status` accepts."""
-    directory = llmenv.llm_env_dir(home)
+    spec = jobenv.llm_env(FAKE_BACKEND.kind)
+    directory = jobenv.env_dir(home, spec)
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
     (directory / "crucible-env.json").write_text(
@@ -54,8 +55,8 @@ def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ),
         encoding="utf-8",
     )
-    pins = llmenv.recipe_pins(llmenv.recipe_for(FAKE_BACKEND.kind))
-    monkeypatch.setattr(llmenv, "installed_packages", lambda _home: dict(pins))
+    pins = jobenv.recipe_pins(jobenv.recipe_for(spec))
+    monkeypatch.setattr(jobenv, "installed_packages", lambda _home, _spec: dict(pins))
     return directory
 
 
@@ -704,6 +705,7 @@ def test_health_says_warming_while_a_load_is_in_flight(
         "status": "ok",
         "queue_depth": 0,
         "resident_models": [MODEL],
+        "resident_kind": "llm",
     }
 
 

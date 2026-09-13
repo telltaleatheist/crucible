@@ -47,8 +47,11 @@ crucible doctor --json          # the same report, machine-readable
 crucible token --show           # print the bearer token
 crucible serve                  # foreground; 127.0.0.1:7100 by default
 crucible install llm            # build the llm env for this host's backend
+crucible install tts --narrator-engine higgs-v3   # ...and a tts env, one per engine
 crucible models list            # model manifests and their standing here
 crucible models pull <id>       # fetch a model's weights at its pinned revision
+crucible voices list            # voice manifests and their standing here
+crucible voices pull <id>       # fetch a voice's weights at its pinned revision
 ```
 
 `crucible init` refuses if a config already exists (`--force` replaces it and mints a
@@ -78,7 +81,10 @@ jobs/<id>/inputs/  the job's inputs, materialised before it is queued
 jobs/<id>/artifacts/   its outputs and their .provenance.json sidecars
 uploads/<blob_id>  blobs from POST /v1/uploads
 envs/llm/          the llm job type's venv, built by `crucible install llm`
+envs/tts-<engine>/ the tts job type's venv, one per narrator engine on cuda-linux
+                   (one shared `envs/tts/` on mlx-darwin, where they can share)
 models/<id>/<backend>/  weights, stamped with the revision they were pulled at
+voices/<id>/<backend>/  the same for voices — a separate namespace on purpose
 logs/engine-<id>.log    one engine's stdout and stderr, command line first
 ```
 

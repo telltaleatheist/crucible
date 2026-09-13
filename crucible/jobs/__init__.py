@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..errors import ApiError
+from ..residency import Residency
 from .base import (
     Job,
     JobContext,
@@ -20,7 +21,8 @@ from .base import (
     validate_member_name,
 )
 from .echo import EchoJobType
-from .llm import LoadModelJobType, Residency, UnloadModelJobType, model_rows
+from .llm import LoadModelJobType, UnloadModelJobType, model_rows
+from .tts import LoadVoiceJobType, UnloadVoiceJobType, voice_rows
 
 #: The vocabulary this build knows, and which config flag turns each one on.
 #: `resolve()` tells "that type does not exist" from "it exists but is off".
@@ -28,6 +30,8 @@ ALL_JOB_TYPES: dict[str, str] = {
     EchoJobType.name: "echo",
     LoadModelJobType.name: "llm",
     UnloadModelJobType.name: "llm",
+    LoadVoiceJobType.name: "tts",
+    UnloadVoiceJobType.name: "tts",
 }
 
 
@@ -36,17 +40,22 @@ def build_registry(
 ) -> dict[str, JobType]:
     """Instantiate the job types this config enables.
 
-    `residency` is the server instance's one-resident-model holder. `crucible
+    `residency` is the server instance's one-resident-engine holder, and every
+    job type that touches the card is handed the SAME one — that is what makes
+    "loading a voice unloads a model" true rather than aspirational. `crucible
     doctor` has no server, so it passes none and gets a fresh (empty) one — which
-    is honest: a doctor run cannot see another process's resident model.
+    is honest: a doctor run cannot see another process's resident engine.
     """
     registry: dict[str, JobType] = {}
+    holder = residency if residency is not None else Residency(config)
     if config.enable_echo:
         registry[EchoJobType.name] = EchoJobType()
     if config.enable_llm:
-        holder = residency if residency is not None else Residency(config)
         registry[LoadModelJobType.name] = LoadModelJobType(config, backend, holder)
         registry[UnloadModelJobType.name] = UnloadModelJobType(config, backend, holder)
+    if config.enable_tts:
+        registry[LoadVoiceJobType.name] = LoadVoiceJobType(config, backend, holder)
+        registry[UnloadVoiceJobType.name] = UnloadVoiceJobType(config, backend, holder)
     return registry
 
 
@@ -100,12 +109,15 @@ __all__ = [
     "JobType",
     "JobTypeStatus",
     "LoadModelJobType",
+    "LoadVoiceJobType",
     "ModelDescriptor",
     "Residency",
     "UnloadModelJobType",
+    "UnloadVoiceJobType",
     "build_registry",
     "model_rows",
     "resolve",
     "resolve_model",
     "validate_member_name",
+    "voice_rows",
 ]
