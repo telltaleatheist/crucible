@@ -148,7 +148,21 @@ class JobContext:
         if self._job.cancel_requested:
             raise JobCancelled(f"job {self._job.id} was cancelled")
 
-    def progress(self, fraction: float, message: str) -> None:
+    def progress(self, fraction: float, message: str, **extra: Any) -> None:
+        """Emit `progress {fraction, message, ...}`.
+
+        `extra` is a job type's own measurements alongside the fraction, and it
+        exists because a fraction is not always the useful number. `asr` sends
+        processed seconds, total seconds and a running segment count
+        (PHASE4-AUDIO.md section 3), so that BookForge's existing progress parser
+        has exactly the information it has today — where those numbers come off
+        the worker's own PROGRESS line and the percentage is still rounding to
+        zero six minutes into an eighteen-hour book.
+
+        `extra` cannot shadow `fraction` or `message`, and there is no check for
+        it here because Python already refuses: both are named parameters, so
+        `progress(0.5, "x", message="y")` is a TypeError before this body runs.
+        """
         if not isinstance(fraction, (int, float)) or isinstance(fraction, bool):
             raise TypeError(f"progress fraction must be a number, got {fraction!r}")
         if not 0.0 <= float(fraction) <= 1.0:
@@ -157,7 +171,7 @@ class JobContext:
             self._store.append_event,
             self._job,
             "progress",
-            {"fraction": float(fraction), "message": message},
+            {"fraction": float(fraction), "message": message, **extra},
         )
 
     def warming(self, message: str) -> None:
