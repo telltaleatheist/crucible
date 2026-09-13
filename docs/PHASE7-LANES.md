@@ -503,6 +503,85 @@ crossed, for a reason, and the reason is written down here.
 
 ---
 
+### 7.1 The token, ruled 2026-09-13
+
+Owen ruled on the whole shape at once rather than piecemeal. Three questions had been
+getting mixed; they separate cleanly.
+
+**(A) WHERE IT LIVES.** Already settled by DESIGN.md section 9 — *"`crucible init` mints
+it; the client stores it per server entry."* So: in the registry that owns the server
+list, which by section 4.2's rule is BookForge's `crucible-servers.json` when Foundry is
+hosted and Foundry's own settings when it is not.
+
+**(B) HOW IT REACHES THE PROCESS THAT CALLS.** Not as a token — **as an opaque header
+map**, in one environment variable set by whoever spawns the engine:
+
+```
+{"Authorization": "Bearer <token>", "X-Crucible-Api": "1"}
+```
+
+Three reasons this beats passing a token:
+
+- **It keeps the client ignorant of what a Crucible is.** The Foundry session asked not to
+  teach its engine the product's name, and it was right: an engine that knows only "this
+  endpoint wants these headers" needs no change the day it points at something else.
+- **It carries both headers through one mechanism.** The version header is not a secret and
+  the token is, but they travel together and neither needs its own path.
+- **It is future-shaped.** Any server wanting a different header set is already supported.
+
+The rest of the discipline, unchanged: **never a flag** (a command line gets pasted into a
+bug report), **never through a settings echo** that prints values by design, **never
+logged**, and **stripped from the environment of any child that does not need it** — a
+rasteriser turning pages into PNGs has no use for a credential, and children inherit
+everything unless an explicit `env` says otherwise.
+
+**Why environment rather than a settings field alone.** Storage is on disk either way, so
+the disk exposure is common to both and cannot break the tie. What differs is the residual
+risk: the environment's is inheritance, fixable once with an explicit `env` at each spawn;
+the settings field's is that the secret sits in a code path that prints values by design,
+where safety depends on every future author remembering to exclude it. A mechanical fix
+beats a remembered one.
+
+**(C) HOW THE USER GETS ONE — the question nobody had answered.** Today it is: open a
+terminal, `wsl`, `crucible token --show`, select text in a terminal, paste. For the case
+Owen actually names — a friend installing Crucible in WSL on their own machine for speed —
+that is the product's first impression, and no field design fixes it.
+
+**So invert who mints it. When the CLIENT installs the server, the client mints the
+token** and passes it to `crucible init --token <generated>`. The user never sees a token,
+never copies one, never learns the word. This is cheap precisely because the client is
+already the thing running the install; it belongs in the **bootstrapper**, which is still
+unbuilt, so it is a requirement on that work rather than work outstanding here.
+
+Split by provenance:
+
+| How the server got there | Token UX |
+|---|---|
+| Installed by BookForge (local WSL — the common case) | **none.** The client mints it. |
+| Installed by hand, or remote (the Mac, a droplet) | paste into a field beside the URL |
+| A pairing code (`crucible pair`) | **deferred** |
+
+Pairing is deferred deliberately: it needs a new **unauthenticated** endpoint, which is a
+security surface added to solve a problem that exists only for machines nobody installed
+from here — and Owen administers all of his.
+
+### 7.2 The registry file is plaintext, deliberately
+
+Written down so that nobody earnestly encrypts it later without knowing what they are
+trading away.
+
+The token sits in plaintext in the registry under `<userData>`. That matches the actual
+threat model — a home tailnet, machines Owen owns, and everything holding one token being
+one trust domain by DESIGN.md section 8 — and it is consistent with how every other
+credential here is already kept, including the HuggingFace token, which is a text file in
+`Downloads`.
+
+An OS keychain would be inconsistent with everything around it and would buy
+cross-platform work against no threat that exists here. If the threat model changes — a
+shared machine, a token that reaches something Owen does not own — this is the paragraph
+to come back and argue with.
+
+
 ## 8. Foundry
 
 Foundry enqueues into this queue (`electron/foundry-host-queue.ts`) and its VLM page
