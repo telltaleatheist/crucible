@@ -134,13 +134,34 @@ and gains exactly one key:
 
 ```json
 "guard": {
-  "verdict": "clean" | "short" | "long" | "hole" | "split" | "rejected",
-  "takes": [ {"take": 0, "seed": 4711, "chars": 412, "seconds": 3.1,
-              "chars_per_sec": 132.9, "capped": true, "outcome": "long"} ],
-  "band":  {"reference": 14.8, "short": 11.4, "long": 19.2, "observed": 37, "warm": true},
-  "parts": 2
+  "verdict": "clean",
+  "clean": true,
+  "parts": 1,
+  "band": {"max_chars_per_sec": 20.0, "min_chars_per_sec": 14.5,
+           "reference": 17.03, "observed": 4, "warm": false},
+  "takes": []
 }
 ```
+
+**The shape above is MEASURED off `GuardPlan.verdict()`, not sketched.** An earlier draft
+of this section invented plausible field names — `chars_per_sec`, `take`, `seed`,
+`capped`, `outcome`, and a band of `{reference, short, long}` — and every one of them was
+wrong. The real take records carry `chars_per_second` (not `_sec`), plus `index`, `depth`,
+`side`, `rung`, `action`, `chars`, `seconds`, `hole_seconds`, `max_hole_seconds`,
+`max_chars_per_sec`, `min_chars_per_sec`, `pace` and `pace_source`; the band is
+`{max_chars_per_sec, min_chars_per_sec, reference, observed, warm}`.
+
+That matters because **a Crucible-side schema written from the old draft would not have
+matched the wire**, and it would have failed at the first guard fire rather than at build
+time. Caught by the agent that wired the serve path, who read the code instead of the
+document. The rule this section states — the server forwards the object verbatim and reads
+nothing inside it — is what keeps the mismatch from being fatal, but a document that lies
+about a shape is a trap for whoever writes the next consumer.
+
+`verdict` is the ladder's own last action: `clean` when nothing fired, else the vocabulary
+`truncation.py` already emits — `short`, `long`, `rerolled`, `resplit`,
+`accepted-off-length`. Deliberately not a taxonomy invented here: a word this document made
+up would be a word that could drift from what the ladder actually did.
 
 Three properties this shape is chosen for:
 

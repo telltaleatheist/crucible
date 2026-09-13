@@ -696,7 +696,17 @@ explicit order — and `tts` render already has exactly this asymmetry for exact
 reason: it may load its own model and emits `warming` while it does.
 
 So the answer is the scheduler's, not the reader's: **whoever owns the queue submits
-`load-model` before it queues the reads.** One load, the whole book, one unload. The
+`load-model` before it queues the reads.**
+
+**AND THE CONDITION INVERTS — this is the part a naive port gets wrong.** Foundry already
+has a call in exactly the right place (`app/electron/job-queue.ts:3638`), but it is gated
+on `isLocalVllmEndpoint`, which is **loopback AND port 8000** — a question about the
+ADDRESS. Residency is a question about the SERVER'S KIND: a Crucible on a droplet needs a
+model made resident exactly as much as one on loopback, because the chat door never loads
+wherever it is running. So the branch that must now call `ensureResident` is precisely the
+branch today's condition EXCLUDES, and a same-shape port would leave every remote read
+refused with `model_not_resident` on page one. Raised by the Foundry session, verified in
+their code. One load, the whole book, one unload. The
 machinery exists (`crucible/jobs/llm/` provides `load-model` and `unload-model`); nothing
 new is needed but the ordering. A client must still render the refusal well, because it is
 what somebody gets when they point at a server nobody loaded — but a good sentence is not
