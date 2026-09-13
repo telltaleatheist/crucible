@@ -25,6 +25,20 @@ DELTAS = ["Crucible ", "is ", "a ", "server."]
 class _Handler(BaseHTTPRequestHandler):
     served_name: str = "unset"
     last_request: dict[str, Any] | None = None
+    #: Every completion body this engine was sent, in arrival order. `ThreadingHTTPServer`
+    #: serves each connection on its own thread, so `last_request` is whichever
+    #: one finished last — no use at all to a test about concurrency.
+    requests: list[dict[str, Any]] | None = None
+    #: How many bytes of body arrived for each of those, which is the only way to
+    #: say "nothing was truncated" about an 11 MB data URI without trusting the
+    #: JSON to have parsed.
+    request_bytes: list[int] | None = None
+    #: Called once per completion, on the serving thread, before anything is
+    #: answered. A test that needs several requests to be genuinely in flight at
+    #: the same moment puts a `threading.Barrier.wait` here; nothing else can
+    #: tell "twelve at once" from "twelve quickly".
+    on_post: Callable[[], None] | None = None
+    lock: threading.Lock | None = None
 
     def log_message(self, *args: Any) -> None:  # keep pytest output clean
         return
@@ -54,8 +68,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
             return
         length = int(self.headers.get("Content-Length", "0"))
-        body = json.loads(self.rfile.read(length) or b"{}")
+        raw = self.rfile.read(length) or b"{}"
+        body = json.loads(raw)
         type(self).last_request = body
+        with type(self).lock:
+            type(self).requests.append(body)
+            type(self).request_bytes.append(len(raw))
+        if type(self).on_post is not None:
+            type(self).on_post()
 
         if body.get("model") != type(self).served_name:
             # What a real engine does with a name it is not serving. Crucible's
@@ -132,6 +152,7 @@ class FakeEngine:
         warmings: int = 3,
         fail_ready: str | None = None,
         hold: threading.Event | None = None,
+        on_post: Callable[[], None] | None = None,
     ) -> None:
         self._python = Path(python)
         self._log_path = Path(log_path)
@@ -143,6 +164,7 @@ class FakeEngine:
         #: When given, `ready()` blocks on it, so a test can look at the server
         #: while a load is genuinely in flight.
         self._hold = hold
+        self._on_post = on_post
         #: Set once `ready()` has been entered, so a test knows the lane has
         #: reached the engine without polling on a sleep.
         self.warming_started = threading.Event()
@@ -169,7 +191,19 @@ class FakeEngine:
     def start(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> None:
-        handler = type("BoundHandler", (_Handler,), {"served_name": served_name})
+        handler = type(
+            "BoundHandler",
+            (_Handler,),
+            {
+                "served_name": served_name,
+                # Per engine, not per class: two engines in one test (a load that
+                # evicts another) must not share a request log.
+                "requests": [],
+                "request_bytes": [],
+                "lock": threading.Lock(),
+                "on_post": self._on_post,
+            },
+        )
         self._handler = handler
         self.args = list(args)
         # The port the caller found may have been taken; the fake binds its own
@@ -213,3 +247,17 @@ class FakeEngine:
     @property
     def last_request(self) -> dict[str, Any] | None:
         return getattr(self, "_handler", _Handler).last_request
+
+    @property
+    def requests(self) -> list[dict[str, Any]]:
+        handler = getattr(self, "_handler", None)
+        if handler is None:
+            raise RuntimeError("fake engine has not been started")
+        return handler.requests
+
+    @property
+    def request_bytes(self) -> list[int]:
+        handler = getattr(self, "_handler", None)
+        if handler is None:
+            raise RuntimeError("fake engine has not been started")
+        return handler.request_bytes
