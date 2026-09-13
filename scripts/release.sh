@@ -13,7 +13,7 @@
 #   crucible-client-<ver>.tgz      the TypeScript SDK, installable by URL
 #
 # The version is read from four places and every one of them must agree:
-# crucible/__init__.py, sdk/ts/package.json, and sdk/ts/src/version.ts (which
+# crucible/__init__.py, pyproject.toml, sdk/ts/package.json, and sdk/ts/src/version.ts (which
 # the SDK reports in its User-Agent). A mismatch is a refusal, not a warning.
 #
 # If the tag already exists — locally, on the remote, or as a release — this
