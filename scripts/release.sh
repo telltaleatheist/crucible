@@ -12,7 +12,7 @@
 #   crucible-<ver>-py3-none-any.whl  the server wheel
 #   crucible-client-<ver>.tgz      the TypeScript SDK, installable by URL
 #
-# The version is read from three places and every one of them must agree:
+# The version is read from four places and every one of them must agree:
 # crucible/__init__.py, sdk/ts/package.json, and sdk/ts/src/version.ts (which
 # the SDK reports in its User-Agent). A mismatch is a refusal, not a warning.
 #
@@ -81,10 +81,15 @@ REMOTE_SHA="$(git rev-parse "origin/$BRANCH")"
 PY_VERSION="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' crucible/__init__.py)"
 SDK_VERSION="$(node -p "require('./sdk/ts/package.json').version")"
 UA_VERSION="$(sed -n "s/^export const SDK_VERSION = '\(.*\)';$/\1/p" sdk/ts/src/version.ts)"
+TOML_VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)"
 
-[ -n "$PY_VERSION" ]  || fail "could not read VERSION from crucible/__init__.py"
-[ -n "$SDK_VERSION" ] || fail "could not read version from sdk/ts/package.json"
-[ -n "$UA_VERSION" ]  || fail "could not read SDK_VERSION from sdk/ts/src/version.ts"
+[ -n "$PY_VERSION" ]   || fail "could not read VERSION from crucible/__init__.py"
+[ -n "$SDK_VERSION" ]  || fail "could not read version from sdk/ts/package.json"
+[ -n "$UA_VERSION" ]   || fail "could not read SDK_VERSION from sdk/ts/src/version.ts"
+[ -n "$TOML_VERSION" ] || fail "could not read version from pyproject.toml"
+
+[ "$PY_VERSION" = "$TOML_VERSION" ] \
+  || fail "crucible/__init__.py says $PY_VERSION but pyproject.toml says $TOML_VERSION; the wheel would carry the wrong version (this is what nearly shipped 0.1.0 bytes as v0.2.0)"
 
 [ "$PY_VERSION" = "$SDK_VERSION" ] \
   || fail "crucible/__init__.py says $PY_VERSION but sdk/ts/package.json says $SDK_VERSION; one release, one version"
