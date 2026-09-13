@@ -655,11 +655,12 @@ starting the row again — which a WebSocket would have needed its own machinery
 Events on the stream, each with the usual strictly-increasing id:
 
 ```
-ready  {voice, fingerprint, sample_rate, backend}
-audio  {id, seq, pcm_base64, seconds}
-done   {id, seconds, chars, chars_per_sec, capped, cancelled}
-error  {id?, code, message}
-closed {reason}
+ready   {voice, fingerprint, sample_rate, backend}
+audio   {id, seq, pcm_base64, seconds}
+restart {id, from_seq, reason}          # added while building — DIFFERENCE 1 below
+done    {id, seconds, chars, chars_per_sec, capped, cancelled}
+error   {id?, code, message}
+closed  {reason}
 ```
 
 Ops on the post:
@@ -701,6 +702,97 @@ BookForge's own TTS WebSocket on 8766 stays exactly where it is and becomes a **
 these three routes. The extension's protocol does not change, which is what keeps Sunday
 working.
 
+### What building it changed, 2026-09-13
+
+Seven things this section did not know, each found by writing `crucible/ttsstream.py`
+against `tests/fake_narrator.py` and then running it on a real socket.
+
+**DIFFERENCE 1 — there is an eighth frame, `restart {id, from_seq, reason}`, and per-row
+cancel is a lie without it.** The contract says `{"op": "cancel", "id": "r12"}` and narrator
+has no such op: its `cancel` aborts **everything in flight**. Redefining the op to mean
+"cancel all" would be a lie on the wire, and reporting one row as cancelled while its
+neighbours silently died with it would be worse. So a row not yet handed to narrator is
+dropped before it starts, a row in flight is stopped by aborting its batch, and the
+**survivors of that batch are resubmitted**. A resubmitted row has already sent audio under
+its id, and without a frame saying so a client concatenates the row's first seconds twice
+with nothing on the wire to explain the stutter. `restart` is that frame: every `audio` for
+that id below `from_seq` is void. `seq` never restarts across it, so "ids strictly increase
+within a row" stays true and `from_seq` is where the good audio begins.
+
+**DIFFERENCE 2 — Orpheus's streaming width is 8, not 16, and there is a 25 ms coalescing
+window.** This section's parenthetical named the *ceiling*; the thing that dispatches is
+`orpheus-worker-pool.ts`'s `flushBatch()`, which coalesces a 25 ms window into
+`min(STREAM_RAMP_WIDTH = 8, streamBatchCeiling())`. Eight is what production runs, so eight
+is what `STREAM_BATCH_WIDTH` carries beside Higgs's 1. The window came with it and was found
+by a failing test rather than designed in: rows arrive one HTTP post at a time, so a worker
+that dispatched the instant the first one landed put **every row in a batch of its own** —
+the width would have been a number that never happened, and the whole cost of a per-row
+cancel would have looked free right up until the day it was not. The wait is skipped
+entirely when the width is 1 rather than added to the first syllable of every sentence.
+
+**So the cost of a per-row cancel, stated plainly:** on `higgs-v3`, nothing — the width is 1,
+the in-flight row IS the batch, there are no survivors and `restart` never fires. On
+`orpheus`, up to seven other rows lose whatever they had generated and generate it again.
+Every voice this build ships is `higgs-v3`, so the survivor path is **unreachable through a
+manifest today**; its test patches the width to reach it and says so.
+
+**DIFFERENCE 3 — a session and the exclusive lane need a mutual exclusion, and this section
+did not say so.** A streaming session is a connection rather than a job, so it does not queue
+behind the lane — and narrator has one stdin and one stdout. Two conversations on that wire
+do not collide loudly; they read each other's `batch_item` lines and deliver a row of audio
+under another row's id, and a `load-voice` arriving mid-session would SIGTERM the engine out
+from under a sentence. So the card now has a named owner: `Residency.claim(holder,
+may_mutate=)`. A session claims it for its lifetime and promises never to load; the render
+door claims it for its batch and may load its own voice, on the thread it claimed on;
+`load`, `load_voice`, `load_aligner` and `unload` refuse **`engine_in_use`** to anybody else.
+All five card-touching job types make the same refusal in `preflight`, so a client is told
+before its job is queued rather than watching it fail in the lane.
+
+**DIFFERENCE 4 — the replay buffer is bounded by the window, not by a count, and a resume it
+cannot serve is refused.** A frame is dropped when it is older than the grace window **and**
+every attached reader has been handed it. A count would either be a number of seconds written
+as a number of frames — wrong the moment the engine's chunk size changes — or big enough to
+hold a book in memory at 64 KB/s of base64. A `Last-Event-ID` below what the session still
+holds is refused as **`replay_unavailable`**, naming the oldest id it has, and never skipped
+past: audio with a hole in it and nothing saying so is the exact failure this door exists to
+prevent.
+
+**DIFFERENCE 5 — `say` carries a required `take` and there is no default on the wire.** The
+SDK's `say(id, text, take?)` defaults it to 0 in the caller's own code, which is a client
+choosing; a default in the request body would be the server choosing, and the day a ladder is
+wired that becomes a render at a take nobody asked for. The refusals a `say` can make are the
+render door's, one row at a time: `unknown_take`, `sampling_not_wired`, `chunk_too_long`
+(refused, never re-split), a blank text, plus `duplicate_row_id` — an id is what every frame
+names its row by, so two rows sharing one would be two streams of audio under one name.
+
+**DIFFERENCE 6 — the refusals this door adds.** `stream_session_open` (a second session, named
+with the first's id), `stream_not_attached` (a `say` on a session whose event stream has never
+been opened — the contract's "refused by name rather than generating into nothing", now with a
+code), `unknown_session`, `unknown_row`, `stream_closing`, `replay_unavailable`,
+`engine_in_use`, and `unknown_narrator_engine` (no measured batch width for an engine nobody
+has measured one for; guessing 1 would halve Orpheus and guessing 16 would multiply a cancel's
+cost). `cancel` answers `{"outcome": "dropped" | "aborting_batch" | "already_finished"}`,
+because those are three different costs and a client is entitled to know which it got —
+`already_finished` in particular is the ordinary race on a live connection and not an error.
+A row that fails on its own gets `error {id, code: "row_failed", message}` and is **never**
+resubmitted; that is also what makes resubmission self-limiting, since a row that genuinely
+fails comes back to a batch with no cancel in it and is reported there.
+
+**DIFFERENCE 7 — `done`'s `chars_per_sec` is nullable.** A row that was cancelled before it
+emitted anything has no rate, and 0.0 would read to a pace guard as an infinitely slow
+narrator. `capped` is `null` against the pinned narrator for section 6's reason, and `null`
+still never means `false`.
+
+**One measurement about the drop itself, because the first version of its test was wrong.**
+A real socket close is carried to the SSE generator by starlette's disconnect listener and
+ends it in about **0.17 s**; the 15 s keepalive is the detector for the *other* kind of
+departure, a tunnel that died without closing anything, where only a write that fails can
+discover it. A shorter `is_disconnected()` tick was written, measured to change neither case,
+and taken back out. The reason this had to be measured at all is that `httpx.Response.close()`
+called from another thread while a reader is inside `iter_lines()` does **not** close the
+socket, so the first reattach test was not testing a reattach — it was opening a second reader
+beside a first that had never left. The test now does a real `shutdown(SHUT_RDWR)`.
+
 ## 8. API additions
 
 | Route | Auth | Returns |
@@ -709,10 +801,10 @@ working.
 | `POST /v1/jobs {type: "load-voice", model}` | yes | a job; `warming` while narrator starts, `done {resident: id}` |
 | `POST /v1/jobs {type: "unload-voice", model}` | yes | a job; `done {resident: null}` |
 | `POST /v1/jobs {type: "tts", model, params}` | yes | a job; `chunk` per chunk, `artifact` per FLAC |
-| `POST /v1/tts/stream` | yes | opens a streaming session, section 7 |
-| `GET /v1/tts/stream/{id}/events` | yes | SSE: `ready`, `audio`, `done`, `error`, `closed` |
-| `POST /v1/tts/stream/{id}` | yes | one op: `say`, `cancel`, `cancel_all`, `close` |
-| `DELETE /v1/tts/stream/{id}` | yes | close the session |
+| `POST /v1/tts/stream` | yes | **201** and `{session_id, voice, fingerprint, sample_rate, backend}`, section 7 |
+| `GET /v1/tts/stream/{id}/events` | yes | SSE: `ready`, `audio`, `restart`, `done`, `error`, `closed` |
+| `POST /v1/tts/stream/{id}` | yes | **202** and one op: `say`, `cancel`, `cancel_all`, `close` |
+| `DELETE /v1/tts/stream/{id}` | yes | close the session; `{session_id, closed}` says whether the wire was down by the time it answered |
 
 `GET /v1/info` gains a `tts` capability whose rows are `/v1/voices`' rows verbatim.
 `GET /v1/health` gains `resident_kind`.
@@ -744,8 +836,9 @@ one env row per narrator engine under `tts_envs`.
 - `render({voice, language, take, chunks, signal})` → **a job id**, not a handle; `chunk` is
   in the event vocabulary, and `writeArtifactsTo(jobId, dir)` is the batch writer of section
   6. See "What the render client deviated from, and why" below for the handle.
-- `stream({voice, language})` → a session: `say(id, text, take?)`, `cancel(id)`, `close()`,
-  and an `AsyncIterable` of `{id, seq, pcm: Int16Array}` interleaved with `{id, done}`.
+- `stream({voice, language})` → a session: `say(id, text, take?)`, `cancel(id)`,
+  `cancelAll()`, `close()`, and an `AsyncIterable` of `{id, seq, pcm: Int16Array}`
+  interleaved with `{id, done}` (and, since the door was built, `{id, restart}`).
   Still zero runtime dependencies, and now genuinely so: it is `fetch` and the same SSE
   reader `events()` already uses, on a runtime that has no `WebSocket` (section 7).
 - Typed refusals for every named code in this document.
@@ -858,6 +951,50 @@ stream — a bug waiting for the Mac, and for phase 4's `align` and `rvc`. It is
 **not** changed here: it is a doctrine call, not a bug fix, and `readEvent` is shared with the
 builder adding `stream()`.
 
+### The streaming client, 2026-09-13 (later still)
+
+`stream()`, `src/stream.ts` and `decodeBase64`. The SDK's unit suite goes from 128 tests to
+146, still none of which needs a live server: a `node:http` fixture writes the frames and
+then destroys the socket under the reader, which is the only way to prove the reattach.
+
+The session object **is** the `AsyncIterable`, which is the one place this differs from
+`render()`'s shape and for the opposite reason to it. A job is watched with `events(jobId)`
+because a job outlives any watcher and two clocks on one stream would disagree; a session
+*is* its stream — it has no life without one, and `say` is refused by name until one is open
+— so an id plus a separate reader would be two halves of one object that cannot be used
+apart.
+
+Four decisions in it are worth arguing with:
+
+- **It reattaches on its own, and `events()` does not.** That asymmetry is deliberate. A job
+  goes on running whether anybody is watching and its event log is kept for the life of the
+  job, so a client can resume whenever it likes; a session's grace window is fifteen seconds
+  and missing it costs the session, the rows in flight and the listener's place in the
+  paragraph. So a dropped stream is reattached with `Last-Event-ID` for as long as the window
+  could still be open — which is the behaviour the server's SSE door was chosen for, and
+  which every caller would otherwise write again and get wrong. A **refusal** is never
+  retried: `unknown_session` and `replay_unavailable` are the server saying the window has
+  closed or that the audio would have a hole in it, and trying again quietly is how a client
+  ends up playing a sentence that is missing its middle.
+- **A read that fails is sorted from a frame that cannot be read.** Anything the client
+  raised — an unknown event kind, an id that does not follow, a session-wide `error` —
+  travels straight back; a socket that died under the reader is the drop this door exists to
+  survive and is reattached. A consumer breaking out of its `for await` lands in neither,
+  because a return completion at a `yield` runs `finally` and skips `catch`.
+- **`decodeBase64` refuses malformed input rather than skipping it**, unlike `atob` and most
+  hand-rolled decoders. One character outside the alphabet would otherwise shift every sample
+  after it, and a session's chunks are concatenated with their neighbours — so "quietly a few
+  samples short" is a click in the middle of a sentence that nothing in the pipeline would
+  explain.
+- **PCM16 is read through a `DataView`, not `new Int16Array(bytes.buffer)`.** The wire is
+  little-endian — narrator's own format, and what `-f s16le` tells ffmpeg on the render door
+  — and the cast would read it in the host's byte order, which is right on x86 and arm64 and
+  silently wrong anywhere else; it also throws outright on an odd byte offset, which a decoded
+  base64 buffer is free to have.
+
+`chunk` stays out of this door's vocabulary and `restart` is new to it, so the contradiction
+above about unknown event kinds is untouched and still owed a ruling.
+
 Four things this section did not say, each found by reading the bytes the server actually
 sends rather than the prose:
 
@@ -954,6 +1091,38 @@ serve `ow_v7_prod`. `sigma` and `thirdreich` agree. The caps survive the gap bec
 rulings over the whole family rather than certificates bound to one directory; the **pace
 bands do not**, and each manifest says so in a comment. Either push the current merges (the
 catalog's notes say Owen has not given the green light) or re-measure against the pins.
+
+### What is built, later still on 2026-09-13: the streaming door
+
+`crucible/ttsstream.py`, the four routes in `crucible/api.py`, the exclusive claim in
+`crucible/residency.py`, and `stream()` in the SDK. `python -m pytest` goes from 616 at the
+branch point to 645 — 29 of those are this door's — and the SDK's unit suite from 128 to 146.
+
+Three things that were owed a measurement and got one, on a real uvicorn and a real socket
+(`tests/test_tts_stream.py` runs the whole server rather than the ASGI app, because a caller
+who walks away from a stream is a state `TestClient` cannot reach):
+
+- **The grace-window reattach works, and the proof is arithmetic.** A row is generating, the
+  socket is killed with `shutdown(SHUT_RDWR)` mid-row, a new stream attaches carrying
+  `Last-Event-ID`, and the two halves concatenate in `seq` order into exactly the row's whole
+  audio — no gap, no repeat, no seq seen twice, and the frames that landed while nobody was
+  listening are still there.
+- **A real drop is carried to the SSE generator in about 0.17 s** by starlette's disconnect
+  listener; the 15 s keepalive is the detector for a tunnel that died without closing
+  anything. The grace window therefore starts when the client goes, not a keepalive later.
+- **Per-row cancel costs nothing on every voice that ships.** All seven manifests declare
+  `narrator_engine = "higgs-v3"`, whose measured width is 1, so the in-flight row is the
+  batch and there are no survivors to resubmit. The Orpheus cost — up to seven rows
+  regenerated — is proved by a test that patches the width, and it says so.
+
+**What is still owed, and it is the only one Owen cares about personally:** the Sunday test.
+The browser extension pointed at BookForge's relay, pointed at these four routes, on the real
+narrator with `deathstalker` on the card. Nothing here has spoken to a GPU.
+
+Two smaller owed items this door added. `GET /v1/health` says nothing about an open session,
+so a client cannot ask "is somebody listening" without trying to open one and being refused;
+and BookForge's relay on 8766 is unwritten, which is where the extension's protocol meets
+these routes.
 
 ## 11. What this deliberately does not do
 

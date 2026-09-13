@@ -363,7 +363,7 @@ class StreamSession:
         the stream follows live. A reattach inside the grace window lands here,
         and it is the one behaviour a WebSocket could not have given for free.
         """
-        reader = _Reader(session=self, waiter=asyncio.Event(), delivered=delivered)
+        reader = _Reader(waiter=asyncio.Event(), delivered=delivered)
         self._attached.append(reader)
         self._ever_attached = True
         self._detached_at = None
@@ -918,9 +918,13 @@ class _RowFailure(Exception):
 
 @dataclass
 class _Reader:
-    """One attached event stream's cursor over the session's log."""
+    """One attached event stream: its own wakeup, and its own cursor.
 
-    session: StreamSession
+    A waiter each, so two streams never steal each other's wakeup — the rule
+    `JobStore.subscribe` already states. A cursor each because `_prune` will not
+    drop a frame below the slowest of them.
+    """
+
     waiter: asyncio.Event
     delivered: int
 
@@ -1135,7 +1139,7 @@ def require_streamable(manifest: VoiceManifest, backend_kind: str) -> None:
         )
 
 
-def require_sayable(session: StreamSession, manifest: VoiceManifest, take: int) -> None:
+def require_sayable(manifest: VoiceManifest, take: int) -> None:
     """What a `say` may ask for. The render door's rules, one row at a time."""
     try:
         manifest.take(take)

@@ -635,7 +635,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         session = streams.get(session_id)
         if body.op == "say":
             manifest = known_voice(session.voice)
-            require_sayable(session, manifest, body.take)
+            require_sayable(manifest, body.take)
             if len(body.text) > session.max_chars:
                 # The cap certificate, refused rather than re-split: chunking is
                 # the client's (PHASE3-TTS.md section 1), and a server that
