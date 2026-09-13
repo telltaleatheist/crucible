@@ -39,12 +39,37 @@ export interface ModelDescriptor {
  * description wherever a client finds it. Narrow with {@link isLlmCapability} or
  * {@link isTtsCapability} before reading a row.
  */
-export type Capability = LlmCapability | TtsCapability | JobCapability;
+export type Capability = LlmCapability | TtsCapability | JobCapability | RawCapability;
 
-/** Any capability other than `llm` and `tts`. */
+/** Any capability other than `llm` and `tts`, whose rows are descriptors. */
 export interface JobCapability {
   readonly jobType: string;
   readonly models: readonly ModelDescriptor[];
+}
+
+/**
+ * A capability whose rows this build cannot read, carried rather than refused.
+ *
+ * The same rule as {@link UnknownEvent}, one level out, and it is here because
+ * the bug has already happened once: `tts`'s rows are voices rather than
+ * descriptors, so a v0.2.0 client calling `info()` against a v0.3.0 server with
+ * tts enabled threw `info.capabilities[2].models[0] has no field "source"` and
+ * lost the whole call — measured on 2026-09-13 against a real server, not
+ * reasoned about.
+ *
+ * `llm` and `tts` are the shapes this client CLAIMS, and it stays strict about
+ * them: a malformed row in either is still a protocol error. Every other
+ * capability is tried as a descriptor and, when it does not fit, carried here
+ * with its rows exactly as they arrived — because a capability this build has
+ * never heard of is not a broken server, it is a newer one, and `info()` is the
+ * call a client makes to find out what it is talking to.
+ */
+export interface RawCapability {
+  readonly jobType: string;
+  /** The rows verbatim. Nothing has been checked beyond "it is an object". */
+  readonly models: readonly Readonly<Record<string, unknown>>[];
+  /** Why the descriptor shape did not fit, for a log rather than a branch. */
+  readonly unreadable: string;
 }
 
 /** The `llm` capability: `GET /v1/models`' rows, carried inside `info()`. */

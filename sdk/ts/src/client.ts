@@ -1179,12 +1179,34 @@ function readCapability(entry: Json, index: number): Capability {
       ),
     };
   }
-  return {
-    jobType,
-    models: models.map((model, at) =>
-      readModel(asObject(model, `${where}.models[${at}]`), `${where}.models[${at}]`),
-    ),
-  };
+  // Every other capability: try the descriptor shape, and carry the rows raw if
+  // they do not fit rather than losing the whole `info()` call. `llm` and `tts`
+  // above are the two shapes this client claims and stays strict about; this is
+  // the one it makes no claim about.
+  //
+  // Not hypothetical. A v0.2.0 client read EVERY capability with the descriptor,
+  // so the day `tts` shipped — whose rows are voices — `info()` began throwing
+  // `models[0] has no field "source"` against any server with tts enabled, and
+  // the client could no longer ask what it was talking to. Measured against a
+  // real server on 2026-09-13. The next capability to grow richer rows would do
+  // it again, to this build, which is why the fix is general rather than a third
+  // `if`.
+  try {
+    return {
+      jobType,
+      models: models.map((model, at) =>
+        readModel(asObject(model, `${where}.models[${at}]`), `${where}.models[${at}]`),
+      ),
+    };
+  } catch (error) {
+    return {
+      jobType,
+      models: models.map((model, at) =>
+        asObject(model, `${where}.models[${at}]`),
+      ),
+      unreadable: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function readModel(entry: Json, where: string): ModelDescriptor {

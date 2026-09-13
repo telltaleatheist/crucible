@@ -121,3 +121,51 @@ test('strictness about a kind the client DOES claim is untouched', async () => {
     await new Promise<void>((resolve) => strict.close(() => resolve()));
   }
 });
+
+// ---------------------------------------------------------- capabilities
+
+/**
+ * The same rule as above, one level out: `info()` must survive a capability
+ * whose rows this build cannot read.
+ *
+ * This one is not hypothetical. Measured on 2026-09-13 against a real v0.3.0
+ * server with tts enabled: a v0.2.0 client read EVERY capability with API v1's
+ * descriptor shape, `tts`'s rows are voices and carry no `source`, and `info()`
+ * threw `info.capabilities[2].models[0] has no field "source"`. The client could
+ * no longer ask what it was talking to — which is the one thing `info()` is for.
+ */
+test('a capability whose rows are unreadable is carried, not thrown', async () => {
+  const body = JSON.stringify({
+    server: { name: 'c', version: '9.0.0', api_version: 1 },
+    host: {
+      platform: 'linux', arch: 'x86_64', backend: 'cuda-linux',
+      gpu: { vendor: 'nvidia', name: 'card', vram_bytes: 1 },
+    },
+    job_types: ['echo', 'aurora'],
+    capabilities: [
+      { job_type: 'echo', models: [] },
+      // A shape from the future: no `source`, no `vram_bytes`.
+      { job_type: 'aurora', models: [{ id: 'northern', lumens: 4 }] },
+    ],
+  });
+  const future = createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' }).end(body);
+  });
+  await new Promise<void>((resolve) => future.listen(0, '127.0.0.1', resolve));
+  const futureUrl = `http://127.0.0.1:${(future.address() as AddressInfo).port}`;
+
+  try {
+    const c = new CrucibleClient({ url: futureUrl, token: TOKEN, clientName: 'test' });
+    const info = await c.info();
+    const aurora = info.capabilities.find((x) => x.jobType === 'aurora');
+    assert.ok(aurora, 'the capability survived');
+    assert.deepEqual(aurora.models, [{ id: 'northern', lumens: 4 }], 'rows carried verbatim');
+    assert.ok(
+      'unreadable' in aurora && typeof aurora.unreadable === 'string',
+      'and it says why it could not be typed, for a log rather than a branch',
+    );
+    assert.deepEqual(info.jobTypes, ['echo', 'aurora']);
+  } finally {
+    await new Promise<void>((resolve) => future.close(() => resolve()));
+  }
+});

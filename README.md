@@ -153,6 +153,24 @@ request with neither is answered 401.
 | `GET /jobs/{id}/artifacts/{name}` | yes | bytes; `{name}.provenance.json` always exists |
 | `DELETE /jobs/{id}` | yes | cancel |
 
+### One known break between client versions, measured
+
+`api_version` is 1 and stays 1: every route, job type and event kind added since
+v0.2.0 is additive, and a v0.2.0 client's `ping`, `health`, `models`, `chat` and the whole
+job path keep working against a v0.3.0 server. **`info()` is the exception**, and only on
+a server with `tts` enabled: the v0.2.0 client read every capability with API v1's
+descriptor shape, and a voice row carries no `source`, so it throws
+`info.capabilities[2].models[0] has no field "source"` and the call is lost. Measured
+against a real server on 2026-09-13 rather than reasoned about.
+
+That was the client being over-strict rather than the wire breaking, and it is fixed in
+v0.3.0 for good: a capability whose rows this build cannot read is now **carried** as
+`{jobType, models, unreadable}` instead of ending the call, exactly as an unknown event
+kind is. The two shapes the client claims — `llm` and `tts` — stay strict.
+
+The practical rule: **upgrade the client before enabling a new capability on a server an
+old client talks to.**
+
 Errors are always `{"error": {"code", "message", "details"?}}`. Refusals name the thing
 refused: `unauthorized`, `api_version_mismatch` (426, naming both versions),
 `unknown_job_type`, `job_type_disabled`, `unknown_model`, `unknown_blob`, `unknown_job`.
