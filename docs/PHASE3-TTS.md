@@ -307,56 +307,102 @@ the whole reason whole-m4b alignment cannot run on this PC today. The SDK fetche
 artifact as its `artifact` event lands and writes `<index>.flac` where assembly and resume
 look, overlapped with the next chunk's generation.
 
-## 7. The streaming door — `GET /v1/tts/stream` (WebSocket)
+## 7. The streaming door — a session, an event stream, and posts
 
 The Listen path, the in-app Play button, and the browser extension Owen uses every Sunday.
 Its requirements are not the render door's with a smaller buffer; they are different in kind
 (CLIENT-SURFACES.md row 18): sub-sentence audio emitted *while a row is still generating*,
 rows retired out of order within a batch, and a cancel that aborts work in flight.
 
-WebSocket rather than SSE, because every one of those needs the client to speak mid-stream.
-The bearer token travels in the `Authorization` header like every other route. Browsers
-cannot set headers on a WebSocket, but no browser talks to Crucible: BookForge's own TTS
-WebSocket on 8766 stays exactly where it is and becomes a **relay**, which is also what
-keeps the extension working unchanged.
+### Why this is not a WebSocket
 
-**Control frames are JSON text.** Client to server:
+It was, in the first draft of this file, and the draft was wrong for a measured reason.
+
+**Node 20 has no global `WebSocket`** — it is behind `--experimental-websocket` there and
+only becomes ordinary in 22. Electron 33, which is what BookForge ships, bundles Node 20.18,
+and the SDK runs in the **main** process, where the renderer's browser `WebSocket` is not in
+scope. Checked on this machine rather than assumed: `node -v` is v20.19.5 and
+`typeof WebSocket` is `undefined`.
+
+That leaves three ways to have a WebSocket and none of them is free. Raising the SDK's floor
+to Node 22 does not help, because Electron's Node is Electron's. Adding `ws` breaks the one
+rule the SDK has had since phase 1 — **zero runtime dependencies**, so it can be imported by
+Node, bun and Electron without a resolution story. Writing an RFC 6455 client by hand is
+about two hundred lines of masking, fragmentation, continuation frames, close codes and
+UTF-8 validation, which is two hundred lines of subtle protocol in a client whose entire
+job is to be boring.
+
+So the door is built out of the two things this server already does well:
+
+| | |
+|---|---|
+| `POST /v1/tts/stream` | opens a session → `{session_id, voice, fingerprint, sample_rate, backend}` |
+| `GET /v1/tts/stream/{id}/events` | SSE: everything the server has to say, including the audio |
+| `POST /v1/tts/stream/{id}` | one op: `say`, `cancel`, `cancel_all`, `close` |
+| `DELETE /v1/tts/stream/{id}` | the same as `close`, for a client that only has verbs |
+
+Every one of those is `fetch` and `ReadableStream`, which the SDK already uses for
+`events()`. Nothing new is imported on either side.
+
+The cost is that SSE is a text protocol, so PCM travels base64 — 33% over the wire. At
+24 kHz mono PCM16 that is 48 KB/s of audio becoming 64 KB/s, which is nothing, and it is
+**not a regression**: narrator already base64s its PCM over its own pipe, so the bytes
+BookForge handles today are the same shape.
+
+The gain is not just the dependency. `Last-Event-ID` **already works** on this server's SSE
+streams, so a Listen connection that drops in a tunnel reattaches mid-sentence instead of
+starting the row again — which a WebSocket would have needed its own machinery to do.
+
+### The frames
+
+Events on the stream, each with the usual strictly-increasing id:
 
 ```
-{"op": "hello",  "voice": "deathstalker", "language": "en"}
+ready  {voice, fingerprint, sample_rate, backend}
+audio  {id, seq, pcm_base64, seconds}
+done   {id, seconds, chars, chars_per_sec, capped, cancelled}
+error  {id?, code, message}
+closed {reason}
+```
+
+Ops on the post:
+
+```
 {"op": "say",    "id": "r12", "text": "...", "take": 0}
 {"op": "cancel", "id": "r12"}
 {"op": "cancel_all"}
 {"op": "close"}
 ```
 
-Server to client:
-
-```
-{"op": "ready",  "voice": "...", "fingerprint": "...", "sample_rate": 24000, "backend": "..."}
-{"op": "done",   "id": "r12", "seconds": 3.41, "chars": 98, "chars_per_sec": 28.7, "capped": false}
-{"op": "error",  "id": "r12", "code": "...", "message": "..."}
-{"op": "closed", "reason": "..."}
-```
-
-**Audio frames are binary and self-describing**, so PCM never pays for base64 and a frame
-never depends on the JSON frame before it:
-
-```
-b"CRU1" | uint32 seq | uint16 id_len | id (utf-8) | pcm16le mono at sample_rate
-```
-
-Out-of-order retirement falls out of that: ids are the client's, `seq` counts within an id,
-and `done` for one id may arrive while another is still emitting. There is no batching
+Out-of-order retirement falls out of the shape: ids are the client's, `seq` counts within an
+id, and `done` for one row may arrive while another is still emitting. There is no batching
 parameter on the wire — how many rows the engine runs at once is engine tuning and belongs
 to the server (Higgs measured worthless above width 1; Orpheus runs 16).
 
-**A keepalive, because the thing being replaced has none.** `narrator.serve` has no
-heartbeat of any kind, which is why BookForge carries a 12-minute no-heartbeat watchdog and
-a 30-second poll. Crucible sends a WebSocket ping every 15 s — the interval the SSE streams
-already use — and a client that stops answering is disconnected and its rows cancelled. A
-dropped connection cancels everything it had in flight: the same rule as the `llm` proxy,
-for the same reason. Work nobody is waiting for is time stolen from the next job.
+`say` returns **202 and the row's id**, not the audio. A client that wants the audio reads
+the stream, and a client that never opened the stream is refused by name rather than
+generating into nothing.
+
+### Lifetime, and what a dropped connection means
+
+A session holds the resident voice's attention, so it cannot outlive its client silently.
+
+- The SSE stream sends a keepalive comment every 15 s, as the job streams already do.
+- **A dropped stream does not cancel immediately.** It starts a 15-second grace window, and
+  a reconnect with `Last-Event-ID` inside that window reattaches to the same session and
+  replays what it missed. This is the one behaviour a WebSocket could not have given for
+  free, and it is the difference between a tunnel costing a reconnect and costing a
+  sentence.
+- When the window closes, the session closes and every row still in flight is cancelled.
+  Work nobody is waiting for is time stolen from the next job — the same rule as the `llm`
+  proxy, for the same reason.
+- A session is refused (`voice_not_resident`) if its voice is not the resident one. The
+  streaming door never loads, exactly as chat never loads; only the render job does, and
+  section 6 says why.
+
+BookForge's own TTS WebSocket on 8766 stays exactly where it is and becomes a **relay** to
+these three routes. The extension's protocol does not change, which is what keeps Sunday
+working.
 
 ## 8. API additions
 
@@ -366,7 +412,10 @@ for the same reason. Work nobody is waiting for is time stolen from the next job
 | `POST /v1/jobs {type: "load-voice", model}` | yes | a job; `warming` while narrator starts, `done {resident: id}` |
 | `POST /v1/jobs {type: "unload-voice", model}` | yes | a job; `done {resident: null}` |
 | `POST /v1/jobs {type: "tts", model, params}` | yes | a job; `chunk` per chunk, `artifact` per FLAC |
-| `GET /v1/tts/stream` | yes | WebSocket, section 7 |
+| `POST /v1/tts/stream` | yes | opens a streaming session, section 7 |
+| `GET /v1/tts/stream/{id}/events` | yes | SSE: `ready`, `audio`, `done`, `error`, `closed` |
+| `POST /v1/tts/stream/{id}` | yes | one op: `say`, `cancel`, `cancel_all`, `close` |
+| `DELETE /v1/tts/stream/{id}` | yes | close the session |
 
 `GET /v1/info` gains a `tts` capability whose rows are `/v1/voices`' rows verbatim.
 `GET /v1/health` gains `resident_kind`.
@@ -378,8 +427,8 @@ for the same reason. Work nobody is waiting for is time stolen from the next job
   `chunk` included, plus `writeArtifactsTo(dir)` — the batch writer of section 6.
 - `stream({voice, language})` → a session: `say(id, text, take?)`, `cancel(id)`, `close()`,
   and an `AsyncIterable` of `{id, seq, pcm: Int16Array}` interleaved with `{id, done}`.
-  Zero runtime dependencies still: Node 20's `WebSocket` is global, and Electron's renderer
-  has one too.
+  Still zero runtime dependencies, and now genuinely so: it is `fetch` and the same SSE
+  reader `events()` already uses, on a runtime that has no `WebSocket` (section 7).
 - Typed refusals for every named code in this document.
 
 ## 10. Verification
