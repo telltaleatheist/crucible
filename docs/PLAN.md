@@ -132,17 +132,23 @@ accelerator, against `tests/fake_engine.py` and — for the disconnect half, whi
 ## Phase 3b: `tts` — contract in `docs/PHASE3-TTS.md`
 The largest job type and the one that deletes the most: BookForge's WSL spawn, path
 rewriting, per-engine sampling tables and VRAM arithmetic for TTS all go. Two doors — a
-render job and a streaming WebSocket — because the extension's streaming is what Owen uses
+render job and a streaming session — because the extension's streaming is what Owen uses
 every Sunday and it is not the render door with a smaller buffer. Voices are manifests the
 server advertises; engine tuning never crosses the wire. narrator is the managed
 subprocess, the way vLLM is, because it already holds the EOS logit surgery the audit calls
 the hardest single item in the contract.
 
-**Built as of 2026-09-13:** the voice manifests and the lifecycle pair, then
-`crucible/engines/narrator.py`, the render door (`{"type": "tts"}`) and the `envs/tts/`
-recipes. The streaming door is the remaining half, and the note above about it being a
-WebSocket is superseded by PHASE3-TTS.md section 7: it is SSE plus posts, because Electron 33
-bundles Node 20 and there is no global `WebSocket` in the main process.
+**Built, both doors, 2026-09-13:** the voice manifests and the lifecycle pair,
+`crucible/engines/narrator.py`, the render door (`{"type": "tts"}`), the `envs/tts/` recipes,
+and the streaming door — a session, an SSE stream and posted ops rather than the WebSocket
+this paragraph used to promise, because Electron 33 bundles Node 20 and there is no global
+`WebSocket` in the main process (PHASE3-TTS.md section 7 has the whole argument, and the
+`Last-Event-ID` reattach it buys).
+
+Building the second door found the hole the first one left: nothing said what happens when a
+render job and a session both want the card, and narrator has **one stdin**, so two
+conversations on it do not fail loudly — they read each other's replies. `Residency.claim`
+refuses the second by name.
 
 ## Phase 3c: page reading — contract in `docs/PHASE3-VLM.md`
 Much smaller than it looked. Both apps rasterise locally and send a chat completion with an
