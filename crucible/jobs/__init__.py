@@ -19,12 +19,14 @@ from .base import (
     ModelDescriptor,
     validate_member_name,
 )
+from .asr import AsrJobType
 from .echo import EchoJobType
 from .llm import LoadModelJobType, Residency, UnloadModelJobType, model_rows
 
 #: The vocabulary this build knows, and which config flag turns each one on.
 #: `resolve()` tells "that type does not exist" from "it exists but is off".
 ALL_JOB_TYPES: dict[str, str] = {
+    AsrJobType.name: "asr",
     EchoJobType.name: "echo",
     LoadModelJobType.name: "llm",
     UnloadModelJobType.name: "llm",
@@ -41,12 +43,17 @@ def build_registry(
     is honest: a doctor run cannot see another process's resident model.
     """
     registry: dict[str, JobType] = {}
+    # Hoisted out of the `llm` branch: every job type that runs the accelerator
+    # guard needs the same owned-pid set, or it would report Crucible's own
+    # resident engine as somebody else's process holding the card.
+    holder = residency if residency is not None else Residency(config)
     if config.enable_echo:
         registry[EchoJobType.name] = EchoJobType()
     if config.enable_llm:
-        holder = residency if residency is not None else Residency(config)
         registry[LoadModelJobType.name] = LoadModelJobType(config, backend, holder)
         registry[UnloadModelJobType.name] = UnloadModelJobType(config, backend, holder)
+    if config.enable_asr:
+        registry[AsrJobType.name] = AsrJobType(config, backend, holder.owned_pids)
     return registry
 
 
@@ -94,6 +101,7 @@ def resolve_model(plugin: JobType, model: str | None) -> str | None:
 
 __all__ = [
     "ALL_JOB_TYPES",
+    "AsrJobType",
     "EchoJobType",
     "Job",
     "JobContext",

@@ -1,0 +1,36 @@
+# faster-whisper tiny — the cheapest rough transcript there is.
+#
+# 39M parameters. Fast enough that the decode dominates; accurate enough for
+# "roughly where is this sentence" and nothing more. BookForge's picker calls it
+# "Rough transcript, lowest accuracy" and means it.
+#
+# revision: the repo's `main` sha read from
+# https://huggingface.co/api/models/Systran/faster-whisper-tiny on 2026-09-13.
+# Systran has not touched these five repos since 2023-11-23.
+#
+# memory_bytes_estimate is COMPUTED, NOT MEASURED — see the note at the bottom.
+
+[model]
+id = "faster-whisper-tiny"
+family = "faster-whisper"
+parameters_m = 39
+
+[backends.cuda-linux]
+engine = "faster-whisper"
+hf_repo = "Systran/faster-whisper-tiny"
+revision = "d90ca5fe260221311c53c58e660288d3deb8d356"
+# COMPUTED, not measured: model.bin is 75_538_270 bytes of float16 CTranslate2
+# weights (the exact size the HF tree API reports for this revision), plus a
+# declared 1.5 GiB for what surrounds them on the card — the CUDA context, the
+# cuBLAS and cuDNN workspaces CTranslate2 allocates on first use, and the
+# encoder/beam-search activation peak for one 30-second window.
+#
+# That 1.5 GiB is a DECLARED ALLOWANCE and not a measurement, and it is the same
+# on all six manifests because none of it scales with model size. Nobody has run
+# faster-whisper under Crucible on a card yet: the 3090 Ti was busy with a
+# fine-tune the week this was written, and PHASE4 forbids touching it. Measure
+# the resident figure with nvidia-smi on a real book and replace this line with a
+# MEASURED one, the way models/qwen3.5-9b.toml's blocks were replaced — until
+# then the guard is working from arithmetic, and it says so here rather than
+# pretending otherwise.
+memory_bytes_estimate = 1_686_151_006

@@ -1,0 +1,24 @@
+# faster-whisper medium — balanced speed and accuracy.
+#
+# 769M parameters.
+#
+# revision: the repo's `main` sha read from
+# https://huggingface.co/api/models/Systran/faster-whisper-medium on 2026-09-13.
+#
+# memory_bytes_estimate is COMPUTED, NOT MEASURED — see the note at the bottom.
+
+[model]
+id = "faster-whisper-medium"
+family = "faster-whisper"
+parameters_m = 769
+
+[backends.cuda-linux]
+engine = "faster-whisper"
+hf_repo = "Systran/faster-whisper-medium"
+revision = "08e178d48790749d25932bbc082711ddcfdfbc4f"
+# COMPUTED, not measured: model.bin is 1_527_906_378 bytes of float16 CTranslate2
+# weights (the exact size the HF tree API reports for this revision), plus the
+# declared 1.5 GiB runtime allowance every one of these six manifests carries.
+# Replace with a MEASURED figure on the first real book;
+# asr/faster-whisper-tiny.toml carries the long version of this note.
+memory_bytes_estimate = 3_138_519_114

@@ -28,8 +28,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import API_VERSION, VERSION
-from .backend import Backend
+from . import API_VERSION, VERSION, accelerator
+from .backend import CUDA_LINUX, Backend
 from .config import Config
 from .errors import ApiError
 from .jobs import Residency, build_registry, model_rows, resolve, resolve_model
@@ -299,6 +299,104 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             "status": status,
             "queue_depth": store.queue_depth,
             "resident_models": residency.ids(),
+        }
+
+    # ----------------------------------------------------------- accelerator
+
+    @private.get("/accelerator")
+    async def accelerator_state(request: Request) -> dict[str, Any]:
+        """What is on the card right now, and which of it is Crucible's.
+
+        PHASE4-AUDIO.md section 5. This is the same `nvidia-smi
+        --query-compute-apps` the load guard runs, plus the free/total figures,
+        plus the resident set, plus a flag saying which holders are this server's
+        own processes — and it exists because BookForge arbitrates the GPU three
+        incompatible ways at once (a queue slot, an in-process mutex whose
+        timeout *proceeds without the lock*, and nothing at all for the hosted
+        page reader), on top of a lock file with no producer inside the app. One
+        call here answers the question all three were guessing at.
+
+        **It never evicts anybody, ever.** It reports, and that is the whole of
+        it. The rule is PHASE2-LLM.md section 4's and it does not soften because
+        more job types now depend on the answer.
+
+        It is private like every other route here: the bearer token and the
+        version header, in that order. A probe of somebody's hardware is not
+        public information, and `GET /v1/ping` already exists for "is this a
+        Crucible".
+        """
+        # nvidia-smi is a subprocess and takes tens of milliseconds; off the
+        # event loop, or a poll of this route stalls every job's event stream.
+        try:
+            state = await asyncio.to_thread(
+                accelerator.read_state, backend.kind, config.desktop_allowance_bytes
+            )
+        except accelerator.ProbeError as exc:
+            # 503 and not 409: nothing was asked for and refused, the server
+            # simply cannot see its own card at the moment. A client polling for
+            # a free GPU must read this as "ask again", never as "it is free" —
+            # which is why the probe raises rather than returning zeroes.
+            raise ApiError(
+                503,
+                "accelerator_unreadable",
+                f"this server cannot read its accelerator: {exc}",
+            ) from None
+
+        owned = residency.owned_pids()
+        holders = [
+            {
+                "pid": app.pid,
+                "name": app.name,
+                # None where the driver will not say (WDDM, permissions). That is
+                # not zero and must not be rendered as zero.
+                "bytes": app.used_bytes,
+                "owned_by_crucible": app.pid in owned,
+            }
+            for app in state.compute_apps
+        ]
+        resident = residency.resident
+        return {
+            "backend": state.backend,
+            "gpu": {
+                "vendor": backend.gpu.vendor,
+                "name": backend.gpu.name,
+                # The live figure from the probe, not the one detection recorded
+                # at start-up. They agree on a real host; where they would not,
+                # the live one is the one a caller is about to make a decision on.
+                "total_bytes": state.total_bytes,
+            },
+            "free_bytes": state.free_bytes,
+            "used_bytes": state.used_bytes,
+            "desktop_allowance_bytes": config.desktop_allowance_bytes,
+            # VRAM in use that no listed compute app accounts for, past the
+            # declared desktop allowance. Under WSL2 the driver shim answers the
+            # compute-app query with an EMPTY LIST even while a process inside
+            # that same VM holds 17 GB (measured on Owen's PC, 2026-09-12), so on
+            # that host this number is the only honest report of the card being
+            # busy and `holders` will be misleadingly empty. Null on mlx-darwin,
+            # where "used unified memory" is the OS doing its job and attributing
+            # it to compute processes is not a question vm_stat can answer.
+            "unattributed_bytes": (
+                accelerator.unattributed_bytes(state, config.desktop_allowance_bytes)
+                if state.backend == CUDA_LINUX
+                else None
+            ),
+            "resident": (
+                None
+                if resident is None
+                else {
+                    # `kind` is the family of thing that is resident, not the job
+                    # type that put it there. Today the only resident thing is an
+                    # LLM engine; phase 3's generalised residency adds tts voices
+                    # and phase 4's aligner, and they land here beside it.
+                    "kind": "llm",
+                    "id": resident.model_id,
+                    "since": resident.loaded_at,
+                    "memory_bytes_estimate": resident.memory_bytes_estimate,
+                }
+            ),
+            "holders": holders,
+            "detail": state.detail,
         }
 
     # ---------------------------------------------------------------- models
