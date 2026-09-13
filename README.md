@@ -9,14 +9,24 @@ never knows what an audiobook or a cleanup pass is.
 
 See `docs/DESIGN.md` for the architecture and `docs/PLAN.md` for the build order.
 
-**Status: phase 4.** The handshake is real — config, token, backend detection, API v1,
-the job queue, provenance sidecars, the `echo` test job type, and the TypeScript client
-that speaks to all of it. Phase 2 added the first real capability: model manifests, a
-per-job-type env, managed vLLM / mlx-lm engines, the accelerator guard, and an
-OpenAI-compatible proxy to one resident model. Phase 4 adds the audio types — `asr`
-(faster-whisper), `align` (Qwen3-ForcedAligner, held resident across a book) and `rvc`
-(ultimate-rvc) — each a library in an env of its own, run as a worker rather than talked
-to over HTTP.
+**Status: every job type is built. Four of them have never met a GPU.**
+
+`llm` and page reading are verified live on both backends — real models, loaded on real
+cards, with the measured VRAM written into the manifests it belongs to. `tts`, `asr`,
+`align` and `rvc` are built, tested and documented, but against **fake engines**: they
+were written on a night when both of Owen's cards were busy, so not one voice, aligner or
+whisper manifest carries a measured memory figure. Every one says
+`estimate_basis = "declared"` — the number came from an engine's own configured
+reservation, or from a file size, rather than from watching a card.
+
+The manifests keep that distinction rather than blurring it, and
+`scripts/keeper-tts-live.sh` is what discharges it for `tts`: one command on a machine
+with a free card, which renders a chapter and prints the measured lines to paste back.
+
+What exists: config, token, backend detection, API v1, the queue, provenance sidecars,
+manifests with pinned revisions, per-job-type envs, managed vLLM / mlx-lm / narrator
+engines, the accelerator guard and the probe over it, and a TypeScript client that speaks
+all of it.
 
 ## Hosts
 
@@ -129,8 +139,12 @@ request with neither is answered 401.
 | Route | Auth | Notes |
 |---|---|---|
 | `GET /ping` | no | `{crucible, name, api_version}` — tells "wrong token" from "not a Crucible" |
-| `GET /info` | yes | server, host (platform/arch/backend/gpu), capabilities |
-| `GET /health` | yes | `{status, queue_depth, resident_models}` |
+| `GET /info` | yes | server, host, `job_types` (what you can POST) and `capabilities` (what it can serve — **one row per capability**, so a model is described once, in one shape, wherever you find it) |
+| `GET /health` | yes | `{status, queue_depth, resident_models, resident_kind}` |
+| `GET /models` | yes | every model manifest and where it stands here |
+| `GET /voices` | yes | every voice manifest and where it stands here |
+| `GET /openai/models` | yes | the resident model in OpenAI's list shape |
+| `POST /openai/chat/completions` | yes | proxied to the resident engine, streaming or not; **never loads one** |
 | `GET /accelerator` | yes | what is on the card right now, who is holding it, and which of them are Crucible's. It **reports and never evicts** |
 | `POST /uploads` | yes | multipart `file=@...` → `{blob_id, bytes, sha256}` |
 | `POST /jobs` | yes | `{type, model?, params, inputs}` → 202 `{job_id}` |
@@ -153,7 +167,13 @@ Inputs come either inline or by blob:
 ```
 
 SSE events are `queued`, `progress {fraction, message, ...}`, `artifact {name}`, `done`,
-`failed {error}`, `cancelled {status}`, each with an integer `id`. Reconnect with
+`failed {error}`, `cancelled {status}`, each with an integer `id`, plus whatever a job
+type adds: `tts` sends `chunk`, `align` sends `cue`. **A kind your client has never heard
+of is not an error.** The vocabulary grows without moving `api_version`, on the ground
+that a client which does not know a kind still sees every `progress`, `artifact` and
+`done` it saw before — so `@crucible/client` carries one through as
+`{event: 'unknown', kind, data}` and never treats it as terminal. It stays strict about
+every kind it does know: a `chunk` missing `capped` is still a protocol error. Reconnect with
 `Last-Event-ID: <n>` to get everything after `n`, including the replay of a job that has
 already finished. A job type may add its own measurements to a `progress` event beside
 the fraction and the message — `asr` sends `stage`, `processed_s`, `total_s` and `cues`,
@@ -373,6 +393,57 @@ the `engine_failed` error quotes its last 40 lines.
 `stop()` signals the engine's process group and waits. Crucible **never** SIGKILLs a
 process holding CUDA — that wedges WSL2 until Windows reboots. If an engine will not go
 within 180 s, the refusal says so and names the log rather than escalating.
+
+### `tts`
+
+Narration (PHASE3-TTS.md). The largest job type, and the only one where the thing that
+produces the bytes is not called a model: **`model` is the voice id**, because for Higgs
+that is not a pun — a v3 voice *is* the merged checkpoint the engine was started on.
+
+```bash
+curl -sS -X POST "$BASE/v1/jobs" -H "$AUTH" -H 'X-Crucible-Api: 1'   -H 'Content-Type: application/json' -d '{
+    "type": "tts", "model": "deathstalker",
+    "params": {"language": "en", "take": 0, "chunks": [
+      {"index": 41, "text": "He had been walking for some time."}]}}'
+```
+
+Out come `<index>.flac`, mono 24 kHz PCM_16 — byte for byte the format BookForge's
+assembly and resume already expect — plus one `chunk` event per row:
+
+```
+chunk {index, seconds, chars, chars_per_sec, tokens, capped, take}
+```
+
+That is the whole guard interface, and the division it draws is the point of the design:
+**the server measures and the client judges.** Crucible reports what a chunk did and
+decides nothing about it — no retake, no re-split, no substitution.
+
+**`capped` and `tokens` are `null` today, and null is not `false`.** narrator computes a
+frame cap and never puts it on its wire, so Crucible publishes "narrator did not say"
+rather than inventing an answer. Until narrator carries it, the event cannot tell a long
+sentence from a runaway — which is the one thing it exists to tell — and that is written
+down as owed rather than papered over.
+
+**A render loads its own voice**, unlike a chat, which never does. A chat is fine-grained
+and unattended and two clients alternating would thrash the card; a render is an
+operator's explicit order that owns the exclusive lane for its whole duration. It emits
+`warming` while it loads.
+
+Voices are manifests in `voices/`, advertised by `GET /v1/voices`, and everything that
+tunes an engine to one — sampling, the EOS levers, the token-budget formula, the cap
+certificate per (voice, backend) — stays on the server. The wire carries a voice id, the
+text, and a take number. Owen's ruling: the client knows what the operator ordered and
+which server to send it to; the server knows how to run it.
+
+Three things are refused by name rather than faked, because narrator cannot do them yet:
+a take-ladder deviation (`sampling_not_wired` — narrator's sampling door takes Orpheus's
+vocabulary and raises on an unknown key), a zero-shot voice (`voice_kind_unsupported` —
+its `load` carries no reference clips), and a chunk over the voice's `max_chars`
+(`chunk_too_long`, never silently re-split).
+
+FLACs are encoded through **ffmpeg**, which this server already requires for `asr`.
+`soundfile` would mean a compiled audio dependency in a process that deliberately imports
+no engine at all.
 
 ### `asr`
 
