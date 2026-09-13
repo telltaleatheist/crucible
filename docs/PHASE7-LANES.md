@@ -359,6 +359,43 @@ differs from naming the PC only when the PC is busy. The machines being unequal 
 DEFAULT is the top-ranked server by name rather than `any` — which was the correction that
 started this — and `any` is the opt-in for a night's work.
 
+### 4.2.1a The default is a SETTING, because a default must not manufacture instructions
+
+The Foundry session found the one case where the shape above and Owen's stated workflow
+disagree, and it is worth the extra setting.
+
+**The case.** Twenty books are queued; each row defaults to `"this-pc"`, visibly. Owen then
+disables this-pc — to do exactly what he described, *"if im doing lots of jobs at the same
+time, im going to want the ability to overflow the queued items to the mac."* By the
+composition rule below, **all twenty hold**: each names a disabled server, and a named
+server is an instruction. But he never touched the picker. **The default wrote an
+instruction into every row on his behalf**, and the feature's own motivating case is the one
+it breaks.
+
+This is the chosen-versus-inherited problem returning — not as a missing field this time,
+but as a default that fabricates choices. It is also *less* visible than the old `null`
+was, in one specific way: the row honestly says `this-pc`, so it is truthful about what it
+will do and silent about why, and nobody chose it.
+
+**The fix is one setting, beside the drag-order and the enable switches. No type change, no
+new per-row state:**
+
+> **New jobs wait for:  ( • ) the top-ranked server   ( ) Any**
+
+The 90% keeps today's behaviour with nothing to click. "Lots of jobs tonight" becomes one
+switch flipped once, and every row queued afterwards can travel. The row still stores
+exactly one string; `any` is simply what the default writes when Owen has said so. It also
+fixes a smaller thing the per-row-only version could not: somebody whose normal mode *is*
+overflow would otherwise be editing every row forever.
+
+**And the rows already queued when the switch flips are told, not moved.** Disabling a
+server that queued rows name **surfaces them** — *"12 rows are waiting for this PC, which
+is now disabled"* — with a one-click bulk change to `any`. They are never silently
+re-routed, because a named server is an instruction and re-routing twenty books onto slower
+hardware without being asked is the failure this whole section exists to prevent. But
+leaving an operator to discover it one row at a time is the other failure, and a surfaced
+count with a bulk action is the answer to both.
+
 ### 4.2.2 Per queue: which servers may the queue use at all?
 
 The second half of Owen's sentence, and a different question from the first. A server is
@@ -393,6 +430,27 @@ The lesson is the Foundry session's, generalised: when the options all feel slig
 the shared assumption is usually the thing to question. Here every draft assumed the row
 stores *a machine*, and modelled "may it travel" separately. It stores **an answer to a
 question**, and `any` is one of the answers.
+
+**And the technique has a ceiling worth knowing.** It finds assumptions shared by the
+options — but both of us were generating options inside one frame, so nothing either
+produced could expose the frame itself. What broke it was Owen restating the requirement in
+his own words. So the companion habit is: **when two people have converged and it still
+feels awkward, do not ask for another option — ask whoever wanted the thing to say what
+they want again.**
+
+### Two consequences confirmed as deliberate
+
+**A queued row does NOT move when the drag-order changes.** Re-ranking affects new rows
+only. This reverses what an earlier draft concluded — resolve at start, so a re-rank moves
+queued work — and the reversal is correct *because the value is now visible*: a row that
+says `this-pc` and means it is honest, where a row that silently re-pointed itself
+overnight would not be. Recorded here because a frozen row reads as a bug six months on
+unless somebody wrote down that it is not.
+
+**`any` with no reachable enabled server holds and NAMES that**, rather than holding
+silently. "Waiting for any server; none of the 2 enabled are reachable" is actionable;
+a row sitting at `queued` with no explanation is the thing `/v1/activity` and every named
+refusal in this document exist to avoid.
 
 ### 4.3 A JOB IS ATOMIC (Owen's ruling, 2026-09-13)
 
