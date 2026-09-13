@@ -1,7 +1,10 @@
 # Crucible — design
 
-Status: v1 API. Phases 1 and 2 are built and verified live on both backends; phases 3 and 4
-are contracted in the files named in section 3 and built against them.
+Status: v1 API. **Every job type in section 3 is built, tested and merged** (2026-09-13).
+`llm` and page reading are verified live on real cards with measured numbers in their
+manifests; `tts`, `asr`, `align` and `rvc` were built against fake engines and their
+manifests say so (`estimate_basis = "declared"`). `docs/PLAN.md`'s top block is the list
+of what a free card and Owen's rulings still have to settle.
 
 This file is the shape of the whole thing. Each job type's exact wire contract lives in its
 own file and **wins over this one where they disagree**, because this one was written before
