@@ -368,6 +368,41 @@ Two fields, and every case falls out:
 | `null` | `true` | top-ranked eligible; on `server_busy`, try the next rank down; wait when the list runs out |
 | `"mac"` | either | **that machine.** Busy or unreachable, it **holds and names the reason** — a pin is an instruction, and `overflow` does not override it |
 
+### The two states the model must not admit
+
+**`{machine: "mac", overflow: true}` is storable and means nothing.** The table says a named
+machine holds either way, so the flag is dead there — and *a state the model admits while
+the behaviour ignores it is where the last contradiction came from*. Something
+representable that means nothing eventually has a meaning invented for it by whoever reads
+the type next. Raised by the Foundry session, and the phrasing is theirs because it is the
+general rule, not a note about this field.
+
+Two mechanisms, neither of which is a type change:
+
+- **The UI disables the overflow control while a machine is named**, visibly, rather than
+  leaving a live checkbox that does nothing. The operator cannot express the state, which
+  matches the ruling instead of merely permitting it.
+- **Choosing a machine clears the flag on write.** So the app cannot produce the state
+  either, and a hand-edited registry that contains it is normalised on read rather than
+  obeyed.
+
+The type stays flat (`string | null` and `boolean`) rather than becoming a discriminated
+union, deliberately: the row is persisted JSON that migrations have to read, and a union
+across that boundary costs more than it saves here. It also keeps *"one line of this table
+gaining meaning"* available as an additive edit if Mac-with-overflow is ever wanted.
+
+**`rank` needs no field, no uniqueness rule and no tie-break: it is the ARRAY ORDER.**
+The Foundry session pointed out that a person-typed integer collides the moment somebody
+adds a third server without re-numbering, and that undefined order there means the machine
+is chosen nondeterministically — the same class of silent wrongness section 4.2 exists to
+remove. They offered enforcing uniqueness or defining a tie-break; the registry makes both
+unnecessary, because `crucible-servers.json` is **already** `{servers: CrucibleServerEntry[]}`
+and an array has an order.
+
+So rank is position, re-ranking is a reorder, the settings UI is a drag-list rather than
+spin boxes, and there is no invalid state to validate because there is no number to get
+wrong. A rank that cannot collide needs no rule.
+
 ### Three things this settles that the three-state version could not
 
 **Resolution happens at START, not at queue time — for free.** Overflow is inherently a
