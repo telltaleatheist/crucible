@@ -541,28 +541,42 @@ below is why.**
 **the book** (its row). There is no per-step override, because there is nothing for it to
 buy.
 
-### 4.4.1 The arithmetic that killed per-step routing
+### 4.4.1 Why per-step routing was wrong — the argument, then the numbers
 
 An earlier draft argued that since the machines' speed ratio varies by step type, the best
-plan is to put the step with the biggest ratio — `tts` — on the fast machine and let the
-rest overflow. **That is exactly backwards when the step you are hoarding is the one that
-dominates the runtime, and for a book it dominates by an order of magnitude.**
+plan is to put the highest-ratio step — `tts` — on the fast machine and let the rest
+overflow.
 
-Take 15 books; on the PC each is roughly `cleanup 10 min → tts 3 h → align 10 min`, and
-call the Mac 2x slower.
+**The decisive objection needs no arithmetic at all.** Routing all TTS to one card
+**serialises every book's dominant step through it**, and leaves the other card doing
+minutes of cleanup between hours of idleness. A plan that leaves half the hardware unused
+for most of a night is wrong on its face, whatever the alternative saves. Hoarding the
+dominant step on the fast machine does not exploit that machine — it makes it the only
+machine.
 
-| plan | what happens | wall clock |
+**The numbers, stated second and deliberately so.** Take 15 books; on the PC each is about
+`cleanup 10 min → tts 3 h → align 10 min`, so 3.33 h, and call the Mac 2x slower at 6.67 h.
+
+| plan | wall clock | the other card |
 |---|---|---|
-| **all `tts` on the PC** (step-type routing) | 15 x 3 h of TTS through one machine, serialised. The Mac does 15 cleanups — about 5 h of work — then sits idle. | **~45 h**, Mac idle for ~40 of them |
-| **one book = one GPU** | both machines render books end to end in parallel; the PC gets through them faster and takes more of them | **~15-20 h**, both machines busy throughout |
+| all `tts` on the PC | **45.0 h** | Mac busy 10 h, **idle 35** |
+| one book = one GPU | **33.3 h** | both busy throughout |
 
-Hoarding the dominant step on the fast machine does not exploit the fast machine — it
-**serialises the whole queue through it** and leaves the other one doing trivia. Splitting
-by book uses both cards for the thing that actually takes the time.
+33.3 h is combined throughput: `1/3.33 + 1/6.67 = 0.45 books/h`, and `15 / 0.45 = 33.3`.
+So the margin is **1.35x — a third faster, not a multiple.**
 
-Step-type routing wins only when the steps have comparable durations and very different
-speed ratios. A book is not that shape and never will be: TTS is hours and everything else
-is minutes.
+**THIS NUMBER HAS BEEN WRONG TWICE AND THAT IS WHY IT IS NOT THE HEADLINE.** The first
+draft of this section recommended step-type routing, reasoning from a speed *ratio* without
+weighting it by *duration*. The correction then claimed one-book-one-GPU finishes in
+"~15-20 h", which is **below the floor for two machines even if the Mac were exactly as
+fast as the PC** (`15 x 3.33 / 2 = 25 h`) — arrived at by imagining both cards busy and
+halving, without applying the 2x penalty to the Mac's share. Same species of error as the
+one it was correcting. Both were caught by the Foundry session; the second was caught
+because a contract carrying "3x" is a number somebody quotes later to justify a change that
+then underdelivers by a factor of two.
+
+The conclusion survived both errors intact, which is the point: **it rests on the idle
+card, not on the margin.**
 
 ### 4.4.2 The other two reasons, both of which also hold
 
@@ -586,6 +600,32 @@ when a book renders somewhere surprising, three states to show in a UI, and a pe
 field on every row that would be `null` for the entire life of almost every queue. Paying
 that for a plan the arithmetic says is slower would have been the worst kind of
 flexibility: expensive, visible, and wrong.
+
+### 4.4.3a THE PRIOR: a draft that adds a level of override is probably wrong
+
+Five rewrites of this section in one day, and **every wrong version was the more flexible
+one**:
+
+| draft | what it added | why it was wrong |
+|---|---|---|
+| `Any` as the default | a hidden preference | asserted the machines are interchangeable |
+| `machine` + `overflow` | a modifier on a machine | a representable state that meant nothing |
+| the default writing a name | an instruction nobody gave | broke the overflow case it existed for |
+| three routing levels | per-step override | slower, per 4.4.1 |
+| per-step-type defaults | a settings block | same |
+
+Owen's corrections have all gone the same direction: **removing something a draft added.**
+
+That is five for five, which is enough to stop treating it as an observation and start
+treating it as a prior. Proposed as a rule for this queue, suggested by the Foundry session:
+
+> **When a draft adds a level of override, the null hypothesis is that it is wrong.** The
+> burden is on the addition to show a case that exists, is not harmful, and is not already
+> served by the level above it.
+
+It generalises a little beyond this section, but not infinitely: it is a claim about a queue
+with one operator, two machines and a workload dominated by one long step. It is not a
+claim that configurability is bad in general.
 
 ### 4.4.4 What this keeps, and what his two modes become
 
