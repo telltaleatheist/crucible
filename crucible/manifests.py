@@ -104,6 +104,11 @@ class ModelManifest:
     backends: dict[str, BackendSpec]
     path: Path
 
+    #: Which subtree of `~/.crucible/` this thing's weights live under. A model id
+    #: and a voice id are separate namespaces and must not be able to collide on
+    #: disk — see `crucible/weights.py`.
+    weights_family = "models"
+
     def supports(self, backend_kind: str) -> bool:
         return backend_kind in self.backends
 
@@ -166,23 +171,31 @@ def manifests_dir() -> Path:
 # ------------------------------------------------------------------ checking
 
 
-def _check_table(
+def check_table(
     where: str,
     table: dict[str, Any],
     required: dict[str, type],
     optional: dict[str, type],
+    *,
+    error: type[CrucibleError] = ManifestError,
 ) -> None:
-    """Every required key present and correctly typed; no key that is not listed."""
+    """Every required key present and correctly typed; no key that is not listed.
+
+    `error` is the exception class to refuse with, because the voice manifests
+    (`crucible/voices.py`) are the same kind of file held to the same strictness
+    and must refuse in their own vocabulary — a reader told "manifest" about a
+    voice file goes looking in `models/`.
+    """
     allowed = set(required) | set(optional)
     unknown = sorted(set(table) - allowed)
     if unknown:
-        raise ManifestError(
+        raise error(
             f"{where}: unknown key(s) {unknown}; this table takes exactly "
             f"{sorted(allowed)}"
         )
     missing = sorted(set(required) - set(table))
     if missing:
-        raise ManifestError(f"{where}: missing required key(s) {missing}")
+        raise error(f"{where}: missing required key(s) {missing}")
     for key, kind in {**required, **optional}.items():
         if key not in table:
             continue
@@ -192,7 +205,7 @@ def _check_table(
         if kind is int and isinstance(value, bool):
             wrong = True
         if wrong:
-            raise ManifestError(
+            raise error(
                 f"{where}: {key} must be {kind.__name__}, got "
                 f"{type(value).__name__}"
             )
@@ -213,7 +226,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
     model = document["model"]
     if not isinstance(model, dict):
         raise ManifestError(f"{path.name}: [model] must be a table")
-    _check_table(f"{path.name} [model]", model, _MODEL_REQUIRED, {})
+    check_table(f"{path.name} [model]", model, _MODEL_REQUIRED, {})
 
     model_id = model["id"]
     if not _MODEL_ID.match(model_id):
@@ -254,7 +267,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             )
         if not isinstance(block, dict):
             raise ManifestError(f"{where}: must be a table")
-        _check_table(where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL)
+        check_table(where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL)
 
         engine = block["engine"]
         if engine != BACKEND_ENGINES[kind]:

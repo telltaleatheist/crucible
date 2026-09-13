@@ -1,0 +1,65 @@
+# Sigma — a merged Higgs v3 fine-tune. Translated from BookForge's
+# electron/data/higgs-models.json (`sigma`); the shared reasoning is in
+# voices/deathstalker.toml and not repeated here.
+#
+# THIS IS THE ONE VOICE WHOSE PIN AND WHOSE MEASUREMENTS ARE THE SAME WEIGHTS.
+# `sigma_prod` (winner sigma_1426) was promoted 2026-09-11 00:32 and pushed to
+# HuggingFace the same day on Owen's explicit green light — the catalog records
+# that by hand, because promote_voice.py does not do the upload step and its stock
+# note says the opposite. The band below was measured at 00:32 on that directory,
+# and the repo's head was written at 04:42. So the cap, the band and the weights a
+# `crucible voices pull` fetches agree.
+
+[voice]
+id = "sigma"
+display = "Sigma"
+kind = "checkpoint"
+narrator_engine = "higgs-v3"
+language = "en"
+sample_rate = 24000
+
+# MEASURED on the served arm at 0.8 / 0.95 / 50 over sigma's full ladder
+# (night4/runs/sigma_ladder/ds_sigma_prod, bank_ds_len, 512 renders, 4 seeds):
+# median 15.56, p05 14.18, p95 17.23, n 422 clean. Edges = median x 1.3 and
+# median / 1.3.
+[voice.pace]
+pace_chars_per_sec = 15.56
+max_chars_per_sec = 20.23
+min_chars_per_sec = 11.97
+# MEASURED 2026-09-11 00:32 by the length ladder (rungs 100-1600, 8 prompts x 4
+# seeds): band 500-1100, in-band failures 0/160 = 0.0% (95% hi 2.3%). The cleanest
+# band of the five, and the reason the cap below is 1100 rather than 800.
+safe_min_chars = 500
+safe_max_chars = 1100
+
+[voice.backends.cuda-linux]
+hf_repo = "owenmorgan/sigma-higgs-v3"
+# Read from the HF API 2026-09-13 with Owen's token (private repo): the
+# 2026-09-11 upload of sigma_prod, merged-dir sha256 32d108ae3c22572b...
+revision = "379150a908ffca2e23507a365fe10fce24111985"
+memory_bytes_estimate = 19_000_000_000
+estimate_basis = "declared"
+estimate_note = """SGLang-Omni's configured reservation on this arm, not a watched \
+card: `--mem-fraction-static 0.60 holds ~19 GB at 16 in flight` (higgs-models.json \
+serving.sglang._memFractionStaticNote, owens-pc RTX 3090 Ti, 2026-09-05). The \
+SERVER's footprint rather than this checkpoint's. Owed: a real reading."""
+# 1100, RAISED 2026-09-11 00:32 so the cap is not below the measured band — a cap
+# under the band is refused by name at load, on both sides. Characters, not
+# tokens; the 800 of the other fine-tunes is Owen's ruling where no sweep exists,
+# and this voice has the sweep.
+max_chars = 1100
+sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+[voice.backends.mlx-darwin]
+hf_repo = "owenmorgan/sigma-higgs-v3"
+revision = "379150a908ffca2e23507a365fe10fce24111985"
+memory_bytes_estimate = 12_133_000_000
+estimate_basis = "declared"
+estimate_note = """The one recorded MLX figure for a Higgs v3 merged checkpoint — \
+11.3 GiB peak at a 900-character chunk, from deathstalker's MLX cap certificate \
+(2026-09-05, owens-mac-studio). Carried here because every v3 fine-tune is the \
+same 4B merge, and it is a sibling's reading rather than this voice's — which is \
+what 'declared' means. It is also a figure taken at 900 characters while this \
+voice's cap is 1100, so it is the number most owed a real measurement of the five."""
+max_chars = 1100
+sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }

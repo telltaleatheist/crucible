@@ -1,0 +1,70 @@
+# Owen Morgan — Owen's own voice, a merged Higgs v3 fine-tune. Translated from
+# BookForge's electron/data/higgs-models.json (`owen`); the shared reasoning is in
+# voices/deathstalker.toml.
+#
+# THE PIN AND THE ARMS HAVE DRIFTED APART, though less far than mistborn's. The
+# catalog's arms point at `ow_v7_prod` (ckpt-966), promoted 2026-09-10 after the
+# `--tail-s 0.25` re-slice fixed the v6 EOS failure; the HuggingFace repo was last
+# written on 2026-09-07, on the previous promotion. The pace below was measured on
+# 2026-09-07 against `owen_gp2w_prod` — so it belongs to the era of the pin rather
+# than to today's arms, which is the one thing that makes this manifest's pace
+# more trustworthy than mistborn's and still not proof. Re-measure before a book.
+
+[voice]
+id = "owen"
+display = "Owen Morgan"
+kind = "checkpoint"
+narrator_engine = "higgs-v3"
+language = "en"
+sample_rate = 24000
+
+# MEASURED 2026-09-07 on the served arm at temperature 0.8 on owen_gp2w_prod:
+# night3/gp/para, the Fuhrer-49 bank, 50 renders, 23 clean by the pace rule.
+# median 16.32, p05 14.62, p95 16.84, p99 17.76. The thinnest clean sample of the
+# five (n 23 against deathstalker's 40 and sigma's 422). Edges = median x 1.3 and
+# median / 1.3, rounded to two places — the catalog's own prose for this voice
+# still computes the short edge at x 1.2 (19.58), which was the factor on
+# 2026-09-08; higgs-models.ts has since raised it to 1.3, and the code is what
+# runs.
+[voice.pace]
+pace_chars_per_sec = 16.32
+max_chars_per_sec = 21.22
+min_chars_per_sec = 12.55
+# SAFE BAND = the training corpus's INTERQUARTILE RANGE, measured 2026-09-09
+# (field notes 4n.37.20). owen_gp2w: p25 555, p75 1082, so the floor is 600. The
+# method was validated on thirdreich, whose IQR 532-985 predicted its measured
+# best band 600-1000. The ceiling is held at Owen's 800 ruling rather than at the
+# measured 1000; the measurement supports raising it and nobody has.
+safe_min_chars = 600
+safe_max_chars = 800
+
+[voice.backends.cuda-linux]
+hf_repo = "owenmorgan/owen-morgan-higgs-v3"
+# Read from the HF API 2026-09-13 with Owen's token (private repo): the
+# 2026-09-07 upload. See the header — the arms have moved on to ow_v7_prod.
+revision = "f566ab43db20cc064096d2557af9271ab7dd3a90"
+memory_bytes_estimate = 19_000_000_000
+estimate_basis = "declared"
+estimate_note = """SGLang-Omni's configured reservation on this arm, not a watched \
+card: `--mem-fraction-static 0.60 holds ~19 GB at 16 in flight` (higgs-models.json \
+serving.sglang._memFractionStaticNote, owens-pc RTX 3090 Ti, 2026-09-05). The \
+SERVER's footprint rather than this checkpoint's. Owed: a real reading."""
+# 800, Owen's ruling of 2026-09-09 over every fine-tune. No length-sweep
+# certificate exists for this voice; if one is run, the deathstalker 2026-09-05
+# sweep is the model (babble == 0 across seeds AND minimum per-seed coverage
+# >= 0.90, contiguous from the shortest tested length, scored by ASR alignment and
+# never by duration ratio). Characters, not tokens.
+max_chars = 800
+sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+[voice.backends.mlx-darwin]
+hf_repo = "owenmorgan/owen-morgan-higgs-v3"
+revision = "f566ab43db20cc064096d2557af9271ab7dd3a90"
+memory_bytes_estimate = 12_133_000_000
+estimate_basis = "declared"
+estimate_note = """The one recorded MLX figure for a Higgs v3 merged checkpoint — \
+11.3 GiB peak at a 900-character chunk, from deathstalker's MLX cap certificate \
+(2026-09-05, owens-mac-studio). A sibling voice's reading, carried because every \
+v3 fine-tune is the same 4B merge. Owed: watch the Mac's allocator here."""
+max_chars = 800
+sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }

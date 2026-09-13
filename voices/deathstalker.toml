@@ -1,0 +1,127 @@
+# Deathstalker — Owen's production narrator, a merged Higgs v3 fine-tune.
+#
+# Every number here is a translation of BookForge's electron/data/higgs-models.json
+# (the `deathstalker` entry), which is where they were measured and where the
+# provenance prose lives. Nothing in this file is a new figure.
+#
+# WHY A FINE-TUNE RATHER THAN REFERENCE CLIPS, from that entry: zero-shot cloning
+# already recovers 92% of the narrator's speaker-identity ceiling (ECAPA cosine
+# 0.7037 of 0.7656 from a 27.4 s two-clip same-book reference), so TIMBRE is
+# largely solved without training. What cloning does not recover is PHRASING — the
+# render places 2.01 pauses per 100 characters against the narrator's 1.39 and
+# runs pitch std 5.17 semitones against his 4.36, i.e. it performs the text rather
+# than reading it, and no reference, sampling setting or control token moved
+# either number.
+
+[voice]
+id = "deathstalker"
+display = "Deathstalker"
+kind = "checkpoint"
+narrator_engine = "higgs-v3"
+language = "en"
+sample_rate = 24000
+
+# THE PACE, chars of text per second of audio, ONE PER VOICE for both arms
+# (Owen, 2026-09-06: "it can be the same setting for both mac and windows since
+# theyre the same voice and theyre pretty close").
+#
+# MEASURED 2026-09-07 on the served arm at temperature 0.8 on ds_v5_prod: the
+# Fuhrer-49 bank, 50 renders, 40 clean by the ladder's rule (coverage >= 0.95, no
+# early stop, no babble, 0.8 <= audio ratio <= 1.25, chars >= 150). median 16.64,
+# mean 16.78, p05 15.73, p95 18.02, p99 18.26, n 40.
+#
+# THE TWO EDGES ARE DERIVED FROM THE MEDIAN, by BookForge's `higgsLengthBand()`:
+# max = median x PACE_GUARD_SHORT_FACTOR (1.3), min = median / PACE_GUARD_LONG_FACTOR
+# (1.3), each rounded to two places. They are a SEED, not a ceiling —
+# narrator keeps only the band's RATIOS and re-centres them on the running median
+# of the book's own shipped takes once ten guarded chunks are in
+# (truncation.PaceTracker). That is what answers Owen's worry that a book
+# averaging 17.6 chars/s should not have every chunk over 17.11 re-rendered.
+#
+# NOTE, because the catalog disagrees with itself here: this entry's `pace.source`
+# prose says "max = median x 1.2 = 19.97", which was the factor when that prose
+# was written on 2026-09-08. higgs-models.ts has since raised the short factor to
+# 1.3 on the Shift measurements (the fixed long edge at 11.97 fired on 340 healthy
+# chunks at take 0). The CODE is what runs, so 1.3 is what is written here.
+[voice.pace]
+pace_chars_per_sec = 16.64
+max_chars_per_sec = 21.63
+min_chars_per_sec = 12.80
+# THE SAFE BAND = the training corpus's INTERQUARTILE RANGE, measured 2026-09-09
+# (orpheus-finetune field notes 4n.37.20). ds_v5: p25 598, p75 1094, so the floor
+# is 600. safeMaxChars is held at Owen's 800 ruling rather than the measured 1000.
+# The floor is the half that did not exist until 2026-09-09: before it, floor and
+# cap were one number, so two 400-char paragraphs could not merge and a 400-char
+# chunk shipped — which is how Owen's Mac render truncated at 323, 502 and 634.
+safe_min_chars = 600
+safe_max_chars = 800
+
+# ONE ESTIMATE PER BACKEND AND NOT ONE PER VOICE, because on `cuda-linux` the
+# number is the SERVER's footprint rather than the checkpoint's: narrator starts
+# SGLang-Omni on the merged directory with `--mem-fraction-static 0.6`, so every
+# Higgs v3 voice on that arm reserves the same share of the same card.
+
+[voice.backends.cuda-linux]
+hf_repo = "owenmorgan/deathstalker-higgs-v3"
+# The repo's current head, read from the HF API 2026-09-13 with Owen's token
+# (the repo is private). It is the 2026-09-06 upload, ds_ad4lm_prod_ckpt1080.
+#
+# THIS IS NOT THE MERGE THE PC IS SERVING TODAY. The catalog's WSL arm points at
+# /home/telltale/higgs_v3_merged/ds_v7_930_prod, promoted 2026-09-11 by temper's
+# pause screen, and its `_promotionNote` says "HuggingFace NOT updated - Owen has
+# not given a green light". Crucible pulls a PUBLISHED voice at a pinned revision
+# (PHASE3-TTS.md section 11) and has no access to a directory inside the guest, so
+# this pin is the honest one: it names the bytes a `crucible voices pull` will
+# actually fetch. The cap below survives the difference because it is a RULING
+# over every fine-tune rather than a certificate bound to one directory — see
+# max_chars. The pace band does not have that property, and re-measuring it
+# against these weights is owed the first time this voice renders a book here.
+revision = "d732c38e9a500d5ba0de06b69252833e9d5ee9b8"
+# DECLARED, not measured — neither of Owen's cards was free the night this was
+# written, and PHASE3-TTS.md section 10 leaves the measurement owed.
+memory_bytes_estimate = 19_000_000_000
+estimate_basis = "declared"
+estimate_note = """SGLang-Omni's own configured reservation, not a watched card. \
+higgs-models.json's serving.sglang._memFractionStaticNote, measured 2026-09-05 on \
+owens-pc (RTX 3090 Ti, 24.5 GB): "--mem-fraction-static 0.60 holds ~19 GB at 16 in \
+flight, healthy in ~110 s, with CUDA graphs captured on sm_86". This is that ~19 GB. \
+It is the SERVER's footprint rather than this checkpoint's, so every Higgs v3 voice \
+on this arm carries it. Owed: load this voice on the 3090 Ti, render a chapter, and \
+write what nvidia-smi actually shows."""
+# 800, OWEN'S RULING (2026-09-09): "my models are limited to an absolute max of
+# 800 characters before we start getting truncations" — the cap is 800 on every
+# fine-tune, both arms. A RULING over the family, not a certificate bound to one
+# merged directory, which is why it still holds for the HF revision pinned above
+# even though the PC now serves a later merge. (The superseded certificate it
+# replaced WAS directory-bound: 1200 for ds_ad4lm_prod_ckpt1080, certified
+# 2026-09-05 against that directory, its generation_config.json and stage-input
+# processor sha 0b36f6507dd11653.)
+#
+# IT IS CHARACTERS, NOT TOKENS. PHASE3-TTS.md section 2 called this field
+# `cap_tokens`; narrator derives the frame cap per chunk from the text it is
+# actually given, `int(len(text) / 15.0 * 25 * 1.8) + 100` clamped against the
+# stack's context. See crucible/voices.py.
+max_chars = 800
+sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+[voice.backends.mlx-darwin]
+hf_repo = "owenmorgan/deathstalker-higgs-v3"
+revision = "d732c38e9a500d5ba0de06b69252833e9d5ee9b8"
+memory_bytes_estimate = 12_133_000_000
+estimate_basis = "declared"
+estimate_note = """The one recorded MLX figure for a Higgs v3 merged checkpoint: \
+"peak memory 11.3 GiB at 900" characters, from this voice's own MLX cap \
+certificate (mlx-audio 0.4.8 / mlx 0.32.0 on owens-mac-studio, 2026-09-05, \
+docs/certificates/max_chars_certificate_mlx_ckpt1080.json), against the same \
+ckpt-1080 weights this revision holds. 11.3 GiB = 12_133_000_000 bytes. Recorded \
+rather than watched here, and it was measured at a 900-character chunk while the \
+cap below is 800, so it is a ceiling for this voice rather than a reading. Owed: \
+watch the Mac's allocator on a real render."""
+max_chars = 800
+sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+# NO [[voice.takes]]. The retake ladder's steps are server config (PHASE3-TTS.md
+# section 3), and BookForge has not measured a second rung for this voice: the
+# ladder it runs today re-rolls at the SAME sampling with a different draw, which
+# `_check_takes` refuses to write down as a rung because it is not one. Take 0 —
+# the boson default — exists implicitly.
