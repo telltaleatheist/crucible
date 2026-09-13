@@ -519,17 +519,29 @@ chat: it refuses with `voice_not_resident` and names what is resident instead.
 `artifact {name}`, a `tts` job emits one new event per chunk:
 
 ```
-chunk {index, seconds, chars, chars_per_sec, tokens, capped, take}
+chunk {index, seconds, chars, chars_per_sec, tokens, capped, take, guard}
 ```
 
-That is the whole guard interface. `capped` is true when generation stopped because it hit
-the frame cap rather than because the model finished — the difference between "a long
-sentence" and "a runaway", which BookForge's PaceTracker needs and cannot infer from a
-duration. The server measures and reports; **it decides nothing**, and it never retakes on
-its own.
+> **AMENDED by PHASE6-REMOTE-RENDER.md (Owen's ruling, 2026-09-13).** This section used to
+> say that the seven fields above were "the whole guard interface", that the server measures
+> and the client judges, and that BookForge's PaceTracker would read those numbers and
+> decide. **The model judges, the server forwards, the client orders.** The seven fields
+> survive, unchanged, as the server's own measurements; `guard` is the eighth, and it is the
+> verdict narrator's engine already reached — forwarded verbatim, `null` when narrator sent
+> none. Crucible reads nothing inside it. PHASE6 sections 3 and 4 are current; read them
+> before writing a consumer.
+>
+> Why the old text could not stand: the PaceTracker was never in this path, and until
+> narrator grew `render_many` the serve world — the door this job drives — had **no guard at
+> all**. See PHASE6 section 0.
 
-Three of those seven fields are the server's own arithmetic and three come off the wire, and
-the split matters:
+`capped` is true when generation stopped because it hit the frame cap rather than because
+the model finished — the difference between "a long sentence" and "a runaway". It is now one
+input to a verdict the engine has already reached rather than a number a client has to
+reason from.
+
+Three of the seven measured fields are the server's own arithmetic and three come off the
+wire, and the split matters:
 
 - `index` and `take` are the request's. `chars` is **Crucible's own count of the text it
   sent**, not a number read off the reply — the rule `crucible/workers.py` states about

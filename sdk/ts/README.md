@@ -90,7 +90,7 @@ capabilities.
 
 `events()` yields typed events with the server's monotonic `id`:
 `queued {position}`, `warming {message}`, `progress {fraction, message, extra}`,
-`chunk {index, seconds, chars, charsPerSec, tokens, capped, take}`, `artifact {name}`,
+`chunk {index, seconds, chars, charsPerSec, tokens, capped, take, guard}`, `artifact {name}`,
 `done`, `failed {error}`, `cancelled {status}`. The iterator ends after the first terminal
 event (`done`, `failed`, `cancelled`).
 
@@ -386,19 +386,36 @@ of `maxChars` — it is per (voice, backend) and it is on the row you already re
 The `index` is yours too, and nothing renumbers it. It goes out, comes back on the retiring
 row, and becomes the artifact's name.
 
-### The `chunk` event, and the null that is load-bearing
+### The `chunk` event, and the nulls that are load-bearing
 
 ```ts
 for await (const event of crucible.events(jobId)) {
   if (event.event !== 'chunk') continue;
-  const { index, seconds, chars, charsPerSec, tokens, capped, take } = event.data;
-  if (capped === true) retake(index);                 // a runaway
-  else if (capped === null) judgeOnDurationAlone(index); // narrator did not say
+  const { index, seconds, chars, charsPerSec, tokens, capped, take, guard } = event.data;
+  if (guard !== null) record(index, guard);   // what the ENGINE decided about it
 }
 ```
 
-This is the whole guard interface. The server measures and reports; it decides nothing, never
-retakes and never re-splits — your PaceTracker is the thing that judges.
+**The model judges, the server forwards, the client orders** (Owen's ruling of 2026-09-13,
+`docs/PHASE6-REMOTE-RENDER.md`, amending PHASE3-TTS.md). The server measures `seconds`,
+`chars` and `charsPerSec` and still decides nothing — it never retakes and never re-splits —
+but the judging is not yours either. A chunk that arrives has already been through the
+engine's own retake ladder and been accepted; `guard` is the verdict it reached, forwarded
+verbatim.
+
+This README used to print `if (capped === true) retake(index)` here and call the seven
+measured fields "the whole guard interface", with "your PaceTracker is the thing that
+judges". Both were wrong in the same way: the PaceTracker was never in this path, and until
+narrator grew a guarded batch driver the door a Crucible render drives had no guard at all.
+Do not retake on what you read on this event.
+
+**`guard` is an opaque object or `null`, and it is not modelled.** Its contents are
+narrator's — today `{verdict, clean, parts, band, takes}`, where `verdict` is the ladder's own
+last action and `parts` says whether it split the chunk — and both this client and the server
+carry it across unopened, because a schema for it would break the first time the ladder grows
+a rung, at the first guard fire on a real book rather than at compile time. Narrow what you
+need yourself, and treat a word you do not recognise as news. A `null` guard means narrator
+sent **no verdict** and is never to be read as "the take was clean".
 
 **`capped` and `tokens` are `boolean | null` and `number | null`, and `null` means "narrator
 did not say" — never `false`, never `0`.** narrator does not put the frame cap on its wire at
@@ -407,8 +424,8 @@ that read that as `false` would report every runaway as a long sentence, which i
 the distinction this event exists to carry. Compare against `true` and `false` explicitly;
 never write `if (chunk.capped)`.
 
-A `chunk` frame that *omits* `capped` is a `CrucibleProtocolError`, not a null: "narrator did
-not say" has to be something the server said.
+A `chunk` frame that *omits* `capped` — or `guard` — is a `CrucibleProtocolError`, not a null:
+"narrator did not say" has to be something the server said.
 
 No `chunk` event and no artifact is produced for a row that rendered nothing. **A failed
 chunk is reported and the run continues** — one bad sentence never sinks the other 1,399 —
@@ -613,8 +630,10 @@ is how it covers the cases a healthy Crucible never produces on a good day: a 50
 not read as an idle card, a holder whose memory the driver would not report, a voice row
 that refuses to load and does not say why, an SSE stream that stops without a terminal
 event, a `chunk` frame whose `capped` is `null` (which is what the pinned narrator sends for
-every chunk), an artifact fetch that fails after its sidecar arrived, and every option this
-client refuses by name before it sends anything.
+every chunk), a `chunk` frame carrying an engine verdict whose vocabulary this client has
+never heard of (which must survive unchanged) and one carrying none at all, an artifact fetch
+that fails after its sidecar arrived, and every option this client refuses by name before it
+sends anything.
 
 Two of the render tests are timing proofs rather than shape proofs. "Fetches each artifact as
 its event lands" **gates the SSE stream on the artifact GET arriving**, so a writer that

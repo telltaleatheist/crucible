@@ -159,9 +159,15 @@ nothing inside it — is what keeps the mismatch from being fatal, but a documen
 about a shape is a trap for whoever writes the next consumer.
 
 `verdict` is the ladder's own last action: `clean` when nothing fired, else the vocabulary
-`truncation.py` already emits — `short`, `long`, `rerolled`, `resplit`,
+`truncation.py` already emits — `short`, `long`, **`hole`**, `rerolled`, `resplit`,
 `accepted-off-length`. Deliberately not a taxonomy invented here: a word this document made
 up would be a word that could drift from what the ladder actually did.
+
+*(`hole` was missing from that list until 2026-09-13 and is a sixth word, not a fifth:
+`LengthVerdict.side` returns it for a take whose longest interior silence exceeds
+`MAX_HOLE_SECONDS`, and `_LadderTask.offer` emits `{'action': verdict.side}`. Found while
+wiring the Crucible half — which is the second field-name correction this section has
+needed, and the reason the rule is "forward it verbatim and read nothing inside".)*
 
 Three properties this shape is chosen for:
 
@@ -191,10 +197,19 @@ say. Crucible does not read it, does not validate its contents beyond it being a
 and does not act on it. That is the same discipline `model_provenance` already has, and it
 is what keeps `api_version` at 1.
 
-**The pace state round-trips through the client.** This is the one tension the ruling
-creates: the guard re-centres on the running median of the book's own shipped takes, which
-is per-**book** state, and DESIGN.md section 10 says Crucible keeps no session, no project
-and no per-user state between jobs.
+**The pace state round-trips through the client.** *Designed here, **NOT BUILT** as of
+2026-09-13 — and the `guard` half above IS built, so do not read this section as one piece
+of shipped work.* narrator has no wire for a pace state at all: `generate_batch` accepts no
+`pace`, `batch_done` carries only `count`, and `truncation.PaceTracker` has no state to
+export or import. So Crucible's `tts` params carry no `pace` and its `done_extra` returns
+none, deliberately, rather than a stub that would drop the state silently and make a
+40-chapter book guard worse than a 1-chapter one with nothing failing. narrator owes its
+half first; `crucible/jobs/tts/render.py`'s module docstring says the same in the code.
+What follows is the design that becomes true when it does.
+
+This is the one tension the ruling creates: the guard re-centres on the running median of
+the book's own shipped takes, which is per-**book** state, and DESIGN.md section 10 says
+Crucible keeps no session, no project and no per-user state between jobs.
 
 The resolution is that **the client carries it, and the server never remembers it**:
 

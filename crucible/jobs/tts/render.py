@@ -1,9 +1,9 @@
 """The render door — job type `tts`. PHASE3-TTS.md section 6.
 
-Text in, one FLAC per chunk out, and a measurement per chunk that the client
-judges. A normal job on the exclusive lane: it owns the card for its whole
-duration, it is the thing the queue was built to serialise, and it is an
-operator's explicit order rather than an unattended request.
+Text in, one FLAC per chunk out, a measurement per chunk, and the verdict the
+ENGINE reached about it. A normal job on the exclusive lane: it owns the card for
+its whole duration, it is the thing the queue was built to serialise, and it is
+an operator's explicit order rather than an unattended request.
 
 What this job does that no other job does
 -----------------------------------------
@@ -15,11 +15,43 @@ front of the lane, it loads the right one and emits `warming` exactly as
 `load-voice` does. (The streaming door, being a connection rather than a job,
 goes back to behaving like chat.)
 
-**It measures and reports and decides nothing.** `chunk {index, seconds, chars,
-chars_per_sec, tokens, capped, take}` is the whole guard interface. Crucible
-never retakes, never re-splits and never substitutes; BookForge's PaceTracker
-reads those numbers and decides what to do about them. The division of knowledge
-(DESIGN.md section 3.1) is the whole architecture here.
+**The model judges, this server forwards, the client orders.** `chunk {index,
+seconds, chars, chars_per_sec, tokens, capped, take, guard}`. The first seven are
+Crucible's own measurements of the bytes that arrived — it still measures, and it
+still never retakes, never re-splits and never substitutes. `guard` is the
+verdict narrator's own retake ladder reached about that chunk, forwarded
+**verbatim** and `null` when narrator did not send one. Crucible does not read
+inside it, does not validate its contents beyond "it is an object", and never
+acts on it: that is `model_provenance`'s discipline, and it is what keeps
+`api_version` at 1 while the ladder's vocabulary is free to grow.
+
+*What this replaced, and why.* Until Owen's ruling of 2026-09-13 this paragraph
+said "it measures and reports and decides nothing", called `chunk {index,
+seconds, chars, chars_per_sec, tokens, capped, take}` "the whole guard
+interface", and said BookForge's PaceTracker would read those numbers and decide
+what to do about them. That was never true of this door. narrator had **two
+rendering worlds** and only the audiobook one was guarded: the serve world —
+which is the door this file drives — reached a Higgs engine through one bare
+`render_audio()` per sentence, with no PaceTracker, no re-roll and no split
+ladder, while `convert_many` ran the same model through all three. And
+BookForge's PaceTracker was not in this path either: the bridge scraped guard
+decisions off narrator's stderr, and a render driven through Crucible has no
+stderr for it to scrape. So the numbers that arm of the design forwarded
+described an unguarded single take, and nobody judged them.
+
+The ruling fixes that by construction — the guard belongs to the model and its
+inference, so it runs wherever the model runs, and the conclusion travels with
+the audio it is about. narrator grew `render_many` (the guarded driver with the
+file-writing sink removed) and puts its verdict on `batch_item`; this file's job
+is to carry it across unopened. `crucible/docs/PHASE6-REMOTE-RENDER.md` sections
+0, 2, 3 and 4; it amends PHASE3-TTS.md sections 1, 3 and 6.
+
+**One artifact per requested index, always** (PHASE6 section 5). The ladder may
+decide a chunk is unsalvageable whole and render it as two halves, but
+`truncation.join_parts` joins them before the chunk retires, so a split arrives
+here as ONE `batch_item` for the requested index and shows up only as `parts: 2`
+inside the verdict. A client that asked for chunk 12 gets `12.flac`. This file
+therefore needs no re-indexing and has none.
 
 **A failed chunk is reported and the run continues.** The same rule `asr`'s
 sibling types have, and the opposite of `asr`'s own: a transcript with a hole in
@@ -54,15 +86,37 @@ What narrator does not report, and what `null` means
 ----------------------------------------------------
 `capped` and `tokens` are on section 6's `chunk` event and are **not on
 narrator's wire** at the pinned sha. `serve/worker.py` sends `{i, format, data,
-duration, sampleRate}` for a retiring row and nothing else; the frame cap it
-computed (`HiggsBudget.cap_frames`, clamped by `sgl_served.frame_cap`) never
-leaves the engine. Crucible cannot derive either — the cap is narrator's own
-arithmetic over the text, and the server does not see a frame count at all.
+duration, sampleRate}` for a retiring row, plus `guard` when the engine guarded
+its own batch, and nothing else; the frame cap it computed
+(`HiggsBudget.cap_frames`, clamped by `sgl_served.frame_cap`) never leaves the
+engine. Crucible cannot derive either — the cap is narrator's own arithmetic over
+the text, and the server does not see a frame count at all. (The cap-hit is now
+one input to a verdict the engine has already reached rather than a number a
+client has to reason from, which is why this gap stopped being urgent without
+being closed.)
 
 So both are `None` when narrator does not say, and `None` is published as JSON
 `null` and **means "narrator did not say"**. It is never to be read as `false`:
 a runaway reported as "not capped" is exactly the failure the field exists to
 prevent. PHASE3-TTS.md section 6 records the owed change on narrator's side.
+
+`guard` obeys the same rule one level up. A `null` guard means narrator sent no
+verdict — an engine with no `render_many` to offer (Orpheus, whose older guard is
+a different mechanism), or a row that failed before the ladder reached a decision
+— and it is never to be read as "the take was clean". `clean` is a key INSIDE a
+verdict that exists; the absence of a verdict says nothing about the take.
+
+**The pace state does NOT round-trip yet, and this door does not pretend it
+does.** PHASE6 section 4 has the client carry the tracker's state between
+chapters, because the guard re-centres on the running median of the book's own
+shipped takes and a book rendered as 40 cold-started chapters would guard
+measurably worse than the same book rendered as one run. narrator has no wire for
+it at the pinned sha: `generate_batch` accepts no `pace`, `batch_done` carries
+only `count`, and `truncation.PaceTracker` has no state to export or import. So
+`tts` params gain no `pace` and `done_extra` carries none. A half-built
+round-trip would silently drop the state and degrade a long book with nothing
+failing, which is the opposite of what this server does with a fact it cannot
+get: the field arrives when narrator can answer it.
 
 `chars` is deliberately **the server's own count of the text it sent**, not a
 number read off the reply, for the reason `crucible/workers.py` gives about
@@ -446,6 +500,40 @@ def _optional_bool(row: dict[str, Any], key: str) -> bool | None:
     return value
 
 
+def _guard_of(row: dict[str, Any]) -> dict[str, Any] | None:
+    """narrator's verdict for this row, UNOPENED, or None when it sent none.
+
+    The whole of Crucible's interest in a guard. It is not parsed, not
+    summarised, not re-keyed and not checked against any vocabulary — the one
+    thing asked of it is that it be a JSON object, because that is what the
+    `chunk` event's field is declared to be and an event has to serialise.
+
+    **Reading inside it would be the bug.** The verdict's own words are the
+    ladder's (`clean`, `short`, `long`, `hole`, `rerolled`, `resplit`,
+    `accepted-off-length` today), the take records are whatever
+    `truncation._LadderTask` put in them, and both are free to grow the day
+    somebody adds a rung. A server that validated any of that would refuse a
+    chunk it rendered perfectly well, at the first guard fire on a real book,
+    for saying a true thing this file had not heard of. PHASE6-REMOTE-RENDER.md
+    section 3, and the same discipline `model_provenance` already has.
+
+    A `guard` that is not an object fails ITS ROW and not the batch, like every
+    other malformed field here: the audio may be fine, but a reply whose verdict
+    is a string is a reply this door cannot describe, and shipping the FLAC with
+    the verdict thrown away would publish a measurement nobody can trace.
+    """
+    guard = row.get("guard")
+    if guard is None:
+        return None
+    if not isinstance(guard, dict):
+        raise _RowFailure(
+            f"narrator sent guard={guard!r}, which is not an object. Crucible "
+            "forwards the verdict verbatim and reads nothing inside it, but the "
+            "`chunk` event's field is an object or null and this is neither"
+        )
+    return guard
+
+
 # ------------------------------------------------------------------ job type
 
 
@@ -782,6 +870,7 @@ class TtsJobType:
             pcm, seconds = _pcm_of(row, chunk.index, sample_rate)
             tokens = _optional_int(row, "tokens")
             capped = _optional_bool(row, "capped")
+            guard = _guard_of(row)
         except _RowFailure as exc:
             return str(exc)
 
@@ -799,5 +888,8 @@ class TtsJobType:
             tokens=tokens,
             capped=capped,
             take=take,
+            # The object narrator sent, handed straight through. Not copied, not
+            # normalised, not inspected — see `_guard_of`.
+            guard=guard,
         )
         return None

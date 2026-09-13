@@ -29,6 +29,7 @@ import {
   num,
   nullableBool,
   nullableNum,
+  nullableObject,
   nullableStr,
   objectField,
   oneOf,
@@ -724,9 +725,22 @@ export class CrucibleClient {
    * ```ts
    * const jobId = await crucible.render({voice, language: 'en', take: 0, chunks});
    * for await (const event of crucible.events(jobId)) {
-   *   if (event.event === 'chunk' && event.data.capped === true) retake(event.data.index);
+   *   if (event.event === 'chunk' && event.data.guard !== null) {
+   *     record(event.data.index, event.data.guard);   // what the engine decided
+   *   }
    * }
    * ```
+   *
+   * **Do not retake on what you read here.** That example used to be
+   * `if (event.data.capped === true) retake(event.data.index)`, and it was the
+   * superseded model in one line: a client re-deciding something the engine had
+   * already decided, without the frame cap, the seed or the book's running pace
+   * in front of it. Owen ruled on 2026-09-13 that the guard and the retake
+   * decision belong to the model and its inference
+   * (`docs/PHASE6-REMOTE-RENDER.md`), so a chunk that arrives has already been
+   * through the ladder and been accepted. {@link ChunkData.guard} says what
+   * happened to it, for your records and your eye — `null` when narrator sent no
+   * verdict, which is never to be read as "it was clean".
    *
    * **The voice need not be resident.** A render job owns the exclusive lane for
    * its whole duration and is an operator's explicit order, so it loads its own
@@ -1398,17 +1412,25 @@ function readProgress(data: Json, where: string): ProgressData {
 }
 
 /**
- * One `chunk` frame (PHASE3-TTS.md section 6): a measurement of one rendered
- * chunk, and the whole of what the server has to say about it.
+ * One `chunk` frame (PHASE3-TTS.md section 6, amended by
+ * PHASE6-REMOTE-RENDER.md section 3): the server's measurements of one rendered
+ * chunk, and the engine's verdict about it.
  *
- * `tokens` and `capped` are read with the nullable readers and **the key must be
- * there**. That is the load-bearing part: `null` on this wire means "narrator did
- * not say", and an absent key would mean "this server does not speak the field
- * at all" — two different pieces of news, and only one of them is something the
- * server stated. A `chunk` frame that omits `capped` is therefore a protocol
- * error rather than a null, and the null that does arrive travels to the caller
- * as a null, never softened into `false`. A client that read it as `false` would
- * report every runaway as a long sentence.
+ * `tokens`, `capped` and `guard` are read with the nullable readers and **the
+ * key must be there**. That is the load-bearing part: `null` on this wire means
+ * "narrator did not say", and an absent key would mean "this server does not
+ * speak the field at all" — two different pieces of news, and only one of them
+ * is something the server stated. A `chunk` frame that omits `capped` is
+ * therefore a protocol error rather than a null, and the null that does arrive
+ * travels to the caller as a null, never softened into `false`. A client that
+ * read it as `false` would report every runaway as a long sentence.
+ *
+ * `guard` follows that precedent exactly rather than inventing a second one, and
+ * adds nothing to it: {@link nullableObject} checks that it is an object and
+ * reads nothing inside. The verdict's vocabulary is the retake ladder's, it is
+ * free to grow, and a reader here that knew the words would be a second owner of
+ * them — which is the one defect `docs/ARCHITECTURE.md` section 1 says every
+ * other defect in this system turned out to be.
  */
 function readChunk(data: Json, where: string): ChunkData {
   return {
@@ -1419,6 +1441,7 @@ function readChunk(data: Json, where: string): ChunkData {
     tokens: nullableNum(data, 'tokens', where),
     capped: nullableBool(data, 'capped', where),
     take: num(data, 'take', where),
+    guard: nullableObject(data, 'guard', where),
   };
 }
 

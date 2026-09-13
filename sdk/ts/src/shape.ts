@@ -98,6 +98,31 @@ export function nullableNum(object: Json, key: string, where: string): number | 
   return value;
 }
 
+/**
+ * A JSON object that the server may honestly answer `null` to, read **without
+ * being opened**.
+ *
+ * The key must be present, for {@link nullableBool}'s reason: `null` is a
+ * statement the server made and an absent key is not that statement. What is
+ * different here is that nothing inside is checked. This is the reader for a
+ * field whose contents belong to somebody else — a `chunk` event's `guard` is
+ * the verdict narrator's own retake ladder reached, forwarded verbatim by a
+ * server that reads nothing inside it (PHASE6-REMOTE-RENDER.md sections 3 and
+ * 4) — and a client that validated the ladder's vocabulary would reject a
+ * perfectly good render the day the ladder grew a rung. So: an object, or null,
+ * and no opinion about either.
+ */
+export function nullableObject(object: Json, key: string, where: string): Json | null {
+  const value = field(object, key, where);
+  if (value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new CrucibleProtocolError(
+      `${where}.${key} is neither a JSON object nor null (got ${describe(value)})`,
+    );
+  }
+  return value as Json;
+}
+
 export function strArray(object: Json, key: string, where: string): string[] {
   const value = asArray(field(object, key, where), `${where}.${key}`);
   return value.map((entry, index) => {

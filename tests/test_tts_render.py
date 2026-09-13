@@ -172,16 +172,30 @@ def test_the_bytes_are_a_real_flac_at_the_voices_sample_rate(
     assert depth == 16
 
 
-def test_the_chunk_event_is_the_whole_guard_interface(
+def test_the_chunk_event_carries_the_measurements_and_the_verdict(
     rendered: Callable[..., list[dict[str, Any]]]
 ) -> None:
-    """The server measures and reports; it decides nothing and never retakes."""
+    """The model judges, the server forwards, the client orders.
+
+    Named `..._is_the_whole_guard_interface` until 2026-09-13, which is the claim
+    Owen's ruling retired: the seven measured fields were never the whole of it,
+    because nothing in this path was guarding at all.
+
+    The seven measured fields are the server's own; `guard` is the eighth and it
+    is narrator's (PHASE6-REMOTE-RENDER.md section 3). The key set is asserted
+    exactly, because an event that grew a field nobody declared is the same
+    defect as one that lost one.
+    """
     chunks = {row["index"]: row for row in events_of(rendered(), "chunk")}
     assert sorted(chunks) == [41, 42, 43]
     row = chunks[41]
     assert set(row) == {
-        "index", "seconds", "chars", "chars_per_sec", "tokens", "capped", "take"
+        "index", "seconds", "chars", "chars_per_sec", "tokens", "capped", "take",
+        "guard",
     }
+    # The fake sends no verdict unless a test asks for one, which is also what a
+    # narrator serving an engine with no `render_many` does.
+    assert row["guard"] is None
     assert row["chars"] == len(CHUNKS[0]["text"])
     # `seconds` is measured off the PCM that arrived, so it is arithmetic on the
     # fake's declared pace rather than a tolerance.
@@ -229,6 +243,146 @@ def test_a_narrator_that_reports_no_cap_publishes_null_and_not_false(
     assert _optional_bool(bare, "capped") is None
     assert _optional_int(bare, "tokens") is None
     assert _optional_bool({**bare, "capped": False}, "capped") is False
+
+
+# ------------------------------------------------------------------- guard
+#
+# Owen's ruling of 2026-09-13: the model and its inference own the guard AND the
+# retake decision, so the verdict travels with the audio it is about and Crucible
+# carries it unopened. These tests assert the CARRYING, never the contents —
+# asserting the contents here would put a second owner on narrator's vocabulary,
+# which is the exact defect docs/ARCHITECTURE.md section 1 names.
+
+#: One verdict, in the shape `truncation.GuardPlan.verdict()` actually builds:
+#: `verdict` is the ladder's own last action, `clean` is the flag, `parts` is how
+#: many text units the chunk was finally rendered as, `band` is the tracker's four
+#: numbers plus `warm`, and `takes` is the event records VERBATIM — which carry
+#: `chars_per_second` (not `_sec`), `rung`, `side`, `depth`, `pace` and
+#: `pace_source`. Copied off the source rather than invented: an earlier draft of
+#: PHASE6 section 3 made up plausible names and every one of them was wrong.
+GUARD = {
+    "verdict": "rerolled",
+    "clean": True,
+    "parts": 1,
+    "band": {
+        "max_chars_per_sec": 20.0,
+        "min_chars_per_sec": 14.5,
+        "reference": 17.03,
+        "observed": 4,
+        "warm": False,
+    },
+    "takes": [
+        {
+            "index": 41,
+            "depth": 0,
+            "side": "short",
+            "chars": 34,
+            "seconds": 1.2,
+            "chars_per_second": 28.33,
+            "max_chars_per_sec": 20.0,
+            "min_chars_per_sec": 14.5,
+            "hole_seconds": 0.0,
+            "max_hole_seconds": 5.0,
+            "pace": 17.03,
+            "pace_source": "recorded",
+            "action": "short",
+            "rung": "reroll",
+        }
+    ],
+}
+
+
+def test_a_guard_verdict_survives_the_round_trip_byte_for_byte(
+    rendered: Callable[..., list[dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forwarded verbatim: the object narrator sent is the object a client reads.
+
+    Whole-object equality, not a field-by-field check — a server that rebuilt the
+    verdict from keys it recognised would pass every field assertion and still
+    drop the rung somebody added last week.
+    """
+    monkeypatch.setenv("CRUCIBLE_FAKE_GUARD", json.dumps({"41": GUARD}))
+    chunks = {row["index"]: row for row in events_of(rendered(), "chunk")}
+    assert chunks[41]["guard"] == GUARD
+
+
+def test_a_row_with_no_guard_publishes_null_and_not_a_missing_key(
+    rendered: Callable[..., list[dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`null` means narrator sent no verdict, and it is never read as "clean".
+
+    The same rule `capped` has, one level up: an ABSENT key would say "this
+    server does not speak the field", which is different news from "narrator did
+    not say", and only one of those is true here. Both cases are produced by one
+    render, so a server that got them from two code paths could not pass.
+    """
+    monkeypatch.setenv("CRUCIBLE_FAKE_GUARD", json.dumps({"41": GUARD}))
+    chunks = {row["index"]: row for row in events_of(rendered(), "chunk")}
+    assert chunks[41]["guard"] == GUARD
+    for index in (42, 43):
+        assert "guard" in chunks[index], chunks[index]
+        assert chunks[index]["guard"] is None
+
+
+def test_crucible_reads_nothing_inside_the_guard(
+    rendered: Callable[..., list[dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vocabulary this server has never heard of crosses it unchanged.
+
+    This is the statelessness that keeps `api_version` at 1. The day the ladder
+    grows a rung, the verdict grows a word, and a Crucible that validated the
+    word would refuse a chunk it rendered perfectly well — at the first guard
+    fire on a real book, not at build time.
+    """
+    future = {
+        "verdict": "a-rung-invented-next-year",
+        "clean": False,
+        "parts": 3,
+        "band": None,
+        "takes": [{"whatever": ["the", "ladder", "wanted"]}],
+        "a_key_this_server_has_never_seen": {"nested": 1},
+    }
+    monkeypatch.setenv("CRUCIBLE_FAKE_GUARD", json.dumps({"42": future}))
+    chunks = {row["index"]: row for row in events_of(rendered(), "chunk")}
+    assert chunks[42]["guard"] == future
+
+
+def test_a_guard_that_is_not_an_object_fails_its_row_and_not_the_batch(
+    rendered: Callable[..., list[dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one thing checked about a verdict, and it fails one row.
+
+    `guard` is an object or it is null; a string is neither, and the `chunk`
+    event has nowhere to put it. Shipping the FLAC with the verdict silently
+    dropped would publish a chunk nobody can trace back to a decision, so the row
+    is refused by name — and its neighbours still land, because that is what
+    every failure on this door does.
+    """
+    monkeypatch.setenv("CRUCIBLE_FAKE_GUARD", json.dumps({"41": "clean"}))
+    events = rendered()
+    assert terminal(events)["event"] == "done"
+    names = sorted(event["name"] for event in events_of(events, "artifact"))
+    assert names == ["42.flac", "43.flac"]
+    failed = terminal(events)["data"]["failed"]
+    assert [row["index"] for row in failed] == [41]
+    assert "guard='clean', which is not an object" in failed[0]["message"]
+    assert sorted(row["index"] for row in events_of(events, "chunk")) == [42, 43]
+
+
+def test_a_guard_reaches_the_event_without_being_rebuilt() -> None:
+    """`_guard_of` hands back the SAME object, not a reshaped copy.
+
+    Identity, not equality. A server that rebuilt the verdict — even into an
+    equal dict — would be a server with an opinion about its keys, and the next
+    rung added to the ladder is the one that opinion drops. The unit-level half
+    of the round-trip test above.
+    """
+    from crucible.jobs.tts.render import _guard_of
+
+    assert _guard_of({"i": 41}) is None
+    assert _guard_of({"i": 41, "guard": None}) is None
+    verdict = {"verdict": "clean", "takes": []}
+    assert _guard_of({"i": 41, "guard": verdict}) is verdict
 
 
 # ---------------------------------------------------------------- failures

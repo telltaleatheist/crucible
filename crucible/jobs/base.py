@@ -224,22 +224,33 @@ class JobContext:
         tokens: int | None,
         capped: bool | None,
         take: int,
+        guard: dict[str, Any] | None,
     ) -> None:
-        """Emit `chunk {index, seconds, chars, chars_per_sec, tokens, capped, take}`.
+        """Emit `chunk {index, seconds, chars, chars_per_sec, tokens, capped,
+        take, guard}`.
 
-        PHASE3-TTS.md section 6: the whole guard interface, and the whole of what
-        the server has to say about a rendered chunk. **It measures and reports;
-        it decides nothing and it never retakes.** BookForge's PaceTracker is the
-        thing that judges, and `capped` is the input it cannot derive for itself
-        — the difference between a long sentence and a runaway is invisible in a
-        duration.
+        PHASE6-REMOTE-RENDER.md sections 3 and 4, amending PHASE3-TTS.md section
+        6. **The model judges, this server forwards, the client orders.** The
+        first seven keys are Crucible's own measurements of the bytes that
+        arrived. `guard` is the verdict narrator's engine reached about the
+        chunk, forwarded **verbatim** and `null` when narrator did not send one.
+
+        Crucible does not read inside `guard`, does not validate its contents
+        beyond "it is an object", and never acts on it — the same discipline
+        `model_provenance` has. That statelessness is deliberate rather than
+        lazy: a schema here that mirrored the retake ladder's internals would
+        break the first time the ladder's vocabulary grew, and it would break at
+        the first guard fire on a real book rather than at build time.
 
         Every argument is keyword-only and none has a default, because each one
         is a measurement and a measurement that defaulted would be a number
         nobody took. `tokens` and `capped` are `None`-able for the reason
         PHASE3-TTS.md section 6 gives: narrator does not report either on its
         wire at the pinned sha, and `None` means *narrator did not say*. It is
-        never to be read as `false`.
+        never to be read as `false`. `guard` carries the same rule one level up:
+        `null` means narrator sent no verdict — an engine that does not guard its
+        own batch, or a row that never reached a decision — and is never to be
+        read as "the take was clean".
 
         `chunk` is an addition to DESIGN.md section 4's event vocabulary and
         `api_version` does not move: a client that does not know the kind still
@@ -247,6 +258,11 @@ class JobContext:
         """
         if capped is not None and not isinstance(capped, bool):
             raise TypeError(f"capped must be a bool or None, got {capped!r}")
+        if guard is not None and not isinstance(guard, dict):
+            # The ONE thing this server checks about a guard, and it checks it
+            # because the event is JSON and an object is what the field is
+            # declared to be. What is INSIDE it is narrator's business.
+            raise TypeError(f"guard must be an object or None, got {guard!r}")
         self._loop.call_soon_threadsafe(
             self._store.append_event,
             self._job,
@@ -259,6 +275,9 @@ class JobContext:
                 "tokens": tokens,
                 "capped": capped,
                 "take": take,
+                # VERBATIM: the object narrator sent, not a copy this server
+                # reshaped. Nothing below this line reads a key inside it.
+                "guard": guard,
             },
         )
 

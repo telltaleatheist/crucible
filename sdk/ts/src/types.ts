@@ -298,17 +298,32 @@ export interface ProgressData {
 }
 
 /**
- * One rendered chunk of a `tts` job, measured (PHASE3-TTS.md section 6).
+ * One rendered chunk of a `tts` job (PHASE3-TTS.md section 6, amended by
+ * PHASE6-REMOTE-RENDER.md sections 3 and 4).
  *
- * This is the **whole guard interface**. Crucible measures and reports; it
- * decides nothing, never retakes, never re-splits and never substitutes.
- * BookForge's PaceTracker is the thing that judges, and this event carries
- * everything it has to judge with. One arrives per chunk that produced audio,
- * and none at all for a row that failed — that row is named in a `progress` line
- * when it happens and again in `done`'s `failed` list.
+ * **The model judges, the server forwards, the client orders.** Crucible
+ * measures the seven numbered fields and still decides nothing about a chunk —
+ * it never retakes, never re-splits and never substitutes. What it no longer
+ * claims is that those seven are the whole guard interface: {@link
+ * ChunkData.guard} is the verdict the ENGINE'S own retake ladder already
+ * reached, carried across unopened. One `ChunkData` arrives per chunk that
+ * produced audio, and none at all for a row that failed — that row is named in a
+ * `progress` line when it happens and again in `done`'s `failed` list.
  *
- * Three of the seven fields are the request's or the server's own arithmetic and
- * two come off narrator's wire, and the split is why two of them are nullable:
+ * *What this replaced.* Until Owen's ruling of 2026-09-13 this comment said
+ * "this is the whole guard interface… BookForge's PaceTracker is the thing that
+ * judges, and this event carries everything it has to judge with". It did not,
+ * and the PaceTracker was never in this path: narrator's serve world — the door
+ * a Crucible render drives — rendered each Higgs chunk with one bare
+ * `render_audio()`, no pace tracking, no re-roll and no split ladder, while its
+ * audiobook world ran the same model through all three. The numbers therefore
+ * described an unguarded single take. The guard now runs where the model runs,
+ * and a client that acts on `capped` or `charsPerSec` instead of reading
+ * `guard` is re-litigating a decision the engine has already made.
+ *
+ * Three of the seven measured fields are the request's or the server's own
+ * arithmetic and two come off narrator's wire, and the split is why two of them
+ * are nullable:
  *
  * - `index` and `take` are the request's, unchanged.
  * - `chars` is **Crucible's own count of the text it sent**, not a number read
@@ -360,6 +375,36 @@ export interface ChunkData {
   readonly capped: boolean | null;
   /** Which rung of the voice's take ladder this render asked for. */
   readonly take: number;
+  /**
+   * **The verdict the engine's own retake ladder reached about this chunk**, or
+   * `null` meaning narrator sent none (Owen's ruling of 2026-09-13,
+   * PHASE6-REMOTE-RENDER.md section 3).
+   *
+   * Deliberately typed as an opaque object and **not modelled**. Its contents
+   * are narrator's: today `{verdict, clean, parts, band, takes}`, where
+   * `verdict` is the ladder's own last action (`clean`, `short`, `long`,
+   * `hole`, `rerolled`, `resplit`, `accepted-off-length`), `parts` is how many
+   * text units the chunk was finally rendered as, `band` is the pace tracker's
+   * edges and `takes` is the guard's event records verbatim. Crucible forwards
+   * the object without reading inside it, and this client does the same, for one
+   * reason: **a schema here would break the first time the ladder grows a rung**
+   * — and it would break at the first guard fire on a real book, not at compile
+   * time. Read what you need with your own narrowing, and treat a word you do
+   * not recognise as news rather than as an error.
+   *
+   * `null` obeys {@link ChunkData.capped}'s rule one level up: it means narrator
+   * sent no verdict — an engine with no guarded batch driver to offer, or a row
+   * that failed before the ladder reached a decision — and it is **never to be
+   * read as "the take was clean"**. `clean` is a key inside a verdict that
+   * exists; the absence of a verdict says nothing about the take. The key itself
+   * is always present, so an absent one is a protocol error and not a null.
+   *
+   * It is the **conclusion, not the evidence**. `verdict` is what the engine
+   * decided; `takes` is why, for analytics and for a human eye. A client that
+   * acts on `takes` is re-deciding something already decided by the only thing
+   * that had the frame cap, the seed and the book's running pace in front of it.
+   */
+  readonly guard: Readonly<Record<string, unknown>> | null;
 }
 
 export interface ArtifactData {

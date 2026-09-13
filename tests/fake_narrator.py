@@ -61,6 +61,17 @@ when they are there and publishes `null` when they are not, which is what it wil
 do against the real narrator until narrator grows them. A test that asserts
 `capped is True` is asserting about THIS file, not about narrator.
 
+`guard` IS NOT one of them — it is on the real wire. `serve/worker.py`'s
+`_emit_batch_item` puts `GuardPlan.verdict()`'s object on a retiring row of a
+batch an engine guarded itself, and `_emit_guarded_batch` is the arm that
+produces it (Owen's ruling of 2026-09-13, crucible/docs/PHASE6-REMOTE-RENDER.md
+section 3). It is OPTIONAL there in exactly the way it is optional here: a row
+with no verdict carries no `guard` key at all, which is what `CRUCIBLE_FAKE_GUARD`
+reproduces by naming the rows that have one. This file does not model the
+verdict's contents and must not start: the tests hand it a literal, because the
+property being tested is that Crucible carries an object it does not understand
+across unchanged.
+
 Run it exactly as Crucible will run the real thing — as an argv, from a subprocess:
 
     [sys.executable, str(FAKE_NARRATOR), "--engine", "higgs-v3"]
@@ -86,6 +97,17 @@ must not be bent into passing test fixtures through it:
     CRUCIBLE_FAKE_CAP_CHARS       a chunk with more characters than this stops at the
                                   cap and reports `capped`. How a runaway is tested
                                   without a model that runs away.
+    CRUCIBLE_FAKE_GUARD           a JSON OBJECT keyed by row index (as a string),
+                                  whose value is that row's `guard` verdict,
+                                  attached verbatim to its retiring `batch_item`.
+                                  A row the object does not name carries no
+                                  `guard` key at all — so one batch carries both
+                                  cases, which is what "null means narrator did
+                                  not say, and an absent key is not a missing
+                                  measurement" needs to be tested against. Not
+                                  valid JSON, or not an object: this process dies
+                                  loudly rather than rendering a batch that
+                                  silently ignored what a test asked for.
     CRUCIBLE_FAKE_FAIL_ROW        a row index (batch `i`, or the literal `0` for a
                                   single generate) that comes back as a per-item
                                   failure. Its neighbours must still succeed: "a failed
@@ -207,6 +229,32 @@ def _duration_for(text: str) -> tuple[float, bool, int]:
     return spoken / _env_float("CRUCIBLE_FAKE_CHARS_PER_SEC", 15.0), capped, chars
 
 
+def _guard_for(row: int | None) -> dict[str, object]:
+    """`{"guard": ...}` for this row, or `{}` — never `{"guard": None}`.
+
+    The empty dict is the point: the real worker omits the key entirely for a row
+    whose engine reached no verdict (`_emit_batch_item`'s
+    `**({'guard': guard} if guard is not None else {})`), and a fake that sent an
+    explicit null instead would make Crucible's "absent means the same as null"
+    path untestable by making it unreachable.
+
+    A single `generate` (`row is None`) never carries one: the guarded arm is
+    `generate_batch`'s, because a retake doubles the latency a listener is
+    already waiting on and the interactive door was deliberately left alone.
+    """
+    raw = os.environ.get("CRUCIBLE_FAKE_GUARD")
+    if raw is None or raw == "" or row is None:
+        return {}
+    verdicts = json.loads(raw)
+    if not isinstance(verdicts, dict):
+        raise TypeError(
+            f"CRUCIBLE_FAKE_GUARD must be a JSON object keyed by row index, got "
+            f"{type(verdicts).__name__}"
+        )
+    key = str(row)
+    return {"guard": verdicts[key]} if key in verdicts else {}
+
+
 def _told_to_fail(row: int | None) -> bool:
     """Answer `CRUCIBLE_FAKE_FAIL_ROW` for this row, and say whether it did."""
     fail_row = _env_int("CRUCIBLE_FAKE_FAIL_ROW")
@@ -246,7 +294,7 @@ def _emit_whole_row(text: str, row: int | None) -> None:
     if row is None:
         send("audio", **fields)
     else:
-        send("batch_item", i=row, **fields)
+        send("batch_item", i=row, **fields, **_guard_for(row))
 
 
 def _stream_row(text: str, row: int | None) -> Iterator[None]:

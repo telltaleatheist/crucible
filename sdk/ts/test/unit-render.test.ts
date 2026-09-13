@@ -406,6 +406,23 @@ const CHUNK_FRAME = {
   tokens: null,
   capped: null,
   take: 0,
+  guard: null,
+};
+
+// One engine verdict, in the shape `truncation.GuardPlan.verdict()` builds —
+// and deliberately carrying a word this client has never heard of, because the
+// property under test is that it survives anyway. PHASE6-REMOTE-RENDER.md
+// section 3 records that an earlier draft invented plausible field names and
+// every one of them was wrong; that is the trap a modelled schema walks into.
+const GUARD = {
+  verdict: 'a-rung-invented-next-year',
+  clean: false,
+  parts: 2,
+  band: { max_chars_per_sec: 20.0, min_chars_per_sec: 14.5, reference: 17.03, observed: 4, warm: false },
+  takes: [
+    { index: 41, depth: 0, side: 'short', chars: 34, seconds: 1.2, chars_per_second: 28.33,
+      action: 'short', rung: 'reroll', pace: 17.03, pace_source: 'recorded' },
+  ],
 };
 
 async function drain(jobId: string): Promise<JobEvent[]> {
@@ -432,6 +449,60 @@ test('a chunk event is typed, narrowable, and read with the server spelling', as
     tokens: null,
     capped: null,
     take: 0,
+    guard: null,
+  });
+});
+
+test('an engine verdict survives the read unchanged, vocabulary and all', async () => {
+  // The whole of this client's contract with `guard`: it arrives as the object
+  // the engine built. Deep equality against the literal, not a field-by-field
+  // check — a reader that rebuilt the verdict from keys it recognised would pass
+  // every field assertion and still drop the rung somebody added last week.
+  streams(
+    frame(1, 'chunk', { ...CHUNK_FRAME, guard: GUARD }),
+    frame(2, 'done', { artifacts: ['41.flac'], rendered: 1, failed: [], take: 0, sample_rate: 24000 }),
+  );
+  const events = await drain('job-tts-1');
+  const chunk = events[0]!;
+  assert.ok(chunk.event === 'chunk');
+  assert.deepEqual(chunk.data.guard, GUARD);
+});
+
+test('guard: null stays null, and is never softened into a verdict', async () => {
+  // A null guard is narrator sending NO verdict — an engine with no guarded
+  // batch driver to offer, or a row that failed before the ladder decided. It is
+  // not "the take was clean": `clean` is a key inside a verdict that exists.
+  streams(
+    frame(1, 'chunk', CHUNK_FRAME),
+    frame(2, 'done', { artifacts: ['41.flac'], rendered: 1, failed: [], take: 0, sample_rate: 24000 }),
+  );
+  const events = await drain('job-tts-1');
+  const chunk = events[0]!;
+  assert.ok(chunk.event === 'chunk');
+  assert.equal(chunk.data.guard, null);
+  assert.ok('guard' in chunk.data);
+  assert.notDeepEqual(chunk.data.guard, {});
+});
+
+test('a chunk frame with no guard key at all is a protocol error, not a null', async () => {
+  // `capped`'s rule, one level up and for the same reason: "narrator did not
+  // say" has to be something the server said, never something this client
+  // inferred from an absence.
+  const { guard: _guard, ...withoutGuard } = CHUNK_FRAME;
+  streams(frame(1, 'chunk', withoutGuard));
+  await assert.rejects(drain('job-tts-1'), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+    assert.match(error.message, /event 1 \(chunk\) has no field "guard"/);
+    return true;
+  });
+});
+
+test('a chunk frame whose guard is not an object is a protocol error', async () => {
+  streams(frame(1, 'chunk', { ...CHUNK_FRAME, guard: 'clean' }));
+  await assert.rejects(drain('job-tts-1'), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+    assert.match(error.message, /guard is neither a JSON object nor null/);
+    return true;
   });
 });
 

@@ -450,12 +450,15 @@ Out come `<index>.flac`, mono 24 kHz PCM_16 — byte for byte the format BookFor
 assembly and resume already expect — plus one `chunk` event per row:
 
 ```
-chunk {index, seconds, chars, chars_per_sec, tokens, capped, take}
+chunk {index, seconds, chars, chars_per_sec, tokens, capped, take, guard}
 ```
 
-That is the whole guard interface, and the division it draws is the point of the design:
-**the server measures and the client judges.** Crucible reports what a chunk did and
-decides nothing about it — no retake, no re-split, no substitution.
+The division it draws is the point of the design: **the model judges, the server forwards,
+the client orders** (Owen's ruling of 2026-09-13, `docs/PHASE6-REMOTE-RENDER.md`; it amends
+PHASE3-TTS.md, which said "the server measures and the client judges"). Crucible measures
+the first seven and still decides nothing about a chunk — no retake, no re-split, no
+substitution. `guard` is the verdict narrator's own retake ladder reached, forwarded
+verbatim and `null` when narrator sent none; Crucible does not read inside it.
 
 **`capped` and `tokens` are `null` today, and null is not `false`.** narrator computes a
 frame cap and never puts it on its wire, so Crucible publishes "narrator did not say"

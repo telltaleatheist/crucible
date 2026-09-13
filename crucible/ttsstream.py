@@ -51,6 +51,34 @@ The frames
 it already holds for a row is void. Without it, resubmitting a row after a
 per-row cancel would deliver the row's first seconds twice and no frame would
 say so.
+
+THIS DOOR IS UNGUARDED, AND THAT IS A DECISION
+----------------------------------------------
+There is no `guard` on `done` and there is not going to be one. The render door
+carries the engine's retake verdict on every `chunk` event (Owen's ruling of
+2026-09-13, `docs/PHASE6-REMOTE-RENDER.md` section 3); this door carries none,
+because **nothing guards a streamed row in the first place**.
+
+Owen ruled on the asymmetry directly, the same day: *"streaming can stay
+unguarded. it needs speed over all else. i believe it's been unguarded this whole
+time. if it becomes a problem we can add a guard later."* He is right that it has
+always been so — narrator's serve world has never guarded a Higgs row — so this
+is the status quo affirmed, not a regression accepted. **Nothing is owed here.** A
+guard on this door would be a new decision, weighed against latency, not the
+discharge of a debt.
+
+The price, named here because it belongs next to the ruling: `_send_batch` below
+sets `"stream": True` on **every row of every batch**, and narrator's
+`serve/worker.py` routes any batch containing a streamed row past the guarded arm
+entirely (`generate_batch`'s `if any(it.get('stream') is True ...)` test, which
+comes before the `render_many` capability check). So it is not only the row
+someone is listening to: the whole batch, read-ahead included, renders unguarded.
+That is the shape of what was chosen — a retake doubles the latency a listener is
+already sitting on, and this is the door where that cost is not payable.
+
+What must NOT happen is a half-path toward it. A `guard` field on an unguarded
+door would be worse than no field: it would read as "the engine looked at this
+and was happy" on audio nothing looked at.
 """
 
 from __future__ import annotations
