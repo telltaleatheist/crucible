@@ -29,6 +29,8 @@ from .conftest import FAKE_BACKEND, parse_sse
 from .fake_engine import ANSWER, DELTAS, FakeEngine
 
 MODEL = "qwen3.5-9b"
+#: The page reader, which sorts first by id and so leads every listing.
+PAGE_MODEL = "dots-ocr"
 BIG_MODEL = "qwen3.8-27b"
 #: The same 27B at 4 bits: the one that does fit Owen's card.
 SMALL_BIG_MODEL = "qwen3.8-27b-4bit"
@@ -165,7 +167,9 @@ def test_models_lists_every_manifest_with_its_standing(
     response = llm_client.get("/v1/models", headers=auth)
     assert response.status_code == 200
     rows = {row["id"]: row for row in response.json()}
-    assert [row["id"] for row in response.json()] == [MODEL, BIG_MODEL, SMALL_BIG_MODEL]
+    assert [row["id"] for row in response.json()] == [
+        PAGE_MODEL, MODEL, BIG_MODEL, SMALL_BIG_MODEL,
+    ]
     row = rows[MODEL]
     assert row["family"] == "qwen3.5"
     assert row["params_b"] == 9
@@ -209,7 +213,7 @@ def test_info_gains_an_llm_capability(
     by_type = {entry["job_type"]: entry for entry in capabilities}
     assert "llm" in by_type
     assert [row["id"] for row in by_type["llm"]["models"]] == [
-        MODEL, BIG_MODEL, SMALL_BIG_MODEL,
+        PAGE_MODEL, MODEL, BIG_MODEL, SMALL_BIG_MODEL,
     ]
     # The two things you can actually POST are listed as themselves.
     assert "load-model" in by_type
