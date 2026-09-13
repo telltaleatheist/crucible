@@ -1,0 +1,48 @@
+# Qwen3-ForcedAligner-0.6B — the aligner, everywhere, with no fallback.
+#
+# PHASE4-AUDIO.md section 2, and DESIGN.md's table before it. BookForge hardcodes
+# `--backend qwen3` at `coverage-align-job.ts:418` for exactly this reason, and
+# here it is the manifest's engine with nothing to fall back to. WhisperX is not
+# a second backend for this job type and never will be: it survives in the app
+# only as a CPU env supplying faster-whisper for the rough-transcript stage, which
+# is Crucible's `asr` type doing a different thing with a different model.
+#
+# WHY THIS ONE. The bake-off (memory `qwen3-forced-aligner-bakeoff`, 2026-09-08,
+# WSL2 on the 3090 Ti): 229x realtime and 51 of 61 cues exact, against WhisperX's
+# 18x and 39. The 0.6B is pinned by name rather than by family — a larger sibling
+# would be a new measurement, not a free upgrade.
+
+[model]
+id = "qwen3-aligner"
+family = "qwen3-forced-aligner"
+# The card's own number. The repo's model.safetensors is 1,835,544,544 bytes of
+# bfloat16, which is about 918M parameters including the audio tower; the name
+# counts the text side.
+parameters_m = 600
+
+[backends.cuda-linux]
+engine = "qwen3-forced-aligner"
+hf_repo = "Qwen/Qwen3-ForcedAligner-0.6B"
+# `main` as the HuggingFace API served it on 2026-09-13.
+revision = "c7cbfc2048c462b0d63a45797104fc9db3ad62b7"
+
+# bfloat16 is what the model card runs and what the bake-off measured
+# (`python/narrator/align/aligner.py:620` picks float32 only on cpu, where
+# bfloat16 matmuls are emulated and slower). Crucible has no CPU backend, so this
+# is bfloat16 and there is no branch.
+dtype = "bfloat16"
+
+# COMPUTED, NOT MEASURED, and this line is what says so.
+#
+#   1,835,544,544  model.safetensors, exactly, from the HuggingFace API
+# + 1,610,612,736  a declared 1.5 GiB for the CUDA context, cuBLAS/cuDNN
+#                  workspaces, and the activations of one 300-second window —
+#                  the longest input this job type accepts (QWEN3_MAX_AUDIO_S)
+# ---------------
+#   3,446,157,280
+#
+# The same basis every `asr/*.toml` uses, and the same caveat: nobody has run
+# this aligner under Crucible on a card (the 3090 Ti was on an overnight
+# fine-tune when this was written), and the first real book is what replaces this
+# arithmetic with a measurement.
+memory_bytes_estimate = 3446157280

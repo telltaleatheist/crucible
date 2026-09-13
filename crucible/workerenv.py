@@ -26,13 +26,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from .errors import CrucibleError
 
@@ -42,12 +43,14 @@ RECIPES_DIR_ENV = "CRUCIBLE_WORKER_RECIPES_DIR"
 #: one library the env exists for, so a half-built or wrong-backend env is obvious
 #: at a glance rather than after a 3 GB model pull.
 HEADLINE_PACKAGE: dict[str, str] = {
+    "align": "qwen-asr",
     "asr": "faster-whisper",
+    "rvc": "ultimate-rvc",
 }
 
 #: Job types that have a worker env at all. `llm` is deliberately absent: it is
 #: `jobenv`'s, until the two modules are merged.
-WORKER_JOB_TYPES: tuple[str, ...] = ("asr",)
+WORKER_JOB_TYPES: tuple[str, ...] = ("align", "asr", "rvc")
 
 
 class WorkerEnvError(CrucibleError):
@@ -131,21 +134,68 @@ def recipe_for(job_type: str, backend_kind: str) -> Path:
     return path
 
 
-def recipe_pins(path: Path) -> dict[str, str]:
-    """The `name==version` pins in a recipe, by lower-cased name."""
-    pins: dict[str, str] = {}
+#: A PEP 508 direct reference at a full commit sha: `name @ git+<url>@<sha>`.
+#: The sha is required and a branch name is refused, for the reason every
+#: manifest's `revision` is a 40-character commit: a branch is a moving target
+#: and a pin is a statement about bytes.
+_DIRECT_REFERENCE = re.compile(
+    r"^(?P<name>[A-Za-z0-9._-]+)\s*@\s*(?P<url>git\+[^\s@]+@(?P<sha>[0-9a-f]{40}))$"
+)
+
+
+def _canonical(name: str) -> str:
+    return name.strip().lower().replace("_", "-")
+
+
+def _requirement_lines(path: Path) -> Iterator[str]:
     for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or stripped.startswith("-"):
             continue
+        yield stripped
+
+
+def recipe_pins(path: Path) -> dict[str, str]:
+    """The `name==version` pins in a recipe, by lower-cased name.
+
+    Direct references (`name @ git+url@sha`) are not pins in this sense and are
+    deliberately left out: `pip list` reports a git install's declared *version*,
+    not its commit, so checking one here would compare a sha against `0.5.11` and
+    call every correctly built env broken. They are checked separately, against
+    `pip freeze`, by `installed_direct_refs`.
+    """
+    pins: dict[str, str] = {}
+    for stripped in _requirement_lines(path):
+        if _DIRECT_REFERENCE.match(stripped):
+            continue
         name, separator, version = stripped.partition("==")
         if separator != "==":
             raise WorkerEnvError(
-                f"{path.name}: {stripped!r} is not a `name==version` pin; every "
-                "requirement in a recipe is pinned exactly"
+                f"{path.name}: {stripped!r} is neither a `name==version` pin nor a "
+                "`name @ git+<url>@<40-character sha>` direct reference; every "
+                "requirement in a recipe is pinned exactly, and a branch name is "
+                "not a pin"
             )
-        pins[name.strip().lower().replace("_", "-")] = version.strip()
+        pins[_canonical(name)] = version.strip()
     return pins
+
+
+def recipe_direct_refs(path: Path) -> dict[str, str]:
+    """The `name @ git+url@sha` requirements in a recipe, by lower-cased name.
+
+    `rvc` is the only user and it is not an indulgence: `generate convert-dir`,
+    the warm-model batch command this whole job type is built on, exists ONLY in
+    Owen's fork (`telltaleatheist/ultimate-rvc`, branch `bookforge`) and not in
+    the `ultimate-rvc` on PyPI. Both call themselves version 0.5.11, so the
+    version is not an identity here — the commit is, and that is what this pins
+    and what `installed_direct_refs` checks.
+    """
+    refs: dict[str, str] = {}
+    for stripped in _requirement_lines(path):
+        match = _DIRECT_REFERENCE.match(stripped)
+        if match is not None:
+            refs[_canonical(match.group("name"))] = match.group("url")
+    return refs
 
 
 # ------------------------------------------------------------------- status
@@ -175,9 +225,40 @@ def installed_packages(home: Path, job_type: str) -> dict[str, str]:
             f"{completed.returncode}: {completed.stderr.strip() or 'no output'}"
         )
     return {
-        entry["name"].lower().replace("_", "-"): entry["version"]
+        _canonical(entry["name"]): entry["version"]
         for entry in json.loads(completed.stdout)
     }
+
+
+def installed_direct_refs(home: Path, job_type: str) -> dict[str, str]:
+    """`pip freeze`'s direct references from the env, by lower-cased name.
+
+    A second subprocess, and only ever run for a job type whose recipe HAS a
+    direct reference, because `pip list` cannot answer this: for a git install it
+    reports the version the project declares and says nothing about the commit.
+    `pip freeze` writes the reference back out in the form the recipe used, which
+    is what makes the two comparable.
+    """
+    python = worker_env_python(home, job_type)
+    if not python.is_file():
+        return {}
+    completed = subprocess.run(
+        [str(python), "-m", "pip", "freeze", "--disable-pip-version-check"],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    if completed.returncode != 0:
+        raise WorkerEnvError(
+            f"`pip freeze` in {worker_env_dir(home, job_type)} exited "
+            f"{completed.returncode}: {completed.stderr.strip() or 'no output'}"
+        )
+    refs: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        match = _DIRECT_REFERENCE.match(line.strip())
+        if match is not None:
+            refs[_canonical(match.group("name"))] = match.group("url")
+    return refs
 
 
 def env_status(home: Path, job_type: str, backend_kind: str) -> EnvStatus:
@@ -221,12 +302,23 @@ def env_status(home: Path, job_type: str, backend_kind: str) -> EnvStatus:
         )
 
     present = installed_packages(home, job_type)
-    pins = recipe_pins(recipe_for(job_type, backend_kind))
+    recipe = recipe_for(job_type, backend_kind)
+    pins = recipe_pins(recipe)
     wrong = sorted(
         f"{name} is {present.get(name, 'absent')}, recipe pins {version}"
         for name, version in pins.items()
         if present.get(name) != version
     )
+    references = recipe_direct_refs(recipe)
+    if references:
+        # Only asked when the recipe has one, so no job type pays for a second
+        # `pip` subprocess to learn that it has no git installs.
+        built = installed_direct_refs(home, job_type)
+        wrong += sorted(
+            f"{name} is {built.get(name, 'absent')}, recipe pins {url}"
+            for name, url in references.items()
+            if built.get(name) != url
+        )
     if wrong:
         return EnvStatus(
             job_type=job_type,
@@ -239,12 +331,27 @@ def env_status(home: Path, job_type: str, backend_kind: str) -> EnvStatus:
             packages=present,
         )
     headline = HEADLINE_PACKAGE[job_type]
+    if headline in references:
+        # A git install. `pip list` reports the version the project DECLARES,
+        # which for `ultimate-rvc` is 0.5.11 for both Owen's fork and the PyPI
+        # release — so the version says nothing and the commit says everything.
+        # The doctor line names the commit for the same reason the recipe pins it.
+        headline_detail = f"{headline} @ {references[headline].rsplit('@', 1)[1][:12]}"
+    elif headline in present:
+        headline_detail = f"{headline} {present[headline]}"
+    else:
+        raise WorkerEnvError(
+            f"{directory} matches {backend_kind}.txt, but {headline!r} — the "
+            f"package the {job_type} env exists for — is not installed in it. "
+            "Either the recipe no longer installs it or HEADLINE_PACKAGE names "
+            "the wrong thing; both are bugs in this build, not in the env."
+        )
     return EnvStatus(
         job_type=job_type,
         installed=True,
         path=directory,
         detail=(
-            f"{headline} {present[headline]}, python {record['python_version']}, "
+            f"{headline_detail}, python {record['python_version']}, "
             f"{len(present)} packages"
         ),
         python_version=record["python_version"],

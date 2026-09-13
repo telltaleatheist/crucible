@@ -246,6 +246,26 @@ class JobContext:
             },
         )
 
+    def cue(self, data: dict[str, Any]) -> None:
+        """Emit a `cue {...}` event — one unit of the answer, as it lands.
+
+        PHASE4-AUDIO.md section 2. `align` sends one per chunk, so a run killed
+        at chunk 900 of 1,400 has cost the client the 500 it had not reached and
+        not the 900 it had. Distinct from `progress`, which says how far along
+        something is and carries no answer, and from `artifact`, which arrives
+        once at the end and is all-or-nothing.
+
+        It takes a dict rather than `**keys` because the payload is a *row of the
+        answer* and its shape is the job type's, not this method's — an align cue
+        is `{index, items}` or `{index, error}`, and a keyword signature here
+        would invite the next type to invent a fourth spelling of `index`.
+        """
+        if not isinstance(data, dict):
+            raise TypeError(f"a cue's data must be a dict, got {type(data).__name__}")
+        self._loop.call_soon_threadsafe(
+            self._store.append_event, self._job, "cue", dict(data)
+        )
+
     def done_extra(self, **keys: Any) -> None:
         """Add keys to this job's `done` event, e.g. `resident` on a load."""
         self._job.done_extra.update(keys)

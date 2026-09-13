@@ -499,6 +499,8 @@ def test_a_resident_voice_is_what_a_model_load_would_reclaim(
         enable_llm=True,
         enable_asr=False,
         enable_tts=True,
+        enable_align=False,
+        enable_rvc=False,
         desktop_allowance_bytes=3 * GIB,
     )
     holder = residency_module.Residency(load_config(home))

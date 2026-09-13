@@ -1,0 +1,59 @@
+# Deathstalker RVC v1 (3000 Degrees) — an RVC voice-conversion model.
+#
+# The Deathstalker narrator, trained on the 3000 Degrees source. A SAME-VOICE
+# cleanup model: it is pointed at that narrator's own audio, not at somebody
+# else's. Published 2026-09-12 (bookforge 40640326).
+#
+# Translated from `electron/data/rvc-voice-assets.json` in BookForge, which is
+# where the digest and the byte count below come from. Every RVC model Owen has
+# published lives as a `.tar.gz` under `rvc/` in ONE HuggingFace repo — there is
+# no per-model repo, which is why this schema has an `archive` key at all
+# (crucible/rvcmodels.py says so at length).
+#
+# The archive unpacks to `rvc/voice_models/deathstalker_rvc_v1/`, which is a whole
+# `URVC_MODELS_DIR` root. Verified against the published tarball, 2026-09-13.
+
+[model]
+id = "deathstalker-rvc-v1"
+display = "Deathstalker RVC v1 (3000 Degrees)"
+# The folder name inside the archive, and the argument urvc is given. Not
+# derivable from the id.
+model_name = "deathstalker_rvc_v1"
+# Every model published to this repo ships its `.index`, so `forceIndexRate0`
+# (which BookForge derives from a MISSING `.index`) fires for none of them. It is
+# still declared rather than assumed: `jobs/rvc` refuses a non-zero `index_rate`
+# against a model that says false, because feature retrieval with no index is not
+# a preference the engine quietly ignores.
+has_index = true
+
+[backends.cuda-linux]
+engine = "ultimate-rvc"
+hf_repo = "owenmorgan/owen-morgan-bookforge"
+# `main` as the HuggingFace API served it on 2026-09-13.
+revision = "dd3504ae68cc8f042a20d7ed8a84238615d398e3"
+archive = "rvc/deathstalker_rvc_v1.tar.gz"
+archive_sha256 = "c9d3fea887c4875da5c2848e929f7d891059bc2b40219e22a85e28a61ff1e777"
+archive_bytes = 184681783
+# COMPUTED, NOT MEASURED. 2.5 GiB: the contentvec embedder and the rmvpe pitch
+# predictor (about 540 MB of base weights between them) plus this model's own
+# generator, plus a declared 1.5 GiB for the CUDA context and one file's
+# activations. Nobody has run ultimate-rvc under Crucible on a card — the 3090 Ti
+# was on an overnight fine-tune when this was written — and the first real pass
+# is what replaces this arithmetic with a measurement.
+memory_bytes_estimate = 2684354560
+
+[backends.mlx-darwin]
+# The Mac is a real rvc backend, unlike `asr`: ultimate-rvc is torch, torch has
+# an MPS backend, and the 96-file recycle in `jobs/rvc` exists BECAUSE of what a
+# 64 GB Mac did without it (BookForge, 2026-07-17). Same weights, same archive —
+# an RVC checkpoint is not quantised per backend.
+engine = "ultimate-rvc"
+hf_repo = "owenmorgan/owen-morgan-bookforge"
+revision = "dd3504ae68cc8f042a20d7ed8a84238615d398e3"
+archive = "rvc/deathstalker_rvc_v1.tar.gz"
+archive_sha256 = "c9d3fea887c4875da5c2848e929f7d891059bc2b40219e22a85e28a61ff1e777"
+archive_bytes = 184681783
+# Unified memory rather than VRAM, and computed the same way. On a Mac the number
+# the guard compares against is the free unified memory, so this is if anything
+# more conservative than it needs to be.
+memory_bytes_estimate = 2684354560

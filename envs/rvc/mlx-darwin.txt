@@ -1,0 +1,70 @@
+# crucible `rvc` env — mlx-darwin (ultimate-rvc on Apple Silicon, through Metal).
+#
+# The Mac IS a real rvc backend, unlike `asr`. ultimate-rvc is torch, torch has
+# an MPS backend, and the app runs this on Owen's Mac today — the 96-file recycle
+# in `crucible/jobs/rvc/worker.py` exists BECAUSE of what a 64 GB Mac did without
+# it (2026-07-17). No device flag is needed anywhere: torch selects MPS on its
+# own, which is why nothing in the job type mentions one.
+#
+# The same commit pin as `cuda-linux.txt`, for the same reason: `generate
+# convert-dir` is in Owen's fork and not on PyPI, and both call themselves
+# 0.5.11.
+#
+# THIS FILE IS NOT A RESOLVED SET EITHER, AND IT IS THE THINNER OF THE TWO
+# ------------------------------------------------------------------------
+# `cuda-linux.txt`'s library versions were read off a working env. These were
+# read off the SAME working env, which is a Windows one, and then had the three
+# CUDA-only lines swapped for their platform-neutral equivalents:
+#
+#   torch==2.7.0+cu128    -> torch==2.7.0         (the macOS wheel is Metal)
+#   torchvision==...cu128 -> torchvision==0.22.0
+#   onnxruntime-gpu       -> onnxruntime          (there is no -gpu for Metal)
+#
+# Everything else is the same pure-python or universal-wheel set. That is a
+# reasoned substitution and not a measurement, `crucible doctor` will say so the
+# moment pip disagrees with any line, and the first real `crucible install rvc`
+# on the Mac is what replaces this notice with a freeze.
+#
+# ONE THING TO PRESERVE ON ANY REBUILD. BookForge's Mac env carries a patch that
+# makes ultimate_rvc free Metal buffers per file: it only freed GPU cache under
+# `if torch.cuda.is_available()`, a no-op on MPS, so buffers accumulated across a
+# long convert-dir batch until unified memory ballooned to ~50 GB and the machine
+# swapped (`packaging/env/patch-urvc-mps-memory.py`). That patch is NOT in this
+# recipe, because it is a source patch rather than a package, and it is not
+# needed for correctness here: the 96-file process recycle is the guaranteed
+# bound and the patch only softens the peak inside one batch. If a future fork
+# commit carries the fix, this comment is how somebody will know it mattered.
+#
+# The base assets — the contentvec embedder and the rmvpe predictor — are not
+# installed by this recipe. See `cuda-linux.txt` for why, and
+# `crucible/jobs/rvc/__init__.py` for the refusal that names them.
+
+ultimate-rvc @ git+https://github.com/telltaleatheist/ultimate-rvc@05cc3f1ba921f070e16eaf3e1f188073c31c0101
+
+# --- the torch trio, all at one version, all from PyPI ---
+torch==2.7.0
+torchvision==0.22.0
+torchaudio==2.7.0
+
+# --- what ultimate-rvc loads ---
+faiss-cpu==1.10.0
+librosa==0.10.2
+local-attention==1.11.1
+numpy==2.2.5
+onnxruntime==1.27.0
+pedalboard==0.9.16
+rotary-embedding-torch==0.6.5
+scikit-learn==1.9.0
+soundfile==0.13.1
+soxr==0.5.0.post1
+torchcrepe==0.0.23
+transformers==4.49.0
+
+# --- the env's own ffmpeg and sox ---
+# urvc's convert path prefers an ffmpeg on PATH over anything it vendors, and
+# `crucible/jobs/rvc/worker.py` puts this env's bin dir at the front of the
+# child's PATH for exactly that reason. These are ultimate-rvc's own declared
+# dependencies; they are pinned here so `crucible doctor` checks the two tools
+# that decision depends on rather than trusting them to be there.
+static-ffmpeg==3.0
+static-sox==1.0.2

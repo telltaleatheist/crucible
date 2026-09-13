@@ -1,0 +1,83 @@
+# crucible `rvc` env — cuda-linux (ultimate-rvc on an NVIDIA card, Linux or WSL2).
+#
+# Installed by `crucible install rvc` into ~/.crucible/envs/rvc/ as a venv built
+# from the server's own interpreter.
+#
+# THE ONE DIRECT REFERENCE IN THE REPO, AND WHY IT IS NOT AN INDULGENCE
+# ---------------------------------------------------------------------
+# `generate convert-dir` — the warm-model batch command this whole job type is
+# built on, the one that loads the model once and converts a directory — exists
+# ONLY in Owen's fork. The `ultimate-rvc` on PyPI has `generate convert`, one
+# file per process, which for a 1,400-sentence book is 1,400 model loads.
+#
+# Both call themselves version 0.5.11, which is exactly why this is pinned to a
+# COMMIT and not a branch: `pip list` would report `0.5.11` for either, so the
+# version is not an identity here. `crucible doctor` checks this line against
+# `pip freeze`, which writes a git install back out in this same form
+# (crucible/workerenv.py, `recipe_direct_refs`).
+#
+# The commit is the one installed in Owen's working `bookforge-urvc` env, read
+# from its `direct_url.json` on 2026-09-13.
+#
+# THIS FILE IS NOT YET A RESOLVED SET, AND THAT IS DELIBERATE
+# ----------------------------------------------------------
+# `envs/llm/cuda-linux.txt` lists every package pip resolved on Owen's PC,
+# recorded exactly, because it was written after a real install. This one was
+# not. It is the set that was CHOSEN: the fork, the torch trio, and the libraries
+# whose versions Owen's working env actually holds — read from
+# `bookforge-urvc` on 2026-09-13, which is a WINDOWS conda env, and Windows is
+# never a Crucible backend. So the *versions* are measured and the *resolve* is
+# not, and `crucible doctor` calls the env NOT READY if pip disagrees with any
+# line of it. When the first real install lands, regenerate from the truth and
+# delete this notice:
+#
+#     ~/.crucible/envs/rvc/bin/python -m pip freeze
+#
+# One deliberate departure from that env while doing so: it holds
+# `torchaudio==2.7.1+cpu` beside a CUDA torch, which is where a hand-built env
+# drifted to rather than a decision anybody made. This asks for the matching
+# CUDA build at the same version as torch, because a CPU torchaudio silently
+# moves resampling off the card.
+#
+# THE BASE ASSETS ARE NOT HERE
+# ----------------------------
+# ultimate-rvc also needs a contentvec embedder and an rmvpe pitch predictor
+# before it can convert anything. They are the engine's, not any model's, they
+# are about 540 MB, and they are NOT installed by this recipe: BookForge ships
+# them on a GitHub release (which DESIGN.md section 5 refuses as a weights
+# source) and urvc's own first-run downloader is precisely what `URVC_SKIP_INIT`
+# turns off. `crucible/jobs/rvc/__init__.py` refuses a job by name
+# (`rvc_base_models_missing`) when they are not under `~/.crucible/rvc-base/`,
+# and says which files it wanted.
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+ultimate-rvc @ git+https://github.com/telltaleatheist/ultimate-rvc@05cc3f1ba921f070e16eaf3e1f188073c31c0101
+
+# --- the torch trio, all cu128, all at one version ---
+torch==2.7.0+cu128
+torchvision==0.22.0+cu128
+torchaudio==2.7.0+cu128
+
+# --- what ultimate-rvc loads, at the versions Owen's working env holds ---
+faiss-cpu==1.10.0
+librosa==0.10.2
+local-attention==1.11.1
+numpy==2.2.5
+onnxruntime-gpu==1.27.0
+pedalboard==0.9.16
+rotary-embedding-torch==0.6.5
+scikit-learn==1.9.0
+soundfile==0.13.1
+soxr==0.5.0.post1
+torchcrepe==0.0.23
+transformers==4.49.0
+
+# --- the env's own ffmpeg and sox ---
+# urvc's convert path prefers an ffmpeg on PATH over anything it vendors, and
+# `crucible/jobs/rvc/worker.py` puts this env's bin dir at the front of the
+# child's PATH for exactly that reason. These are ultimate-rvc's own declared
+# dependencies; they are pinned here so `crucible doctor` checks the two tools
+# that decision depends on rather than trusting them to be there.
+static-ffmpeg==3.0
+static-sox==1.0.2

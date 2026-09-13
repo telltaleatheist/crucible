@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .alignmodels import AlignBackendSpec, AlignManifest
 from .config import Config
 from .engines import (
     EngineError,
@@ -39,11 +40,22 @@ from .engines import (
 )
 from .manifests import BackendSpec, ModelManifest, fingerprint
 from .voices import VoiceBackendSpec, VoiceManifest
+from .workers import WorkerError, WorkerSession
 
-#: The two kinds of thing that can hold the card, and what `/v1/health` reports
-#: as `resident_kind` so a client can tell which door to knock on.
+#: The kinds of thing that can hold the card, and what `/v1/health` reports as
+#: `resident_kind` so a client can tell which door to knock on.
+#:
+#: `align` is the third, and it is a different *shape* of resident thing rather
+#: than a third engine: an LLM and a voice are both HTTP-or-stdio servers behind
+#: `SubprocessEngine`, while the aligner is a `workers.WorkerSession` — the same
+#: JSON-lines worker every phase 4 type speaks to, held open instead of run once
+#: (PHASE4-AUDIO.md section 2). It gets its own resident dataclass and its own
+#: holder slot rather than being dressed up as an engine, because an aligner has
+#: no `base_url`, nothing to proxy to, and no readiness route; pretending
+#: otherwise would put three lies in a row on one row of `/v1/health`.
 KIND_LLM = "llm"
 KIND_TTS = "tts"
+KIND_ALIGN = "align"
 
 #: How long a load waits for the engine to prove it is up. vLLM on a 19 GB model
 #: spends most of it reading weights and capturing CUDA graphs; narrator on
@@ -147,29 +159,87 @@ class ResidentVoice:
         }
 
 
-Resident = ResidentModel | ResidentVoice
+@dataclass(frozen=True)
+class ResidentAligner:
+    """The forced aligner Crucible currently has loaded.
+
+    No `base_url` and no `engine`, for `ResidentVoice`'s reason and one more: the
+    aligner is not a server at all. It is `crucible/jobs/align/worker.py` held
+    open by a `workers.WorkerSession`, and what makes it *resident* is that the
+    1.7 GB checkpoint stays on the card between jobs — hundreds of chunks and one
+    load, which is the whole point (PHASE4-AUDIO.md section 2).
+
+    `device` and `dtype` are on the row because they are what the model was
+    actually loaded with, not what a manifest says it prefers: `bfloat16` is what
+    the bake-off measured, and a row that did not name it could not tell a reader
+    whether the timings they are looking at came from that arrangement.
+    """
+
+    kind = KIND_ALIGN
+
+    aligner_id: str
+    backend: str
+    revision: str
+    fingerprint: str
+    device: str
+    dtype: str
+    max_audio_s: float
+    memory_bytes_estimate: int
+    log_path: Path
+    loaded_at: str
+
+    @property
+    def id(self) -> str:
+        return self.aligner_id
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "aligner": self.aligner_id,
+            "backend": self.backend,
+            "revision": self.revision,
+            "fingerprint": self.fingerprint,
+            "device": self.device,
+            "dtype": self.dtype,
+            "max_audio_s": self.max_audio_s,
+            "memory_bytes_estimate": self.memory_bytes_estimate,
+            "log_path": str(self.log_path),
+            "loaded_at": self.loaded_at,
+        }
+
+
+Resident = ResidentModel | ResidentVoice | ResidentAligner
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+#: What to call each kind in a refusal. A mapping and not a two-way conditional,
+#: because there are three of them now and "the resident model is
+#: 'qwen3-aligner'" would be a sentence that sends its reader to `unload-model`.
+KIND_NOUNS: dict[str, str] = {
+    KIND_LLM: "model",
+    KIND_TTS: "voice",
+    KIND_ALIGN: "aligner",
+}
+
+
 def describe_resident(residency: "Residency", kind: str, absent: str) -> str:
     """What holds the card, as the tail of a `*_not_resident` refusal.
 
-    One wording for both doors. `absent` is what to say when nothing is resident,
+    One wording for every door. `absent` is what to say when nothing is resident,
     in the vocabulary of the door the reader came through — "no model is" for
-    `unload-model`, "no voice is" for `unload-voice` — and when something of the
-    OTHER kind is resident the message says so by name, because "no model is
-    resident" while narrator holds the whole card is true and useless.
+    `unload-model`, "no voice is" for `unload-voice`, "no aligner is" for
+    `unload-aligner` — and when something of ANOTHER kind is resident the message
+    says so by name, because "no model is resident" while narrator holds the
+    whole card is true and useless.
     """
     resident = residency.resident
     if resident is None:
         return absent
     if resident.kind == kind:
         return f"{resident.id!r} is"
-    other = "voice" if resident.kind == KIND_TTS else "model"
-    return f"the resident {other} is {resident.id!r}"
+    return f"the resident {KIND_NOUNS[resident.kind]} is {resident.id!r}"
 
 
 class Residency:
@@ -179,6 +249,12 @@ class Residency:
         self._config = config
         self._resident: Resident | None = None
         self._engine: SubprocessEngine | None = None
+        # The held thing when the resident is an aligner. A second slot rather
+        # than one `_held` of a union type, because the two are stopped
+        # differently and nothing good comes of a `hasattr` deciding which: an
+        # engine is stopped through `EngineError`, a session through
+        # `WorkerError`, and each caller catches the one its own door raises.
+        self._session: WorkerSession | None = None
         self._warming: str | None = None
 
     # -------------------------------------------------------------- reading
@@ -233,6 +309,22 @@ class Residency:
         return engine
 
     @property
+    def resident_aligner(self) -> ResidentAligner | None:
+        """The resident, if it is an aligner. None otherwise."""
+        return self._resident if isinstance(self._resident, ResidentAligner) else None
+
+    @property
+    def aligner_session(self) -> "WorkerSession | None":
+        """The held worker behind the resident aligner, or None.
+
+        This is what `align` sends each job's chunks down. It is exposed rather
+        than wrapped because the job type owns the *vocabulary* of an align
+        request and this module owns the *lifetime* of the process — and a
+        `Residency.align(...)` would be this module learning what a chunk is.
+        """
+        return None if self.resident_aligner is None else self._session
+
+    @property
     def warming(self) -> str | None:
         """The id a load job is currently warming, or None."""
         return self._warming
@@ -266,7 +358,20 @@ class Residency:
         self._warming = None
 
     def owned_pids(self) -> frozenset[int]:
-        return frozenset() if self._engine is None else self._engine.pids
+        """Every pid Crucible itself has on the card.
+
+        Both slots, unioned, so the accelerator guard never reports Crucible's own
+        resident aligner as somebody else's process holding the card. Only one of
+        them is ever non-empty — one card holds one thing — but reading only the
+        engine slot was the bug waiting to happen the moment a second shape of
+        resident thing existed.
+        """
+        pids: frozenset[int] = frozenset()
+        if self._engine is not None:
+            pids |= self._engine.pids
+        if self._session is not None:
+            pids |= self._session.pids
+        return pids
 
     def reclaimable_bytes(self, excluding: str | None = None) -> int:
         """What unloading the current resident would give back.
@@ -426,6 +531,88 @@ class Residency:
         say(f"{manifest.id} is resident")
         return self._resident
 
+    def load_aligner(
+        self,
+        manifest: AlignManifest,
+        spec: AlignBackendSpec,
+        weights_dir: Path,
+        python: Path,
+        script: Path,
+        *,
+        device: str,
+        dtype: str,
+        max_audio_s: float,
+        timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> ResidentAligner:
+        """Make this aligner the resident thing, unloading whatever was there.
+
+        The load is the session's FIRST exchange — a `{"op": "load"}` request the
+        worker answers with `ready` once the checkpoint is on the device. It is a
+        real exchange and not a bare spawn on purpose: a process that has started
+        has proved only that python runs, while a `ready` to a load has proved
+        that 1.7 GB of weights are where the next job expects them. That is the
+        same bar `engine.ready()` sets for vLLM, met the way this worker can meet
+        it.
+        """
+
+        def say(message: str) -> None:
+            if on_progress is not None:
+                on_progress(message)
+
+        self._evict(say, manifest.id)
+
+        log_path = engine_log_path(self._config.home, manifest.id)
+        session = WorkerSession(python=python, script=script, log_path=log_path)
+
+        self.begin_warming(manifest.id)
+        say(
+            f"loading {manifest.id} ({spec.engine}) on {device} at {dtype}; "
+            f"log {log_path}"
+        )
+        try:
+            outcome = session.start(
+                {
+                    "op": "load",
+                    "model_dir": str(weights_dir),
+                    "device": device,
+                    "dtype": dtype,
+                },
+                ready_silence_timeout=timeout,
+                on_ready=lambda message: say(
+                    f"{manifest.id} loaded in {message['seconds']:.1f}s on "
+                    f"{message['device']} at {message['dtype']}"
+                ),
+                on_progress=lambda message: say(str(message["message"])),
+            )
+        finally:
+            self.end_warming()
+        if outcome.results:
+            # `start` already stopped nothing — the worker is alive and holding
+            # the card — so this refuses loudly rather than letting a worker that
+            # answered a load with chunk results go on to answer a book.
+            session.stop()
+            raise WorkerError(
+                f"{script.name} answered a load request with "
+                f"{len(outcome.results)} result(s); a load produces none"
+            )
+
+        self._session = session
+        self._resident = ResidentAligner(
+            aligner_id=manifest.id,
+            backend=spec.backend,
+            revision=spec.revision,
+            fingerprint=fingerprint(manifest.id, spec.revision),
+            device=device,
+            dtype=dtype,
+            max_audio_s=max_audio_s,
+            memory_bytes_estimate=spec.memory_bytes_estimate,
+            log_path=log_path,
+            loaded_at=_now(),
+        )
+        say(f"{manifest.id} is resident")
+        return self._resident
+
     @staticmethod
     def _load_the_voice(
         engine: NarratorEngine,
@@ -518,16 +705,28 @@ class Residency:
         return args
 
     def unload(self, subject_id: str) -> Resident:
-        """Stop the engine serving `subject_id`. Raises KeyError if not resident."""
+        """Stop whatever is serving `subject_id`. Raises KeyError if not resident.
+
+        One door for all three kinds, because "one card holds one thing" is only
+        true if there is one place that takes it off. Which of the two holder
+        slots is occupied decides how — `engine.stop()` raises `EngineError`,
+        `session.stop()` raises `WorkerError` — and both are let out, because a
+        thing that would not stop is the one fact a caller must not be told a
+        soothing version of.
+        """
         resident = self._resident
         if resident is None or resident.id != subject_id:
             raise KeyError(subject_id)
-        engine = self._engine
-        # Unpublish first: from here on nothing new is proxied to a dying engine.
+        engine, session = self._engine, self._session
+        # Unpublish first: from here on nothing new is proxied to a dying engine,
+        # and no align job is handed a session that is being stopped.
         self._resident = None
         self._engine = None
+        self._session = None
         if engine is not None:
             engine.stop()
+        if session is not None:
+            session.stop()
         return resident
 
     def shutdown(self) -> None:

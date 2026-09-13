@@ -321,8 +321,20 @@ def test_doctor_runs_with_every_job_type_enabled(
     missing and the command that fixes it.
     """
     monkeypatch.setattr("crucible.cli.detect_backend", lambda: FAKE_BACKEND)
+    # EVERY type, which is what this test is named after and what it has to keep
+    # being: two more (`align`, `rvc`) landed after it was written, and a test
+    # that says "every" while naming four is a test that stops covering the
+    # thing it exists for the moment a fifth arrives.
     assert cli.main(
-        ["init", "--enable-echo", "--enable-llm", "--enable-tts", "--enable-asr"]
+        [
+            "init",
+            "--enable-echo",
+            "--enable-llm",
+            "--enable-tts",
+            "--enable-asr",
+            "--enable-align",
+            "--enable-rvc",
+        ]
     ) == 0
     capsys.readouterr()
 
@@ -333,9 +345,14 @@ def test_doctor_runs_with_every_job_type_enabled(
     assert report["llm_env"]["installed"] is False
     assert "crucible install llm" in report["llm_env"]["detail"]
     assert set(report["tts_envs"]) == {"higgs-v3", "orpheus"}
-    assert [row["job_type"] for row in report["worker_envs"]] == ["asr"]
+    assert [row["job_type"] for row in report["worker_envs"]] == [
+        "align", "asr", "rvc",
+    ]
 
     enabled = {e["name"] for e in report["job_types"] if e["enabled"]}
-    assert {"echo", "load-model", "load-voice", "tts", "asr"} <= enabled
+    assert {
+        "echo", "load-model", "load-voice", "tts", "asr", "align",
+        "unload-aligner", "rvc",
+    } <= enabled
     for problem in report["problems"]:
         assert problem, "a problem with no text is a problem nobody can act on"

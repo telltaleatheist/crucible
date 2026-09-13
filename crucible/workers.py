@@ -47,6 +47,22 @@ Two things, and neither of them is a change to the envelope:
   module, not a different one — `run_worker` below is the one-shot case of it,
   and the split to make is `start`/`send`/`stop` with `run_worker` as the three
   in a row.
+
+  That split is now here. `WorkerSession` is the worker that outlives a job
+  (`align`'s aligner, held by `crucible/residency.py`), `run_worker` is
+  `start`/`send`/`stop` in a row (`asr`'s and `rvc`'s one-shot workers), and both
+  go through the same `_Conversation` — one exchange is one request in, one
+  `ready`, N results, one `done`. The only difference between the two is what
+  happens to stdin afterwards: a one-shot worker gets it CLOSED, because a
+  process blocked on a read it will never satisfy is a hang with no error, and a
+  session's is left open because the next request goes down it.
+
+  `rvc` does NOT take a session, and that is deliberate rather than an omission.
+  Its 96-file recycle is a memory bound that wants the process to *die* so the OS
+  reclaims everything it leaked (proven on a 64 GB Mac, 2026-07-17); a worker
+  held open across jobs would be the one thing that bound exists to prevent. The
+  recycling happens one level down, inside `jobs/rvc/worker.py`, where each batch
+  is its own urvc process.
 """
 
 from __future__ import annotations
@@ -69,6 +85,14 @@ from .errors import CrucibleError, JobCancelled
 #: so. It never escalates to SIGKILL. Same number and same reason as
 #: `crucible/engines/base.py`.
 STOP_TIMEOUT_SECONDS = 180.0
+
+#: How long `WorkerSession.stop()` waits for a worker to notice its stdin closed
+#: and exit on its own, before it reaches for SIGTERM. An aligner between chunks
+#: is sitting in `readline` and goes immediately; one that is mid-chunk takes as
+#: long as that chunk has left, which for a 90 s narrator chunk is well under
+#: this. It is not a deadline on anything — missing it only means the polite door
+#: was not taken and the signal is sent instead.
+STOP_ON_EOF_SECONDS = 30.0
 
 #: How often the reading loop wakes to notice a cancel or a missed deadline. It
 #: is not a timeout on anything: a worker that is working silently for an hour is
@@ -194,6 +218,56 @@ def parse_message(line: str, script: Path) -> dict[str, Any]:
 # --------------------------------------------------------------------- running
 
 
+def _spawn(
+    python: Path,
+    script: Path,
+    log_handle: Any,
+    environment: dict[str, str] | None,
+) -> subprocess.Popen[str]:
+    """The one place a worker process is created. Refuses by name, never guesses."""
+    if not python.is_file():
+        raise WorkerError(
+            f"no interpreter at {python}; this job type's env is not installed"
+        )
+    if not script.is_file():
+        raise WorkerError(f"no worker script at {script}")
+
+    merged = dict(os.environ)
+    if environment is not None:
+        merged.update(environment)
+
+    try:
+        return subprocess.Popen(
+            [str(python), str(script)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=log_handle,
+            # Its own session, so a SIGTERM reaches anything the worker forked —
+            # ffmpeg in the `asr` case, a urvc batch in `rvc`'s — and not only
+            # the worker itself.
+            start_new_session=True,
+            env=merged,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as exc:
+        raise WorkerError(f"could not spawn {python} {script}: {exc}") from exc
+
+
+def _open_log(python: Path, script: Path, log_path: Path) -> Any:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = log_path.open("wb")
+    handle.write(
+        (
+            f"=== crucible worker {script.name}, "
+            f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"=== {python} {script}\n"
+        ).encode("utf-8")
+    )
+    handle.flush()
+    return handle
+
+
 def run_worker(
     *,
     python: Path,
@@ -207,6 +281,10 @@ def run_worker(
     environment: dict[str, str] | None = None,
 ) -> WorkerOutcome:
     """Run one worker to completion and return what it said.
+
+    `start`/`send`/`stop` in a row, which is what a one-shot worker is: spawn it,
+    hand it its one request, read until `done`, and let end-of-stream and the
+    exit code have the last word.
 
     `ready_silence_timeout` bounds the wait for the `ready` line, and it is a
     **silence** timeout rather than a deadline: any message resets it, so a
@@ -223,6 +301,7 @@ def run_worker(
     """
     script = Path(script)
     python = Path(python)
+    log_path = Path(log_path)
     if not python.is_file():
         raise WorkerError(
             f"no interpreter at {python}; this job type's env is not installed"
@@ -230,190 +309,410 @@ def run_worker(
     if not script.is_file():
         raise WorkerError(f"no worker script at {script}")
 
-    log_path = Path(log_path)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_handle = log_path.open("wb")
-    log_handle.write(
-        (
-            f"=== crucible worker {script.name}, "
-            f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"=== {python} {script}\n"
-        ).encode("utf-8")
-    )
-    log_handle.flush()
-
-    merged = dict(os.environ)
-    if environment is not None:
-        merged.update(environment)
-
+    log_handle = _open_log(python, script, log_path)
     try:
-        process = subprocess.Popen(
-            [str(python), str(script)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=log_handle,
-            # Its own session, so a SIGTERM reaches anything the worker forked —
-            # ffmpeg, in the `asr` case — and not only the worker itself.
-            start_new_session=True,
-            env=merged,
-            text=True,
-            bufsize=1,
-        )
-    except OSError as exc:
+        process = _spawn(python, script, log_handle, environment)
+    except WorkerError:
         log_handle.close()
-        raise WorkerError(f"could not spawn {python} {script}: {exc}") from exc
+        raise
 
+    conversation = _Conversation(process, script, log_path)
     try:
-        return _converse(
-            process=process,
-            script=script,
-            request=request,
-            log_path=log_path,
+        return conversation.exchange(
+            request,
             ready_silence_timeout=ready_silence_timeout,
             on_ready=on_ready,
             on_progress=on_progress,
             cancelled=cancelled,
+            keep_open=False,
         )
     finally:
         log_handle.close()
 
 
-def _converse(
-    *,
-    process: subprocess.Popen[str],
-    script: Path,
-    request: dict[str, Any],
-    log_path: Path,
-    ready_silence_timeout: float,
-    on_ready: Callable[[dict[str, Any]], None] | None,
-    on_progress: Callable[[dict[str, Any]], None] | None,
-    cancelled: Callable[[], bool] | None,
-) -> WorkerOutcome:
-    assert process.stdin is not None and process.stdout is not None
-    try:
-        process.stdin.write(json.dumps(request) + "\n")
-        process.stdin.flush()
-        # The request is the whole conversation for a one-shot worker, so stdin
-        # is closed: a worker blocked on a read it will never satisfy is a hang
-        # with no error, and closing turns it into an EOF the worker can act on.
-        process.stdin.close()
-    except OSError as exc:
-        # Much the commonest reason a request cannot be delivered is that the
-        # worker is already dead: a broken env dies at import time, before it
-        # reads a byte, and the write then fails with EPIPE. Report the death and
-        # its log, which is the thing that explains this, rather than the pipe
-        # error it caused.
-        code = process.poll()
-        if code is None:
-            try:
-                code = process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                code = None
-        if code is not None:
+class _Conversation:
+    """One worker process, and the exchanges run over its two pipes.
+
+    An **exchange** is one request written to stdin and everything the worker
+    says in reply, up to and including `done`. A one-shot worker has exactly one
+    (`keep_open=False`, which closes stdin and then makes the exit code the last
+    word); a `WorkerSession` has one per request and the process outlives all of
+    them.
+    """
+
+    def __init__(
+        self, process: subprocess.Popen[str], script: Path, log_path: Path
+    ) -> None:
+        assert process.stdin is not None and process.stdout is not None
+        self.process = process
+        self.script = script
+        self.log_path = log_path
+        # One reader for the life of the process. A second one per exchange
+        # would race the first for the same pipe and lose lines to whichever
+        # thread got there first.
+        self.reader = _Reader(process.stdout)
+
+    # ------------------------------------------------------------- sending
+
+    def _write(self, request: dict[str, Any], keep_open: bool) -> None:
+        process, script, log_path = self.process, self.script, self.log_path
+        assert process.stdin is not None
+        try:
+            process.stdin.write(json.dumps(request) + "\n")
+            process.stdin.flush()
+            if not keep_open:
+                # The request is the whole conversation for a one-shot worker, so
+                # stdin is closed: a worker blocked on a read it will never
+                # satisfy is a hang with no error, and closing turns it into an
+                # EOF the worker can act on.
+                process.stdin.close()
+        except OSError as exc:
+            # Much the commonest reason a request cannot be delivered is that the
+            # worker is already dead: a broken env dies at import time, before it
+            # reads a byte, and the write then fails with EPIPE. Report the death
+            # and its log, which is the thing that explains this, rather than the
+            # pipe error it caused.
+            code = process.poll()
+            if code is None:
+                try:
+                    code = process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    code = None
+            if code is not None:
+                raise WorkerError(
+                    f"{script.name} exited {code} before it read its request. "
+                    f"{_log_tail(log_path)}"
+                ) from None
+            _terminate(process, script, log_path)
             raise WorkerError(
-                f"{script.name} exited {code} before it read its request. "
+                f"could not send the request to {script.name}: {exc}. "
                 f"{_log_tail(log_path)}"
             ) from None
-        _terminate(process, script, log_path)
-        raise WorkerError(
-            f"could not send the request to {script.name}: {exc}. "
-            f"{_log_tail(log_path)}"
-        ) from None
 
-    reader = _Reader(process.stdout)
-    ready: dict[str, Any] | None = None
-    results: list[dict[str, Any]] = []
-    done = False
-    deadline = time.monotonic() + ready_silence_timeout
+    # ------------------------------------------------------------ exchange
 
-    while True:
-        if cancelled is not None and cancelled():
-            _terminate(process, script, log_path)
-            raise JobCancelled(f"{script.name} was cancelled")
+    def exchange(
+        self,
+        request: dict[str, Any],
+        *,
+        ready_silence_timeout: float,
+        on_ready: Callable[[dict[str, Any]], None] | None,
+        on_progress: Callable[[dict[str, Any]], None] | None,
+        cancelled: Callable[[], bool] | None,
+        keep_open: bool,
+    ) -> WorkerOutcome:
+        self._write(request, keep_open)
 
+        process, script, log_path = self.process, self.script, self.log_path
+        ready: dict[str, Any] | None = None
+        results: list[dict[str, Any]] = []
+        done = False
         ended = False
-        for line in reader.lines(POLL_SECONDS):
-            if line is None:
-                ended = True
-                break
-            try:
-                message = parse_message(line, script)
-            except WorkerError:
-                # A worker that has broken the protocol is a worker whose later
-                # lines cannot be trusted either, and it may be holding the card.
-                # Stop it before reporting.
+        deadline = time.monotonic() + ready_silence_timeout
+
+        while not (done and keep_open):
+            if cancelled is not None and cancelled():
                 _terminate(process, script, log_path)
-                raise
-            kind = message["type"]
-            # Any message is proof of life, so the silence clock starts again.
-            deadline = time.monotonic() + ready_silence_timeout
+                raise JobCancelled(f"{script.name} was cancelled")
 
-            if kind == READY:
-                if ready is not None:
+            for line in self.reader.lines(POLL_SECONDS):
+                if line is None:
+                    ended = True
+                    break
+                try:
+                    message = parse_message(line, script)
+                except WorkerError:
+                    # A worker that has broken the protocol is a worker whose
+                    # later lines cannot be trusted either, and it may be holding
+                    # the card. Stop it before reporting.
                     _terminate(process, script, log_path)
-                    raise WorkerError(f"{script.name} sent two ready messages")
-                ready = message
-                if on_ready is not None:
-                    on_ready(message)
-                continue
+                    raise
+                kind = message["type"]
+                # Any message is proof of life, so the silence clock starts again.
+                deadline = time.monotonic() + ready_silence_timeout
 
-            if kind == PROGRESS:
-                if on_progress is not None:
-                    on_progress(message)
-                continue
+                if kind == READY:
+                    if ready is not None:
+                        _terminate(process, script, log_path)
+                        raise WorkerError(f"{script.name} sent two ready messages")
+                    ready = message
+                    if on_ready is not None:
+                        on_ready(message)
+                    continue
 
-            if kind == RESULT:
-                if ready is None:
+                if kind == PROGRESS:
+                    if on_progress is not None:
+                        on_progress(message)
+                    continue
+
+                if kind == RESULT:
+                    if ready is None:
+                        _terminate(process, script, log_path)
+                        raise WorkerError(
+                            f"{script.name} sent a result before it said it was "
+                            "ready; the ready message is what tells the server how "
+                            "many results to expect"
+                        )
+                    results.append(message)
+                    continue
+
+                if kind == FAILED:
                     _terminate(process, script, log_path)
                     raise WorkerError(
-                        f"{script.name} sent a result before it said it was ready; "
-                        "the ready message is what tells the server how many "
-                        "results to expect"
+                        f"{script.name} failed: "
+                        f"{message.get('message', '(no message)')}. "
+                        f"{_log_tail(log_path)}"
                     )
-                results.append(message)
-                continue
 
-            if kind == FAILED:
+                # DONE ends this exchange. A one-shot worker keeps being drained
+                # until end-of-stream so the exit code is the last word; a
+                # session's worker is now waiting for its next request, and the
+                # `while` condition above stops here.
+                if done:
+                    _terminate(process, script, log_path)
+                    raise WorkerError(f"{script.name} sent two done messages")
+                done = True
+
+            if ended:
+                break
+            if ready is None and time.monotonic() >= deadline:
                 _terminate(process, script, log_path)
                 raise WorkerError(
-                    f"{script.name} failed: {message.get('message', '(no message)')}. "
+                    f"{script.name} said nothing at all for "
+                    f"{ready_silence_timeout:.0f}s and has still not become ready. "
                     f"{_log_tail(log_path)}"
                 )
 
-            # DONE: the worker has said everything it is going to say. Keep
-            # draining until end-of-stream so the exit code is the last word.
-            if done:
-                _terminate(process, script, log_path)
-                raise WorkerError(f"{script.name} sent two done messages")
-            done = True
-
-        if ended:
-            break
-        if ready is None and time.monotonic() >= deadline:
-            _terminate(process, script, log_path)
+        if not keep_open:
+            code = process.wait()
+            if code != 0:
+                raise WorkerError(f"{script.name} exited {code}. {_log_tail(log_path)}")
+        elif ended:
+            # A session's worker reached end-of-stream without finishing this
+            # exchange: it died mid-request. Its exit code and its log are the
+            # only account of why, and they go in the error rather than a pointer
+            # to a file the client may not be able to read (section 6).
+            code = process.wait()
             raise WorkerError(
-                f"{script.name} said nothing at all for {ready_silence_timeout:.0f}s "
-                "and has still not become ready. "
+                f"{script.name} exited {code} in the middle of a request, after "
+                f"{len(results)} result(s). {_log_tail(log_path)}"
+            )
+        if ready is None:
+            raise WorkerError(
+                f"{script.name} exited 0 without ever saying it was ready. "
                 f"{_log_tail(log_path)}"
             )
+        if not done:
+            raise WorkerError(
+                f"{script.name} exited 0 without saying done, after "
+                f"{len(results)} result(s). An answer that stopped early is not a "
+                f"short answer, it is an unfinished one. {_log_tail(log_path)}"
+            )
+        return WorkerOutcome(ready=ready, results=tuple(results))
 
-    code = process.wait()
-    if code != 0:
-        raise WorkerError(
-            f"{script.name} exited {code}. {_log_tail(log_path)}"
+
+# --------------------------------------------------------------- a session
+
+
+class WorkerSession:
+    """A worker held open across more than one request.
+
+    `align`'s reason for existing, and the module docstring's second bullet: the
+    Qwen3 aligner is 1.7 GB of weights and a book is hundreds of chunks, so a
+    worker that loaded and exited per job would spend most of a book loading. The
+    process is started once, fed a request per job on the same stdin, and stopped
+    by whatever unloads models — which is `crucible/residency.py`, the same holder
+    that stops an engine, because a card holds one thing whatever kind it is.
+
+    It is deliberately NOT a pool and not reference-counted. One session, held by
+    the residency, stopped by an explicit unload or by something else taking the
+    card: the same lifecycle an engine has, so there is one story about what is on
+    the accelerator rather than two.
+    """
+
+    def __init__(
+        self,
+        *,
+        python: Path,
+        script: Path,
+        log_path: Path,
+        environment: dict[str, str] | None = None,
+    ) -> None:
+        self._python = Path(python)
+        self._script = Path(script)
+        self._log_path = Path(log_path)
+        self._environment = environment
+        self._log_handle: Any | None = None
+        self._conversation: _Conversation | None = None
+
+    # -------------------------------------------------------------- reading
+
+    @property
+    def log_path(self) -> Path:
+        return self._log_path
+
+    @property
+    def pids(self) -> frozenset[int]:
+        """Every pid this session owns, for the accelerator guard.
+
+        The worker's own pid and nothing else: it is spawned into its own process
+        group and anything it forks is short-lived, so a pid tree walked here
+        would be stale by the time the guard read it. Same shape and same purpose
+        as `SubprocessEngine.pids`.
+        """
+        conversation = self._conversation
+        if conversation is None or conversation.process.poll() is not None:
+            return frozenset()
+        return frozenset({conversation.process.pid})
+
+    @property
+    def alive(self) -> bool:
+        conversation = self._conversation
+        return conversation is not None and conversation.process.poll() is None
+
+    # -------------------------------------------------------------- writing
+
+    def start(
+        self,
+        request: dict[str, Any],
+        *,
+        ready_silence_timeout: float,
+        on_ready: Callable[[dict[str, Any]], None] | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> WorkerOutcome:
+        """Spawn the worker and run the first exchange — usually its load.
+
+        No `cancelled` hook: a load is what the exclusive lane is waiting on and
+        what `/v1/health` reports as `warming`, and a half-loaded model that was
+        interrupted is a process holding VRAM that nothing is tracking. A load
+        that will not finish ends through the silence timeout, by name.
+        """
+        if self._conversation is not None:
+            raise WorkerError(
+                f"{self._script.name} is already started; a session is one worker, "
+                "started once and stopped once"
+            )
+        if not self._python.is_file():
+            raise WorkerError(
+                f"no interpreter at {self._python}; this job type's env is not "
+                "installed"
+            )
+        if not self._script.is_file():
+            raise WorkerError(f"no worker script at {self._script}")
+
+        self._log_handle = _open_log(self._python, self._script, self._log_path)
+        try:
+            process = _spawn(
+                self._python, self._script, self._log_handle, self._environment
+            )
+        except WorkerError:
+            self._log_handle.close()
+            self._log_handle = None
+            raise
+        self._conversation = _Conversation(process, self._script, self._log_path)
+        try:
+            return self._exchange(
+                request,
+                ready_silence_timeout=ready_silence_timeout,
+                on_ready=on_ready,
+                on_progress=on_progress,
+                cancelled=None,
+            )
+        except BaseException:
+            # A worker that could not load holds nothing worth keeping and may
+            # hold VRAM. Tidy it up, but report the START failure: a stop failure
+            # on top of it is appended by `stop`, never substituted for it.
+            self._discard()
+            raise
+
+    def send(
+        self,
+        request: dict[str, Any],
+        *,
+        ready_silence_timeout: float,
+        on_ready: Callable[[dict[str, Any]], None] | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> WorkerOutcome:
+        """One more request down the same stdin. Raises if the worker is gone."""
+        if self._conversation is None:
+            raise WorkerError(
+                f"{self._script.name} has not been started; a session takes a "
+                "request only after `start`"
+            )
+        if not self.alive:
+            code = self._conversation.process.poll()
+            raise WorkerError(
+                f"{self._script.name} is no longer running (it exited {code}); "
+                f"the resident worker must be reloaded. {_log_tail(self._log_path)}"
+            )
+        try:
+            return self._exchange(
+                request,
+                ready_silence_timeout=ready_silence_timeout,
+                on_ready=on_ready,
+                on_progress=on_progress,
+                cancelled=cancelled,
+            )
+        except JobCancelled:
+            # `_terminate` has already stopped the worker — a cancel mid-exchange
+            # cannot leave a process whose stdin is half a request behind. The
+            # session is dead and says so on the next `send` rather than handing
+            # the next job a stream it can no longer parse.
+            self._discard()
+            raise
+
+    def _exchange(
+        self,
+        request: dict[str, Any],
+        *,
+        ready_silence_timeout: float,
+        on_ready: Callable[[dict[str, Any]], None] | None,
+        on_progress: Callable[[dict[str, Any]], None] | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> WorkerOutcome:
+        assert self._conversation is not None
+        return self._conversation.exchange(
+            request,
+            ready_silence_timeout=ready_silence_timeout,
+            on_ready=on_ready,
+            on_progress=on_progress,
+            cancelled=cancelled,
+            keep_open=True,
         )
-    if ready is None:
-        raise WorkerError(
-            f"{script.name} exited 0 without ever saying it was ready. "
-            f"{_log_tail(log_path)}"
-        )
-    if not done:
-        raise WorkerError(
-            f"{script.name} exited 0 without saying done, after "
-            f"{len(results)} result(s). An answer that stopped early is not a "
-            f"short answer, it is an unfinished one. {_log_tail(log_path)}"
-        )
-    return WorkerOutcome(ready=ready, results=tuple(results))
+
+    def stop(self) -> None:
+        """Close stdin, wait briefly, then SIGTERM. Never SIGKILL.
+
+        Closing stdin first is the polite door: the worker's read loop sees EOF
+        and exits 0 on its own, releasing CUDA the way its own code expects to.
+        SIGTERM is the backstop, and there is no third step — killing a process
+        that may be holding CUDA wedges WSL2 until Windows reboots.
+        """
+        conversation = self._conversation
+        if conversation is None:
+            return
+        process = conversation.process
+        if process.poll() is None and process.stdin is not None:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=STOP_ON_EOF_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+        try:
+            _terminate(process, self._script, self._log_path)
+        finally:
+            self._discard()
+
+    def _discard(self) -> None:
+        """Forget the process and close the log. Never signals anything."""
+        self._conversation = None
+        if self._log_handle is not None:
+            self._log_handle.close()
+            self._log_handle = None
 
 
 def _terminate(process: subprocess.Popen[str], script: Path, log_path: Path) -> None:
