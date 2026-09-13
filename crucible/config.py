@@ -77,6 +77,11 @@ class Config:
     enable_align: bool
     enable_rvc: bool
     desktop_allowance_bytes: int
+    #: Capability flags this config did not carry, so they were read as off.
+    #: Empty for a config written by this build. `crucible doctor` prints it, so
+    #: "the type is not enabled" and "the config predates the type" are told
+    #: apart by a reader rather than guessed at.
+    flags_absent: tuple[str, ...] = ()
 
     @property
     def jobs_dir(self) -> Path:
@@ -113,6 +118,46 @@ def _require(table: dict[str, Any], section: str, key: str, kind: type) -> Any:
     return value
 
 
+def _capability_flag(table: dict[str, Any], key: str) -> bool:
+    """`[jobs] enable_<type>`, where ABSENT means off and that is not a fallback.
+
+    Every other key in this file is required, and stays required: a config that
+    forgets its token or its backend is broken, and guessing one would hide the
+    break. A capability flag is a different animal. `enable_rvc` was not missing
+    from a config written in phase 2 — `rvc` did not exist. Demanding it means
+    that adding a job type INVALIDATES EVERY CONFIG IN EXISTENCE, and the only
+    repair on offer, `crucible init --force`, mints a new token and breaks every
+    client that had one.
+
+    Found on Owen's Mac on 2026-09-13: its server had been running since before
+    `asr`, `tts`, `align` and `rvc` were built, and after an upgrade the CLI
+    could not read its own config to print its own token.
+
+    So: absent means off. It fails SAFELY (a capability cannot switch itself on)
+    and it fails VISIBLY — `crucible doctor` lists which flags were absent, and
+    `/v1/info`'s `job_types` shows the type is not there. A wrong type or an
+    unknown key in `[jobs]` is still a refusal; it is only absence that is
+    allowed to mean "written before this existed".
+    """
+    section = table.get("jobs")
+    if section is None:
+        raise ConfigError("config is missing the [jobs] section")
+    if key not in section:
+        return False
+    return _require(table, "jobs", key, bool)
+
+
+#: Every capability flag, in the order `crucible init` writes them.
+CAPABILITY_FLAGS: tuple[str, ...] = (
+    "enable_echo",
+    "enable_llm",
+    "enable_asr",
+    "enable_tts",
+    "enable_align",
+    "enable_rvc",
+)
+
+
 def load_config(home: Path | None = None) -> Config:
     """Read config.toml. Raises ConfigError naming the missing piece."""
     root = home if home is not None else crucible_home()
@@ -135,12 +180,15 @@ def load_config(home: Path | None = None) -> Config:
         port=_require(table, "server", "port", int),
         token=_require(table, "auth", "token", str),
         backend_kind=_require(table, "backend", "kind", str),
-        enable_echo=_require(table, "jobs", "enable_echo", bool),
-        enable_llm=_require(table, "jobs", "enable_llm", bool),
-        enable_asr=_require(table, "jobs", "enable_asr", bool),
-        enable_tts=_require(table, "jobs", "enable_tts", bool),
-        enable_align=_require(table, "jobs", "enable_align", bool),
-        enable_rvc=_require(table, "jobs", "enable_rvc", bool),
+        enable_echo=_capability_flag(table, "enable_echo"),
+        enable_llm=_capability_flag(table, "enable_llm"),
+        enable_asr=_capability_flag(table, "enable_asr"),
+        enable_tts=_capability_flag(table, "enable_tts"),
+        enable_align=_capability_flag(table, "enable_align"),
+        enable_rvc=_capability_flag(table, "enable_rvc"),
+        flags_absent=tuple(
+            flag for flag in CAPABILITY_FLAGS if flag not in table.get("jobs", {})
+        ),
         desktop_allowance_bytes=_require(
             table, "accelerator", "desktop_allowance_bytes", int
         ),

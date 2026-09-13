@@ -714,6 +714,11 @@ def _doctor_report() -> dict[str, Any]:
             "enable_rvc": config.enable_rvc,
             "desktop_allowance_bytes": config.desktop_allowance_bytes,
             "backend_kind": config.backend_kind,
+            # Which capability flags this config did not carry. A config written
+            # before a job type existed reads that type as off, which is the only
+            # answer that does not invalidate every server on an upgrade — and
+            # this is how it says so out loud instead of looking like a choice.
+            "flags_absent": list(config.flags_absent),
         }
         if mode != "0o600":
             report["problems"].append(
@@ -816,6 +821,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         else:
             print(f"config:  {config['path']} (mode {config['mode']})")
             print(f"serves:  {config['name']} on {config['host']}:{config['port']}")
+            if config["flags_absent"]:
+                absent = ", ".join(config["flags_absent"])
+                print(
+                    f"note:    this config predates {absent}; those job types are "
+                    "off. Add the keys to [jobs] to turn them on — do NOT run "
+                    "`crucible init --force`, which mints a new token"
+                )
         env = report["llm_env"]
         if env is not None:
             mark = "ready" if env["installed"] else "NOT READY"
