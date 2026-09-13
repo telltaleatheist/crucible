@@ -554,3 +554,35 @@ def test_one_holder_serves_both_job_types(
         holder = client.app.state.residency
         for name in ("load-model", "unload-model", "load-voice", "unload-voice"):
             assert store.registry[name].residency is holder
+
+
+def test_a_render_with_no_ffmpeg_is_refused_before_it_is_queued(
+    tts_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refused by the same name and through the same probe `asr` uses.
+
+    It lives here rather than beside the rest of the render tests because those
+    all encode a real FLAC and are skipped on a machine with no ffmpeg — and a
+    machine with no ffmpeg is exactly where this refusal has to be right.
+    """
+    from crucible.jobs import asr as asr_jobs
+
+    fake_weights("deathstalker")
+    monkeypatch.setattr(asr_jobs, "ffmpeg_path", lambda: None)
+    response = submit(
+        tts_client,
+        auth,
+        type="tts",
+        model="deathstalker",
+        params={
+            "language": "en",
+            "take": 0,
+            "chunks": [{"index": 41, "text": "He had been walking for some time."}],
+        },
+    )
+    assert response.status_code == 409, response.json()
+    assert response.json()["error"]["code"] == "ffmpeg_missing"
+    assert "libsndfile" in response.json()["error"]["message"]

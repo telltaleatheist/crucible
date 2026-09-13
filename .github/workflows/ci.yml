@@ -46,11 +46,31 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
 
+      # `tts` encodes every chunk through ffmpeg rather than growing a compiled
+      # audio dependency in the server's own interpreter, so the render tests
+      # shell out to a real one and assert the bytes on disk really are a 24 kHz
+      # mono FLAC. They skip themselves when ffmpeg is absent — a fresh clone on
+      # a bare box should report a missing tool, not a broken server — and this
+      # step is what stops that skip from ever firing in CI, where "not run"
+      # would be indistinguishable from "passed".
+      # Linux only, and that is deliberate. `brew install ffmpeg` pulls a long
+      # dependency chain and would cost the macOS jobs minutes each; the render
+      # tests' assertions (a real FLAC at 24 kHz mono) are not platform-specific,
+      # so proving them once per Python version on Linux is proving them. What
+      # the macOS jobs are for is the rest of the suite — a path or a signal
+      # assumption that only holds on Linux — and they report the skip rather
+      # than hiding it, because `-rs` below prints skip reasons.
+      - name: ffmpeg
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg && ffmpeg -version | head -1
+
       - name: install
         run: python -m pip install --upgrade pip && python -m pip install -e ".[test]"
 
       - name: pytest
-        run: python -m pytest -q
+        # `-rs` prints skip reasons, so a module that skipped itself is visible
+        # in the log instead of hiding inside a green tick.
+        run: python -m pytest -q -rs
 
   sdk:
     name: sdk

@@ -37,6 +37,28 @@ from .test_tts_api import run_job, submit
 
 VOICE = "deathstalker"
 
+#: Most of this module encodes real PCM into a real FLAC through a real ffmpeg,
+#: which is a deliberately strong assertion — it is the difference between "the
+#: server said it wrote a FLAC" and "the bytes on disk are a 24 kHz mono FLAC".
+#: It also makes those tests the only ones in the suite that need something the
+#: machine did not bring with it, and a fresh clone on a box without ffmpeg
+#: would otherwise report a broken server rather than a missing tool. CI installs
+#: ffmpeg precisely so this skip never fires there (.github/workflows/ci.yml);
+#: everywhere else it degrades to an honest "not run" instead of a false red.
+#:
+#: The refusal path — `ffmpeg_missing` when the probe finds nothing — is NOT
+#: skipped: it monkeypatches the probe and is the test that matters most on a
+#: machine without ffmpeg.
+#: Module-level, not per test: `ffmpeg_missing` is a PREFLIGHT refusal, so on a
+#: machine without ffmpeg EVERY submit here is a 409 before any rendering
+#: happens, and marking tests one at a time would miss one. The refusal itself is
+#: tested in `test_tts_api.py`, which needs no ffmpeg and therefore always runs —
+#: which is the test that matters most on a machine that has none.
+pytestmark = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None,
+    reason="these tests encode real FLACs; install ffmpeg to run them",
+)
+
 #: The fake worker's default: 15.0 characters of text per second of audio, which
 #: is Higgs's configured pace. Every duration assertion below is arithmetic on
 #: this number rather than a tolerance, because the fake makes it exact.
@@ -236,27 +258,6 @@ def test_a_failed_chunk_is_reported_and_its_neighbours_still_land(
     )
     # No `chunk` measurement for a row that produced no audio.
     assert sorted(row["index"] for row in events_of(events, "chunk")) == [41, 43]
-
-
-def test_a_render_with_no_ffmpeg_is_refused_before_it_is_queued(
-    tts_client: TestClient,  # noqa: F811
-    auth: dict[str, str],
-    fake_weights: Callable[[str], Path],  # noqa: F811
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Refused by the same name and through the same probe `asr` uses."""
-    fake_weights(VOICE)
-    monkeypatch.setattr(asr_jobs, "ffmpeg_path", lambda: None)
-    response = submit(
-        tts_client,
-        auth,
-        type="tts",
-        model=VOICE,
-        params={"language": "en", "take": 0, "chunks": CHUNKS},
-    )
-    assert response.status_code == 409, response.json()
-    assert response.json()["error"]["code"] == "ffmpeg_missing"
-    assert "libsndfile" in response.json()["error"]["message"]
 
 
 # ---------------------------------------------------------------- refusals
