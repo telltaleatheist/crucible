@@ -37,6 +37,14 @@ and carries the 98304-token context of Owen's Ollama tag `qwen3.8:27b-24g`, so
 `context_default` is a per-model number and not a constant. Nothing else about a model's
 *use* belongs here: sampling is the client's, sent per request.
 
+A backend block may also carry a `context_default` of its own, and then that is the
+context that backend serves — `--max-model-len`, the `/v1/models` row, the resident
+model. `[model] context_default` is what the model is FOR; the backend's is what that
+accelerator has room for. `qwen3.8-27b-4bit` is the case that made this necessary:
+98304 on 64 GB of unified memory, 16384 on a 24 GB card, both measured. It is optional and
+never a silent default — absent means the model's number, and everything that needs a
+context asks `ModelManifest.context_for(backend)` rather than reading either field.
+
 Weights live under `~/.crucible/models/<id>/<backend>/`, pulled by `crucible models pull
 <id>` with `huggingface_hub` at the pinned revision. Never from GitHub Releases. The HF
 token comes from `HF_TOKEN` in the environment or `[hf] token` in config; a private repo
@@ -144,11 +152,32 @@ operator. Nothing in the app UI changes.
 
 ## 8. Verification (the GPU is touched for the first time)
 
-Card check before any load: `nvidia-smi` must show only the desktop (about 2.3 GB) or the
-run is refused; Owen's other work on the card is never evicted. On the PC: install the
-env in WSL, pull `qwen3.5-9b`, load it (measure the real VRAM and record it in the
-manifest), run a chat completion through the proxy and a streamed one, unload, and
-confirm the card returns to the desktop-only figure. On the Mac: the same with mlx-lm
-and the bf16 conversion; then load `qwen3.8-27b` there to prove the 27B routing story.
-On the PC, `load-model qwen3.8-27b` must be refused with `insufficient_memory` naming
-54 GB against 24 GB. Everything through the CLI and the SDK, nothing hand-rolled.
+Card check before any load: `nvidia-smi` must show only the desktop (1-3 GB) or the run is
+refused; Owen's other work on the card is never evicted. On the PC: install the env in
+WSL, pull `qwen3.5-9b`, load it (measure the real VRAM and record it in the manifest), run
+a chat completion through the proxy and a streamed one, unload, and confirm the card
+returns to the desktop-only figure. On the Mac: the same with mlx-lm and the bf16
+conversion; then load `qwen3.8-27b` there to prove the 27B routing story. On the PC,
+`load-model qwen3.8-27b` must be refused with `insufficient_memory` naming 54 GB against
+24 GB. Everything through the CLI and the SDK, nothing hand-rolled.
+
+**Done, both backends.** `mlx-darwin` 2026-09-12 on the Mac Studio; `cuda-linux` the same
+day on the 3090 Ti, from Windows through the BookForge CLI to a server in WSL2 —
+`keeper-llm-live.sh` in remote mode, 12 passed, 0 failed. See README's *cuda-linux,
+verified* for the figures. Three amendments this section did not anticipate, all measured
+and all now in the code or the manifests:
+
+- **A load can fail for reasons that have nothing to do with the card.** Two of the three
+  blockers on the PC were environment facts: WSL2's pinned memory disabled by default in
+  vLLM, and no CUDA compiler in the llm env for FlashInfer's sampler to JIT against. The
+  card check passes and the engine still dies. `crucible/engines/vllm.py` carries both
+  reasons and the measurements.
+- **`--gpu-memory-utilization` is not "how much of the card may we use".** It is a budget
+  vLLM fills — spending the remainder on KV — and it does not subtract the host desktop.
+  Left at the contract's example 0.85 it took the card to 139 MiB free. The number to pick
+  is the one whose KV pool is the size you want, and a manifest should say which it is.
+- **A measurement is worth a load, and the log is worth keeping.** Both computed estimates
+  were light (the 9B's total by 6.3%, the 27B-4bit's KV-per-token by 24%), and the first
+  failed run destroyed the engine log that explained it, because
+  `scripts/measure-llm-memory.sh` deleted its throwaway home on the way out. It keeps the
+  log on a non-zero exit now.
