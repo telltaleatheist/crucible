@@ -48,6 +48,17 @@ UPLOAD_CHUNK = 1024 * 1024
 PROXY_CONNECT_TIMEOUT = 10.0
 PROXY_READ_TIMEOUT = 900.0
 
+#: The proxy sends the client's own bytes, so it declares the type itself rather
+#: than letting httpx serialise a document and label it.
+JSON_HEADERS = {"Content-Type": "application/json"}
+
+#: How often a non-streamed completion checks whether its caller is still there.
+#: `Request.is_disconnected()` is a poll and not a wait — it reads `receive`
+#: inside an already-cancelled scope and answers at once — so something has to
+#: hold the clock. A quarter of a second is far below the seconds a completion
+#: takes and far above what asking costs.
+DISCONNECT_POLL_SECONDS = 0.25
+
 
 # --------------------------------------------------------------------- schemas
 
@@ -420,6 +431,22 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     # itself answers to. They differ on mlx-lm, which has no
                     # --served-model-name (crucible/engines/mlx_lm.py).
                     "engine_model_name": resident.engine_model_name,
+                    # This entry describes the ENGINE, not the manifest, so both
+                    # of these are what was actually loaded. `/v1/models`' row
+                    # for the same model reports the manifest's pin, and the two
+                    # differ only if somebody edited the manifest while the
+                    # engine was up — in which case a client recording what it
+                    # talked to wants this one.
+                    "revision": resident.revision,
+                    "fingerprint": resident.fingerprint,
+                    # The context this engine was started with, under OpenAI's
+                    # own field name. This is the door Foundry reads — it asks
+                    # the OpenAI-shaped listing, not `/v1/models` — and it is the
+                    # one that must not lie, because `capFor` subtracts the
+                    # prompt from this number to size `max_tokens` and skips the
+                    # clamp entirely when it is absent (CLIENT-SURFACES.md
+                    # section 6.1).
+                    "max_model_len": resident.max_model_len,
                 }
             ],
         }
@@ -427,7 +454,8 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     @private.post("/openai/chat/completions")
     async def openai_chat_completions(request: Request) -> Response:
         """Proxied to the resident engine. Never loads one (section 5)."""
-        body = _chat_body(await request.body())
+        raw = await request.body()
+        body = _chat_body(raw)
         requested = body.get("model")
         if not isinstance(requested, str) or requested == "":
             raise ApiError(
@@ -453,17 +481,20 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                  else resident.model_id},
             )
 
-        forwarded = dict(body)
-        forwarded["model"] = resident.engine_model_name
+        forwarded = _forward_body(raw, body, resident)
         url = f"{resident.base_url}/v1/chat/completions"
         client: httpx.AsyncClient = request.app.state.http
 
         if body.get("stream") is True:
             return await _proxy_stream(client, url, forwarded, resident)
         try:
-            upstream = await client.post(url, json=forwarded)
+            upstream = await _post_unless_the_caller_leaves(
+                client, url, forwarded, request
+            )
         except httpx.HTTPError as exc:
             raise _engine_unreachable(resident, exc) from None
+        if upstream is None:
+            return _caller_gone(resident)
         content = upstream.content
         if upstream.status_code == 200:
             content = _restore_model_id(content, resident)
@@ -493,6 +524,94 @@ def _chat_body(raw: bytes) -> dict[str, Any]:
             f"{type(body).__name__}",
         )
     return body
+
+
+def _forward_body(raw: bytes, body: dict[str, Any], resident: Any) -> bytes:
+    """The client's chat body on its way to the engine.
+
+    The proxy owns exactly one field (PHASE2-LLM.md section 5), so where the
+    engine already answers to the Crucible id — vLLM, which takes
+    `--served-model-name` — there is nothing to substitute and the bytes the
+    client sent are the bytes the engine reads. That is worth more than
+    tidiness: `response_format.json_schema.schema` is a grammar Foundry hands to
+    the guided-decoding backend (CLIENT-SURFACES.md section 6.2), and
+    re-encoding somebody else's grammar on the way past is not the proxy's job.
+
+    Where the two names differ — mlx-lm has no `--served-model-name` and answers
+    to the resolved weights directory — one field has to change, so the document
+    is re-serialised with `model` replaced in the position it already held.
+    Nothing else is added, removed or reordered.
+    """
+    if resident.engine_model_name == resident.model_id:
+        return raw
+    return json.dumps({**body, "model": resident.engine_model_name}).encode("utf-8")
+
+
+async def _watch_for_disconnect(request: Request) -> None:
+    """Return once the caller's connection has gone away."""
+    while not await request.is_disconnected():
+        await asyncio.sleep(DISCONNECT_POLL_SECONDS)
+
+
+async def _post_unless_the_caller_leaves(
+    client: httpx.AsyncClient, url: str, body: bytes, request: Request
+) -> httpx.Response | None:
+    """The upstream POST, raced against the caller hanging up.
+
+    A bare `await client.post(...)` is not enough, and the gap is not cosmetic:
+    nothing inside it watches the caller's own socket, so somebody who gives up
+    after five seconds leaves the engine generating to the end of its token
+    budget with no one to hand the answer to. Crucible runs one job at a time
+    (DESIGN.md section 6), so that is not wasted time in the abstract — it is the
+    next job's time. Dropping the connection is also the *only* cancel either app
+    has for a chat (CLIENT-SURFACES.md, closing section), which makes this the
+    cancel path rather than a refinement of one.
+
+    Returns the engine's response, or None when the caller went first. In that
+    case the upstream request has already been cancelled, and cancelling it is
+    what closes the socket the engine is writing to — which is how the engine
+    learns to stop.
+    """
+    post = asyncio.create_task(client.post(url, content=body, headers=JSON_HEADERS))
+    watch = asyncio.create_task(_watch_for_disconnect(request))
+    try:
+        done, _ = await asyncio.wait({post, watch}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        watch.cancel()
+    if post in done:
+        return post.result()
+
+    post.cancel()
+    try:
+        await post
+    except asyncio.CancelledError:
+        # Ours, not this handler's: the task was cancelled two lines above, and
+        # awaiting it is how the cancellation is given time to reach httpx and
+        # close the connection. Letting it propagate would report the caller's
+        # own departure as this request being cancelled.
+        pass
+    return None
+
+
+def _caller_gone(resident: Any) -> JSONResponse:
+    """What the proxy answers a caller who is no longer there to read it.
+
+    Nothing reads this: the socket it would travel down is closed. It exists
+    because the handler still has to return something, and returning a body
+    shaped like a completion would be a lie told to the log. 499 is nginx's code
+    for a client that closed the request, and Crucible borrows it rather than
+    inventing one.
+    """
+    return JSONResponse(
+        status_code=499,
+        content=ApiError(
+            499,
+            "client_disconnected",
+            f"the caller closed the connection before the engine serving "
+            f"{resident.model_id!r} answered; the engine's request was cancelled "
+            "with it",
+        ).body(),
+    )
 
 
 def _engine_unreachable(resident: Any, exc: Exception) -> ApiError:
@@ -571,8 +690,43 @@ def _restore_model_id_in_frame(frame: bytes, resident: Any) -> bytes:
     return b"\n".join(lines) if changed else frame
 
 
+class _RelayResponse(StreamingResponse):
+    """A streamed relay whose upstream is closed however the relay ends.
+
+    A caller who drops a streamed completion has to reach the engine, or it goes
+    on producing tokens for nobody — and on one exclusive lane that is the next
+    job's time. What closes the engine's end is closing the upstream response, so
+    the only question is who is certain to do it.
+
+    Not the relay generator, is the answer. Measured 2026-09-13 against uvicorn
+    0.52 and starlette 1.6: uvicorn advertises ASGI `spec_version` 2.3, so
+    `StreamingResponse.__call__` takes its task-group branch, a disconnect
+    cancels the task pulling from the generator, the `CancelledError` lands in
+    the generator's frame and a `finally` there would run. Read the 2.4 branch of
+    that same function, though, and the disconnect arrives as an `OSError` out of
+    `send` — raised *outside* the generator, which is then left suspended at its
+    `yield` until asyncio's async-generator finalizer gets to it, whenever that
+    is. Same proxy, same engine, two different answers depending on which branch
+    Starlette takes.
+
+    Which is not a thing this proxy should depend on. The upstream's lifetime
+    belongs to the response that owns it, not to the generator that happens to be
+    reading from it, and `__call__`'s `finally` runs on every one of those paths.
+    """
+
+    def __init__(self, *args: Any, upstream: httpx.Response, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._upstream = upstream
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._upstream.aclose()
+
+
 async def _proxy_stream(
-    client: httpx.AsyncClient, url: str, body: dict[str, Any], resident: Any
+    client: httpx.AsyncClient, url: str, body: bytes, resident: Any
 ) -> Response:
     """Forward a streamed completion, SSE framing intact.
 
@@ -589,7 +743,8 @@ async def _proxy_stream(
     request = client.build_request(
         "POST",
         url,
-        json=body,
+        content=body,
+        headers=JSON_HEADERS,
         # A streamed completion emits a token at a time and may think for a long
         # while before the first one; there is no honest read deadline here.
         timeout=httpx.Timeout(
@@ -616,27 +771,25 @@ async def _proxy_stream(
         )
 
     async def relay() -> AsyncIterator[bytes]:
-        try:
-            if resident.engine_model_name == resident.model_id:
-                async for chunk in upstream.aiter_bytes():
-                    yield chunk
-                return
-            # SSE frames end at a blank line, so the relay holds a partial frame
-            # until it has one. Whatever is left when the engine stops is
-            # forwarded as it stands rather than swallowed.
-            buffer = b""
+        if resident.engine_model_name == resident.model_id:
             async for chunk in upstream.aiter_bytes():
-                buffer += chunk
-                while b"\n\n" in buffer:
-                    frame, buffer = buffer.split(b"\n\n", 1)
-                    yield _restore_model_id_in_frame(frame, resident) + b"\n\n"
-            if buffer:
-                yield _restore_model_id_in_frame(buffer, resident)
-        finally:
-            await upstream.aclose()
+                yield chunk
+            return
+        # SSE frames end at a blank line, so the relay holds a partial frame
+        # until it has one. Whatever is left when the engine stops is
+        # forwarded as it stands rather than swallowed.
+        buffer = b""
+        async for chunk in upstream.aiter_bytes():
+            buffer += chunk
+            while b"\n\n" in buffer:
+                frame, buffer = buffer.split(b"\n\n", 1)
+                yield _restore_model_id_in_frame(frame, resident) + b"\n\n"
+        if buffer:
+            yield _restore_model_id_in_frame(buffer, resident)
 
-    return StreamingResponse(
+    return _RelayResponse(
         relay(),
+        upstream=upstream,
         status_code=200,
         media_type=upstream.headers.get("content-type", "text/event-stream"),
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},

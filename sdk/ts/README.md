@@ -163,7 +163,18 @@ the server's own words; a row that says `loadable: false` and gives no reason is
 `CrucibleProtocolError`, because an operator cannot act on a refusal with no cause.
 
 The rest is the manifest: `id`, `family`, `paramsB`, `memoryBytesEstimate` (weights plus KV
-at the default context, measured on the host, not guessed) and `contextDefault`.
+at the default context, measured on the host, not guessed) and two numbers about context
+that are not the same number. `contextDefault` is the manifest's intent — what this host
+would serve the model at. `maxModelLen` is what is being served **right now**, which for
+the resident model is the context its engine was actually started with. Size a request
+against `maxModelLen`: it is what the engine measures your prompt plus `maxTokens` against.
+
+`fingerprint` is `<id>@<revision>` and it is what to write down. A model id alone does not
+identify weights — the same id serves a different repo on each backend, and a manifest can
+be re-pinned — so an id in a record cannot say afterwards what actually produced the
+output. The server assembles the string so every client files the same weights under the
+same name. `fingerprint`, `revision`, `memoryBytesEstimate` and `maxModelLen` are all
+`null` together on a model this host's backend cannot serve.
 
 ### `loadModel()` and `unloadModel()`
 
@@ -177,15 +188,54 @@ ever evicted to make room.
 
 ### `chat()` and `chatStream()`
 
-Both take `{model, messages, temperature?, topP?, maxTokens?, stop?, signal?}` and post to
-`/v1/openai/chat/completions` with the bearer and `X-Crucible-Api` headers, like every
-other authenticated call. `model` and `messages` are required and refused by name when
-missing; every other knob is simply left out of the body when you do not pass it, so the
-engine's own default applies and this client invents nothing.
+Both take `{model, messages, temperature?, topP?, maxTokens?, stop?, seed?,
+responseFormat?, thinking?, signal?}` and post to `/v1/openai/chat/completions` with the
+bearer and `X-Crucible-Api` headers, like every other authenticated call. `model` and
+`messages` are required and refused by name when missing; every other knob is simply left
+out of the body when you do not pass it, so the engine's own default applies and this
+client invents nothing.
 
 `chat()` returns `ChatResponse {id, model, content, finishReason, usage: {promptTokens,
 completionTokens, totalTokens}}` — OpenAI's `chat.completion` read down to the parts a
 caller uses, from the first (and only) choice.
+
+`finishReason` is the engine's own word, surfaced and never normalised — a plain string, so
+a value this client did not anticipate still reaches you. `length` means the answer is
+truncated; check it before you use `content`.
+
+### Structured output
+
+`responseFormat` is OpenAI's `response_format`, forwarded to the engine exactly as given:
+
+```ts
+const verdict = await crucible.chat({
+  model: 'qwen3.5-9b',
+  messages: [{ role: 'user', content: passage }],
+  temperature: 0,
+  maxTokens: 128,
+  thinking: false,              // a grammar on a thinking model fills `reasoning` instead
+  responseFormat: {
+    type: 'json_schema',
+    json_schema: {
+      name: 'verdict',
+      strict: true,
+      schema: { type: 'object', properties: { supported: { type: 'boolean' } },
+                required: ['supported'], additionalProperties: false },
+    },
+  },
+});
+if (verdict.finishReason === 'length') throw new Error('truncated, not malformed');
+const answer = JSON.parse(verdict.content);
+```
+
+The `schema` is yours. This client checks only what a typo makes an engine answer plausibly
+and wrongly — a `type` outside `text | json_object | json_schema`, or a `json_schema`
+without a `name` or a `schema` — and reads nothing inside the grammar. Which dialect of
+JSON Schema an engine supports is the engine's to accept or refuse, and a refusal arrives
+as that engine's own 400, relayed with the message naming the part to fix.
+
+`seed` is the engine's sampling seed: the same seed and the same sampling give the same
+answer from the same engine, and say nothing across engines or backends.
 
 `chatStream()` is an `AsyncIterable<string>` of the content deltas in order; concatenating
 everything it yields gives the text `chat()` would have returned. Chunks that carry no

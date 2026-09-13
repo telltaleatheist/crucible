@@ -1,11 +1,12 @@
 """`load-model`, `unload-model`, `/v1/models` and the OpenAI proxy.
 
-No GPU and no 19 GB of weights: the env, the weights and the engine are all
-stood up as the real code paths read them — a stamped venv directory, a stamped
-weights directory, and an `Engine` that serves a trivial OpenAI surface on a real
-loopback port (tests/fake_engine.py). What is *not* faked is any of the server's
-own logic: the preflight refusals, the exclusive lane, the event stream and the
-proxy are exactly what runs on the PC.
+No GPU and no 19 GB of weights — the env, the weights and the engine are stood
+up by the fixtures in conftest.py exactly as the real code paths read them. What
+is *not* faked is any of the server's own logic: the preflight refusals, the
+exclusive lane, the event stream and the proxy are exactly what runs on the PC.
+
+The one thing this file cannot ask is what happens when the caller goes away
+mid-request; `TestClient` has no such state. That is tests/test_proxy_disconnect.py.
 """
 
 from __future__ import annotations
@@ -20,13 +21,13 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, llmenv
+from crucible import accelerator
 from crucible.accelerator import GIB, ComputeApp
 from crucible.jobs.llm import residency as residency_module
 from crucible.manifests import load_manifest
 
-from .conftest import FAKE_BACKEND, parse_sse
-from .fake_engine import ANSWER, DELTAS, FakeEngine
+from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
+from .fake_engine import ANSWER, DELTAS, TOOL_CALL, FakeEngine
 
 MODEL = "qwen3.5-9b"
 BIG_MODEL = "qwen3.8-27b"
@@ -35,61 +36,6 @@ SMALL_BIG_MODEL = "qwen3.8-27b-4bit"
 
 
 # ------------------------------------------------------------------ fixtures
-
-
-@pytest.fixture
-def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A stamped `~/.crucible/envs/llm` that `env_status` accepts."""
-    directory = llmenv.llm_env_dir(home)
-    (directory / "bin").mkdir(parents=True)
-    (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "backend": FAKE_BACKEND.kind,
-                "recipe": f"{FAKE_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
-    pins = llmenv.recipe_pins(llmenv.recipe_for(FAKE_BACKEND.kind))
-    monkeypatch.setattr(llmenv, "installed_packages", lambda _home: dict(pins))
-    return directory
-
-
-@pytest.fixture
-def fake_weights(home: Path) -> Callable[[str], Path]:
-    """Stamp a model as pulled at exactly the revision its manifest pins."""
-
-    def stamp(model_id: str) -> Path:
-        spec = load_manifest(model_id).spec(FAKE_BACKEND.kind)
-        directory = home / "models" / model_id / FAKE_BACKEND.kind
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "crucible-pull.json").write_text(
-            json.dumps(
-                {
-                    "model": model_id,
-                    "backend": FAKE_BACKEND.kind,
-                    "hf_repo": spec.hf_repo,
-                    "revision": spec.revision,
-                    "bytes": 19_306_310_880,
-                    "seconds": 300.0,
-                    "pulled": "2026-09-12T19:00:00+0000",
-                }
-            ),
-            encoding="utf-8",
-        )
-        return directory
-
-    return stamp
-
-
-@pytest.fixture
-def idle_card(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
-    monkeypatch.setattr(accelerator, "probe_vram", lambda: (22 * GIB, 24 * GIB))
 
 
 #: A card big enough for the 27B, so residency can be tested with two real
@@ -145,6 +91,17 @@ def submit(client: TestClient, auth: dict[str, str], **body: Any):
     return client.post("/v1/jobs", headers=auth, json=body)
 
 
+def _stream_chunks(text: str) -> list[dict[str, Any]]:
+    """Every `chat.completion.chunk` of a streamed completion, in order.
+
+    Asserts the stream ended on OpenAI's terminator on the way past, because a
+    chunk list read out of a truncated stream would quietly be a shorter one.
+    """
+    lines = [line for line in text.split("\n") if line.startswith("data: ")]
+    assert lines[-1] == "data: [DONE]", lines[-3:]
+    return [json.loads(line[len("data: ") :]) for line in lines[:-1]]
+
+
 def run_job(client: TestClient, auth: dict[str, str], **body: Any) -> list[dict]:
     """Submit a job and read its whole event stream. Fails loudly if refused."""
     response = submit(client, auth, **body)
@@ -177,6 +134,7 @@ def test_models_lists_every_manifest_with_its_standing(
     assert row["resident"] is False
     assert row["loadable"] is False
     assert row["context_default"] == 12288
+    assert row["max_model_len"] == 12288
     assert row["memory_bytes_estimate"] > 0
     assert "no weights at" in row["reason"]
 
@@ -265,8 +223,232 @@ memory_bytes_estimate = 3000000000
     assert [row["id"] for row in rows] == ["mac-only"]
     assert rows[0]["backend_supported"] is False
     assert rows[0]["revision"] is None
+    assert rows[0]["memory_bytes_estimate"] is None
+    # And no max_model_len either: this host would not serve it at any context.
+    # `context_default` still answers, because the model's own number is a fact
+    # about the model rather than about a backend block that is not there.
+    assert rows[0]["max_model_len"] is None
+    assert rows[0]["context_default"] == 4096
     by_type = {entry["job_type"]: entry for entry in capabilities}
     assert by_type["llm"]["models"] == rows
+
+
+# ---------------------------------------------------------------- fingerprint
+
+
+def test_every_row_carries_the_fingerprint_a_client_records(
+    llm_client: TestClient, auth: dict[str, str]
+) -> None:
+    """`<id>@<revision>` — the id alone does not identify bytes.
+
+    Foundry hashes the served model id into its cleanup cache key and BookForge
+    stamps it into a book's OPF (CLIENT-SURFACES.md section 6.5). The server
+    spells the fingerprint out rather than leaving each client to assemble one,
+    because two clients inventing two spellings is two names for one set of
+    weights.
+    """
+    rows = llm_client.get("/v1/models", headers=auth).json()
+    for row in rows:
+        assert row["fingerprint"] == f"{row['id']}@{row['revision']}"
+    assert rows[0]["fingerprint"] == (
+        f"{MODEL}@{load_manifest(MODEL).spec(FAKE_BACKEND.kind).revision}"
+    )
+
+
+def test_a_model_this_backend_cannot_serve_has_no_fingerprint(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Null, not the bare id: an unpinned fingerprint would look like a pin."""
+    fixture = tmp_path / "models"
+    fixture.mkdir()
+    (fixture / "mac-only.toml").write_text(
+        """
+[model]
+id = "mac-only"
+family = "demo"
+params_b = 1
+context_default = 4096
+
+[backends.mlx-darwin]
+engine = "mlx-lm"
+hf_repo = "demo/Demo-1B"
+revision = "0123456789abcdef0123456789abcdef01234567"
+memory_bytes_estimate = 3000000000
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CRUCIBLE_MODELS_DIR", str(fixture))
+    with make_client(enable_llm=True) as client:
+        row = client.get("/v1/models", headers=auth).json()[0]
+    assert row["revision"] is None
+    assert row["fingerprint"] is None
+
+
+def test_the_openai_listing_names_the_weights_the_engine_actually_read(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """That entry describes the engine, so its pin is the loaded one."""
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    entry = llm_client.get("/v1/openai/models", headers=auth).json()["data"][0]
+    revision = load_manifest(MODEL).spec(FAKE_BACKEND.kind).revision
+    assert entry["revision"] == revision
+    assert entry["fingerprint"] == f"{MODEL}@{revision}"
+
+
+def test_a_provenance_sidecar_names_the_revision_it_was_served_at(
+    make_app: Callable[..., Any],
+    fake_env: Path,
+) -> None:
+    """The bug: `revision: null` on every artifact Crucible had ever written.
+
+    The queue holds a model id and nothing that could turn it into a revision, so
+    it wrote null and a sidecar named a model while declining to say which one.
+    The job type knows; it is asked.
+
+    No `llm` job produces artifacts today, so this reads the document the way the
+    artifact writer does rather than fetching a file. That is the point of fixing
+    it now: `tts` and `vlm-pages` are the ones that will write it into a book.
+    """
+    store = make_app(enable_llm=True).state.store
+    spec = load_manifest(MODEL).spec(FAKE_BACKEND.kind)
+
+    job = store.create("load-model", MODEL, {})
+    assert store.provenance(job)["model"] == {
+        "id": MODEL,
+        "revision": spec.revision,
+        "fingerprint": f"{MODEL}@{spec.revision}",
+    }
+
+    # A model-less job type still says `model: null`, which is the honest shape.
+    assert store.provenance(store.create("echo", None, {}))["model"] is None
+
+
+def test_a_provenance_sidecar_names_THIS_host_s_pin(
+    make_app: Callable[..., Any],
+    fake_env: Path,
+) -> None:
+    """The same model at two shas, because the weights differ per backend.
+
+    `qwen3.5-9b` is one Crucible id over two HuggingFace repos — Qwen's own on
+    cuda-linux, the bf16 conversion on mlx-darwin. A record that named the id
+    without the host's pin would say the same thing about two different sets of
+    bytes, which is exactly what the fingerprint exists to prevent.
+    """
+    mac_store = make_app(enable_llm=True, backend=FAKE_MAC_BACKEND).state.store
+    mac = mac_store.provenance(mac_store.create("load-model", MODEL, {}))["model"]
+    pc_store = make_app(enable_llm=True).state.store
+    pc = pc_store.provenance(pc_store.create("load-model", MODEL, {}))["model"]
+
+    assert mac["id"] == pc["id"] == MODEL
+    assert mac["revision"] == load_manifest(MODEL).spec(FAKE_MAC_BACKEND.kind).revision
+    assert pc["revision"] == load_manifest(MODEL).spec(FAKE_BACKEND.kind).revision
+    assert mac["fingerprint"] != pc["fingerprint"]
+
+
+# ------------------------------------------------------------- max_model_len
+
+
+def test_the_openai_listing_reports_the_context_the_engine_was_started_with(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """`/v1/openai/models` is the door Foundry reads, so it carries the number.
+
+    Without it `capFor` has no clamp at all and the request goes out unsized
+    (CLIENT-SURFACES.md section 6.1).
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    entry = llm_client.get("/v1/openai/models", headers=auth).json()["data"][0]
+    assert entry["id"] == MODEL
+    assert entry["max_model_len"] == 12288
+    # The same number vLLM was handed as --max-model-len.
+    assert engines[0].args[-2:] == ["--max-model-len", "12288"]
+
+
+def test_max_model_len_follows_the_engine_and_context_default_follows_the_manifest(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    fake_env: Path,
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """The one moment the two fields disagree, and which one is which.
+
+    A manifest edited while its engine is up: `context_default` is the manifest's
+    intent and moves with the file, `max_model_len` is what is being served and
+    stays with the engine. Re-deriving `max_model_len` from the manifest would
+    have this row promise a 32768-token context to a client talking to an engine
+    that was started at 8192 — and the client would size a request against it and
+    be refused by the engine.
+    """
+    fixture = tmp_path / "models"
+    fixture.mkdir()
+    manifest = fixture / "shifty.toml"
+
+    def write(context: int) -> None:
+        manifest.write_text(
+            f"""
+[model]
+id = "shifty"
+family = "demo"
+params_b = 1
+context_default = {context}
+
+[backends.cuda-linux]
+engine = "vllm"
+hf_repo = "demo/Demo-1B"
+revision = "0123456789abcdef0123456789abcdef01234567"
+memory_bytes_estimate = 3000000000
+""",
+            encoding="utf-8",
+        )
+
+    write(8192)
+    monkeypatch.setenv("CRUCIBLE_MODELS_DIR", str(fixture))
+    with make_client(enable_llm=True) as client:
+        spec = load_manifest("shifty", fixture).spec(FAKE_BACKEND.kind)
+        weights_dir = home / "models" / "shifty" / FAKE_BACKEND.kind
+        weights_dir.mkdir(parents=True)
+        (weights_dir / "crucible-pull.json").write_text(
+            json.dumps(
+                {
+                    "model": "shifty",
+                    "backend": FAKE_BACKEND.kind,
+                    "hf_repo": spec.hf_repo,
+                    "revision": spec.revision,
+                    "bytes": 3_000_000_000,
+                    "seconds": 1.0,
+                    "pulled": "2026-09-12T19:00:00+0000",
+                }
+            ),
+            encoding="utf-8",
+        )
+        events = run_job(client, auth, type="load-model", model="shifty")
+        assert events[-1]["event"] == "done", events[-1]
+        assert engines[0].args == ["--max-model-len", "8192"]
+
+        write(32768)  # somebody edits the manifest with the engine still up
+        row = client.get("/v1/models", headers=auth).json()[0]
+        assert row["resident"] is True
+        assert row["context_default"] == 32768, "the manifest's intent moved"
+        assert row["max_model_len"] == 8192, "what is being served did not"
+        entry = client.get("/v1/openai/models", headers=auth).json()["data"][0]
+        assert entry["max_model_len"] == 8192
 
 
 # -------------------------------------------------- the refusals before queuing
@@ -460,6 +642,9 @@ def test_the_4bit_27b_is_loadable_on_this_card_where_the_bf16_27b_is_not(
     # own 16384 and that is what vLLM is given as --max-model-len.
     assert load_manifest(SMALL_BIG_MODEL).context_default == 98304
     assert small["context_default"] == 16384
+    # Nothing is resident, so what this host WOULD serve it at is the whole
+    # answer, and the two fields agree.
+    assert small["max_model_len"] == 16384
     assert small["memory_bytes_estimate"] == 21_633_171_456
     assert small["revision"] == (
         load_manifest(SMALL_BIG_MODEL).spec(FAKE_BACKEND.kind).revision
@@ -834,14 +1019,16 @@ def test_a_streamed_completion_keeps_its_sse_framing(
         assert response.headers["content-type"].startswith("text/event-stream")
         text = "".join(response.iter_text())
 
-    lines = [line for line in text.split("\n") if line.startswith("data: ")]
-    assert lines[-1] == "data: [DONE]"
+    chunks = _stream_chunks(text)
     deltas = [
-        json.loads(line[len("data: ") :])["choices"][0]["delta"].get("content", "")
-        for line in lines[:-1]
+        chunk["choices"][0]["delta"]["content"]
+        for chunk in chunks
+        if "content" in chunk["choices"][0]["delta"]
     ]
     assert deltas == DELTAS
     assert "".join(deltas) == ANSWER
+    # The closing frame carries no delta, only the reason the engine stopped.
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
     # Every frame is terminated by a blank line, as SSE requires.
     assert text.endswith("data: [DONE]\n\n")
 
@@ -918,13 +1105,227 @@ def test_every_streamed_chunk_names_crucible_s_id(
         assert response.status_code == 200
         text = "".join(response.iter_text())
 
-    lines = [line for line in text.split("\n") if line.startswith("data: ")]
-    assert lines[-1] == "data: [DONE]"
-    chunks = [json.loads(line[len("data: ") :]) for line in lines[:-1]]
-    assert [chunk["model"] for chunk in chunks] == [MODEL] * len(DELTAS)
+    chunks = _stream_chunks(text)
+    # Every frame, the closing one included — the relabelling reaches all of them.
+    assert [chunk["model"] for chunk in chunks] == [MODEL] * (len(DELTAS) + 1)
     # The framing and the content survived the relabelling.
-    assert [chunk["choices"][0]["delta"].get("content", "") for chunk in chunks] == DELTAS
+    assert [
+        chunk["choices"][0]["delta"]["content"]
+        for chunk in chunks
+        if "content" in chunk["choices"][0]["delta"]
+    ] == DELTAS
     assert text.endswith("data: [DONE]\n\n")
+
+
+# ------------------------------------------- the constrained transport survives
+
+#: A Foundry analyze verdict, as `askConstrained` builds it (CLIENT-SURFACES.md
+#: section 6.2), plus every other knob the OpenAI dialect defines that a client
+#: might one day send. The point of the extra fields is that "verbatim" is a rule
+#: about the whole body and not about the four keys Crucible happens to know:
+#: `logit_bias` and `top_logprobs` are here precisely because nothing in either
+#: app sends them today, so nothing in the proxy has ever been taught about them.
+CONSTRAINED_BODY: dict[str, Any] = {
+    "model": MODEL,
+    "messages": [{"role": "user", "content": "Does the passage support the claim?"}],
+    "temperature": 0,
+    "max_tokens": 128,
+    "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "verdict",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "supported": {"type": "boolean"},
+                    "quote": {"type": "string", "maxLength": 200},
+                },
+                "required": ["supported", "quote"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+    },
+    "chat_template_kwargs": {"enable_thinking": False},
+    "logprobs": True,
+    "top_logprobs": 5,
+    "seed": 1729,
+    "stop": ["\n\n", "</answer>"],
+    "logit_bias": {"15496": -100},
+}
+
+
+def _post_raw(
+    client: TestClient, auth: dict[str, str], body: dict[str, Any]
+) -> tuple[bytes, Any]:
+    """POST a chat body as exact bytes, so byte identity is a question you can ask."""
+    payload = json.dumps(body).encode("utf-8")
+    response = client.post(
+        "/v1/openai/chat/completions",
+        headers={**auth, "Content-Type": "application/json"},
+        content=payload,
+    )
+    return payload, response
+
+
+def test_a_constrained_body_reaches_the_engine_byte_for_byte(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """On vLLM there is nothing to substitute, so nothing is re-encoded.
+
+    `response_format.json_schema.schema` is a grammar the guided-decoding backend
+    compiles. Crucible round-tripping it through `json.loads`/`json.dumps` would
+    be a re-encoding of somebody else's document on the way past — harmless until
+    the day it is not. Here the engine reads the client's own bytes.
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    payload, response = _post_raw(llm_client, auth, CONSTRAINED_BODY)
+
+    assert response.status_code == 200, response.text
+    assert engines[0].last_request_bytes == payload
+
+
+def test_only_the_model_field_changes_when_the_engine_answers_to_a_path(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines_under_a_path_name: list[FakeEngine],
+) -> None:
+    """The other backend's shape: one field substituted, nothing else touched.
+
+    mlx-lm has no `--served-model-name`, so `model` has to change and the
+    document is re-serialised. Everything else — the schema, `strict`, the
+    template kwargs, the knobs Crucible has never heard of — arrives with the
+    same value in the same position.
+    """
+    weights = fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    _, response = _post_raw(llm_client, auth, CONSTRAINED_BODY)
+    assert response.status_code == 200, response.text
+
+    sent = engines_under_a_path_name[0].last_request
+    assert sent == {**CONSTRAINED_BODY, "model": str(weights.resolve())}
+    # Order too: `model` keeps the place it held, so nothing is appended or
+    # shuffled on the way through.
+    assert list(sent) == list(CONSTRAINED_BODY)
+
+
+@pytest.mark.parametrize("reason", ["stop", "length", "tool_calls"])
+def test_finish_reason_comes_back_untouched(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engine_factory: Callable[..., list[FakeEngine]],
+    reason: str,
+) -> None:
+    """Foundry turns `length` into a degradation rather than a wrong answer.
+
+    A proxy that normalised or dropped the field would turn a caught truncation
+    into silent corruption (CLIENT-SURFACES.md section 6.2), so the engine's own
+    word is what comes back — including on a `tool_calls` completion, whose
+    `content` is null and whose answer is not text at all.
+    """
+    engine_factory(finish_reason=reason)
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    response = llm_client.post(
+        "/v1/openai/chat/completions",
+        headers=auth,
+        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == reason
+    if reason == "tool_calls":
+        assert choice["message"]["content"] is None
+        assert choice["message"]["tool_calls"] == [TOOL_CALL]
+
+
+@pytest.mark.parametrize("reason", ["stop", "length", "tool_calls"])
+def test_a_streamed_finish_reason_comes_back_untouched(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engine_factory: Callable[..., list[FakeEngine]],
+    reason: str,
+) -> None:
+    """The same rule on the streaming half, where it lives in the closing frame."""
+    engine_factory(finish_reason=reason)
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    with llm_client.stream(
+        "POST",
+        "/v1/openai/chat/completions",
+        headers=auth,
+        json={
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        text = "".join(response.iter_text())
+
+    chunks = _stream_chunks(text)
+    assert chunks[-1]["choices"][0]["finish_reason"] == reason
+    # And it is the ONLY frame that names one: the deltas keep their null.
+    assert [chunk["choices"][0]["finish_reason"] for chunk in chunks[:-1]] == [
+        None
+    ] * len(DELTAS)
+
+
+def test_an_engine_s_own_400_is_relayed_rather_than_rewritten(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engine_factory: Callable[..., list[FakeEngine]],
+) -> None:
+    """A schema the engine will not compile is the engine's refusal to explain.
+
+    Rewrapped in Crucible's `{"error": {"code", "message"}}` envelope it would
+    read as the server refusing, and the message naming the part of the grammar
+    to fix would be gone.
+    """
+    engine_factory(reject_response_format=True)
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    _, response = _post_raw(llm_client, auth, CONSTRAINED_BODY)
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["type"] == "BadRequestError"
+    assert "prefixItems" in body["message"]
+    # Not Crucible's envelope: this refusal is not Crucible's to make.
+    assert "error" not in body
+
+
+def test_an_engine_s_own_400_is_relayed_on_a_streamed_request_too(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engine_factory: Callable[..., list[FakeEngine]],
+) -> None:
+    """The stream is opened before anything is returned, so a refusal is a refusal.
+
+    It must never come back as a 200 whose stream turns out to be an error.
+    """
+    engine_factory(reject_response_format=True)
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    _, response = _post_raw(llm_client, auth, {**CONSTRAINED_BODY, "stream": True})
+
+    assert response.status_code == 400
+    assert response.json()["type"] == "BadRequestError"
 
 
 def test_the_proxy_requires_a_model(

@@ -153,8 +153,9 @@ are two different voices).
 ## 7. Provenance
 
 Every artifact has a sibling `<name>.provenance.json`:
-`{server: {name, version}, backend, job_type, model: {id, revision} or null for a model-less type, params, started, finished}`. Keys stay snake_case in every client; the sidecar is persisted verbatim.
-Clients must persist it with the output. A finished audiobook says which server rendered it.
+`{server: {name, version}, backend, job_type, model: {id, revision, fingerprint} or null for a model-less type, params, started, finished}`. Keys stay snake_case in every client; the sidecar is persisted verbatim.
+Clients must persist it with the output. A finished audiobook says which server rendered it —
+and, since `fingerprint` (`<id>@<revision>`, PHASE2-LLM.md section 5), which weights.
 
 ## 8. Versioning and updates
 

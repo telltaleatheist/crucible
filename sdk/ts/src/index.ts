@@ -57,6 +57,7 @@ export type {
   ProgressData,
   Provenance,
   QueuedData,
+  ResponseFormat,
   ServerInfo,
   TerminalEventName,
   UploadResult,

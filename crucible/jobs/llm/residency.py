@@ -25,7 +25,7 @@ from ...engines import (
     engine_model_name,
     find_free_port,
 )
-from ...manifests import BackendSpec, ModelManifest
+from ...manifests import BackendSpec, ModelManifest, fingerprint
 
 #: How long a load waits for the engine to answer `/v1/models`. vLLM on a 19 GB
 #: model spends most of it reading weights and capturing CUDA graphs.
@@ -41,10 +41,20 @@ class ResidentModel:
     base_url: str
     port: int
     revision: str
-    context_default: int
+    #: The context this engine was actually started with — vLLM's
+    #: `--max-model-len`, mlx-lm's own config. It comes from
+    #: `ModelManifest.context_for(backend)` at load time, which is why it is not
+    #: simply read back off the manifest: a manifest edited while this engine is
+    #: up would then describe a context nothing is serving.
+    max_model_len: int
     memory_bytes_estimate: int
     log_path: Path
     loaded_at: str
+
+    @property
+    def fingerprint(self) -> str:
+        """`<id>@<revision>` for the weights this engine actually read."""
+        return fingerprint(self.model_id, self.revision)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,7 +64,8 @@ class ResidentModel:
             "engine_model_name": self.engine_model_name,
             "base_url": self.base_url,
             "revision": self.revision,
-            "context_default": self.context_default,
+            "fingerprint": self.fingerprint,
+            "max_model_len": self.max_model_len,
             "memory_bytes_estimate": self.memory_bytes_estimate,
             "log_path": str(self.log_path),
             "loaded_at": self.loaded_at,
@@ -182,7 +193,7 @@ class Residency:
             base_url=engine.base_url,
             port=port,
             revision=spec.revision,
-            context_default=context,
+            max_model_len=context,
             memory_bytes_estimate=spec.memory_bytes_estimate,
             log_path=log_path,
             loaded_at=_now(),

@@ -29,7 +29,12 @@ from ... import accelerator, llmenv, weights
 from ...config import Config
 from ...engines import EngineError
 from ...errors import ApiError, JobError
-from ...manifests import ManifestError, ModelManifest, load_all_manifests
+from ...manifests import (
+    ManifestError,
+    ModelManifest,
+    fingerprint,
+    load_all_manifests,
+)
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from .residency import DEFAULT_READY_TIMEOUT_SECONDS, Residency, ResidentModel
 
@@ -140,11 +145,13 @@ def model_rows(
     """
     backend_kind = backend.kind
     env = llmenv.env_status(config.home, backend_kind)
+    resident = residency.resident
     rows: list[dict[str, Any]] = []
     for manifest in _manifests().values():
         supported = manifest.supports(backend_kind)
         estimate: int | None = None
         revision: str | None = None
+        max_model_len: int | None = None
         is_installed = False
         reason: str | None = None
         if not supported:
@@ -156,6 +163,17 @@ def model_rows(
             spec = manifest.spec(backend_kind)
             estimate = spec.memory_bytes_estimate
             revision = spec.revision
+            # For the model that is up, the number the engine was actually
+            # started with, read off the engine's own record; for everything else
+            # the number this host would start it with. A manifest edited under a
+            # resident engine is the case that makes the distinction real, and it
+            # is the resident engine that wins, because that is the context a
+            # request sent right now will be measured against.
+            max_model_len = (
+                resident.max_model_len
+                if resident is not None and resident.model_id == manifest.id
+                else manifest.context_for(backend_kind)
+            )
             is_installed = weights.installed(config, manifest, spec) is not None
             if estimate > backend.gpu.vram_bytes:
                 # Not loadable here at all, so say so instead of asking for a
@@ -181,21 +199,72 @@ def model_rows(
             # backend has no revision here at all, and says so with null rather
             # than with an empty string that would read as a real pin.
             "revision": revision,
+            # `id` and `revision` joined — exactly those two fields of this same
+            # row, so it can never disagree with them, and null wherever
+            # `revision` is. It is spelled out rather than left to the client to
+            # assemble because it is a *record*: Foundry hashes it into the
+            # cleanup cache key and BookForge stamps it into a book's OPF
+            # (CLIENT-SURFACES.md section 6.5), and two clients each inventing
+            # their own way of writing it down is two ways for the same weights
+            # to be filed under different names.
+            "fingerprint": (
+                None if revision is None else fingerprint(manifest.id, revision)
+            ),
             "backend_supported": supported,
             "installed": is_installed,
             "resident": residency.resident_id == manifest.id,
             "loadable": reason is None,
             "memory_bytes_estimate": estimate,
-            # The context THIS host would serve, the same way `revision` and
-            # `memory_bytes_estimate` above are this host's. A backend may carry
-            # its own; where it does not, this is the model's own number, so a
-            # host with no block for this model still reports something true.
+            # The manifest's INTENT: the context THIS host would serve, the same
+            # way `revision` and `memory_bytes_estimate` above are this host's. A
+            # backend may carry its own; where it does not, this is the model's
+            # own number, so a host with no block for this model still reports
+            # something true.
             "context_default": manifest.context_for(backend_kind),
+            # What is being served RIGHT NOW, which is a different question and
+            # is why it is a different field. A client sizes a request against
+            # this one: Foundry's `capFor` is
+            # `max_model_len − (⌈chars/2.5⌉ + 256)` and has **no clamp at all**
+            # when the server does not report the field, so the request goes out
+            # unclamped and comes back a 400 (CLIENT-SURFACES.md section 6.1).
+            # Null when `backend_supported` is false, for the same reason
+            # `revision` and `memory_bytes_estimate` are: the number lives in a
+            # backend block this manifest does not have.
+            "max_model_len": max_model_len,
         }
         if reason is not None:
             row["reason"] = reason
         rows.append(row)
     return rows
+
+
+def _model_provenance(backend_kind: str, model: str | None) -> dict[str, Any] | None:
+    """The `model` block of a provenance sidecar (DESIGN.md section 7).
+
+    `revision` is the sha this host's backend block pins, and that is a statement
+    about bytes and not merely about a file: a load refuses weights pulled at any
+    other revision (`weights.require_installed`), so the pin the manifest names is
+    the pin the engine read.
+
+    `fingerprint` is the two joined, because that is the string a client writes
+    down. A finished audiobook says which server rendered it; it now also says
+    which weights, which is what makes two renders at two precisions tellable
+    apart in their records.
+    """
+    if model is None:
+        return None
+    manifest = _known(model)
+    spec = manifest.backends.get(backend_kind)
+    if spec is None:
+        # Unreachable through the API — `preflight` refuses `backend_unsupported`
+        # long before a job exists — but a sidecar has to say something true even
+        # if it is reached some other way, and inventing a revision is not it.
+        return {"id": model, "revision": None, "fingerprint": None}
+    return {
+        "id": model,
+        "revision": spec.revision,
+        "fingerprint": fingerprint(model, spec.revision),
+    }
 
 
 def _require_loadable(
@@ -276,6 +345,9 @@ class LoadModelJobType:
         if not manifest.supports(self._config.backend_kind):
             return 0
         return manifest.spec(self._config.backend_kind).memory_bytes_estimate
+
+    def model_provenance(self, model: str | None) -> dict[str, Any] | None:
+        return _model_provenance(self._config.backend_kind, model)
 
     def check(self, backend: Any) -> JobTypeStatus:
         env = llmenv.env_status(self._config.home, backend.kind)
@@ -385,6 +457,9 @@ class UnloadModelJobType:
 
     def vram_estimate(self, model: str | None) -> int:
         return 0
+
+    def model_provenance(self, model: str | None) -> dict[str, Any] | None:
+        return _model_provenance(self._config.backend_kind, model)
 
     def check(self, backend: Any) -> JobTypeStatus:
         resident = self._residency.resident_id

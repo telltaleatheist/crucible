@@ -83,17 +83,70 @@ eviction of other people's processes, ever.
 
 | Route | Auth | Returns |
 |---|---|---|
-| `GET /v1/models` | yes | `[{id, family, params_b, revision, backend_supported, installed, resident, loadable, reason (when not loadable), memory_bytes_estimate, context_default}]` |
+| `GET /v1/models` | yes | `[{id, family, params_b, revision, fingerprint, backend_supported, installed, resident, loadable, reason (when not loadable), memory_bytes_estimate, context_default, max_model_len}]` |
 | `POST /v1/jobs {type: "load-model", model}` | yes | a normal job. Events: `queued`, `warming {message}` streamed from the engine's readiness (several), `done {resident: id}`. Refusals by name before queuing: `unknown_model`, `model_not_installed`, `backend_unsupported`, `accelerator_busy`, `insufficient_memory`, `env_missing`. |
 | `POST /v1/jobs {type: "unload-model", model}` | yes | a normal job; `done {resident: null}` — the same field the load reports, saying what is resident *now*, which after an unload is nothing. `model_not_resident` if it isn't. |
 | `POST /v1/openai/chat/completions` | yes | proxied to the resident engine, streaming or not, verbatim but for `model` (see below). `model` in the body must equal the resident id, else **409 `model_not_resident`** naming the resident model (or none). Never loads implicitly. |
-| `GET /v1/openai/models` | yes | the resident model in OpenAI's list shape, or an empty list. |
+| `GET /v1/openai/models` | yes | the resident model in OpenAI's list shape (`{id, object, created, owned_by, engine_model_name, revision, fingerprint, max_model_len}`), or an empty list. |
 
 `revision` is the pin in **this host's** backend block, so a client records the same sha
 the puller used; it is `null` — not `""` — when `backend_supported` is false, because a
 model this host cannot serve has no revision here to name. `memory_bytes_estimate` is
 `null` in that same case and for the same reason: both figures live in the backend block
 this manifest does not have, and `0` would read as "needs nothing".
+
+`context_default` and `max_model_len` are two fields because they answer two questions.
+`context_default` is the **manifest's intent**: what this host would serve this model at,
+its backend block's own number where it has one (section 1). `max_model_len` is **what is
+being served right now**: for the resident model it is the number the engine was actually
+started with, read off the engine's record and not re-derived from the manifest, so a
+manifest edited under a running engine cannot make this row promise a context nothing is
+serving; for every other model it is what this host would start it with. They agree on a
+server nobody has edited underneath, and the one moment they disagree is the moment a
+client needs to be able to tell them apart. `max_model_len` is `null` when
+`backend_supported` is false, alongside `revision` and `memory_bytes_estimate`.
+
+`GET /v1/openai/models` carries `max_model_len` too, under OpenAI's own field name, and
+that is the door that matters: Foundry reads the OpenAI-shaped listing rather than
+`/v1/models`, and its `capFor` (`vllm.ts:208`) sizes `max_tokens` as
+`max_model_len − (⌈chars/2.5⌉ + 256)` — **with no clamp at all when the server does not
+report the field** (CLIENT-SURFACES.md section 6.1). An unclamped request is a 400 from
+the engine, so the field being absent costs a whole call.
+
+### The served name, and what a client writes down
+
+**`fingerprint` is `<id>@<revision>`, and it is what belongs in a record — never the bare
+id.** A client does not merely display the model it talked to; Foundry hashes the served
+model id into its cleanup cache key and its translate bank, and BookForge stamps it into a
+book's OPF (CLIENT-SURFACES.md section 6.5). Two consequences follow, and they pull in
+opposite directions, which is why the rule has two halves:
+
+- **The id is stable, so a cache stays warm.** Changing the name Crucible reports for the
+  same weights re-asks every block of every book. `qwen3.5-9b` is that name on both
+  backends, and the proxy puts it back on the way out precisely so that a book cleaned on
+  the Mac and a book cleaned on the PC are filed under one name.
+- **The revision travels with it, so a record is not a lie.** The same id serves different
+  bytes on different hosts — `qwen3.5-9b` is Qwen's own repo on `cuda-linux` and the bf16
+  conversion on `mlx-darwin`, at two different shas — and a manifest can be re-pinned. A
+  record that says only `qwen3.5-9b` cannot tell those apart afterwards.
+
+On `/v1/models`, `fingerprint` is `id` and `revision` from that same row joined, so it can
+never disagree with them, and it is `null` wherever `revision` is — an unpinned fingerprint
+would be worse than none, because it would look like a pin. On `/v1/openai/models` both
+come off the resident engine, because that entry describes what is **running**. The
+provenance sidecar (DESIGN.md section 7) carries all three — `{id, revision, fingerprint}`
+— and its `revision` is this host's backend pin, which is a statement about bytes and not
+about a file: a load refuses weights pulled at any other revision, so the pin the manifest
+names is the pin the engine read.
+
+**A Crucible id carries its dtype when the dtype is not bf16.** That is why
+`qwen3.8-27b-4bit` is a separate id from `qwen3.8-27b` rather than a flag on it: a server
+reports one served name, so two books cleaned at two precisions would otherwise be
+indistinguishable in their records, and the int4 and bf16 answers to the same prompt are
+not the same answer. bf16 is the unmarked case and takes no suffix. The precision is part
+of the *id* and not of the revision because it is a choice about which weights to serve,
+which the client may legitimately care about; the revision is which commit of those
+weights, which it only records.
 
 `GET /v1/info` gains `capabilities: [{job_type: "llm", models: [...]}]` whose rows are the
 `/v1/models` rows **verbatim**, produced by the same function. That is the one exception to
@@ -114,17 +167,66 @@ on the server's disk on `mlx-darwin` and the Crucible id on `cuda-linux`, where 
 take a served name. One id, both directions, both backends. (On a backend where the two
 names already agree there is nothing to undo and the stream is relayed byte for byte.)
 
+That holds on the way **in** as well, and literally: where the engine answers to the
+Crucible id there is nothing to substitute, so the bytes the client sent are the bytes the
+engine reads — the proxy does not parse-and-re-serialise a body it has no field to change
+in. Two things in particular ride on that and are tested (`tests/test_llm_api.py`):
+
+- **`response_format: {type: "json_schema", json_schema: {...}, strict: true}`** is the only
+  structured-output mechanism either app uses — Foundry's analyze verdicts and both tag
+  calls (CLIENT-SURFACES.md section 6.2) — and its `schema` is a grammar the engine's
+  guided-decoding backend compiles. Re-encoding somebody else's grammar in transit is not
+  the proxy's job. The same applies to every other field the OpenAI dialect defines and
+  Crucible has never been taught about: `logprobs`, `top_logprobs`, `seed`, `stop`,
+  `logit_bias`.
+- **`finish_reason` is never touched**, streamed or not, including `tool_calls`, whose
+  `content` is `null`. Foundry turns `length` into a degradation rather than a wrong answer
+  and BookForge's audiobook analysis throws by name on it; a proxy that normalised the
+  field would turn a caught truncation into silent corruption.
+
+An engine's own refusal is relayed with the engine's status code and body, not rewrapped in
+Crucible's `{"error": {code, message}}` envelope. A schema vLLM will not compile is a 400
+the *engine* made, and the message naming the part of the grammar to fix is the useful half
+of it. A streamed request is no different: the upstream response is opened before anything
+is returned, so a refusal arrives as a refusal and never as a 200 whose stream turns out to
+be an error.
+
+**A caller who goes away takes the engine's request with them.** Neither app can cancel a
+chat any other way — Foundry's `Transport` has no abort member at all and BookForge chains
+an `AbortSignal` to the fetch, so for both of them the cancel *is* dropping the connection
+(CLIENT-SURFACES.md, closing section). Crucible runs one job at a time, so tokens generated
+for somebody who has hung up are not wasted in the abstract; they are the next job's time.
+A streamed completion's upstream is closed by the response that owns it, on every path out
+of it. A non-streamed one races the upstream POST against the caller's own socket and
+cancels the POST when that socket closes, which is what closes the engine's end: a bare
+`await client.post(...)` watches nothing and would sit there to the end of the token
+budget. The handler then answers **499 `client_disconnected`** — a status nobody will read,
+because the connection it would travel down is gone, written down here so that nothing in
+the code has to pretend a completion happened.
+
 A load job runs on the exclusive lane like everything else, so it waits behind a running
 job and a chat request never races a load.
 
 ## 6. SDK additions (`@crucible/client`)
 
 `models()`, `loadModel(id)` → job id (use `events()` as usual), `unloadModel(id)` → job
-id, `chat({model, messages, temperature?, topP?, maxTokens?, stop?, thinking?, signal?})`
-→ the OpenAI response typed minimally (`id, model, choices[0].message.content, usage`),
-and `chatStream(...)` → `AsyncIterable<string>` of content deltas. 409
-`model_not_resident` surfaces as `CrucibleRefused` with that code. `signal` aborts the
-fetch.
+id, `chat({model, messages, temperature?, topP?, maxTokens?, stop?, seed?,
+responseFormat?, thinking?, signal?})` → the OpenAI response typed minimally (`id, model,
+choices[0].message.content, finishReason, usage`), and `chatStream(...)` →
+`AsyncIterable<string>` of content deltas. 409 `model_not_resident` surfaces as
+`CrucibleRefused` with that code. `signal` aborts the fetch, and dropping the fetch is what
+cancels the engine's work (section 5).
+
+`ModelInfo` carries `maxModelLen` and `fingerprint` alongside `contextDefault` and
+`revision`, all four nullable together on a model this host's backend cannot serve.
+
+`responseFormat` is OpenAI's `response_format`, forwarded verbatim. The SDK checks only
+what a typo makes an engine answer plausibly and wrongly — a `type` outside
+`text | json_object | json_schema`, a `json_schema` with no `name` or no `schema` — and
+reads nothing inside the grammar, because which dialect of JSON Schema an engine supports
+is the engine's to accept or refuse. `finishReason` is a plain string and is surfaced
+rather than narrowed to a union: a value this client did not anticipate must reach the
+caller rather than become a protocol error.
 
 `thinking` is the one sampling knob that is not OpenAI's: Qwen3.5 and its kind think
 before they answer, and a short ceiling spends the whole budget on `reasoning` and returns

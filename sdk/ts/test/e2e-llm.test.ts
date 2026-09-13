@@ -91,6 +91,13 @@ test('the server offers the llm capability and lists the model', async () => {
     model.revision !== null && /^[0-9a-f]{40}$/.test(model.revision),
     `${MODEL} must name the commit it is pinned to, got ${String(model.revision)}`,
   );
+  // What a client writes into a book's record, and what it sizes a request
+  // against: the id alone identifies neither the weights nor the context.
+  assert.equal(model.fingerprint, `${MODEL}@${model.revision}`);
+  assert.ok(
+    model.maxModelLen !== null && model.maxModelLen > 0,
+    `${MODEL} must report the context it is served at, got ${String(model.maxModelLen)}`,
+  );
   if (!model.loadable) {
     // `reason` is guaranteed present when `loadable` is false; the client
     // refuses a row that omits it, so this never prints "undefined".

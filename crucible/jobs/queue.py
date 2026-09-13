@@ -146,12 +146,20 @@ class JobStore:
     # -------------------------------------------------------------- provenance
 
     def provenance(self, job: Job, finished: str | None = None) -> dict[str, Any]:
-        """DESIGN.md section 7. Written beside every artifact."""
+        """DESIGN.md section 7. Written beside every artifact.
+
+        The `model` block comes from the job type, because the job type is what
+        knows its models: the queue has a model *id* and nothing else, and until
+        this was fixed it wrote `revision: null` on every artifact Crucible had
+        ever produced — a sidecar that named a model and then declined to say
+        which one. A model-less job type answers None, and the sidecar says
+        `model: null`, which is the honest shape for `echo`.
+        """
         return {
             "server": {"name": self._config.name, "version": VERSION},
             "backend": self._backend.kind,
             "job_type": job.type,
-            "model": None if job.model is None else {"id": job.model, "revision": None},
+            "model": self._registry[job.type].model_provenance(job.model),
             "params": job.params,
             "started": job.started,
             "finished": finished if finished is not None else utcnow(),

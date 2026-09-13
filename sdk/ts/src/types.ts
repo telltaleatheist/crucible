@@ -224,7 +224,12 @@ export interface Provenance {
   readonly server: { readonly name: string; readonly version: string };
   readonly backend: string;
   readonly job_type: string;
-  readonly model: { readonly id: string; readonly revision: string | null } | null;
+  readonly model: {
+    readonly id: string;
+    readonly revision: string | null;
+    /** `<id>@<revision>`: which weights, not merely which model. */
+    readonly fingerprint: string | null;
+  } | null;
   readonly params: Readonly<Record<string, unknown>>;
   readonly started: string | null;
   readonly finished: string;
@@ -256,6 +261,17 @@ export interface ModelInfo {
    * revision here to name.
    */
   readonly revision: string | null;
+  /**
+   * `<id>@<revision>` — what to write down when you record what you talked to.
+   *
+   * The bare id does not identify bytes: one Crucible id serves different
+   * weights on different backends, and a manifest can be re-pinned. This is
+   * {@link ModelInfo.id} and {@link ModelInfo.revision} joined by the server, so
+   * it never disagrees with them, and it is `null` wherever `revision` is — an
+   * unpinned fingerprint would be worse than none, because it would read as a
+   * pin.
+   */
+  readonly fingerprint: string | null;
   readonly backendSupported: boolean;
   readonly installed: boolean;
   readonly resident: boolean;
@@ -273,8 +289,45 @@ export interface ModelInfo {
    * and there is no block. Never `0` — a zero would read as "needs nothing".
    */
   readonly memoryBytesEstimate: number | null;
+  /**
+   * The manifest's intent: the context this host would serve this model at.
+   * Compare {@link ModelInfo.maxModelLen}, which is what is being served.
+   */
   readonly contextDefault: number;
+  /**
+   * The context in force **right now** — for the resident model, the one its
+   * engine was actually started with. Size a request against this one: it is
+   * the number the engine will measure `max_tokens` plus the prompt against.
+   *
+   * `null` when `backendSupported` is false, like {@link ModelInfo.revision} and
+   * {@link ModelInfo.memoryBytesEstimate}: this host would not serve it at any
+   * context.
+   */
+  readonly maxModelLen: number | null;
 }
+
+/**
+ * OpenAI's structured-output request, passed through to the engine verbatim.
+ *
+ * `schema` is a JSON Schema document and is deliberately untyped here: it is the
+ * grammar the engine's guided-decoding backend compiles, and this client is not
+ * in the business of deciding which of JSON Schema an engine supports. A schema
+ * the engine will not compile comes back as its own 400, which is the answer
+ * that says what to fix.
+ */
+export type ResponseFormat =
+  | { readonly type: 'text' }
+  | { readonly type: 'json_object' }
+  | {
+      readonly type: 'json_schema';
+      readonly json_schema: {
+        readonly name: string;
+        readonly schema: Readonly<Record<string, unknown>>;
+        /** Whether the engine must follow the schema exactly. */
+        readonly strict?: boolean;
+        readonly description?: string;
+      };
+    };
 
 /** One turn of a chat. `content` is text; this client sends no other part types. */
 export interface ChatMessage {
@@ -295,6 +348,29 @@ export interface ChatOptions {
   readonly topP?: number;
   readonly maxTokens?: number;
   readonly stop?: readonly string[];
+  /**
+   * The engine's sampling seed. Two identical requests at the same seed and the
+   * same sampling give the same answer on the same engine; it says nothing
+   * across engines or across backends.
+   */
+  readonly seed?: number;
+  /**
+   * Make the engine answer in a shape rather than in prose — OpenAI's
+   * `response_format`, forwarded to the engine exactly as given.
+   *
+   * `{type: 'json_schema', json_schema: {name, schema, strict: true}}` is the
+   * one structured-output mechanism the engines share, and the grammar inside it
+   * is yours: Crucible does not read it, rewrite it or validate it. The reply
+   * still arrives as {@link ChatResponse.content} — a string that happens to
+   * hold JSON — because that is what the engine returns; parse it yourself and
+   * check {@link ChatResponse.finishReason} first, since a `length` stop is a
+   * truncated document and not a malformed one.
+   *
+   * On a reasoning model, consider `thinking: false` alongside it: a grammar
+   * applied to a model that is still thinking routes the object into the
+   * reasoning channel.
+   */
+  readonly responseFormat?: ResponseFormat;
   /**
    * Whether a reasoning model thinks before it answers.
    *
@@ -333,7 +409,16 @@ export interface ChatResponse {
    */
   readonly model: string;
   readonly content: string;
-  /** `stop`, `length`, ... — the engine's own word for why it stopped. */
+  /**
+   * The engine's own word for why it stopped, surfaced rather than swallowed:
+   * `stop`, `length`, `tool_calls`, or whatever else that engine says.
+   *
+   * It is a plain string and not a union on purpose — a value this client did
+   * not anticipate must reach the caller, not become a protocol error — and
+   * nothing normalises it in either direction. `length` means the answer is
+   * truncated: both apps treat that as a degradation to record rather than an
+   * answer to use, which only works if it arrives.
+   */
   readonly finishReason: string;
   readonly usage: ChatUsage;
 }
