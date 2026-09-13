@@ -283,7 +283,14 @@ VRAM measurement, and `keeper-llm-live.sh` in local mode on that host. Consequen
   alongside the Windows desktop it may well be too low to leave room for the KV cache;
   expect to raise it, and record the measured reason when you do.
 
-The `mlx-darwin` half is fully verified, including from a Windows client over the tailnet.
+The `mlx-darwin` half is fully verified — locally on the Mac Studio, and **from a Windows
+client over the tailnet**, which is the shape the apps actually use:
+
+```bash
+export CRUCIBLE_URL=http://owens-mac-studio.hs.owenmorgan.com:7100
+export CRUCIBLE_TOKEN=...          # the Mac's `crucible token --show`
+./scripts/keeper-llm-live.sh       # 11 passed, 0 failed
+```
 
 #### Logs
 
