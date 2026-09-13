@@ -88,6 +88,20 @@ class JobStore:
     def running_id(self) -> str | None:
         return self._running_id
 
+    @property
+    def running(self) -> Job | None:
+        """The job on the lane right now, or None."""
+        return None if self._running_id is None else self._jobs[self._running_id]
+
+    def queued(self) -> list[Job]:
+        """Everything waiting, in the order it will run.
+
+        A LIST AND NOT THE DEQUE. `_pending` is the lane's own structure and a
+        caller holding it could mutate the queue by accident; this is a snapshot
+        for reading. PHASE7-LANES.md section 5.
+        """
+        return [self._jobs[job_id] for job_id in self._pending]
+
     def get(self, job_id: str) -> Job:
         job = self._jobs.get(job_id)
         if job is None:
@@ -104,7 +118,13 @@ class JobStore:
 
     # ------------------------------------------------------------------ submit
 
-    def create(self, job_type: str, model: str | None, params: dict[str, Any]) -> Job:
+    def create(
+        self,
+        job_type: str,
+        model: str | None,
+        params: dict[str, Any],
+        client: str | None = None,
+    ) -> Job:
         job_id = uuid.uuid4().hex
         directory = Path(self._config.jobs_dir) / job_id
         (directory / "inputs").mkdir(parents=True, exist_ok=False)
@@ -116,6 +136,7 @@ class JobStore:
             params=params,
             dir=directory,
             created=utcnow(),
+            client=client,
         )
         self._jobs[job_id] = job
         return job
@@ -133,6 +154,13 @@ class JobStore:
         job.events.append(event)
         if kind == "progress":
             job.progress = float(data["fraction"])
+            # The latest line, for the whole-server read. The event log stays
+            # the truth; a `progress` without a message leaves the last one
+            # standing rather than blanking it, because "rendering 118 of 280"
+            # followed by an empty bench row reads as a stall.
+            message = data.get("message")
+            if isinstance(message, str) and message:
+                job.message = message
         for waiter in self._subscribers.get(job.id, []):
             waiter.set()
 

@@ -15,6 +15,7 @@ import hashlib
 import json
 import secrets
 import shutil
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -234,6 +235,10 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store: JobStore = app.state.store
+        # MONOTONIC, not a wall clock: uptime is a duration, and a duration
+        # computed across an NTP correction or a DST jump is how a bench ends up
+        # reporting that a server has been up for minus four minutes.
+        app.state.started_at = time.monotonic()
         store.start()
         app.state.http = httpx.AsyncClient(
             timeout=httpx.Timeout(
@@ -532,6 +537,125 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             "detail": state.detail,
         }
 
+    # -------------------------------------------------------------- activity
+
+    def _activity_row(store: JobStore, job: Any) -> dict[str, Any]:
+        """One job, as a bench reads it. Never its params: a chat prompt or a
+        chapter of a book is not something a whole-server read should spray at
+        anyone holding the token."""
+        return {
+            "job_id": job.id,
+            "type": job.type,
+            "model": job.model,
+            "status": job.status,
+            "position": store.position(job),
+            "progress": job.progress,
+            "message": job.message,
+            "created": job.created,
+            "started": job.started,
+            "client": job.client,
+        }
+
+    @private.get("/activity")
+    async def activity(request: Request, accelerator_probe: bool = False) -> dict[str, Any]:
+        """What is on this server and how far along — one read, no job id.
+
+        PHASE7-LANES.md section 5. Owen, 2026-09-13: *"Crucible will have to have
+        an api endpoint that will report what's on it and its progress so
+        Bookforge can hit that endpoint and fill that gpu slot with that data."*
+
+        WHY THIS IS A POLL AND NOT THE SSE IT ALREADY HAS. Per-job events are
+        push, fine-grained and exactly right for the step that owns a job. This
+        answers a different question, asked by a bench widget that owns no job
+        and may never own one: *what is this machine doing?* Opening a stream per
+        job per server to render one line of text is the wrong shape. The two do
+        not compete — the step reads the stream, the bench reads this.
+
+        IT REPORTS AND NOTHING ELSE. It does not admit, reserve, claim or lock. A
+        client that reads "free" and submits is racing every other client, and
+        that race is ALREADY handled correctly by the lane: the second job
+        queues. Crucible owning a queue is precisely what makes admission not the
+        client's problem, and a reservation here would hand it back.
+
+        THE PROBE IS OPT-IN, and that is the one design decision in this route.
+        `nvidia-smi` is a subprocess costing tens of milliseconds, and a bench
+        polling three servers every few seconds would spawn one per server per
+        tick forever to render a number nobody is reading. `resident` below
+        already says what is loaded and roughly what it costs, in memory, for
+        free. A caller that genuinely wants the live figure asks for it with
+        `?accelerator_probe=true` and pays for it; `GET /v1/accelerator` remains
+        the full answer.
+        """
+        store: JobStore = request.app.state.store
+        running = store.running
+        queued = store.queued()
+        resident = residency.resident
+
+        body: dict[str, Any] = {
+            "server": {
+                "name": config.name,
+                "version": VERSION,
+                "api_version": API_VERSION,
+                "backend": backend.kind,
+                "uptime_s": round(time.monotonic() - request.app.state.started_at, 3),
+            },
+            "resident": (
+                None
+                if resident is None
+                else {
+                    "kind": resident.kind,
+                    "id": resident.id,
+                    "since": resident.loaded_at,
+                    "memory_bytes_estimate": resident.memory_bytes_estimate,
+                }
+            ),
+            # `warming` is neither running nor queued and a bench that ignored it
+            # would draw an idle machine that is in fact spending two minutes
+            # loading a model. It is the reason a slot is unavailable, so it is
+            # reported where the slot is.
+            "warming": residency.warming,
+            "slots": {
+                # ONE LANE TODAY, and it is named rather than counted so the
+                # ancillary lane (PHASE7-LANES.md section 3) can appear beside it
+                # without changing this one's meaning. A key that is absent means
+                # this build has no such lane — never that the lane is idle.
+                "accelerated": {
+                    "busy": 0 if running is None else 1,
+                    "of": 1,
+                    "queue_depth": store.queue_depth,
+                },
+            },
+            "running": [] if running is None else [_activity_row(store, running)],
+            "queued": [_activity_row(store, job) for job in queued],
+        }
+
+        if accelerator_probe:
+            try:
+                state = await asyncio.to_thread(
+                    accelerator.read_state, backend.kind, config.desktop_allowance_bytes
+                )
+            except accelerator.ProbeError as exc:
+                # NOT a 503 for the whole route, unlike `/v1/accelerator`. The
+                # caller asked for the bench and additionally for a probe; a card
+                # the driver will not talk about right now must not blank out the
+                # progress of a render that is plainly still going. The failure is
+                # named in place and everything else stands.
+                body["accelerator"] = {"error": f"{exc}"}
+            else:
+                body["accelerator"] = {
+                    "total_bytes": state.total_bytes,
+                    "free_bytes": state.free_bytes,
+                    "used_bytes": state.used_bytes,
+                    "unattributed_bytes": (
+                        accelerator.unattributed_bytes(
+                            state, config.desktop_allowance_bytes
+                        )
+                        if state.backend == CUDA_LINUX
+                        else None
+                    ),
+                }
+        return body
+
     # ---------------------------------------------------------------- models
 
     @private.get("/models")
@@ -710,7 +834,12 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         # fail (PHASE2-LLM.md section 5).
         plugin.preflight(model, body.params)
 
-        job = store.create(body.type, model, body.params)
+        # The SDK sends `<clientName> crucible-client/<version>`; anything else
+        # speaking to this server may send whatever it likes, or nothing.
+        # Truncated because it is a header, and a header is attacker-controlled
+        # length even inside one trust domain.
+        agent = (request.headers.get("user-agent") or "").strip()[:200] or None
+        job = store.create(body.type, model, body.params, client=agent)
         try:
             _materialise_inputs(config, job, body.inputs)
         except ApiError:

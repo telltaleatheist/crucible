@@ -163,6 +163,83 @@ machine over the local one, because the local card is the scarce thing that a `l
 step queued behind it will need. A `local`-only step takes the local slot or waits, even
 when three remote machines are idle.
 
+### 4.1 A slot is a STEP, not a request
+
+Stated here because it is a correctness constraint and not a throughput knob, and because
+the Foundry session supplied the numbers that prove it.
+
+A VLM page-read step occupies **one** slot and runs **twelve** page requests in flight
+inside it (`DEFAULT_VLM_CONCURRENCY`). That twelve is not tuning. `foundry/src/vlm/read.ts`
+narrows each page's token cap from the longest page accepted *so far*, so a page is sent
+under a band up to N answers out of date — and the 4x margin in `band.ts` and the 2x retry
+factor in `models.ts` were both chosen against a lag of exactly twelve. Measured over
+**18,202 pages**: at twelve the lag costs zero accepted pages; at twenty-four it costs two.
+
+So a slot model that decided how many requests were in flight would be silently changing
+what two other files are allowed to assume. Lowering is always safe; raising past twelve
+requires `band.ts` and `models.ts` revisited in the same commit. **The scheduler allocates
+steps. What a step does inside its slot is the step's own business.**
+
+### 4.2 Picking the machine
+
+Owen, 2026-09-13: *"The easiest way to do this is probably to disable or enable servers at
+will from the queue page. To make sure it goes to the server we want. Do you have a
+different idea of how we pick the server to use for a job or a set of jobs"*
+
+The toggle is right and should be built — but it answers a different question from the one
+it is being asked to answer, and used for routing it has a failure mode worth avoiding.
+
+**Keep the toggle, as a capacity switch.** "This machine is available to the queue at all"
+is a real, standing piece of state with an obvious use: the Mac is fine-tuning tonight,
+keep the queue off it. It belongs on the queue page exactly as Owen describes.
+
+**But routing by toggling is modal, and the queue is asynchronous.** Disabling two machines
+to force one job onto the third also routes every job that admits afterwards, and Owen is
+usually not watching — the pattern this whole system is built around is queueing a night's
+work and going to bed. The assignment happens at **admission**, not at enqueue, so with a
+global toggle the machine a job lands on is decided by whatever the toggle happened to be
+hours later, in an order he did not choose. It also cannot express "these three chapters
+on the Mac, those three on the PC", which is the case that motivated the question.
+
+**So: a per-row pin, defaulting to Any.** `Run on: [ Any | This PC | Mac Studio ]`, set when
+the row is created and editable while it is still queued. The decision is recorded at the
+moment the intent exists — when Owen makes the row — instead of being inferred from global
+state at an unpredictable later time. It costs almost nothing, because section 4 already
+requires an eligibility function; a pin is one more input to it:
+
+```
+eligible(step) = step.machines() ∩ enabled(machine) ∩ (step.pin ?? any)
+```
+
+A pin naming a machine that is disabled, unreachable or stale **holds the step and says so
+by name**. It never silently falls back to another machine: a pin is an instruction, and
+quietly doing something else with Owen's book is the failure this rule exists to prevent.
+
+### 4.3 A chain STICKS to the machine its first step ran on
+
+This is the part that is not a preference, and it is the reason a per-row pin alone is not
+enough.
+
+The two backends are different implementations of the same model. `cuda-linux` renders
+Higgs through SGLang (`engine/higgs/v3_served.py`); `mlx-darwin` renders it through
+mlx-audio (`engine/higgs/mlx_backend.py`). Different samplers, different RNG, different
+batching. **They do not produce the same audio**, and they need not, because until now a
+book was rendered on one machine by construction.
+
+Spreading one book across machines breaks that in two ways at once:
+
+1. **The book acquires a seam.** Chapters 1-4 in one engine's voice and 5-8 in another's is
+   audible in a way no test asserts.
+2. **The guard's pace state is carried across a rate change.** Phase 6 section 4 has the
+   running median travelling chapter to chapter; if the two engines speak at even slightly
+   different rates, chapter 5 starts centred on chapter 4's machine and fires on healthy
+   chunks — which is exactly the failure raising the short factor to 1.3 was meant to stop.
+
+So **machine affinity is inherited down a chain**: the first step to be assigned fixes the
+machine, and every step chained behind it inherits the pin unless Owen overrides it
+explicitly. A book is a chain. That gets the parallelism where it is safe — two *different*
+books on two machines at once — and refuses it where it is not.
+
 ---
 
 ## 5. `GET /v1/activity` — what is on this server and how far along
@@ -300,7 +377,9 @@ still moving. The Foundry session has been told exactly that.
 ## 9. Order, and what depends on what
 
 1. **`/v1/activity` + the recorded client** — server-side, small, independently useful,
-   and nothing else can be built without it. **Start here.**
+   and nothing else can be built without it. **Start here.** *(Built 2026-09-13, branch
+   `feat/phase6-remote-render`: the route, the opt-in probe, `Job.client` from the
+   User-Agent, `Job.message` from the last progress event.)*
 2. **The ancillary lane in Crucible** — a second, non-exclusive lane; the `tts` FLAC
    encode moves into it. Independently valuable (it stops a book's encoding from occupying
    the card's lane) and it is what makes `slots.ancillary` honest.

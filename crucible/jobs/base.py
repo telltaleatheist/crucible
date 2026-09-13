@@ -72,6 +72,22 @@ class Job:
     artifacts: list[str] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     cancel_requested: bool = False
+    #: The last `progress` event's message, so a whole-server read
+    #: (`GET /v1/activity`, PHASE7-LANES.md section 5) can say what a job is
+    #: doing without replaying its event log. The event log stays the truth;
+    #: this is the latest line off it.
+    message: str | None = None
+    #: Who submitted this job, from the User-Agent the SDK already sends
+    #: (`<clientName> crucible-client/<version>`), or None when something spoke
+    #: to this server without one.
+    #:
+    #: IDENTIFICATION, NOT AUTHORISATION. Everything holding the token is one
+    #: trust domain (DESIGN.md section 8) and a client that lies about its name
+    #: is lying to a bench widget. It exists because two BookForge instances can
+    #: point at one server, and a bench that drew somebody else's render as its
+    #: own would offer Owen a cancel button for a chapter his other machine is
+    #: rendering. PHASE7-LANES.md section 5.
+    client: str | None = None
     #: Extra keys a job type adds to its own `done` event. `load-model` puts
     #: `resident` here (PHASE2-LLM.md section 5); `artifacts` is always present.
     done_extra: dict[str, Any] = field(default_factory=dict)
