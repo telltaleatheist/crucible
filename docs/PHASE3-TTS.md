@@ -780,7 +780,8 @@ built, and `crucible/engines/narrator.py` does not exist: `build_voice_engine()`
 `stdio()`/`attach()`/`detach()` seam in `SubprocessEngine.start()`, the three `envs/tts/`
 recipes, `crucible/narratorpatches.py` and the `narrator_patches` row in `crucible doctor`.
 The helpers `load-voice` and the render door share moved to `crucible/jobs/tts/common.py`;
-nothing about their behaviour changed in the move. `python -m pytest` goes from 406 to 468.
+nothing about their behaviour changed in the move. `python -m pytest` goes from 406 at the branch point to 469 — 61 of those are this
+branch's, and `origin/main` gained the rest while it was being built.
 
 Section 7, the streaming door, is still unbuilt. What the engine seam **gives** it: the
 process lifetime, `send()` for an out-of-band op while a request is in flight, and
