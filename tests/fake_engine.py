@@ -58,6 +58,20 @@ class _Handler(BaseHTTPRequestHandler):
     #: request it is still working on is for nobody. Bound per engine in
     #: `FakeEngine.start`.
     aborted: threading.Event = threading.Event()
+    #: Every completion body this engine was sent, in arrival order. `ThreadingHTTPServer`
+    #: serves each connection on its own thread, so `last_request` is whichever
+    #: one finished last — no use at all to a test about concurrency.
+    requests: list[dict[str, Any]] | None = None
+    #: How many bytes of body arrived for each of those, which is the only way to
+    #: say "nothing was truncated" about an 11 MB data URI without trusting the
+    #: JSON to have parsed.
+    request_bytes: list[int] | None = None
+    #: Called once per completion, on the serving thread, before anything is
+    #: answered. A test that needs several requests to be genuinely in flight at
+    #: the same moment puts a `threading.Barrier.wait` here; nothing else can
+    #: tell "twelve at once" from "twelve quickly".
+    on_post: Callable[[], None] | None = None
+    lock: threading.Lock | None = None
 
     def log_message(self, *args: Any) -> None:  # keep pytest output clean
         return
@@ -107,6 +121,11 @@ class _Handler(BaseHTTPRequestHandler):
         body = json.loads(raw or b"{}")
         type(self).last_request_bytes = raw
         type(self).last_request = body
+        with type(self).lock:
+            type(self).requests.append(body)
+            type(self).request_bytes.append(len(raw))
+        if type(self).on_post is not None:
+            type(self).on_post()
 
         if type(self).reject_response_format and "response_format" in body:
             # vLLM's own refusal shape for a schema it will not compile. The
@@ -250,6 +269,7 @@ class FakeEngine:
         reject_response_format: bool = False,
         answer_delay: float = 0.0,
         stream_forever: bool = False,
+        on_post: Callable[[], None] | None = None,
     ) -> None:
         self._python = Path(python)
         self._log_path = Path(log_path)
@@ -267,6 +287,7 @@ class FakeEngine:
         #: When given, `ready()` blocks on it, so a test can look at the server
         #: while a load is genuinely in flight.
         self._hold = hold
+        self._on_post = on_post
         #: Set once `ready()` has been entered, so a test knows the lane has
         #: reached the engine without polling on a sleep.
         self.warming_started = threading.Event()
@@ -303,6 +324,12 @@ class FakeEngine:
                 "answer_delay": self._answer_delay,
                 "stream_forever": self._stream_forever,
                 "aborted": self.aborted,
+                # Per engine, not per class: two engines in one test (a load that
+                # evicts another) must not share a request log.
+                "requests": [],
+                "request_bytes": [],
+                "lock": threading.Lock(),
+                "on_post": self._on_post,
             },
         )
         self._handler = handler
@@ -353,3 +380,17 @@ class FakeEngine:
     def last_request_bytes(self) -> bytes | None:
         """The last chat body as it arrived, before anything parsed it."""
         return getattr(self, "_handler", _Handler).last_request_bytes
+
+    @property
+    def requests(self) -> list[dict[str, Any]]:
+        handler = getattr(self, "_handler", None)
+        if handler is None:
+            raise RuntimeError("fake engine has not been started")
+        return handler.requests
+
+    @property
+    def request_bytes(self) -> list[int]:
+        handler = getattr(self, "_handler", None)
+        if handler is None:
+            raise RuntimeError("fake engine has not been started")
+        return handler.request_bytes

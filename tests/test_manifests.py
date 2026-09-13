@@ -26,6 +26,7 @@ id = "demo-1b"
 family = "demo"
 params_b = 1
 context_default = 4096
+modalities = ["text"]
 
 [backends.cuda-linux]
 engine = "vllm"
@@ -126,7 +127,7 @@ def test_an_unknown_top_level_table_is_refused() -> None:
 
 
 @pytest.mark.parametrize(
-    "key", sorted({"id", "family", "params_b", "context_default"})
+    "key", sorted({"id", "family", "params_b", "context_default", "modalities"})
 )
 def test_every_model_key_is_required(key: str) -> None:
     lines = [line for line in GOOD.splitlines() if not line.startswith(f"{key} ")]
@@ -244,12 +245,30 @@ def test_an_unknown_model_id_names_what_is_shipped(tmp_path: Path) -> None:
 #: Every manifest this build ships, in the order `load_all_manifests` returns
 #: them — which is id order, and the order `/v1/models` lists them in. The 4-bit
 #: 27B sorts after the bf16 one because its id extends it.
-SHIPPED = ["qwen3.5-9b", "qwen3.8-27b", "qwen3.8-27b-4bit"]
+SHIPPED = ["dots-ocr", "qwen3.5-9b", "qwen3.8-27b", "qwen3.8-27b-4bit"]
 
 #: Each model's `context_default`. The two bf16 manifests carry Owen's pinned
 #: cleanup context; the 4-bit 27B carries the 98304 of his `qwen3.8:27b-24g`
-#: Ollama tag, which is the context he actually runs on the 3090 Ti.
-CONTEXTS = {"qwen3.5-9b": 12288, "qwen3.8-27b": 12288, "qwen3.8-27b-4bit": 98304}
+#: Ollama tag, which is the context he actually runs on the 3090 Ti; `dots-ocr`
+#: carries the 32768 a rasterised page needs (PHASE3-VLM.md section 4).
+CONTEXTS = {
+    "dots-ocr": 32768,
+    "qwen3.5-9b": 12288,
+    "qwen3.8-27b": 12288,
+    "qwen3.8-27b-4bit": 98304,
+}
+
+#: Which backends each shipped manifest declares. The three text models are
+#: served on both; `dots-ocr` has a cuda-linux block only, because Foundry's
+#: in-process `mlx-local` route is the Mac's only page-reading route today and a
+#: block here carrying an unmeasured estimate would compete with a route that
+#: works (PHASE3-VLM.md section 4).
+BACKENDS = {
+    "dots-ocr": ["cuda-linux"],
+    "qwen3.5-9b": ["cuda-linux", "mlx-darwin"],
+    "qwen3.8-27b": ["cuda-linux", "mlx-darwin"],
+    "qwen3.8-27b-4bit": ["cuda-linux", "mlx-darwin"],
+}
 
 #: Where a backend serves a context of its own. `qwen3.8-27b-4bit` wants 98304
 #: and gets it on the Mac; on a 24 GB card 98304 of its KV is 7.9 GiB that is not
@@ -257,7 +276,7 @@ CONTEXTS = {"qwen3.5-9b": 12288, "qwen3.8-27b": 12288, "qwen3.8-27b-4bit": 98304
 BACKEND_CONTEXTS = {("qwen3.8-27b-4bit", "cuda-linux"): 16384}
 
 
-def test_this_build_ships_the_phase_two_manifests() -> None:
+def test_this_build_ships_the_manifests_the_contracts_name() -> None:
     manifests = load_all_manifests()
     assert sorted(manifests) == SHIPPED
 
@@ -289,9 +308,9 @@ def test_an_id_that_is_a_prefix_of_another_still_lists_in_id_order(
 
 
 @pytest.mark.parametrize("model_id", SHIPPED)
-def test_each_shipped_manifest_declares_both_backends(model_id: str) -> None:
+def test_each_shipped_manifest_declares_the_backends_it_serves(model_id: str) -> None:
     manifest = load_manifest(model_id)
-    assert sorted(manifest.backends) == ["cuda-linux", "mlx-darwin"]
+    assert sorted(manifest.backends) == BACKENDS[model_id]
     assert manifest.context_default == CONTEXTS[model_id]
     for kind, spec in manifest.backends.items():
         assert spec.engine == BACKEND_ENGINES[kind]

@@ -30,6 +30,8 @@ from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
 from .fake_engine import ANSWER, DELTAS, TOOL_CALL, FakeEngine
 
 MODEL = "qwen3.5-9b"
+#: The page reader, which sorts first by id and so leads every listing.
+PAGE_MODEL = "dots-ocr"
 BIG_MODEL = "qwen3.8-27b"
 #: The same 27B at 4 bits: the one that does fit Owen's card.
 SMALL_BIG_MODEL = "qwen3.8-27b-4bit"
@@ -122,7 +124,9 @@ def test_models_lists_every_manifest_with_its_standing(
     response = llm_client.get("/v1/models", headers=auth)
     assert response.status_code == 200
     rows = {row["id"]: row for row in response.json()}
-    assert [row["id"] for row in response.json()] == [MODEL, BIG_MODEL, SMALL_BIG_MODEL]
+    assert [row["id"] for row in response.json()] == [
+        PAGE_MODEL, MODEL, BIG_MODEL, SMALL_BIG_MODEL,
+    ]
     row = rows[MODEL]
     assert row["family"] == "qwen3.5"
     assert row["params_b"] == 9
@@ -167,7 +171,7 @@ def test_info_gains_an_llm_capability(
     by_type = {entry["job_type"]: entry for entry in capabilities}
     assert "llm" in by_type
     assert [row["id"] for row in by_type["llm"]["models"]] == [
-        MODEL, BIG_MODEL, SMALL_BIG_MODEL,
+        PAGE_MODEL, MODEL, BIG_MODEL, SMALL_BIG_MODEL,
     ]
     # The two things you can actually POST are listed as themselves.
     assert "load-model" in by_type
@@ -207,6 +211,7 @@ id = "mac-only"
 family = "demo"
 params_b = 1
 context_default = 4096
+modalities = ["text"]
 
 [backends.mlx-darwin]
 engine = "mlx-lm"
@@ -250,7 +255,11 @@ def test_every_row_carries_the_fingerprint_a_client_records(
     rows = llm_client.get("/v1/models", headers=auth).json()
     for row in rows:
         assert row["fingerprint"] == f"{row['id']}@{row['revision']}"
-    assert rows[0]["fingerprint"] == (
+    # By id, not by position: the rows are sorted by manifest stem, so which one
+    # is first changes the moment a manifest is added — `dots-ocr` took the slot
+    # from `qwen3.5-9b` the day page reading landed.
+    row = next(r for r in rows if r["id"] == MODEL)
+    assert row["fingerprint"] == (
         f"{MODEL}@{load_manifest(MODEL).spec(FAKE_BACKEND.kind).revision}"
     )
 
@@ -271,6 +280,7 @@ id = "mac-only"
 family = "demo"
 params_b = 1
 context_default = 4096
+modalities = ["text"]
 
 [backends.mlx-darwin]
 engine = "mlx-lm"
@@ -408,6 +418,7 @@ id = "shifty"
 family = "demo"
 params_b = 1
 context_default = {context}
+modalities = ["text"]
 
 [backends.cuda-linux]
 engine = "vllm"
@@ -478,6 +489,7 @@ id = "mac-only"
 family = "demo"
 params_b = 1
 context_default = 4096
+modalities = ["text"]
 
 [backends.mlx-darwin]
 engine = "mlx-lm"

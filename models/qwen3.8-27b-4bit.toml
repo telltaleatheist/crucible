@@ -119,6 +119,10 @@ id = "qwen3.8-27b-4bit"
 family = "qwen3.8"
 params_b = 27
 context_default = 98304
+# Text, for the same reason as the bf16 manifest and the 9B's: a vision tower the
+# server does not offer, and on cuda-linux a `--skip-mm-profiling` that leaves
+# nothing reserved for a page. models/qwen3.5-9b.toml carries the long version.
+modalities = ["text"]
 
 [backends.cuda-linux]
 engine = "vllm"

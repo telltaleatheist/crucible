@@ -1,0 +1,164 @@
+# dots.ocr — the page reader (PHASE3-VLM.md section 4).
+#
+# The first manifest in this repo whose `modalities` carries `image`, and the
+# only model here a client sends a picture to. Foundry's page reading is an
+# ORDINARY chat completion whose first content part is a data-URI PNG — one page
+# per request, twelve in flight, `temperature: 0`, `max_tokens <= 8192` — so this
+# model is served through the same `llm` proxy as everything else and there is no
+# `vlm-pages` job type to go with the file name.
+#
+# ------------------------------------------------------------------- the repo
+#
+# `rednote-hilab/dots.ocr` is the name both apps send today and the name
+# PHASE3-VLM.md was written with. It is no longer the repo's own name: as of
+# 2026-09-13 the hub answers `GET /api/models/rednote-hilab/dots.ocr` with a
+# **307 to `/api/models/dots-studio/dots.ocr`**, and `?author=rednote-hilab`
+# lists nothing at all — the org was renamed, weights and history intact. Both
+# names report the same `main` at the same commit, so this is a rename and not a
+# fork or a mirror.
+#
+# The pin below is that commit, read from the hub on 2026-09-13:
+#   GET /api/models/dots-studio/dots.ocr/refs
+#     -> main = c0111ce6bc07803dbc267932ffef0ae3a51dc951
+#   GET /api/models/rednote-hilab/dots.ocr/refs  (through the 307)
+#     -> the same sha
+# and `resolve/c0111ce6.../config.json` returns the config quoted below, so the
+# revision is one the puller can actually fetch rather than one read off a page.
+#
+# `hf_repo` names the repo as it is named now. Pinning the redirect would work
+# today and would be a fallback — a name that resolves because somebody else's
+# server is still forwarding it, which is exactly the kind of dependency that
+# fails quietly on the day it stops. The client-side name is a different
+# question and stays where it is: Foundry sends `--vlm-endpoint-model dots-ocr`,
+# Crucible's own id, and the proxy rewrites nothing (PHASE3-VLM.md section 5).
+#
+# -------------------------------------------------------------- what it is
+#
+# From `config.json` at the pinned sha: `DotsOCRForCausalLM`, `model_type`
+# `dots_ocr`, custom modeling code in the repo (`modeling_dots_ocr.py`,
+# `configuration_dots.py`) — hence `--trust-remote-code`. A 28-layer, 1536-hidden
+# language model with 12 attention heads over 2 KV heads, and a 42-layer vision
+# tower at patch 14 with `spatial_merge_size` 2. The weights are two bf16
+# safetensors shards totalling 6_078_431_736 B (5.661 GiB), read from the tree
+# API at the pinned sha — about 3.04 B parameters, which is the `params_b` below.
+#
+# Foundry rasterises at a pinned `VLM_DPI = 200`, so a 468x760 pt page becomes a
+# 1300x2112 PNG: floor(1300/14) x floor(2112/14) = 13_800 patches, merged 2x2 to
+# **3_450 image tokens**. That plus the layout-all prompt plus an 8192-token
+# answer is what has to fit the context, and it is why the context is 32768 and
+# not less.
+
+[model]
+id = "dots-ocr"
+family = "dots"
+params_b = 3
+context_default = 32768
+# The point of the file. `image` here is what makes the loader refuse
+# `--skip-mm-profiling` in the block below — the flag the two text manifests
+# carry, worth a measured 1.90 GiB on the 9B, and the one thing that must NOT be
+# set on a model that will actually be handed a page.
+modalities = ["text", "image"]
+
+[backends.cuda-linux]
+engine = "vllm"
+hf_repo = "dots-studio/dots.ocr"
+revision = "c0111ce6bc07803dbc267932ffef0ae3a51dc951"
+# ##########################################################################
+# DECLARED, NOT MEASURED. This is the one number in models/ that was not read
+# off an accelerator, and it is labelled so nobody later mistakes it for one.
+# The 3090 Ti was running an overnight fine-tune the night this manifest was
+# written and the Mac was on an audio job, so the honest choice was between a
+# number with its derivation shown and no manifest at all.
+#
+# It is NOT invented. Both apps that serve this model on this exact card
+# converge on the same reservation, and the number below is that reservation:
+#
+#   BookForge, electron/vlm-page-server.ts — `RESERVE_CAP_MB = 12_288`, a cap
+#   on the reservation rather than a fraction of the card, and the comment
+#   there names the incident that set it: on 2026-08-11 a ~20 GiB reservation
+#   (the fraction ceiling applied to an idle card) held the machine at 93%
+#   commit all night and OOM-killed bun, ffmpeg and python around it, because
+#   under WSL's dxg layer every reserved GiB is ALSO committed host RAM.
+#
+#   Foundry, app/electron/vllm-server.ts — `GPU_UTIL = 0.5`, flat, for the same
+#   stated reason: "half is clear of the ~6 GB of weights plus a workable KV
+#   cache ... reserving for the card's emptiness rather than the model's need is
+#   a way to OOM the machine around it."
+#
+# 12_288 MiB of a 24_564 MiB card is 0.5003, which is where the 0.5 below comes
+# from, and this is the configuration that reads Owen's books today.
+#
+# Why the estimate equals the budget: `--gpu-memory-utilization` is a fraction
+# of the card's TOTAL and a BUDGET rather than a demand — vLLM sizes the KV pool
+# to fill whatever the weights, the profiled activation peak and the CUDA graphs
+# leave of it (models/qwen3.5-9b.toml explains this at length). So the engine's
+# share is the budget, whatever the model is. Against the two blocks in this
+# repo where both figures exist:
+#   qwen3.5-9b       util 0.84 -> budget 20.15 GiB, MEASURED peak 19.52 GiB
+#   qwen3.8-27b-4bit util 0.86 -> budget 20.63 GiB, MEASURED peak 20.15 GiB
+# the budget over-states the measured peak by 0.6 and 0.5 GiB. Over-stating is
+# the safe direction for a guard whose job is to refuse a load there is no room
+# for, so the budget is what goes in:
+#   0.5 x 24_564 MiB = 12_282 MiB = 12_878_610_432 B = 11.99 GiB
+#
+# The floor, for the same reason the 27B manifests carry theirs — weights plus
+# KV at this context, COMPUTED from config.json at the pinned sha:
+#   head_dim = hidden_size / num_attention_heads = 1536 / 12 = 128
+#   per token per layer = 2 (K and V) x 2 kv heads x 128 x 2 bytes = 1_024 B
+#   per token = 1_024 x 28 layers = 28_672 B
+#   at 32_768 tokens = 939_524_096 B (0.875 GiB)
+#   6_078_431_736 (weights) + 939_524_096 (KV) = 7_017_955_832 B = 6.54 GiB
+# so the declared figure leaves about 5.4 GiB for the vision tower's activation
+# peak, the CUDA graphs and the KV of more than one page at a time. That last
+# one is the part to watch: a page in flight is ~3_450 image tokens plus the
+# prompt plus up to 8192 of answer, so at the worst case 12 concurrent pages
+# want about 4.1 GiB of KV. If the pool comes out under that vLLM PREEMPTS and
+# the run slows down; it does not fail, and it does not OOM the host.
+#
+# WHAT MUST BE MEASURED, AND WHEN: the first time a card is free. Pull this
+# model, load it, read one real page through the proxy, and sample nvidia-smi
+# across the run the way scripts/measure-llm-memory.sh does for the text
+# models — then replace this number and this comment with the measured peak and
+# the run that produced it. In particular the profiled activation peak WITH an
+# image in it is a different number from anything the text models measured,
+# because `--skip-mm-profiling` is precisely what they used to avoid measuring
+# it. Until that run happens, treat 0.5 as a working configuration and not as a
+# tuned one.
+# ##########################################################################
+memory_bytes_estimate = 12_878_610_432
+# `--trust-remote-code`: dots.ocr ships its modeling class in its own repo
+# (`auto_map` points at `modeling_dots_ocr.DotsOCRForCausalLM`), and vLLM refuses
+# the repo without this — by name, in a pydantic ValidationError, which is how
+# BookForge found it rather than a user.
+#
+# `--max-model-len 32768`: the model's `max_position_embeddings` is 131072, so
+# this is a choice about the card and not a limit of the weights. It is what both
+# apps serve, and PHASE3-VLM.md's floor: 3_450 image tokens plus the layout-all
+# prompt plus an 8192-token answer do not fit less with room to spare.
+#
+# `--max-num-seqs 16`: Foundry's ungated default is twelve pages in flight and
+# BookForge takes it by passing `concurrency: 0`, so twelve is the floor a page
+# reader has to clear. Sixteen is the number the other two manifests use and the
+# number BookForge's own text server runs on this card. Neither app passes this
+# flag at all today, which leaves vLLM's default in place; it is set here for the
+# 9B's measured reason — the count of CUDA graphs vLLM captures follows it, and
+# at the default the 9B captured 51 of them and paged at 87 s for one.
+#
+# No `--dtype`: the checkpoint's config already says `bfloat16`, and neither
+# working launch line overrides it, so there is nothing here to override.
+#
+# No `--skip-mm-profiling`, and the loader will not accept one beside
+# `modalities = [..., "image"]` (PHASE3-VLM.md section 3). This is the model that
+# flag was always going to be wrong for.
+engine_args = [
+    "--trust-remote-code",
+    "--max-model-len", "32768",
+    "--gpu-memory-utilization", "0.5",
+    "--max-num-seqs", "16",
+]
+
+# No `[backends.mlx-darwin]`. `mlx-community/dots.ocr-4bit` exists and Foundry's
+# `mlx-local` route serves it in-process on the Mac today, which is the Mac's
+# only route and the reason there is no hurry: a block here with an unmeasured
+# estimate would compete with a route that works. It gets one when the model is
+# measured on that machine.

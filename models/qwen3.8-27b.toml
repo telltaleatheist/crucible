@@ -36,6 +36,13 @@ id = "qwen3.8-27b"
 family = "qwen3.8"
 params_b = 27
 context_default = 12288
+# Text, for the reason models/qwen3.5-9b.toml gives at length: the checkpoint has
+# a vision tower and this server does not offer it. This block carries no
+# `--skip-mm-profiling`, so nothing stops it being offered for images one day —
+# but neither estimate here has ever been measured with an image profiled in, and
+# a modality is advertised on what was measured, not on what is architecturally
+# possible.
+modalities = ["text"]
 
 [backends.cuda-linux]
 engine = "vllm"
