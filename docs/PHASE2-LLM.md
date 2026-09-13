@@ -156,6 +156,19 @@ of it. A streamed request is no different: the upstream response is opened befor
 is returned, so a refusal arrives as a refusal and never as a 200 whose stream turns out to
 be an error.
 
+**A caller who goes away takes the engine's request with them.** Neither app can cancel a
+chat any other way — Foundry's `Transport` has no abort member at all and BookForge chains
+an `AbortSignal` to the fetch, so for both of them the cancel *is* dropping the connection
+(CLIENT-SURFACES.md, closing section). Crucible runs one job at a time, so tokens generated
+for somebody who has hung up are not wasted in the abstract; they are the next job's time.
+A streamed completion's upstream is closed by the response that owns it, on every path out
+of it. A non-streamed one races the upstream POST against the caller's own socket and
+cancels the POST when that socket closes, which is what closes the engine's end: a bare
+`await client.post(...)` watches nothing and would sit there to the end of the token
+budget. The handler then answers **499 `client_disconnected`** — a status nobody will read,
+because the connection it would travel down is gone, written down here so that nothing in
+the code has to pretend a completion happened.
+
 A load job runs on the exclusive lane like everything else, so it waits behind a running
 job and a chat request never races a load.
 

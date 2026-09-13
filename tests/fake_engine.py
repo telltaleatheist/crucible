@@ -10,7 +10,10 @@ on a real loopback port — so the proxy's socket path is the real one.
 from __future__ import annotations
 
 import json
+import select
+import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -45,9 +48,35 @@ class _Handler(BaseHTTPRequestHandler):
     #: Answer any body carrying `response_format` with a 400 in the engine's own
     #: shape — what vLLM does with a schema it cannot compile.
     reject_response_format: bool = False
+    #: Seconds to spend before answering a non-streamed completion, and seconds
+    #: between frames of a streamed one. A real engine is slow; a test that wants
+    #: to walk away mid-answer needs an answer that is still being written.
+    answer_delay: float = 0.0
+    #: Keep streaming frames until somebody hangs up, rather than finishing.
+    stream_forever: bool = False
+    #: Set when this engine notices the end of its connection go away: the
+    #: request it is still working on is for nobody. Bound per engine in
+    #: `FakeEngine.start`.
+    aborted: threading.Event = threading.Event()
 
     def log_message(self, *args: Any) -> None:  # keep pytest output clean
         return
+
+    def _peer_gone(self, timeout: float) -> bool:
+        """Wait up to `timeout` for the other end of this socket to close.
+
+        This is how a real engine learns its caller is gone: the TCP connection
+        closes under it. `MSG_PEEK` so nothing that did arrive is consumed —
+        readable-and-empty is EOF, readable-with-bytes is a client that is still
+        there.
+        """
+        try:
+            ready, _, _ = select.select([self.connection], [], [], timeout)
+            if not ready:
+                return False
+            return self.connection.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
 
     def _json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -110,6 +139,9 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
+            if type(self).stream_forever:
+                self._stream_until_hung_up()
+                return
             for index, delta in enumerate(DELTAS):
                 self._frame(
                     {
@@ -129,6 +161,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._frame({"index": 0, "delta": {}, "finish_reason": type(self).finish_reason})
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
+            return
+
+        if type(self).answer_delay > 0.0 and self._wait_out_the_answer():
             return
 
         reason = type(self).finish_reason
@@ -151,6 +186,39 @@ class _Handler(BaseHTTPRequestHandler):
                 },
             },
         )
+
+    def _wait_out_the_answer(self) -> bool:
+        """Spend `answer_delay` generating, watching for the caller to hang up.
+
+        Returns True if the caller went away first — a real engine would have
+        spent that whole time producing tokens for nobody, which on the exclusive
+        lane is time stolen from the next job.
+        """
+        deadline = time.monotonic() + type(self).answer_delay
+        while time.monotonic() < deadline:
+            if self._peer_gone(0.02):
+                type(self).aborted.set()
+                return True
+        return False
+
+    def _stream_until_hung_up(self) -> None:
+        """Emit frames forever, the way an engine mid-generation does.
+
+        Nothing here ever sends `[DONE]`: the only thing that ends this stream is
+        somebody closing it, which is exactly the question the test is asking.
+        """
+        while True:
+            if self._peer_gone(type(self).answer_delay):
+                type(self).aborted.set()
+                return
+            try:
+                self._frame(
+                    {"index": 0, "delta": {"content": "on "}, "finish_reason": None}
+                )
+            except OSError:
+                # The write itself found the socket gone, which is the same news.
+                type(self).aborted.set()
+                return
 
     def _frame(self, choice: dict[str, Any]) -> None:
         """One `chat.completion.chunk` SSE frame, flushed as a real engine does."""
@@ -180,11 +248,17 @@ class FakeEngine:
         hold: threading.Event | None = None,
         finish_reason: str = "stop",
         reject_response_format: bool = False,
+        answer_delay: float = 0.0,
+        stream_forever: bool = False,
     ) -> None:
         self._python = Path(python)
         self._log_path = Path(log_path)
         self._finish_reason = finish_reason
         self._reject_response_format = reject_response_format
+        self._answer_delay = answer_delay
+        self._stream_forever = stream_forever
+        #: Set when a request this engine was serving lost its caller.
+        self.aborted = threading.Event()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._port: int | None = None
@@ -226,6 +300,9 @@ class FakeEngine:
                 "served_name": served_name,
                 "finish_reason": self._finish_reason,
                 "reject_response_format": self._reject_response_format,
+                "answer_delay": self._answer_delay,
+                "stream_forever": self._stream_forever,
+                "aborted": self.aborted,
             },
         )
         self._handler = handler

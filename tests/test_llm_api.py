@@ -1,11 +1,12 @@
 """`load-model`, `unload-model`, `/v1/models` and the OpenAI proxy.
 
-No GPU and no 19 GB of weights: the env, the weights and the engine are all
-stood up as the real code paths read them — a stamped venv directory, a stamped
-weights directory, and an `Engine` that serves a trivial OpenAI surface on a real
-loopback port (tests/fake_engine.py). What is *not* faked is any of the server's
-own logic: the preflight refusals, the exclusive lane, the event stream and the
-proxy are exactly what runs on the PC.
+No GPU and no 19 GB of weights — the env, the weights and the engine are stood
+up by the fixtures in conftest.py exactly as the real code paths read them. What
+is *not* faked is any of the server's own logic: the preflight refusals, the
+exclusive lane, the event stream and the proxy are exactly what runs on the PC.
+
+The one thing this file cannot ask is what happens when the caller goes away
+mid-request; `TestClient` has no such state. That is tests/test_proxy_disconnect.py.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, llmenv
+from crucible import accelerator
 from crucible.accelerator import GIB, ComputeApp
 from crucible.jobs.llm import residency as residency_module
 from crucible.manifests import load_manifest
@@ -35,61 +36,6 @@ SMALL_BIG_MODEL = "qwen3.8-27b-4bit"
 
 
 # ------------------------------------------------------------------ fixtures
-
-
-@pytest.fixture
-def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A stamped `~/.crucible/envs/llm` that `env_status` accepts."""
-    directory = llmenv.llm_env_dir(home)
-    (directory / "bin").mkdir(parents=True)
-    (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "backend": FAKE_BACKEND.kind,
-                "recipe": f"{FAKE_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
-    pins = llmenv.recipe_pins(llmenv.recipe_for(FAKE_BACKEND.kind))
-    monkeypatch.setattr(llmenv, "installed_packages", lambda _home: dict(pins))
-    return directory
-
-
-@pytest.fixture
-def fake_weights(home: Path) -> Callable[[str], Path]:
-    """Stamp a model as pulled at exactly the revision its manifest pins."""
-
-    def stamp(model_id: str) -> Path:
-        spec = load_manifest(model_id).spec(FAKE_BACKEND.kind)
-        directory = home / "models" / model_id / FAKE_BACKEND.kind
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "crucible-pull.json").write_text(
-            json.dumps(
-                {
-                    "model": model_id,
-                    "backend": FAKE_BACKEND.kind,
-                    "hf_repo": spec.hf_repo,
-                    "revision": spec.revision,
-                    "bytes": 19_306_310_880,
-                    "seconds": 300.0,
-                    "pulled": "2026-09-12T19:00:00+0000",
-                }
-            ),
-            encoding="utf-8",
-        )
-        return directory
-
-    return stamp
-
-
-@pytest.fixture
-def idle_card(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
-    monkeypatch.setattr(accelerator, "probe_vram", lambda: (22 * GIB, 24 * GIB))
 
 
 #: A card big enough for the 27B, so residency can be tested with two real
@@ -131,36 +77,6 @@ def engines(monkeypatch: pytest.MonkeyPatch) -> list[FakeEngine]:
         lambda engine_name, model_dir, model_id: model_id,
     )
     return built
-
-
-@pytest.fixture
-def engine_factory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Callable[..., list[FakeEngine]]:
-    """`engines`, for a test that needs the engine configured.
-
-    Returns the same list of built engines; the keyword arguments go to every
-    `FakeEngine` the residency builds, so a test can say what the engine stops
-    for or what it refuses without writing its own `build_engine` patch.
-    """
-
-    def install(**options: Any) -> list[FakeEngine]:
-        built: list[FakeEngine] = []
-
-        def build(engine_name: str, python: Path, log_path: Path) -> FakeEngine:
-            engine = FakeEngine(python, log_path, **options)
-            built.append(engine)
-            return engine
-
-        monkeypatch.setattr(residency_module, "build_engine", build)
-        monkeypatch.setattr(
-            residency_module,
-            "engine_model_name",
-            lambda engine_name, model_dir, model_id: model_id,
-        )
-        return built
-
-    return install
 
 
 @pytest.fixture
