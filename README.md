@@ -257,6 +257,34 @@ watching a job fail a minute later.
 > On Apple Silicon that rule does not apply: "used" unified memory is the OS and the
 > user's apps, so the free figure is the whole check.
 
+#### TODO(cuda-linux verification)
+
+**The `cuda-linux` half of PHASE2-LLM.md section 8 has not been run.** Owen's RTX 3090 Ti
+was busy with a Higgs ladder render for the whole of the phase-2 build, and Crucible never
+evicts another process — including its own author's.
+
+What *did* run on the PC, for real:
+
+- `crucible install llm` — 196 s, 8.0 GB, vLLM 0.29.0 / torch 2.13.0 / transformers 5.17.0
+- `crucible models pull qwen3.5-9b` — 19.33 GB at the pinned sha in 154 s
+- `crucible doctor` — healthy, the 194-pin recipe verified against the built env
+- the guard refusing, live, against that busy card: `accelerator_busy`
+- `load-model qwen3.5-27b` refused `insufficient_memory` (52.5 GiB against 24.0 GiB)
+- `pytest` — 127 passed
+
+What did **not**: loading `qwen3.5-9b` into vLLM, the chat completions through it, the
+VRAM measurement, and `keeper-llm-live.sh` in local mode on that host. Consequently:
+
+- `models/qwen3.5-9b.toml`'s **`[backends.cuda-linux] memory_bytes_estimate` is COMPUTED,
+  not measured** — weights on disk plus KV at 12288. Its comment says so. Replace it with
+  a measured number (`./scripts/measure-llm-memory.sh qwen3.5-9b`) when the card is free.
+- `[backends.cuda-linux] engine_args`'s `--gpu-memory-utilization 0.85` is the contract's
+  example value and has never been exercised. On a 24 GB card holding a 19.3 GB model
+  alongside the Windows desktop it may well be too low to leave room for the KV cache;
+  expect to raise it, and record the measured reason when you do.
+
+The `mlx-darwin` half is fully verified, including from a Windows client over the tailnet.
+
 #### Logs
 
 Each engine's stdout and stderr go to `~/.crucible/logs/engine-<model id>.log`, starting
