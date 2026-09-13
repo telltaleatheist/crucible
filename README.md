@@ -60,6 +60,8 @@ crucible token --show           # print the bearer token
 crucible serve                  # foreground; 127.0.0.1:7100 by default
 crucible install llm            # build the llm env for this host's backend
 crucible install tts --narrator-engine higgs-v3   # ...and a tts env, one per engine
+crucible capability             # what this host's card can hold, and why (dry run)
+crucible capability --write     # record that verdict in config.toml
 crucible models list            # model manifests and their standing here
 crucible models pull <id>       # fetch a model's weights at its pinned revision
 crucible voices list            # voice manifests and their standing here
@@ -71,6 +73,40 @@ crucible rvc pull <id>          # fetch and unpack one RVC model's archive
 `crucible init` refuses if a config already exists (`--force` replaces it and mints a
 **new** token, which every client then needs). It refuses outright if no backend is
 viable, naming the reason.
+
+### What this server can hold
+
+`crucible install <type>` does not only build an env. When the env is in place it
+compares this host's accelerator against the models that type needs, writes the
+`[jobs] enable_<type>` flag from the answer, and records the **reason** in a
+`[capability]` table beside it (PHASE9-CAPABILITY.md). A type turned off records the
+number that turned it off, so the refusal a client gets names it:
+
+```
+'tts' is disabled on this server: tts — disabled: the smallest of 7 voices is
+zeroshot at 17.7 GiB and there is only 3.0 GiB available (6.0 GiB card less a
+3.0 GiB desktop allowance) — short by 14.7 GiB. Higgs v3 is not quantized and will
+not be, so this is not a tuning choice — the engine is disabled on this
+accelerator. Turning [jobs] enable_tts on would not change any of those numbers;
+it would only move the failure to the first request.
+```
+
+That last sentence is the point. The old refusal said *"set `[jobs] enable_tts = true`
+in config.toml"*, which on a card that cannot hold Higgs is an instruction to produce
+an OOM. A refusal that recommends a fix which cannot work is worse than one that just
+says no.
+
+`crucible capability` asks the same question without building anything, and is a **dry
+run** unless given `--write`. Even with `--write` it may only turn a type **off**: a
+flag means "this server offers this type", which needs the card to fit *and* the env to
+exist, and only `crucible install` knows the second.
+
+Selection runs on the **declared** `memory_bytes_estimate` in each manifest, against
+`total` accelerator memory less `[accelerator] desktop_allowance_bytes` — 3 GiB flat on
+`cuda-linux`, 25% of unified memory on `mlx-darwin`. Free VRAM is deliberately not
+consulted: a capability is a fact about the host, not about the second `install` ran in,
+and the accelerator guard already refuses `insufficient_memory` at load time with the
+measured figure.
 
 ### Binding and the tailnet
 

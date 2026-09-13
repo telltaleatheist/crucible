@@ -986,3 +986,121 @@ def test_the_batch_width_has_no_default_for_an_unmeasured_engine(
     with pytest.raises(Exception) as caught:
         ttsstream.batch_width_for("some-engine-nobody-measured")
     assert getattr(caught.value, "code", None) == "unknown_narrator_engine"
+
+
+# --------------------------------------- the bench, while a session is running
+
+
+def test_the_bench_does_not_show_an_idle_machine_while_a_session_runs(
+    streaming_server: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    """The defect this was written for, and the direction it failed in.
+
+    `/v1/activity` drew its whole answer from the JobStore, and a streaming
+    session does not occupy the lane. So a bench polling for a free machine read
+    `busy: 0`, `running: []` and `queued: []` **while the browser extension was
+    streaming from that very server**, submitted, and was refused
+    `engine_in_use` after the round trip. The refusal was right; the display was
+    a lie, and it lied in the one direction that matters.
+
+    Owen, 2026-09-13, naming the three surfaces that do this — the streaming
+    page, the correct-sentences/re-roll page and the browser extension:
+    *"those places are independent of a queue but claim a server while they
+    run... that means crucible wont always have a percent complete to hand
+    back."*
+    """
+    with streaming_server() as base:
+        session = opened(base, auth)
+        body = httpx.get(f"{base}/v1/activity", headers=auth, timeout=30.0).json()
+
+        # The lane really is free, and still says so. `busy` counts the lane and
+        # nothing else — redefining it to mean "the card" would make it a second
+        # owner of the claim.
+        assert body["slots"]["accelerated"]["busy"] == 0
+        assert body["running"] == []
+        assert body["queued"] == []
+
+        # But the machine will not take work, and now says so in one read.
+        assert body["slots"]["accelerated"]["accepts_work"] is False
+        assert body["claim"] is not None
+        assert "tts stream" in body["claim"]["held_by"]
+
+        streaming = body["streaming"]
+        assert streaming is not None
+        assert streaming["session_id"] == session["session_id"]
+        assert streaming["voice"] == VOICE
+        assert streaming["since"]
+
+        # THE POINT OF THE WHOLE FIELD. A session has no denominator: rows arrive
+        # one `say` at a time, indefinitely, so any percentage would be a
+        # percentage of the work that happens to have arrived — a number that
+        # goes DOWN when more arrives. The key is present and null, which is this
+        # server's one spelling of "did not say"; what it offers instead is
+        # counts.
+        assert "progress" in streaming
+        assert streaming["progress"] is None
+        assert streaming["said"] == 0
+        assert streaming["finished"] == 0
+        assert streaming["in_flight"] == 0
+
+        # And the refusal a client gets if it submits anyway agrees with the
+        # bench about who has it. One fact.
+        refused = httpx.post(
+            f"{base}/v1/jobs",
+            headers=auth,
+            json={"type": "tts", "model": VOICE,
+                  "params": {"language": "en", "take": 0,
+                             "chunks": [{"index": 0, "text": "Rain."}]}},
+            timeout=30.0,
+        )
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["error"]["details"]["held_by"] == body["claim"]["held_by"]
+
+
+def test_the_bench_counts_what_a_session_has_actually_said(
+    streaming_server: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    """Counts rather than a percentage — the honest half of the same answer."""
+    with streaming_server() as base:
+        session = opened(base, auth)
+        sid = session["session_id"]
+        with listen(base, auth, sid) as stream:
+            stream.wait_for(lambda s: s.of("ready"), "the ready frame")
+            say(base, auth, sid, "r1", "Rain fell on the roof.")
+            stream.wait_for(lambda s: s.of("done"), "the row to retire")
+
+        streaming = httpx.get(
+            f"{base}/v1/activity", headers=auth, timeout=30.0
+        ).json()["streaming"]
+        assert streaming["said"] == 1
+        assert streaming["finished"] == 1
+        assert streaming["in_flight"] == 0
+        assert streaming["chars"] == len("Rain fell on the roof.")
+        assert streaming["seconds"] > 0.0
+        # Still no percentage, and there never will be one.
+        assert streaming["progress"] is None
+
+
+def test_the_bench_names_the_client_that_opened_the_session_or_says_it_did_not(
+    streaming_server: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    """null means "it did not say" — never a name this server invented.
+
+    A bench that guessed would be confidently wrong about who is on the card,
+    which is the rule `Job.client` already follows (PHASE7-LANES.md section 5).
+    """
+    with streaming_server() as base:
+        named = httpx.post(
+            f"{base}/v1/tts/stream",
+            headers={**auth, "User-Agent": "bookforge/owens-pc crucible-client/0.4.0"},
+            json={"voice": VOICE, "language": "en"},
+            timeout=30.0,
+        )
+        assert named.status_code == 201, named.text
+        body = httpx.get(f"{base}/v1/activity", headers=auth, timeout=30.0).json()
+        assert body["streaming"]["client"] == "bookforge/owens-pc crucible-client/0.4.0"
+        httpx.delete(
+            f"{base}/v1/tts/stream/{body['streaming']['session_id']}",
+            headers=auth,
+            timeout=30.0,
+        )

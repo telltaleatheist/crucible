@@ -11,6 +11,59 @@ of it can be trusted.
 
 ---
 
+## Status, 2026-09-13
+
+**BUILT — the selection step (section 2) and the refusal (section 2.1).**
+
+| what | where |
+|---|---|
+| the selection rule itself | `crucible/capability.py` — `CLASSES`, `decide`, `decide_all`, `job_type_enabled` |
+| the record in config.toml | `crucible/config.py` — `CapabilityRow`, `CapabilityRecord`, `[capability]` + `[[capability.classes]]` |
+| the refusal that names the number | `crucible/jobs/__init__.py` — `disabled_error`, used by `resolve`, `/v1/models`, `/v1/voices` and the streaming door |
+| install's selection step | `crucible/cli.py` — `_capability_step`, called by both install branches |
+| a door of its own | `crucible/cli.py` — `crucible capability [--write] [--json]` |
+| doctor | `crucible/cli.py` — `_capability_report`: stale record, contradicted flag, a fitting type not yet installed |
+| the tests | `tests/test_capability.py`, 32 of them, starting with the two answers Owen already runs |
+
+Three decisions the build made that this document did not state, each argued at length in
+`crucible/capability.py`'s module docstring:
+
+1. **A capability class, not a job type, is the unit of selection.** `enable_llm` is one
+   boolean and the ruling needs three — Owen's *"translation is binary per server"* cannot be
+   said by a flag that also covers cleanup. So `llm` is `clean` + `translate` + `pages`, the
+   flag is the disjunction, and the per-class rows carry the verdicts. Without this, a host
+   that cleans and cannot translate has nowhere to say so, and "translate is disabled" would
+   survive only as prose inside a reason string — which R4 forbids from being load-bearing.
+2. **Candidates are ordered by declared size, descending.** Not by a new `precision` key in
+   the manifests: `memory_bytes_estimate` already answers "how heavily is this quantized"
+   within a family, and a second field saying it in other units is a second owner of one fact
+   (R1). The order comes out right on both backends — 56.4 > 21.6 on cuda, 55.5 > 33.9 on mlx.
+3. **There is no `margin` term.** Section 1.3 writes the test as `estimate + margin ≤ total −
+   allowance` and section 1.2 answers what `margin` is: it is `desktop_allowance_bytes`. A
+   second reserve on top of the first is a number nobody has measured, and on the 3090 Ti it
+   would disable translate at 20.1 GiB against a 21.0 GiB budget — a card that has been
+   translating for months. That is section 1.1's failure repeating itself, so the fit test is
+   `estimate ≤ total − allowance` and the two known-good answers are asserted as tests.
+
+**One thing in this document is WRONG and the build does not implement it.** Section 3 calls a
+6 GB box *"an `llm` + `rvc` + `asr` server"*. Section 1.1 point 2 says the opposite and is
+right: there is no 4-bit 9B in this build and no 27B small enough, so **a 6 GB card has no
+`llm` capability at all** — `clean`, `translate` and `pages` all fail and the flag goes with
+them. `test_a_six_gig_card_keeps_llm_only_if_something_behind_it_fits` is that correction.
+`rvc` and `asr` survive, exactly as section 3 says.
+
+**STILL OWED**
+
+- Section 3's typed slot in BookForge's router, and a pin validated when it is made.
+- Section 5's deletion of `electron/orpheus-memory.ts`'s tier table.
+- Section 4's measurement is **DESCOPED, not deferred** — Owen, 2026-09-13: *"I don't think we
+  need to measure estimates. I've been using this system the way it is for months and it works
+  fine. Use the current settings for each."* Selection runs on the DECLARED estimates. There
+  is deliberately no `measured` vs `declared` distinction in `capability.py`, because nothing
+  would consume one.
+
+---
+
 ## 1. The ruling, and why it is smaller than it looks
 
 **Owen, 2026-09-13, refining it:** *"translation is binary per server as well. it should use a
@@ -220,7 +273,7 @@ the machine answering it.
 So the ruling adds **one axis** — card size — to a mechanism that already reasons about
 capability. What is missing is only that a human sets the flag today and a measurement should.
 
-## 2. What install does
+## 2. What install does — BUILT
 
 `crucible install` gains a selection step, between building the env and finishing:
 
@@ -232,7 +285,26 @@ capability. What is missing is only that a human sets the flag today and a measu
 The reason is not decoration. It is the difference between a server that is configured and a
 server that is broken in a way nobody can see.
 
-### 2.1 The refusal message must change with it
+**As built**, with three things the four steps above leave open:
+
+- **The step runs after the env, and writes before it refuses.** Not before the env, because a
+  flag saying "this server offers tts" must not be written by a run whose pip install then
+  failed. Not skipped when the card is too small, because the env on disk is still right — the
+  card is what is wrong, and a bigger GPU or a smaller allowance makes the same env usable
+  without a rebuild. And the record is written *and then* the command exits 1 with the named
+  reason, because R6 says partial work survives failure and here the partial work is the only
+  durable answer to "why is tts off on this box".
+- **`crucible capability` is a verb of its own**, and a dry run by default. The decision
+  depends on three things that move independently of the envs — the card (Owen swaps GPUs),
+  `desktop_allowance_bytes`, and the manifests (a new quantization ships with a release). If
+  the only door to re-deciding were `crucible install`, re-deciding would mean rebuilding a
+  multi-gigabyte venv to answer a question about arithmetic, and nobody would ever do it.
+- **`--write` may only turn a type OFF.** A flag means "this server offers this type", which
+  needs the card to fit *and* the env to exist, and only `install` knows the second. Turning a
+  flag off because the model no longer fits is safe in the direction that matters; turning one
+  on because the arithmetic works would advertise a job type with no env behind it.
+
+### 2.1 The refusal message must change with it — BUILT
 
 Today a disabled type says:
 
@@ -248,6 +320,27 @@ refusal has to carry it:
 **A refusal that suggests a fix which cannot work is worse than one that just says no.** It is
 the no-band-aids rule applied to an error message, and it is the whole reason step 3 records a
 reason rather than a boolean.
+
+**As built** (`crucible/jobs/__init__.py`, `disabled_error`), there turned out to be **three**
+reasons a type is off and not two, and a reader has to be able to tell them apart:
+
+1. **Nothing has been decided here** — no `[capability]` record, a config `crucible init`
+   wrote and nothing probed. It must not invent a reason and must not imply the flag is safe:
+   *"no capability selection has been recorded here — nothing knows whether this host can hold
+   the models it needs. Run `crucible capability` to find out before turning [jobs] enable_tts
+   on; on a card that is too small, turning it on buys an OOM instead of a server."*
+2. **The card cannot hold it** — the section 2.1 case. Every class behind the flag is recorded
+   disabled, the message carries each one's reason and shortfall, and it ends *"Turning [jobs]
+   enable_tts on would not change any of those numbers; it would only move the failure to the
+   first request."* The shortfall is also on `details.shortfall_bytes` as a NUMBER, because a
+   sentence is never load-bearing (R4).
+3. **The card can hold it and the env was never built** — recorded enabled, flag off. This is
+   the one case with an action that works, so it is the one case that gets one: *"Install it
+   with `crucible install tts`."*
+
+The old sentence had **four** owners — `resolve`, `/v1/models`, `/v1/voices` and the streaming
+door each wrote their own copy. They are now one function, because three of the four would
+otherwise have been left behind saying the harmful thing.
 
 ## 3. What it costs PHASE7: a slot becomes typed
 
@@ -265,7 +358,15 @@ So:
 - **ONE BOOK = ONE GPU survives intact**, and gains a precondition: the server a book is pinned
   to must be able to do *every step in that book's chain*, because the book does not move.
 
-## 4. The prerequisite: the estimates are declared, not measured
+## 4. The prerequisite: the estimates are declared, not measured — DESCOPED
+
+> **RULED 2026-09-13, and the build follows it.** Owen: *"I don't think we need to measure
+> estimates. I've been using this system the way it is for months and it works fine. Use the
+> current settings for each."* Selection runs on the DECLARED estimates in the manifests, and
+> `crucible/capability.py` carries no `measured` / `declared` distinction — a field nothing
+> consumes is a field that drifts. The section below is kept as the record of why the
+> distinction looked necessary and of what a real measurement would still be worth; it is not
+> a blocker on anything in section 2, which is built.
 
 **This phase cannot be trusted until the numbers it reads are real**, and today they are not:
 
@@ -329,15 +430,18 @@ numbers needs to win. They go with the table.
 
 ## 6. Order
 
-1. **Carry `measure-llm-memory.sh`'s Darwin branch into `keeper-tts-live.sh`** so the Mac half
-   can run at all. Cheap, and it unblocks everything below.
-2. **Measure**, both backends, and move `estimate_basis` to `measured` where it now exists —
-   adding the field to the asr / align / rvc loaders where it does not.
-3. **Install's selection step** (section 2), with the reason recorded and the refusal rewritten.
+1. ~~**Carry `measure-llm-memory.sh`'s Darwin branch into `keeper-tts-live.sh`**~~ — DESCOPED
+   with section 4. Still worth doing on its own merits; no longer on this phase's path.
+2. ~~**Measure**, both backends~~ — DESCOPED. See section 4's ruling block.
+3. **Install's selection step** (section 2), with the reason recorded and the refusal
+   rewritten — **DONE, 2026-09-13.** See the status block at the top for where each piece is.
 4. **The typed slot** in the client router (section 3) — `any` filtered by advertised
-   `job_types`, and a pin validated when it is made.
-5. **Delete the tier table** (section 5) once Crucible is the thing sizing.
+   `job_types`, and a pin validated when it is made. **OWED**, and it is the one that touches
+   BookForge's queue.
+5. **Delete the tier table** (section 5) now that Crucible is the thing sizing. **OWED**, and
+   it goes last because it is a deletion in the other repo.
 
-Steps 1 and 2 are a card and an afternoon. Step 3 is small because the flags already exist.
-Step 4 is the one that touches BookForge's queue. Step 5 is a deletion and goes last, because
-until step 3 ships the tier table is still the thing doing the job.
+Steps 4 and 5 are what is left. Step 3 went first rather than third because steps 1 and 2 were
+descoped out from under it, and it turned out to be the step the other two depend on anyway:
+step 4 filters on what a server advertises, and nothing advertised a per-type verdict until
+step 3 wrote one down.

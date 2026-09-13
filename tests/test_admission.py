@@ -122,6 +122,12 @@ def test_the_refusal_names_the_holder_and_what_it_is_doing(
         error = refused.json()["error"]
         assert error["code"] == "server_busy"
 
+        # These KEYS are the wire, not just this test's expectations. The
+        # TypeScript SDK reads every one of them into `CrucibleBusy`
+        # (sdk/ts/src/errors.ts) and answers a missing one with a
+        # CrucibleProtocolError rather than a quiet downgrade — so renaming one
+        # here without renaming it there breaks every bench's "GPU busy" line.
+        # This assertion block is what goes red first when that happens.
         details = error["details"]
         assert details["holder"] == "bookforge/owens-pc crucible-client/0.4.0"
         assert details["job_id"] == first

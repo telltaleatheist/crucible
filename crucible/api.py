@@ -36,6 +36,7 @@ from .errors import ApiError
 from .jobs import (
     ALL_JOB_TYPES,
     build_registry,
+    disabled_error,
     model_rows,
     resolve,
     resolve_model,
@@ -539,6 +540,21 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
 
     # -------------------------------------------------------------- activity
 
+    def _client_agent(request: Request) -> str | None:
+        """Who is speaking to this server, or None because they did not say.
+
+        The SDK sends `<clientName> crucible-client/<version>`; anything else may
+        send whatever it likes, or nothing. Truncated because it is a header, and
+        a header is attacker-controlled length even inside one trust domain.
+
+        One function rather than one expression per door, because there are now
+        two doors that record a holder — `POST /v1/jobs` and `POST /v1/tts/stream`
+        — and a bench puts both names in the same column. Two copies of "how we
+        read the User-Agent" would be two truncation limits and two spellings of
+        "did not say" the day one of them was edited.
+        """
+        return (request.headers.get("user-agent") or "").strip()[:200] or None
+
     def _activity_row(store: JobStore, job: Any) -> dict[str, Any]:
         """One job, as a bench reads it. Never its params: a chat prompt or a
         chapter of a book is not something a whole-server read should spray at
@@ -594,9 +610,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         the full answer.
         """
         store: JobStore = request.app.state.store
+        streams: StreamManager = request.app.state.streams
         running = store.running
         queued = store.queued()
         resident = residency.resident
+        session = streams.session
 
         body: dict[str, Any] = {
             "server": {
@@ -621,15 +639,67 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # loading a model. It is the reason a slot is unavailable, so it is
             # reported where the slot is.
             "warming": residency.warming,
+            # WHO HOLDS NARRATOR'S WIRE, WHICH IS NOT THE SAME QUESTION AS THE
+            # LANE. `refuse_if_claimed`'s docstring is the long version: a
+            # streaming session holds the resident engine *without* occupying the
+            # lane, so `slots` below can say this server is free while the card is
+            # not. Until this field existed, a bench polling for a free machine
+            # read `busy: 0` and `running: []` **while the browser extension was
+            # streaming from it**, submitted, and was refused `engine_in_use`
+            # after the round trip. The refusal was right; the display was a lie,
+            # and it lied in the one direction that matters (R3: nothing is ever
+            # told "maybe" — and "free" when it is not is worse than "maybe").
+            #
+            # Reported as its own field rather than folded into `slots` because it
+            # is a different fact with a different owner: the lane belongs to
+            # `JobStore`, the claim belongs to `Residency`. Folding them would
+            # give the composite a third owner and lose which one said no.
+            "claim": (
+                None
+                if residency.claimed_by is None
+                else {"held_by": residency.claimed_by}
+            ),
+            # THE OTHER KIND OF WORK. Three BookForge surfaces stream rather than
+            # queue — the streaming page, the correct-sentences/re-roll page and
+            # the browser extension — and they claim a server for as long as a
+            # reader keeps reading. `progress` is null and always will be: see
+            # `StreamSession.progress_report` for why a session has no
+            # denominator and what is counted instead.
+            "streaming": (
+                None
+                if session is None
+                else {
+                    "session_id": session.id,
+                    "voice": session.voice,
+                    "language": session.language,
+                    "narrator_engine": session.narrator_engine,
+                    "since": session.opened_at,
+                    "client": session.client,
+                    "progress": None,
+                    **session.progress_report(),
+                }
+            ),
             "slots": {
                 # ONE LANE TODAY, and it is named rather than counted so the
                 # ancillary lane (PHASE7-LANES.md section 3) can appear beside it
                 # without changing this one's meaning. A key that is absent means
                 # this build has no such lane — never that the lane is idle.
+                #
+                # `busy` counts THE LANE and nothing else — a stream does not take
+                # it, and saying otherwise would redefine the lane to mean "the
+                # card", which is `claim`'s job above. What a caller actually
+                # wants before submitting is `accepts_work`, which is the
+                # composition, derived here once so that three benches do not each
+                # invent their own and disagree.
                 "accelerated": {
                     "busy": 0 if running is None else 1,
                     "of": 1,
                     "queue_depth": store.queue_depth,
+                    # Derived, never stored. Still not a reservation: a client
+                    # that reads true and submits is racing every other client,
+                    # and that race is settled at the door. See this route's
+                    # "IT REPORTS AND NOTHING ELSE" note.
+                    "accepts_work": running is None and residency.claimed_by is None,
                 },
             },
             "running": [] if running is None else [_activity_row(store, running)],
@@ -669,12 +739,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     async def models(request: Request) -> list[dict[str, Any]]:
         """Every model this build has a manifest for, and where it stands here."""
         if not config.enable_llm:
-            raise ApiError(
-                400,
-                "job_type_disabled",
-                "job type 'llm' is not enabled on this server "
-                "(set [jobs] enable_llm = true in config.toml)",
-            )
+            # The same sentence the job door refuses with, from the same
+            # producer: a client told "llm is off" by /v1/models and something
+            # else by POST /v1/jobs would have two stories about one server
+            # (PHASE9-CAPABILITY.md section 2.1).
+            raise disabled_error("load-model", config)
         return model_rows(config, backend, residency)
 
     # ---------------------------------------------------------------- voices
@@ -683,12 +752,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     async def voices(request: Request) -> list[dict[str, Any]]:
         """Every voice this build has a manifest for, and where it stands here."""
         if not config.enable_tts:
-            raise ApiError(
-                400,
-                "job_type_disabled",
-                "job type 'tts' is not enabled on this server "
-                "(set [jobs] enable_tts = true in config.toml)",
-            )
+            raise disabled_error("tts", config)
         return voice_rows(config, backend, residency)
 
     # -------------------------------------------------------- tts streaming
@@ -702,12 +766,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     def _streaming_voice(voice: str) -> Any:
         """The manifest for a voice this server may be asked to stream."""
         if not config.enable_tts:
-            raise ApiError(
-                400,
-                "job_type_disabled",
-                "job type 'tts' is not enabled on this server "
-                "(set [jobs] enable_tts = true in config.toml)",
-            )
+            raise disabled_error("tts", config)
         manifest = known_voice(voice)
         require_streamable(manifest, config.backend_kind)
         return manifest
@@ -721,6 +780,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             voice=body.voice,
             language=body.language,
             manifest=manifest,
+            client=_client_agent(request),
             loop=asyncio.get_running_loop(),
         )
         return {
@@ -854,7 +914,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         them again.
         """
         store: JobStore = request.app.state.store
-        plugin = resolve(store.registry, body.type)
+        plugin = resolve(store.registry, body.type, config)
         model = resolve_model(plugin, body.model)
         # Is there room right now? The one question the server answers about
         # scheduling; the queue is the client's (ARCHITECTURE.md section 3).
@@ -867,12 +927,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         # refuse `engine_in_use` from here (crucible/residency.py).
         plugin.preflight(model, body.params)
 
-        # The SDK sends `<clientName> crucible-client/<version>`; anything else
-        # speaking to this server may send whatever it likes, or nothing.
-        # Truncated because it is a header, and a header is attacker-controlled
-        # length even inside one trust domain.
-        agent = (request.headers.get("user-agent") or "").strip()[:200] or None
-        job = store.create(body.type, model, body.params, client=agent)
+        job = store.create(body.type, model, body.params, client=_client_agent(request))
         try:
             _materialise_inputs(config, job, body.inputs)
             # `enqueue` asks admission again and is the authority on it; nothing

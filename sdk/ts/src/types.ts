@@ -165,6 +165,112 @@ export interface Health {
   readonly residentKind: string | null;
 }
 
+/**
+ * One job as a bench reads it. Never its params — a chat prompt or a chapter of
+ * a book is not something a whole-server read should spray at anyone holding the
+ * token.
+ */
+export interface ActivityJob {
+  readonly jobId: string;
+  readonly type: string;
+  readonly model: string | null;
+  readonly status: string;
+  readonly position: number | null;
+  /** 0..1. A job HAS a denominator: the client posted every chunk up front. */
+  readonly progress: number;
+  readonly message: string | null;
+  readonly created: string;
+  readonly started: string | null;
+  /** The submitting User-Agent. Null = it did not say; never a guessed name. */
+  readonly client: string | null;
+}
+
+/**
+ * An open TTS streaming session, as a bench reads it.
+ *
+ * **`progress` is `null` and always will be.** A render job knows its own
+ * denominator; a session's rows arrive one `say` at a time, indefinitely, on a
+ * reader's whim — so a percentage would be a percentage of the work that happens
+ * to have arrived, a number that goes DOWN when more arrives. Owen named the
+ * three BookForge surfaces that work this way on 2026-09-13 — the streaming
+ * page, the correct-sentences/re-roll page and the browser extension: *"those
+ * places are independent of a queue but claim a server while they run... that
+ * means crucible wont always have a percent complete to hand back."*
+ *
+ * The field is present rather than omitted because on this wire a present null
+ * is a statement and an absent key is not. Draw a spinner and the counts.
+ */
+export interface ActivityStreaming {
+  readonly sessionId: string;
+  readonly voice: string;
+  readonly language: string;
+  readonly narratorEngine: string;
+  /** When the session opened, in {@link ActivityJob.started}'s format. */
+  readonly since: string;
+  /** Who opened it. Null = it did not say. */
+  readonly client: string | null;
+  /** Always null. See the interface docstring — this is not an omission. */
+  readonly progress: null;
+  /** Rows this session has been asked to say, ever. */
+  readonly said: number;
+  readonly finished: number;
+  readonly inFlight: number;
+  /** Seconds of audio delivered, measured from the bytes. */
+  readonly seconds: number;
+  readonly chars: number;
+}
+
+/** `GET /v1/activity` — what is on this server and how far along. */
+export interface Activity {
+  readonly server: {
+    readonly name: string;
+    readonly version: string;
+    readonly apiVersion: number;
+    readonly backend: string;
+    readonly uptimeS: number;
+  };
+  readonly resident: {
+    readonly kind: string;
+    readonly id: string;
+    readonly since: string;
+    readonly memoryBytesEstimate: number | null;
+  } | null;
+  /** The id of a model being loaded right now, or null. */
+  readonly warming: string | null;
+  /**
+   * Who holds narrator's wire, or null.
+   *
+   * **Not the same question as the lane.** A streaming session holds the
+   * resident engine without occupying the lane, so {@link ActivitySlot.busy} can
+   * be 0 while this is set — which is exactly the state a bench used to read as
+   * an idle machine while the browser extension was streaming from it.
+   */
+  readonly claim: { readonly heldBy: string } | null;
+  /** The open streaming session, or null. */
+  readonly streaming: ActivityStreaming | null;
+  readonly slots: { readonly accelerated: ActivitySlot };
+  readonly running: readonly ActivityJob[];
+  readonly queued: readonly ActivityJob[];
+}
+
+export interface ActivitySlot {
+  /** THE LANE, and nothing else. A stream does not take it. */
+  readonly busy: number;
+  readonly of: number;
+  readonly queueDepth: number;
+  /**
+   * The composition a caller actually wants before submitting: the lane is free
+   * AND nobody holds the card. Derived by the server, once, so that three
+   * benches do not each invent it and disagree.
+   *
+   * **Still not a reservation.** A client that reads `true` and submits is
+   * racing every other client, and that race is settled at the door — `POST
+   * /v1/jobs` admits one and refuses the other by name. Reading this is never
+   * permission; only the door can say yes.
+   */
+  readonly acceptsWork: boolean;
+}
+
 /** `POST /v1/uploads`. */
 export interface UploadResult {
   readonly blobId: string;

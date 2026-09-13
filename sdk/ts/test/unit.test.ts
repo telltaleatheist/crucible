@@ -17,6 +17,7 @@ import { after, before, test } from 'node:test';
 
 import {
   CrucibleAuthError,
+  CrucibleBusy,
   CrucibleClient,
   CrucibleConfigError,
   CrucibleNotACrucible,
@@ -26,7 +27,20 @@ import {
   CrucibleUnreachable,
   CrucibleVersionError,
   SDK_VERSION,
+  isServerSpecificRefusal,
 } from '../src/index.js';
+
+/** The body `crucible/jobs/queue.py` actually sends with a 409 server_busy. */
+const BUSY_DETAILS = {
+  holder: 'foundry/0.9.0',
+  job_id: 'a1b2c3',
+  type: 'tts',
+  model: 'higgs-v3',
+  status: 'running',
+  since: '2026-09-13T18:04:11Z',
+  progress: 0.62,
+  message: 'rendering 118 of 280',
+};
 
 /** What the fixture should answer next, set by each test before it calls. */
 let reply: { status: number; body: string; contentType: string } = {
@@ -237,4 +251,202 @@ test('SDK_VERSION matches package.json', () => {
     readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
   ) as { version: string };
   assert.equal(SDK_VERSION, manifest.version);
+});
+
+
+// ------------------------------------------- 409 server_busy is its own type
+
+test('a 409 server_busy is read into CrucibleBusy, fields and all', async () => {
+  answer(409, {
+    error: {
+      code: 'server_busy',
+      message: 'this server is busy with job a1b2c3 (tts), running since ...',
+      details: BUSY_DETAILS,
+    },
+  });
+  await assert.rejects(
+    client().submit({ type: 'tts', params: {}, inputs: {} }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleBusy, `got ${String(error)}`);
+      // Still a CrucibleRefused: nothing that already handles 4xx changes.
+      assert.ok(error instanceof CrucibleRefused);
+      assert.equal(error.status, 409);
+      assert.equal(error.holder, 'foundry/0.9.0');
+      assert.equal(error.jobId, 'a1b2c3');
+      assert.equal(error.jobType, 'tts');
+      assert.equal(error.model, 'higgs-v3');
+      assert.equal(error.jobStatus, 'running');
+      assert.equal(error.since, '2026-09-13T18:04:11Z');
+      assert.equal(error.progress, 0.62);
+      assert.equal(error.jobMessage, 'rendering 118 of 280');
+      // The one line a bench puts in front of a human.
+      assert.equal(error.busyLine, 'busy: foundry/0.9.0, tts higgs-v3, 62% done — rendering 118 of 280');
+      return true;
+    },
+  );
+});
+
+test('an unnamed holder is reported as unnamed, never guessed', async () => {
+  // The server refuses to invent a name when a client sent no User-Agent, so a
+  // bench must never be confidently wrong about whose render is on the card
+  // (PHASE7-LANES.md section 5). null means "it did not say".
+  answer(409, {
+    error: {
+      code: 'server_busy',
+      message: 'busy',
+      details: { ...BUSY_DETAILS, holder: null, model: null, message: null },
+    },
+  });
+  await assert.rejects(
+    client().submit({ type: 'tts', params: {}, inputs: {} }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleBusy, `got ${String(error)}`);
+      assert.equal(error.holder, null);
+      assert.equal(error.model, null);
+      assert.equal(error.jobMessage, null);
+      assert.equal(error.busyLine, 'busy: an unnamed client, tts, 62% done');
+      return true;
+    },
+  );
+});
+
+test('a server_busy body missing a promised field is a protocol error, not a quiet downgrade', async () => {
+  // These fields are API v1's promise. A silent fall back to a plain
+  // CrucibleRefused would hide a broken wire behind an error that still looks
+  // normal: the caller would see "busy" and never learn the holder and progress
+  // it was about to display had gone missing.
+  const { progress: _dropped, ...withoutProgress } = BUSY_DETAILS;
+  answer(409, {
+    error: { code: 'server_busy', message: 'busy', details: withoutProgress },
+  });
+  await assert.rejects(
+    client().submit({ type: 'tts', params: {}, inputs: {} }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+      assert.match(error.message, /progress/);
+      return true;
+    },
+  );
+});
+
+test('only refusals about a SERVER travel to the next one', () => {
+  // The fact a `waitFor: "any"` walk needs, and the only honest owner of it is
+  // the server that emits the code (PHASE7-LANES.md section 4.2.1).
+  for (const code of [
+    'server_busy',
+    // Not the lane — narrator's wire. This is what a render gets while the
+    // browser extension is streaming from that machine, and it travels just as
+    // well: another server's card may be free.
+    'engine_in_use',
+    'stream_session_open',
+    'job_type_disabled',
+    'model_not_resident',
+    'unknown_model',
+    'env_missing',
+  ]) {
+    assert.equal(isServerSpecificRefusal(code), true, code);
+  }
+  // These are about the REQUEST. They are refused identically everywhere, so a
+  // walk that retried them would report the fourth machine's error after three
+  // pointless round trips.
+  for (const code of [
+    'invalid_request',
+    'unknown_job_type',
+    'unknown_blob',
+    'unknown_job',
+    'job_not_cancellable',
+  ]) {
+    assert.equal(isServerSpecificRefusal(code), false, code);
+  }
+  // An unknown code answers false on purpose: a refusal this build has never
+  // seen is surfaced to the caller rather than swallowed by a walk.
+  assert.equal(isServerSpecificRefusal('something_invented_next_year'), false);
+});
+
+
+// ------------------------------------------ the bench read, and what it cannot say
+
+/** A `/v1/activity` body with a session open and the lane free. */
+const ACTIVITY_WITH_SESSION = {
+  server: { name: 'crucible@mac', version: '0.4.0', api_version: 1, backend: 'mlx-darwin', uptime_s: 12.5 },
+  resident: { kind: 'tts', id: 'deathstalker', since: '2026-09-13T18:00:00Z', memory_bytes_estimate: 19000000000 },
+  warming: null,
+  claim: { held_by: 'tts stream 3f2a' },
+  streaming: {
+    session_id: '3f2a',
+    voice: 'deathstalker',
+    language: 'en',
+    narrator_engine: 'higgs-v3',
+    since: '2026-09-13T18:02:00Z',
+    client: 'bookforge-extension crucible-client/0.4.0',
+    progress: null,
+    said: 7,
+    finished: 6,
+    in_flight: 1,
+    seconds: 41.2,
+    chars: 903,
+  },
+  slots: { accelerated: { busy: 0, of: 1, queue_depth: 0, accepts_work: false } },
+  running: [],
+  queued: [],
+};
+
+test('a machine with a session open is not reported as idle', async () => {
+  // The lane really is free and still says so; what changed is that the CARD's
+  // holder is now on the same read, and `acceptsWork` composes the two.
+  answer(200, ACTIVITY_WITH_SESSION);
+  const seen = await client().activity();
+  assert.equal(seen.slots.accelerated.busy, 0);
+  assert.deepEqual(seen.running, []);
+  assert.equal(seen.slots.accelerated.acceptsWork, false);
+  assert.deepEqual(seen.claim, { heldBy: 'tts stream 3f2a' });
+  assert.equal(seen.streaming?.sessionId, '3f2a');
+  assert.equal(seen.streaming?.client, 'bookforge-extension crucible-client/0.4.0');
+  assert.equal(seen.streaming?.said, 7);
+  assert.equal(seen.streaming?.inFlight, 1);
+  // No percentage, and the type says so: `progress: null` is the declared type,
+  // not a value it happens to hold.
+  assert.equal(seen.streaming?.progress, null);
+});
+
+test('a session that claims a percentage is a protocol error', async () => {
+  // A session has no denominator. A number here would be a fraction of the work
+  // that happens to have arrived — one that falls as more arrives — and a bench
+  // drawing it would show a reader's progress bar going backwards. Caught rather
+  // than rendered.
+  answer(200, {
+    ...ACTIVITY_WITH_SESSION,
+    streaming: { ...ACTIVITY_WITH_SESSION.streaming, progress: 0.85 },
+  });
+  await assert.rejects(client().activity(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+    assert.match(error.message, /no total to be a fraction of/);
+    return true;
+  });
+});
+
+test('an idle machine reports both nulls, and both keys are required', async () => {
+  answer(200, {
+    ...ACTIVITY_WITH_SESSION,
+    resident: null,
+    claim: null,
+    streaming: null,
+    slots: { accelerated: { busy: 0, of: 1, queue_depth: 0, accepts_work: true } },
+  });
+  const seen = await client().activity();
+  assert.equal(seen.claim, null);
+  assert.equal(seen.streaming, null);
+  assert.equal(seen.resident, null);
+  assert.equal(seen.slots.accelerated.acceptsWork, true);
+
+  // An ABSENT key is not the same news as a present null: it means the server
+  // does not speak the field, which this client will not silently read as "and
+  // therefore nothing is happening".
+  const { claim: _gone, ...withoutClaim } = ACTIVITY_WITH_SESSION;
+  answer(200, withoutClaim);
+  await assert.rejects(client().activity(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+    assert.match(error.message, /claim/);
+    return true;
+  });
 });

@@ -1,11 +1,13 @@
 """The `crucible` command line.
 
-    crucible init      mint the token, write the config, record the backend
-    crucible serve     run the API in the foreground
-    crucible models    list and pull model weights
-    crucible voices    list and pull voice weights
-    crucible doctor    probe the host and every job type; exit 0 only when healthy
-    crucible token     print the bearer token (needs --show)
+    crucible init       mint the token, write the config, record the backend
+    crucible install    build a job type's env, then decide whether the card fits it
+    crucible capability what this host can hold, and why; --write records it
+    crucible serve      run the API in the foreground
+    crucible models     list and pull model weights
+    crucible voices     list and pull voice weights
+    crucible doctor     probe the host and every job type; exit 0 only when healthy
+    crucible token      print the bearer token (needs --show)
 
 Exit codes: 0 success, 1 refused (named reason on stderr), 2 usage.
 """
@@ -19,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import API_VERSION, VERSION, jobenv, narratorpatches, weights, workerenv
+from . import API_VERSION, VERSION, capability, jobenv, narratorpatches, weights, workerenv
 from .alignmodels import (
     AlignManifest,
     AlignManifestError,
@@ -28,6 +30,7 @@ from .alignmodels import (
 from .asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
 from .backend import WINDOWS_REFUSAL, Backend, detect_backend
 from .config import (
+    CAPABILITY_FLAGS,
     CRUCIBLE_HOME_ENV,
     DEFAULT_DESKTOP_ALLOWANCE_BYTES,
     DEFAULT_HOST,
@@ -177,6 +180,173 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# -------------------------------------------------------------- capability
+
+
+def _decide_here(config: Config, backend: Backend) -> tuple[capability.Decision, ...]:
+    """Every capability class, decided against this host's accelerator.
+
+    The size comes from `backend.gpu.vram_bytes` — the one owner of "how big is
+    this card" — and NOT from `accelerator.read_state().free_bytes`. A capability
+    is a fact about the host; free VRAM is a fact about this second, and a browser
+    open while `crucible install` runs must not permanently disable TTS on a card
+    that could hold it. The runtime guard already owns the other question and
+    refuses `insufficient_memory` with the measured figure at load time
+    (crucible/accelerator.py).
+    """
+    return capability.decide_all(
+        backend.kind,
+        total_bytes=backend.gpu.vram_bytes,
+        desktop_allowance_bytes=config.desktop_allowance_bytes,
+    )
+
+
+def _write_capability(
+    config: Config,
+    backend: Backend,
+    decisions: tuple[capability.Decision, ...],
+    flags: dict[str, bool],
+) -> Path:
+    """Rewrite config.toml with new capability flags and the record behind them.
+
+    `write_config` writes the whole document, so everything that is not being
+    changed is read back off the loaded `Config` and written out again — the token
+    included. That is deliberate rather than incidental: an in-place TOML edit
+    would have to round-trip comments and would be one more thing that can lose a
+    token, and `crucible init --force` (which mints a NEW token and breaks every
+    client) must never become the repair for a capability decision.
+    """
+    values = {
+        flag: flags.get(flag, getattr(config, flag)) for flag in CAPABILITY_FLAGS
+    }
+    return write_config(
+        config.home,
+        name=config.name,
+        host=config.host,
+        port=config.port,
+        token=config.token,
+        backend_kind=config.backend_kind,
+        desktop_allowance_bytes=config.desktop_allowance_bytes,
+        capability=capability.record(
+            backend.kind,
+            total_bytes=backend.gpu.vram_bytes,
+            desktop_allowance_bytes=config.desktop_allowance_bytes,
+            decisions=decisions,
+        ),
+        **values,
+    )
+
+
+def _print_decisions(
+    config: Config, backend: Backend, decisions: tuple[capability.Decision, ...]
+) -> None:
+    budget = capability.available_bytes(
+        backend.gpu.vram_bytes, config.desktop_allowance_bytes
+    )
+    gib = 1024 ** 3
+    print(f"backend:  {backend.kind} ({backend.gpu.name})")
+    print(
+        f"pool:     {backend.gpu.vram_bytes / gib:.1f} GiB "
+        f"{capability.POOL_NAME[backend.kind]}"
+    )
+    print(
+        f"reserve:  {config.desktop_allowance_bytes / gib:.1f} GiB for this host "
+        "itself"
+    )
+    print(f"budget:   {budget / gib:.1f} GiB available to a job")
+    for decision in decisions:
+        mark = "yes" if decision.enabled else "NO"
+        print(f"{decision.capability:<10} {mark:<4} {decision.reason}")
+
+
+def cmd_capability(args: argparse.Namespace) -> int:
+    """`crucible capability` — what this host can hold, and why.
+
+    **Why this is a verb of its own and not only a step inside `install`.** The
+    decision depends on three things that move independently of the envs: the card
+    (Owen swaps GPUs between machines), `desktop_allowance_bytes` (an operator may
+    state one), and the manifests (a new quantization ships with a release and
+    changes what fits). Any of those changing means the recorded verdict is stale,
+    and the only door to re-deciding would otherwise be `crucible install`, which
+    rebuilds a multi-gigabyte venv to answer a question about arithmetic. A
+    capability that can only be re-decided by reinstalling is a capability nobody
+    re-decides.
+
+    It is a **dry run by default**. `--write` is the one that touches config.toml,
+    and even then it may only turn a flag OFF, never on: a flag means "this server
+    offers this type", which needs the card to fit AND the env to exist, and only
+    `crucible install` knows the second. Turning a flag off because the model can
+    no longer fit is safe in the direction that matters; turning one on because
+    the arithmetic works would advertise a job type with no env behind it.
+    """
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        return _fail(str(exc))
+    try:
+        backend = detect_backend()
+    except NoViableBackend as exc:
+        return _fail(f"no viable backend: {exc.reason}")
+    if backend.kind != config.backend_kind:
+        return _fail(
+            f"this host detects backend {backend.kind}, but {config.path} was "
+            f"initialised for {config.backend_kind}; re-run `crucible init --force`"
+        )
+    decisions = _decide_here(config, backend)
+
+    # Only the falling edge. See the docstring: `install` owns the rising one.
+    turn_off = {
+        f"enable_{name}": False
+        for name in sorted({d.job_type for d in decisions})
+        if getattr(config, f"enable_{name}")
+        and not capability.job_type_enabled(name, decisions)
+    }
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "backend": backend.kind,
+                    "total_bytes": backend.gpu.vram_bytes,
+                    "desktop_allowance_bytes": config.desktop_allowance_bytes,
+                    "available_bytes": capability.available_bytes(
+                        backend.gpu.vram_bytes, config.desktop_allowance_bytes
+                    ),
+                    "classes": [d.to_dict() for d in decisions],
+                    "job_types": {
+                        name: capability.job_type_enabled(name, decisions)
+                        for name in sorted({d.job_type for d in decisions})
+                    },
+                    "written": bool(args.write),
+                    "turned_off": sorted(turn_off),
+                },
+                indent=2,
+            )
+        )
+    else:
+        _print_decisions(config, backend, decisions)
+
+    if not args.write:
+        if not args.json:
+            print(
+                "dry run: nothing written. Pass --write to record this in "
+                f"{config.path}"
+            )
+        return EXIT_OK
+
+    written = _write_capability(config, backend, decisions, turn_off)
+    if not args.json:
+        print(f"recorded in {written}")
+        for flag in sorted(turn_off):
+            print(f"TURNED OFF: [jobs] {flag} — this host cannot hold it")
+        if not turn_off:
+            print(
+                "no flag changed: `crucible capability` only turns a type OFF; "
+                "turning one on is `crucible install <type>`"
+            )
+    return EXIT_OK
+
+
 # ------------------------------------------------------------------ install
 
 
@@ -243,7 +413,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     for name in sorted(status.packages):
         if name in (spec.headline, "torch", "numpy", "transformers", "mlx"):
             print(f"  {name}=={status.packages[name]}")
-    return EXIT_OK
+    return _capability_step(config, backend, args.job_type)
 
 
 def _install_worker_env(
@@ -283,7 +453,50 @@ def _install_worker_env(
     for name in sorted(status.packages):
         if name in (headline, "ctranslate2", "numpy", "onnxruntime"):
             print(f"  {name}=={status.packages[name]}")
+    return _capability_step(config, backend, args.job_type)
+
+
+def _capability_step(config: Config, backend: Backend, job_type: str) -> int:
+    """The selection step `crucible install` gains (PHASE9-CAPABILITY.md §2).
+
+    It runs AFTER the env is built, and the order is deliberate in both
+    directions. Not before, because a flag saying "this server offers tts" must
+    not be written by a run whose pip install then failed. Not skipped when the
+    card turns out to be too small, because the env is still the right thing to
+    have on disk — the card is what is wrong, and a second GPU or a smaller
+    allowance makes the same env usable without rebuilding it.
+
+    It writes the record and the flag, and THEN refuses. R6: partial work
+    survives failure, and here the partial work is the only durable answer to
+    "why is tts off on this box" — throwing it away to make the exit code tidy
+    would leave the operator with a refusal and nothing to read.
+
+    Unlike `crucible capability --write`, this one may turn a flag ON, because it
+    is the door that has just established the other half of the claim: the env
+    exists.
+    """
+    decisions = _decide_here(config, backend)
+    enabled = capability.job_type_enabled(job_type, decisions)
+    mine = [d for d in decisions if d.job_type == job_type]
+    written = _write_capability(
+        config, backend, decisions, {f"enable_{job_type}": enabled}
+    )
+    print("capability:")
+    for decision in mine:
+        mark = "yes" if decision.enabled else "NO"
+        print(f"  {decision.capability:<10} {mark:<4} {decision.reason}")
+    print(f"recorded in {written}")
+    if not enabled:
+        return _fail(
+            f"the env is installed, but {job_type!r} is DISABLED on this host: "
+            + "; ".join(f"{d.capability} — {d.reason}" for d in mine)
+            + f". [jobs] enable_{job_type} = false is written, with the numbers, "
+            f"so the refusal a client gets will name them."
+        )
+    print(f"[jobs] enable_{job_type} = true")
     return EXIT_OK
+
+
 def _env_spec(
     job_type: str, narrator_engine: str | None, backend_kind: str
 ) -> jobenv.EnvSpec:
@@ -686,6 +899,71 @@ def _env_report(
     return status.to_dict()
 
 
+def _capability_report(
+    report: dict[str, Any], config: Config, backend: Backend
+) -> None:
+    """What was decided here, whether it is still true, and whether it agrees.
+
+    Three checks, and only ONE of them is a problem, which is the point:
+
+    * **The record is stale.** It names a different backend or a different pool
+      size than this host now has. A swapped card is the case this catches, and it
+      is caught by comparing NUMBERS rather than by writing down a date — the date
+      a decision was made says nothing about whether it is still right.
+    * **A flag is on that the numbers refuse.** `enable_tts = true` with every tts
+      class recorded disabled. This is the dangerous direction and the only
+      PROBLEM: the server is advertising a job type whose first request is an OOM.
+    * **A flag is off that the numbers allow.** Printed as a NOTE, never a
+      problem. It is the ordinary state of a host whose env for that type has not
+      been built yet, and `crucible install <type>` is the thing that changes it.
+    """
+    record = config.capability
+    if record is None:
+        report["capability"] = None
+        return
+    entry: dict[str, Any] = {
+        **record.to_dict(),
+        "stale": False,
+        "could_enable": [],
+    }
+    if record.backend_kind != backend.kind:
+        entry["stale"] = True
+        report["problems"].append(
+            f"capability_stale: the record was decided on {record.backend_kind} "
+            f"and this host is {backend.kind}; re-run `crucible capability --write`"
+        )
+    if record.total_bytes != backend.gpu.vram_bytes:
+        entry["stale"] = True
+        report["problems"].append(
+            f"capability_stale: the record was decided against "
+            f"{record.total_bytes / 1024 ** 3:.1f} GiB and this host has "
+            f"{backend.gpu.vram_bytes / 1024 ** 3:.1f} GiB; re-run "
+            "`crucible capability --write`"
+        )
+    for name in sorted({cls.job_type for cls in capability.CLASSES}):
+        rows = [
+            record.row(cls.name) for cls in capability.classes_for_job_type(name)
+        ]
+        known = [row for row in rows if row is not None]
+        if not known:
+            continue
+        fits = any(row.enabled for row in known)
+        flagged = getattr(config, f"enable_{name}")
+        if flagged and not fits:
+            report["problems"].append(
+                f"capability_contradicted: [jobs] enable_{name} is true and "
+                "nothing behind it fits this host — "
+                + "; ".join(f"{row.capability}: {row.reason}" for row in known)
+            )
+        # `echo` is deliberately not here: it fits every card (it never touches
+        # one) and there is no `crucible install echo`, so suggesting one would
+        # be a note whose action does not exist. `INSTALLABLE_JOB_TYPES` is the
+        # owner of "has an installer", so it is the thing asked.
+        if fits and not flagged and name in INSTALLABLE_JOB_TYPES:
+            entry["could_enable"].append(name)
+    report["capability"] = entry
+
+
 def _doctor_report() -> dict[str, Any]:
     home = crucible_home()
     report: dict[str, Any] = {
@@ -699,6 +977,7 @@ def _doctor_report() -> dict[str, Any]:
         "worker_envs": [],
         "tts_envs": {},
         "narrator_patches": [],
+        "capability": None,
         "problems": [],
     }
 
@@ -749,6 +1028,7 @@ def _doctor_report() -> dict[str, Any]:
             )
 
     if config is not None and backend is not None:
+        _capability_report(report, config, backend)
         if config.enable_llm:
             report["llm_env"] = _env_report(
                 report,
@@ -867,6 +1147,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             else:
                 mark = "applied" if entry["applied"] else entry["status"].upper()
             print(f"narrator patch ({entry['id']}): {mark} — {entry['detail']}")
+        capability_entry = report["capability"]
+        if capability_entry is None:
+            print(
+                "capability: NOT DECIDED — nothing has probed this host's card "
+                "against the models; run `crucible capability`"
+            )
+        else:
+            for row in capability_entry["classes"]:
+                mark = "yes" if row["enabled"] else "NO"
+                print(f"capability {row['capability']}: {mark} — {row['reason']}")
+            for name in capability_entry["could_enable"]:
+                print(
+                    f"note:    this host can hold {name}, and [jobs] enable_{name} "
+                    f"is off — `crucible install {name}` builds its env and turns "
+                    "it on"
+                )
         for entry in report["job_types"]:
             mark = "ready" if entry["ready"] else ("off" if not entry["enabled"] else "NOT READY")
             print(f"job {entry['name']}: {mark} — {entry['detail']}")
@@ -986,6 +1282,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose", action="store_true", help="echo pip's output line by line"
     )
     install.set_defaults(func=cmd_install)
+
+    capability_parser = subparsers.add_parser(
+        "capability",
+        help="what this host's card can hold, and why; --write records it",
+    )
+    capability_parser.add_argument(
+        "--write",
+        action="store_true",
+        help=(
+            "record the verdict in config.toml. It may only turn a job type OFF; "
+            "turning one on needs its env, which is `crucible install <type>`"
+        ),
+    )
+    capability_parser.add_argument(
+        "--json", action="store_true", help="machine-readable"
+    )
+    capability_parser.set_defaults(func=cmd_capability)
 
     models = subparsers.add_parser("models", help="list and pull model weights")
     model_commands = models.add_subparsers(dest="models_command", required=True)

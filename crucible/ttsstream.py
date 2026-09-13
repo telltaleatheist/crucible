@@ -94,6 +94,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .engines import EngineError, NarratorEngine
+from .jobs.base import utcnow
 from .errors import ApiError, JobCancelled, JobError
 from .residency import KIND_TTS, Residency, describe_resident
 from .voices import NARRATOR_ENGINE_SAMPLING, VoiceError, VoiceManifest
@@ -270,12 +271,21 @@ class StreamSession:
         backend: str,
         max_chars: int,
         narrator_engine: str,
+        client: str | None,
         engine: NarratorEngine,
         residency: Residency,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         self.id = session_id
         self.voice = voice
+        #: The User-Agent that opened this session, recorded for the same reason
+        #: `Job.client` is and read the same way: **null means it did not say**,
+        #: never a name this server invented. A bench that guessed would be
+        #: confidently wrong about who is on the card (PHASE7-LANES.md section 5).
+        self.client = client
+        #: Wall clock, in `Job.started`'s own format, because a bench puts the two
+        #: side by side and a second time format would be a second thing to parse.
+        self.opened_at = utcnow()
         self.language = language
         self.fingerprint = fingerprint
         self.sample_rate = sample_rate
@@ -364,6 +374,40 @@ class StreamSession:
             self._floor = oldest.id + 1
 
     # ------------------------------------------------------- readers, SSE
+
+    def progress_report(self) -> dict[str, Any]:
+        """What a bench can honestly say about this session. **Any thread.**
+
+        THERE IS NO PERCENTAGE HERE, AND THERE NEVER CAN BE. A render job knows
+        its own denominator: the client posted every chunk up front, so
+        `fraction` is a real quantity and `Job.progress` is a real answer. A
+        streaming session's rows arrive **one `say` at a time, indefinitely**, on
+        a reader's whim or a browser extension's — there is no total, so any
+        percentage would be a percentage of the work that has happened to arrive
+        so far, which is a number that goes DOWN when more work arrives.
+
+        Owen, 2026-09-13, on the three BookForge surfaces that stream rather than
+        queue — the streaming page, the correct-sentences/re-roll page and the
+        browser extension: *"those places are independent of a queue but claim a
+        server while they run... that means crucible wont always have a percent
+        complete to hand back."*
+
+        So the wire says `progress: null` for a session and counts instead. The
+        key is PRESENT and null, which is this server's one rule for "did not
+        say" (see `sdk/ts/src/shape.ts`); an absent key would mean "this build
+        does not speak the field", which is a different piece of news. A bench
+        reading null draws a spinner and the counts, not a bar at 0%.
+        """
+        with self._state:
+            rows = list(self._rows.values())
+        finished = sum(1 for row in rows if row.state == FINISHED)
+        return {
+            "said": len(rows),
+            "finished": finished,
+            "in_flight": len(rows) - finished,
+            "seconds": round(sum(row.seconds for row in rows), 3),
+            "chars": sum(row.chars for row in rows),
+        }
 
     def check_replayable(self, delivered: int) -> None:
         """Can this session still start a stream after event `delivered`?
@@ -999,6 +1043,7 @@ class StreamManager:
         voice: str,
         language: str,
         manifest: VoiceManifest,
+        client: str | None,
         loop: asyncio.AbstractEventLoop,
     ) -> StreamSession:
         """Open the session, or refuse by name. **Event loop only.**"""
@@ -1055,6 +1100,7 @@ class StreamManager:
                 backend=resident.backend,
                 max_chars=resident.max_chars,
                 narrator_engine=manifest.narrator_engine,
+                client=client,
                 engine=engine,
                 residency=residency,
                 loop=loop,

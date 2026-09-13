@@ -102,6 +102,69 @@ def default_server_name() -> str:
 
 
 @dataclass(frozen=True)
+class CapabilityRow:
+    """One capability class's verdict, as `crucible capability` decided it.
+
+    A row is a RECORD, not an authority. `[jobs] enable_*` stays the single owner
+    of what this server offers (ARCHITECTURE.md R1); this says what the numbers
+    were when somebody decided it, so a refusal can name the number that turned
+    the class off instead of telling an operator to flip a flag that will OOM
+    (PHASE9-CAPABILITY.md section 2.1).
+
+    `selected` is `""` rather than absent when nothing fit, and `shortfall_bytes`
+    is `0` rather than absent when something did: TOML has no null, and a key that
+    comes and goes would make "no candidate fit" and "this config predates the
+    field" the same reading.
+    """
+
+    capability: str
+    enabled: bool
+    selected: str
+    reason: str
+    shortfall_bytes: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "capability": self.capability,
+            "enabled": self.enabled,
+            "selected": self.selected,
+            "reason": self.reason,
+            "shortfall_bytes": self.shortfall_bytes,
+        }
+
+
+@dataclass(frozen=True)
+class CapabilityRecord:
+    """`[capability]` — what the card was, and what was decided from it.
+
+    The three scalars are the INPUTS to the decision, kept so a reader can tell a
+    stale record from a current one. `crucible doctor` compares `total_bytes`
+    against the card it detects now, which is how a swapped GPU is noticed
+    without anybody writing down a date: the number that matters is the one the
+    decision was made on, not the day it was made.
+    """
+
+    backend_kind: str
+    total_bytes: int
+    desktop_allowance_bytes: int
+    rows: tuple[CapabilityRow, ...]
+
+    def row(self, capability: str) -> CapabilityRow | None:
+        for entry in self.rows:
+            if entry.capability == capability:
+                return entry
+        return None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "backend_kind": self.backend_kind,
+            "total_bytes": self.total_bytes,
+            "desktop_allowance_bytes": self.desktop_allowance_bytes,
+            "classes": [entry.to_dict() for entry in self.rows],
+        }
+
+
+@dataclass(frozen=True)
 class Config:
     path: Path
     home: Path
@@ -122,6 +185,12 @@ class Config:
     #: "the type is not enabled" and "the config predates the type" are told
     #: apart by a reader rather than guessed at.
     flags_absent: tuple[str, ...] = ()
+    #: What `crucible capability` decided on this host, or None when nothing has
+    #: decided anything here yet — a config written by `crucible init` alone, or
+    #: one written before this field existed. None is a REPORTED state, not a
+    #: guess: the refusal in `crucible/jobs/__init__.py` says "no selection has
+    #: been recorded here" rather than inventing a reason for a disabled type.
+    capability: CapabilityRecord | None = None
 
     @property
     def jobs_dir(self) -> Path:
@@ -198,6 +267,113 @@ CAPABILITY_FLAGS: tuple[str, ...] = (
 )
 
 
+#: The scalars of `[capability]`, and the keys of one `[[capability.classes]]`.
+_CAPABILITY_REQUIRED: dict[str, type] = {
+    "backend_kind": str,
+    "total_bytes": int,
+    "desktop_allowance_bytes": int,
+}
+_CAPABILITY_ROW_REQUIRED: dict[str, type] = {
+    "capability": str,
+    "enabled": bool,
+    "selected": str,
+    "reason": str,
+    "shortfall_bytes": int,
+}
+
+
+def _capability_record(table: dict[str, Any]) -> CapabilityRecord | None:
+    """`[capability]`, or None when this config has never had one written.
+
+    ABSENT means "nobody has decided", exactly as `_capability_flag`'s absence
+    means "written before this existed", and for the same reason: a config from
+    phase 8 must still load on a phase 9 build. Where the two differ is what an
+    absence is allowed to become. A missing FLAG becomes `False`, because a
+    capability that switches itself on is the dangerous direction. A missing
+    RECORD becomes None and stays None — it must never become an empty record,
+    because an empty record reads as "the card was probed and nothing fit", which
+    is a different and false statement about the host.
+
+    PRESENT and malformed is a refusal, like every other table in this file: a
+    `[capability]` block with a misspelled key must not load with that class
+    silently missing and have a refusal claim no selection was ever run.
+    """
+    section = table.get("capability")
+    if section is None:
+        return None
+    if not isinstance(section, dict):
+        raise ConfigError("config key capability must be a table")
+    allowed = set(_CAPABILITY_REQUIRED) | {"classes"}
+    unknown = sorted(set(section) - allowed)
+    if unknown:
+        raise ConfigError(
+            f"config [capability]: unknown key(s) {unknown}; this table takes "
+            f"exactly {sorted(allowed)}"
+        )
+    for key, kind in _CAPABILITY_REQUIRED.items():
+        if key not in section:
+            raise ConfigError(f"config is missing capability.{key}")
+        value = section[key]
+        if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+            raise ConfigError(
+                f"config key capability.{key} must be {kind.__name__}, got "
+                f"{type(value).__name__}"
+            )
+    raw_rows = section.get("classes")
+    if raw_rows is None:
+        raise ConfigError("config is missing capability.classes")
+    if not isinstance(raw_rows, list):
+        raise ConfigError(
+            "config key capability.classes must be an array of tables, one per "
+            "capability class"
+        )
+    rows: list[CapabilityRow] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_rows):
+        where = f"config [[capability.classes]][{index}]"
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{where} must be a table")
+        unknown = sorted(set(raw) - set(_CAPABILITY_ROW_REQUIRED))
+        if unknown:
+            raise ConfigError(
+                f"{where}: unknown key(s) {unknown}; a row takes exactly "
+                f"{sorted(_CAPABILITY_ROW_REQUIRED)}"
+            )
+        for key, kind in _CAPABILITY_ROW_REQUIRED.items():
+            if key not in raw:
+                raise ConfigError(f"{where}: missing required key {key!r}")
+            value = raw[key]
+            if not isinstance(value, kind) or (
+                kind is int and isinstance(value, bool)
+            ):
+                raise ConfigError(
+                    f"{where}: {key} must be {kind.__name__}, got "
+                    f"{type(value).__name__}"
+                )
+        name = raw["capability"]
+        if name in seen:
+            raise ConfigError(
+                f"{where}: capability {name!r} is recorded twice; one class has "
+                "one verdict"
+            )
+        seen.add(name)
+        rows.append(
+            CapabilityRow(
+                capability=name,
+                enabled=raw["enabled"],
+                selected=raw["selected"],
+                reason=raw["reason"],
+                shortfall_bytes=raw["shortfall_bytes"],
+            )
+        )
+    return CapabilityRecord(
+        backend_kind=section["backend_kind"],
+        total_bytes=section["total_bytes"],
+        desktop_allowance_bytes=section["desktop_allowance_bytes"],
+        rows=tuple(rows),
+    )
+
+
 def load_config(home: Path | None = None) -> Config:
     """Read config.toml. Raises ConfigError naming the missing piece."""
     root = home if home is not None else crucible_home()
@@ -232,6 +408,7 @@ def load_config(home: Path | None = None) -> Config:
         desktop_allowance_bytes=_require(
             table, "accelerator", "desktop_allowance_bytes", int
         ),
+        capability=_capability_record(table),
     )
 
 
@@ -250,12 +427,20 @@ def write_config(
     enable_align: bool,
     enable_rvc: bool,
     desktop_allowance_bytes: int,
+    capability: CapabilityRecord | None = None,
 ) -> Path:
-    """Write config.toml at mode 0600 under a 0700 home. Returns the path."""
+    """Write config.toml at mode 0600 under a 0700 home. Returns the path.
+
+    `capability` is optional and the default writes NO `[capability]` table, which
+    is the honest record for `crucible init`: init takes the operator's
+    `--enable-*` flags at their word and probes nothing, so it has no verdict to
+    write down. `crucible capability --write` and `crucible install` are the two
+    doors that have one.
+    """
     home.mkdir(parents=True, exist_ok=True)
     os.chmod(home, 0o700)
     path = config_path(home)
-    document = {
+    document: dict[str, Any] = {
         "server": {"name": name, "host": host, "port": port},
         "auth": {"token": token},
         "backend": {"kind": backend_kind},
@@ -269,6 +454,8 @@ def write_config(
         },
         "accelerator": {"desktop_allowance_bytes": desktop_allowance_bytes},
     }
+    if capability is not None:
+        document["capability"] = capability.to_dict()
     # Create with 0600 from the outset so the token is never briefly world-readable.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as handle:

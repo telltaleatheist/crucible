@@ -25,6 +25,7 @@ export {
   ACCELERATOR_UNREADABLE,
   CrucibleAcceleratorUnreadable,
   CrucibleAuthError,
+  CrucibleBusy,
   CrucibleConfigError,
   CrucibleError,
   CrucibleNotACrucible,
@@ -33,6 +34,8 @@ export {
   CrucibleServerError,
   CrucibleUnreachable,
   CrucibleVersionError,
+  SERVER_BUSY,
+  isServerSpecificRefusal,
 } from './errors.js';
 
 export {
@@ -57,6 +60,10 @@ export type {
 export { API_VERSION, TERMINAL_EVENTS, isLlmCapability, isTtsCapability } from './types.js';
 export type {
   AcceleratorGpu,
+  Activity,
+  ActivityJob,
+  ActivitySlot,
+  ActivityStreaming,
   AcceleratorHolder,
   AcceleratorResident,
   AcceleratorState,

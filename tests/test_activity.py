@@ -82,7 +82,17 @@ def test_an_idle_server_reports_itself_and_nothing_else(
     assert body["warming"] is None
     assert body["running"] == []
     assert body["queued"] == []
-    assert body["slots"]["accelerated"] == {"busy": 0, "of": 1, "queue_depth": 0}
+    # Nobody holds narrator's wire and nobody is streaming. Both keys are PRESENT
+    # and null: a key that is absent would mean "this build does not speak the
+    # field", which is a different piece of news from "nothing is happening".
+    assert body["claim"] is None
+    assert body["streaming"] is None
+    assert body["slots"]["accelerated"] == {
+        "busy": 0,
+        "of": 1,
+        "queue_depth": 0,
+        "accepts_work": True,
+    }
 
 
 def test_the_probe_is_off_unless_it_is_asked_for(
@@ -155,7 +165,12 @@ def test_the_bench_shows_one_job_and_nothing_waiting_behind_it(
         body = wait_until(client, auth, lambda a: a["running"], f"job {first} running")
         assert [row["job_id"] for row in body["running"]] == [first]
         assert body["queued"] == []
-        assert body["slots"]["accelerated"] == {"busy": 1, "of": 1, "queue_depth": 1}
+        assert body["slots"]["accelerated"] == {
+            "busy": 1,
+            "of": 1,
+            "queue_depth": 1,
+            "accepts_work": False,
+        }
 
         refused = client.post("/v1/jobs", json=job_body(delay_ms=0), headers=auth)
         assert refused.status_code == 409, refused.text

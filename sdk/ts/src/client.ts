@@ -16,7 +16,9 @@ import {
   CrucibleError,
   CrucibleNotACrucible,
   CrucibleProtocolError,
+  CrucibleBusy,
   CrucibleRefused,
+  SERVER_BUSY,
   CrucibleServerError,
   CrucibleUnreachable,
   CrucibleVersionError,
@@ -45,6 +47,9 @@ import {
   type AcceleratorHolder,
   type AcceleratorResident,
   type AcceleratorState,
+  type Activity,
+  type ActivityJob,
+  type ActivityStreaming,
   type ArtifactWrite,
   type AsrOptions,
   type CancelResult,
@@ -255,6 +260,73 @@ export class CrucibleClient {
       // that threw a protocol error on a kind it had not heard of would be
       // broken by the server that added one.
       residentKind: nullableStr(body, 'resident_kind', 'health'),
+    };
+  }
+
+  /**
+   * `GET /v1/activity` — what is on this server and how far along, in one read,
+   * with no job id.
+   *
+   * The question a bench widget asks, which is not the question a job's event
+   * stream answers. The step that owns a job reads the stream; a widget that
+   * owns no job and may never own one reads this. The two do not compete.
+   *
+   * **It reports and nothing else.** It does not admit, reserve, claim or lock.
+   * Reading `acceptsWork: true` and submitting is racing every other client, and
+   * that race is settled at the door: `POST /v1/jobs` admits one and refuses the
+   * other by name. The loser has lost a round trip and nothing else, because it
+   * never gave up ownership of its own queue.
+   *
+   * `accelerator` is opt-in and costs an `nvidia-smi` per call; a bench polling
+   * three servers every few seconds should not ask for it.
+   */
+  async activity(options?: { acceleratorProbe?: boolean }): Promise<Activity> {
+    const probe = options?.acceleratorProbe === true;
+    const path = probe ? '/v1/activity?accelerator_probe=true' : '/v1/activity';
+    const body = await this.#json(path, { method: 'GET' }, 'activity');
+    const server = objectField(body, 'server', 'activity');
+    const resident = nullableObject(body, 'resident', 'activity');
+    const claim = nullableObject(body, 'claim', 'activity');
+    const streaming = nullableObject(body, 'streaming', 'activity');
+    const slot = objectField(objectField(body, 'slots', 'activity'), 'accelerated', 'activity.slots');
+    return {
+      server: {
+        name: str(server, 'name', 'activity.server'),
+        version: str(server, 'version', 'activity.server'),
+        apiVersion: num(server, 'api_version', 'activity.server'),
+        backend: str(server, 'backend', 'activity.server'),
+        uptimeS: num(server, 'uptime_s', 'activity.server'),
+      },
+      resident:
+        resident === null
+          ? null
+          : {
+              kind: str(resident, 'kind', 'activity.resident'),
+              id: str(resident, 'id', 'activity.resident'),
+              since: str(resident, 'since', 'activity.resident'),
+              memoryBytesEstimate: nullableNum(
+                resident,
+                'memory_bytes_estimate',
+                'activity.resident',
+              ),
+            },
+      warming: nullableStr(body, 'warming', 'activity'),
+      claim: claim === null ? null : { heldBy: str(claim, 'held_by', 'activity.claim') },
+      streaming: streaming === null ? null : readStreaming(streaming),
+      slots: {
+        accelerated: {
+          busy: num(slot, 'busy', 'activity.slots.accelerated'),
+          of: num(slot, 'of', 'activity.slots.accelerated'),
+          queueDepth: num(slot, 'queue_depth', 'activity.slots.accelerated'),
+          acceptsWork: bool(slot, 'accepts_work', 'activity.slots.accelerated'),
+        },
+      },
+      running: asArray(field(body, 'running', 'activity'), 'activity.running').map(
+        (entry, index) => readActivityJob(asObject(entry, `activity.running[${index}]`), `activity.running[${index}]`),
+      ),
+      queued: asArray(field(body, 'queued', 'activity'), 'activity.queued').map(
+        (entry, index) => readActivityJob(asObject(entry, `activity.queued[${index}]`), `activity.queued[${index}]`),
+      ),
     };
   }
 
@@ -1154,6 +1226,13 @@ export class CrucibleClient {
     }
     if (response.status >= 400) {
       const details = 'details' in envelope ? envelope['details'] : null;
+      // One 4xx gets its own type, for the reason one 5xx does: the body is not
+      // decoration. `crucible/jobs/queue.py` answers server_busy with the
+      // holder, the job, what it is doing and how far along — everything a bench
+      // needs to say "GPU busy: foundry" and everything a `waitFor: "any"` walk
+      // needs to decide to try the next machine. Read once here rather than
+      // re-parsed identically in every client.
+      if (code === SERVER_BUSY) return busyRefusal(response.status, code, message, details);
       return new CrucibleRefused(response.status, code, message, details);
     }
     return new CrucibleProtocolError(
@@ -2180,6 +2259,93 @@ function normaliseUrl(url: string): string {
     );
   }
   return trimmed;
+}
+
+/**
+ * Read a 409 `server_busy` body into {@link CrucibleBusy}.
+ *
+ * A body that is not the v1 shape comes back as a {@link CrucibleProtocolError}
+ * rather than quietly degrading to a plain {@link CrucibleRefused}. That is the
+ * same call `#failure` already makes two branches up for an unparseable
+ * envelope, and it is the right one: these fields are API v1's promise, a change
+ * to them is a breaking change that arrives with a new `api_version`, and a
+ * silent downgrade here would hide a broken wire behind an error that still
+ * looks normal — a caller would see "busy" and never learn that the holder,
+ * progress and job id it was about to display had gone missing.
+ */
+function busyRefusal(
+  status: number,
+  code: string,
+  message: string,
+  details: unknown,
+): CrucibleError {
+  try {
+    const body = asObject(details, 'error.details');
+    return new CrucibleBusy(status, code, message, details, {
+      holder: nullableStr(body, 'holder', 'error.details'),
+      jobId: str(body, 'job_id', 'error.details'),
+      jobType: str(body, 'type', 'error.details'),
+      model: nullableStr(body, 'model', 'error.details'),
+      jobStatus: str(body, 'status', 'error.details'),
+      since: str(body, 'since', 'error.details'),
+      progress: num(body, 'progress', 'error.details'),
+      jobMessage: nullableStr(body, 'message', 'error.details'),
+    });
+  } catch (cause) {
+    if (cause instanceof CrucibleProtocolError) return cause;
+    throw cause;
+  }
+}
+
+function readActivityJob(data: Json, where: string): ActivityJob {
+  return {
+    jobId: str(data, 'job_id', where),
+    type: str(data, 'type', where),
+    model: nullableStr(data, 'model', where),
+    status: str(data, 'status', where),
+    position: nullableNum(data, 'position', where),
+    progress: num(data, 'progress', where),
+    message: nullableStr(data, 'message', where),
+    created: str(data, 'created', where),
+    started: nullableStr(data, 'started', where),
+    client: nullableStr(data, 'client', where),
+  };
+}
+
+/**
+ * One open streaming session.
+ *
+ * `progress` is read with {@link nullableNum} and then **required to be null**,
+ * rather than simply not read. Reading it proves the key is on the wire — which
+ * is what makes the null a statement rather than an absence — and asserting it
+ * is null is the one place a server that started inventing a percentage for a
+ * session would be caught. A session has no denominator; a number here would be
+ * a fraction of the work that happened to have arrived so far, which falls as
+ * more arrives.
+ */
+function readStreaming(data: Json): ActivityStreaming {
+  const where = 'activity.streaming';
+  const progress = nullableNum(data, 'progress', where);
+  if (progress !== null) {
+    throw new CrucibleProtocolError(
+      `${where}.progress is ${progress}, but a streaming session has no total to ` +
+        'be a fraction of; only null is meaningful here',
+    );
+  }
+  return {
+    sessionId: str(data, 'session_id', where),
+    voice: str(data, 'voice', where),
+    language: str(data, 'language', where),
+    narratorEngine: str(data, 'narrator_engine', where),
+    since: str(data, 'since', where),
+    client: nullableStr(data, 'client', where),
+    progress: null,
+    said: num(data, 'said', where),
+    finished: num(data, 'finished', where),
+    inFlight: num(data, 'in_flight', where),
+    seconds: num(data, 'seconds', where),
+    chars: num(data, 'chars', where),
+  };
 }
 
 function describeCause(cause: unknown): string {
