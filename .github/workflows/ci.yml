@@ -1,0 +1,109 @@
+# Every push and every pull request runs the whole suite and builds both halves of a
+# release. Until now the tests ran when somebody remembered to run them, on one of
+# two machines, in a conda env built by hand — which is fine for a repo with one
+# author and useless the first time a friend clones it.
+#
+# The suite is hermetic: `tests/conftest.py` gives every test a throwaway
+# CRUCIBLE_HOME and a fake backend, so nothing here needs a GPU and nothing here can
+# see a real ~/.crucible. That is what makes a hosted runner an honest place to run
+# it. What a runner CANNOT do is prove a model loads, so this is a guard against
+# regressions and never evidence that a backend works — that evidence is measured on
+# the card and written into the manifest it belongs to.
+#
+# macOS is in the matrix even though the tests do not detect a real backend, because
+# the server runs there and the one thing a Linux runner cannot catch is a path or a
+# signal assumption that only holds on Linux.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: server (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: install
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[test]"
+
+      - name: pytest
+        run: python -m pytest -q
+
+  sdk:
+    name: sdk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The SDK has no runtime dependencies and targets Node 20+, bun and
+          # Electron. 20 is the floor, so 20 is what CI proves.
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: sdk/ts/package-lock.json
+
+      - name: install
+        working-directory: sdk/ts
+        run: npm ci --no-audit --no-fund
+
+      - name: build
+        working-directory: sdk/ts
+        run: npm run build
+
+      - name: pack
+        # `npm pack` is how the SDK is released, so a tarball that cannot be built is
+        # a release that cannot be cut. Failing here is cheaper than failing in
+        # scripts/release.sh with a tag half-created.
+        working-directory: sdk/ts
+        run: npm pack --silent --pack-destination "$RUNNER_TEMP"
+
+  dist:
+    name: sdist and wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: build
+        run: python -m pip install --upgrade pip build && python -m build
+
+      - name: the four version sources agree
+        # scripts/release.sh refuses a release when these disagree, and the incident
+        # that rule came from is in its comments: 0.1.0 bytes nearly shipped as
+        # v0.2.0 because pyproject.toml and crucible/__init__.py had drifted apart.
+        # Catching it on every push is better than catching it while cutting a tag.
+        run: |
+          set -euo pipefail
+          py=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' crucible/__init__.py)
+          toml=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)
+          sdk=$(node -p "require('./sdk/ts/package.json').version")
+          ua=$(sed -n "s/^export const SDK_VERSION = '\(.*\)';$/\1/p" sdk/ts/src/version.ts)
+          echo "crucible/__init__.py=$py pyproject.toml=$toml package.json=$sdk version.ts=$ua"
+          test "$py" = "$toml" && test "$py" = "$sdk" && test "$py" = "$ua"
