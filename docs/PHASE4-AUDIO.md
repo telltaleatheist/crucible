@@ -326,7 +326,7 @@ whose deletion nothing watches — hence a 15-second admission recheck.
   "free_bytes": 24297504768,
   "used_bytes": 1459716096,
   "desktop_allowance_bytes": 3221225472,
-  "unattributed_bytes": -3011411968,
+  "unattributed_bytes": 0,
   "resident": { "kind": "llm", "id": "qwen3.5-9b", "since": "...", "memory_bytes_estimate": 20950548480 },
   "holders": [
     { "pid": 44503, "name": "python", "bytes": 1249902592, "owned_by_crucible": false }
@@ -348,7 +348,12 @@ wrong conclusion:
   PC, 2026-09-12). On that host — which is the host BookForge runs on — `holders` is
   misleadingly empty and this is the only honest report that the card is busy. It is `null`,
   not `0`, on `mlx-darwin`, where "used unified memory" is the OS doing its job and
-  attributing it to compute processes is not a question `vm_stat` can answer.
+  attributing it to compute processes is not a question `vm_stat` can answer. It is **never
+  negative**: the subtraction goes below zero whenever the allowance already covers
+  everything the driver can see — an idle 3090 Ti holding 1.7 GiB against a 3.0 GiB
+  allowance read as −1.5 GiB until 2026-09-13 — and a client sizing a load against a
+  negative is reading headroom that is not there. The example above shows the zero an idle
+  card now reports.
 - **`used_bytes` and `desktop_allowance_bytes`** — so a client can do the same arithmetic
   the guard does rather than inferring the host's declared facts.
 - **`holders[].bytes` may be `null`**, where the driver will not say (WDDM, permissions).
@@ -378,6 +383,74 @@ Crucible already tails the engine log into `EngineError` on a failed start. Exte
 courtesy to a failed *job*: when a job fails because its engine died, the `failed {error}`
 event carries the last lines of that engine's log in `details`, not a pointer to a file on a
 machine the client may not be able to read.
+
+## 6a. SDK additions (`@crucible/client`)
+
+Written 2026-09-13, after sections 3 and 5 landed on the server.
+
+- **`accelerator()` → `AcceleratorState`.** The probe, typed. The section-5 route shipped
+  with **no SDK method at all**, and the reasoning was sound: the SDK's tests needed a live
+  server, so the method could not be proved without one, and "every behaviour gets a test"
+  outranked the convenience. That premise is now false — see the unit-test note below — and
+  the method is the thing BookForge's `setGpuHolderProbe` seam has been waiting for.
+
+  `holders[].bytes` is `number | null` and the null travels all the way to the caller.
+  `unattributedBytes` is `number | null` and is not defaulted to zero on `mlx-darwin`:
+  "nobody unaccounted for" and "unanswerable" are different answers. `resident.kind` is a
+  plain string, not a union, because this section says the set grows.
+
+- **503 `accelerator_unreadable` is its own type**, `CrucibleAcceleratorUnreadable`. It
+  extends `CrucibleServerError` — the status really is a 5xx, and every phase-2 handler that
+  catches one still catches this — with a narrower name for the callers that must act
+  differently. That distinction is the entire point of the route: an unreadable probe is
+  *ask again*, never *the card is free*, and a caller that cannot tell the two apart gets no
+  more from this route than it had from the lock file.
+
+- **`asr(options) → job id.`** `{model, audio, filename, language, vadFilter,
+  wordTimestamps}`, every one required and none supplied by the client. `language` is sent
+  as given: faster-whisper's own code list is the server's authority, it refuses naming the
+  code before the job is queued, and a second copy of a hundred codes in the SDK is a second
+  thing to drift. `filename` is a parameter and not a constant because the input's name
+  becomes the file's name on disk and ffmpeg reads the container off the extension.
+
+  It returns a job id, like every other submit; the transcript is the artifact
+  `transcript.json`. There is no "job handle" type in this SDK and inventing one for `asr`
+  alone would be a second way to watch a job.
+
+- **`progress` now carries `extra`.** Section 3's three additional keys were reaching a
+  typed client and being silently dropped, because `ProgressData` modelled `{fraction,
+  message}` and nothing else. `JobContext.progress(fraction, message, **extra)` is open by
+  design, so the SDK carries everything else on the frame verbatim — server spelling, server
+  types — in `ProgressData.extra`, and `{}` where there was none. Modelling `stage` /
+  `processed_s` / `total_s` / `cues` as named fields would have put one job type's vocabulary
+  in the API's type, where the next job type's measurements collide with it.
+
+- **`ModelInfo.modalities`** (phase 3c), **`Health.residentKind`** (PHASE3-TTS.md section 8)
+  and **`ServerInfo.jobTypes`** (`fix(info)`, 2026-09-13) were all being sent and all being
+  ignored. All three are read strictly now. `modalities` is never null on any host, unlike
+  every other field on that row; `jobTypes` is what to POST and is deliberately not the
+  capability list, so a client reads "what can I ask for" from it rather than discovering an
+  unknown job type by being refused one.
+
+- **`unattributedBytes` is surfaced exactly as it arrives, negative or not.** The server
+  clamps it at zero as of `fix(accelerator)`, and a negative from an older one is that
+  server's bug. Clamping it in the client too would put the correction in the wrong
+  repository and make the real fault unfindable — the same argument as the one against the
+  CPU fallback in section 3.
+
+**The unit suite no longer needs a server.** It answers each route from an in-process
+`node:http` fixture — the harness phase 1 already had, extended — which is how a test asserts
+that `/v1/accelerator` is called with the bearer token and the version header, that a holder
+row missing `bytes` is a `CrucibleProtocolError` rather than a zero, that a 503
+`accelerator_unreadable` never resolves to a state, and that `asr()` refuses each missing
+option by name before it sends anything. 52 tests to 84. `scripts/e2e.sh` still proves the
+live seam, and gained two cheap cases that need no weights: the probe answers a state or the
+named refusal, and `voices()` is refused `job_type_disabled` on the echo-only server it
+starts.
+
+**Not built, deliberately: `render()` and `stream()`** (PHASE3-TTS.md sections 6 and 7).
+Their wire is still being written in Python, and a client for a contract that may move is how
+the two ends come to disagree silently.
 
 ## 7. What is deliberately left out, and why
 
