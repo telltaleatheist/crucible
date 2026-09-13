@@ -186,7 +186,11 @@ def model_rows(
             "resident": residency.resident_id == manifest.id,
             "loadable": reason is None,
             "memory_bytes_estimate": estimate,
-            "context_default": manifest.context_default,
+            # The context THIS host would serve, the same way `revision` and
+            # `memory_bytes_estimate` above are this host's. A backend may carry
+            # its own; where it does not, this is the model's own number, so a
+            # host with no block for this model still reports something true.
+            "context_default": manifest.context_for(backend_kind),
         }
         if reason is not None:
             row["reason"] = reason

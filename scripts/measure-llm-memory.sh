@@ -24,11 +24,25 @@ SERVER_PID=""
 ROOT=""
 
 cleanup() {
+  status=$?
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill -TERM "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
-  [ -n "$ROOT" ] && [ -d "$ROOT" ] && rm -rf "$ROOT"
+  if [ -n "$ROOT" ] && [ -d "$ROOT" ]; then
+    # A failed measurement's whole value is the engine log, and it lives in the
+    # throwaway home this script is about to delete. On a non-zero exit, keep it
+    # and say where. (Measured 2026-09-12: the 9B's first load on the PC failed
+    # with `UVA is not available`, and the log carrying that line went into the
+    # bin with the temp directory. Finding out cost another load.)
+    if [ "$status" -ne 0 ] && [ -d "$ROOT/home/logs" ]; then
+      KEPT="${TMPDIR:-/tmp}/crucible-measure-failed.$$"
+      mkdir -p "$KEPT"
+      cp -r "$ROOT/home/logs" "$KEPT/logs"
+      echo "measure: kept the engine log at $KEPT/logs (exit $status)" >&2
+    fi
+    rm -rf "$ROOT"
+  fi
 }
 trap cleanup EXIT
 

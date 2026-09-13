@@ -154,19 +154,21 @@ The first capability that touches the accelerator. Crucible runs one language mo
 time and puts an OpenAI-compatible surface in front of it; the prompts, the chunking and
 the rubrics stay in the app.
 
-Three models ship. **`qwen3.5-9b`** is Owen's cleanup model and the only one that fits a
-24 GB card comfortably — about 19.7 GB at its 12288-token context, and the model both
+Three models ship. **`qwen3.5-9b`** is Owen's cleanup model, measured at 20.95 GB on the
+3090 Ti at its 12288-token context and 20.38 GB on the Mac Studio, and the model both
 machines have actually run. **`qwen3.8-27b`** is the same 27B the Mac Studio runs at
 bf16: roughly 56 GB with KV, so it loads on 64 GB of unified memory and is refused on the
 3090 Ti by name, which is the point of carrying a `cuda-linux` block it can never satisfy.
 **`qwen3.8-27b-4bit`** is that 27B quantized to int4 — Crucible's equivalent of Owen's
-Ollama tag `qwen3.8:27b-24g`, the 27B he actually runs on the 3090 Ti — and it carries
-that tag's 98304-token context, which is also the `--max-model-len` vLLM is started with.
-At 4 bits the weights are 18.6 GB on `cuda-linux` and 16.1 GB on `mlx-darwin`, so it fits
-a 24 GB card on paper with about 0.7 GiB to spare once the 6.00 GiB of KV at 98304 tokens
-is counted. On paper is the operative phrase: its `cuda-linux` estimate is computed, never
-measured, for the reason in TODO(cuda-linux verification) below, and the margin is thinner
-than the 9B's computed figure turned out to be wrong by.
+Ollama tag `qwen3.8:27b-24g`, the 27B he actually runs on the 3090 Ti.
+
+That last one is where the two backends stop agreeing. Its `[model] context_default` is
+the tag's 98304, which `mlx-darwin` serves; on a 24 GB card 98304 tokens of its KV is
+7.9 GiB that is not there once 18.6 GB of weights are down, and `load-model` is refused
+by name for it. So its `[backends.cuda-linux]` block carries a `context_default` of its
+own, 16384 — measured, and the same context BookForge's own text server runs this model at
+on this card. **A model is FOR a context; an accelerator has room for one.** Where the
+two differ the backend block says so, and where it is silent the model's number stands.
 
 ```bash
 crucible init --enable-llm        # or add [jobs] enable_llm = true to an existing config
@@ -271,46 +273,62 @@ watching a job fail a minute later.
 > On Apple Silicon that rule does not apply: "used" unified memory is the OS and the
 > user's apps, so the free figure is the whole check.
 
-#### TODO(cuda-linux verification)
+#### cuda-linux, verified 2026-09-12
 
-**The `cuda-linux` half of PHASE2-LLM.md section 8 has not been run.** Owen's RTX 3090 Ti
-was busy with a Higgs ladder render for the whole of the phase-2 build, and Crucible never
-evicts another process — including its own author's.
+**Both halves of PHASE2-LLM.md section 8 have now been run.** The `cuda-linux` half went
+on Owen's RTX 3090 Ti, from inside WSL2, driven from Windows through the BookForge CLI:
+`qwen3.5-9b` and `qwen3.8-27b-4bit` each loaded, answered, were measured and were
+unloaded, and `./scripts/keeper-llm-live.sh` passed against that server in remote mode —
+**12 passed, 0 failed**. `pytest`: 155 passed.
 
-What *did* run on the PC, for real:
+| | `qwen3.5-9b` | `qwen3.8-27b-4bit` |
+|---|---|---|
+| context served here | 12288 | **16384** (the model's own is 98304) |
+| weights on the card | 17.66 GiB | 17.68 GiB |
+| non-KV demand | 19.02 GiB | 19.12 GiB |
+| `--gpu-memory-utilization` | 0.84 | 0.86 |
+| KV pool | 1.09 GiB, 27,443 tokens | 1.51 GiB, 18,811 tokens |
+| card at rest | 20,986 MiB | 21,502 MiB |
+| card peak, full-context | 21,172 MiB | 21,819 MiB |
+| free at that peak | 3,140 MiB | 2,493 MiB |
+| engine's share (the estimate) | 19.52 GiB | 20.15 GiB |
+| load, warm compile cache | 78 s | 89 s |
 
-- `crucible install llm` — 196 s, 8.0 GB, vLLM 0.29.0 / torch 2.13.0 / transformers 5.17.0
-- `crucible models pull qwen3.5-9b` — 19.33 GB at the pinned sha in 154 s
-- `crucible doctor` — healthy, the 194-pin recipe verified against the built env
-- the guard refusing, live, against that busy card: `accelerator_busy`
-- `load-model qwen3.5-27b` refused `insufficient_memory` (52.5 GiB against 24.0 GiB) —
-  that id is now `qwen3.8-27b`; same size, same arithmetic, same refusal
-- `pytest` — 127 passed
+Three things stood between the first `load-model` and a resident model, none of them
+visible without the card. All three are fixed in `crucible/engines/vllm.py` and the
+manifests, each with the measurement that justifies it:
 
-What did **not**: loading `qwen3.5-9b` into vLLM, the chat completions through it, the
-VRAM measurement, and `keeper-llm-live.sh` in local mode on that host. Consequently:
+1. **`RuntimeError: UVA is not available`** — vLLM 0.29's V2 model runner needs page-locked
+   host memory, and under WSL it asks `VLLM_WSL2_ENABLE_PIN_MEMORY`, which defaults to 0.
+   Pinned memory works fine on this kernel; the engine now says so.
+2. **`Could not find nvcc`** — FlashInfer JIT-builds its top-k/top-p sampler on first use
+   and the llm env ships no CUDA compiler, so a load died *after* allocating its KV cache.
+   The engine now asks for the sampler that needs no compiler.
+3. **`--gpu-memory-utilization 0.85` filled the card.** The flag is a fraction of the
+   card's TOTAL, it is a budget rather than a demand, vLLM spends whatever is left of it
+   on KV, and it does not subtract the Windows desktop. At 0.85 with vLLM's default
+   `--max-num-seqs` the card reached 24,173 MiB of 24,564 with 139 MiB free and CUDA-graph
+   capture paged at 87 s for one of 51 graphs. Both manifests now carry a utilisation that
+   leaves the card 2.4-3.1 GiB, plus `--max-num-seqs 16` (9 graphs in 5 s) and
+   `--skip-mm-profiling` (worth 1.90 GiB of budget on these multimodal checkpoints, which
+   the `llm` lane never sends an image to).
 
-- `models/qwen3.5-9b.toml`'s **`[backends.cuda-linux] memory_bytes_estimate` is COMPUTED,
-  not measured** — weights on disk plus KV at 12288. Its comment says so. Replace it with
-  a measured number (`./scripts/measure-llm-memory.sh qwen3.5-9b`) when the card is free.
-- `[backends.cuda-linux] engine_args`'s `--gpu-memory-utilization 0.85` is the contract's
-  example value and has never been exercised. On a 24 GB card holding a 19.3 GB model
-  alongside the Windows desktop it may well be too low to leave room for the KV cache;
-  expect to raise it, and record the measured reason when you do.
-- **`models/qwen3.8-27b-4bit.toml` has never been near the card either**, and it is the
-  manifest where that matters most, because it is the one whose whole claim is that it
-  fits. The card was still off limits when it was written — Owen's ladder owns it, and
-  Crucible never evicts — so its `cuda-linux` block is arithmetic and unit tests: weights
-  summed from the hub's tree API at the pinned sha, plus KV at 98304 tokens. 25.0 GB
-  against a 24 GB card leaves 0.7 GiB, and on the 9B the same arithmetic came out about
-  6% under a measured figure. So `load-model qwen3.8-27b-4bit` on the PC may well be
-  refused `insufficient_memory` the first time it is tried, especially with the Windows
-  desktop's ~2.3 GB on the card. When the card is free: pull it, measure it
-  (`./scripts/measure-llm-memory.sh qwen3.8-27b-4bit`), and if it does not fit, lower
-  `context_default` rather than raising the estimate — KV is 6.00 GiB of that budget.
-  Its `mlx-darwin` block, by contrast, is measured on the Mac Studio.
+Two numbers that were arithmetic are now measurements, and both were light: the 9B's
+estimate by 6.3%, and the 27B-4bit's KV-per-token by 24% — vLLM pads the attention page up
+to the hybrid model's recurrent state, so counting only the full-attention layers
+understates it. `qwen3.8-27b` (bf16) is still refused here, by name and before queueing:
+`insufficient_memory`, 52.5 GiB against 24.0 GiB.
 
-The `mlx-darwin` half is fully verified — locally on the Mac Studio, and **from a Windows
+`qwen3.8-27b-4bit` at its own 98304 was refused the same way — *needs 23.3 GiB and this
+host has 22.6 GiB free of 24.0 GiB* — which is why its `cuda-linux` block carries
+`context_default = 16384` of its own. 32768 would fit only by filling the card and was not
+taken; the manifest shows that arithmetic.
+
+The one thing **not** measured on this host is `./scripts/measure-llm-memory.sh` end to
+end: the figures above were read from `nvidia-smi` sampled every 2 s around loads driven
+through the CLI, because the script's own load is what needed diagnosing first.
+
+The `mlx-darwin` half is verified — locally on the Mac Studio, and **from a Windows
 client over the tailnet**, which is the shape the apps actually use:
 
 ```bash

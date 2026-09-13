@@ -229,7 +229,7 @@ def cmd_models_list(args: argparse.Namespace) -> int:
                 "hf_repo": spec.hf_repo,
                 "revision": spec.revision,
                 "memory_bytes_estimate": spec.memory_bytes_estimate,
-                "context_default": manifest.context_default,
+                "context_default": manifest.context_for(backend.kind),
                 "detail": (
                     f"{found.bytes / 1e9:.2f} GB at {found.path}"
                     if found is not None

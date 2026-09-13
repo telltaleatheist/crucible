@@ -454,9 +454,13 @@ def test_the_4bit_27b_is_loadable_on_this_card_where_the_bf16_27b_is_not(
     assert small["installed"] is True
     assert small["loadable"] is True
     assert "reason" not in small
-    # Owen's `qwen3.8:27b-24g` context, and what vLLM is given as --max-model-len.
-    assert small["context_default"] == 98304
-    assert small["memory_bytes_estimate"] == 25_010_841_096
+    # THIS HOST's context, not the model's. The model wants Owen's
+    # `qwen3.8:27b-24g` 98304 and gets it on mlx-darwin; on a 24 GB card that is
+    # 7.9 GiB of KV the card does not have, so the cuda-linux block carries its
+    # own 16384 and that is what vLLM is given as --max-model-len.
+    assert load_manifest(SMALL_BIG_MODEL).context_default == 98304
+    assert small["context_default"] == 16384
+    assert small["memory_bytes_estimate"] == 21_633_171_456
     assert small["revision"] == (
         load_manifest(SMALL_BIG_MODEL).spec(FAKE_BACKEND.kind).revision
     )
@@ -499,8 +503,13 @@ def test_the_4bit_27b_actually_loads_on_a_free_24_gib_card(
     assert len(engines) == 1
     # vLLM is told the context the manifest promises, and nothing forces a dtype:
     # compressed-tensors W4A16 carries its own, and `dtype auto` is what it wants.
+    # `--max-model-len` is the cuda-linux block's own 16384, not the model's
+    # 98304: on a 24 GB card 98304 of KV is 7.9 GiB that is not there.
     assert engines[0].args == [
-        "--gpu-memory-utilization", "0.85", "--max-model-len", "98304",
+        "--gpu-memory-utilization", "0.86",
+        "--max-num-seqs", "16",
+        "--skip-mm-profiling",
+        "--max-model-len", "16384",
     ]
 
 
