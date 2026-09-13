@@ -45,7 +45,7 @@
 # Crucible inventing a pin nobody measured. pip resolves them from narrator's own
 # metadata.
 
-narrator[narrator-mlx] @ git+https://github.com/telltaleatheist/bookforge@4ebc529f30cfa205b820cf494e48fcb76ac12977#subdirectory=python
+narrator[narrator-mlx] @ git+https://github.com/telltaleatheist/bookforge@770415db591e0af2cc650cf8c889224972e8906d#subdirectory=python
 
 # --- the two exact pins from narrator's `narrator-mlx` extra ---
 mlx-lm==0.31.3

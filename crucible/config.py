@@ -37,7 +37,47 @@ TOKEN_BYTES = 32
 #: subtracts this before calling unaccounted VRAM "somebody else's job"
 #: (crucible/accelerator.py). It is a declared fact about the host, written by
 #: `crucible init`, not a fudge factor the code picks.
+#:
+#: **This is the `cuda-linux` number and only that one.** See
+#: `default_desktop_allowance_bytes` below for why the Mac cannot share it.
 DEFAULT_DESKTOP_ALLOWANCE_BYTES = 3 * 1024 ** 3
+
+#: The share of unified memory `mlx-darwin` reserves for the machine itself.
+#:
+#: A discrete card and a unified pool are not the same question wearing different
+#: numbers. On `cuda-linux` the desktop's appetite is roughly CONSTANT — a
+#: compositor and a browser want about the same VRAM on a 12 GB card as on a
+#: 24 GB one — so a fixed byte count is the honest shape. On `mlx-darwin` the
+#: allowance has to cover the entire operating system and every app on it, out of
+#: the same pool the model allocates from, and that scales with the machine: 3 GiB
+#: is defensible on a 16 GB Mac mini and absurd on a 192 GB Studio.
+#:
+#: 25% is not picked. It is the complement of Metal's own
+#: `recommendedMaxWorkingSetSize`, which Apple reports as ~75% of physical memory
+#: on Apple Silicon — the working set the platform itself says a GPU process may
+#: take before the system starts suffering.
+#:
+#: The check that this is right is Owen's own long-standing configuration, which
+#: predates the rule: he translates with a 4-bit 27B on the Mac and has for
+#: months. A flat 3 GiB allowance leaves 60.8 GB "available" on his 64 GB Studio,
+#: a best-first walk selects the **bf16** 27B at 55.5 GB, and macOS is left 8.5 GB.
+#: At 25% the walk sees 48 GB, refuses bf16 and selects the 4-bit — which is what
+#: he already runs. PHASE9-CAPABILITY.md section 1.1 records that disagreement:
+#: the rule was wrong, not the operator.
+MLX_DESKTOP_ALLOWANCE_FRACTION = 0.25
+
+
+def default_desktop_allowance_bytes(backend_kind: str, total_bytes: int) -> int:
+    """This backend's default host reserve, given the pool it is reserving from.
+
+    `crucible init` calls this AFTER detection, because the answer depends on
+    which backend was found and how big its pool is — an argparse default cannot
+    know either. An explicit `--desktop-allowance-bytes` still wins over it: this
+    is the default for an operator who does not state one, not a ceiling.
+    """
+    if backend_kind == "mlx-darwin":
+        return int(total_bytes * MLX_DESKTOP_ALLOWANCE_FRACTION)
+    return DEFAULT_DESKTOP_ALLOWANCE_BYTES
 
 
 def crucible_home() -> Path:

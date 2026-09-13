@@ -155,9 +155,25 @@ system, and 3 GiB is nowhere near it.
 
 **So the allowance is per-backend, and it is a ruling rather than a default** — on unified memory
 it is the larger part of the ruling, because it is the only thing standing between "the model
-fits" and "the machine still works". Section 4's measurement has to produce it for both backends,
-and until it does, the honest behaviour is the dry run: record what would have been selected and
-select nothing.
+fits" and "the machine still works".
+
+> **RULED AND BUILT, 2026-09-13.** `config.default_desktop_allowance_bytes(backend_kind,
+> total_bytes)`, resolved by `crucible init` **after** detection rather than by argparse before
+> it, and still overridden by an explicit `--desktop-allowance-bytes`.
+>
+> - `cuda-linux` — **3 GiB flat**, unchanged. A compositor and a browser want about the same
+>   VRAM on a 12 GB card as on a 24 GB one, so a constant is the honest shape, and Owen's 3090 Ti
+>   has run this number for months.
+> - `mlx-darwin` — **25% of unified memory**. The reserve has to cover the entire OS out of the
+>   pool the model allocates from, and that scales with the machine. 25% is the complement of
+>   Metal's own `recommendedMaxWorkingSetSize` (~75% of physical on Apple Silicon), so it is a
+>   number with a source rather than a guess.
+>
+> It did not need the measurement of section 4, because a better check was already available:
+> **Owen's own configuration, which predates the rule.** At 25% the 64 GB Studio shows 48 GB
+> available, bf16 27B (55.5 GB) is refused and the 4-bit (33.9 GB) is selected — which is what he
+> already runs. `test_the_mac_reserve_selects_the_4bit_27b_owen_already_runs` in
+> `tests/test_accelerator.py` is that check, kept.
 
 This is worth stating plainly because of how it was found: the rule was written, then checked
 against a decision Owen had already made, and it disagreed with him. **The disagreement was the
@@ -179,8 +195,15 @@ The arithmetic on the machine this was ruled on:
 It nominally fits and practically does not — that is before a browser or a compositor. So the
 desktop-reserve question that section 5 deletes from BookForge **returns here as Crucible's**,
 and translate is the job that makes it bite: too low an allowance and translate is enabled and
-OOMs; too high and it is disabled on a card that could have done it. This number is now a
-ruling, not a default, and it belongs in the measurement of section 4.
+OOMs; too high and it is disabled on a card that could have done it.
+
+**Owen ruled on this directly (2026-09-13): the estimates are not to be measured.** *"I've been
+using this system the way it is for months and it works fine. Use the current settings for
+each."* The 3 GiB reserve and the declared per-model sizes are therefore the numbers this build
+selects on, and the 0.9 GB margin above is a margin that has been holding in production rather
+than one nobody has tried. Section 4's measurement is **descoped**, not deferred: what it was
+for — deciding whether translate exists on the 3090 Ti — has already been answered by a year of
+the machine answering it.
 
 **Almost none of this is new machinery.** Crucible already has:
 

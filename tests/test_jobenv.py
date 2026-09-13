@@ -81,6 +81,27 @@ def test_every_requirement_in_every_recipe_is_pinned() -> None:
             assert version, f"{backend}: {name} has no version"
 
 
+def test_every_tts_recipe_pins_the_same_narrator_commit() -> None:
+    """narrator is ONE package, and a recipe is a statement about bytes.
+
+    The three `tts` recipes each carry their own direct reference because each
+    names a different extra, so the sha is written three times — and three
+    copies of one fact is the shape `docs/ARCHITECTURE.md` §1 names. A bump that
+    lands on two of the three gives a host whose Higgs env speaks one wire and
+    whose Orpheus env speaks another, and `crucible doctor` calls both installed
+    because each matches the recipe that built it.
+    """
+    shas = {
+        spec.recipe_name: jobenv.recipe_direct_references(recipe_for(spec))["narrator"]
+        for spec in (
+            tts_env("higgs-v3", "cuda-linux"),
+            tts_env("orpheus", "cuda-linux"),
+            tts_env("higgs-v3", "mlx-darwin"),
+        )
+    }
+    assert len(set(shas.values())) == 1, shas
+
+
 def test_an_unpinned_requirement_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "cuda-linux.txt"
     path.write_text("# a comment\nvllm==0.29.0\ntorch>=2.0\n", encoding="utf-8")

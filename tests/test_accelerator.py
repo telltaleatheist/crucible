@@ -286,3 +286,50 @@ def test_unattributed_never_goes_below_zero() -> None:
     )
     assert state.used_bytes == 1_711_276_032
     assert accelerator.unattributed_bytes(state, 3 * GIB) == 0
+
+
+# ------------------------------------- the host reserve, which is per backend
+
+
+def test_the_cuda_reserve_is_flat_and_the_mac_reserve_scales() -> None:
+    """A discrete card and a unified pool are not one question.
+
+    On `cuda-linux` the desktop's appetite does not grow with the card, so the
+    reserve is a fixed byte count. On `mlx-darwin` the reserve has to cover the
+    whole operating system out of the same pool the model allocates from, so it
+    is a share — 3 GiB is defensible on a 16 GB Mac mini and absurd on a 192 GB
+    Studio.
+    """
+    from crucible.config import (
+        DEFAULT_DESKTOP_ALLOWANCE_BYTES,
+        default_desktop_allowance_bytes,
+    )
+
+    for total in (12 * GIB, 24 * GIB, 80 * GIB):
+        assert (
+            default_desktop_allowance_bytes("cuda-linux", total)
+            == DEFAULT_DESKTOP_ALLOWANCE_BYTES
+        )
+
+    small = default_desktop_allowance_bytes("mlx-darwin", 16 * GIB)
+    large = default_desktop_allowance_bytes("mlx-darwin", 192 * GIB)
+    assert large == 12 * small
+
+
+def test_the_mac_reserve_selects_the_4bit_27b_owen_already_runs() -> None:
+    """The rule is checked against a known-good answer, not just written.
+
+    Owen has translated with a 4-bit 27B on the 64 GB Studio for months. Under a
+    flat 3 GiB reserve a best-first walk selects the **bf16** 27B instead and
+    leaves macOS 8.5 GB — PHASE9-CAPABILITY.md section 1.1 is the record of that
+    disagreement, and of the finding that the rule was wrong rather than the
+    operator. This is the test that keeps it that way.
+    """
+    from crucible.config import default_desktop_allowance_bytes
+
+    total = 64 * 1000 ** 3  # 64 GB as Apple counts it
+    available = total - default_desktop_allowance_bytes("mlx-darwin", total)
+    bf16_27b = 55.5 * 1000 ** 3
+    fourbit_27b = 33.9 * 1000 ** 3
+    assert bf16_27b > available, "bf16 must NOT fit — it leaves macOS nothing"
+    assert fourbit_27b < available, "the 4-bit must fit — it is what he runs"

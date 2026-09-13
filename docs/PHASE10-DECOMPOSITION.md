@@ -125,19 +125,25 @@ None of them can install narrator.
 pip-installable package from a git URL, pinned to a sha, in three recipe files. Only the URL
 changes.
 
-**Live defect this move must also fix.** The pinned sha `4ebc529f` is **three commits behind**,
-and those three commits are the whole of phase 6:
+**Live defect this move had to fix first, and it is FIXED (2026-09-13).** The pin was
+`4ebc529f`, **five commits behind** on `python/`, and those commits are the whole of phase 6:
 
 ```
 fe7f35cb  feat(narrator): the guard runs where the model does
 6efa16e5  test(narrator): the phase-6 keeper — a guarded render on a real card
 c3bedef3  fix(higgs): a base-weights server can be attached to
+04784608  fix(text): one acronym list, read by every reader
+0630dd1c  fix(narrator): MLX reaches parity, the empty-sentence door is declared
 ```
 
-So `crucible install tts` currently builds an env whose narrator has **no `render_many`**. The
-server-side forwarding is written and the SDK now reads `guard`, and the narrator that recipe
-installs cannot emit it — the field would be `null` forever with nothing saying why. The pin
-bump is owed the moment those commits merge.
+`crucible install tts` was building an env whose narrator had **no `render_many`** — the
+server-side forwarding was written and the SDK reads `guard`, and the installed narrator could
+not emit it, so the field would have been `null` forever with nothing saying why. All three
+recipes now pin `770415db591e0af2cc650cf8c889224972e8906d`
+(BookForge `feat/narrator-guarded-serve`, pushed so the sha is fetchable), narrator's
+`pyproject.toml` is byte-identical across the two shas so every restated pin still holds, and
+`test_every_tts_recipe_pins_the_same_narrator_commit` now refuses a bump that lands on two of
+the three. **The pin bump is no longer a prerequisite of this move.**
 
 ### The check this move owes
 

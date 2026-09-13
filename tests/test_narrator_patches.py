@@ -19,8 +19,15 @@ from crucible.narratorpatches import (
     NARRATOR_PATCHES,
     NO_ENV,
     NO_FILE,
+    NOT_APPLICABLE,
+    SOUND_STATUSES,
     STALE,
 )
+
+#: The pins of a recipe that installs everything both patches edit — the shape of
+#: `envs/tts/higgs-v3-cuda-linux.txt`. Every check below runs against this unless
+#: it is about a backend that does not have the vLLM stack at all.
+CUDA_PINS = {patch.distribution: "0.28.0" for patch in NARRATOR_PATCHES}
 
 PRISTINE_INPUT_PROCESSOR = "if min_input_id < 0:\n    raise ValueError('oov')\n"
 PATCHED_INPUT_PROCESSOR = "if min_input_id < 0 and min_input_id != -100:\n"
@@ -48,8 +55,69 @@ def env_with(tmp_path: Path, **files: str) -> Path:
     return tmp_path / "env"
 
 
-def rows(env: Path) -> dict[str, dict]:
-    return {row["id"]: row for row in narratorpatches.check(env)}
+def rows(env: Path, pins: dict[str, str] | None = None) -> dict[str, dict]:
+    return {
+        row["id"]: row
+        for row in narratorpatches.check(env, CUDA_PINS if pins is None else pins)
+    }
+
+
+# ------------------------------------------------- the backend that has no vLLM
+
+
+def test_a_backend_without_the_vllm_stack_is_not_applicable_not_broken(
+    tmp_path: Path,
+) -> None:
+    """`crucible doctor` called a sound Mac unhealthy until 2026-09-13.
+
+    Both patches edit `vllm`/`vllm-omni`, which `envs/tts/mlx-darwin.txt` does
+    not install — Higgs v3 on the Mac is narrator's in-process MLX backend. The
+    old check reported `no_such_file` for both, the doctor turned each into a
+    problem, and `healthy` went false on a machine with nothing wrong with it.
+    """
+    found = rows(tmp_path / "env", pins={"mlx-lm": "0.31.3", "mlx-audio": "0.4.8"})
+    assert [row["status"] for row in found.values()] == [
+        NOT_APPLICABLE,
+        NOT_APPLICABLE,
+    ]
+    # Not a problem — and the doctor must not read `applied` to learn that,
+    # because "is the marker in the file" has no honest answer when there is no
+    # file and never will be one.
+    assert all(row["status"] in SOUND_STATUSES for row in found.values())
+    assert not any(row["applied"] for row in found.values())
+    assert "does not install vllm" in found["vllm-negative-token-id"]["detail"]
+
+
+def test_a_recipe_that_adds_the_stack_starts_being_checked_on_its_own(
+    tmp_path: Path,
+) -> None:
+    """The applicability fact has ONE owner, the recipe. Nothing in
+    `narratorpatches` names a backend, so a Mac recipe that one day pins
+    `vllm-omni` is checked without an edit here."""
+    env = env_with(tmp_path, **{"higgs-sentinel-filter": PATCHED_STAGE})
+    assert rows(env, pins={"mlx-lm": "0.31.3"})["higgs-sentinel-filter"]["status"] == (
+        NOT_APPLICABLE
+    )
+    assert rows(env, pins={"vllm-omni": "0.28.0"})["higgs-sentinel-filter"][
+        "status"
+    ] == APPLIED
+
+
+def test_the_shipped_cuda_recipe_makes_both_patches_applicable() -> None:
+    """The fixture above is only honest if the real recipe agrees with it."""
+    from crucible import jobenv
+
+    pins = jobenv.recipe_pins(jobenv.recipe_for(jobenv.tts_env("higgs-v3", "cuda-linux")))
+    for patch in NARRATOR_PATCHES:
+        assert patch.distribution in pins, patch.id
+
+
+def test_the_shipped_mac_recipe_makes_neither_applicable() -> None:
+    from crucible import jobenv
+
+    pins = jobenv.recipe_pins(jobenv.recipe_for(jobenv.tts_env("higgs-v3", "mlx-darwin")))
+    for patch in NARRATOR_PATCHES:
+        assert patch.distribution not in pins, patch.id
 
 
 def test_both_patches_in_is_the_only_applied_answer(tmp_path: Path) -> None:

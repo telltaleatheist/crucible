@@ -32,10 +32,12 @@ from .config import (
     DEFAULT_DESKTOP_ALLOWANCE_BYTES,
     DEFAULT_HOST,
     DEFAULT_PORT,
+    MLX_DESKTOP_ALLOWANCE_FRACTION,
     Config,
     config_mode,
     config_path,
     crucible_home,
+    default_desktop_allowance_bytes,
     default_server_name,
     load_config,
     mint_token,
@@ -84,6 +86,17 @@ def cmd_init(args: argparse.Namespace) -> int:
     except NoViableBackend as exc:
         return _fail(f"no viable backend: {exc.reason}")
 
+    # The host reserve is resolved HERE rather than by argparse, because it
+    # depends on the backend that was just detected and on the size of its pool
+    # (config.default_desktop_allowance_bytes says why the two backends cannot
+    # share a number). `None` means the operator did not state one.
+    if args.desktop_allowance_bytes is None:
+        desktop_allowance_bytes = default_desktop_allowance_bytes(
+            backend.kind, backend.gpu.vram_bytes
+        )
+    else:
+        desktop_allowance_bytes = args.desktop_allowance_bytes
+
     token = mint_token()
     written = write_config(
         home,
@@ -98,7 +111,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         enable_tts=args.enable_tts,
         enable_align=args.enable_align,
         enable_rvc=args.enable_rvc,
-        desktop_allowance_bytes=args.desktop_allowance_bytes,
+        desktop_allowance_bytes=desktop_allowance_bytes,
     )
     print(f"backend:  {backend.kind} ({backend.gpu.name}, {backend.detail})")
     print(f"config:   {written} (mode {config_mode(written)})")
@@ -109,9 +122,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"tts job:  {'enabled' if args.enable_tts else 'disabled'}")
     print(f"align:    {'enabled' if args.enable_align else 'disabled'}")
     print(f"rvc job:  {'enabled' if args.enable_rvc else 'disabled'}")
+    source = "stated" if args.desktop_allowance_bytes is not None else (
+        f"{backend.kind} default"
+    )
     print(
-        f"desktop:  {args.desktop_allowance_bytes / 1024 ** 3:.1f} GiB of VRAM "
-        "treated as this host's own desktop, not somebody's job"
+        f"desktop:  {desktop_allowance_bytes / 1024 ** 3:.1f} GiB of "
+        f"{backend.gpu.vram_bytes / 1024 ** 3:.1f} GiB treated as this host's own "
+        f"desktop, not somebody's job ({source})"
     )
     print("token:    minted; print it with `crucible token --show`")
     return EXIT_OK
@@ -773,14 +790,18 @@ def _doctor_report() -> dict[str, Any]:
             # folded into it, because an env whose pins all match is otherwise
             # reported ready — and a reader has no way to tell that from an env
             # that will render every chunk with 240 ms of garbage on the end.
+            patched_spec = jobenv.tts_env(
+                narratorpatches.PATCHED_ENGINE, backend.kind
+            )
             report["narrator_patches"] = narratorpatches.check(
-                jobenv.env_dir(
-                    config.home,
-                    jobenv.tts_env(narratorpatches.PATCHED_ENGINE, backend.kind),
-                )
+                jobenv.env_dir(config.home, patched_spec),
+                jobenv.recipe_pins(jobenv.recipe_for(patched_spec)),
             )
             for entry in report["narrator_patches"]:
-                if not entry["applied"]:
+                # `applied` is not the test. Both patches edit the vLLM stack,
+                # which `mlx-darwin`'s recipe does not install, and a Mac that
+                # has nothing to patch is sound rather than broken.
+                if entry["status"] not in narratorpatches.SOUND_STATUSES:
                     report["problems"].append(
                         f"narrator_patch[{entry['id']}]: {entry['status']} — "
                         f"{entry['detail']}. {entry['why']}"
@@ -841,7 +862,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             mark = "ready" if entry["installed"] else "NOT READY"
             print(f"tts env ({engine}): {mark} — {entry['detail']}")
         for entry in report["narrator_patches"]:
-            mark = "applied" if entry["applied"] else entry["status"].upper()
+            if entry["status"] == narratorpatches.NOT_APPLICABLE:
+                mark = "n/a"
+            else:
+                mark = "applied" if entry["applied"] else entry["status"].upper()
             print(f"narrator patch ({entry['id']}): {mark} — {entry['detail']}")
         for entry in report["job_types"]:
             mark = "ready" if entry["ready"] else ("off" if not entry["enabled"] else "NOT READY")
@@ -926,11 +950,14 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument(
         "--desktop-allowance-bytes",
         type=int,
-        default=DEFAULT_DESKTOP_ALLOWANCE_BYTES,
+        default=None,
         help=(
             "VRAM this host's own desktop holds, which the accelerator guard does "
-            f"not count as somebody's job (default {DEFAULT_DESKTOP_ALLOWANCE_BYTES}"
-            " = 3 GiB; use 0 on a headless box)"
+            "not count as somebody's job. Defaults PER BACKEND once the card is "
+            f"detected: cuda-linux {DEFAULT_DESKTOP_ALLOWANCE_BYTES} = 3 GiB flat, "
+            f"mlx-darwin {MLX_DESKTOP_ALLOWANCE_FRACTION:.0%} of unified memory "
+            "because the model and the whole OS share one pool. Use 0 on a "
+            "headless box"
         ),
     )
     init.set_defaults(func=cmd_init)

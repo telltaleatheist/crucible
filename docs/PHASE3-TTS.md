@@ -1107,8 +1107,10 @@ its wire), and no route — all four of those are section 7's own work.
 are exact pins, just of a commit) and `jobenv.recipe_direct_references` checks them against
 the commit pip actually recorded in **PEP 610's `direct_url.json`**, because `pip list`
 reports narrator's declared version and that does not move when the sha does. A direct
-reference naming a branch instead of a sha is refused: a branch is not a pin. The sha this
-build carries is BookForge `4ebc529f30cfa205b820cf494e48fcb76ac12977`.
+reference naming a branch instead of a sha is refused: a branch is not a pin. **The sha
+itself is not restated here** — it lives in the three `envs/tts/*.txt` recipes, and
+`test_every_tts_recipe_pins_the_same_narrator_commit` is what keeps those three copies one
+fact. A fourth copy in prose is a copy nothing compares.
 
 Three deliberate gaps, each refused by name rather than worked around, and each with what is
 owed on narrator's side written beside it: sampling and the take ladder (section 4), zero-shot

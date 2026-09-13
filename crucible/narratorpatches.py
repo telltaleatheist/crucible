@@ -17,6 +17,23 @@ sound". The markers were measured on the certifying box (vllm-omni 0.28.0,
 2026-09-05) and are quoted rather than paraphrased, so a `git grep` finds both
 copies when one moves.
 
+BOTH PATCHES ARE EDITS TO THE vLLM STACK, WHICH ONLY ONE BACKEND HAS
+--------------------------------------------------------------------
+`envs/tts/higgs-v3-cuda-linux.txt` pins `vllm` and `vllm-omni`;
+`envs/tts/mlx-darwin.txt` pins neither, because Higgs v3 on the Mac is narrator's
+in-process MLX backend and there is no served vLLM under it at all. So on
+`mlx-darwin` these files are not merely unpatched, they are **not there** — and a
+check that reports that as `no_such_file` makes `crucible doctor` call a perfectly
+sound Mac unhealthy, which is what it did until 2026-09-13.
+
+The fix is not a backend list in this module. That would be a second copy of a
+fact the recipe already states, which is the shape `docs/ARCHITECTURE.md` §1
+names. Each patch instead declares the **distribution** it edits, and `check`
+takes the pins of the recipe that built the env: a patch whose distribution is
+not in that recipe is `not_applicable`, and says so by name rather than being
+silently skipped. Add `vllm-omni` to the Mac recipe one day and the check starts
+running there on its own, with nothing here to remember to change.
+
 A NAME IN THE SPEC IS STALE, AND THIS IS WHERE IT SHOWS
 -------------------------------------------------------
 PHASE3-TTS.md section 4 and narrator's own `pyproject.toml` both name
@@ -43,6 +60,15 @@ MISSING = "missing"
 STALE = "stale"
 NO_FILE = "no_such_file"
 NO_ENV = "no_env"
+#: The recipe that built this env does not install the distribution this patch
+#: edits, so there is nothing here to patch and nothing wrong. Distinct from
+#: `no_such_file`, which means the package SHOULD be here and is not.
+NOT_APPLICABLE = "not_applicable"
+
+#: The statuses that are not a problem. `crucible doctor` reads this rather than
+#: testing `applied`, because `applied` answers "is the marker in the file" and a
+#: patch with no file to be in has no honest answer to that question.
+SOUND_STATUSES: frozenset[str] = frozenset({APPLIED, NOT_APPLICABLE})
 
 
 @dataclass(frozen=True)
@@ -50,6 +76,9 @@ class NarratorPatch:
     """One edit, where it lands, and how to tell whether it is there."""
 
     id: str
+    #: The pinned distribution this patch edits, as the recipe names it. A patch
+    #: whose distribution the recipe does not install is `not_applicable`.
+    distribution: str
     #: Relative to the env's `site-packages`.
     rel_path: str
     #: A string the patched file must contain.
@@ -67,6 +96,7 @@ class NarratorPatch:
 NARRATOR_PATCHES: tuple[NarratorPatch, ...] = (
     NarratorPatch(
         id="vllm-negative-token-id",
+        distribution="vllm",
         rel_path="vllm/v1/engine/input_processor.py",
         marker="min_input_id != -100",
         absent_marker=None,
@@ -79,6 +109,7 @@ NARRATOR_PATCHES: tuple[NarratorPatch, ...] = (
     ),
     NarratorPatch(
         id="higgs-sentinel-filter",
+        distribution="vllm-omni",
         rel_path=(
             "vllm_omni/model_executor/stage_input_processors/higgs_audio_v3.py"
         ),
@@ -112,11 +143,29 @@ def site_packages(env_dir: Path) -> Path | None:
     return None
 
 
-def check(env_dir: Path) -> list[dict[str, Any]]:
-    """One row per patch: what it is, whether it is in, and what breaks if not."""
+def check(env_dir: Path, recipe_pins: dict[str, str]) -> list[dict[str, Any]]:
+    """One row per patch: what it is, whether it is in, and what breaks if not.
+
+    `recipe_pins` is `jobenv.recipe_pins(jobenv.recipe_for(spec))` for the env
+    being checked — the caller passes it rather than this module reading it,
+    because this module must work against a directory in a test with no recipes
+    dir at all. A patch whose distribution is absent from those pins is
+    `not_applicable`: see the module docstring for why that is read off the
+    recipe and not off a backend name.
+    """
     packages = site_packages(env_dir)
     rows: list[dict[str, Any]] = []
     for patch in NARRATOR_PATCHES:
+        if patch.distribution not in recipe_pins:
+            rows.append(
+                _row(
+                    patch,
+                    NOT_APPLICABLE,
+                    f"this env's recipe does not install {patch.distribution}, so "
+                    f"{patch.rel_path} is not here to patch",
+                )
+            )
+            continue
         if packages is None:
             rows.append(_row(patch, NO_ENV, f"there is no venv at {env_dir}"))
             continue

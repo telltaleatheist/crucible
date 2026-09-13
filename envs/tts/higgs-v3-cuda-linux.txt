@@ -67,7 +67,7 @@
 # doctor` reports both by name under `narrator_patches`, so an env that is
 # "ready" by its pins alone is not mistaken for one that will render correctly.
 
-narrator[higgs-v3-server] @ git+https://github.com/telltaleatheist/bookforge@4ebc529f30cfa205b820cf494e48fcb76ac12977#subdirectory=python
+narrator[higgs-v3-server] @ git+https://github.com/telltaleatheist/bookforge@770415db591e0af2cc650cf8c889224972e8906d#subdirectory=python
 
 # --- narrator's `higgs-v3-server` extra, restated so doctor verifies it ---
 # WSL `higgs3`: python 3.11, torch 2.13.0+cu130, vllm 0.28.0, vllm-omni 0.28.0.
