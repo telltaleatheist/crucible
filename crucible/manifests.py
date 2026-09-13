@@ -311,6 +311,11 @@ def load_all_manifests(directory: Path | None = None) -> dict[str, ModelManifest
     """Every manifest this build ships, by id, in id order."""
     root = directory if directory is not None else manifests_dir()
     manifests: dict[str, ModelManifest] = {}
-    for path in sorted(root.glob("*.toml")):
+    # By id — `path.stem` — and not by path. The two orders differ whenever one
+    # id is a prefix of another, because the extension gets in the way: as whole
+    # paths, `qwen3.8-27b-4bit.toml` sorts BEFORE `qwen3.8-27b.toml` ('-' is
+    # 0x2D, '.' is 0x2E), while as ids `qwen3.8-27b` comes first. This function's
+    # order is what `/v1/models` lists in, so it is the documented one.
+    for path in sorted(root.glob("*.toml"), key=lambda p: p.stem):
         manifests[path.stem] = load_manifest(path.stem, root)
     return manifests
