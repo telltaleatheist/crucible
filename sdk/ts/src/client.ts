@@ -459,6 +459,11 @@ export class CrucibleClient {
    * `code === "model_not_resident"`, its message naming what is resident
    * instead. It never loads a model to satisfy a chat.
    *
+   * `finishReason` comes back as the engine said it. `length` means the answer
+   * is truncated — check it before you use `content`, and check it before you
+   * parse `content` as JSON under a `responseFormat`, because a truncated
+   * document and a malformed one are different problems.
+   *
    * Passing an already-aborted `signal`, or aborting during the call, rejects
    * with the DOM `AbortError` itself - the caller's own cancellation is not a
    * dead server and is not reported as one.
@@ -536,6 +541,20 @@ export class CrucibleClient {
       payload['max_tokens'] = maxTokens;
     }
     if (given.stop !== undefined) payload['stop'] = requireStrings(given.stop, 'stop');
+    if (given.seed !== undefined) {
+      const seed = requireFinite(given.seed, 'seed');
+      if (!Number.isInteger(seed)) {
+        throw new CrucibleConfigError('seed', `must be an integer, got ${seed}`);
+      }
+      payload['seed'] = seed;
+    }
+    if (given.responseFormat !== undefined) {
+      // Checked for the shape the engines agree on and then forwarded as it
+      // stands. The `schema` inside is the caller's grammar: this client does
+      // not read it, and an engine that will not compile it says so itself in a
+      // 400 the proxy relays untouched.
+      payload['response_format'] = readResponseFormat(given.responseFormat);
+    }
     if (given.thinking !== undefined) {
       if (typeof given.thinking !== 'boolean') {
         throw new CrucibleConfigError(
@@ -695,16 +714,26 @@ function readProvenance(entry: Json, member: string): Provenance {
     },
     backend: str(entry, 'backend', where),
     job_type: str(entry, 'job_type', where),
-    model:
-      model === null
-        ? null
-        : {
-            id: str(asObject(model, `${where}.model`), 'id', `${where}.model`),
-            revision: nullableStr(asObject(model, `${where}.model`), 'revision', `${where}.model`),
-          },
+    model: model === null ? null : readProvenanceModel(asObject(model, `${where}.model`), where),
     params: asObject(field(entry, 'params', where), `${where}.params`),
     started: nullableStr(entry, 'started', where),
     finished: str(entry, 'finished', where),
+  };
+}
+
+/**
+ * The `model` block of a provenance sidecar. `revision` and `fingerprint` are
+ * nullable together: a model served on a backend whose block the manifest does
+ * not carry has neither, and a fingerprint without a pin would read as one.
+ */
+function readProvenanceModel(
+  model: Json,
+  where: string,
+): NonNullable<Provenance['model']> {
+  return {
+    id: str(model, 'id', `${where}.model`),
+    revision: nullableStr(model, 'revision', `${where}.model`),
+    fingerprint: nullableStr(model, 'fingerprint', `${where}.model`),
   };
 }
 
@@ -785,6 +814,9 @@ function readModelInfo(entry: Json, where: string): ModelInfo {
     paramsB: num(entry, 'params_b', where),
     // Null on a model this backend cannot serve; a string everywhere else.
     revision: nullableStr(entry, 'revision', where),
+    // `<id>@<revision>`, assembled by the server so that every client records
+    // one spelling of it. Null exactly where `revision` is.
+    fingerprint: nullableStr(entry, 'fingerprint', where),
     backendSupported: bool(entry, 'backend_supported', where),
     installed: bool(entry, 'installed', where),
     resident: bool(entry, 'resident', where),
@@ -793,6 +825,9 @@ function readModelInfo(entry: Json, where: string): ModelInfo {
     // figures live in the backend block this manifest does not have.
     memoryBytesEstimate: nullableNum(entry, 'memory_bytes_estimate', where),
     contextDefault: num(entry, 'context_default', where),
+    // What is being served right now, which is the number to size a request
+    // against. Null on a model this backend cannot serve, like `revision`.
+    maxModelLen: nullableNum(entry, 'max_model_len', where),
   };
   if (!loadable) {
     // A refusal with no reason is unusable: the operator cannot tell whether to
@@ -946,6 +981,50 @@ function requireFinite(value: unknown, option: string): number {
     throw new CrucibleConfigError(option, `must be a finite number, got ${String(value)}`);
   }
   return value;
+}
+
+const RESPONSE_FORMAT_TYPES = ['text', 'json_object', 'json_schema'] as const;
+
+/**
+ * `responseFormat`, checked only as far as the engines agree and no further.
+ *
+ * The parts that are checked are the ones a typo in makes the engine answer
+ * something plausible and wrong: a `type` it does not know, or a `json_schema`
+ * with no `name` or no `schema`. The `schema` itself is not read — it is a JSON
+ * Schema document for the engine's guided-decoding backend, and which dialect of
+ * it an engine supports is the engine's business to accept or refuse.
+ */
+function readResponseFormat(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new CrucibleConfigError('responseFormat', `must be an object, got ${typeof value}`);
+  }
+  const format = value as Record<string, unknown>;
+  const type = format['type'];
+  if (typeof type !== 'string' || !(RESPONSE_FORMAT_TYPES as readonly string[]).includes(type)) {
+    throw new CrucibleConfigError(
+      'responseFormat.type',
+      `must be one of ${RESPONSE_FORMAT_TYPES.join(', ')}, got ${JSON.stringify(type)}`,
+    );
+  }
+  if (type === 'json_schema') {
+    const schema = format['json_schema'];
+    if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) {
+      throw new CrucibleConfigError(
+        'responseFormat.json_schema',
+        'is required when type is "json_schema", and must be {name, schema}',
+      );
+    }
+    const declared = schema as Record<string, unknown>;
+    requireText(declared['name'], 'responseFormat.json_schema.name');
+    const grammar = declared['schema'];
+    if (typeof grammar !== 'object' || grammar === null || Array.isArray(grammar)) {
+      throw new CrucibleConfigError(
+        'responseFormat.json_schema.schema',
+        'must be a JSON Schema object',
+      );
+    }
+  }
+  return format;
 }
 
 function requireStrings(value: unknown, option: string): string[] {

@@ -210,11 +210,23 @@ job and a chat request never races a load.
 ## 6. SDK additions (`@crucible/client`)
 
 `models()`, `loadModel(id)` → job id (use `events()` as usual), `unloadModel(id)` → job
-id, `chat({model, messages, temperature?, topP?, maxTokens?, stop?, thinking?, signal?})`
-→ the OpenAI response typed minimally (`id, model, choices[0].message.content, usage`),
-and `chatStream(...)` → `AsyncIterable<string>` of content deltas. 409
-`model_not_resident` surfaces as `CrucibleRefused` with that code. `signal` aborts the
-fetch.
+id, `chat({model, messages, temperature?, topP?, maxTokens?, stop?, seed?,
+responseFormat?, thinking?, signal?})` → the OpenAI response typed minimally (`id, model,
+choices[0].message.content, finishReason, usage`), and `chatStream(...)` →
+`AsyncIterable<string>` of content deltas. 409 `model_not_resident` surfaces as
+`CrucibleRefused` with that code. `signal` aborts the fetch, and dropping the fetch is what
+cancels the engine's work (section 5).
+
+`ModelInfo` carries `maxModelLen` and `fingerprint` alongside `contextDefault` and
+`revision`, all four nullable together on a model this host's backend cannot serve.
+
+`responseFormat` is OpenAI's `response_format`, forwarded verbatim. The SDK checks only
+what a typo makes an engine answer plausibly and wrongly — a `type` outside
+`text | json_object | json_schema`, a `json_schema` with no `name` or no `schema` — and
+reads nothing inside the grammar, because which dialect of JSON Schema an engine supports
+is the engine's to accept or refuse. `finishReason` is a plain string and is surfaced
+rather than narrowed to a union: a value this client did not anticipate must reach the
+caller rather than become a protocol error.
 
 `thinking` is the one sampling knob that is not OpenAI's: Qwen3.5 and its kind think
 before they answer, and a short ceiling spends the whole budget on `reasoning` and returns

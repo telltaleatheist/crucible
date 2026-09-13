@@ -216,7 +216,12 @@ assert row["memory_bytes_estimate"] > 0, row
 # The pin this host would serve, and the same row shape /info carries.
 revision = row["revision"]
 assert isinstance(revision, str) and len(revision) == 40, row
+# What a client records, and what it clamps against. Nothing is resident yet, so
+# max_model_len is what this host WOULD serve it at.
+assert row["fingerprint"] == f"{row['id']}@{revision}", row
+assert isinstance(row["max_model_len"], int) and row["max_model_len"] > 0, row
 print("    revision:", revision)
+print("    fingerprint:", row["fingerprint"], "at", row["max_model_len"], "tokens")
 PYCODE
 then
   ok "GET /models is a bare array and says $MODEL is installed and loadable"

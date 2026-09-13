@@ -85,12 +85,14 @@ const MODEL_ROW = {
   family: 'qwen3.5',
   params_b: 9,
   revision: REVISION,
+  fingerprint: `qwen3.5-9b@${REVISION}`,
   backend_supported: true,
   installed: true,
   resident: true,
   loadable: true,
   memory_bytes_estimate: 21000000000,
   context_default: 12288,
+  max_model_len: 12288,
 };
 
 const COMPLETION = {
@@ -141,6 +143,7 @@ test('models() reads every field /v1/models promises', async () => {
         family: 'qwen3.5',
         params_b: 27,
         revision: 'b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
+        fingerprint: 'qwen3.8-27b@b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
         backend_supported: true,
         installed: false,
         resident: false,
@@ -148,14 +151,17 @@ test('models() reads every field /v1/models promises', async () => {
         reason: 'not installed: run `crucible models pull qwen3.8-27b`',
         memory_bytes_estimate: 54000000000,
         context_default: 12288,
+        max_model_len: 12288,
       },
       {
         // A model this host's backend cannot serve has no revision here to
-        // name: the server sends null, never the other backend's sha.
+        // name: the server sends null, never the other backend's sha. Its
+        // fingerprint and its max_model_len are null for the same reason.
         id: 'mac-only',
         family: 'demo',
         params_b: 1,
         revision: null,
+        fingerprint: null,
         backend_supported: false,
         installed: false,
         resident: false,
@@ -163,6 +169,7 @@ test('models() reads every field /v1/models promises', async () => {
         reason: 'mac-only.toml has no cuda-linux block; it declares [mlx-darwin]',
         memory_bytes_estimate: null,
         context_default: 4096,
+        max_model_len: null,
       },
     ]);
 
@@ -178,18 +185,21 @@ test('models() reads every field /v1/models promises', async () => {
       family: 'qwen3.5',
       paramsB: 9,
       revision: REVISION,
+      fingerprint: `qwen3.5-9b@${REVISION}`,
       backendSupported: true,
       installed: true,
       resident: true,
       loadable: true,
       memoryBytesEstimate: 21000000000,
       contextDefault: 12288,
+      maxModelLen: 12288,
     },
     {
       id: 'qwen3.8-27b',
       family: 'qwen3.5',
       paramsB: 27,
       revision: 'b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
+      fingerprint: 'qwen3.8-27b@b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
       backendSupported: true,
       installed: false,
       resident: false,
@@ -197,12 +207,14 @@ test('models() reads every field /v1/models promises', async () => {
       reason: 'not installed: run `crucible models pull qwen3.8-27b`',
       memoryBytesEstimate: 54000000000,
       contextDefault: 12288,
+      maxModelLen: 12288,
     },
     {
       id: 'mac-only',
       family: 'demo',
       paramsB: 1,
       revision: null,
+      fingerprint: null,
       backendSupported: false,
       installed: false,
       resident: false,
@@ -210,6 +222,7 @@ test('models() reads every field /v1/models promises', async () => {
       reason: 'mac-only.toml has no cuda-linux block; it declares [mlx-darwin]',
       memoryBytesEstimate: null,
       contextDefault: 4096,
+      maxModelLen: null,
     },
   ]);
   assert.ok(!('reason' in models[0]!), 'a loadable model carries no reason');
@@ -227,6 +240,28 @@ test('a model that is not loadable and does not say why is a protocol error', as
 test('a /v1/models body that is not an array is a protocol error, not an empty list', async () => {
   handle = (_request, response) => json(response, 200, { models: [MODEL_ROW] });
   await assert.rejects(client().models(), CrucibleProtocolError);
+});
+
+test('a row without a max_model_len is a protocol error, not an unclamped model', async () => {
+  // The whole reason the field exists: a client that cannot read it has no
+  // clamp at all, and an unclamped request is a 400 from the engine.
+  const { max_model_len: _len, ...withoutLen } = MODEL_ROW;
+  handle = (_request, response) => json(response, 200, [withoutLen]);
+  await assert.rejects(client().models(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+    assert.match(error.message, /models\[0\] has no field "max_model_len"/);
+    return true;
+  });
+});
+
+test('a row without a fingerprint is a protocol error, not a model to file under its id', async () => {
+  const { fingerprint: _fingerprint, ...withoutFingerprint } = MODEL_ROW;
+  handle = (_request, response) => json(response, 200, [withoutFingerprint]);
+  await assert.rejects(client().models(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+    assert.match(error.message, /models\[0\] has no field "fingerprint"/);
+    return true;
+  });
 });
 
 test('a model row without a revision is a protocol error, not an unpinned model', async () => {
@@ -283,12 +318,14 @@ test("info() reads the llm capability's rows with the /models reader", async () 
       family: 'qwen3.5',
       paramsB: 9,
       revision: REVISION,
+      fingerprint: `qwen3.5-9b@${REVISION}`,
       backendSupported: true,
       installed: true,
       resident: true,
       loadable: true,
       memoryBytesEstimate: 21000000000,
       contextDefault: 12288,
+      maxModelLen: 12288,
     },
   ]);
 
@@ -545,6 +582,198 @@ test('thinking must be a boolean and is refused by name when it is not', async (
       return true;
     },
   );
+});
+
+// -------------------------------------------------------------- provenance
+
+test('a provenance sidecar names the weights, not only the model', async () => {
+  handle = (_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(
+      JSON.stringify({
+        server: { name: 'crucible@owens-pc', version: '0.2.0' },
+        backend: 'cuda-linux',
+        job_type: 'load-model',
+        model: {
+          id: 'qwen3.5-9b',
+          revision: REVISION,
+          fingerprint: `qwen3.5-9b@${REVISION}`,
+        },
+        params: {},
+        started: '2026-09-13T00:00:00+00:00',
+        finished: '2026-09-13T00:04:00+00:00',
+      }),
+    );
+  };
+
+  const provenance = await client().provenance('job-1', 'payload.bin');
+  assert.equal(lastPath, '/v1/jobs/job-1/artifacts/payload.bin.provenance.json');
+  assert.deepEqual(provenance.model, {
+    id: 'qwen3.5-9b',
+    revision: REVISION,
+    fingerprint: `qwen3.5-9b@${REVISION}`,
+  });
+  // The document round-trips: clients persist it verbatim beside the artifact.
+  assert.equal(provenance.backend, 'cuda-linux');
+});
+
+test('a provenance model block with no fingerprint is a protocol error', async () => {
+  handle = (_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(
+      JSON.stringify({
+        server: { name: 'crucible@owens-pc', version: '0.2.0' },
+        backend: 'cuda-linux',
+        job_type: 'load-model',
+        model: { id: 'qwen3.5-9b', revision: REVISION },
+        params: {},
+        started: null,
+        finished: '2026-09-13T00:04:00+00:00',
+      }),
+    );
+  };
+  await assert.rejects(client().provenance('job-1', 'payload.bin'), CrucibleProtocolError);
+});
+
+// ----------------------------------------------- the constrained transport
+
+/** A Foundry analyze verdict's schema, as `askConstrained` builds it. */
+const VERDICT_SCHEMA = {
+  type: 'object',
+  properties: {
+    supported: { type: 'boolean' },
+    quote: { type: 'string', maxLength: 200 },
+  },
+  required: ['supported', 'quote'],
+  additionalProperties: false,
+} as const;
+
+test('responseFormat and seed reach the wire under OpenAI\'s own names', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  await client().chat({
+    model: 'qwen3.5-9b',
+    messages: [{ role: 'user', content: 'Does the passage support the claim?' }],
+    temperature: 0,
+    maxTokens: 128,
+    seed: 1729,
+    responseFormat: {
+      type: 'json_schema',
+      json_schema: { name: 'verdict', schema: VERDICT_SCHEMA, strict: true },
+    },
+    thinking: false,
+  });
+
+  assert.deepEqual(JSON.parse(lastBody), {
+    model: 'qwen3.5-9b',
+    messages: [{ role: 'user', content: 'Does the passage support the claim?' }],
+    stream: false,
+    temperature: 0,
+    max_tokens: 128,
+    seed: 1729,
+    response_format: {
+      type: 'json_schema',
+      json_schema: { name: 'verdict', schema: VERDICT_SCHEMA, strict: true },
+    },
+    chat_template_kwargs: { enable_thinking: false },
+  });
+});
+
+test('the grammar inside responseFormat is forwarded, not read', async () => {
+  // A schema using a keyword this client has never heard of: it is the engine's
+  // guided-decoding backend that decides what it supports, and if it will not
+  // compile this it answers its own 400 saying so.
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  const exotic = { type: 'array', prefixItems: [{ type: 'string' }], unevaluatedItems: false };
+  await client().chat({
+    model: 'qwen3.5-9b',
+    messages: [{ role: 'user', content: 'hi' }],
+    responseFormat: { type: 'json_schema', json_schema: { name: 'pair', schema: exotic } },
+  });
+  assert.deepEqual(JSON.parse(lastBody)['response_format']['json_schema']['schema'], exotic);
+});
+
+test('responseFormat: {type: "json_object"} needs no schema', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  await client().chat({
+    model: 'qwen3.5-9b',
+    messages: [{ role: 'user', content: 'hi' }],
+    responseFormat: { type: 'json_object' },
+  });
+  assert.deepEqual(JSON.parse(lastBody)['response_format'], { type: 'json_object' });
+});
+
+test('a malformed responseFormat is refused by name, before anything is posted', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  const cases: Array<[unknown, string]> = [
+    [{ type: 'jsonschema' }, 'responseFormat.type'],
+    [{ type: 'json_schema' }, 'responseFormat.json_schema'],
+    [{ type: 'json_schema', json_schema: { schema: {} } }, 'responseFormat.json_schema.name'],
+    [
+      { type: 'json_schema', json_schema: { name: 'verdict' } },
+      'responseFormat.json_schema.schema',
+    ],
+    [
+      { type: 'json_schema', json_schema: { name: 'verdict', schema: 'an object, please' } },
+      'responseFormat.json_schema.schema',
+    ],
+    ['json', 'responseFormat'],
+  ];
+  for (const [responseFormat, option] of cases) {
+    await assert.rejects(
+      client().chat({
+        model: 'qwen3.5-9b',
+        messages: [{ role: 'user', content: 'hi' }],
+        responseFormat: responseFormat as never,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof CrucibleConfigError, `got ${String(error)}`);
+        assert.equal(error.option, option);
+        return true;
+      },
+      `expected ${option} to be refused by name`,
+    );
+  }
+});
+
+test('seed must be an integer and is refused by name when it is not', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  await assert.rejects(
+    client().chat({
+      model: 'qwen3.5-9b',
+      messages: [{ role: 'user', content: 'hi' }],
+      seed: 1.5,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleConfigError, `got ${String(error)}`);
+      assert.equal(error.option, 'seed');
+      return true;
+    },
+  );
+});
+
+test('finishReason is the engine\'s own word, surfaced rather than normalised', async () => {
+  // `length` is the one that matters: both apps record it as a degradation
+  // instead of using the answer, which only works if it arrives. `content` is
+  // present here — a truncated answer is still an answer that was begun.
+  for (const reason of ['stop', 'length', 'content_filter', 'something_new']) {
+    handle = (_request, response) =>
+      json(response, 200, {
+        ...COMPLETION,
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: '{"supported": tr' },
+            finish_reason: reason,
+          },
+        ],
+      });
+    const answer = await client().chat({
+      model: 'qwen3.5-9b',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    assert.equal(answer.finishReason, reason);
+    assert.equal(answer.content, '{"supported": tr');
+  }
 });
 
 test('a completion that is all reasoning and no content says why, and how to fix it', async () => {
