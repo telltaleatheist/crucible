@@ -193,12 +193,22 @@ def test_llm_survives_when_one_of_its_three_classes_survives() -> None:
 
 def test_a_disabled_class_records_the_number_that_disabled_it() -> None:
     """Section 2 step 4. The shortfall is a NUMBER on the row, not only a phrase
-    inside the sentence: a log line is never load-bearing (ARCHITECTURE.md R4)."""
-    verdict = _decide("align", "cuda-linux", SIX_GIG, CUDA_RESERVE)
+    inside the sentence: a log line is never load-bearing (ARCHITECTURE.md R4).
+
+    And it is the shortfall of the SMALLEST candidate, because that is the one
+    that says how much bigger a card would have to be. `asr` on a 4 GiB card is
+    the case that can tell: six whisper models, none of them fitting, and
+    `large-v3` is 2.8 GiB further out of reach than `tiny`. Reporting the largest
+    would tell an operator to buy three times the card they need.
+    """
+    tiny_card = 4 * GIB
+    verdict = _decide("asr", "cuda-linux", tiny_card, CUDA_RESERVE)
     assert verdict.enabled is False
-    smallest = min(c.memory_bytes_estimate for c in verdict.candidates)
-    assert verdict.shortfall_bytes == smallest - (SIX_GIG - CUDA_RESERVE)
+    assert len(verdict.candidates) > 1, "the point of this test is several"
+    sizes = [c.memory_bytes_estimate for c in verdict.candidates]
+    assert verdict.shortfall_bytes == min(sizes) - (tiny_card - CUDA_RESERVE)
     assert verdict.shortfall_bytes > 0
+    assert verdict.shortfall_bytes < max(sizes) - (tiny_card - CUDA_RESERVE)
 
 
 def test_asr_and_align_have_no_mac_candidates_and_say_which_it_is() -> None:

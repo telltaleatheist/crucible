@@ -62,7 +62,7 @@ wrong.
 `tests/test_capability.py` and both predate the rule:
 
     3090 Ti, 24.0 GiB, 3.0 GiB reserve   -> translate ENABLED on qwen3.8-27b-4bit
-                                            (20.2 GiB needed, 21.0 GiB available)
+                                            (20.1 GiB needed, 21.0 GiB available)
     64 GiB Studio, 25% reserve           -> translate ENABLED on qwen3.8-27b-4bit,
                                             bf16 REFUSED (51.7 GiB against 48.0)
 

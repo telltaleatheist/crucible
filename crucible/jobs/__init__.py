@@ -4,6 +4,11 @@
 subset this server is configured to offer. Asking for a type that exists but is not
 enabled is refused differently from asking for one that does not exist — the client
 is told which of the two it is.
+
+Since phase 9 the first of those two refusals also carries the NUMBER that turned
+the type off, read off the `[capability]` record `crucible install` wrote — see
+`disabled_error`, which is the one producer of that sentence for all four doors
+that say it.
 """
 
 from __future__ import annotations
