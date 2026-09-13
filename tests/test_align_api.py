@@ -621,6 +621,35 @@ def test_a_library_printing_to_fd_1_is_refused_not_skipped(
     assert "whisperx.alignment" in message
 
 
+def test_a_cancel_that_is_honoured_ends_the_job_and_the_residency(
+    ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the cancel path: the worker DOES go when asked.
+
+    A cancel stops a held worker mid-exchange, so the session is gone; the
+    resident row has to go with it, or `/v1/health` advertises an aligner that is
+    not there until some later job happens to notice.
+    """
+    monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_SLOW_S", "30")
+    job_id = submit(ready, auth).json()["job_id"]
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        if ready.get(f"/v1/jobs/{job_id}", headers=auth).json()["status"] == "running":
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("the job never started running")
+    assert ready.delete(f"/v1/jobs/{job_id}", headers=auth).status_code == 200
+
+    with ready.stream("GET", f"/v1/jobs/{job_id}/events", headers=auth) as stream:
+        events = parse_sse(line for line in stream.iter_lines())
+    assert terminal(events)["event"] == "cancelled", terminal(events)
+    assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
+    # And the next job loads it again rather than sending into a closed pipe.
+    monkeypatch.delenv("CRUCIBLE_FAKE_ALIGN_SLOW_S")
+    assert terminal(run_job(ready, auth))["event"] == "done"
+
+
 def test_a_cancel_stops_the_worker_and_does_not_sigkill_it(
     ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -660,7 +689,8 @@ def test_a_cancel_stops_the_worker_and_does_not_sigkill_it(
     assert terminal(events)["event"] in ("cancelled", "failed")
     if terminal(events)["event"] == "failed":
         assert "does not SIGKILL" in terminal(events)["data"]["error"]["message"]
-    # And a worker that would not go is not left advertised as resident.
+    # And a cancelled run leaves nothing advertised as resident — whichever way
+    # it ended, the session is gone and the row must go with it.
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
 
     # This test made the process; this test cleans it up. Nothing in Crucible

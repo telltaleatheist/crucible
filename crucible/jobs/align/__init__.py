@@ -84,7 +84,7 @@ from ...alignmodels import (
     load_all_align_manifests,
 )
 from ...config import Config
-from ...errors import ApiError, JobError
+from ...errors import ApiError, JobCancelled, JobError
 from ...manifests import fingerprint
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
@@ -514,6 +514,14 @@ class AlignJobType:
             # resident thing whose process has gone.
             self._forget(model)
             raise JobError("worker_failed", str(exc)) from None
+        except JobCancelled:
+            # A cancel stops the worker mid-exchange, so the session is gone too
+            # — `WorkerSession.send` discards it rather than hand the next job a
+            # stream it can no longer parse. The resident row has to go with it,
+            # or `/v1/health` advertises an aligner that is not there until some
+            # later job notices and reloads.
+            self._forget(model)
+            raise
 
         try:
             results = workers.require_positional_results(outcome, total, "chunk")

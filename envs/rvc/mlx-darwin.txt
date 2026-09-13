@@ -59,3 +59,12 @@ soundfile==0.13.1
 soxr==0.5.0.post1
 torchcrepe==0.0.23
 transformers==4.49.0
+
+# --- the env's own ffmpeg and sox ---
+# urvc's convert path prefers an ffmpeg on PATH over anything it vendors, and
+# `crucible/jobs/rvc/worker.py` puts this env's bin dir at the front of the
+# child's PATH for exactly that reason. These are ultimate-rvc's own declared
+# dependencies; they are pinned here so `crucible doctor` checks the two tools
+# that decision depends on rather than trusting them to be there.
+static-ffmpeg==3.0
+static-sox==1.0.2

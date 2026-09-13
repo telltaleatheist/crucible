@@ -182,12 +182,25 @@ def _run_batch(argv: list[str], models_dir: str, on_line) -> None:
 
     The child inherits this worker's environment, which the SERVER set
     (`URVC_SKIP_INIT`, `HF_HUB_OFFLINE`, `KMP_DUPLICATE_LIB_OK`,
-    `OMP_NUM_THREADS`) — see `jobs/rvc/__init__.py` for what each one is for.
-    `URVC_MODELS_DIR` is added here because it is the one that depends on this
-    job's staged model root.
+    `OMP_NUM_THREADS`) — see `jobs/rvc/__init__.py` for what each one is for. Two
+    things are added here rather than there, because both depend on where this
+    worker itself is running:
+
+    - `URVC_MODELS_DIR`, the model root the server staged for this job.
+    - **this env's `bin` at the front of PATH.** urvc's convert path prefers an
+      ffmpeg on PATH over anything it vendors, and the env installs its own
+      through `static-ffmpeg` and `static-sox` — which are beside this
+      interpreter and nowhere a bare `crucible serve` would have on its PATH.
+      BookForge does the same thing for the same reason
+      (`electron/rvc-bridge.ts`, `relocatableEnvBinDirs`). Prepended, not
+      appended: the point is that the env's own tools win.
     """
     environment = dict(os.environ)
     environment["URVC_MODELS_DIR"] = models_dir
+    own_bin = os.path.dirname(os.path.abspath(sys.executable))
+    environment["PATH"] = os.pathsep.join(
+        [own_bin, environment.get("PATH", "")]
+    ).rstrip(os.pathsep)
     process = subprocess.Popen(
         argv,
         stdout=subprocess.PIPE,
