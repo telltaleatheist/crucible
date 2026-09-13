@@ -243,6 +243,37 @@ Three things this buys immediately:
 than a constraint: nothing here forecloses it. A future job that wants to split can do it
 by being **two jobs**, which the chain already expresses.
 
+#### Two things "atomic" does NOT mean, and both need saying
+
+The word is load-bearing and it has two readings that would each break something that
+works today. The Foundry session raised both; they are wording, not design, and this
+contract will outlive everyone's memory of what was meant.
+
+**It is about where a job RUNS, not who it may talk to.** A job is *claimed* by one
+machine, runs there, and finishes or fails there. It is emphatically **not** "a job does
+not involve another machine" — that phrasing would retroactively outlaw Foundry's
+`--vlm-endpoint`, which has worked for months and is the only reason this PC's 3090 is
+reachable from the Mac at all. A page read runs start to finish on one machine and calls a
+GPU over HTTP the way anything calls a database. **The remote server is a service the job
+consumes, not a second machine the job runs on.** Ownership is the test; conversation is
+not.
+
+**It means atomic in CLAIMING, never in EFFECT. Partial work surviving a failure is a
+feature, and deleting it would be the most expensive mistake available in this codebase.**
+A killed VLM read is deliberately not rolled back: `foundry/src/vlm/readings.ts` appends
+and fsyncs every answer the moment it lands, so a halt at page 400 of 900 banks 399 pages
+of GPU time and the re-run pays only for what is missing. That module's header records a
+previous version which "safely" rotated banks aside on failure and thereby lost a finished
+book. Phase 6's chunk fetcher has exactly the same property for exactly the same reason —
+a render that dies at chunk 900 of 1,400 keeps its 900 chunks, which is what BookForge's
+resume has always relied on.
+
+So: **no failure cleanup, no rollback-to-clean, no tidying a partial output on the strength
+of the word "atomic".** The hazard here is not a bug; it is a well-intentioned future edit
+that looks principled while destroying hours of GPU per book. It is the same shape as
+section 4.1's twelve: a reasonable-sounding improvement to the slot model silently breaking
+a correctness or cost property that lives in a different repo.
+
 ### 4.4 A chain STICKS to the machine its first step ran on
 
 This is the part that is not a preference, and it is the reason a per-row pin alone is not
