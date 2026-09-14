@@ -565,6 +565,15 @@ what was seen.
 
 ### 4.6 The Mac — no host, and what "works out of the box" is measured against
 
+> **BUILT 2026-09-14, and section 7c is what came of it.** `align` and `asr`
+> are served, with every estimate MEASURED on that machine rather than
+> declared; `pages` got the structural half — `BACKEND_ENGINES` is one engine
+> per (backend, class family) — and NOT the manifest block, because mlx-vlm's
+> own HTTP server was measured and does not put the image into the prompt.
+> `envs/rvc/mlx-darwin.txt`'s owed freeze and `doctor`'s owed PATH line landed
+> with them. Read 7c for the numbers; what follows is the decision they came
+> from.
+
 **Owen, 2026-09-14:** *"we'll have to make sure crucible works on mac as well. it wouldnt need a
 wsl sidecar for mac obviously. it would just function out of the box with mlx-audio and
 everything we have configured for mac bookforge."*
@@ -724,3 +733,153 @@ rollout plan already lists (`RunOptions.waitFor`, `hosted_placement_not_vendored
   door, and it opens when there is a reason.
 - Deleting BookForge's legacy local spawn layer (`'local'`, the WSL bridges, ollama's remaining
   doors). That is the in-app-pass deletion already on the rollout plan.
+
+## 7c. What was built — the Mac
+
+> **Numbered 7c and not 7**, because sections 7a and 7b belong to the two
+> builds 4.6 hands work to and neither is written yet. This is the Mac's, and
+> it is the record 4.6 asked for.
+
+Section 4.6 listed three unserved classes in ascending cost and one owed
+improvement. Two of the three now run, the third is measured and deliberately
+not shipped, and the improvement landed. Everything below was done on
+2026-09-14 against the Mac Studio (M1 Ultra, 64 GiB unified, macOS 26.3.1); no
+number here is a guess, and where a figure is absent this section says
+"unmeasured" rather than inventing one.
+
+### `align` — served
+
+| what | where |
+|---|---|
+| recipe | `envs/align/mlx-darwin.txt` — the freeze of the Mac's `qwen-align` env, read 2026-09-14. Cuda's set minus the 19 `nvidia-*`/`cuda-*` wheels and `triton`, `platformdirs` one patch newer, everything else identical. Two lines named and left out: `conda-pack` (BookForge's packing step) and `torchaudio` (absent from the working cuda env, which is the proof it is not needed). |
+| engine | `mlx-darwin: "qwen3-forced-aligner"` — the SAME engine on both backends. Not a second engine the way `asr` needs one: the aligner is plain torch and torch runs on Metal. |
+| weights | `Qwen/Qwen3-ForcedAligner-0.6B` @ `c7cbfc2048c462b0d63a45797104fc9db3ad62b7`, 1,840,072,459 B — the identical repo and revision the cuda block pins, re-read from the hub API rather than copied. |
+| device | `crucible/jobs/align/__init__.py` owns a per-backend table with **no default**: `cuda-linux` → `cuda`, `mlx-darwin` → `mps`. A backend nobody decided about is a refusal, never a `cuda` handed to a Mac. The dtype still comes off the manifest. |
+| **estimate_basis** | **MEASURED.** 5,885,296,640 B — the high-water of `torch.mps.driver_allocated_memory()`, sampled at 20 Hz, over three back-to-back 300-second chunks (QWEN3_MAX_AUDIO_S, the longest input this job type accepts). It settles at the second chunk and does not move on the third, which is what says ceiling rather than leak. DRIVER-allocated and not current-allocated, because torch's MPS caching allocator keeps what it takes and an align session is resident for a whole book; live tensors peaked at 3,032,348,672. It is LARGER than the cuda block's declared arithmetic, which is the argument for measuring. |
+| also measured | ~77x realtime warm (900 s of audio in 11.72 s), beside BookForge's 97x on a 95 s clip. |
+| **unmeasured** | **The timestamp comparison.** Nobody has aligned one chapter on both machines and compared the cues. `bfloat16` on MPS is a different numerical path from `bfloat16` on CUDA. `envs/align/mlx-darwin.md` says what the comparison is and what the bar is. |
+
+### `asr` — served, by a second engine
+
+CTranslate2 has no Metal backend, so this is `mlx-whisper` with its own recipe
+(`envs/asr/mlx-darwin.txt`, the freeze of a scratch env built from the pin and
+deleted after), its own worker (`crucible/jobs/asr/mlx_worker.py`) and **seven
+new ids**. The wire is byte-for-byte the faster-whisper worker's, so
+`transcript.json` is one document whichever machine made it.
+
+**The ids never cross, and the loader enforces it.** A transcript records the
+model id and nothing else about the bytes; the two libraries' "large-v3" are
+different conversions at a different quantisation. `ASR_ENGINE_ID_PREFIX`
+refuses a manifest whose id does not name its engine.
+
+Every revision below was verified twice against the hub API on 2026-09-14 (main
+through `/refs`, then the byte total through `/tree/<sha>?recursive=1`). Every
+estimate is **MEASURED**: `mx.get_peak_memory()` over ONE 900-second window —
+`WINDOW_SECONDS`, the unit a book is actually cut into — with
+`word_timestamps=True`, after `mx.reset_peak_memory()` before the load.
+
+| id | repo @ sha | repo bytes | estimate (MEASURED) | 900 s took |
+|---|---|---|---|---|
+| `mlx-whisper-tiny` | `mlx-community/whisper-tiny-mlx` @ `6caf9c55601caafbe6508a8b0d216bdf4783c4e8` | 74,420,620 | 549,418,642 | 11.95 s (75.3x) |
+| `mlx-whisper-base` | `mlx-community/whisper-base-mlx` @ `1e3e249fb8d01c655324bd6841b1deadffd6d04c` | 143,726,326 | 877,017,662 | 13.11 s (68.6x) |
+| `mlx-whisper-small` | `mlx-community/whisper-small-mlx` @ `45f3915923c7a79a5a5b5a7d909d39aeb0e5630e` | 481,309,720 | 1,540,273,318 | 31.11 s (28.9x) |
+| `mlx-whisper-medium` | `mlx-community/whisper-medium-mlx` @ `7fc08c4eac4c316526498f147dfdee6f6303f975` | 1,524,927,044 | 2,607,243,002 | 36.39 s (24.7x) |
+| `mlx-whisper-large-v3` | `mlx-community/whisper-large-v3-mlx` @ `49e6aa286ad60c14352c404340ded53710378a11` | 3,083,522,487 | 4,153,379,610 | 142.01 s (6.3x) |
+| `mlx-whisper-large-v3-turbo` | `mlx-community/whisper-large-v3-turbo` @ `a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb` | 1,613,979,758 | 2,654,916,970 | 35.43 s (25.4x) |
+| `mlx-whisper-distil-large-v3` | `mlx-community/distil-whisper-large-v3` @ `e1c3c155644be59f8b477c0186719442f7e3fbb0` | 1,509,132,231 | 2,549,972,298 | 25.84 s (34.8x) |
+
+**A finding worth the table: `large-v3` is four times slower than `turbo`** for
+the same 128-mel encoder, because it decodes with thirty-two layers against
+turbo's four. An 18-hour book is about three hours of Mac on `large-v3` and
+about forty minutes on `turbo`.
+
+**One value is refused rather than differing.** mlx-whisper has no VAD at all —
+faster-whisper's is Silero; `no_speech_threshold` is the model's own
+per-segment judgement, a different mechanism on different evidence. So
+`vad_filter: true` is `400 vad_unsupported_by_engine`, asked off the BACKEND so
+it lands before the env and weights checks. And one field is reconstructed
+rather than dropped: `language_probability`, from whisper's own
+`detect_language` on the window's first 30 s (measured: `en` at
+0.9946824908256531), with the detected code then passed into `transcribe` so
+the detection runs once.
+
+**Unmeasured: ACCURACY.** Nobody has put one book through both engines. The
+memory and the speed are watched; which transcript is better on Owen's material
+is an open question and `envs/asr/mlx-darwin.md` says so.
+
+### `pages` — the structure landed, the manifest block did NOT, and that is a measurement
+
+4.6's decision is built: **`BACKEND_ENGINES` is now one engine per (backend,
+class family)** — `cuda-linux` maps both text and pages to vLLM as it always
+did, `mlx-darwin` maps text to `mlx-lm` and pages to `mlx-vlm`. The family is
+DERIVED from `modalities` rather than declared, so `qwen3.5-9b` (a vision model
+served text-only) states that fact once. `crucible/engines/mlx_vlm.py` is the
+new class; `residency.load()` needed no change, because it already picked the
+class off `spec.engine`.
+
+**`models/dots-ocr.toml` still has no `[backends.mlx-darwin]` block, and the
+reason changed from "nobody measured it" to "it was measured and it is wrong".**
+
+| | |
+|---|---|
+| in process, `mlx_vlm.generate()` | five blocks in the `dots-json` dialect, the three body paragraphs transcribed VERBATIM, **16.32 s/page**, peak **4,927,004,359 B** |
+| over its own server, same weights, same image, same prompt | `[{"bbox": [1, 0, 1008, 1008], "category": "Picture"}]`, 0.72 s |
+
+The discriminator is the token count. The server logs `images=1` and then
+`prompt_tokens=216` — the text alone; asked a 21-token question it logs
+`prompt_tokens=21`. On the same machine, in the same env,
+`mlx_vlm.utils.prepare_inputs(processor, images=[the page], prompts=<the same
+formatted prompt>)` returns **3,464** input_ids with pixel_values of
+(13800, 588) — the 13,800 patches a 1300x2112 page makes at patch 14, merged
+2x2 into 3,450 image tokens. The image placeholder is never expanded on the
+server's path.
+
+Not the request shape and not the version: four shapes (image part first, text
+part first, a local file path, an explicit `resize_shape`) produced the
+byte-identical wrong answer, on mlx-vlm **0.6.10 and 0.7.1** alike, and
+`apply_chat_template` was ruled out directly — it produces the same
+`<|img|><|imgpad|><|endofimg|>` prompt from a string and from the message list
+the server passes. The page was a synthetic 1300x2112 PNG (the size Foundry's
+pinned `VLM_DPI = 200` makes of a 468x760 pt page) with known text; no personal
+document was read.
+
+Writing the block would light `pages: yes` on every Mac and answer every page
+with one `Picture` covering the sheet — a well-formed answer in the right
+dialect that is simply not the page. **What is needed is one thing:** an
+mlx-vlm whose `/v1/chat/completions` reports `prompt_tokens` in the thousands
+for that page. Then the block is `engine = "mlx-vlm"`,
+`hf_repo = "mlx-community/dots.ocr-4bit"`,
+`revision = "4ab989e403d4f8cafa5fdeede5b2290a706c2405"` (3,538,472,109 B, hub
+API verified), `memory_bytes_estimate = 4927004359` re-taken through the
+server, and no `--trust-remote-code` (mlx-vlm ships its own `dots_ocr` class,
+unlike vLLM). `envs/llm/mlx-darwin.txt` carries the same decision about its
+pin: adding `mlx-vlm==0.6.10` takes that env from 34 packages to 54, and
+installing it for an engine nothing can reach is weight for a capability that
+is off.
+
+Foundry's Mac page reading is unaffected — its `mlx-local` route calls
+`generate()` in process, which is the half that works, and that is also why
+nobody had found this.
+
+### `rvc` — the recipe stopped being a substitution
+
+`envs/rvc/mlx-darwin.txt` is now `pip freeze` from `~/.crucible/envs/rvc` on
+that machine, 104 packages, and the env's own stamp says this file built it
+(`recipe: mlx-darwin.txt`, python 3.11.16, 43.4 s). All three CUDA→neutral
+substitutions the old notice asked to have checked are confirmed.
+
+### The owed improvement — `doctor` names both PATHs
+
+`crucible doctor` prints `PATH (this shell)` and `PATH (the service)`, the
+second read back out of the unit or plist Crucible wrote
+(`service.read_recorded_path`, through `plistlib` and systemd's `%%`
+unescaping), with a note when they differ saying that is normal. "No service
+installed" prints as `none recorded` beside where the definition would be,
+rather than as an absent line.
+
+### What a Mac still cannot do, and it is not on this list by accident
+
+`pages`, until the mlx-vlm defect above is fixed. Everything else in 4.6's
+"served today" row is unchanged: `tts`, `llm`, `rvc`, `denoise`. The upgrade
+off conda (4.6's checklist, the audit's §3) is untouched by all of this and
+still has to be done in that order.

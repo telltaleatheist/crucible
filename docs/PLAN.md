@@ -9,7 +9,9 @@ in DESIGN.md's table exists, is tested, is documented in its own contract file, 
 reachable from `@crucible/client`. Two of them — `llm` and page reading — are verified on
 real cards with measured numbers in their manifests. The other four were built against
 fake engines on a night when both of Owen's cards were busy, and say so: every voice,
-aligner and whisper manifest carries `estimate_basis = "declared"`.
+aligner and whisper manifest carries `estimate_basis = "declared"`. (Partly discharged
+2026-09-14: every `mlx-darwin` aligner and whisper figure is now MEASURED on the M1 Ultra
+— see the Mac paragraph below. The cuda-linux blocks and every voice are still declared.)
 
 **Superseded in part, 2026-09-13 (later the same day).** Owen ruled that the guard belongs
 to the model and that a connected server is queue capacity, which opened two more phases:
@@ -135,6 +137,39 @@ pack it names. `crucible doctor` prints each env's pack sha beside its recipe ha
   making one is a setup act rather than a test — so the four `mlx-darwin` packs and their
   interpreter pin are proved by the first `macos-14` CI job and not before. The four torch
   packs' runner-disk figures are labelled ESTIMATES in section 3.3.
+
+**Landed, 2026-09-14: the Mac catches up** (`PHASE15-HOST.md` 4.6 and the record in 7c).
+The read-only audit found three classes `mlx-darwin` did not serve; two of them do now, and
+the third is the interesting one. **`align`** is the same engine on a different device —
+Qwen3-ForcedAligner is plain torch, torch runs on Metal — so the whole change is a recipe
+(the freeze of BookForge's `qwen-align` env), the identical repo and revision, and a
+per-backend device table with no default. **`asr`** is a SECOND ENGINE, because CTranslate2
+has no Metal backend: `mlx-whisper`, its own worker, and seven `mlx-whisper-*` ids the
+loader will not let anyone confuse with the card's six, since a transcript records the id
+and nothing else about the bytes. The wire is unchanged either way, so BookForge's readers
+change nothing; `vad_filter: true` is refused BY NAME on mlx-whisper rather than ignored.
+**Every estimate on those eight new blocks was MEASURED on the M1 Ultra** — none is a
+declared allowance and none is a copy of the cuda figure, which would have been an
+allowance for a CUDA context that does not exist. Also landed: `envs/rvc/mlx-darwin.txt`'s
+owed freeze (from the env `crucible install rvc` actually built there), and the audit's one
+owed improvement — `crucible doctor` now names the SERVICE's PATH beside the shell's, read
+back out of the plist or unit Crucible wrote.
+
+- **`pages` got the structure and not the capability, and that is a measurement.**
+  `BACKEND_ENGINES` is one engine per (backend, class family) as 4.6 decided, the family
+  derived from `modalities` rather than declared, and `crucible/engines/mlx_vlm.py` is the
+  class. But mlx-vlm's OWN HTTP SERVER does not put the image into the prompt for dots.ocr:
+  in process the page reads correctly in 16.32 s, over the server the same weights answer
+  `[{"bbox": [1,0,1008,1008], "category": "Picture"}]` in 0.72 s, and the server logs
+  `prompt_tokens=216` where `prepare_inputs` on that machine returns 3,464. Four request
+  shapes, two versions. Shipping the manifest block would light `pages: yes` on every Mac
+  and answer every page with one Picture, so it is not written and
+  `models/dots-ocr.toml` carries the run, the pins and the estimate for the day it can be.
+  Foundry's Mac route is unaffected — it calls `generate()` in process, the half that works,
+  which is why nobody had found this.
+- **Still unmeasured, and said so rather than guessed:** the aligner's MPS-vs-CUDA timestamp
+  comparison, and mlx-whisper-vs-faster-whisper accuracy on a real book. Both are one book
+  through two machines and neither has been run.
 
 **Landed, 2026-09-14: phase 13, the operator door** (`PHASE13-OPERATOR.md`). Owen:
 *"not microservices. but crucible has its own ui. and it provides the token or whatever
