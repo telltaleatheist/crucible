@@ -50,6 +50,28 @@
 
 # --- what ultimate-rvc loads, at the versions Owen's working env holds ---
 
+# --- the `denoise` job type's engine, in this same env ---
+# PHASE4-AUDIO.md section 4.2. `denoise` is a separate job type and NOT a
+# separate env: audio-separator is torch, this env already holds the exact torch
+# it wants, and BookForge runs the two out of one env today for the same reason
+# (`electron/denoise-bridge.ts` reaches for the RVC env's python). A second venv
+# would be a second 3 GB torch on disk to run the same card.
+#
+# 0.31.1 is the version BookForge's resident worker was written and verified
+# against — `electron/scripts/separator_worker.py` says so, having read that
+# release's `cli.py` to confirm every separation parameter it leaves alone is an
+# argparse default identical to the constructor default. Read against this
+# recipe's other pins from PyPI metadata on 2026-09-13, every one compatible:
+# torch>=2.3 (here 2.7.0), numpy>=2 (2.2.5), librosa>=0.10 (0.10.2),
+# rotary-embedding-torch>=0.6.1,<0.7.0 (0.6.5), scipy>=1.13 and onnxruntime via
+# its `gpu` extra, which this env already carries as onnxruntime-gpu.
+#
+# THE PIN IS COMPATIBLE, NOT RESOLVED. Nobody has run pip against this file; the
+# notice at the top of this recipe covers this line too. audio-separator also
+# pulls `onnx-weekly` and `onnx2torch-py313`, neither of which it pins, so the
+# first real install is what turns this into a freeze.
+audio-separator==0.31.1
+
 # --- the env's own ffmpeg and sox ---
 # urvc's convert path prefers an ffmpeg on PATH over anything it vendors, and
 # `crucible/jobs/rvc/worker.py` puts this env's bin dir at the front of the

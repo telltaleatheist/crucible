@@ -179,6 +179,11 @@ class Config:
     enable_tts: bool
     enable_align: bool
     enable_rvc: bool
+    #: `denoise` shares the `rvc` env, and it still gets a flag of its own: a
+    #: host may have the env and the RVC models and no separator checkpoint, or
+    #: the other way round, and one flag for both would advertise a job type
+    #: whose first request refuses.
+    enable_denoise: bool
     desktop_allowance_bytes: int
     #: Capability flags this config did not carry, so they were read as off.
     #: Empty for a config written by this build. `crucible doctor` prints it, so
@@ -264,6 +269,7 @@ CAPABILITY_FLAGS: tuple[str, ...] = (
     "enable_tts",
     "enable_align",
     "enable_rvc",
+    "enable_denoise",
 )
 
 
@@ -402,6 +408,7 @@ def load_config(home: Path | None = None) -> Config:
         enable_tts=_capability_flag(table, "enable_tts"),
         enable_align=_capability_flag(table, "enable_align"),
         enable_rvc=_capability_flag(table, "enable_rvc"),
+        enable_denoise=_capability_flag(table, "enable_denoise"),
         flags_absent=tuple(
             flag for flag in CAPABILITY_FLAGS if flag not in table.get("jobs", {})
         ),
@@ -427,6 +434,13 @@ def write_config(
     enable_align: bool,
     enable_rvc: bool,
     desktop_allowance_bytes: int,
+    #: Defaulted, and it is the ONE flag that is, because a config's every other
+    #: writer passes it: `_write_capability` builds its call from
+    #: `CAPABILITY_FLAGS`, so it always states this, and `crucible init` states
+    #: it too. What the default serves is a caller written before this job type
+    #: existed — a test, a script — for which `False` is the same answer
+    #: `_capability_flag` gives an absent key, and the safe direction.
+    enable_denoise: bool = False,
     capability: CapabilityRecord | None = None,
 ) -> Path:
     """Write config.toml at mode 0600 under a 0700 home. Returns the path.
@@ -451,6 +465,7 @@ def write_config(
             "enable_tts": enable_tts,
             "enable_align": enable_align,
             "enable_rvc": enable_rvc,
+            "enable_denoise": enable_denoise,
         },
         "accelerator": {"desktop_allowance_bytes": desktop_allowance_bytes},
     }

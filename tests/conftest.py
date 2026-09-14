@@ -69,6 +69,7 @@ def make_app(home: Path) -> Callable[..., FastAPI]:
         enable_tts: bool = False,
         enable_align: bool = False,
         enable_rvc: bool = False,
+        enable_denoise: bool = False,
         token: str = TOKEN,
         backend: Backend = FAKE_BACKEND,
         desktop_allowance_bytes: int = 3 * 1024 ** 3,
@@ -90,6 +91,7 @@ def make_app(home: Path) -> Callable[..., FastAPI]:
             enable_tts=enable_tts,
             enable_align=enable_align,
             enable_rvc=enable_rvc,
+            enable_denoise=enable_denoise,
             desktop_allowance_bytes=desktop_allowance_bytes,
             capability=capability,
         )

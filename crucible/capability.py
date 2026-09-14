@@ -86,6 +86,7 @@ from .alignmodels import load_all_align_manifests
 from .asrmodels import load_all_asr_manifests
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .config import CapabilityRecord, CapabilityRow
+from .denoisemodels import load_all_denoise_manifests
 from .manifests import load_all_manifests
 from .rvcmodels import load_all_rvc_manifests
 from .voices import load_all_voices
@@ -295,6 +296,17 @@ CLASSES: tuple[CapabilityClass, ...] = (
         purpose="voice conversion",
         noun="RVC models",
         candidates=_from_catalog(load_all_rvc_manifests),
+    ),
+    # Its own class even though it shares the rvc ENV, because a class is about
+    # what the CARD can hold and the two hold different things: a 913 MB
+    # separator and a 2.5 GiB urvc stack are different arithmetic, and a host
+    # that can denoise and cannot convert is a host that should say so.
+    CapabilityClass(
+        name="denoise",
+        job_type="denoise",
+        purpose="noise removal and stem separation",
+        noun="separator models",
+        candidates=_from_catalog(load_all_denoise_manifests),
     ),
 )
 

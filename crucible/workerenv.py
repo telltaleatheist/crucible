@@ -49,8 +49,41 @@ HEADLINE_PACKAGE: dict[str, str] = {
 }
 
 #: Job types that have a worker env at all. `llm` is deliberately absent: it is
-#: `jobenv`'s, until the two modules are merged.
+#: `jobenv`'s, until the two modules are merged. `denoise` is absent for a
+#: different reason — it has no env of its own; see below.
 WORKER_JOB_TYPES: tuple[str, ...] = ("align", "asr", "rvc")
+
+#: Which job types one env serves. Almost always itself; `rvc` is the exception
+#: and `denoise` is why.
+#:
+#: audio-separator is torch, the rvc env already holds the exact torch it wants,
+#: and BookForge runs both out of one env today (`electron/denoise-bridge.ts`
+#: reaches for the RVC env's python). A second venv would be a second 3 GB torch
+#: on disk to drive the same card.
+#:
+#: It is a table rather than a fact each caller knows because two of them need
+#: it and they are far apart: `crucible install rvc` decides the capability flag
+#: for both types, and `crucible doctor` names the install command that would
+#: turn a type on. A second copy of "denoise lives in the rvc env" is exactly
+#: the shape ARCHITECTURE.md R1 is about.
+JOB_TYPES_SERVED_BY_ENV: dict[str, tuple[str, ...]] = {
+    "align": ("align",),
+    "asr": ("asr",),
+    "rvc": ("rvc", "denoise"),
+}
+
+
+def env_for_job_type(job_type: str) -> str | None:
+    """Which env's recipe builds what this job type needs, or None.
+
+    None means no worker env is involved at all (`llm` has `jobenv`'s, `echo`
+    and the lifecycle types have none), which is a different answer from "an env
+    that does not exist".
+    """
+    for env, served in JOB_TYPES_SERVED_BY_ENV.items():
+        if job_type in served:
+            return env
+    return None
 
 
 class WorkerEnvError(CrucibleError):

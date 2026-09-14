@@ -125,6 +125,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         enable_tts=args.enable_tts,
         enable_align=args.enable_align,
         enable_rvc=args.enable_rvc,
+        enable_denoise=args.enable_denoise,
         desktop_allowance_bytes=desktop_allowance_bytes,
     )
     print(f"backend:  {backend.kind} ({backend.gpu.name}, {backend.detail})")
@@ -136,6 +137,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"tts job:  {'enabled' if args.enable_tts else 'disabled'}")
     print(f"align:    {'enabled' if args.enable_align else 'disabled'}")
     print(f"rvc job:  {'enabled' if args.enable_rvc else 'disabled'}")
+    print(f"denoise:  {'enabled' if args.enable_denoise else 'disabled'}")
     source = "stated" if args.desktop_allowance_bytes is not None else (
         f"{backend.kind} default"
     )
@@ -532,6 +534,19 @@ def cmd_capability(args: argparse.Namespace) -> int:
 #: this tuple is the one place the difference does not leak.
 INSTALLABLE_JOB_TYPES = ("llm", "tts", *workerenv.WORKER_JOB_TYPES)
 
+#: Which `crucible install <type>` builds the env a job type needs. Almost
+#: always itself; `denoise` is the exception, because it shares the `rvc` env
+#: (`workerenv.JOB_TYPES_SERVED_BY_ENV` is the owner of that fact). `crucible
+#: doctor` reads this so the command it suggests is one that exists.
+INSTALLER_FOR: dict[str, str] = {
+    **{name: name for name in INSTALLABLE_JOB_TYPES},
+    **{
+        job_type: env
+        for env, served in workerenv.JOB_TYPES_SERVED_BY_ENV.items()
+        for job_type in served
+    },
+}
+
 
 def cmd_install(args: argparse.Namespace) -> int:
     if args.job_type not in INSTALLABLE_JOB_TYPES:
@@ -627,10 +642,16 @@ def _install_worker_env(
     for name in sorted(status.packages):
         if name in (headline, "ctranslate2", "numpy", "onnxruntime"):
             print(f"  {name}=={status.packages[name]}")
-    return _capability_step(config, backend, args.job_type)
+    # One env can serve more than one job type — `rvc`'s also carries
+    # audio-separator, which is `denoise` — and the flag for each of them is
+    # decided here, because this is the door that has just built the thing they
+    # share.
+    return _capability_step(
+        config, backend, *workerenv.JOB_TYPES_SERVED_BY_ENV[args.job_type]
+    )
 
 
-def _capability_step(config: Config, backend: Backend, job_type: str) -> int:
+def _capability_step(config: Config, backend: Backend, *job_types: str) -> int:
     """The selection step `crucible install` gains (PHASE9-CAPABILITY.md §2).
 
     It runs AFTER the env is built, and the order is deliberate in both
@@ -648,26 +669,40 @@ def _capability_step(config: Config, backend: Backend, job_type: str) -> int:
     Unlike `crucible capability --write`, this one may turn a flag ON, because it
     is the door that has just established the other half of the claim: the env
     exists.
+
+    `job_types` is more than one when one env serves more than one type — the
+    `rvc` env also carries audio-separator, which is `denoise`. Each gets its
+    own verdict, because they are different arithmetic against the same card,
+    and the exit code is a refusal if ANY of them came out disabled: the
+    operator asked for an env and one of the things it was for cannot run here.
     """
     decisions = _decide_here(config, backend)
-    enabled = capability.job_type_enabled(job_type, decisions)
-    mine = [d for d in decisions if d.job_type == job_type]
-    written = _write_capability(
-        config, backend, decisions, {f"enable_{job_type}": enabled}
-    )
+    flags: dict[str, bool] = {}
+    disabled: list[str] = []
     print("capability:")
-    for decision in mine:
-        mark = "yes" if decision.enabled else "NO"
-        print(f"  {decision.capability:<10} {mark:<4} {decision.reason}")
+    for job_type in job_types:
+        enabled = capability.job_type_enabled(job_type, decisions)
+        flags[f"enable_{job_type}"] = enabled
+        mine = [d for d in decisions if d.job_type == job_type]
+        for decision in mine:
+            mark = "yes" if decision.enabled else "NO"
+            print(f"  {decision.capability:<10} {mark:<4} {decision.reason}")
+        if not enabled:
+            disabled.append(
+                f"{job_type!r} is DISABLED on this host: "
+                + "; ".join(f"{d.capability} — {d.reason}" for d in mine)
+            )
+    written = _write_capability(config, backend, decisions, flags)
     print(f"recorded in {written}")
-    if not enabled:
+    if disabled:
         return _fail(
-            f"the env is installed, but {job_type!r} is DISABLED on this host: "
-            + "; ".join(f"{d.capability} — {d.reason}" for d in mine)
-            + f". [jobs] enable_{job_type} = false is written, with the numbers, "
-            f"so the refusal a client gets will name them."
+            "the env is installed, but "
+            + " / ".join(disabled)
+            + ". The false flag(s) are written, with the numbers, so the refusal "
+            "a client gets will name them."
         )
-    print(f"[jobs] enable_{job_type} = true")
+    for flag in flags:
+        print(f"[jobs] {flag} = true")
     return EXIT_OK
 
 
@@ -1131,9 +1166,12 @@ def _capability_report(
             )
         # `echo` is deliberately not here: it fits every card (it never touches
         # one) and there is no `crucible install echo`, so suggesting one would
-        # be a note whose action does not exist. `INSTALLABLE_JOB_TYPES` is the
-        # owner of "has an installer", so it is the thing asked.
-        if fits and not flagged and name in INSTALLABLE_JOB_TYPES:
+        # be a note whose action does not exist. `INSTALLER_FOR` is the owner of
+        # "which command installs this", so it is the thing asked — and it is
+        # what keeps the note for `denoise` pointing at `crucible install rvc`,
+        # the env it actually shares, rather than at a command that does not
+        # exist.
+        if fits and not flagged and name in INSTALLER_FOR:
             entry["could_enable"].append(name)
     report["capability"] = entry
 
@@ -1182,6 +1220,7 @@ def _doctor_report() -> dict[str, Any]:
             "enable_tts": config.enable_tts,
             "enable_align": config.enable_align,
             "enable_rvc": config.enable_rvc,
+            "enable_denoise": config.enable_denoise,
             "desktop_allowance_bytes": config.desktop_allowance_bytes,
             "backend_kind": config.backend_kind,
             # Which capability flags this config did not carry. A config written
@@ -1334,8 +1373,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             for name in capability_entry["could_enable"]:
                 print(
                     f"note:    this host can hold {name}, and [jobs] enable_{name} "
-                    f"is off — `crucible install {name}` builds its env and turns "
-                    "it on"
+                    f"is off — `crucible install {INSTALLER_FOR[name]}` builds its "
+                    "env and turns it on"
                 )
         for entry in report["job_types"]:
             mark = "ready" if entry["ready"] else ("off" if not entry["enabled"] else "NOT READY")
@@ -1418,6 +1457,12 @@ def build_parser() -> argparse.ArgumentParser:
         "([jobs] enable_rvc)",
     )
     init.add_argument(
+        "--enable-denoise",
+        action="store_true",
+        help="register the denoise (audio-separator stem separation) job type; "
+        "it shares the rvc env ([jobs] enable_denoise)",
+    )
+    init.add_argument(
         "--desktop-allowance-bytes",
         type=int,
         default=None,
@@ -1438,7 +1483,11 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument(
         "job_type",
         choices=sorted(INSTALLABLE_JOB_TYPES),
-        help="the job type to install",
+        help=(
+            "the job type to install. 'rvc' also installs 'denoise', which "
+            "shares its env (audio-separator is torch, and the rvc env already "
+            "holds the torch it wants)"
+        ),
     )
     install.add_argument(
         "--narrator-engine",

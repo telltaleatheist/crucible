@@ -619,13 +619,13 @@ def test_the_capability_route_answers_every_class_and_its_reason(
     assert record["backend_kind"]
     assert record["total_bytes"] > 0
     names = {row["capability"] for row in record["classes"]}
-    # The eight classes. `simplify` and `analysis` are deliberately NOT here:
-    # they select the model `translate` selects, and a capability axis nothing
-    # selects on is a field that will drift (Owen, 2026-09-13).
     # translate / simplify / analysis are SEPARATE, and share a selected model.
     # Owen, 2026-09-13: a job must never be named as a different job.
+    # `denoise` is its own class despite sharing the rvc ENV, because a class is
+    # about what the card can hold and a 913 MB separator and a 2.5 GiB urvc
+    # stack are different arithmetic.
     assert names == {
-        "align", "analysis", "asr", "clean", "echo", "pages", "rvc",
+        "align", "analysis", "asr", "clean", "denoise", "echo", "pages", "rvc",
         "simplify", "translate", "tts",
     }
     picked = {row["capability"]: row["selected"] for row in record["classes"]}

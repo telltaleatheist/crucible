@@ -479,6 +479,123 @@ a model by NAME and a root holding seven is a root where a name can resolve to t
 `--output-ext`, and "one artifact per input, same name" is only true when the output keeps
 the input's extension. A mixed-format job is refused by name rather than half converted.
 
+## 4.2 `denoise` — audio-separator, in the rvc env
+
+The pass BookForge runs over a session's rendered sentences before it assembles them.
+Orpheus voices are trained on a deliberate ~-65 dBFS room-hiss bed — **load-bearing for
+reliable end-of-audio**, so it is not a defect in the training data — and the consequence
+is that every raw render carries a hiss during speech that cuts out at the digitally
+silent assembly gaps. One mel-band roformer pass removes it.
+
+It is a job type and not a mode of `rvc`, and it is **not** an env of its own.
+
+### It shares the `rvc` env, and that is the first time anything does
+
+audio-separator is torch, `envs/rvc/<backend>.txt` already pins the exact torch it wants,
+and BookForge runs both out of one env today (`electron/denoise-bridge.ts` reaches for the
+RVC env's python). A second venv would be a second 3 GB torch on disk to drive the same
+card. So:
+
+- `envs/rvc/cuda-linux.txt` and `envs/rvc/mlx-darwin.txt` pin **`audio-separator==0.31.1`**
+  — the version BookForge's own resident worker was written and verified against, having
+  read that release's `cli.py` to confirm every separation parameter it leaves alone is an
+  argparse default identical to the constructor default. Checked against this recipe's
+  other pins from PyPI metadata on 2026-09-13 and compatible on every one (torch>=2.3 here
+  2.7.0, numpy>=2 here 2.2.5, librosa>=0.10 here 0.10.2,
+  rotary-embedding-torch>=0.6.1,<0.7.0 here 0.6.5). **The pin is compatible, not resolved**
+  — nobody has run pip against these files, which is what their existing "NOT YET A
+  RESOLVED SET" notice already says, and audio-separator additionally pulls `onnx-weekly`
+  and `onnx2torch-py313` unpinned.
+- `crucible install rvc` builds the env and decides **both** capability flags, because it
+  is the door that has just built the thing they share.
+  `workerenv.JOB_TYPES_SERVED_BY_ENV` is the one owner of "denoise lives in the rvc env",
+  and `crucible doctor`'s "you could turn this on" note reads it so the command it
+  suggests is one that exists.
+- `[jobs] enable_denoise` is still its **own** flag. A host may have the env and the RVC
+  models and no separator checkpoint, or the other way round, and one flag for both would
+  advertise a job type whose first request refuses.
+- The capability class is its own too: a 913 MB separator and a 2.5 GiB urvc stack are
+  different arithmetic against the same card.
+
+### The job
+
+```json
+{
+  "type": "denoise",
+  "model": "denoise-roformer",
+  "params": {},
+  "inputs": { "block_00.wav": {"blob_id": "..."} }
+}
+```
+
+**One audio input, at the model's native rate.** Every stem the separator writes comes back
+as an artifact, and `done` names which of them is the primary one.
+
+**`params` is empty, and that is the contract.** Every knob audio-separator takes is an
+engine default BookForge measured and left alone; `use_autocast` is CUDA-only by the
+library's own documentation, so the server reads it off the *backend* rather than off a
+manifest or a request. DESIGN.md section 3.1's rule is that a knob crosses the seam one at
+a time, with a reason, and none has one yet. The params object is still validated with
+`extra="forbid"`: a client asking for something is told no by name rather than answered
+with something else.
+
+**Blocking stays in the client**, the same ruling that put chunking there for `tts`. The
+app concatenates a book's sentences into ~22-minute blocks, denoises each, and slices the
+stems back at recorded offsets. Crucible denoises one thing at a time.
+
+### Three invariants, each one BookForge's and each one measured
+
+- **The input must already be at 44.1 kHz.** The model is 44.1 kHz native and its librosa
+  front-end crashes on other rates. Crucible does **not** resample: a stem returned at a
+  rate the caller did not send is a stem whose sample offsets no longer mean anything, and
+  the client is the one that knows what rate it wants back. The worker refuses before the
+  model loads. (It is the worker's check and not the server's because the server's
+  interpreter deliberately imports no audio library at all.)
+- **Exactly one output names the primary stem** (`(dry)`, declared in the manifest). Zero
+  means the model produced something other than what the manifest says it produces; two
+  means nothing can say which one is the denoised audio. The app asserts the same thing.
+- **The primary stem comes back the same length, sample for sample.** That invariant is
+  what makes the client's offset slicing safe. It is enforced on the primary stem only,
+  because that is the one it was measured on; the other stems' figures are reported and
+  not enforced, rather than enforced on an assumption nobody has tested.
+
+### The checkpoint has a real upstream, and Crucible still does not fetch it
+
+`denoise/denoise-roformer.toml` names both halves of the model's identity, because they
+disagree: audio-separator resolves a model by **filename** inside its `model_file_dir`
+(`denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt` and its `..._config.yaml`, read from
+the library's own `models.json`), while the bytes come from paths that are named
+differently. Neither is derived from the other.
+
+The upstream is **`Politrees/UVR_resources` at `929e057b…`** — verified against the
+HuggingFace API on 2026-09-13, with the checkpoint's LFS oid as its sha256 (913,097,300
+bytes) and the config's digest computed from the bytes the API served. That matters
+because audio-separator's *own* downloader pulls from a GitHub release, which DESIGN.md
+section 5 refuses as a source of weights; the HF mirror is a source it allows.
+
+What does not exist yet is the command that fetches them. `crucible/jobs/denoise` refuses
+by name (`denoise_model_missing`) with the repo, the revision, the two source paths and
+the two target names — strictly more than `rvc`'s base-asset refusal can say, because
+that one has no upstream to name at all.
+
+### Ruling owed
+
+- **Should `crucible denoise pull` exist?** The manifest already carries everything a
+  puller needs, and the same machinery would discharge `rvc`'s base assets (PLAN.md's owed
+  ruling 3). Proceeding on the careful assumption that **the refusal is enough for now**,
+  because the alternative was to invent a second downloader beside `crucible/weights.py`
+  in the same commit as a new job type.
+- **Does audio-separator reach the network even when both files are present?**
+  `list_supported_model_files` fetches `download_checks.json`, and `load_model` fetches
+  `mdx_model_data.json` / `vr_model_data.json`, each skipped only when the file is already
+  in `model_file_dir`. So a job on a host with no route out may fail for a reason that has
+  nothing to do with the model. **Not verified**, because verifying it means installing the
+  env, and the first real `crucible install rvc` is what settles it. If it does, those
+  three files join the two the refusal already names.
+- **`use_autocast` on `mlx-darwin`.** Off, because audio-separator documents it as
+  CUDA-only. Nobody has measured what the Mac does without it; BookForge's own denoise runs
+  on the PC.
+
 ## 5. The accelerator probe — `GET /v1/accelerator`
 
 The single highest-value item in the audit, and the smallest. BookForge has **three

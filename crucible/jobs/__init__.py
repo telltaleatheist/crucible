@@ -28,6 +28,7 @@ from .base import (
 )
 from .align import AlignJobType, UnloadAlignerJobType
 from .asr import AsrJobType
+from .denoise import DenoiseJobType
 from .echo import EchoJobType
 from .llm import LoadModelJobType, UnloadModelJobType, model_rows
 from .rvc import RvcJobType
@@ -39,6 +40,7 @@ ALL_JOB_TYPES: dict[str, str] = {
     AlignJobType.name: "align",
     UnloadAlignerJobType.name: "align",
     AsrJobType.name: "asr",
+    DenoiseJobType.name: "denoise",
     EchoJobType.name: "echo",
     LoadModelJobType.name: "llm",
     UnloadModelJobType.name: "llm",
@@ -90,6 +92,13 @@ def build_registry(
         # Only the owned-pid set, like `asr`: nothing is ever resident for
         # `rvc`, whose whole design is a process that exits every 96 files.
         registry[RvcJobType.name] = RvcJobType(config, backend, holder.owned_pids)
+    if config.enable_denoise:
+        # The same, and for the nearer version of the same reason: one job, one
+        # model load, one exit. `denoise` shares `rvc`'s ENV but not its flag —
+        # a host can have the env and no separator checkpoint.
+        registry[DenoiseJobType.name] = DenoiseJobType(
+            config, backend, holder.owned_pids
+        )
     _assert_every_type_implements_the_protocol(registry)
     return registry
 
@@ -305,6 +314,7 @@ __all__ = [
     "ALL_JOB_TYPES",
     "AlignJobType",
     "AsrJobType",
+    "DenoiseJobType",
     "EchoJobType",
     "Job",
     "JobContext",

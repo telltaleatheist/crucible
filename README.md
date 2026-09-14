@@ -699,6 +699,36 @@ rmvpe predictor) under `~/.crucible/rvc-base/`. They are the engine's rather tha
 model's and Crucible does not fetch them; a job without them is refused by name with the
 paths it wanted.
 
+### `denoise`
+
+Stem separation with audio-separator (PHASE4-AUDIO.md section 4.2). One audio file in,
+every stem out, and `done` names which one is the answer. It is what strips the faint
+room hiss an Orpheus voice reproduces — the voices are trained on a deliberate hiss bed,
+which is load-bearing for reliable end-of-audio.
+
+```bash
+crucible init --enable-denoise      # or add [jobs] enable_denoise = true
+crucible install rvc                # denoise SHARES the rvc env; this builds both
+```
+
+```json
+{"type": "denoise",
+ "model": "denoise-roformer",
+ "params": {},
+ "inputs": {"block_00.wav": {"blob_id": "…"}}}
+```
+
+**No params at all**, and that is the contract: every separation knob is an engine default
+and `use_autocast` is decided by the backend (it is CUDA-only). **The input must already
+be at the model's native 44.1 kHz** — nothing is resampled here, because a stem returned
+at a rate the caller did not send has offsets that no longer mean anything. Blocking stays
+in the client, which is where chunking lives for every type.
+
+Like `rvc`, it will tell you what it needs: the checkpoint and its YAML config in
+`~/.crucible/denoise-models/`, under the two names audio-separator resolves by. The
+refusal names the HuggingFace repo, the revision and the two paths — Crucible does not
+fetch them, because the library's own downloader pulls from a GitHub release.
+
 ## The client
 
 `sdk/ts/` is `@crucible/client`, the TypeScript client for this API: ESM and CommonJS

@@ -1,0 +1,89 @@
+# Mel-Band Roformer Denoise (aufr33) — the model BookForge denoises with today.
+#
+# PHASE4-AUDIO.md section 4.2. This is the checkpoint `electron/denoise-bridge.ts`
+# names in one constant (`DENOISE_MODEL`) and calls "the proven denoise model",
+# and it is what strips the faint room hiss an Orpheus voice reproduces because
+# it was trained on a deliberate ~-65 dBFS hiss bed.
+#
+# WHAT IT IS FOR, in the app's own words: one pass over a session's rendered
+# sentences, post-generation and pre-assembly. The app concatenates ~22-minute
+# blocks, denoises each one, and slices the result back at recorded offsets —
+# and that slicing is only safe because the roformer returns exactly what it was
+# given, sample for sample. Crucible does the middle step; the blocking and the
+# slicing stay in the client, where DESIGN.md section 3.1 puts chunking.
+#
+# THE TWO FILENAMES ARE NOT THE TWO PATHS. audio-separator resolves a model by
+# filename inside its model_file_dir, against its own registry, and expects
+# these exact names. The HuggingFace mirror below holds the same two files under
+# different paths, and its config has a different name again. Both halves are
+# declared; nothing derives one from the other (crucible/denoisemodels.py).
+
+[model]
+id = "denoise-roformer"
+display = "Mel-Band Roformer Denoise (aufr33, SDR 27.9959)"
+# What audio-separator must find in model_file_dir. Read from its own
+# `models.json` at main on 2026-09-13:
+#   "Roformer Model: Mel-Roformer-Denoise-Aufr33": {
+#     "denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt":
+#       "denoise_mel_band_roformer_aufr33_sdr_27.9959_config.yaml" }
+model_filename = "denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt"
+config_filename = "denoise_mel_band_roformer_aufr33_sdr_27.9959_config.yaml"
+# "the signal minus the noise" — the stem the app keeps and the only one it
+# asserts on (`DENOISE_STEM = 'dry'`, and it refuses a run that produced
+# anything other than exactly one of them).
+primary_stem = "dry"
+# The model is 44.1 kHz native: feeding it anything else makes its librosa
+# front-end crash, which is why the app resamples to 44.1 kHz stereo on the way
+# in and back to the session's own rate on the way out. Corroborated by the
+# config's own `chunk_size: 352800`, which is 8.0 s at this rate — the internal
+# chunk the app's "a block shorter than ~8 s crashes the overlap-add" note is
+# about.
+sample_rate = 44100
+
+[backends.cuda-linux]
+engine = "audio-separator"
+# THE UPSTREAM, and it is a real one rather than a placeholder. audio-separator
+# fetches this checkpoint from a GitHub release, which DESIGN.md section 5
+# refuses as a source of weights; `Politrees/UVR_resources` is the same file on
+# HuggingFace, which it allows. Read from the HF API on 2026-09-13: the repo's
+# `main` was 929e057b, the ckpt's LFS oid IS its sha256, and the config is a
+# 1,621-byte plain file whose digest was computed from the bytes the API served.
+hf_repo = "Politrees/UVR_resources"
+revision = "929e057b81aa49bc2e6490bef8671f47b2c120f6"
+model_path = "models/Roformer/MelBand/denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt"
+model_sha256 = "7c1c39191edc34e942ca7f2346ce6b6c0e1208a5f76349ffce6f696bd12910de"
+model_bytes = 913097300
+config_path = "models/Roformer/MelBand/config_melband_roformer_denoise_aufr33_sdr_27.9959.yaml"
+config_sha256 = "5d7d83b2e9d232da60941b717b0abdc345155d45cff3f79715cdb2790ba18c36"
+# COMPUTED, NOT MEASURED:
+#
+#     913_097_300  the checkpoint, exactly, from the HuggingFace API
+#   1_610_612_736  the declared 1.5 GiB every phase 4 manifest carries for the
+#                  CUDA context, cuBLAS/cuDNN workspaces and the activation peak
+#                  of one internal chunk (8.0 s at 44.1 kHz, stereo)
+#   -------------
+#   2_523_710_036
+#
+# Nobody has run audio-separator under Crucible on a card. The app's own figure
+# for the same model on the same 3090 Ti is not recorded anywhere as a number —
+# only as "29.2x realtime with fp16 autocast" — so the first real pass is what
+# replaces this arithmetic with a measurement.
+memory_bytes_estimate = 2523710036
+
+[backends.mlx-darwin]
+# A separator checkpoint is not quantised per platform, and torch has an MPS
+# backend: the same two files, fetched the same way. The one thing that differs
+# is `use_autocast`, which audio-separator documents as CUDA-only, and which the
+# job reads off the backend rather than off this manifest.
+engine = "audio-separator"
+hf_repo = "Politrees/UVR_resources"
+revision = "929e057b81aa49bc2e6490bef8671f47b2c120f6"
+model_path = "models/Roformer/MelBand/denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt"
+model_sha256 = "7c1c39191edc34e942ca7f2346ce6b6c0e1208a5f76349ffce6f696bd12910de"
+model_bytes = 913097300
+config_path = "models/Roformer/MelBand/config_melband_roformer_denoise_aufr33_sdr_27.9959.yaml"
+config_sha256 = "5d7d83b2e9d232da60941b717b0abdc345155d45cff3f79715cdb2790ba18c36"
+# Unified memory rather than VRAM, computed the same way. Without autocast the
+# activations are fp32 here, which is the direction that makes the declared
+# 1.5 GiB allowance conservative rather than optimistic.
+memory_bytes_estimate = 2523710036
