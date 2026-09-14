@@ -229,6 +229,43 @@ is written by the host, section 4.3, with an ACL of the current user only). One 
 the same machine reads it (5.1) and never asks a person to type a token. Rotating the token
 rewrites it.
 
+**Where it is, per platform (pinned 2026-09-14 for Foundry's package J and the host agent):**
+
+| platform | path | written by |
+|---|---|---|
+| linux (incl. inside the WSL guest), darwin | `<CRUCIBLE_HOME>/pairing` = `~/.crucible/pairing` | `crucible init` / `service install` / token rotation |
+| Windows | `%LOCALAPPDATA%\Crucible\pairing` (beside `host\`, 4.4) | the host (4.1/4.3): the host-mode server's line while that runs, then the GUEST's line after the migrate step — same token, host, port |
+
+`CRUCIBLE_HOME` set in the environment overrides the directory on every platform (on Windows
+the file is then `%CRUCIBLE_HOME%\pairing`). The Windows file is the host's COPY of the
+guest's line, because the guest's own home is inside the distro where no Windows app looks.
+An absent file means "no local server" — a fact the app shows, not a fallback it fills. Until
+a host exists on a machine (Owen's PC today), an app's "read `config.toml` through `wsl.exe`"
+door is how the WSL server gets registered, and that door is deleted when the host lands.
+
+**Where a READER looks, pinned** (added 2026-09-14 by the BookForge build of 5.1, which had to
+open the file before the host existed to write it — the preamble's rule: a name this file did
+not have is added here first). Two locations, in this order, and neither is a fallback for the
+other — the first is an override the operator set and the second is the only default there is:
+
+1. `$CRUCIBLE_HOME/pairing`, when `CRUCIBLE_HOME` is set and non-empty. Same env var
+   `config.py crucible_home()` already honours, so a second server on a second home is found
+   by the app the same way the CLI finds it.
+2. Otherwise, per platform:
+   - **win32:** `%LOCALAPPDATA%\Crucible\pairing`. NOT `~/.crucible`: on Windows the server is
+     the WSL guest's or the host-mode child's, and in both cases the thing that writes a
+     WINDOWS-side pairing file is `crucible host` (4.3), whose own per-machine root is already
+     `%LOCALAPPDATA%\Crucible\` — `wsl\`, `downloads\` (`sdk/bootstrap/src/distro.ts`) and
+     `host\` (4.4) are all under it, so the pairing file is its fourth member and the host runs
+     with `CRUCIBLE_HOME` set to that directory. `LOCALAPPDATA` is read from the environment and
+     never assembled from a username, exactly as `distro.ts` does it; unset is refused by name,
+     not guessed.
+   - **linux/darwin:** `~/.crucible/pairing`, which is `crucible_home()`'s default.
+
+A reader that finds no file answers `null` — "no engine on this machine" is a FACT, and the
+caller's next line is "install one" or "paste a connect code" (5.1). It is never an error and
+never a retry.
+
 ### 3.7 The page gains a Settings panel
 
 `crucible/ui/` gains **Settings**, between Job types and Connect an app: one row per llm
