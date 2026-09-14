@@ -184,13 +184,13 @@ server that runs one task at a time). Only when something IS missing is the modu
 ("Preparing the narration engine… downloading deathstalker 8.5 GB…"). A person never sees
 the word module.
 
-**Consent, on a server that is not theirs.** Automatic, with nothing to press, on the LOCAL
-server and on a server added in this session — presence of the app is the request. On any
-OTHER registered remote (a friend's box, a shared machine), when the catalog says something
-is missing the app says WHAT and HOW BIG ("Owen's Mac is missing the page reader — 3.1 GB
-to download onto it") and the person presses once. That is not a permanent button; it is
-the one moment somebody else's disk and bandwidth are about to be spent. (Default ruling
-2026-09-14 on Foundry's proposal; Owen may make it unconditional.)
+**No consent step — Owen, 2026-09-14: *"lets make it as simple as possible."*** Coordination is
+automatic on EVERY server the app is connected to, local or remote, with nothing to press:
+the person sees the progress sentence, never a question. Stated once so it is a choice and
+not an accident: opening an app on a laptop connected to the Mac downloads onto the Mac
+whatever that app needs that is not there yet. (Foundry's proposal of a one-press consent
+on a remote registered in an earlier session was heard and overruled for simplicity;
+disabling a server in Settings is the way to say "not that one".)
 
 A module task refused `server_busy` (a lease, a job) is retried when the card settles, with
 the holder named in the meantime. Foundry does the same with its own module. Two apps on
