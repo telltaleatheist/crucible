@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { guestPathFor, guestUnpackArgv, networkPathBehind, parseWslList, shellQuote, toWslPath, wslArgv, wslListArgv } from '../src/index.js';
+import { guestPathFor, networkPathBehind, parseWslList, shellQuote, toWslPath, wslArgv, wslListArgv } from '../src/index.js';
 import { FakeRunner, refusal } from './fake.js';
 
 test('wslArgv: always -d <distro> --exec, never the implicit shell, and never `--`', () => {
@@ -77,10 +77,3 @@ test('shellQuote: single quotes, with the one character they cannot hold spliced
   assert.equal(shellQuote("it's"), "'it'\\''s'");
 });
 
-test('guestUnpackArgv: the distro\'s own tar reads the archive through /mnt, never \\\\wsl$', () => {
-  const runner = new FakeRunner({ files: { 'C:\\dl\\env.tar.gz': '' } }, []);
-  assert.deepEqual(guestUnpackArgv(runner, 'Ubuntu', 'C:\\dl\\env.tar.gz', '/home/owen/.crucible/envs/llm'), [
-    'wsl.exe', '-d', 'Ubuntu', '--exec', 'bash', '-c',
-    "mkdir -p '/home/owen/.crucible/envs/llm' && exec tar -xzf '/mnt/c/dl/env.tar.gz' -C '/home/owen/.crucible/envs/llm'",
-  ]);
-});

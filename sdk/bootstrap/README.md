@@ -19,8 +19,8 @@ Node 20+, and the Electron main process. ESM and CommonJS builds ship side by si
 From the GitHub Release, beside the client (there is no npm registry publish):
 
 ```bash
-npm install https://github.com/telltaleatheist/crucible/releases/download/v0.5.0/crucible-client-0.5.0.tgz
-npm install https://github.com/telltaleatheist/crucible/releases/download/v0.5.0/crucible-bootstrap-0.5.0.tgz
+npm install https://github.com/telltaleatheist/crucible/releases/download/v0.6.0/crucible-client-0.6.0.tgz
+npm install https://github.com/telltaleatheist/crucible/releases/download/v0.6.0/crucible-bootstrap-0.6.0.tgz
 ```
 
 Pin both URLs in `package.json`. Only the *app* half of an Electron product consumes this.
@@ -30,20 +30,31 @@ endpoint and never learns what a Crucible is.
 ## Where the server lives
 
 Windows is never a backend. On win32 every verb reaches into a WSL2 distro through
-`wsl.exe -d <distro> --exec …`, and the distro is **required** — there is no default
-distro, because "the default" is whatever `wsl --set-default` last said and a server read
-from the wrong guest is the wrong server. `detectHost()` lists the distros so the app can
-choose. On macOS and Linux the verbs run on the machine itself. Anything else is refused.
+`wsl.exe -d <distro> --exec …`, and **which distro has one rule** (`docs/PHASE14-ENVPACKS.md`
+4b): the distro Crucible owns — `crucible`, imported by `ensureDistro()` — when there is
+one, else the distro the app names, else `no_wsl_distro`. There is still no "the default
+distro": that is whatever `wsl --set-default` last said, and a server read from the wrong
+guest is the wrong server. A machine with a `crucible` distro AND a config in the app's
+distro is `two_local_crucibles`, refused rather than guessed; `{exact: true}` is the way
+out. `detectHost()` lists the distros so the app can choose. On macOS and Linux the verbs
+run on the machine itself. Anything else is refused.
+
+**There is no conda and no Python prerequisite.** The server arrives as a *pack* — a
+relocatable CPython with the crucible wheel already installed — downloaded from the
+release into `<CRUCIBLE_HOME>/server`, and every verb runs
+`<CRUCIBLE_HOME>/server/bin/crucible`.
 
 ## The surface
 
 | Verb | Does | Refuses by name |
 |---|---|---|
-| `detectHost({distro?, condaRoots?})` | what this host (or its guest) has: `{platform, wsl, gpu, python, conda, refusals}` | `wsl_missing` (with `wsl --install -d Ubuntu` and the reboot note), `no_wsl_distro`, `wsl_read_failed`, `unsupported_platform`; and, as entries in `refusals` beside each null: `no_nvidia_driver`, `not_apple_silicon`, `no_conda`, `no_python` |
-| `install({distro?, jobTypes, home?, wheel, onLine, onStep?, bind?})` | interpreter → `pip install <wheel>` → `crucible init --token …` → `crucible install <type>`… → `crucible service install` → (win32) `loginctl enable-linger` as root → `crucible capability --write` | every `detectHost` refusal, `bad_job_type`, `wheel_missing`, `network_path`, `config_unreadable`, `config_missing_key`, and `step_failed` (a `BootstrapStepFailed` with the step, exit code, tail and the steps that finished) |
-| `ensureRunning({distro?, home?})` | `{running: true, pid, mechanism, definition, linger, enableLinger, lingerStep, started}` — a no-op when it already is, except that linger is asked (and on win32 granted) either way | `service_not_installed`, `service_failed` (with the status output and where the logs are), `no_local_config`, `linger_unreadable`, `linger_failed`, and the interpreter refusals |
-| `readLocalConfig({distro?, home?})` | `{name, url, token, configPath, via}` from the server's own `config.toml` | `no_local_config`, `no_wsl_distro`, `wsl_read_failed`, `config_unreadable`, `config_missing_key` |
-| `health({distro?, home?, clientName?})` | the SDK's `Activity` from `GET /v1/activity` | `unreachable`, `wrong_token`, `not_a_crucible`, `version_mismatch`, plus everything `readLocalConfig` refuses |
+| `detectHost({distro?, home?, release?})` | what this host (or its guest) has: `{platform, backend, wsl, wslState, gpu, guest, server, refusals}` | `wsl_missing` (with `wsl --install --no-distribution`), `no_wsl_distro`, `wsl_read_failed`, `unsupported_platform`; and, as entries in `refusals` beside each null: `no_nvidia_driver`, `not_apple_silicon`, `guest_missing_tool` |
+| `install({distro?, exact?, jobTypes, home?, release?, onLine, onStep?, bind?})` | host-facts → server-pack → `crucible init --token …` → `crucible install <type>`… → `crucible service install` → (win32) `loginctl enable-linger` as root → `crucible capability --write` | every `detectHost` refusal, `bad_job_type`, `two_local_crucibles`, the pack refusals (`pack_manifest_unreadable`, `pack_not_published`, `pack_download_failed`, `pack_sha_mismatch`, `pack_disk`, `pack_unpack_failed`), `config_unreadable`, `config_missing_key`, and `step_failed` (a `BootstrapStepFailed` with the step, exit code, tail and the steps that finished) |
+| `ensureDistro({release, installDir?, downloadDir?, rootfsUrl?, onLine?})` | win32: the `crucible` distro exists, runs systemd and came from our rootfs — idempotent | `distro_unmarked`, `distro_import_failed`, `pack_download_failed`, `pack_sha_mismatch`, `wsl1_only`, `unsupported_platform` |
+| `detectWslState({release, appDistro?, requiredBytes?, checkNetwork?, guestUser?})` | win32: the first row of PHASE14 4c that matches, with the sentence and the action | nothing — every state IS an answer, `wsl_ready` included |
+| `ensureRunning({distro?, exact?, home?})` | `{running: true, pid, mechanism, definition, linger, enableLinger, lingerStep, started}` — a no-op when it already is, except that linger is asked (and on win32 granted) either way | `no_server_pack`, `service_not_installed`, `service_failed` (with the status output and where the logs are), `no_local_config`, `linger_unreadable`, `linger_failed` |
+| `readLocalConfig({distro?, exact?, home?})` | `{name, url, token, configPath, via}` from the server's own `config.toml` | `no_local_config`, `no_wsl_distro`, `two_local_crucibles`, `wsl_read_failed`, `config_unreadable`, `config_missing_key` |
+| `health({distro?, exact?, home?, clientName?})` | the SDK's `Activity` from `GET /v1/activity` | `unreachable`, `wrong_token`, `not_a_crucible`, `version_mismatch`, plus everything `readLocalConfig` refuses |
 
 Every verb is idempotent. Every function takes an optional second argument, a `Runner`,
 which is the one door to the machine (`spawn`, `fs`); the tests script it and assert on the
@@ -58,7 +69,7 @@ try {
   if (err instanceof BootstrapRefusal) {
     err.code;     // 'service_not_installed'
     err.message;  // the sentence
-    err.command;  // '/home/owen/anaconda3/envs/crucible/bin/crucible service install' — or null
+    err.command;  // '/home/owen/.crucible/server/bin/crucible service install' — or null
     err.detail;   // verbatim evidence (a status page, a stderr tail) — or null
   }
 }
@@ -74,20 +85,18 @@ attempts them, never falls back past them, and never guesses a value it could no
 await install({
   distro: 'Ubuntu',
   jobTypes: ['llm', { type: 'tts', narratorEngine: 'higgs-v3' }, 'asr', 'rvc', 'denoise'],
-  wheel: 'C:\\Users\\owen\\Downloads\\crucible-0.5.0-py3-none-any.whl',   // or the release URL
   onLine: (line, stream, step) => log.append(`[${step}] ${line}`),
   onStep: (step) => ui.setStep(step.name, step.status),
 });
 ```
 
-- **The interpreter is found, never made.** `<conda>/envs/crucible/bin/python`, a 3.11,
-  with conda found by `test -x` at `~/anaconda3 | ~/miniconda3 | ~/miniforge3` in that
-  order (never `which`, so the conda whose `envs/` the interpreter lands in is the one
-  used). Absent, the refusal names the miniforge install and the `conda create` line.
-  `condaRoots` overrides the list for a host whose conda lives elsewhere.
-- **The wheel is the host's.** A release path or URL, passed as given; a Windows path is
-  mapped to `/mnt/<drive>/…` after the filesystem confirms it is not a mapped network
-  drive, which WSL2 does not mount.
+- **The interpreter arrives with the server.** `release` names a Crucible version and
+  defaults to this package's own — the bootstrapper ships AT the server's version, so
+  "which release" is not a question anybody has to answer. The server pack is fetched
+  INSIDE the guest with the guest's `curl`, never through `/mnt/c`; parts are appended and
+  deleted one at a time (peak extra disk is one part), the sha256 is computed in the guest
+  and compared here, and the unpack is renamed into place only after the tree runs its own
+  `--version`. A stamp that already matches the manifest is a skip.
 - **The token is minted here** and handed to `crucible init --token`, so the app already
   holds what `readLocalConfig()` would read back. It is never logged: the step's recorded
   argv spells it `<redacted>`, and `onLine` only sees what the step printed. `init` is
@@ -132,17 +141,38 @@ From Foundry's deleted launcher (`docs/FROM-FOUNDRY-WSL-VLLM.md` section 2), car
 verbatim:
 
 - always `wsl.exe -d <distro> --exec …`, never the implicit shell (it pre-expands `$var`);
-- wsl.exe's own output is UTF-16LE with a BOM, the guest's is UTF-8, on the same handles —
-  decided per chunk by looking for NULs (`decodeWslBytes`);
+- wsl.exe's own output is UTF-16LE with a BOM, the guest's is UTF-8, on the same handles,
+  and BOTH CAN ARRIVE IN ONE CHUNK — so the decode is per run of bytes, not per chunk
+  (`segmentWslBytes`), and a chunk that ends mid-character waits for the next one
+  (`incompleteTailBytes`);
 - every one-shot call has its own timeout, and a timeout is a reported failure;
 - argument arrays, never shell strings; backslashes doubled once, because wsl.exe halves
   them once before bash exists (`wslArgv`);
 - `toWslPath` maps `C:\a\b` → `/mnt/c/a/b`, refuses UNC, and `realpath.native` catches
   mapped drives (`guestPathFor`);
-- conda by `test -x` in order, never `which`;
-- prebuilt environment archives are unpacked by the distro's own tar through `/mnt`, never
-  through `\\wsl$` (`guestUnpackArgv`);
+- a prebuilt environment never crosses `/mnt/c` at all: the guest downloads it with its
+  own `curl` and unpacks it with its own `tar --zstd` (`pack.ts`), which is faster than
+  the 9P mount and keeps the permission bits a Python tree needs;
 - pip's `\r`-repainted progress is split into lines (`splitLines`).
+
+## The standalone installer
+
+The same sequence, without an app (`docs/PHASE14-ENVPACKS.md` 4a):
+
+```bash
+curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh | sh
+```
+
+`scripts/install.sh` and `scripts/install.ps1` are **generated** from `src/steps.ts` — the
+same list `install()` walks — by `scripts/gen-install-scripts.ts`, and a test asserts that
+the files on disk are what the generator writes. An app-driven install and a hand install
+cannot describe different installs. `npm run gen:install` regenerates them. They carry no
+job types and no weights: a bare Crucible that serves nothing until an app asks.
+
+On Windows `install.ps1` walks every WSL state in `src/wsl-states.ts`, imports the distro
+Crucible owns, and then runs the same `install.sh` inside it.
+`scripts/build-rootfs.sh` builds the image it imports; that runs in CI on Linux and cannot
+run on Windows.
 
 ## Tests
 

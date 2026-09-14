@@ -36,7 +36,10 @@ test('a well-formed manifest parses, and the pack for a backend is found by name
   const server = findPack(manifest, 'server', 'cuda-linux');
   assert.equal(server.sha256, PACK_SHA);
   assert.equal(server.parts.length, 2);
-  assert.equal(server.recipeSha256, null, 'the server pack is built from a wheel, not a recipe');
+  assert.equal(server.recipeSha256, 'e'.repeat(64), 'the server pack hashes pyproject.toml, which owns its dependencies');
+  // A manifest that omits it still parses: the field is the SERVER's to refuse
+  // drift on (`pack_recipe_drift`), and nothing here compares recipes.
+  assert.equal(parseEnvpacks(ENVPACKS_JSON.replace(/"recipe_sha256":"[a-f]+",/g, ''), URL, '0.6.0').packs[0]?.recipeSha256, null);
   assert.equal(findPack(manifest, 'llm', 'cuda-linux').recipeSha256, 'd'.repeat(64));
   assert.equal(findPack(manifest, 'server', 'mlx-darwin').parts.length, 1);
 });

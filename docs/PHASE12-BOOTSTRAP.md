@@ -1,5 +1,13 @@
 # Phase 12: `@crucible/bootstrap`
 
+> **AMENDED 2026-09-14 by PHASE14-ENVPACKS.md section 4.** The conda half of this document
+> is HISTORY: `DEFAULT_CONDA_ROOTS`, `SERVER_ENV_NAME`, `probeInterpreter`, `no_conda`,
+> `no_python` and `InstallOptions.wheel` are deleted, and the sequence is the one in
+> section 1a below. What stays exactly as written: the five verbs, the injectable `Runner`,
+> the named refusals, the WSL transport facts in section 2, the token discipline, and
+> section 6's linger ruling. PHASE14 7b is what was built; this file is why the package is
+> shaped the way it is.
+
 The app-side half of PHASE5-APPS.md section 6.0's ruling — **a local Crucible is a
 SERVICE, and the bootstrapper ships WITH Crucible** — built 2026-09-14 as `sdk/bootstrap/`,
 a sibling of `sdk/ts/`, released as the fourth asset of every release at the server's
@@ -18,6 +26,34 @@ is ever spawned as a child that should be a service: `ensureRunning()` is `cruci
 start`, which is `systemctl --user start` / `launchctl kickstart`. The token is never
 logged or printed. `sdk/bootstrap/README.md` is the surface; this file is the reasoning.
 
+## 1a. The sequence, as of PHASE14
+
+```
+host-facts       one guest script: CRUCIBLE_HOME, the user, free disk, curl/tar/zstd, and
+                 the server pack already there with its stamp
+server-pack      the release's crucible-env-server-<backend>-<release>.tar.zst, fetched by
+                 the GUEST's curl into the guest's filesystem, sha256'd in the guest,
+                 unpacked to <dest>.partial and renamed. A matching stamp is a skip.
+init             <CRUCIBLE_HOME>/server/bin/crucible init --token … (skipped when a config exists)
+install-<type>   <…>/bin/crucible install <type> — now a download, not minutes of pip
+service-install  <…>/bin/crucible service install
+linger           win32, as root (section 6's ruling, unchanged)
+capability-write <…>/bin/crucible capability --write
+```
+
+Three things this moved that are worth stating in this file, because they change what the
+package IS rather than what it runs:
+
+- **There is no interpreter to find.** The pack carries one. "The server interpreter is
+  found, never made" (section 3) has become "the server interpreter arrives with the
+  server", and the whole `no_conda` / `no_python` hand-over — which fired on every fresh
+  machine, which is to say on every machine this package exists for — is gone with it.
+- **The step list is DATA** (`src/steps.ts`), because `install.sh` and `install.ps1` are
+  generated from it. `install()` walks the list; the generator reads the same list.
+- **Which WSL distro is `local` has one rule** (`src/distro.ts`), because there is now a
+  distro Crucible owns. See PHASE14 4b; `readLocalConfig`, `ensureRunning` and `install`
+  all go through `resolveDistro()`.
+
 ## 2. Where each of Foundry's facts landed
 
 FROM-FOUNDRY-WSL-VLLM.md section 2 listed the Windows-side facts that belonged to the
@@ -30,8 +66,8 @@ unbuilt bootstrapper. Each now has a home and a test:
 | every one-shot call has a timeout | `RunOptions.timeoutMs` is required; the fake runner refuses a call without one; a timeout is `failure`, never a hang | `unit-runner` (a child that never exits) |
 | argument arrays, never shell strings; backslash-halving | `spawn(argv[0], argv.slice(1))` only; `wslArgv` doubles `\` once | `unit-wsl` |
 | `toWslPath` refuses UNC; `realpath.native` catches mapped drives | `toWslPath` (pure) + `networkPathBehind` + `guestPathFor`; `install()` runs the wheel through it | `unit-wsl`, `unit-install` |
-| conda by `test -x` at `~/anaconda3 \| ~/miniconda3 \| ~/miniforge3`, in order, never `which` | `host.ts` `interpreterScript` — one bash script, exit 0 always, `key=value` lines out | `unit-host` asserts the script text |
-| prebuilt env tarballs unpacked by the distro's own tar, never through `\\wsl$` | `wsl.ts` `guestUnpackArgv` — the one spelling; **not yet driven by `install()`**, see section 6 | `unit-wsl` |
+| ~~conda by `test -x` at the three roots~~ → **the guest is asked ONE script for what it has** | `pack.ts` `guestProbeScript` — exit 0 always, `key=value` lines out. Same shape, no conda | `unit-host`, `unit-pack` assert the script text |
+| prebuilt env tarballs unpacked by the distro's own tar, never through `\\wsl$` | `pack.ts` `installPack` — and the archive never crosses `/mnt/c` at all now: the GUEST downloads it | `unit-pack`, `unit-install` |
 | pip's `\r`-repainted bar split into lines | `runner.ts` `splitLines` | `unit-runner` |
 
 BookForge's `electron/crucible/local.ts` (the config.toml read rule and the bind→connect
@@ -42,18 +78,20 @@ derived copy and the two say the same thing (ARCHITECTURE.md R1).
 
 ## 3. Decisions taken while building, each with its reason
 
-**The server interpreter is found, never made.** `<conda>/envs/crucible/bin/python`, a
-3.11. `crucible install <type>` builds every job type's venv from it, so this package's
-whole interpreter job is to locate that one thing and refuse by name when it is not there:
-`no_conda` (with the miniforge one-liner for the platform) or `no_python` (with the exact
-`conda create -n crucible python=3.11 -y`, or the remove-and-recreate pair when the env
-exists at the wrong version). The spec said refuse; creating a conda env unasked is a
-change to somebody's machine of the kind this package does not make.
+**~~The server interpreter is found, never made.~~ SUPERSEDED 2026-09-14 (PHASE14 0).** It
+was `<conda>/envs/crucible/bin/python`, a 3.11, refused by name as `no_conda` or
+`no_python` when absent — and absent is what it is on every machine that does not already
+have a Crucible, which is every machine this verb is for. The reasoning was sound and the
+premise was wrong: the right move was not a better refusal but removing the prerequisite.
+The server pack carries its own CPython, and `pack.ts`'s `requirePack()` is all that is
+left: either `<CRUCIBLE_HOME>/server/bin/crucible` is there or `install()` downloads it.
 
 **On win32 the distro is required for every verb except `detectHost`.** `local.ts`'s rule,
 kept: there is no default distro on purpose. `detectHost()` is the exception because it is
 how the app learns which distros exist; it reads the guest's facts through the one wsl.exe
-marks default when none is named, and **records which** in `wsl.probed`.
+marks default when none is named, and **records which** in `wsl.probed`. *(PHASE14 4b adds
+one layer above this: when a `crucible` distro exists it wins, and a machine with both it
+and a config in the app's distro is `two_local_crucibles`. The rule below it is unchanged.)*
 
 **`detectHost()` returns nulls AND the refusals for them.** The ruled shape was `{platform,
 wsl, gpu, python}` with nulls; the ruled behaviour was refusals by name. Both, then: every
@@ -133,19 +171,21 @@ list per call, and that is what an app on that Mac must pass until section 6's r
 
 ## 6. Rulings owed
 
-1. **The Mac's conda root.** Either `/opt/homebrew/Caskroom/miniconda/base` joins the
-   darwin root list (a fourth root, ordered after the three), or the `crucible` env moves
-   under `~/miniforge3`. Until ruled, apps on that Mac pass `condaRoots`. Related: should
-   the interpreter be read from the installed service definition when one exists (the
-   plist / unit already names the console script), rather than searched for? That would
-   make the definition the one owner of "which interpreter" on an installed host.
-2. **Should `install()` create the `crucible` conda env when conda is present and the env
-   is not?** Built as a refusal with the exact command. It is one idempotent, GPU-free
-   command; the argument against is that it is a change to the machine the app did not
-   ask for by name.
-3. **Prebuilt environments.** `guestUnpackArgv` is the spelling; nothing calls it. The
-   friend's install path (env archives as release assets, sha256 per part, stamp file,
-   replace-only-your-own) needs a catalog and a downloader before it is a verb here.
+1. ~~**The Mac's conda root.**~~ **MOOT, 2026-09-14 (PHASE14 0).** There are no conda roots
+   to rank. The Mac's `crucible` env at `/opt/homebrew/Caskroom/miniconda/base/envs/crucible`
+   is the OLD server's and stays whatever it is; a Crucible installed from now on lives at
+   `~/.crucible/server` on that Mac like everywhere else. The interesting half of the
+   question — should "which interpreter" be read from the installed service definition? —
+   is answered differently and better: the definition is written FROM the pack, so the pack
+   path is the one owner and nothing has to read the plist back.
+2. ~~**Should `install()` create the `crucible` conda env?**~~ **MOOT.** It creates nothing
+   on somebody's machine except `<CRUCIBLE_HOME>`, which is the directory the thing being
+   installed lives in.
+3. ~~**Prebuilt environments.**~~ **BUILT, 2026-09-14 — this is PHASE14.** "Env archives as
+   release assets, sha256 per part, stamp file" needed "a catalog and a downloader"; the
+   catalog is `envpacks.json` and the downloader is `pack.ts`. `guestUnpackArgv` is gone
+   with the rest of the `/mnt/c` route: the archive never reaches a Windows path at all,
+   because the guest fetches it.
 4. ~~**`linger` off after `install()`.**~~ **RULED, 2026-09-14, by measurement.** The
    ruling had been framed as "whether the app shows the sudo line once, every launch, or
    offers to run it with elevation", which assumed there was elevation to obtain. On

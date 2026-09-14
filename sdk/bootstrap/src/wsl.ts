@@ -25,10 +25,14 @@
  *   the filesystem can tell `Z:` (a share wearing a letter) from `C:`
  *   (memory `wsl-cannot-see-network-drives`). {@link guestPathFor} asks it.
  *
- * - **Prebuilt environments are unpacked by the DISTRO's own tar, never through
- *   `\\wsl$`**, whose 9P redirector flattens the symlink thicket a Python
- *   install is. The archive is downloaded on the Windows side, handed across
- *   as `/mnt/c/…`, and {@link guestUnpackArgv} is the one spelling of that.
+ * - **A prebuilt environment never crosses `/mnt/c` at all.** It used to be
+ *   downloaded on the Windows side and handed to the distro's own tar as
+ *   `/mnt/c/…` — never through `\\wsl$`, whose 9P redirector flattens the
+ *   symlink thicket a Python install is. As of PHASE14 the GUEST fetches it
+ *   with its own `curl` into its own filesystem, which is faster still, keeps
+ *   the permission bits, and puts the gigabytes on the disk they live on.
+ *   `pack.ts` owns that, and `guestUnpackArgv` is deleted rather than kept as
+ *   a second way in.
  */
 import { BootstrapRefusal } from './errors.js';
 import type { Runner } from './runner.js';
@@ -170,15 +174,4 @@ export function guestPathFor(runner: Runner, windowsPath: string): string {
  */
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-/**
- * Unpack a prebuilt environment archive INSIDE the distro, with its own tar.
- * The archive sits on a local Windows drive (already downloaded and sha256-
- * verified by the host — a null digest is a refusal there, not here) and is
- * read through `/mnt/<drive>`. `guestDest` is a guest path and is created.
- */
-export function guestUnpackArgv(runner: Runner, distro: string, windowsArchive: string, guestDest: string): string[] {
-  const archive = guestPathFor(runner, windowsArchive);
-  return wslArgv(distro, ['bash', '-c', `mkdir -p ${shellQuote(guestDest)} && exec tar -xzf ${shellQuote(archive)} -C ${shellQuote(guestDest)}`]);
 }

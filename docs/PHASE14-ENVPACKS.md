@@ -119,10 +119,40 @@ final job merges the fragments into `envpacks.json` and uploads that LAST — so
 whose manifest exists has every pack it names. A job that fails leaves the manifest without
 that pack, which `install` refuses by name (`pack_not_published`) — never a half pack.
 
-Runner disk is finite (~14 GB free on ubuntu-latest): one pack per job, prune the
-python-build-standalone download after unpack, delete the unpacked tree after tarring. If a
-pack cannot fit a hosted runner, the job says so and that pack is built on Owen's machines by
-`crucible envpack build` and uploaded by hand — recorded here, not discovered at release time.
+Runner disk is finite: one pack per job, prune the python-build-standalone download after
+unpack, delete the unpacked tree after tarring. If a pack cannot fit a hosted runner, the job
+says so and that pack is built on Owen's machines by `crucible envpack build` and uploaded by
+hand — recorded here, not discovered at release time.
+
+**BUILT, and what the disk actually costs.** `.github/workflows/envpacks.yml` runs on `v*`
+with a 10-row matrix (6 `cuda-linux` on `ubuntu-latest`, 4 `mlx-darwin` on `macos-14`), one
+pack per job, `fail-fast: false`, and a final `manifest` job with `if: always()` that merges
+the fragments and uploads `envpacks.json` LAST. The high-water mark of a build is **the
+unpacked tree plus its archive at the same instant** — the order in `envpack.build_pack` is
+chosen for exactly that: the build tree is deleted before the smoke test unpacks its own
+copy, and `split_archive` deletes the archive as it writes the parts.
+
+`ubuntu-latest` starts with ~21 GB free on `/` and the workflow's `free-disk` step reclaims
+about 25 GB more (Android SDK, .NET, GHC, boost, CodeQL — none of which this build reads).
+Each job checks `df` against a declared `needs_gb` BEFORE it downloads anything and fails
+with `::error title=pack_disk::` naming both numbers and the sentence *"build it on Owen's
+machine with `crucible envpack build <name>`"*. Only two of those figures are measured:
+
+| pack | needs_gb | basis |
+|---|---|---|
+| `server` | 2 | measured (see §7) |
+| `asr` | 6 | **measured**: 2.86 GB unpacked + 1.29 GB archive (§7) |
+| `align` | 20 | estimated from the recipe (one torch + transformers + librosa) |
+| `rvc` | 24 | estimated (torch cu128 + audio-separator + onnxruntime) |
+| `llm` | 30 | estimated (torch + vLLM) |
+| `tts-higgs-v3` | 30 | estimated (torch + vLLM + vllm-omni + narrator) |
+
+The four estimates have **not** been built on a runner, and are written as estimates so that
+the first red job is read as "the number was wrong" rather than as "CI is broken". On the
+measured evidence the torch packs are the ones at risk: BookForge's own WSL Higgs env is
+~14 GB unpacked, which with its archive would want ~19 GB — inside the ~46 GB a reclaimed
+`ubuntu-latest` has, but not inside the 21 GB it starts with. That is why the reclaim step
+is not optional and why the pre-flight names the pack.
 
 ## 4. Bootstrap: install a server without conda
 
@@ -139,9 +169,20 @@ linger           win32, as root, as built in 0.6.0
 capability-write
 ```
 
-`readLocalConfig()` unchanged. `ensureRunning()` unchanged. The wheel option and the conda
-options are deleted from `InstallOptions`; `release` (a version) replaces them. The bootstrap
-package's version already equals the server's, so "which release" is never a question.
+The wheel option and the conda options are deleted from `InstallOptions`; `release` (a
+version) replaces them. The bootstrap package's version already equals the server's, so
+"which release" is never a question.
+
+`readLocalConfig()` gains one rule and no new behaviour otherwise: **which distro** (4b).
+`ensureRunning()` learns the pack path and the distro name — the interpreter is no longer
+something to find, so a host with no `<CRUCIBLE_HOME>/server/bin/crucible` is
+`no_server_pack` rather than a hunt through conda roots.
+
+**The pack archive's members are the pack's CONTENTS at top level** — `bin/`, `lib/`, … with
+no wrapper directory — so the unpack fills whatever directory it is pointed at and the name
+on disk is the installer's decision. `crucible/envpack.py`'s `create_archive` tars `.` from
+inside the tree for exactly that reason, and bootstrap unpacks with the same
+`tar --zstd -xf <archive> -C <dir>`.
 
 Windows→WSL: the download runs INSIDE the guest (`wsl.exe --exec <server>/bin/crucible …` after
 the server pack exists; the server pack itself is fetched by the guest's `curl` — which every
@@ -231,6 +272,35 @@ The distro's name is `crucible`, its files live under `%LOCALAPPDATA%\Crucible\w
 `crucible service uninstall --distro` removes it entirely — a person can delete the whole
 thing with one command and their own WSL is exactly as it was.
 
+**WHICH DISTRO IS `local` — the rule, written once, in `sdk/bootstrap/src/distro.ts`'s
+`resolveDistro()`, and used by `readLocalConfig`, `ensureRunning` and `install`:**
+
+1. `{exact: true}` with a name: that one, no questions. This exists so a person who
+   deliberately runs two can say which, and so a caller that has already resolved does not
+   resolve twice.
+2. A `crucible` distro exists: **that one.** It is ours, and an app that imported it is not
+   then supposed to read a server out of somebody else's guest.
+3. Otherwise the app's own WSL distro setting.
+4. Otherwise `no_wsl_distro`. There is still no "the default distro" here, for `target.ts`'s
+   reason: a server read from the wrong guest is the wrong server.
+
+Between 2 and 3 sits the one refusal: a `crucible` distro AND a config inside the app's
+distro is **`two_local_crucibles`**, naming both ways out, because picking silently would
+move an app from the server it has been using to an empty one. (`detectHost` is the one
+exception to step 4: it is how an app LEARNS what is on the machine, so it falls back to the
+distro wsl.exe marks default and records which one it asked in `wsl.probed`.)
+
+**The rootfs's digest is a sibling asset**, `crucible-rootfs-<version>.tar.zst.sha256`, one
+line, the digest first. `install.ps1` checks it with `Get-FileHash` and bootstrap with
+`certutil -hashfile` — two mechanisms because one is a cmdlet and the other must be a program
+the injectable runner can spawn; one fact, checked before `wsl --import` is allowed to read
+the file. `scripts/build-rootfs.sh` writes both assets and is what CI runs.
+
+**A `crucible` distro with no marker is not always ours.** Unregistering destroys a
+filesystem, so: no marker and nothing installed is a partial import — unregistered and
+redone; no marker and a config inside it is **`distro_unmarked`**, refused, because that
+would delete a server somebody is using.
+
 ## 4c. Every WSL state, detected and answered by name (the idiot-proof table)
 
 | state | detected by | answer |
@@ -249,8 +319,301 @@ thing with one command and their own WSL is exactly as it was.
 `install.ps1` and bootstrap share this table (one owner: the table is data in
 `sdk/bootstrap/src/wsl-states.ts`, and the script generator emits it).
 
+**BUILT.** Each row is `{code, probe, means, sentence, action}` — a probe keyed so ten rows
+cost at most six commands, a refusal code an app can switch on, a sentence in a person's
+words, and an action that is one of `run-elevated` / `run` / `instruct` / `link`.
+`detectWslState()` returns the FIRST row that matches, and the order above is the order they
+are tried, deepest cause first: **virtualization is checked before "WSL is not installed"**,
+because `--status` fails for both and a person told to press Enable WSL on a machine with
+VT-x off will press it forever.
+
+Three things the shape forced:
+
+- **Bootstrap never elevates.** `run-elevated` is DATA: `elevatedArgv(action)` spells the
+  `Start-Process -Verb RunAs` the APP runs, at a moment the app chooses. A library that
+  raises a UAC prompt from a background probe is a dialog nobody asked for.
+- **A row that costs something is only probed when it is wanted.** The network row (a `curl`
+  to the release) and the disk row (a number only the caller knows) are `enabled: false`
+  unless the caller passes `checkNetwork` / `requiredBytes`. Reading a machine's facts does
+  not reach the internet.
+- **The last row is total.** `wsl_ready` matches anything, so "nothing is wrong" is a state
+  with a name rather than a null every caller has to interpret.
+
+The two rows about a NOT-ours distro are the same probe with opposite answers, and that is
+the point: `distro_not_systemd` is repaired without asking (the distro is ours),
+`foreign_distro_not_systemd` says what is wrong and stops (it is theirs).
+
 ## 6. Not in this phase, written so it is not forgotten
 
 - **Delta updates** between versions. A new version is a new pack; the old env dir is removed
   after the new one is stamped.
 - **A pack for Windows.** Windows is never a backend.
+
+---
+
+## 7. What was built, 2026-09-14 — the server side
+
+Sections 0-3 and 5. Sections 4, 4a, 4b and 4c are the bootstrap's and are not touched here.
+
+### 7.1 The pinned interpreter
+
+`crucible/envpack.py`'s `STANDALONE_PYTHON` is the one place, release
+**`astral-sh/python-build-standalone` 20260901**, CPython **3.11.16**, the `install_only`
+build for each backend:
+
+| backend | asset | sha256 |
+|---|---|---|
+| `cuda-linux` | `cpython-3.11.16+20260901-x86_64-unknown-linux-gnu-install_only.tar.gz` | `faa07585…b89eed` |
+| `mlx-darwin` | `cpython-3.11.16+20260901-aarch64-apple-darwin-install_only.tar.gz` | `50424fa4…c085c9` |
+
+Both digests were **read from that release's own `SHA256SUMS`**, not from a download and not
+from memory. 3.11 rather than 3.12+ because `requires-python = ">=3.11"` is what the server
+declares and every recipe in `envs/` was resolved by pip against 3.11 —
+`envs/asr/cuda-linux.txt` records one pin that moved for exactly that reason, and building a
+pack on 3.12 would resolve a different set than `crucible doctor` checks the env against.
+
+### 7.2 The measured build — `asr` on `cuda-linux`, real
+
+On Owen's PC inside WSL2 (Ubuntu, AMD Ryzen, `zstd -T0 -10`), into a temp directory, with a
+temp `CRUCIBLE_HOME`; the live server was not touched.
+
+| | `asr` | `server` |
+|---|---|---|
+| build time | **69 s** | **18 s** |
+| unpacked | **2,858,328,974 B** (2.86 GB) | **199,032,812 B** (199 MB) |
+| archive (zstd -10) | **1,293,238,960 B** (1.29 GB) — 45% of the tree | **55,146,161 B** (55 MB) — 28% |
+| parts | **1** (under the 1900 MiB split) | **1** |
+| sha256 | `50c23895fafe…88f24e` | `a35f069e3a5a…23d3c171` |
+| recipe sha256 | `41cd6b32be13…` (`envs/asr/cuda-linux.txt`) | `ebef09466a9c…` (`pyproject.toml`) |
+| smoke test | `import faster_whisper` in a temp unpack — passed | `bin/crucible --version` → `crucible 0.6.0` — passed |
+| **install time** | **12 s** from a `file://` manifest: fetch, join, sha256, unpack 2.7 GB, stamp, rename | not installed (section 4's job) |
+
+Build time is with the interpreter already in `<out>/.cache` after the first run; the
+first build adds the 49 MB python-build-standalone download.
+
+Then, in that temp home: `crucible doctor` reports
+
+```
+asr env: ready — faster-whisper 1.2.1, python 3.11.16, 29 packages
+         pack 50c23895fafe, cuda-linux.txt 41cd6b32be13
+```
+
+and `<home>/envs/asr/bin/python -c "import faster_whisper"` prints `faster_whisper ok on
+3.11.16` — the relocation that a venv cannot do. `downloads/` is empty afterwards: the parts
+are appended and deleted one at a time and the reassembled archive goes after the rename.
+
+### 7.2a THE DEFECT THE REAL BUILD FOUND — pip's shebang is not relocatable
+
+The `server` pack failed its first smoke test with
+
+```
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/crucible-smoke-yyk1s139/pack/bin/crucible'
+```
+
+while `bin/crucible` was sitting right there. **python-build-standalone bakes no absolute
+paths and `pip install` does**: every console script's shebang is the absolute path of the
+interpreter that installed it. Unpack the tree anywhere else and that path is gone — and
+`exec` on a script with an unresolvable shebang raises **ENOENT naming the SCRIPT**, so the
+message says the file does not exist.
+
+This is not a new discovery in this system, which is what makes it worth writing down twice.
+BookForge hit it in `electron/rvc-bridge.ts` and `crucible/jobs/rvc/worker.py`'s header still
+carries the finding: *"an env that was installed by extracting into a temp directory and
+moving it into place then points at a python that no longer exists — which fails with exit 1
+and zero output, because the launcher dies before python starts."* Its answer was to never
+call a console script. **That answer is not available to a pack**, because section 4 has the
+bootstrap run `<server>/bin/crucible init` and point a systemd `ExecStart` at it.
+
+So `envpack.relocate_console_scripts()` rewrites every `bin/` entry whose shebang names the
+build tree, to distlib's sh/Python polyglot with the path derived from `$0`:
+
+```sh
+#!/bin/sh
+'''exec' "$(dirname -- "$0")/python3" "$0" "$@"
+' '''
+```
+
+`sh` reads line 2 as `exec <the python beside this script> <this script> <args>`; Python
+reads lines 2-3 as one triple-quoted string it discards. **The single quotes are
+load-bearing** — the obvious `"exec" "$(dirname -- "$0")/python3" …` is a Python
+`SyntaxError`, because the nested `"` inside the command substitution ends the string early,
+and that version also reached the smoke test before it was corrected. Both forms distlib
+emits (the one-line shebang and the three-line long-path wrapper) are replaced; a shebang
+that does NOT name the build tree — `#!/usr/bin/env python3` — is left alone, because it is
+already relocatable and rewriting it would be this function inventing policy.
+
+It runs for every pack, not just `server`: `asr` had 21 scripts rewritten (`ct2-*`,
+`huggingface-cli`, `f2py`, …), and a broken one in a job env is the same trap one directory
+over. `<home>/envs/asr/bin/huggingface-cli` runs after the install, from a path the build
+never saw.
+
+The whole failure is pinned by five tests, one of which builds a script, MOVES the tree and
+executes it.
+
+### 7.3 What was decided, where the doc left a choice
+
+- **`recipe_sha256` for the `server` pack is the sha256 of `pyproject.toml`.** The server
+  pack has no `envs/` recipe and inventing one would be a second declaration of the same
+  dependencies — exactly the two-owners shape R1 forbids. So the file that already owns them
+  is the file whose digest goes in, and `pack_recipe_drift` keeps meaning what it means
+  everywhere else.
+- **A package's own `tests/` directory is NOT pruned.** 3.2 lists it as prunable and it is
+  not safe in general: several packages import test helpers from library code, and the
+  failure then lands inside somebody's book rather than in the smoke test. `__pycache__` is
+  pruned, which is where the megabytes actually are. On `asr` this costs nothing measurable.
+- **The pack is named for the env DIRECTORY, not the job type.** On `cuda-linux` the tts
+  pack is `tts-higgs-v3`, because that is the directory it unpacks into — which makes install
+  a rename rather than a lookup, and makes the second narrator engine a second pack rather
+  than a rebuild of the first.
+- **The download's progress crosses the process boundary on a sentinel line.** The install
+  task runs `crucible install` as a CHILD and reads its stdout; that pipe is the only channel
+  between them. So `envpack.PROGRESS_PREFIX` is a declared WIRE carrying JSON — one owner
+  writes it and parses it — and the human-readable line beside it is parsed by nothing. This
+  is not the log-scraping R4 is about, and the alternative (an extra inherited fd) is a
+  second transport to keep working on two platforms for one event shape.
+- **`crucible envpack build` takes no `--backend`.** pip installs wheels for the machine it
+  runs on, so a pack is built on the backend it targets; the build host's platform is the
+  answer and anything else is `pack_not_buildable_here`. `envpack.build_backend_kind()` reads
+  platform and arch only — deliberately NOT `detect_backend()`, which demands a working card
+  and would make every release wait on Owen's desk instead of running on a hosted runner.
+- **The recipe is resolved before the pack table is asked.** `crucible install align` on the
+  Mac still answers *"no align env recipe for backend 'mlx-darwin'; this build ships
+  ['cuda-linux']"* rather than *"there is no pack called 'align'"*, which is true and useless.
+- **`require_zstd_tar()` runs before the manifest is read.** Discovering there is no `zstd`
+  after three gigabytes have arrived is a refusal that cost somebody their evening.
+- **Ten packs**, and no `asr`/`align` on the Mac: those have `.md` files rather than `.txt`
+  recipes, and the absence is a fact (CTranslate2 has no Metal backend) rather than a gap.
+
+### 7.4 What was NOT done, and why
+
+- **No pack was built on the Mac.** `ssh mac` is reachable and the machine is `arm64` with
+  `/opt/homebrew/bin/zstd` and `bsdtar 3.5.3` (libarchive 3.7.4) — the two facts the darwin
+  path depends on — but **there is no Crucible checkout on it**. Building one there means
+  cloning the repo and running pip on a machine nobody has set Crucible up on, which is a
+  setup act rather than a test. The `mlx-darwin` interpreter pin and the four darwin packs
+  are therefore **unexercised**; the first `macos-14` CI job is what proves them.
+- **`asr` has no `mlx-darwin` pack to build there in any case** — see above.
+- **The four torch packs' `needs_gb` are estimates**, labelled as such in 3.3. Building one
+  costs an 8 GB download and tens of minutes, and the runner is where the number matters.
+- **Nothing installs the `server` pack yet.** It is built, smoke-tested and published; the
+  consumer is section 4's bootstrap sequence, which is the bootstrap agent's half.
+
+---
+
+## 7b. What was built, 2026-09-14 — the host side
+
+Sections 4, 4a, 4b and 4c, in `sdk/bootstrap/`. Sections 0-3 and 5 are the server's (7).
+`npm test` in `sdk/bootstrap`: **193 passing**, from 122 before this phase.
+
+### 7b.1 The sequence, verbatim
+
+`installSteps()` in `src/steps.ts` is the list, and `install()` WALKS it rather than
+restating it:
+
+```
+host-facts       probeGuest(): CRUCIBLE_HOME, the guest user, free disk, curl/tar/zstd,
+                 and the pack already there with its stamp — ONE script, key=value out
+server-pack      fetch envpacks.json with the GUEST's curl -> findPack(server, backend) ->
+                 pre-flight disk -> curl each part, append, delete -> sha256sum in the
+                 guest -> tar --zstd into <dest>.partial -> run its own --version ->
+                 rm -rf <dest> && mv -> write <dest>/.pack   (SKIPPED when the stamp matches)
+init             <CRUCIBLE_HOME>/server/bin/crucible init --token … --enable-<type>…
+                 (SKIPPED when a config exists; its token is kept)
+install-<type>   <…>/bin/crucible install <type> [--narrator-engine e] --verbose
+service-install  <…>/bin/crucible service install
+linger           win32 only, ensureLinger() as root, unchanged from 0.6.0
+capability-write <…>/bin/crucible capability --write
+```
+
+`interpreter` and `pip-install` are gone. `InstallResult` gains `release`, `backend` and
+`crucible` (the pack's console script), because a caller that asked for an install should not
+have to re-derive which one it got.
+
+### 7b.2 `install.sh` / `install.ps1` are GENERATED
+
+`scripts/gen-install-scripts.ts` reads `installSteps()` and `wslStates()` and writes
+`sdk/bootstrap/scripts/install.sh` and `install.ps1`, both committed and both checked by
+`test/unit-gen-install.test.ts` — a step added and not regenerated is a red suite, the way
+the modules `--check` works. `npm run gen:install` regenerates. `release.sh` uploads the two
+files as assets (one line, at the end of its `gh release create`).
+
+What is literally shared, not merely kept in step: the step names, their order, the skip
+rules, every argv-shaped step (`renderArgv` for the spawn, `renderSh` for the line, from the
+same words), the host probe script, `CURL_ARGS`, `TAR_ARGS`, the `<home>/server`,
+`downloads/`, `.partial` and `.pack` paths, the URL shapes, and every refusal name. The
+three steps that are PROGRAMS — the probe, the pack fetch, linger — are spelled in each
+language, and their constants come from `pack.ts`; that is the seam, and it is where a test
+asserts the constants rather than trusting the prose.
+
+`install.sh` detects the backend (`Linux/x86_64` → cuda-linux + `sha256sum` + systemd,
+`Darwin/arm64` → mlx-darwin + `shasum -a 256` + launchd, anything else `unsupported_platform`)
+and reads the manifest with `awk -v RS='}'` plus `sed`, because a fresh machine has neither
+`jq` nor a guaranteed `python`. Linger there is: already on → nothing; root → do it;
+`sudo -n` → do it; otherwise print the one line a person must run. **No job types, no
+weights** (4a).
+
+`install.ps1` walks 4c in order, imports the distro, verifies the rootfs, and then runs the
+SAME `install.sh` inside it. Windows PowerShell 5.1 safe by test: no `&&`/`||`, no ternary,
+no native-stderr redirection (`$ErrorActionPreference = "Continue"` with explicit
+`$LASTEXITCODE` checks), and `wsl.exe`'s UTF-16 output stripped of its NULs before any
+`-match`.
+
+### 7b.3 Measured on Owen's PC, 2026-09-14
+
+A throwaway distro `crucible-test-phase14` under `C:\tmp`, imported from a **stock Alpine
+3.21 minirootfs as a labelled STAND-IN** for `crucible-rootfs-<version>.tar.zst` (which
+cannot be built on Windows and is not on a release yet), and **unregistered at the end**;
+`Ubuntu` was never touched, `wsl --shutdown` never run.
+
+- `curl.exe -fL --retry 3 --create-dirs -o …` — the exact argv `distro.ts` builds — 0.
+- `certutil -hashfile … SHA256` → the hex parse in `distro.ts` returns 64 chars.
+- `wsl.exe --import crucible-test-phase14 … --version 2` → 0.
+- `/etc/wsl.conf` written as root through `wsl -u root --exec` and read back **exactly**
+  `WSL_CONF_TEXT`, marker first.
+- `wsl --terminate <that distro>` → 0; `wsl --unregister` → 0; `wsl -l -v` afterwards lists
+  `* Ubuntu Running 2` and nothing else.
+- `probeGuest()` through `wsl.exe --exec`, as the default user `/etc/wsl.conf` names:
+  `{"home":"/home/crucible/.crucible","user":"crucible","freeBytes":1026089299968,
+  "missingTools":[],"server":null}`. Before `apk add`, the same probe reported the guest had
+  no bash — which is the stand-in's difference from the real image, named rather than
+  papered over.
+- **`install.sh` ran under busybox `ash`**: `sh -n` parses it, and a real run printed
+  `release 0.6.0, backend cuda-linux` → `host-facts` → `server-pack` → exit 1, because the
+  0.6.0 release has no `envpacks.json` yet. That is `pack_manifest_unreadable` doing its job.
+- The manifest `awk`/`sed` were exercised against both a compact and a pretty-printed
+  manifest, for both backends, and returned the same sha, sizes and part list each time.
+
+### 7b.4 Decisions, where the doc left a choice
+
+- **`ensureDistro` verifies BEFORE it destroys.** A `crucible` distro with no marker and a
+  config inside it is `distro_unmarked`, not a re-import: 4b's "a partial import is
+  unregistered and redone" is right only when there is nothing in it to lose.
+- **A caller-supplied `rootfsUrl` skips the digest check and says so out loud** on `onLine`.
+  There is no `.sha256` beside somebody else's image, and pretending to verify it would be
+  worse than naming who vouched for it. It is how the live check above ran.
+- **`detectHost()` carries the 4c state** (`wslState`) rather than making an app call two
+  verbs to learn "what is wrong with WSL here". It costs at most four more commands and no
+  network.
+- **The disk pre-flight's "one part" is the archive over the part count.** The manifest does
+  not publish per-part sizes and the splitter cuts equal parts under 1900 MiB, so this
+  over-states by less than a part and never under-states. `crucible/envpack.py` uses the real
+  largest part, which it can see; the two agree on the shape of the sum.
+- **`InstallOptions.release` defaults to `BOOTSTRAP_VERSION`.** The one legitimate default in
+  this package: the bootstrapper ships AT the server's version, so the default is the answer
+  rather than a guess at one.
+
+### 7b.5 What the host side could NOT do
+
+- **No real rootfs was imported**, because `crucible-rootfs-<version>.tar.zst` does not exist
+  yet — `scripts/build-rootfs.sh` is written for CI to run on `ubuntu-latest` and has been
+  syntax-checked only. Everything around the image is exercised (7b.3).
+- **No pack was actually downloaded by bootstrap**, because no release publishes
+  `envpacks.json` yet. The whole fetch is asserted argv-by-argv against the injectable
+  runner, and `install.sh` reached exactly the point where the manifest would have been.
+- **`crucible service install` from a pack was not run.** It should be right: `cli.py` passes
+  `sys.executable`, the pack's polyglot console script makes that `<pack>/bin/python3`, and
+  `service.console_script()` then resolves `<pack>/bin/crucible` — which is what ExecStart
+  gets. The one thing to watch on the first real install is the unit's recorded `PATH`: it is
+  the installing shell's, and under `wsl.exe --exec` that is the guest's default PATH, which
+  does not contain the pack's `bin`. ExecStart is absolute so the service starts; anything the
+  server spawns by bare name still resolves from `/usr/bin`.

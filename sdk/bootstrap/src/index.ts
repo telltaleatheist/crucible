@@ -98,7 +98,7 @@ export type { BootstrapRefusalCode, BootstrapRefusalOptions } from './errors.js'
 export { decodeWslBytes, incompleteTailBytes, processRunner, segmentWslBytes, splitLines } from './runner.js';
 export type { OutputStream, RunOptions, RunResult, Runner, StreamOptions, WslSegment } from './runner.js';
 
-export { guestPathFor, guestUnpackArgv, networkPathBehind, parseWslList, shellQuote, toWslPath, wslArgv, wslListArgv, wslRootArgv } from './wsl.js';
+export { guestPathFor, networkPathBehind, parseWslList, shellQuote, toWslPath, wslArgv, wslListArgv, wslRootArgv } from './wsl.js';
 export type { WslDistro } from './wsl.js';
 
 export { parseToml, TomlError } from './toml.js';

@@ -176,6 +176,9 @@ export const ENVPACKS_JSON = JSON.stringify({
       bytes: 120_000_000,
       sha256: PACK_SHA,
       parts: ['crucible-env-server-cuda-linux-0.6.0.tar.zst.part00', 'crucible-env-server-cuda-linux-0.6.0.tar.zst.part01'],
+      // The server pack has no envs/ recipe; `envpack.server_recipe()` hashes
+      // pyproject.toml, which already owns those dependencies (section 7.3).
+      recipe_sha256: 'e'.repeat(64),
       unpacked_bytes: 400_000_000,
     },
     {
