@@ -1,7 +1,8 @@
 """The `crucible` command line.
 
     crucible init       mint the token, write the config, record the backend
-    crucible install    build a job type's env, then decide whether the card fits it
+    crucible install    download a job type's env pack, then decide whether the card fits it
+    crucible envpack    build the packs a release carries (developer / CI)
     crucible capability what this host can hold, and why; --write records it
     crucible serve      run the API in the foreground
     crucible service    install/start/stop the machine service that runs `serve`
@@ -28,6 +29,7 @@ from . import (
     VERSION,
     capability,
     denoisemodels,
+    envpack,
     jobenv,
     narratorpatches,
     pairing,
@@ -571,6 +573,11 @@ INSTALLABLE_JOB_TYPES = ("llm", "tts", *workerenv.WORKER_JOB_TYPES)
 #: always itself; `denoise` is the exception, because it shares the `rvc` env
 #: (`workerenv.JOB_TYPES_SERVED_BY_ENV` is the owner of that fact). `crucible
 #: doctor` reads this so the command it suggests is one that exists.
+#:
+#: ITS PARTNER IS `envpack.SMOKE_IMPORT`, which says what a built pack for each
+#: of these names must be able to import before it becomes a release asset. It
+#: lives over there because `envpack` cannot import this module without a cycle;
+#: `tests/test_envpack.py` is what keeps the two from drifting apart (R1).
 INSTALLER_FOR: dict[str, str] = {
     **{name: name for name in INSTALLABLE_JOB_TYPES},
     **{
@@ -600,6 +607,11 @@ def cmd_install(args: argparse.Namespace) -> int:
             f"this host detects backend {backend.kind}, but {config.path} was "
             f"initialised for {config.backend_kind}; re-run `crucible init --force`"
         )
+    # THE DEFAULT IS A DOWNLOAD (PHASE14-ENVPACKS.md section 3.1). `--build` is
+    # the developer's path and an ARGUMENT: nothing below chooses it because a
+    # download failed, and every way a download can fail has a name of its own.
+    if not args.build:
+        return _install_from_pack(config, backend, args)
     # Which installer a type uses is a fact about the SHAPE of its work, not
     # about its name: `llm` and `tts` run an engine server and get a `jobenv`;
     # `asr`, and `align` and `rvc` after it, run a library in its own venv and
@@ -636,6 +648,116 @@ def cmd_install(args: argparse.Namespace) -> int:
         if name in (spec.headline, "torch", "numpy", "transformers", "mlx"):
             print(f"  {name}=={status.packages[name]}")
     return _capability_step(config, backend, args.job_type)
+
+
+def _env_key_for(job_type: str, narrator_engine: str | None, backend_kind: str) -> str:
+    """The directory under `~/.crucible/envs/` this job type installs into.
+
+    Two modules own two halves of that answer — `workerenv` names its envs
+    after the job type, `jobenv` names `tts`'s after the narrator engine — and
+    the pack is named after the DIRECTORY, so this is where the question is
+    asked once rather than in each of the two install paths.
+    """
+    if job_type in workerenv.WORKER_JOB_TYPES:
+        if narrator_engine is not None:
+            raise jobenv.EnvError(
+                "--narrator-engine names which tts env to build and means "
+                f"nothing for {job_type!r}, which has exactly one env per host"
+            )
+        # ASKED FOR ITS REFUSAL, not for its answer. A type with no recipe on
+        # this backend — `align` and `asr` on the Mac — must be refused by the
+        # module that knows WHY (CTranslate2 has no Metal backend, and
+        # `envs/asr/mlx-darwin.md` is prose saying so). Asking the pack table
+        # first would answer "there is no pack called 'align'", which is true
+        # and tells its reader nothing they can act on.
+        workerenv.recipe_for(job_type, backend_kind)
+        return job_type
+    spec = _env_spec(job_type, narrator_engine, backend_kind)
+    jobenv.recipe_for(spec)
+    return spec.key
+
+
+def _install_from_pack(
+    config: Config, backend: Backend, args: argparse.Namespace
+) -> int:
+    """`crucible install <type>` — the default: download, verify, unpack.
+
+    The already-installed short-circuit is the same one `--build` has and for
+    the same reason, one order of magnitude louder: re-running the command must
+    not fetch eight gigabytes to arrive at the env that is already there.
+    """
+    try:
+        key = _env_key_for(args.job_type, args.narrator_engine, backend.kind)
+        target = envpack.target_for_env_key(key, backend.kind)
+    except (jobenv.EnvError, workerenv.WorkerEnvError, envpack.PackError) as exc:
+        return _fail(str(exc))
+
+    if not args.force:
+        existing = _env_status_for(config, backend, args.job_type, args.narrator_engine)
+        if existing is not None and existing.installed:
+            print(f"already installed: {existing.detail}")
+            return _capability_step(config, backend, *_types_served(args.job_type))
+
+    print(f"backend: {backend.kind}")
+    print(f"pack:    {target.name} {VERSION}")
+    print(f"target:  {target.env_dir(config.home)}")
+    last = [0.0]
+
+    def on_progress(done: int, total: int | None, name: str) -> None:
+        # Two audiences, two lines (R4). The sentinel is the install TASK's wire
+        # and carries no prose; the human line is throttled prose and carries no
+        # contract. `crucible/envpack.py` owns the sentinel's shape.
+        print(envpack.progress_line(done, total, name), flush=True)
+        now = time.monotonic()
+        if now - last[0] < 1.0:
+            return
+        last[0] = now
+        share = f"{100 * done / total:.0f}%" if total else "?"
+        print(f"  {name}: {done / 1e9:.2f} GB ({share})", flush=True)
+
+    try:
+        entry = envpack.install_pack(
+            config.home,
+            target,
+            VERSION,
+            location=args.manifest_url,
+            on_line=lambda line: print(f"  {line}", flush=True),
+            on_progress=on_progress,
+        )
+    except envpack.PackError as exc:
+        return _fail(f"{exc.code}: {exc.message}")
+
+    status = _env_status_for(config, backend, args.job_type, args.narrator_engine)
+    if status is None or not status.installed:
+        detail = "no status could be read" if status is None else status.detail
+        return _fail(
+            f"the pack unpacked but the env did not come out installed: {detail}"
+        )
+    print(f"installed from pack {entry.sha256[:12]}: {status.detail}")
+    return _capability_step(config, backend, *_types_served(args.job_type))
+
+
+def _types_served(job_type: str) -> tuple[str, ...]:
+    """Which capability flags this install decides. `rvc` decides two."""
+    return workerenv.JOB_TYPES_SERVED_BY_ENV.get(job_type, (job_type,))
+
+
+def _env_status_for(
+    config: Config, backend: Backend, job_type: str, narrator_engine: str | None
+) -> "jobenv.EnvStatus | workerenv.EnvStatus | None":
+    """This job type's env status, from whichever module owns it, or None.
+
+    None means the question itself could not be asked — no recipe for this
+    backend, an engine that does not exist — and the caller says so rather than
+    reporting a missing env, which would be a different fact.
+    """
+    try:
+        if job_type in workerenv.WORKER_JOB_TYPES:
+            return workerenv.env_status(config.home, job_type, backend.kind)
+        spec = _env_spec(job_type, narrator_engine, backend.kind)
+        return jobenv.env_status(config.home, spec, backend.kind)
+    except (jobenv.EnvError, workerenv.WorkerEnvError):
+        return None
 
 
 def _install_worker_env(
@@ -736,6 +858,64 @@ def _capability_step(config: Config, backend: Backend, *job_types: str) -> int:
         )
     for flag in flags:
         print(f"[jobs] {flag} = true")
+    return EXIT_OK
+
+
+# ------------------------------------------------------------------ envpack
+
+
+def cmd_envpack_list(args: argparse.Namespace) -> int:
+    """Every (pack, backend) a tag carries. `scripts/release.sh` reads this."""
+    rows = [
+        {"name": name, "backend": backend}
+        for name, backend in envpack.every_pack()
+        if args.backend is None or backend == args.backend
+    ]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return EXIT_OK
+    for row in rows:
+        print(f"{row['name']}\t{row['backend']}")
+    return EXIT_OK
+
+
+def cmd_envpack_build(args: argparse.Namespace) -> int:
+    """`crucible envpack build <name>` — produce (or check) one pack.
+
+    No `--backend`: pip installs wheels for the machine it runs on, so a pack
+    is built on the backend it targets and nowhere else (section 3.3). The
+    build host's platform is the answer, and a host that is neither is refused
+    by name rather than producing a tree of wrong-platform wheels.
+    """
+    try:
+        backend_kind = envpack.build_backend_kind()
+        target = envpack.pack_target(args.name, backend_kind)
+    except envpack.PackError as exc:
+        return _fail(f"{exc.code}: {exc.message}")
+    out = Path(args.out).expanduser().resolve()
+    print(f"backend: {backend_kind}")
+    print(f"recipe:  {target.recipe}")
+    print(f"out:     {out}")
+
+    if args.check:
+        try:
+            entry = envpack.check_pack(out, target, VERSION)
+        except envpack.PackError as exc:
+            return _fail(f"{exc.code}: {exc.message}")
+        print(
+            f"ok: {entry.name}/{entry.backend} {entry.bytes / 1e9:.2f} GB in "
+            f"{len(entry.parts)} part(s), sha {entry.sha256[:12]}, recipe "
+            f"{entry.recipe_sha256[:12]}"
+        )
+        return EXIT_OK
+
+    try:
+        entry = envpack.build_pack(
+            target, VERSION, out, on_line=lambda line: print(f"  {line}", flush=True)
+        )
+    except envpack.PackError as exc:
+        return _fail(f"{exc.code}: {exc.message}")
+    print(json.dumps(entry.to_dict(), indent=2))
     return EXIT_OK
 
 
@@ -1312,12 +1492,69 @@ def _env_report(
     """One env's status, appending a problem to the report when it is not ready."""
     try:
         status = jobenv.env_status(home, spec, backend_kind)
+        recipe = jobenv.recipe_for(spec)
     except jobenv.EnvError as exc:
         report["problems"].append(f"{label}: {exc}")
         return {"installed": False, "detail": str(exc)}
     if not status.installed:
         report["problems"].append(f"{label}: {status.detail}")
-    return status.to_dict()
+    entry = status.to_dict()
+    entry["provenance"] = _provenance(report, label, status, recipe)
+    return entry
+
+
+def _provenance(
+    report: dict[str, Any],
+    label: str,
+    status: "jobenv.EnvStatus | workerenv.EnvStatus",
+    recipe: Path,
+) -> dict[str, Any]:
+    """Where this env came from, and whether its recipe has moved since.
+
+    PHASE14-ENVPACKS.md section 5: `doctor` reports each env's pack sha beside
+    its recipe hash. The comparison is the point rather than the display — an
+    env installed from a pack that was built from a recipe this checkout no
+    longer has is the drift `crucible install` refuses at download time, and
+    an env already on disk has nobody else to notice it.
+    """
+    here = jobenv.recipe_sha256(recipe) if recipe.is_file() else None
+    entry = {
+        "source": "pack" if status.pack_sha256 else "built",
+        "pack_sha256": status.pack_sha256,
+        "recipe_sha256": status.recipe_sha256,
+        "recipe_sha256_now": here,
+        "recipe": recipe.name,
+        "drifted": bool(
+            status.recipe_sha256 is not None
+            and here is not None
+            and status.recipe_sha256 != here
+        ),
+    }
+    if entry["drifted"]:
+        report["problems"].append(
+            f"{label}: pack_recipe_drift — this env was installed from a "
+            f"{recipe.name} hashing {status.recipe_sha256[:12]} and the one in "
+            f"this build hashes {here[:12]}. Re-run its `crucible install`"
+        )
+    return entry
+
+
+def _provenance_line(entry: dict[str, Any]) -> str:
+    """The one-line form `crucible doctor` prints after an env's detail."""
+    if entry["source"] == "pack":
+        where = f"pack {entry['pack_sha256'][:12]}"
+    else:
+        where = "built here"
+    if entry["recipe_sha256"] is None:
+        recipe = f"{entry['recipe']} hash not recorded (installed before 0.6.0)"
+    elif entry["drifted"]:
+        recipe = (
+            f"{entry['recipe']} {entry['recipe_sha256'][:12]} != "
+            f"{entry['recipe_sha256_now'][:12]} HERE"
+        )
+    else:
+        recipe = f"{entry['recipe']} {entry['recipe_sha256'][:12]}"
+    return f"{where}, {recipe}"
 
 
 def _capability_report(
@@ -1467,7 +1704,14 @@ def _doctor_report() -> dict[str, Any]:
                 continue
             try:
                 worker_env = workerenv.env_status(config.home, job_type, backend.kind)
-                report["worker_envs"].append(worker_env.to_dict())
+                entry = worker_env.to_dict()
+                entry["provenance"] = _provenance(
+                    report,
+                    f"{job_type}_env",
+                    worker_env,
+                    workerenv.recipe_for(job_type, backend.kind),
+                )
+                report["worker_envs"].append(entry)
                 if not worker_env.installed:
                     report["problems"].append(f"{job_type}_env: {worker_env.detail}")
             except workerenv.WorkerEnvError as exc:
@@ -1558,14 +1802,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if env is not None:
             mark = "ready" if env["installed"] else "NOT READY"
             print(f"llm env: {mark} — {env['detail']}")
+            if "provenance" in env:
+                print(f"         {_provenance_line(env['provenance'])}")
         for worker_env in report["worker_envs"]:
             mark = "ready" if worker_env["installed"] else "NOT READY"
             print(
                 f"{worker_env['job_type']} env: {mark} — {worker_env['detail']}"
             )
+            if "provenance" in worker_env:
+                print(f"         {_provenance_line(worker_env['provenance'])}")
         for engine, entry in sorted(report["tts_envs"].items()):
             mark = "ready" if entry["installed"] else "NOT READY"
             print(f"tts env ({engine}): {mark} — {entry['detail']}")
+            if "provenance" in entry:
+                print(f"         {_provenance_line(entry['provenance'])}")
         for entry in report["narrator_patches"]:
             if entry["status"] == narratorpatches.NOT_APPLICABLE:
                 mark = "n/a"
@@ -1756,7 +2006,9 @@ def build_parser() -> argparse.ArgumentParser:
     init.set_defaults(func=cmd_init)
 
     install = subparsers.add_parser(
-        "install", help="create a job type's env and install its recipe"
+        "install",
+        help="download this job type's published env pack and unpack it "
+        "(--build installs its recipe with pip instead)",
     )
     install.add_argument(
         "job_type",
@@ -1782,7 +2034,73 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument(
         "--verbose", action="store_true", help="echo pip's output line by line"
     )
+    install.add_argument(
+        "--build",
+        action="store_true",
+        help=(
+            "build the env here from its recipe with pip, instead of "
+            "downloading the published pack. The developer's path, and an "
+            "argument: nothing chooses it because a download failed"
+        ),
+    )
+    install.add_argument(
+        "--manifest-url",
+        default=None,
+        help=(
+            "read envpacks.json from here instead of this version's release "
+            f"(also ${envpack.MANIFEST_URL_ENV}). For a mirror or a test; "
+            "parts are fetched from beside it"
+        ),
+    )
     install.set_defaults(func=cmd_install)
+
+    envpack_parser = subparsers.add_parser(
+        "envpack",
+        help="build and check the environment packs a release carries",
+        description=(
+            "A pack is a relocatable CPython with one recipe installed into "
+            "it (PHASE14-ENVPACKS.md). `crucible install` downloads one; this "
+            "is the verb that produces one, on the backend it targets."
+        ),
+    )
+    envpack_commands = envpack_parser.add_subparsers(
+        dest="envpack_command", required=True
+    )
+
+    envpack_list = envpack_commands.add_parser(
+        "list", help="every (pack, backend) a tag carries"
+    )
+    envpack_list.add_argument(
+        "--backend",
+        default=None,
+        choices=sorted(envpack.STANDALONE_PYTHON),
+        help="only this backend's packs",
+    )
+    envpack_list.add_argument("--json", action="store_true", help="machine-readable")
+    envpack_list.set_defaults(func=cmd_envpack_list)
+
+    envpack_build = envpack_commands.add_parser(
+        "build",
+        help="build one pack for THIS machine's backend, smoke-test it, and "
+        "record it in <out>/envpacks.json",
+    )
+    envpack_build.add_argument(
+        "name",
+        help="the pack name — `crucible envpack list` prints them. It is the "
+        "env DIRECTORY's name, so on cuda-linux the tts pack is 'tts-higgs-v3'",
+    )
+    envpack_build.add_argument(
+        "--out",
+        default="packs",
+        help="where the parts and envpacks.json are written (default ./packs)",
+    )
+    envpack_build.add_argument(
+        "--check",
+        action="store_true",
+        help="build nothing: verify the parts already in --out against "
+        "envpacks.json and against this checkout's recipe",
+    )
+    envpack_build.set_defaults(func=cmd_envpack_build)
 
     capability_parser = subparsers.add_parser(
         "capability",
