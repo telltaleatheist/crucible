@@ -376,13 +376,77 @@ refuses a line with no `/` before the fragment.
 `config.toml` for `local`), never typed. An external browser is not used: the fragment would
 land in its history. Every server row in Settings → Crucible Servers gets **Open**.
 
-### 5.4 The module
+**The operator window does NOT inherit the app's bridge, and this is a contract
+for both apps, not a preference.** A Crucible's page is code the app does not
+own — the server may be the Mac Studio, a friend's box, or a machine whose
+address somebody pasted — and `<url>/#token=` hands that page a window inside
+an Electron process that has a preload, an IPC bridge to the filesystem, and a
+session holding the user's cookies. So the window is built with **no preload at
+all**, `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, and
+**its own `session.fromPartition()`** so nothing it stores can reach the app's
+storage or be reached from it. Navigation is pinned to the server's origin:
+`will-navigate` is denied for any URL whose origin differs, and
+`setWindowOpenHandler` returns `{action: 'deny'}` for every `window.open`. A
+page that wants to send the user somewhere says so in text they can copy.
 
-`shared/crucible/bookforge.module.json` in BookForge (Foundry ships its own beside its
-package): the section-3.3 shape, versioned. A **"Set up for BookForge"** button on a server
-row posts it and shows the task's progress in the row. It is the ONLY place BookForge says
-what it needs from a server, replacing `BOOKFORGE_JOB_TYPES` and the pull list in
-`electron/crucible/install.ts`, which are deleted (one fact, one owner: the module file).
+Nothing about this is a response to distrusting Crucible; it is that "the page
+is served by the thing it administers" stops being a safe sentence the moment
+the thing is on another machine, and a window with no bridge costs nothing
+because the page needs none — it talks to its own server over HTTP.
+
+### 5.4 The module is GENERATED, never hand-written
+
+`bookforge.module.json` and `foundry.module.json` are **written by a generator
+in this repo, from these manifests**, and each app vendors its file byte for
+byte. `scripts/gen-modules.py` is that generator and `--check` is the guard CI
+runs, exactly as `scripts/gen-foundry-lineup.py --check` already guards the
+lineup (which this leaves byte-identical).
+
+**Why not a file typed by hand beside each app.** Foundry already vendors
+`foundry-lineup.json` from this repo's manifests, for the reason
+ARCHITECTURE.md R1 gives: "what can this machine run" has one owner. A module
+file typed beside it would restate the same model ids — `qwen3.8-27b-4bit`
+appears in both — with nothing comparing them, so the day a manifest is renamed
+the lineup is regenerated and the module is not, and a "Set up for Foundry"
+button asks a server for a subject that does not exist. That is the same defect
+as every row in ARCHITECTURE.md's table, introduced on purpose, in a file whose
+whole job is to be correct about ids.
+
+**What an app declares, and what the generator derives.** In `modules/<app>.toml`
+an app states only what Crucible cannot know: the job types it needs (with the
+narrator engine, for `tts`), the capability CLASSES it uses, and any subject it
+names outright — a specific voice, the RVC base assets, a separator. The
+generator resolves every one of those against the manifests and refuses by name
+if it cannot:
+
+- a class with a **floor** in `crucible/lineup.py` resolves to the floor — the
+  floor is by definition the smallest model the class may run on at all, which
+  is precisely the one an app must have pulled;
+- a class with **exactly one** candidate model resolves to it;
+- a class with several candidates and no floor **must be named** in the
+  declaration (`model = "qwen3.8-27b-4bit"`), and the generator checks that the
+  named model really serves that class. `analysis` is such a class today, and a
+  generator that picked for it would be inventing a policy nobody wrote down;
+- every explicitly named subject is checked to exist, in the right kind's
+  catalog, before it can be written.
+
+**`version` is derived, not typed.** It is `<crucible version>+<12 hex of the
+sha-256 of the module's own content, version excluded>`, so two apps at the same
+crucible version whose needs differ have different versions, and a regenerated
+file that says the same thing keeps the same one. A hand-typed semver on a
+generated file is a number somebody forgets to bump.
+
+A **"Set up for BookForge"** button on a server row posts the vendored file and
+shows the task's progress in the row. It is the ONLY place BookForge says what
+it needs from a server, replacing `BOOKFORGE_JOB_TYPES` and the pull list in
+`electron/crucible/install.ts`, which are deleted.
+
+**When that button is refused `server_busy` because a LEASE is open, the row
+shows the holder verbatim** — "held by foundry — translate, qwen3.8-27b-4bit,
+until 03:12" — out of the `details` 3.3 specifies. It must not render as a
+generic failure: a lease means another app on the same machine is mid-run, which
+is the system working, and an operator shown a dead button with no name will
+conclude the button is broken and press it until it is.
 
 ## 6. Not in this phase, written so it is not forgotten
 
