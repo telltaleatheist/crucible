@@ -1,6 +1,6 @@
 {
   "name": "@crucible/client",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "TypeScript client for a Crucible inference server. Zero runtime dependencies.",
   "type": "module",
   "license": "MIT",
