@@ -795,3 +795,274 @@ rollout plan already lists (`RunOptions.waitFor`, `hosted_placement_not_vendored
   door, and it opens when there is a reason.
 - Deleting BookForge's legacy local spawn layer (`'local'`, the WSL bridges, ollama's remaining
   doors). That is the in-app-pass deletion already on the rollout plan.
+
+---
+
+## 7b. What was built, 2026-09-14 — the host side
+
+Section 4 entirely, plus the pieces of 3.5/3.6 the host needs to exist. Sections 1-3 and 5 are
+the server's and the apps'. `crucible/host/` is new; `npm test` in `sdk/bootstrap` is **245
+passing**, from 191 at the start of this phase.
+
+### 7b.1 The package, and why it is eleven files
+
+Everything that can be a pure function is one, in its own module, because the tray cannot be
+tested and every decision it draws must be. `tray.py` is the only file with no test, and it
+contains no `if`.
+
+| file | what it owns |
+|---|---|
+| `paths.py` | every path, from the environment only. `%LOCALAPPDATA%\Crucible\` and its four members. |
+| `log.py` | `host.log`, appended, rolled once at 2 MiB. |
+| `menu.py` | `(distro, engine) → MenuModel`. 4.2. |
+| `runner.py` | the one door to a subprocess and to `/v1/ping`. Injectable. |
+| `presence.py` | the boot, the two recovery recipes, the 15 s watch. 4.1. |
+| `wsl_states.py` | **GENERATED** from `sdk/bootstrap/src/wsl-states.ts`. |
+| `wslstate.py` | the predicates for that table, and the walk. |
+| `landoor.py` | 4.1's LAN forward: which mechanism, and whether it is already open. |
+| `installer.py` | 4.7's sequence. |
+| `door.py` | `POST /install` on 127.0.0.1:7101. |
+| `startup.py` | the Startup shortcut, and the two verbs that own it. |
+| `tray.py` | pystray. Nothing else. |
+| `app.py` | the loop that holds them. |
+
+**Importing the package needs neither pystray nor tkinter.** pytest runs in WSL, in an env
+that has neither, and a suite that cannot import its subject pins nothing. `tray` is imported
+inside the functions that use it and nothing else imports it at all.
+
+### 7b.2 The 4c table crosses into Python by GENERATION
+
+`gen-install-scripts.ts` gained a third output. The table's DATA — code, probe argv, sentence,
+action, order — is emitted into `crucible/host/wsl_states.py`, and `npm run gen:install --
+--check` refuses a drift in it exactly as it does for `install.sh` and `install.ps1`. Only the
+`means` PREDICATES are spelled twice, because they are code; `wslstate.MEANS` holds one per
+code and a pytest asserts the two sets are equal. It is the seam `envpack.SMOKE_IMPORT` has
+with `cli.INSTALLABLE_JOB_TYPES`, and `steps.ts` has with its three programs.
+
+Getting a template out of a sentence that is a FUNCTION of its evidence took sentinels: the
+generator calls each row with values that cannot occur, swaps them for `{said}`,
+`{app_distro}`, `{guest_user}`, `{release}`, `{required}`, `{free}`, and **refuses** both when
+a sentinel survives and when a placeholder the table used to produce stops appearing. A
+sentence that reaches a person with a sentinel in it is worse than a generator that stops.
+One row needed thought: `pack_disk`'s two figures are rendered by `gib()`, so the sentinels
+there are NUMBERS (`424242 GiB` and a `df` reply) rather than strings.
+
+### 7b.3 `install.ps1` no longer walks the table
+
+It downloads the host pack for this release, verifies it, unpacks it to
+`%LOCALAPPDATA%\Crucible\host\`, asks `crucible host --install-startup` for the login item,
+starts the tray with `pythonw`, and stops. It needs no admin. Three things it does that the
+old one did not:
+
+- **It asks `tar --version` whether this machine's tar carries zstd.** Measured below.
+- **It unpacks BESIDE, runs the moved `crucible.cmd --version`, and only then renames.**
+- **It never elevates.** The host raises UAC later, by name, when a 4c row needs it.
+
+The old walk is not lost — it moved into `installer.py`, where it can carry a reboot across
+(the Startup item) and where the page's engine switch (4.7) drives the same code.
+
+### 7b.4 Measured on Owen's PC, 2026-09-14, with nothing changed
+
+**bsdtar and zstd, which decided two designs.**
+
+```
+C:\Windows\system32\tar.exe --version
+  bsdtar 3.8.1 - libarchive 3.8.1 zlib/1.2.13.1-motley liblzma/5.4.3 bz2lib/1.0.8
+  libzstd/1.5.5 cng/2.0 libb2/bundled
+zstd --version                                  -> not found (no zstd.exe on Windows at all)
+tar.exe --zstd --options zstd:compression-level=10 -C src -cf out.tar.zst .   -> 0
+tar.exe -xf out.tar.zst -C back                                              -> 0, bytes intact
+```
+
+So `require_zstd_tar()` ASKS the tar it found rather than demanding a binary the OS does not
+ship — and the refusal is not theoretical: **`crucible envpack build host` run from Git Bash
+refused by name**, because Git Bash puts its own GNU tar 1.32 ahead of System32 on PATH:
+
+```
+crucible: pack_no_zstd: `C:\Program Files\Git\usr\bin\tar.EXE` reports 'tar (GNU tar) 1.32',
+which does not name libzstd. … Put that one ahead of this one on PATH. A GNU tar here would
+shell out to a `zstd` that is not installed and fail at the compression step, which is after
+the interpreter download and the pip run — the expensive end of the build to find out at.
+```
+
+That is the check earning its place on the first real run.
+
+**The interpreter pin, read from the release.** `curl` of
+`https://github.com/astral-sh/python-build-standalone/releases/download/20260901/SHA256SUMS`
+(870 lines): the word "shared" appears **0** times, "static" 90. So 4.4's
+`x86_64-pc-windows-msvc-shared-install_only` does not exist and the pin is
+`cpython-3.11.16+20260901-x86_64-pc-windows-msvc-install_only.tar.gz`, sha256
+`6be524fa6752af802146a4adc7d098565425b0b1c166e19a5a7a4c8cccb86bf6`. 4.4 is corrected.
+
+**WSL and the LAN door, read and deliberately not changed.** `wsl --version` 2.5.7.0,
+Windows 10.0.26100 — mirrored networking is supported. `%USERPROFILE%\.wslconfig` has no
+`networkingMode`, so this machine is on NAT. `netsh interface portproxy show v4tov4` listed
+**nothing**. `landoor.detect()` therefore answers `portproxy / not open`, which is the state
+that would prompt for administrator on a real install; **no `netsh` was run.**
+
+**The probes, against the real machine.**
+
+```
+paths.crucible_root      C:\Users\tellt\AppData\Local\Crucible
+startup.shortcut_path    C:\Users\tellt\AppData\Roaming\Microsoft\Windows\Start Menu\
+                         Programs\Startup\Crucible.lnk
+probe_distro             absent — wsl -l -v lists Ubuntu and no "crucible"
+GET 127.0.0.1:7100/v1/ping   answered
+```
+
+`absent` is the honest answer on this machine and it is what makes the menu offer the WSL
+install; Owen's own Ubuntu was read and never touched.
+
+**The tray, by hand.** Run from a throwaway venv under `C:\tmp` (pystray + pillow, deleted
+afterwards — nothing installed system-wide), against a TEMPORARY `LOCALAPPDATA` and `APPDATA`,
+with the install door on a port the OS picked. **No server was started, no distro imported, no
+Startup shortcut written, port 7100 untouched, and nothing went near the card.**
+
+The icon appeared in the notification area. Its menu read:
+
+```
+Crucible — stopped
+  Open console                                            (disabled)
+  Install the WSL2 engine (faster pages and text; TTS, ASR…)…
+  Restart engine
+  Stop engine                                             (disabled)
+  Open log
+  Quit (stops the engine)
+```
+
+`Open log` opened the log in Notepad and wrote `menu: open-log` to it. Driving the state to
+`installing` and then to `running` redrew the title to `Crucible — installing…` and then
+`Crucible — running (llama-windows)` without the icon flickering. `Quit` returned from
+`icon.run()` cleanly. Afterwards `%LOCALAPPDATA%\Crucible` did not exist and the real Startup
+folder was unchanged — verified, not assumed.
+
+### 7b.4a The Windows host pack, BUILT — `crucible envpack build host`
+
+On Owen's PC, with `C:\Windows\System32` ahead of Git Bash on PATH, into `C:\tmp\hostpack`.
+CPU only: a python-build-standalone download, a `pip install` of the wheel plus `pystray` and
+`pillow`, a prune and a tar. **Nothing went near the card.**
+
+| | `host` / `llama-windows` |
+|---|---|
+| build time | **64 s** (interpreter cached after the first run) |
+| unpacked | **185,628,698 B** (186 MB) |
+| archive (bsdtar `--zstd`, level 10) | **46,151,197 B** (46 MB) — 25% of the tree |
+| parts | **1** |
+| sha256 | `1a7ffac5c379c1063dfbf2344662b5761bac9f0d3efc090177464fadd790d8d0` |
+| recipe sha256 | `ebef09466a9c…` (`pyproject.toml` — the SAME digest PHASE14 7.2 recorded for the `server` pack, which is the point of 7.3's ruling) |
+| python | **3.11.16**, from the pin read out of SHA256SUMS |
+| shims written | **13** — `crucible`, `dotenv`, `fastapi`, `hf`, `httpx`, `huggingface-cli`, `idna`, `tiny-agents`, `tqdm`, `uvicorn`, `watchfiles`, `websockets`, `wheel` |
+| smoke test | `crucible.cmd --version` in a temp unpack → `crucible 0.6.0` — **passed** |
+
+**And then the pack was moved again, by hand, and the relocation question settled.** Copying
+the single part to `C:\tmp\hostcheck\pack.tar.zst` and unpacking it into a directory the build
+never saw:
+
+```
+tar -tf …            ./  ./crucible.cmd  ./DLLs/  ./dotenv.cmd  ./fastapi.cmd  …
+                     — TOP LEVEL, no wrapper directory (PHASE14 7.3a's invariant)
+cat crucible.cmd     @echo off
+                     "%~dp0python.exe" -m crucible.cli %*
+crucible.cmd --version          -> crucible 0.6.0            exit 0
+crucible.cmd host --install-startup -> wrote the shortcut     exit 0
+Scripts\crucible.exe --version  -> (nothing)                 exit 1
+```
+
+**That last line is the whole reason `write_cmd_shims` exists.** pip's launcher binary carries
+the build tree's interpreter path inside it, and it is dead the moment the tree moves — the
+Windows form of the defect PHASE14 7.2a found on POSIX, where a shebang rewrite fixed it and
+here where no rewrite can reach. The `%~dp0` shim beside it runs.
+
+**Two things this by-hand run found that reading the code had not:**
+
+1. **`crucible host --remove-startup` did not parse.** The PowerShell was two adjacent strings
+   with only the first an f-string, so the second's escaped braces stayed DOUBLED and
+   PowerShell got `} } else {` — "Unexpected token '}'". It was found by using it to undo the
+   shortcut the line above had just written, which is exactly the sequence a person performs.
+   Fixed, and pinned by two tests that assert the braces are balanced and single.
+2. **The shortcut was written to the REAL Startup folder** by that `--install-startup`, which
+   this session was told not to do. It was removed with the fixed verb and the folder verified
+   back to its two original entries (`LG Monitor App Installer.lnk`, `Ollama.lnk`).
+
+### 7b.5 Decisions, where the doc left a choice
+
+- **`distro = unknown` is a state and not a synonym for `absent`.** `wsl.exe` failing to
+  answer offers the install and never claims a server. Reading it as `absent` would import a
+  SECOND distro, which is the one mistake here that pressing the button again cannot undo;
+  reading it as `present` would hide the only item that can fix the machine.
+- **A ping that answers ANY status is a server that is up**, 401 included. Treating a refused
+  token as "down" would have the host boot a distro because somebody's bearer was wrong.
+- **A failed pairing-file ACL DELETES the file.** A bearer token on disk that everybody on the
+  machine can read is worse than no pairing file: absent is a fact an app knows how to handle
+  (3.6), readable is a silent leak.
+- **`main()`'s win32 gate NARROWED rather than opened.** A subparser opts in with
+  `win32_ok=True`; `host` and `envpack` do (4.4 builds the Windows pack on Windows) and
+  everything else keeps the old refusal until 3.5's `llama-windows` server lands. Letting
+  every verb through now would replace one honest refusal with a `NoViableBackend` from
+  somewhere deeper — the same "no" with a worse sentence and a stack trace.
+- **The guest half of the install is `install.sh`, run by the host.** Restating its six steps
+  in Python would be the third spelling of a list that already has two. The cost is one extra
+  `crucible init --force --config-from` afterwards, because `install.sh` mints its own token
+  and 3.5 says the Windows one has to survive; two inits and one token beats one init and an
+  app that silently stops being paired.
+- **`--config-from` is extracted TEXTUALLY, not parsed and re-emitted.** A key is a secret and
+  a round trip through a writer is a chance to mangle one. `write_config` copies the carried
+  tables verbatim and refuses to shadow a table it owns.
+- **The door's `done` carries a result where `crucible/tasks.py`'s carries `{}`.** It has a
+  caller tasks.py does not: `install()` is a library function that must RETURN an
+  `InstallResult`, and on Windows it cannot go and read the guest's config instead — that
+  `wsl.exe` door is one of the things this phase deletes. The relaying server may drop it.
+- **The door accepts fields it does not read** (`release`, `job_types`, `home`, `bind`).
+  `engine_target_unknown` is reserved for a `target` that is not `wsl`, which is the one field
+  whose wrong value would DO the wrong thing. An older door refusing a field a newer client
+  was told to send is how two halves of one release stop talking.
+- **The CI job for the Windows pack is a job and not a matrix row.** Every step in that matrix
+  is written in `sh` and reclaims disk with `sudo rm -rf`. One job with four Windows-shaped
+  steps is honest; a matrix with `if: runner.os` on half its steps is a matrix pretending to
+  be one job.
+
+### 7b.6 What the host side could NOT do, and why
+
+- The pack build below DID happen and is in 7b.4a; what is still owed is a `windows-latest`
+  run and a published asset.
+- **No distro was imported and no install was run end to end.** `crucible-rootfs-<version>.tar.zst`
+  is not on any release yet (PHASE14 7b.5 says the same), and importing anything on this
+  machine was out of scope by instruction. `installer._import_distro` therefore refuses
+  `no_crucible_distro` naming the missing asset rather than importing somebody else's image,
+  and the steps after it are exercised only against the scripted runner.
+- **`install-job-types` and `migrate-weights` install and move NOTHING yet**, and say so on
+  the event stream. Their inputs are the Windows server's coordinate records and its catalog
+  (4.7, 3.5), and the `llama-windows` backend that would fill both is the server agent's half
+  of this phase. What IS built is the shape and the ORDER — pull in the guest, then delete on
+  Windows, never the reverse — and nothing is deleted on either side today, which is the half
+  of that rule that matters.
+- **There is no delete door for the Windows copies.** 3.5's last bullet needs one
+  (`DELETE` on a catalog subject, or a verb); the host must not reach into
+  `crucible/weights.py`'s layout from outside, which would be a second owner of where a
+  subject lives. Named here so it is asked for rather than improvised.
+- **The LAN forward was not added.** `netsh` needs administrator and Owen's machine was to be
+  read, not changed. Detection is measured (7b.4); `add_argv()` / `remove_argv()` are data and
+  tested as data.
+- **`crucible host` was not run through the CLI verb itself** — only its objects, from a
+  harness, so that nothing wrote to the real `%LOCALAPPDATA%` or Startup folder. The verb's
+  refusal off win32 IS tested.
+- **The full pytest suite was not re-measured at the end.** A training run held the WSL VM
+  (the suite refuses beside one, by rule), so the number below is the last clean measurement
+  plus this file's own, and is owed a confirming run.
+
+### 7b.7 Tests
+
+| suite | before | after |
+|---|---|---|
+| `sdk/bootstrap` `npm test` | 191 | **245** |
+| `tests/test_host.py` | — | **69** |
+| `tests/test_envpack.py` | 45 passed / 14 skipped | **67 passed / 14 skipped** |
+| pytest, whole tree minus `tests/test_lineup.py` | 1234 (reported) / 1215 measured here | **owed** — a trainer held the VM |
+
+`tests/test_lineup.py` fails on this checkout for a reason that is not this phase's: it is a
+git WORKTREE, its `.git` is a file pointing at a Windows path, and `git rev-parse` inside WSL
+cannot follow it. Four failures, all of them that.
+
+**Every host test runs off Windows.** The platform, the environment and every subprocess are
+injected, because a suite that skipped its subject on the machine it runs on would pin
+nothing. All fifteen cells of 4.1's `(distro, engine)` table are walked, not sampled.
