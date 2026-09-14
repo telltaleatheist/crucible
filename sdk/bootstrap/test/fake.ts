@@ -6,7 +6,7 @@
  */
 import assert from 'node:assert/strict';
 
-import type { OutputStream, RunOptions, RunResult, Runner, StreamOptions } from '../src/index.js';
+import type { HostFetch, OutputStream, RunOptions, RunResult, Runner, StreamOptions } from '../src/index.js';
 
 export interface Expectation {
   /** The exact argv, or a predicate over it. */
@@ -209,6 +209,120 @@ export const CRUCIBLE_BIN = '/home/owen/.crucible/server/bin/crucible';
 export const DOWNLOADS = '/home/owen/.crucible/downloads';
 export const ARCHIVE = `${DOWNLOADS}/crucible-env-server-cuda-linux-0.6.0.tar.zst`;
 export const DEST = '/home/owen/.crucible/server';
+
+// ---------------------------------------------------- the host's loopback door
+
+/** Where `install.ps1` unpacks the host pack on the fake machine, and its `.cmd`. */
+export const HOST_DIR = 'C:\\Users\\owen\\AppData\\Local\\Crucible\\host';
+export const HOST_CMD = `${HOST_DIR}\\crucible.cmd`;
+/** The host-mode server's own config — where {@link hostToken} reads the bearer. */
+export const HOST_CONFIG_PATH = 'C:\\Users\\owen\\AppData\\Local\\Crucible\\config.toml';
+/** A win32 `FakeHost`'s environment. `LOCALAPPDATA` is READ, never assembled. */
+export const WIN_ENV = { LOCALAPPDATA: 'C:\\Users\\owen\\AppData\\Local' };
+/**
+ * The host-mode `config.toml`, as `crucible init` wrote it before the migrate.
+ * `llama-windows` and not `none`: PHASE15 section 0's amendment makes Windows
+ * a backend of its own (llama.cpp + GGUF), which WSL then upgrades.
+ */
+export const HOST_CONFIG = `[server]
+name = "crucible@owens-pc"
+host = "127.0.0.1"
+port = 7100
+
+[auth]
+token = "host-token-not-a-secret"
+
+[backend]
+kind = "llama-windows"
+`;
+
+/** What the fake door was asked. One request per {@link fakeHostDoor}. */
+export interface DoorRequest {
+  url: string;
+  method: string | undefined;
+  authorization: string | null;
+  contentType: string | null;
+  body: unknown;
+}
+
+export interface FakeDoorScript {
+  /** The HTTP status. 200 unless a test is exercising 401/409. */
+  status?: number;
+  /**
+   * The response body, already chunked. Each entry is one chunk off the wire —
+   * so a test that wants an ndjson line split across two reads simply puts half
+   * of it in one entry and half in the next.
+   */
+  chunks?: readonly string[];
+  /**
+   * The `data` of each event, keyed by kind, in order. The `{"id", "event",
+   * "data"}` envelope is added here so no test has to keep the ids in step by
+   * hand — and so a test that DOES want a malformed envelope writes `chunks`.
+   */
+  events?: readonly (readonly [kind: string, data: unknown])[];
+  /** `fetch` rejects with this instead of answering: a refused connection, a timeout. */
+  rejectWith?: Error;
+  /** A non-streaming body, for the statuses that carry a sentence rather than events. */
+  text?: string;
+}
+
+/** `{"id": n, "event": kind, "data": …}` — `crucible/tasks.py`'s envelope, one line. */
+export function doorLine(id: number, kind: string, data: unknown): string {
+  return `${JSON.stringify({ id, event: kind, data })}\n`;
+}
+
+/**
+ * A `fetchImpl` that replays a scripted door. Nothing opens a socket, and the
+ * request the client built is kept verbatim so a test can assert the URL, the
+ * method, the bearer and the body it would have sent.
+ */
+export function fakeHostDoor(script: FakeDoorScript): { fetchImpl: HostFetch; requests: DoorRequest[] } {
+  const requests: DoorRequest[] = [];
+  const fetchImpl = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+    const headers = new Headers(init?.headers ?? {});
+    requests.push({
+      url: String(input),
+      method: init?.method,
+      authorization: headers.get('authorization'),
+      contentType: headers.get('content-type'),
+      body: typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body,
+    });
+    if (script.rejectWith !== undefined) throw script.rejectWith;
+    const status = script.status ?? 200;
+    if (script.text !== undefined) return new Response(script.text, { status });
+    const chunks = script.chunks ?? (script.events ?? []).map(([kind, data], index) => doorLine(index + 1, kind, data));
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller): void {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+        controller.close();
+      },
+    });
+    return new Response(stream, { status });
+  }) as HostFetch;
+  return { fetchImpl, requests };
+}
+
+const GUEST_CRUCIBLE = '/home/crucible/.crucible/server/bin/crucible';
+
+/** The `data` of a `done` event describing a finished WSL install, as `crucible/host/door.py` sends it. */
+export const HOST_DONE_DATA = {
+  server: { name: 'crucible@owens-pc-wsl', url: 'http://127.0.0.1:7100', config_path: 'crucible:/home/crucible/.crucible/config.toml' },
+  release: '0.6.0',
+  backend: 'cuda-linux',
+  crucible: GUEST_CRUCIBLE,
+  steps: [
+    { name: 'host-facts', argv: [], status: 'ok', detail: 'crucible: CRUCIBLE_HOME /home/crucible/.crucible, user crucible, 380.0 GiB free' },
+    { name: 'server-pack', argv: [GUEST_CRUCIBLE], status: 'ok', detail: 'unpacked 2 part(s)' },
+    { name: 'init', argv: [GUEST_CRUCIBLE, 'init', '--token', '<redacted>', '--enable-llm'], status: 'ok', detail: 'exit 0' },
+    { name: 'service-install', argv: [GUEST_CRUCIBLE, 'service', 'install'], status: 'ok', detail: 'exit 0' },
+    { name: 'linger', argv: ['loginctl', 'enable-linger', 'crucible'], status: 'ok', detail: 'granted' },
+    { name: 'capability-write', argv: [GUEST_CRUCIBLE, 'capability', '--write'], status: 'ok', detail: 'exit 0' },
+  ],
+};
+
+/** That `done`, as a scripted event: `['done', HOST_DONE_DATA]`. */
+export const HOST_DONE: readonly [string, unknown] = ['done', HOST_DONE_DATA];
 
 export async function refusal<T>(promise: Promise<T>): Promise<{ code: string; message: string; command: string | null; detail: string | null; error: unknown }> {
   try {

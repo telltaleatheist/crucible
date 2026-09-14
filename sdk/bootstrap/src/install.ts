@@ -13,7 +13,8 @@
  *                    SKIPPED when a config already exists (its token is kept)
  *   install-<type>   <server>/bin/crucible install <type>
  *   service-install  <server>/bin/crucible service install
- *   linger           win32 only: `loginctl enable-linger <guest user>` as root
+ *   linger           WSL only: `loginctl enable-linger <guest user>` as root —
+ *                    which since PHASE15 means the HOST runs it, never this file
  *   capability-write <server>/bin/crucible capability --write
  *
  * **There is no conda step and no pip step.** A fresh machine has no Python at
@@ -35,13 +36,27 @@
  * step stops the sequence with a {@link BootstrapStepFailed} naming the step,
  * carrying the tail, and listing the steps that finished — what they did is on
  * disk and stays there (ARCHITECTURE.md R6).
+ *
+ * **ON WINDOWS NONE OF THAT HAPPENS HERE** (PHASE15-HOST.md section 4.3). The
+ * sequence has ONE implementation and it is the host's: `crucible host`, the
+ * Windows-native tray process, walks the state table and the step list and
+ * raises the UAC prompts a WSL install needs. (It has no window of its own —
+ * 4.7: its UI is the tray menu and the operator page.) So on win32 this
+ * function is two branches and nothing else —
+ *
+ *   host installed?  ask it (`requestHostInstall`) and relay its events
+ *                    through the SAME `onLine`/`onStep` this function was given
+ *   host absent?     `host_not_installed`, carrying the `irm … | iex` line
+ *
+ * — and the walk below is reached only on linux and darwin, where the machine
+ * IS the server and there is no host to ask.
  */
 import { randomBytes } from 'node:crypto';
 
 import { readLocalConfig, type LocalConfig } from './config.js';
-import { resolveDistro } from './distro.js';
 import { backendFor, envpacksUrl, type PackBackend } from './envpacks.js';
 import { BootstrapRefusal, BootstrapStepFailed } from './errors.js';
+import { hostInstallCommand, hostInstalled, hostPackDir, requestHostInstall, type HostEvent, type HostFetch } from './hostdoor.js';
 import { ensureLinger } from './linger.js';
 import { fetchManifest, installPack, probeGuest, refuseMissingTools, SERVER_SUBDIR } from './pack.js';
 import { processRunner, type OutputStream, type Runner } from './runner.js';
@@ -79,9 +94,16 @@ export const DEFAULT_INSTALL_TIMEOUTS: InstallTimeouts = {
 };
 
 export interface InstallOptions {
-  /** win32: the app's WSL distro setting. The `crucible` distro wins when it exists. */
+  /**
+   * **No longer read by `install()`.** Which distro a Windows Crucible goes
+   * into is the HOST's answer now (PHASE15 4.3): it owns the `crucible` distro
+   * and imports it itself, so there is nothing for an app to choose and
+   * nothing to send over the door. Kept on the interface because
+   * `readLocalConfig()` and `detectHost()` still take it and callers pass one
+   * object to all three.
+   */
   distro?: string;
-  /** win32: use `distro` verbatim, resolving nothing. The way out of `two_local_crucibles`. */
+  /** Same: the host resolves the distro. See {@link InstallOptions.distro}. */
   exact?: boolean;
   jobTypes: readonly JobTypeRequest[];
   /** `CRUCIBLE_HOME` for every `crucible` verb, as the target spells it. Omit for the server's default. */
@@ -99,6 +121,19 @@ export interface InstallOptions {
   /** What `crucible init` should bind. Omit for the server's own defaults (127.0.0.1:7100). */
   bind?: { host?: string; port?: number };
   timeouts?: Partial<InstallTimeouts>;
+  /**
+   * win32 only: every event the host's door sent, verbatim, including the 4c
+   * `state` rows that have no place in `onLine`/`onStep`. Ignored off win32,
+   * where there is no host and no door.
+   */
+  onHostEvent?: (event: HostEvent) => void;
+  /**
+   * win32 only: the `fetch` the host's door is asked with. Defaults to
+   * `globalThis.fetch` — the platform's own, on the node this package declares
+   * (`engines: node >=20`). This exists so the tests can script a host without
+   * opening a socket; an app has no reason to pass it.
+   */
+  fetchImpl?: HostFetch;
 }
 
 export interface InstallStep {
@@ -174,16 +209,67 @@ export function planJobTypes(requests: readonly JobTypeRequest[]): Plan {
   return { enableFlags, installs };
 }
 
+/**
+ * win32: PHASE15 4.3's two branches, and nothing else.
+ *
+ * There is no third branch that walks the steps here. A Windows machine
+ * installs its Crucible exactly one way — through `crucible host` — so that
+ * `install.ps1`, the operator page's engine switch (4.7) and an app's
+ * `install()` cannot describe three different installs (PHASE14 4a, "cannot
+ * differ").
+ *
+ * **Why a library posts to a loopback port when there is a whole tasks API.**
+ * 4.3 names two callers of the door. The page's `POST /v1/tasks
+ * {"type":"engine","target":"wsl"}` is the primary one and goes through the
+ * Windows SERVER, which relays the door's events under a task id. This is the
+ * other one, and it runs on a machine that has no server yet — the very first
+ * install, before there is a page to open or a `/v1/tasks` to post to.
+ */
+async function installThroughHost(options: InstallOptions, release: string, runner: Runner): Promise<InstallResult> {
+  // The one thing this side still does with the job list: refuse a malformed
+  // one BY NAME. `{type: 'tts'}` with no narrator engine is the caller's bug,
+  // and being told so must not require a host to be installed and answering.
+  // The plan itself is thrown away — the host builds its own from the same list.
+  planJobTypes(options.jobTypes);
+
+  if (!hostInstalled(runner)) {
+    throw new BootstrapRefusal(
+      'host_not_installed',
+      `there is no Crucible host at ${hostPackDir(runner)} on this machine, and on Windows the host is what installs `
+        + 'a Crucible: it walks the WSL state table, raises the two UAC prompts a WSL install needs, and shows the '
+        + 'steps in its own window. Run the line below once, then call install() again. '
+        + 'It is not run from here on purpose — a library that downloads and elevates an installer from a background '
+        + 'call is a dialog nobody asked for.',
+      { command: hostInstallCommand(release) },
+    );
+  }
+
+  return await requestHostInstall(
+    {
+      release,
+      jobTypes: options.jobTypes,
+      ...(options.home === undefined ? {} : { home: options.home }),
+      ...(options.bind === undefined ? {} : { bind: options.bind }),
+      ...(options.onHostEvent === undefined ? {} : { onEvent: options.onHostEvent }),
+      ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+      onLine: options.onLine,
+      ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
+    },
+    runner,
+  );
+}
+
 export async function install(options: InstallOptions, runner: Runner = processRunner()): Promise<InstallResult> {
   const release = options.release ?? BOOTSTRAP_VERSION;
+  if (runner.platform === 'win32') return await installThroughHost(options, release, runner);
+  // ---------------------------------------------------------------------
+  // linux and darwin only, from here down: win32 returned above. Every step,
+  // every argv and every refusal below is what it was before PHASE15 — the
+  // only thing that went is the distro resolution, which had no answer to give
+  // on a machine that IS the server and whose one caller was the win32 arm.
+  // ---------------------------------------------------------------------
   const backend = backendFor(runner.platform);
-  const distro = runner.platform === 'win32'
-    ? await resolveDistro(runner, {
-      ...(options.distro === undefined ? {} : { distro: options.distro }),
-      ...(options.exact === undefined ? {} : { exact: options.exact }),
-    })
-    : undefined;
-  const target = resolveTarget(runner, distro);
+  const target = resolveTarget(runner, undefined);
   const jobs = planJobTypes(options.jobTypes);
   const timeouts = { ...DEFAULT_INSTALL_TIMEOUTS, ...options.timeouts };
   const steps: InstallStep[] = [];
@@ -231,10 +317,7 @@ export async function install(options: InstallOptions, runner: Runner = processR
     options.onStep?.(step);
   };
 
-  const configOptions = {
-    ...(distro === undefined ? {} : { distro, exact: true }),
-    ...(options.home === undefined ? {} : { home: options.home }),
-  };
+  const configOptions = options.home === undefined ? {} : { home: options.home };
   const values: Partial<Record<RefName, string>> = { release, backend };
   let crucible: string | null = null;
   // Measured by `host-facts`, consumed by `server-pack`. Locals rather than a
