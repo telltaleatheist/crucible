@@ -173,16 +173,28 @@ and the last thing it prints is the pairing line (`crucible token --url`). On Wi
 `.ps1` does the WSL minute (admin prompt for `wsl --install` if needed, reboot notice, resume)
 and then the same.
 
-**Every app coordinates on connect, not only on install.** When an app finds a Crucible —
-`local` on this machine, or a remote it was given — it posts its module (`POST /v1/tasks
-{type: module}`) EVERY time it connects, idempotent: job types already installed and
-subjects already present are `skipped`; anything missing is installed and pulled with the
-task's events drawn in the app ("Preparing the narration engine… downloading deathstalker
-8.5 GB…"). A person never sees the word module and never presses "Set up for X": presence
-of the app is the request. A module task refused `server_busy` (a lease, a job) is retried
-when the card settles, with the holder named in the meantime. Foundry does the same with
-its own module. Two apps on one machine = the union of two modules on one server, as
-PHASE5-APPS.md §6.0 always said.
+**Every app coordinates on connect, not only on install — ASK, THEN ACT.** When an app finds
+a Crucible — `local` on this machine, or a remote it was given — it READS `GET /v1/catalog`
+(cheap, read-only, no lane) and compares its module against it. Nothing missing is a read
+and nothing else: no task, no `task_busy` between two apps arriving at once, no
+`server_busy` naming the app's own lease because its own book is running (Foundry's catch,
+2026-09-14 — a task whose whole content would be `skipped` events must not be posted on a
+server that runs one task at a time). Only when something IS missing is the module posted
+(`POST /v1/tasks {type: module}`), and the task's events are drawn in a person's words
+("Preparing the narration engine… downloading deathstalker 8.5 GB…"). A person never sees
+the word module.
+
+**Consent, on a server that is not theirs.** Automatic, with nothing to press, on the LOCAL
+server and on a server added in this session — presence of the app is the request. On any
+OTHER registered remote (a friend's box, a shared machine), when the catalog says something
+is missing the app says WHAT and HOW BIG ("Owen's Mac is missing the page reader — 3.1 GB
+to download onto it") and the person presses once. That is not a permanent button; it is
+the one moment somebody else's disk and bandwidth are about to be spent. (Default ruling
+2026-09-14 on Foundry's proposal; Owen may make it unconditional.)
+
+A module task refused `server_busy` (a lease, a job) is retried when the card settles, with
+the holder named in the meantime. Foundry does the same with its own module. Two apps on
+one machine = the union of two modules on one server, as PHASE5-APPS.md §6.0 always said.
 
 This is what makes the split simpler than what it replaced: Crucible is a service you can
 put on a machine by itself; an app that arrives later asks it for what the app needs; the
