@@ -744,8 +744,8 @@ def _env_spec(
 ) -> jobenv.EnvSpec:
     """The env `crucible install <job type>` builds on this host.
 
-    `tts` needs a second word on `cuda-linux` — there are two envs there, one
-    per narrator engine — so the flag is required for it and refused for `llm`,
+    `tts` needs a second word on `cuda-linux` — the env there is named per
+    narrator engine — so the flag is required for it and refused for `llm`,
     rather than quietly ignored on the type that has only one env.
     """
     if job_type == "llm":
@@ -757,10 +757,11 @@ def _env_spec(
         return jobenv.llm_env(backend_kind)
     if narrator_engine is None:
         raise jobenv.EnvError(
-            "`crucible install tts` needs --narrator-engine (higgs-v3 or orpheus): "
-            "on cuda-linux the two cannot share a venv, because Orpheus pins "
-            "vllm 0.7.3 for its per-request logits processors and Higgs v3 needs a "
-            "far later torch"
+            "`crucible install tts` needs --narrator-engine "
+            f"({' or '.join(sorted(NARRATOR_ENGINE_SAMPLING))}): on cuda-linux "
+            "the env is named per narrator engine, because two of them cannot "
+            "share a venv — each pins its own serving stack against its own "
+            "torch — and there is no default"
         )
     if narrator_engine not in NARRATOR_ENGINE_SAMPLING:
         raise jobenv.EnvError(
@@ -1475,10 +1476,10 @@ def _doctor_report() -> dict[str, Any]:
                 )
                 report["problems"].append(f"{job_type}_env: {exc}")
         if config.enable_tts:
-            # One row per narrator engine, because on cuda-linux they are two
-            # separate venvs and a voice load picks by its manifest's
-            # `narrator_engine`. On mlx-darwin both names resolve to the same
-            # env, and the two rows say so by carrying the same path.
+            # One row per narrator engine, because on cuda-linux each is its
+            # own venv and a voice load picks by its manifest's
+            # `narrator_engine`. On mlx-darwin every name resolves to the same
+            # env, and the rows say so by carrying the same path.
             report["tts_envs"] = {
                 engine: _env_report(
                     report,
@@ -1771,8 +1772,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         choices=sorted(NARRATOR_ENGINE_SAMPLING),
         help=(
-            "which tts env to build; required for 'tts' because cuda-linux has "
-            "one venv per narrator engine, and refused for 'llm'"
+            "which tts env to build; required for 'tts' because cuda-linux "
+            "names one venv per narrator engine, and refused for 'llm'"
         ),
     )
     install.add_argument(

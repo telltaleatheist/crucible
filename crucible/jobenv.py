@@ -10,13 +10,18 @@ Why an env is not simply one per job type
 -----------------------------------------
 `llm` is: one venv, `~/.crucible/envs/llm/`, whichever backend the host is.
 `tts` is not, and the reason is in narrator's dependency matrix rather than in
-Crucible's design (PHASE3-TTS.md section 4). Orpheus needs `vllm==0.7.3` — the
-last version whose V0 engine takes per-request logits processors, which is what
-the EOS boost *is* — and Higgs v3 needs `vllm-omni` against a much later torch;
-installing both into one env resolves torch twice and breaks whichever loses. So
-on `cuda-linux` there are two tts envs and the voice manifest's `narrator_engine`
-picks which one a load uses, while on `mlx-darwin` the two engines genuinely do
-share one, and there is one env there.
+Crucible's design (PHASE3-TTS.md section 4). Narrator engines pin conflicting
+serving stacks against conflicting torches, and installing two of them into one
+env resolves torch twice and breaks whichever loses. So on `cuda-linux` the env
+is named for the engine and the voice manifest's `narrator_engine` picks which
+one a load uses, while on `mlx-darwin` the engines share one and the env is
+named for the backend the way `llm`'s is.
+
+Since Owen's ruling of 2026-09-14 there is exactly ONE narrator engine
+(`voices.NARRATOR_ENGINE_SAMPLING` carries it), so `cuda-linux` has one tts env
+today — `tts-higgs-v3`. The engine stays in the NAME rather than collapsing to
+`tts`, because the whole point of the naming rule is that the second engine
+needs a second directory and not a rebuild of the first.
 
 So an env is named by an `EnvSpec`, and each job type states its own naming rule
 in its own constructor below — `llm_env()` and `tts_env()` — where the two can be
@@ -66,9 +71,12 @@ NARRATOR_PACKAGE = "narrator"
 #:              a second one, `sglang-omni`, which BookForge's own WSL env
 #:              serves; a Crucible env that installed it would be a different
 #:              recipe and a different value here.)
-#:   orpheus    NOT PRESENT, deliberately. `NARRATOR_ENGINE=orpheus` loads vLLM
-#:              0.7.3 in process; there is no server underneath it and no
-#:              `HIGGS_*` variable is read on that path.
+#:
+#: A TABLE OF ONE, keyed by engine on purpose (Owen's ruling of 2026-09-14
+#: removed `orpheus`; see `voices.NARRATOR_ENGINE_SAMPLING`). An engine ABSENT
+#: from this table is one that starts no server underneath narrator — the
+#: lookup below is `.get()` for that reason, and `None` is the answer rather
+#: than a missing key.
 #
 # RULING OWED: THIS REPO SAYS "SGLang-Omni" IN SEVEN PLACES AND INSTALLS
 # vllm-omni. `docs/PHASE3-TTS.md` section 4, `crucible/residency.py`'s warm-up
@@ -115,7 +123,7 @@ class EnvSpec:
     #: WHICH SERVING STACK narrator will start UNDERNEATH ITSELF out of this
     #: env, or None where it starts no server at all. `None` is not "unknown":
     #: it means this env's engine renders IN PROCESS (the Mac's mlx-audio) or
-    #: has no stack concept (Orpheus, which loads vLLM itself).
+    #: has no stack concept (an engine that loads its own runtime).
     #:
     #: IT BELONGS TO THE RECIPE, which is why it is here rather than in the
     #: voice manifest. A Higgs v3 voice does not choose vllm-omni over
@@ -146,10 +154,10 @@ def llm_env(backend_kind: str) -> EnvSpec:
 def tts_env(narrator_engine: str, backend_kind: str) -> EnvSpec:
     """The `tts` env this narrator engine runs in on this backend.
 
-    On `cuda-linux` the two engines cannot share a venv (see the module
+    On `cuda-linux` two narrator engines cannot share a venv (see the module
     docstring), so the engine is in the env's name and in the recipe's. On
-    `mlx-darwin` they can and do, so there is one env and one recipe, named for
-    the backend the way `llm`'s are.
+    `mlx-darwin` they can, so there is one env and one recipe, named for the
+    backend the way `llm`'s are.
     """
     if backend_kind not in BACKEND_HEADLINE_PACKAGE:
         raise EnvError(

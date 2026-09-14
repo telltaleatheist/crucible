@@ -77,24 +77,30 @@ VOICES_DIR_ENV = "CRUCIBLE_VOICES_DIR"
 #: when a voice says nothing. A deviation from these values owes a
 #: `sampling_reason` — see the module docstring.
 #:
+#: THIS IS THE ONE LIST. `NARRATOR_ENGINES`, the `--narrator-engine` choices,
+#: `/v1/capability`'s `narrator_engines` row and the task door's refusal all
+#: read it, so an engine that is not here cannot be named anywhere.
+#:
+#: A TABLE OF ONE, ON PURPOSE. Owen's ruling of 2026-09-14: "orpheus is
+#: deprecated too but hasn't been removed yet. higgs is the frontier" — "I
+#: guess we can remove it now." Crucible had listed `orpheus` as a servable
+#: narrator engine since PHASE3-TTS.md and would never serve it, which is the
+#: same defect as any other fact with two owners: an operator page drew an
+#: engine picker from this table and offered a choice with no future. It is
+#: still a TABLE and not a constant because a second engine WILL come, and the
+#: shape a new one has to fill is: a row here (its own sampling defaults), a
+#: row in `ttsstream.STREAM_BATCH_WIDTH` (a MEASURED streaming width, never a
+#: guess), a recipe per backend under `envs/tts/`, a row in
+#: `jobenv.CUDA_LINUX_SERVING_STACK` if it starts a server underneath narrator,
+#: and membership of `narratorvoices.DOCUMENT_READERS` if it resolves a voice
+#: by name in a document. `tests/test_narrator_engine.py`'s drift guard
+#: asserts the first three agree.
+#:
 #: higgs-v3: Owen's ruling of 2026-09-12, "Let's set temp to 0.8 across the board
 #: for Higgs in Bookforge. Streaming and rendering both." Recorded with its A/B
 #: in `higgs-models.json`'s `_samplingNote`.
-#:
-#: orpheus: `narrator/engine/orpheus/config.py`'s `EngineDefaults` —
-#: ORPHEUS_TEMPERATURE 0.6, ORPHEUS_TOP_P 0.8, ORPHEUS_MIN_P 0.0,
-#: ORPHEUS_REP_PENALTY 1.1. There is deliberately **no top_k and no seed** in
-#: that table: Orpheus's vLLM path is seeded by the caller per re-roll and its
-#: sampler has never taken a top_k, so listing either here would invite a
-#: manifest to set a knob nothing reads.
 NARRATOR_ENGINE_SAMPLING: dict[str, dict[str, float]] = {
     "higgs-v3": {"temperature": 0.8, "top_p": 0.95, "top_k": 50},
-    "orpheus": {
-        "temperature": 0.6,
-        "top_p": 0.8,
-        "min_p": 0.0,
-        "repetition_penalty": 1.1,
-    },
 }
 
 #: What a voice can BE. `checkpoint` is a merged fine-tune the engine is started
@@ -160,12 +166,14 @@ _PACE_OPTIONAL: dict[str, type] = {
 
 #: `[voice.serving]` — WHAT THE SERVER narrator STARTS IS CONFIGURED WITH.
 #:
-#: REQUIRED of every `higgs-v3` voice and REFUSED on an `orpheus` one, because
-#: narrator reads it on exactly one of those paths: `HIGGS_MAX_NUM_SEQS` is
+#: REQUIRED of every voice in this build, because every voice in this build
+#: names `higgs-v3` and narrator reads it on that path: `HIGGS_MAX_NUM_SEQS` is
 #: `v3_served.serve_concurrency()`, which refuses BY NAME when it is unset and
 #: is BOTH stage 0's admission width and the width of narrator's own batch.
-#: Orpheus reads no such variable, and a manifest carrying a number nothing
-#: reads is a lever that reports success.
+#: (It was REFUSED on an `orpheus` voice until 2026-09-14, when that engine
+#: left `NARRATOR_ENGINE_SAMPLING` — see the ruling there. A second engine that
+#: reads no `HIGGS_*` variable brings that refusal back with it, rather than
+#: inheriting a required table it configures nothing with.)
 #:
 #: The NOTE is required with the number for the reason `estimate_note` is: 16
 #: is not an obvious value and it is CONTESTED — the deathstalker cap
@@ -363,9 +371,10 @@ class VoiceManifest:
     language: str
     sample_rate: int
     pace: Pace
-    #: `[voice.serving]`, or None for a voice whose engine starts no server.
-    #: Required of every `higgs-v3` voice and refused on an `orpheus` one — see
-    #: `_SERVING_REQUIRED`.
+    #: `[voice.serving]`, or None for a voice whose engine reads no `HIGGS_*`
+    #: variable. Required of every `higgs-v3` voice — see `_SERVING_REQUIRED`.
+    #: `higgs-v3` is the only engine in this build, so None is what the next
+    #: engine will need rather than a shape any manifest has today.
     serving: Serving | None
     backends: dict[str, VoiceBackendSpec]
     takes: tuple[Take, ...]
@@ -630,7 +639,7 @@ def _check_clips(where: str, block: dict[str, Any], kind: str) -> Any:
 def _check_serving(
     path: Path, voice: dict[str, Any], narrator_engine: str
 ) -> Serving | None:
-    """`[voice.serving]`: required for `higgs-v3`, refused for `orpheus`.
+    """`[voice.serving]`: required for `higgs-v3`, refused for any other engine.
 
     THE NUMBER narrator REFUSES TO RENDER WITHOUT. `HIGGS_MAX_NUM_SEQS` is
     stage 0's `max_num_seqs` on the vllm-omni stack AND the width of narrator's
@@ -638,10 +647,12 @@ def _check_serving(
     unset — "a guessed width is either a server idling at 1 or a queue the
     render never asked for"). Crucible states it from here.
 
-    REFUSED ON AN ORPHEUS VOICE rather than ignored. Orpheus reads no `HIGGS_*`
-    variable at all, so a number in that manifest would be a lever that reports
-    success — the exact shape of the defect the whole BookForge serving block
-    was until 2026-09-05, when it declared a configuration nothing applied.
+    REFUSED ON AN ENGINE THAT READS NO `HIGGS_*` VARIABLE rather than ignored,
+    because a number in that manifest would be a lever that reports success —
+    the exact shape of the defect the whole BookForge serving block was until
+    2026-09-05, when it declared a configuration nothing applied. `higgs-v3` is
+    the only engine `NARRATOR_ENGINE_SAMPLING` names today, so this refusal is
+    the rule a second engine arrives into rather than one any manifest trips.
     """
     where = f"{path.name} [voice.serving]"
     block = voice.get("serving")

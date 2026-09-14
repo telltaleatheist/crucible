@@ -17,10 +17,11 @@ name = "bookforge"
 # ---------------------------------------------------------------- job types
 #
 # The six BookForge drives, and `tts` says which narrator engine because
-# cuda-linux has one venv per engine. `higgs-v3` is what BookForge narrates
-# with (memory `higgs-engine-in-app`); a machine that still renders Orpheus
-# books needs a second `tts` entry with `narrator_engine = "orpheus"`, which is
-# another multi-gigabyte install and therefore a decision for a person.
+# cuda-linux names one venv per engine. `higgs-v3` is what BookForge narrates
+# with (memory `higgs-engine-in-app`) and, since Owen's ruling of 2026-09-14,
+# the only engine Crucible names at all. A future engine gets its own `tts`
+# entry here rather than replacing this one: that is another multi-gigabyte
+# install and therefore a decision for a person.
 
 [[job_types]]
 type = "llm"

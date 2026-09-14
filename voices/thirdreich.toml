@@ -58,8 +58,9 @@ safe_max_chars = 700
 # render without: `HIGGS_MAX_NUM_SEQS` is stage 0's admission width on the
 # vllm-omni stack AND the width of narrator's own batch
 # (`v3_served.serve_concurrency`, which raises by name when it is unset).
-# Required of every higgs-v3 voice and refused on an orpheus one, which reads
-# no HIGGS_* variable at all.
+# Required of every higgs-v3 voice and refused on an engine that reads no
+# HIGGS_* variable at all. higgs-v3 is the only engine Crucible names, so the
+# refusal is the rule the next engine arrives into (ruling of 2026-09-14).
 [voice.serving]
 max_num_seqs = 16
 max_num_seqs_note = """16 is vllm-omni's OWN stage-0 value in higgs_multimodal_qwen3.yaml, and it is ALSO a measured ceiling at the shipped memory fractions: on owens-pc (RTX 3090 Ti, 2026-09-05) 16 concurrent at 0.35 + 0.10 ran 11,387-11,584 chars/min over three runs while 32 filled the card and stalled. It replaced a 2 that was never anything but a placeholder and reached nothing until 2026-09-05, so no measurement was ever taken against it. THE deathstalker CAP CERTIFICATE RAN AT 64, at the older fractions and before that stall was measured, so 16 is not the width its cap was certified at; nothing measured says whether batch width moves the safe chunk length, and if it does, that certificate is bound to 64 and this is the field that would have to change. It is also the width of narrator's own batch (v3_served.serve_concurrency), so raising it raises concurrent POSTs and VRAM pressure together. Translated from BookForge's electron/data/higgs-models.json serving._maxNumSeqsNote, where it was measured."""

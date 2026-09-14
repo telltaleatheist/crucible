@@ -39,7 +39,12 @@ ENGINES: dict[str, type[SubprocessEngine]] = {
 #: It is a set rather than a `dict[str, type]` for that reason, and it is checked
 #: against `crucible/voices.py`'s own table by a test, so a manifest can never
 #: name an engine this file cannot start.
-NARRATOR_ENGINES: frozenset[str] = frozenset({"higgs-v3", "orpheus"})
+#:
+#: A SET OF ONE since Owen's ruling of 2026-09-14 removed `orpheus`: Higgs is
+#: the frontier and Orpheus will never be served here, so Crucible stops naming
+#: it. `crucible/voices.py`'s `NARRATOR_ENGINE_SAMPLING` carries the ruling and
+#: what a second engine has to add.
+NARRATOR_ENGINES: frozenset[str] = frozenset({"higgs-v3"})
 
 
 def engine_log_path(home: Path, model_id: str) -> Path:
@@ -78,9 +83,9 @@ def build_voice_engine(
     the recipe installs, None where narrator starts no server), `max_num_seqs`
     belongs to the VOICE MANIFEST (`[voice.serving]`), and `voices` is the
     document `crucible/narratorvoices.py` wrote from that manifest and the
-    pulled weights for THIS load (None for `orpheus`, which reads none). All
-    are mandatory keywords: `None` is a real answer and a default would hide a
-    caller that forgot.
+    pulled weights for THIS load (None for an engine that resolves no voice by
+    name — `narratorvoices.DOCUMENT_READERS`). All are mandatory keywords:
+    `None` is a real answer and a default would hide a caller that forgot.
     """
     if narrator_engine not in NARRATOR_ENGINES:
         raise EngineError(

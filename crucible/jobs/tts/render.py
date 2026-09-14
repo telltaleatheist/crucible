@@ -101,8 +101,8 @@ a runaway reported as "not capped" is exactly the failure the field exists to
 prevent. PHASE3-TTS.md section 6 records the owed change on narrator's side.
 
 `guard` obeys the same rule one level up. A `null` guard means narrator sent no
-verdict — an engine with no `render_many` to offer (Orpheus, whose older guard is
-a different mechanism), or a row that failed before the ladder reached a decision
+verdict — an engine with no `render_many` to offer, or a row that failed
+before the ladder reached a decision
 — and it is never to be read as "the take was clean". `clean` is a key INSIDE a
 verdict that exists; the absence of a verdict says nothing about the take.
 
@@ -297,7 +297,8 @@ def _require_renderable(
 
     # TAKE 0's SAMPLING IS THE MANIFEST'S, AND IT REACHES NARRATOR. Not through
     # `caps` on the load message — that channel is `register_voice_caps`, whose
-    # vocabulary is Orpheus's — but through the NARRATOR_HIGGS_VOICES document
+    # vocabulary is narrator's older engine's — but through the
+    # NARRATOR_HIGGS_VOICES document
     # `crucible/narratorvoices.py` writes at every load, whose `sampling` key
     # narrator's `load_voices` reads onto the voice and both arms apply as the
     # engine's override. So a voice that deviates from the boson default (with

@@ -1,8 +1,8 @@
 """narrator — the managed subprocess that is to `tts` what vLLM is to `llm`.
 
-PHASE3-TTS.md section 4. Crucible does not reimplement Orpheus's EOS surgery,
-Higgs's frame budget or either engine's codec arithmetic; it runs the code that
-already has them. `python/narrator` in the BookForge repo is an installable
+PHASE3-TTS.md section 4. Crucible does not reimplement Higgs's frame budget,
+its guard or its codec arithmetic; it runs the code that already has them.
+`python/narrator` in the BookForge repo is an installable
 package whose `serve` entry point loads a voice once and answers sentence
 requests over stdin and stdout, and this file is the client for that wire.
 
@@ -124,9 +124,11 @@ STACK_VARIABLE = "HIGGS_STACK"
 ENV_PREFIX_VARIABLE = "HIGGS_ENV"
 MAX_NUM_SEQS_VARIABLE = "HIGGS_MAX_NUM_SEQS"
 
-#: The narrator engine those three belong to. A set of one, written as a
-#: constant so the refusals below read as a rule rather than as a special case:
-#: `orpheus` loads vLLM 0.7.3 in process and reads no `HIGGS_*` variable.
+#: The narrator engine those three belong to. Written as a constant so the
+#: refusals below read as a rule rather than as a special case: they are the
+#: shape a narrator engine that reads no `HIGGS_*` variable would arrive into,
+#: and since Owen's ruling of 2026-09-14 (`voices.NARRATOR_ENGINE_SAMPLING`)
+#: `higgs-v3` is the only engine Crucible names at all.
 HIGGS_V3 = "higgs-v3"
 
 #: How long `stop()` gives the `quit` action before falling back on SIGTERM.
@@ -198,10 +200,11 @@ class NarratorEngine(SubprocessEngine):
         before the process does names the missing thing instead of leaving a
         reader to find `HIGGS_STACK is not set` at the end of an engine log.
 
-        `serving_stack` is None for `orpheus` and on `mlx-darwin`, where
-        narrator starts no server and reads none of these; see
-        `jobenv.tts_env`. `voices` is None for `orpheus` only: its weights ride
-        the `load` message and it reads no `NARRATOR_HIGGS_*` variable.
+        `serving_stack` is None on `mlx-darwin`, where narrator starts no
+        server and reads none of these, and for any engine with no row in
+        `jobenv.CUDA_LINUX_SERVING_STACK`. `voices` is None for an engine
+        outside `narratorvoices.DOCUMENT_READERS` — one whose weights ride the
+        `load` message and which reads no `NARRATOR_HIGGS_*` variable.
         """
         super().__init__(python=python, log_path=log_path)
         self._narrator_engine = narrator_engine
@@ -221,14 +224,15 @@ class NarratorEngine(SubprocessEngine):
                     "manifest and the pulled weights at every load"
                 )
         elif voices is not None:
-            # A DOCUMENT FOR AN ENGINE THAT READS NONE. `orpheus` takes its
-            # weights on the `load` message and never reads the variable;
-            # handing it one would leave two statements of where the weights
-            # are, one of them read by nothing.
+            # A DOCUMENT FOR AN ENGINE THAT READS NONE. An engine outside
+            # `narratorvoices.DOCUMENT_READERS` takes its weights on the `load`
+            # message and never reads the variable; handing it one would leave
+            # two statements of where the weights are, one of them read by
+            # nothing.
             raise EngineError(
                 f"{self.name} was given a voices document ({voices.path}), but "
-                f"only {HIGGS_V3!r} resolves a voice by name in one; orpheus "
-                "takes its weights on the load message"
+                f"only {HIGGS_V3!r} resolves a voice by name in one; any other "
+                "engine takes its weights on the load message"
             )
         self._voices = voices
         if narrator_engine == HIGGS_V3 and serving_stack is not None:
@@ -267,9 +271,9 @@ class NarratorEngine(SubprocessEngine):
             self._env_prefix: Path | None = root
         elif serving_stack is not None:
             # A STACK ON AN ENGINE THAT HAS NONE. `HIGGS_*` is Higgs v3's
-            # vocabulary; `orpheus` loads vLLM 0.7.3 in process and reads not
-            # one of these names. Silently dropping the value would leave the
-            # env recipe and this file disagreeing about what that env starts.
+            # vocabulary, and an engine that renders in process reads not one
+            # of these names. Silently dropping the value would leave the env
+            # recipe and this file disagreeing about what that env starts.
             raise EngineError(
                 f"{self.name} was given serving_stack={serving_stack!r}, but "
                 f"only {HIGGS_V3!r} starts a server underneath narrator and "
@@ -322,10 +326,10 @@ class NarratorEngine(SubprocessEngine):
 
         `model_dir`, `served_name` and `port` are not on it. The voice travels
         on the `load` message, because narrator is a resident server that
-        switches voices without respawning; the weights travel with it for
-        `orpheus` (`modelDir`) and in the NARRATOR_HIGGS_VOICES document for
-        `higgs-v3` (see `load`); the port is not used at all, and `Residency`
-        finds one anyway for the reason it says there.
+        switches voices without respawning; the weights travel in the
+        NARRATOR_HIGGS_VOICES document for `higgs-v3` (see `load`); the port is
+        not used at all, and `Residency` finds one anyway for the reason it
+        says there.
         """
         return [str(self._python), "-m", MODULE]
 
@@ -340,17 +344,11 @@ class NarratorEngine(SubprocessEngine):
         import), and there is no launch script for `HIGGS_ENV` to mean anything
         to. Setting them there would be three levers read by nothing.
 
-        RULING OWED: WHAT ORPHEUS NEEDS ON `cuda-linux`. BookForge's spawn
-        (`electron/parallel-tts-bridge.ts` + `orpheus-worker-pool.ts`) hands
-        that worker an `ORPHEUS_*` set — the model/adapter directories, the EOS
-        levers, the per-voice caps, `VLLM_USE_V1=0` — and this engine states
-        none of it. It is NOT one variable, so it is not being guessed at
-        tonight: narrator's `serve/worker.py` reads its Orpheus configuration
-        from that environment and from the `load` message's `modelDir` /
-        `adapterDir` / `baseDir` / `caps`, and which of those Crucible owns is
-        the same question `load()` already defers on for `caps`. The first
-        `orpheus` job through Crucible will find it the way the first
-        `higgs-v3` job found this.
+        A SECOND ENGINE WILL OWE ITS OWN SET HERE, and finding it is that
+        engine's first job rather than something guessed in advance: narrator's
+        `serve/worker.py` reads each engine's configuration from the
+        environment and from the `load` message, and which half Crucible owns
+        is the same question `load()` defers on for `caps`.
         """
         environment = {
             ENGINE_VARIABLE: self._narrator_engine,
@@ -634,8 +632,8 @@ class NarratorEngine(SubprocessEngine):
         says the engine underneath it has a voice in memory.
 
         **Where the weights ride depends on the engine, and the message says
-        only what that engine reads.** `orpheus` takes them on the message as
-        `modelDir`. `higgs-v3` REFUSES `modelDir` by name on both arms
+        only what that engine reads.** `higgs-v3` REFUSES `modelDir` by name on
+        both arms
         (`resolve_load_voice`: "the served model is the launch script's
         argument, not a per-load field") and resolves `voice` in the
         NARRATOR_HIGGS_VOICES document this engine was constructed with — so
@@ -646,9 +644,10 @@ class NarratorEngine(SubprocessEngine):
         checks them agree is the difference between one owner and two.
 
         **No `caps` are sent, and that is a decision rather than an omission.**
-        narrator's caps channel is `register_voice_caps`, whose key vocabulary is
-        Orpheus's (`temperature`, `topP`, `minP`, `repPenalty`, the four `eos*`
-        levers, `maxCharsPerSec`) and which **raises on a key it does not know**;
+        narrator's caps channel is `register_voice_caps`, whose key vocabulary
+        is its older engine's (`temperature`, `topP`, `minP`, `repPenalty`, the
+        four `eos*` levers, `maxCharsPerSec`) and which **raises on a key it
+        does not know**;
         `higgs_v3_config_from_worker_kwargs` refuses the whole payload by name.
         A Higgs voice's sampling reaches narrator through the DOCUMENT instead
         (`narratorvoices.voice_entry`, key `sampling`), which is the channel

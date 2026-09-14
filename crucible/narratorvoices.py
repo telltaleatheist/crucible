@@ -54,7 +54,8 @@ catalog's camelCase is the WIRE), and nothing it does not read is written:
     sampling         the backend block's `sampling`, with narrator's key names
                      (`topP`, `topK`). This is the channel PHASE3-TTS.md
                      section 4 said sampling did not have: `register_voice_caps`
-                     is Orpheus's vocabulary, but the DOCUMENT's `sampling` is
+                     speaks narrator's older engine's vocabulary, but the
+                     DOCUMENT's `sampling` is
                      read onto the voice by `load_voices` and applied as the
                      engine's override on both arms (`v3_engine
                      .higgs_v3_config_from_worker_kwargs`, `mlx_backend
@@ -126,9 +127,12 @@ MLX_MODEL_VARIABLE = "NARRATOR_HIGGS3_MLX_MODEL"
 DOCUMENT_NAME = "narrator-higgs-voices.json"
 
 #: The narrator engines that resolve a voice through the document. A set of
-#: one, written as a set so the rule reads as a rule: `orpheus` takes its
-#: weights on the `load` message (`modelDir` / `adapterDir` / `baseDir`) and
-#: reads no `NARRATOR_HIGGS_*` variable at all.
+#: one, written as a set so the rule reads as a rule: an engine outside it
+#: takes its weights on the `load` message (`modelDir` / `adapterDir` /
+#: `baseDir`) and reads no `NARRATOR_HIGGS_*` variable at all. Since Owen's
+#: ruling of 2026-09-14 (`voices.NARRATOR_ENGINE_SAMPLING`) `higgs-v3` is the
+#: only engine Crucible names, so this set and that table happen to agree —
+#: the next engine is what separates them again.
 DOCUMENT_READERS: frozenset[str] = frozenset({"higgs-v3"})
 
 #: Crucible's voice kinds -> narrator's `kind` values. `zeroshot` is absent on

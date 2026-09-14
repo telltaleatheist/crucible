@@ -669,8 +669,8 @@ class Residency:
         # (`Higgs v3 load carried modelDir=...`), because a Higgs voice is a
         # NAME in the NARRATOR_HIGGS_VOICES document and never a directory on
         # the message. Regenerated at every load so it can never name a voice
-        # whose stamp has since moved. `orpheus` reads no document and is
-        # handed none.
+        # whose stamp has since moved. An engine outside `DOCUMENT_READERS`
+        # reads no document and is handed none.
         env_spec = tts_env(manifest.narrator_engine, spec.backend)
         voices = (
             write_document(self._config.home, manifest, spec, weights_dir)

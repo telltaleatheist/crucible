@@ -1,8 +1,8 @@
 """The `denoise` job type: one audio file in, its separated stems out.
 
 PHASE4-AUDIO.md section 4.2. It is the pass BookForge runs over a session's
-rendered sentences to strip the faint room hiss an Orpheus voice reproduces —
-the voices are trained on a deliberate ~-65 dBFS hiss bed, which is load-bearing
+rendered sentences to strip the faint room hiss a fine-tuned voice reproduces —
+those voices are trained on a deliberate ~-65 dBFS hiss bed, which is load-bearing
 for reliable end-of-audio, so every raw render carries a hiss during speech that
 cuts out at the digitally-silent assembly gaps.
 

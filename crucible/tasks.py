@@ -194,17 +194,17 @@ def require_narrator_engine(job_type: str, narrator_engine: str | None) -> None:
     """`tts` must say which engine; everything else must not.
 
     The same rule `crucible install` enforces and for the same reason
-    (`crucible/cli.py`'s `_env_spec`): on `cuda-linux` there are two tts envs,
-    one per narrator engine, because Orpheus pins vllm 0.7.3 and Higgs v3 needs
-    a far later torch. A bare `tts` would build one of them and the operator
-    would not know which.
+    (`crucible/cli.py`'s `_env_spec`): on `cuda-linux` the tts env is named per
+    narrator engine, because two of them cannot share a venv — each pins its
+    own serving stack against its own torch. A bare `tts` would build one of
+    them and the operator would not know which.
     """
     if job_type == "tts":
         if narrator_engine is None:
             raise ApiError(
                 400,
                 "narrator_engine_required",
-                "installing 'tts' needs narrator_engine: on cuda-linux the two "
+                "installing 'tts' needs narrator_engine: on cuda-linux two "
                 "engines cannot share a venv, so there is one env per engine "
                 f"and no default. This build knows "
                 f"{sorted(NARRATOR_ENGINE_SAMPLING)}",
@@ -230,11 +230,11 @@ def env_installed(config: Config, backend: Backend, job_type: str, engine: str |
     """Is this job type's env already built on this host?
 
     **The env, not the `[jobs]` flag.** A flag is one boolean for a whole
-    capability, and `tts` has two envs behind it: with `enable_tts` true because
-    Higgs is installed, asking the flag would refuse an Orpheus install as
-    `job_type_installed` while there is no Orpheus env anywhere on the disk. The
-    env is the thing `install` actually builds, so the env is what decides
-    whether there is anything to do.
+    capability, and `tts` has one env PER NARRATOR ENGINE behind it: with
+    `enable_tts` true because one engine is installed, asking the flag would
+    refuse the next engine's install as `job_type_installed` while there is no
+    env for it anywhere on the disk. The env is the thing `install` actually
+    builds, so the env is what decides whether there is anything to do.
     """
     try:
         if job_type in workerenv.WORKER_JOB_TYPES:

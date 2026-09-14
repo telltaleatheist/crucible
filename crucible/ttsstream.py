@@ -142,17 +142,20 @@ DURATION_TOLERANCE_SECONDS = 0.05
 #: There is no batching parameter on the wire — how many rows the engine runs at
 #: once is engine tuning and belongs to the server — so these are the server's
 #: numbers, and they are BookForge's measured ones rather than invented ones.
-#: `electron/orpheus-worker-pool.ts`'s `flushBatch()` coalesces a 25 ms window
-#: into `min(STREAM_RAMP_WIDTH = 8, streamBatchCeiling())`, where the ceiling is
-#: **16 for Orpheus** and **`HIGGS_STREAM_BATCH_WIDTH = 1`** for Higgs, which was
-#: measured worthless above one at 2.0x realtime (CLIENT-SURFACES.md section
-#: 3.3). So the width actually run in production today is 8 for Orpheus and 1 for
-#: Higgs, and those are the two numbers here. PHASE3-TTS.md section 7's
-#: parenthetical "Orpheus runs 16" names the ceiling rather than the width; the
-#: ramp is the thing that dispatches, and 8 is what it dispatches.
+#: BookForge's worker pool coalesces a 25 ms window into
+#: `min(STREAM_RAMP_WIDTH = 8, streamBatchCeiling())`, and the ceiling is
+#: **`HIGGS_STREAM_BATCH_WIDTH = 1`** for Higgs, which was measured worthless
+#: above one at 2.0x realtime (CLIENT-SURFACES.md section 3.3). So 1 is the
+#: width actually run in production today, and 1 is the number here.
+#:
+#: A TABLE OF ONE, keyed by engine on purpose. Owen's ruling of 2026-09-14
+#: removed `orpheus`, whose measured width was 8 (see
+#: `voices.NARRATOR_ENGINE_SAMPLING`). A second engine adds a row, and
+#: `batch_width_for` refuses one that has not — the width must be MEASURED, and
+#: there is deliberately no default to fall back on.
 #:
 #: The width is also the **cost of a per-row cancel** — see `_abort_for_cancel`.
-STREAM_BATCH_WIDTH = {"higgs-v3": 1, "orpheus": 8}
+STREAM_BATCH_WIDTH = {"higgs-v3": 1}
 
 #: How long a batch waits for more rows before it dispatches what it has.
 #:
@@ -161,9 +164,9 @@ STREAM_BATCH_WIDTH = {"higgs-v3": 1, "orpheus": 8}
 #: row in a batch of its own. The width above would then have been a number that
 #: never happened, and with it the whole cost of a per-row cancel would have
 #: looked free right up until the day it was not. BookForge has the same window
-#: for the same reason and measured it at 25 ms
-#: (`orpheus-worker-pool.ts`'s `flushBatch()`, CLIENT-SURFACES.md section 3.3),
-#: so this is that number rather than a new one.
+#: for the same reason and measured it at 25 ms (its worker pool's
+#: `flushBatch()`, CLIENT-SURFACES.md section 3.3), so this is that number
+#: rather than a new one.
 #:
 #: It costs nothing on `higgs-v3`, where the width is 1 and there is nothing to
 #: coalesce: the wait is skipped entirely rather than added to every sentence's
@@ -175,8 +178,8 @@ def batch_width_for(narrator_engine: str) -> int:
     """`STREAM_BATCH_WIDTH` for this engine, or a refusal naming it.
 
     No default. A narrator engine nobody has measured a width for is an engine
-    whose batching is unknown, and guessing 1 would quietly halve Orpheus's
-    throughput while guessing 16 would quietly multiply a cancel's cost.
+    whose batching is unknown, and a guess is wrong in both directions: too low
+    quietly halves throughput, too high quietly multiplies a cancel's cost.
     """
     width = STREAM_BATCH_WIDTH.get(narrator_engine)
     if width is None:
@@ -822,10 +825,12 @@ class StreamSession:
         - **higgs-v3: exact, and free.** `HIGGS_STREAM_BATCH_WIDTH = 1`
           (CLIENT-SURFACES.md section 3.3, measured worthless above one at 2.0x
           realtime), so the in-flight row IS the batch. Nothing survives to be
-          resubmitted, and this branch never fires.
-        - **orpheus: up to seven other rows lose their progress.** The ramp
-          dispatches eight, so cancelling one in flight throws away whatever the
-          other seven had generated and generates them again from the start.
+          resubmitted, and this branch never fires. It is the only engine in
+          this build (`voices.NARRATOR_ENGINE_SAMPLING`), so the branch is
+          written for the engine after it rather than exercised today.
+        - **A width of N: up to N-1 other rows lose their progress.** The ramp
+          dispatches N, so cancelling one in flight throws away whatever the
+          others had generated and generates them again from the start.
           Measured in rows rather than in seconds, because what a row had done
           when the axe fell is not knowable from here.
 
@@ -1229,9 +1234,10 @@ def require_streamable(manifest: VoiceManifest, backend_kind: str) -> None:
             f"voice {manifest.id!r} declares sampling {spec.sampling} on "
             f"{spec.backend}, which is not the {manifest.narrator_engine} default "
             f"{default}. narrator's only sampling channel is "
-            "`register_voice_caps`, whose key vocabulary is Orpheus's and which "
-            "raises on a key it does not know, so Crucible cannot ask for this "
-            "and will not stream at the default instead (PHASE3-TTS.md section 4)",
+            "`register_voice_caps`, whose key vocabulary is its older engine's "
+            "and which raises on a key it does not know, so Crucible cannot "
+            "ask for this and will not stream at the default instead "
+            "(PHASE3-TTS.md section 4)",
             {"voice": manifest.id, "sampling": spec.sampling, "engine_default": default},
         )
 

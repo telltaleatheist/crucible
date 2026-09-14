@@ -8,15 +8,21 @@
 #
 # WHY THERE IS AN ENV PER NARRATOR ENGINE HERE AND NOT PER BACKEND
 # ----------------------------------------------------------------
-# `llm` has one env per host. `tts` on cuda-linux has two, and the reason is in
-# narrator's dependency matrix rather than in Crucible's design: Orpheus needs
-# `vllm==0.7.3` and Higgs v3 needs `vllm==0.28.0` plus `vllm-omni==0.28.0`
-# against a much later torch. narrator's own pyproject.toml says so in as many
-# words — "Installing any two into one env resolves torch twice and breaks
-# whichever loses" — and its extras are mutually exclusive for exactly that
-# reason. So this file is the `higgs-v3-server` extra and
-# `orpheus-cuda-linux.txt` is the `orpheus` one. On mlx-darwin the two genuinely
-# do share an env, and there is one recipe there.
+# `llm` has one env per host. `tts` on cuda-linux is named per narrator engine,
+# and the reason is in narrator's dependency matrix rather than in Crucible's
+# design: each engine pins its own serving stack against its own torch — this
+# one needs `vllm==0.28.0` plus `vllm-omni==0.28.0`. narrator's own
+# pyproject.toml says so in as many words — "Installing any two into one env
+# resolves torch twice and breaks whichever loses" — and its extras are
+# mutually exclusive for exactly that reason. So this file is the
+# `higgs-v3-server` extra. On mlx-darwin the engines share an env, and there is
+# one recipe there.
+#
+# SINCE 2026-09-14 THIS IS THE ONLY cuda-linux tts RECIPE. Owen's ruling that
+# day removed `orpheus` from the engines Crucible names (see
+# `crucible/voices.py`'s `NARRATOR_ENGINE_SAMPLING`), and
+# `envs/tts/orpheus-cuda-linux.txt` went with it. The per-engine NAMING stays,
+# because the next engine needs its own file here and not an edit to this one.
 #
 # NARRATOR IS PINNED BY GIT SHA, AND THAT IS AN OWED RULING RATHER THAN A HACK
 # ---------------------------------------------------------------------------

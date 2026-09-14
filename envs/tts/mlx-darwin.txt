@@ -1,20 +1,22 @@
-# crucible `tts` env — BOTH narrator engines on mlx-darwin.
+# crucible `tts` env — EVERY narrator engine on mlx-darwin.
 #
-# Installed by `crucible install tts --narrator-engine <higgs-v3|orpheus>` into
+# Installed by `crucible install tts --narrator-engine <engine>` into
 # ~/.crucible/envs/tts/ — one directory, whichever engine is named, because on
-# the Mac the two genuinely do share a stack. `jobenv.tts_env()` resolves both
-# names to this one env and both `crucible doctor` rows carry the same path, so
-# that the sharing is visible rather than implied.
+# the Mac they genuinely do share a stack. `jobenv.tts_env()` resolves every
+# name to this one env and every `crucible doctor` row carries the same path,
+# so that the sharing is visible rather than implied. Since Owen's ruling of
+# 2026-09-14 there is exactly one such engine, `higgs-v3`; the recipe stays
+# named for the BACKEND because that is what it is named for here.
 #
 # Read `higgs-v3-cuda-linux.txt`'s header for why narrator is pinned by a git
 # sha, why only narrator's own exact pins are restated here, and why this is not
 # yet a resolved set.
 #
-# WHY ONE ENV HERE AND TWO ON CUDA-LINUX
-# --------------------------------------
-# narrator's `narrator-mlx` extra was renamed from `orpheus-mlx` on 2026-09-05,
-# when Higgs v3 gained an in-process MLX backend, and narrator's own comment
-# explains the rename exactly: "the group is no longer Orpheus's, it is THE
+# WHY ONE ENV HERE AND ONE PER ENGINE ON CUDA-LINUX
+# -------------------------------------------------
+# narrator's `narrator-mlx` extra is named for the MAC rather than for an
+# engine, in narrator's own words on 2026-09-05, when Higgs v3 gained an
+# in-process MLX backend: "the group is no longer [one engine]'s, it is THE
 # MAC's". Higgs v3 on the Mac shares every one of these pins and adds none —
 # `mlx_audio.tts.models.higgs_audio_v3` and `mlx_audio.codec.models.higgs_audio`
 # are both in mlx-audio 0.4.8, they load the official
@@ -30,12 +32,20 @@
 #   mlx-lm==0.31.3    the batched fast path is version-PINNED, not
 #                     feature-detected (mlx_fastpath refuses below it); 0.31.3 is
 #                     where `GenerationBatch` exists.
-#   mlx-audio==0.4.8  0.5.1 CANNOT RENDER ORPHEUS — `mlx_audio/lm/generate.py`'s
-#                     `_eos_ids` does `set(tokenizer.eos_token_ids)` on an int
-#                     (128009) under transformers 5.x and raises TypeError on
-#                     EVERY generate. 0.3.x drags mlx-lm below the fast-path pin.
-#                     0.4.8 is the one version that works, and it only requires
-#                     mlx>=0.31.1, so it coexists with narrator's mlx floor.
+#   mlx-audio==0.4.8  0.5.1's `mlx_audio/lm/generate.py` `_eos_ids` does
+#                     `set(tokenizer.eos_token_ids)` on an int (128009) under
+#                     transformers 5.x and raises TypeError on EVERY generate.
+#                     0.3.x drags mlx-lm below the fast-path pin. 0.4.8 is the
+#                     one version that works, and it only requires mlx>=0.31.1,
+#                     so it coexists with narrator's mlx floor.
+#                     PIN OWED A RE-MEASUREMENT. The failure above was measured
+#                     on the engine Owen removed on 2026-09-14, and this file
+#                     has never been re-run against 0.5.1 with `higgs-v3`
+#                     alone. The number stays where the measurement put it —
+#                     moving a pin on the strength of a deleted engine would be
+#                     Crucible inventing a pin nobody measured — but whether
+#                     0.4.8 is still the ceiling is an open question for the
+#                     Mac, not a settled one.
 #
 # narrator's remaining Mac requirements are RANGES rather than pins — `mlx>=0.32.0`
 # (for `mx.new_thread_unsafe_stream`, which decode overlap needs; below it the

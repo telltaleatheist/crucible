@@ -145,8 +145,8 @@ NARRATOR_PATCHES: tuple[NarratorPatch, ...] = (
     ),
 )
 
-#: The narrator engine these belong to. Orpheus's env needs neither: they are
-#: both edits to the vllm-omni stack Higgs v3 serves through.
+#: The narrator engine these belong to. They are both edits to the vllm-omni
+#: stack Higgs v3 serves through, so an engine on another stack needs neither.
 PATCHED_ENGINE = "higgs-v3"
 
 

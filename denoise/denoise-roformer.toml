@@ -2,8 +2,8 @@
 #
 # PHASE4-AUDIO.md section 4.2. This is the checkpoint `electron/denoise-bridge.ts`
 # names in one constant (`DENOISE_MODEL`) and calls "the proven denoise model",
-# and it is what strips the faint room hiss an Orpheus voice reproduces because
-# it was trained on a deliberate ~-65 dBFS hiss bed.
+# and it is what strips the faint room hiss a fine-tuned narration voice
+# reproduces because it was trained on a deliberate ~-65 dBFS hiss bed.
 #
 # WHAT IT IS FOR, in the app's own words: one pass over a session's rendered
 # sentences, post-generation and pre-assembly. The app concatenates ~22-minute
