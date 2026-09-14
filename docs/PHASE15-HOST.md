@@ -453,7 +453,7 @@ Presence is a PAIR, `(distro, engine)`, and every value has a name:
 | `engine` | means | title line |
 |---|---|---|
 | `starting` | the boot, or a recovery recipe, is in flight | `Crucible — starting…` |
-| `running` | `GET /v1/ping` answered | `Crucible — running (WSL)` / `Crucible — running (host mode)` |
+| `running` | `GET /v1/ping` answered | `Crucible — running (WSL)` / `Crucible — running (llama-windows)` (section 0's amendment: host mode is a BACKEND, and the title names it) |
 | `stopped` | the ping failed and this down-edge's recovery is spent | `Crucible — stopped` |
 | `failed` | both recipes ran and neither brought it up | `Crucible — engine did not start — open the log` |
 | `installing` | the 4.3 sequence is running | `Crucible — installing…` |
@@ -462,7 +462,8 @@ The recovery recipes are named. With the distro: `user-unit-start`
 (`systemctl --user start crucible` inside it), then `user-bus-restart`
 (`systemctl restart user@1000` as root, through `wsl -d crucible -u root`), in that order, at
 most once per down-edge. In host mode there is one: `host-mode-respawn`, which starts
-`crucible serve` as a child again. `BOOT_WAIT_SECONDS = 30` and `WATCH_SECONDS = 15` are the
+`crucible serve` as a child again (the `llama-windows` server, 3.5 — the host starts and
+stops that process and knows nothing about what it runs). `BOOT_WAIT_SECONDS = 30` and `WATCH_SECONDS = 15` are the
 two numbers 4.1 states, and they are constants with those names.
 
 **The Startup verbs.** `crucible host --install-startup` writes the shortcut and prints its
