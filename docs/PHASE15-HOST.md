@@ -746,3 +746,177 @@ rollout plan already lists (`RunOptions.waitFor`, `hosted_placement_not_vendored
   door, and it opens when there is a reason.
 - Deleting BookForge's legacy local spawn layer (`'local'`, the WSL bridges, ollama's remaining
   doors). That is the in-app-pass deletion already on the rollout plan.
+
+## 7. What was built (server half, 2026-09-14)
+
+Written by the agent that landed sections 2, 3.1–3.4, 3.6–3.8 and the foundation of
+3.10. It says what was measured, what was decided, what deviates from the sections above
+and why, and — for the half that is not built — every fact the next build would otherwise
+derive a second time.
+
+### 7.1 Built and tested
+
+| section | what landed | where |
+|---|---|---|
+| 2 | `[routes]`, `[upstreams.*]`, `Config.adopt` carrying both, `manifest_model_id_slash` | `crucible/config.py`, `crucible/upstreams.py`, `crucible/manifests.py` |
+| 3.1–3.2 | `GET`/`PUT /v1/settings`, `POST /v1/settings/upstreams/{name}/test` | `crucible/settings.py`, `crucible/api.py` |
+| 3.3 | `route` on every capability row; the local sentence kept after routing | `crucible/capability.py`, `crucible/api.py` |
+| 3.4 | chat forwarding to all three upstreams, streaming and not | `crucible/upstreams.py`, `crucible/api.py` |
+| 3.6 | `<CRUCIBLE_HOME>/pairing`, written by `init` and `service install` | `crucible/config.py`, `crucible/cli.py` |
+| 3.7 | the page's Settings panel | `crucible/ui/` |
+| 3.8 | `settings()`, `putSettings()`, `testUpstream()`, `readPairingFile()` | `sdk/ts/src/` |
+| 0, 3.3, 3.5, 3.10 | the `llama-windows` BACKEND, its catalog rows and its capability answer | `crucible/backend.py`, `models/`, `crucible/capability.py` |
+
+**Refusals added, by name.** `route_not_routable`, `route_bad_model`,
+`route_upstream_unconfigured`, `upstream_in_use`, `unknown_upstream`,
+`upstream_bad_field`, `upstream_unconfigured`, `upstream_rejected`,
+`upstream_unreachable`, `upstream_rate_limited`, `lease_not_needed`,
+`manifest_model_id_slash`. Every `PUT /v1/settings` refusal carries `details.field`, the
+dotted path; `upstream_in_use` also carries `details.classes`.
+
+**The exact settings document the fake server produces** (`tests/test_settings_api.py`,
+a 24 GB card with a 3 GiB allowance, nothing configured):
+
+```json
+{
+  "routes": {
+    "clean":     {"route": "local", "model": "qwen3.5-9b"},
+    "translate": {"route": "local", "model": "qwen3.8-27b-4bit"},
+    "simplify":  {"route": "local", "model": "qwen3.8-27b-4bit"},
+    "analysis":  {"route": "local", "model": "qwen3.8-27b-4bit"}
+  },
+  "upstreams": {
+    "anthropic": {"configured": false, "key_hint": null},
+    "openai":    {"configured": false, "key_hint": null},
+    "ollama":    {"configured": false, "url": null}
+  },
+  "desktop_allowance_bytes": 3221225472,
+  "backend_kind": "cuda-linux"
+}
+```
+
+### 7.2 Decisions this build made, and the deviations
+
+- **`X-Crucible-Sampling` gains two source values**, because the header has to stay honest
+  across a hop with no manifest: `dropped` (the request stated `thinking` and this server
+  did not forward it, since none of the three upstreams reads `chat_template_kwargs`) and
+  `upstream default 4096` (Anthropic requires `max_tokens` and the request stated none).
+  The number is in the string so a reader holding one response can see what was sent.
+- **Every non-2xx from an upstream except 429 is `upstream_rejected` (502)**, with the
+  provider's own message and `details.upstream_status`. Section 3.4 spells out the 401;
+  the rest — a model the account cannot reach, an overloaded region — are the same event
+  from this server's side, and multiplying the names would lose nothing and cost a client
+  a table. 429 is passed through with the upstream's own `Retry-After`, never retried.
+- **Capability is recomputed on an ALLOWANCE change too**, not only on a route change
+  (section 2 names the route). The allowance is the other input `decide()` reads, and a
+  write that changed it and left the record alone would leave the rows describing the old
+  reserve.
+- **`settings.recomputed_capability` reads the card's numbers from the RECORD** and the
+  GPU vendor from the live backend. A settings write is not the door that re-measures a
+  card (`crucible capability --write` is, and it needs the host); the vendor is a live
+  host fact, and `cmd_serve` already refuses to start when the detected backend and the
+  recorded one disagree, so the two cannot drift under a running server.
+- **The fit rule on `llama-windows` is AVAILABLE memory, not free VRAM.** Section 3.10
+  says free; `crucible/capability.py`'s rule 2 says total-less-the-allowance, with the
+  reason that a capability decided on a transient is switched off by an open browser.
+  One rule on three backends; the runtime guard still owns "is there room right now" and
+  refuses `insufficient_memory` with the measured figure at load.
+- **A cardless Windows box still lights its rows**, with `cpu build — slow; the model
+  runs on this machine's CPU` appended and the pool called `system memory` rather than
+  `card`. The arithmetic is unchanged: RAM is a real limit, and a 27B in 8 GB does not
+  run slowly, it thrashes.
+- **`qwen3.8-27b-4bit`'s llama-windows file is `UD-Q4_K_M`, not `Q4_K_M`**, because
+  `unsloth/Qwen3.8-27B-GGUF` publishes no plain one — its plain Q4s are `Q4_0` and
+  `Q4_1`, both worse. A row is never guessed; this is the file that exists.
+- **`readPairingFile()` is async**, although it reads one short line. A static
+  `import … from 'node:fs'` in a module `index.ts` re-exports would put fs into the graph
+  of `import {CrucibleClient}`, which the SDK README already forbids for
+  `writeArtifactsTo`; the specifier is assembled at run time exactly as that one is, and
+  a dynamic import is a promise.
+- **`tests/test_ui_mount.py`'s "reaches for another host" guard was narrowed for
+  `app.js`**, not dropped: since 3.7 the page draws a field for an Ollama address and
+  `http://host:11434` in its placeholder is an example shown to a person. Every absolute
+  URL in the script must now sit on a `placeholder:` line; the HTML and the CSS keep the
+  absolute rule, and what the page actually fetches is pinned twice over by the two
+  neighbouring tests.
+
+### 7.3 Measured, and unmeasured
+
+- **UNMEASURED, and deliberately: everything that needs the card.** Owen ruled the GPU
+  off limits while a fine-tune holds it. No `llama-server` has been started by this
+  build, on CPU or CUDA. So: seconds per page under the Q8 GGUF, whether the Q8 answers
+  in `parseDotsPage`'s dialect exactly, and seconds per page under vLLM on the 4090 are
+  all **unmeasured — tested once the GPU is free** (3.10's fact 8 stands unchanged).
+- **The three `llama-windows` `memory_bytes_estimate` figures are DECLARED**, not
+  measured: the GGUF's own size plus 1.5 GB, which is Foundry's `OVERHEAD_GB` and the
+  same number every `[local] needs_bytes` in `models/` declares.
+- **Read from the HuggingFace API on 2026-09-14** (tree API, LFS size):
+  `unsloth/Qwen3.5-9B-GGUF` @ `3885219b6810b007914f3a7950a8d1b469d598a5`,
+  `Qwen3.5-9B-Q8_0.gguf` 9 527 502 048 B;
+  `unsloth/Qwen3.8-27B-GGUF` @ `4ca720788d1e01f1bff70c033e0d0028fd02e502`,
+  `Qwen3.8-27B-UD-Q4_K_M.gguf` 16 464 440 224 B. `dots-ocr` reuses the pin its `[local]`
+  table already carries.
+
+### 7.4 NOT built, and every fact the next build would otherwise derive twice
+
+The `llama-windows` backend EXISTS — kind, detection, catalog rows, capability. What it
+cannot yet do is start a model. Owed, in this order:
+
+1. **The `engine` subject** (3.10, fact 1). `LLAMA_CPP_RELEASE` is to be pinned at
+   **`b10970`** (ggml-org/llama.cpp, published 2026-09-14T20:53:17Z). Its three assets and
+   their sha256, read from the GitHub releases API on 2026-09-14 — the API publishes a
+   `digest` per asset, so these are the release's own checksums and not a local
+   measurement:
+
+   | asset | bytes | sha256 |
+   |---|---|---|
+   | `llama-b10970-bin-win-cuda-12.4-x64.zip` | 254 074 942 | `78c878ae30622a9e4be09e3831066454668ca70398114f23bf74ac814e52dad8` |
+   | `cudart-llama-bin-win-cuda-12.4-x64.zip` | 391 443 627 | `8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6` |
+   | `llama-b10970-bin-win-cpu-x64.zip` | 18 428 751 | `2c6d6516c04e95caa080d8eb917743e71858c73985acbb6739ad61b14e68b298` |
+
+   NVIDIA takes the first two into ONE directory (the server does not start without the
+   cudart DLLs); a cardless machine takes the third. Refusals `engine_download_failed`,
+   `engine_sha_mismatch`.
+2. **`weights.pull` and `weights.installed` must become FILE-AWARE.** This is the one
+   piece of existing machinery that blocks everything else and it is not optional:
+   `pull` calls `snapshot_download` on the whole repo, and `unsloth/Qwen3.8-27B-GGUF`
+   holds every quantization — hundreds of gigabytes. `BackendSpec.files` already exists
+   and is the one owner of "which files does this backend fetch"; `pull` needs it as
+   `allow_patterns` and `installed` needs to require every one of them present, which is
+   also what makes `dots-ocr` report `installed: false` with the text tower and no mmproj
+   (fact 2) and what makes section 3.5's *"the catalog's `installed` list must be exact
+   per subject"* true for the host's weights migration.
+3. **`LlamaServerEngine`**, a `SubprocessEngine` whose `command()` is `llama-server.exe`
+   rather than a Python module. `Residency._engine_args` composes `-m <dir>/<file>`,
+   `--mmproj <dir>/<mmproj>`, `-c <context>` and `--alias <crucible id>` from the spec —
+   only the server knows where it put the weights, which is why the manifest's
+   `engine_args` carries `--parallel 1` and nothing else.
+   **One decision to record here: `--alias <crucible id>`, so `engine_model_name()`
+   returns the Crucible id and the proxy is verbatim.** Fact 4 asks readiness to wait for
+   a `/v1/models` name *ending in* `dots.ocr`; with an alias the check becomes "the name
+   equals the id this server started", which is strictly stricter and generalises to the
+   two text models the same mechanism serves. `pages_engine_wrong_model` keeps its name.
+   `port_in_use` and the fatal-line early exit (`pages_engine_failed`) are unchanged, and
+   **nothing is ever adopted** (fact 5).
+4. **`install llm|pages` on this backend fetches the engine and nothing else**, and
+   `install tts|asr|align|rvc|denoise` is refused `needs_wsl` with
+   `capability.NEEDS_WSL_REASON`, which is already the sentence the capability rows carry.
+5. **`crucible doctor`** prints the `backend: llama-windows on windows/x86_64 — llama.cpp
+   <tag> (cuda-12.4 | cpu)` line; **`/v1/accelerator`** answers from nvidia-smi, or `cpu`
+   with `physical_memory_bytes()` as the figure (already written, in
+   `crucible/backend.py`).
+6. **`main()`'s win32 gate.** Left untouched on purpose: the host agent's branch
+   (`feat/phase15-host`) replaces it with an opt-in `win32_ok` flag, and two edits to one
+   line is a merge conflict for nothing. Widening it is one flag.
+7. **Section 3.5a** (`DELETE /v1/catalog/{kind}/{id}`, `crucible remove`,
+   `removeSubject()`) and **section 4.7** (the `engine` task forwarding to the host's
+   loopback door) — neither started.
+
+### 7.5 Tests
+
+Run under the WSL lock, single files, because a `train_lora.py` run holds the VM:
+`test_settings_api.py` (25), `test_upstream_chat.py` (26), `test_pairing_file.py` (7),
+`test_llama_windows.py` (19), plus `test_ui_mount.py`, `test_manifests.py` and
+`test_capability.py` re-run green after their fixtures learned `route` and `gpu_vendor`.
+**The full suite is owed and is scheduled after the training run** — it was 1234 before
+this work. `sdk/ts`: 257, up from 235.

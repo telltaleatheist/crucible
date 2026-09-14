@@ -209,6 +209,33 @@ which compares the named engines against the recipe files in both directions.
 **Nothing under `~/.crucible` was touched.** The 7.1 GB `tts-orpheus` env on the PC's WSL
 server is the operator's to remove, and this repo does not remove an operator's disk.
 
+**Landed, 2026-09-14: phase 15's SETTINGS HALF — the engine holds the keys**
+(`PHASE15-HOST.md` sections 2, 3.1–3.4, 3.6–3.8, and 3.10's foundation). Owen:
+*"Settings live in the engine and nowhere else … If the user enters an anthropic api key,
+it should pass through to crucible."* `config.toml` gains `[routes]` and
+`[upstreams.*]`; `GET`/`PUT /v1/settings` is the one door that changes them, applied
+whole or not at all, live without a restart, with a key that is write-only and reaches
+no response, log line or activity row. `POST /v1/settings/upstreams/{name}/test` asks the
+provider what it serves, because this server ships no cloud model list. The chat door
+forks on one character — a `model` with a `/` goes to the named upstream, Anthropic
+translated in both directions including a `response_format` schema as one forced tool —
+and it never retries a request that may already be billed. `/v1/capability` rows say
+`route`. The operator page gained a Settings panel that holds nothing, `@crucible/client`
+gained `settings`, `putSettings`, `testUpstream` and `readPairingFile`, and
+`<CRUCIBLE_HOME>/pairing` means an app on the server's own machine never asks anybody to
+type a token.
+
+**And the same day: Windows became a backend.** Owen: *"the windows side should still host
+GPU jobs even if WSL isnt present/workable … just like it runs from the mac side."*
+`llama-windows` is now a backend kind beside `cuda-linux` and `mlx-darwin` —
+`llama-server` on GGUF, detected on win32 with a card or with the machine's RAM, refusing
+nothing — with its catalog rows on the three models whose GGUF is published and a
+capability answer in three parts: the llm classes and `pages` from the GGUF table, the
+five Python job types off with one sentence about WSL, and `echo` always on. What is
+still owed on it is the engine subject and the child: see PHASE15-HOST.md section 7,
+which records the pinned llama.cpp tag, its three asset digests and every decision the
+next build needs so nothing is derived twice.
+
 So what is left is not code. It is **a card, and Owen's rulings on the five things below.**
 
 ### Owed, and only a free card discharges it
