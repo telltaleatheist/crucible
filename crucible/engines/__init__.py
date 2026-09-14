@@ -8,6 +8,7 @@ for a different one.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .base import (
     Engine,
@@ -19,6 +20,9 @@ from .base import (
 from .mlx_lm import MlxLmEngine
 from .narrator import NarratorEngine
 from .vllm import VllmEngine
+
+if TYPE_CHECKING:  # `crucible.narratorvoices` imports this package; no cycle at runtime
+    from ..narratorvoices import VoicesDocument
 
 ENGINES: dict[str, type[SubprocessEngine]] = {
     VllmEngine.name: VllmEngine,
@@ -59,20 +63,24 @@ def build_voice_engine(
     *,
     serving_stack: str | None,
     max_num_seqs: int | None,
+    voices: "VoicesDocument | None",
 ) -> NarratorEngine:
     """The engine that serves a voice. Refuses an engine this build cannot run.
 
     One class for both narrator engines, because from Crucible's side they differ
     only in which env the interpreter comes from, what `NARRATOR_ENGINE` says and
-    — since 2026-09-13 — what the server underneath is configured with.
+    — since 2026-09-13 — what the server underneath is configured with, and
+    — since 2026-09-14 — which document names its voices.
 
-    THE TWO EXTRA FACTS HAVE DIFFERENT OWNERS, which is why they arrive as two
-    arguments rather than one object: `serving_stack` belongs to the ENV RECIPE
-    (`jobenv.tts_env` — vllm-omni on `cuda-linux` because that is what the
-    recipe installs, None where narrator starts no server), `max_num_seqs`
-    belongs to the VOICE MANIFEST (`[voice.serving]`). Both are mandatory
-    keywords: `None` is a real answer and a default would hide a caller that
-    forgot.
+    THE THREE EXTRA FACTS HAVE DIFFERENT OWNERS, which is why they arrive as
+    three arguments rather than one object: `serving_stack` belongs to the ENV
+    RECIPE (`jobenv.tts_env` — vllm-omni on `cuda-linux` because that is what
+    the recipe installs, None where narrator starts no server), `max_num_seqs`
+    belongs to the VOICE MANIFEST (`[voice.serving]`), and `voices` is the
+    document `crucible/narratorvoices.py` wrote from that manifest and the
+    pulled weights for THIS load (None for `orpheus`, which reads none). All
+    are mandatory keywords: `None` is a real answer and a default would hide a
+    caller that forgot.
     """
     if narrator_engine not in NARRATOR_ENGINES:
         raise EngineError(
@@ -85,6 +93,7 @@ def build_voice_engine(
         log_path=log_path,
         serving_stack=serving_stack,
         max_num_seqs=max_num_seqs,
+        voices=voices,
     )
 
 

@@ -392,6 +392,68 @@ def _run_batch(message: dict) -> None:
     send("batch_done")
 
 
+#: Which of narrator's engines this process is standing in for — `--engine` on
+#: the argv, exactly where `FakeNarratorEngine.command()` puts it.
+_engine = ""
+
+
+def _refuse_load_as_narrator_would(message: dict) -> str | None:
+    """narrator's OWN refusals at the `load` message, for the Higgs v3 arms.
+
+    Both are real and both were hit by real renders on 2026-09-14. narrator's
+    `HiggsV3Engine.resolve_load_voice` and `HiggsV3MlxEngine.resolve_load_voice`
+    refuse a `modelDir` by name — the served model is the launch script's
+    argument, the MLX model is the voice document's — and then look the voice
+    up in the JSON document `NARRATOR_HIGGS_VOICES` names, refusing an unset
+    variable, a missing file and an absent voice each by name
+    (`engine/higgs/config.py`: `voices_path`, `load_voice`). The messages are
+    narrator's, near enough that a Crucible-side test asserting on one would
+    also match the real worker's.
+
+    `orpheus` keeps the message it always had: `modelDir` on the load, no
+    document at all.
+    """
+    if _engine != "higgs-v3":
+        return None
+    model_dir = message.get("modelDir")
+    if model_dir:
+        return (
+            f"Higgs v3 load carried modelDir={model_dir!r}. The served model is "
+            "the launch script's argument, not a per-load field."
+        )
+    path = (os.environ.get("NARRATOR_HIGGS_VOICES") or "").strip()
+    if not path:
+        return (
+            "NARRATOR_HIGGS_VOICES is not set. A Higgs voice is reference clips "
+            "plus their book-exact transcripts, which cannot be passed as a "
+            "voice name; point NARRATOR_HIGGS_VOICES at the JSON document that "
+            "defines them."
+        )
+    if not os.path.isfile(path):
+        return f"NARRATOR_HIGGS_VOICES points at {path}, which does not exist."
+    with open(path, "r", encoding="utf-8") as handle:
+        document = json.load(handle)
+    name = (message.get("voice") or "").strip()
+    if name not in document:
+        return (
+            f"Higgs voice '{name}' is not in {path}. It defines: "
+            f"{', '.join(sorted(document))}."
+        )
+    entry = document[name]
+    if entry.get("kind") == "checkpoint" and not entry.get("checkpointDir"):
+        return (
+            f"{path}: voice '{name}' is kind 'checkpoint' with no "
+            "'checkpointDir'. The checkpoint IS the voice - there is nothing to "
+            "serve without it."
+        )
+    if entry.get("kind") == "checkpoint" and entry.get("maxChars") is None:
+        return (
+            f"{path}: voice '{name}' is a fine-tune (kind 'checkpoint') and "
+            "carries no 'maxChars'."
+        )
+    return None
+
+
 def _handle(message: dict) -> bool:
     """Act on one line. Returns False when the process should exit.
 
@@ -402,6 +464,10 @@ def _handle(message: dict) -> bool:
     action = message.get("action")
 
     if action == "load":
+        refusal = _refuse_load_as_narrator_would(message)
+        if refusal is not None:
+            send("error", message=refusal)
+            return True
         send(
             "loaded",
             voice=message.get("voice"),
@@ -459,6 +525,10 @@ def _start_work(target: Callable[[dict], None], message: dict) -> None:
 
 
 def main() -> int:
+    global _engine
+    if "--engine" in sys.argv:
+        _engine = sys.argv[sys.argv.index("--engine") + 1]
+
     exit_code = _env_int("CRUCIBLE_FAKE_EXIT_CODE")
     if exit_code is not None:
         # Before the `ready` line and before reading a byte: an engine that dies during

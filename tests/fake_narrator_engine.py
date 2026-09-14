@@ -22,6 +22,7 @@ import pytest
 
 from crucible import residency as residency_module
 from crucible.engines.narrator import NarratorEngine
+from crucible.narratorvoices import VoicesDocument
 
 FAKE_NARRATOR = Path(__file__).resolve().parent / "fake_narrator.py"
 
@@ -59,6 +60,7 @@ def install(monkeypatch: pytest.MonkeyPatch) -> list[FakeNarratorEngine]:
         *,
         serving_stack: str | None,
         max_num_seqs: int | None,
+        voices: VoicesDocument | None,
     ) -> FakeNarratorEngine:
         # THE SERVER'S OWN CONFIGURATION IS TAKEN AND DROPPED, deliberately.
         # The real `build_voice_engine` would check the interpreter sits in a
@@ -69,12 +71,18 @@ def install(monkeypatch: pytest.MonkeyPatch) -> list[FakeNarratorEngine]:
         # configure is asserted directly in `tests/test_narrator_engine.py`
         # against a real venv-shaped directory. The signature is mirrored so a
         # change to it fails here rather than silently passing a default.
+        #
+        # THE VOICES DOCUMENT IS PASSED THROUGH, because the fake worker reads
+        # it exactly as narrator does: under `--engine higgs-v3` it refuses a
+        # `modelDir` by name and resolves the voice in NARRATOR_HIGGS_VOICES,
+        # so a residency that stopped writing the document would fail here.
         engine = FakeNarratorEngine(
             narrator_engine=narrator_engine,
             python=python,
             log_path=log_path,
             serving_stack=None,
             max_num_seqs=None,
+            voices=voices,
         )
         built.append(engine)
         return engine

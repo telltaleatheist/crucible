@@ -549,6 +549,31 @@ def test_a_render_loads_its_own_voice_and_says_it_is_warming(
     assert health["resident_kind"] == KIND_TTS
 
 
+def test_a_render_writes_the_voices_document_narrator_reads(
+    rendered: Callable[..., list[dict[str, Any]]],
+    home: Path,
+    narrator: list[Any],
+) -> None:
+    """The document is written at the load, from the manifest and the pulled
+    directory, and the engine is told where it is — which is the whole of what
+    Crucible's first real render on either arm was missing (2026-09-14)."""
+    rendered()
+    document = home / "narrator-higgs-voices.json"
+    assert document.is_file()
+    written = json.loads(document.read_text(encoding="utf-8"))
+    assert list(written) == [VOICE]
+    entry = written[VOICE]
+    assert entry["kind"] == "checkpoint"
+    assert entry["checkpointDir"] == str(home / "voices" / VOICE / "cuda-linux")
+    # deathstalker.toml's own numbers, on the wire narrator reads.
+    assert entry["maxChars"] == 800
+    assert entry["safeMinChars"] == 600
+    assert entry["safeMaxChars"] == 800
+    assert entry["sampling"] == {"temperature": 0.8, "topP": 0.95, "topK": 50}
+    assert entry["paceCharsPerSec"] == 16.64
+    assert narrator[0].environment()["NARRATOR_HIGGS_VOICES"] == str(document)
+
+
 def test_a_second_render_does_not_restart_narrator(
     rendered: Callable[..., list[dict[str, Any]]], narrator: list[Any]
 ) -> None:

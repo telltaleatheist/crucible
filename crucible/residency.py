@@ -55,6 +55,7 @@ from .manifests import (
     ModelManifest,
     fingerprint,
 )
+from .narratorvoices import DOCUMENT_READERS, write_document
 from .voices import VoiceBackendSpec, VoiceManifest
 from .workers import WorkerError, WorkerSession
 
@@ -656,13 +657,26 @@ class Residency:
         self._evict(say, manifest.id)
 
         log_path = engine_log_path(self._config.home, manifest.id)
-        # THE SERVER'S OWN CONFIGURATION, from its two owners: the env recipe
+        # THE SERVER'S OWN CONFIGURATION, from its three owners: the env recipe
         # says which serving stack narrator will start (None where it starts
-        # none), the voice manifest says how wide it admits. Both are stated
-        # here rather than left to the engine to find, because narrator refuses
-        # each of them BY NAME and does it before it prints `ready` — the first
-        # real render died that way (HIGGS_STACK is not set, exit 3).
+        # none), the voice manifest says how wide it admits, and the voices
+        # DOCUMENT — written here, now, from that manifest and the pulled
+        # directory — says which weights, which cap and which sampling the
+        # voice is. All three are stated here rather than left to the engine
+        # to find, because narrator refuses each of them BY NAME: the first
+        # real render died on the stack before `ready` (HIGGS_STACK is not
+        # set, exit 3), and the next one died at the load on both arms
+        # (`Higgs v3 load carried modelDir=...`), because a Higgs voice is a
+        # NAME in the NARRATOR_HIGGS_VOICES document and never a directory on
+        # the message. Regenerated at every load so it can never name a voice
+        # whose stamp has since moved. `orpheus` reads no document and is
+        # handed none.
         env_spec = tts_env(manifest.narrator_engine, spec.backend)
+        voices = (
+            write_document(self._config.home, manifest, spec, weights_dir)
+            if manifest.narrator_engine in DOCUMENT_READERS
+            else None
+        )
         engine = build_voice_engine(
             manifest.narrator_engine,
             python,
@@ -672,6 +686,7 @@ class Residency:
                 None if manifest.serving is None
                 else manifest.serving.max_num_seqs
             ),
+            voices=voices,
         )
         # narrator answers no HTTP route, so this port is not a proxy target; it
         # is found and passed for the same reason every other engine's is, so
@@ -825,7 +840,7 @@ class Residency:
         """
         say(f"loading {manifest.id} into narrator from {weights_dir}")
         loaded = engine.load(
-            voice=manifest.id, model_dir=weights_dir, warm=True, on_progress=say
+            voice=manifest.id, weights_dir=weights_dir, warm=True, on_progress=say
         )
         reported = loaded.get("sampleRate")
         if not isinstance(reported, int) or isinstance(reported, bool):

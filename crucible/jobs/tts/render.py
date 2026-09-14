@@ -139,7 +139,7 @@ from ...config import Config
 from ...engines import EngineError, NarratorEngine
 from ...errors import ApiError, JobError
 from ...residency import KIND_TTS, Residency, describe_resident
-from ...voices import NARRATOR_ENGINE_SAMPLING, VoiceError, VoiceManifest
+from ...voices import VoiceError, VoiceManifest
 from .. import asr
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from .common import (
@@ -295,23 +295,16 @@ def _require_renderable(
             {"voice": voice_id, "kind": manifest.kind},
         )
 
-    default = NARRATOR_ENGINE_SAMPLING[manifest.narrator_engine]
-    if spec.sampling != default:
-        # See `NarratorEngine.load` on why no caps are sent. A voice that asks
-        # for sampling other than its engine's default is asking for something
-        # Crucible has no way to deliver at this pin, and rendering it at the
-        # default anyway would be the wrong narrator delivered as a success.
-        raise ApiError(
-            409,
-            "sampling_not_wired",
-            f"voice {voice_id!r} declares sampling {spec.sampling} on "
-            f"{spec.backend}, which is not the {manifest.narrator_engine} "
-            f"default {default}. narrator's only sampling channel is "
-            "`register_voice_caps`, whose key vocabulary is Orpheus's and which "
-            "raises on a key it does not know, so Crucible cannot ask for this "
-            "and will not render at the default instead (PHASE3-TTS.md section 4)",
-            {"voice": voice_id, "sampling": spec.sampling, "engine_default": default},
-        )
+    # TAKE 0's SAMPLING IS THE MANIFEST'S, AND IT REACHES NARRATOR. Not through
+    # `caps` on the load message — that channel is `register_voice_caps`, whose
+    # vocabulary is Orpheus's — but through the NARRATOR_HIGGS_VOICES document
+    # `crucible/narratorvoices.py` writes at every load, whose `sampling` key
+    # narrator's `load_voices` reads onto the voice and both arms apply as the
+    # engine's override. So a voice that deviates from the boson default (with
+    # the written reason `crucible/voices.py` requires) renders at what it
+    # declares, and there is nothing here to refuse. (Until 2026-09-14 this was
+    # a `sampling_not_wired` refusal; it was unreachable with the shipped
+    # manifests and, once the document existed, false.)
 
     try:
         manifest.take(params.take)
@@ -327,16 +320,18 @@ def _require_renderable(
         ) from None
     if params.take != 0:
         # Reachable only for a voice that declares a ladder. No manifest in this
-        # build does, so this is not dead code so much as the second half of the
-        # same refusal above: a rung that exists on paper still needs a channel
-        # to narrator, and there is none.
+        # build does, so this is not dead code so much as a refusal waiting for
+        # its manifest: a rung is PER RENDER, the voices document is written
+        # PER LOAD, and narrator has no per-request sampling channel on
+        # `generate_batch` — so a take above 0 has no way to reach the engine
+        # without a reload, and a reload per take is not a ladder.
         raise ApiError(
             409,
             "sampling_not_wired",
-            f"take {params.take} of {voice_id!r} deviates from the "
-            f"{manifest.narrator_engine} default and Crucible has no channel to "
-            "narrator for it. Take 0 is the engine's own sampling, which is what "
-            "asking for nothing gets (PHASE3-TTS.md section 4)",
+            f"take {params.take} of {voice_id!r} deviates from take 0's sampling "
+            "and Crucible has no per-request channel to narrator for it: the "
+            "voices document carries one sampling per load, and narrator's "
+            "generate_batch takes none (PHASE3-TTS.md section 4)",
             {"voice": voice_id, "take": params.take},
         )
 

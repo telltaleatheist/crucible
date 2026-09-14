@@ -56,10 +56,13 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator
 
 from ..errors import JobCancelled
 from .base import LOG_TAIL_LINES, EngineError, SubprocessEngine
+
+if TYPE_CHECKING:  # `crucible.narratorvoices` imports this package; no cycle at runtime
+    from ..narratorvoices import VoicesDocument
 
 #: How narrator is started. It takes no configuration on the command line — its
 #: whole interface is the protocol on stdin and stdout plus the environment — so
@@ -107,6 +110,16 @@ ENGINE_VARIABLE = "NARRATOR_ENGINE"
 #: launcher as package data as of BookForge 0eeb0267 and runs it when no
 #: override is named; an operator's path into somebody's checkout is exactly
 #: what that commit removed the need for.
+#:
+#: NARRATOR_HIGGS_VOICES (and, on the MLX arm, NARRATOR_HIGGS3_MLX_MODEL) is
+#: the fourth thing a `higgs-v3` worker needs, ON BOTH ARMS, and it is not a
+#: constant here because it is not a value: it is the PATH of a document
+#: Crucible writes at every load, `crucible/narratorvoices.py`, handed to this
+#: engine at construction as `voices`. Crucible's first real render found it
+#: on the served arm and the keeper found it again on the Mac (2026-09-14):
+#: narrator resolves a Higgs v3 voice BY NAME in that document and refuses a
+#: `modelDir` on the `load` message by name, so a worker with no document
+#: cannot load any voice at all.
 STACK_VARIABLE = "HIGGS_STACK"
 ENV_PREFIX_VARIABLE = "HIGGS_ENV"
 MAX_NUM_SEQS_VARIABLE = "HIGGS_MAX_NUM_SEQS"
@@ -165,15 +178,19 @@ class NarratorEngine(SubprocessEngine):
         *,
         serving_stack: str | None,
         max_num_seqs: int | None,
+        voices: VoicesDocument | None,
     ) -> None:
         """`serving_stack` comes from the env spec, `max_num_seqs` from the
-        voice manifest, and for `higgs-v3` BOTH ARE REQUIRED HERE.
+        voice manifest, `voices` from `narratorvoices.write_document`, and for
+        `higgs-v3` ALL THREE ARE REQUIRED HERE — the first two on the served
+        arm, the document on both.
 
-        NEITHER HAS A DEFAULT, keyword-only and mandatory. `None` is a real
-        answer — "narrator starts no server out of this env" — and a default
-        would make FORGETTING to pass one indistinguishable from saying it,
-        which is precisely how a worker ends up spawned without HIGGS_STACK.
-        A caller must state both; `build_voice_engine` is where they come from.
+        NONE HAS A DEFAULT, keyword-only and mandatory. `None` is a real
+        answer — "narrator starts no server out of this env", "this engine
+        reads no document" — and a default would make FORGETTING to pass one
+        indistinguishable from saying it, which is precisely how a worker ends
+        up spawned without HIGGS_STACK. A caller must state all three;
+        `build_voice_engine` is where they come from.
 
         Refused at CONSTRUCTION and not at spawn, because the alternative is a
         worker that starts, reads 8.5 GB off disk and exits 3 before it says
@@ -183,12 +200,37 @@ class NarratorEngine(SubprocessEngine):
 
         `serving_stack` is None for `orpheus` and on `mlx-darwin`, where
         narrator starts no server and reads none of these; see
-        `jobenv.tts_env`.
+        `jobenv.tts_env`. `voices` is None for `orpheus` only: its weights ride
+        the `load` message and it reads no `NARRATOR_HIGGS_*` variable.
         """
         super().__init__(python=python, log_path=log_path)
         self._narrator_engine = narrator_engine
         self._serving_stack = serving_stack
         self._max_num_seqs = max_num_seqs
+        if narrator_engine == HIGGS_V3:
+            if voices is None:
+                # THE DOCUMENT IS HOW A HIGGS VOICE IS NAMED, on both arms.
+                # Without it there is no load this worker could accept, so the
+                # refusal is here and not at the first `load`.
+                raise EngineError(
+                    f"cannot start {self.name} without a voices document: "
+                    "narrator resolves a Higgs v3 voice by name in the "
+                    "NARRATOR_HIGGS_VOICES document and refuses a modelDir on the "
+                    "load message, on the served arm and the MLX arm alike. "
+                    "crucible/narratorvoices.py writes it from the voice "
+                    "manifest and the pulled weights at every load"
+                )
+        elif voices is not None:
+            # A DOCUMENT FOR AN ENGINE THAT READS NONE. `orpheus` takes its
+            # weights on the `load` message and never reads the variable;
+            # handing it one would leave two statements of where the weights
+            # are, one of them read by nothing.
+            raise EngineError(
+                f"{self.name} was given a voices document ({voices.path}), but "
+                f"only {HIGGS_V3!r} resolves a voice by name in one; orpheus "
+                "takes its weights on the load message"
+            )
+        self._voices = voices
         if narrator_engine == HIGGS_V3 and serving_stack is not None:
             # THE SERVED ARM. `serving_stack` set is what "narrator will start a
             # server out of this env" means, and it is the one condition under
@@ -278,10 +320,12 @@ class NarratorEngine(SubprocessEngine):
     ) -> list[str]:
         """`<tts env python> -m narrator.serve`, and nothing else.
 
-        `model_dir`, `served_name` and `port` are not on it. The first two travel
-        on the `load` message instead, because narrator is a resident server that
-        switches voices without respawning; the port is not used at all, and
-        `Residency` finds one anyway for the reason it says there.
+        `model_dir`, `served_name` and `port` are not on it. The voice travels
+        on the `load` message, because narrator is a resident server that
+        switches voices without respawning; the weights travel with it for
+        `orpheus` (`modelDir`) and in the NARRATOR_HIGGS_VOICES document for
+        `higgs-v3` (see `load`); the port is not used at all, and `Residency`
+        finds one anyway for the reason it says there.
         """
         return [str(self._python), "-m", MODULE]
 
@@ -324,6 +368,11 @@ class NarratorEngine(SubprocessEngine):
             environment[STACK_VARIABLE] = self._serving_stack
             environment[ENV_PREFIX_VARIABLE] = str(self._env_prefix)
             environment[MAX_NUM_SEQS_VARIABLE] = str(self._max_num_seqs)
+        if self._voices is not None:
+            # NARRATOR_HIGGS_VOICES on both Higgs arms, plus the MLX arm's base
+            # weights when the document has a voice that loads them. The
+            # document decides which; see `narratorvoices.VoicesDocument`.
+            environment.update(self._voices.environment())
         return environment
 
     def stdio(self, log_handle: Any) -> dict[str, Any]:
@@ -574,7 +623,7 @@ class NarratorEngine(SubprocessEngine):
         self,
         *,
         voice: str,
-        model_dir: Path,
+        weights_dir: Path,
         warm: bool,
         on_progress: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
@@ -584,31 +633,53 @@ class NarratorEngine(SubprocessEngine):
         only that a process is up: `ready` says narrator is listening, `loaded`
         says the engine underneath it has a voice in memory.
 
+        **Where the weights ride depends on the engine, and the message says
+        only what that engine reads.** `orpheus` takes them on the message as
+        `modelDir`. `higgs-v3` REFUSES `modelDir` by name on both arms
+        (`resolve_load_voice`: "the served model is the launch script's
+        argument, not a per-load field") and resolves `voice` in the
+        NARRATOR_HIGGS_VOICES document this engine was constructed with — so
+        the message carries the voice id and `warm`, nothing else, and the
+        document's entry is where `weights_dir` already is, as `checkpointDir`.
+        `weights_dir` is still taken here so the two can be COMPARED: the
+        document and this call are two statements of one fact, and a load that
+        checks them agree is the difference between one owner and two.
+
         **No `caps` are sent, and that is a decision rather than an omission.**
         narrator's caps channel is `register_voice_caps`, whose key vocabulary is
         Orpheus's (`temperature`, `topP`, `minP`, `repPenalty`, the four `eos*`
-        levers, `maxCharsPerSec`) and which **raises on a key it does not know**.
-        Every voice this build ships renders at its narrator engine's own default
-        sampling — `crucible/voices.py` refuses a deviation that carries no
-        written reason, and not one manifest carries either — so take 0 *is* the
-        engine default, and the honest way to ask for the engine default is to
-        register nothing. When a voice does deviate, `crucible/jobs/tts/render.py`
-        refuses it by name instead of sending a payload narrator would reject or,
-        worse, silently translate; PHASE3-TTS.md section 4 records what narrator
-        owes before that can change.
+        levers, `maxCharsPerSec`) and which **raises on a key it does not know**;
+        `higgs_v3_config_from_worker_kwargs` refuses the whole payload by name.
+        A Higgs voice's sampling reaches narrator through the DOCUMENT instead
+        (`narratorvoices.voice_entry`, key `sampling`), which is the channel
+        narrator's `load_voices` reads it from on both arms.
         """
+        request: dict[str, Any] = {
+            "action": "load",
+            "voice": voice,
+            # Explicit, though narrator's own default is true: a first load may
+            # spend time on discarded warm-up renders, and a load-voice job is
+            # an operator's explicit order that would rather pay it here than in
+            # the first chunk of a book.
+            "warm": warm,
+        }
+        if self._voices is None:
+            request["modelDir"] = str(weights_dir)
+        else:
+            # Refused HERE, by name, for a voice the document does not carry or
+            # a directory it does not agree with — narrator would refuse the
+            # first the same way, after the process is up.
+            named = self._voices.weights_for(voice)
+            if named != weights_dir:
+                raise EngineError(
+                    f"{self.name} was asked to load {voice!r} from {weights_dir}, "
+                    f"but {self._voices.path} names {named} for it. The document "
+                    "is what narrator reads; two directories for one voice is a "
+                    "load nobody can vouch for"
+                )
         loaded: dict[str, Any] | None = None
         for message in self.converse(
-            {
-                "action": "load",
-                "voice": voice,
-                "modelDir": str(model_dir),
-                # Explicit, though narrator's own default is true: a first load
-                # may spend time on discarded warm-up renders, and a load-voice
-                # job is an operator's explicit order that would rather pay it
-                # here than in the first chunk of a book.
-                "warm": warm,
-            },
+            request,
             terminal=frozenset({"loaded"}),
             silence_timeout=LOAD_SILENCE_TIMEOUT_SECONDS,
         ):

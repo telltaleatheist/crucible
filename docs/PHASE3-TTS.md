@@ -338,8 +338,9 @@ marker grep.
 It is one class for both narrator engines, because from Crucible's side they differ only in
 which env the interpreter comes from and what `NARRATOR_ENGINE` says; what runs underneath is
 narrator's business and Crucible learns which it got from the `ready` line. The argv is
-`<tts env python> -m narrator.serve` and nothing else — the voice and the weights directory
-ride the `load` message, and the port is not used at all, so **`base_url` refuses** rather
+`<tts env python> -m narrator.serve` and nothing else — the voice rides the `load` message
+(and the weights directory with it for `orpheus`; for `higgs-v3` it is in the voices document
+Crucible writes, see below), and the port is not used at all, so **`base_url` refuses** rather
 than returning a port nothing is listening on.
 
 Four things about it that are decisions rather than details:
@@ -372,33 +373,92 @@ time and a mismatch names both numbers. It is deliberately not a resample: audio
 match a manifest is audio that no longer matches the engine, and nothing downstream would say
 so.
 
-### Sampling does not reach narrator yet, and nothing pretends it does
+### The voices document: Crucible writes what narrator reads (2026-09-14)
 
-**No `caps` are sent on the `load` message.** narrator's sampling channel is
+**A Higgs v3 voice is a NAME, not a directory on the `load` message.** Crucible's first real
+render found this on both arms in one night. On `cuda-linux` the launcher agent read
+`Higgs v3 load carried modelDir='…'. The served model is the launch script's argument, not a
+per-load field` off the engine log; on `mlx-darwin` the keeper got the same refusal from
+`HiggsV3MlxEngine.resolve_load_voice` ("which weights the MLX backend loads comes from the
+voice document … not from a per-load field"). Both arms then resolve `voice` by name in a
+JSON document whose path is **`NARRATOR_HIGGS_VOICES`** (`engine/higgs/config.py`:
+`voices_path` refuses an unset variable, `load_voice` refuses an absent voice, naming the
+ones the file has). Crucible had never written one. Two defects, one cause: the document is
+per-engine tuning — the merged directory the server starts on, the cap, the safe band, the
+pace triple, the sampling — and under BookForge `electron/higgs-models.ts:higgsVoicesDocument`
+writes it per spawn from `higgs-models.json`.
+
+**Under Crucible the one owner of every one of those facts is the voice manifest**, and the
+weights are where `crucible voices pull` put them. So `crucible/narratorvoices.py` is
+`higgsVoicesDocument` for a server that has never heard of BookForge: `Residency.load_voice`
+calls `write_document(home, manifest, spec, weights_dir)` **at every load**, before the engine
+is built, and hands the result to `build_voice_engine(..., voices=)`; `NarratorEngine
+.environment()` then carries `NARRATOR_HIGGS_VOICES=<path>`. One file per server —
+`~/.crucible/narrator-higgs-voices.json` — holding **exactly the voice being loaded**, overwritten
+each time. Per load and not per engine start or per install, because a Higgs v3 voice change
+IS a worker restart, so a load is the one moment the document has to be true, and a document
+listing every installed voice would be a list of claims about stamps nobody re-checked.
+
+The entry, key by key — every one a key narrator's `load_voices` reads, spelled as it reads
+it, and nothing it does not read:
+
+| key | from | note |
+|---|---|---|
+| `kind` | `[voice].kind` | `checkpoint` → `checkpoint`; `token` → **`default`**, narrator's name for the model's own voice |
+| `checkpointDir` | the pulled directory | checkpoint voices only. narrator checks the directory's required files itself at the load message (`checkpoint_serve_target`) |
+| `maxChars` | `[voice.backends.<arm>].max_chars` | characters; the one key narrator refuses a checkpoint without |
+| `targetChars` | `[voice.pace].target_chars` | when declared |
+| `safeMinChars`, `safeMaxChars` | `[voice.pace].safe_*_chars` | when declared; the manifest loader has already refused a band above the cap |
+| `sampling` | `[voice.backends.<arm>].sampling` | as `{temperature, topP, topK}`; `topK` a whole number because narrator refuses `50.0` |
+| `paceCharsPerSec`, `maxCharsPerSec`, `minCharsPerSec` | `[voice.pace]` | the triple narrator's `_length_band` takes all-or-nothing |
+
+Not written, each deliberately (the module docstring says why): `maxCharsSource`, `scene`,
+`allowedControls`, `maxReferenceSeconds`, `clips`, `_overrideNote`.
+
+**The `load` message per engine.** `higgs-v3`: `{"action": "load", "voice": <id>, "warm":
+true}` — nothing else, on both arms; the engine refuses, before sending, a voice the document
+does not carry and a `weights_dir` the document's `checkpointDir` disagrees with (two
+statements of one fact, compared). `orpheus`: `{"action": "load", "voice", "modelDir", "warm"}`,
+byte for byte what it was; it reads no document and is refused one. `tests/fake_narrator.py`
+now makes narrator's own refusals under `--engine higgs-v3` — `modelDir` by name, an unset
+variable, an absent voice — so a residency that stopped writing the document fails in the
+suite rather than on a book.
+
+**Two (voice, arm) pairs are refused by name before any engine starts**, in
+`narratorvoices.voice_entry`:
+
+- `kind = "zeroshot"`, either arm — the same refusal the render door makes as
+  `voice_kind_unsupported`, made at the load door too; section 6 says what narrator owes.
+- `kind = "token"` on `cuda-linux`. narrator's served arm exports `HIGGS_MODEL_DIR` only for a
+  checkpoint voice and **unsets** it otherwise, and its launch script then serves "the base
+  snapshot out of the HF cache" — not the directory Crucible pulled at the pin, so a server
+  started that way would render under a fingerprint naming bytes it never read. On
+  `mlx-darwin` the same voice loads: the base weights come from `NARRATOR_HIGGS3_MLX_MODEL`
+  (`model_dir = checkpoint or model_dir_from_env()`), which the document sets to the pulled
+  directory. **RULING OWED, narrator's side:** a way for the served arm to be told the base
+  directory for a `default` voice. Until then `higgs-default` is a Mac-only smoke voice.
+
+### Sampling reaches narrator through the document — take 0 only
+
+**No `caps` are sent on the `load` message**, still. narrator's caps channel is
 `register_voice_caps`, whose key vocabulary is Orpheus's — `temperature`, `topP`, `minP`,
-`repPenalty`, the four `eos*` levers, `maxCharsPerSec` — with **no `topK` at all**, and which
-*raises* on a key it does not know. A manifest's `sampling = {temperature, top_p, top_k}`
-therefore cannot be handed over: `top_p` alone would raise. (The Higgs engine class has no
-`register_voice_caps` method at all, while `serve/worker.py` calls it unconditionally; that
-is narrator's business rather than Crucible's, but it is a second reason not to send a
-payload here.)
+`repPenalty`, the four `eos*` levers, `maxCharsPerSec` — with **no `topK` at all**, which
+*raises* on a key it does not know, and which `higgs_v3_config_from_worker_kwargs` refuses
+wholesale by name. **The document is the channel that exists**: its `sampling` key is read
+onto the voice by `load_voices` and applied as the engine's override on both arms
+(`v3_engine.higgs_v3_config_from_worker_kwargs` since the pinned 0eeb0267;
+`mlx_backend.higgs_v3_mlx_config_from_worker_kwargs` since 2026-09-06). Every manifest in this
+build states the boson default, so what the document asks for is what the engine would have
+rendered at — **except** on a merged checkpoint whose own `generation_config.json` says
+otherwise, where writing it is what makes take 0 the boson default rather than whatever the
+merge script left in the file. A voice that deviates with its written reason renders at what
+it declares; the take-0 half of `sampling_not_wired` is gone because it had become false.
 
-That costs nothing today and it is checked rather than assumed:
-
-- Every voice in this build renders at its narrator engine's own default sampling —
-  `crucible/voices.py` refuses a deviation carrying no written reason, and not one manifest
-  carries either. So take 0 *is* the engine default, and the honest way to ask for the engine
-  default is to register nothing.
-- Every voice in this build declares exactly one take. `unknown_take` already refuses
-  anything else.
-- A voice that DID deviate, or a take above 0 on a voice that declares a ladder, is refused
-  by name as **`sampling_not_wired`** rather than rendered at the default. That refusal is
-  live and tested; it is simply unreachable with the manifests that ship.
-
-**Owed on narrator's side before the ladder can climb:** a sampling channel on `generate` and
-`generate_batch`, or a caps vocabulary that takes the manifest's own key names. Until then
-the retake ladder is a design that is written down and refused, which is the state this
-document already describes for zero-shot clips.
+What is still refused, and why: **a take above 0** on a voice that declares a ladder. A rung
+is per RENDER; the document is per LOAD; narrator's `generate_batch` takes no sampling. A
+reload per take is not a ladder. **Owed on narrator's side before the ladder can climb:** a
+sampling channel on `generate` / `generate_batch`. `unknown_take` already refuses a rung past
+the end, and no shipped manifest declares one.
 
 ## 5. Residency holds one thing, whatever kind it is
 
@@ -607,7 +667,7 @@ note), `invalid_params`, `ffmpeg_missing`, `backend_unsupported`, `env_missing`,
 | code | what it means |
 |---|---|
 | `voice_kind_unsupported` | the voice is `kind = "zeroshot"`, and narrator's `load` message carries `voice`, `modelDir`, `adapterDir`, `baseDir`, `caps` and `warm` — **and no reference clips**. There is no channel on this wire for the thing a zero-shot voice *is*, and rendering one would mean conditioning on nothing: a whole book in the base model's voice, reported as success. |
-| `sampling_not_wired` | the voice deviates from its engine's default sampling, or the take does. Section 4. |
+| `sampling_not_wired` | the take is above 0. Take 0's sampling reaches narrator through the voices document (section 4), which is written per LOAD; a rung is per RENDER and narrator's `generate_batch` takes no sampling, so a ladder has no channel yet. A voice whose take-0 sampling deviates (with its written reason) is no longer refused — the document carries it. |
 | `unknown_take` | a take past the end of the ladder. Never clamped. |
 | `chunk_too_long` | a chunk longer than the (voice, backend) `max_chars`. **Refused, not re-split**: chunking is the client's (section 1), and a server that quietly cut a chunk in half would return two files where one was asked for. |
 

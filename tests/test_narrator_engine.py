@@ -39,11 +39,32 @@ from crucible.engines.narrator import (
 )
 from crucible.engines.vllm import VllmEngine
 from crucible.errors import JobCancelled
-from crucible.voices import NARRATOR_ENGINE_SAMPLING
+from crucible.narratorvoices import (
+    DOCUMENT_VARIABLE,
+    MLX_MODEL_VARIABLE,
+    VoicesDocument,
+    write_document,
+)
+from crucible.voices import NARRATOR_ENGINE_SAMPLING, parse_voice
 
 from .fake_narrator_engine import FAKE_NARRATOR, FakeNarratorEngine
+from .test_voices import GOOD
 
 BATCH_TERMINAL = frozenset({"batch_done"})
+
+
+def a_document(
+    home: Path, weights: Path, voice_id: str = "deathstalker"
+) -> VoicesDocument:
+    """The voices document a load of `voice_id` from `weights` writes — the
+    real writer on a real manifest, because what a `higgs-v3` engine is
+    constructed with is this and nothing simpler."""
+    manifest = parse_voice(
+        GOOD.replace('id = "probe"', f'id = "{voice_id}"'),
+        Path(f"{voice_id}.toml"),
+        voice_id,
+    )
+    return write_document(home, manifest, manifest.spec("cuda-linux"), weights)
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +91,7 @@ def weights(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def engine(tmp_path: Path) -> Iterator[FakeNarratorEngine]:
+def engine(tmp_path: Path, weights: Path) -> Iterator[FakeNarratorEngine]:
     built = FakeNarratorEngine(
         narrator_engine="higgs-v3",
         python=Path(sys.executable),
@@ -80,6 +101,9 @@ def engine(tmp_path: Path) -> Iterator[FakeNarratorEngine]:
         # variables to configure. They have their own tests below.
         serving_stack=None,
         max_num_seqs=None,
+        # The document IS read, by the fake exactly as by narrator: a load
+        # names a voice in it or is refused.
+        voices=a_document(tmp_path, weights),
     )
     yield built
     try:
@@ -105,6 +129,7 @@ def test_the_argv_is_narrator_serve_and_nothing_else() -> None:
         log_path=Path("/tmp/x.log"),
         serving_stack=None,
         max_num_seqs=None,
+        voices=None,
     )
     assert built.command(Path("/weights"), "owen", 7100, []) == [
         "/opt/env/bin/python",
@@ -137,12 +162,14 @@ def test_a_higgs_worker_is_told_the_stack_the_env_and_the_width(
     them: Crucible's first real `tts` render exited 3 before `ready` with
     `HIGGS_STACK is not set`."""
     python = a_venv(tmp_path)
+    document = a_document(tmp_path, tmp_path / "weights")
     built = build_voice_engine(
         "higgs-v3",
         python,
         tmp_path / "x.log",
         serving_stack="vllm-omni",
         max_num_seqs=16,
+        voices=document,
     )
     environment = built.environment()
     assert environment[ENGINE_VARIABLE] == "higgs-v3"
@@ -150,6 +177,39 @@ def test_a_higgs_worker_is_told_the_stack_the_env_and_the_width(
     assert environment[STACK_VARIABLE] == "vllm-omni"
     assert environment[ENV_PREFIX_VARIABLE] == str(python.parent.parent)
     assert environment[MAX_NUM_SEQS_VARIABLE] == "16"
+    # The fourth thing, on both arms: where narrator resolves the voice.
+    assert environment[DOCUMENT_VARIABLE] == str(document.path)
+    # And NOT the MLX arm's base weights: a checkpoint voice never reads them.
+    assert MLX_MODEL_VARIABLE not in environment
+
+
+def test_a_higgs_worker_without_a_document_is_refused_by_name(
+    tmp_path: Path,
+) -> None:
+    """The keeper's finding on the Mac and the launcher's on the PC, one
+    refusal: narrator resolves a Higgs v3 voice by name in the
+    NARRATOR_HIGGS_VOICES document, on both arms, so an engine with none can
+    load nothing — and says so before a process exists."""
+    python = a_venv(tmp_path)
+    for stack in ("vllm-omni", None):
+        with pytest.raises(EngineError) as caught:
+            build_voice_engine(
+                "higgs-v3", python, tmp_path / "x.log",
+                serving_stack=stack, max_num_seqs=16, voices=None)
+        assert DOCUMENT_VARIABLE in str(caught.value)
+        assert "narratorvoices" in str(caught.value)
+
+
+def test_a_document_for_orpheus_is_refused_by_name(tmp_path: Path) -> None:
+    """orpheus takes its weights on the load message and reads no
+    NARRATOR_HIGGS_* variable; a document handed to it is a statement of where
+    the weights are that nothing reads."""
+    with pytest.raises(EngineError) as caught:
+        build_voice_engine(
+            "orpheus", a_venv(tmp_path, "tts-orpheus"), tmp_path / "x.log",
+            serving_stack=None, max_num_seqs=None,
+            voices=a_document(tmp_path, tmp_path / "weights"))
+    assert "orpheus takes its weights on the load message" in str(caught.value)
 
 
 def test_the_width_is_a_string_because_an_environment_holds_strings(
@@ -157,7 +217,8 @@ def test_the_width_is_a_string_because_an_environment_holds_strings(
 ) -> None:
     built = build_voice_engine(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
-        serving_stack="vllm-omni", max_num_seqs=16)
+        serving_stack="vllm-omni", max_num_seqs=16,
+        voices=a_document(tmp_path, tmp_path / "weights"))
     for name, value in built.environment().items():
         assert isinstance(value, str), name
 
@@ -166,7 +227,8 @@ def test_a_higgs_worker_with_no_width_is_refused_by_name(tmp_path: Path) -> None
     with pytest.raises(EngineError) as caught:
         build_voice_engine(
             "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
-            serving_stack="vllm-omni", max_num_seqs=None)
+            serving_stack="vllm-omni", max_num_seqs=None,
+            voices=a_document(tmp_path, tmp_path / "weights"))
     assert MAX_NUM_SEQS_VARIABLE in str(caught.value)
     assert "[voice.serving]" in str(caught.value)
 
@@ -175,7 +237,8 @@ def test_a_width_below_one_is_refused(tmp_path: Path) -> None:
     with pytest.raises(EngineError) as caught:
         build_voice_engine(
             "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
-            serving_stack="vllm-omni", max_num_seqs=0)
+            serving_stack="vllm-omni", max_num_seqs=0,
+            voices=a_document(tmp_path, tmp_path / "weights"))
     assert "at least 1" in str(caught.value)
 
 
@@ -189,7 +252,8 @@ def test_an_interpreter_that_is_not_in_a_venv_is_refused(tmp_path: Path) -> None
     with pytest.raises(EngineError) as caught:
         build_voice_engine(
             "higgs-v3", stray, tmp_path / "x.log",
-            serving_stack="vllm-omni", max_num_seqs=16)
+            serving_stack="vllm-omni", max_num_seqs=16,
+            voices=a_document(tmp_path, tmp_path / "weights"))
     assert ENV_PREFIX_VARIABLE in str(caught.value)
     assert "pyvenv.cfg" in str(caught.value)
 
@@ -199,15 +263,23 @@ def test_an_arm_that_starts_no_server_is_told_none_of_the_three(
 ) -> None:
     """`mlx-darwin` renders in process (`HiggsV3MlxEngine` reads neither
     HIGGS_STACK nor HIGGS_MAX_NUM_SEQS) and `orpheus` loads vLLM 0.7.3 itself.
-    Three levers read by nothing is how a Mac spawn ends up looking served."""
+    Three levers read by nothing is how a Mac spawn ends up looking served.
+
+    The DOCUMENT is not one of the three: the MLX arm reads it exactly as the
+    served arm does, which is what the keeper found on the Mac."""
     for engine_id in ("higgs-v3", "orpheus"):
+        document = (
+            a_document(tmp_path, tmp_path / "weights") if engine_id == "higgs-v3"
+            else None
+        )
         built = build_voice_engine(
             engine_id, a_venv(tmp_path, f"tts-{engine_id}"), tmp_path / "x.log",
-            serving_stack=None, max_num_seqs=16)
+            serving_stack=None, max_num_seqs=16, voices=document)
         environment = built.environment()
         assert environment[ENGINE_VARIABLE] == engine_id
         for name in (STACK_VARIABLE, ENV_PREFIX_VARIABLE, MAX_NUM_SEQS_VARIABLE):
             assert name not in environment, (engine_id, name)
+        assert (DOCUMENT_VARIABLE in environment) == (document is not None)
 
 
 def test_a_stack_on_an_engine_that_has_none_is_refused(tmp_path: Path) -> None:
@@ -217,26 +289,38 @@ def test_a_stack_on_an_engine_that_has_none_is_refused(tmp_path: Path) -> None:
     with pytest.raises(EngineError) as caught:
         build_voice_engine(
             "orpheus", a_venv(tmp_path, "tts-orpheus"), tmp_path / "x.log",
-            serving_stack="vllm-omni", max_num_seqs=16)
+            serving_stack="vllm-omni", max_num_seqs=16, voices=None)
     assert "serving_stack='vllm-omni'" in str(caught.value)
 
 
-def test_the_two_facts_have_no_defaults(tmp_path: Path) -> None:
+def test_the_three_facts_have_no_defaults(tmp_path: Path) -> None:
     """A default would make FORGETTING to pass one indistinguishable from
     saying `None`, which is exactly how a worker is spawned without
-    HIGGS_STACK."""
+    HIGGS_STACK — or, since 2026-09-14, without a voices document."""
+    python = a_venv(tmp_path)
     with pytest.raises(TypeError):
         NarratorEngine(  # type: ignore[call-arg]
             narrator_engine="higgs-v3",
-            python=a_venv(tmp_path),
+            python=python,
             log_path=tmp_path / "x.log",
+        )
+    with pytest.raises(TypeError):
+        NarratorEngine(  # type: ignore[call-arg]
+            narrator_engine="higgs-v3",
+            python=python,
+            log_path=tmp_path / "x.log",
+            serving_stack=None,
+            max_num_seqs=None,
         )
 
 
-def test_the_engine_id_is_in_the_name_so_a_refusal_says_which() -> None:
+def test_the_engine_id_is_in_the_name_so_a_refusal_says_which(
+    tmp_path: Path,
+) -> None:
     built = build_voice_engine(
         "higgs-v3", Path(sys.executable), Path("/tmp/x.log"),
-        serving_stack=None, max_num_seqs=None)
+        serving_stack=None, max_num_seqs=None,
+        voices=a_document(tmp_path, tmp_path / "weights"))
     assert built.name == "narrator (higgs-v3)"
     assert built.narrator_engine == "higgs-v3"
 
@@ -245,7 +329,7 @@ def test_an_engine_this_build_cannot_start_is_refused_by_name() -> None:
     with pytest.raises(EngineError) as caught:
         build_voice_engine(
             "higgs-v2", Path(sys.executable), Path("/tmp/x.log"),
-            serving_stack=None, max_num_seqs=None)
+            serving_stack=None, max_num_seqs=None, voices=None)
     assert "unknown narrator engine 'higgs-v2'" in str(caught.value)
     assert "['higgs-v3', 'orpheus']" in str(caught.value)
 
@@ -353,23 +437,126 @@ def test_a_load_sends_narrators_own_message_and_returns_its_answer(
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_TRANSCRIPT", str(transcript))
     up(engine, weights)
-    loaded = engine.load(voice="deathstalker", model_dir=weights, warm=True)
+    loaded = engine.load(voice="deathstalker", weights_dir=weights, warm=True)
     assert loaded["type"] == "loaded"
     assert loaded["sampleRate"] == 24_000
 
     sent = transcript.read_text(encoding="utf-8").splitlines()
     assert len(sent) == 1
     message = json.loads(sent[0])
+    # THE VOICE ID AND `warm`, NOTHING ELSE. A `higgs-v3` load names a voice
+    # in the NARRATOR_HIGGS_VOICES document; narrator refuses `modelDir` by
+    # name on both arms (the launcher agent's finding on the PC and the
+    # keeper's on the Mac, 2026-09-14), and the weights are the document's
+    # `checkpointDir`.
     assert message == {
         "action": "load",
         "voice": "deathstalker",
+        "warm": True,
+    }
+    assert "modelDir" not in message
+    # No `caps`. See `NarratorEngine.load` on why that is a decision: narrator's
+    # caps channel raises on a key it does not know; a Higgs voice's sampling
+    # rides in the document instead.
+    assert "caps" not in message
+
+
+def test_an_orpheus_load_carries_the_weights_on_the_message(
+    tmp_path: Path,
+    weights: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """orpheus takes `modelDir` on the load and has no document — the shape it
+    always had, kept byte for byte."""
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_TRANSCRIPT", str(transcript))
+    built = FakeNarratorEngine(
+        narrator_engine="orpheus",
+        python=Path(sys.executable),
+        log_path=tmp_path / "engine-owen.log",
+        serving_stack=None,
+        max_num_seqs=None,
+        voices=None,
+    )
+    try:
+        up(built, weights)
+        built.load(voice="owen", weights_dir=weights, warm=True)
+    finally:
+        built.stop()
+    message = json.loads(transcript.read_text(encoding="utf-8").splitlines()[0])
+    assert message == {
+        "action": "load",
+        "voice": "owen",
         "modelDir": str(weights),
         "warm": True,
     }
-    # No `caps`. See `NarratorEngine.load` on why that is a decision: narrator's
-    # caps channel raises on a key it does not know, and take 0 IS the engine
-    # default, which is what registering nothing asks for.
-    assert "caps" not in message
+
+
+def test_a_voice_the_document_does_not_carry_is_refused_before_it_is_sent(
+    engine: FakeNarratorEngine,
+    weights: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """narrator's own refusal, made on this side of the pipe: a load for a voice
+    the document does not carry names the file and the voices it does carry."""
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_TRANSCRIPT", str(transcript))
+    up(engine, weights)
+    with pytest.raises(EngineError) as caught:
+        engine.load(voice="sigma", weights_dir=weights, warm=True)
+    assert "carries no voice 'sigma'" in str(caught.value)
+    assert "['deathstalker']" in str(caught.value)
+    assert not transcript.exists()
+
+
+def test_a_directory_the_document_disagrees_with_is_refused(
+    engine: FakeNarratorEngine,
+    weights: Path,
+    tmp_path: Path,
+) -> None:
+    """Two statements of where the weights are, compared rather than trusted."""
+    up(engine, weights)
+    with pytest.raises(EngineError) as caught:
+        engine.load(
+            voice="deathstalker", weights_dir=tmp_path / "elsewhere", warm=True
+        )
+    assert "two directories for one voice" in str(caught.value)
+
+
+def test_the_fake_worker_refuses_a_model_dir_exactly_as_narrator_does(
+    tmp_path: Path,
+    weights: Path,
+) -> None:
+    """The test double is only worth having if it fails the way the real thing
+    failed. Send it the OLD message shape over the real pipes and it must
+    refuse with narrator's words — which is the line the launcher agent read
+    off the PC's engine log on 2026-09-14."""
+    built = FakeNarratorEngine(
+        narrator_engine="higgs-v3",
+        python=Path(sys.executable),
+        log_path=tmp_path / "engine-deathstalker.log",
+        serving_stack=None,
+        max_num_seqs=None,
+        voices=a_document(tmp_path, weights),
+    )
+    try:
+        up(built, weights)
+        with pytest.raises(EngineError) as caught:
+            for _ in built.converse(
+                {
+                    "action": "load",
+                    "voice": "deathstalker",
+                    "modelDir": str(weights),
+                    "warm": True,
+                },
+                terminal=frozenset({"loaded"}),
+                silence_timeout=10.0,
+            ):
+                pass
+        assert "Higgs v3 load carried modelDir=" in str(caught.value)
+    finally:
+        built.stop()
 
 
 def test_rows_retire_out_of_order_and_nothing_reorders_them(
@@ -381,7 +568,7 @@ def test_rows_retire_out_of_order_and_nothing_reorders_them(
     quietly make it right: the iterator is arrival order, and `i` is the identity.
     """
     up(engine, weights)
-    engine.load(voice="deathstalker", model_dir=weights, warm=True)
+    engine.load(voice="deathstalker", weights_dir=weights, warm=True)
     indices = [
         message["i"]
         for message in engine.converse(
@@ -404,7 +591,7 @@ def test_a_failed_row_arrives_beside_its_successful_neighbours(
 ) -> None:
     monkeypatch.setenv("CRUCIBLE_FAKE_FAIL_ROW", "1")
     up(engine, weights)
-    engine.load(voice="deathstalker", model_dir=weights, warm=True)
+    engine.load(voice="deathstalker", weights_dir=weights, warm=True)
     rows = {
         message["i"]: message
         for message in engine.converse(
@@ -459,7 +646,7 @@ def test_a_cancel_is_sent_and_the_run_is_reported_as_cancelled(
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_TRANSCRIPT", str(transcript))
     up(engine, weights)
-    engine.load(voice="deathstalker", model_dir=weights, warm=True)
+    engine.load(voice="deathstalker", weights_dir=weights, warm=True)
     with pytest.raises(JobCancelled):
         for _ in engine.converse(
             {
@@ -507,6 +694,7 @@ def test_a_line_on_stdout_that_is_not_a_message_is_a_refusal_naming_it(
         # three HIGGS_* variables have nothing to configure.
         serving_stack=None,
         max_num_seqs=None,
+        voices=a_document(tmp_path, tmp_path / "weights"),
     )
     try:
         built.start(weights, "deathstalker", 0, [])
@@ -612,6 +800,7 @@ def test_a_worker_that_will_not_go_is_reported_and_never_sigkilled(
         # three HIGGS_* variables have nothing to configure.
         serving_stack=None,
         max_num_seqs=None,
+        voices=a_document(tmp_path, tmp_path / "weights"),
     )
     built.start(weights, "deathstalker", 0, [])
     built.ready(30.0)
@@ -663,6 +852,7 @@ def test_stopping_a_worker_that_ignores_sigterm_does_not_wedge_the_server(
         # three HIGGS_* variables have nothing to configure.
         serving_stack=None,
         max_num_seqs=None,
+        voices=a_document(tmp_path, tmp_path / "weights"),
     )
     built.start(weights, "deathstalker", 0, [])
     built.ready(30.0)
