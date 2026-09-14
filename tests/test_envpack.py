@@ -117,9 +117,21 @@ def test_the_server_pack_lands_beside_the_envs_not_inside_them() -> None:
     )
 
 
-def test_every_pack_is_ten_rows_across_two_backends() -> None:
+def test_every_pack_is_eleven_rows_across_three_backends() -> None:
+    """Ten was right until PHASE15 4.4 added the `host` pack.
+
+    The eleventh row is `("host", "llama-windows")`, and it is ONE row rather
+    than a set of them because that backend's engine is `llama-server` over
+    GGUF (3.10) — a binary Crucible spawns, not a pip env it installs — so
+    there are no job-type recipes for it to publish. `scripts/release.sh` and
+    `envpacks.yml` both read `every_pack()`, so this count is what notices a
+    backend that silently stopped publishing something.
+    """
     rows = envpack.every_pack()
-    assert len(rows) == len(set(rows)) == 10
+    assert len(rows) == len(set(rows)) == 11
+    assert ("host", "llama-windows") in rows
+    windows = [row for row in rows if row[1] == "llama-windows"]
+    assert windows == [("host", "llama-windows")]
 
 
 def test_a_pack_nobody_publishes_is_refused_by_name() -> None:
@@ -143,6 +155,176 @@ def test_the_pinned_interpreter_is_one_place_per_backend() -> None:
         assert "install_only" in pin.asset
     assert "x86_64-unknown-linux-gnu" in envpack.STANDALONE_PYTHON["cuda-linux"].asset
     assert "aarch64-apple-darwin" in envpack.STANDALONE_PYTHON["mlx-darwin"].asset
+    assert "x86_64-pc-windows-msvc" in envpack.STANDALONE_PYTHON["llama-windows"].asset
+
+
+# --------------------------------------------------- the Windows host pack
+
+
+def test_the_windows_pin_is_the_asset_that_exists_and_carries_no_shared_infix() -> None:
+    """A REGRESSION PIN ON PHASE15 4.4's OWN CORRECTION.
+
+    The doc first wrote the Windows interpreter as
+    `x86_64-pc-windows-msvc-SHARED-install_only` and then corrected itself
+    from the release's `SHA256SUMS`: there is no such asset on 20260901, the
+    `-shared` infix is retired, and the Windows `install_only` build IS the
+    shared one. A pin nobody can download fails on the `windows-latest`
+    runner and nowhere else, hours after the tag, so the spelling is asserted
+    here where it costs a second.
+    """
+    pin = envpack.STANDALONE_PYTHON[envpack.LLAMA_WINDOWS]
+    assert pin.asset == (
+        "cpython-3.11.16+20260901-x86_64-pc-windows-msvc-install_only.tar.gz"
+    )
+    assert pin.sha256 == (
+        "6be524fa6752af802146a4adc7d098565425b0b1c166e19a5a7a4c8cccb86bf6"
+    )
+    assert "-shared" not in pin.asset
+    # Same release and same CPython as the two backends: the host pack runs
+    # the same server code, so a different 3.11 would resolve a different set.
+    assert pin.release == envpack.STANDALONE_PYTHON["cuda-linux"].release
+    assert pin.python_version == envpack.STANDALONE_PYTHON["cuda-linux"].python_version
+
+
+@pytest.mark.parametrize("arch", ["AMD64", "x86_64"])
+def test_a_windows_machine_builds_the_host_pack(
+    monkeypatch: pytest.MonkeyPatch, arch: str
+) -> None:
+    """Both spellings, because both are seen.
+
+    `platform.machine()` reads the registry on Windows and says `AMD64`;
+    every other tool in this system says `x86_64` for the same silicon, and a
+    build that answered `pack_not_buildable_here` on a perfectly good runner
+    because of the case of four letters would be a very long afternoon.
+
+    The platform is INJECTED rather than skipped: this suite runs in WSL, and
+    a test that skips its subject is not a test of it (PHASE15 4.5).
+    """
+    monkeypatch.setattr(envpack.sys, "platform", "win32")
+    monkeypatch.setattr(envpack.platform, "machine", lambda: arch)
+    assert envpack.build_backend_kind() == envpack.LLAMA_WINDOWS
+
+
+def test_arm_windows_builds_nothing_and_the_refusal_names_all_three_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """There is no `aarch64-pc-windows` pin and no runner, so it is refused.
+
+    The refusal must NOT say "Windows is never a backend" any more, and that
+    is not a loosened assertion: PHASE15 section 0's amendment makes Windows
+    the `llama-windows` backend, so the old sentence became false. A refusal
+    that told an ARM Windows reader "Windows builds nothing" while an x86_64
+    Windows machine builds the host pack is a refusal that sends them to the
+    wrong question.
+    """
+    monkeypatch.setattr(envpack.sys, "platform", "win32")
+    monkeypatch.setattr(envpack.platform, "machine", lambda: "ARM64")
+    with pytest.raises(PackError) as caught:
+        envpack.build_backend_kind()
+    assert caught.value.code == "pack_not_buildable_here"
+    assert "never a backend" not in caught.value.message
+    for backend_kind in ("cuda-linux", "mlx-darwin", "llama-windows"):
+        assert backend_kind in caught.value.message
+    assert "win32/ARM64" in caught.value.message
+
+
+def test_llama_windows_publishes_the_host_pack_and_nothing_else() -> None:
+    """No job-type packs, because that backend's engine is not a pip env.
+
+    `llama-windows` serves its llm classes and `pages` from `llama-server`
+    children over GGUF (PHASE15 3.10) — a binary Crucible spawns, not
+    something pip installs — and the Python job types need WSL2 there and say
+    so. So there is nothing for an `envs/<type>/llama-windows.txt` to hold.
+
+    And the traffic goes both ways — `host` must not appear on the two POSIX
+    backends, or `crucible envpack list` would offer a Linux runner a pack
+    with a tray in it.
+    """
+    assert set(envpack.pack_targets(envpack.LLAMA_WINDOWS)) == {"host"}
+    assert "host" not in envpack.pack_targets("cuda-linux")
+    assert "host" not in envpack.pack_targets("mlx-darwin")
+
+
+def test_the_host_pack_is_built_from_pyproject_and_smoke_tested_by_running() -> None:
+    target = envpack.pack_target("host", envpack.LLAMA_WINDOWS)
+    assert target.recipe.name == "pyproject.toml"
+    assert target.job_type is None
+    # Like `server`: the thing most likely to be broken is the `.cmd` shim
+    # that replaces pip's unrelocatable `.exe`, and an import would not touch
+    # it.
+    assert target.smoke_import is None
+
+
+def test_asking_llama_windows_for_the_server_pack_names_what_it_does_publish() -> None:
+    with pytest.raises(PackError) as caught:
+        envpack.pack_target("server", envpack.LLAMA_WINDOWS)
+    assert caught.value.code == "pack_unknown"
+    assert "'host'" in caught.value.message
+
+
+def test_the_host_pack_lands_beside_the_server_rather_than_under_envs() -> None:
+    """`%LOCALAPPDATA%\\Crucible\\host\\` (PHASE15 4.4), and `<home>/host` here.
+
+    Not under `envs/`, where `crucible doctor` reads every directory as a job
+    env and would report the tray as a broken one.
+    """
+    home = Path("/h")
+    assert (
+        envpack.pack_target("host", envpack.LLAMA_WINDOWS).env_dir(home) == home / "host"
+    )
+
+
+def test_the_host_packs_archive_follows_the_one_naming_rule() -> None:
+    """NO SPECIAL CASE, and the backend's name is why there needs to be none.
+
+    Section 1's rule is `crucible-env-<name>-<backend>-<version>.tar.zst` and
+    `pack_filename` is the one place that states it. An earlier draft called
+    this backend `host-windows`, which made the asset
+    `crucible-env-host-host-windows-…` and put the naming rule at odds with
+    4.4's own sentence — the kind of disagreement that gets settled with a
+    special case in the one function whose whole job is to state the rule,
+    and then has to be mirrored byte-for-byte in
+    `sdk/bootstrap/src/envpacks.ts`'s `packAssetName` or `install.ps1`
+    downloads a 404. Renaming the backend to `llama-windows` (PHASE15 section
+    0) dissolved it: the asset falls straight out of the rule.
+    """
+    assert (
+        envpack.pack_filename("host", "llama-windows", "0.6.0")
+        == "crucible-env-host-llama-windows-0.6.0.tar.zst"
+    )
+    assert envpack.pack_target("host", envpack.LLAMA_WINDOWS).archive_name(
+        "0.6.0"
+    ) == envpack.pack_filename("host", "llama-windows", "0.6.0")
+
+
+def test_pack_python_knows_each_layout_and_refuses_one_it_does_not() -> None:
+    """THE reason `pack_python` is public (PHASE15 4.4).
+
+    python-build-standalone's Windows `install_only` tree is `python.exe`,
+    `pythonw.exe`, `Scripts\\`, `Lib\\`, `DLLs\\` — there is no `bin/` at all.
+    Three call sites spelling `bin/python` inline would be three places that
+    have to learn this and two that will not.
+    """
+    root = Path("/p")
+    assert envpack.pack_python(root, "cuda-linux") == root / "bin" / "python"
+    assert envpack.pack_python(root, "mlx-darwin") == root / "bin" / "python"
+    assert envpack.pack_python(root, envpack.LLAMA_WINDOWS) == root / "python.exe"
+    with pytest.raises(PackError) as caught:
+        envpack.pack_python(root, "rocm-linux")
+    assert caught.value.code == "pack_not_buildable_here"
+
+
+def test_the_tray_packages_are_named_once_and_are_not_wheel_dependencies() -> None:
+    """Why they are here and not in `pyproject.toml`.
+
+    `pyproject.toml` is what EVERY pack's server half is built from, so a
+    tray dependency there would make every Linux and Mac server download and
+    carry a GUI toolkit it can never open a window with.
+    """
+    assert envpack.HOST_EXTRA_PACKAGES == ("pystray", "pillow")
+    pyproject = (envpack.repo_root() / "pyproject.toml").read_text(encoding="utf-8")
+    for package in envpack.HOST_EXTRA_PACKAGES:
+        assert package not in pyproject
 
 
 # ---------------------------------------------------------------- manifests
@@ -793,6 +975,282 @@ def test_a_relocated_script_actually_runs_from_somewhere_else(
     )
     assert completed.returncode == 0, completed.stderr
     assert str(moved / "bin" / "crucible") in completed.stdout
+
+
+# ------------------------------------------------------- the Windows .cmd shim
+
+
+def fake_windows_pack(
+    tmp_path: Path, *, entry_points: str, scripts: tuple[str, ...] = ("crucible",)
+) -> Path:
+    """The SHAPE of a built Windows pack, without the 200 MB pip run.
+
+    python-build-standalone's Windows `install_only` tree plus what pip leaves
+    in it: `python.exe` at the root, an `.exe` launcher per console script in
+    `Scripts\\`, and the distribution's own `entry_points.txt` under
+    `Lib/site-packages`. Placeholders, because what is under test is the
+    reading of the metadata and the bytes of the shim — not pip.
+    """
+    root = tmp_path / "pack"
+    (root / "Scripts").mkdir(parents=True)
+    (root / "python.exe").write_bytes(b"MZ not really a PE, and not read")
+    for name in scripts:
+        (root / "Scripts" / f"{name}.exe").write_bytes(b"MZ pip's launcher")
+    dist_info = root / "Lib" / "site-packages" / "crucible-0.6.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "entry_points.txt").write_text(entry_points, encoding="utf-8")
+    return root
+
+
+def test_the_cmd_shim_is_written_beside_python_exe_with_exactly_these_bytes(
+    tmp_path: Path,
+) -> None:
+    """7.2a's defect, in its Windows shape, and the exact answer PHASE15 4.4 gives.
+
+    pip does not write a shebang on Windows; it writes `Scripts\\<name>.exe`,
+    a launcher BINARY with the building interpreter's absolute path compiled
+    into it. A move breaks it and no shebang rewrite can reach it, so the
+    pack ships a `.cmd` beside `python.exe` instead.
+
+    The bytes are asserted whole rather than sniffed for a substring, because
+    every part of them is load-bearing: `%~dp0` (the script's own directory,
+    trailing backslash included — which is why there is no second backslash),
+    the quotes (`%LOCALAPPDATA%` holds a user name, and "Owen Morgan" would
+    otherwise split the command in two), `%*` (the arguments), and CRLF
+    (cmd.exe's batch parser is line-oriented on CRLF; an LF-only `.cmd`
+    misparses and the symptom is a shim that silently does nothing).
+    """
+    root = fake_windows_pack(
+        tmp_path, entry_points="[console_scripts]\ncrucible = crucible.cli:main\n"
+    )
+    assert envpack.write_cmd_shims(root) == ["crucible"]
+    shim = root / "crucible.cmd"
+    assert shim.read_bytes() == (
+        b'@echo off\r\n"%~dp0python.exe" -m crucible.cli %*\r\n'
+    )
+    # Beside python.exe, at the pack ROOT — not in Scripts\, or `%~dp0` would
+    # point one directory below the interpreter and `install.ps1` would need a
+    # subdirectory in every path it writes.
+    assert shim.parent == root
+    assert not (root / "Scripts" / "crucible.cmd").exists()
+
+
+def test_a_console_script_whose_function_is_not_main_is_called_by_name(
+    tmp_path: Path,
+) -> None:
+    """`-m` would run the module and NOT the function, and exit 0 doing nothing.
+
+    `-m <module>` is right for `crucible.cli` because that module ends in
+    `if __name__ == "__main__": raise SystemExit(main())` — running it as a
+    script and calling its `main` are the same act. For any other function
+    name that equivalence is gone, and the shim would be a command that
+    succeeds having done none of the work. So the other form is spelled out.
+    """
+    root = fake_windows_pack(
+        tmp_path,
+        entry_points="[console_scripts]\ncrucible = crucible.cli:serve_forever\n",
+    )
+    assert envpack.write_cmd_shims(root) == ["crucible"]
+    assert (root / "crucible.cmd").read_bytes() == (
+        b"@echo off\r\n"
+        b'"%~dp0python.exe" -c "import sys; from crucible.cli import '
+        b'serve_forever; sys.exit(serve_forever())" %*\r\n'
+    )
+
+
+def test_the_shim_text_is_the_same_two_forms_asked_for_directly() -> None:
+    """`cmd_shim_text` is the one owner of both forms, so both are pinned."""
+    assert envpack.cmd_shim_text("crucible.cli", "main") == (
+        '@echo off\r\n"%~dp0python.exe" -m crucible.cli %*\r\n'
+    )
+    assert "%~dp0python.exe" in envpack.cmd_shim_text("pkg.mod", "run")
+    assert envpack.cmd_shim_text("pkg.mod", "run").endswith(" %*\r\n")
+
+
+def test_every_launcher_pip_wrote_gets_a_shim(tmp_path: Path) -> None:
+    """The NAMES come from `Scripts\\*.exe` — pip's own record of what it made."""
+    root = fake_windows_pack(
+        tmp_path,
+        entry_points=(
+            "[console_scripts]\n"
+            "crucible = crucible.cli:main\n"
+            "pip = pip._internal.cli.main:main\n"
+            "pip3.11 = pip._internal.cli.main:main\n"
+            "\n"
+            "[gui_scripts]\n"
+            "nothing = nowhere:main\n"
+        ),
+        scripts=("crucible", "pip", "pip3.11"),
+    )
+    assert envpack.write_cmd_shims(root) == ["crucible", "pip", "pip3.11"]
+    # A `gui_scripts` entry pip did not write an `.exe` for gets no shim: the
+    # launchers are the authority on what is in this tree.
+    assert not (root / "nothing.cmd").exists()
+
+
+def test_an_entry_point_that_is_not_module_colon_function_is_refused_by_name(
+    tmp_path: Path,
+) -> None:
+    """A shim cannot be written for something nobody can read, and silence is worse.
+
+    Writing no shim would ship a pack whose command is simply missing, and
+    the person who discovers that is the operator, at the point of use.
+    """
+    root = fake_windows_pack(
+        tmp_path, entry_points="[console_scripts]\ncrucible = crucible.cli\n"
+    )
+    with pytest.raises(PackError) as caught:
+        envpack.write_cmd_shims(root)
+    assert caught.value.code == "pack_build_failed"
+    assert "module:function" in caught.value.message
+    assert "crucible" in caught.value.message
+
+
+def test_a_launcher_no_metadata_explains_is_refused_rather_than_skipped(
+    tmp_path: Path,
+) -> None:
+    """The pack's contents and its metadata disagreeing is a defect, not a gap."""
+    root = fake_windows_pack(
+        tmp_path,
+        entry_points="[console_scripts]\ncrucible = crucible.cli:main\n",
+        scripts=("crucible", "mystery"),
+    )
+    with pytest.raises(PackError) as caught:
+        envpack.write_cmd_shims(root)
+    assert caught.value.code == "pack_build_failed"
+    assert "mystery" in caught.value.message
+
+
+def test_a_tree_pip_never_installed_into_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "pack"
+    root.mkdir()
+    with pytest.raises(PackError) as caught:
+        envpack.write_cmd_shims(root)
+    assert caught.value.code == "pack_build_failed"
+    assert "Scripts" in caught.value.message
+
+
+# ------------------------------------------------------ tar, on three platforms
+
+
+def test_the_two_create_argvs_are_not_interchangeable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One level, two spellings, and NEITHER is a fallback for the other.
+
+    GNU tar reaches zstd by launching the binary, and `-T0` is a `zstd` CLI
+    flag that exists nowhere else. `tar.exe` is bsdtar with libzstd linked
+    in — it compresses in-process, needs no `zstd.exe` (Windows ships none,
+    which is the whole reason), and has `--options` where GNU tar has
+    nothing. Sending either argv to the other tar fails.
+
+    Both are asserted as data because that is what they are, and because a
+    Windows runner is the only place the second one ever runs.
+    """
+    root, archive = tmp_path / "tree", tmp_path / "a.tar.zst"
+    level = envpack.ZSTD_BUILD_LEVEL
+
+    monkeypatch.setattr(envpack.sys, "platform", "linux")
+    assert envpack.archive_argv("tar", root, archive) == [
+        "tar",
+        "--use-compress-program",
+        f"zstd -T0 -{level}",
+        "-C",
+        str(root),
+        "-cf",
+        str(archive),
+        ".",
+    ]
+
+    monkeypatch.setattr(envpack.sys, "platform", "win32")
+    assert envpack.archive_argv("tar", root, archive) == [
+        "tar",
+        "--zstd",
+        "--options",
+        f"zstd:compression-level={level}",
+        "-C",
+        str(root),
+        "-cf",
+        str(archive),
+        ".",
+    ]
+
+
+def test_the_read_argv_is_one_spelling_on_every_platform(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`--zstd -xf` costs nothing on either tar, so the read path does not fork.
+
+    GNU tar launches the `zstd` that `require_zstd_tar` already proved is
+    there; bsdtar decompresses in-process and accepts the flag in extract
+    mode (measured 2026-09-14). One argv is one fewer thing that can differ
+    between the machine that builds a pack and the machine that installs it.
+    """
+    archive, into = tmp_path / "a.tar.zst", tmp_path / "out"
+    expected = ["tar", "--zstd", "-xf", str(archive), "-C", str(into)]
+    for platform_name in ("linux", "darwin", "win32"):
+        monkeypatch.setattr(envpack.sys, "platform", platform_name)
+        assert envpack.extract_argv("tar", archive, into) == expected
+
+
+def test_windows_needs_one_tool_and_asks_it_whether_it_carries_zstd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows ships `tar.exe` and NO `zstd.exe`, so demanding both is wrong.
+
+    Demanding `zstd.exe` would refuse a build the stock machine can do —
+    `C:\\Windows\\System32\\tar.exe` is bsdtar 3.8.1 with libzstd 1.5.5 linked
+    in. What replaces the demand is a question rather than an assumption: an
+    old libarchive, or a GNU tar first on PATH, is a real machine, and it must
+    be turned away here and not at the compression step, which is after the
+    interpreter download and the pip run.
+    """
+    monkeypatch.setattr(envpack.sys, "platform", "win32")
+    monkeypatch.setattr(
+        envpack.shutil, "which", lambda name: r"C:\Windows\System32\tar.exe"
+        if name == "tar"
+        else None,
+    )
+    bsdtar = (
+        "bsdtar 3.8.1 - libarchive 3.8.1 zlib/1.2.13.1-motley liblzma/5.4.3 "
+        "bz2lib/1.0.8 libzstd/1.5.5 cng/2.0 libb2/bundled\n"
+    )
+    monkeypatch.setattr(
+        envpack.subprocess,
+        "run",
+        lambda *a, **k: _Completed(0, bsdtar),
+    )
+    envpack.require_zstd_tar()  # no refusal, and `zstd` was never looked for
+
+
+def test_a_tar_that_does_not_carry_zstd_is_refused_by_name_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GNU tar first on PATH: it would shell out to a `zstd` that is not there."""
+    monkeypatch.setattr(envpack.sys, "platform", "win32")
+    monkeypatch.setattr(envpack.shutil, "which", lambda name: "C:\\msys\\tar.exe")
+    monkeypatch.setattr(
+        envpack.subprocess,
+        "run",
+        lambda *a, **k: _Completed(0, "tar (GNU tar) 1.32\n"),
+    )
+    with pytest.raises(PackError) as caught:
+        envpack.require_zstd_tar()
+    assert caught.value.code == "pack_no_zstd"
+    # It names what it FOUND, so its reader can tell "wrong tar first on PATH"
+    # from "no tar at all".
+    assert "GNU tar" in caught.value.message
+    assert "libzstd" in caught.value.message
+    assert "System32" in caught.value.message
+
+
+class _Completed:
+    """The two fields of `CompletedProcess` that `_require_tar_with_zstd` reads."""
+
+    def __init__(self, returncode: int, stdout: str, stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 # ------------------------------------------------------------------ the CLI
