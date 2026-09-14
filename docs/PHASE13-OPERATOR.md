@@ -110,7 +110,7 @@ without it is refused: it is what keeps the fragment out of the path.
   "urls": ["http://192.168.68.20:7100", "http://100.64.0.3:7100"],
   "token": "…",
   "pairing": ["crucible://crucible%40mac-studio@192.168.68.20:7100/#…", "…one per url…"],
-  "job_types": ["llm", "tts"],
+  "job_types": ["echo", "load-model", "tts", "unload-model"],
   "config_path": "/Users/telltale/.crucible/config.toml"
 }
 ```
@@ -120,6 +120,16 @@ IPv4 interface, in the order the OS lists them; a concrete bind host becomes exa
 entry. Never a guess, never a hostname lookup — an interface the host has is a fact; a name
 somebody else's DNS may resolve is not. `job_types` is what `/v1/info` says; it is repeated
 here so the page draws from one read.
+
+**`job_types` is the POSTABLE list, not the capability list, and this example
+said otherwise until 2026-09-14** (it read `["llm", "tts"]`; the code has
+always answered `sorted(store.registry)`). The two lists are the pair
+`/v1/info` deliberately keeps apart: `job_types` is *what you may send to*
+`POST /v1/jobs` — `load-model`, `unload-model`, `tts`, `echo` — and
+`capabilities[].job_type` is *what this server serves* — `llm`, `tts`. `llm` is
+never in the first list, because there is no job you POST called `llm`.
+Anything asking "is this capability here" must read `capabilities`; the page
+does, and section 3.2's sentence below was corrected for the same reason.
 
 **Where the interfaces come from: `getifaddrs(3)`, through `ctypes`**
 (`crucible/interfaces.py`). It is the question the OS answers, on both backends,
@@ -155,9 +165,13 @@ pairing line.
   already owns (R1); no new table.
 - A `job_type` whose env is NOT installed still lists its subjects (you may pull weights
   before the env); the page says so on the row, by comparing `job_type` against
-  `/v1/setup`'s `job_types`. There is no `env_installed` field on the row: that is
-  a fact about the job type, not about the subject, and one copy per subject is
-  how it would come to disagree with itself (R1).
+  **`/v1/info`'s `capabilities[].job_type`**. There is no `env_installed` field on
+  the row: that is a fact about the job type, not about the subject, and one copy
+  per subject is how it would come to disagree with itself (R1).
+  (**Corrected 2026-09-14**: this said `/v1/setup`'s `job_types`, which is the
+  POSTable list — see 3.1. A `model` row's `job_type` is `llm`, a word that list
+  never contains, so the comparison said "llm not installed" on a server that was
+  serving it. Nothing was wrong with the route; the doc named the wrong list.)
 - **Subjects with no block for THIS backend are absent, not listed as
   unsupported.** The route's sentence is "every subject this backend can hold";
   a row for a `mlx-darwin`-only voice on the PC would be a row with nothing
@@ -226,8 +240,9 @@ So the route now answers the record **plus** one derived key:
   added, which is R1's shape; held in the page they would be the same defect one
   layer further out.
 - **Whether a type is OFFERED here is deliberately not in this row.**
-  `/v1/setup`'s `job_types` is `store.registry` and owns that, including in the
-  seconds around an install's reload (3.4).
+  `/v1/info`'s `capabilities[].job_type` is that list — the capability spelling,
+  which is what a row here and a catalog row both speak. (`/v1/setup`'s
+  `job_types` is the other list, the POSTable one; see 3.1.)
 - A server that has decided nothing still answers `503 capability_undecided` and
   the whole section goes with it, including the list. That is the honest state:
   the page shows the refusal with its code and the command that fixes it.
