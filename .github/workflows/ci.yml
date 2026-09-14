@@ -80,6 +80,14 @@ jobs:
         # operator would use, proved from a clean checkout on every push.
         run: python scripts/gen-foundry-lineup.py --check
 
+      - name: every app's module file is current
+        # modules/*.module.json are generated from the same manifests and
+        # vendored by BookForge and Foundry byte for byte (PHASE13-OPERATOR.md
+        # section 5.4). A hand-typed module beside foundry-lineup.json would
+        # restate the same model ids with nothing comparing them; this is what
+        # compares them. tests/test_modules.py asserts the same equality.
+        run: python scripts/gen-modules.py --check
+
   sdk:
     name: sdk
     runs-on: ubuntu-latest

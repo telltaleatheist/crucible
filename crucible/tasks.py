@@ -156,19 +156,41 @@ class Task:
 # come back in ten minutes to be told about the typo.
 
 
-def _require_installable(job_type: str) -> None:
-    from .cli import INSTALLABLE_JOB_TYPES  # one owner of "what has an installer"
+def require_installable(job_type: str) -> None:
+    """Is there an installer for this type? Names the one that builds it if not.
 
-    if job_type not in INSTALLABLE_JOB_TYPES:
+    `INSTALLER_FOR` is `crucible doctor`'s table and the owner of "which command
+    installs this", and it is asked here for doctor's reason: `denoise` has no
+    installer of its own because it SHARES the `rvc` env, so the bare refusal
+    — "there is no installer for 'denoise'" — is true and sends its reader
+    looking for a command that will never exist. A refusal that names the fix
+    which actually works is the difference between a declaration somebody can
+    correct and one they argue with.
+    """
+    # One owner of "what has an installer", and of "which one builds this".
+    from .cli import INSTALLABLE_JOB_TYPES, INSTALLER_FOR
+
+    if job_type in INSTALLABLE_JOB_TYPES:
+        return
+    installer = INSTALLER_FOR.get(job_type)
+    if installer is not None:
         raise ApiError(
             400,
             "unknown_job_type",
-            f"there is no installer for job type {job_type!r}; this build "
-            f"installs {sorted(INSTALLABLE_JOB_TYPES)}",
+            f"job type {job_type!r} has no installer of its own: it shares "
+            f"{installer!r}'s env, so installing {installer!r} is what builds "
+            f"it. Name {installer!r} instead",
+            {"job_type": job_type, "installed_by": installer},
         )
+    raise ApiError(
+        400,
+        "unknown_job_type",
+        f"there is no installer for job type {job_type!r}; this build "
+        f"installs {sorted(INSTALLABLE_JOB_TYPES)}",
+    )
 
 
-def _require_narrator_engine(job_type: str, narrator_engine: str | None) -> None:
+def require_narrator_engine(job_type: str, narrator_engine: str | None) -> None:
     """`tts` must say which engine; everything else must not.
 
     The same rule `crucible install` enforces and for the same reason
@@ -268,8 +290,8 @@ def _validate_pull(config: Config, backend: Backend, kind: str, subject_id: str)
 def _validate_install(
     config: Config, backend: Backend, job_type: str, narrator_engine: str | None
 ) -> None:
-    _require_installable(job_type)
-    _require_narrator_engine(job_type, narrator_engine)
+    require_installable(job_type)
+    require_narrator_engine(job_type, narrator_engine)
     if env_installed(config, backend, job_type, narrator_engine):
         raise ApiError(
             409,
@@ -346,8 +368,8 @@ def validate_module(
             problems.append(f"{where}: `narrator_engine` must be a string")
             continue
         try:
-            _require_installable(job_type)
-            _require_narrator_engine(job_type, engine)
+            require_installable(job_type)
+            require_narrator_engine(job_type, engine)
         except ApiError as exc:
             problems.append(f"{where}: {exc.message}")
             continue
@@ -1082,6 +1104,8 @@ __all__ = [
     "TaskStore",
     "env_installed",
     "install_command",
+    "require_installable",
+    "require_narrator_engine",
     "module_document",
     "validate_module",
 ]

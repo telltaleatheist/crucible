@@ -267,6 +267,34 @@ def _pull_denoise(
     return lambda **kwargs: denoisemodels.pull(config, manifest, spec, **kwargs)
 
 
+def declared_ids() -> dict[str, list[str]]:
+    """Every subject id this BUILD declares, per kind, across all backends.
+
+    `subjects()`' question with the host taken out of it, and it has one
+    caller: `crucible/modules.py`, which writes a module file an app posts to
+    a Mac and a PC alike. A module that named only what the generating machine
+    could hold would be a module that installs less on the other one — so the
+    existence check there has to be about the catalog, not about a card.
+
+    It walks the SAME loaders `subjects()` does, in this file, so the day a
+    sixth kind arrives both answers change together. What it cannot share is
+    the row-building, because there is no backend to read a spec from.
+    """
+    return {
+        "model": sorted(
+            {
+                *load_all_manifests(),
+                *load_all_asr_manifests(),
+                *load_all_align_manifests(),
+            }
+        ),
+        "voice": sorted(load_all_voices()),
+        "rvc": sorted(load_all_rvc_manifests()),
+        "rvc-base": [RVC_BASE_ID],
+        "denoise": sorted(denoisemodels.load_all_denoise_manifests()),
+    }
+
+
 def find(
     config: Config, backend: Backend, kind: str, subject_id: str
 ) -> Subject | None:
@@ -355,4 +383,12 @@ def rows(config: Config, backend: Backend, residency: Residency) -> list[dict[st
     return built
 
 
-__all__ = ["KINDS", "RVC_BASE_ID", "Subject", "find", "rows", "subjects"]
+__all__ = [
+    "KINDS",
+    "RVC_BASE_ID",
+    "Subject",
+    "declared_ids",
+    "find",
+    "rows",
+    "subjects",
+]

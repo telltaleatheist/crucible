@@ -1,0 +1,88 @@
+# What BookForge needs from a Crucible. PHASE13-OPERATOR.md section 5.4.
+#
+# This file is the DECLARATION. `scripts/gen-modules.py` resolves it against
+# the manifests and writes `modules/bookforge.module.json`, which BookForge
+# vendors byte for byte and POSTs to `POST /v1/tasks {type: "module"}`. It
+# replaces `BOOKFORGE_JOB_TYPES` and the printed pull list in
+# `electron/crucible/install.ts`, which were a second owner of these ids.
+#
+# Nothing here is a model id that could go stale on its own: a class resolves
+# through the catalog, and a named subject is checked to exist before the JSON
+# is written. A rename in `models/` therefore turns the guard red rather than
+# shipping a button that asks a server for something it has never heard of.
+
+[module]
+name = "bookforge"
+
+# ---------------------------------------------------------------- job types
+#
+# The six BookForge drives, and `tts` says which narrator engine because
+# cuda-linux has one venv per engine. `higgs-v3` is what BookForge narrates
+# with (memory `higgs-engine-in-app`); a machine that still renders Orpheus
+# books needs a second `tts` entry with `narrator_engine = "orpheus"`, which is
+# another multi-gigabyte install and therefore a decision for a person.
+
+[[job_types]]
+type = "llm"
+
+[[job_types]]
+type = "asr"
+
+[[job_types]]
+type = "tts"
+narrator_engine = "higgs-v3"
+
+[[job_types]]
+type = "align"
+
+# `rvc` and nothing after it: `denoise` has no installer of its own, because
+# audio-separator lives in the rvc env and `crucible install rvc` writes both
+# flags (`workerenv.JOB_TYPES_SERVED_BY_ENV`). Naming it here would be refused
+# by name, and the refusal would say exactly this.
+[[job_types]]
+type = "rvc"
+
+# -------------------------------------------------------------------- needs
+#
+# The cleanup model, asked for by the CLASS it serves rather than by name.
+# `clean` has one candidate in this build, so the generator resolves it and a
+# new 9B variant that took over the class would change this file rather than
+# leave BookForge pulling the old one.
+
+[[needs]]
+class = "clean"
+
+# ----------------------------------------------------------------- subjects
+#
+# The five that are NOT a class resolution, and each of them is a choice
+# BookForge made rather than something the catalog can decide. `asr` has six
+# whisper models and `tts` has seven voices; a generator picking one of those
+# would be choosing a transcriber's accuracy or a narrator's voice.
+
+# The transcriber. large-v3 rather than distil: BookForge's transcripts are
+# used for alignment, where a dropped word is a cue in the wrong place.
+[[subjects]]
+kind = "model"
+id = "faster-whisper-large-v3"
+
+# The forced aligner — one candidate, but named rather than classed because
+# `align`'s candidates are not models' namespace.
+[[subjects]]
+kind = "model"
+id = "qwen3-aligner"
+
+# The default narration voice.
+[[subjects]]
+kind = "voice"
+id = "higgs-default"
+
+# ultimate-rvc's shared base assets: the embedder and the pitch predictors.
+# The engine's, not any model's, which is why the id is `base`.
+[[subjects]]
+kind = "rvc-base"
+id = "base"
+
+# The hiss separator the Enhance tab runs.
+[[subjects]]
+kind = "denoise"
+id = "denoise-roformer"

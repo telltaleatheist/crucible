@@ -1,0 +1,23 @@
+{
+  "name": "foundry",
+  "version": "0.6.0+7cd96db1f5dc",
+  "job_types": [
+    {
+      "type": "llm"
+    }
+  ],
+  "subjects": [
+    {
+      "kind": "model",
+      "id": "qwen3.5-9b"
+    },
+    {
+      "kind": "model",
+      "id": "qwen3.8-27b-4bit"
+    },
+    {
+      "kind": "model",
+      "id": "dots-ocr"
+    }
+  ]
+}

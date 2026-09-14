@@ -1,0 +1,48 @@
+{
+  "name": "bookforge",
+  "version": "0.6.0+72062ef5269b",
+  "job_types": [
+    {
+      "type": "llm"
+    },
+    {
+      "type": "asr"
+    },
+    {
+      "type": "tts",
+      "narrator_engine": "higgs-v3"
+    },
+    {
+      "type": "align"
+    },
+    {
+      "type": "rvc"
+    }
+  ],
+  "subjects": [
+    {
+      "kind": "model",
+      "id": "qwen3.5-9b"
+    },
+    {
+      "kind": "model",
+      "id": "faster-whisper-large-v3"
+    },
+    {
+      "kind": "model",
+      "id": "qwen3-aligner"
+    },
+    {
+      "kind": "voice",
+      "id": "higgs-default"
+    },
+    {
+      "kind": "rvc-base",
+      "id": "base"
+    },
+    {
+      "kind": "denoise",
+      "id": "denoise-roformer"
+    }
+  ]
+}
