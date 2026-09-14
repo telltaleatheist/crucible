@@ -25,7 +25,7 @@ from crucible.jobs import asr as asr_jobs
 from crucible.residency import KIND_TTS
 
 from . import fake_narrator_engine
-from .conftest import parse_sse
+from .conftest import holding_the_card, parse_sse
 from .test_tts_api import (  # noqa: F401 — imported to be used as fixtures
     fake_env,
     fake_weights,
@@ -539,12 +539,15 @@ def test_a_render_loads_its_own_voice_and_says_it_is_warming(
 ) -> None:
     """Section 6's one asymmetry with `llm`: a render job is an operator's
     explicit order and owns the lane, so it loads rather than refusing."""
-    events = rendered()
+    with holding_the_card(tts_client):
+        events = rendered()
+        health = tts_client.get("/v1/health", headers=auth).json()
     warmings = [row["message"] for row in events_of(events, "warming")]
     assert any("checking the accelerator for deathstalker" in m for m in warmings)
     assert any("starting narrator (higgs-v3)" in m for m in warmings)
     assert any("narrator loaded deathstalker" in m for m in warmings)
-    health = tts_client.get("/v1/health", headers=auth).json()
+    # Held, or the render's own end would have cleared the card before this read
+    # (Owen's ruling, 2026-09-14; crucible/settle.py).
     assert health["resident_models"] == [VOICE]
     assert health["resident_kind"] == KIND_TTS
 
@@ -575,18 +578,56 @@ def test_a_render_writes_the_voices_document_narrator_reads(
 
 
 def test_a_second_render_does_not_restart_narrator(
-    rendered: Callable[..., list[dict[str, Any]]], narrator: list[Any]
+    rendered: Callable[..., list[dict[str, Any]]],
+    tts_client: TestClient,  # noqa: F811
+    narrator: list[Any],
 ) -> None:
     """A Higgs voice change IS a full worker restart, so not changing it must not
-    be one: two jobs on one voice share the engine that is already up."""
+    be one: two jobs on one voice share the engine that is already up.
+
+    HELD ACROSS THE TWO, since Owen's unload ruling (2026-09-14): a render is
+    done with its voice when it ends, so two unheld renders are two narrators.
+    The holder stands in for the lease the render door cannot take yet — the
+    RULING OWED in crucible/settle.py — and the companion test below is what the
+    same two renders cost without one.
+    """
+    with holding_the_card(tts_client):
+        rendered()
+        assert len(narrator) == 1
+        second = rendered()
+        assert terminal(second)["event"] == "done"
+        assert len(narrator) == 1
+        assert not any(
+            "starting narrator" in row["message"]
+            for row in events_of(second, "warming")
+        )
+
+
+def test_an_unheld_render_clears_the_card_and_the_next_one_reloads(
+    rendered: Callable[..., list[dict[str, Any]]],
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    narrator: list[Any],
+) -> None:
+    """The bill for not stating an intention, stated (crucible/settle.py).
+
+    A book rendered as ONE job still loads once, which is the shape BookForge
+    uses. A book rendered as twenty jobs is twenty narrators, and that cost is
+    what the RULING OWED about leasing a voice is asking to remove.
+    """
+    events = rendered()
+    note = [row for row in events_of(events, "note")]
+    assert note, "the unload must be said on the job that triggered it"
+    assert note[-1]["unloaded"] == VOICE
+    assert "nothing holds it" in note[-1]["message"]
+    # Said before the terminal event, so a client reading the stream is told.
+    kinds = [row["event"] for row in events]
+    assert kinds.index("note") < kinds.index("done")
+    assert tts_client.get("/v1/health", headers=auth).json()["resident_kind"] is None
+    assert len(narrator) == 1
+
     rendered()
-    assert len(narrator) == 1
-    second = rendered()
-    assert terminal(second)["event"] == "done"
-    assert len(narrator) == 1
-    assert not any(
-        "starting narrator" in row["message"] for row in events_of(second, "warming")
-    )
+    assert len(narrator) == 2
 
 
 def test_the_load_is_part_of_the_load(
@@ -666,10 +707,11 @@ def test_one_holder_still_serves_both_kinds(
 ) -> None:
     """A render leaves a VOICE on the card, and the proxy's honest answer for a
     chat request is still `model_not_resident`."""
-    rendered()
-    assert tts_client.app.state.residency.resident_kind == KIND_TTS
-    assert tts_client.app.state.residency.resident_model is None
-    assert tts_client.app.state.residency.voice_engine is not None
+    with holding_the_card(tts_client):
+        rendered()
+        assert tts_client.app.state.residency.resident_kind == KIND_TTS
+        assert tts_client.app.state.residency.resident_model is None
+        assert tts_client.app.state.residency.voice_engine is not None
 
 
 def test_the_provenance_sidecar_names_the_merge_that_rendered_it(
@@ -696,9 +738,10 @@ def test_the_residency_is_torn_down_when_the_server_stops(
     tts_client: TestClient,  # noqa: F811
     narrator: list[Any],
 ) -> None:
-    rendered()
-    engine = narrator[0]
-    assert engine.pids
+    with holding_the_card(tts_client):
+        rendered()
+        engine = narrator[0]
+        assert engine.pids
     tts_client.app.state.residency.shutdown()
     assert engine.pids == frozenset()
 

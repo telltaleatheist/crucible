@@ -868,8 +868,21 @@ def test_the_session_closes_when_nobody_comes_back(
         assert response.status_code == 404, response.text
         assert response.json()["error"]["code"] == "unknown_session"
 
-        # And the card is free, which is the point of closing it at all.
-        assert open_session(base, auth).status_code == 201
+        # And the card is not merely free, it is EMPTY. A session closing is the
+        # last holder letting go, so Owen's ruling clears the voice behind it
+        # (2026-09-14, crucible/settle.py) — which is a stronger version of the
+        # point of closing it at all. The streaming door never loads, so the
+        # honest answer to the next `open` is that nothing is resident.
+        deadline = time.monotonic() + WAIT
+        while time.monotonic() < deadline:
+            health = httpx.get(f"{base}/v1/health", headers=auth, timeout=30.0)
+            if health.json()["resident_kind"] is None:
+                break
+            time.sleep(0.05)
+        assert health.json()["resident_kind"] is None, health.text
+        refused = open_session(base, auth)
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["error"]["code"] == "voice_not_resident"
 
 
 def test_a_resume_the_session_can_no_longer_serve_is_refused_not_skipped(

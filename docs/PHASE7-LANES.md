@@ -986,6 +986,135 @@ translation. The SDK does **not** wait a lease out, for the reason it does not r
 
 ---
 
+### 5.3 The unload — when the last holder lets go, the card is cleared
+
+**BUILT 2026-09-14.** Owen: *"Models should always be unloaded when we're done with them.
+Every time."*
+
+This **overrules PHASE5-APPS.md section 7**, which proposed the opposite — *"no idle
+unload, and the Servers row shows what is resident and for how long"* — on the grounds that
+an idle unload is a 110-second reload the next time anyone types. The proposal was answered
+by what happened on 2026-09-13: a 9B sat resident after the Foundry proof until a person
+unloaded it, and Owen saw *"something loaded and nothing happening"*. The card is not
+storage.
+
+#### "Done" is a fact, not a timer
+
+Foundry's shape was *up while a client has work, down when the queue drains*, with an
+optional keep-warm window (`keepServerWarmMinutes`, default 0) — three books loaded the
+model once, and bringing it back cost ~44 s (FROM-FOUNDRY-WSL-VLLM.md section 3). Crucible
+takes the drain and refuses the window, because a window is **a fact standing in for a
+guess**: ninety idle seconds is evidence of nothing, N would be tuned against one workload
+and silently wrong for the next, and both failures would be quiet. That is the same shape
+section 5.2 refused for the lease, one layer along.
+
+So there is no window, no timer and no config key that turns this off. There are **four
+facts**, and the resident thing — model, voice or aligner, every kind — is unloaded the
+moment the last of them goes false, checked at that moment rather than on a clock:
+
+| # | the fact | who owns it |
+|---|---|---|
+| 1 | no job is running or queued on the lane | `JobStore.occupied_by_anything_but` |
+| 2 | no lease is open | `crucible/leases.py` |
+| 3 | no streaming session holds the claim | `Residency.claimed_by` |
+| 4 | no chat completion is in flight | `crucible/inflight.py` |
+
+`Residency.warming` is deliberately not a fifth: it is only ever set from inside a load
+job, which is on the lane, so it is a sub-state of fact 1 — the same ruling
+`refuse_if_busy` made (ARCHITECTURE.md section 3.1). Testing it separately would be a guard
+against a bug rather than against a state.
+
+**One place asks, five moments ask it.** `crucible/settle.py`'s `Settlement.settle()` is the
+whole of the decision, and it is called from the five ways a holder can let go: a job
+ending (inside `_execute`, before the terminal event), a lease released, a lease expiring,
+a streaming session closing, the last chat returning. Five copies of *"is anything still
+using the card"* would be five answers the day a sixth kind of holder arrives.
+
+#### The consequence, stated rather than discovered
+
+**A run of requests with no lease open reloads its model.** Foundry leases a whole cleanup
+and pays nothing; **BookForge's doors do not lease yet** (`electron/ai-bridge.ts`'s
+`crucible` provider loads nothing and leases nothing), so a BookForge cleanup against a
+Crucible today will find the model gone the moment its previous completion returned, and be
+answered `model_not_resident` until something submits another `load-model`. That is not a
+bug in the rule; it is the bill for not stating an intention, and the fix is a lease at
+BookForge's door, never an exception in the server. `tests/test_settle.py` pins it as a
+test rather than leaving it as a sentence.
+
+#### A load is not a holder letting go
+
+`load-model` and `load-voice` exist to make something resident and nothing else, so their
+own completion cannot be the moment the card is cleared: the thing would be gone before the
+operator's next request, and neither the chat door nor the streaming door ever loads
+(PHASE2-LLM.md section 5, PHASE3-TTS.md section 6), so nothing downstream could bring it
+back. A server whose `load-model` is a no-op is not a stricter server, it is a broken one.
+
+That is the rule read correctly rather than an exception to it — a load is the *start* of a
+resident thing's life. But it leaves four doors that have to say so, recorded as
+`# RULING OWED:` in `crucible/settle.py`:
+
+1. **`load-model` / `load-voice` must be able to lease in the same job**, atomically, so
+   nothing can slip between *"it is resident"* and *"somebody holds it"*. Until then a load
+   that is never used sits on the card until the next thing finishes.
+2. **The render door (`tts`) must be able to lease A VOICE.** A book rendered as one job
+   loads once and unloads at the end, which is right and is the shape BookForge uses. A
+   book rendered as twenty jobs is twenty narrators, and `POST /v1/models/{id}/lease` cannot
+   help because it leases the resident **model**.
+3. **The `align` door must be able to lease AN ALIGNER.** Sharper, because the resident
+   aligner exists precisely so hundreds of chunks pay one load (PHASE4-AUDIO.md section 2).
+   Within one job they still do; across a book aligned chapter by chapter they no longer do.
+4. **The streaming door is safe only because `load-voice` is.** A session claims the card,
+   so a session keeps the voice — but the gap between `load-voice` finishing and
+   `POST /v1/tts/stream` opening is held by nothing, and survives today only because a load
+   is not a trigger.
+
+#### It is SAID
+
+An unload that nobody can explain is a load somebody pays for twice without knowing why. So
+every settlement says so in the two places a reader looks:
+
+- **the server log**, always: `crucible: unloaded qwen3.5-9b (the resident llm): nothing
+  holds it — the lease was released`. It is the only place a lease- or chat-triggered
+  unload *can* say it, because there is no job to carry an event.
+- **the triggering job's events**, when a job is what triggered it: a `note` event carrying
+  `{message, unloaded, kind, trigger}`, appended **before** the terminal event, because
+  `_event_stream` returns at the terminal event and a note after `done` is a note nobody is
+  told.
+
+**`GET /v1/activity` gains nothing.** What is resident is already `resident`; *why the last
+thing went away* is history rather than state, and putting it on the same read would give
+residency a second owner (R1).
+
+#### Where it runs, and the one window that remains
+
+**Never on the event loop.** `SubprocessEngine.stop()` SIGTERMs and waits up to 180 s, and a
+server that stops answering `/v1/activity` for three minutes is indistinguishable from a
+dead one. `settle()` is synchronous and called from a worker thread — `asyncio.to_thread` at
+the loop-side triggers, directly at the one trigger that is already a thread. A chat's
+settlement rides on the response's background task, so the completion is written first and
+the card is cleared behind it.
+
+Running off the loop means admission can move underneath it, so the settlement **claims the
+card** for the duration, exactly as a render does, and re-reads the four facts under that
+claim. A job that reaches the lane while the claim is up is refused `engine_in_use` rather
+than racing a dying engine. The window that remains — a job whose `preflight` passed before
+the claim went up and whose `enqueue` landed after the re-read — fails loudly at the
+mutation instead of quietly, which is R3-shaped and is not new: the same window has always
+existed between `preflight` and a streaming session opening.
+
+#### Expiry: the fifth moment, which has no edge
+
+Four of the five ways a holder lets go are edges this server sees. A lease is **read**
+against the clock and never swept (section 5.2), so a client that crashed mid-run stops
+holding the card at an instant nothing is watching — and its 21 GB would sit there until
+somebody happened to submit something, which is precisely the overnight card this ruling is
+about. So a one-shot is armed at the lease's **own `expires_at`** — the number the client
+chose and heartbeats forward, never an interval tuned here — cancelled and re-armed at the
+three moments that move it (open, heartbeat, release). A firing that finds the lease still
+open simply re-arms, which is what makes a missed heartbeat self-correcting.
+
+---
+
 ## 6. Admission across the seam
 
 Local admission is unchanged: the lock file and the gpu-arbiter, because they describe

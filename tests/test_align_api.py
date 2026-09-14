@@ -29,7 +29,7 @@ from crucible.alignmodels import load_align_manifest
 from crucible.jobs import align as align_job
 from crucible.residency import KIND_ALIGN
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
+from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, holding_the_card, parse_sse
 
 MODEL = "qwen3-aligner"
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_align_worker.py"
@@ -560,34 +560,67 @@ def test_the_model_is_loaded_once_and_held_across_jobs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The whole reason this type has a residency: hundreds of chunks, one load."""
+    """The whole reason this type has a residency: hundreds of chunks, one load.
+
+    ACROSS jobs that is true only while something holds the card, since Owen's
+    unload ruling (2026-09-14, crucible/settle.py): an align job that ends with
+    nothing holding the aligner clears it, because the job really is done with
+    it. The holder here stands in for the lease the align door cannot take yet
+    — the RULING OWED in crucible/settle.py — and the companion test below is
+    what the same two jobs cost without one.
+    """
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_TRANSCRIPT", str(transcript))
+    with holding_the_card(ready):
+        run_job(ready, auth)
+        run_job(ready, auth)
+    ops = [json.loads(line)["op"] for line in transcript.read_text().splitlines()]
+    assert ops == ["load", "align", "align"]
+
+
+def test_an_unheld_aligner_is_cleared_and_the_next_job_pays_for_it(
+    ready: TestClient,
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The bill for not stating an intention, stated (crucible/settle.py).
+
+    Two align jobs, nothing holding the card between them, two loads of a 1.7 GB
+    checkpoint. That is the cost the RULING OWED names, measured rather than
+    described, so that the day the align door leases an aligner this test is the
+    one that changes.
+    """
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_TRANSCRIPT", str(transcript))
     run_job(ready, auth)
+    assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
     run_job(ready, auth)
     ops = [json.loads(line)["op"] for line in transcript.read_text().splitlines()]
-    assert ops == ["load", "align", "align"]
+    assert ops == ["load", "align", "load", "align"]
 
 
 def test_a_resident_aligner_lights_up_its_own_row(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
-    run_job(ready, auth)
-    capabilities = ready.get("/v1/info", headers=auth).json()["capabilities"]
-    by_type = {entry["job_type"]: entry for entry in capabilities}
-    row = next(r for r in by_type["align"]["models"] if r["id"] == MODEL)
-    assert row["resident"] is True
-    health = ready.get("/v1/health", headers=auth).json()
-    assert health["resident_kind"] == KIND_ALIGN
-    assert health["resident_models"] == [MODEL]
+    with holding_the_card(ready):
+        run_job(ready, auth)
+        capabilities = ready.get("/v1/info", headers=auth).json()["capabilities"]
+        by_type = {entry["job_type"]: entry for entry in capabilities}
+        row = next(r for r in by_type["align"]["models"] if r["id"] == MODEL)
+        assert row["resident"] is True
+        health = ready.get("/v1/health", headers=auth).json()
+        assert health["resident_kind"] == KIND_ALIGN
+        assert health["resident_models"] == [MODEL]
 
 
 def test_the_accelerator_route_names_the_aligner_as_the_resident_kind(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
     """It read `resident.model_id` and the literal "llm" until phase 4."""
-    run_job(ready, auth)
-    resident = ready.get("/v1/accelerator", headers=auth).json()["resident"]
+    with holding_the_card(ready):
+        run_job(ready, auth)
+        resident = ready.get("/v1/accelerator", headers=auth).json()["resident"]
     assert resident["kind"] == KIND_ALIGN
     assert resident["id"] == MODEL
 
@@ -595,8 +628,9 @@ def test_the_accelerator_route_names_the_aligner_as_the_resident_kind(
 def test_unloading_takes_it_off_the_card(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
-    run_job(ready, auth)
-    events = run_job(ready, auth, type="unload-aligner", params={}, inputs={})
+    with holding_the_card(ready):
+        run_job(ready, auth)
+        events = run_job(ready, auth, type="unload-aligner", params={}, inputs={})
     assert terminal(events)["event"] == "done", terminal(events)
     assert terminal(events)["data"]["resident"] is None
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None

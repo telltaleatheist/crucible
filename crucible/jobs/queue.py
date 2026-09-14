@@ -66,6 +66,13 @@ class JobStore:
         self._worker: asyncio.Task[None] | None = None
         self._running_id: str | None = None
         self._subscribers: dict[str, list[asyncio.Event]] = {}
+        #: Owen's ruling, 2026-09-14 (`crucible/settle.py`). Injected rather than
+        #: constructed here, because the settlement has to read three things this
+        #: store has never heard of — the lease, the claim and the chats in
+        #: flight — and a queue that built it would have to learn all three.
+        #: None is a store with no server around it: `crucible doctor` and the
+        #: admission unit tests build one, and neither has a card to clear.
+        self._settlement: Any | None = None
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -98,6 +105,10 @@ class JobStore:
 
     # ------------------------------------------------------------------- state
 
+    def attach_settlement(self, settlement: Any) -> None:
+        """Hand the lane the thing that clears the card when a job is done."""
+        self._settlement = settlement
+
     @property
     def registry(self) -> dict[str, JobType]:
         return self._registry
@@ -122,6 +133,28 @@ class JobStore:
     def running(self) -> Job | None:
         """The job on the lane right now, or None."""
         return None if self._running_id is None else self._jobs[self._running_id]
+
+    def occupied_by_anything_but(self, job_id: str | None) -> Job | None:
+        """The job holding the lane other than this one, or None.
+
+        The lane's half of the settlement's four facts (`crucible/settle.py`).
+        `job_id` is the job asking, and it is asking **while it is still the
+        running job** — the card is cleared before its terminal event, so the
+        note lands on a stream its client is still reading. Without the
+        exclusion every job would find itself and nothing would ever unload.
+
+        Reads the deque as well as `_running_id`, for `refuse_if_busy`'s reason:
+        a job admitted and not yet picked up is as much a hold on the card as one
+        already running, and clearing the card out from under it would cost it a
+        reload it never asked for.
+        """
+        running = self.running
+        if running is not None and running.id != job_id:
+            return running
+        for pending_id in self._pending:
+            if pending_id != job_id:
+                return self._jobs[pending_id]
+        return None
 
     def queued(self) -> list[Job]:
         """Everything waiting, in the order it will run.
@@ -415,25 +448,60 @@ class JobStore:
         self.append_event(job, "progress", {"fraction": 0.0, "message": "started"})
         loop = asyncio.get_running_loop()
         ctx = JobContext(self, job, loop)
+        status = DONE
+        error: dict[str, str] | None = None
         try:
             await asyncio.to_thread(plugin.run, job, ctx)
         except JobCancelled:
-            self._finish(job, CANCELLED)
+            status = CANCELLED
         except JobError as exc:
-            self._finish(job, FAILED, {"code": exc.code, "message": exc.message})
+            status, error = FAILED, {"code": exc.code, "message": exc.message}
         except Exception as exc:  # a plugin bug; surface it, never swallow it
-            self._finish(
-                job,
-                FAILED,
-                {"code": "job_failed", "message": f"{type(exc).__name__}: {exc}"},
-            )
+            status = FAILED
+            error = {"code": "job_failed", "message": f"{type(exc).__name__}: {exc}"}
         else:
             if job.cancel_requested:
-                self._finish(job, CANCELLED)
-            else:
-                self._finish(job, DONE)
+                status = CANCELLED
+        try:
+            # OWEN'S RULING, 2026-09-14: this job is done with the card, so if
+            # nothing else holds it the card is cleared NOW (crucible/settle.py).
+            #
+            # BEFORE THE TERMINAL EVENT AND WHILE THIS JOB STILL HOLDS THE LANE,
+            # which is two properties in one placement. The note lands on a
+            # stream the client is still reading — `_event_stream` returns at the
+            # terminal event, so a line appended after `done` is a line nobody is
+            # told. And `_running_id` is still set, so `refuse_if_busy` refuses a
+            # submission that would otherwise race the unload; a job admitted
+            # here waits behind this one instead of failing against a dying
+            # engine.
+            await self._settle(job)
         finally:
+            self._finish(job, status, error)
             self._running_id = None
+
+    async def _settle(self, job: Job) -> None:
+        """Clear the card if this job was the last thing holding it.
+
+        A CLEANUP FAILURE IS NOT AN OPERATION FAILURE. An engine that will not
+        stop is a real fact and is said in both places a reader looks, but it
+        does not rewrite the outcome of the render that finished: a book that
+        rendered is a book that rendered, whatever happened to the card
+        afterwards.
+        """
+        if self._settlement is None:
+            return
+        try:
+            settled = await asyncio.to_thread(self._settlement.settle_for_job, job)
+        except Exception as exc:
+            line = (
+                f"could not clear the card after job {job.id} ({job.type}): "
+                f"{type(exc).__name__}: {exc}"
+            )
+            print(f"crucible: {line}", file=sys.stderr)
+            self.append_event(job, "note", {"message": line})
+            return
+        if settled is not None:
+            self.append_event(job, "note", settled.to_dict())
 
     def _fail_out_of_band(self, job: Job, exc: BaseException) -> None:
         """Mark a job failed when the queue's own machinery is what broke.

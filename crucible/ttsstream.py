@@ -91,7 +91,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .engines import EngineError, NarratorEngine
 from .jobs.base import utcnow
@@ -1014,12 +1014,29 @@ class StreamManager:
     one pipe.
     """
 
-    def __init__(self, residency: Residency) -> None:
+    def __init__(
+        self, residency: Residency, on_closed: Callable[[str], Any] | None = None
+    ) -> None:
         self._residency = residency
+        #: What to do once a session has really put the wire down — Owen's
+        #: unload ruling asks here, because a closed session is one of the four
+        #: ways the card stops being held (`crucible/settle.py`). Called on
+        #: whichever thread closed the session, which is never the event loop,
+        #: so it may block on an engine that takes its time stopping.
+        self._on_closed = on_closed
         self._lock = threading.Lock()
         self._session: StreamSession | None = None
         self._watchdog: threading.Thread | None = None
         self._stop_watchdog = threading.Event()
+
+    def when_closed(self, on_closed: Callable[[str], Any]) -> None:
+        """Say what happens after a session lets the card go.
+
+        Set after construction because the settlement needs this manager (a
+        session's claim is one of the facts it reads) and this manager needs the
+        settlement — one of the two has to be wired second, and it is this one.
+        """
+        self._on_closed = on_closed
 
     @property
     def session(self) -> StreamSession | None:
@@ -1121,11 +1138,17 @@ class StreamManager:
         """
         session.begin_close(reason)
         finished = session.join(CLOSE_JOIN_SECONDS)
-        if finished:
-            with self._lock:
-                if self._session is session:
-                    self._session = None
-        return finished
+        if not finished:
+            # The worker still has the wire, so the claim is still held and the
+            # card is still spoken for. Asking for a settlement now would be
+            # asking a question whose answer is "no" by construction.
+            return False
+        with self._lock:
+            if self._session is session:
+                self._session = None
+        if self._on_closed is not None:
+            self._on_closed(f"streaming session {session.id} closed")
+        return True
 
     def shutdown(self) -> None:
         """Close whatever is open. Called when the server exits."""

@@ -7,6 +7,7 @@ test can see or touch a real `~/.crucible`.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -221,6 +222,31 @@ def engine_factory(
 # ------------------------------------------------------------------ helpers
 
 
+@contextmanager
+def holding_the_card(client: TestClient, act: str = "clean") -> Iterator[None]:
+    """Keep what a job left resident on the card across the job's end.
+
+    OWEN'S RULING, 2026-09-14 (`crucible/settle.py`): the card is cleared the
+    moment the last of four holders lets go. A test that wants to LOOK at what a
+    job left resident is, by definition, looking after the last holder let go —
+    so it has to be one.
+
+    A chat completion in flight is the holder it takes, because it is the only
+    one of the four a test can hold with no resident MODEL to lease: the lane is
+    the thing under test, the claim belongs to a streaming session, and
+    `POST /v1/models/{id}/lease` is refused for a resident voice or aligner. That
+    is the gap the RULING OWED in `crucible/settle.py` names — when the render
+    and align doors can lease what they load, this helper is what they replace.
+
+    Nothing is faked: `Settlement.holder` reads this record through exactly the
+    code path `/v1/activity` reports it from.
+    """
+    with client.app.state.inflight.tracked(
+        act=act, model="a test holding the card", client=None
+    ):
+        yield
+
+
 def parse_sse(lines: Iterator[str]) -> list[dict[str, Any]]:
     """Turn an SSE byte stream's lines into [{id, event, data}] in arrival order."""
     events: list[dict[str, Any]] = []
@@ -250,6 +276,7 @@ __all__ = [
     "FAKE_BACKEND",
     "FAKE_MAC_BACKEND",
     "TOKEN",
+    "holding_the_card",
     "parse_sse",
     "mint_token",
 ]

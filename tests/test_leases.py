@@ -279,8 +279,14 @@ def test_a_ttl_outside_the_range_is_refused_at_both_ends_with_the_range(
         assert str(MIN_TTL_SECONDS) in error["message"]
         assert str(MAX_TTL_SECONDS) in error["message"]
 
-    # Both ends of the range itself are fine.
+    # Both ends of the range itself are fine. The model is loaded again between
+    # the two, because releasing the first lease is a holder letting go and the
+    # card is cleared behind it (Owen's ruling, crucible/settle.py) — so the
+    # second `POST .../lease` would otherwise be answered `model_not_resident`,
+    # truthfully.
     for ttl in (MIN_TTL_SECONDS, MAX_TTL_SECONDS):
+        if activity(resident_client, auth)["resident"] is None:
+            run_job(resident_client, auth, type="load-model", model=MODEL)
         lease = a_lease(resident_client, auth, ttl_seconds=ttl)
         assert (
             resident_client.delete(

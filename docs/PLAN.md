@@ -71,6 +71,19 @@ model_leased` at the door (chats never are: they are what it protects). Expiry i
 from the clock, never swept, and a restart forgets. In the SDK as `lease`/`heartbeat`/
 `release`, `Activity.lease` and the typed `CrucibleLeased`.
 
+**Landed 2026-09-14: the unload** (`PHASE7-LANES.md` section 5.3). Owen: *"Models should
+always be unloaded when we're done with them. Every time."* This **overrules
+`PHASE5-APPS.md` section 7**, which had proposed no idle unload with the Servers row showing
+what is resident and for how long. "Done" is read from four facts — no job on the lane, no
+lease open, no streaming session holding the claim, no chat in flight — and the moment the
+last goes false the resident model, voice or aligner is unloaded and says why, in the server
+log and in a `note` event on the job that triggered it. No window, no timer and no config
+key: a keep-warm minute is a fact standing in for a guess. What makes it safe rather than a
+44-second reload between every book is the lease above — so **a client that does not lease
+reloads its model between requests**, and BookForge's doors do not lease yet. A load is not
+a holder letting go, which leaves four `# RULING OWED:` in `crucible/settle.py`: the load
+door, the render door and the align door must each be able to lease what they load.
+
 **Landed 2026-09-14: the local form** (`PHASE9-CAPABILITY.md` section 7). Owen, via
 Foundry: these manifests are the catalog of record for Foundry's LOCAL lineup too, so "what
 can this machine run" has one owner. A `[local]` table on a model manifest (an Ollama tag,

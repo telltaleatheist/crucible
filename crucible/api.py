@@ -20,13 +20,14 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 import httpx
 from fastapi import APIRouter, Depends, FastAPI, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import API_VERSION, VERSION, accelerator
@@ -45,9 +46,10 @@ from .jobs import (
 from .jobs.base import Job, validate_member_name
 from .jobs.queue import JobStore
 from .jobs.tts.common import known_voice
-from .inflight import InFlight, read_act, require_act_name
+from .inflight import Entry, InFlight, read_act, require_act_name
 from .leases import Leases, require_ttl
 from .residency import Residency
+from .settle import Settlement
 from .sampling import SAMPLING_HEADER, Applied, apply_defaults
 from .ttsstream import (
     StreamManager,
@@ -301,6 +303,19 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     # In memory, and a restart forgets: a lease protects a resident model, and a
     # restarted server holds none (crucible/leases.py).
     app.state.leases = Leases()
+    # OWEN'S RULING, 2026-09-14: *"Models should always be unloaded when we're
+    # done with them. Every time."* The settlement is the one place that decides
+    # nothing holds the card any more, and it is wired to all four of the things
+    # that can hold it — the lane, the lease, the claim and the chats in flight
+    # (crucible/settle.py). Built last because it reads every one of them.
+    app.state.settlement = Settlement(
+        residency=residency,
+        store=app.state.store,
+        leases=app.state.leases,
+        inflight=app.state.inflight,
+    )
+    app.state.store.attach_settlement(app.state.settlement)
+    app.state.streams.when_closed(app.state.settlement.settle_quietly)
 
     Path(config.jobs_dir).mkdir(parents=True, exist_ok=True)
     Path(config.uploads_dir).mkdir(parents=True, exist_ok=True)
@@ -921,6 +936,10 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             client=_client_agent(request),
             ttl_seconds=ttl_seconds,
         )
+        # The lease is now the thing holding the card, and its deadline is the
+        # one moment a holder lets go that this server would otherwise never
+        # see. Armed at the client's own `expires_at` (crucible/settle.py).
+        request.app.state.settlement.arm_for_lease_expiry()
         return lease.receipt()
 
     @private.post("/leases/{lease_id}/heartbeat")
@@ -934,7 +953,10 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         talking for too long".
         """
         leases: Leases = request.app.state.leases
-        return {"expires_at": leases.heartbeat(lease_id).expires_at.isoformat()}
+        extended = leases.heartbeat(lease_id)
+        # The deadline moved, so the one-shot that watches it moves with it.
+        request.app.state.settlement.arm_for_lease_expiry()
+        return {"expires_at": extended.expires_at.isoformat()}
 
     @private.delete("/leases/{lease_id}", status_code=204)
     async def release_lease(request: Request, lease_id: str) -> Response:
@@ -946,7 +968,17 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         hour of nothing happening.
         """
         leases: Leases = request.app.state.leases
+        settlement: Settlement = request.app.state.settlement
         leases.release(lease_id)
+        # The lease is gone, so the deadline it was watched by is too.
+        settlement.arm_for_lease_expiry()
+        # OWEN'S RULING, 2026-09-14: a released lease is a holder letting go, so
+        # if the lane, the claim and the chats are also clear the card is cleared
+        # before this 204 is written. That is Foundry's *"down when the queue
+        # drains"* (FROM-FOUNDRY-WSL-VLLM.md section 3) with the drain stated by
+        # the client instead of guessed at. Off the loop, because stopping an
+        # engine waits on a process.
+        await asyncio.to_thread(settlement.settle_quietly, "the lease was released")
         return Response(status_code=204)
 
     # ---------------------------------------------------------------- voices
@@ -1308,17 +1340,32 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         # completion that ran and was then reported under a name nobody knows.
         act = read_act(request.headers)
 
-        # A chat is the one piece of accelerator work that took the lane, made a
-        # job row and left a record NOWHERE. Tracked here so `/v1/activity` can
-        # say what this machine is doing; it still gates nothing — see
+        settlement: Settlement = request.app.state.settlement
+        chat_over = _chat_over(settlement)
+
+        # A chat is the one piece of accelerator work that took no lane, made no
+        # job row and left a record NOWHERE. Tracked so `/v1/activity` can say
+        # what this machine is doing; it still gates nothing — see
         # crucible/inflight.py for why taking the lane would have been the wrong
         # fix for the right bug.
-        with inflight.tracked(
+        entry = inflight.open(
             act=act, model=resident.model_id, client=_client_agent(request)
-        ):
+        )
+        try:
             if body.get("stream") is True:
+                # THE RELAY OUTLIVES THIS HANDLER, so the record and the
+                # settlement belong to the relay's end and not to this `return`.
+                # Closing them here would count a streamed completion as finished
+                # the moment its first byte was ready — and since 2026-09-14 that
+                # would clear the card out from under a stream still producing
+                # tokens.
                 return await _proxy_stream(
-                    client, url, forwarded, resident, sampling_headers
+                    client,
+                    url,
+                    forwarded,
+                    resident,
+                    sampling_headers,
+                    when_relayed=_after_the_stream(inflight, entry, chat_over),
                 )
             try:
                 upstream = await _post_unless_the_caller_leaves(
@@ -1327,19 +1374,37 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             except httpx.HTTPError as exc:
                 raise _engine_unreachable(resident, exc) from None
             if upstream is None:
-                return _caller_gone(resident)
-            content = upstream.content
-            if upstream.status_code == 200:
-                content = _restore_model_id(content, resident)
-            return Response(
-                content=content,
-                status_code=upstream.status_code,
-                media_type=upstream.headers.get("content-type", "application/json"),
-                # On the engine's own refusal too: a 400 whose `max_tokens` came
-                # from the manifest is a 400 the manifest caused, and the reader
-                # needs that on the response that carries it.
-                headers=sampling_headers,
-            )
+                response = _caller_gone(resident)
+            else:
+                content = upstream.content
+                if upstream.status_code == 200:
+                    content = _restore_model_id(content, resident)
+                response = Response(
+                    content=content,
+                    status_code=upstream.status_code,
+                    media_type=upstream.headers.get(
+                        "content-type", "application/json"
+                    ),
+                    # On the engine's own refusal too: a 400 whose `max_tokens`
+                    # came from the manifest is a 400 the manifest caused, and the
+                    # reader needs that on the response that carries it.
+                    headers=sampling_headers,
+                )
+            inflight.close(entry)
+            # AFTER THE ANSWER IS WRITTEN, not before it. Starlette runs a
+            # response's background task once the body has gone out, so a client
+            # gets its completion at the speed the engine produced it and the
+            # card is cleared behind it. A settlement can wait on a SIGTERM for
+            # as long as three minutes, and no answer should be held for that.
+            response.background = BackgroundTask(chat_over)
+            return response
+        except BaseException:
+            # A refusal, a disconnect, an engine that died: the record must not
+            # outlive the request, and the card is as free now as it would have
+            # been had this succeeded.
+            inflight.close(entry)
+            await chat_over()
+            raise
 
     app.include_router(public)
     app.include_router(private)
@@ -1537,6 +1602,42 @@ def _restore_model_id_in_frame(frame: bytes, resident: Any) -> bytes:
     return b"\n".join(lines) if changed else frame
 
 
+def _chat_over(settlement: Settlement) -> Callable[[], Awaitable[None]]:
+    """OWEN'S RULING, 2026-09-14: the chat is over, so who still has the card?
+
+    A chat holds nothing and reserves nothing, which is right while it runs and
+    is exactly why its END is worth asking at: a client that did not lease has
+    now said everything it is going to say, and if the lane, the lease and the
+    claim are all clear the card goes. **A run of chats with no lease therefore
+    reloads its model between requests**, which is the bill for not stating an
+    intention rather than a bug in the rule (crucible/settle.py).
+
+    A CLEANUP FAILURE IS NOT AN OPERATION FAILURE. An engine that will not stop
+    is said, loudly, in the server log — it does not turn a completion that
+    arrived into a 500, and it does not break a stream that had already been
+    delivered.
+    """
+
+    async def over() -> None:
+        await asyncio.to_thread(
+            settlement.settle_quietly, "the last chat completion finished"
+        )
+
+    return over
+
+
+def _after_the_stream(
+    inflight: InFlight, entry: Entry, chat_over: Callable[[], Awaitable[None]]
+) -> Callable[[], Awaitable[None]]:
+    """Close the record and ask about the card, once the relay is really done."""
+
+    async def done() -> None:
+        inflight.close(entry)
+        await chat_over()
+
+    return done
+
+
 class _RelayResponse(StreamingResponse):
     """A streamed relay whose upstream is closed however the relay ends.
 
@@ -1561,15 +1662,27 @@ class _RelayResponse(StreamingResponse):
     reading from it, and `__call__`'s `finally` runs on every one of those paths.
     """
 
-    def __init__(self, *args: Any, upstream: httpx.Response, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        upstream: httpx.Response,
+        when_relayed: Callable[[], Awaitable[None]],
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._upstream = upstream
+        # THE END OF A STREAMED COMPLETION, for the same reason the upstream's
+        # close lives here rather than in the generator: this `finally` is the
+        # one place that runs on every path Starlette can take. It is where the
+        # chat stops being in flight and where the card is asked about.
+        self._when_relayed = when_relayed
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         try:
             await super().__call__(scope, receive, send)
         finally:
             await self._upstream.aclose()
+            await self._when_relayed()
 
 
 async def _proxy_stream(
@@ -1578,6 +1691,7 @@ async def _proxy_stream(
     body: bytes,
     resident: Any,
     extra_headers: dict[str, str],
+    when_relayed: Callable[[], Awaitable[None]],
 ) -> Response:
     """Forward a streamed completion, SSE framing intact.
 
@@ -1620,6 +1734,10 @@ async def _proxy_stream(
             status_code=upstream.status_code,
             media_type=upstream.headers.get("content-type", "application/json"),
             headers=dict(extra_headers),
+            # There is no relay on this path, so the end of the completion is
+            # here: the record closes and the card is asked about, after the
+            # engine's own refusal has been written out.
+            background=BackgroundTask(when_relayed),
         )
 
     async def relay() -> AsyncIterator[bytes]:
@@ -1642,6 +1760,7 @@ async def _proxy_stream(
     return _RelayResponse(
         relay(),
         upstream=upstream,
+        when_relayed=when_relayed,
         status_code=200,
         media_type=upstream.headers.get("content-type", "text/event-stream"),
         # The sampling audit rides on the response headers, which is the one

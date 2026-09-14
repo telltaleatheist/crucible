@@ -234,9 +234,32 @@ keep-warm window with a ceiling of 240 minutes, defaulting to "stop when the que
 Crucible has nothing: what is resident stays resident until an operator or a job says
 otherwise. For one machine with one operator that is right — an idle unload is a 110-second
 reload the next time anyone types — but it means a forgotten model holds a card overnight.
-The probe makes that visible rather than fixing it. **Proposed default: no idle unload, and
-the Servers row shows what is resident and for how long.** It is a config key, not a
-behaviour change, if Owen disagrees.
+The probe makes that visible rather than fixing it. ~~**Proposed default: no idle unload,
+and the Servers row shows what is resident and for how long.** It is a config key, not a
+behaviour change, if Owen disagrees.~~
+
+> **OVERRULED, 2026-09-14. Owen:** *"Models should always be unloaded when we're done with
+> them. Every time."*
+>
+> He disagreed, and the proposal above had already been answered by what happened the night
+> before: a 9B sat resident after the Foundry proof until a person unloaded it, and Owen saw
+> *"something loaded and nothing happening"*. The card is not storage, and the "forgotten
+> model holds a card overnight" this section wrote down as a cost is the whole of the
+> defect.
+>
+> **And it is not a config key**, which is the part of the proposal that was most wrong. A
+> keep-warm window is a fact standing in for a guess — ninety idle seconds is evidence of
+> nothing — so there is no window, no timer and no key that turns the rule off. "Done" is
+> read from **four facts**: no job on the lane, no lease open, no streaming session holding
+> the claim, no chat in flight. The moment the last of them goes false, the resident thing
+> is unloaded and says why. **PHASE7-LANES.md section 5.3** is the ruling;
+> `crucible/settle.py` is the code.
+>
+> What makes it safe rather than a 44-second reload between every book is section 5.2's
+> lease, built the same night. The consequence for the app is therefore this section's to
+> carry: **a BookForge chat run with no lease open reloads its model per request**, because
+> `electron/ai-bridge.ts`'s `crucible` provider neither loads nor leases. The fix is a lease
+> at BookForge's door, and it belongs on this phase's list rather than in the server.
 
 **Does BookForge ever start a server it did not install?** Adoption (section 1) is the text
 server's answer to "something is already on 8300". For Crucible the equivalent question is

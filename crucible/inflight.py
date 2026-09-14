@@ -140,15 +140,40 @@ class InFlight:
         self._entries: dict[int, Entry] = {}
         self._ids = itertools.count(1)
 
-    @contextmanager
-    def tracked(
-        self, *, act: str | None, model: str, client: str | None
-    ) -> Iterator[Entry]:
+    def open(self, *, act: str | None, model: str, client: str | None) -> Entry:
+        """Record a completion that has started. Pair it with `close`.
+
+        THE PAIR EXISTS BECAUSE ONE COMPLETION OUTLIVES ITS HANDLER. A streamed
+        chat returns a `StreamingResponse` and the tokens are relayed afterwards,
+        so `with tracked(...)` around the handler stopped counting at the moment
+        the relay began — a reporting wart while nothing acted on the count, and
+        a real hazard since 2026-09-14, when "no chat is in flight" became one of
+        the four facts that let the card be cleared (`crucible/settle.py`).
+        Unloading a model out from under a stream that is still producing tokens
+        is exactly the eviction this server refuses to do to anyone else.
+
+        So the streamed door opens the record here and closes it where the relay
+        really ends (`_RelayResponse.__call__`'s `finally`, which runs on every
+        path including a caller who walked away). The synchronous door keeps the
+        context manager below, which is these two with a `try`.
+        """
         entry = Entry(
             id=next(self._ids), act=act, model=model, client=client, since=utcnow()
         )
         with self._lock:
             self._entries[entry.id] = entry
+        return entry
+
+    def close(self, entry: Entry) -> None:
+        """This completion is over. Idempotent: closing twice is not an error."""
+        with self._lock:
+            self._entries.pop(entry.id, None)
+
+    @contextmanager
+    def tracked(
+        self, *, act: str | None, model: str, client: str | None
+    ) -> Iterator[Entry]:
+        entry = self.open(act=act, model=model, client=client)
         try:
             yield entry
         finally:
@@ -156,8 +181,7 @@ class InFlight:
             # disconnects mid-completion, an engine that dies and an abort all
             # end here, and an entry that outlives its request would make the
             # server look permanently busy with work that stopped.
-            with self._lock:
-                self._entries.pop(entry.id, None)
+            self.close(entry)
 
     def rows(self) -> list[dict[str, Any]]:
         with self._lock:
