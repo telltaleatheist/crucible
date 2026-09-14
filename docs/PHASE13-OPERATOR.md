@@ -210,13 +210,24 @@ Request bodies, one `type` each:
   `invalid_module`. A `module` is validated WHOLE before anything starts; installed job
   types and installed subjects inside a module are SKIPPED with a `skipped` event each
   (a module is idempotent; a single pull is not — the difference is written here on purpose).
-- Three more refusals this build needed, and where they come from:
+- Five more refusals this build needed, and where they come from:
   `unknown_task` (404, `GET`/`DELETE` of an id this server does not hold — the
   shape `unknown_job` already has), `not_running` (409, cancelling a task that
-  has finished), and `install_command_missing` (503, from an `install` task: the
+  has finished), `install_command_missing` (503, from an `install` task: the
   `crucible` console script is not beside this interpreter and not on `PATH`,
   and the refusal names both places searched, exactly as every "tool missing"
-  refusal does since `crucible/hosttools.py`).
+  refusal does since `crucible/hosttools.py`), and the two a RUNNING task fails
+  with rather than falling into a generic bucket `crucible/errors.py` says this
+  server does not have: `pull_failed` (the weights module's own sentence — a
+  gated repo, a revision the manifest names and the repo does not, a digest
+  that did not match) and `install_failed` (the console script's exit code,
+  with its output already on the event stream). Both arrive as the task's
+  `failed` event, never as a status on the POST, because by then the task has
+  been admitted.
+- `GET /v1/tasks` answers `{"tasks": [ …the section's status shape… ]}`,
+  newest first — the same `{"rows": …}` / `{"tasks": …}` envelope
+  `GET /v1/catalog` uses, so a listing can grow a cursor one day without
+  becoming a different document.
 - **`409 server_busy` on a task carries the holder in the shape the API already
   names it**, which is not one shape but four, because four different things can
   hold the card (`crucible/settle.py`). `details.fact` says which — `a job`,
@@ -308,6 +319,28 @@ anyway and hope — is the shape of every defect in ARCHITECTURE.md's table.
 plus a PURE `parsePairing(line): {name, url, token}` that refuses malformed lines by name
 (`invalid_pairing`). Typed against section 3 verbatim; tested against a fake server like
 every other method in `sdk/ts/test`.
+
+**BUILT, 2026-09-14, with two additions that are named here because they are
+now part of the contract:**
+
+- **`tasks()`** — `GET /v1/tasks`. The doc listed the single read and not the
+  listing, and the page's Tasks section draws "the last few finished" from it;
+  a client that could not ask for them would have had to keep its own list of
+  ids across a reload, which is a second record of something the server
+  already keeps.
+- **`CrucibleCardHeld`**, for the four-shaped `409 server_busy` above. The
+  SDK's existing `CrucibleBusy` reads a JOB's eight fields, so a lease-shaped
+  body read as one comes back a *protocol error* — a page told its server sent
+  nonsense when it sent exactly what this document specifies. The client
+  discriminates on `details.fact` and produces the job type or the card type
+  accordingly. `details.who` is the server's own sentence and an app's row
+  shows it verbatim (5.4).
+
+The pairing line's two implementations are held together by a LITERAL: the same
+line appears in `tests/test_setup_route.py` and `sdk/ts/test/unit-pairing.test.ts`,
+one asserting the producer emits it and the other asserting the parser reads it.
+Neither is written against the other's code, so a change to 2.1 fails on both
+sides with the old and the new spelling visible.
 
 ### 3.7 Tests
 
