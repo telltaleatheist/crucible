@@ -834,7 +834,8 @@ contains no `if`.
 | `wsl_states.py` | **GENERATED** from `sdk/bootstrap/src/wsl-states.ts`. |
 | `wslstate.py` | the predicates for that table, and the walk. |
 | `landoor.py` | 4.1's LAN forward: which mechanism, and whether it is already open. |
-| `installer.py` | 4.7's sequence. |
+| `catalog.py` | the two catalog ports the weights migration reads, and 3.5a's delete. |
+| `installer.py` | 4.7's sequence, including the weights migration. |
 | `door.py` | `POST /install` on 127.0.0.1:7101. |
 | `startup.py` | the Startup shortcut, and the two verbs that own it. |
 | `tray.py` | pystray. Nothing else. |
@@ -998,6 +999,52 @@ here where no rewrite can reach. The `%~dp0` shim beside it runs.
    this session was told not to do. It was removed with the fixed verb and the folder verified
    back to its two original entries (`LG Monitor App Installer.lnk`, `Ollama.lnk`).
 
+### 7b.4b The weights migration, made real against 3.5a
+
+`DELETE /v1/catalog/{kind}/{id}` (3.5a) is the door 7b.6 asked for, and `migrate-weights` is
+now written against it rather than describing what it would do.
+
+**The shape.** `crucible/host/catalog.py` has two ports and three verbs —
+`installed_subjects()`, `pull()`, `remove()`. They are two ports and not one because during
+the move both servers want `127.0.0.1:7100` and on Windows the Windows one has it: the
+Windows server is dialled over loopback from this process, the guest is reached by running
+`curl` INSIDE the distro, which is the only address unambiguously its own. They speak the
+same verbs and answer the same refusals, so the sequence never branches on which side it is
+talking to — **it is the ORDER that carries 3.5's rule, not the transport.** One bearer opens
+both, because `migrate-config`, three steps earlier, made the guest's token the Windows one.
+
+**The loop, per round:** read BOTH catalogs; for each subject the Windows engine reports
+installed, submit the guest's pull if the guest does not have it, WAIT until the guest's own
+catalog says `installed`, then `DELETE` it on Windows. Then re-read and go again. A machine
+unplugged at any instant has that subject on one side or on both, never on neither.
+
+**Idempotent by RE-DIFFING, not by a journal.** Every round re-reads the two catalogs and acts
+on the difference, so a resume after a crash, a reboot or a Ctrl-C needs no state that
+survived the crash — which is the only kind of resume that is true after a power cut. Running
+the whole step again on a finished machine reads two catalogs and does nothing, which is a
+test.
+
+**`subject_in_use` is waited out, never skipped.** 3.5 says nothing is skipped, so a held
+subject comes back on the next round with `details.who` named in the meantime —
+`MIGRATE_IN_USE_ROUNDS` (60) x `MIGRATE_POLL_SECONDS` (5 s), five minutes of somebody closing
+an app — and then the step fails BY THAT NAME, naming every holder. The bound is deliberate:
+the two honest ends are "removed" and "still held, and here is who", and an unbounded wait
+would be a third, which is a move that never finishes and never says why. Nothing is lost when
+it fails that way — the guest has its copy and the Windows one is still there.
+
+Three more refusals, each of which keeps a Windows copy alive rather than deleting it:
+`subject_pull_timeout` (the guest never reported it installed), any other `DELETE` refusal
+verbatim (`subject_remove_failed`, …), and `catalog_unreachable` — because **"nothing
+installed" and "could not ask" must never be the same answer**, the first being an answer that
+would delete every Windows copy on the machine.
+
+**Tested with two fake servers**, which is the only way to witness an order between two
+machines: the guest has a subject before the Windows copy goes; a subject the guest already
+has is not pulled again; a half-done move resumes from the diff and is a no-op the second
+time; `subject_in_use` is retried three times and then succeeds; held forever fails by name
+with the holder; a pull that never lands leaves the Windows copy alone; and a non-`in_use`
+refusal keeps both copies.
+
 ### 7b.5 Decisions, where the doc left a choice
 
 - **`distro = unknown` is a state and not a synonym for `absent`.** `wsl.exe` failing to
@@ -1030,6 +1077,13 @@ here where no rewrite can reach. The `%~dp0` shim beside it runs.
   `engine_target_unknown` is reserved for a `target` that is not `wsl`, which is the one field
   whose wrong value would DO the wrong thing. An older door refusing a field a newer client
   was told to send is how two halves of one release stop talking.
+- **The migration polls the CATALOG, not the pull task's events.** A task is a report about
+  a fact and `installed` is the fact, and the thing that gates a deletion has to be the fact.
+  It also makes the step survive losing the event stream, which a six-hour download will.
+- **The catalog ports are built per RUN, not once at tray start.** The token they use is the
+  one the config holds when the move BEGINS, and `migrate-config` is what makes the guest's
+  token the Windows one. A port that captured a token at startup would be holding a token the
+  guest never had.
 - **The CI job for the Windows pack is a job and not a matrix row.** Every step in that matrix
   is written in `sh` and reclaims disk with `sudo rm -rf`. One job with four Windows-shaped
   steps is honest; a matrix with `if: runner.os` on half its steps is a matrix pretending to
@@ -1044,16 +1098,14 @@ here where no rewrite can reach. The `%~dp0` shim beside it runs.
   machine was out of scope by instruction. `installer._import_distro` therefore refuses
   `no_crucible_distro` naming the missing asset rather than importing somebody else's image,
   and the steps after it are exercised only against the scripted runner.
-- **`install-job-types` and `migrate-weights` install and move NOTHING yet**, and say so on
-  the event stream. Their inputs are the Windows server's coordinate records and its catalog
-  (4.7, 3.5), and the `llama-windows` backend that would fill both is the server agent's half
-  of this phase. What IS built is the shape and the ORDER — pull in the guest, then delete on
-  Windows, never the reverse — and nothing is deleted on either side today, which is the half
-  of that rule that matters.
-- **There is no delete door for the Windows copies.** 3.5's last bullet needs one
-  (`DELETE` on a catalog subject, or a verb); the host must not reach into
-  `crucible/weights.py`'s layout from outside, which would be a second owner of where a
-  subject lives. Named here so it is asked for rather than improvised.
+- **`install-job-types` installs NOTHING yet**, and says so on the event stream. Its input is
+  the coordinate records the Windows server keeps for each connected app (4.7), and there is
+  no door onto them yet. The apps' own coordinate step (PHASE14 4a) installs what they need
+  on first connect to the guest, so nothing is lost — it is just not done here.
+- **`migrate-weights` is now REAL** (7b.4b) but has never run against two live servers,
+  because neither the `llama-windows` catalog nor a guest on this machine exists yet. It is
+  exercised against two fake ones, which is the only way to witness an ORDER between two
+  machines at all.
 - **The LAN forward was not added.** `netsh` needs administrator and Owen's machine was to be
   read, not changed. Detection is measured (7b.4); `add_argv()` / `remove_argv()` are data and
   tested as data.
@@ -1069,13 +1121,20 @@ here where no rewrite can reach. The `%~dp0` shim beside it runs.
 | suite | before | after |
 |---|---|---|
 | `sdk/bootstrap` `npm test` | 191 | **245** |
-| `tests/test_host.py` | — | **69** |
+| `tests/test_host.py` | — | **85 passed, 1 skipped** |
 | `tests/test_envpack.py` | 45 passed / 14 skipped | **67 passed / 14 skipped** |
-| pytest, whole tree minus `tests/test_lineup.py` | 1234 (reported) / 1215 measured here | **owed** — a trainer held the VM |
+| pytest, whole tree minus `tests/test_lineup.py` | 1234 (reported) / 1215 measured here | **owed** — a LoRA trainer (pid 557, mistborn, step 1015/5978) held the VM through every attempt |
 
 `tests/test_lineup.py` fails on this checkout for a reason that is not this phase's: it is a
 git WORKTREE, its `.git` is a file pointing at a Windows path, and `git rev-parse` inside WSL
 cannot follow it. Four failures, all of them that.
+
+The one skip is `test_on_posix_the_pairing_file_is_0600_from_the_outset`, and it is skipped
+on NTFS rather than deleted or faked: a mode is a property of the FILESYSTEM and NTFS has none
+to report (it answers `0o666` for every file). It is the only assertion in the file that
+cannot be platform-injected, because the thing under test is the filesystem's own answer. The
+Windows half of that same rule — the `icacls` ACL and the file being DELETED when it cannot be
+set — runs everywhere.
 
 **Every host test runs off Windows.** The platform, the environment and every subprocess are
 injected, because a suite that skipped its subject on the machine it runs on would pin

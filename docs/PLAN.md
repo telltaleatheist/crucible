@@ -255,9 +255,13 @@ and no install ran end to end, because `crucible-rootfs-<version>.tar.zst` is on
 yet; `install-job-types` and `migrate-weights` install and move NOTHING and say so on the
 event stream, because their inputs are the Windows server's coordinate records and catalog,
 which are the server half of this phase; there is no delete door for a Windows weights copy
-(3.5's last bullet needs one, and the host must not reach into `weights.py`'s layout from
-outside); and the LAN forward was detected but not added, because `netsh` needs
-administrator and Owen's machine was to be read, not changed.
+and the LAN forward was detected but not added, because `netsh` needs administrator and
+Owen's machine was to be read, not changed. **The delete door landed while this was being
+written** (3.5a, `DELETE /v1/catalog/{kind}/{id}`), so `migrate-weights` is real: pull in the
+guest, wait for the GUEST's catalog to say `installed`, then delete on Windows, re-diffing
+both catalogs every round so a resume needs no state that survived the crash. A
+`subject_in_use` is waited out with its holder named and then fails BY THAT NAME — never
+skipped, because 3.5 says nothing is skipped and an unbounded wait would be a third ending.
 
 So what is left is not code. It is **a card, and Owen's rulings on the five things below.**
 
