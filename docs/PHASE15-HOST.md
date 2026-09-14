@@ -325,6 +325,20 @@ Now:
   BOTH copies of the unfinished subject and resumes on the next host start; it never deletes
   first.
 
+### 3.5a A subject can be REMOVED — `DELETE /v1/catalog/{kind}/{id}`
+
+The weights rule (3.5, last bullet) needs a door the host can call to delete a Windows copy
+once the guest has its own, and the host must never reach into `weights.py`'s layout from
+outside. So the catalog gains one verb: `DELETE /v1/catalog/{kind}/{id}` removes an installed
+subject's files (every file the manifest names for THIS backend, and the subject's directory
+if it is then empty) and answers `204`. Refusals by name: `subject_unknown` (404),
+`subject_not_installed` (409), `subject_in_use` (409, with `details.who` — resident, leased,
+or named by a running task), `subject_remove_failed` (500, with the path). Same auth as every
+private route; recorded in `/v1/activity` with the act. `crucible remove <kind> <id>` is the
+CLI spelling, refusing identically. The page's Catalog panel gains a Remove on installed rows.
+An app never calls it on a user's behalf without saying so on screen (BookForge and Foundry:
+not in this phase — the host is the only caller for now).
+
 ### 3.6 The pairing file
 
 `crucible init` and `crucible service install` write the pairing line to a user-only file
