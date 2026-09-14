@@ -32,6 +32,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import API_VERSION, VERSION, accelerator, catalog, pairing
+from . import capability as capability_classes
 from .backend import CUDA_LINUX, Backend
 from .config import Config, load_config
 from .errors import ApiError
@@ -54,6 +55,7 @@ from .residency import KIND_NOUNS, Residency
 from .settle import Settlement
 from .sampling import SAMPLING_HEADER, Applied, apply_defaults
 from .tasks import TASK_TYPES, ReloadRefused, Task, TaskStore
+from .voices import NARRATOR_ENGINE_SAMPLING
 from .ttsstream import (
     StreamManager,
     StreamSession,
@@ -289,6 +291,59 @@ class StreamOp(BaseModel):
 
 def _error_response(error: ApiError) -> JSONResponse:
     return JSONResponse(status_code=error.status_code, content=error.body())
+
+
+def installable_job_type_rows() -> list[dict[str, Any]]:
+    """Every job type this BUILD knows, and what it would take to have it.
+
+    `GET /v1/capability`'s `job_types`, PHASE13-OPERATOR.md sections 3.2a and 4.
+    One row per job type named by the capability class table, in that table's
+    report order, and every field read from the module that already owns it:
+
+    | field | owner |
+    |---|---|
+    | `job_type`, `classes` | `crucible/capability.py`'s `CLASSES` |
+    | `installer` | `crucible/cli.py`'s `INSTALLER_FOR` |
+    | `narrator_engines` | `crucible/voices.py`'s `NARRATOR_ENGINE_SAMPLING` |
+
+    `installer` is the job type `POST /v1/tasks {"type": "install"}` must be
+    given to build this one's env, which is almost always itself — `denoise` is
+    the exception, because it shares `rvc`'s env, and a page offering it an
+    Install button of its own would be drawing a control the task door refuses
+    `unknown_job_type`. `null` means nothing installs it: `echo` is compiled in.
+
+    `narrator_engines` is empty for every type but `tts`, and for `tts` it is
+    the whole of what `narrator_engine` may be — the same list the task door
+    validates against, so a page cannot offer an engine the POST will refuse.
+    It is a LIST and not a default: on cuda-linux the two engines cannot share
+    a venv and there is no default (`crucible/tasks.py`'s
+    `require_narrator_engine`).
+
+    Whether the type is OFFERED here is deliberately absent: that is
+    `/v1/setup`'s `job_types`, which is `store.registry` and the one owner of
+    it. Repeating it would make a stale second answer possible in the seconds
+    around an install's reload (3.4).
+    """
+    from .cli import INSTALLER_FOR
+
+    ordered: list[str] = []
+    classes_of: dict[str, list[str]] = {}
+    for entry in capability_classes.CLASSES:
+        if entry.job_type not in classes_of:
+            ordered.append(entry.job_type)
+            classes_of[entry.job_type] = []
+        classes_of[entry.job_type].append(entry.name)
+    return [
+        {
+            "job_type": job_type,
+            "classes": classes_of[job_type],
+            "installer": INSTALLER_FOR.get(job_type),
+            "narrator_engines": (
+                sorted(NARRATOR_ENGINE_SAMPLING) if job_type == "tts" else []
+            ),
+        }
+        for job_type in ordered
+    ]
 
 
 def require_auth(request: Request) -> None:
@@ -569,6 +624,21 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         somebody decided. `total_bytes` is the card the decision was made on, so a
         reader can tell a stale record from a current one — which is how a swapped
         GPU is noticed without anybody writing down a date.
+
+        `job_types` IS NOT PART OF THE RECORD, and that is why it is added here
+        rather than in `CapabilityRecord.to_dict()`. PHASE13-OPERATOR.md section
+        4 draws the operator page's Job types section from this one read, and to
+        draw it the page needs three things the stored record cannot carry: which
+        job type each class feeds (`capability.CLASSES`), which command builds
+        that type's env (`cli.INSTALLER_FOR` — `denoise` shares `rvc`'s), and
+        which narrator engines a `tts` install may name
+        (`voices.NARRATOR_ENGINE_SAMPLING`). All three are THIS BUILD's tables,
+        read live; a record written months ago must not be able to answer them,
+        because they are facts about the code, not about the card. Put in the
+        record they would be a second copy that goes stale the day an engine is
+        added — which is the shape R1 exists to forbid. The page holding its own
+        copy is the same defect one layer out, and is what section 4 means by
+        "never a hard-coded list".
         """
         record = config.capability
         if record is None:
@@ -583,7 +653,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 "on this host yet. Run `crucible capability --write` (or reinstall) "
                 "to decide, and read `GET /v1/info` for what it offers meanwhile",
             )
-        return record.to_dict()
+        return {**record.to_dict(), "job_types": installable_job_type_rows()}
 
     # ------------------------------------------------------------------ info
 

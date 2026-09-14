@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from crucible import capability, cli
+from crucible import capability, cli, voices
 from crucible.capability import (
     CLASSES,
     BY_NAME,
@@ -637,6 +637,61 @@ def test_the_capability_route_answers_every_class_and_its_reason(
         assert isinstance(row["enabled"], bool)
         if row["enabled"]:
             assert row["selected"] or row["capability"] == "echo"
+
+
+def test_the_route_says_which_job_type_each_class_feeds_and_what_builds_it(
+    make_client, auth
+) -> None:
+    """`job_types`, the operator page's Job types section in one read.
+
+    PHASE13-OPERATOR.md section 3.2a. The page must not carry a list of job
+    types, a list of narrator engines, or the knowledge that `denoise` has no
+    installer of its own — all three are this BUILD's tables, and a copy in a
+    page is the copy nobody updates (R1, and section 4's "never a hard-coded
+    list").
+    """
+    total, allowance = 26 * 1024 ** 3, 3 * 1024 ** 3
+    decided = capability.record(
+        "cuda-linux",
+        total_bytes=total,
+        desktop_allowance_bytes=allowance,
+        decisions=capability.decide_all(
+            "cuda-linux", total_bytes=total, desktop_allowance_bytes=allowance
+        ),
+    )
+    with make_client(capability=decided) as instance:
+        record = instance.get("/v1/capability", headers=auth).json()
+
+    rows = {row["job_type"]: row for row in record["job_types"]}
+    # Every class the same read reports belongs to exactly one of these rows,
+    # and no row names a class that is not there — that is what makes the two
+    # halves of the section one read rather than two that can disagree.
+    classed = [name for row in record["job_types"] for name in row["classes"]]
+    assert sorted(classed) == sorted(row["capability"] for row in record["classes"])
+    assert len(classed) == len(set(classed))
+
+    assert rows["llm"]["classes"] == [
+        "clean", "translate", "simplify", "analysis", "pages"
+    ]
+    # Almost always itself. `denoise` shares `rvc`'s env, so a page that offered
+    # it an Install button of its own would draw a control the task door refuses
+    # `unknown_job_type` — and `echo` is compiled in, which is not the same as
+    # "installed".
+    assert rows["llm"]["installer"] == "llm"
+    assert rows["denoise"]["installer"] == "rvc"
+    assert rows["echo"]["installer"] is None
+
+    # The whole of what `narrator_engine` may be, from the table the task door
+    # validates against, and empty for every type the field means nothing for.
+    assert rows["tts"]["narrator_engines"] == sorted(voices.NARRATOR_ENGINE_SAMPLING)
+    assert all(
+        row["narrator_engines"] == []
+        for name, row in rows.items()
+        if name != "tts"
+    )
+
+    # OFFERED is not answered here: `/v1/setup`'s `job_types` owns it.
+    assert all("offered" not in row and "installed" not in row for row in rows.values())
 
 
 def test_a_server_that_has_decided_nothing_says_so_rather_than_answering_empty(

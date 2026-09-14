@@ -183,6 +183,55 @@ pairing line.
   that broke it, rather than dropping the `floors` key or emitting `[]` — an
   empty floors list means "this model floors nothing", which is a claim.
 
+### 3.2a `GET /v1/capability` grows `job_types`
+
+**Added 2026-09-14, while building the page (section 4).** Section 4 says the Job
+types section is drawn from `/v1/capability`, and it could not be: the route
+answered the stored `[capability]` record, whose rows carry a capability CLASS
+(`clean`, `translate`, `tts`, …) and no job type. A page cannot turn `clean` into
+an `{"type": "install", "job_type": "llm"}` without a table of its own, and
+section 4 forbids exactly that ("never a hard-coded list").
+
+So the route now answers the record **plus** one derived key:
+
+```json
+"job_types": [
+  { "job_type": "llm", "classes": ["clean","translate","simplify","analysis","pages"],
+    "installer": "llm", "narrator_engines": [] },
+  { "job_type": "tts", "classes": ["tts"], "installer": "tts",
+    "narrator_engines": ["higgs-v3", "orpheus"] },
+  { "job_type": "denoise", "classes": ["denoise"], "installer": "rvc",
+    "narrator_engines": [] },
+  { "job_type": "echo", "classes": ["echo"], "installer": null,
+    "narrator_engines": [] }
+]
+```
+
+- One row per job type named by `crucible/capability.py`'s `CLASSES`, in that
+  table's report order; `classes` partitions the same read's `classes` list
+  exactly, so the two halves of the section cannot disagree.
+- `installer` is the job type `POST /v1/tasks {"type": "install"}` must be given
+  to build this one's env — `crucible/cli.py`'s `INSTALLER_FOR`, which is almost
+  always the type itself. `denoise` is `rvc`, because it shares that env; `echo`
+  is `null`, because it is compiled in. A page that did not know this would draw
+  an Install button the task door refuses `unknown_job_type`.
+- `narrator_engines` is the whole of what `narrator_engine` may be, from the
+  table the task door validates against (`crucible/voices.py`'s
+  `NARRATOR_ENGINE_SAMPLING`), and `[]` for every type the field means nothing
+  for. A list and not a default: on cuda-linux the two engines cannot share a
+  venv and there is no default.
+- **`job_types` is built live and is NOT part of the record**, because all three
+  facts are about this BUILD rather than about the card. Written into
+  `[capability]` they would be a second copy that goes stale the day an engine is
+  added, which is R1's shape; held in the page they would be the same defect one
+  layer further out.
+- **Whether a type is OFFERED here is deliberately not in this row.**
+  `/v1/setup`'s `job_types` is `store.registry` and owns that, including in the
+  seconds around an install's reload (3.4).
+- A server that has decided nothing still answers `503 capability_undecided` and
+  the whole section goes with it, including the list. That is the honest state:
+  the page shows the refusal with its code and the command that fixes it.
+
 ### 3.3 Tasks — `POST /v1/tasks`, `GET /v1/tasks`, `GET /v1/tasks/{id}`, `GET /v1/tasks/{id}/events`, `DELETE /v1/tasks/{id}`
 
 Request bodies, one `type` each:
