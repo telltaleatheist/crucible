@@ -13,6 +13,8 @@ import pytest
 
 from crucible.manifests import (
     BACKEND_ENGINES,
+    class_family,
+    engine_for,
     GgufLocal,
     ManifestError,
     OllamaLocal,
@@ -172,10 +174,10 @@ def test_a_short_sha_is_not_a_pin() -> None:
     assert "40-character commit sha" in str(caught.value)
 
 
-def test_the_engine_must_match_the_backend() -> None:
+def test_the_engine_must_match_the_backend_and_the_family() -> None:
     with pytest.raises(ManifestError) as caught:
         parse(GOOD.replace('engine = "vllm"', 'engine = "mlx-lm"'))
-    assert "does not run on cuda-linux" in str(caught.value)
+    assert "does not serve 'text' models on cuda-linux" in str(caught.value)
 
 
 def test_an_invented_backend_is_refused() -> None:
@@ -315,11 +317,60 @@ def test_each_shipped_manifest_declares_the_backends_it_serves(model_id: str) ->
     assert sorted(manifest.backends) == BACKENDS[model_id]
     assert manifest.context_default == CONTEXTS[model_id]
     for kind, spec in manifest.backends.items():
-        assert spec.engine == BACKEND_ENGINES[kind]
+        assert spec.engine == engine_for(kind, manifest.modalities)
         assert len(spec.revision) == 40
         expected = BACKEND_CONTEXTS.get((model_id, kind), CONTEXTS[model_id])
         assert manifest.context_for(kind) == expected
         assert spec.memory_bytes_estimate > 0
+
+
+def test_the_engine_table_is_one_per_backend_and_family() -> None:
+    """The change of 2026-09-14, and what did NOT change with it.
+
+    `cuda-linux` maps both families to vLLM, which is why "one engine per
+    backend" was true by accident for a year. `mlx-darwin` cannot: mlx-lm is a
+    text server and cannot be handed an image.
+    """
+    assert BACKEND_ENGINES == {
+        "cuda-linux": {"text": "vllm", "pages": "vllm"},
+        "mlx-darwin": {"text": "mlx-lm", "pages": "mlx-vlm"},
+    }
+
+
+def test_the_family_is_read_off_modalities_and_is_not_a_key() -> None:
+    """One owner: `qwen3.5-9b` has a vision tower and is served text-only, and
+    it says so once. A `family = "pages"` key would be the second owner."""
+    assert class_family(["text"]) == "text"
+    assert class_family(["text", "image"]) == "pages"
+    assert load_manifest("dots-ocr").modalities == ("text", "image")
+    assert class_family(load_manifest("dots-ocr").modalities) == "pages"
+    assert class_family(load_manifest("qwen3.5-9b").modalities) == "text"
+
+
+def test_a_text_engine_named_by_a_page_model_is_refused() -> None:
+    """The refusal the new table exists to make. It names the modalities it
+    read the family from, because a reader who was told only "wrong engine"
+    would go looking in the wrong table."""
+    text = GOOD.replace('modalities = ["text"]', 'modalities = ["text", "image"]')
+    text = text.replace("[backends.cuda-linux]", "[backends.mlx-darwin]")
+    text = text.replace('engine = "vllm"', 'engine = "mlx-lm"')
+    with pytest.raises(ManifestError) as caught:
+        parse(text)
+    message = str(caught.value)
+    assert "does not serve 'pages' models on mlx-darwin" in message
+    assert "that pairing's engine is 'mlx-vlm'" in message
+    assert "read off [model] modalities" in message
+
+
+def test_a_page_engine_named_by_a_text_model_is_refused_too() -> None:
+    """The mirror, which is the half that keeps `mlx-vlm` from quietly becoming
+    the Mac's text server."""
+    text = GOOD.replace("[backends.cuda-linux]", "[backends.mlx-darwin]")
+    text = text.replace('engine = "vllm"', 'engine = "mlx-vlm"')
+    with pytest.raises(ManifestError) as caught:
+        parse(text)
+    assert "does not serve 'text' models on mlx-darwin" in str(caught.value)
+    assert "that pairing's engine is 'mlx-lm'" in str(caught.value)
 
 
 def test_the_27b_does_not_fit_a_24_gib_card() -> None:

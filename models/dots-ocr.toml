@@ -207,8 +207,83 @@ engine_args = [
     "--max-num-seqs", "16",
 ]
 
-# No `[backends.mlx-darwin]`. `mlx-community/dots.ocr-4bit` exists and Foundry's
-# `mlx-local` route serves it in-process on the Mac today, which is the Mac's
-# only route and the reason there is no hurry: a block here with an unmeasured
-# estimate would compete with a route that works. It gets one when the model is
-# measured on that machine.
+# ###########################################################################
+# STILL NO `[backends.mlx-darwin]` — AND SINCE 2026-09-14 THE REASON IS A
+# MEASUREMENT RATHER THAN AN ABSENCE OF ONE.
+#
+# Everything the block needs exists. The weights are on that machine, the
+# engine slot is there (`BACKEND_ENGINES` became one engine per (backend,
+# class family) on the same day, and `crucible/engines/mlx_vlm.py` is the
+# class), the env holds mlx-vlm, and the model was measured. What is missing
+# is that mlx-vlm's OWN HTTP SERVER — the only thing Crucible can drive —
+# does not show the model the page.
+#
+# WHAT WAS MEASURED, Mac Studio M1 Ultra (64 GiB, macOS 26.3.1), 2026-09-14,
+# conda env `vlmtest` (mlx-vlm 0.6.10, mlx 0.32.2), against
+# `mlx-community/dots.ocr-4bit` @ 4ab989e403d4f8cafa5fdeede5b2290a706c2405
+# (18 files, 3,538,472,109 B, of which model.safetensors is 3,524,130,967 —
+# read from the hub tree API at that sha the same day, and the sha itself
+# confirmed as `main` through /refs). The page was a synthetic 1300x2112 PNG,
+# the size Foundry's pinned VLM_DPI = 200 makes of a 468x760 pt page, with
+# known text — no personal document was read.
+#
+#   IN PROCESS, `mlx_vlm.generate()`:
+#     load 1.93 s; ONE PAGE in 16.32 s
+#     peak memory     4,927,004,359 B   (mx.get_peak_memory(), reset before
+#                                        the load)
+#     after load      3,527,055,368 B   — essentially the weights
+#     the answer      five blocks in the dots-json dialect
+#                     [{bbox, category, text}, ...] in reading order:
+#                     Page-header, Section-header, and the three body
+#                     paragraphs TRANSCRIBED VERBATIM. It missed the "117"
+#                     folio and the "1" footer.
+#
+#   OVER ITS OWN SERVER, `python -m mlx_vlm server --model <dir>`, the same
+#   weights, the same image, the same prompt:
+#     `[{"bbox": [1, 0, 1008, 1008], "category": "Picture"}]`, in 0.72 s.
+#
+# THE DISCRIMINATOR IS THE TOKEN COUNT AND IT IS UNAMBIGUOUS. The server logs
+# the request as `images=1` and then `prompt_tokens=216` — the text alone.
+# Asked a 21-token question instead of the layout prompt, it logs
+# `prompt_tokens=21`. On the same machine, in the same env,
+# `mlx_vlm.utils.prepare_inputs(processor, images=[the page], prompts=<the
+# same formatted prompt>)` returns input_ids of length 3,464 with pixel_values
+# of shape (13800, 588) — the 13,800 patches a 1300x2112 page makes at patch
+# 14, merged 2x2 into 3,450 image tokens. The image placeholder is never
+# expanded on the server's path.
+#
+# It is not the request shape and it is not the version. Four shapes were
+# tried — image part first, text part first, a local file path instead of a
+# data URI, and an explicit `resize_shape` — and all four produced the
+# byte-identical wrong answer with the identical 216 tokens. mlx-vlm 0.7.1,
+# installed clean in a scratch env, does exactly the same.
+# `apply_chat_template` was ruled out directly: it produces the same
+# `<|img|><|imgpad|><|endofimg|>` prompt whether it is handed a string or the
+# message list the server passes.
+#
+# WHY THAT IS A BLOCKER AND NOT A CAVEAT. A manifest block here lights
+# `pages: yes` on every Mac (`crucible/capability.py` reads this file), and
+# every page would come back as one `Picture` covering the sheet — a
+# well-formed answer in the right dialect that is simply not the page. That
+# is the exact failure this repo refuses everywhere else: a result produced
+# under conditions nothing in the output records.
+#
+# WHAT WOULD LET THE BLOCK BE WRITTEN, and nothing else is needed:
+#   * an mlx-vlm whose `/v1/chat/completions` reports `prompt_tokens` in the
+#     thousands for this page — i.e. the image expanded into the prompt — and
+#     returns the five blocks the in-process call returns; then
+#   * this block, with `engine = "mlx-vlm"`,
+#     hf_repo = "mlx-community/dots.ocr-4bit",
+#     revision = "4ab989e403d4f8cafa5fdeede5b2290a706c2405", and
+#     memory_bytes_estimate = 4927004359 — MEASURED above, and to be re-taken
+#     through the server, since the in-process peak is a floor for it.
+#   * no `--trust-remote-code`: mlx-vlm ships its own `dots_ocr` model class
+#     (`mlx_vlm/models/dots_ocr/`), so the repo's `auto_map` is never
+#     followed. vLLM needs the flag for the same weights; this engine does
+#     not.
+#
+# Foundry's `mlx-local` route is unaffected and goes on working, because it
+# calls `mlx_vlm.generate()` in process — the half that is correct. That is
+# also why nobody had found this: the app's Mac page reader never used the
+# server.
+# ###########################################################################

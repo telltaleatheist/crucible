@@ -43,12 +43,75 @@ from .errors import CrucibleError
 
 MODELS_DIR_ENV = "CRUCIBLE_MODELS_DIR"
 
-#: Which engine each backend is allowed to name. A manifest that pairs them any
-#: other way is a manifest bug, not a runtime decision.
-BACKEND_ENGINES: dict[str, str] = {
-    CUDA_LINUX: "vllm",
-    MLX_DARWIN: "mlx-lm",
+#: The two CLASS FAMILIES a `models/` manifest can belong to. Not a new key and
+#: not a new vocabulary: `pages` is exactly the set of models whose
+#: `modalities` carries `image`, which is already the load-bearing fact about
+#: what this server OFFERS the model for, and `text` is the rest. Deriving the
+#: family instead of declaring it keeps one owner (ARCHITECTURE.md R1) —
+#: `qwen3.5-9b` has a vision tower and is served text-only, and it says so
+#: once.
+TEXT_FAMILY = "text"
+PAGES_FAMILY = "pages"
+CLASS_FAMILIES: tuple[str, ...] = (TEXT_FAMILY, PAGES_FAMILY)
+
+#: Which engine each backend is allowed to name, PER CLASS FAMILY. A manifest
+#: that pairs them any other way is a manifest bug, not a runtime decision.
+#:
+#: ONE ENGINE PER (BACKEND, CLASS FAMILY), decided in docs/PHASE15-HOST.md 4.6
+#: and not one per backend as this table read until 2026-09-14. The old shape
+#: was never a rule anybody chose; it was true by accident because `cuda-linux`
+#: happens to serve both families with vLLM. `mlx-darwin` cannot: `mlx-lm` is a
+#: text server that cannot be handed an image, so a Mac that reads pages needs
+#: a second server class beside it, and a table with one slot per backend had
+#: nowhere to say which.
+#:
+#: **The lease and the four facts are per RESIDENT, not per engine**, so nothing
+#: about arbitration changes. What changes is that `crucible/residency.py`
+#: learns which server class to start from the manifest's own `engine`, which
+#: it already read — the block below is what decides whether that name is
+#: allowed.
+#:
+#: `mlx-vlm` appears here as the `pages` engine on `mlx-darwin` and NO manifest
+#: names it yet. That is deliberate and it is written down in
+#: `models/dots-ocr.toml` with the measurement that stopped it: mlx-vlm's own
+#: HTTP server does not put the image into the prompt for dots.ocr, so shipping
+#: the block would light `pages: yes` on a Mac that answers every page with a
+#: single `Picture`. The engine slot exists so the day that is fixed is a
+#: manifest block and nothing else.
+BACKEND_ENGINES: dict[str, dict[str, str]] = {
+    CUDA_LINUX: {TEXT_FAMILY: "vllm", PAGES_FAMILY: "vllm"},
+    MLX_DARWIN: {TEXT_FAMILY: "mlx-lm", PAGES_FAMILY: "mlx-vlm"},
 }
+
+
+def class_family(modalities: "tuple[str, ...] | list[str]") -> str:
+    """Which family a model belongs to, from what it accepts.
+
+    `image` in `modalities` makes it a page reader and nothing else does. The
+    family is DERIVED rather than declared for the reason the table above
+    gives: a `family = "pages"` key would be a second owner of a fact
+    `modalities` already states, and the two would drift the first time
+    somebody added a vision model served text-only.
+    """
+    return PAGES_FAMILY if "image" in modalities else TEXT_FAMILY
+
+
+def engine_for(backend_kind: str, modalities: "tuple[str, ...] | list[str]") -> str:
+    """The engine this backend serves this family with. Refuses either unknown."""
+    engines = BACKEND_ENGINES.get(backend_kind)
+    if engines is None:
+        raise ManifestError(
+            f"{backend_kind!r} is not a Crucible backend; the backends are "
+            f"{sorted(BACKEND_ENGINES)}"
+        )
+    family = class_family(modalities)
+    found = engines.get(family)
+    if found is None:
+        raise ManifestError(
+            f"{backend_kind!r} serves no {family!r} engine; it serves "
+            f"{sorted(engines)}"
+        )
+    return found
 
 #: What a client may put in a chat request's content parts for this model
 #: (PHASE3-VLM.md section 2). It is a statement about what Crucible OFFERS on
@@ -841,10 +904,17 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
         check_table(where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL)
 
         engine = block["engine"]
-        if engine != BACKEND_ENGINES[kind]:
+        # PER (BACKEND, CLASS FAMILY), and the family comes off `modalities`
+        # above rather than out of this block — so a manifest cannot claim a
+        # page-reading engine for a text model by naming one.
+        expected = engine_for(kind, modalities)
+        if engine != expected:
+            family = class_family(modalities)
             raise ManifestError(
-                f"{where}: engine {engine!r} does not run on {kind}; that backend's "
-                f"engine is {BACKEND_ENGINES[kind]!r}"
+                f"{where}: engine {engine!r} does not serve {family!r} models on "
+                f"{kind}; that pairing's engine is {expected!r}. The family is "
+                f"read off [model] modalities = {list(modalities)} and not out of "
+                "this block, so an engine cannot be chosen by naming it"
             )
         if not _HF_REPO.match(block["hf_repo"]):
             raise ManifestError(

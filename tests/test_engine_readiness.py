@@ -23,12 +23,21 @@ from pathlib import Path
 
 import pytest
 
-from crucible.engines import EngineError, SubprocessEngine
+from crucible.engines import (
+    ENGINES,
+    EngineError,
+    SubprocessEngine,
+    build_engine,
+    engine_model_name,
+    find_free_port,
+)
 from crucible.engines.base import SubprocessEngine as BaseEngine
 from crucible.engines.mlx_lm import MlxLmEngine
+from crucible.engines.mlx_vlm import MlxVlmEngine
 from crucible.engines.vllm import VllmEngine
 
 FAKE_NARRATOR = Path(__file__).resolve().parent / "fake_narrator.py"
+FAKE_MLX_VLM = Path(__file__).resolve().parent / "fake_mlx_vlm"
 
 
 class ReadyLineEngine(SubprocessEngine):
@@ -159,13 +168,103 @@ def test_sigterm_stops_it(
     assert engine.pids == frozenset()
 
 
+class FakeMlxVlmEngine(MlxVlmEngine):
+    """The REAL `MlxVlmEngine`, pointed at a fake `mlx_vlm` on PYTHONPATH.
+
+    A subclass that overrides `environment()` and nothing else, so the command
+    under test — `python -m mlx_vlm server --model ... --host ... --port ...` —
+    is the one `MlxVlmEngine.command()` actually builds. A double that
+    reimplemented `command()` would test the double.
+    """
+
+    def environment(self) -> dict[str, str]:
+        return {"PYTHONPATH": str(FAKE_MLX_VLM)}
+
+
+def test_mlx_vlm_is_ready_when_v1_models_answers_and_needs_no_confirm(
+    tmp_path: Path,
+) -> None:
+    """The measured difference from mlx-lm, and the reason this class is short.
+
+    mlx-vlm preloads inside FastAPI's lifespan, which uvicorn completes before
+    it accepts — so a 200 from `/v1/models` means the weights are in memory and
+    the base class's poll is the honest check. mlx-lm answers that route while
+    still reading gigabytes, which is why IT needs a one-token completion.
+    """
+    assert MlxVlmEngine.confirm is BaseEngine.confirm
+    assert MlxLmEngine.confirm is not BaseEngine.confirm
+
+    weights = tmp_path / "dots"
+    weights.mkdir()
+    engine = FakeMlxVlmEngine(
+        python=Path(sys.executable), log_path=tmp_path / "engine.log"
+    )
+    port = find_free_port()
+    # `str(weights)` and not a resolved spelling: what the engine reports is
+    # what it was given, and `engine_model_name` has to agree.
+    engine.start(weights, str(weights), port, [])
+    try:
+        engine.ready(60.0)
+        assert engine.base_url == f"http://127.0.0.1:{port}"
+        assert engine.pids
+    finally:
+        engine.stop()
+    assert engine.pids == frozenset()
+    # The command really was the one the class builds.
+    log = (tmp_path / "engine.log").read_text(encoding="utf-8", errors="replace")
+    assert "-m mlx_vlm server --model" in log
+
+
+def test_mlx_vlm_serving_something_else_is_not_a_not_yet(tmp_path: Path) -> None:
+    """An engine that is up and serving the WRONG model must raise, not poll."""
+    weights = tmp_path / "dots"
+    weights.mkdir()
+    engine = FakeMlxVlmEngine(
+        python=Path(sys.executable), log_path=tmp_path / "engine.log"
+    )
+    engine.start(weights, "some-name-it-will-never-report", find_free_port(), [])
+    try:
+        with pytest.raises(EngineError) as caught:
+            engine.ready(60.0)
+        assert "will not proxy a model it did not ask for" in str(caught.value)
+    finally:
+        engine.stop()
+
+
+def test_the_two_mlx_engines_name_a_model_differently_and_that_is_measured(
+    tmp_path: Path,
+) -> None:
+    """mlx-lm resolves the path it was given and reports that; mlx-vlm stores
+    the string verbatim. Resolving for mlx-vlm would introduce the very
+    mismatch the resolve prevents on the other one."""
+    unresolved = tmp_path / "weights" / ".." / "weights"
+    (tmp_path / "weights").mkdir()
+    assert engine_model_name("mlx-vlm", unresolved, "dots-ocr") == str(unresolved)
+    assert engine_model_name("mlx-lm", unresolved, "dots-ocr") == str(
+        unresolved.resolve()
+    )
+    # vLLM is told the Crucible id and answers to it, so there is no path at all.
+    assert engine_model_name("vllm", unresolved, "dots-ocr") == "dots-ocr"
+
+
+def test_this_build_has_three_engine_classes_for_two_backends() -> None:
+    """One per (backend, class family): cuda-linux serves text and pages with
+    vLLM, mlx-darwin needs mlx-lm for one and mlx-vlm for the other."""
+    assert sorted(ENGINES) == ["mlx-lm", "mlx-vlm", "vllm"]
+    built = build_engine("mlx-vlm", Path(sys.executable), Path("/tmp/x.log"))
+    assert isinstance(built, MlxVlmEngine)
+    with pytest.raises(EngineError) as caught:
+        build_engine("mlx-vlm-2", Path(sys.executable), Path("/tmp/x.log"))
+    assert "unknown engine 'mlx-vlm-2'" in str(caught.value)
+
+
 def test_the_http_engines_did_not_change(
     engine: ReadyLineEngine, weights: Path
 ) -> None:
-    """The seam is an override point, not a rewrite: vLLM and mlx-lm still prove
-    readiness exactly as PHASE2-LLM.md section 3 specifies, through the base
-    class's own `/v1/models` poll."""
-    for cls in (VllmEngine, MlxLmEngine):
+    """The seam is an override point, not a rewrite: vLLM, mlx-lm and mlx-vlm
+    still prove readiness exactly as PHASE2-LLM.md section 3 specifies, through
+    the base class's own `/v1/models` poll."""
+    for cls in (VllmEngine, MlxLmEngine, MlxVlmEngine):
         assert cls.announced_ready is BaseEngine.announced_ready
         assert cls.readiness_description is BaseEngine.readiness_description
     # And the default description still names the route, so a vLLM timeout reads

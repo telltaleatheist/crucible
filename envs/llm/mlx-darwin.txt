@@ -11,6 +11,36 @@
 # Install time on that host: 14 s.
 # Regenerate after any deliberate bump with:
 #     ~/.crucible/envs/llm/bin/python -m pip freeze
+#
+# MLX-VLM IS NOT HERE, AND THE COST OF PUTTING IT HERE IS MEASURED
+# ----------------------------------------------------------------
+# `mlx-darwin`'s `pages` engine is `mlx-vlm` (crucible/manifests.py), and the
+# plan of record was that this one env would hold both — mlx-vlm 0.6.10 pins
+# `mlx>=0.32.0`, `mlx-lm>=0.31.3` and `transformers>=5.14.0`, every one of
+# which this file already satisfies. It is not added, for two reasons, and the
+# second is the decisive one.
+#
+# FIRST, the pin set does move, and by more than those three lines. Resolved
+# for macOS 14 arm64 / python 3.11 on 2026-09-14 (a cross-resolve validated by
+# reproducing THIS file exactly from `mlx-lm==0.31.3` alone), adding
+# `mlx-vlm==0.6.10` takes the env from 34 packages to 54. Nothing already here
+# changes version; what arrives is fastapi, starlette, uvicorn,
+# python-multipart, pydantic and pydantic-core (mlx-vlm's server), plus
+# llguidance, miniaudio, opencv-python, Pillow, scipy, cffi, pycparser,
+# annotated-types, typing-inspection, charset-normalizer, requests and urllib3
+# — and `mlx-audio==0.5.4` with `sounddevice`, which mlx-vlm declares and this
+# env has no use for. On a backend where the tts env already pins its own
+# mlx-audio, that is a second copy at a different version in a second env.
+#
+# SECOND AND DECISIVE: no manifest names `mlx-vlm` yet, because mlx-vlm's own
+# HTTP server does not put the image into the prompt for dots.ocr — measured
+# on the Mac Studio on 2026-09-14, on 0.6.10 and 0.7.1 alike, with the run
+# written out in `models/dots-ocr.toml`. Installing a package into every Mac
+# that nothing can reach is weight for a capability that is off.
+#
+# So this stays a one-line diff for the day the block can be written: add
+# `mlx-vlm==0.6.10` under the pin below and re-resolve. The twenty names above
+# are what to expect.
 
 mlx-lm==0.31.3
 
