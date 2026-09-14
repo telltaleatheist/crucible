@@ -117,7 +117,11 @@ url = "http://192.168.68.20:11434"   # no key; ollama is reached by address
 
 - `routes.<class>.model` for `local` is the class's SELECTED local model (the capability row's
   `selected`), or `null` when nothing fits. It is here so a window can show "translate: local,
-  qwen3.8-27b-4bit" without a second call.
+  qwen3.8-27b-4bit" without a second call. It is **also `null` when this server has no
+  capability record at all** (`GET /v1/capability` answers `503 capability_undecided`), and
+  that is not the same statement wearing one spelling: this document must be readable before
+  anything has probed the card, because writing the key is what an app does FIRST. A window
+  that needs the two apart reads capability, which says which it is by name.
 - A key is **write-only**. `key_hint` is the last four characters, enough to recognise which
   key is there and nothing else. There is no route that returns a key.
 
@@ -142,6 +146,18 @@ Body is any subset of:
   `upstream_in_use` with the classes that name it — the caller re-routes first, in the same
   request if it likes. Order inside one request: upstreams are applied, then routes, then the
   whole is validated; a refusal applies nothing.
+- **Two more refusals the patch door needs, added while building (2026-09-14).**
+  `unknown_upstream` (400) — `upstreams` names something other than the three, and a typo
+  must not be stored as a fourth upstream nothing can call. `upstream_bad_field` (400) — an
+  upstream given the field it does not take (a `url` for `anthropic`, a `key` for `ollama`);
+  each name takes exactly one, so a request carrying the other one is a request about a
+  different upstream than the one it named. A body that is not an object, or a value of the
+  wrong type, is the API's existing `invalid_request` (400) and is not given a name of its
+  own.
+- **A config edited by hand is refused at LOAD**, with the same three route names in the
+  sentence (`route_not_routable`, `route_bad_model`, `route_upstream_unconfigured`), because
+  a server that started with a route it cannot serve would refuse every request for that
+  class with a sentence about the wrong thing.
 - `POST /v1/settings/upstreams/{name}/test` with an optional body `{"key": "…"}` or
   `{"url": "…"}` (to test BEFORE saving) → `200 {"models": [...ids...]}` from the upstream's
   own model listing, unbilled; `502 upstream_unreachable` / `401 upstream_rejected` /
@@ -195,10 +211,32 @@ Now:
   tool (this is how `analysis` gets guided decoding upstream); streaming SSE is re-emitted in
   OpenAI chunk shape. OpenAI and Ollama are already OpenAI-shaped (`/v1/chat/completions`).
 - `thinking: false` (BookForge sends it) is dropped for upstreams that do not know it, never
-  forwarded blind.
+  forwarded blind. It travels in `chat_template_kwargs` (PHASE2-LLM.md section 9) and **none
+  of the three upstreams reads that table**, so the whole table is what is dropped, for all
+  three. The audit header says so: a fourth source value, **`dropped`**, meaning *the request
+  stated it and this server did not forward it, because the upstream does not take it*.
+  Saying `request` would claim a value reached the model and saying `engine` would hide that
+  the caller asked.
+- **The `max_tokens` audit value, spelled exactly.** `X-Crucible-Sampling` names a SOURCE per
+  key, so Anthropic's filled-in default is the source string
+  **`upstream default 4096`** — the sentence `max_tokens=4096 (upstream default)` written in
+  the one place the header has room for it. The number is
+  `crucible/upstreams.py`'s `ANTHROPIC_MAX_TOKENS_DEFAULT`, and it is in the string rather
+  than only in the constant because a reader holding one response must be able to see what
+  was sent without reading the server's source.
+- **A `model` with a `/` whose prefix is not one of the three upstreams is refused
+  `route_bad_model` (400)** — the same name section 3.2 gives the same malformation, because
+  it is the same mistake arriving at a different door, and two names for it would be two
+  vocabularies for one fact.
 - `GET /v1/openai/models` lists local models as today PLUS, for each configured upstream, the
   routed upstream models (only the ones a route names — not the upstream's whole catalog,
-  which is `test`'s job).
+  which is `test`'s job). An upstream row is
+  `{"id": "<upstream>/<model>", "object": "model", "owned_by": "<upstream>",
+  "upstream": "<upstream>", "routed_for": [classes]}` and carries **no** `created`,
+  `max_model_len` or `defaults`: this server did not load it, does not know its context and
+  has no manifest for it. A client that sizes `max_tokens` against `max_model_len` already
+  skips the clamp when the field is absent (CLIENT-SURFACES.md section 6.1), which is the
+  correct behaviour here and not a gap.
 - A lease on an upstream model (`POST /v1/models/{id}/lease`) is refused `lease_not_needed`
   with the sentence "an upstream model is never resident; send the chat". Same for
   `{"type": "load-model"}` naming one.
@@ -213,6 +251,10 @@ Now:
   host answer), `/v1/info` with `backend_kind: "none"`, chat completions to upstreams. It has no
   `install` task (refused `no_backend`), no catalog subjects (`/v1/catalog` returns empty lists
   and `backend_kind: "none"`), no accelerator (`/v1/accelerator` → `no_backend`), no lease.
+  **`GET /v1/catalog` carries `backend_kind` on every backend**, not only this one — a reader
+  that had to infer "this list is empty because there is no card" from the emptiness would be
+  guessing, and the same key on `cuda-linux` is what makes it a field rather than a host-mode
+  marker.
 - `crucible doctor` in host mode prints the one line "backend: none — host mode on
   windows/x86_64; the accelerator engine runs inside WSL2 (see `crucible host`)", then the
   upstream lines.
@@ -228,6 +270,14 @@ is written by the host, section 4.3, with an ACL of the current user only). One 
 `127.0.0.1` pairing line, trailing newline. `crucible token --url` prints the same. An app on
 the same machine reads it (5.1) and never asks a person to type a token. Rotating the token
 rewrites it.
+
+**The file's line is the LOOPBACK one, always, whatever the server is bound to**, and
+`crucible token --url` therefore prints it first and then the reachable lines
+(`reachable_urls`, 3.1) — which on a `127.0.0.1` bind are the same one line, printed once.
+The file answers one question, *"an app on THIS machine wants in"*, and the answer to that
+is never a LAN address: a wildcard-bound server has no loopback entry in `reachable_urls`
+at all, so a file built from that list would hand a local app an address that depends on
+which interface the OS listed first.
 
 **Where it is, per platform (pinned 2026-09-14 for Foundry's package J and the host agent):**
 
