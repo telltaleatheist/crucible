@@ -541,6 +541,14 @@ adds two: `host_not_installed` (there is no `%LOCALAPPDATA%\Crucible\host\` on t
 the answer is `install.ps1`) and `host_unreachable` (the host pack is installed and the door
 did not answer).
 
+**Who calls the door.** Two callers and no third. (1) The Windows SERVER, when the page posts
+`POST /v1/tasks {"type": "engine", "target": "wsl"}` (4.7): the server relays this door's
+events under its own task id, so the events are shaped like `crucible/tasks.py`'s — a step
+name, a state, `bytes_done`/`bytes_total` while something downloads, and the 4c sentence on a
+failure. (2) `@crucible/bootstrap`'s `install()`, directly, on a machine that has no server at
+all yet — the very first install, before there is a page to open. The shape is the same for
+both, because there is one sequence.
+
 **The 4c table crosses into Python by GENERATION, not by a second copy.** `crucible host` is
 Python and the table is `sdk/bootstrap/src/wsl-states.ts`, so its DATA — the code, the probe
 argv, the sentence, the action — is EMITTED into `crucible/host/wsl_states.py` by the same
@@ -551,10 +559,13 @@ code rather than data. `crucible/host/wslstate.py` holds one per code and a test
 two sets are equal — the "tied by a check instead of by an import" seam `envpack.SMOKE_IMPORT`
 and `cli.INSTALLABLE_JOB_TYPES` already use.
 
-**The window** is tkinter (which is in the pinned interpreter, 4.4): one row per step with a
-state beside it, no console. `crucible host --install` runs the same sequence in the
-FOREGROUND and prints the events, which is how it is tested and how a support session reads
-it.
+**The host has NO window of its own (amended by 4.7).** Its UI is the tray menu and the
+operator PAGE. Because `llama-windows` runs on any Windows machine, the host starts the
+Windows server within seconds of install and opens the page; the WSL install is then the
+page's engine switch (4.7), shown as a task in the page's Tasks panel like a pull. The
+states that need a reboot are answered by the task saying "reboot, then Crucible continues"
+and the Startup item resuming the task and reopening the page. There is no tkinter, no
+second progress UI, no second owner of the sequence.
 
 **The migrate step, named.** `crucible init --config-from <file>` is the flag 4.3 asks for:
 the file is a TOML document the host wrote at 0600 and deletes afterwards, and `init` takes
@@ -641,6 +652,46 @@ asserted; the generated `crucible/host/wsl_states.py` is checked against `wsl-st
 refusals. Windows-only code paths take the platform as an argument so they run on both — the
 suite runs in WSL (`pytest`) and must not be a suite that skips its subject.
 
+### 4.7 The engine switch — Windows ⇄ WSL2 is a control on the page, and a task
+
+**Owen, 2026-09-14:** *"crucible will need a wsl install configuration page in its installer, so
+the user can configure the wsl side, and the user can flip from windows to wsl. maybe there's
+a switch or something on the UI that determines if the crucible server is operating from WSL
+or from windows. if the user flips it from windows to WSL then the wsl configuration
+activates and it installs all the models and dependencies necessary in wsl, and deletes them
+in windows. itll be more than a switch i suppose, since itll be a compute heavy configuration
+update to download the necessary models and wheels."*
+
+- The page's Status panel on a Windows machine shows **Engine: Windows (llama.cpp)** or
+  **Engine: WSL2 (vLLM/SGLang)** and a control **Move to WSL2…** (only while Windows). The
+  page never shows the Python job types as installable on the Windows engine; it shows them
+  under the control, as what the move brings.
+- Pressing it is `POST /v1/tasks {"type": "engine", "target": "wsl"}` — a task like a pull or an
+  install: one at a time (`409 task_busy`), events on `/v1/tasks/{id}/events`, cancellable
+  between steps, visible in the Tasks panel with bytes where a step downloads. The Windows
+  server does not run it: it hands it to the HOST's loopback door (4.3) and relays the host's
+  events under the task id, because only the host can run `wsl.exe`, prompt UAC and survive
+  the reboot. A Windows server that was not started by a host (a developer running `crucible
+  serve` by hand) refuses `engine_move_needs_host`.
+- The task's steps are the state table + the step list + the migrate step of 4.3, in order:
+  detect the WSL state → the named answer for it (feature enable / `wsl --install` / reboot /
+  kernel update / import the Crucible distro) → server pack in the guest → move the config →
+  install the job types the apps' modules asked for (the coordinate records the server keeps
+  from every connected app say which; nothing is guessed) → pull each installed subject's
+  guest form → delete the Windows copies (3.5) → service install, linger, capability → stop
+  the Windows server → the guest answers `:7100` with the same token → `done`. The page,
+  which lost its server for a few seconds at the switch-over, re-reads `/v1/info` and shows
+  **Engine: WSL2**.
+- A failed step fails the task by name with the state table's sentence and leaves the Windows
+  engine running and untouched — the move is not partial from the app's point of view until
+  the final switch-over, and the weights rule (3.5) already says nothing is deleted before
+  the guest has it.
+- **The reverse (WSL2 → Windows) is not in this phase.** The control shows the one forward
+  move; removing the WSL engine is an explicit operator act, written in section 6.
+- **"There will never, ever be a local gpu configured"** — the same ruling from BookForge's side
+  (5.3): every GPU slot the queue shows is a Crucible endpoint, and the engine question is
+  asked and answered HERE, once, not in an app.
+
 ## 5. The apps
 
 ### 5.1 Connect: three ways, in this order, all automatic
@@ -680,7 +731,12 @@ read added this morning; any cloud model list. The cleanup/OCR/translation/simpl
 doors send `capability.selected` as the model to the registry's server and nothing else.
 `shared/queue/slot-sets.ts`: a row whose class routes `upstream` on its server takes that
 server's **`[cloud]` lane** (one per server, width 2), no GPU slot, no lease; `runVenueOfRow`
-names it. The keeper suite pins every deleted door by name (as `test-no-e2a-doors.js` does).
+names it. **Every GPU slot the queue shows is a Crucible endpoint (Owen, 2026-09-14: "there
+will never, ever be a local gpu configured. there simply wont be an outlet for it").** The
+slot sets are: one `[gpu]` set per registered Crucible server, its `[cloud]` lane, and
+`local-work [cpu][cpu]` (CPU slots stay local, ruling dd50e8c3). The legacy set with its own
+GPU slot is deleted with the legacy spawn layer after Owen's in-app pass — that deletion is
+already scheduled and this phase names the end state, not a new date. The keeper suite pins every deleted door by name (as `test-no-e2a-doors.js` does).
 
 **Foundry:** `cloud-providers.ts`, the cloud card, `ComputeSlotKind = 'cloud'`, the cloud
 placement in `crucible-dispatch.ts`, `FOUNDRY_ENDPOINT_HEADERS` composed from an app-held key.
@@ -697,6 +753,7 @@ rollout plan already lists (`RunOptions.waitFor`, `hosted_placement_not_vendored
 
 ## 6. Not in this phase, written so it is not forgotten
 
+- Removing the WSL engine / moving back to Windows (`engine` task with `target: "windows"`): an explicit operator act, not the switch.
 - A Mac menu-bar host. launchd covers supervision; the pairing file covers connect.
 - Per-request cost or token accounting for upstreams. `/v1/activity` records the act and the
   model; a usage figure is the upstream's dashboard's until somebody asks for it here.
