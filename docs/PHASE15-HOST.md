@@ -178,6 +178,12 @@ Body is any subset of:
   OpenAI: `GET /v1/models` with bearer; Ollama: `GET /api/tags`.
 - The response of `PUT` is the full `GET /v1/settings` document after the write, so a window
   never has to guess what took.
+- **The `details` keys, pinned (Foundry package I reads exactly these):** every `PUT` refusal
+  carries `details.field` (string — the dotted path that was refused, e.g. `"routes.translate"`
+  or `"upstreams.anthropic.key"`); `upstream_in_use` additionally carries `details.classes`
+  (string[] — the classes that name the upstream). `key_hint` is rendered VERBATIM by a client:
+  the value INCLUDES the leading ellipsis (`"…k3A9"`, U+2026 then the last four characters), and
+  a client prepends nothing.
 - `X-Crucible-Act` (PHASE13) is honoured: a settings write is recorded in `/v1/activity`'s
   history with the act and the client agent, minus any key.
 
@@ -333,7 +339,11 @@ what 3.5 says.
 
 ### 3.8 The SDK (`@crucible/client`)
 
-`settings()`, `putSettings(patch)`, `testUpstream(name, probe?)`, `readPairingFile(home?)`
+`settings()`, `putSettings(patch)`, `testUpstream(name, probe?)` — which does NOT throw on the
+three test refusals (a settings window wants one shape to draw): it returns
+`{ok: true, models: string[]} | {ok: false, code: 'upstream_unreachable' | 'upstream_rejected' |
+'upstream_unconfigured', message: string}`, and throws only for what every call throws
+(auth, version, transport) — `readPairingFile(home?)`
 (node only; returns the parsed pairing or `null` when absent — `null` is a fact here, not a
 fallback: the caller's next line is "install one" or "paste one"). `CapabilityRow.route`,
 `SettingsDocument`, `SettingsPatch`, `UpstreamName`, the refusal names above as constants.
