@@ -641,6 +641,117 @@ def test_building_a_second_pack_merges_rather_than_replaces(tmp_path: Path) -> N
     assert sorted(p.name for p in manifest.packs) == ["asr", "llm"]
 
 
+# ------------------------------------------------- the relocatable shebang
+
+
+def write_script(path: Path, shebang: bytes, body: str = "import sys\nprint('ok')\n") -> None:
+    path.write_bytes(shebang + body.encode("utf-8"))
+    path.chmod(0o755)
+
+
+def test_a_baked_in_shebang_is_rewritten_to_one_that_survives_a_move(
+    tmp_path: Path,
+) -> None:
+    """The defect that killed the first real `server` build, 2026-09-14.
+
+    pip writes each console script's shebang as the ABSOLUTE path of the
+    interpreter that installed it. Move the tree and that path is gone, and
+    `exec` answers ENOENT naming the SCRIPT — so the failure reads as "the
+    file you are looking at does not exist".
+    """
+    root = tmp_path / "python"
+    (root / "bin").mkdir(parents=True)
+    script = root / "bin" / "crucible"
+    write_script(script, f"#!{root}/bin/python3.11\n".encode("utf-8"))
+
+    assert envpack.relocate_console_scripts(root) == ["crucible"]
+    text = script.read_text(encoding="utf-8")
+    assert str(root) not in text
+    assert text.startswith(envpack.RELOCATABLE_SHEBANG)
+    assert text.endswith("import sys\nprint('ok')\n")
+    assert script.stat().st_mode & 0o111, "it must still be executable"
+
+
+def test_the_rewritten_header_is_valid_python(tmp_path: Path) -> None:
+    """The obvious form is a SyntaxError, and the smoke test is where it lands.
+
+    `"exec" "$(dirname -- "$0")/python3" …` looks like implicit string
+    concatenation and is not: the nested `"` inside the command substitution
+    closes the Python string early. The single-quoted triple form is what
+    makes the same two lines a shell command and a discarded docstring.
+    """
+    compile(
+        envpack.RELOCATABLE_SHEBANG + "print('ok')\n", "crucible", "exec"
+    )
+
+
+def test_distlibs_long_path_wrapper_is_replaced_whole(tmp_path: Path) -> None:
+    """pip writes a THREE-line wrapper when the interpreter path is long."""
+    root = tmp_path / "python"
+    (root / "bin").mkdir(parents=True)
+    script = root / "bin" / "uvicorn"
+    write_script(
+        script,
+        (
+            "#!/bin/sh\n"
+            f"'''exec' {root}/bin/python3.11 \"$0\" \"$@\"\n"
+            "' '''\n"
+        ).encode("utf-8"),
+    )
+    assert envpack.relocate_console_scripts(root) == ["uvicorn"]
+    text = script.read_text(encoding="utf-8")
+    assert str(root) not in text
+    assert text.count("'''") == 2, "the old wrapper's quotes must be gone"
+    compile(text, "uvicorn", "exec")
+
+
+def test_a_shebang_that_is_not_ours_is_left_alone(tmp_path: Path) -> None:
+    """`#!/usr/bin/env python3` is already relocatable; rewriting it would be
+    this function inventing policy about somebody else's script."""
+    root = tmp_path / "python"
+    (root / "bin").mkdir(parents=True)
+    write_script(root / "bin" / "theirs", b"#!/usr/bin/env python3\n")
+    (root / "bin" / "python3").write_bytes(b"\x7fELF binary, not a script")
+    assert envpack.relocate_console_scripts(root) == []
+    assert (root / "bin" / "theirs").read_text("utf-8").startswith(
+        "#!/usr/bin/env python3"
+    )
+
+
+@needs_tar_zstd
+def test_a_relocated_script_actually_runs_from_somewhere_else(
+    tmp_path: Path,
+) -> None:
+    """The whole point, proved by running it: build here, execute there.
+
+    `bin/python3` is a shell script here rather than CPython, because what is
+    under test is the HEADER finding its neighbour — not the interpreter.
+    """
+    if os.name != "posix":
+        pytest.skip("the shebang is a POSIX sh polyglot")
+    root = tmp_path / "python"
+    (root / "bin").mkdir(parents=True)
+    stub = root / "bin" / "python3"
+    stub.write_text('#!/bin/sh\necho "ran $1"\n', encoding="utf-8")
+    stub.chmod(0o755)
+    write_script(root / "bin" / "crucible", f"#!{root}/bin/python3.11\n".encode())
+    envpack.relocate_console_scripts(root)
+
+    moved = tmp_path / "somewhere" / "else"
+    moved.parent.mkdir()
+    shutil.move(str(root), str(moved))
+    import subprocess
+
+    completed = subprocess.run(
+        [str(moved / "bin" / "crucible"), "--version"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert str(moved / "bin" / "crucible") in completed.stdout
+
+
 # ------------------------------------------------------------------ the CLI
 
 

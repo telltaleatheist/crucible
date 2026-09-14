@@ -717,13 +717,21 @@ def require_zstd_tar() -> None:
     _tool("zstd")
 
 
-def _run(command: Sequence[str], code: str, failure: str, on_line: Any = None) -> None:
+def _run(
+    command: Sequence[str],
+    code: str,
+    failure: str,
+    on_line: Any = None,
+    *,
+    cwd: Path | None = None,
+) -> None:
     process = subprocess.Popen(
         list(command),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        cwd=None if cwd is None else str(cwd),
     )
     tail: list[str] = []
     assert process.stdout is not None
@@ -1148,6 +1156,84 @@ def _prune(root: Path) -> None:
         shutil.rmtree(directory, ignore_errors=True)
 
 
+#: The three lines that replace a baked-in shebang — distlib's own polyglot,
+#: with the absolute interpreter path swapped for one derived from `$0`.
+#:
+#: `sh` reads line 2 as `exec <the python beside this script> <this script>
+#: <the args>` — `'''exec'` is `''` then `'exec'`, which is the word `exec` —
+#: and never reaches line 3, because `exec` has replaced it. Python reads lines
+#: 2 and 3 as ONE triple-quoted string that it throws away.
+#:
+#: The single quotes are load-bearing. The obvious `"exec" "$(dirname -- "$0")
+#: /python3" …` is a SyntaxError in Python, because the nested `"` inside the
+#: command substitution ends the Python string early. (Written after watching
+#: exactly that reach the smoke test, 2026-09-14.)
+RELOCATABLE_SHEBANG = (
+    "#!/bin/sh\n"
+    "'''exec' \"$(dirname -- \"$0\")/python3\" \"$0\" \"$@\"\n"
+    "' '''\n"
+)
+
+
+def relocate_console_scripts(root: Path) -> list[str]:
+    """Make every `bin/` entry point survive the move. THE WHOLE PACK DEPENDS ON IT.
+
+    **The interpreter is relocatable and the console scripts are not.**
+    python-build-standalone bakes no absolute paths, but `pip install` writes
+    each entry point with the *absolute* path of the interpreter that installed
+    it, as a shebang. Unpack that anywhere else and the path is gone — and the
+    failure is the worst-shaped one there is: `exec` on a script whose shebang
+    does not resolve raises **ENOENT naming the SCRIPT**, so the message says
+    `bin/crucible` does not exist while it is sitting right there.
+
+    BookForge has been bitten by exactly this and wrote it down
+    (`crucible/jobs/rvc/worker.py`'s header, from `electron/rvc-bridge.ts`):
+    an env installed by extracting into a temp directory and moving it into
+    place fails with exit 1 and *zero output*, because the launcher dies before
+    python starts. Its answer was to never call a console script. That answer
+    is not available here — PHASE14 section 4 has the bootstrap run
+    `<server>/bin/crucible init` and point a systemd `ExecStart` at it — so the
+    shebang is fixed instead of avoided.
+
+    Found by building the `server` pack for real, 2026-09-14: the wheel
+    installed, the archive tarred, and the smoke test died on
+    `FileNotFoundError: .../pack/bin/crucible`.
+
+    A script reached through a SYMLINK is not covered: `dirname "$0"` is the
+    link's directory, not the pack's. That is deliberate rather than an
+    oversight — `readlink -f` would cover it and is absent from macOS before
+    12.3 — and nothing in Crucible symlinks into a pack: the service unit names
+    the real path.
+
+    Returns the names it rewrote, so a build can say so.
+    """
+    bin_dir = root / "bin"
+    marker = str(root).encode("utf-8")
+    rewritten: list[str] = []
+    for entry in sorted(bin_dir.iterdir()):
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        body = entry.read_bytes()
+        if not body.startswith(b"#!"):
+            continue
+        lines = body.split(b"\n")
+        if marker not in b"\n".join(lines[:3]):
+            # A shebang that does not name this build tree is somebody else's
+            # business — `#!/usr/bin/env python3` is already relocatable, and
+            # rewriting it would be this function inventing policy.
+            continue
+        if lines[0] == b"#!/bin/sh" and lines[1].startswith(b"'''exec'"):
+            # distlib's long-path form: three lines of wrapper, then the code.
+            rest = b"\n".join(lines[3:])
+        else:
+            rest = b"\n".join(lines[1:])
+        mode = entry.stat().st_mode
+        entry.write_bytes(RELOCATABLE_SHEBANG.encode("utf-8") + rest)
+        entry.chmod(mode)
+        rewritten.append(entry.name)
+    return rewritten
+
+
 def _pack_python(root: Path) -> Path:
     return root / "bin" / "python"
 
@@ -1234,6 +1320,8 @@ def build_pack(
             f"{pin.python_version}",
         )
 
+    rewritten = relocate_console_scripts(root)
+    say(f"relocated {len(rewritten)} console script(s): {', '.join(rewritten)}")
     _prune(root)
     unpacked_bytes = directory_bytes(root)
     archive = out / target.archive_name(version)
@@ -1270,6 +1358,22 @@ def build_pack(
 def _build_wheel(out: Path, say: Callable[[str], None]) -> Path:
     """`python -m build --wheel` from the checkout, for the server pack."""
     root = repo_root()
+    # ASKED BEFORE THE INTERPRETER IS FETCHED WOULD BE BETTER STILL, but this
+    # is the first line of the only branch that needs it, and the refusal is
+    # what matters: `python -m build` with no `build` installed prints "No
+    # module named build", which is a true sentence that names neither the
+    # package to install nor the fact that only the SERVER pack needs it.
+    probe = subprocess.run(
+        [sys.executable, "-c", "import build"], capture_output=True, text=True
+    )
+    if probe.returncode != 0:
+        raise PackError(
+            "pack_build_failed",
+            f"{sys.executable} has no `build` module, and the server pack is "
+            "the one pack built from a wheel rather than from a recipe: "
+            "`pip install build`. (scripts/release.sh refuses for the same "
+            "reason and with the same fix.)",
+        )
     destination = out / ".wheel"
     if destination.exists():
         shutil.rmtree(destination)
@@ -1280,6 +1384,14 @@ def _build_wheel(out: Path, say: Callable[[str], None]) -> Path:
         "pack_build_failed",
         f"could not build the crucible wheel from {root}",
         say,
+        # NOT from the checkout, and this is not fussiness. `python -m` puts the
+        # working directory on `sys.path`, and a checkout that has ever run
+        # `python -m build` has a `build/` DIRECTORY in it — which shadows the
+        # `build` module and fails with "No module named build.__main__", a
+        # message that sends its reader to pip. The source directory is an
+        # argument, so the build does not need to stand in it. (Hit for real
+        # while building the server pack, 2026-09-14.)
+        cwd=destination,
     )
     wheels = sorted(destination.glob("crucible-*.whl"))
     if len(wheels) != 1:
