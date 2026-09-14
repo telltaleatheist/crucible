@@ -1,0 +1,326 @@
+# Build the environment packs a tag carries, on the backends they target.
+#
+# PHASE14-ENVPACKS.md section 3.3. `scripts/release.sh` cuts the tag and uploads
+# the four existing assets; this runs ON THE TAG and adds the packs.
+#
+# ONE PACK PER JOB, and the shape of the matrix is not a style choice: a hosted
+# runner has a finite disk and a pack's high-water mark is its unpacked tree
+# plus its archive at the same instant. Two packs in one job would add those
+# numbers together.
+#
+# A THIRD JOB builds the `crucible` WSL rootfs (4b) — not a pack, so not in the
+# matrix: no recipe, no smoke import, no row in `envpacks.json`. It uploads the
+# image and the `.sha256` sibling `install.ps1` and `distro.ts` read the digest
+# from, under exactly that name.
+#
+# THE MANIFEST IS UPLOADED LAST, by a job that waits for every build. That is
+# the whole invariant of this file: a release whose `envpacks.json` exists has
+# every pack that manifest names. A build that fails leaves its pack out of the
+# manifest, and `crucible install` refuses it by name (`pack_not_published`)
+# rather than being handed half a pack.
+#
+# ------------------------------------------------------------------ the disk
+#
+# `ubuntu-latest` has roughly 21 GB free on `/` after the standard image, and
+# the `free-disk` step below reclaims about another 25 GB by removing tool
+# caches this build never touches (the Android SDK, .NET, GHC, CodeQL). Every
+# job PRINTS `df` before and after, because "roughly" is a number that changes
+# when GitHub rebuilds the image and the only honest source is the run's own
+# log.
+#
+# `needs_gb` in the matrix is what each job checks the free space against
+# BEFORE it downloads anything, and a job that does not have it FAILS BY NAME
+# with the two numbers rather than dying inside pip with ENOSPC. Where the
+# figure came from, per pack:
+#
+#   asr   6  MEASURED on Owen's PC, 2026-09-14 (docs/PHASE14-ENVPACKS.md §7).
+#   server 2 MEASURED the same way: CPython plus fastapi and httpx.
+#   align 20 ESTIMATED from the recipe (one torch + transformers + librosa).
+#   rvc   24 ESTIMATED from the recipe (torch cu128 + audio-separator + onnx).
+#   tts-* 30 ESTIMATED from the recipe (torch + vllm + vllm-omni + narrator).
+#   llm   30 ESTIMATED from the recipe (torch + vllm).
+#
+# The four ESTIMATES are labelled as estimates on purpose and none of them has
+# been built on a runner. If one does not fit, its job fails with the sentence
+# the summary repeats — build it on Owen's machine with
+# `crucible envpack build <name>` and `gh release upload` it by hand — and the
+# release still ships every pack that DID fit, because the manifest is merged
+# from the fragments that exist.
+
+name: envpacks
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "the release tag to build packs for (must already exist)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: envpacks-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pack:
+    name: ${{ matrix.name }} (${{ matrix.backend }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # NEVER fail-fast. Each pack is independent and a pack that builds is
+      # worth uploading even when another does not; the manifest merge is what
+      # makes a partial set honest rather than broken.
+      fail-fast: false
+      matrix:
+        include:
+          - { name: server,       backend: cuda-linux,  runner: ubuntu-latest, needs_gb: 2 }
+          - { name: asr,          backend: cuda-linux,  runner: ubuntu-latest, needs_gb: 6 }
+          - { name: align,        backend: cuda-linux,  runner: ubuntu-latest, needs_gb: 20 }
+          - { name: rvc,          backend: cuda-linux,  runner: ubuntu-latest, needs_gb: 24 }
+          - { name: llm,          backend: cuda-linux,  runner: ubuntu-latest, needs_gb: 30 }
+          - { name: tts-higgs-v3, backend: cuda-linux,  runner: ubuntu-latest, needs_gb: 30 }
+          - { name: server,       backend: mlx-darwin,  runner: macos-14,      needs_gb: 2 }
+          - { name: rvc,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 20 }
+          - { name: llm,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 10 }
+          - { name: tts,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 25 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # bsdtar links libarchive with zstd on macOS, but `tar
+      # --use-compress-program 'zstd -T0 -10'` needs the BINARY, which is how
+      # the build controls the level and the thread count. It is a small
+      # formula and it is not on the image.
+      - name: zstd (macOS)
+        if: runner.os == 'macOS'
+        run: brew install zstd && zstd --version
+
+      - name: free disk (Linux)
+        if: runner.os == 'Linux'
+        # Tool caches nothing in this workflow reads. Reclaiming them is worth
+        # about 25 GB, which is the difference between a torch pack fitting and
+        # not. `|| true` on each: a future image that does not ship one of
+        # these must not fail the build for the absence of something we were
+        # deleting anyway.
+        run: |
+          set -x
+          df -h /
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: the disk is big enough for this pack
+        # BY NAME, before anything is downloaded — the same rule
+        # `envpack.check_disk` follows on an operator's machine. The message is
+        # what section 3.3 says it must be, so the summary can repeat it.
+        run: |
+          set -euo pipefail
+          free_gb=$(df -Pk . | awk 'NR==2 {print int($4/1024/1024)}')
+          echo "free: ${free_gb} GB, this pack declares it needs ${{ matrix.needs_gb }} GB"
+          if [ "$free_gb" -lt "${{ matrix.needs_gb }}" ]; then
+            echo "::error title=pack_disk::${{ matrix.name }}/${{ matrix.backend }} needs ${{ matrix.needs_gb }} GB and this runner has ${free_gb} GB. Build it on Owen's machine with \`crucible envpack build ${{ matrix.name }}\` and upload it with \`gh release upload\`."
+            exit 1
+          fi
+
+      - name: install crucible
+        # `-e .` and not the wheel: `envpack build` reads `envs/` and
+        # `pyproject.toml` out of the CHECKOUT, and the recipe's sha256 is what
+        # the manifest records.
+        run: python -m pip install --upgrade pip build && python -m pip install -e .
+
+      - name: the build host targets the backend this job claims
+        # The matrix says which backend a runner produces; `envpack` derives it
+        # from platform and arch. Two answers to one question is the shape
+        # docs/ARCHITECTURE.md section 1 is about, so they are compared rather
+        # than trusted.
+        run: |
+          set -euo pipefail
+          here=$(python -c "from crucible import envpack; print(envpack.build_backend_kind())")
+          echo "runner builds $here, matrix says ${{ matrix.backend }}"
+          test "$here" = "${{ matrix.backend }}"
+
+      - name: build, smoke-test and split
+        # The smoke test is INSIDE this step (`envpack.build_pack` runs it
+        # before the split): a pack that cannot be unpacked somewhere else and
+        # imported is not an asset, so it must never reach the upload below.
+        run: python -m crucible.cli envpack build "${{ matrix.name }}" --out packs
+
+      - name: what it cost
+        run: |
+          df -h .
+          ls -l packs
+
+      - name: upload the parts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        # `--clobber` because a re-run of one job must replace that pack's
+        # parts rather than fail on a name that exists. It replaces only this
+        # pack's assets; nothing else on the release is touched.
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" --clobber \
+            $(ls packs/*.part[0-9][0-9])
+
+      - name: keep this pack's manifest fragment
+        uses: actions/upload-artifact@v4
+        with:
+          name: envpack-fragment-${{ matrix.name }}-${{ matrix.backend }}
+          path: packs/envpacks.json
+          if-no-files-found: error
+
+  rootfs:
+    # The WSL2 image Crucible owns (PHASE14-ENVPACKS.md 4b), so that a Windows
+    # install never touches the person's own Ubuntu and never faces the
+    # username/password dialog `wsl --install -d Ubuntu` opens and an app
+    # cannot answer. It is a release asset rather than something bootstrap
+    # makes, because `wsl --import` needs a Linux filesystem tarball with
+    # Linux ownership intact — which Windows cannot produce.
+    #
+    # It is NOT in the `pack` matrix: it is not a pack, it has no recipe, no
+    # smoke import and no row in `envpacks.json`. Sharing that matrix would
+    # mean giving every pack job a `docker` step it never runs.
+    name: the crucible WSL rootfs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: docker and zstd are here
+        # `sdk/bootstrap/scripts/build-rootfs.sh` needs exactly these two and
+        # refuses without them. Both ship on `ubuntu-latest`; this step is what
+        # turns "a future image dropped one" into a named failure at the top of
+        # the job rather than a refusal four minutes in.
+        run: |
+          set -euo pipefail
+          for tool in docker zstd; do
+            command -v "$tool" >/dev/null \
+              || { echo "::error title=rootfs_tool_missing::build-rootfs.sh needs \`$tool\` and this runner has none. Build the rootfs on a machine that has it and \`gh release upload\` both assets by hand."; exit 1; }
+          done
+          docker --version && zstd --version
+
+      - name: build
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        # The version comes off the TAG rather than off the script's own
+        # default, so the asset name and the release cannot disagree.
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          bash sdk/bootstrap/scripts/build-rootfs.sh "$version" rootfs
+          ls -l rootfs
+
+      - name: upload the image and its digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        # BOTH, and the `.sha256` sibling's name is exact: `install.ps1` and
+        # `sdk/bootstrap/src/distro.ts` read the digest from
+        # `<asset>.sha256` and verify the download against it.
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          gh release upload "$TAG" --clobber \
+            "rootfs/crucible-rootfs-$version.tar.zst" \
+            "rootfs/crucible-rootfs-$version.tar.zst.sha256"
+
+  manifest:
+    name: merge and upload envpacks.json
+    runs-on: ubuntu-latest
+    # `always()` so the manifest is still written when one pack failed: the
+    # release then carries every pack that built, and `crucible install`
+    # refuses the missing one by name. A manifest written only on a clean run
+    # would make one failed job cost every pack in the matrix.
+    needs: pack
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: install crucible
+        run: python -m pip install --upgrade pip && python -m pip install -e .
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: envpack-fragment-*
+          path: fragments
+
+      - name: merge
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        # The merge REFUSES a fragment from another version and refuses two
+        # fragments carrying one pack (crucible/envpack.py), so a manifest that
+        # is written is a manifest whose rows all came from this tag's build.
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, pathlib
+          from crucible import VERSION, envpack
+          tag = os.environ["TAG"]
+          assert tag == f"v{VERSION}", f"{tag} is not v{VERSION}; the tag and the code disagree"
+          documents = [
+              (str(path), path.read_text(encoding="utf-8"))
+              for path in sorted(pathlib.Path("fragments").rglob("envpacks.json"))
+          ]
+          assert documents, "no fragments: every pack job failed"
+          merged = envpack.merge_manifests(VERSION, documents)
+          pathlib.Path("envpacks.json").write_text(merged.dumps(), encoding="utf-8")
+          for entry in merged.packs:
+              print(f"{entry.name}/{entry.backend}  {entry.bytes/1e9:.2f} GB  {len(entry.parts)} part(s)")
+          PY
+
+      - name: upload envpacks.json LAST
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: gh release upload "$TAG" --clobber envpacks.json
+
+      - name: say what the release carries
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Environment packs on $TAG"
+            echo
+            python - <<'PY'
+          import pathlib
+          from crucible import envpack
+          manifest = envpack.parse_manifest(pathlib.Path("envpacks.json").read_text("utf-8"))
+          published = {(p.name, p.backend) for p in manifest.packs}
+          print("| pack | backend | archive | parts | unpacked |")
+          print("|---|---|---|---|---|")
+          for entry in manifest.packs:
+              print(
+                  f"| `{entry.name}` | {entry.backend} | {entry.bytes/1e9:.2f} GB "
+                  f"| {len(entry.parts)} | {entry.unpacked_bytes/1e9:.2f} GB |"
+              )
+          missing = [row for row in envpack.every_pack() if row not in published]
+          if missing:
+              print()
+              print("**Not published by this run**, so `crucible install` refuses them "
+                    "`pack_not_published`. Build each on Owen's machine with "
+                    "`crucible envpack build <name>` and upload its parts and its "
+                    "manifest row by hand:")
+              print()
+              for name, backend in missing:
+                  print(f"- `{name}` / {backend}")
+          PY
+          } >> "$GITHUB_STEP_SUMMARY"
