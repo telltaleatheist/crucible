@@ -318,6 +318,44 @@ the notification area. It is the front door Owen asked for. It owns exactly four
   from the host is `systemctl --user stop`, which `Restart=always` respects — the unit is
   stopped, not exited.)
 
+**The names this build gives 4.1.** The host's own root is `%LOCALAPPDATA%\Crucible\` and the
+host runs with `CRUCIBLE_HOME` set to it (3.6), so the host-mode config is
+`%LOCALAPPDATA%\Crucible\config.toml` and the log is `%LOCALAPPDATA%\Crucible\host.log` — one
+file, appended, rolled at 2 MiB to `host.log.1`. A tray that starts at every login for a year
+must not grow without bound, and one previous file is enough to read a failure that happened
+before the last restart.
+
+Presence is a PAIR, `(distro, engine)`, and every value has a name:
+
+| `distro` | means |
+|---|---|
+| `present` | `wsl -l -v` lists `crucible`: this machine runs the WSL server |
+| `absent` | it does not: this machine runs the host-mode child |
+| `unknown` | `wsl.exe` could not be asked — missing, or it errored. The menu says so and still offers the install; it never reads this as `absent`, because "install the engine" on a machine whose WSL merely failed to answer would import a second distro. |
+
+| `engine` | means | title line |
+|---|---|---|
+| `starting` | the boot, or a recovery recipe, is in flight | `Crucible — starting…` |
+| `running` | `GET /v1/ping` answered | `Crucible — running (WSL)` / `Crucible — running (host mode)` |
+| `stopped` | the ping failed and this down-edge's recovery is spent | `Crucible — stopped` |
+| `failed` | both recipes ran and neither brought it up | `Crucible — engine did not start — open the log` |
+| `installing` | the 4.3 sequence is running | `Crucible — installing…` |
+
+The recovery recipes are named. With the distro: `user-unit-start`
+(`systemctl --user start crucible` inside it), then `user-bus-restart`
+(`systemctl restart user@1000` as root, through `wsl -d crucible -u root`), in that order, at
+most once per down-edge. In host mode there is one: `host-mode-respawn`, which starts
+`crucible serve` as a child again. `BOOT_WAIT_SECONDS = 30` and `WATCH_SECONDS = 15` are the
+two numbers 4.1 states, and they are constants with those names.
+
+**The Startup verbs.** `crucible host --install-startup` writes the shortcut and prints its
+path; `crucible host --remove-startup` deletes it and says whether there was one. Both exit
+without starting a tray, and both are the ONE owner of that file — `install.ps1` calls the
+first rather than writing a `.lnk` of its own. The shortcut is written by
+`crucible/host/startup.py` through a PowerShell `WScript.Shell` one-liner (no pywin32, no new
+dependency) and its target is `pythonw.exe -m crucible.cli host`, not the `.cmd` (4.4): a
+`.cmd` opens a console window, and a tray program has none.
+
 ### 4.2 The menu
 
 `Crucible — running (WSL)` / `running (host mode)` / `stopped` / `installing…` as the title
@@ -326,6 +364,16 @@ hardened window rule applies to a browser: it is the default browser), **Install
 accelerator engine (WSL2)…** (only when the distro is absent — runs section 4.3), **Restart
 engine**, **Stop engine**, **Open log**, **Quit** (stops the host; the WSL server keeps running
 because it is systemd's; in host mode the child server stops with it, and the menu says so).
+
+**The menu is a pure function** — `menu_model(distro, engine)` in `crucible/host/menu.py` —
+and every item carries an id that the click handler and the tests name it by: `open-console`,
+`install-engine`, `restart-engine`, `stop-engine`, `open-log`, `quit`. `install-engine` is
+ABSENT rather than disabled unless `distro` is `absent` or `unknown` (4.2 says "only when the
+distro is absent"); every other item is always present and carries `enabled`. `open-console`
+is enabled only while `engine` is `running`, because the URL it opens comes from the pairing
+file and there is nothing to open when nothing answers. `quit`'s LABEL is what says which
+Crucible this is: `Quit (the engine keeps running)` with the WSL server, `Quit (stops the
+engine)` in host mode.
 
 ### 4.3 Install and migrate — the wsl-states table, driven
 
@@ -347,6 +395,41 @@ capability write; stop the host-mode child; switch the pairing file to the guest
 same line — same token, same host, same port). Every step is one of the existing named steps
 or one of the state table's named states; the host adds no new sentence of its own.
 
+**The door, named.** `POST /install` on `127.0.0.1:7101`, bearer = the engine token (the
+host-mode config's, and the guest's after the migrate — the same token either way, 3.5). The
+response is newline-delimited JSON, one event per line:
+`{"event": "state"|"step"|"line"|"done"|"error", …}`. A connection that closes before `done`
+is a failure the client names rather than a success it assumes. Refusals, by name:
+`host_install_running` (409 — a second POST while one is in flight; there is one install on a
+machine and the second caller waits), `host_no_token` (503 — the host has no config yet, which
+is only true before its first host-mode `init`), `host_unauthorized` (401), and every state
+code from the 4c table verbatim when the machine cannot be carried further. Bootstrap's side
+adds two: `host_not_installed` (there is no `%LOCALAPPDATA%\Crucible\host\` on this machine —
+the answer is `install.ps1`) and `host_unreachable` (the host pack is installed and the door
+did not answer).
+
+**The 4c table crosses into Python by GENERATION, not by a second copy.** `crucible host` is
+Python and the table is `sdk/bootstrap/src/wsl-states.ts`, so its DATA — the code, the probe
+argv, the sentence, the action — is EMITTED into `crucible/host/wsl_states.py` by the same
+`scripts/gen-install-scripts.ts` that writes `install.ps1`, and `npm run gen:install --
+--check` refuses a drift exactly as it does for the two scripts. What is spelled twice is only
+what `steps.ts` already spells twice for the same reason: the PREDICATES (`means`), which are
+code rather than data. `crucible/host/wslstate.py` holds one per code and a test asserts the
+two sets are equal — the "tied by a check instead of by an import" seam `envpack.SMOKE_IMPORT`
+and `cli.INSTALLABLE_JOB_TYPES` already use.
+
+**The window** is tkinter (which is in the pinned interpreter, 4.4): one row per step with a
+state beside it, no console. `crucible host --install` runs the same sequence in the
+FOREGROUND and prints the events, which is how it is tested and how a support session reads
+it.
+
+**The migrate step, named.** `crucible init --config-from <file>` is the flag 4.3 asks for:
+the file is a TOML document the host wrote at 0600 and deletes afterwards, and `init` takes
+exactly three things out of it — `auth.token`, `[routes]` and `[upstreams]` — and nothing
+else. The host, the port, the name, the backend and the job flags belong to the machine being
+initialised, not to the one being left. A file without `auth.token` is refused
+`config_from_no_token`; a file that is not TOML is `config_from_unreadable`.
+
 ### 4.4 Packaging
 
 - A Windows host pack: `crucible-env-host-windows-<version>.tar.zst`, built by the same
@@ -365,6 +448,49 @@ or one of the state table's named states; the host adds no new sentence of its o
 - **Mac:** no host. launchd already supervises; the pairing file (3.6) is what an app reads.
   A menu-bar item is out of this phase.
 
+**CORRECTION TO THE INTERPRETER PIN, read from the release rather than from memory.** There is
+no `x86_64-pc-windows-msvc-shared-install_only` asset on python-build-standalone **20260901**.
+The `-shared` infix is retired: the word "shared" appears ZERO times in that release's
+`SHA256SUMS` (against 90 occurrences of "static"), and the Windows `install_only` build IS the
+shared one. The pin is therefore
+`cpython-3.11.16+20260901-x86_64-pc-windows-msvc-install_only.tar.gz`, sha256
+`6be524fa6752af802146a4adc7d098565425b0b1c166e19a5a7a4c8cccb86bf6`, read on 2026-09-14 from
+`https://github.com/astral-sh/python-build-standalone/releases/download/20260901/SHA256SUMS`.
+Same release and same CPython (3.11.16) as the two backends, which is the property that
+mattered.
+
+**The pack's layout is Windows's, and its entry point is a `.cmd`.** python-build-standalone's
+Windows tree is `python.exe` / `pythonw.exe` / `Scripts\` / `Lib\`, not `bin/`, so `envpack`
+asks `pack_python(root, backend)` for the interpreter instead of assuming `bin/python`. And
+the relocation defect 7.2a solved for POSIX has no POSIX answer here: pip writes
+`Scripts\<name>.exe` launchers with the building interpreter's absolute path embedded in the
+binary, which a move breaks and which no shebang rewrite can reach. So the Windows build
+writes `crucible.cmd` beside `python.exe`:
+
+```bat
+@echo off
+"%~dp0python.exe" -m crucible.cli %*
+```
+
+`%~dp0` is the Windows spelling of the same idea as `$(dirname -- "$0")` — the interpreter is
+found from the script's own location — so `relocate_console_scripts()` on this backend writes
+one `.cmd` per console script the wheel declares, and the pack keeps the `.exe` launchers only
+as the dead weight pip left (nothing in Crucible calls them, and `pack_smoke` proves the
+`.cmd`, moved).
+
+- The pack's name is `host`, its backend kind is `host-windows`, and its archive is
+  `crucible-env-host-windows-<version>.tar.zst`. `host-windows` is a PACK BACKEND and never a
+  `backend_kind` in a config: a config on this machine says `none` (3.5). The pack table's key
+  is about which wheels pip resolved; **Windows is never a backend** and nothing in this pack
+  runs a model.
+- `crucible envpack build host` is refused `pack_not_buildable_here` off win32, and on win32
+  every OTHER pack name is refused by the same function and the same rule.
+- **The pairing file's ACL** (3.6, "an ACL of the current user only") is set with
+  `icacls <file> /inheritance:r /grant:r <user>:(R,W)`, `<user>` read from `%USERNAME%` in the
+  environment and never assembled. `icacls` ships with Windows, so this adds no dependency. A
+  failure is `pairing_acl_failed` and the file is DELETED rather than left readable by
+  everybody with a bearer token in it.
+
 ### 4.5 Tests
 
 sdk/bootstrap: the shrunk `install()` (host present / absent) with a fake host. pytest: `crucible
@@ -372,6 +498,15 @@ host` is refused off win32 (`host_windows_only`); the menu model as a pure funct
 (distro state, ping state); the Startup shortcut path; the migrate step's `--config-from`; the
 pairing-file switch. The tray itself is exercised by hand on Owen's PC and the doc records
 what was seen.
+
+Added by the build, each because it pins something that would otherwise drift silently: the
+`(distro, engine)` table above is walked exhaustively and every cell's title and item set is
+asserted; the generated `crucible/host/wsl_states.py` is checked against `wsl-states.ts` by
+`gen:install --check` and its codes against `wslstate.py`'s predicates by pytest; the
+`icacls` argv; the `.cmd` shim's text and the fact that a MOVED pack still runs it; the
+`host-windows` row in the pack table and its refusal off win32; and the loopback door's four
+refusals. Windows-only code paths take the platform as an argument so they run on both — the
+suite runs in WSL (`pytest`) and must not be a suite that skips its subject.
 
 ## 5. The apps
 
