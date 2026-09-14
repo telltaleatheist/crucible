@@ -53,6 +53,41 @@ from .base import (
 )
 
 
+def busy_details(job: Job) -> dict[str, Any]:
+    """What a `409 server_busy` says about the job that is in the way.
+
+    Its own function because there are now TWO doors that refuse for this job:
+    `POST /v1/jobs`, below, and `POST /v1/tasks` (PHASE13-OPERATOR.md section
+    3.3), which reads it through `Settlement.holder()`. Two hand-written copies
+    of these eight fields would be two answers about one job the first time one
+    of them was edited — ARCHITECTURE.md R1 in the smallest possible space.
+
+    `holder` is `Job.client`, the recorded User-Agent, and it is null when
+    something spoke to this server without one: **null means "it did not say"**,
+    and inventing a name here would make a bench confidently wrong about whose
+    render is on the card (PHASE7-LANES.md section 5).
+    """
+    return {
+        "holder": job.client,
+        "job_id": job.id,
+        "type": job.type,
+        "model": job.model,
+        # Named so `since` is unambiguous: "running" dates from `started`,
+        # "queued" from `created`. Without it a client cannot tell a job that
+        # has been rendering for an hour from one admitted 2 ms ago.
+        "status": job.status,
+        # `started` for a running job, `created` for one the lane has not
+        # reached: both answer "since when", and a null `started` reported as
+        # `since` would read as "it has been busy since never".
+        "since": job.started if job.started is not None else job.created,
+        "progress": job.progress,
+        # The holder's latest progress line, which is what turns "busy" into
+        # "rendering 118 of 280" on somebody else's bench. Null until the job
+        # has said anything.
+        "message": job.message,
+    }
+
+
 class JobStore:
     """Holds every job this server has seen in this process, plus the run lane."""
 
@@ -230,35 +265,18 @@ class JobStore:
 
         who = "an unnamed client" if holder.client is None else repr(holder.client)
         what = holder.type if holder.model is None else f"{holder.type} {holder.model!r}"
-        # `started` for a running job, `created` for one the lane has not reached:
-        # both answer "since when", and a null `started` reported as `since` would
-        # read as "it has been busy since never".
-        since = holder.started if holder.started is not None else holder.created
+        details = busy_details(holder)
         doing = "" if not holder.message else f" — {holder.message}"
         raise ApiError(
             409,
             "server_busy",
             f"this server is busy with job {holder.id} ({what}), {holder.status} "
-            f"since {since}, submitted by {who}, {holder.progress:.0%} done"
+            f"since {details['since']}, submitted by {who}, "
+            f"{holder.progress:.0%} done"
             f"{doing}. Crucible admits one job at a time and does not queue: the "
             "client owns the queue, the server owns admission (ARCHITECTURE.md "
             "section 3). Read GET /v1/activity to see when it is finished.",
-            {
-                "holder": holder.client,
-                "job_id": holder.id,
-                "type": holder.type,
-                "model": holder.model,
-                # Named so `since` is unambiguous: "running" dates from `started`,
-                # "queued" from `created`. Without it a client cannot tell a job
-                # that has been rendering for an hour from one admitted 2 ms ago.
-                "status": holder.status,
-                "since": since,
-                "progress": holder.progress,
-                # The holder's latest progress line, which is what turns "busy"
-                # into "rendering 118 of 280" on somebody else's bench. Null until
-                # the job has said anything.
-                "message": holder.message,
-            },
+            details,
         )
 
     # ------------------------------------------------------------------ submit

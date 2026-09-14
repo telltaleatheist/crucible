@@ -20,7 +20,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar
 
 import httpx
 from fastapi import APIRouter, Depends, FastAPI, Request, Response, UploadFile
@@ -32,7 +32,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import API_VERSION, VERSION, accelerator, catalog, pairing
 from .backend import CUDA_LINUX, Backend
-from .config import Config
+from .config import Config, load_config
 from .errors import ApiError
 from .interfaces import InterfaceError
 from .jobs import (
@@ -52,6 +52,7 @@ from .leases import Leases, require_ttl
 from .residency import KIND_NOUNS, Residency
 from .settle import Settlement
 from .sampling import SAMPLING_HEADER, Applied, apply_defaults
+from .tasks import TASK_TYPES, ReloadRefused, Task, TaskStore
 from .ttsstream import (
     StreamManager,
     StreamSession,
@@ -128,6 +129,79 @@ class StreamOpen(BaseModel):
 
     voice: str = Field(min_length=1)
     language: str = Field(min_length=1)
+
+
+class TaskCreate(BaseModel):
+    """`POST /v1/tasks` — one operator operation. PHASE13-OPERATOR.md 3.3.
+
+    One model for three request shapes rather than three routes, because there
+    is one lane and one refusal (`task_busy`) governing all of them, and a
+    client that had to pick a path before it could be told "busy" would have to
+    know which of three doors to retry.
+
+    The validator is `StreamOp`'s in spirit: the `type` word decides which
+    fields are required and which are REFUSED. A `narrator_engine` sent with a
+    `pull`, or an `id` sent with an `install`, is a client that has confused two
+    requests, and accepting it silently would run the wrong one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    # pull
+    kind: str | None = None
+    id: str | None = None
+    # install
+    job_type: str | None = None
+    narrator_engine: str | None = None
+    # module
+    module: dict[str, Any] | None = None
+
+    #: Which fields each type owns. The validator reads this rather than three
+    #: hand-written branches, so a fourth task type is one row.
+    FIELDS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "pull": ("kind", "id"),
+        "install": ("job_type", "narrator_engine"),
+        "module": ("module",),
+    }
+    #: ...and which of those may not be omitted. `narrator_engine` is absent
+    #: here because whether it is required depends on the job type, which is
+    #: `crucible/tasks.py`'s question and not this schema's.
+    REQUIRED: ClassVar[dict[str, tuple[str, ...]]] = {
+        "pull": ("kind", "id"),
+        "install": ("job_type",),
+        "module": ("module",),
+    }
+
+    @model_validator(mode="after")
+    def the_type_carries_what_it_needs(self) -> "TaskCreate":
+        if self.type not in TASK_TYPES:
+            raise ValueError(
+                f"type must be one of {list(TASK_TYPES)}, got {self.type!r}"
+            )
+        mine = self.FIELDS[self.type]
+        for name in self.REQUIRED[self.type]:
+            if getattr(self, name) is None:
+                raise ValueError(f"a {self.type} task needs {name!r}")
+        theirs = [
+            name
+            for group in self.FIELDS.values()
+            for name in group
+            if name not in mine and getattr(self, name) is not None
+        ]
+        if theirs:
+            raise ValueError(
+                f"a {self.type} task takes {list(mine)}; it was also sent "
+                f"{sorted(theirs)}, which belong to another task type"
+            )
+        return self
+
+    def request(self) -> dict[str, Any]:
+        """The body as the task echoes it: this type's fields and no others."""
+        return {
+            "type": self.type,
+            **{name: getattr(self, name) for name in self.FIELDS[self.type]},
+        }
 
 
 class LeaseOpen(BaseModel):
@@ -281,6 +355,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         try:
             yield
         finally:
+            # Before the job lane, because an operator task can be holding a
+            # download thread and a pip subprocess, and both want telling
+            # before the process goes. A task's cancel is cooperative and
+            # returns in milliseconds (`crucible/tasks.py`).
+            await app.state.tasks.stop()
             await store.stop()
             await app.state.http.aclose()
             # Before the residency, and that order is load-bearing: a streaming
@@ -333,6 +412,52 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     )
     app.state.store.attach_settlement(app.state.settlement)
     app.state.streams.when_closed(app.state.settlement.settle_quietly)
+
+    def reload_registry() -> list[str]:
+        """Make an installed job type reachable, in place. **Event loop only.**
+
+        PHASE13-OPERATOR.md section 3.4, which is where the decision and its
+        reason are written. The whole of it is here rather than in
+        `crucible/tasks.py` because it is a statement about how a server is
+        ASSEMBLED — the config object, the registry, the residency — and a task
+        module that reached for those would be a second owner of that.
+
+        THE FOUR FACTS ARE READ AGAIN, HERE, and this is the second read (the
+        first gated the task at POST). Minutes of pip have passed since then and
+        a job may have been admitted; swapping the registry underneath it would
+        hand its `_restamp_provenance` a plugin instance built from a different
+        config, and a capability step that turned a flag OFF would remove the
+        very type it is running. So a holder found here is a refusal that fails
+        the task, naming it — a loud wrong answer rather than a quiet one (R3).
+
+        Nothing awaits between the read and the swap, so the two are one atomic
+        stretch on the loop, which is `JobStore.enqueue`'s property and its
+        reason.
+        """
+        held = app.state.settlement.holder()
+        if held is not None:
+            raise ReloadRefused(held)
+        # The SAME Config object, re-read from the same file. See
+        # `Config.adopt`: every route, the residency, the store and every
+        # plugin holds a reference to this one object, and handing half of them
+        # a second one is R1's defect built on purpose.
+        config.adopt(load_config(config.home))
+        # The SAME residency, so what was resident stays resident and the new
+        # plugin instances hold the live engine. The dict's CONTENTS are
+        # replaced rather than the dict, because `JobStore` holds it by
+        # reference and a store pointed at the old mapping would accept exactly
+        # the job types the rest of the server had stopped offering.
+        rebuilt = build_registry(config, backend, residency)
+        registry.clear()
+        registry.update(rebuilt)
+        return sorted(registry)
+
+    app.state.tasks = TaskStore(
+        config,
+        backend,
+        reload=reload_registry,
+        holder=app.state.settlement.holder,
+    )
 
     Path(config.jobs_dir).mkdir(parents=True, exist_ok=True)
     Path(config.uploads_dir).mkdir(parents=True, exist_ok=True)
@@ -1356,6 +1481,68 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         )
         return FileResponse(path, media_type=media_type, filename=name)
 
+    # ----------------------------------------------------------------- tasks
+    #
+    # PHASE13-OPERATOR.md section 3.3. Five routes with the shapes the job
+    # routes have — a 202 with an id, a status read, an SSE stream, a DELETE
+    # that cancels, a list — because a page that already knows how to watch a
+    # job should not have to learn a second protocol to watch an install. What
+    # they are NOT is `POST /v1/jobs`: a job is work a client wants done with
+    # this server's card, a task is work done to the server itself, and
+    # `crucible/tasks.py` is where that difference is written down.
+
+    @private.post("/tasks", status_code=202)
+    async def create_task(request: Request, body: TaskCreate) -> dict[str, str]:
+        """Admit one operator task, or refuse by name.
+
+        Every refusal is made here, before the 202, and in the order the job
+        door uses: what is wrong with the REQUEST first (`unknown_subject`,
+        `unknown_job_type`, `narrator_engine_required`, `invalid_module`), then
+        what is already true (`already_installed`, `job_type_installed`), then
+        what this server is doing (`task_busy`, and for anything that reloads
+        the registry, `server_busy`). A client with a misspelled id told "busy"
+        would come back in ten minutes to be told about the typo.
+        """
+        tasks: TaskStore = request.app.state.tasks
+        return {"task_id": tasks.submit(body.request()).id}
+
+    @private.get("/tasks")
+    async def list_tasks(request: Request) -> dict[str, Any]:
+        """The last few tasks, newest first. In memory; a restart forgets them."""
+        tasks: TaskStore = request.app.state.tasks
+        return {"tasks": [task.to_dict() for task in tasks.recent()]}
+
+    @private.get("/tasks/{task_id}")
+    async def get_task(request: Request, task_id: str) -> dict[str, Any]:
+        tasks: TaskStore = request.app.state.tasks
+        return tasks.get(task_id).to_dict()
+
+    @private.delete("/tasks/{task_id}")
+    async def cancel_task(request: Request, task_id: str) -> dict[str, str]:
+        """Cancel. A pull stops at its next chunk and its partial bytes go.
+
+        `cancelling` and not `cancelled`, exactly as the job door answers:
+        the flag is set here and the runner ends when it sees it, which for a
+        pull is the next progress callback and for an install is the SIGTERM
+        landing. Watch the stream for the `cancelled` event — telling a caller
+        "cancelled" before the download thread has stopped would be the
+        ambiguous answer R3 forbids.
+        """
+        tasks: TaskStore = request.app.state.tasks
+        task = tasks.get(task_id)
+        return {"task_id": task.id, "status": tasks.cancel(task)}
+
+    @private.get("/tasks/{task_id}/events")
+    async def task_events(request: Request, task_id: str) -> StreamingResponse:
+        tasks: TaskStore = request.app.state.tasks
+        task = tasks.get(task_id)
+        delivered = _last_event_id(request)
+        return StreamingResponse(
+            _task_event_stream(request, tasks, task, delivered),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
     # --------------------------------------------------------------- openai
 
     @private.get("/openai/models")
@@ -2024,6 +2211,41 @@ async def _session_event_stream(
         # cancel immediately — that is the whole reason this door is SSE — so
         # this marks the session unattended and the watchdog does the rest.
         session.detach(reader)
+
+
+async def _task_event_stream(
+    request: Request, tasks: TaskStore, task: Task, last_event_id: int
+) -> AsyncIterator[str]:
+    """A task's events, in the job stream's shape and with its own terminal set.
+
+    A third copy of this loop rather than a parameterised one, which is the
+    call `_session_event_stream` already made and for the same kind of reason:
+    the three logs have three lifetimes. A job's log lives as long as its
+    directory, a session's is pruned behind its readers, and a TASK's can be
+    dropped whole when it ages past `HISTORY` — so this one has to survive its
+    subject disappearing between two iterations, which the others never do.
+    """
+    waiter = tasks.subscribe(task)
+    index = last_event_id
+    try:
+        while True:
+            while index < len(task.events):
+                event = task.events[index]
+                index += 1
+                yield _format_event(event)
+                if event["event"] in TERMINAL_EVENTS:
+                    return
+            waiter.clear()
+            if index < len(task.events):
+                continue
+            try:
+                await asyncio.wait_for(waiter.wait(), timeout=KEEPALIVE_SECONDS)
+            except asyncio.TimeoutError:
+                if await request.is_disconnected():
+                    return
+                yield ": keepalive\n\n"
+    finally:
+        tasks.unsubscribe(task, waiter)
 
 
 async def _event_stream(

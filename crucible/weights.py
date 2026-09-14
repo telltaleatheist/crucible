@@ -88,6 +88,38 @@ class WeightsError(CrucibleError):
     """Weights are missing, half-pulled, or could not be fetched."""
 
 
+class PullCancelled(CrucibleError):
+    """A pull stopped because its caller's progress hook said to stop.
+
+    Its own type and NOT a `WeightsError`, because the two must never be caught
+    together: a failed pull is news and a cancelled one is what was asked for.
+    Every `except Exception` in this module re-raises it untouched for that
+    reason — wrapped in a `WeightsError` it would reach an operator as "pulling
+    … failed", which is a lie about their own cancel.
+
+    Whatever was on disk is REMOVED before this leaves the module. R6 does not
+    apply and PHASE13-OPERATOR.md section 3.3 says why: half a safetensors file
+    is not partial work anybody can resume or use, and leaving it would make the
+    next `installed()` read a directory with no stamp — which is honest, but
+    also several gigabytes of nothing.
+    """
+
+
+#: What a caller is told while bytes are arriving: `(done, total|None, file)`.
+#:
+#: `total` is None where the server did not say how big the file is, which
+#: happens and must not be reported as zero. `file` is the name the hub is
+#: fetching, so a progress line says which of a repo's forty shards is in
+#: flight.
+#:
+#: THE HOOK IS ALSO THE CANCEL POINT, and that is not a second job bolted onto
+#: it — it is the only place in a `snapshot_download` where this process's own
+#: code runs. A hook that raises `PullCancelled` stops the pull; nothing else
+#: can, because a thread cannot be killed and the hub takes no cancellation
+#: token. See `crucible/tasks.py`, whose `DELETE /v1/tasks/{id}` is the caller.
+ProgressHook = Callable[[int, "int | None", str], None]
+
+
 @dataclass(frozen=True)
 class InstalledWeights:
     path: Path
@@ -190,6 +222,64 @@ def hf_token(config: Config) -> str | None:
     return None
 
 
+def reporting_tqdm(on_progress: ProgressHook) -> Any:
+    """A `tqdm_class` for `huggingface_hub` that reports bytes to `on_progress`.
+
+    R4, applied to the one thing in this module that was only ever a log line: a
+    pull's progress existed exclusively as the hub's own progress BAR on
+    somebody's terminal, so a client that asked a server to pull 19 GB could be
+    told "pulling" and then nothing for twenty minutes. The bar is untouched —
+    `on_line` still prints what it always printed — and the fact is promoted to
+    an event beside it.
+
+    **Only byte bars are reported.** `snapshot_download` also raises a bar
+    counting FILES (`unit="it"`), and forwarding both would interleave two
+    different meanings of the same three numbers into one event stream. The
+    file count is recoverable from the sequence of `file` names; a byte count
+    mistaken for a file count is not recoverable from anything.
+    """
+    try:
+        from huggingface_hub.utils import tqdm as hub_tqdm
+    except ImportError as exc:  # pragma: no cover - a dependency, not a condition
+        raise WeightsError(
+            f"huggingface_hub is not importable: {exc}"
+        ) from exc
+
+    class _Reporting(hub_tqdm):  # type: ignore[misc, valid-type]
+        """A hub progress bar that also reports, and reports even when hidden.
+
+        THE COUNTING IS OUR OWN, and that is not redundancy. `tqdm.update`
+        returns immediately when the bar is `disable`d, and `tqdm.__init__`
+        does not even set `self.unit` or `self.desc` in that case — so a server
+        whose environment carries `HF_HUB_DISABLE_PROGRESS_BARS` would have
+        emitted no `progress` events at all, and, far worse, would have had
+        **no cancel point**: the hook is the only place a
+        `snapshot_download` can be interrupted (see `PullCancelled`). A
+        download nobody can stop because somebody turned off a progress bar is
+        exactly the kind of coupling ARCHITECTURE.md R4 is about.
+        """
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._crucible_unit = kwargs.get("unit")
+            self._crucible_desc = kwargs.get("desc") or ""
+            self._crucible_done = int(kwargs.get("initial", 0) or 0)
+            super().__init__(*args, **kwargs)
+
+        def update(self, n: float | None = 1) -> bool | None:
+            displayed = super().update(n)
+            if self._crucible_unit == "B":
+                self._crucible_done += int(n or 0)
+                # `self.total` IS set on a disabled bar, and the hub revises it
+                # once it has read the content length, so it is asked rather
+                # than remembered.
+                on_progress(
+                    self._crucible_done, self.total, self._crucible_desc
+                )
+            return displayed
+
+    return _Reporting
+
+
 def directory_bytes(path: Path) -> int:
     total = 0
     for entry in path.rglob("*"):
@@ -205,6 +295,7 @@ def pull(
     *,
     force: bool = False,
     on_line: Callable[[str], None] | None = None,
+    on_progress: ProgressHook | None = None,
 ) -> InstalledWeights:
     """Fetch this model's or voice's weights for this backend at its pin."""
     try:
@@ -237,6 +328,9 @@ def pull(
             f"({'with' if token else 'without'} an HF token)"
         )
     started = time.monotonic()
+    extra: dict[str, Any] = {}
+    if on_progress is not None:
+        extra["tqdm_class"] = reporting_tqdm(on_progress)
     try:
         snapshot_download(
             repo_id=spec.hf_repo,
@@ -244,7 +338,13 @@ def pull(
             local_dir=str(target),
             token=token,
             max_workers=8,
+            **extra,
         )
+    except PullCancelled:
+        # The caller asked for this. Everything written so far goes, and the
+        # cancellation travels untouched — see `PullCancelled`.
+        shutil.rmtree(target, ignore_errors=True)
+        raise
     except GatedRepoError as exc:
         raise WeightsError(
             f"{spec.hf_repo} is gated and this server has no HF token that opens it "
@@ -317,6 +417,7 @@ def pull_archive(
     *,
     force: bool = False,
     on_line: Callable[[str], None] | None = None,
+    on_progress: ProgressHook | None = None,
 ) -> InstalledWeights:
     """Fetch one archive from a repo, verify it, and unpack it into the weights dir.
 
@@ -370,6 +471,9 @@ def pull_archive(
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
+    extra: dict[str, Any] = {}
+    if on_progress is not None:
+        extra["tqdm_class"] = reporting_tqdm(on_progress)
     try:
         downloaded = hf_hub_download(
             repo_id=spec.hf_repo,
@@ -377,7 +481,11 @@ def pull_archive(
             revision=spec.revision,
             local_dir=str(staging),
             token=token,
+            **extra,
         )
+    except PullCancelled:
+        shutil.rmtree(target, ignore_errors=True)
+        raise
     except GatedRepoError as exc:
         raise WeightsError(
             f"{spec.hf_repo} is gated and this server has no HF token that opens it "
@@ -528,6 +636,7 @@ def pull_files(
     stamp_name: str = STAMP_NAME,
     force: bool = False,
     on_line: Callable[[str], None] | None = None,
+    on_progress: ProgressHook | None = None,
 ) -> InstalledWeights:
     """Fetch each named file at one revision, verify it, and place it.
 
@@ -593,6 +702,9 @@ def pull_files(
         )
     started = time.monotonic()
     fetched: list[tuple[FileSource, Path, Path]] = []
+    extra: dict[str, Any] = {}
+    if on_progress is not None:
+        extra["tqdm_class"] = reporting_tqdm(on_progress)
     try:
         for entry in files:
             destination = _safe_target(target_root, entry.target)
@@ -603,7 +715,13 @@ def pull_files(
                     revision=revision,
                     local_dir=str(staging),
                     token=token,
+                    **extra,
                 )
+            except PullCancelled:
+                # Nothing has been MOVED yet — every file is placed only after
+                # all of them verify — so the staging tree the `finally` below
+                # removes is the whole of what this pull wrote.
+                raise
             except GatedRepoError as exc:
                 raise WeightsError(
                     f"{hf_repo} is gated and this server has no HF token that "

@@ -140,11 +140,12 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
 from .errors import JobError
+from .jobs.queue import busy_details
 
 if TYPE_CHECKING:  # pragma: no cover - imports for annotations only
     from .inflight import InFlight
@@ -177,15 +178,25 @@ LEAVES_IT_RESIDENT: frozenset[str] = frozenset({"load-model", "load-voice"})
 
 @dataclass(frozen=True)
 class Held:
-    """Why the card was not cleared: which fact, and who it names.
+    """Why the card was not cleared: which fact, who it names, and its own facts.
 
-    A pair rather than a sentence, because the same value is read twice — once to
-    decide, once to say — and a decision made on a string is a decision nobody
-    can test.
+    A triple rather than a sentence, because the same value is read three times
+    — once to decide, once to say, and since PHASE13-OPERATOR.md section 3.3
+    once to put on the wire — and a decision made on a string is a decision
+    nobody can test.
+
+    `details` is that third reading, and it is **the holding fact's own shape,
+    not a shape invented here**: a job's is `POST /v1/jobs`' `server_busy` body
+    verbatim (`crucible/jobs/queue.py`'s `busy_details`), a lease's is the
+    receipt `POST /v1/models/{id}/lease` hands back (`Lease.receipt`), and the
+    other two have one field each because there is one fact to state. An app
+    refused `server_busy` on an operator task shows the holder verbatim, and it
+    can only do that if the fields it reads are the ones it already knows.
     """
 
     fact: str
     who: str
+    details: dict[str, Any] = field(default_factory=dict)
 
     def __str__(self) -> str:
         return f"{self.fact} holds it: {self.who}"
@@ -317,17 +328,29 @@ class Settlement:
         """
         job = self._store.occupied_by_anything_but(excluding_job)
         if job is not None:
-            return Held("a job", f"{job.type} {job.id} ({job.status})")
+            return Held(
+                "a job", f"{job.type} {job.id} ({job.status})", busy_details(job)
+            )
         lease = self._leases.current()
         if lease is not None:
             who = "an unnamed client" if lease.client is None else repr(lease.client)
-            return Held("a lease", f"{who} for {lease.act!r}, until {lease.expires_at.isoformat()}")
+            return Held(
+                "a lease",
+                f"{who} for {lease.act!r}, until {lease.expires_at.isoformat()}",
+                # The RECEIPT and not `to_dict()`: a refusal arrives with no
+                # `resident` beside it, so the leased thing has to be named here
+                # or the reader cannot say what is held (the same call
+                # `Lease.to_dict`'s docstring makes about `kind`).
+                lease.receipt(),
+            )
         claim = self._residency.claimed_by
         if claim is not None and claim != SETTLEMENT_HOLDER:
-            return Held("the claim", claim)
+            return Held("the claim", claim, {"held_by": claim})
         chats = len(self._inflight)
         if chats:
-            return Held("a chat", f"{chats} completion(s) in flight")
+            return Held(
+                "a chat", f"{chats} completion(s) in flight", {"in_flight": chats}
+            )
         return None
 
     # ------------------------------------------------------------ the ruling

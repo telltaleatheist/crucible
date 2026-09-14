@@ -1,15 +1,23 @@
-"""`GET /v1/catalog` — every pullable subject this backend can hold.
+"""Every pullable subject this backend can hold — the one list, read two ways.
 
-PHASE13-OPERATOR.md section 3.2. The operator page draws one grid from this and
-nothing else, which is the whole reason it exists as one route: before it, a
-person answering *"what can this machine hold and what has it got"* read five
-`crucible … list` commands with five shapes, and a page would have had to make a
-sixth by merging them.
+PHASE13-OPERATOR.md sections 2 and 3.2. A **subject** is one pullable thing:
+`{kind, id}` where `kind ∈ model, voice, rvc, rvc-base, denoise`. Two callers
+want that set and they want different halves of it:
+
+* `GET /v1/catalog` wants a row per subject, for the operator page's grid.
+* `POST /v1/tasks {type: "pull"}` wants ONE subject by name, and then wants to
+  ask it whether it is installed and to fetch it.
+
+Those are the same set, so they are the same function — `subjects()` — and the
+route and the task each take what they need from it. Written the other way
+round (a list for the page, a `match kind:` in the task runner) the two would
+disagree the first time a sixth kind arrived, and they would disagree silently:
+a subject the page can see and no task can pull is a button that does nothing.
 
 WHAT THIS MODULE IS, AND IS NOT
 -------------------------------
-It is a READER, in exactly the sense `crucible/lineup.py` is one. Every field on
-every row comes from somewhere that already owns it:
+It is a READER, in exactly the sense `crucible/lineup.py` is one. Every field
+comes from somewhere that already owns it:
 
 | field | owner |
 |---|---|
@@ -20,10 +28,8 @@ every row comes from somewhere that already owns it:
 | `job_type` | which loader read the manifest: `models/` is `llm`, `asr/` is `asr`, … |
 | `source` | the backend block's `hf_repo` |
 
-There is **no table in this file**. A `kind` is a directory of manifests and a
-function that says whether its weights are on disk, and that is all a row is
-(ARCHITECTURE.md R1: where a copy must exist it is derived, never authored
-twice).
+There is **no table of kinds** here beyond the five `subjects()` walks, and each
+of those five is a loader plus the two functions that already pull and check it.
 
 THE TWO FIELDS THAT ARE OFTEN NULL, AND WHY THEY STAY ON THE WIRE
 ------------------------------------------------------------------
@@ -47,7 +53,8 @@ in front of somebody about to spend twenty minutes on a download.
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from . import denoisemodels, lineup, rvcbase, weights
 from .alignmodels import load_all_align_manifests
@@ -60,6 +67,10 @@ from .residency import KIND_ALIGN, KIND_LLM, KIND_TTS, Residency
 from .rvcmodels import load_all_rvc_manifests
 from .voices import load_all_voices
 
+#: The five words a subject's `kind` may be, in the order `/v1/catalog` lists
+#: them. A tuple and not a set, because the order IS the catalog's order.
+KINDS: tuple[str, ...] = ("model", "voice", "rvc", "rvc-base", "denoise")
+
 #: The one id `rvc-base` has. PHASE13-OPERATOR.md section 2: the base assets are
 #: the ENGINE's, not any model's, and there is one set of them — so the subject
 #: is `{kind: "rvc-base", id: "base"}` rather than the declaration's engine id.
@@ -67,18 +78,208 @@ from .voices import load_all_voices
 #: detail of which engine this build's `rvc` job runs.
 RVC_BASE_ID = "base"
 
-#: Which resident kind, if any, a subject of this kind could BE. `rvc`,
-#: `rvc-base` and `denoise` are absent on purpose: nothing of those kinds is ever
-#: resident (`crucible/jobs/rvc` and `crucible/jobs/denoise` both run a process
-#: that loads, works and exits), so their rows report `resident: false` without
-#: asking. Reading them off a residency that can never name them would be a
-#: comparison whose answer is structurally fixed, which is how a field becomes
-#: wrong the day the structure changes.
+#: Which resident kind, if any, a subject of this job type could BE. `rvc` and
+#: `denoise` are absent on purpose: nothing of those kinds is ever resident
+#: (both run a process that loads, works and exits), so their rows report
+#: `resident: false` without asking. Reading them off a residency that can never
+#: name them would be a comparison whose answer is structurally fixed, which is
+#: how a field becomes wrong the day the structure changes.
 _RESIDENT_KIND_FOR_JOB_TYPE: dict[str, str] = {
     "llm": KIND_LLM,
     "align": KIND_ALIGN,
     "tts": KIND_TTS,
 }
+
+
+@dataclass(frozen=True)
+class Subject:
+    """One pullable thing, and the two things anybody ever does to it.
+
+    `installed` and `pull` are bound callables rather than a `kind` this module
+    switches on twice, because the switch is what would rot: the catalog route
+    and the pull task would each carry a copy of "how do you fetch an rvc-base",
+    and the second copy is always the one that is not updated.
+    """
+
+    kind: str
+    id: str
+    name: str | None
+    job_type: str
+    expected_bytes: int | None
+    source: str
+    #: What a person would type to fetch this by hand. Carried so a refusal can
+    #: name it, in the idiom `crucible/weights.py` already uses.
+    pull_command: str
+    installed: Callable[[], weights.InstalledWeights | None]
+    pull: Callable[..., weights.InstalledWeights]
+
+
+def subjects(config: Config, backend: Backend) -> list[Subject]:
+    """Every subject this backend can hold, grouped by kind in `KINDS` order.
+
+    Within a kind the order is each loader's, which is id order for all of them
+    (`load_all_manifests` and its siblings say so). `model` spans three loaders
+    — `models/`, `asr/`, `align/` — so it is three id-ordered runs rather than
+    one, which is the honest shape: those are three catalogs that happen to
+    share a namespace, not one catalog.
+
+    A subject with no block for this backend is ABSENT rather than listed as
+    unsupported: the sentence this answers is "what this backend can hold", and
+    an entry for a Mac-only voice on the PC would have nothing truthful to put
+    in `installed`, `expected_bytes` or `source`.
+    """
+    found: list[Subject] = []
+
+    # --- model. Three directories, one namespace, three job types.
+    # `crucible/cli.py`'s `_all_manifests` already treats them as one set of ids
+    # for `crucible models pull`; this keeps that and adds the job type each
+    # came from, which is the fact the page needs and the CLI does not.
+    for job_type, loaded in (
+        ("llm", load_all_manifests()),
+        ("asr", load_all_asr_manifests()),
+        ("align", load_all_align_manifests()),
+    ):
+        for manifest in loaded.values():
+            if not manifest.supports(backend.kind):
+                continue
+            spec = manifest.spec(backend.kind)
+            found.append(
+                Subject(
+                    kind="model",
+                    id=manifest.id,
+                    # ASR and align manifests carry no display name; null is the
+                    # honest answer and the page prints the id.
+                    name=getattr(manifest, "display", None),
+                    job_type=job_type,
+                    expected_bytes=None,
+                    source=f"hf:{spec.hf_repo}",
+                    pull_command=f"crucible models pull {manifest.id}",
+                    installed=_installed_weights(config, manifest, spec),
+                    pull=_pull_weights(config, manifest, spec),
+                )
+            )
+
+    for voice in load_all_voices().values():
+        if not voice.supports(backend.kind):
+            continue
+        spec = voice.spec(backend.kind)
+        found.append(
+            Subject(
+                kind="voice",
+                id=voice.id,
+                name=voice.display,
+                job_type="tts",
+                expected_bytes=None,
+                source=f"hf:{spec.hf_repo}",
+                pull_command=f"crucible voices pull {voice.id}",
+                installed=_installed_weights(config, voice, spec),
+                pull=_pull_weights(config, voice, spec),
+            )
+        )
+
+    for model in load_all_rvc_manifests().values():
+        if not model.supports(backend.kind):
+            continue
+        spec = model.spec(backend.kind)
+        found.append(
+            Subject(
+                kind="rvc",
+                id=model.id,
+                name=model.display,
+                job_type="rvc",
+                expected_bytes=spec.archive_bytes,
+                source=f"hf:{spec.hf_repo}",
+                pull_command=f"crucible rvc pull {model.id}",
+                installed=_installed_weights(config, model, spec),
+                pull=_pull_archive(config, model, spec),
+            )
+        )
+
+    # --- rvc-base. Exactly one, and backend-independent: these are the engine's
+    # shared assets and the same files serve both backends.
+    assets = rvcbase.load_rvc_base()
+    found.append(
+        Subject(
+            kind="rvc-base",
+            id=RVC_BASE_ID,
+            name=f"{assets.id}'s base assets",
+            job_type="rvc",
+            expected_bytes=assets.total_bytes,
+            source=f"hf:{assets.hf_repo}",
+            pull_command=rvcbase.PULL_COMMAND,
+            installed=lambda: rvcbase.installed(config, assets),
+            pull=lambda **kwargs: rvcbase.pull(config, assets, **kwargs),
+        )
+    )
+
+    for separator in denoisemodels.load_all_denoise_manifests().values():
+        if not separator.supports(backend.kind):
+            continue
+        spec = separator.spec(backend.kind)
+        found.append(
+            Subject(
+                kind="denoise",
+                id=separator.id,
+                name=separator.display,
+                job_type="denoise",
+                expected_bytes=spec.total_bytes,
+                source=f"hf:{spec.hf_repo}",
+                pull_command=f"{denoisemodels.PULL_COMMAND} {separator.id}",
+                installed=_installed_denoise(config, separator, spec),
+                pull=_pull_denoise(config, separator, spec),
+            )
+        )
+    return found
+
+
+# Bound one per subject rather than written inline, because a lambda closing
+# over a loop variable is the classic way to build five closures that all
+# describe the last manifest.
+
+
+def _installed_weights(
+    config: Config, manifest: Any, spec: Any
+) -> Callable[[], weights.InstalledWeights | None]:
+    return lambda: weights.installed(config, manifest, spec)
+
+
+def _pull_weights(
+    config: Config, manifest: Any, spec: Any
+) -> Callable[..., weights.InstalledWeights]:
+    return lambda **kwargs: weights.pull(config, manifest, spec, **kwargs)
+
+
+def _pull_archive(
+    config: Config, manifest: Any, spec: Any
+) -> Callable[..., weights.InstalledWeights]:
+    return lambda **kwargs: weights.pull_archive(config, manifest, spec, **kwargs)
+
+
+def _installed_denoise(
+    config: Config, manifest: Any, spec: Any
+) -> Callable[[], weights.InstalledWeights | None]:
+    return lambda: denoisemodels.installed(config.home, manifest, spec)
+
+
+def _pull_denoise(
+    config: Config, manifest: Any, spec: Any
+) -> Callable[..., weights.InstalledWeights]:
+    return lambda **kwargs: denoisemodels.pull(config, manifest, spec, **kwargs)
+
+
+def find(
+    config: Config, backend: Backend, kind: str, subject_id: str
+) -> Subject | None:
+    """One subject by `{kind, id}`, or None. The caller names the refusal.
+
+    None rather than a raise, because the two callers refuse differently: a
+    pull task answers `404 unknown_subject` and a module's validation collects
+    every bad entry before refusing once (`invalid_module`).
+    """
+    for subject in subjects(config, backend):
+        if subject.kind == kind and subject.id == subject_id:
+            return subject
+    return None
 
 
 def _floors_by_model() -> dict[str, list[str]]:
@@ -89,54 +290,15 @@ def _floors_by_model() -> dict[str, list[str]]:
     disagree about what floors what — which is the exact drift the `floors` key
     was added to that file to stop (2026-09-14).
     """
-    rows, _omitted = lineup.build()
+    built, _omitted = lineup.build()
     inverted: dict[str, list[str]] = {}
-    for capability_class, model_id in lineup.floors(rows).items():
+    for capability_class, model_id in lineup.floors(built).items():
         inverted.setdefault(model_id, []).append(capability_class)
     return inverted
 
 
-def _row(
-    *,
-    kind: str,
-    subject_id: str,
-    name: str | None,
-    job_type: str,
-    installed: Any,
-    expected_bytes: int | None,
-    floors: list[str],
-    source: str,
-    resident: bool,
-) -> dict[str, Any]:
-    return {
-        "kind": kind,
-        "id": subject_id,
-        "name": name,
-        "job_type": job_type,
-        "installed": installed is not None,
-        "installed_bytes": None if installed is None else installed.bytes,
-        "expected_bytes": expected_bytes,
-        "floors": floors,
-        # See the module docstring. Null until a manifest declares one.
-        "license": None,
-        "source": source,
-        "resident": resident,
-    }
-
-
 def rows(config: Config, backend: Backend, residency: Residency) -> list[dict[str, Any]]:
-    """Every subject this backend can hold, grouped by kind in the order below.
-
-    Within a kind the order is each loader's, which is id order for all of them
-    (`load_all_manifests` and its siblings say so). `model` spans three loaders
-    — `models/`, `asr/`, `align/` — so it is three id-ordered runs rather than
-    one, which is the honest shape: those are three catalogs that happen to
-    share a namespace, not one catalog.
-
-    A subject with no block for this backend is ABSENT rather than listed as
-    unsupported: the route's sentence is "what this backend can hold", and a row
-    for a Mac-only voice on the PC would have nothing truthful to put in
-    `installed`, `expected_bytes` or `source`.
+    """`GET /v1/catalog`'s body — `subjects()` with the two live facts added.
 
     A manifest that cannot be read at all fails the whole route by name, and
     that is deliberate. A catalog missing one row looks exactly like a catalog
@@ -145,117 +307,39 @@ def rows(config: Config, backend: Backend, residency: Residency) -> list[dict[st
     """
     resident = residency.resident
 
-    def is_resident(job_type: str, subject_id: str) -> bool:
-        wanted = _RESIDENT_KIND_FOR_JOB_TYPE.get(job_type)
+    def is_resident(subject: Subject) -> bool:
+        wanted = _RESIDENT_KIND_FOR_JOB_TYPE.get(subject.job_type)
         if wanted is None or resident is None:
             return False
-        return resident.kind == wanted and resident.id == subject_id
+        return resident.kind == wanted and resident.id == subject.id
 
     try:
         floors = _floors_by_model()
-        out: list[dict[str, Any]] = []
-
-        # --- kind: model. Three directories, one namespace, three job types.
-        # `crucible/cli.py`'s `_all_manifests` already treats them as one set of
-        # ids for `crucible models pull`; this keeps that and adds the job type
-        # each came from, which is the fact the page needs and the CLI does not.
-        for job_type, loaded in (
-            ("llm", load_all_manifests()),
-            ("asr", load_all_asr_manifests()),
-            ("align", load_all_align_manifests()),
-        ):
-            for manifest in loaded.values():
-                if not manifest.supports(backend.kind):
-                    continue
-                spec = manifest.spec(backend.kind)
-                out.append(
-                    _row(
-                        kind="model",
-                        subject_id=manifest.id,
-                        # ASR and align manifests carry no display name; null is
-                        # the honest answer and the page prints the id.
-                        name=getattr(manifest, "display", None),
-                        job_type=job_type,
-                        installed=weights.installed(config, manifest, spec),
-                        expected_bytes=None,
-                        floors=list(floors.get(manifest.id, [])),
-                        source=f"hf:{spec.hf_repo}",
-                        resident=is_resident(job_type, manifest.id),
-                    )
-                )
-
-        # --- kind: voice.
-        for voice in load_all_voices().values():
-            if not voice.supports(backend.kind):
-                continue
-            spec = voice.spec(backend.kind)
-            out.append(
-                _row(
-                    kind="voice",
-                    subject_id=voice.id,
-                    name=voice.display,
-                    job_type="tts",
-                    installed=weights.installed(config, voice, spec),
-                    expected_bytes=None,
-                    floors=[],
-                    source=f"hf:{spec.hf_repo}",
-                    resident=is_resident("tts", voice.id),
-                )
-            )
-
-        # --- kind: rvc. One archive, whose size the manifest states.
-        for model in load_all_rvc_manifests().values():
-            if not model.supports(backend.kind):
-                continue
-            spec = model.spec(backend.kind)
-            out.append(
-                _row(
-                    kind="rvc",
-                    subject_id=model.id,
-                    name=model.display,
-                    job_type="rvc",
-                    installed=weights.installed(config, model, spec),
-                    expected_bytes=spec.archive_bytes,
-                    floors=[],
-                    source=f"hf:{spec.hf_repo}",
-                    resident=False,
-                )
-            )
-
-        # --- kind: rvc-base. Exactly one, and backend-independent: these are the
-        # engine's shared assets and the same files serve both backends.
-        assets = rvcbase.load_rvc_base()
-        out.append(
-            _row(
-                kind="rvc-base",
-                subject_id=RVC_BASE_ID,
-                name=f"{assets.id}'s base assets",
-                job_type="rvc",
-                installed=rvcbase.installed(config, assets),
-                expected_bytes=assets.total_bytes,
-                floors=[],
-                source=f"hf:{assets.hf_repo}",
-                resident=False,
-            )
-        )
-
-        # --- kind: denoise. Two named files, whose sizes the manifest states.
-        for separator in denoisemodels.load_all_denoise_manifests().values():
-            if not separator.supports(backend.kind):
-                continue
-            spec = separator.spec(backend.kind)
-            out.append(
-                _row(
-                    kind="denoise",
-                    subject_id=separator.id,
-                    name=separator.display,
-                    job_type="denoise",
-                    installed=denoisemodels.installed(config.home, separator, spec),
-                    expected_bytes=spec.total_bytes,
-                    floors=[],
-                    source=f"hf:{spec.hf_repo}",
-                    resident=False,
-                )
+        built: list[dict[str, Any]] = []
+        for subject in subjects(config, backend):
+            found = subject.installed()
+            built.append(
+                {
+                    "kind": subject.kind,
+                    "id": subject.id,
+                    "name": subject.name,
+                    "job_type": subject.job_type,
+                    "installed": found is not None,
+                    "installed_bytes": None if found is None else found.bytes,
+                    "expected_bytes": subject.expected_bytes,
+                    # Only a model can floor a capability class; every other
+                    # kind gets the empty list because nothing floors on it, not
+                    # because nobody looked.
+                    "floors": (
+                        list(floors.get(subject.id, []))
+                        if subject.kind == "model"
+                        else []
+                    ),
+                    # See the module docstring. Null until a manifest declares one.
+                    "license": None,
+                    "source": subject.source,
+                    "resident": is_resident(subject),
+                }
             )
     except ApiError:
         raise
@@ -268,7 +352,7 @@ def rows(config: Config, backend: Backend, residency: Residency) -> list[dict[st
             "missing a row is indistinguishable from a build that does not ship "
             "it",
         ) from None
-    return out
+    return built
 
 
-__all__ = ["RVC_BASE_ID", "rows"]
+__all__ = ["KINDS", "RVC_BASE_ID", "Subject", "find", "rows", "subjects"]

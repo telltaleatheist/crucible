@@ -547,6 +547,7 @@ def pull(
     *,
     force: bool = False,
     on_line: Callable[[str], None] | None = None,
+    on_progress: weights.ProgressHook | None = None,
 ) -> weights.InstalledWeights:
     """Fetch both files at the pinned revision, verify both, and place both.
 
@@ -565,6 +566,7 @@ def pull(
         stamp_name=stamp_name(manifest),
         force=force,
         on_line=on_line,
+        on_progress=on_progress,
     )
 
 

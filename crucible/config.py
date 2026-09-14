@@ -197,6 +197,47 @@ class Config:
     #: been recorded here" rather than inventing a reason for a disabled type.
     capability: CapabilityRecord | None = None
 
+    def adopt(self, fresh: "Config") -> None:
+        """Take on a re-read of this same file, in place. **One Config per process.**
+
+        PHASE13-OPERATOR.md section 3.4. `crucible install` rewrites `[jobs]` and
+        `[capability]` while this server is running, and a client that asked for
+        the install must see the new job type before the task says `done`. So the
+        config has to change under a live app — and the only honest way to do
+        that is for there to go on being exactly ONE config object.
+
+        **Why not simply hand out a new one.** Every route in `crucible/api.py`
+        closes over this object; so do `Residency`, `JobStore`, every job-type
+        plugin and the streaming manager. Replacing the app's reference would
+        leave all of those reading the old flags while `/v1/setup` read the new
+        ones — one fact with two owners and nothing comparing them, which is the
+        whole of ARCHITECTURE.md section 1. Rebinding every holder is the same
+        bug with more places to forget.
+
+        **Why this is not a licence to mutate a frozen dataclass.** `frozen=True`
+        stays, and `object.__setattr__` appears exactly here, in a method whose
+        name says what it is for. Nothing else in the package writes to a Config,
+        and a test asserts that
+        (`tests/test_tasks_api.py`). The immutability being
+        protected is *"a config is not edited field by field from wherever"*, and
+        that is intact: this replaces the whole document at once, from a file.
+
+        IDENTITY IS REFUSED, CAPABILITY IS ADOPTED. A fresh config from a
+        different path or home is not a re-read of this one, it is a different
+        server, and adopting it would silently move where this process keeps its
+        jobs. The token, the name, the host and the port are adopted, because
+        `crucible init --force` is the only thing that changes them and it tells
+        the operator every client will need the new one.
+        """
+        if fresh.path != self.path or fresh.home != self.home:
+            raise ConfigError(
+                f"refusing to adopt a config from {fresh.path} into the one this "
+                f"server loaded from {self.path}. A reload re-reads THIS server's "
+                "own file; a different file is a different server"
+            )
+        for name in self.__dataclass_fields__:
+            object.__setattr__(self, name, getattr(fresh, name))
+
     @property
     def jobs_dir(self) -> Path:
         return self.home / "jobs"

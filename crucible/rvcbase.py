@@ -349,6 +349,7 @@ def pull(
     *,
     force: bool = False,
     on_line: Callable[[str], None] | None = None,
+    on_progress: weights.ProgressHook | None = None,
 ) -> weights.InstalledWeights:
     """Fetch and place every declared file, each verified before any is placed."""
     return weights.pull_files(
@@ -360,6 +361,7 @@ def pull(
         label=f"{assets.id}'s base assets",
         force=force,
         on_line=on_line,
+        on_progress=on_progress,
     )
 
 
