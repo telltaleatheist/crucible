@@ -61,6 +61,16 @@ those three are settled.
   and the job reads, so `crucible doctor`'s denoise row stops saying "Crucible does not
   fetch them".
 
+**Landed 2026-09-14: the local form** (`PHASE9-CAPABILITY.md` section 7). Owen, via
+Foundry: these manifests are the catalog of record for Foundry's LOCAL lineup too, so "what
+can this machine run" has one owner. A `[local]` table on a model manifest (an Ollama tag,
+or a GGUF + its projector, with a memory figure and its basis), `scripts/gen-foundry-
+lineup.py` writing `foundry-lineup.json` through the manifest loader and
+`capability.CLASSES`, and a `--check` CI runs so the committed file cannot drift. Two
+findings written into the manifests rather than around them: `qwen3.8:27b-24g` is a local
+Modelfile (404 on ollama.com — labelled stopgap, ruling owed), and Foundry's page reader
+pins a different GGUF projector than the one ruled.
+
 So what is left is not code. It is **a card, and Owen's rulings on the five things below.**
 
 ### Owed, and only a free card discharges it

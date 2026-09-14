@@ -58,6 +58,56 @@ context_default = 32768
 # carry, worth a measured 1.90 GiB on the 9B, and the one thing that must NOT be
 # set on a model that will actually be handed a page.
 modalities = ["text", "image"]
+# The two display facts (PHASE9-CAPABILITY.md, "The local form"), required by
+# the [local] table below.
+display = "dots.ocr"
+description = "The page reader: a 3B vision-language model that turns a rasterised page into its text and layout. Two files on a machine without Crucible — the text tower and its vision projector."
+
+# ------------------------------------------------------------ the local form
+#
+# What a machine with NO Crucible runs to read a page: llama-server with
+# `-m <file> --mmproj <mmproj>` — Foundry's local reader (PHASE9-CAPABILITY.md,
+# "The local form: one catalog, two doors"). TWO files, because llama.cpp
+# serves a vision model as a text tower plus a projector, and a server started
+# without the projector loads, answers /v1/models and refuses every page. The
+# loader refuses a `[local]` GGUF on an `image` model that has no `mmproj` for
+# exactly that reason.
+#
+# Every number, with where it came from and when (all read from the hub's API
+# on 2026-09-14, at the pinned sha):
+#   hf_repo/revision  anthonym21/dots.ocr-GGUF @ 42ab310215a26d05ebe21ccc55f64db6c2bfc6ce
+#                     GET /api/models/anthonym21/dots.ocr-GGUF/refs -> main = that sha
+#                     (no tags, no other branches). The repo's README records
+#                     that `mmproj-Dots.Ocr-F16.gguf` was regenerated on
+#                     2026-03-23 from a corrected DotsOCR converter and the text
+#                     GGUFs did not change; the pin is that state.
+#   file              Dots.Ocr-1.8B-Q8_0.gguf     1_894_530_336 B  (tree API, LFS size)
+#   mmproj            mmproj-Dots.Ocr-F16.gguf    2_524_495_808 B  (tree API, LFS size)
+#   download_bytes    4_419_026_144 — the two, added.
+#   needs_bytes       5_919_026_144 — download + 1_500_000_000, DECLARED, the same
+#                     discipline as the two Ollama rows (Foundry's `OVERHEAD_GB`).
+#                     What the 1.5 GB has to cover here: KV at the 32768 context
+#                     this manifest serves is 28_672 B/token x 32_768 = 0.94 GB
+#                     (the arithmetic in the cuda-linux block below), and the
+#                     vision tower's activations for one ~3_450-token page are
+#                     the rest. Not watched on a card.
+#
+# FOUNDRY TODAY NAMES A DIFFERENT PAIR, and this block is the copy that will
+# expose it: `app/electron/page-reader.ts` pins `ggml-org/dots.ocr-GGUF` with
+# `dots.ocr-Q8_0.gguf` (1_894_530_272 B) + `mmproj-dots.ocr-Q8_0.gguf`
+# (1_344_068_512 B), a Q8_0 projector against the F16 one ruled here. Same
+# model, two repos, two projectors — one fact with two owners. The manifest is
+# the catalog of record and Foundry's keeper compares by content, so the first
+# vendoring says so rather than letting the two drift in silence.
+[local]
+kind = "gguf"
+hf_repo = "anthonym21/dots.ocr-GGUF"
+revision = "42ab310215a26d05ebe21ccc55f64db6c2bfc6ce"
+file = "Dots.Ocr-1.8B-Q8_0.gguf"
+mmproj = "mmproj-Dots.Ocr-F16.gguf"
+download_bytes = 4_419_026_144
+needs_bytes = 5_919_026_144
+needs_basis = "declared"
 
 [backends.cuda-linux]
 engine = "vllm"

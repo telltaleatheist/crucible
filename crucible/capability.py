@@ -87,7 +87,7 @@ from .asrmodels import load_all_asr_manifests
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .config import CapabilityRecord, CapabilityRow
 from .denoisemodels import load_all_denoise_manifests
-from .manifests import load_all_manifests
+from .manifests import BACKEND_ENGINES, load_all_manifests
 from .rvcmodels import load_all_rvc_manifests
 from .voices import load_all_voices
 
@@ -117,21 +117,28 @@ class Candidate:
         return {"id": self.id, "memory_bytes_estimate": self.memory_bytes_estimate}
 
 
-def _from_catalog(
-    load: Callable[[], dict[str, Any]], family: str | None = None
-) -> Callable[[str], tuple[Candidate, ...]]:
-    """Read one catalog into candidates for a backend, best-first.
+@dataclass(frozen=True)
+class CatalogCandidates:
+    """One catalog, read into candidates for a backend, best-first.
 
     `family` filters `models/` down to one model family — the `[model] family` key
     that is already in the manifests (`qwen3.5`, `qwen3.8`, `dots`), so the class
     table below names a fact the repo already states rather than listing model ids
     that would go stale the day a variant is added.
+
+    A class with fields rather than a closure, because `classes_for_model` below
+    has to ask a class WHICH catalog it reads — the lineup Foundry vendors lists
+    model manifests only, and must not load the voice catalog to find out that
+    `tts` never names a model. A closure cannot be asked; a dataclass can.
     """
 
-    def candidates(backend_kind: str) -> tuple[Candidate, ...]:
+    load: Callable[[], dict[str, Any]]
+    family: str | None = None
+
+    def __call__(self, backend_kind: str) -> tuple[Candidate, ...]:
         found: list[Candidate] = []
-        for manifest in load().values():
-            if family is not None and manifest.family != family:
+        for manifest in self.load().values():
+            if self.family is not None and manifest.family != self.family:
                 continue
             if not manifest.supports(backend_kind):
                 continue
@@ -151,7 +158,11 @@ def _from_catalog(
         found.sort(key=lambda c: (-c.memory_bytes_estimate, c.id))
         return tuple(found)
 
-    return candidates
+
+def _from_catalog(
+    load: Callable[[], dict[str, Any]], family: str | None = None
+) -> CatalogCandidates:
+    return CatalogCandidates(load, family)
 
 
 @dataclass(frozen=True)
@@ -317,6 +328,42 @@ BY_NAME: dict[str, CapabilityClass] = {entry.name: entry for entry in CLASSES}
 def classes_for_job_type(job_type: str) -> tuple[CapabilityClass, ...]:
     """Every class whose verdict feeds one `enable_*` flag."""
     return tuple(entry for entry in CLASSES if entry.job_type == job_type)
+
+
+def classes_for_model(model_id: str) -> tuple[str, ...]:
+    """Every class a MODEL manifest can satisfy, on any backend, in report order.
+
+    Read off the class table and not off the manifest: which classes a model
+    serves is decided by `CLASSES` — its family filter, its catalog — and nowhere
+    else, so the lineup Foundry vendors (`crucible/lineup.py`) asks here rather
+    than carrying a `classes = [...]` key in the manifest that would be a second
+    owner of the same fact (ARCHITECTURE.md R1).
+
+    The union over backends, because a class is about what a model is FOR:
+    `dots-ocr` reads pages whether or not this host is the one with its
+    cuda-linux block, and the machine the lineup describes has no Crucible at all.
+    Only the classes that read `models/` are walked — the voice, whisper, aligner
+    and RVC catalogs are different namespaces and a model id can never appear in
+    them. An id the catalog does not hold is refused by name rather than answered
+    with an empty tuple that reads as "a model with no class".
+    """
+    catalog = load_all_manifests()
+    if model_id not in catalog:
+        raise ValueError(
+            f"{model_id!r} is not a model in this build's catalog; it ships "
+            f"{sorted(catalog)}"
+        )
+    names: list[str] = []
+    for entry in CLASSES:
+        source = entry.candidates
+        if not isinstance(source, CatalogCandidates):
+            continue
+        if source.load is not load_all_manifests:
+            continue
+        served = {c.id for kind in BACKEND_ENGINES for c in source(kind)}
+        if model_id in served:
+            names.append(entry.name)
+    return tuple(names)
 
 
 @dataclass(frozen=True)
@@ -514,9 +561,11 @@ __all__ = [
     "CLASSES",
     "Candidate",
     "CapabilityClass",
+    "CatalogCandidates",
     "Decision",
     "available_bytes",
     "classes_for_job_type",
+    "classes_for_model",
     "decide",
     "decide_all",
     "job_type_enabled",

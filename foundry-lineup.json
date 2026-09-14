@@ -1,0 +1,72 @@
+{
+  "generated_from": "a7ab9af2f90e376f1fc5c9252c6267e512675c88",
+  "schema": 1,
+  "models": [
+    {
+      "id": "dots-ocr",
+      "classes": [
+        "pages"
+      ],
+      "label": "dots.ocr",
+      "description": "The page reader: a 3B vision-language model that turns a rasterised page into its text and layout. Two files on a machine without Crucible — the text tower and its vision projector.",
+      "local": {
+        "kind": "gguf",
+        "hf_repo": "anthonym21/dots.ocr-GGUF",
+        "revision": "42ab310215a26d05ebe21ccc55f64db6c2bfc6ce",
+        "file": "Dots.Ocr-1.8B-Q8_0.gguf",
+        "mmproj": "mmproj-Dots.Ocr-F16.gguf",
+        "downloadGB": 4.42,
+        "needsGB": {
+          "value": 5.92,
+          "basis": "declared"
+        }
+      },
+      "minimum": false,
+      "minimumFor": []
+    },
+    {
+      "id": "qwen3.5-9b",
+      "classes": [
+        "clean"
+      ],
+      "label": "Qwen 3.5 · 9B",
+      "description": "The cleanup model, in bf16. Cleanup and the other 9B-class text work; wants a 24 GB card at this precision.",
+      "local": {
+        "kind": "ollama",
+        "tag": "qwen3.5:9b-bf16",
+        "downloadGB": 19.32,
+        "needsGB": {
+          "value": 20.82,
+          "basis": "declared"
+        }
+      },
+      "minimum": false,
+      "minimumFor": []
+    },
+    {
+      "id": "qwen3.8-27b-4bit",
+      "classes": [
+        "translate",
+        "simplify",
+        "analysis"
+      ],
+      "label": "Qwen 3.8 · 27B (4-bit)",
+      "description": "The 27B standard for translation, simplification and analysis, quantized to fit a 24 GB card. The smallest model those three may run on.",
+      "local": {
+        "kind": "ollama",
+        "tag": "qwen3.8:27b-24g",
+        "downloadGB": 17.74,
+        "needsGB": {
+          "value": 19.24,
+          "basis": "declared"
+        }
+      },
+      "minimum": true,
+      "minimumFor": [
+        "translate",
+        "simplify",
+        "analysis"
+      ]
+    }
+  ]
+}

@@ -43,6 +43,11 @@ context_default = 12288
 # a modality is advertised on what was measured, not on what is architecturally
 # possible.
 modalities = ["text"]
+# The display facts, for the row's sake. No [local] table follows: there is no
+# Ollama tag or GGUF for a bf16 27B that a machine without Crucible would run,
+# so the lineup omits this model and `gen-foundry-lineup.py --verbose` says so.
+display = "Qwen 3.8 · 27B"
+description = "The 27B in bf16 — the best translation this catalog holds, and only a machine with more than 56 GB to give can hold it."
 
 [backends.cuda-linux]
 engine = "vllm"

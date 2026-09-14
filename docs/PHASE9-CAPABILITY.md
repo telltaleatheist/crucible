@@ -62,6 +62,14 @@ them. `test_a_six_gig_card_keeps_llm_only_if_something_behind_it_fits` is that c
   is deliberately no `measured` vs `declared` distinction in `capability.py`, because nothing
   would consume one.
 
+**BUILT, 2026-09-14 — the local form (section 7).** Owen's ruling, via Foundry: these manifests
+are the catalog of record for Foundry's LOCAL lineup too. A `[local]` table on a model
+manifest, `crucible/lineup.py`, `scripts/gen-foundry-lineup.py [--check|--verbose]`,
+`foundry-lineup.json` at the repo root (committed, generated, compared by content in CI and in
+`tests/test_lineup.py`). One amendment to the bullet above: `[local]` DOES carry a
+`measured` / `declared` distinction (`needs_basis`), because that table now has a consumer —
+Foundry's picker draws the basis so it can err on the side it wants.
+
 ---
 
 ## 1. The ruling, and why it is smaller than it looks
@@ -445,3 +453,125 @@ Steps 4 and 5 are what is left. Step 3 went first rather than third because step
 descoped out from under it, and it turned out to be the step the other two depend on anyway:
 step 4 filters on what a server advertises, and nothing advertised a per-type verdict until
 step 3 wrote one down.
+
+## 7. The local form: one catalog, two doors — BUILT 2026-09-14
+
+**Owen, 2026-09-13, via Foundry:** Crucible's model manifests are the catalog of record for
+Foundry's **local** lineup too — the Ollama / llama.cpp fallback its app runs when no Crucible
+is present — so that "what can this machine run" has one owner. Foundry's app vendors a
+generated JSON and compares it by content.
+
+### 7.1 Why one owner
+
+Before this, the same three models were described in three places and nothing compared them:
+
+| the fact | Crucible | Foundry |
+|---|---|---|
+| the 9B and the 27B a machine can run | `models/*.toml`, sizes measured on the card | `app/electron/llm-catalog.ts` — a table of Ollama tags with sizes *"read off ollama.com/library/qwen3.5/tags, 2026-08-26"* |
+| the page reader's weights | `models/dots-ocr.toml` — `dots-studio/dots.ocr` for vLLM | `app/electron/page-reader.ts` — `ggml-org/dots.ocr-GGUF`, a Q8_0 pair for llama-server |
+| what translate may run on at all | `capability.py` — the class is disabled below a 27B | the wizard's "largest that fits" over its own table |
+
+That is ARCHITECTURE.md section 1's shape exactly: one fact, two owners, nothing comparing
+them. The ruling collapses it to one owner and **two doors**: `/v1/models` for a machine that
+has a Crucible, and `foundry-lineup.json` for one that does not. Both are read off the same
+file.
+
+### 7.2 The `[local]` table
+
+Optional, one per model manifest, validated as strictly as every other table (unknown key
+refused by name; required keys per kind; a wrong type named; a pin that is not a pin refused):
+
+```toml
+[local]
+kind = "ollama"                      # or "gguf"
+tag = "qwen3.5:9b-bf16"              # ollama: the exact tag — what `ollama pull` gets, what --model is
+# hf_repo  = "<owner>/<name>"        # gguf: the repo
+# revision = "<40-char sha>"         # gguf: the pin; a branch name is refused
+# file     = "<name>.gguf"           # gguf: the text tower
+# mmproj   = "<name>.gguf"           # gguf: the vision projector — REQUIRED when [model]
+#                                    #   modalities carries "image", REFUSED when it does not
+download_bytes = 19_321_189_044      # what a pull fetches
+needs_bytes = 20_821_189_044         # what it takes to RUN: weights resident plus working room
+needs_basis = "declared"             # or "measured" — the same discipline as estimate_basis
+minimum_for = ["translate"]          # optional: the classes this model is the FLOOR for
+```
+
+Two rules cross tables, and both are refusals at load rather than surprises at a screen:
+
+- **A `[local]` table requires `[model] display` and `[model] description`.** The lineup is
+  drawn as tiles, and a tile with no label is a tile somebody downstream would invent a label
+  for. `display` is the name every other catalog in this repo already uses (voices, rvc,
+  denoise); `description` is new and optional on a model without a local form. Both now travel
+  on `/v1/models`, `null` when unstated.
+- **A page reader needs its projector.** llama-server serves a vision model as a text tower
+  plus an `--mmproj`; started without the projector it loads, answers `/v1/models`, and
+  refuses every page — a broken page rather than a missing file. So `image` in `modalities`
+  without `mmproj` is refused, and `mmproj` on a text-only model is refused too.
+
+`minimum_for` is **Owen's tile rule**: the smallest model a class may run on *at all*. Each
+entry must be a name in `capability.CLASSES` (the manifest may not invent a class), and the
+generator further refuses a floor for a class the model does not serve.
+
+### 7.3 The file
+
+`scripts/gen-foundry-lineup.py` writes `foundry-lineup.json` at the repo root. It re-parses no
+TOML: every row comes through `crucible/manifests.py`, and every `classes` list through
+`capability.classes_for_model`, which walks the same `CLASSES` table install selects on — so a
+model's classes have one owner and no `classes = [...]` key exists in any manifest.
+
+```json
+{ "generated_from": "<crucible git sha>", "schema": 1, "models": [
+  { "id": "qwen3.5-9b", "classes": ["clean"], "label": "Qwen 3.5 · 9B", "description": "…",
+    "local": { "kind": "ollama", "tag": "qwen3.5:9b-bf16",
+               "downloadGB": 19.32, "needsGB": { "value": 20.82, "basis": "declared" } },
+    "minimum": false, "minimumFor": [] } ] }
+```
+
+A `gguf` row's `local` is `{kind, hf_repo, revision, file, mmproj | null, downloadGB,
+needsGB}`. Gigabytes are decimal at two places — Ollama's own unit (`ollama list` prints
+19_321_189_044 B as "19 GB"). Rows are in id order. **A model without a `[local]` table is
+omitted**, not emitted with `local: null`: a machine without Crucible cannot run it, and
+`--verbose` says which. `minimum` is true when the row is in `minimum_for` for any of its
+classes.
+
+`generated_from` is the commit the generator ran on — always one behind the commit carrying
+the file — so **`--check` and `tests/test_lineup.py` compare everything but that key**; a
+check that included it would be red on every commit, and a red guard is a broken guard (R2).
+CI runs `--check` on every push.
+
+### 7.4 What the three rows say, and the two things writing them found
+
+All three `needs_bytes` are **DECLARED**: the download plus 1_500_000_000 — Foundry's own
+`OVERHEAD_GB` (`app/electron/llm-catalog.ts`: KV at an ordinary context plus the runner's
+buffers, chosen to err small). None has been watched on a card, and the basis says so all the
+way to the picker. Each manifest's `[local]` comment records where every byte came from and
+the date it was read.
+
+| model | local form | download | needs |
+|---|---|---|---|
+| `qwen3.5-9b` | `qwen3.5:9b-bf16` — bf16 because that is the clean-text ruling | 19.32 GB (`/api/tags`, 2026-09-14) | 20.82 GB |
+| `qwen3.8-27b-4bit` | `qwen3.8:27b-24g` (Q4_K_M); `minimum_for = translate, simplify, analysis` | 17.74 GB | 19.24 GB |
+| `dots-ocr` | `anthonym21/dots.ocr-GGUF` @ `42ab3102…`: `Dots.Ocr-1.8B-Q8_0.gguf` + `mmproj-Dots.Ocr-F16.gguf` | 4.42 GB (tree API, LFS sizes) | 5.92 GB |
+
+**Found 1 — the 27B tag is not a published tag.** `qwen3.8:27b-24g` is Owen's own Modelfile
+over the library's `qwen3.8:27b` (num_ctx 98304 and his sampling baked in; `ollama show` says
+`parent_model: qwen3.8:27b`). `ollama.com/library/qwen3.8:27b-24g` answers **404**;
+`qwen3.8:27b` answers 200. So `ollama pull qwen3.8:27b-24g` fails on every machine but his,
+which contradicts the key's own definition. It is written as ruled and **labelled a stopgap in
+the manifest**; the ruling owed is one of two — the catalog names the published parent and
+Foundry keeps pinning `num_ctx` per book on its ollama door (its SLOTS.md says it already
+does), or the Modelfile is published under a namespace and the tag gains that prefix. The
+bytes are the same either way: the model and projector blobs are the parent's; a Modelfile
+adds a 132-byte params layer.
+
+**Found 2 — Foundry's page reader pins a different pair.** `page-reader.ts` names
+`ggml-org/dots.ocr-GGUF` with a **Q8_0** projector (1.34 GB); the ruling names anthonym21's
+**F16** projector (2.52 GB, regenerated 2026-03-23 from a corrected converter per that repo's
+README). Same model, two repos, two projectors — the exact defect this section exists to
+close, and the first vendoring will say so rather than let the two drift in silence.
+
+### 7.5 What it is not
+
+Not on the wire. A Crucible never runs Ollama, so `/v1/models` does not carry `[local]`; the
+JSON file is that table's one door. `display` and `description` do travel, because they are
+facts about the model rather than about a machine that lacks a server.

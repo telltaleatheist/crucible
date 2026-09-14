@@ -13,7 +13,9 @@ import pytest
 
 from crucible.manifests import (
     BACKEND_ENGINES,
+    GgufLocal,
     ManifestError,
+    OllamaLocal,
     load_all_manifests,
     load_manifest,
     manifests_dir,
@@ -360,3 +362,342 @@ def test_the_4bit_27b_does_not_force_a_dtype() -> None:
 def test_the_manifests_directory_is_beside_the_package() -> None:
     assert manifests_dir().is_dir()
     assert (manifests_dir() / "qwen3.5-9b.toml").is_file()
+
+
+# ------------------------------------------------------------ the local form
+#
+# `[local]` is what a model is on a machine with NO Crucible — Foundry's Ollama
+# / llama.cpp fallback — and Owen ruled (2026-09-13) that these manifests are the
+# catalog of record for that lineup too. It is held to the same strictness as
+# every other table, for the same reason: the row it feeds lights a tile on a
+# screen, and a typo that loaded as "no memory figure" would light it on a card
+# that cannot hold the model.
+
+#: GOOD with the two display facts a `[local]` table requires.
+NAMED = GOOD.replace(
+    'modalities = ["text"]',
+    'modalities = ["text"]\ndisplay = "Demo 1B"\ndescription = "A fixture."',
+)
+
+OLLAMA = NAMED + """
+[local]
+kind = "ollama"
+tag = "demo:1b"
+download_bytes = 1000000000
+needs_bytes = 2500000000
+needs_basis = "declared"
+"""
+
+#: A page reader: `image` in modalities, and a projector beside the file.
+GGUF = NAMED.replace('modalities = ["text"]', 'modalities = ["text", "image"]') + """
+[local]
+kind = "gguf"
+hf_repo = "demo/Demo-1B-GGUF"
+revision = "fedcba9876543210fedcba9876543210fedcba98"
+file = "demo-1b-q8_0.gguf"
+mmproj = "mmproj-demo-1b-f16.gguf"
+download_bytes = 1000000000
+needs_bytes = 2500000000
+needs_basis = "declared"
+"""
+
+
+def test_an_ollama_local_form_parses() -> None:
+    manifest = parse(OLLAMA)
+    assert manifest.display == "Demo 1B"
+    assert manifest.description == "A fixture."
+    local = manifest.local
+    assert isinstance(local, OllamaLocal)
+    assert local.kind == "ollama"
+    assert local.tag == "demo:1b"
+    assert local.download_bytes == 1_000_000_000
+    assert local.needs_bytes == 2_500_000_000
+    assert local.needs_basis == "declared"
+    assert local.minimum_for == ()
+    assert local.to_dict() == {
+        "kind": "ollama",
+        "download_bytes": 1_000_000_000,
+        "needs_bytes": 2_500_000_000,
+        "needs_basis": "declared",
+        "minimum_for": [],
+        "tag": "demo:1b",
+    }
+
+
+def test_a_gguf_local_form_parses() -> None:
+    local = parse(GGUF).local
+    assert isinstance(local, GgufLocal)
+    assert local.kind == "gguf"
+    assert local.hf_repo == "demo/Demo-1B-GGUF"
+    assert local.revision == "fedcba9876543210fedcba9876543210fedcba98"
+    assert local.file == "demo-1b-q8_0.gguf"
+    assert local.mmproj == "mmproj-demo-1b-f16.gguf"
+    assert local.to_dict()["mmproj"] == "mmproj-demo-1b-f16.gguf"
+
+
+def test_a_text_only_gguf_carries_no_projector() -> None:
+    text = GGUF.replace('modalities = ["text", "image"]', 'modalities = ["text"]')
+    text = text.replace('mmproj = "mmproj-demo-1b-f16.gguf"\n', "")
+    local = parse(text).local
+    assert isinstance(local, GgufLocal)
+    assert local.mmproj is None
+
+
+def test_minimum_for_is_kept_in_the_manifests_order() -> None:
+    local = parse(OLLAMA + 'minimum_for = ["translate", "clean"]\n').local
+    assert local is not None
+    assert local.minimum_for == ("translate", "clean")
+
+
+def test_a_manifest_without_a_local_table_says_so() -> None:
+    manifest = parse(GOOD)
+    assert manifest.local is None
+    assert manifest.display is None
+    assert manifest.description is None
+
+
+def test_the_display_facts_are_on_the_row_and_the_local_form_is_not() -> None:
+    """`local` is what a machine WITHOUT Crucible runs; `/v1/models` is what a
+    Crucible says about itself. Its one door is the lineup file."""
+    row = parse(OLLAMA).to_dict()
+    assert row["display"] == "Demo 1B"
+    assert row["description"] == "A fixture."
+    assert "local" not in row
+    unnamed = parse(GOOD).to_dict()
+    assert unnamed["display"] is None and unnamed["description"] is None
+
+
+# --------------------------------------------------- what [local] refuses
+
+
+def test_a_local_table_needs_the_display_facts() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA.replace('display = "Demo 1B"\n', ""))
+    assert "[local] is present but [model] is missing ['display']" in str(caught.value)
+
+
+def test_an_empty_display_is_not_a_display() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(NAMED.replace('display = "Demo 1B"', 'display = "  "'))
+    assert "model.display is empty" in str(caught.value)
+
+
+def test_an_unknown_key_in_local_is_refused() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA.replace('tag = "demo:1b"', 'tag = "demo:1b"\ntagg = "x"'))
+    assert "[local]: unknown key(s) ['tagg']" in str(caught.value)
+
+
+def test_a_typo_in_needs_bytes_is_a_refusal_not_a_row_without_a_figure() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA.replace("needs_bytes", "needs_byte"))
+    assert "unknown key(s) ['needs_byte']" in str(caught.value)
+
+
+def test_a_local_table_without_a_kind_is_refused() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA.replace('kind = "ollama"\n', ""))
+    assert "missing required key(s) ['kind']" in str(caught.value)
+    assert "['gguf', 'ollama']" in str(caught.value)
+
+
+def test_an_invented_kind_is_refused() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA.replace('kind = "ollama"', 'kind = "mlx"'))
+    assert "kind 'mlx' is not a local form Crucible knows" in str(caught.value)
+
+
+def test_a_gguf_key_on_an_ollama_block_is_an_unknown_key() -> None:
+    """A half-converted block: the other kind's keys are not silently ignored."""
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA.replace('tag = "demo:1b"', 'tag = "demo:1b"\nhf_repo = "demo/x"'))
+    assert "unknown key(s) ['hf_repo']" in str(caught.value)
+
+
+@pytest.mark.parametrize("key", ["download_bytes", "needs_bytes", "needs_basis", "tag"])
+def test_every_ollama_key_is_required(key: str) -> None:
+    lines = [line for line in OLLAMA.splitlines() if not line.startswith(f"{key} ")]
+    with pytest.raises(ManifestError) as caught:
+        parse("\n".join(lines))
+    assert f"[local]: missing required key(s) ['{key}']" in str(caught.value)
+
+
+@pytest.mark.parametrize("key", ["hf_repo", "revision", "file"])
+def test_every_gguf_key_is_required(key: str) -> None:
+    # Only the [local] block loses the key: `hf_repo` and `revision` are backend
+    # keys too, and stripping those would make the backend table refuse first.
+    # The fixture appends [local] after the backend block, so it is the tail.
+    head, local = GGUF.split("[local]")
+    kept = [line for line in local.splitlines() if not line.startswith(f"{key} ")]
+    with pytest.raises(ManifestError) as caught:
+        parse(head + "[local]" + "\n".join(kept) + "\n")
+    assert f"[local]: missing required key(s) ['{key}']" in str(caught.value)
+
+
+def test_a_bare_ollama_name_is_not_a_pin() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA.replace('tag = "demo:1b"', 'tag = "demo"'))
+    assert "tag 'demo' must be <name>:<tag>" in str(caught.value)
+    assert "floating pointer" in str(caught.value)
+
+
+def test_a_gguf_branch_name_is_not_a_pin() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(GGUF.replace('"fedcba9876543210fedcba9876543210fedcba98"', '"main"'))
+    assert "[local]: revision 'main' must be a full 40-character commit sha" in (
+        str(caught.value)
+    )
+
+
+def test_a_gguf_repo_must_be_owner_slash_name() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(GGUF.replace('"demo/Demo-1B-GGUF"', '"Demo-1B-GGUF"'))
+    assert "[local]: hf_repo 'Demo-1B-GGUF' is not an <owner>/<name>" in str(caught.value)
+
+
+def test_a_page_reader_without_a_projector_is_refused() -> None:
+    """llama-server without `--mmproj` loads, answers /v1/models, and refuses
+    every page — a broken page rather than a missing file. Refused at the file."""
+    with pytest.raises(ManifestError) as caught:
+        parse(GGUF.replace('mmproj = "mmproj-demo-1b-f16.gguf"\n', ""))
+    assert "declares 'image' and this block has no mmproj" in str(caught.value)
+
+
+def test_a_projector_on_a_text_only_model_is_refused() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(GGUF.replace('modalities = ["text", "image"]', 'modalities = ["text"]'))
+    assert "names a vision projector, but [model] modalities is ['text']" in (
+        str(caught.value)
+    )
+
+
+def test_a_file_that_is_not_a_gguf_is_refused() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(GGUF.replace('file = "demo-1b-q8_0.gguf"', 'file = "demo-1b-q8_0"'))
+    assert "file 'demo-1b-q8_0' does not end in '.gguf'" in str(caught.value)
+
+
+def test_the_projector_must_be_a_second_file() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(GGUF.replace('mmproj = "mmproj-demo-1b-f16.gguf"', 'mmproj = "demo-1b-q8_0.gguf"'))
+    assert "mmproj and file are the same name" in str(caught.value)
+
+
+def test_a_zero_download_is_refused() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA.replace("download_bytes = 1000000000", "download_bytes = 0"))
+    assert "[local]: download_bytes must be positive, got 0" in str(caught.value)
+
+
+def test_needs_less_than_the_weights_is_refused() -> None:
+    """A model cannot run in less memory than its weights occupy."""
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA.replace("needs_bytes = 2500000000", "needs_bytes = 900000000"))
+    assert "needs_bytes (900000000) is less than download_bytes (1000000000)" in (
+        str(caught.value)
+    )
+
+
+def test_a_needs_basis_that_is_neither_measured_nor_declared_is_refused() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA.replace('needs_basis = "declared"', 'needs_basis = "guessed"'))
+    assert "needs_basis 'guessed' must be one of ['declared', 'measured']" in (
+        str(caught.value)
+    )
+
+
+def test_a_bool_is_not_a_byte_count() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA.replace("needs_bytes = 2500000000", "needs_bytes = true"))
+    assert "[local]: needs_bytes must be int, got bool" in str(caught.value)
+
+
+def test_minimum_for_must_name_a_capability_class() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA + 'minimum_for = ["translate", "summarise"]\n')
+    assert "minimum_for[1] is 'summarise', which is not a capability class" in (
+        str(caught.value)
+    )
+    assert "'translate'" in str(caught.value)
+
+
+def test_minimum_for_entries_are_strings() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA + "minimum_for = [27]\n")
+    assert "minimum_for[0] must be a string, got int" in str(caught.value)
+
+
+def test_an_empty_minimum_for_is_refused() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA + "minimum_for = []\n")
+    assert "minimum_for is empty" in str(caught.value)
+
+
+def test_minimum_for_may_not_repeat_a_class() -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA + 'minimum_for = ["translate", "translate"]\n')
+    assert "minimum_for lists a class twice" in str(caught.value)
+
+
+def test_a_local_table_that_is_not_a_table_is_refused() -> None:
+    with pytest.raises(ManifestError) as caught:
+        # At the top, before any table, or TOML files it under [backends.cuda-linux].
+        parse('local = "ollama"\n' + NAMED)
+    assert "[local]: must be a table" in str(caught.value)
+
+
+# ---------------------------------------------- the shipped local forms
+
+#: The three Foundry runs locally, and the one it cannot (no Ollama tag or GGUF
+#: for a bf16 27B on a machine without Crucible).
+LOCAL_KINDS_SHIPPED = {
+    "dots-ocr": "gguf",
+    "qwen3.5-9b": "ollama",
+    "qwen3.8-27b-4bit": "ollama",
+}
+
+
+def test_the_three_local_models_are_the_ones_foundry_runs() -> None:
+    manifests = load_all_manifests()
+    shipped = {k: v.local.kind for k, v in manifests.items() if v.local is not None}
+    assert shipped == LOCAL_KINDS_SHIPPED
+    assert manifests["qwen3.8-27b"].local is None
+
+
+@pytest.mark.parametrize("model_id", sorted(LOCAL_KINDS_SHIPPED))
+def test_each_shipped_local_form_is_declared_and_named(model_id: str) -> None:
+    manifest = load_manifest(model_id)
+    assert manifest.display and manifest.description
+    local = manifest.local
+    assert local is not None
+    # DECLARED, every one: the numbers are downloads plus Foundry's 1.5 GB
+    # overhead, and none has been watched on a card. The basis travels to the
+    # screen so a picker can err on the side it wants.
+    assert local.needs_basis == "declared"
+    assert local.needs_bytes == local.download_bytes + 1_500_000_000
+
+
+def test_the_cleanup_model_is_the_bf16_tag_the_clean_text_ruling_names() -> None:
+    local = load_manifest("qwen3.5-9b").local
+    assert isinstance(local, OllamaLocal)
+    assert local.tag == "qwen3.5:9b-bf16"
+    assert local.download_bytes == 19_321_189_044
+    assert local.minimum_for == ()
+
+
+def test_the_27b_is_the_floor_for_translate_simplify_and_analysis() -> None:
+    local = load_manifest("qwen3.8-27b-4bit").local
+    assert isinstance(local, OllamaLocal)
+    assert local.tag == "qwen3.8:27b-24g"
+    assert local.download_bytes == 17_741_872_172
+    assert local.minimum_for == ("translate", "simplify", "analysis")
+
+
+def test_the_page_reader_is_a_gguf_pair_at_a_pinned_sha() -> None:
+    local = load_manifest("dots-ocr").local
+    assert isinstance(local, GgufLocal)
+    assert local.hf_repo == "anthonym21/dots.ocr-GGUF"
+    assert local.revision == "42ab310215a26d05ebe21ccc55f64db6c2bfc6ce"
+    assert local.file == "Dots.Ocr-1.8B-Q8_0.gguf"
+    assert local.mmproj == "mmproj-Dots.Ocr-F16.gguf"
+    assert local.download_bytes == 1_894_530_336 + 2_524_495_808

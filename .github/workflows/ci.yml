@@ -72,6 +72,14 @@ jobs:
         # in the log instead of hiding inside a green tick.
         run: python -m pytest -q -rs
 
+      - name: the lineup Foundry vendors is current
+        # foundry-lineup.json is generated from models/*.toml and committed, so a
+        # manifest edited without regenerating it is two answers to "what can this
+        # machine run" — the shape of every defect in docs/ARCHITECTURE.md section
+        # 1. tests/test_lineup.py asserts the same equality; this is the door an
+        # operator would use, proved from a clean checkout on every push.
+        run: python scripts/gen-foundry-lineup.py --check
+
   sdk:
     name: sdk
     runs-on: ubuntu-latest

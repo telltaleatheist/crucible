@@ -14,6 +14,19 @@ Where the manifests live
 contract writes it. `manifests_dir()` resolves it there, and honours
 `$CRUCIBLE_MODELS_DIR` so a test can point at a fixture directory. If neither
 exists the loader refuses by name; it never falls back to "no models".
+
+The local form
+--------------
+A manifest may carry one `[local]` table: what the SAME model is on a machine
+that has no Crucible at all — an Ollama tag, or a GGUF (plus its vision
+projector) for llama-server. Owen, 2026-09-13: these manifests are the catalog
+of record for Foundry's local lineup too, so that "what can this machine run"
+has one owner (PHASE9-CAPABILITY.md, "The local form: one catalog, two doors").
+`crucible/lineup.py` reads the table into the JSON Foundry vendors; nothing on
+Crucible's own wire reads it, because Crucible never runs Ollama. It is
+validated exactly as strictly as every other table here, for the same reason:
+a `needs_byte` typo must not quietly become a row with no memory figure that a
+picker then lights on a card that cannot hold it.
 """
 
 from __future__ import annotations
@@ -107,6 +120,17 @@ _MODEL_REQUIRED: dict[str, type] = {
     # about content parts, several layers away from the file that was wrong.
     "modalities": list,
 }
+_MODEL_OPTIONAL: dict[str, type] = {
+    # The two display facts a catalog row carries: what a picker prints as the
+    # model's name, and the sentence under it. Optional on the model, because
+    # Crucible's own doors name a model by id and nothing on the wire draws a
+    # tile; REQUIRED the moment the manifest carries a `[local]` table, because
+    # the lineup that table feeds IS drawn on a screen, and a row with no label
+    # is a row somebody downstream would invent a label for. `display` is the
+    # name every other catalog in this repo already uses (voices, rvc, denoise).
+    "display": str,
+    "description": str,
+}
 _BACKEND_REQUIRED: dict[str, type] = {
     "engine": str,
     "hf_repo": str,
@@ -124,6 +148,58 @@ _BACKEND_OPTIONAL: dict[str, type] = {
     # a silent default.
     "context_default": int,
 }
+
+#: The two shapes a model takes on a machine with no Crucible. `ollama` is a
+#: tag in Ollama's library; `gguf` is a file (and, for a model that reads
+#: images, a projector) in a HuggingFace repo, served by llama-server. There is
+#: no third kind: an MLX conversion is Crucible's own `mlx-darwin` block, not a
+#: local form, because on the Mac Crucible IS the local route.
+LOCAL_KINDS: frozenset[str] = frozenset({"ollama", "gguf"})
+
+#: Where `needs_bytes` came from — the same discipline the voice manifests keep
+#: as `estimate_basis`. `measured` is a number watched on a card; `declared` is
+#: arithmetic (a download plus a stated overhead), and a row that is declared
+#: says so all the way to the screen, so a picker can err on the side it wants.
+NEEDS_BASES: frozenset[str] = frozenset({"measured", "declared"})
+
+_LOCAL_COMMON_REQUIRED: dict[str, type] = {
+    "kind": str,
+    #: The bytes a pull fetches, so a picker can say what it is about to ask for.
+    "download_bytes": int,
+    #: The memory the model wants to RUN — weights resident plus its working room.
+    "needs_bytes": int,
+    "needs_basis": str,
+}
+_LOCAL_COMMON_OPTIONAL: dict[str, type] = {
+    #: Owen's tile rule: the classes this model is the FLOOR for — the smallest
+    #: model the class may run on at all. A machine that cannot hold a model
+    #: named here does not light that class's tile. Each entry is a name in
+    #: `capability.CLASSES`; the manifest is not allowed to invent a class.
+    "minimum_for": list,
+}
+_LOCAL_KIND_REQUIRED: dict[str, dict[str, type]] = {
+    "ollama": {
+        #: The exact tag — what `ollama pull` is given and what `--model` is.
+        "tag": str,
+    },
+    "gguf": {
+        "hf_repo": str,
+        "revision": str,
+        "file": str,
+    },
+}
+_LOCAL_KIND_OPTIONAL: dict[str, dict[str, type]] = {
+    "ollama": {},
+    "gguf": {
+        #: The vision projector llama-server is handed as `--mmproj`. Required
+        #: for a model whose `modalities` carries `image` and refused for one
+        #: whose does not: a server started without it loads, answers
+        #: `/v1/models`, and then refuses every page — which looks exactly like
+        #: a broken page rather than a missing file.
+        "mmproj": str,
+    },
+}
+
 
 def fingerprint(model_id: str, revision: str) -> str:
     """`qwen3.5-9b@<sha>` — how a model's identity is written down.
@@ -226,6 +302,61 @@ NO_DEFAULTS = ModelDefaults()
 
 
 @dataclass(frozen=True)
+class LocalForm:
+    """`[local]` — what this model is on a machine with no Crucible.
+
+    The two concrete shapes are `OllamaLocal` and `GgufLocal`; this is what they
+    share. A manifest without the table has `local = None` on its `ModelManifest`,
+    and that is a statement — "this model has no local form; a machine without
+    Crucible cannot run it" — which `crucible/lineup.py` reports rather than
+    fills in.
+    """
+
+    kind: str
+    download_bytes: int
+    needs_bytes: int
+    needs_basis: str
+    #: In the order the manifest wrote them. Empty when the model is the floor
+    #: for nothing, which is most models.
+    minimum_for: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "download_bytes": self.download_bytes,
+            "needs_bytes": self.needs_bytes,
+            "needs_basis": self.needs_basis,
+            "minimum_for": list(self.minimum_for),
+        }
+
+
+@dataclass(frozen=True)
+class OllamaLocal(LocalForm):
+    tag: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**super().to_dict(), "tag": self.tag}
+
+
+@dataclass(frozen=True)
+class GgufLocal(LocalForm):
+    hf_repo: str
+    revision: str
+    file: str
+    #: None on a text-only model, and only there.
+    mmproj: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **super().to_dict(),
+            "hf_repo": self.hf_repo,
+            "revision": self.revision,
+            "file": self.file,
+            "mmproj": self.mmproj,
+        }
+
+
+@dataclass(frozen=True)
 class ModelManifest:
     id: str
     family: str
@@ -241,6 +372,12 @@ class ModelManifest:
     #: same on both cards. If a backend ever needs its own, it needs its own
     #: argument first.
     defaults: ModelDefaults = NO_DEFAULTS
+    #: `[model] display` and `[model] description`, or None where the manifest
+    #: states neither. Both are present whenever `local` is, by validation.
+    display: str | None = None
+    description: str | None = None
+    #: `[local]`, or None: no local form, which the lineup reports by name.
+    local: LocalForm | None = None
 
     #: Which subtree of `~/.crucible/` this thing's weights live under. A model id
     #: and a voice id are separate namespaces and must not be able to collide on
@@ -290,8 +427,16 @@ class ModelManifest:
             "params_b": self.params_b,
             "context_default": self.context_default,
             "modalities": list(self.modalities),
+            # Always present, null when unstated, for the reason `defaults` is:
+            # a row whose keys come and go cannot tell "no display name" from
+            # "a build that predates the field".
+            "display": self.display,
+            "description": self.description,
             "defaults": self.defaults.to_dict(),
             "backends": {k: v.to_dict() for k, v in sorted(self.backends.items())},
+            # `local` is deliberately NOT here. It is what a machine WITHOUT
+            # Crucible runs, and this dict is what a Crucible tells its clients
+            # about itself; its one door is the lineup file (crucible/lineup.py).
         }
 
 
@@ -435,12 +580,172 @@ def _parse_defaults(table: Any, path: Path) -> ModelDefaults:
     return ModelDefaults(**values)
 
 
+_GGUF_FILE = ".gguf"
+
+
+def _gguf_name(where: str, key: str, value: str) -> str:
+    """A GGUF file name as the hub's tree lists it: non-empty, ending `.gguf`."""
+    if value == "" or value.strip() != value:
+        raise ManifestError(f"{where}: {key} must be a file name, got {value!r}")
+    if not value.endswith(_GGUF_FILE):
+        raise ManifestError(
+            f"{where}: {key} {value!r} does not end in {_GGUF_FILE!r}; llama-server "
+            "reads nothing else, and a name without the extension is usually a "
+            "repo id or a directory rather than the file"
+        )
+    return value
+
+
+def _parse_local(
+    table: Any, path: Path, modalities: tuple[str, ...]
+) -> LocalForm:
+    """`[local]`, validated as strictly as every other table in this file.
+
+    Unknown key: refusal naming it, and a key that belongs to the OTHER kind is
+    an unknown key — an ollama block with `hf_repo` in it is a block somebody
+    half-converted. Wrong type: refusal naming both. A pin that is not a pin
+    (a bare Ollama name, a branch name for a revision): refused, because the
+    lineup this feeds is vendored into another app and compared by content, and
+    a floating pointer would make two vendorings of one file disagree.
+    """
+    where = f"{path.name} [local]"
+    if not isinstance(table, dict):
+        raise ManifestError(f"{where}: must be a table")
+    if "kind" not in table:
+        raise ManifestError(
+            f"{where}: missing required key(s) ['kind']; the kinds are "
+            f"{sorted(LOCAL_KINDS)}"
+        )
+    kind = table["kind"]
+    if not isinstance(kind, str) or kind not in LOCAL_KINDS:
+        raise ManifestError(
+            f"{where}: kind {kind!r} is not a local form Crucible knows; the "
+            f"kinds are {sorted(LOCAL_KINDS)}"
+        )
+    check_table(
+        where,
+        table,
+        {**_LOCAL_COMMON_REQUIRED, **_LOCAL_KIND_REQUIRED[kind]},
+        {**_LOCAL_COMMON_OPTIONAL, **_LOCAL_KIND_OPTIONAL[kind]},
+    )
+
+    download = table["download_bytes"]
+    needs = table["needs_bytes"]
+    if download <= 0:
+        raise ManifestError(f"{where}: download_bytes must be positive, got {download}")
+    if needs <= 0:
+        raise ManifestError(f"{where}: needs_bytes must be positive, got {needs}")
+    if needs < download:
+        raise ManifestError(
+            f"{where}: needs_bytes ({needs}) is less than download_bytes "
+            f"({download}); a model cannot run in less memory than its weights "
+            "occupy, so one of the two numbers is wrong"
+        )
+    basis = table["needs_basis"]
+    if basis not in NEEDS_BASES:
+        raise ManifestError(
+            f"{where}: needs_basis {basis!r} must be one of {sorted(NEEDS_BASES)}"
+        )
+
+    minimum_for = table.get("minimum_for", [])
+    if "minimum_for" in table and not minimum_for:
+        raise ManifestError(
+            f"{where}: minimum_for is empty. A model that is the floor for no "
+            "class says so by omitting the key; an empty list reads as a "
+            "decision somebody made and then forgot to write down"
+        )
+    if minimum_for:
+        # Deferred, not top-level: `crucible/capability.py` imports this module
+        # to read the catalog, and the class table is the one owner of which
+        # classes exist (ARCHITECTURE.md R1) — a second list of their names here
+        # would be the drift this check exists to refuse. Importing it at call
+        # time costs nothing and closes the cycle in the only direction it can.
+        from .capability import BY_NAME
+
+        for index, entry in enumerate(minimum_for):
+            if not isinstance(entry, str):
+                raise ManifestError(
+                    f"{where}: minimum_for[{index}] must be a string, got "
+                    f"{type(entry).__name__}"
+                )
+            if entry not in BY_NAME:
+                raise ManifestError(
+                    f"{where}: minimum_for[{index}] is {entry!r}, which is not a "
+                    f"capability class; this build knows {sorted(BY_NAME)}"
+                )
+        if len(set(minimum_for)) != len(minimum_for):
+            raise ManifestError(
+                f"{where}: minimum_for lists a class twice: {minimum_for}"
+            )
+
+    common = {
+        "kind": kind,
+        "download_bytes": download,
+        "needs_bytes": needs,
+        "needs_basis": basis,
+        "minimum_for": tuple(minimum_for),
+    }
+
+    if kind == "ollama":
+        tag = table["tag"]
+        name, colon, version = tag.partition(":")
+        if colon == "" or name == "" or version == "" or tag.split() != [tag]:
+            raise ManifestError(
+                f"{where}: tag {tag!r} must be <name>:<tag>; a bare name is "
+                "`:latest`, which is a floating pointer and not a pin"
+            )
+        return OllamaLocal(**common, tag=tag)
+
+    if not _HF_REPO.match(table["hf_repo"]):
+        raise ManifestError(
+            f"{where}: hf_repo {table['hf_repo']!r} is not an <owner>/<name> "
+            "HuggingFace repo id"
+        )
+    if not _REVISION.match(table["revision"]):
+        raise ManifestError(
+            f"{where}: revision {table['revision']!r} must be a full 40-character "
+            "commit sha, so a pull is reproducible; branch names are not pins"
+        )
+    file = _gguf_name(where, "file", table["file"])
+    mmproj = table.get("mmproj")
+    reads_images = "image" in modalities
+    if reads_images and mmproj is None:
+        raise ManifestError(
+            f"{where}: [model] modalities declares 'image' and this block has no "
+            "mmproj. llama-server serves a vision model as a text tower plus a "
+            "projector; without the projector it loads, answers /v1/models, and "
+            "refuses every page. Name the mmproj file"
+        )
+    if mmproj is not None:
+        mmproj = _gguf_name(where, "mmproj", mmproj)
+        if not reads_images:
+            raise ManifestError(
+                f"{where}: mmproj {mmproj!r} names a vision projector, but [model] "
+                f"modalities is {list(modalities)}. A projector nothing here sends a "
+                "page to is a file nobody would load; either offer 'image' or take "
+                "it out"
+            )
+    if mmproj == file:
+        raise ManifestError(
+            f"{where}: mmproj and file are the same name {file!r}; the projector "
+            "is a second file"
+        )
+    return GgufLocal(
+        **common,
+        hf_repo=table["hf_repo"],
+        revision=table["revision"],
+        file=file,
+        mmproj=mmproj,
+    )
+
+
 def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManifest:
-    unknown = sorted(set(document) - {"model", "backends", "defaults"})
+    unknown = sorted(set(document) - {"model", "backends", "defaults", "local"})
     if unknown:
         raise ManifestError(
             f"{path.name}: unknown top-level table(s) {unknown}; a manifest has "
-            "exactly [model], [backends.<kind>] and an optional [defaults]"
+            "exactly [model], [backends.<kind>], an optional [defaults] and an "
+            "optional [local]"
         )
     if "model" not in document:
         raise ManifestError(f"{path.name}: missing the [model] table")
@@ -450,7 +755,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
     model = document["model"]
     if not isinstance(model, dict):
         raise ManifestError(f"{path.name}: [model] must be a table")
-    check_table(f"{path.name} [model]", model, _MODEL_REQUIRED, {})
+    check_table(f"{path.name} [model]", model, _MODEL_REQUIRED, _MODEL_OPTIONAL)
 
     model_id = model["id"]
     if not _MODEL_ID.match(model_id):
@@ -472,6 +777,25 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             f"{path.name}: model.context_default must be positive, got "
             f"{model['context_default']}"
         )
+    for key in _MODEL_OPTIONAL:
+        if key in model and model[key].strip() == "":
+            raise ManifestError(
+                f"{path.name}: model.{key} is empty; a display fact nobody wrote "
+                "is said by omitting the key, not by an empty string a screen "
+                "would print as nothing"
+            )
+    if "local" in document:
+        # The one rule that crosses [model] and [local]: a local form is drawn
+        # on a screen, and a row with no name is a row somebody would name for
+        # it. Both are required here and nowhere else.
+        unnamed = sorted(key for key in _MODEL_OPTIONAL if key not in model)
+        if unnamed:
+            raise ManifestError(
+                f"{path.name}: [local] is present but [model] is missing {unnamed}; "
+                "the lineup that table feeds is drawn as a tile, and a tile "
+                "needs its label and its sentence from the same file as its "
+                "numbers"
+            )
 
     modalities = model["modalities"]
     if not modalities:
@@ -587,6 +911,13 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             NO_DEFAULTS
             if "defaults" not in document
             else _parse_defaults(document["defaults"], path)
+        ),
+        display=model.get("display"),
+        description=model.get("description"),
+        local=(
+            None
+            if "local" not in document
+            else _parse_local(document["local"], path, tuple(modalities))
         ),
     )
 
