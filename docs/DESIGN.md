@@ -110,6 +110,14 @@ build version.
 | `GET /jobs/{id}/artifacts/{name}` | yes | bytes. `.../{name}.provenance.json` always exists (see section 7). |
 | `DELETE /jobs/{id}` | yes | cancel: 200 `{status: "cancelling"}` on a running job (cooperative), 200 `{status: "cancelled"}` on a queued one, 409 `job_not_cancellable` on a terminal one. |
 | `/openai/*` | yes | OpenAI-compatible passthrough for `llm` (phase 2). |
+| `GET /setup` | yes | **The operator door** (PHASE13-OPERATOR.md section 3.1). `{name, version, backend, bind, urls, token, pairing, job_types, config_path}` — everything an app needs to be pointed here, in one read. `urls` is the bind address made reachable (a wildcard bind becomes one entry per non-loopback IPv4 interface, read from `getifaddrs(3)`; never a hostname lookup), and `pairing` is one `crucible://<name>@<host>:<port>/#<token>` line per url. It returns the token and reveals nothing: only a caller who already has it can reach the route. |
+| `GET /catalog` | yes | `{rows: [{kind, id, name, job_type, installed, installed_bytes, expected_bytes, floors, license, source, resident}]}` — every pullable subject this BACKEND can hold, installed or not. `kind ∈ model, voice, rvc, rvc-base, denoise`. Every field is derived from something the server already owns; a subject with no block for this backend is absent rather than listed as unsupported. |
+| `POST /tasks` | yes | One operator operation on the server itself: `{type: "pull", kind, id}`, `{type: "install", job_type, narrator_engine?}` or `{type: "module", module}` → `{task_id}` (202). **One task at a time** (`409 task_busy`); an `install` additionally waits for the card (`409 server_busy`, whose `details.fact` names which of the four holders it is). Refusals by name at POST: `unknown_subject`, `already_installed`, `unknown_job_type`, `job_type_installed`, `narrator_engine_required`, `narrator_engine_refused`, `invalid_module`. |
+| `GET /tasks` | yes | `{tasks: [...]}` — the last 50, newest first, in memory. A restart forgets them. |
+| `GET /tasks/{id}` | yes | `{task_id, type, request, state: running / done / failed / cancelled, error, created, started, finished}`. There is no `queued`: a task is admitted and running in the same act. |
+| `GET /tasks/{id}/events` | yes | SSE, the job stream's envelope: `started {type}`, `step {name, index, total, job_types?}`, `progress` (`{bytes_done, bytes_total, file}` for a pull, `{line}` for an install), `skipped {reason}`, `done`, `failed {code, message}`, `cancelled`. |
+| `DELETE /tasks/{id}` | yes | cancel: 200 `{status: "cancelling"}`, 409 `not_running` once terminal. A pull stops at its next chunk and its partial directory is removed; an install is SIGTERMed. |
+| `GET /` and `GET /ui/*` | **no** | The operator page, served as package data from `crucible/ui/`. Public because there is no secret in any of it: the page asks for the token, or reads it out of the URL fragment a pairing line put there, and a fragment never reaches the server. |
 
 Errors are JSON `{error: {code, message}}`. No route ever degrades to a different
 model or backend than asked for.
@@ -125,6 +133,7 @@ crucible doctor           # host probe + per-job-type env/model status, exit cod
 crucible install <type>   # create that job type's env and pull its models
 crucible update           # self-update from GitHub Releases; drains the queue first
 crucible token --show     # print the bearer token (owner only)
+crucible token --url      # print the pairing line an app's connect door takes
 ```
 
 Config: `~/.crucible/config.toml` (mode 0600, holds the token), models under

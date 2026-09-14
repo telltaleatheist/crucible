@@ -107,6 +107,49 @@ findings written into the manifests rather than around them: `qwen3.8:27b-24g` i
 Modelfile (404 on ollama.com — labelled stopgap, ruling owed), and Foundry's page reader
 pins a different GGUF projector than the one ruled.
 
+**Landed, 2026-09-14: phase 13, the operator door** (`PHASE13-OPERATOR.md`). Owen:
+*"not microservices. but crucible has its own ui. and it provides the token or whatever
+else we need to set it up on foundry or bookforge."* Everything a person does to a
+Crucible after it exists needed a shell on that machine; now it is five routes and a
+page the server serves itself.
+
+- **`GET /v1/setup`** — name, backend, every URL this server is reachable on
+  (`getifaddrs(3)` through ctypes; never a hostname lookup, and an unreadable interface
+  list is `503 interfaces_unreadable` rather than an empty `urls`), the token, and one
+  `crucible://<name>@<host>:<port>/#<token>` **pairing line** per URL. The name is
+  percent-encoded because a server name contains an `@`, and a line with two of them is
+  refused rather than split at the likelier one.
+- **`GET /v1/catalog`** — every pullable subject this backend can hold, derived from the
+  stamp `weights.py` writes, the manifests, `lineup.floors()` and the residency. No new
+  table: `crucible/catalog.py` is the one list, and the pull task reads the same one.
+- **`POST /v1/tasks`** (+ list, read, SSE, cancel) — `pull`, `install`, `module`. One at
+  a time; an `install` waits for the four facts and its `409 server_busy` names which of
+  the four holds the card, in that holder's own fields. **A pull is genuinely
+  cancellable**: the hook `huggingface_hub` already takes is made the cancel point, so a
+  `DELETE` stops the download at its next chunk and removes the partial directory —
+  rather than reporting "cancelled" while nineteen gigabytes went on arriving.
+- **3.4, decided: an in-place reload.** Re-exec cannot deliver the `done` event it would
+  take with it, and presumes a supervisor a foreground `crucible serve` does not have.
+  The swap adopts a re-read of `config.toml` into the one `Config` object every route
+  holds, rebuilds the registry with the same residency, and re-reads the four facts
+  immediately before it — a holder found there fails the task `reload_refused` and
+  leaves the env on disk (R6).
+- **`GET /` and `/ui/*`**, public, serving `crucible/ui/` as package data. The page
+  itself is the next commit; what landed is the mount.
+- **`crucible token --url`**, and `init` / `service install` ending with the same lines.
+  Two existing tests reverse deliberately: `init` used to assert the token never reached
+  stdout, and it now rides in the pairing line in front of the person who just minted it.
+- **The SDK** grows `setup`, `catalog`, `submitTask`, `task`, `tasks`, `taskEvents`,
+  `cancelTask` and a pure `parsePairing`. The pairing rule has two implementations
+  because one must run in TypeScript, so the seam is a literal line asserted from both
+  ends.
+- **Modules are GENERATED** (5.4, from Foundry's review): `modules/<app>.toml` declares
+  job types, capability classes and named subjects; `scripts/gen-modules.py` resolves
+  them against these manifests and writes the JSON each app vendors byte for byte, with
+  a `--check` in CI beside the lineup's. A class with a floor resolves to it, a class
+  with one candidate resolves to it, and `analysis` — two candidates, no floor — must be
+  named in the declaration, because picking would be inventing a policy nobody wrote.
+
 So what is left is not code. It is **a card, and Owen's rulings on the five things below.**
 
 ### Owed, and only a free card discharges it
