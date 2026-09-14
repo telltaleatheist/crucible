@@ -33,6 +33,14 @@ import { shellQuote } from './wsl.js';
 
 /** `<CRUCIBLE_HOME>/server` — where the server pack is unpacked. */
 export const SERVER_SUBDIR = 'server';
+
+/**
+ * Where the WINDOWS host pack unpacks, under `%LOCALAPPDATA%\Crucible\`
+ * (PHASE15-HOST.md 4.4). Beside `wsl\` and `downloads\`, which
+ * `distro.ts` already puts there. `crucible/host/paths.py` spells the same
+ * word on the Python side and `install.ps1` is generated from this one.
+ */
+export const HOST_SUBDIR = 'host';
 /** `<CRUCIBLE_HOME>/downloads` — parts land here and are deleted as they are appended. */
 export const DOWNLOADS_SUBDIR = 'downloads';
 /** The half-unpacked tree's suffix. Renamed onto the real path only when tar exits 0. */
