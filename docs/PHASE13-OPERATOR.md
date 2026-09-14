@@ -481,6 +481,58 @@ generic failure: a lease means another app on the same machine is mid-run, which
 is the system working, and an operator shown a dead button with no name will
 conclude the button is broken and press it until it is.
 
+### 5.5 The setup step PROBES, and shows ONE face
+
+Written 2026-09-14, from BookForge's `docs/CRUCIBLE_ROLLOUT_PLAN.md` §0b C2 and
+`docs/SETUP-AND-SETTINGS-AROUND-CRUCIBLE.md` §6. The doc specified the doors and
+not the moment a person first meets them, and the two are different problems.
+
+**In SETTINGS, the three doors stay closed until one is opened.** That is
+correct there, and it is a measurement decision rather than a layout one:
+composing the install picture spawns `wsl.exe -l -v` and an `nvidia-smi` query,
+and a settings page that did that every time it was opened would cost a second
+of somebody's time to answer a question they did not ask.
+
+**In the WIZARD, the step probes on entry and shows exactly one of three
+faces.** A person setting the app up for the first time is being asked *which
+server*, not *read these three options and work out which applies to you* —
+three collapsed doors is the app handing back the question it exists to answer.
+
+1. **Connected** — a local server resolves. Its name, its address, where the
+   config was read from, and two buttons: **Open Crucible** (5.3) and **Set up
+   for BookForge** (5.4), with the task's events drawn in place.
+2. **Install here** — no local server, and this machine could hold one. The
+   measured machine, the pre-server sequence, the commands the app cannot run
+   for anybody (`wsl --install -d Ubuntu`, `sudo loginctl enable-linger
+   "$USER"`), and the driven **Install** button gated on the published release.
+   No printed pull list and no printed env installs: 5.4's module is what
+   stocks a server, and the page is where it is watched.
+3. **Connect only** — this machine cannot hold one, said by name. One
+   "Paste from Crucible" field, with Name / Address / Token still fillable by
+   hand, then Test and Add.
+
+**THE VERDICT IS THE MAIN PROCESS'S, AND IT HAS THREE VALUES, NOT TWO.** The
+renderer draws a decision rather than making a second one out of the same
+nulls (R1). And the decision is `yes` / `no` / **`unknown`**, because on Windows
+the honest answer is sometimes the third one: whether a Crucible can run here is
+whether the GUEST sees a card, and an app must not answer that from the
+Windows-side `nvidia-smi` — a Windows driver that answers says nothing about
+whether the passthrough works. So a machine with no WSL2 guest, or one where
+nobody has named the guest, is `unknown`, and `unknown` draws the **install**
+face: its first step is the thing that would settle it. Telling somebody with a
+4090 "this machine cannot host one" because they have not installed Ubuntu yet
+would be a wrong answer stated confidently, which is worse than a maybe (R3
+forbids the maybe; it does not license the confident error). The verdict always
+carries its own sentence, whichever way it went.
+
+**After a DRIVEN install completes, the step posts the module by itself.** The
+install ends with a server that answers and holds nothing — no job
+environments, no weights — and leaving somebody there with a second button to
+find would be handing the install story back in two halves. A person who ran
+the sequence by hand presses **Set up for BookForge** instead; it is the same
+task either way, and it is idempotent, so pressing it on a stocked server is
+how you find out that it is one.
+
 ## 6. Not in this phase, written so it is not forgotten
 
 - **Packed envs on the release** (conda-pack per backend per job type, split at 2 GiB like
