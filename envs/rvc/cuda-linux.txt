@@ -70,6 +70,10 @@
 # notice at the top of this recipe covers this line too. audio-separator also
 # pulls `onnx-weekly` and `onnx2torch-py313`, neither of which it pins, so the
 # first real install is what turns this into a freeze.
+# torch/torchaudio/torchvision here are CUDA 12.8 builds (`+cu128`), which live on
+# PyTorch's own index, not PyPI. `pip freeze` prints the local version but not the
+# index it came from; without this line the resolved set is unresolvable.
+--extra-index-url https://download.pytorch.org/whl/cu128
 audio-separator==0.31.1
 
 # --- the env's own ffmpeg and sox ---
