@@ -14,11 +14,20 @@
 #   crucible-bootstrap-<ver>.tgz   the app-side installer/ensurer (PHASE5-APPS.md 6.0),
 #                                  peer-depending on the client at this exact version
 #   install.sh                     the standalone installer for Linux/WSL and macOS
-#   install.ps1                    the same for Windows (WSL2 first, then install.sh)
+#   install.ps1                    the same for Windows: the HOST pack, and stop
 #
 # The two installers are GENERATED from bootstrap's own step list
 # (PHASE14-ENVPACKS.md 4a), so an app-driven install and a hand install cannot
-# differ. A stale one refuses the cut.
+# differ. A stale one refuses the cut. Since PHASE15-HOST.md 4.4, `install.ps1`
+# no longer walks the WSL states itself: it installs `crucible host` and stops,
+# and the host owns the sequence from there — for the page's engine switch
+# (4.7), for an app's `install()` and for a hand install alike.
+#
+# THE WORKFLOW BELOW UPLOADS AN ELEVENTH PACK. `.github/workflows/envpacks.yml`
+# gained a `windows-latest` job for `crucible-env-host-llama-windows-<ver>`
+# (4.4), which is what `install.ps1` downloads. A release without it is one
+# where the first thing anybody runs on Windows refuses `pack_not_published`,
+# which is why the manifest job waits for it.
 #
 # The ENVIRONMENT PACKS are not built here. `.github/workflows/envpacks.yml`
 # runs on the tag this creates and uploads them beside the four, because a pack
