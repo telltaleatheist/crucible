@@ -74,6 +74,16 @@ if block:
         time.sleep(0.01)
 
 print("fake installer: collecting torch", flush=True)
+
+# Since 0.6.0 an install is usually a DOWNLOAD, and a download reports bytes
+# on the sentinel line `crucible/envpack.py` owns. Three of them, so the test
+# can see both that the first becomes a typed event and that the rest are
+# throttled rather than leaking into the line stream.
+from crucible.envpack import progress_line
+for done in (1000, 2000, 3000):
+    print(progress_line(done, 3000, "crucible-env-llm-cuda-linux.tar.zst.part00"),
+          flush=True)
+
 if os.environ.get("FAKE_INSTALL_FAIL") == "1":
     print("fake installer: ERROR could not build a wheel", flush=True)
     raise SystemExit(3)
@@ -485,12 +495,48 @@ def test_an_install_streams_its_lines_reloads_and_makes_the_type_live(
 
     assert kinds(events)[-1] == "done"
     assert steps(events) == ["install llm", "reload"]
-    lines = [e["data"]["line"] for e in events if e["event"] == "progress"]
+    # `.get("line")` and not `["line"]`: since 0.6.0 a `progress` event is
+    # EITHER a line or the three byte fields, and the test beside this one is
+    # the one that reads the other kind.
+    lines = [
+        e["data"]["line"] for e in events
+        if e["event"] == "progress" and "line" in e["data"]
+    ]
     assert any("collecting torch" in line for line in lines)
     reload_step = next(e for e in events if e["data"].get("name") == "reload")
     assert "load-model" in reload_step["data"]["job_types"]
     assert "load-model" in info["job_types"]
     assert setup["job_types"] == info["job_types"]
+
+
+def test_an_install_reports_its_download_in_the_shape_a_pull_does(
+    make_client: Callable[..., TestClient], auth: dict[str, str], fake_installer: Path
+) -> None:
+    """PHASE14 section 3.1: the SAME `progress` event the pull task emits.
+
+    An env install is a download now, and the operator page draws it with the
+    code that already draws a 19 GB weights pull — so the event carries
+    `bytes_done`, `bytes_total` and `file` and not a fourth shape. The second
+    assertion is the one that matters as much: the sentinel line must never
+    also arrive as prose, or a page would render `crucible-progress {...}` in
+    the log pane beside the bar it drew from it.
+    """
+    with make_client(enable_echo=True, enable_llm=False) as client:
+        events = run(client, auth, {"type": "install", "job_type": "llm"})
+
+    progress = [e["data"] for e in events if e["event"] == "progress"]
+    measured = [row for row in progress if "bytes_done" in row]
+    assert measured, "no byte progress reached the task's event stream"
+    assert measured[0] == {
+        "bytes_done": 1000,
+        "bytes_total": 3000,
+        "file": "crucible-env-llm-cuda-linux.tar.zst.part00",
+    }
+    # Every byte event carries exactly the pull's three keys, and no line
+    # event carries the sentinel's text.
+    assert all(set(row) == {"bytes_done", "bytes_total", "file"} for row in measured)
+    lines = [row["line"] for row in progress if "line" in row]
+    assert not [line for line in lines if line.startswith("crucible-progress")]
 
 
 def test_the_reload_adopts_the_config_so_every_door_agrees(
