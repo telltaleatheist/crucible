@@ -517,8 +517,9 @@ the input's extension. A mixed-format job is refused by name rather than half co
 ## 4.2 `denoise` — audio-separator, in the rvc env
 
 The pass BookForge runs over a session's rendered sentences before it assembles them.
-Orpheus voices are trained on a deliberate ~-65 dBFS room-hiss bed — **load-bearing for
-reliable end-of-audio**, so it is not a defect in the training data — and the consequence
+Fine-tuned narration voices are trained on a deliberate ~-65 dBFS room-hiss bed —
+**load-bearing for reliable end-of-audio**, so it is not a defect in the training
+data — and the consequence
 is that every raw render carries a hiss during speech that cuts out at the digitally
 silent assembly gaps. One mel-band roformer pass removes it.
 

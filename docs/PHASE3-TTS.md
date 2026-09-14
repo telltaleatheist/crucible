@@ -19,7 +19,7 @@ being a later addition.
 
 **Moves to Crucible.** The engine process and its lifetime. The accelerator lease. Which
 voice is resident. Sampling per (voice, backend). Cap certificates per (voice, backend). The
-token-budget formula that turns characters into `max_new_tokens`. Orpheus's EOS levers. The
+token-budget formula that turns characters into `max_new_tokens`. An engine's EOS levers. The
 reference clips a zero-shot voice is conditioned on. The WSL spawn, the path rewriting and
 the per-engine VRAM arithmetic — all of it deleted rather than ported.
 
@@ -251,11 +251,33 @@ a decision rather than a drift. **Owen has this open as a question.**
 
 ## 4. Engines: narrator is the managed subprocess
 
-Crucible does not reimplement Orpheus's EOS surgery. It runs the code that already has it.
+> **THE ENGINE LIST, 2026-09-14.** Owen: *"orpheus is deprecated too but hasnt been
+> removed yet. higgs is the frontier"* — *"i guess we can remove it now."* This section
+> described TWO narrator engines and Crucible shipped a recipe, an env key, a sampling
+> row, a streaming width and a CLI choice for both. **There is now exactly one,
+> `higgs-v3`**, and the paragraphs below that still reason about "the two engines" are
+> kept because the REASON survives the engine: the per-engine env naming, the per-engine
+> recipe and the per-engine tables exist so that the SECOND engine is an addition and
+> never a rebuild of the first.
+>
+> What a new narrator engine has to add, one place per fact: a row in
+> `voices.NARRATOR_ENGINE_SAMPLING` (the one list the `--narrator-engine` choices, the
+> task door's refusal and `/v1/capability`'s `narrator_engines` all read), a row in
+> `ttsstream.STREAM_BATCH_WIDTH` (a MEASURED width; `batch_width_for` refuses an engine
+> nobody has measured and there is no default), a recipe per backend under `envs/tts/`,
+> a row in `jobenv.CUDA_LINUX_SERVING_STACK` if it starts a server underneath narrator,
+> and membership of `narratorvoices.DOCUMENT_READERS` if it resolves a voice by name.
+> `tests/test_jobenv.py`'s drift guard compares the first of those against the recipes
+> on disk in both directions, which is the check that was missing while an unservable
+> engine sat in the list.
+
+Crucible does not reimplement narrator's EOS surgery, guard or codec arithmetic. It runs
+the code that already has them.
 
 `python/narrator` in the BookForge repo is a proper installable Python package with exactly
-the shape Crucible's engine layer wants: an engine registry keyed by id (`orpheus`,
-`higgs-v3`), a per-engine extras matrix in its `pyproject.toml` that mirrors Crucible's
+the shape Crucible's engine layer wants: an engine registry keyed by id (of which
+`higgs-v3` is the one Crucible names), a per-engine extras matrix in its `pyproject.toml`
+that mirrors Crucible's
 `envs/<type>/<backend>.txt` one for one, a resident server (`python -m narrator.serve`)
 speaking newline-delimited JSON over stdin and stdout, and the EOS levers, caps, guards and
 codec arithmetic that CLIENT-SURFACES.md row 15 calls "the single hardest thing in the `tts`
@@ -299,13 +321,14 @@ Two consequences, both named rather than hidden:
   Owen**; until he makes it, this pin is the honest arrangement rather than a workaround.
 
 `envs/tts/` holds one recipe per (narrator engine, backend) rather than one per backend, and
-the reason is in narrator's dependency matrix rather than in Crucible's design: Orpheus
-needs `vllm==0.7.3` (the last version whose V0 engine takes per-request logits processors,
-which is what the EOS boost *is*), Higgs v3 needs `vllm-omni==0.28.0` against torch 2.13,
-and installing both into one env resolves torch twice and breaks whichever loses. So
-`cuda-linux` gets `~/.crucible/envs/tts-higgs-v3/` and `~/.crucible/envs/tts-orpheus/`, and
-the voice manifest's `narrator_engine` picks which one a load uses. On `mlx-darwin` both
-engines share one env, because on the Mac they genuinely do.
+the reason is in narrator's dependency matrix rather than in Crucible's design: each engine
+pins its own serving stack against its own torch — Higgs v3 needs `vllm-omni==0.28.0`
+against torch 2.13, and narrator's own pyproject says installing any two into one env
+"resolves torch twice and breaks whichever loses". So `cuda-linux` gets
+`~/.crucible/envs/tts-<engine>/` and the voice manifest's `narrator_engine` picks which one
+a load uses; today that is `~/.crucible/envs/tts-higgs-v3/` and nothing else. On
+`mlx-darwin` the engines share one env, because on the Mac they genuinely do, and the
+recipe there is named for the backend.
 
 Two site-packages patches must be re-applied after any upgrade of the `higgs-v3-server`
 group. pip cannot express that. `crucible doctor` checks for both and reports them by name,
@@ -339,8 +362,9 @@ It is one class for both narrator engines, because from Crucible's side they dif
 which env the interpreter comes from and what `NARRATOR_ENGINE` says; what runs underneath is
 narrator's business and Crucible learns which it got from the `ready` line. The argv is
 `<tts env python> -m narrator.serve` and nothing else — the voice rides the `load` message
-(and the weights directory with it for `orpheus`; for `higgs-v3` it is in the voices document
-Crucible writes, see below), and the port is not used at all, so **`base_url` refuses** rather
+(for `higgs-v3` the weights are in the voices document Crucible writes, see below; an engine
+that reads no document carries its weights directory on the message instead), and the port is
+not used at all, so **`base_url` refuses** rather
 than returning a port nothing is listening on.
 
 Four things about it that are decisions rather than details:
@@ -418,8 +442,9 @@ Not written, each deliberately (the module docstring says why): `maxCharsSource`
 **The `load` message per engine.** `higgs-v3`: `{"action": "load", "voice": <id>, "warm":
 true}` — nothing else, on both arms; the engine refuses, before sending, a voice the document
 does not carry and a `weights_dir` the document's `checkpointDir` disagrees with (two
-statements of one fact, compared). `orpheus`: `{"action": "load", "voice", "modelDir", "warm"}`,
-byte for byte what it was; it reads no document and is refused one. `tests/fake_narrator.py`
+statements of one fact, compared). An engine outside `DOCUMENT_READERS` takes
+`{"action": "load", "voice", "modelDir", "warm"}` instead, byte for byte what narrator's wire
+always had; it reads no document and is refused one. `tests/fake_narrator.py`
 now makes narrator's own refusals under `--engine higgs-v3` — `modelDir` by name, an unset
 variable, an absent voice — so a residency that stopped writing the document fails in the
 suite rather than on a book.
@@ -441,7 +466,7 @@ suite rather than on a book.
 ### Sampling reaches narrator through the document — take 0 only
 
 **No `caps` are sent on the `load` message**, still. narrator's caps channel is
-`register_voice_caps`, whose key vocabulary is Orpheus's — `temperature`, `topP`, `minP`,
+`register_voice_caps`, whose key vocabulary is narrator's older engine's — `temperature`, `topP`, `minP`,
 `repPenalty`, the four `eos*` levers, `maxCharsPerSec` — with **no `topK` at all**, which
 *raises* on a key it does not know, and which `higgs_v3_config_from_worker_kwargs` refuses
 wholesale by name. **The document is the channel that exists**: its `sampling` key is read
@@ -757,7 +782,7 @@ Ops on the post:
 Out-of-order retirement falls out of the shape: ids are the client's, `seq` counts within an
 id, and `done` for one row may arrive while another is still emitting. There is no batching
 parameter on the wire — how many rows the engine runs at once is engine tuning and belongs
-to the server (Higgs measured worthless above width 1; Orpheus runs 16).
+to the server (Higgs measured worthless above width 1).
 
 `say` returns **202 and the row's id**, not the audio. A client that wants the audio reads
 the stream, and a client that never opened the stream is refused by name rather than
@@ -801,11 +826,14 @@ with nothing on the wire to explain the stutter. `restart` is that frame: every 
 that id below `from_seq` is void. `seq` never restarts across it, so "ids strictly increase
 within a row" stays true and `from_seq` is where the good audio begins.
 
-**DIFFERENCE 2 — Orpheus's streaming width is 8, not 16, and there is a 25 ms coalescing
-window.** This section's parenthetical named the *ceiling*; the thing that dispatches is
-`orpheus-worker-pool.ts`'s `flushBatch()`, which coalesces a 25 ms window into
-`min(STREAM_RAMP_WIDTH = 8, streamBatchCeiling())`. Eight is what production runs, so eight
-is what `STREAM_BATCH_WIDTH` carries beside Higgs's 1. The window came with it and was found
+**DIFFERENCE 2 — a width is a MEASUREMENT, and there is a 25 ms coalescing window.**
+This section's parenthetical above named a *ceiling*; the thing that dispatches is
+BookForge's worker pool `flushBatch()`, which coalesces a 25 ms window into
+`min(STREAM_RAMP_WIDTH = 8, streamBatchCeiling())` — so the number that matters is what the
+ramp dispatches and not what the ceiling allows. `STREAM_BATCH_WIDTH` carries Higgs's 1 and,
+since the ruling of 2026-09-14, nothing else; the second engine's row is a measurement
+somebody takes, which is why `batch_width_for` refuses rather than defaulting. The window
+came with it and was found
 by a failing test rather than designed in: rows arrive one HTTP post at a time, so a worker
 that dispatched the instant the first one landed put **every row in a batch of its own** —
 the width would have been a number that never happened, and the whole cost of a per-row
@@ -813,10 +841,10 @@ cancel would have looked free right up until the day it was not. The wait is ski
 entirely when the width is 1 rather than added to the first syllable of every sentence.
 
 **So the cost of a per-row cancel, stated plainly:** on `higgs-v3`, nothing — the width is 1,
-the in-flight row IS the batch, there are no survivors and `restart` never fires. On
-`orpheus`, up to seven other rows lose whatever they had generated and generate it again.
-Every voice this build ships is `higgs-v3`, so the survivor path is **unreachable through a
-manifest today**; its test patches the width to reach it and says so.
+the in-flight row IS the batch, there are no survivors and `restart` never fires. On an
+engine with a width of N, up to N-1 other rows lose whatever they had generated and generate
+it again. `higgs-v3` is the only engine this build names, so the survivor path is
+**unreachable through a manifest today**; its test patches the width to reach it and says so.
 
 **DIFFERENCE 3 — a session and the exclusive lane need a mutual exclusion, and this section
 did not say so.** A streaming session is a connection rather than a job, so it does not queue
@@ -864,8 +892,8 @@ with the first's id), `stream_not_attached` (a `say` on a session whose event st
 been opened — the contract's "refused by name rather than generating into nothing", now with a
 code), `unknown_session`, `unknown_row`, `stream_closing`, `replay_unavailable`,
 `engine_in_use`, and `unknown_narrator_engine` (no measured batch width for an engine nobody
-has measured one for; guessing 1 would halve Orpheus and guessing 16 would multiply a cancel's
-cost). `cancel` answers `{"outcome": "dropped" | "aborting_batch" | "already_finished"}`,
+has measured one for; a guess is wrong in both directions — too low halves throughput, too
+high multiplies a cancel's cost). `cancel` answers `{"outcome": "dropped" | "aborting_batch" | "already_finished"}`,
 because those are three different costs and a client is entitled to know which it got —
 `already_finished` in particular is the ordinary race on a live connection and not an error.
 A row that fails on its own gets `error {id, code: "row_failed", message}` and is **never**
@@ -919,9 +947,12 @@ same way `/v1/models` is for `llm`, and `/v1/info` simply carries no `tts` capab
 
 The CLI gains `crucible voices list` and `crucible voices pull <id>` beside `crucible models`
 (the same rows, answering "what is on this disk" rather than "what can this server be asked
-for"), and `crucible install tts --narrator-engine <higgs-v3|orpheus>`. The flag is required
-for `tts` and refused for `llm`: `cuda-linux` has one venv per narrator engine and
-`mlx-darwin` has one for both, so the command may not pick for you. `crucible doctor` reports
+for"), and `crucible install tts --narrator-engine <engine>`, whose choices are
+`voices.NARRATOR_ENGINE_SAMPLING`. The flag is required for `tts` and refused for `llm`:
+`cuda-linux` names one venv per narrator engine and `mlx-darwin` has one for every engine,
+so the command may not pick for you — and it stays required with one engine in the list,
+because the alternative is a default that silently becomes the wrong engine the day there
+are two. `crucible doctor` reports
 one env row per narrator engine under `tts_envs`.
 
 ## 9. SDK additions (`@crucible/client`)
@@ -1208,8 +1239,8 @@ who walks away from a stream is a state `TestClient` cannot reach):
   anything. The grace window therefore starts when the client goes, not a keepalive later.
 - **Per-row cancel costs nothing on every voice that ships.** All seven manifests declare
   `narrator_engine = "higgs-v3"`, whose measured width is 1, so the in-flight row is the
-  batch and there are no survivors to resubmit. The Orpheus cost — up to seven rows
-  regenerated — is proved by a test that patches the width, and it says so.
+  batch and there are no survivors to resubmit. The cost on a wider engine — up to N-1
+  rows regenerated — is proved by a test that patches the width, and it says so.
 
 **What is still owed, and it is the only one Owen cares about personally:** the Sunday test.
 The browser extension pointed at BookForge's relay, pointed at these four routes, on the real

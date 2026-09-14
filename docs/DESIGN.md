@@ -56,7 +56,7 @@ declaring: the env it needs, the models it can serve, a VRAM estimate per model,
 | Type | In | Out | Notes |
 |---|---|---|---|
 | `llm` | chat messages, model id, sampling | text | OpenAI-compatible endpoint (`/v1/openai/...`), so vLLM / SGLang / mlx-lm batching comes for free. Phase 2, `PHASE2-LLM.md`. |
-| `tts` | text chunks, voice id, take | audio (FLAC per chunk) + measurements | Higgs and Orpheus through narrator. Two doors: a render job and a streaming connection. Voices are the server's, and so is every knob that tunes an engine to one. Phase 3b, `PHASE3-TTS.md`. |
+| `tts` | text chunks, voice id, take | audio (FLAC per chunk) + measurements | Higgs v3 through narrator (the one narrator engine Crucible names — PLAN.md, the ruling of 2026-09-14). Two doors: a render job and a streaming connection. Voices are the server's, and so is every knob that tunes an engine to one. Phase 3b, `PHASE3-TTS.md`. |
 | `align` | audio + text | timestamped items | Qwen3-ForcedAligner-0.6B, resident across a whole book. Phase 4, `PHASE4-AUDIO.md`. |
 | `asr` | one audio file | transcript with word timestamps | faster-whisper, six sizes, no default. Phase 4, `PHASE4-AUDIO.md`. |
 | `rvc` | audio + model id + params | audio | ultimate-rvc. Phase 4, `PHASE4-AUDIO.md`. |
@@ -81,7 +81,7 @@ knows it has an order to narrate this book, that it has three servers registered
 that the operator (or the queue) said "server 2".
 
 Everything that tunes an engine to a model lives in **Crucible's own configuration**, not
-on the wire: sampling defaults per backend, Orpheus's EOS controls, cap certificates,
+on the wire: sampling defaults per backend, an engine's EOS controls, cap certificates,
 token-budget formulas, dtype, engine flags. A `tts` request carries the text chunks, a
 voice id and the take number; the server's voice config decides the rest. Where the app
 genuinely needs to steer a knob (a temperature the operator set, a cap override), the

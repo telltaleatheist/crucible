@@ -213,7 +213,7 @@ So the route now answers the record **plus** one derived key:
   { "job_type": "llm", "classes": ["clean","translate","simplify","analysis","pages"],
     "installer": "llm", "narrator_engines": [] },
   { "job_type": "tts", "classes": ["tts"], "installer": "tts",
-    "narrator_engines": ["higgs-v3", "orpheus"] },
+    "narrator_engines": ["higgs-v3"] },
   { "job_type": "denoise", "classes": ["denoise"], "installer": "rvc",
     "narrator_engines": [] },
   { "job_type": "echo", "classes": ["echo"], "installer": null,
@@ -480,11 +480,13 @@ Live totals remain `GET /v1/accelerator`, for somebody who asks.
 `capabilities[].job_type`.** Not `/v1/setup`'s `job_types` — see the correction
 in 3.1. A class that is off is drawn with the number that turned it off.
 
-**Orpheus appears in the `tts` engine picker, because the server lists it.** The
-deprecation ruling of 2026-09-14 is not this page's to apply: it draws
-`narrator_engines` and nothing else, so the day the table drops an engine the
-control drops it in the same tick. A page that filtered would be a second
-opinion about what this build ships.
+**The `tts` engine picker shows one engine, because the server lists one.** When
+this section was written the list held two and the page drew both, correctly —
+applying a deprecation was never this page's job. Owen's ruling landed later the
+same day and `voices.NARRATOR_ENGINE_SAMPLING` dropped `orpheus`, so the control
+dropped it in the same tick with no page change. That is the property worth
+keeping: a page that filtered would be a second opinion about what this build
+ships, and the day a second engine returns this picker grows it for free.
 
 **Service draws the `crucible service …` lines, because `/v1/info` carries no
 service facts in this build.** The page tests the READ (`info.service`), never a

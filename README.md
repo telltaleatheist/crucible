@@ -524,8 +524,8 @@ text, and a take number. Owen's ruling: the client knows what the operator order
 which server to send it to; the server knows how to run it.
 
 Three things are refused by name rather than faked, because narrator cannot do them yet:
-a take-ladder deviation (`sampling_not_wired` — narrator's sampling door takes Orpheus's
-vocabulary and raises on an unknown key), a zero-shot voice (`voice_kind_unsupported` —
+a take-ladder deviation (`sampling_not_wired` — narrator's sampling door takes its older
+engine's vocabulary and raises on an unknown key), a zero-shot voice (`voice_kind_unsupported` —
 its `load` carries no reference clips), and a chunk over the voice's `max_chars`
 (`chunk_too_long`, never silently re-split).
 
@@ -564,8 +564,9 @@ rather than cancelling on the spot.
 `cancel` aborts everything in flight, so a per-row cancel drops the rows not yet started,
 aborts the batch, and resubmits the survivors — and a resubmitted row would otherwise have
 its first seconds concatenated twice with nothing saying so. On `higgs-v3` this costs
-nothing, because its measured batch width is 1 and the in-flight row *is* the batch; on
-Orpheus, up to seven other rows regenerate.
+nothing, because its measured batch width is 1 and the in-flight row *is* the batch; on an
+engine with a width of N, up to N-1 other rows regenerate. `higgs-v3` is the only narrator
+engine this build names (see `docs/PLAN.md`, the ruling of 2026-09-14).
 
 **One session at a time** (`stream_session_open`), and a render job and a session cannot both
 hold the card (`engine_in_use`). That is not tidiness: narrator has one stdin, and two
@@ -719,7 +720,7 @@ still refused by name — the refusal names this command.
 
 Stem separation with audio-separator (PHASE4-AUDIO.md section 4.2). One audio file in,
 every stem out, and `done` names which one is the answer. It is what strips the faint
-room hiss an Orpheus voice reproduces — the voices are trained on a deliberate hiss bed,
+room hiss a fine-tuned narration voice reproduces — those voices are trained on a hiss bed,
 which is load-bearing for reliable end-of-audio.
 
 ```bash

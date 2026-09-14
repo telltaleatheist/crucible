@@ -154,6 +154,32 @@ page the server serves itself.
   with one candidate resolves to it, and `analysis` — two candidates, no floor — must be
   named in the declaration, because picking would be inventing a policy nobody wrote.
 
+**Landed, 2026-09-14: Orpheus is removed.** Owen: *"orpheus is deprecated too but
+hasnt been removed yet. higgs is the frontier"* — *"i guess we can remove it now."*
+Crucible had named `orpheus` as a servable narrator engine since PHASE3-TTS.md, with a
+recipe on disk (`envs/tts/orpheus-cuda-linux.txt`), an env key (`tts-orpheus`), a
+sampling row, a streaming width and a `--narrator-engine` choice — and no Crucible was
+ever going to serve it. The operator page built the day before made the cost visible:
+it draws its `tts` engine picker from `/v1/capability`'s `narrator_engines`, so the page
+offered an engine with no future, correctly, because the server said so. The engine is
+out of every table.
+
+Each of those tables **stays a table keyed by engine, with one row and the ruling beside
+it**, because a second engine will come. What it has to add, in one place per fact: a
+row in `voices.NARRATOR_ENGINE_SAMPLING` (its own sampling defaults, since that table is
+the one list the CLI choices, the task door and the capability row all read), a row in
+`ttsstream.STREAM_BATCH_WIDTH` (a MEASURED streaming width — `batch_width_for` refuses
+an engine nobody has measured, and there is deliberately no default), a recipe per
+backend under `envs/tts/`, a row in `jobenv.CUDA_LINUX_SERVING_STACK` if it starts a
+server underneath narrator, and membership of `narratorvoices.DOCUMENT_READERS` if it
+resolves a voice by name in a document. The drift guard that would have caught the
+listed-but-unservable engine is
+`tests/test_jobenv.py::test_the_engines_the_server_names_are_exactly_the_engines_with_a_recipe`,
+which compares the named engines against the recipe files in both directions.
+
+**Nothing under `~/.crucible` was touched.** The 7.1 GB `tts-orpheus` env on the PC's WSL
+server is the operator's to remove, and this repo does not remove an operator's disk.
+
 So what is left is not code. It is **a card, and Owen's rulings on the five things below.**
 
 ### Owed, and only a free card discharges it
@@ -163,6 +189,9 @@ So what is left is not code. It is **a card, and Owen's rulings on the five thin
   produces today, and measure the utilisation with multimodal profiling ON.
 - The tts envs have never been installed anywhere, so their recipes are pins read off
   narrator's own `pyproject.toml` rather than a resolved set.
+- `mlx-audio==0.4.8` on the Mac: the ceiling was measured against the engine removed on
+  2026-09-14, and nobody has run 0.5.1 against `higgs-v3` alone. The pin stays where the
+  measurement put it and the recipe header says the re-measurement is owed.
 
 ### Owed from Owen, and each blocks something
 1. **Extract `narrator` into its own repo?** `telltaleatheist/bookforge` is private, so
