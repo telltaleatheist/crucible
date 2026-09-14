@@ -58,7 +58,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from . import catalog, jobenv, workerenv
+from . import catalog, envpack, jobenv, workerenv
 from .backend import Backend
 from .config import Config
 from .errors import ApiError, CrucibleError
@@ -925,11 +925,33 @@ class TaskStore:
         )
         task.process = process
         assert process.stdout is not None
+        last_bytes = 0.0
         try:
             for line in process.stdout:
-                self._from_thread(task, "progress", {"line": line.rstrip("\n")})
+                stripped = line.rstrip("\n")
+                # THE CANCEL CHECK IS FIRST, before anything below can `continue`
+                # past it. A download emits a sentinel line per megabyte and
+                # most of them are throttled away; a cancel tested only on the
+                # lines that survive the throttle is a cancel that waits half a
+                # second at best and, on a quiet stretch, never fires.
                 if task.cancel_requested and process.poll() is None:
                     process.terminate()
+                # SINCE 0.6.0 AN INSTALL IS USUALLY A DOWNLOAD, and a download
+                # reports bytes. `crucible install` prints a sentinel line
+                # carrying the three fields the PULL task already emits
+                # (`envpack.PROGRESS_PREFIX` owns the shape and says why the
+                # child's stdout is the transport), so the operator page draws
+                # an env install with exactly the code that draws a weights
+                # pull instead of a second progress shape.
+                measured = envpack.parse_progress_line(stripped)
+                if measured is not None:
+                    now = time.monotonic()
+                    if now - last_bytes < PROGRESS_INTERVAL_SECONDS:
+                        continue
+                    last_bytes = now
+                    self._from_thread(task, "progress", measured)
+                    continue
+                self._from_thread(task, "progress", {"line": stripped})
             code = process.wait(timeout=TERMINATE_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
             process.kill()
