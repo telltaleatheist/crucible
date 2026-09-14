@@ -603,17 +603,18 @@ initialised, not to the one being left. A file without `auth.token` is refused
 
 ### 4.4 Packaging
 
-- A Windows host pack: `crucible-env-host-windows-<version>.tar.zst`, built by the same
+- A Windows host pack: `crucible-env-host-llama-windows-<version>.tar.zst`, built by the same
   `crucible envpack build host` on a `windows-latest` runner: python-build-standalone
-  `x86_64-pc-windows-msvc-shared-install_only` (pinned in `STANDALONE_PYTHON` with its
+  `x86_64-pc-windows-msvc-install_only` (pinned in `STANDALONE_PYTHON` with its
   SHA256SUMS digest like the two others) + the server package + `pystray` + `pillow` (the
   tray). Unpacked to `%LOCALAPPDATA%\Crucible\host\`. It is the ONLY Windows-native Python
-  Crucible ever ships, and it never gets a backend.
+  Crucible ever ships, and since section 0's amendment it carries BOTH halves of what runs on
+  Windows: the tray, and the `llama-windows` server the tray starts.
 - `install.ps1` (generated, PHASE14 7b.2) becomes: download the host pack for this version,
   verify, unpack, write the Startup shortcut, start `crucible host`, and STOP — the host takes
   it from there (4.3) and shows the WSL steps in its own window. `install.sh` is unchanged
   (linux/darwin have no host).
-- The release gains the host pack in `envpacks.json` (backend `host-windows`) and CI gains the
+- The release gains the host pack in `envpacks.json` (backend `llama-windows`) and CI gains the
   `windows-latest` job. release.sh's asset list is updated (seven assets now: the installers
   are unchanged in count).
 - **Mac:** no host. launchd already supervises; the pairing file (3.6) is what an app reads.
@@ -649,11 +650,16 @@ one `.cmd` per console script the wheel declares, and the pack keeps the `.exe` 
 as the dead weight pip left (nothing in Crucible calls them, and `pack_smoke` proves the
 `.cmd`, moved).
 
-- The pack's name is `host`, its backend kind is `host-windows`, and its archive is
-  `crucible-env-host-windows-<version>.tar.zst`. `host-windows` is a PACK BACKEND and never a
-  `backend_kind` in a config: a config on this machine says `none` (3.5). The pack table's key
-  is about which wheels pip resolved; **Windows is never a backend** and nothing in this pack
-  runs a model.
+- **The pack backend is `llama-windows`, the same word a config on this machine uses**
+  (3.5) — CORRECTED 2026-09-14, after section 0's amendment. The pack's name is `host` and its
+  archive is what `pack_filename`'s rule yields with no special case:
+  `crucible-env-host-llama-windows-<version>.tar.zst`. An earlier draft of this section wrote
+  the backend `host-windows` and the asset `crucible-env-host-windows-…`, which is the rule
+  with the repeated word quietly elided — two spellings of one name, and a 404 the first time
+  `install.ps1` composed the URL from the rule instead of from the prose. `host-windows` also
+  gave one machine two names, which is the R1 shape: a Windows Crucible IS `llama-windows`,
+  here and in `backend_kind` and in `crucible doctor`, and the pack table's key is the same
+  word because pip resolved those wheels for that machine.
 - `crucible envpack build host` is refused `pack_not_buildable_here` off win32, and on win32
   every OTHER pack name is refused by the same function and the same rule.
 - **The pairing file's ACL** (3.6, "an ACL of the current user only") is set with
@@ -675,7 +681,7 @@ Added by the build, each because it pins something that would otherwise drift si
 asserted; the generated `crucible/host/wsl_states.py` is checked against `wsl-states.ts` by
 `gen:install --check` and its codes against `wslstate.py`'s predicates by pytest; the
 `icacls` argv; the `.cmd` shim's text and the fact that a MOVED pack still runs it; the
-`host-windows` row in the pack table and its refusal off win32; and the loopback door's four
+`llama-windows` row in the pack table and its refusal off win32; and the loopback door's four
 refusals. Windows-only code paths take the platform as an argument so they run on both — the
 suite runs in WSL (`pytest`) and must not be a suite that skips its subject.
 
