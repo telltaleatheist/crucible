@@ -30,6 +30,8 @@ from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
 MODEL = "faster-whisper-base"
 BIG_MODEL = "faster-whisper-large-v3"
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_asr_worker.py"
+FAKE_MLX_WORKER = Path(__file__).resolve().parent / "fake_mlx_asr_worker.py"
+MAC_MODEL = "mlx-whisper-base"
 
 ALL_MODELS = [
     "faster-whisper-base",
@@ -38,6 +40,13 @@ ALL_MODELS = [
     "faster-whisper-medium",
     "faster-whisper-small",
     "faster-whisper-tiny",
+    "mlx-whisper-base",
+    "mlx-whisper-distil-large-v3",
+    "mlx-whisper-large-v3",
+    "mlx-whisper-large-v3-turbo",
+    "mlx-whisper-medium",
+    "mlx-whisper-small",
+    "mlx-whisper-tiny",
 ]
 
 PARAMS = {"language": "en", "vad_filter": True, "word_timestamps": True}
@@ -121,8 +130,72 @@ def ffmpeg(monkeypatch: pytest.MonkeyPatch) -> str:
 
 @pytest.fixture
 def fake_worker(monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(asr_job, "WORKER_SCRIPT", FAKE_WORKER)
+    """Both engines' scripts, replaced by their own doubles.
+
+    BOTH, in one fixture, because the table is what the server reads and a test
+    that replaced only one entry would pass while the server ran the real
+    mlx-whisper worker on a machine that has no mlx.
+    """
+    monkeypatch.setitem(
+        asr_job.WORKER_SCRIPT_FOR_ENGINE, "faster-whisper", FAKE_WORKER
+    )
+    monkeypatch.setitem(
+        asr_job.WORKER_SCRIPT_FOR_ENGINE, "mlx-whisper", FAKE_MLX_WORKER
+    )
     return FAKE_WORKER
+
+
+def _mac_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`asr_env`, stamped for `mlx-darwin` instead.
+
+    A function and not a fixture: the Mac tests build their client themselves
+    (they pass `backend=FAKE_MAC_BACKEND`), so they need this AFTER the home
+    exists and BEFORE the client starts, which is not an ordering a fixture can
+    express without a second `home`.
+    """
+    directory = workerenv.worker_env_dir(home, "asr")
+    (directory / "bin").mkdir(parents=True)
+    (directory / "bin" / "python").symlink_to(sys.executable)
+    (directory / "crucible-env.json").write_text(
+        json.dumps(
+            {
+                "job_type": "asr",
+                "backend": FAKE_MAC_BACKEND.kind,
+                "recipe": f"{FAKE_MAC_BACKEND.kind}.txt",
+                "python_version": "3.11.16",
+                "seconds": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    pins = workerenv.recipe_pins(
+        workerenv.recipe_for("asr", FAKE_MAC_BACKEND.kind)
+    )
+    monkeypatch.setattr(
+        workerenv, "installed_packages", lambda _home, _type: dict(pins)
+    )
+    return directory
+
+
+def _mac_weights(home: Path, model_id: str) -> Path:
+    spec = load_asr_manifest(model_id).spec(FAKE_MAC_BACKEND.kind)
+    directory = home / "models" / model_id / FAKE_MAC_BACKEND.kind
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "crucible-pull.json").write_text(
+        json.dumps(
+            {
+                "model": model_id,
+                "backend": FAKE_MAC_BACKEND.kind,
+                "hf_repo": spec.hf_repo,
+                "revision": spec.revision,
+                "bytes": 143_726_326,
+                "seconds": 6.0,
+                "pulled": "2026-09-14T02:00:00+0000",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return directory
 
 
 @pytest.fixture
@@ -324,21 +397,118 @@ def test_somebody_else_on_the_card_refuses_by_name(
     assert "never evicts" in response.json()["error"]["message"]
 
 
-def test_the_mac_is_refused_because_ctranslate2_has_no_metal(
+def test_a_faster_whisper_id_is_refused_on_the_mac_and_says_why(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
     home: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The ids do not cross, and the refusal says that rather than "no Metal".
+
+    CTranslate2 still has no Metal backend; what changed on 2026-09-14 is that
+    the Mac has its own whisper under its own ids. So asking a Mac for
+    `faster-whisper-base` is not "this host cannot transcribe", it is "you
+    named the other engine's weights".
+    """
     monkeypatch.setattr(
         accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
     )
     monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
     with make_client(enable_asr=True, backend=FAKE_MAC_BACKEND) as client:
-        response = submit(client, auth)
+        # `vad_filter: false`, because the VAD refusal is deliberately EARLIER
+        # than this one and would answer first — see
+        # `test_vad_on_the_mac_is_refused_by_name_rather_than_ignored`.
+        response = submit(
+            client,
+            auth,
+            params={"language": "en", "vad_filter": False, "word_timestamps": True},
+        )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "backend_unsupported"
-    assert "no Metal backend" in response.json()["error"]["message"]
+    message = response.json()["error"]["message"]
+    assert "Each backend has its OWN whisper" in message
+    assert "names this host's engine" in message
+
+
+def test_an_mlx_id_is_refused_on_the_card_for_the_mirror_reason(
+    asr_client: TestClient, auth: dict[str, str], ffmpeg: str, idle_card: None
+) -> None:
+    """The rule has two directions and only one of them was ever tested."""
+    response = submit(asr_client, auth, model=MAC_MODEL)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "backend_unsupported"
+    assert "mlx-whisper-base" in response.json()["error"]["message"]
+
+
+def test_the_mac_runs_its_own_worker_with_its_own_device(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point of the second engine: a Mac transcribes.
+
+    And it asserts on the envelope, because "the job ran" would also be true if
+    the server had spawned the faster-whisper worker with `cuda` in the
+    request. `metal` is MLX's own device name and deliberately not `mps`.
+    """
+    sent = tmp_path / "sent-to-mlx.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_MLX_ASR_TRANSCRIPT", str(sent))
+    monkeypatch.setattr(
+        accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
+    )
+    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
+    monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
+    monkeypatch.setitem(
+        asr_job.WORKER_SCRIPT_FOR_ENGINE, "mlx-whisper", FAKE_MLX_WORKER
+    )
+    _mac_env(home, monkeypatch)
+    _mac_weights(home, MAC_MODEL)
+    with make_client(enable_asr=True, backend=FAKE_MAC_BACKEND) as client:
+        events = run_job(
+            client,
+            auth,
+            model=MAC_MODEL,
+            params={"language": "en", "vad_filter": False, "word_timestamps": True},
+        )
+    assert terminal(events)["event"] == "done", terminal(events)
+    assert terminal(events)["data"]["artifacts"] == ["transcript.json"]
+    envelope = json.loads(sent.read_text(encoding="utf-8").splitlines()[0])
+    assert envelope["device"] == "metal"
+    assert envelope["compute_type"] == "float16"
+    assert envelope["window_s"] == 900
+    assert envelope["overlap_s"] == 15
+
+
+def test_vad_on_the_mac_is_refused_by_name_rather_than_ignored(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """mlx-whisper has no VAD, and a transcript made without the filter the
+    caller asked for is a different transcript with nothing to say so."""
+    monkeypatch.setattr(
+        accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
+    )
+    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
+    monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
+    _mac_env(home, monkeypatch)
+    _mac_weights(home, MAC_MODEL)
+    with make_client(enable_asr=True, backend=FAKE_MAC_BACKEND) as client:
+        response = submit(
+            client,
+            auth,
+            model=MAC_MODEL,
+            params={"language": "en", "vad_filter": True, "word_timestamps": True},
+        )
+    assert response.status_code == 400, response.json()
+    error = response.json()["error"]
+    assert error["code"] == "vad_unsupported_by_engine"
+    assert "no voice-activity detector" in error["message"]
+    assert error["details"]["engine"] == "mlx-whisper"
+    assert error["details"]["backend"] == "mlx-darwin"
 
 
 def test_a_model_bigger_than_the_card_is_refused_before_the_download(

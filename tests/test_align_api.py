@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 from crucible import accelerator, workerenv
 from crucible.accelerator import GIB, ComputeApp
 from crucible.alignmodels import load_align_manifest
+from crucible.errors import JobError
 from crucible.jobs import align as align_job
 from crucible.residency import KIND_ALIGN
 
@@ -107,6 +108,58 @@ def align_weights(home: Path) -> Callable[[str], Path]:
         return directory
 
     return stamp
+
+
+def _mac_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`align_env`, stamped for `mlx-darwin` instead.
+
+    A function and not a fixture, for `tests/test_asr_api.py`'s reason: the Mac
+    test builds its own client (it passes `backend=FAKE_MAC_BACKEND`), so it
+    needs this after the home exists and before the client starts.
+    """
+    directory = workerenv.worker_env_dir(home, "align")
+    (directory / "bin").mkdir(parents=True)
+    (directory / "bin" / "python").symlink_to(sys.executable)
+    (directory / "crucible-env.json").write_text(
+        json.dumps(
+            {
+                "job_type": "align",
+                "backend": FAKE_MAC_BACKEND.kind,
+                "recipe": f"{FAKE_MAC_BACKEND.kind}.txt",
+                "python_version": "3.11.16",
+                "seconds": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    pins = workerenv.recipe_pins(
+        workerenv.recipe_for("align", FAKE_MAC_BACKEND.kind)
+    )
+    monkeypatch.setattr(
+        workerenv, "installed_packages", lambda _home, _type: dict(pins)
+    )
+    return directory
+
+
+def _mac_weights(home: Path, model_id: str) -> Path:
+    spec = load_align_manifest(model_id).spec(FAKE_MAC_BACKEND.kind)
+    directory = home / "models" / model_id / FAKE_MAC_BACKEND.kind
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "crucible-pull.json").write_text(
+        json.dumps(
+            {
+                "model": model_id,
+                "backend": FAKE_MAC_BACKEND.kind,
+                "hf_repo": spec.hf_repo,
+                "revision": spec.revision,
+                "bytes": 1_840_072_459,
+                "seconds": 40.0,
+                "pulled": "2026-09-14T02:00:00+0000",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return directory
 
 
 @pytest.fixture
@@ -314,21 +367,49 @@ def test_no_ffmpeg_is_refused_before_the_job_is_queued(
     assert "16 kHz mono float32" in response.json()["error"]["message"]
 
 
-def test_the_mac_is_refused_because_nobody_has_measured_it(
+def test_the_mac_aligns_on_mps_and_nothing_had_to_be_told_it(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
+    home: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Not "it cannot work" — "nobody has measured it", which is a different refusal."""
+    """The Mac stopped being a refusal on 2026-09-14.
+
+    The whole change on this side is one word in the load envelope: the same
+    engine, the same weights, the same bfloat16 off the manifest, and `mps`
+    instead of `cuda`. So `mps` is what this asserts — a run that passed but
+    had sent `cuda` would have died inside torch on a machine with no CUDA,
+    which is exactly the failure a table with no default is there to prevent.
+    """
+    transcript = tmp_path / "sent-on-the-mac.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_TRANSCRIPT", str(transcript))
     monkeypatch.setattr(
         accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
     )
+    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
     monkeypatch.setattr(align_job, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
+    monkeypatch.setattr(align_job, "WORKER_SCRIPT", FAKE_WORKER)
+    _mac_env(home, monkeypatch)
+    _mac_weights(home, MODEL)
     with make_client(enable_align=True, backend=FAKE_MAC_BACKEND) as client:
-        response = submit(client, auth)
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "backend_unsupported"
-    assert "nobody has measured" in response.json()["error"]["message"]
+        events = run_job(client, auth)
+    assert terminal(events)["event"] == "done", terminal(events)
+    load = json.loads(transcript.read_text(encoding="utf-8").splitlines()[0])
+    assert load["device"] == "mps"
+    assert load["dtype"] == "bfloat16"
+
+
+def test_the_align_device_table_has_no_default(
+    make_client: Callable[..., TestClient],
+) -> None:
+    """A backend nobody decided a device for is a refusal naming it, not a
+    `cuda` handed to whatever this is."""
+    assert align_job.device_for("cuda-linux") == "cuda"
+    assert align_job.device_for("mlx-darwin") == "mps"
+    with pytest.raises(JobError) as caught:
+        align_job.device_for("llama-windows")
+    assert "no align device for backend" in str(caught.value)
 
 
 def test_somebody_else_on_the_card_refuses_by_name(

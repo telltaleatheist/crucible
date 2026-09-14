@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -64,10 +65,11 @@ def test_each_backend_publishes_exactly_the_packs_its_recipes_describe() -> None
     cuda = sorted(envpack.pack_targets("cuda-linux"))
     mac = sorted(envpack.pack_targets("mlx-darwin"))
     assert cuda == ["align", "asr", "llm", "rvc", "server", "tts-higgs-v3"]
-    # No `asr` and no `align` on the Mac, and those are facts rather than gaps:
-    # `envs/asr/mlx-darwin.md` is prose explaining that CTranslate2 has no
-    # Metal backend, and there is no `.txt` for either.
-    assert mac == ["llm", "rvc", "server", "tts"]
+    # Since 2026-09-14 the Mac has `align` and `asr` too: one is the same
+    # engine on a different device, the other is a second engine with its own
+    # recipe. A pack exists exactly when its `.txt` does, which is why adding
+    # those two files was all it took.
+    assert mac == ["align", "asr", "llm", "rvc", "server", "tts"]
 
 
 def test_smoke_table_covers_every_installable_name() -> None:
@@ -117,14 +119,16 @@ def test_the_server_pack_lands_beside_the_envs_not_inside_them() -> None:
     )
 
 
-def test_every_pack_is_ten_rows_across_two_backends() -> None:
+def test_every_pack_is_twelve_rows_across_two_backends() -> None:
     rows = envpack.every_pack()
-    assert len(rows) == len(set(rows)) == 10
+    assert len(rows) == len(set(rows)) == 12
 
 
 def test_a_pack_nobody_publishes_is_refused_by_name() -> None:
+    """`tts-higgs-v3` is cuda-linux's pack name; the Mac's is plain `tts`,
+    because on that backend every narrator engine resolves to one env."""
     with pytest.raises(PackError) as caught:
-        envpack.pack_target("asr", "mlx-darwin")
+        envpack.pack_target("tts-higgs-v3", "mlx-darwin")
     assert caught.value.code == "pack_unknown"
     assert "'llm'" in caught.value.message
 
@@ -813,7 +817,14 @@ def test_envpack_list_names_every_pack(
     )
     assert cli.main(["envpack", "list", "--backend", "mlx-darwin", "--json"]) == 0
     rows = json.loads(capsys.readouterr().out)
-    assert {row["name"] for row in rows} == {"server", "llm", "rvc", "tts"}
+    assert {row["name"] for row in rows} == {
+        "server",
+        "llm",
+        "rvc",
+        "tts",
+        "align",
+        "asr",
+    }
 
 
 def test_a_host_with_no_zstd_is_refused_before_anything_is_downloaded(
@@ -868,18 +879,21 @@ def test_install_refuses_a_pack_this_release_does_not_publish(
     assert "pack_not_published" in capsys.readouterr().err
 
 
-def test_the_mac_still_gets_the_recipe_refusal_not_a_pack_one(
+def test_a_type_with_no_recipe_gets_the_recipe_refusal_not_a_pack_one(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Why the recipe is resolved before the pack table is asked.
 
-    "There is no pack called 'align'" is true and useless; "CTranslate2 has no
-    Metal backend, this build ships cuda-linux" is the answer.
+    "There is no pack called 'align'" is true and useless; naming the backends
+    whose recipes this build ships is the answer. The Mac stopped being the
+    example on 2026-09-14 — it has both recipes now — so the case is made with
+    a backend that has none of them.
     """
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    windows = replace(FAKE_MAC_BACKEND, kind="llama-windows", platform="win32")
+    monkeypatch.setattr(cli, "detect_backend", lambda: windows)
     assert cli.main(["init", "--enable-align"]) == 0
     capsys.readouterr()
     assert cli.main(["install", "align"]) == 1
     error = capsys.readouterr().err
-    assert "no align env recipe for backend 'mlx-darwin'" in error
+    assert "no align env recipe for backend 'llama-windows'" in error
     assert "pack_unknown" not in error

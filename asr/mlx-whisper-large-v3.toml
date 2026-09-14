@@ -1,0 +1,52 @@
+# mlx-whisper large-v3 — the most accurate and the slowest.
+#
+# The most accurate and, on this backend, by far the slowest — 6.3x realtime
+# against turbo's 25.4x for the same 128-mel encoder. An 18-hour book is about
+# three hours of Mac. That is the trade this id exists to offer; it is not a
+# defect and it is measured below.
+#
+# THE MAC'S WHISPER IS A DIFFERENT ENGINE, NOT A SECOND RECIPE. faster-whisper
+# is CTranslate2 and CTranslate2 has no Metal backend, so there is no
+# `[backends.mlx-darwin]` on any `asr/faster-whisper-*.toml` and there never
+# will be. These are `mlx-community`'s own conversions: different bytes,
+# different quantisation, a different library. The id says `mlx-whisper-` for
+# that reason — two sets of weights at one id would be a lie about what
+# produced a transcript, and `transcript.json` records the id.
+#
+# repo/revision, read from the hub's API on 2026-09-14 and verified twice:
+#   GET /api/models/mlx-community/whisper-large-v3-mlx/refs        -> main = the sha below
+#   GET /api/models/mlx-community/whisper-large-v3-mlx/tree/<sha>?recursive=1
+#     -> 4 files, 3,083,522,487 B in total,
+#        of which weights.npz is 3,083,520,416 B
+
+[model]
+id = "mlx-whisper-large-v3"
+family = "mlx-whisper"
+parameters_m = 1550
+
+[backends.mlx-darwin]
+engine = "mlx-whisper"
+hf_repo = "mlx-community/whisper-large-v3-mlx"
+revision = "49e6aa286ad60c14352c404340ded53710378a11"
+# MEASURED, on the machine it is for, 2026-09-14. Not arithmetic and not the
+# faster-whisper row's "weights plus a declared 1.5 GiB" — that allowance was
+# written for a CUDA context and cuBLAS/cuDNN workspaces, none of which exist
+# here.
+#
+#   the host      Mac Studio, M1 Ultra, 64 GiB unified, macOS 26.3.1
+#   the env       a scratch python 3.11.16 built from `envs/asr/mlx-darwin.txt`
+#                 exactly, and deleted afterwards
+#   what was run  `mlx_whisper.transcribe(audio, path_or_hf_repo=<the snapshot
+#                 of this revision>, word_timestamps=True)` over ONE 900-second
+#                 window — WINDOW_SECONDS, the size `crucible/jobs/asr` cuts
+#                 every book into, so this is the shape of one real unit of
+#                 work and not a toy. The audio was a real 75 s narration clip
+#                 decoded to 16 kHz mono and tiled.
+#   the figure    `mx.get_peak_memory()` immediately after the call, having
+#                 called `mx.reset_peak_memory()` before the load. It is MLX's
+#                 own high-water for the process, which on unified memory is
+#                 the number the guard is comparing against.
+#   what it said  weights resident (active) 3,087,532,938 B
+#                 PEAK over the window       4,153,379,610 B
+#                 the window took            142.01 s, i.e. 6.3x realtime
+memory_bytes_estimate = 4153379610

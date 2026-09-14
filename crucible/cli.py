@@ -793,9 +793,13 @@ def _install_worker_env(
     if not status.installed:
         return _fail(f"the env did not come out installed: {status.detail}")
     print(f"installed in {elapsed:.0f}s: {status.detail}")
-    headline = workerenv.HEADLINE_PACKAGE[args.job_type]
+    headline = workerenv.headline_package(args.job_type, backend.kind)
     for name in sorted(status.packages):
-        if name in (headline, "ctranslate2", "numpy", "onnxruntime"):
+        # The headline plus the packages whose version is the thing most
+        # likely to be quietly wrong. `mlx` is here for the same reason
+        # `ctranslate2` is: it is the engine under the headline, and an
+        # mlx that resolved differently is a different numerical path.
+        if name in (headline, "ctranslate2", "mlx", "numpy", "onnxruntime"):
             print(f"  {name}=={status.packages[name]}")
     # One env can serve more than one job type — `rvc`'s also carries
     # audio-separator, which is `denoise` — and the flag for each of them is

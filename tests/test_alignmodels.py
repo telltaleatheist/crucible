@@ -107,12 +107,18 @@ def test_the_mac_recipe_is_there_and_its_note_says_what_is_still_owed() -> None:
     envs = align_manifests_dir().parent / "envs" / "align"
     recipe = envs / "mlx-darwin.txt"
     assert recipe.is_file()
-    pins = recipe.read_text(encoding="utf-8")
-    assert "qwen-asr==0.0.6" in pins
-    assert "torch==2.14.0" in pins
-    # It is a Mac recipe: nothing CUDA survived the read.
-    assert "nvidia-" not in pins
-    assert "triton==" not in pins
+    lines = [
+        line
+        for line in recipe.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert "qwen-asr==0.0.6" in lines
+    assert "torch==2.14.0" in lines
+    # It is a Mac recipe: no CUDA wheel survived the read. Read off the PINS
+    # and not the whole file, because the header explains at length which
+    # `nvidia-*` lines are absent and why.
+    assert not [line for line in lines if line.startswith(("nvidia-", "cuda-"))]
+    assert not [line for line in lines if line.startswith("triton==")]
     note = (envs / "mlx-darwin.md").read_text(encoding="utf-8")
     assert "Compare the timestamps" in note
     assert "97x realtime" in note

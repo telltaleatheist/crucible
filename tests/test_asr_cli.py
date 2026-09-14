@@ -71,16 +71,22 @@ def test_doctor_says_nothing_about_asr_when_it_is_off(
     assert report["worker_envs"] == []
 
 
-def test_installing_asr_on_the_mac_refuses_and_names_what_ships(
-    home: Path, mac: None, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """There is no mlx-darwin recipe, and the reason is CTranslate2's."""
-    assert cli.main(["init", "--enable-asr"]) == 0
-    capsys.readouterr()
-    assert cli.main(["install", "asr"]) == 1
-    error = capsys.readouterr().err
-    assert "no asr env recipe for backend 'mlx-darwin'" in error
-    assert "['cuda-linux']" in error
+def test_the_mac_asr_recipe_installs_mlx_whisper_and_not_faster_whisper() -> None:
+    """The Mac stopped being a refusal on 2026-09-14: it has an `asr` recipe.
+
+    A recipe with a DIFFERENT headline package, which is the thing worth
+    asserting — `crucible doctor` reads that name to describe the env, and
+    before the table was keyed by backend it would have looked in the mlx
+    recipe for faster-whisper and refused an env that was perfectly good.
+    """
+    from crucible import workerenv
+
+    assert workerenv.headline_package("asr", "mlx-darwin") == "mlx-whisper"
+    recipe = workerenv.recipe_for("asr", "mlx-darwin")
+    pins = workerenv.recipe_pins(recipe)
+    assert pins["mlx-whisper"] == "0.4.3"
+    assert "faster-whisper" not in pins
+    assert "ctranslate2" not in pins
 
 
 def test_models_list_covers_both_manifest_directories(
@@ -120,25 +126,31 @@ def test_one_id_declared_twice_is_refused_rather_than_resolved(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """`crucible models pull <id>` is one question; two answers is not an answer."""
-    clashing = tmp_path / "asr-fixture"
+    # The clash is made on the `models/` side, because an `asr/` manifest can
+    # no longer take an arbitrary id: the loader requires it to name its engine
+    # (`faster-whisper-` or `mlx-whisper-`), so the collision has to come from
+    # the other directory.
+    clashing = tmp_path / "models-fixture"
     clashing.mkdir()
-    (clashing / "qwen3.5-9b.toml").write_text(
+    (clashing / "faster-whisper-base.toml").write_text(
         """
 [model]
-id = "qwen3.5-9b"
-family = "faster-whisper"
-parameters_m = 74
+id = "faster-whisper-base"
+family = "qwen3.5"
+params_b = 9
+context_default = 4096
+modalities = ["text"]
 
 [backends.cuda-linux]
-engine = "faster-whisper"
-hf_repo = "Systran/faster-whisper-base"
+engine = "vllm"
+hf_repo = "Qwen/Qwen3.5-9B"
 revision = "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66"
 memory_bytes_estimate = 1755830268
 """,
         encoding="utf-8",
     )
-    monkeypatch.setenv("CRUCIBLE_ASR_DIR", str(clashing))
+    monkeypatch.setenv("CRUCIBLE_MODELS_DIR", str(clashing))
     assert cli.main(["init"]) == 0
     capsys.readouterr()
-    assert cli.main(["models", "pull", "qwen3.5-9b"]) == 1
+    assert cli.main(["models", "pull", "faster-whisper-base"]) == 1
     assert "a model id names one model" in capsys.readouterr().err

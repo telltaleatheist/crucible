@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from . import jobenv
+from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
 
 RECIPES_DIR_ENV = "CRUCIBLE_WORKER_RECIPES_DIR"
@@ -44,14 +45,37 @@ RECIPES_DIR_ENV = "CRUCIBLE_WORKER_RECIPES_DIR"
 #: pack and a pip build cannot leave two different files behind.
 ENV_STAMP_NAME = jobenv.ENV_STAMP_NAME
 
-#: What `crucible doctor` and `crucible install <type>` report the version of: the
-#: one library the env exists for, so a half-built or wrong-backend env is obvious
-#: at a glance rather than after a 3 GB model pull.
-HEADLINE_PACKAGE: dict[str, str] = {
-    "align": "qwen-asr",
-    "asr": "faster-whisper",
-    "rvc": "ultimate-rvc",
+#: What `crucible doctor` and `crucible install <type>` report the version of:
+#: the one library the env exists for, so a half-built or wrong-backend env is
+#: obvious at a glance rather than after a 3 GB model pull.
+#:
+#: PER (JOB TYPE, BACKEND), since 2026-09-14, because `asr` stopped having one
+#: answer: `cuda-linux` installs faster-whisper (CTranslate2) and `mlx-darwin`
+#: installs mlx-whisper (MLX), and they are two libraries rather than two builds
+#: of one. The other two types have one library on both backends and say so by
+#: repeating it — written out rather than defaulted, because "this type has the
+#: same headline everywhere" is a fact about those recipes and not a rule, and
+#: the next type to gain a second engine must be a KeyError here rather than a
+#: doctor line quietly naming a package the env does not contain.
+HEADLINE_PACKAGE: dict[tuple[str, str], str] = {
+    ("align", CUDA_LINUX): "qwen-asr",
+    ("align", MLX_DARWIN): "qwen-asr",
+    ("asr", CUDA_LINUX): "faster-whisper",
+    ("asr", MLX_DARWIN): "mlx-whisper",
+    ("rvc", CUDA_LINUX): "ultimate-rvc",
+    ("rvc", MLX_DARWIN): "ultimate-rvc",
 }
+
+
+def headline_package(job_type: str, backend_kind: str) -> str:
+    """The library this env exists for. Refuses a pair nobody has decided."""
+    found = HEADLINE_PACKAGE.get((job_type, backend_kind))
+    if found is None:
+        raise WorkerEnvError(
+            f"no headline package for the {job_type!r} env on {backend_kind!r}; "
+            f"this build knows {sorted(HEADLINE_PACKAGE)}"
+        )
+    return found
 
 #: Job types that have a worker env at all. `llm` is deliberately absent: it is
 #: `jobenv`'s, until the two modules are merged. `denoise` is absent for a
@@ -389,7 +413,7 @@ def env_status(home: Path, job_type: str, backend_kind: str) -> EnvStatus:
             pack_sha256=pack_sha256,
             recipe_sha256=recipe_sha256,
         )
-    headline = HEADLINE_PACKAGE[job_type]
+    headline = headline_package(job_type, backend_kind)
     if headline in references:
         # A git install. `pip list` reports the version the project DECLARES,
         # which for `ultimate-rvc` is 0.5.11 for both Owen's fork and the PyPI

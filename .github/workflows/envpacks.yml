@@ -34,20 +34,30 @@
 # figure came from, per pack:
 #
 #   asr   6  MEASURED on Owen's PC, 2026-09-14 (docs/PHASE14-ENVPACKS.md §7).
+#            The cuda number only. The mlx-darwin asr pack is a DIFFERENT
+#            recipe with a different engine and its own figure below.
 #   server 2 MEASURED the same way: CPython plus fastapi and httpx.
 #   align 20 ESTIMATED from the recipe (one torch + transformers + librosa).
 #   rvc   24 ESTIMATED from the recipe (torch cu128 + audio-separator + onnx).
 #   tts-* 30 ESTIMATED from the recipe (torch + vllm + vllm-omni + narrator).
 #   llm   30 ESTIMATED from the recipe (torch + vllm).
 #
-#   The mlx-darwin row added 2026-09-14 is ESTIMATED the same way and
-#   labelled the same way — it has not been built on a runner:
+#   The two mlx-darwin rows added 2026-09-14 are ESTIMATED the same way and
+#   labelled the same way — neither has been built on a runner:
 #
 #   align/mlx-darwin 12  ESTIMATED. The recipe is cuda's minus the 19
 #                        `nvidia-*`/`cuda-*` wheels and triton, which is most
 #                        of what makes the cuda align pack want 20 GB; what
 #                        is left is one macOS torch plus transformers,
 #                        librosa and gradio.
+#   asr/mlx-darwin   12  ESTIMATED. mlx-whisper itself is tiny, but it
+#                        DECLARES torch and the macOS arm64 torch wheel is
+#                        the bulk of the tree; the cuda asr pack's measured
+#                        6 GB does not transfer, because CTranslate2 is not
+#                        torch. The env was built for real on Owen's Mac on
+#                        2026-09-14 to take the seven manifests'
+#                        measurements — what was not measured is the PACK,
+#                        which is why this stays an estimate.
 #
 # The four ESTIMATES are labelled as estimates on purpose and none of them has
 # been built on a runner. If one does not fit, its job fails with the sentence
@@ -94,6 +104,7 @@ jobs:
           - { name: server,       backend: mlx-darwin,  runner: macos-14,      needs_gb: 2 }
           - { name: rvc,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 20 }
           - { name: align,        backend: mlx-darwin,  runner: macos-14,      needs_gb: 12 }
+          - { name: asr,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 12 }
           - { name: llm,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 10 }
           - { name: tts,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 25 }
     steps:

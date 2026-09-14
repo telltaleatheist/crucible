@@ -53,21 +53,36 @@ def test_the_align_recipe_is_all_version_pins() -> None:
     assert pins["torch"] == "2.14.0"
 
 
-def test_every_worker_job_type_has_a_headline_package() -> None:
-    """`crucible doctor` reads it to describe the env at a glance, and a type
-    without one is a KeyError in the doctor rather than a message."""
+def test_every_recipe_that_ships_has_a_headline_package() -> None:
+    """`crucible doctor` reads it to describe the env at a glance.
+
+    Per (job type, BACKEND), since `asr` gained a second engine: cuda-linux
+    installs faster-whisper and mlx-darwin installs mlx-whisper. A recipe file
+    with no entry here would be a KeyError in the doctor rather than a message,
+    so the test walks the recipes that exist rather than the job types.
+    """
     for job_type in workerenv.WORKER_JOB_TYPES:
-        assert job_type in workerenv.HEADLINE_PACKAGE
+        for path in workerenv.recipes_dir(job_type).glob("*.txt"):
+            assert (job_type, path.stem) in workerenv.HEADLINE_PACKAGE, path
 
 
 def test_every_headline_package_is_in_its_own_recipe() -> None:
+    """The one that would have shipped a broken Mac `asr` env: before the table
+    was keyed by backend, `envs/asr/mlx-darwin.txt` was checked for
+    faster-whisper, which it will never contain."""
     for job_type in workerenv.WORKER_JOB_TYPES:
-        headline = workerenv.HEADLINE_PACKAGE[job_type]
         for path in workerenv.recipes_dir(job_type).glob("*.txt"):
+            headline = workerenv.headline_package(job_type, path.stem)
             named = set(workerenv.recipe_pins(path)) | set(
                 workerenv.recipe_direct_refs(path)
             )
             assert headline in named, f"{path.name} does not install {headline}"
+
+
+def test_a_pair_nobody_decided_is_refused_by_name() -> None:
+    with pytest.raises(workerenv.WorkerEnvError) as caught:
+        workerenv.headline_package("asr", "llama-windows")
+    assert "no headline package" in str(caught.value)
 
 
 # ------------------------------------------------------------------ refusals

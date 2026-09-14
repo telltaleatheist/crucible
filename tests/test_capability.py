@@ -211,23 +211,37 @@ def test_a_disabled_class_records_the_number_that_disabled_it() -> None:
     assert verdict.shortfall_bytes < max(sizes) - (tiny_card - CUDA_RESERVE)
 
 
-def test_asr_has_no_mac_candidates_and_says_which_it_is() -> None:
+def test_asr_and_align_are_both_enabled_on_the_studio() -> None:
+    """Both stopped being the Mac's missing manifests on 2026-09-14.
+
+    They got there differently and the selections say so: `align` runs the SAME
+    engine on `mps`, so the Mac's candidate is the id the card already used;
+    `asr` runs a SECOND engine, so its candidates are ids the card has never
+    heard of and best-first picks the largest mlx conversion.
+    """
+    align = _decide("align", "mlx-darwin", STUDIO, MAC_RESERVE)
+    assert align.enabled is True
+    assert align.selected == "qwen3-aligner"
+
+    asr = _decide("asr", "mlx-darwin", STUDIO, MAC_RESERVE)
+    assert asr.enabled is True
+    assert asr.selected == "mlx-whisper-large-v3"
+    assert all(c.id.startswith("mlx-whisper-") for c in asr.candidates)
+    # And the card's six are not among them, which is the id rule showing up
+    # where a client would notice it.
+    assert not any(c.id.startswith("faster-whisper-") for c in asr.candidates)
+
+
+def test_a_class_with_nothing_on_this_backend_still_says_which_it_is() -> None:
     """"nothing this build can serve here" and "it does not fit" are different
-    facts about a host, and a reader who cannot tell them apart goes looking for a
-    bigger Mac to fix a missing manifest."""
-    verdict = _decide("asr", "mlx-darwin", STUDIO, MAC_RESERVE)
+    facts about a host, and a reader who cannot tell them apart goes looking
+    for a bigger Mac to fix a missing manifest. `pages` is the class that still
+    reads that way on the Mac — see docs/PHASE15-HOST.md 7c."""
+    verdict = _decide("pages", "mlx-darwin", STUDIO, MAC_RESERVE)
     assert verdict.enabled is False
     assert verdict.candidates == ()
     assert verdict.shortfall_bytes == 0
     assert "ships none with a mlx-darwin block" in verdict.reason
-
-
-def test_align_is_enabled_on_the_studio() -> None:
-    """`align` stopped being the Mac's missing manifest on 2026-09-14: the
-    aligner is plain torch, torch runs on Metal, and the block is there."""
-    verdict = _decide("align", "mlx-darwin", STUDIO, MAC_RESERVE)
-    assert verdict.enabled is True
-    assert verdict.selected == "qwen3-aligner"
 
 
 def test_echo_needs_no_accelerator_and_is_never_disabled_by_a_card() -> None:
