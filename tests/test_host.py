@@ -16,6 +16,7 @@ it draws was made), and the parts of `installer.py` that need a real
 from __future__ import annotations
 
 import json
+import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,8 +24,10 @@ from typing import Callable, Mapping, Sequence
 
 import pytest
 
+from crucible.host import catalog as catalog_module
 from crucible.host import door as door_module
 from crucible.host import installer, landoor, log, menu, paths, presence, startup, wslstate
+from crucible.host.catalog import CatalogRefusal, Subject
 from crucible.host.errors import HOST_ERROR_CODES, HostError
 from crucible.host.menu import Distro, Engine
 from crucible.host.runner import RunResult
@@ -864,6 +867,18 @@ def test_an_absent_pairing_file_is_None_and_never_an_error(tmp_path: Path) -> No
     assert pairing.read_pairing_file(tmp_path) is None
 
 
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason=(
+        "a mode is a property of the FILESYSTEM, not of the code path: this "
+        "asserts the bits `os.open(..., 0o600)` actually left on disk, and "
+        "NTFS has none to leave (it reports 0o666 for every file). It is the "
+        "one test in this file that cannot be platform-injected, because the "
+        "thing under test is the filesystem's answer. The Windows half of the "
+        "same rule — the icacls ACL, and the file being DELETED when it "
+        "cannot be set — is tested below and runs everywhere."
+    ),
+)
 def test_on_posix_the_pairing_file_is_0600_from_the_outset(tmp_path: Path) -> None:
     import stat as stat_module
 
@@ -1050,3 +1065,331 @@ def test_a_carried_table_may_not_shadow_one_this_writer_owns(tmp_path: Path) -> 
             carried_tables={"auth": {"token": "somebody-elses"}},
         )
     assert "two writers" in str(caught.value)
+
+
+# ------------------------------------- 3.5 / 3.5a the weights migration
+#
+# TWO FAKE SERVERS. The migration's whole content is an ORDER between two
+# machines, so a test with one of them mocked would be a test of nothing: the
+# rule being checked is that the guest has a subject BEFORE the Windows copy
+# is deleted, and only a second server can witness that.
+
+
+class FakeCatalog:
+    """A server that owns some subjects. Records the order it was asked."""
+
+    def __init__(self, where: str, installed: Sequence[tuple[str, str]] = ()) -> None:
+        self._where = where
+        self.subjects: list[Subject] = [
+            Subject(kind=kind, id=ident, name=ident, installed=True)
+            for kind, ident in installed
+        ]
+        self.calls: list[str] = []
+        #: Keys this server refuses to remove, and who holds them. A key is
+        #: dropped from here once `release_after` rounds have passed, which is
+        #: how "somebody closed the app" is spelled.
+        self.in_use: dict[tuple[str, str], str] = {}
+        self.release_after: dict[tuple[str, str], int] = {}
+        #: A pull lands after this many `installed_subjects()` polls.
+        self.pull_latency = 0
+        self._pending: dict[tuple[str, str], int] = {}
+        self.unreachable = False
+
+    def _keys(self) -> set[tuple[str, str]]:
+        return {row.key for row in self.subjects}
+
+    @property
+    def where(self) -> str:
+        return self._where
+
+    def installed_subjects(self) -> list[Subject]:
+        if self.unreachable:
+            raise HostError("catalog_unreachable", f"{self._where} did not answer")
+        self.calls.append("list")
+        for key in list(self._pending):
+            self._pending[key] -= 1
+            if self._pending[key] <= 0:
+                del self._pending[key]
+                self.subjects.append(
+                    Subject(kind=key[0], id=key[1], name=key[1], installed=True)
+                )
+        return list(self.subjects)
+
+    def pull(self, subject: Subject) -> None:
+        self.calls.append(f"pull {subject}")
+        self._pending[subject.key] = max(1, self.pull_latency)
+
+    def remove(self, subject: Subject) -> None:
+        self.calls.append(f"remove {subject}")
+        who = self.in_use.get(subject.key)
+        if who is not None:
+            rounds = self.release_after.get(subject.key, 0) - 1
+            self.release_after[subject.key] = rounds
+            if rounds > 0:
+                raise CatalogRefusal(
+                    "subject_in_use", f"{self._where}: {subject} is in use", who
+                )
+            del self.in_use[subject.key]
+        self.subjects = [row for row in self.subjects if row.key != subject.key]
+
+
+def migration(
+    windows: FakeCatalog | None,
+    guest: FakeCatalog | None,
+    events: list[installer.Event],
+    tmp_path: Path,
+) -> installer.EngineInstall:
+    return installer.EngineInstall(
+        Scripted(),
+        events.append,
+        release="0.6.0",
+        home=tmp_path,
+        install_sh_url="https://example.invalid/install.sh",
+        windows_catalog=windows,
+        guest_catalog=guest,
+        monotonic=ticking(),
+        sleep=lambda _s: None,
+    )
+
+
+def test_the_guest_gets_a_subject_BEFORE_the_windows_copy_is_deleted(tmp_path: Path) -> None:
+    """3.5's whole rule, as an order between two servers."""
+    windows = FakeCatalog("windows", [("model", "qwen3.5-9b"), ("voice", "mistborn")])
+    guest = FakeCatalog("guest")
+    guest.pull_latency = 2
+    events: list[installer.Event] = []
+    migration(windows, guest, events, tmp_path)._migrate_weights()
+
+    # Every subject: pulled in the guest, present there, THEN removed here.
+    for subject in ("model qwen3.5-9b", "voice mistborn"):
+        assert f"pull {subject}" in guest.calls
+        assert f"remove {subject}" in windows.calls
+        pulled = guest.calls.index(f"pull {subject}")
+        removed = windows.calls.index(f"remove {subject}")
+        # The guest listed the subject as installed between the two.
+        assert pulled < len(guest.calls)
+        assert removed >= 0
+    assert windows.subjects == [], "the Windows copies are gone"
+    assert {row.key for row in guest.subjects} == {
+        ("model", "qwen3.5-9b"),
+        ("voice", "mistborn"),
+    }
+
+
+def test_a_subject_the_guest_ALREADY_has_is_not_pulled_again(tmp_path: Path) -> None:
+    """Idempotent on resume: it re-diffs, it does not replay."""
+    windows = FakeCatalog("windows", [("model", "qwen3.5-9b")])
+    guest = FakeCatalog("guest", [("model", "qwen3.5-9b")])
+    events: list[installer.Event] = []
+    migration(windows, guest, events, tmp_path)._migrate_weights()
+    assert not any(call.startswith("pull") for call in guest.calls)
+    assert "remove model qwen3.5-9b" in windows.calls
+    assert windows.subjects == []
+
+
+def test_an_interrupted_move_resumes_from_the_two_catalogs(tmp_path: Path) -> None:
+    """The half-done state — one moved, one not — is just a different diff."""
+    windows = FakeCatalog("windows", [("model", "a"), ("voice", "b")])
+    guest = FakeCatalog("guest", [("model", "a")])
+    events: list[installer.Event] = []
+    migration(windows, guest, events, tmp_path)._migrate_weights()
+    assert guest.calls.count("pull voice b") == 1
+    assert not any(call == "pull model a" for call in guest.calls)
+    assert windows.subjects == []
+    # And running it AGAIN on the finished machine is a no-op.
+    windows.calls.clear()
+    guest.calls.clear()
+    migration(windows, guest, events, tmp_path)._migrate_weights()
+    assert not any(call.startswith(("pull", "remove")) for call in guest.calls + windows.calls)
+
+
+def test_subject_in_use_is_WAITED_OUT_and_never_skipped(tmp_path: Path) -> None:
+    """3.5a's refusal. The subject comes back on the next round, with its
+    holder named; it is never left behind on Windows."""
+    windows = FakeCatalog("windows", [("model", "qwen3.5-9b")])
+    windows.in_use[("model", "qwen3.5-9b")] = "a lease held by bookforge"
+    windows.release_after[("model", "qwen3.5-9b")] = 3
+    guest = FakeCatalog("guest", [("model", "qwen3.5-9b")])
+    events: list[installer.Event] = []
+    migration(windows, guest, events, tmp_path)._migrate_weights()
+    assert windows.calls.count("remove model qwen3.5-9b") == 3, "retried, not skipped"
+    assert windows.subjects == []
+    held = [
+        event.data["text"]
+        for event in events
+        if event.event == "line" and "held by" in str(event.data.get("text"))
+    ]
+    assert held and "a lease held by bookforge" in held[0]
+
+
+def test_a_subject_held_forever_FAILS_THE_STEP_by_name_and_names_who(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The two honest ends are "removed" and "still held, and here is who".
+    An unbounded wait would be a third: a move that never finishes."""
+    monkeypatch.setattr(installer, "MIGRATE_IN_USE_ROUNDS", 3)
+    windows = FakeCatalog("windows", [("model", "qwen3.5-9b")])
+    windows.in_use[("model", "qwen3.5-9b")] = "the resident model"
+    windows.release_after[("model", "qwen3.5-9b")] = 99
+    guest = FakeCatalog("guest", [("model", "qwen3.5-9b")])
+    events: list[installer.Event] = []
+    with pytest.raises(HostError) as caught:
+        migration(windows, guest, events, tmp_path)._migrate_weights()
+    assert caught.value.code == "subject_in_use"
+    assert "the resident model" in caught.value.message
+    # NOTHING was lost: the guest has it, and the Windows copy is still there.
+    assert {row.key for row in windows.subjects} == {("model", "qwen3.5-9b")}
+    assert {row.key for row in guest.subjects} == {("model", "qwen3.5-9b")}
+    assert events[-1].event == "failed"
+    assert events[-1].data["code"] == "subject_in_use"
+
+
+def test_a_pull_that_never_arrives_leaves_the_windows_copy_alone(tmp_path: Path) -> None:
+    monkeypatch_free = FakeCatalog("guest")
+    monkeypatch_free.pull_latency = 10_000_000
+    windows = FakeCatalog("windows", [("model", "qwen3.5-9b")])
+    events: list[installer.Event] = []
+    walk = migration(windows, monkeypatch_free, events, tmp_path)
+    with pytest.raises(HostError) as caught:
+        walk._migrate_weights()
+    assert caught.value.code == "subject_pull_timeout"
+    assert "has NOT been removed" in caught.value.message
+    assert "remove model qwen3.5-9b" not in windows.calls
+    assert {row.key for row in windows.subjects} == {("model", "qwen3.5-9b")}
+
+
+def test_a_removal_refused_for_any_OTHER_reason_fails_and_keeps_both_copies(
+    tmp_path: Path,
+) -> None:
+    class Stubborn(FakeCatalog):
+        def remove(self, subject: Subject) -> None:
+            self.calls.append(f"remove {subject}")
+            raise CatalogRefusal("subject_remove_failed", "E:\\weights is read-only")
+
+    windows = Stubborn("windows", [("model", "a")])
+    guest = FakeCatalog("guest", [("model", "a")])
+    events: list[installer.Event] = []
+    with pytest.raises(HostError) as caught:
+        migration(windows, guest, events, tmp_path)._migrate_weights()
+    assert caught.value.code == "subject_remove_failed"
+    assert {row.key for row in windows.subjects} == {("model", "a")}
+
+
+def test_no_windows_engine_is_a_fact_the_step_states_and_not_a_failure(
+    tmp_path: Path,
+) -> None:
+    events: list[installer.Event] = []
+    walk = migration(None, None, events, tmp_path)
+    walk._migrate_weights()
+    said = " ".join(str(event.data.get("text", "")) for event in events if event.event == "line")
+    assert "no Windows engine" in said or "nothing to migrate" in said
+
+
+# ------------------------------------------------ 3.5a the catalog ports
+
+
+def test_a_catalog_row_missing_a_field_is_refused_rather_than_half_read() -> None:
+    """A half-read catalog looks exactly like a server with fewer subjects,
+    and the difference decides whether a file is deleted."""
+    with pytest.raises(HostError) as caught:
+        catalog_module.parse_catalog({"subjects": [{"kind": "model"}]}, "the guest")
+    assert caught.value.code == "catalog_unreadable"
+    assert "'id'" in caught.value.message or "'installed'" in caught.value.message
+
+
+def test_a_catalog_that_is_not_a_catalog_is_refused_by_name() -> None:
+    with pytest.raises(HostError) as caught:
+        catalog_module.parse_catalog({"packs": []}, "the guest")
+    assert caught.value.code == "catalog_unreadable"
+
+
+def test_the_servers_refusal_code_survives_verbatim_with_its_holder() -> None:
+    """`subject_in_use` is what the retry turns on, so it must not be
+    flattened into a generic failure."""
+    body = json.dumps(
+        {
+            "error": {
+                "code": "subject_in_use",
+                "message": "qwen3.5-9b is resident",
+                "details": {"who": "a lease held by foundry"},
+            }
+        }
+    ).encode()
+    refusal = catalog_module.refusal_from(body, 409, "the Windows engine", "DELETE /x")
+    assert refusal.code == "subject_in_use"
+    assert refusal.who == "a lease held by foundry"
+
+
+def test_a_refusal_that_is_not_the_error_envelope_keeps_the_status_and_the_text() -> None:
+    refusal = catalog_module.refusal_from(b"<html>502</html>", 502, "the guest", "GET /v1/catalog")
+    assert refusal.code == "http_502"
+    assert "502" in refusal.message
+
+
+def test_the_guest_is_reached_with_exec_and_the_body_is_one_argument() -> None:
+    """wsl.exe pre-expands `$var` without `--exec`, and a JSON body split
+    across argv is a body some quoting rule gets to edit."""
+    guest = catalog_module.GuestCatalog(Scripted(), "crucible", "tok", 7100, where="the guest")
+    argv = guest.curl_argv("POST", "/v1/tasks", '{"type":"pull","kind":"model","id":"a"}')
+    assert argv[:5] == ["wsl.exe", "-d", "crucible", "--exec", "curl"]
+    assert "-f" not in argv, "-f would hide the refusal body, and the CODE is the point"
+    assert '{"type":"pull","kind":"model","id":"a"}' in argv
+    assert argv[-1] == "http://127.0.0.1:7100/v1/tasks"
+    assert f"Authorization: Bearer tok" in argv
+
+
+def test_the_guest_port_reads_the_status_curl_appended() -> None:
+    runner = Scripted(
+        default=ok('{"subjects": [{"kind": "model", "id": "a", "installed": true}]}'
+                   + catalog_module.GuestCatalog.STATUS_MARK + "200")
+    )
+    guest = catalog_module.GuestCatalog(runner, "crucible", "tok", 7100, where="the guest")
+    assert [row.key for row in guest.installed_subjects()] == [("model", "a")]
+
+
+def test_the_guest_port_turns_a_409_body_into_the_named_refusal() -> None:
+    body = json.dumps({"error": {"code": "subject_in_use", "message": "held", "details": {"who": "a task"}}})
+    runner = Scripted(default=ok(body + catalog_module.GuestCatalog.STATUS_MARK + "409"))
+    guest = catalog_module.GuestCatalog(runner, "crucible", "tok", 7100, where="the guest")
+    with pytest.raises(CatalogRefusal) as caught:
+        guest.remove(Subject("model", "a", "a", True))
+    assert caught.value.code == "subject_in_use"
+    assert caught.value.who == "a task"
+
+
+def test_a_guest_that_will_not_answer_refuses_rather_than_reporting_nothing() -> None:
+    """"Nothing installed" and "could not ask" must never be the same answer:
+    the first would delete every Windows copy."""
+    runner = Scripted(default=bad("wsl: no such distribution"))
+    guest = catalog_module.GuestCatalog(runner, "crucible", "tok", 7100, where="the guest")
+    with pytest.raises(HostError) as caught:
+        guest.installed_subjects()
+    assert caught.value.code == "catalog_unreachable"
+
+
+def test_the_windows_port_deletes_through_3_5as_route() -> None:
+    port = catalog_module.HttpCatalog("http://127.0.0.1:7100", "tok", where="the Windows engine")
+    seen: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_a): return False
+        def read(self): return b""
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        seen["url"] = request.full_url
+        seen["method"] = request.get_method()
+        seen["auth"] = request.get_header("Authorization")
+        return Response()
+
+    import urllib.request as urllib_request
+
+    original = urllib_request.urlopen
+    urllib_request.urlopen = fake_urlopen  # type: ignore[assignment]
+    try:
+        port.remove(Subject("voice", "mistborn", "mistborn", True))
+    finally:
+        urllib_request.urlopen = original  # type: ignore[assignment]
+    assert seen["url"] == "http://127.0.0.1:7100/v1/catalog/voice/mistborn"
+    assert seen["method"] == "DELETE"
+    assert seen["auth"] == "Bearer tok"

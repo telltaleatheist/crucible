@@ -32,12 +32,14 @@ from typing import Callable
 
 from .. import VERSION
 from . import installer, menu, startup
+from .catalog import CatalogPort, GuestCatalog, HttpCatalog
 from .door import InstallDoor, serve
 from .errors import HostError
 from .log import HostLog
 from .menu import Distro, Engine
 from .paths import (
     CONSOLE_CMD,
+    ENGINE_PORT,
     console_cmd_path,
     crucible_root,
     engine_url,
@@ -47,6 +49,7 @@ from .paths import (
 )
 from .presence import Presence, PresenceWatcher
 from .runner import ProcessRunner, Runner
+from .wsl_states import CRUCIBLE_DISTRO
 
 #: A second tray is refused by a file, not by a mutex: the file NAMES the
 #: process that holds it, so "another one is running" is a sentence with a pid
@@ -370,13 +373,41 @@ def run(argv: list[str] | None = None) -> int:
 
 
 def _sequence(context: HostContext) -> Callable[[Callable[[installer.Event], None]], None]:
+    """Bind the install sequence to THIS host's two servers.
+
+    The catalogs are built per RUN and not once at startup, because the token
+    they both use is the one the config has at the moment the move begins —
+    and `migrate-config`, a few steps earlier in that same run, is what makes
+    the guest's token the Windows one. A port that captured a token at tray
+    start would be a port holding a token the guest never had.
+
+    `None` for either side is a fact rather than a fallback: a machine with no
+    Windows config has no Windows engine, so there is no catalog to move from
+    and `migrate-weights` says exactly that.
+    """
     def run_sequence(emit: Callable[[installer.Event], None]) -> None:
+        token = read_token(context.home)
+        windows: CatalogPort | None = None
+        guest: CatalogPort | None = None
+        if token is not None:
+            windows = HttpCatalog(
+                engine_url(), token, where="the Windows engine"
+            )
+            guest = GuestCatalog(
+                context.runner,
+                CRUCIBLE_DISTRO,
+                token,
+                ENGINE_PORT,
+                where=f'the "{CRUCIBLE_DISTRO}" engine',
+            )
         installer.EngineInstall(
             context.runner,
             emit,
             release=context.release,
             home=context.home,
             install_sh_url=INSTALL_SH_URL.format(release=context.release),
+            windows_catalog=windows,
+            guest_catalog=guest,
         ).run()
 
     return run_sequence

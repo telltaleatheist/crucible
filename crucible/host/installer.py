@@ -40,11 +40,13 @@ reads the two catalogs every time rather than carrying a list across.
 from __future__ import annotations
 
 import base64
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence
 
 from . import landoor, wslstate
+from .catalog import CatalogPort, CatalogRefusal, Subject
 from .errors import HostError
 from .paths import engine_url
 from .runner import RunResult, Runner
@@ -74,6 +76,24 @@ STEPS: tuple[str, ...] = (
 IMPORT_TIMEOUT_SECONDS = 30 * 60.0
 GUEST_INSTALL_TIMEOUT_SECONDS = 120 * 60.0
 QUICK_TIMEOUT_SECONDS = 5 * 60.0
+
+#: How long the migration waits for ONE subject to arrive in the guest. A
+#: narrator voice is a few hundred megabytes and a model is tens of gigabytes
+#: over somebody's home line; the number is generous because the alternative
+#: to waiting is deleting a Windows copy that has no replacement.
+MIGRATE_PULL_TIMEOUT_SECONDS = 6 * 60 * 60.0
+
+#: Between two polls of the guest's catalog, and between two rounds of the
+#: migration when something was held.
+MIGRATE_POLL_SECONDS = 5.0
+
+#: How many rounds a `subject_in_use` may survive before the step fails by
+#: name. BOUNDED on purpose: 3.5 says nothing is skipped, so the only two
+#: honest ends are "it was removed" and "it is still held, and here is who" —
+#: an unbounded wait would be a third, which is a migration that never
+#: finishes and never says why. 60 x 5 s is five minutes of somebody closing
+#: an app.
+MIGRATE_IN_USE_ROUNDS = 60
 
 #: The sentence 4.7 requires for the reboot states, verbatim in one place.
 REBOOT_SENTENCE = (
@@ -180,6 +200,10 @@ class EngineInstall:
         install_sh_url: str,
         distro: str = CRUCIBLE_DISTRO,
         elevate: bool = True,
+        windows_catalog: CatalogPort | None = None,
+        guest_catalog: CatalogPort | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._runner = runner
         self._emit = emit
@@ -190,6 +214,14 @@ class EngineInstall:
         #: `False` in a test and in `--install --no-elevate`: the argv is still
         #: reported, and nothing raises a consent dialog.
         self._elevate = elevate
+        #: The two servers the weights migration talks to (3.5, 3.5a). Both
+        #: `None` on a machine that has no Windows server yet — the very first
+        #: install — and that is a FACT the step states, not a fallback: there
+        #: is nothing on this machine to move.
+        self._windows = windows_catalog
+        self._guest = guest_catalog
+        self._monotonic = monotonic
+        self._sleep = sleep
         self._index = 0
         self._records: list[StepRecord] = []
 
@@ -464,21 +496,124 @@ class EngineInstall:
         self._finish("install-job-types", "none: the coordinate records are the server's")
 
     def _migrate_weights(self) -> None:
-        """3.5: pull in the guest, then delete on Windows. Never the reverse.
+        """3.5 and 3.5a: pull in the guest, then delete on Windows. Never the reverse.
 
-        Idempotent by construction: it reads BOTH catalogs every time and acts
-        on the difference, so an interrupted move resumes here with both copies
-        of the unfinished subject still present.
+        THE ORDER IS THE WHOLE RULE. For each subject the Windows catalog
+        reports installed: submit the guest's pull, WAIT until the guest's own
+        catalog says it is installed there, and only then
+        `DELETE /v1/catalog/{kind}/{id}` on the Windows server. A machine
+        unplugged at any instant has the subject on one side or on both, never
+        on neither.
+
+        IDEMPOTENT BY RE-DIFFING, not by a journal. Every round re-reads BOTH
+        catalogs and acts on the difference, so a resume after a crash, a
+        reboot or a `Ctrl-C` needs no state that survived the crash — which is
+        the only kind of resume that is true after a power cut.
+
+        `subject_in_use` (3.5a) is WAITED OUT, never skipped. Something holds
+        the subject — a lease, a resident model, a running task — and 3.5 says
+        nothing is skipped, so the subject is retried on the next round with
+        its holder named in the meantime, for a bounded number of rounds, and
+        then the step fails BY THAT NAME. The two honest ends are "removed"
+        and "still held, and here is who".
+
+        The host never touches a file: every read, pull and delete is a
+        request to the server that owns that disk (3.5a's reason for existing).
         """
         self._step("migrate-weights")
-        self._line(
-            "no weights were migrated: the Windows engine's catalog is the input "
-            "(3.5) and the llama-windows backend's GGUF subjects are not built "
-            "yet. Nothing was deleted on either side, which is the half of this "
-            "rule that matters — the guest pulls its own form first and the "
-            "Windows copy goes only after."
+        if self._windows is None or self._guest is None:
+            self._line(
+                "nothing to migrate: this machine had no Windows engine, so there "
+                "is no catalog to move from. Whatever the apps need, the guest's "
+                "own coordinate step pulls on first connect (PHASE14 4a)."
+            )
+            self._finish("migrate-weights", "no Windows engine; nothing to move")
+            return
+
+        moved: list[str] = []
+        held: dict[tuple[str, str], str] = {}
+        for round_number in range(1, MIGRATE_IN_USE_ROUNDS + 1):
+            source = {row.key: row for row in self._windows.installed_subjects()}
+            if not source:
+                detail = (
+                    f"moved {len(moved)} subject(s): {', '.join(moved)}"
+                    if moved
+                    else "the Windows engine had no installed subjects"
+                )
+                self._line(f"migrate-weights: {detail}")
+                self._finish("migrate-weights", detail)
+                return
+            target = {row.key for row in self._guest.installed_subjects()}
+            held = {}
+            for key in sorted(source):
+                subject = source[key]
+                if key not in target:
+                    self._pull_into_guest(subject)
+                try:
+                    self._windows.remove(subject)
+                except CatalogRefusal as refusal:
+                    if refusal.code != "subject_in_use":
+                        raise self._fail(
+                            refusal.code,
+                            f"{subject} could not be removed from the Windows engine: "
+                            f"{refusal.message}. The guest has it; the Windows copy "
+                            "stays until this is answered, because a half-deleted "
+                            "subject is worse than a duplicated one.",
+                        )
+                    who = refusal.who or "something on the Windows engine"
+                    held[key] = who
+                    self._line(
+                        f"migrate-weights: {subject} is held by {who} on the "
+                        "Windows engine; the guest already has it, so this is a "
+                        "wait and not a skip",
+                        "stderr",
+                    )
+                    continue
+                moved.append(str(subject))
+                self._line(f"migrate-weights: {subject} is the guest's now, and gone from Windows")
+            if not held:
+                # Everything this round either moved or was already gone. The
+                # next round re-reads and finds the catalog empty, which is
+                # the one place this loop returns from.
+                continue
+            if round_number == MIGRATE_IN_USE_ROUNDS:
+                break
+            self._sleep(MIGRATE_POLL_SECONDS)
+
+        names = ", ".join(f"{kind} {ident} (held by {who})" for (kind, ident), who in sorted(held.items()))
+        raise self._fail(
+            "subject_in_use",
+            f"after {MIGRATE_IN_USE_ROUNDS} attempts over "
+            f"{MIGRATE_IN_USE_ROUNDS * MIGRATE_POLL_SECONDS / 60:.0f} minutes, the "
+            f"Windows engine still holds {names}. The guest has its own copy of "
+            "each, so nothing is lost — close whatever is named and run the move "
+            "again; it resumes from where it stopped.",
         )
-        self._finish("migrate-weights", "nothing to move, and nothing deleted")
+
+    def _pull_into_guest(self, subject: Subject) -> None:
+        """Submit the guest's pull and WAIT for the guest's catalog to say so.
+
+        The task's own events are not read: the catalog is the fact
+        (`installed`), a task is a report about it, and the thing that gates a
+        deletion has to be the fact.
+        """
+        assert self._guest is not None  # only called from the step, which checked
+        self._line(f"migrate-weights: pulling {subject} in the guest")
+        self._guest.pull(subject)
+        deadline = self._monotonic() + MIGRATE_PULL_TIMEOUT_SECONDS
+        while True:
+            self._sleep(MIGRATE_POLL_SECONDS)
+            if any(row.key == subject.key for row in self._guest.installed_subjects()):
+                self._line(f"migrate-weights: the guest has {subject}")
+                return
+            if self._monotonic() >= deadline:
+                raise self._fail(
+                    "subject_pull_timeout",
+                    f"the guest did not report {subject} installed within "
+                    f"{MIGRATE_PULL_TIMEOUT_SECONDS / 3600:.0f} h. The Windows copy "
+                    "has NOT been removed; look at the guest's tasks for what "
+                    "happened to the pull.",
+                )
 
     def _lan_door(self) -> None:
         """4.1: the Windows-side forward that makes the LAN pairing lines true."""
