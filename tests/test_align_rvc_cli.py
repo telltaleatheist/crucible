@@ -110,22 +110,23 @@ def test_align_is_installable_and_rvc_is_installable(viable: None) -> None:
     assert set(workerenv.WORKER_JOB_TYPES) == {"align", "asr", "rvc"}
 
 
-def test_installing_align_on_the_mac_refuses_and_names_what_ships(
-    home: Path, mac: None, capsys: pytest.CaptureFixture[str]
-) -> None:
-    assert cli.main(["init"]) == 0
-    capsys.readouterr()
-    assert cli.main(["install", "align"]) == 1
-    error = capsys.readouterr().err
-    assert "no align env recipe for backend 'mlx-darwin'" in error
-    assert "['cuda-linux']" in error
+def test_every_worker_type_has_a_mac_recipe_now(mac: None) -> None:
+    """`align` joined `rvc` on 2026-09-14, and `asr` came with it.
 
-
-def test_rvc_has_a_mac_recipe_unlike_align(mac: None) -> None:
-    """The Mac is a real rvc backend; it is not a real align backend YET."""
-    assert workerenv.recipe_for("rvc", FAKE_MAC_BACKEND.kind).is_file()
-    with pytest.raises(workerenv.WorkerEnvError):
-        workerenv.recipe_for("align", FAKE_MAC_BACKEND.kind)
+    All three recipes are freezes of envs that exist on Owen's Mac: `rvc`'s is
+    the one `crucible install rvc` built there, `align`'s is BookForge's
+    `qwen-align`, and `asr`'s is the scratch env the seven mlx-whisper
+    manifests were measured in.
+    """
+    for job_type in workerenv.WORKER_JOB_TYPES:
+        recipe = workerenv.recipe_for(job_type, FAKE_MAC_BACKEND.kind)
+        assert recipe.is_file(), job_type
+        assert workerenv.recipe_pins(recipe), job_type
+    # And a backend with no recipe at all still refuses by name, which is what
+    # the Mac used to be the example of.
+    with pytest.raises(workerenv.WorkerEnvError) as caught:
+        workerenv.recipe_for("align", "llama-windows")
+    assert "no align env recipe for backend 'llama-windows'" in str(caught.value)
 
 
 # ------------------------------------------------------------------- models

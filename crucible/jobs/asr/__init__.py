@@ -67,7 +67,12 @@ from typing import Any, Callable
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from ... import accelerator, hosttools, weights, workerenv, workers
-from ...asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
+from ...asrmodels import (
+    ASR_BACKEND_ENGINES,
+    AsrManifest,
+    AsrManifestError,
+    load_all_asr_manifests,
+)
 from ...config import Config
 from ...errors import ApiError, JobError
 # The one place `<id>@<revision>` is spelled. Two spellings of a fingerprint
@@ -95,11 +100,65 @@ READY_SILENCE_TIMEOUT_SECONDS = 900.0
 #: twice, once in each of two consecutive windows. BookForge's number.
 OVERLAP_TOLERANCE_SECONDS = 0.1
 
-#: `compute_type` on an accelerator. There is no CPU entry because there is no
-#: CPU backend; see the module docstring on why the app's CPU fallback is not
-#: carried across.
-COMPUTE_TYPE = "float16"
-DEVICE = "cuda"
+#: `compute_type` and the device, per ENGINE — because this job type has two,
+#: and they are two libraries rather than two builds of one.
+#:
+#: There is no CPU entry in either table and there is no default in either:
+#: Crucible has no CPU backend, and a backend nobody has decided about must be
+#: a refusal naming it rather than a `cuda` handed to a Mac.
+#:
+#: Both engines land on `float16` and that is a coincidence worth stating
+#: rather than a shared constant: faster-whisper's is CTranslate2's
+#: `compute_type`, and mlx-whisper's is the `fp16=True` its `transcribe()`
+#: defaults to and turns into `mx.float16`. They mean the same precision by two
+#: different routes, which is why the worker is told the value rather than
+#: assuming it.
+#:
+#: The device names are each library's own. `cuda` is CTranslate2's;
+#: `metal` is MLX's one and only device, and it is deliberately NOT `mps` —
+#: `mps` is torch's name for the same silicon and the `align` job type uses it
+#: because the aligner IS torch. Two libraries, two spellings, and neither
+#: worker will accept the other's (`crucible/jobs/asr/mlx_worker.py` refuses by
+#: name).
+COMPUTE_TYPE_FOR_ENGINE: dict[str, str] = {
+    "faster-whisper": "float16",
+    "mlx-whisper": "float16",
+}
+DEVICE_FOR_ENGINE: dict[str, str] = {
+    "faster-whisper": "cuda",
+    "mlx-whisper": "metal",
+}
+
+#: Which script runs each engine. A SECOND WORKER and not a branch inside the
+#: first: the two run in different envs on different machines and share no
+#: import — one needs `faster_whisper` (CTranslate2), the other `mlx_whisper`
+#: (MLX), and neither library exists in the other's env. The wire between
+#: server and worker is identical, which is what keeps `transcript.json` one
+#: document whichever machine produced it.
+WORKER_SCRIPT_FOR_ENGINE: dict[str, Path] = {
+    "faster-whisper": Path(__file__).resolve().parent / "worker.py",
+    "mlx-whisper": Path(__file__).resolve().parent / "mlx_worker.py",
+}
+
+#: Engines with no voice-activity detector at all. faster-whisper ships Silero;
+#: mlx-whisper ships nothing of the kind. A job that asks for `vad_filter` on
+#: one of these is refused BY NAME rather than transcribed without it, for the
+#: reason the module docstring gives about the CPU fallback: the run would
+#: produce a transcript under different rules and nothing in the file would say
+#: so.
+ENGINES_WITHOUT_VAD: frozenset[str] = frozenset({"mlx-whisper"})
+
+
+def _for_engine(table: dict[str, Any], engine: str, what: str) -> Any:
+    """One engine's entry, or a refusal naming it. Never a default."""
+    found = table.get(engine)
+    if found is None:
+        raise JobError(
+            "engine_unsupported",
+            f"there is no {what} for asr engine {engine!r}; this build runs "
+            f"{sorted(table)}",
+        )
+    return found
 
 #: The language codes faster-whisper accepts, read from
 #: `faster_whisper/tokenizer.py`'s `_LANGUAGE_CODES` at master on 2026-09-13.
@@ -118,9 +177,6 @@ WHISPER_LANGUAGES = frozenset(
 #: It is a value, not an absence: "detect it" is a decision, and a job that did
 #: not make it is a job that did not say what it wanted.
 AUTO_LANGUAGE = "auto"
-
-WORKER_SCRIPT = Path(__file__).resolve().parent / "worker.py"
-
 
 class AsrParams(BaseModel):
     """`params` for an asr job. Unknown keys are refused, not ignored."""
@@ -371,8 +427,9 @@ class AsrJobType:
                 "backend_unsupported",
                 f"ASR model {model_id!r} has no {backend_kind} block; "
                 f"{manifest.path.name} declares {sorted(manifest.backends)}. "
-                "faster-whisper is CTranslate2, which has no Metal backend, so "
-                "there is no mlx-darwin block for any of them",
+                "Each backend has its OWN whisper — faster-whisper on "
+                "cuda-linux, mlx-whisper on mlx-darwin — so the model ids do "
+                "not cross: ask for one whose id names this host's engine",
                 {
                     "model": model_id,
                     "backend": backend_kind,
@@ -409,10 +466,44 @@ class AsrJobType:
             ) from None
         return manifest, spec, python, installed.path
 
+    def _refuse_vad_this_engine_has_not_got(self, params: AsrParams) -> None:
+        """`vad_filter: true` on mlx-whisper is a 400, never a quiet no-op.
+
+        THE ONE PLACE THE TWO ENGINES DIFFER ON THE WIRE, and it is a refusal
+        rather than a difference. faster-whisper ships Silero VAD;
+        `mlx-whisper` has no voice-activity detector at all — its
+        `no_speech_threshold` is the model's own per-segment judgement, which
+        is a different mechanism on different evidence and not a substitute.
+
+        Running the job anyway would produce a transcript under rules the
+        caller did not ask for, with nothing in `transcript.json` to say which
+        rules those were: the same failure PHASE4-AUDIO.md section 3 refuses
+        the CPU fallback for. `vad_filter: false` runs perfectly well, so the
+        refusal names the value and not the field.
+        """
+        # THE ENGINE IS THE BACKEND'S, not the model's, which is why this asks
+        # `ASR_BACKEND_ENGINES` rather than a manifest: the answer is the same
+        # for every id this host can serve, and asking it here means the
+        # refusal lands BEFORE the env and weights checks. A caller who cannot
+        # have what they asked for should not first be told to install 2 GB.
+        engine = ASR_BACKEND_ENGINES.get(self._backend.kind)
+        if engine in ENGINES_WITHOUT_VAD and params.vad_filter:
+            raise ApiError(
+                400,
+                "vad_unsupported_by_engine",
+                f"this host transcribes with {engine!r}, and that engine has no "
+                "voice-activity detector at all — faster-whisper's is Silero, "
+                "and mlx-whisper ships nothing of the kind. Send "
+                "vad_filter: false and get a transcript this server can "
+                "describe, rather than one produced under rules nothing in the "
+                "file records",
+                {"backend": self._backend.kind, "engine": engine, "vad_filter": True},
+            )
+
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs a model")
-        _params(params)
+        self._refuse_vad_this_engine_has_not_got(_params(params))
         _require_ffmpeg()
         _, spec, _, _ = self._require_runnable(model)
         accelerator.guard(
@@ -465,7 +556,9 @@ class AsrJobType:
             total_s=0.0,
             cues=0,
         )
-        outcome = self._transcribe(ctx, job, python, weights_dir, ffmpeg, audio, params)
+        outcome = self._transcribe(
+            ctx, job, spec.engine, python, weights_dir, ffmpeg, audio, params
+        )
 
         windows = outcome.ready["windows"]
         try:
@@ -518,6 +611,7 @@ class AsrJobType:
         self,
         ctx: JobContext,
         job: Job,
+        engine: str,
         python: Path,
         weights_dir: Path,
         ffmpeg: str,
@@ -531,8 +625,10 @@ class AsrJobType:
             "language": params.whisper_language(),
             "vad_filter": params.vad_filter,
             "word_timestamps": params.word_timestamps,
-            "device": DEVICE,
-            "compute_type": COMPUTE_TYPE,
+            "device": _for_engine(DEVICE_FOR_ENGINE, engine, "device"),
+            "compute_type": _for_engine(
+                COMPUTE_TYPE_FOR_ENGINE, engine, "compute_type"
+            ),
             "window_s": WINDOW_SECONDS,
             "overlap_s": OVERLAP_SECONDS,
         }
@@ -569,7 +665,9 @@ class AsrJobType:
         try:
             return workers.run_worker(
                 python=python,
-                script=WORKER_SCRIPT,
+                script=_for_engine(
+                    WORKER_SCRIPT_FOR_ENGINE, engine, "worker script"
+                ),
                 request=request,
                 log_path=self._config.logs_dir / f"asr-{job.id}.log",
                 ready_silence_timeout=READY_SILENCE_TIMEOUT_SECONDS,

@@ -46,3 +46,81 @@ dtype = "bfloat16"
 # fine-tune when this was written), and the first real book is what replaces this
 # arithmetic with a measurement.
 memory_bytes_estimate = 3446157280
+
+[backends.mlx-darwin]
+# THE MAC IS A REAL ALIGN BACKEND, and unlike `asr` it needs no second engine.
+# Qwen3-ForcedAligner-0.6B is a plain torch model loaded through
+# `qwen_asr.Qwen3ForcedAligner.from_pretrained`, torch has an MPS backend, and
+# `mlx-darwin` already runs torch-on-Metal for `rvc`. Same engine, same weights,
+# same revision: an aligner checkpoint is not quantised per backend, so this
+# block pins the identical repo the cuda one does and the two sets of timestamps
+# come from the same bytes.
+engine = "qwen3-forced-aligner"
+hf_repo = "Qwen/Qwen3-ForcedAligner-0.6B"
+# `main` as the HuggingFace API served it on 2026-09-14 — the same sha the
+# cuda-linux block pins, re-read rather than copied
+# (GET /api/models/Qwen/Qwen3-ForcedAligner-0.6B/refs).
+revision = "c7cbfc2048c462b0d63a45797104fc9db3ad62b7"
+
+# bfloat16, for the cuda block's reason and one of its own:
+# `python/narrator/align/aligner.py:620` picks float32 on `cpu` and bfloat16 on
+# everything else, `mps` included, and BookForge's 2026-09-08 measurement on this
+# machine was taken in bfloat16. Crucible has no CPU backend, so there is no
+# branch here either.
+dtype = "bfloat16"
+
+# MEASURED, on the machine it is for, and DELIBERATELY NOT THE CUDA FIGURE.
+#
+# The cuda block's 3,446,157,280 is weights plus a declared 1.5 GiB for "the
+# CUDA context, cuBLAS/cuDNN workspaces, and the activations of one 300-second
+# window". Three of those four things do not exist on Metal, so copying that
+# number would have been an allowance for hardware that is not there. This one
+# was watched instead.
+#
+# THE RUN, 2026-09-14, Mac Studio M1 Ultra (64 GiB unified, macOS 26.3.1),
+# BookForge's `qwen-align` env (python 3.11.16, torch 2.14.0) — the env
+# `envs/align/mlx-darwin.txt` is the freeze of — against the snapshot of THIS
+# revision already in that machine's HuggingFace cache. Nothing was written
+# under `~/.crucible` and the running service was not touched.
+#
+#   what was run   `Qwen3ForcedAligner.from_pretrained(dtype=torch.bfloat16,
+#                  device_map="mps")`, then `model.align(...)` THREE TIMES on a
+#                  300-second input — QWEN3_MAX_AUDIO_S, the longest chunk this
+#                  job type accepts and therefore the worst case it has to
+#                  budget for. The audio was a real 75 s narration clip decoded
+#                  to 16 kHz mono and tiled 4x; the text was 900 words, what
+#                  300 s of narration carries at ~180 wpm. The TIMESTAMPS from
+#                  that run are meaningless — the words are not that audio —
+#                  and were not read; the model placed all 900 items and the
+#                  only thing taken from the run is the memory high-water.
+#   how it was     `torch.mps.driver_allocated_memory()` sampled on a thread at
+#     measured     20 Hz for the whole run, plus the value read after each of
+#                  the three chunks.
+#   what it said   after load          1,887,846,400   (weights resident:
+#                                                       current_allocated
+#                                                       1,849,052,928)
+#                  after chunk 1       4,962,533,376
+#                  after chunk 2       5,885,280,256
+#                  after chunk 3       5,885,280,256   <- it stops growing
+#                  sampled high-water  5,885,296,640
+#
+# DRIVER-allocated and not current-allocated, and that is the decision in this
+# number. Live tensors peaked at 3,032,348,672 on the first run; the difference
+# is blocks torch's MPS caching allocator has taken from the driver and keeps
+# rather than returning. An align session is RESIDENT across a whole book
+# (`crucible/residency.py` holds it beside a model and a voice), so that memory
+# is gone from the machine for as long as the session is open, and a guard that
+# counted only the live tensors would be admitting work against memory the Mac
+# does not have. The third chunk is what says this is a ceiling and not a leak.
+memory_bytes_estimate = 5885296640
+
+# Also measured in the same run, and recorded here because it is the number a
+# reader will want next: 900 s of audio aligned in 11.72 s WARM — about 77x
+# realtime, against the 3090 Ti's 229x in the bake-off and consistent with
+# BookForge's 97x on 95 s (2026-09-08, `electron/components/qwen-align-env.ts`).
+# The cold first chunk was 5.39 s for 300 s.
+#
+# STILL OWED, and it is not memory: nobody has compared the TIMESTAMPS this
+# produces on MPS with the ones the same revision produces on CUDA. bfloat16 on
+# Metal is a different numerical path. `envs/align/mlx-darwin.md` says what the
+# comparison is and how to do it.

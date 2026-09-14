@@ -258,8 +258,11 @@ STANDALONE_PYTHON: dict[str, StandalonePython] = {
 #: from `HEADLINE_PACKAGE` would fail every smoke test on four of six packs.
 SMOKE_IMPORT: dict[str, dict[str, str]] = {
     "llm": {CUDA_LINUX: "vllm", MLX_DARWIN: "mlx_lm"},
-    "asr": {CUDA_LINUX: "faster_whisper"},
-    "align": {CUDA_LINUX: "qwen_asr"},
+    # `asr` is TWO ENGINES, so the smoke import differs by backend: a Mac
+    # pack that imported `faster_whisper` would fail every build, and one
+    # that imported nothing would ship an env nobody had opened.
+    "asr": {CUDA_LINUX: "faster_whisper", MLX_DARWIN: "mlx_whisper"},
+    "align": {CUDA_LINUX: "qwen_asr", MLX_DARWIN: "qwen_asr"},
     "rvc": {CUDA_LINUX: "ultimate_rvc", MLX_DARWIN: "ultimate_rvc"},
     # The tts env's KEY is the pack's name, and it differs by backend for the
     # reason `jobenv.tts_env` gives: on cuda-linux two narrator engines cannot

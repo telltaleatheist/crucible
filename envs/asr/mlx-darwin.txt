@@ -1,0 +1,66 @@
+# crucible `asr` env — mlx-darwin (mlx-whisper on Apple Silicon, through Metal).
+#
+# A DIFFERENT ENGINE, not this recipe's cuda sibling with the CUDA lines taken
+# out. faster-whisper is CTranslate2 and CTranslate2 has no Metal backend
+# (`envs/asr/mlx-darwin.md` carries the long version), so the Mac's whisper is
+# `mlx-whisper`: different weights, different repos, different model ids, and
+# its own worker beside the faster-whisper one. Nothing in this file appears in
+# `cuda-linux.txt` and nothing in that file appears here.
+#
+# A RESOLVED SET, read from a real install
+# ----------------------------------------
+# `mlx-whisper==0.4.3` is the pin that was CHOSEN. Everything under it is
+# `pip freeze` from a python 3.11.16 env built from exactly that one line on
+# Owen's Mac Studio (M1 Ultra, macOS 26.3.1) on 2026-09-14 — the scratch env the
+# seven manifests in `asr/` were measured in, which was deleted afterwards.
+# `crucible doctor` calls the env NOT READY if any one of these is absent or at
+# another version.
+#
+# `torch==2.14.0` is here because `mlx-whisper` DECLARES it, not because
+# anything in the transcribe path imports it: the worker's hot loop is mlx,
+# numba, scipy and tiktoken. It is the same torch `envs/align/mlx-darwin.txt`
+# pins, which is a coincidence of dates and not a constraint either file states.
+#
+# `mlx-metal==0.32.2` comes with `mlx` on Darwin and is the half that talks to
+# the GPU; an install that somehow lacked it would run on the CPU and say
+# nothing, which is the failure this file is pinned against.
+#
+# Regenerate after any deliberate bump with:
+#     ~/.crucible/envs/asr/bin/python -m pip freeze
+
+mlx-whisper==0.4.3
+
+# --- the set pip resolved under it ---
+anyio==4.15.1
+certifi==2026.7.22
+charset-normalizer==3.5.1
+click==8.5.0
+filelock==3.32.6
+fsspec==2026.7.0
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface_hub==1.31.0
+idna==3.19
+Jinja2==3.1.6
+llvmlite==0.49.0
+MarkupSafe==3.0.3
+mlx-metal==0.32.2
+mlx==0.32.2
+more-itertools==11.1.0
+mpmath==1.3.0
+networkx==3.6.1
+numba==0.67.0
+numpy==2.4.6
+packaging==26.3
+PyYAML==6.0.3
+regex==2026.9.10
+requests==2.34.2
+scipy==1.17.1
+sympy==1.14.0
+tiktoken==0.14.0
+torch==2.14.0
+tqdm==4.70.1
+typing_extensions==4.16.0
+urllib3==2.7.0

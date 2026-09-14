@@ -10,18 +10,34 @@ looks fine, is worse, and says nothing about it — so a manifest that misspells
 `memory_bytes_estimat` must be a refusal rather than a model that quietly loads
 with no estimate behind it.
 
-Only `cuda-linux` is an ASR backend
------------------------------------
+Two backends, two ENGINES, and never two sets of weights at one id
+------------------------------------------------------------------
 faster-whisper is CTranslate2, and CTranslate2 has **no Metal backend** — on
 Apple Silicon it runs on the CPU through Accelerate and nothing else
 (SYSTRAN/faster-whisper#515, #911, still true as of 2026-09). Crucible has no CPU
-backend, and section 3 already refuses the CPU road on its own terms: a
-transcript that quietly ran at `int8` on a CPU is a different transcript. So
-`ASR_BACKEND_ENGINES` has one entry, and a manifest that declares an
-`[backends.mlx-darwin]` block is refused by name with that reason rather than
-loaded and then failed later. The Mac's ASR story is `mlx-whisper` — different
-weights, a different library, its own manifests and its own worker — and it is
-not in this phase.
+backend, and PHASE4-AUDIO.md section 3 refuses the CPU road on its own terms: a
+transcript that quietly ran at `int8` on a CPU is a different transcript.
+
+So the Mac does not get an `[backends.mlx-darwin]` block on the faster-whisper
+manifests. It gets `mlx-whisper`: a **second engine** with its own converted
+weights (`mlx-community/whisper-*`), its own recipe
+(`envs/asr/mlx-darwin.txt`), its own worker
+(`crucible/jobs/asr/mlx_worker.py`) and — the part this module enforces — its
+own SEVEN MODEL IDS, all prefixed `mlx-whisper-`.
+
+**Different weights at one id would be a lie**, and it is this loader's job to
+make that impossible rather than a convention. `transcript.json` records the
+model id and nothing else about the bytes; `faster-whisper-large-v3` and
+`mlx-whisper-large-v3` are different conversions at a different quantisation
+and they will disagree about a hard passage, so an operator comparing two
+transcripts has to be able to tell from the id which engine produced each.
+A manifest that pairs a backend with the other backend's engine is refused by
+name.
+
+One thing DOES cross the two: `vad_filter`. faster-whisper has Silero VAD and
+mlx-whisper has none at all, so `crucible/jobs/asr` refuses `vad_filter: true`
+on this engine BY NAME rather than transcribing without it — the same argument
+as the CPU one, one layer up.
 
 Why this is not `crucible/manifests.py`
 ---------------------------------------
@@ -43,15 +59,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .backend import CUDA_LINUX
+from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
 
 ASR_DIR_ENV = "CRUCIBLE_ASR_DIR"
 
-#: Which engine each backend is allowed to name. See the module docstring for why
-#: `mlx-darwin` is not in here and is not an oversight.
+#: Which engine each backend is allowed to name. TWO ENGINES, one per backend,
+#: because CTranslate2 has no Metal backend — see the module docstring.
 ASR_BACKEND_ENGINES: dict[str, str] = {
     CUDA_LINUX: "faster-whisper",
+    MLX_DARWIN: "mlx-whisper",
+}
+
+#: The id prefix each engine's manifests must carry. Not decoration: it is what
+#: stops one id ever standing for two different sets of weights, which is the
+#: thing `transcript.json` cannot recover from. Checked by the loader, so a new
+#: manifest cannot break the rule by being written carelessly.
+ASR_ENGINE_ID_PREFIX: dict[str, str] = {
+    "faster-whisper": "faster-whisper-",
+    "mlx-whisper": "mlx-whisper-",
 }
 
 _MODEL_REQUIRED: dict[str, type] = {
@@ -250,10 +276,9 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
         if kind not in ASR_BACKEND_ENGINES:
             raise AsrManifestError(
                 f"{where}: {kind!r} is not an asr backend; the asr backends are "
-                f"{sorted(ASR_BACKEND_ENGINES)}. faster-whisper is CTranslate2 and "
-                "CTranslate2 has no Metal backend, so on Apple Silicon it would run "
-                "on the CPU — and a transcript that quietly ran on a CPU at int8 is "
-                "a different transcript (PHASE4-AUDIO.md section 3)"
+                f"{sorted(ASR_BACKEND_ENGINES)}, each with its own engine "
+                f"({ASR_BACKEND_ENGINES}). Windows is never a backend "
+                "(docs/PHASE15-HOST.md)"
             )
         if not isinstance(block, dict):
             raise AsrManifestError(f"{where}: must be a table")
@@ -263,7 +288,24 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
         if engine != ASR_BACKEND_ENGINES[kind]:
             raise AsrManifestError(
                 f"{where}: engine {engine!r} does not run asr on {kind}; that "
-                f"backend's asr engine is {ASR_BACKEND_ENGINES[kind]!r}"
+                f"backend's asr engine is {ASR_BACKEND_ENGINES[kind]!r}. "
+                "faster-whisper is CTranslate2, which has no Metal backend; "
+                "mlx-whisper is MLX, which has no CUDA one. They are not two "
+                "recipes for one thing"
+            )
+        prefix = ASR_ENGINE_ID_PREFIX[engine]
+        if not model_id.startswith(prefix):
+            # THE RULE THAT KEEPS A TRANSCRIPT HONEST. `transcript.json` names
+            # the model id and nothing else about the bytes, and the two
+            # engines' conversions of "large-v3" are different weights at a
+            # different quantisation that will disagree about a hard passage.
+            # An id that did not say which engine made it would leave a reader
+            # comparing two transcripts with no way to tell them apart.
+            raise AsrManifestError(
+                f"{where}: engine {engine!r} requires an id beginning "
+                f"{prefix!r} and this manifest is {model_id!r}; two engines' "
+                "weights must never share an id, because a transcript records "
+                "the id and nothing else about what produced it"
             )
         if not _HF_REPO.match(block["hf_repo"]):
             raise AsrManifestError(

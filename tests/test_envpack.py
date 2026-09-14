@@ -18,12 +18,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from crucible import cli, envpack, jobenv, workerenv
+from crucible import capability, cli, envpack, jobenv, workerenv
 from crucible.envpack import PackEntry, PackError, PackManifest
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
@@ -64,10 +65,11 @@ def test_each_backend_publishes_exactly_the_packs_its_recipes_describe() -> None
     cuda = sorted(envpack.pack_targets("cuda-linux"))
     mac = sorted(envpack.pack_targets("mlx-darwin"))
     assert cuda == ["align", "asr", "llm", "rvc", "server", "tts-higgs-v3"]
-    # No `asr` and no `align` on the Mac, and those are facts rather than gaps:
-    # `envs/asr/mlx-darwin.md` is prose explaining that CTranslate2 has no
-    # Metal backend, and there is no `.txt` for either.
-    assert mac == ["llm", "rvc", "server", "tts"]
+    # Since 2026-09-14 the Mac has `align` and `asr` too: one is the same
+    # engine on a different device, the other is a second engine with its own
+    # recipe. A pack exists exactly when its `.txt` does, which is why adding
+    # those two files was all it took.
+    assert mac == ["align", "asr", "llm", "rvc", "server", "tts"]
 
 
 def test_smoke_table_covers_every_installable_name() -> None:
@@ -117,26 +119,29 @@ def test_the_server_pack_lands_beside_the_envs_not_inside_them() -> None:
     )
 
 
-def test_every_pack_is_eleven_rows_across_three_backends() -> None:
-    """Ten was right until PHASE15 4.4 added the `host` pack.
+def test_every_pack_is_thirteen_rows_across_three_backends() -> None:
+    """Ten, then eleven, then thirteen — and each number is a decision.
 
-    The eleventh row is `("host", "llama-windows")`, and it is ONE row rather
-    than a set of them because that backend's engine is `llama-server` over
-    GGUF (3.10) — a binary Crucible spawns, not a pip env it installs — so
-    there are no job-type recipes for it to publish. `scripts/release.sh` and
-    `envpacks.yml` both read `every_pack()`, so this count is what notices a
-    backend that silently stopped publishing something.
+    PHASE15 4.4 added the `host` pack, which is the ONE row `llama-windows`
+    publishes: that backend's engine is `llama-server` over GGUF (3.10), a
+    binary Crucible spawns rather than a pip env it installs, so there are no
+    job-type recipes for it. The Mac added `asr` and `align` on the same day
+    (7c). `scripts/release.sh` and `envpacks.yml` both read `every_pack()`,
+    so this count is what notices a backend that silently stopped publishing
+    something.
     """
     rows = envpack.every_pack()
-    assert len(rows) == len(set(rows)) == 11
+    assert len(rows) == len(set(rows)) == 13
     assert ("host", "llama-windows") in rows
     windows = [row for row in rows if row[1] == "llama-windows"]
     assert windows == [("host", "llama-windows")]
 
 
 def test_a_pack_nobody_publishes_is_refused_by_name() -> None:
+    """`tts-higgs-v3` is cuda-linux's pack name; the Mac's is plain `tts`,
+    because on that backend every narrator engine resolves to one env."""
     with pytest.raises(PackError) as caught:
-        envpack.pack_target("asr", "mlx-darwin")
+        envpack.pack_target("tts-higgs-v3", "mlx-darwin")
     assert caught.value.code == "pack_unknown"
     assert "'llm'" in caught.value.message
 
@@ -1271,7 +1276,14 @@ def test_envpack_list_names_every_pack(
     )
     assert cli.main(["envpack", "list", "--backend", "mlx-darwin", "--json"]) == 0
     rows = json.loads(capsys.readouterr().out)
-    assert {row["name"] for row in rows} == {"server", "llm", "rvc", "tts"}
+    assert {row["name"] for row in rows} == {
+        "server",
+        "llm",
+        "rvc",
+        "tts",
+        "align",
+        "asr",
+    }
 
 
 def test_a_host_with_no_zstd_is_refused_before_anything_is_downloaded(
@@ -1326,18 +1338,27 @@ def test_install_refuses_a_pack_this_release_does_not_publish(
     assert "pack_not_published" in capsys.readouterr().err
 
 
-def test_the_mac_still_gets_the_recipe_refusal_not_a_pack_one(
+def test_a_type_with_no_recipe_gets_the_MOST_SPECIFIC_refusal_it_has_earned(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Why the recipe is resolved before the pack table is asked.
+    """Why the answer is resolved from the outside in.
 
-    "There is no pack called 'align'" is true and useless; "CTranslate2 has no
-    Metal backend, this build ships cuda-linux" is the answer.
+    Three sentences are true of `crucible install align` on `llama-windows`
+    and only one of them helps. "There is no pack called 'align'" is a fact
+    about a table. "No align env recipe for backend 'llama-windows'" is a
+    fact about this checkout. `needs_wsl` is the fact about the MACHINE —
+    PHASE15-HOST.md 3.5 and 7.4's item 4 — and it is the one with something
+    the operator can do in it, so it is asked first and it is the same
+    sentence the capability row carries (`capability.NEEDS_WSL_REASON`).
     """
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    windows = replace(FAKE_MAC_BACKEND, kind="llama-windows", platform="win32")
+    monkeypatch.setattr(cli, "detect_backend", lambda: windows)
     assert cli.main(["init", "--enable-align"]) == 0
     capsys.readouterr()
     assert cli.main(["install", "align"]) == 1
     error = capsys.readouterr().err
-    assert "no align env recipe for backend 'mlx-darwin'" in error
+    assert "needs_wsl" in error
+    assert capability.NEEDS_WSL_REASON in error
+    # Neither of the two less useful truths reaches the operator.
     assert "pack_unknown" not in error
+    assert "recipe" not in error

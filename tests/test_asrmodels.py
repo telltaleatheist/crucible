@@ -1,10 +1,17 @@
-"""The `asr/<id>.toml` loader, and the six manifests this build actually ships.
+"""The `asr/<id>.toml` loader, and the thirteen manifests this build ships.
 
 Two halves. The first asserts that the loader refuses every way a manifest can be
 wrong, because an ASR manifest that loads with a key missing is a guard working
 from nothing. The second asserts facts about the shipped files themselves — the
-pins are full shas, the ids match the filenames, and none of them claims a
-backend faster-whisper cannot run on.
+pins are full shas, the ids match the filenames, and neither engine's ids ever
+name the other engine's backend.
+
+**Two engines, thirteen ids, and no id shared.** faster-whisper is CTranslate2
+and has no Metal backend; mlx-whisper is MLX and has no CUDA one. They convert
+the same original whisper checkpoints to different bytes at different
+quantisations and they will disagree about a hard passage, so the loader
+enforces the id prefix rather than trusting a reviewer to notice — a transcript
+records the id and nothing else about what produced it.
 """
 
 from __future__ import annotations
@@ -22,7 +29,7 @@ from crucible.asrmodels import (
     parse_asr_manifest,
 )
 
-MODELS = [
+CUDA_MODELS = [
     "faster-whisper-base",
     "faster-whisper-distil-large-v3",
     "faster-whisper-large-v3",
@@ -30,6 +37,16 @@ MODELS = [
     "faster-whisper-small",
     "faster-whisper-tiny",
 ]
+MAC_MODELS = [
+    "mlx-whisper-base",
+    "mlx-whisper-distil-large-v3",
+    "mlx-whisper-large-v3",
+    "mlx-whisper-large-v3-turbo",
+    "mlx-whisper-medium",
+    "mlx-whisper-small",
+    "mlx-whisper-tiny",
+]
+MODELS = sorted(CUDA_MODELS + MAC_MODELS)
 
 GOOD = """
 [model]
@@ -45,6 +62,20 @@ memory_bytes_estimate = 1686151006
 """
 
 
+MAC_GOOD = """
+[model]
+id = "mlx-whisper-tiny"
+family = "mlx-whisper"
+parameters_m = 39
+
+[backends.mlx-darwin]
+engine = "mlx-whisper"
+hf_repo = "mlx-community/whisper-tiny-mlx"
+revision = "6caf9c55601caafbe6508a8b0d216bdf4783c4e8"
+memory_bytes_estimate = 549418642
+"""
+
+
 def parse(text: str, model_id: str = "faster-whisper-tiny"):
     return parse_asr_manifest(text, Path(f"{model_id}.toml"), model_id)
 
@@ -52,8 +83,9 @@ def parse(text: str, model_id: str = "faster-whisper-tiny"):
 # ------------------------------------------------------------ the shipped six
 
 
-def test_this_build_ships_exactly_six_asr_models() -> None:
+def test_this_build_ships_thirteen_asr_models_across_two_engines() -> None:
     assert sorted(load_all_asr_manifests()) == MODELS
+    assert len(CUDA_MODELS) == 6 and len(MAC_MODELS) == 7
 
 
 def test_every_shipped_pin_is_a_full_commit_sha() -> None:
@@ -65,12 +97,63 @@ def test_every_shipped_pin_is_a_full_commit_sha() -> None:
             int(spec.revision, 16)  # raises if it is not hex
 
 
-def test_every_shipped_model_is_cuda_linux_only() -> None:
-    """CTranslate2 has no Metal backend; there is no mlx-darwin ASR block."""
-    for manifest in load_all_asr_manifests().values():
+def test_each_model_serves_one_backend_with_that_backends_engine() -> None:
+    """No model spans both, because no two sets of these weights are the same."""
+    assert ASR_BACKEND_ENGINES == {
+        "cuda-linux": "faster-whisper",
+        "mlx-darwin": "mlx-whisper",
+    }
+    for model_id in CUDA_MODELS:
+        manifest = load_asr_manifest(model_id)
         assert sorted(manifest.backends) == ["cuda-linux"]
         assert manifest.spec("cuda-linux").engine == "faster-whisper"
-    assert sorted(ASR_BACKEND_ENGINES) == ["cuda-linux"]
+    for model_id in MAC_MODELS:
+        manifest = load_asr_manifest(model_id)
+        assert sorted(manifest.backends) == ["mlx-darwin"]
+        assert manifest.spec("mlx-darwin").engine == "mlx-whisper"
+
+
+def test_the_mac_estimates_are_measured_and_none_is_the_cuda_arithmetic() -> None:
+    """Every mlx figure is `mx.get_peak_memory()` over ONE 900-second window on
+    the M1 Ultra on 2026-09-14, recorded in each manifest with its method — not
+    "weights plus a declared 1.5 GiB", which was written for a CUDA context and
+    cuBLAS/cuDNN workspaces that do not exist on this backend."""
+    measured = {
+        "mlx-whisper-tiny": 549_418_642,
+        "mlx-whisper-base": 877_017_662,
+        "mlx-whisper-small": 1_540_273_318,
+        "mlx-whisper-medium": 2_607_243_002,
+        "mlx-whisper-large-v3": 4_153_379_610,
+        "mlx-whisper-large-v3-turbo": 2_654_916_970,
+        "mlx-whisper-distil-large-v3": 2_549_972_298,
+    }
+    assert sorted(measured) == sorted(MAC_MODELS)
+    runtime = 1024 ** 3 + 512 * 1024 ** 2
+    for model_id, peak in measured.items():
+        manifest = load_asr_manifest(model_id)
+        assert manifest.spec("mlx-darwin").memory_bytes_estimate == peak
+        # A watched number, so it is not weights plus a round constant.
+        assert peak % runtime != 0
+        text = manifest.path.read_text(encoding="utf-8")
+        assert "MEASURED, on the machine it is for" in text
+        assert "mx.get_peak_memory()" in text
+
+
+def test_every_mac_weight_is_smaller_than_its_estimate() -> None:
+    """The peak has to cover the weights it loaded; the repo totals are the hub
+    tree API's for those exact revisions, read on 2026-09-14."""
+    repo_bytes = {
+        "mlx-whisper-tiny": 74_420_620,
+        "mlx-whisper-base": 143_726_326,
+        "mlx-whisper-small": 481_309_720,
+        "mlx-whisper-medium": 1_524_927_044,
+        "mlx-whisper-large-v3": 3_083_522_487,
+        "mlx-whisper-large-v3-turbo": 1_613_979_758,
+        "mlx-whisper-distil-large-v3": 1_509_132_231,
+    }
+    for model_id, size in repo_bytes.items():
+        spec = load_asr_manifest(model_id).spec("mlx-darwin")
+        assert spec.memory_bytes_estimate > size
 
 
 def test_every_shipped_estimate_covers_the_weights() -> None:
@@ -90,6 +173,7 @@ def test_every_shipped_estimate_covers_the_weights() -> None:
         "faster-whisper-distil-large-v3": 1_512_927_867,
     }
     runtime = 1024 ** 3 + 512 * 1024 ** 2
+    assert sorted(weights_bytes) == sorted(CUDA_MODELS)
     for model_id, size in weights_bytes.items():
         spec = load_asr_manifest(model_id).spec("cuda-linux")
         assert spec.memory_bytes_estimate == size + runtime
@@ -138,7 +222,8 @@ def test_a_missing_key_names_itself() -> None:
     assert "missing required key(s) ['family']" in str(caught.value)
 
 
-def test_an_mlx_block_is_refused_with_the_reason() -> None:
+def test_faster_whisper_on_the_mac_is_refused_by_name() -> None:
+    """A Mac block on a CTranslate2 model: the pairing that cannot be."""
     text = GOOD + """
 [backends.mlx-darwin]
 engine = "faster-whisper"
@@ -149,8 +234,38 @@ memory_bytes_estimate = 1686151006
     with pytest.raises(AsrManifestError) as caught:
         parse(text)
     message = str(caught.value)
-    assert "not an asr backend" in message
+    assert "does not run asr on mlx-darwin" in message
     assert "no Metal backend" in message
+
+
+def test_an_id_that_does_not_name_its_engine_is_refused() -> None:
+    """THE RULE THAT KEEPS A TRANSCRIPT HONEST. mlx-whisper weights filed under
+    a `faster-whisper-` id would make two conversions one id, and
+    `transcript.json` records the id and nothing else about the bytes."""
+    text = MAC_GOOD.replace('id = "mlx-whisper-tiny"', 'id = "faster-whisper-tiny"')
+    with pytest.raises(AsrManifestError) as caught:
+        parse_asr_manifest(
+            text, Path("faster-whisper-tiny.toml"), "faster-whisper-tiny"
+        )
+    message = str(caught.value)
+    assert "requires an id beginning 'mlx-whisper-'" in message
+    assert "a transcript records the id" in message
+
+
+def test_a_good_mac_manifest_parses() -> None:
+    manifest = parse_asr_manifest(
+        MAC_GOOD, Path("mlx-whisper-tiny.toml"), "mlx-whisper-tiny"
+    )
+    assert manifest.supports("mlx-darwin")
+    assert not manifest.supports("cuda-linux")
+    assert manifest.spec("mlx-darwin").engine == "mlx-whisper"
+
+
+def test_a_windows_block_is_refused() -> None:
+    with pytest.raises(AsrManifestError) as caught:
+        parse(GOOD.replace("[backends.cuda-linux]", "[backends.llama-windows]"))
+    assert "not an asr backend" in str(caught.value)
+    assert "Windows is never a backend" in str(caught.value)
 
 
 def test_a_branch_name_is_not_a_pin() -> None:
@@ -169,6 +284,7 @@ def test_the_wrong_engine_for_the_backend_is_refused() -> None:
     with pytest.raises(AsrManifestError) as caught:
         parse(GOOD.replace('engine = "faster-whisper"', 'engine = "vllm"'))
     assert "does not run asr on cuda-linux" in str(caught.value)
+    assert "not two recipes for one thing" in str(caught.value)
 
 
 def test_a_model_with_no_backend_block_is_not_a_model() -> None:

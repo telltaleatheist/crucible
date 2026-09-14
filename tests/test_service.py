@@ -739,6 +739,134 @@ def test_cli_service_on_a_mac_uses_launchd(
     assert "mechanism: launchd" in capsys.readouterr().out
 
 
+def test_doctor_names_the_services_path_beside_the_shells(
+    home: Path,
+    user_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """THE MAC AUDIT'S ONE OWED IMPROVEMENT (2026-09-14).
+
+    `crucible doctor` over a non-login `ssh mac '<cmd>'` reported "there is no
+    ffmpeg on PATH" while the service was healthy — the plist carried
+    /opt/homebrew/bin and the running process had it. Naming one PATH was not
+    enough; Crucible wrote the other one and can read it back.
+    """
+    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+
+    path = service.plist_path(user_home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        service.launchd_plist_text(
+            program="/opt/crucible/bin/crucible",
+            crucible_home=home,
+            host="127.0.0.1",
+            port=7100,
+            path_value="/opt/homebrew/bin:/usr/bin:/bin",
+            log_path=home / "logs" / "serve.log",
+        ),
+        encoding="utf-8",
+    )
+
+    cli.main(["doctor", "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert report["path"] == {
+        "shell": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "service": "/opt/homebrew/bin:/usr/bin:/bin",
+        "mechanism": "launchd",
+        "definition": str(path),
+        # Computed rather than left to the reader, and FALSE here — which is
+        # the healthy case, not a defect: a login shell has more than a
+        # launchd agent's recorded PATH needs.
+        "agree": False,
+    }
+
+    cli.main(["doctor"])
+    printed = capsys.readouterr().out
+    assert "PATH (this shell):   /usr/bin:/bin:/usr/sbin:/sbin" in printed
+    assert "PATH (the service):  /opt/homebrew/bin:/usr/bin:/bin" in printed
+    assert "the two differ, which is normal" in printed
+
+
+def test_doctor_says_none_recorded_rather_than_nothing(
+    home: Path,
+    user_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """"no service is installed" and "the service has no PATH" are different
+    facts, and an omitted line would read as either."""
+    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+    cli.main(["doctor", "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert report["path"]["service"] is None
+    assert report["path"]["agree"] is None
+    assert report["path"]["mechanism"] == "launchd"
+    cli.main(["doctor"])
+    assert "PATH (the service):  none recorded" in capsys.readouterr().out
+
+
+def test_the_recorded_path_survives_the_escaping_that_wrote_it(
+    user_home: Path, tmp_path: Path
+) -> None:
+    """A round trip, because both writers escape and a reader that did not
+    unescape would report a PATH the service does not have.
+
+    systemd doubles every `%` (it expands `%x` specifiers); the plist is XML
+    and escapes `&`. Neither is hypothetical — a Homebrew prefix under a
+    directory with an ampersand in it is a perfectly ordinary Mac.
+    """
+    awkward = "/opt/homebrew/bin:/Users/a&b/100%/bin"
+
+    unit = service.unit_path(user_home)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(
+        service.systemd_unit_text(
+            server_name="forge",
+            program="/opt/crucible/bin/crucible",
+            crucible_home=user_home / ".crucible",
+            host="127.0.0.1",
+            port=7100,
+            path_value=awkward,
+        ),
+        encoding="utf-8",
+    )
+    assert service.read_recorded_path("systemd", user_home) == awkward
+
+    plist = service.plist_path(user_home)
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_text(
+        service.launchd_plist_text(
+            program="/opt/crucible/bin/crucible",
+            crucible_home=user_home / ".crucible",
+            host="127.0.0.1",
+            port=7100,
+            path_value=awkward,
+            log_path=user_home / "serve.log",
+        ),
+        encoding="utf-8",
+    )
+    assert service.read_recorded_path("launchd", user_home) == awkward
+
+
+def test_a_unit_written_before_the_path_was_recorded_reads_as_none(
+    user_home: Path,
+) -> None:
+    """A pre-0.6.0 unit has no `Environment=PATH=` line at all, and that is a
+    missing recording rather than an empty PATH."""
+    unit = service.unit_path(user_home)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(
+        "[Service]\nExecStart=/opt/crucible/bin/crucible serve\n", encoding="utf-8"
+    )
+    assert service.read_recorded_path("systemd", user_home) is None
+
+
 def test_cli_service_refuses_without_a_config(
     home: Path, user_home: Path, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

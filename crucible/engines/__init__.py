@@ -3,6 +3,12 @@
 `build_engine()` is the only place an engine name becomes a class. A manifest
 naming an engine this build does not have is refused by name, never substituted
 for a different one.
+
+ONE ENGINE PER (BACKEND, CLASS FAMILY) since 2026-09-14, which is why there are
+three classes for two backends: `cuda-linux` serves both text and pages with
+vLLM, and `mlx-darwin` serves text with `mlx-lm` and pages with `mlx-vlm`.
+`crucible/manifests.py` owns the pairing and refuses every other one; this
+module owns only "which class does this name mean".
 """
 
 from __future__ import annotations
@@ -19,15 +25,29 @@ from .base import (
 )
 from .llama_server import LlamaServerEngine
 from .mlx_lm import MlxLmEngine
+from .mlx_vlm import MlxVlmEngine
 from .narrator import NarratorEngine
 from .vllm import VllmEngine
 
 if TYPE_CHECKING:  # `crucible.narratorvoices` imports this package; no cycle at runtime
     from ..narratorvoices import VoicesDocument
 
+#: Every server class this build can start, by the name a manifest uses.
+#:
+#: There are three and not two because `mlx-darwin` needs a SECOND class for
+#: page reading: `mlx-lm` is a text server and cannot be handed an image, so
+#: `crucible/manifests.py` maps (mlx-darwin, pages) to `mlx-vlm` and this is
+#: where that name becomes a class. `cuda-linux` maps both families to vLLM,
+#: which is why it needs only one.
+#:
+#: `residency.load()` picks by `spec.engine` and always has, so the family
+#: never appears in the residency at all — the manifest names the engine, the
+#: loader has already refused every pairing that is not allowed, and this dict
+#: turns the surviving name into a process.
 ENGINES: dict[str, type[SubprocessEngine]] = {
     VllmEngine.name: VllmEngine,
     MlxLmEngine.name: MlxLmEngine,
+    MlxVlmEngine.name: MlxVlmEngine,
     LlamaServerEngine.name: LlamaServerEngine,
 }
 
@@ -107,16 +127,23 @@ def build_voice_engine(
 def engine_model_name(engine_name: str, model_dir: Path, model_id: str) -> str:
     """The name *the engine* will answer to for this model.
 
-    vLLM is told `--served-model-name <crucible id>`, so the two agree. mlx-lm has
-    no such flag and reports the model directory it was given; the proxy rewrites
-    the one `model` field after checking it against the resident Crucible id (see
-    `crucible/engines/mlx_lm.py`).
+    vLLM is told `--served-model-name <crucible id>`, so the two agree. Neither
+    MLX engine has such a flag and both report the model directory they were
+    given; the proxy rewrites the one `model` field after checking it against
+    the resident Crucible id (see `crucible/engines/mlx_lm.py`).
+
+    THE TWO MLX ENGINES DIFFER BY ONE `resolve()`, and it is measured rather
+    than assumed. mlx-lm reports `str(Path(--model).resolve())`, so this has to
+    resolve too or readiness would compare two spellings of one path. mlx-vlm
+    stores `model_path` exactly as handed over and reports that
+    (`get_cached_model`, exercised on the Mac Studio 2026-09-14:
+    `reports_the_path_verbatim` was true for the unresolved string), so
+    resolving here would introduce the very mismatch the resolve prevents on
+    the other one.
     """
     if engine_name == VllmEngine.name:
         return model_id
     if engine_name == MlxLmEngine.name:
-        # mlx-lm's /v1/models reports `str(Path(--model).resolve())`, so this must
-        # be resolved too or readiness would compare two spellings of one path.
         return str(Path(model_dir).resolve())
     if engine_name == LlamaServerEngine.name:
         # `--alias <crucible id>` (PHASE15-HOST.md 7.4, item 3): llama-server
@@ -125,6 +152,8 @@ def engine_model_name(engine_name: str, model_dir: Path, model_id: str) -> str:
         # the Crucible id, which makes readiness "the name equals the id this
         # server started" and the proxy verbatim — no rewrite, unlike mlx-lm.
         return model_id
+    if engine_name == MlxVlmEngine.name:
+        return str(model_dir)
     raise EngineError(
         f"unknown engine {engine_name!r}; this build has {sorted(ENGINES)}"
     )
@@ -137,6 +166,7 @@ __all__ = [
     "EngineError",
     "LlamaServerEngine",
     "MlxLmEngine",
+    "MlxVlmEngine",
     "NarratorEngine",
     "SubprocessEngine",
     "VllmEngine",

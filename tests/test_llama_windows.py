@@ -61,7 +61,10 @@ def test_windows_is_a_backend_and_llama_server_is_its_engine() -> None:
     `mlx-darwin` is — a per-model engine child — and the engine is llama.cpp.
     """
     assert LLAMA_WINDOWS in BACKEND_KINDS
-    assert BACKEND_ENGINES[LLAMA_WINDOWS] == "llama-server"
+    assert BACKEND_ENGINES[LLAMA_WINDOWS] == {
+        "text": "llama-server",
+        "pages": "llama-server",
+    }
     assert set(BACKEND_KINDS) == {CUDA_LINUX, MLX_DARWIN, LLAMA_WINDOWS}
 
 

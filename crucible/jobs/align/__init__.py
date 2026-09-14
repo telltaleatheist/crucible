@@ -82,6 +82,7 @@ from ...alignmodels import (
     AlignManifestError,
     load_all_align_manifests,
 )
+from ...backend import CUDA_LINUX, MLX_DARWIN
 from ...config import Config
 from ...errors import ApiError, JobCancelled, JobError
 from ...manifests import fingerprint
@@ -123,9 +124,33 @@ QWEN3_LANGUAGES: dict[str, str] = {
     "yue": "Cantonese",
 }
 
-#: `bfloat16` on an accelerator. There is no CPU entry because there is no CPU
-#: backend; the dtype itself comes off the manifest, and this is the device.
-DEVICE = "cuda"
+#: What `device_map=` is given, per backend. The DTYPE comes off the manifest —
+#: it is a property of what the bake-off measured — and this is the other half:
+#: which piece of silicon torch is told to put the checkpoint on.
+#:
+#: There is no CPU entry because there is no CPU backend, and there is no
+#: default: a backend nobody has decided a device for must be a refusal naming
+#: it, not a silent `cuda` handed to a Mac. The names are torch's own, and
+#: `mps` is the one narrator already uses on this machine
+#: (`python/narrator/align/aligner.py` lists it in `GPU_DEVICES` and picks
+#: float32 only on `cpu`, bfloat16 on `mps` exactly as on `cuda`).
+DEVICE_FOR_BACKEND: dict[str, str] = {
+    CUDA_LINUX: "cuda",
+    MLX_DARWIN: "mps",
+}
+
+
+def device_for(backend_kind: str) -> str:
+    """The torch device this backend aligns on. Refuses an unknown backend."""
+    found = DEVICE_FOR_BACKEND.get(backend_kind)
+    if found is None:
+        raise JobError(
+            "backend_unsupported",
+            f"there is no align device for backend {backend_kind!r}; this build "
+            f"aligns on {sorted(DEVICE_FOR_BACKEND)}",
+        )
+    return found
+
 
 #: How long the server waits on a worker that has said *nothing at all* before it
 #: gives up on it. Not a run deadline: every message resets it. 900 s covers
@@ -403,10 +428,7 @@ class AlignJobType:
                 400,
                 "backend_unsupported",
                 f"aligner {model_id!r} has no {backend_kind} block; "
-                f"{manifest.path.name} declares {sorted(manifest.backends)}. "
-                "Qwen3-ForcedAligner is a torch model and torch has an MPS "
-                "backend, so a Mac block is possible — but nobody has measured "
-                "this aligner on Metal (envs/align/mlx-darwin.md)",
+                f"{manifest.path.name} declares {sorted(manifest.backends)}",
                 {
                     "model": model_id,
                     "backend": backend_kind,
@@ -575,7 +597,7 @@ class AlignJobType:
             "hf_repo": spec.hf_repo,
             "engine": spec.engine,
             "dtype": spec.dtype,
-            "device": DEVICE,
+            "device": device_for(self._config.backend_kind),
             "language": params.language,
             "language_name": params.model_language(),
             "max_audio_s": QWEN3_MAX_AUDIO_S,
@@ -701,7 +723,7 @@ class AlignJobType:
                 weights_dir,
                 python,
                 WORKER_SCRIPT,
-                device=DEVICE,
+                device=device_for(self._config.backend_kind),
                 dtype=spec.dtype,
                 max_audio_s=QWEN3_MAX_AUDIO_S,
                 timeout=DEFAULT_READY_TIMEOUT_SECONDS,

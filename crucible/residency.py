@@ -591,6 +591,12 @@ class Residency:
         self._evict(say, manifest.id)
 
         log_path = engine_log_path(self._config.home, manifest.id)
+        # WHICH SERVER CLASS comes off the manifest's own `engine`, which is
+        # all that changed when `BACKEND_ENGINES` became one engine per
+        # (backend, class family) on 2026-09-14: the loader has already refused
+        # every pairing that is not allowed, so the name arriving here is the
+        # right one for this model's family and the residency never learns
+        # what a family is.
         engine = build_engine(spec.engine, python, log_path)
         served = engine_model_name(spec.engine, weights_dir, manifest.id)
         port = find_free_port()
