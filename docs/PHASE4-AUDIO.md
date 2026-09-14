@@ -594,7 +594,7 @@ stems back at recorded offsets. Crucible denoises one thing at a time.
   because that is the one it was measured on; the other stems' figures are reported and
   not enforced, rather than enforced on an assumption nobody has tested.
 
-### The checkpoint has a real upstream, and Crucible still does not fetch it
+### The checkpoint has a real upstream, and `crucible denoise pull` fetches it
 
 `denoise/denoise-roformer.toml` names both halves of the model's identity, because they
 disagree: audio-separator resolves a model by **filename** inside its `model_file_dir`
@@ -608,20 +608,44 @@ bytes) and the config's digest computed from the bytes the API served. That matt
 because audio-separator's *own* downloader pulls from a GitHub release, which DESIGN.md
 section 5 refuses as a source of weights; the HF mirror is a source it allows.
 
-What does not exist yet is the command that fetches them. `crucible/jobs/denoise` refuses
-by name (`denoise_model_missing`) with the repo, the revision, the two source paths and
-the two target names — strictly more than `rvc`'s base-asset refusal can say, because
-that one has no upstream to name at all.
+**`crucible denoise list` and `crucible denoise pull <id> [--force]` are that command**,
+and the ruling this section used to owe is discharged. They are `rvc list` / `rvc
+pull-base`'s shape with nothing new invented: `weights.pull_files` does the fetching,
+every digest is verified before either file is placed, the stamp is the same stamp, and
+a pull that finished while leaving an expected file absent is **said out loud rather than
+reported as success**. `crucible doctor`'s denoise row and `/v1/info`'s model row then
+report what is here. Four refusals, each by name: an unknown id (naming what this build
+ships), a model with no block for this backend, a digest mismatch (`weights`', which
+places nothing at all), and the post-pull absence above.
+
+Three things this had to decide, each of them a consequence of the *flat* directory:
+
+- **The layout has one owner and it is `crucible/denoisemodels.py`.**
+  `denoise_models_root(home)` and `model_files(manifest, spec)` are what the puller
+  writes by and what `crucible/jobs/denoise/__init__.py` looks by, because the drift this
+  prevents already happened once next door: `rvc`'s base assets were two lists and the
+  job's was one file shorter, which showed up inside transformers hours later
+  (ARCHITECTURE.md R1).
+- **One stamp per model, not one per directory.** `~/.crucible/denoise-models` is flat
+  because audio-separator resolves a model by filename inside one `model_file_dir`, so a
+  single `crucible-pull.json` there would be overwritten by the second model's pull and
+  would then report the first as never installed. `weights.pull_files` gained a
+  `stamp_name` for exactly this, and the stamp is `crucible-pull-<id>.json`. For the same
+  reason `--force` does not empty the directory — it replaces this model's two files and
+  leaves anybody else's alone.
+- **`config_bytes` joined the manifest**, beside the `model_bytes` that was already there.
+  It is 1,621, read from the HuggingFace API at the pinned revision, and it is what lets
+  `denoise list` say what a pull will cost before it runs. The `FileSource` shape
+  `pull_files` takes wants a size per file, and a size nobody declared is a size nobody
+  checked.
+
+The job's refusal is unchanged in kind and better in content: `denoise_model_missing`
+still names the repo, the revision, the two source paths and the two target names, and
+now also names the command that places them — strictly more than `rvc`'s base-asset
+refusal could say before it had one.
 
 ### Ruling owed
 
-- **Should `crucible denoise pull` exist?** It should, and the machinery now exists:
-  `weights.pull_files` was written for `rvc`'s base assets in the commit after this one
-  (section 4.1), the manifest already carries the repo, the revision, both source paths
-  and both digests, and the target directory is flat. It is a small follow-up rather than
-  an open question — the reason it is not in this commit is that inventing a second
-  downloader beside `crucible/weights.py` in the same commit as a new job type was the
-  wrong order to do two things in.
 - **Does audio-separator reach the network even when both files are present?**
   `list_supported_model_files` fetches `download_checks.json`, and `load_model` fetches
   `mdx_model_data.json` / `vr_model_data.json`, each skipped only when the file is already

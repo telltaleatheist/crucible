@@ -27,6 +27,7 @@ from . import (
     API_VERSION,
     VERSION,
     capability,
+    denoisemodels,
     jobenv,
     narratorpatches,
     rvcbase,
@@ -1104,6 +1105,142 @@ def cmd_rvc_pull_base(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# ------------------------------------------------------------------ denoise
+
+
+def cmd_denoise_list(args: argparse.Namespace) -> int:
+    """Every denoise manifest this build ships and where it stands here.
+
+    Its own command rather than a row in `crucible models list`, for `crucible
+    rvc list`'s reason one job type along: a separator's weights are two named
+    files placed under names an engine resolves by, not a repo snapshot, so
+    `models pull` could not fetch one — and the ids are their own namespace.
+    """
+    resolved = _models_config()
+    if isinstance(resolved, int):
+        return resolved
+    config, backend = resolved
+    try:
+        manifests = denoisemodels.load_all_denoise_manifests()
+    except denoisemodels.DenoiseManifestError as exc:
+        return _fail(str(exc))
+    root = denoisemodels.denoise_models_root(config.home)
+    rows = []
+    for manifest in manifests.values():
+        if not manifest.supports(backend.kind):
+            rows.append(
+                {
+                    "id": manifest.id,
+                    "backend_supported": False,
+                    "installed": False,
+                    "detail": f"no {backend.kind} block; declares "
+                    f"{sorted(manifest.backends)}",
+                }
+            )
+            continue
+        spec = manifest.spec(backend.kind)
+        found = denoisemodels.installed(config.home, manifest, spec)
+        absent = denoisemodels.missing(config.home, manifest)
+        # Stamped and present are different facts and this prints both. A
+        # stamp with a file missing beside it is not installed; two files
+        # somebody placed by hand are usable and unstamped, which is the state
+        # every host was in before this command existed.
+        if found is not None:
+            detail = f"{found.bytes / 1e9:.2f} GB at {found.path}"
+        elif not absent:
+            detail = (
+                f"both files are in {root} but Crucible did not place them — "
+                f"`{denoisemodels.PULL_COMMAND} {manifest.id} --force` to pin them"
+            )
+        else:
+            detail = f"not pulled — `{denoisemodels.PULL_COMMAND} {manifest.id}`"
+        rows.append(
+            {
+                "id": manifest.id,
+                "display": manifest.display,
+                "model_filename": manifest.model_filename,
+                "config_filename": manifest.config_filename,
+                "primary_stem": manifest.primary_stem,
+                "sample_rate": manifest.sample_rate,
+                "backend_supported": True,
+                "installed": found is not None,
+                "present": not absent,
+                "missing": absent,
+                "root": str(root),
+                "hf_repo": spec.hf_repo,
+                "revision": spec.revision,
+                "model_path": spec.model_path,
+                "config_path": spec.config_path,
+                "total_bytes": spec.total_bytes,
+                "memory_bytes_estimate": spec.memory_bytes_estimate,
+                "detail": detail,
+            }
+        )
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return EXIT_OK
+    for row in rows:
+        mark = "installed" if row["installed"] else (
+            "unsupported" if not row["backend_supported"] else (
+                "unstamped" if row["present"] else "not pulled"
+            )
+        )
+        print(f"{row['id']:<22} {mark:<12} {row['detail']}")
+    return EXIT_OK
+
+
+def cmd_denoise_pull(args: argparse.Namespace) -> int:
+    """`crucible denoise pull <id>` — the checkpoint and its config, at the pin.
+
+    Both files, both digests, one revision, into the flat directory
+    audio-separator reads by name. The layout is `crucible/denoisemodels.py`'s
+    and the job reads the same function, so what this places is what a job
+    looks for (ARCHITECTURE.md R1).
+    """
+    resolved = _models_config()
+    if isinstance(resolved, int):
+        return resolved
+    config, backend = resolved
+    try:
+        manifest = denoisemodels.load_denoise_manifest(args.model)
+    except denoisemodels.DenoiseManifestError as exc:
+        return _fail(str(exc))
+    if not manifest.supports(backend.kind):
+        return _fail(
+            f"denoise model {args.model!r} has no {backend.kind} block; "
+            f"{manifest.path.name} declares {sorted(manifest.backends)}"
+        )
+    spec = manifest.spec(backend.kind)
+    print(
+        f"{manifest.id}: {spec.hf_repo}@{spec.revision[:12]}, 2 file(s), "
+        f"{spec.total_bytes / 1e9:.2f} GB for {backend.kind}"
+    )
+    for entry in denoisemodels.model_files(manifest, spec):
+        print(f"  {entry.target} — {entry.why}")
+    try:
+        result = denoisemodels.pull(
+            config,
+            manifest,
+            spec,
+            force=args.force,
+            on_line=lambda line: print(f"  {line}"),
+        )
+    except weights.WeightsError as exc:
+        return _fail(str(exc))
+    absent = denoisemodels.missing(config.home, manifest)
+    if absent:
+        # Unreachable unless something removed a file between the place and
+        # this read; said out loud rather than reported as success, because the
+        # next thing to look at this tree is a job that will fail inside
+        # audio-separator. `rvc pull-base`'s rule, and its reason.
+        return _fail(
+            f"the pull finished but {sorted(absent)} are not under "
+            f"{denoisemodels.denoise_models_root(config.home)}"
+        )
+    print(f"{manifest.id}: {result.bytes / 1e9:.2f} GB at {result.path}")
+    return EXIT_OK
+
+
 # ------------------------------------------------------------------- doctor
 
 
@@ -1629,6 +1766,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="re-pull even if they are already there"
     )
     rvc_pull_base.set_defaults(func=cmd_rvc_pull_base)
+
+    denoise = subparsers.add_parser(
+        "denoise", help="list and pull separator checkpoints for the denoise job"
+    )
+    denoise_commands = denoise.add_subparsers(dest="denoise_command", required=True)
+
+    denoise_list = denoise_commands.add_parser(
+        "list", help="every denoise manifest this build ships and where it stands here"
+    )
+    denoise_list.add_argument("--json", action="store_true", help="machine-readable")
+    denoise_list.set_defaults(func=cmd_denoise_list)
+
+    denoise_pull = denoise_commands.add_parser(
+        "pull",
+        help="fetch a separator's checkpoint and its config at the manifest's "
+        "pinned revision, into the directory audio-separator reads by name",
+    )
+    denoise_pull.add_argument(
+        "model", help="the Crucible denoise id, e.g. denoise-roformer"
+    )
+    denoise_pull.add_argument(
+        "--force", action="store_true", help="re-pull even if it is already installed"
+    )
+    denoise_pull.set_defaults(func=cmd_denoise_pull)
 
     serve = subparsers.add_parser("serve", help="run the API in the foreground")
     serve.add_argument("--host", default=None, help="bind host (default from config)")

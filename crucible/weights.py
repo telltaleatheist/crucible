@@ -22,7 +22,11 @@ repo is laid out rather than because anybody wanted another shape:
 * `pull_files` fetches NAMED files and places each one exactly where an engine
   looks for it, which is what ultimate-rvc's shared base assets are: four files
   scattered through a repo that also holds six pretrained GAN checkpoints, read
-  back from a tree with different names (see `crucible/rvcbase.py`).
+  back from a tree with different names (see `crucible/rvcbase.py`). It is also
+  what a separator checkpoint is — two files out of a mirror of every UVR model
+  there is, landing under the two names audio-separator resolves by (see
+  `crucible/denoisemodels.py`), which is why it takes a `stamp_name`: that
+  target root holds one set per model rather than one set.
 
 All three write the same stamp, so nothing downstream has to know which ran.
 """
@@ -462,7 +466,11 @@ class FileSource(Protocol):
 
 
 def files_installed(
-    target_root: Path, hf_repo: str, revision: str
+    target_root: Path,
+    hf_repo: str,
+    revision: str,
+    *,
+    stamp_name: str = STAMP_NAME,
 ) -> InstalledWeights | None:
     """The stamped file set at `target_root`, or None.
 
@@ -470,8 +478,15 @@ def files_installed(
     `installed`'s reason: the declaration moved, and serving the old bytes under
     the new pin would be a silent substitution. Every target is checked for
     presence too — a stamp beside a file somebody deleted is a stamp that lies.
+
+    `stamp_name` is the default when one directory holds exactly one set, which
+    is ultimate-rvc's base assets. It is NOT the default for
+    `~/.crucible/denoise-models`, where audio-separator reads every separator
+    model by filename out of one flat directory: one stamp there would be
+    overwritten by the second model's pull and would then report the first as
+    never installed. One stamp per set, named after the set.
     """
-    stamp = target_root / STAMP_NAME
+    stamp = target_root / stamp_name
     if not stamp.is_file():
         return None
     record = json.loads(stamp.read_text(encoding="utf-8"))
@@ -510,6 +525,7 @@ def pull_files(
     files: Sequence[FileSource],
     target_root: Path,
     label: str,
+    stamp_name: str = STAMP_NAME,
     force: bool = False,
     on_line: Callable[[str], None] | None = None,
 ) -> InstalledWeights:
@@ -524,6 +540,13 @@ def pull_files(
 
     `label` is what the progress lines call this set, because a caller pulling
     "ultimate-rvc's base assets" should not read lines about a model id.
+
+    `stamp_name` is `files_installed`'s: a target root that holds more than one
+    set — `~/.crucible/denoise-models`, where audio-separator reads every
+    separator by filename out of one flat directory — needs one stamp per set,
+    or the second pull's stamp says the first was never made. Note that force
+    does NOT empty the target root, unlike `pull` and `pull_archive`: it
+    replaces this set's files and leaves anybody else's alone.
     """
     try:
         from huggingface_hub import hf_hub_download
@@ -543,12 +566,14 @@ def pull_files(
             f"{label} declares no files; a set with nothing in it is not a set"
         )
 
-    existing = files_installed(target_root, hf_repo, revision)
+    existing = files_installed(
+        target_root, hf_repo, revision, stamp_name=stamp_name
+    )
     if existing is not None and not force:
         return existing
 
     target_root.mkdir(parents=True, exist_ok=True)
-    stamp = target_root / STAMP_NAME
+    stamp = target_root / stamp_name
     if stamp.exists():
         # Removed FIRST: from here until the new stamp is written this tree is
         # honestly "not installed", so a run interrupted half way cannot be read
@@ -644,7 +669,9 @@ def pull_files(
     stamp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     if on_line is not None:
         on_line(f"placed {total / 1e9:.2f} GB in {elapsed:.0f}s at {target_root}")
-    result = files_installed(target_root, hf_repo, revision)
+    result = files_installed(
+        target_root, hf_repo, revision, stamp_name=stamp_name
+    )
     if result is None:  # pragma: no cover - the stamp was just written
         raise WeightsError(f"wrote {stamp} but it does not read back as installed")
     return result

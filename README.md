@@ -70,6 +70,8 @@ crucible voices list            # voice manifests and their standing here
 crucible voices pull <id>       # fetch a voice's weights at its pinned revision
 crucible rvc list               # RVC voice-conversion manifests and their standing
 crucible rvc pull <id>          # fetch and unpack one RVC model's archive
+crucible denoise list           # separator manifests and their standing here
+crucible denoise pull <id>      # fetch one separator's checkpoint and its config
 ```
 
 `crucible init` refuses if a config already exists (`--force` replaces it and mints a
@@ -145,7 +147,10 @@ rvc-base/          urvc's shared embedder and pitch predictors — the engine's
                    rather than any model's, placed by `crucible rvc pull-base`
                    (PHASE4-AUDIO.md section 4.1)
 denoise-models/    audio-separator's model_file_dir: the separator checkpoint
-                   and its YAML config, under the names the library resolves by
+                   and its YAML config, under the names the library resolves by,
+                   placed by `crucible denoise pull` — a FLAT directory, so the
+                   stamp is `crucible-pull-<id>.json`, one per model
+                   (PHASE4-AUDIO.md section 4.2)
 logs/engine-<id>.log    one engine's stdout and stderr, command line first
 logs/<type>-<job id>.log  one worker's stderr, for `asr` and `rvc` — one file per
                         job, because their workers live and die with one. The
@@ -719,6 +724,8 @@ which is load-bearing for reliable end-of-audio.
 ```bash
 crucible init --enable-denoise      # or add [jobs] enable_denoise = true
 crucible install rvc                # denoise SHARES the rvc env; this builds both
+crucible denoise list               # the separators this build ships, and their standing
+crucible denoise pull denoise-roformer   # ~0.9 GB, two files, both digests verified
 ```
 
 ```json
@@ -734,10 +741,12 @@ be at the model's native 44.1 kHz** — nothing is resampled here, because a ste
 at a rate the caller did not send has offsets that no longer mean anything. Blocking stays
 in the client, which is where chunking lives for every type.
 
-Like `rvc`, it will tell you what it needs: the checkpoint and its YAML config in
-`~/.crucible/denoise-models/`, under the two names audio-separator resolves by. The
-refusal names the HuggingFace repo, the revision and the two paths — Crucible does not
-fetch them, because the library's own downloader pulls from a GitHub release.
+The checkpoint and its YAML config live in `~/.crucible/denoise-models/`, under the two
+names audio-separator resolves by — which are **not** the paths they come from, so the
+manifest carries both halves. `crucible denoise pull` places them from a HuggingFace
+mirror at a pinned revision, verifying both digests before it places either; the library's
+own downloader is never allowed to run, because it pulls from a GitHub release. A job
+without them is still refused by name, and the refusal names this command.
 
 ## The client
 

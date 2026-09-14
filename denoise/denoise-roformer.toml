@@ -55,6 +55,7 @@ model_sha256 = "7c1c39191edc34e942ca7f2346ce6b6c0e1208a5f76349ffce6f696bd12910de
 model_bytes = 913097300
 config_path = "models/Roformer/MelBand/config_melband_roformer_denoise_aufr33_sdr_27.9959.yaml"
 config_sha256 = "5d7d83b2e9d232da60941b717b0abdc345155d45cff3f79715cdb2790ba18c36"
+config_bytes = 1621
 # COMPUTED, NOT MEASURED:
 #
 #     913_097_300  the checkpoint, exactly, from the HuggingFace API
@@ -83,6 +84,7 @@ model_sha256 = "7c1c39191edc34e942ca7f2346ce6b6c0e1208a5f76349ffce6f696bd12910de
 model_bytes = 913097300
 config_path = "models/Roformer/MelBand/config_melband_roformer_denoise_aufr33_sdr_27.9959.yaml"
 config_sha256 = "5d7d83b2e9d232da60941b717b0abdc345155d45cff3f79715cdb2790ba18c36"
+config_bytes = 1621
 # Unified memory rather than VRAM, computed the same way. Without autocast the
 # activations are fp32 here, which is the direction that makes the declared
 # 1.5 GiB allowance conservative rather than optimistic.

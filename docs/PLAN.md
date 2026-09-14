@@ -54,6 +54,12 @@ those three are settled.
   primary stem, same length sample for sample). PHASE4-AUDIO.md section 4.2.
 - **urvc's base assets are pulled** — owed ruling 3 below, answered by reading the engine:
   its own first-run downloader names a HuggingFace repo. `crucible rvc pull-base`.
+- **The separator checkpoint is pulled too** — `crucible denoise list` /
+  `crucible denoise pull <id>`, which is what PHASE4-AUDIO.md section 4.2's own owed
+  ruling asked for. Both files, both digests, one pinned revision, into the flat
+  directory audio-separator reads by name — a layout `crucible/denoisemodels.py` owns
+  and the job reads, so `crucible doctor`'s denoise row stops saying "Crucible does not
+  fetch them".
 
 So what is left is not code. It is **a card, and Owen's rulings on the five things below.**
 

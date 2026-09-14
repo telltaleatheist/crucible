@@ -43,12 +43,25 @@ import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from . import weights
 from .backend import CUDA_LINUX, MLX_DARWIN
+from .config import Config
 from .errors import CrucibleError
 
 DENOISE_DIR_ENV = "CRUCIBLE_DENOISE_DIR"
+
+#: audio-separator's `model_file_dir` under a Crucible home, as one name.
+#: **The one owner of that layout** (ARCHITECTURE.md R1): `crucible denoise
+#: pull` writes into this tree and `crucible/jobs/denoise/__init__.py` reads
+#: from it, and the two agreeing today is two constants that can disagree
+#: tomorrow — which is exactly the bug `rvcbase.targets` was written to end.
+DENOISE_MODELS_DIRNAME = "denoise-models"
+
+#: What fetches a separator's two files, spelled once so the job's refusal, the
+#: doctor line and the CLI all send a reader to the same command.
+PULL_COMMAND = "crucible denoise pull"
 
 #: Both backends run the same engine: audio-separator is torch, torch has an MPS
 #: backend, and a separator checkpoint is not quantised per platform. The one
@@ -76,6 +89,7 @@ _BACKEND_REQUIRED: dict[str, type] = {
     "model_bytes": int,
     "config_path": str,
     "config_sha256": str,
+    "config_bytes": int,
     "memory_bytes_estimate": int,
 }
 
@@ -113,7 +127,13 @@ class DenoiseBackendSpec:
     model_bytes: int
     config_path: str
     config_sha256: str
+    config_bytes: int
     memory_bytes_estimate: int
+
+    @property
+    def total_bytes(self) -> int:
+        """What `crucible denoise pull` fetches, both files."""
+        return self.model_bytes + self.config_bytes
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -126,6 +146,7 @@ class DenoiseBackendSpec:
             "model_bytes": self.model_bytes,
             "config_path": self.config_path,
             "config_sha256": self.config_sha256,
+            "config_bytes": self.config_bytes,
             "memory_bytes_estimate": self.memory_bytes_estimate,
         }
 
@@ -321,10 +342,11 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> DenoiseMan
                     "A single file fetched by path gets the assurance a snapshot "
                     "download gets from its revision, or it gets none"
                 )
-        if block["model_bytes"] <= 0:
-            raise DenoiseManifestError(
-                f"{where}: model_bytes must be positive, got {block['model_bytes']}"
-            )
+        for key in ("model_bytes", "config_bytes"):
+            if block[key] <= 0:
+                raise DenoiseManifestError(
+                    f"{where}: {key} must be positive, got {block[key]}"
+                )
         if block["memory_bytes_estimate"] <= 0:
             raise DenoiseManifestError(
                 f"{where}: memory_bytes_estimate must be positive, got "
@@ -340,6 +362,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> DenoiseMan
             model_bytes=block["model_bytes"],
             config_path=block["config_path"],
             config_sha256=block["config_sha256"],
+            config_bytes=block["config_bytes"],
             memory_bytes_estimate=block["memory_bytes_estimate"],
         )
 
@@ -399,14 +422,169 @@ def load_all_denoise_manifests(
     return manifests
 
 
+# ------------------------------------------------------------- on this host
+
+
+@dataclass(frozen=True)
+class DenoiseFile:
+    """One of a separator's two files, on its way from the mirror to the tree.
+
+    The field names are `crucible.weights.FileSource`'s, so `pull_files` takes
+    these directly and there is one downloader rather than a second one written
+    for this job type. `source` is the path inside the HuggingFace repo and
+    `target` is the name audio-separator resolves by; the module docstring says
+    at length why those are two different strings and why neither is derived
+    from the other.
+    """
+
+    source: str
+    target: str
+    sha256: str
+    bytes: int
+    why: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "target": self.target,
+            "sha256": self.sha256,
+            "bytes": self.bytes,
+            "why": self.why,
+        }
+
+
+def denoise_models_root(home: Path) -> Path:
+    """audio-separator's `model_file_dir` under a Crucible home.
+
+    A FLAT directory holding each separator's checkpoint and its YAML config
+    under the names the library resolves by — its own tree rather than
+    `~/.crucible/models/`, because these are not a repo snapshot and the ids are
+    a separate namespace (`crucible/rvcmodels.py`'s argument, one job type
+    along).
+
+    Takes the home and not the `Config`, so a caller that has only a path can
+    name the directory without standing one up.
+    """
+    return home / DENOISE_MODELS_DIRNAME
+
+
+def stamp_name(manifest: DenoiseManifest) -> str:
+    """This model's pull stamp, which is NOT `weights.STAMP_NAME`.
+
+    One flat directory, one set of files per model: a single
+    `crucible-pull.json` at the root would be overwritten by the second model's
+    pull and would then report the first as never installed. The id is in the
+    name because the id is what the set belongs to.
+    """
+    return f"crucible-pull-{manifest.id}.json"
+
+
+def model_files(
+    manifest: DenoiseManifest, spec: DenoiseBackendSpec
+) -> tuple[DenoiseFile, ...]:
+    """The two files this model needs, in the order they are fetched.
+
+    **The one owner of "which files a separator needs"** — `pull` fetches
+    exactly this list and `missing` checks exactly this list, so the set that is
+    placed and the set that is looked for cannot drift (ARCHITECTURE.md R1).
+    That is the drift `rvcbase` was already bitten by, where the job's list was
+    one file shorter than the puller's and the difference only showed up inside
+    transformers, hours later.
+    """
+    return (
+        DenoiseFile(
+            source=spec.model_path,
+            target=manifest.model_filename,
+            sha256=spec.model_sha256,
+            bytes=spec.model_bytes,
+            why=f"the separator checkpoint — {manifest.display}",
+        ),
+        DenoiseFile(
+            source=spec.config_path,
+            target=manifest.config_filename,
+            sha256=spec.config_sha256,
+            bytes=spec.config_bytes,
+            why=(
+                "the architecture YAML audio-separator loads beside the "
+                "checkpoint; without it the checkpoint alone is unreadable"
+            ),
+        ),
+    )
+
+
+def missing(home: Path, manifest: DenoiseManifest) -> list[str]:
+    """Which of this model's files are not on this host, in declared order.
+
+    Presence, not digest, for `rvcbase.missing`'s reason: a file Crucible placed
+    was verified when it was placed, re-hashing 913 MB on every `crucible
+    doctor` would cost seconds nobody agreed to spend, and a file somebody else
+    put there is one Crucible has nothing to compare against anyway.
+    """
+    root = denoise_models_root(home)
+    return [
+        name
+        for name in (manifest.model_filename, manifest.config_filename)
+        if not (root / name).is_file()
+    ]
+
+
+def installed(
+    home: Path, manifest: DenoiseManifest, spec: DenoiseBackendSpec
+) -> weights.InstalledWeights | None:
+    """The pulled set at this pin, or None. A stamp at another pin is not this."""
+    return weights.files_installed(
+        denoise_models_root(home),
+        spec.hf_repo,
+        spec.revision,
+        stamp_name=stamp_name(manifest),
+    )
+
+
+def pull(
+    config: Config,
+    manifest: DenoiseManifest,
+    spec: DenoiseBackendSpec,
+    *,
+    force: bool = False,
+    on_line: Callable[[str], None] | None = None,
+) -> weights.InstalledWeights:
+    """Fetch both files at the pinned revision, verify both, and place both.
+
+    Every digest is checked before either file is placed — `weights.pull_files`'
+    rule, and the one that matters most here: a checkpoint beside somebody
+    else's config is a separator that loads and produces audio which is subtly
+    wrong and says so nowhere.
+    """
+    return weights.pull_files(
+        config,
+        hf_repo=spec.hf_repo,
+        revision=spec.revision,
+        files=model_files(manifest, spec),
+        target_root=denoise_models_root(config.home),
+        label=f"the {manifest.id} separator",
+        stamp_name=stamp_name(manifest),
+        force=force,
+        on_line=on_line,
+    )
+
+
 __all__ = [
     "DENOISE_BACKEND_ENGINES",
     "DENOISE_DIR_ENV",
+    "DENOISE_MODELS_DIRNAME",
+    "PULL_COMMAND",
     "DenoiseBackendSpec",
+    "DenoiseFile",
     "DenoiseManifest",
     "DenoiseManifestError",
     "denoise_manifests_dir",
+    "denoise_models_root",
+    "installed",
     "load_all_denoise_manifests",
     "load_denoise_manifest",
+    "missing",
+    "model_files",
     "parse_denoise_manifest",
+    "pull",
+    "stamp_name",
 ]

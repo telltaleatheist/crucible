@@ -58,11 +58,14 @@ from ... import accelerator, workerenv, workers
 from ...backend import CUDA_LINUX
 from ...config import Config
 from ...denoisemodels import (
+    PULL_COMMAND,
     DenoiseBackendSpec,
     DenoiseManifest,
     DenoiseManifestError,
+    denoise_models_root,
     load_all_denoise_manifests,
 )
+from ...denoisemodels import missing as missing_model_files
 from ...errors import ApiError, JobError
 from ...manifests import fingerprint
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
@@ -110,15 +113,13 @@ WORKER_SCRIPT = Path(__file__).resolve().parent / "worker.py"
 def denoise_models_dir_for(home: Path) -> Path:
     """audio-separator's `model_file_dir` under a Crucible home.
 
-    A flat directory holding the checkpoint and its YAML config under the names
-    audio-separator resolves by. Its own tree rather than `~/.crucible/models/`
-    because these are not a repo snapshot and the ids are a separate namespace —
-    `crucible/rvcmodels.py`'s argument, one job type along.
-
-    Takes the home rather than the config, so that whatever eventually fetches
-    these files can name the directory without standing up a `Config` first.
+    **The layout is not decided here.** `crucible/denoisemodels.py` owns it,
+    because `crucible denoise pull` has to place two files in exactly the tree
+    this job reads them from, and two functions that agree today are two
+    functions that can disagree tomorrow (ARCHITECTURE.md R1). This is the name
+    the job side calls it by and nothing more.
     """
-    return home / "denoise-models"
+    return denoise_models_root(home)
 
 
 def denoise_models_dir(config: Config) -> Path:
@@ -190,26 +191,21 @@ def _params(params: dict[str, Any]) -> DenoiseParams:
 
 
 def _missing_files(config: Config, manifest: DenoiseManifest) -> list[str]:
-    root = denoise_models_dir(config)
-    return [
-        name
-        for name in (manifest.model_filename, manifest.config_filename)
-        if not (root / name).is_file()
-    ]
+    """Which of this model's two files are absent. One owner: the puller's."""
+    return missing_model_files(config.home, manifest)
 
 
 def _require_model_files(config: Config, manifest: DenoiseManifest) -> Path:
     """The separator's model directory, or `denoise_model_missing` by name.
 
-    **Crucible does not fetch these two files, and it does not let
-    audio-separator fetch them either.** The library's own downloader pulls from
-    a GitHub release, which DESIGN.md section 5 refuses as a source of weights,
-    and a job that reached the network mid-run would be a job whose bytes nobody
-    pinned. The manifest names a HuggingFace mirror at a pinned revision with a
-    digest for each file, so the refusal can say exactly what to put there — and
-    `crucible/jobs/rvc/__init__.py` already refuses its base assets the same way
-    for the same reason. What neither has yet is the command that fetches them;
-    PHASE4-AUDIO.md section 4.2 records that as the owed piece.
+    **Crucible fetches these two files itself and does not let audio-separator
+    fetch them.** The library's own downloader pulls from a GitHub release,
+    which DESIGN.md section 5 refuses as a source of weights, and a job that
+    reached the network mid-run would be a job whose bytes nobody pinned. The
+    manifest names a HuggingFace mirror at a pinned revision with a digest for
+    each file, and `crucible denoise pull` is the one door that places them —
+    so, as with `crucible/jobs/rvc/__init__.py`'s base assets, this refusal
+    names a command that works rather than a directory to fill by hand.
     """
     root = denoise_models_dir(config)
     missing = _missing_files(config, manifest)
@@ -222,18 +218,20 @@ def _require_model_files(config: Config, manifest: DenoiseManifest) -> Path:
     paths = (
         [spec.model_path, spec.config_path] if spec is not None else []
     )
+    command = f"{PULL_COMMAND} {manifest.id}"
     raise ApiError(
         409,
         "denoise_model_missing",
         f"audio-separator needs {manifest.model_filename!r} and "
         f"{manifest.config_filename!r} in {root}, and {missing} are not there. "
-        f"Crucible does not fetch them and does not let the library fetch them: "
-        f"its own downloader pulls from a GitHub release, which is not a source "
-        f"this server takes weights from. The bytes are {where}, at "
-        f"{paths} — put them in {root} under the two names above and try again",
+        f"Crucible does not let the library fetch them: its own downloader "
+        f"pulls from a GitHub release, which is not a source this server takes "
+        f"weights from. The bytes are {where}, at {paths} — run "
+        f"`{command}` to place them and try again",
         {
             "root": str(root),
             "missing": sorted(missing),
+            "command": command,
             "hf_repo": None if spec is None else spec.hf_repo,
             "revision": None if spec is None else spec.revision,
             "paths": paths,
@@ -357,12 +355,17 @@ class DenoiseJobType:
         ]
         if not installed:
             root = denoise_models_dir(self._config)
+            pullable = sorted(
+                manifest.id
+                for manifest in manifests.values()
+                if manifest.supports(backend.kind)
+            )
             return JobTypeStatus(
                 ready=False,
                 detail=(
                     f"{env.detail}; but no separator checkpoint is in {root} — "
-                    "Crucible does not fetch them (see the refusal for where "
-                    "they are)"
+                    f"`{PULL_COMMAND} <id>` fetches one, and this build ships "
+                    f"{pullable}"
                 ),
             )
         return JobTypeStatus(
