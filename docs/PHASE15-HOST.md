@@ -784,7 +784,17 @@ against is the Mac Studio as read on 2026-09-14 (crucible 0.6.0, M1 Ultra 64 GB,
     seven repos measured in the audit (large-v3 2.87 GiB, turbo 1.50 GiB). Nothing on the Mac
     runs mlx-whisper today and BookForge's Mac ASR was CPU faster-whisper, so this is the gap
     with the least standing work behind it.
-  - `pages` — the model, package and dialect are PROVEN on that machine (Foundry's Mac route:
+  - `pages` — **BUILT AND THEN NOT SHIPPED (7c, measured 2026-09-14):** the engine class and the
+    per-family table landed, but `models/dots-ocr.toml` has NO mlx-darwin block on purpose:
+    mlx-vlm's own HTTP server (0.6.10 and 0.7.1 alike) does not put the image into dots.ocr's
+    prompt — in-process `generate` returns 5 correct blocks in the dialect at 16.3 s/page,
+    peak 4.93 GB; the same weights over its server answer one `Picture` box in 0.72 s
+    (`prompt_tokens=216` vs 3,464 ids in-process). Shipping the block would light `pages: yes`
+    on every Mac and answer every page with one box. **RULING OWED (recommended: yes):**
+    Crucible serves dots on the Mac through its OWN small server over `mlx_vlm.generate` —
+    the same lifecycle as every engine child, the request builder shared with the two other
+    backends — rather than waiting on an upstream fix. The original finding follows.
+  - `pages` (original) — the model, package and dialect are PROVEN on that machine (Foundry's Mac route:
     `mlx-vlm 0.6.10` + `mlx-community/dots.ocr-4bit` @ `4ab989e4…`, 3.30 GiB, 0.80% CER,
     ~27 s/page), but `mlx-darwin`'s one engine is `mlx-lm`, a text server that cannot read an
     image. **DECIDED here: `BACKEND_ENGINES` stops being one engine per backend and becomes
@@ -910,7 +920,8 @@ when it's fully ready to test, ill release the card and let you know when its re
 
 One script, `scripts/testrun-phase15.sh`, run from Git Bash on the PC with no arguments. It
 runs the stages below IN ORDER, stops at the first failure with the stage's name and the
-failing command's output, and writes `C:	mp\phase15-testrun\<timestamp>eport.md` as it goes
+failing command's output, and writes `C:	mp\phase15-testrun\<timestamp>
+eport.md` as it goes
 so a stopped run still says what passed. Every stage prints its wall-clock seconds. Nothing
 in it asks a question; anything it needs (a key, a PDF page) is a file it looks for by name
 and reports SKIPPED by name when absent — never silently.
@@ -943,7 +954,7 @@ and reports SKIPPED by name when absent — never silently.
 | T6 | dots under vLLM in WSL: submit a `vlm-pages` job for `C:	mp\phase15-testrun\page.pdf` (SKIPPED by name if absent) to the WSL server; record seconds/page and that the artifact parses in the {bbox,category,text} dialect | YES | one page parsed, figure recorded |
 | T7 | llama-windows: start the staged Windows server on 7101, `load-model dots-ocr`, the same page through the same job wire; the artifact byte-shape identical to T6's; then `load-model qwen3.5-9b` and one cleanup chunk; unload; stop the server | YES | both answered; seconds/page and seconds/chunk recorded; `/v1/activity` shows the acts |
 | T8 | the remove door: `DELETE /v1/catalog/model/qwen3.5-9b` on the staged Windows server, then `installed: false` in its catalog | no | 204 then false |
-| T9 | Mac: `ssh mac` — the Mac server's `/v1/capability` after ITS upgrade (7c) shows `align`, `asr`, `pages` enabled; one align job, one asr job, one page (the Mac's card, allowed) | Mac's card | three artifacts, figures recorded |
+| T9 | Mac: `ssh mac` — the Mac server's `/v1/capability` after ITS upgrade (7c's M-steps; the deploy is a `git pull` of `/Volumes/Callisto/Projects/crucible`, the editable checkout — never a wheel) shows `align` and `asr` enabled; one align job, one asr job (the Mac's card, allowed). `pages` is NOT expected: see 4.6's mlx-vlm finding | Mac's card | two artifacts, figures recorded |
 | T10 | the engine task on this PC: `POST /v1/tasks {"type":"engine","target":"wsl"}` on the staged Windows server with the host's door running — on a machine that already has the distro this exercises detection + migrate-config + migrate-weights (the subject from T7 pulled in the guest, then deleted on Windows) and refuses the steps that do not apply, by name | no | task `done`; the Windows copy gone, the guest's present |
 
 Then Owen's in-app pass (BookForge, Foundry) — his, not the script's. The report's last
