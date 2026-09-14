@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
-# Cut one release: the Python sdist, the Python wheel, and the SDK tarball,
-# under a single tag `v<version>`.
+# Cut one release: the Python sdist, the Python wheel, the SDK tarball and the
+# bootstrap tarball, under a single tag `v<version>`.
 #
 #   ./scripts/release.sh                 # release main
 #   ./scripts/release.sh --dry-run       # build and check, create nothing
 #   ./scripts/release.sh --branch <name> # release a branch (see below)
 #
-# One version, one tag, one release, three assets:
+# One version, one tag, one release, four assets:
 #
 #   crucible-<ver>.tar.gz          the server sdist
 #   crucible-<ver>-py3-none-any.whl  the server wheel
 #   crucible-client-<ver>.tgz      the TypeScript SDK, installable by URL
+#   crucible-bootstrap-<ver>.tgz   the app-side installer/ensurer (PHASE5-APPS.md 6.0),
+#                                  peer-depending on the client at this exact version
 #
-# The version is read from four places and every one of them must agree:
-# crucible/__init__.py, pyproject.toml, sdk/ts/package.json, and sdk/ts/src/version.ts (which
-# the SDK reports in its User-Agent). A mismatch is a refusal, not a warning.
+# The version is read from seven places and every one of them must agree:
+# crucible/__init__.py, pyproject.toml, sdk/ts/package.json, sdk/ts/src/version.ts (which
+# the SDK reports in its User-Agent), sdk/bootstrap/package.json, its @crucible/client
+# peer pin, and sdk/bootstrap/src/version.ts. A mismatch is a refusal, not a warning:
+# a bootstrapper is never paired with a server nobody tested it against.
 #
 # If the tag already exists — locally, on the remote, or as a release — this
 # refuses. Re-cutting a version is how two different sets of bytes end up with
@@ -41,7 +45,7 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "release: --branch needs a branch name" >&2; exit 2; }
       branch_override="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "release: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -82,11 +86,18 @@ PY_VERSION="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' crucible/__init__.py)"
 SDK_VERSION="$(node -p "require('./sdk/ts/package.json').version")"
 UA_VERSION="$(sed -n "s/^export const SDK_VERSION = '\(.*\)';$/\1/p" sdk/ts/src/version.ts)"
 TOML_VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)"
+BOOT_VERSION="$(node -p "require('./sdk/bootstrap/package.json').version")"
+BOOT_PEER="$(node -p "require('./sdk/bootstrap/package.json').peerDependencies['@crucible/client']")"
+BOOT_LITERAL="$(sed -n "s/^export const BOOTSTRAP_VERSION = '\(.*\)';$/\1/p" sdk/bootstrap/src/version.ts)"
 
 [ -n "$PY_VERSION" ]   || fail "could not read VERSION from crucible/__init__.py"
 [ -n "$SDK_VERSION" ]  || fail "could not read version from sdk/ts/package.json"
 [ -n "$UA_VERSION" ]   || fail "could not read SDK_VERSION from sdk/ts/src/version.ts"
 [ -n "$TOML_VERSION" ] || fail "could not read version from pyproject.toml"
+[ -n "$BOOT_VERSION" ] || fail "could not read version from sdk/bootstrap/package.json"
+[ -n "$BOOT_PEER" ] && [ "$BOOT_PEER" != "undefined" ] \
+  || fail "could not read the @crucible/client peer pin from sdk/bootstrap/package.json"
+[ -n "$BOOT_LITERAL" ] || fail "could not read BOOTSTRAP_VERSION from sdk/bootstrap/src/version.ts"
 
 [ "$PY_VERSION" = "$TOML_VERSION" ] \
   || fail "crucible/__init__.py says $PY_VERSION but pyproject.toml says $TOML_VERSION; the wheel would carry the wrong version (this is what nearly shipped 0.1.0 bytes as v0.2.0)"
@@ -95,6 +106,12 @@ TOML_VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)"
   || fail "crucible/__init__.py says $PY_VERSION but sdk/ts/package.json says $SDK_VERSION; one release, one version"
 [ "$PY_VERSION" = "$UA_VERSION" ] \
   || fail "crucible/__init__.py says $PY_VERSION but sdk/ts/src/version.ts says $UA_VERSION; the SDK would report the wrong version in User-Agent"
+[ "$PY_VERSION" = "$BOOT_VERSION" ] \
+  || fail "crucible/__init__.py says $PY_VERSION but sdk/bootstrap/package.json says $BOOT_VERSION; the bootstrapper ships at the server's version"
+[ "$PY_VERSION" = "$BOOT_PEER" ] \
+  || fail "sdk/bootstrap/package.json pins @crucible/client $BOOT_PEER, not $PY_VERSION; the bootstrapper must peer-depend on the client cut beside it"
+[ "$PY_VERSION" = "$BOOT_LITERAL" ] \
+  || fail "crucible/__init__.py says $PY_VERSION but sdk/bootstrap/src/version.ts says $BOOT_LITERAL; the bootstrapper would name itself wrongly"
 
 VERSION="$PY_VERSION"
 TAG="v$VERSION"
@@ -126,14 +143,21 @@ echo "release: building the sdk"
 ( cd sdk/ts && npm ci --no-audit --no-fund >/dev/null && npm run build >/dev/null )
 ( cd sdk/ts && npm pack --silent --pack-destination "$OUT" >/dev/null )
 
+# The bootstrap's dev dependency on the client is `file:../ts`, which `npm ci`
+# links in place — so the client must already be built, and it is, just above.
+echo "release: building the bootstrap"
+( cd sdk/bootstrap && npm ci --no-audit --no-fund >/dev/null && npm run build >/dev/null )
+( cd sdk/bootstrap && npm pack --silent --pack-destination "$OUT" >/dev/null )
+
 SDIST="$OUT/crucible-$VERSION.tar.gz"
 WHEEL="$OUT/crucible-$VERSION-py3-none-any.whl"
 TGZ="$OUT/crucible-client-$VERSION.tgz"
-for asset in "$SDIST" "$WHEEL" "$TGZ"; do
+BOOT="$OUT/crucible-bootstrap-$VERSION.tgz"
+for asset in "$SDIST" "$WHEEL" "$TGZ" "$BOOT"; do
   [ -f "$asset" ] || fail "expected asset $asset was not built"
 done
 echo "release: built"
-for asset in "$SDIST" "$WHEEL" "$TGZ"; do
+for asset in "$SDIST" "$WHEEL" "$TGZ" "$BOOT"; do
   echo "  $(basename "$asset")"
 done
 
@@ -144,7 +168,7 @@ fi
 
 # ------------------------------------------------------------------- the release
 
-NOTES_HEADER="Server \`crucible\` $VERSION and TypeScript client \`@crucible/client\` $VERSION."
+NOTES_HEADER="Server \`crucible\` $VERSION, TypeScript client \`@crucible/client\` $VERSION, and app-side bootstrapper \`@crucible/bootstrap\` $VERSION."
 if [ -n "$branch_override" ]; then
   NOTES_HEADER="$NOTES_HEADER
 
@@ -152,10 +176,11 @@ Cut from branch \`$branch_override\` at \`$(git rev-parse --short HEAD)\`, befor
 fi
 NOTES_HEADER="$NOTES_HEADER
 
-Install the client:
+Install the client, and the bootstrapper beside it (it peer-depends on the client at this exact version):
 
 \`\`\`
 npm install https://github.com/$REPO_SLUG/releases/download/$TAG/crucible-client-$VERSION.tgz
+npm install https://github.com/$REPO_SLUG/releases/download/$TAG/crucible-bootstrap-$VERSION.tgz
 \`\`\`"
 
 gh release create "$TAG" \
@@ -164,7 +189,7 @@ gh release create "$TAG" \
   --title "$TAG" \
   --generate-notes \
   --notes "$NOTES_HEADER" \
-  "$SDIST" "$WHEEL" "$TGZ"
+  "$SDIST" "$WHEEL" "$TGZ" "$BOOT"
 
 echo "release: $TAG created"
 gh release view "$TAG" --repo "$REPO_SLUG" --json tagName,url,assets \
