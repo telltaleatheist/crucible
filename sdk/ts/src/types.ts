@@ -1535,10 +1535,42 @@ export interface CrucibleModule {
     readonly type: string;
     readonly narrator_engine?: string;
   }[];
+  /**
+   * CAPABILITY CLASSES, unresolved, and the SERVER resolves them
+   * (PHASE15-HOST.md 5.3a).
+   *
+   * The generator used to turn a class into one model id — the id its own
+   * machine's backend would use — and the module then said `dots-ocr` to a
+   * Mac that has no block for it, and `qwen3.8-27b-4bit` to a Mac whose
+   * capability had selected `qwen3.8-27b`. PHASE9 puts the resolution in the
+   * capability record, and the record is per machine, so the class travels
+   * and the server decides.
+   *
+   * A class this engine has DISABLED is not a refusal: the task finishes and
+   * reports it in {@link TaskStatus.unmet}.
+   */
+  readonly needs: readonly { readonly class: string }[];
+  /**
+   * Ids an app CHOSE: a voice, a whisper size, the rvc base. An explicit id
+   * a backend cannot hold is still `unknown_subject` and still refuses the
+   * whole module — the asymmetry is the point. A class is "give me whatever
+   * serves this", which a machine can answer with "nothing here does". An id
+   * is "give me this one", which it cannot.
+   */
   readonly subjects: readonly {
     readonly kind: SubjectKind;
     readonly id: string;
   }[];
+}
+
+/** One class a `module` named that this engine does not serve. 5.3a. */
+export interface UnmetNeed {
+  readonly class: string;
+  /**
+   * The capability row's OWN sentence, verbatim. Never one the task wrote:
+   * the row said why the class is off, and an app shows that.
+   */
+  readonly reason: string;
 }
 
 /** One `module`: an ordered list of installs and pulls, validated whole. */
@@ -1593,6 +1625,15 @@ export interface TaskStatus {
   readonly created: string;
   readonly started: string;
   readonly finished: string | null;
+  /**
+   * Classes a `module` named that this engine does not serve (5.3a).
+   *
+   * EMPTY and never absent, on every task type, so "nothing was unmet" and
+   * "this server predates the field" are not one reading. A `done` task with
+   * entries here did everything it could; the app shows "not on this engine"
+   * beside the pulls it made.
+   */
+  readonly unmet: readonly UnmetNeed[];
 }
 
 /** One step of a task. For a `module`, one per entry plus the reload. */

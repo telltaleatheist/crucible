@@ -1,23 +1,27 @@
 {
   "name": "foundry",
-  "version": "0.6.0+7cd96db1f5dc",
+  "version": "0.6.0+66fd04e88639",
   "job_types": [
     {
       "type": "llm"
     }
   ],
-  "subjects": [
+  "needs": [
     {
-      "kind": "model",
-      "id": "qwen3.5-9b"
+      "class": "clean"
     },
     {
-      "kind": "model",
-      "id": "qwen3.8-27b-4bit"
+      "class": "translate"
     },
     {
-      "kind": "model",
-      "id": "dots-ocr"
+      "class": "simplify"
+    },
+    {
+      "class": "analysis"
+    },
+    {
+      "class": "pages"
     }
-  ]
+  ],
+  "subjects": []
 }

@@ -1,6 +1,6 @@
 {
   "name": "bookforge",
-  "version": "0.6.0+72062ef5269b",
+  "version": "0.6.0+8b7dd947029d",
   "job_types": [
     {
       "type": "llm"
@@ -19,11 +19,12 @@
       "type": "rvc"
     }
   ],
-  "subjects": [
+  "needs": [
     {
-      "kind": "model",
-      "id": "qwen3.5-9b"
-    },
+      "class": "clean"
+    }
+  ],
+  "subjects": [
     {
       "kind": "model",
       "id": "faster-whisper-large-v3"

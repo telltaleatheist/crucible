@@ -146,6 +146,35 @@ def resolve_class(capability_class: str, named: str | None) -> str:
     )
 
 
+def declared_models() -> list[str]:
+    """Every model id this BUILD declares, on any backend. Sorted."""
+    return catalog.declared_ids()["model"]
+
+
+def check_class(capability_class: str) -> None:
+    """Is this a class a module may name? Refuses, and resolves NOTHING.
+
+    PHASE15-HOST.md 5.3a. Two of `resolve_class`'s three questions are facts
+    about this CHECKOUT and are the same on every machine — a class this
+    build does not have, and a class that selects no model — so they are
+    asked here, at generation, where the answer can be a red build rather
+    than a refused install. The third — WHICH id serves it — is a fact about
+    a machine's card and is the server's alone.
+    """
+    if capability_class not in BY_NAME:
+        raise ModuleError(
+            f"{capability_class!r} is not a capability class; they are "
+            f"{sorted(BY_NAME)}"
+        )
+    served = _model_classes()
+    if capability_class not in served:
+        raise ModuleError(
+            f"the {capability_class!r} class does not select a model — it "
+            "selects a voice, an aligner or nothing at all. Name what it "
+            "needs under [[subjects]] instead"
+        )
+
+
 def read_declaration(path: Path) -> dict[str, Any]:
     """Parse one `modules/<app>.toml`, or refuse naming the file."""
     try:
@@ -221,6 +250,20 @@ def build(declaration: dict[str, Any], where: str) -> dict[str, Any]:
         if {"kind": kind, "id": subject_id} not in subjects:
             subjects.append({"kind": kind, "id": subject_id})
 
+    # NEEDS TRAVEL AS CLASSES, UNRESOLVED (PHASE15-HOST.md 5.3a, found
+    # 2026-09-14 by Foundry against the Mac). This generator used to resolve a
+    # class to ONE id here — the cuda-linux answer, because it runs on a PC —
+    # and post it to every machine. The Mac then refused the WHOLE module
+    # `unknown_subject` (dots-ocr has no mlx-darwin block), and even where it
+    # did not, `qwen3.8-27b-4bit` is not what the Mac's capability selected
+    # (`qwen3.8-27b`). The generator was a second owner of a decision that is
+    # the SERVER's: PHASE9 says the capability record is the one place a class
+    # is resolved, and the record is per machine.
+    #
+    # So this half only CHECKS. A class the build does not have, or one that
+    # selects no model, is refused here — those are facts about this
+    # checkout and are the same on every machine. Which id serves it is not.
+    needs: list[dict[str, str]] = []
     for index, raw in enumerate(declaration.get("needs", [])):
         at = f"{where}: needs[{index}]"
         if not isinstance(raw, dict):
@@ -235,9 +278,24 @@ def build(declaration: dict[str, Any], where: str) -> dict[str, Any]:
         if named is not None and not isinstance(named, str):
             raise ModuleError(f"{at}: `model` must be a string")
         try:
-            add("model", resolve_class(capability_class, named))
+            check_class(capability_class)
         except ModuleError as exc:
             raise ModuleError(f"{at}: {exc}") from None
+        if named is not None:
+            # A `model` beside a class is an app OVERRIDING the resolution,
+            # which is an explicit choice and therefore an explicit subject.
+            # It is checked to exist in SOME backend's block, like every other
+            # named id, and it stops being a class on the wire.
+            if named not in declared_models():
+                raise ModuleError(
+                    f"{at}: this build has no model called {named!r}; it ships "
+                    f"{declared_models()}"
+                )
+            add("model", named)
+            continue
+        entry = {"class": capability_class}
+        if entry not in needs:
+            needs.append(entry)
 
     for index, raw in enumerate(declaration.get("subjects", [])):
         at = f"{where}: subjects[{index}]"
@@ -261,12 +319,17 @@ def build(declaration: dict[str, Any], where: str) -> dict[str, Any]:
             )
         add(kind, subject_id)
 
-    if not job_types and not subjects:
+    if not job_types and not subjects and not needs:
         raise ModuleError(
             f"{where}: this declaration asks for nothing. An app that needs "
             "nothing from a server needs no module"
         )
-    body = {"name": name, "job_types": job_types, "subjects": subjects}
+    body = {
+        "name": name,
+        "job_types": job_types,
+        "needs": needs,
+        "subjects": subjects,
+    }
     return {"name": name, "version": version_of(body), **body}
 
 
@@ -316,6 +379,8 @@ __all__ = [
     "ModuleError",
     "build",
     "check",
+    "check_class",
+    "declared_models",
     "file_name",
     "read_declaration",
     "render",

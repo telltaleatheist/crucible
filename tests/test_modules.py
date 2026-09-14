@@ -70,29 +70,52 @@ def test_bookforge_asks_for_what_its_install_door_used_to_print() -> None:
         "align",
         "rvc",
     ]
+    # EXPLICIT IDS ONLY, and every one of them is a genuine app choice
+    # (PHASE15-HOST.md 5.3a): a whisper size, the aligner, a voice, the rvc
+    # base, a separator. `qwen3.5-9b` LEFT this set on 2026-09-14 — it is the
+    # `clean` class's answer on a PC, and which model serves `clean` is the
+    # SERVER's to say, per machine.
     assert {(s["kind"], s["id"]) for s in document["subjects"]} == {
-        ("model", "qwen3.5-9b"),
         ("model", "faster-whisper-large-v3"),
         ("model", "qwen3-aligner"),
         ("voice", "higgs-default"),
         ("rvc-base", "base"),
         ("denoise", "denoise-roformer"),
     }
+    assert [need["class"] for need in document["needs"]] == ["clean"]
     tts = next(e for e in document["job_types"] if e["type"] == "tts")
     assert tts["narrator_engine"] == "higgs-v3"
 
 
 def test_foundry_asks_for_the_classes_owens_ruling_names() -> None:
+    """FIVE CLASSES AND NO IDS AT ALL, since PHASE15-HOST.md 5.3a.
+
+    Measured by Foundry against the Mac: this file used to carry
+    `qwen3.8-27b-4bit` and `dots-ocr` as RESOLVED ids, because the generator
+    resolved a class to one model at generation time — the cuda-linux answer,
+    because the generator runs on a PC. Posted to the Mac, `validate_module`
+    refused the whole module `unknown_subject` (dots-ocr has no mlx-darwin
+    block), and `qwen3.8-27b-4bit` is not what that machine's capability
+    selected anyway (`qwen3.8-27b`).
+
+    Deduplication moved with the resolution: three classes resolving to one
+    model on one card is the SERVER's `skipped`, and here they are three
+    different classes and stay three entries.
+    """
     document = json.loads(
         (MODULES_DIR / "foundry.module.json").read_text(encoding="utf-8")
     )
-    ids = [s["id"] for s in document["subjects"]]
-    # translate, simplify and analysis all resolve to the 27B, and it appears
-    # ONCE: a module that named it three times would make the server run two
-    # steps whose only outcome is `skipped`.
-    assert ids.count("qwen3.8-27b-4bit") == 1
-    assert set(ids) == {"qwen3.5-9b", "qwen3.8-27b-4bit", "dots-ocr"}
-    assert all(s["kind"] == "model" for s in document["subjects"])
+    assert [need["class"] for need in document["needs"]] == [
+        "clean",
+        "translate",
+        "simplify",
+        "analysis",
+        "pages",
+    ]
+    assert document["subjects"] == []
+    # Nothing in this document is a model id, on any machine.
+    assert "qwen3" not in json.dumps(document)
+    assert "dots-ocr" not in json.dumps(document)
 
 
 # ------------------------------------------------------------------ versions
@@ -241,9 +264,12 @@ def test_check_is_empty_only_when_the_documents_agree() -> None:
     path = MODULES_DIR / "foundry.toml"
     fresh = modules.build(modules.read_declaration(path), path.name)
     assert modules.check(modules.render(fresh), fresh) == []
-    drifted = {**fresh, "subjects": []}
+    # Foundry's `subjects` is EMPTY since 5.3a — every id it used to carry
+    # is a class the server resolves — so the drift is made in `needs`,
+    # which is where its content now lives.
+    drifted = {**fresh, "needs": []}
     problems = modules.check(modules.render(drifted), fresh)
-    assert any(problem.startswith("subjects:") for problem in problems)
+    assert any(problem.startswith("needs:") for problem in problems)
 
 
 def test_a_drifted_version_is_a_drifted_module() -> None:

@@ -30,17 +30,16 @@ class = "translate"
 [[needs]]
 class = "simplify"
 
-# `analysis` is the one class this generator refuses to resolve on its own, and
-# the refusal is right. Both 27Bs serve it and neither declares itself the
-# floor, so picking — the largest, the smallest, the first — would be inventing
-# a policy nobody wrote down. Named here, and checked against the class table:
-# a model that stopped serving `analysis` turns the guard red.
-#
-# It is the same model `translate` and `simplify` resolve to today, so this
-# adds no second download; the generator deduplicates the subject.
+# `analysis` travels as a CLASS like the other three, since PHASE15-HOST.md
+# 5.3a. It used to carry `model = "qwen3.8-27b-4bit"` because this generator
+# refuses to pick between the two 27Bs — and that refusal is still right HERE,
+# where there is no card to pick against. What changed is that the choice is
+# not this file's to make: the SERVER resolves every class through its own
+# capability record, which does decide, per machine. The id this line used to
+# carry is the cuda-linux answer, and posting it to the Mac is exactly the
+# defect 5.3a was written for.
 [[needs]]
 class = "analysis"
-model = "qwen3.8-27b-4bit"
 
 # The VLM page reader. One candidate, resolved.
 [[needs]]

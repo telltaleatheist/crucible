@@ -59,7 +59,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from . import catalog, envpack, jobenv, workerenv
+from . import capability, catalog, envpack, jobenv, workerenv
 from .backend import LLAMA_WINDOWS, Backend
 from .config import Config
 from .errors import ApiError, CrucibleError
@@ -198,6 +198,12 @@ class Task:
     finished: str | None = None
     error: dict[str, str] | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
+    #: Classes a `module` named that this engine does not serve, with the
+    #: capability row's own reason (PHASE15-HOST.md 5.3a). Empty for every
+    #: other task type and for a module whose every class resolved — an
+    #: EMPTY LIST and not None, so "nothing was unmet" and "this server
+    #: predates the field" are not one reading.
+    unmet: list[dict[str, str]] = field(default_factory=list)
     cancel_requested: bool = False
     #: The install subprocess, while one is running. A cancel SIGTERMs it.
     process: subprocess.Popen[str] | None = None
@@ -212,6 +218,7 @@ class Task:
             "created": self.created,
             "started": self.started,
             "finished": self.finished,
+            "unmet": self.unmet,
         }
 
 
@@ -419,13 +426,21 @@ def _validate_install(
 
 @dataclass(frozen=True)
 class ModuleEntry:
-    """One step of a module, resolved. `subject` is None for a job type."""
+    """One step of a module. A job type, a named subject, or a CLASS.
+
+    The third arm arrived with PHASE15-HOST.md 5.3a: a module names classes
+    and THIS server resolves them, through its own capability record, because
+    the record is per machine and the generator that used to resolve them
+    runs on one. A class entry becomes a pull of whatever this card selected,
+    or an `unmet` row — never a refusal of the whole module.
+    """
 
     name: str
     job_type: str | None = None
     narrator_engine: str | None = None
     kind: str | None = None
     subject_id: str | None = None
+    capability_class: str | None = None
 
 
 def validate_module(
@@ -451,11 +466,13 @@ def validate_module(
     for key in ("name", "version"):
         if not isinstance(module.get(key), str) or module[key].strip() == "":
             problems.append(f"{key}: a module needs a non-empty string {key}")
-    unknown = sorted(set(module) - {"name", "version", "job_types", "subjects"})
+    unknown = sorted(
+        set(module) - {"name", "version", "job_types", "needs", "subjects"}
+    )
     if unknown:
         problems.append(
             f"unknown key(s) {unknown}; a module carries exactly name, version, "
-            "job_types and subjects"
+            "job_types, needs and subjects"
         )
 
     entries: list[ModuleEntry] = []
@@ -492,6 +509,47 @@ def validate_module(
                 + (f" ({engine})" if engine else ""),
                 job_type=job_type,
                 narrator_engine=engine,
+            )
+        )
+
+    # NEEDS ARE CLASSES AND THIS SERVER RESOLVES THEM (5.3a). What is checked
+    # here is only that the class EXISTS — a word this build does not have is
+    # a defect in the module and is the same defect on every machine. Whether
+    # this card can serve it is not checked at all: a class this backend has
+    # disabled is `unmet` on the result, not a refusal, because a module is an
+    # app saying what it needs and a Mac with no page reader is still a Mac
+    # Foundry can use for text.
+    raw_needs = module.get("needs", [])
+    if not isinstance(raw_needs, list):
+        problems.append("needs: must be a list")
+        raw_needs = []
+    for index, raw in enumerate(raw_needs):
+        where = f"needs[{index}]"
+        if not isinstance(raw, dict):
+            problems.append(f"{where}: must be an object with a `class`")
+            continue
+        stray = sorted(set(raw) - {"class"})
+        if stray:
+            problems.append(
+                f"{where}: unknown key(s) {stray}. A need is a CLASS and nothing "
+                "else; an app that wants one specific model names it under "
+                "`subjects`, which is a choice and says so"
+            )
+            continue
+        capability_class = raw.get("class")
+        if not isinstance(capability_class, str):
+            problems.append(f"{where}: `class` must be a string")
+            continue
+        if capability_class not in capability.BY_NAME:
+            problems.append(
+                f"{where}: {capability_class!r} is not a capability class; they "
+                f"are {sorted(capability.BY_NAME)}"
+            )
+            continue
+        entries.append(
+            ModuleEntry(
+                name=f"resolve {capability_class}",
+                capability_class=capability_class,
             )
         )
 
@@ -895,7 +953,7 @@ class TaskStore:
         task.process = None
         self._running_id = None
         if state == DONE:
-            self.append_event(task, "done", {})
+            self.append_event(task, "done", {"unmet": task.unmet})
         elif state == FAILED:
             if error is not None:
                 self.append_event(task, "failed", error)
@@ -1232,9 +1290,31 @@ class TaskStore:
             total += 1
         index = 0
         installed_anything = False
+        #: The classes this server could NOT resolve, with the capability
+        #: row's own sentence. 5.3a: a class this backend has disabled is not
+        #: a refusal — the module is done, and the app shows "not on this
+        #: engine" beside the pulls it did make.
+        unmet: list[dict[str, str]] = []
         for entry in entries:
             index += 1
             self._raise_if_cancelled(task)
+            if entry.capability_class is not None:
+                resolved = self._resolve_need(task, entry, index, total)
+                if resolved is None:
+                    unmet.append(self._unmet_row(entry.capability_class))
+                    continue
+                if resolved.installed() is not None:
+                    self.append_event(
+                        task,
+                        "skipped",
+                        {
+                            "reason": f"{entry.name}: this card selected "
+                            f"{resolved.id!r} and it is already installed"
+                        },
+                    )
+                    continue
+                await self._pull(task, resolved)
+                continue
             if entry.job_type is not None:
                 self.append_event(
                     task,
@@ -1296,6 +1376,82 @@ class TaskStore:
                         "what the module asks for"
                     },
                 )
+        # WHAT THIS ENGINE CANNOT DO, on the task's own record (5.3a). Carried
+        # on the task rather than only on an event, because an app that
+        # attached late reads `GET /v1/tasks/{id}` and must still learn that
+        # `pages` is not on this machine — and a `done` with no `unmet` and a
+        # `done` whose `unmet` is empty have to be the same answer.
+        task.unmet = unmet
+
+    def _resolve_need(
+        self, task: Task, entry: ModuleEntry, index: int, total: int
+    ) -> "catalog.Subject | None":
+        """Which subject THIS card selected for this class, or None.
+
+        PHASE9: the capability record is the one place a class is resolved,
+        and the record is per machine. None means the class is not served
+        here — disabled, or selected onto a model this backend has no block
+        for — and the caller turns that into an `unmet` row rather than a
+        failure.
+        """
+        assert entry.capability_class is not None
+        self.append_event(
+            task, "step", {"name": entry.name, "index": index, "total": total}
+        )
+        row = self._capability_row(entry.capability_class)
+        if row is None or not row.enabled or row.selected == "":
+            return None
+        subject = catalog.find(
+            self._config, self._backend, "model", row.selected
+        )
+        if subject is None:
+            # The record names a model this backend has no block for. That is
+            # a stale record rather than a disabled class, and it is reported
+            # as `unmet` for the same reason: the app's answer is the same,
+            # and `crucible capability --write` is the operator's fix.
+            return None
+        self.append_event(
+            task,
+            "progress",
+            {
+                "line": f"{entry.capability_class}: this card selected "
+                f"{row.selected}"
+            },
+        )
+        return subject
+
+    def _capability_row(self, capability_class: str) -> Any:
+        record = self._config.capability
+        return None if record is None else record.row(capability_class)
+
+    def _unmet_row(self, capability_class: str) -> dict[str, str]:
+        """`{class, reason}` — the capability row's OWN sentence, or why not.
+
+        Never a sentence written here: the row said why the class is off and
+        that is the sentence an app shows. A server with NO record at all
+        says so by name, because "nothing has probed this card" and "this
+        card cannot do it" are different things for an operator to fix.
+        """
+        row = self._capability_row(capability_class)
+        if row is None:
+            return {
+                "class": capability_class,
+                "reason": (
+                    "this server has no capability record, so it cannot say "
+                    "which model serves this class. Run `crucible capability "
+                    "--write` on it"
+                ),
+            }
+        if row.selected != "" and row.enabled:
+            return {
+                "class": capability_class,
+                "reason": (
+                    f"this card selected {row.selected!r} and this backend has "
+                    "no block for it; the capability record is stale. Run "
+                    "`crucible capability --write`"
+                ),
+            }
+        return {"class": capability_class, "reason": row.reason}
 
     async def _install_step(
         self, task: Task, entry: ModuleEntry, index: int, total: int

@@ -233,7 +233,11 @@ test('a module is posted exactly as the app vendored it', async () => {
     name: 'bookforge',
     version: '0.6.0+1f2e3d4c5b6a',
     job_types: [{ type: 'llm' }, { type: 'tts', narrator_engine: 'higgs-v3' }],
-    subjects: [{ kind: 'model' as const, id: 'qwen3.5-9b' }],
+    // CLASSES since PHASE15-HOST.md 5.3a, and the ids that remain are the
+    // app's own choices. Posted byte for byte either way: the document is a
+    // file the app vendors and this client is not a second author of it.
+    needs: [{ class: 'clean' }],
+    subjects: [{ kind: 'model' as const, id: 'faster-whisper-large-v3' }],
   };
   answer(202, { task_id: 't4' });
   await client().submitTask({ type: 'module', module: vendored });
@@ -324,7 +328,30 @@ test('task reads the record and keeps the echoed request verbatim', async () => 
     created: '2026-09-14T03:00:00+00:00',
     started: '2026-09-14T03:00:00+00:00',
     finished: '2026-09-14T03:04:00+00:00',
+    // ABSENT reads as EMPTY (PHASE15-HOST.md 5.3a): a server that predates
+    // the field ran a module in which every class resolved, or named none,
+    // because a server that could leave one unmet is one that carries it.
+    unmet: [],
   });
+});
+
+test("unmet travels with the class and the capability row's own reason", async () => {
+  answer(200, {
+    ...TASK,
+    type: 'module',
+    unmet: [{ class: 'pages', reason: 'disabled: mlx-vlm serves no image here' }],
+  });
+  const task = await client().task('t1');
+  assert.deepEqual(task.unmet, [
+    { class: 'pages', reason: 'disabled: mlx-vlm serves no image here' },
+  ]);
+});
+
+test('an unmet row missing its reason is a protocol error, not a blank', async () => {
+  // A window drawing "not on this engine" needs the reason, and there is
+  // nothing to fall back to.
+  answer(200, { ...TASK, unmet: [{ class: 'pages' }] });
+  await assert.rejects(() => client().task('t1'), CrucibleProtocolError);
 });
 
 test('a task has no queued state, and one claiming it is a protocol error', async () => {

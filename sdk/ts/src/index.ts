@@ -177,6 +177,7 @@ export type {
   TaskSkippedData,
   TaskState,
   TaskStatus,
+  UnmetNeed,
   TaskStepData,
   TerminalEventName,
   TtsCapability,

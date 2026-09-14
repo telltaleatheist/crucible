@@ -102,6 +102,7 @@ import {
   type TaskRequest,
   type TaskState,
   type TaskStatus,
+  type UnmetNeed,
   type TaskStepData,
   type UploadResult,
   type UpstreamName,
@@ -1831,6 +1832,7 @@ export class CrucibleClient {
       created: str(body, 'created', 'task'),
       started: str(body, 'started', 'task'),
       finished: nullableStr(body, 'finished', 'task'),
+      unmet: readUnmet(body, 'task'),
     };
   }
 
@@ -3240,6 +3242,28 @@ function excerpt(text: string): string {
 /** Where an `engine` task can move this machine. 4.7: forward only. */
 const ENGINE_TARGETS = ['wsl'] as const;
 
+/**
+ * `unmet` off a task document. PHASE15-HOST.md 5.3a.
+ *
+ * ABSENT reads as EMPTY, and that is a statement about vintage rather than a
+ * default: a server that predates the field ran a module in which every
+ * class was resolved or the module named none, because a server that could
+ * leave one unmet is one that carries the field. A PRESENT `unmet` that is
+ * not a list of `{class, reason}` is a protocol error, because a settings
+ * window drawing "not on this engine" needs the reason and there is nothing
+ * to fall back to.
+ */
+function readUnmet(body: Json, where: string): UnmetNeed[] {
+  const raw = body['unmet'];
+  if (raw === undefined) return [];
+  const rows = asArray(raw, `${where}.unmet`);
+  return rows.map((entry, index) => {
+    const at = `${where}.unmet[${index}]`;
+    const row = asObject(entry, at);
+    return { class: str(row, 'class', at), reason: str(row, 'reason', at) };
+  });
+}
+
 /** The vocabulary `TaskState` closes over, for `oneOf`. */
 const TASK_STATES: readonly TaskState[] = ['running', 'done', 'failed', 'cancelled'];
 
@@ -3301,6 +3325,7 @@ function readTaskStatus(row: Json, where: string): TaskStatus {
     created: str(row, 'created', where),
     started: str(row, 'started', where),
     finished: nullableStr(row, 'finished', where),
+    unmet: readUnmet(row, where),
   };
 }
 
