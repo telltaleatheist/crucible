@@ -572,3 +572,47 @@ export class CrucibleProtocolError extends CrucibleError {
     this.detail = detail;
   }
 }
+
+// ---------------------------------------------- the settings door's refusals
+//
+// PHASE15-HOST.md sections 3.2 and 3.4, as constants so a caller switches on a
+// name this package spells rather than on a string literal it typed. Every one
+// of them arrives as a `CrucibleRefused` (4xx) or a `CrucibleServerError`
+// (5xx) whose `code` is one of these; they are not subclasses, because nothing
+// about handling them differs from handling any other named refusal — what a
+// window needs is the name and `details.field`, and both are already there.
+
+/** `PUT /v1/settings`: a class that cannot run anywhere but this card. */
+export const ROUTE_NOT_ROUTABLE = 'route_not_routable';
+/** A route value (or a chat's `model`) that is not `<upstream>/<model>`. */
+export const ROUTE_BAD_MODEL = 'route_bad_model';
+/** A route whose upstream has no key/url. The server never stores one. */
+export const ROUTE_UPSTREAM_UNCONFIGURED = 'route_upstream_unconfigured';
+/** Removing an upstream a route still names. `details.classes` says which. */
+export const UPSTREAM_IN_USE = 'upstream_in_use';
+/** A name that is not one of the three. */
+export const UNKNOWN_UPSTREAM = 'unknown_upstream';
+/** An upstream handed the field it does not take (a `url` for `anthropic`). */
+export const UPSTREAM_BAD_FIELD = 'upstream_bad_field';
+
+/** A chat naming an upstream this server has no credential for (409). */
+export const UPSTREAM_UNCONFIGURED = 'upstream_unconfigured';
+/** The upstream refused. The message is the provider's own words. */
+export const UPSTREAM_REJECTED = 'upstream_rejected';
+/** The upstream did not answer. */
+export const UPSTREAM_UNREACHABLE = 'upstream_unreachable';
+/**
+ * The upstream rate-limited it, passed through with `Retry-After`. **The
+ * caller waits**: Crucible never retries a request that may already be billed,
+ * and neither does this client.
+ */
+export const UPSTREAM_RATE_LIMITED = 'upstream_rate_limited';
+/** A lease or a `load-model` naming an upstream model. */
+export const LEASE_NOT_NEEDED = 'lease_not_needed';
+
+/** The three `testUpstream` answers that are results rather than exceptions. */
+export const UPSTREAM_TEST_REFUSALS = [
+  UPSTREAM_UNREACHABLE,
+  UPSTREAM_REJECTED,
+  UPSTREAM_UNCONFIGURED,
+] as const;

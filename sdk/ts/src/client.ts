@@ -27,6 +27,7 @@ import {
   CrucibleServerError,
   CrucibleUnreachable,
   CrucibleVersionError,
+  UPSTREAM_TEST_REFUSALS,
 } from './errors.js';
 import {
   asArray,
@@ -87,8 +88,11 @@ import {
   type RenderFailure,
   type RenderOptions,
   type RenderResult,
+  type RouteSetting,
   type ServerInfo,
   type ServerSetup,
+  type SettingsDocument,
+  type SettingsPatch,
   type SubjectKind,
   type TaskCancelResult,
   type TaskEvent,
@@ -98,6 +102,9 @@ import {
   type TaskStatus,
   type TaskStepData,
   type UploadResult,
+  type UpstreamName,
+  type UpstreamSetting,
+  type UpstreamTestResult,
   type VoiceInfo,
   type VoiceKind,
   type VoicePace,
@@ -289,6 +296,92 @@ export class CrucibleClient {
   async capability(): Promise<CapabilityRecord> {
     const body = await this.#json('/v1/capability', { method: 'GET' }, 'capability');
     return readCapabilityRecord(body);
+  }
+
+  // -------------------------------------------------------------- settings
+  //
+  // PHASE15-HOST.md sections 3.1, 3.2 and 3.8. Owen, 2026-09-14: *"Bookforge
+  // and foundry setup/settings should be able to configure crucible settings.
+  // If the user enters an anthropic api key, it should pass through to
+  // crucible."* These three methods are the whole of that pass-through, and an
+  // app that uses them holds no key, no route and no cloud model list.
+
+  /**
+   * `GET /v1/settings` — where each class's work runs, and which upstreams are
+   * configured.
+   *
+   * **No key comes back, ever.** {@link UpstreamSetting.keyHint} is `…` plus
+   * four characters, which is enough to recognise which of two accounts is in
+   * there and nothing else. Render it verbatim; the ellipsis is the server's.
+   */
+  async settings(): Promise<SettingsDocument> {
+    const body = await this.#json('/v1/settings', { method: 'GET' }, 'settings');
+    return readSettings(body);
+  }
+
+  /**
+   * `PUT /v1/settings` — a PARTIAL patch, applied whole or not at all.
+   *
+   * Returns the document AFTER the write, so a window draws what it is handed
+   * and never guesses what took. **A refusal applies nothing**: configure an
+   * upstream and route a class to it in ONE call and either both happen or
+   * neither does, which is what makes the "paste a key" step in an app's AI
+   * settings a single action rather than two that can half-fail.
+   *
+   * Every refusal carries `details.field`, the dotted path — `routes.translate`,
+   * `upstreams.anthropic.key` — so a window highlights the control that caused
+   * it instead of showing a banner. `upstream_in_use` additionally carries
+   * `details.classes`.
+   */
+  async putSettings(patch: SettingsPatch): Promise<SettingsDocument> {
+    const body = await this.#json(
+      '/v1/settings',
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settingsPayload(patch)),
+      },
+      'putSettings',
+    );
+    return readSettings(body);
+  }
+
+  /**
+   * `POST /v1/settings/upstreams/{name}/test` — ask an upstream what it serves.
+   *
+   * With a `probe` the key or url is tested BEFORE it is saved, which is the
+   * order a person works in: paste, check, save. Without one, the stored
+   * credential is used.
+   *
+   * **This does not throw for the three test refusals.** `upstream_unreachable`,
+   * `upstream_rejected` and `upstream_unconfigured` are ordinary answers to
+   * "does this work" — a person pasting a key expects to be told no, not to
+   * have an exception raised at their settings page — so they come back as
+   * `{ok: false, code, message}` with the provider's own words. Everything
+   * else (a bad bearer, a version mismatch, a server that is not there) throws
+   * exactly as every other method does.
+   */
+  async testUpstream(
+    name: UpstreamName,
+    probe?: { key?: string; url?: string },
+  ): Promise<UpstreamTestResult> {
+    const path = `/v1/settings/upstreams/${encodeURIComponent(name)}/test`;
+    try {
+      const body = await this.#json(
+        path,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(probe ?? {}),
+        },
+        'testUpstream',
+      );
+      return { ok: true, models: strArray(body, 'models', 'testUpstream') };
+    } catch (error) {
+      const code = upstreamTestRefusal(error);
+      if (code === null) throw error;
+      return { ok: false, code, message: (error as CrucibleError).message };
+    }
   }
 
   /** `GET /v1/health` — is the lane free, and how deep is the queue. */
@@ -1784,7 +1877,100 @@ function readCapabilityRow(entry: Json, where: string): CapabilityRow {
     selected: str(entry, 'selected', where),
     reason: str(entry, 'reason', where),
     shortfallBytes: num(entry, 'shortfall_bytes', where),
+    route: oneOf(str(entry, 'route', where), ROUTES, `${where}.route`),
   };
+}
+
+// ---------------------------------------------------------------- settings
+
+const ROUTES = ['local', 'upstream'] as const;
+const UPSTREAM_NAMES = ['anthropic', 'openai', 'ollama'] as const;
+
+/**
+ * `GET /v1/settings`, read whole. Every field the contract promises is
+ * REQUIRED here: a document missing one is a protocol error rather than an
+ * `undefined` handed to a settings page, which is this client's rule
+ * everywhere and matters most on the page that writes a key.
+ */
+function readSettings(body: Json): SettingsDocument {
+  const where = 'settings';
+  const routesRaw = objectField(body, 'routes', where);
+  const routes: Record<string, RouteSetting> = {};
+  for (const name of Object.keys(routesRaw)) {
+    const at = `${where}.routes.${name}`;
+    const entry = objectField(routesRaw, name, `${where}.routes`);
+    routes[name] = {
+      route: oneOf(str(entry, 'route', at), ROUTES, `${at}.route`),
+      model: nullableStr(entry, 'model', at),
+    };
+  }
+  const upstreamsRaw = objectField(body, 'upstreams', where);
+  const upstreams = {} as Record<UpstreamName, UpstreamSetting>;
+  for (const name of UPSTREAM_NAMES) {
+    const at = `${where}.upstreams.${name}`;
+    const entry = objectField(upstreamsRaw, name, `${where}.upstreams`);
+    // The two shapes differ by ONE key, and which one is present is decided
+    // by the upstream rather than by this client: `ollama` is reached by
+    // address and has no secret, the other two are the reverse. Read what is
+    // there rather than demanding both, so neither card is drawn with a field
+    // its provider does not have.
+    const setting: {
+      configured: boolean;
+      keyHint?: string | null;
+      url?: string | null;
+    } = { configured: bool(entry, 'configured', at) };
+    if ('key_hint' in entry) setting.keyHint = nullableStr(entry, 'key_hint', at);
+    if ('url' in entry) setting.url = nullableStr(entry, 'url', at);
+    upstreams[name] = setting;
+  }
+  return {
+    routes,
+    upstreams,
+    desktopAllowanceBytes: num(body, 'desktop_allowance_bytes', where),
+    backendKind: str(body, 'backend_kind', where),
+  };
+}
+
+/**
+ * A patch, in the wire's spelling. Only what the caller stated travels: a
+ * patch is partial, and a key written here as `undefined` would be sent as an
+ * absent field anyway — but sending `{"routes": undefined}` through
+ * `JSON.stringify` and sending nothing are the same bytes only by accident,
+ * so the omission is deliberate rather than relied upon.
+ */
+function settingsPayload(patch: SettingsPatch): Json {
+  const body: Json = {};
+  if (patch.routes !== undefined) body.routes = { ...patch.routes };
+  if (patch.upstreams !== undefined) body.upstreams = { ...patch.upstreams };
+  if (patch.desktopAllowanceBytes !== undefined) {
+    body.desktop_allowance_bytes = patch.desktopAllowanceBytes;
+  }
+  return body;
+}
+
+/**
+ * Is this error one of `testUpstream`'s three RESULTS, or a real failure?
+ *
+ * **Narrowed on the CODE, across every error type, and never on the status.**
+ * `upstream_rejected` arrives as a 401 from this door, which `#failure` maps
+ * to `CrucibleAuthError` like every other 401 — correctly, since it cannot
+ * know whose credential was refused. Keying on the status here would have
+ * turned an upstream's bad API key into "your Crucible token is wrong", shown
+ * on a page whose Crucible token is demonstrably fine. Keying on the class
+ * would have done the same thing one layer up.
+ *
+ * A real auth failure of THIS server still throws: its code is `unauthorized`,
+ * which is not in the list, and a test pins that.
+ */
+function upstreamTestRefusal(
+  error: unknown,
+): 'upstream_unreachable' | 'upstream_rejected' | 'upstream_unconfigured' | null {
+  if (!(error instanceof CrucibleError)) return null;
+  const code = (error as { code?: unknown }).code;
+  if (typeof code !== 'string') return null;
+  return (UPSTREAM_TEST_REFUSALS as readonly string[]).includes(code)
+    ? (code as 'upstream_unreachable' | 'upstream_rejected' | 'upstream_unconfigured')
+    : null;
 }
 
 function readModel(entry: Json, where: string): ModelDescriptor {

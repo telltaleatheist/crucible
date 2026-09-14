@@ -738,6 +738,12 @@ it out of static analysis, so a bundle that never calls `writeArtifactsTo()` nev
 it. webpack will warn about an expression as a dependency; that warning is the mechanism
 working, and `/* webpackIgnore: true */` is on the import for it.
 
+`readPairingFile()` is the second, and does the same thing for the same reason — which is
+why it is **async** although it reads one short file: a dynamic import is a promise, and a
+connect door that was going to await a server anyway pays nothing for it. A static import
+there would have put `node:fs` into the graph of `import {CrucibleClient}` itself, since
+`index.ts` re-exports it.
+
 The cost is that a dynamic `import()` of a non-literal hands back `any`, so the four fs calls
 and the one path call the writer makes are declared as an interface and checked at the seam.
 A runtime that has neither module gets a `CrucibleError` naming what is missing and what to

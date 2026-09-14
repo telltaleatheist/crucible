@@ -40,13 +40,35 @@ export {
   CrucibleUnreachable,
   CrucibleVersionError,
   INVALID_PAIRING,
+  LEASE_NOT_NEEDED,
   LEASED,
+  ROUTE_BAD_MODEL,
+  ROUTE_NOT_ROUTABLE,
+  ROUTE_UPSTREAM_UNCONFIGURED,
   SERVER_BUSY,
+  UNKNOWN_UPSTREAM,
+  UPSTREAM_BAD_FIELD,
+  UPSTREAM_IN_USE,
+  UPSTREAM_RATE_LIMITED,
+  UPSTREAM_REJECTED,
+  UPSTREAM_TEST_REFUSALS,
+  UPSTREAM_UNCONFIGURED,
+  UPSTREAM_UNREACHABLE,
   isServerSpecificRefusal,
 } from './errors.js';
 
 export { PAIRING_SCHEME, parsePairing } from './pairing.js';
 export type { Pairing } from './pairing.js';
+
+// NODE ONLY, and re-exported from its own module so a browser bundle that
+// wants `parsePairing` does not pull `node:fs` in behind it
+// (PHASE15-HOST.md section 3.8).
+export {
+  CRUCIBLE_HOME_ENV,
+  PAIRING_FILE,
+  cruciblePairingPath,
+  readPairingFile,
+} from './pairing-file.js';
 
 export {
   isStreamAudio,
@@ -130,8 +152,11 @@ export type {
   RenderOptions,
   RenderResult,
   ResponseFormat,
+  RouteSetting,
   ServerInfo,
   ServerSetup,
+  SettingsDocument,
+  SettingsPatch,
   SubjectKind,
   TaskBytesProgress,
   TaskCancelResult,
@@ -146,6 +171,9 @@ export type {
   TerminalEventName,
   TtsCapability,
   UploadResult,
+  UpstreamName,
+  UpstreamSetting,
+  UpstreamTestResult,
   VoiceInfo,
   VoiceKind,
   VoicePace,

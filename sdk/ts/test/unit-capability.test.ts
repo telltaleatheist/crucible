@@ -72,6 +72,7 @@ const RECORD = {
       selected: '',
       reason: 'always available: the test job type; it never touches the accelerator',
       shortfall_bytes: 0,
+      route: 'local',
     },
     {
       capability: 'clean',
@@ -79,6 +80,7 @@ const RECORD = {
       selected: 'qwen3.5-9b',
       reason: 'qwen3.5-9b fits: it needs 19.0 GiB and there is 21.0 GiB available',
       shortfall_bytes: 0,
+      route: 'local',
     },
     {
       capability: 'translate',
@@ -86,6 +88,7 @@ const RECORD = {
       selected: 'qwen3.8-27b-4bit',
       reason: 'qwen3.8-27b-4bit fits: it needs 20.1 GiB and there is 21.0 GiB available',
       shortfall_bytes: 0,
+      route: 'local',
     },
     {
       capability: 'tts',
@@ -95,6 +98,7 @@ const RECORD = {
         'disabled: the smallest of 4 voices is deathstalker at 24.0 GiB and there is only ' +
         '21.0 GiB available — short by 3.0 GiB. Higgs v3 is not quantized and will not be.',
       shortfall_bytes: 3 * GIB,
+      route: 'local',
     },
   ],
 };

@@ -1317,6 +1317,15 @@ export interface CapabilityRow {
    * `reason` — a sentence is never load-bearing (ARCHITECTURE.md R4).
    */
   readonly shortfallBytes: number;
+  /**
+   * Where this class's work actually runs (PHASE15-HOST.md section 3.3).
+   *
+   * `upstream` means the operator routed it, `selected` is the
+   * `<upstream>/<model>` id to send as a chat's `model`, and `reason` keeps
+   * the local sentence after `the local answer would be: ` so nothing is lost
+   * when they route back.
+   */
+  readonly route: 'local' | 'upstream';
 }
 
 /**
@@ -1627,3 +1636,83 @@ export interface TaskCancelResult {
    */
   readonly status: 'cancelling';
 }
+
+// ---------------------------------------------------------------- settings
+//
+// PHASE15-HOST.md sections 3.1, 3.2 and 3.8. Owen, 2026-09-14: *"Settings live
+// in the engine and nowhere else."* An app draws these and writes through
+// `putSettings`; it holds no key, no route and no cloud model list of its own.
+
+/** The three upstreams a Crucible speaks to. Exactly these names. */
+export type UpstreamName = 'anthropic' | 'openai' | 'ollama';
+
+/** Where one capability class's work runs on a server. */
+export interface RouteSetting {
+  /** `local` (this server's card) or `upstream` (the operator's account). */
+  readonly route: 'local' | 'upstream';
+  /**
+   * For `local`, the selected local model, or `null` when nothing fits — and
+   * also `null` when this server has decided nothing yet (`capability()`
+   * refuses `capability_undecided`, which is how the two are told apart).
+   * For `upstream`, the `<upstream>/<model>` id to send as a chat's `model`.
+   */
+  readonly model: string | null;
+}
+
+/**
+ * One upstream card. **The key is never here**: `keyHint` is `…` followed by
+ * its last four characters, and is rendered verbatim.
+ */
+export interface UpstreamSetting {
+  readonly configured: boolean;
+  /** `anthropic` and `openai`. Absent for `ollama`, which has no secret. */
+  readonly keyHint?: string | null;
+  /** `ollama`. Absent for the two hosted upstreams, whose address is fixed. */
+  readonly url?: string | null;
+}
+
+/** `GET /v1/settings` — the whole of what an app's settings window draws. */
+export interface SettingsDocument {
+  /** One entry per routable class: `clean`, `translate`, `simplify`, `analysis`. */
+  readonly routes: Readonly<Record<string, RouteSetting>>;
+  readonly upstreams: Readonly<Record<UpstreamName, UpstreamSetting>>;
+  readonly desktopAllowanceBytes: number;
+  readonly backendKind: string;
+}
+
+/**
+ * A `PUT /v1/settings` patch. Every field is optional and a patch is PARTIAL:
+ * what it does not mention it does not change.
+ *
+ * Inside one request the server applies upstreams, then routes, then validates
+ * the whole — which is what lets one call both configure an upstream and route
+ * a class to it, and lets one call re-route away from an upstream and remove
+ * it. A refusal applies nothing.
+ */
+export interface SettingsPatch {
+  /** Class → `'local'` or an upstream model id. */
+  readonly routes?: Readonly<Record<string, string>>;
+  /** Name → its one field, or `null` to remove the upstream. */
+  readonly upstreams?: Readonly<
+    Partial<Record<UpstreamName, { key?: string; url?: string } | null>>
+  >;
+  readonly desktopAllowanceBytes?: number;
+}
+
+/**
+ * What `testUpstream` answers. **It does not throw for the three test
+ * refusals**, because all three are ordinary answers to "does this key work" —
+ * a person pasting one expects to be told, not to have an exception raised at
+ * their settings page. Auth, version and transport failures still throw, like
+ * every other call.
+ */
+export type UpstreamTestResult =
+  | { readonly ok: true; readonly models: string[] }
+  | {
+      readonly ok: false;
+      readonly code:
+        | 'upstream_unreachable'
+        | 'upstream_rejected'
+        | 'upstream_unconfigured';
+      readonly message: string;
+    };
