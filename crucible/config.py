@@ -16,6 +16,7 @@ import os
 import secrets
 import socket
 import stat
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,11 +82,36 @@ def default_desktop_allowance_bytes(backend_kind: str, total_bytes: int) -> int:
     return DEFAULT_DESKTOP_ALLOWANCE_BYTES
 
 
+#: Where a Windows server keeps everything, under `%LOCALAPPDATA%`.
+#:
+#: PHASE15-HOST.md section 3.5: *"On Windows the server's home is
+#: `%LOCALAPPDATA%\\Crucible\\` and every subject lives under it."* Not
+#: `~/.crucible`, because on Windows a dot-directory in the user profile is
+#: roamed by some configurations and backed up by others, and this directory
+#: holds tens of gigabytes of GGUF that must never leave the machine. It is
+#: also the directory the host pack unpacks beside (section 4.4), so the
+#: engine and the weights it reads are under one root.
+WINDOWS_HOME_DIRNAME = "Crucible"
+
+
 def crucible_home() -> Path:
-    """The root of this server's state. Honours $CRUCIBLE_HOME."""
+    """The root of this server's state. Honours $CRUCIBLE_HOME on every platform."""
     override = os.environ.get(CRUCIBLE_HOME_ENV)
     if override is not None and override != "":
         return Path(override).expanduser()
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA")
+        if local is None or local == "":
+            # Not a fallback to `~/.crucible`: a Windows session without
+            # LOCALAPPDATA is broken in a way that would make every path this
+            # server writes wrong, and putting tens of gigabytes somewhere
+            # else quietly is worse than saying so.
+            raise ConfigError(
+                "%LOCALAPPDATA% is not set, so this Windows host cannot say "
+                f"where Crucible's home is. Set {CRUCIBLE_HOME_ENV} to a "
+                "directory on a disk with room for the weights"
+            )
+        return Path(local) / WINDOWS_HOME_DIRNAME
     return Path.home() / ".crucible"
 
 

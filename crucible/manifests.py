@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .backend import CUDA_LINUX, MLX_DARWIN
+from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
 from .errors import CrucibleError
 
 MODELS_DIR_ENV = "CRUCIBLE_MODELS_DIR"
@@ -48,6 +48,11 @@ MODELS_DIR_ENV = "CRUCIBLE_MODELS_DIR"
 BACKEND_ENGINES: dict[str, str] = {
     CUDA_LINUX: "vllm",
     MLX_DARWIN: "mlx-lm",
+    # PHASE15-HOST.md sections 0 and 3.10. Windows natively, llama.cpp's
+    # `llama-server` on GGUF. A block for this backend names FILES inside the
+    # repo rather than the whole repo, because a GGUF repo holds twenty
+    # quantizations and this server pulls one.
+    LLAMA_WINDOWS: "llama-server",
 }
 
 #: What a client may put in a chat request's content parts for this model
@@ -139,6 +144,15 @@ _BACKEND_REQUIRED: dict[str, type] = {
 }
 _BACKEND_OPTIONAL: dict[str, type] = {
     "engine_args": list,
+    # `llama-windows` only, and REQUIRED there — checked below rather than in
+    # this table, because the table is per-key and this rule is per-backend.
+    # A GGUF repo holds every quantization of a model; `file` says which one
+    # this row is, and `mmproj` says which vision projector goes with it.
+    # `mmproj` is absent for a text model and MANDATORY for one this server
+    # offers images on: half a vision model is a model that loads and then
+    # cannot see (section 3.10, fact 2).
+    "file": str,
+    "mmproj": str,
     # A context this backend can actually hold, when the model's own number is
     # not one it can. `[model] context_default` is what the model is FOR; this is
     # what a particular accelerator has room for, and the two are allowed to
@@ -234,6 +248,23 @@ class BackendSpec:
     engine_args: tuple[str, ...]
     #: This backend's own context, or None to use the model's.
     context_default: int | None
+    #: `llama-windows`: the one GGUF in `hf_repo` this row IS, and the vision
+    #: projector beside it. None on every other backend, where the whole repo
+    #: is the weights and there is no file to choose.
+    file: str | None = None
+    mmproj: str | None = None
+
+    @property
+    def files(self) -> tuple[str, ...]:
+        """Every file this spec names, in pull order. Empty = the whole repo.
+
+        The one place "which files does this backend fetch" is answered, so
+        the puller, the catalog's `installed` and the engine's `-m` cannot
+        come to disagree about whether a subject is complete (section 3.5's
+        last bullet: the catalog's `installed` list is the input to the host's
+        weights migration, so it has to be exact).
+        """
+        return tuple(name for name in (self.file, self.mmproj) if name is not None)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -244,6 +275,8 @@ class BackendSpec:
             "memory_bytes_estimate": self.memory_bytes_estimate,
             "engine_args": list(self.engine_args),
             "context_default": self.context_default,
+            "file": self.file,
+            "mmproj": self.mmproj,
         }
 
 
@@ -882,6 +915,41 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
                     f"{where}: engine_args[{index}] must be a string, got "
                     f"{type(argument).__name__}"
                 )
+        # WHICH FILE, and it is per-backend rather than per-key. `file` is
+        # meaningless on a backend that pulls a whole repo and mandatory on one
+        # that pulls one GGUF out of twenty, so the table above cannot express
+        # it and this does (section 3.10, fact 2).
+        if kind == LLAMA_WINDOWS:
+            if "file" not in block:
+                raise ManifestError(
+                    f"{where}: llama-windows needs `file`, the one GGUF in "
+                    f"{block['hf_repo']!r} this row is. A GGUF repo holds every "
+                    "quantization of a model and this server pulls one"
+                )
+            if "image" in modalities and "mmproj" not in block:
+                raise ManifestError(
+                    f"{where}: [model] modalities declares 'image' and this "
+                    "block names no `mmproj`. Half a vision model is a model "
+                    "that loads and then cannot see; the projector is not "
+                    "optional (PHASE15-HOST.md section 3.10, fact 2)"
+                )
+            for key in ("file", "mmproj"):
+                name = block.get(key)
+                if name is None:
+                    continue
+                if name != Path(name).name or name.startswith("."):
+                    raise ManifestError(
+                        f"{where}: {key} {name!r} must be a plain file name "
+                        "inside the repo, not a path"
+                    )
+        else:
+            extra = sorted({"file", "mmproj"} & set(block))
+            if extra:
+                raise ManifestError(
+                    f"{where}: {extra} belong to a llama-windows block. On "
+                    f"{kind} the whole repo is the weights and there is no "
+                    "file to choose"
+                )
         if "image" in modalities and SKIP_MM_PROFILING in engine_args:
             # The one rule that crosses the two tables, and it crosses them
             # because the fact and the flag live apart: what a model is offered
@@ -911,6 +979,8 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             memory_bytes_estimate=block["memory_bytes_estimate"],
             engine_args=tuple(engine_args),
             context_default=backend_context,
+            file=block.get("file"),
+            mmproj=block.get("mmproj"),
         )
 
     return ModelManifest(

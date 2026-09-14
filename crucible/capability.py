@@ -84,7 +84,7 @@ from typing import Any, Callable
 
 from .alignmodels import load_all_align_manifests
 from .asrmodels import load_all_asr_manifests
-from .backend import CUDA_LINUX, MLX_DARWIN
+from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
 from .config import CapabilityRecord, CapabilityRow
 from .denoisemodels import load_all_denoise_manifests
 from .manifests import BACKEND_ENGINES, load_all_manifests
@@ -103,7 +103,36 @@ def _gib(value: int) -> str:
 POOL_NAME: dict[str, str] = {
     CUDA_LINUX: "card",
     MLX_DARWIN: "unified memory",
+    LLAMA_WINDOWS: "card",
 }
+
+#: What `llama-windows` is measuring when there is no card: the machine's RAM,
+#: which is where a GGUF on the CPU allocates from. Keyed on the GPU VENDOR
+#: rather than on the backend, because one backend kind serves both machines
+#: and the pool is the only thing that differs (PHASE15-HOST.md section 3.10:
+#: *"no NVIDIA → enabled: true with the reason 'cpu build — slow'"*).
+CPU_VENDOR = "cpu"
+CPU_POOL_NAME = "system memory"
+
+#: The job types that need the WSL2 engine and will never run natively on
+#: Windows: they are PYTHON environments (narrator, whisper, the aligner, urvc,
+#: the separator), not llama.cpp. PHASE15-HOST.md section 3.3 gives all five
+#: ONE sentence, so an app shows it once instead of five times.
+WSL_ONLY_JOB_TYPES: frozenset[str] = frozenset(
+    {"tts", "asr", "align", "rvc", "denoise"}
+)
+
+NEEDS_WSL_REASON = (
+    "this job type needs the WSL2 engine (vLLM/SGLang); install it from the "
+    "console"
+)
+
+#: What a class answers on a Windows box with no NVIDIA card. Owen: *"a
+#: crucible server will run on absolutely anything."* Nothing refuses it — the
+#: sentence is the warning, and the row stays enabled.
+CPU_BUILD_REASON = (
+    "cpu build — slow; the model runs on this machine's CPU"
+)
 
 #: Said in front of a class's LOCAL sentence when the operator has routed it
 #: upstream. The local answer is kept whole after it (section 3.3), so routing
@@ -446,21 +475,61 @@ def available_bytes(total_bytes: int, desktop_allowance_bytes: int) -> int:
     return max(0, total_bytes - desktop_allowance_bytes)
 
 
-def decide(
-    entry: CapabilityClass,
-    backend_kind: str,
-    *,
-    total_bytes: int,
-    desktop_allowance_bytes: int,
-) -> Decision:
-    """Walk one class's candidates best-first and take the first that fits."""
-    budget = available_bytes(total_bytes, desktop_allowance_bytes)
+def pool_name(backend_kind: str, gpu_vendor: str) -> str:
+    """What the pool this class is measured against is CALLED.
+
+    Two inputs because one backend serves two machines: `llama-windows` on a
+    box with an NVIDIA card is measuring the card, and on a box without one it
+    is measuring the machine's RAM, which is where a GGUF on the CPU really
+    allocates from. Calling both "card" would put a lie in every reason string
+    on a CPU-only host, the way "card" was already a lie on a Mac.
+    """
+    if gpu_vendor == CPU_VENDOR:
+        return CPU_POOL_NAME
     pool = POOL_NAME.get(backend_kind)
     if pool is None:
         raise ValueError(
             f"{backend_kind!r} is not a Crucible backend; the backends are "
             f"{sorted(POOL_NAME)}"
         )
+    return pool
+
+
+def decide(
+    entry: CapabilityClass,
+    backend_kind: str,
+    *,
+    total_bytes: int,
+    desktop_allowance_bytes: int,
+    gpu_vendor: str,
+) -> Decision:
+    """Walk one class's candidates best-first and take the first that fits.
+
+    `gpu_vendor` is REQUIRED and has no default, because on `llama-windows` it
+    is the difference between two true answers and there is no safe guess: a
+    machine with no card told it has one would report a 24 GiB pool that does
+    not exist, and one with a card told it has none would say "slow" about a
+    4090. Every caller has a `Backend` in hand.
+    """
+    if backend_kind == LLAMA_WINDOWS and entry.job_type in WSL_ONLY_JOB_TYPES:
+        # THE FIVE PYTHON JOB TYPES, and they are off for a reason that has
+        # nothing to do with the card: narrator, whisper, the aligner, urvc and
+        # the separator are Python environments, and this backend is
+        # llama.cpp. One sentence for all five (section 3.3), so an app shows
+        # it once rather than printing five variations of "install WSL".
+        return Decision(
+            capability=entry.name,
+            job_type=entry.job_type,
+            enabled=False,
+            selected="",
+            reason=NEEDS_WSL_REASON,
+            shortfall_bytes=0,
+            available_bytes=available_bytes(total_bytes, desktop_allowance_bytes),
+            candidates=(),
+            fit_count=0,
+        )
+    budget = available_bytes(total_bytes, desktop_allowance_bytes)
+    pool = pool_name(backend_kind, gpu_vendor)
     arithmetic = (
         f"{_gib(budget)} available ({_gib(total_bytes)} {pool} less a "
         f"{_gib(desktop_allowance_bytes)} desktop allowance)"
@@ -496,6 +565,15 @@ def decide(
             fit_count=0,
         )
 
+    # ON A CARDLESS WINDOWS BOX THE ROW STILL LIGHTS, and says what it will
+    # cost. Owen: *"a crucible server will run on absolutely anything."* The
+    # sentence is the warning; the arithmetic is unchanged, because RAM is a
+    # real limit and a 27B in 8 GB does not run slowly, it thrashes.
+    cpu_note = (
+        f" {CPU_BUILD_REASON}."
+        if backend_kind == LLAMA_WINDOWS and gpu_vendor == CPU_VENDOR
+        else ""
+    )
     fitting = [c for c in found if c.memory_bytes_estimate <= budget]
     if fitting:
         best = fitting[0]
@@ -507,7 +585,7 @@ def decide(
             reason=(
                 f"{best.id} fits: it needs {_gib(best.memory_bytes_estimate)} and "
                 f"there is {arithmetic}; {len(fitting)} of {len(found)} "
-                f"{entry.noun} fit"
+                f"{entry.noun} fit{cpu_note}"
             ),
             shortfall_bytes=0,
             available_bytes=budget,
@@ -536,7 +614,11 @@ def decide(
 
 
 def decide_all(
-    backend_kind: str, *, total_bytes: int, desktop_allowance_bytes: int
+    backend_kind: str,
+    *,
+    total_bytes: int,
+    desktop_allowance_bytes: int,
+    gpu_vendor: str,
 ) -> tuple[Decision, ...]:
     """Every class, decided on one host. The order of `CLASSES`."""
     return tuple(
@@ -545,6 +627,7 @@ def decide_all(
             backend_kind,
             total_bytes=total_bytes,
             desktop_allowance_bytes=desktop_allowance_bytes,
+            gpu_vendor=gpu_vendor,
         )
         for entry in CLASSES
     )
@@ -583,7 +666,7 @@ def record(
     desktop_allowance_bytes: int,
     decisions: tuple[Decision, ...],
     routes: dict[str, str],
-) -> CapabilityRecord:
+) -> CapabilityRecord:  # noqa: D401 - the docstring below is the contract
     """The decisions, in the shape `config.toml` keeps them, routes applied.
 
     `routes` is REQUIRED and has no default, which is the whole point of it
@@ -626,7 +709,13 @@ def job_type_enabled(job_type: str, decisions: tuple[Decision, ...]) -> bool:
 __all__ = [
     "BY_NAME",
     "CLASSES",
+    "CPU_BUILD_REASON",
+    "CPU_POOL_NAME",
+    "CPU_VENDOR",
     "LOCAL_ANSWER_PREFIX",
+    "NEEDS_WSL_REASON",
+    "WSL_ONLY_JOB_TYPES",
+    "pool_name",
     "ROUTABLE_CLASSES",
     "routed_row",
     "Candidate",

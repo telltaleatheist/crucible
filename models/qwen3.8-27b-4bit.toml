@@ -234,3 +234,37 @@ revision = "3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
 # it is 2.2x low. That script now reports the unified-memory delta instead.)
 memory_bytes_estimate = 33_873_484_870
 engine_args = []
+
+# ---------------------------------------------------------------------------
+# PHASE15-HOST.md sections 0 and 3.10: the 27B that translate, simplify and
+# analysis need, at the only precision a 24 GB card can hold it at. Read from
+# the HuggingFace API on 2026-09-14:
+#
+#   hf_repo/revision  unsloth/Qwen3.8-27B-GGUF @ 4ca720788d1e01f1bff70c033e0d0028fd02e502
+#                     (`base_model: Qwen/Qwen3.8-27B` — the same weights the
+#                     cuda-linux block's AWQ-INT4 is made from)
+#   file              Qwen3.8-27B-UD-Q4_K_M.gguf  16_464_440_224 B (tree API, LFS size)
+#
+# **`UD-Q4_K_M` and not `Q4_K_M`, because the repo publishes no plain one.**
+# Section 3.10 asks for "a Q4_K_M GGUF"; unsloth's dynamic quantization is a
+# Q4_K_M with per-tensor precision raised where it measured a loss, and the
+# repo's plain Q4 offerings are `Q4_0` and `Q4_1`, both worse. A row is never
+# guessed here — this is the file that exists, named exactly.
+#
+# It lands on this manifest and not on `qwen3.8-27b.toml` because THIS is the
+# 4-bit row: the bf16 27B has no llama-windows block, since a 55 GB GGUF on a
+# 24 GB card is not a thing a Windows box runs, and a row with nothing
+# truthful to put in it is worse than no row (3.10: "a model whose GGUF is not
+# published is simply absent from this backend's block").
+#
+# memory_bytes_estimate: the file plus 1.5 GB, DECLARED, exactly as the other
+# two llama-windows blocks. On a 24 GB card that is 16.7 GiB against 19.5 GiB
+# available with Windows's 3 GiB desktop allowance — it fits, and it is the
+# only 27B here that does.
+[backends.llama-windows]
+engine = "llama-server"
+hf_repo = "unsloth/Qwen3.8-27B-GGUF"
+revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
+file = "Qwen3.8-27B-UD-Q4_K_M.gguf"
+memory_bytes_estimate = 17_964_440_224
+engine_args = ["--parallel", "1"]

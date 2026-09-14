@@ -729,7 +729,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         resolved = settings_module.resolve(live, patch)
         # Off the event loop: this writes a file and re-reads it, and a settings
         # write must not stall a job's event stream.
-        await asyncio.to_thread(settings_module.apply, live, resolved)
+        await asyncio.to_thread(
+            lambda: settings_module.apply(
+                live, resolved, gpu_vendor=backend.gpu.vendor
+            )
+        )
         if resolved.changed:
             request.app.state.settings_history.record(
                 act=act,

@@ -53,9 +53,26 @@ MAC_RESERVE = default_desktop_allowance_bytes("mlx-darwin", STUDIO)
 SIX_GIG = 6 * GIB
 
 
-def _decide(name: str, backend: str, total: int, reserve: int) -> Any:
+def _decide(
+    name: str,
+    backend: str,
+    total: int,
+    reserve: int,
+    vendor: str = "nvidia",
+) -> Any:
+    """One class, decided. `vendor` defaults to the card these tests are about.
+
+    It is a keyword with a default HERE and a required argument in
+    `capability.decide` on purpose: production has a `Backend` in hand and
+    must state it, while every test below asks about a machine with a card
+    and saying so eighteen times would bury the one line that differs.
+    """
     return decide(
-        BY_NAME[name], backend, total_bytes=total, desktop_allowance_bytes=reserve
+        BY_NAME[name],
+        backend,
+        total_bytes=total,
+        desktop_allowance_bytes=reserve,
+        gpu_vendor=vendor,
     )
 
 
@@ -143,7 +160,10 @@ def test_higgs_is_binary_and_a_six_gig_card_loses_tts_entirely() -> None:
     assert verdict.selected == ""
     assert "not quantized" in verdict.reason
     assert job_type_enabled("tts", decide_all(
-        "cuda-linux", total_bytes=SIX_GIG, desktop_allowance_bytes=CUDA_RESERVE
+        "cuda-linux",
+        total_bytes=SIX_GIG,
+        desktop_allowance_bytes=CUDA_RESERVE,
+        gpu_vendor="nvidia",
     )) is False
 
 
@@ -163,7 +183,10 @@ def test_a_six_gig_card_keeps_llm_only_if_something_behind_it_fits() -> None:
     `enable_llm` fail, and the flag goes with them.
     """
     decisions = decide_all(
-        "cuda-linux", total_bytes=SIX_GIG, desktop_allowance_bytes=CUDA_RESERVE
+        "cuda-linux",
+        total_bytes=SIX_GIG,
+        desktop_allowance_bytes=CUDA_RESERVE,
+        gpu_vendor="nvidia",
     )
     by_name = {d.capability: d for d in decisions}
     assert by_name["clean"].enabled is False
@@ -180,7 +203,10 @@ def test_llm_survives_when_one_of_its_three_classes_survives() -> None:
     """A host that cleans and cannot translate is an `llm` host, and the per-class
     rows are where it says which half it has. `enable_llm` alone cannot."""
     decisions = decide_all(
-        "cuda-linux", total_bytes=24 * GIB, desktop_allowance_bytes=8 * GIB
+        "cuda-linux",
+        total_bytes=24 * GIB,
+        desktop_allowance_bytes=8 * GIB,
+        gpu_vendor="nvidia",
     )
     by_name = {d.capability: d for d in decisions}
     assert by_name["pages"].enabled is True
@@ -280,6 +306,7 @@ def test_the_capability_record_round_trips_through_config_toml(home: Path) -> No
         "cuda-linux",
         total_bytes=THREE_NINETY,
         desktop_allowance_bytes=CUDA_RESERVE,
+        gpu_vendor="nvidia",
     )
     written = capability.record(
         "cuda-linux",
@@ -416,7 +443,10 @@ def test_the_llm_refusal_reads_every_class_behind_the_flag(home: Path) -> None:
     type (`load-model`); both have to arrive at one sentence, which names all
     three classes rather than whichever one happened to be checked."""
     decisions = decide_all(
-        "cuda-linux", total_bytes=SIX_GIG, desktop_allowance_bytes=CUDA_RESERVE
+        "cuda-linux",
+        total_bytes=SIX_GIG,
+        desktop_allowance_bytes=CUDA_RESERVE,
+        gpu_vendor="nvidia",
     )
     rows = tuple(d.row() for d in decisions if d.job_type == "llm")
     config = _config_with(home, rows)
@@ -610,7 +640,10 @@ def test_the_capability_route_answers_every_class_and_its_reason(
         total_bytes=total,
         desktop_allowance_bytes=allowance,
         decisions=capability.decide_all(
-            "cuda-linux", total_bytes=total, desktop_allowance_bytes=allowance
+            "cuda-linux",
+            total_bytes=total,
+            desktop_allowance_bytes=allowance,
+            gpu_vendor="nvidia",
         ),
         routes={},
     )
@@ -658,7 +691,10 @@ def test_the_route_says_which_job_type_each_class_feeds_and_what_builds_it(
         total_bytes=total,
         desktop_allowance_bytes=allowance,
         decisions=capability.decide_all(
-            "cuda-linux", total_bytes=total, desktop_allowance_bytes=allowance
+            "cuda-linux",
+            total_bytes=total,
+            desktop_allowance_bytes=allowance,
+            gpu_vendor="nvidia",
         ),
         routes={},
     )

@@ -266,16 +266,25 @@ CONTEXTS = {
 #: block here carrying an unmeasured estimate would compete with a route that
 #: works (PHASE3-VLM.md section 4).
 BACKENDS = {
-    "dots-ocr": ["cuda-linux"],
-    "qwen3.5-9b": ["cuda-linux", "mlx-darwin"],
+    # `llama-windows` (PHASE15-HOST.md 3.10) on the three whose GGUF is
+    # published. `qwen3.8-27b` has none and gets no row: a 55 GB GGUF on a
+    # 24 GB card is not a thing a Windows box runs, and a row with nothing
+    # truthful in it is worse than no row.
+    "dots-ocr": ["cuda-linux", "llama-windows"],
+    "qwen3.5-9b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.8-27b": ["cuda-linux", "mlx-darwin"],
-    "qwen3.8-27b-4bit": ["cuda-linux", "mlx-darwin"],
+    "qwen3.8-27b-4bit": ["cuda-linux", "llama-windows", "mlx-darwin"],
 }
 
 #: Where a backend serves a context of its own. `qwen3.8-27b-4bit` wants 98304
 #: and gets it on the Mac; on a 24 GB card 98304 of its KV is 7.9 GiB that is not
 #: there, MEASURED 2026-09-12, so its cuda-linux block carries 16384.
-BACKEND_CONTEXTS = {("qwen3.8-27b-4bit", "cuda-linux"): 16384}
+BACKEND_CONTEXTS = {
+    ("qwen3.8-27b-4bit", "cuda-linux"): 16384,
+    # `-c 16384` is Foundry's launcher verbatim: a page at 200 dpi is up to
+    # ~8k image tokens plus the answer (PHASE15-HOST.md 3.10, fact 3).
+    ("dots-ocr", "llama-windows"): 16384,
+}
 
 
 def test_this_build_ships_the_manifests_the_contracts_name() -> None:

@@ -165,3 +165,34 @@ revision = "27cdb77d9381d508abfe5d4e06bcb95471e312ac"
 # have said 19.22 GB, 6% under the truth.)
 memory_bytes_estimate = 20_378_749_158
 engine_args = []
+
+# ---------------------------------------------------------------------------
+# PHASE15-HOST.md sections 0 and 3.10: the same weights the cuda-linux block
+# names (`Qwen/Qwen3.5-9B`), quantized to Q8_0 by unsloth, run by llama.cpp on
+# Windows. Read from the HuggingFace API on 2026-09-14:
+#
+#   hf_repo/revision  unsloth/Qwen3.5-9B-GGUF @ 3885219b6810b007914f3a7950a8d1b469d598a5
+#                     (`base_model: Qwen/Qwen3.5-9B`, so this is a quantization
+#                     of the bf16 weights above and not a different model)
+#   file              Qwen3.5-9B-Q8_0.gguf   9_527_502_048 B  (tree API, LFS size)
+#
+# Q8_0 and not Q4: this is the CLEANUP model, and cleanup is the one act where
+# a wrong word is silently wrong — the output reads fine and says something
+# else. 9.5 GB of Q8 fits the same 24 GB card the bf16 needs 20.9 GB for, so
+# there is nothing to buy by going lower here.
+#
+# No `mmproj`, and the loader would refuse one: `[model] modalities` is
+# `["text"]`. Qwen3.5-9B has a vision tower and this server does not offer it
+# on any backend (the cuda-linux block says why).
+#
+# memory_bytes_estimate: the file plus 1.5 GB for KV at `context_default` and
+# llama.cpp's own buffers — Foundry's `OVERHEAD_GB`, the same number the
+# `[local]` table above declares, and DECLARED for the same reason: nothing
+# has watched this on a Windows card.
+[backends.llama-windows]
+engine = "llama-server"
+hf_repo = "unsloth/Qwen3.5-9B-GGUF"
+revision = "3885219b6810b007914f3a7950a8d1b469d598a5"
+file = "Qwen3.5-9B-Q8_0.gguf"
+memory_bytes_estimate = 11_027_502_048
+engine_args = ["--parallel", "1"]

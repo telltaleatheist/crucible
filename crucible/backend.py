@@ -25,14 +25,51 @@ from .errors import NoViableBackend
 CUDA_LINUX = "cuda-linux"
 MLX_DARWIN = "mlx-darwin"
 
+#: Windows, natively, with llama.cpp as the engine and GGUF as the weights.
+#:
+#: **Windows IS a backend** (PHASE15-HOST.md section 0's AMENDED block, Owen
+#: 2026-09-14: *"the windows side should still host GPU jobs even if WSL isnt
+#: present/workable … just like it runs from the mac side"*). Structurally this
+#: is what `mlx-darwin` is: a per-model engine child the server spawns, leases,
+#: settles and kills. What it is NOT is a second Crucible, a relay, or a
+#: stopgap — it is one backend of three, and the WSL engine is still the better
+#: one on any Windows machine that can run it (vLLM/SGLang, parallel page
+#: reading, and the five Python job types this backend will never have).
+LLAMA_WINDOWS = "llama-windows"
+
+#: Every backend kind this build knows, in no particular order. Used where a
+#: refusal has to list them, so a fourth is added in one place.
+BACKEND_KINDS: tuple[str, ...] = (CUDA_LINUX, MLX_DARWIN, LLAMA_WINDOWS)
+
 # WSL2 ships the driver shim here and does not always put it on PATH — notably not
 # under `wsl.exe -d <distro> --exec bash -c ...`, which starts a non-login shell.
 # This is a known location, not a guess.
 WSL_NVIDIA_SMI = "/usr/lib/wsl/lib/nvidia-smi"
 
+#: Why a config's backend and the host it is on must agree, on every platform.
+#: PHASE15-HOST.md section 3.5: *"a backend runs where its engine runs and
+#: nowhere else"*. `llama-windows` off win32 is as wrong as `cuda-linux` on it.
+def backend_not_here(recorded: str, detected: str, platform_name: str) -> str:
+    return (
+        f"this config records backend {recorded!r} and this host is "
+        f"{platform_name}, which runs {detected!r}. A backend runs where its "
+        "engine runs and nowhere else: llama-windows is llama.cpp on Windows, "
+        "cuda-linux is vLLM/SGLang on Linux (inside WSL2 on a Windows box), "
+        "mlx-darwin is mlx on Apple Silicon"
+    )
+
+
+#: **Superseded, and kept because the sentence is still true of ONE thing.**
+#: Until 2026-09-14 this was the whole of what Crucible said about Windows, and
+#: `main()` printed it before parsing a single verb. Section 0's AMENDED block
+#: overrules it: `llama-windows` is a backend and every verb runs on win32.
+#: What survives is the part that is still a fact — vLLM and SGLang have no
+#: win32 build — so it is now the sentence a `cuda-linux` CONFIG gets when it
+#: is found on a Windows host, and nothing else prints it.
 WINDOWS_REFUSAL = (
-    "Crucible runs inside WSL2 on Windows; it has no Windows code path "
-    "(vLLM and SGLang do not run on win32)."
+    "the cuda-linux backend runs inside WSL2 on Windows and has no Windows "
+    "code path (vLLM and SGLang do not run on win32). Natively, Windows runs "
+    "the llama-windows backend — `crucible init` records it."
 )
 
 
@@ -156,13 +193,85 @@ def _sysctl(name: str) -> str:
     return value
 
 
+def physical_memory_bytes() -> int:
+    """This Windows machine's installed RAM, from the OS.
+
+    `GlobalMemoryStatusEx` through ctypes, for `crucible/interfaces.py`'s
+    reason: it is the question the OS answers, it is stdlib, and the
+    alternative (`psutil`) is a dependency for a fact the C library already
+    states. It is the POOL FIGURE for a CPU-only `llama-windows` host — a
+    GGUF on the CPU allocates from system RAM exactly as a model on a Mac
+    allocates from unified memory, so the capability arithmetic reads the same
+    shape on both.
+    """
+    import ctypes
+
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    status = MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(MemoryStatusEx)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        raise NoViableBackend(
+            "GlobalMemoryStatusEx would not answer, so this host cannot say "
+            "how much memory it has — and a capability decided from a guessed "
+            "pool is a capability nobody can trust"
+        )
+    return int(status.ullTotalPhys)
+
+
+def detect_windows(arch: str) -> Backend:
+    """The `llama-windows` backend, with or without a card.
+
+    PHASE15-HOST.md sections 0 and 3.10. **Nothing here refuses.** Owen: *"a
+    crucible server will run on absolutely anything"* — a machine with no
+    NVIDIA card runs the CPU build of llama.cpp, slowly, and the capability
+    row says so in words rather than turning the class off. So the two answers
+    differ only in which pool is measured and which build the engine subject
+    fetches.
+
+    `nvidia-smi` is asked, not assumed: the Windows driver is the right
+    authority for a Windows-native engine (unlike the WSL question, where a
+    Windows driver says nothing about whether passthrough works — PHASE13 5.5).
+    """
+    try:
+        name, vram_bytes = probe_nvidia_smi()
+    except NoViableBackend:
+        # NOT an error. A CPU-only machine is a machine this backend serves,
+        # and the pool it serves from is RAM.
+        return Backend(
+            kind=LLAMA_WINDOWS,
+            platform="windows",
+            arch=arch,
+            gpu=Gpu(vendor="cpu", name="cpu", vram_bytes=physical_memory_bytes()),
+            detail="llama.cpp cpu build; no NVIDIA card answered nvidia-smi",
+        )
+    return Backend(
+        kind=LLAMA_WINDOWS,
+        platform="windows",
+        arch=arch,
+        gpu=Gpu(vendor="nvidia", name=name, vram_bytes=vram_bytes),
+        detail=f"llama.cpp cuda build; nvidia-smi at {nvidia_smi_path()}",
+    )
+
+
 def detect_backend() -> Backend:
     """Detect this host's backend or raise NoViableBackend(reason)."""
     system = sys.platform
     arch = platform.machine()
 
     if system == "win32":
-        raise NoViableBackend(WINDOWS_REFUSAL)
+        return detect_windows(arch)
 
     if system == "linux":
         name, vram_bytes = probe_nvidia_smi()

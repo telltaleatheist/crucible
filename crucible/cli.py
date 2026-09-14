@@ -428,6 +428,11 @@ def _decide_here(config: Config, backend: Backend) -> tuple[capability.Decision,
         backend.kind,
         total_bytes=backend.gpu.vram_bytes,
         desktop_allowance_bytes=config.desktop_allowance_bytes,
+        # WHICH POOL THIS IS, which the size alone cannot say: on
+        # `llama-windows` 24 GiB is a card on one machine and system RAM on
+        # another, and the row's words differ (`crucible/capability.py`'s
+        # `pool_name` and the cpu-build sentence).
+        gpu_vendor=backend.gpu.vendor,
     )
 
 

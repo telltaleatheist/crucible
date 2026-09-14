@@ -152,11 +152,35 @@ def test_the_page_asks_for_exactly_its_own_two_files_by_relative_name() -> None:
 
 
 def test_no_file_of_the_page_reaches_for_another_host() -> None:
-    """No CDN, no font service, no analytics: the Mac may have no route out."""
-    for path in (INDEX, SCRIPT, STYLE):
+    """No CDN, no font service, no analytics: the Mac may have no route out.
+
+    In the HTML and the CSS a URL IS a load, so any absolute one is a
+    refusal. In the SCRIPT it is not: since PHASE15-HOST.md section 3.7 the
+    page draws a field for an Ollama address, and `http://host:11434` in its
+    placeholder is an EXAMPLE shown to a person, not a fetch.
+
+    So the script's rule is narrowed rather than dropped (R2: a guard that
+    cannot be made green is fixed, never tolerated red): every absolute URL in
+    `app.js` must sit on a `placeholder:` line. What the page actually fetches
+    is pinned twice over and far more strictly, by the two tests below and
+    above — the `fetch` call sites by name, and every `/v1` path against the
+    app's own route table.
+    """
+    for path in (INDEX, STYLE):
         text = _read(path)
         for marker in ("http://", "https://", "//cdn", "@import", "url("):
             assert marker not in text, f"{path.name} reaches out with {marker!r}"
+
+    script = _read(SCRIPT)
+    for marker in ("//cdn", "@import"):
+        assert marker not in script, f"app.js reaches out with {marker!r}"
+    for number, line in enumerate(script.splitlines(), start=1):
+        if "http://" not in line and "https://" not in line:
+            continue
+        assert "placeholder" in line, (
+            f"app.js:{number} carries an absolute URL that is not a "
+            f"placeholder shown to a person: {line.strip()}"
+        )
 
 
 def test_the_page_uses_no_door_that_cannot_carry_the_token() -> None:

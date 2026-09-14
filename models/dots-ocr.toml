@@ -212,3 +212,35 @@ engine_args = [
 # only route and the reason there is no hurry: a block here with an unmeasured
 # estimate would compete with a route that works. It gets one when the model is
 # measured on that machine.
+
+# ---------------------------------------------------------------------------
+# PHASE15-HOST.md sections 0 and 3.10. Windows natively, llama.cpp on the SAME
+# two GGUF files the `[local]` table above already names — one repo, one
+# revision, one pair. That is not a coincidence and it is the point: `[local]`
+# describes the form of this model on a machine with no Crucible, and
+# `llama-windows` is Crucible USING that form, so a second pin here would be
+# ARCHITECTURE.md R1's defect written on purpose in one file.
+#
+# `memory_bytes_estimate` is `[local] needs_bytes` — 4.42 GB of weights plus
+# Foundry's own 1.5 GB OVERHEAD_GB for KV at `-c 16384` and the runner's
+# buffers. DECLARED, not measured: no Windows box has run this yet (Owen's
+# card is off-limits while a fine-tune holds it), and section 3.10's fact 8
+# says so out loud — seconds per page and whether the Q8 answers in the
+# parser's dialect are both UNMEASURED and are the first two things measured
+# on a card.
+#
+# `-c 16384` and `--parallel 1` are Foundry's working launcher verbatim
+# (`ensurePageReader()`): a page at the app's 200 dpi is up to ~8k image
+# tokens plus the answer, and one page at a time is what the guard and the
+# lease already assume. The `-m` and `--mmproj` paths are NOT here — they are
+# composed by `Residency._engine_args` from `file` and `mmproj` below, because
+# only the server knows where it put the weights.
+[backends.llama-windows]
+engine = "llama-server"
+hf_repo = "anthonym21/dots.ocr-GGUF"
+revision = "42ab310215a26d05ebe21ccc55f64db6c2bfc6ce"
+file = "Dots.Ocr-1.8B-Q8_0.gguf"
+mmproj = "mmproj-Dots.Ocr-F16.gguf"
+memory_bytes_estimate = 5_919_026_144
+context_default = 16384
+engine_args = ["--parallel", "1"]

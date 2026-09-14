@@ -380,7 +380,7 @@ def _validate(resolved: Resolved) -> None:
 
 
 def recomputed_capability(
-    config: Config, resolved: Resolved
+    config: Config, resolved: Resolved, *, gpu_vendor: str
 ) -> CapabilityRecord | None:
     """`[capability]`, decided again with the new routes and allowance applied.
 
@@ -408,6 +408,14 @@ def recomputed_capability(
         record.backend_kind,
         total_bytes=record.total_bytes,
         desktop_allowance_bytes=resolved.desktop_allowance_bytes,
+        # A LIVE host fact, like the detection that wrote the record in the
+        # first place. It is not in `[capability]` because it is not part of
+        # the decision's inputs — the pool SIZE is, and that is recorded; the
+        # vendor only decides what the pool is CALLED and whether the row
+        # carries the cpu-build sentence. `cmd_serve` already refuses to start
+        # when the detected backend and the recorded one disagree, so the two
+        # cannot drift apart under a running server.
+        gpu_vendor=gpu_vendor,
     )
     return capability_classes.record(
         record.backend_kind,
@@ -418,7 +426,7 @@ def recomputed_capability(
     )
 
 
-def apply(config: Config, resolved: Resolved) -> None:
+def apply(config: Config, resolved: Resolved, *, gpu_vendor: str) -> None:
     """Write the file and adopt it into the Config this process holds.
 
     **In that order, and into the SAME object.** Every route, the residency,
@@ -449,7 +457,7 @@ def apply(config: Config, resolved: Resolved) -> None:
         enable_rvc=config.enable_rvc,
         enable_denoise=config.enable_denoise,
         desktop_allowance_bytes=resolved.desktop_allowance_bytes,
-        capability=recomputed_capability(config, resolved),
+        capability=recomputed_capability(config, resolved, gpu_vendor=gpu_vendor),
         routes=routes,
         upstreams=upstreams,
     )

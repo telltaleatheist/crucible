@@ -30,7 +30,10 @@ def decided(total: int = 26 * 1024 ** 3, allowance: int = 3 * 1024 ** 3) -> Any:
         total_bytes=total,
         desktop_allowance_bytes=allowance,
         decisions=capability.decide_all(
-            "cuda-linux", total_bytes=total, desktop_allowance_bytes=allowance
+            "cuda-linux",
+            total_bytes=total,
+            desktop_allowance_bytes=allowance,
+            gpu_vendor="nvidia",
         ),
         routes={},
     )
@@ -434,6 +437,7 @@ def test_the_operators_routes_survive_a_capability_rewrite(
         "cuda-linux",
         total_bytes=FAKE_BACKEND.gpu.vram_bytes,
         desktop_allowance_bytes=config.desktop_allowance_bytes,
+        gpu_vendor=FAKE_BACKEND.gpu.vendor,
     )
     _write_capability(config, FAKE_BACKEND, decisions, {"enable_tts": True})
     after = load_config(home)
