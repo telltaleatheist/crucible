@@ -62,6 +62,41 @@ Showing the token on the page to somebody who authenticated with that token reve
 | **module** | an app's statement of what it needs: job types + subjects. The APP owns its module and posts it; Crucible never learns what the app is for. |
 | **pairing line** | `crucible://<name>@<host>:<port>/#<token>` — everything an app's connect door needs, in one string. |
 
+### 2.1 How a pairing line is spelled, exactly
+
+A server name **contains an `@`** (`crucible@mac-studio` is the default, and
+`config.default_server_name()` builds it from the hostname), so the naive line
+`crucible://crucible@mac-studio@192.168.68.20:7100/#…` has two `@` in its
+authority. Some parsers split at the last one and some at the first; a format
+whose meaning depends on which parser read it is not a format.
+
+**The rule: `<name>` and `<token>` are RFC 3986 percent-encoded.** Only the
+unreserved set passes through literally — `A-Z`, `a-z`, `0-9`, `-`, `.`, `_`,
+`~`. Every other byte of the UTF-8 encoding is written `%XX` with **uppercase**
+hex. So the Mac's line is:
+
+```
+crucible://crucible%40mac-studio@192.168.68.20:7100/#bXktdG9rZW4
+```
+
+and nothing else is. Three consequences, all of them wanted:
+
+- The line is a genuine URI. `new URL(line)` and Python's `urlsplit` both read
+  it, and both agree about where the name ends.
+- **A line with two literal `@` in its authority is refused `invalid_pairing`**,
+  not repaired by guessing which `@` was meant. Crucible is the only producer of
+  these lines; a line it did not write is a line whose meaning nobody knows
+  (R3 — nothing is ever told "maybe").
+- The token survives whatever it is made of. `secrets.token_urlsafe` emits only
+  unreserved characters today, so today's tokens are unchanged by the encoding —
+  which is exactly why the rule has to be written down now rather than the first
+  time a token contains something else.
+
+The producer is `crucible/pairing.py` (`pairing_line`); the inverse is the SDK's
+`parsePairing` (3.6), and the two are tested against each other in both
+directions. The trailing `/` before the `#` is part of the format and a line
+without it is refused: it is what keeps the fragment out of the path.
+
 ## 3. The server (Crucible, Python)
 
 ### 3.1 `GET /v1/setup` — "whatever else we need to set it up"
@@ -74,7 +109,7 @@ Showing the token on the page to somebody who authenticated with that token reve
   "bind": "http://0.0.0.0:7100",
   "urls": ["http://192.168.68.20:7100", "http://100.64.0.3:7100"],
   "token": "…",
-  "pairing": ["crucible://crucible@mac-studio@192.168.68.20:7100/#…", "…one per url…"],
+  "pairing": ["crucible://crucible%40mac-studio@192.168.68.20:7100/#…", "…one per url…"],
   "job_types": ["llm", "tts"],
   "config_path": "/Users/telltale/.crucible/config.toml"
 }
@@ -85,6 +120,21 @@ IPv4 interface, in the order the OS lists them; a concrete bind host becomes exa
 entry. Never a guess, never a hostname lookup — an interface the host has is a fact; a name
 somebody else's DNS may resolve is not. `job_types` is what `/v1/info` says; it is repeated
 here so the page draws from one read.
+
+**Where the interfaces come from: `getifaddrs(3)`, through `ctypes`**
+(`crucible/interfaces.py`). It is the question the OS answers, on both backends,
+and it is stdlib. The three alternatives were each rejected for saying something
+else: `socket.gethostbyname(socket.gethostname())` is the hostname lookup this
+route exists to avoid; a UDP socket `connect()`ed to a routable address and asked
+its `getsockname()` reports **one** interface chosen by the routing table, which
+is a guess about where a client will come from rather than a list of what the
+host has; and `psutil` is a dependency for a fact the C library already states.
+A host on which `getifaddrs` cannot be called at all is a **named refusal**,
+`interfaces_unreadable` (503), never an empty list — an empty `urls` reads as
+"this server is reachable from nowhere", which is a different and false claim.
+Loopback (`127.0.0.0/8`) and link-local (`169.254.0.0/16`) addresses are
+excluded: neither is an address another machine can use, so neither can carry a
+pairing line.
 
 ### 3.2 `GET /v1/catalog`
 
@@ -104,7 +154,34 @@ here so the page draws from one read.
   declares or `null` — never estimated. Every field is derived from something the server
   already owns (R1); no new table.
 - A `job_type` whose env is NOT installed still lists its subjects (you may pull weights
-  before the env); the page says so on the row.
+  before the env); the page says so on the row, by comparing `job_type` against
+  `/v1/setup`'s `job_types`. There is no `env_installed` field on the row: that is
+  a fact about the job type, not about the subject, and one copy per subject is
+  how it would come to disagree with itself (R1).
+- **Subjects with no block for THIS backend are absent, not listed as
+  unsupported.** The route's sentence is "every subject this backend can hold";
+  a row for a `mlx-darwin`-only voice on the PC would be a row with nothing
+  truthful to put in `installed`, `expected_bytes` or `source`.
+- **Every `license` is `null` in this build, and that is the honest value.** No
+  manifest schema in the repo — model, voice, rvc, rvc-base or denoise — carries
+  a licence key, so there is nothing to derive one from. Reading "Apache-2.0"
+  off a HuggingFace repo name would be Crucible making a licence claim on
+  somebody else's weights, which it has no basis for. The field stays on the
+  wire so the page and the SDK are built against the shape that will carry it
+  the day a manifest declares one; the day it does, the manifest is where it is
+  declared.
+- **`expected_bytes` is `null` for models and voices, and a real number for
+  `rvc`, `rvc-base` and `denoise`.** The second three declare the bytes they
+  fetch (`archive_bytes`, the base assets' summed `bytes`, the separator's
+  `total_bytes`), because each is a named file with a pinned digest. A model or
+  a voice is a `snapshot_download` of a whole repo and no manifest states its
+  size; `[local] download_bytes` is the OLLAMA/GGUF artifact's size, a different
+  file from a different repo, and lending it to this field would be the
+  two-owners bug wearing a plausible number.
+- **`floors` comes from `crucible/lineup.py` and nothing else.** A catalog that
+  could not read the lineup answers `503 catalog_unreadable` naming the manifest
+  that broke it, rather than dropping the `floors` key or emitting `[]` — an
+  empty floors list means "this model floors nothing", which is a claim.
 
 ### 3.3 Tasks — `POST /v1/tasks`, `GET /v1/tasks`, `GET /v1/tasks/{id}`, `GET /v1/tasks/{id}/events`, `DELETE /v1/tasks/{id}`
 
@@ -133,6 +210,23 @@ Request bodies, one `type` each:
   `invalid_module`. A `module` is validated WHOLE before anything starts; installed job
   types and installed subjects inside a module are SKIPPED with a `skipped` event each
   (a module is idempotent; a single pull is not — the difference is written here on purpose).
+- Three more refusals this build needed, and where they come from:
+  `unknown_task` (404, `GET`/`DELETE` of an id this server does not hold — the
+  shape `unknown_job` already has), `not_running` (409, cancelling a task that
+  has finished), and `install_command_missing` (503, from an `install` task: the
+  `crucible` console script is not beside this interpreter and not on `PATH`,
+  and the refusal names both places searched, exactly as every "tool missing"
+  refusal does since `crucible/hosttools.py`).
+- **`409 server_busy` on a task carries the holder in the shape the API already
+  names it**, which is not one shape but four, because four different things can
+  hold the card (`crucible/settle.py`). `details.fact` says which — `a job`,
+  `a lease`, `the claim`, `a chat` — and beside it are that fact's own fields:
+  a job's are `POST /v1/jobs`' verbatim (`holder`, `job_id`, `type`, `model`,
+  `status`, `since`, `progress`, `message`); a lease's are `409 leased`'s
+  verbatim plus the `subject` a receipt carries (`lease_id`, `kind`, `client`,
+  `act`, `subject`, `since`, `expires_at`); the claim's is `held_by`; a chat's
+  is `in_flight`. One producer, `Settlement.holder()`, so the task door and the
+  job door cannot come to disagree about who is in the way.
 - **Events** stream on the same SSE envelope jobs use (`api.py`'s `text/event-stream`
   routes; same `{"type": …}` discipline). Task event types: `started`, `step` (`{name,
   index, total}` — for a module, one per entry), `progress` (`{bytes_done, bytes_total|null,
@@ -156,12 +250,51 @@ The running server built its registry from `[jobs]` at startup (`create_app` →
 (`_write_capability`, which MERGES — every other flag survives, verified `cli.py:413`).
 
 **Requirement:** a client that posted `{"type":"install"}` sees the new job type in
-`/v1/info` before the task's `done` event, with nothing to run by hand. The builder decides
-HOW with a written reason in this section — either re-read `[jobs]` and rebuild the
-registry in place, or (if the app object cannot safely grow a mounted route set) re-exec
-under the service supervisor when the four facts are settled — and writes the reason here.
-Whichever it is, the events say what happened (`step {name:"reload"}` or
-`step {name:"restart"}`), and the page reconnects. "Restart it yourself" is not an option.
+`/v1/info` before the task's `done` event, with nothing to run by hand.
+
+**DECIDED, 2026-09-14: an in-place reload. `step {name: "reload"}`.** Re-exec was
+not a close second — it cannot satisfy the requirement as written. A task's
+record and its event log live in this process's memory (3.3: *"a task is not a
+record anybody keeps"*), so a server that re-exec'd would take the task with it
+and the `done` event would never be written. "The client sees the type before
+`done`" and "the process that owes it a `done` is replaced" cannot both be true.
+Re-exec also presumes a supervisor: a `crucible serve` in a terminal has none,
+and the one door where an operator is most likely to type `crucible install` is
+exactly that one.
+
+**What the reload actually swaps, and why it is two things.** The routes read
+capability off `Config` (`config.enable_llm`, `config.enable_tts`,
+`config.capability`) and read what is POSTable off `JobStore.registry`, which
+`build_registry` built from the same flags. `crucible install` rewrites BOTH —
+the `[jobs]` flag and the `[capability]` record — so a reload that rebuilt only
+the registry would leave `/v1/models` refusing `llm` while `POST /v1/jobs`
+accepted `load-model`. The reload therefore:
+
+1. re-reads `config.toml` with `load_config`, and **adopts the result into the
+   Config object this process already holds** (`Config.adopt`). One `Config` per
+   server process is not a convenience here, it is R1: every route, the
+   residency, the store and every plugin hold a reference to that one object,
+   and handing half of them a second one is the two-owners bug built on purpose.
+   `adopt` refuses a config from a different path or home by name, because those
+   are identity rather than capability;
+2. rebuilds the registry with `build_registry(config, backend, residency)` —
+   the SAME residency, so a model that was resident stays resident and the new
+   plugin instances hold the live engine — and swaps the contents of the dict
+   the store already has, so nothing holds a stale mapping;
+3. writes the new `job_types` into the task's `step` event, so the client is
+   told what became reachable rather than having to diff two `/v1/info` reads.
+
+**The four facts are read TWICE, and the second read can fail the task.** They
+gate the task at `POST` (an install may not start while the card is held), and
+they are read again immediately before the swap, on the event loop, in one
+synchronous stretch with it. A job admitted during the minutes the pip install
+took would otherwise have the registry replaced underneath it — and worse, a
+capability step that turned a flag OFF (an env that built on a card too small)
+would remove the very type that job is running. So a holder found at the second
+read is `failed {code: "reload_refused"}` naming it. The env stays on disk
+(R6), and re-running `install` finds it built and reaches the reload in seconds.
+That is a loud wrong answer instead of a quiet one (R3): the alternative — swap
+anyway and hope — is the shape of every defect in ARCHITECTURE.md's table.
 
 ### 3.5 The CLI grows one verb and two lines
 
@@ -224,7 +357,9 @@ static mount is tested (`GET /` is HTML, `GET /ui/app.js` is JS, no `/v1` under 
 Beside Name / Address / Token: **"Paste from Crucible"** — one field. A `crucible://` line
 fills the three (through the SDK's `parsePairing`; a malformed line shows `invalid_pairing`
 and fills nothing). Test and Add are unchanged. Foundry's door does the same, through the
-same SDK function.
+same SDK function. The spelling `parsePairing` accepts is 2.1's, exactly: it
+percent-decodes the name, refuses a second literal `@` in the authority, and
+refuses a line with no `/` before the fragment.
 
 ### 5.2 The install door becomes "Open Crucible"
 
