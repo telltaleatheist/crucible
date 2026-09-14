@@ -245,8 +245,23 @@ Now:
 - Nothing in host mode is a stopgap for WSL, and WSL is the better engine (section 0's block:
   parallel page reading under vLLM, the faster text path, the five Python job types). When WSL
   arrives, the host (section 4) moves the config — token, routes, upstreams — into the guest
-  and STOPS the Windows server; its GGUF weights are deleted with it (the guest pulls its
-  own). The token survives the move, so every app that paired stays paired.
+  and STOPS the Windows server. The token survives the move, so every app that paired stays
+  paired.
+- **Crucible owns WHERE the weights are, and a model is never stored twice on one machine
+  (Owen, 2026-09-14: "crucible will manage the location of the models, too … crucible can
+  move the models to WSL instead of storing it in both windows and in wsl").** On Windows the
+  server's home is `%LOCALAPPDATA%\Crucible\` and every subject lives under it; in the guest it
+  is `~/.crucible` as today. The two engines read DIFFERENT FILES for the same subject —
+  `llama-windows` runs GGUF, `cuda-linux` runs the safetensors under vLLM/SGLang — so a file
+  cannot be carried across; "move" is a migration STEP the host runs (4.3), by name, per
+  installed subject: the guest pulls its own form of each subject that was installed on
+  Windows (the catalog's `installed` list is the input, so nothing the operator had is
+  forgotten), and only when the guest reports that subject `installed: true` is the Windows
+  copy deleted. Throughout, one catalog, one `installed` answer per subject; an app never
+  sees a path. Weights Windows never had (voices, whisper, aligners, RVC, denoise) are
+  pulled by the module's coordinate step as before. A migration interrupted mid-way leaves
+  BOTH copies of the unfinished subject and resumes on the next host start; it never deletes
+  first.
 
 ### 3.6 The pairing file
 
@@ -509,7 +524,7 @@ through a UAC prompt by name with the sentence that explains why, the reboot sta
 fetch the server pack in the guest; **move the host-mode config into the guest** (token,
 routes, upstreams — `crucible init` in the guest with `--config-from` a file the host wrote,
 0600) so the token survives; install the module's job types; service install; linger;
-capability write; stop the host-mode child; switch the pairing file to the guest's line (the
+capability write; MIGRATE THE WEIGHTS per subject (3.5: pull in the guest, then delete on Windows, never the reverse); stop the host-mode child; switch the pairing file to the guest's line (the
 same line — same token, same host, same port). Every step is one of the existing named steps
 or one of the state table's named states; the host adds no new sentence of its own.
 
