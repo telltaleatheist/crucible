@@ -1547,7 +1547,31 @@ export interface ModuleTaskRequest {
   readonly module: CrucibleModule;
 }
 
-export type TaskRequest = PullTaskRequest | InstallTaskRequest | ModuleTaskRequest;
+/**
+ * One `engine`: move this Windows machine to the WSL2 engine (PHASE15-HOST.md
+ * 4.7).
+ *
+ * **The server does not run it.** Only the host — `crucible host`, the tray
+ * process — can run `wsl.exe`, prompt for administrator and survive the
+ * reboot the move may need, so the Windows server hands this to the host's
+ * loopback door and relays the host's events under the task id it returns.
+ * A server that was not started by a host refuses `engine_move_needs_host`;
+ * a server that is not a Windows one refuses `engine_move_not_here`.
+ *
+ * `target` is `'wsl'` and nothing else in this phase: moving BACK to Windows
+ * is an explicit operator act (section 6) and is refused
+ * `engine_target_unknown` rather than half-done.
+ */
+export interface EngineTaskRequest {
+  readonly type: 'engine';
+  readonly target: 'wsl';
+}
+
+export type TaskRequest =
+  | PullTaskRequest
+  | InstallTaskRequest
+  | ModuleTaskRequest
+  | EngineTaskRequest;
 
 /**
  * A task has no `queued`: it is admitted and running in the same act, because
@@ -1560,7 +1584,7 @@ export const TASK_TERMINAL_STATES = ['done', 'failed', 'cancelled'] as const;
 /** `GET /v1/tasks/{id}`. */
 export interface TaskStatus {
   readonly taskId: string;
-  /** `pull`, `install` or `module`. */
+  /** `pull`, `install`, `module` or `engine`. */
   readonly type: string;
   /** The request body, echoed, in the server's own spelling. */
   readonly request: Readonly<Record<string, unknown>>;

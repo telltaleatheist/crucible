@@ -856,6 +856,18 @@ update to download the necessary models and wheels."*
   events under the task id, because only the host can run `wsl.exe`, prompt UAC and survive
   the reboot. A Windows server that was not started by a host (a developer running `crucible
   serve` by hand) refuses `engine_move_needs_host`.
+
+  **`CRUCIBLE_HOST_DOOR`, named here because `crucible/host/` did not have a name for
+  it (added 2026-09-14 by the build of this section).** The host spawns `crucible serve`
+  as a child (4.1) and the child inherited nothing that said a host was there. So the
+  host sets ONE variable on the child's environment — `CRUCIBLE_HOST_DOOR=http://
+  127.0.0.1:7101`, its own door's base URL — and **its presence IS the fact**: a server
+  with it set was started by a host, and a server without it refuses
+  `engine_move_needs_host`. A probe of 7101 is the wrong question twice over, because
+  something that is not a host can answer it and a host restarting its own door is still
+  the host. **The TOKEN is not carried.** The door's bearer is the ENGINE's token, which
+  the server already holds in its own config; a second copy in an environment variable
+  would be a secret with two owners and one more place for it to be stale.
 - The task's steps are the state table + the step list + the migrate step of 4.3, in order:
   detect the WSL state → the named answer for it (feature enable / `wsl --install` / reboot /
   kernel update / import the Crucible distro) → server pack in the guest → move the config →

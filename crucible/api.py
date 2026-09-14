@@ -183,6 +183,8 @@ class TaskCreate(BaseModel):
     narrator_engine: str | None = None
     # module
     module: dict[str, Any] | None = None
+    # engine (PHASE15-HOST.md 4.7)
+    target: str | None = None
 
     #: Which fields each type owns. The validator reads this rather than three
     #: hand-written branches, so a fourth task type is one row.
@@ -190,6 +192,7 @@ class TaskCreate(BaseModel):
         "pull": ("kind", "id"),
         "install": ("job_type", "narrator_engine"),
         "module": ("module",),
+        "engine": ("target",),
     }
     #: ...and which of those may not be omitted. `narrator_engine` is absent
     #: here because whether it is required depends on the job type, which is
@@ -198,6 +201,7 @@ class TaskCreate(BaseModel):
         "pull": ("kind", "id"),
         "install": ("job_type",),
         "module": ("module",),
+        "engine": ("target",),
     }
 
     @model_validator(mode="after")

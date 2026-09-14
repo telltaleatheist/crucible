@@ -138,6 +138,7 @@ export type {
   FailedData,
   GpuInfo,
   Health,
+  EngineTaskRequest,
   InstallTaskRequest,
   JobCapability,
   JobEvent,

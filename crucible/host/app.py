@@ -42,6 +42,7 @@ from .paths import (
     ENGINE_PORT,
     console_cmd_path,
     crucible_root,
+    door_url,
     engine_url,
     host_pack_dir,
     log_path,
@@ -49,6 +50,7 @@ from .paths import (
 )
 from .presence import Presence, PresenceWatcher
 from .runner import ProcessRunner, Runner
+from ..tasks import HOST_DOOR_ENV
 from .wsl_states import CRUCIBLE_DISTRO
 
 #: A second tray is refused by a file, not by a mutex: the file NAMES the
@@ -147,6 +149,27 @@ def server_argv(env: "os._Environ[str] | dict[str, str]") -> list[str]:
     return [str(console_cmd_path(env)), "serve"]
 
 
+def server_environment(
+    env: "os._Environ[str] | dict[str, str]",
+) -> dict[str, str]:
+    """The child server's environment: this one, plus where the door is.
+
+    4.7's engine task is the server handing the move to THIS process, and it
+    refuses `engine_move_needs_host` when there is nothing to hand it to. The
+    fact "a host started me" is not one a server can probe for — 127.0.0.1:
+    7101 can be answered by something that is not a host, and a host
+    restarting its own door is still the host — so it is STATED, here, by the
+    only thing that knows it.
+
+    The token is deliberately NOT passed. The door's bearer is the engine's
+    own token, which the child already holds in its config; a copy in an
+    environment variable would be a secret with two owners.
+    """
+    environment = dict(env)
+    environment[HOST_DOOR_ENV] = door_url("")
+    return environment
+
+
 def init_argv(env: "os._Environ[str] | dict[str, str]") -> list[str]:
     """The first-run `crucible init` for the host-mode server.
 
@@ -233,7 +256,9 @@ class Host:
             )
             if not first.ok:
                 return Presence(distro, Engine.FAILED, f"crucible init: {first.said()}")
-        self._c.watcher.respawn_host_mode(server_argv(env), env)
+        self._c.watcher.respawn_host_mode(
+            server_argv(env), server_environment(env)
+        )
         if self._c.watcher._wait_for_ping(30.0):  # noqa: SLF001 - one object, one loop
             return Presence(distro, Engine.RUNNING, "the Windows engine answered /v1/ping")
         return Presence(

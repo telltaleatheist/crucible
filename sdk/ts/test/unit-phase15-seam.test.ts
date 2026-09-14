@@ -538,3 +538,30 @@ test('the engine subject is removable like any other', async () => {
   await client().removeSubject('engine', 'llama-cpp');
   assert.equal(lastPath, '/v1/catalog/engine/llama-cpp');
 });
+
+// ------------------------------ 7. the engine task — PHASE15-HOST.md 4.7
+
+test('submitTask sends an engine move as {type, target}', async () => {
+  answers(202, { task_id: 'abc123' });
+  const id = await client().submitTask({ type: 'engine', target: 'wsl' });
+  assert.equal(id, 'abc123');
+  assert.equal(lastMethod, 'POST');
+  assert.equal(lastPath, '/v1/tasks');
+});
+
+test('the reverse move is refused by this package, before it leaves', async () => {
+  // Moving BACK to Windows is an explicit operator act (section 6). A
+  // client that could ask for it here would get a server's refusal for a
+  // request this package already knew was wrong.
+  await assert.rejects(
+    client().submitTask({ type: 'engine', target: 'windows' as never }),
+    /target/,
+  );
+});
+
+test('a task type this build does not have names the four that exist', async () => {
+  await assert.rejects(
+    client().submitTask({ type: 'reboot' } as never),
+    /'pull', 'install', 'module' or 'engine'/,
+  );
+});

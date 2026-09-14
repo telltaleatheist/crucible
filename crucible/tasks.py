@@ -49,6 +49,7 @@ folded behind a `_run_one`.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -59,7 +60,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import catalog, envpack, jobenv, workerenv
-from .backend import Backend
+from .backend import LLAMA_WINDOWS, Backend
 from .config import Config
 from .errors import ApiError, CrucibleError
 from .hosttools import searched_note, which
@@ -74,8 +75,45 @@ FAILED = "failed"
 CANCELLED = "cancelled"
 TERMINAL_STATES = frozenset({DONE, FAILED, CANCELLED})
 
-#: The three things a task can be. PHASE13-OPERATOR.md section 3.3.
-TASK_TYPES: tuple[str, ...] = ("pull", "install", "module")
+#: The four things a task can be. PHASE13-OPERATOR.md 3.3, plus PHASE15-HOST.md
+#: 4.7's `engine`, which is the one this server does not RUN: it hands it to
+#: the host's loopback door and relays the host's events under its own id,
+#: because only the host can run `wsl.exe`, prompt UAC and survive the reboot.
+TASK_TYPES: tuple[str, ...] = ("pull", "install", "module", "engine")
+
+#: The only place this build moves the engine TO. 4.7: the reverse (WSL2 back
+#: to Windows) is an explicit operator act written into section 6, and is
+#: refused here rather than half-done.
+ENGINE_TARGETS: tuple[str, ...] = ("wsl",)
+
+#: **The env var the host sets on the server it starts**, naming its own
+#: loopback door. Added by this build because `crucible/host/` did not have
+#: one: the host spawns `crucible serve` as a child (`host/app.py`'s
+#: `server_argv`) and the child inherited nothing that said a host was there.
+#:
+#: ITS PRESENCE IS THE FACT. 4.7: *"a Windows server that was not started by a
+#: host (a developer running `crucible serve` by hand) refuses
+#: `engine_move_needs_host`"*, and that is exactly "this variable is not set".
+#: A probe of 127.0.0.1:7101 would be the wrong question twice over — it can
+#: be answered by something that is not a host, and a host that is momentarily
+#: restarting its door is still the host.
+#:
+#: THE TOKEN IS NOT CARRIED. The door's bearer is the ENGINE's token
+#: (`crucible/host/door.py`: "a caller that can reach the engine can reach
+#: this"), which this server already holds in its own config. A second copy in
+#: an environment variable would be a secret with two owners and one more
+#: place for it to be stale.
+HOST_DOOR_ENV = "CRUCIBLE_HOST_DOOR"
+
+#: What the host's door answers on. The server POSTs `{"target": "wsl"}` here
+#: and reads newline-delimited JSON back.
+HOST_DOOR_PATH = "/install"
+
+#: How long the server waits for the host to ACCEPT the move. The sequence
+#: itself takes as long as it takes — a distro import and a pack download —
+#: and is read line by line with no deadline of its own, because a deadline
+#: here would abandon an install that is still running on the machine.
+HOST_DOOR_CONNECT_SECONDS = 30.0
 
 #: How many finished tasks a server remembers. In memory, and a restart forgets
 #: — a task is not a record anybody keeps (3.3). Fifty is enough for a page that
@@ -99,6 +137,36 @@ TERMINATE_GRACE_SECONDS = 10.0
 
 class TaskCancelled(CrucibleError):
     """Raised inside a runner once a cancel has been asked for."""
+
+
+class TaskFailedByHost(CrucibleError):
+    """The host's sequence failed and has ALREADY said why on this stream.
+
+    Its own type so `_run` can mark the task failed without writing a second
+    description of one failure. 4.7's events are the host's verbatim, and the
+    `failed` one among them is the sentence a person reads.
+    """
+
+    def __init__(self, task: "Task") -> None:
+        super().__init__(f"task {task.id} failed on the host")
+
+
+def _host_refusal_code(body: str) -> str:
+    """The host's own `error.code` out of its refusal body, or ours.
+
+    The host refuses with named codes of its own — `host_install_running`,
+    `host_no_token`, `host_unauthorized`, `engine_target_unknown` and every
+    state code from the 4c table — and those names are what a client acts on,
+    so they travel rather than being flattened into one. A body this server
+    cannot read becomes `engine_move_needs_host`, which is the honest answer
+    about a door that is not behaving like the host's.
+    """
+    try:
+        payload = json.loads(body)
+        code = payload["error"]["code"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return "engine_move_needs_host"
+    return str(code) if isinstance(code, str) and code else "engine_move_needs_host"
 
 
 class ReloadRefused(CrucibleError):
@@ -285,6 +353,51 @@ def _validate_pull(config: Config, backend: Backend, kind: str, subject_id: str)
             f"it deliberately, run `{subject.pull_command} --force` on the server",
             {"kind": kind, "id": subject_id},
         )
+
+
+def _validate_engine(backend: Backend, target: str) -> str:
+    """The engine move's three refusals, in the door's order. 4.7.
+
+    Returns the host door's base URL. Every refusal here is made BEFORE the
+    202, like every other task's, and the order is the same: what is wrong
+    with the REQUEST (`engine_target_unknown`), then what is wrong with this
+    MACHINE (`engine_move_not_here`), then what is wrong with this PROCESS
+    (`engine_move_needs_host`).
+    """
+    if target not in ENGINE_TARGETS:
+        raise ApiError(
+            400,
+            "engine_target_unknown",
+            f"{target!r} is not an engine this build moves to; the targets are "
+            f"{list(ENGINE_TARGETS)}. Moving BACK to Windows is an explicit "
+            "operator act (PHASE15-HOST.md section 6) and is refused rather "
+            "than half-done",
+            {"target": target, "targets": list(ENGINE_TARGETS)},
+        )
+    if backend.kind != LLAMA_WINDOWS:
+        raise ApiError(
+            409,
+            "engine_move_not_here",
+            f"this server runs the {backend.kind} backend on "
+            f"{backend.platform}, and the engine move is a Windows machine "
+            "swapping llama.cpp for the WSL2 guest. There is nothing here to "
+            "move from",
+            {"backend": backend.kind, "platform": backend.platform},
+        )
+    door = os.environ.get(HOST_DOOR_ENV, "").strip()
+    if door == "":
+        raise ApiError(
+            409,
+            "engine_move_needs_host",
+            "this server was not started by `crucible host`, so there is "
+            f"nothing to hand the move to (${HOST_DOOR_ENV} is not set). Only "
+            "the host can run wsl.exe, prompt for administrator and survive "
+            "the reboot the move may need — a server doing it itself would "
+            "stop halfway through and take its own event stream with it. "
+            "Start the host and press it again from the page",
+            {"env": HOST_DOOR_ENV},
+        )
+    return door.rstrip("/")
 
 
 def _validate_install(
@@ -610,6 +723,8 @@ class TaskStore:
             )
         elif task_type == "module":
             validate_module(self._config, self._backend, request["module"])
+        elif task_type == "engine":
+            _validate_engine(self._backend, request["target"])
         else:  # unreachable: the request model closes the vocabulary
             raise ApiError(
                 400,
@@ -729,10 +844,18 @@ class TaskStore:
                 await self._run_pull(task)
             elif task.type == "install":
                 await self._run_install(task)
+            elif task.type == "engine":
+                await self._run_engine(task)
             else:
                 await self._run_module(task)
         except (TaskCancelled, PullCancelled):
             self._finish(task, CANCELLED, None)
+        except TaskFailedByHost:
+            # The host's own `failed` event is already on this stream, with
+            # its own code and its own sentence. `_finish` is called with no
+            # error dict so nothing writes a second one; the task is FAILED
+            # and the reason is the event above it.
+            self._finish(task, FAILED, None)
         except ReloadRefused as exc:
             self._finish(
                 task,
@@ -774,7 +897,8 @@ class TaskStore:
         if state == DONE:
             self.append_event(task, "done", {})
         elif state == FAILED:
-            self.append_event(task, "failed", error or {})
+            if error is not None:
+                self.append_event(task, "failed", error)
         else:
             self.append_event(task, "cancelled", {})
 
@@ -854,6 +978,120 @@ class TaskStore:
             print(f"crucible: task {task.id}: {line}", file=sys.stderr)
 
         subject.pull(force=False, on_line=on_line, on_progress=on_progress)
+
+    # ---------------------------------------------------------------- engine
+
+    async def _run_engine(self, task: Task) -> None:
+        """Hand the move to the host and RELAY what it says. 4.7.
+
+        This server runs none of it. The host's door emits newline-delimited
+        JSON whose lines are already shaped like this module's events — that
+        is `crucible/host/installer.py`'s `Event`, written that way on
+        purpose, because *"a relay that reshapes is a second owner of the
+        shape"*. So the whole of the relay is: read a line, append it.
+
+        THE STREAM ENDS WHEN THE HOST ENDS IT. There is no deadline on the
+        read: the sequence imports a distro and downloads a pack, and a
+        server that gave up on it would leave an install running on the
+        machine with nobody watching. A connection that CLOSES before a
+        terminal event is a failure the host did not report, and is named
+        here rather than reported as success.
+        """
+        door = _validate_engine(self._backend, task.request["target"])
+        self.append_event(
+            task,
+            "step",
+            {"name": "hand the move to the host", "index": 1, "total": 1},
+        )
+        terminal = await asyncio.to_thread(self._relay_blocking, task, door)
+        if terminal is None:
+            raise ApiError(
+                502,
+                "engine_move_needs_host",
+                f"the host's door at {door}{HOST_DOOR_PATH} closed its stream "
+                "without saying whether the move finished. Nothing here can "
+                "tell a completed install from an abandoned one, so it is "
+                "reported as a failure; the host's log says what happened",
+                {"door": door},
+            )
+        if terminal == "failed":
+            # The host already emitted its own `failed` event with its own
+            # code and sentence, and that event is on this task's stream
+            # verbatim. Raising a SECOND description of it would put two
+            # sentences about one failure in one place.
+            raise TaskFailedByHost(task)
+
+    def _relay_blocking(self, task: Task, door: str) -> str | None:
+        """**Worker thread.** POST, then one appended event per line read.
+
+        Returns the name of the terminal event the host sent (`done` or
+        `failed`), or None when the stream ended without one.
+        """
+        import urllib.error
+        import urllib.request
+
+        body = json.dumps({"target": task.request["target"]}).encode("utf-8")
+        request = urllib.request.Request(
+            f"{door}{HOST_DOOR_PATH}",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                # The ENGINE's token, which this server already holds. The
+                # door takes it because a caller that can reach the engine
+                # can reach the door and nothing else can.
+                "Authorization": f"Bearer {self._config.token}",
+            },
+        )
+        terminal: str | None = None
+        try:
+            with urllib.request.urlopen(
+                request, timeout=HOST_DOOR_CONNECT_SECONDS
+            ) as stream:
+                for raw in stream:
+                    if task.cancel_requested:
+                        # 4.7: cancellable BETWEEN STEPS. Dropping the read is
+                        # what this side can do; the host's own sequence
+                        # finishes the step it is in and stops, which is why
+                        # the cancel is not a kill.
+                        raise TaskCancelled(f"task {task.id} was cancelled")
+                    line = raw.decode("utf-8", "replace").strip()
+                    if line == "":
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        # A line this server cannot read is still evidence,
+                        # and it is put on the stream as one rather than
+                        # dropped: the alternative is an install whose events
+                        # silently thin out.
+                        self._from_thread(task, "progress", {"line": line})
+                        continue
+                    name = str(event.get("event") or "progress")
+                    data = event.get("data")
+                    self._from_thread(
+                        task, name, data if isinstance(data, dict) else {}
+                    )
+                    if name in ("done", "failed", "cancelled"):
+                        terminal = name
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:400]
+            raise ApiError(
+                502 if exc.code >= 500 else 409,
+                _host_refusal_code(detail),
+                f"the host refused the move with HTTP {exc.code}: {detail}",
+                {"door": door, "host_status": exc.code},
+            ) from None
+        except (urllib.error.URLError, OSError) as exc:
+            raise ApiError(
+                502,
+                "engine_move_needs_host",
+                f"the host's door at {door}{HOST_DOOR_PATH} did not answer: "
+                f"{type(exc).__name__}: {exc}. The host is named by "
+                f"${HOST_DOOR_ENV} and is not running, or not running any more",
+                {"door": door},
+            ) from None
+        return terminal
 
     # --------------------------------------------------------------- install
 

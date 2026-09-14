@@ -711,6 +711,24 @@
     return rows;
   }
 
+  /** Is this `cuda-linux` server the WSL guest of a Windows machine?
+
+   * 4.7's Status line says **Engine: WSL2 (vLLM/SGLang)** there, and
+   * nothing at all on a real Linux box, where there is no second engine to
+   * have moved from. The distinction is not one a Linux server can make
+   * about itself — inside the guest, WSL looks like Linux — so it is read
+   * off the one thing that differs: the guest's kernel names itself.
+   * `/v1/info`'s `host.platform` is `linux` either way, so this asks the
+   * BROWSER, which is running on the Windows machine when it is one.
+   */
+  function isWindowsHost() {
+    return (
+      typeof navigator !== 'undefined' &&
+      typeof navigator.platform === 'string' &&
+      navigator.platform.indexOf('Win') === 0
+    );
+  }
+
   function renderStatus() {
     var body = document.getElementById('status-body');
     body.textContent = '';
@@ -738,6 +756,66 @@
           ' · backend ',
           mono(setup.backend)
         ])
+      ]);
+    }
+
+    // WHICH ENGINE RUNS THIS MACHINE, and the one control that changes it
+    // (PHASE15-HOST.md 4.7). Shown on a Windows machine only, because on
+    // Linux and the Mac there is nothing to move: the backend IS the engine
+    // and there is no second one beside it.
+    if (setup && setup.backend === 'llama-windows') {
+      var engineLine = el('span', null, [
+        chip('Windows (llama.cpp)', 'ok'),
+        ' — the llm classes and pages. TTS, ASR, alignment, RVC and denoise ' +
+          'are Python engines and need the WSL2 guest.'
+      ]);
+      pairs.push(['Engine', engineLine]);
+      pairs.push([
+        '',
+        el('span', null, [
+          el('button', {
+            id: 'move-to-wsl',
+            class: 'button primary',
+            type: 'button',
+            disabled: state.running !== null,
+            title:
+              state.running !== null
+                ? 'one operator task at a time; this server is busy'
+                : 'install the WSL2 engine, move this config and these ' +
+                  'weights into it, and stop the Windows server',
+            onclick: function () {
+              var question =
+                'Move this machine to the WSL2 engine?' +
+                '\n\nThis installs the guest, pulls each installed subject ' +
+                'in it, deletes the Windows copies once the guest has them, ' +
+                'and stops the Windows server. The token does not change, so ' +
+                'every app that paired stays paired.' +
+                '\n\nIt may need administrator, and it may need a reboot.';
+              if (!window.confirm(question)) {
+                return;
+              }
+              // THE SERVER DOES NOT RUN IT. It hands the move to the host's
+              // loopback door and relays the host's events under this task
+              // id, so what this page watches is the same Tasks panel that
+              // watches a pull. A server started by hand refuses
+              // `engine_move_needs_host`, and that refusal is drawn like any
+              // other.
+              submit({ type: 'engine', target: 'wsl' }, 'engine:wsl');
+            }
+          }, ['Move to WSL2…']),
+          ' ',
+          el('span', {
+            class: 'empty',
+            text:
+              'faster page reading and text under vLLM/SGLang, and the five ' +
+              'Python job types'
+          })
+        ])
+      ]);
+    } else if (setup && setup.backend === 'cuda-linux' && isWindowsHost()) {
+      pairs.push([
+        'Engine',
+        el('span', null, [chip('WSL2 (vLLM/SGLang)', 'ok')])
       ]);
     }
 

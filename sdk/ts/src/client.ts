@@ -3237,6 +3237,9 @@ function excerpt(text: string): string {
 
 // ------------------------------------------------- the operator door's readers
 
+/** Where an `engine` task can move this machine. 4.7: forward only. */
+const ENGINE_TARGETS = ['wsl'] as const;
+
 /** The vocabulary `TaskState` closes over, for `oneOf`. */
 const TASK_STATES: readonly TaskState[] = ['running', 'done', 'failed', 'cancelled'];
 
@@ -3322,6 +3325,7 @@ function taskPayload(request: TaskRequest): Record<string, unknown> {
     jobType?: unknown;
     narratorEngine?: unknown;
     module?: unknown;
+    target?: unknown;
   };
   const type = requireText(given.type, 'type');
   if (type === 'pull') {
@@ -3350,9 +3354,19 @@ function taskPayload(request: TaskRequest): Record<string, unknown> {
     // reshaping it here would make this client a second author of it.
     return { type, module: given.module };
   }
+  if (type === 'engine') {
+    // 4.7. `wsl` and nothing else in this phase: moving BACK to Windows is
+    // an explicit operator act (section 6), and a client that could ask for
+    // it here would get a server's refusal for a request this package knew
+    // was wrong before it left.
+    return {
+      type,
+      target: oneOf(requireText(given.target, 'target'), ENGINE_TARGETS, 'target'),
+    };
+  }
   throw new CrucibleConfigError(
     'type',
-    `must be 'pull', 'install' or 'module', got ${JSON.stringify(type)}`,
+    `must be 'pull', 'install', 'module' or 'engine', got ${JSON.stringify(type)}`,
   );
 }
 
