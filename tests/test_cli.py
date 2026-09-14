@@ -406,3 +406,26 @@ def test_a_config_written_before_a_job_type_existed_still_loads(
     assert set(report["config"]["flags_absent"]) == {
         "enable_asr", "enable_tts", "enable_align", "enable_rvc",
     }
+
+
+def test_init_takes_a_token_the_caller_minted(
+    home: Path, viable: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--token` is for `@crucible/bootstrap`, which mints on the app's side.
+
+    The token written is the one given, byte for byte, and it is still never
+    printed — the bootstrapper's whole reason for minting it itself is that it
+    must not have to read it back out of a log.
+    """
+    given = "bootstrap-minted-" + "x" * 30
+    assert cli.main(["init", "--token", given, "--enable-echo"]) == 0
+    assert load_config(home).token == given
+    out = capsys.readouterr().out
+    assert given not in out
+    assert "token:    as given" in out
+
+
+def test_init_refuses_a_blank_or_spaced_token(home: Path, viable: None) -> None:
+    assert cli.main(["init", "--token", "   "]) == 1
+    assert cli.main(["init", "--token", "has a space"]) == 1
+    assert not config_path(home).exists()

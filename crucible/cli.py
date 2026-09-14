@@ -113,7 +113,18 @@ def cmd_init(args: argparse.Namespace) -> int:
     else:
         desktop_allowance_bytes = args.desktop_allowance_bytes
 
-    token = mint_token()
+    # The token is minted HERE unless the caller brought one. `--token` exists
+    # for `@crucible/bootstrap` (PHASE12-BOOTSTRAP.md): the app that installs a
+    # local server mints the token on its own side and hands it over, so it
+    # already holds what it would otherwise have to read back out of the file.
+    # A blank one is refused — a config with an empty token is a server nothing
+    # can reach, and `load_config` would refuse it anyway.
+    if args.token is not None:
+        token = args.token
+        if token.strip() == "" or any(ch.isspace() for ch in token):
+            return _fail("--token must be a non-empty string with no whitespace")
+    else:
+        token = mint_token()
     written = write_config(
         home,
         name=args.name if args.name is not None else default_server_name(),
@@ -148,7 +159,11 @@ def cmd_init(args: argparse.Namespace) -> int:
         f"{backend.gpu.vram_bytes / 1024 ** 3:.1f} GiB treated as this host's own "
         f"desktop, not somebody's job ({source})"
     )
-    print("token:    minted; print it with `crucible token --show`")
+    print(
+        "token:    "
+        + ("as given; " if args.token is not None else "minted; ")
+        + "print it with `crucible token --show`"
+    )
     return EXIT_OK
 
 
@@ -1601,6 +1616,14 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--name", default=None, help="server name (default crucible@<hostname>)")
     init.add_argument("--host", default=DEFAULT_HOST, help=f"default bind host ({DEFAULT_HOST})")
     init.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"default port ({DEFAULT_PORT})")
+    init.add_argument(
+        "--token",
+        default=None,
+        help=(
+            "use this bearer token instead of minting one. For an installer that "
+            "mints on its own side (@crucible/bootstrap); never printed"
+        ),
+    )
     init.add_argument(
         "--enable-echo",
         action="store_true",
