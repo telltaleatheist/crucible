@@ -484,6 +484,34 @@ executes it.
 - **Ten packs**, and no `asr`/`align` on the Mac: those have `.md` files rather than `.txt`
   recipes, and the absence is a fact (CTranslate2 has no Metal backend) rather than a gap.
 
+### 7.3a The invariants 7b depends on, and the checks that hold them
+
+Bootstrap (7b) reads `envpacks.json` field for field as `envpack.py` writes it, and
+unpacks the `server` pack straight into `~/.crucible/server/`. Two things that would
+break it silently are therefore asserted on THIS side:
+
+- **The archive holds the pack at TOP LEVEL** — `bin/`, `lib/`, no wrapper directory.
+  `create_archive` tars the CONTENTS (`-C <root> … .`) for exactly this reason: a
+  wrapper would make bootstrap's `~/.crucible/server/bin/crucible` into
+  `~/.crucible/server/python/bin/crucible`, and every path bootstrap, the systemd unit
+  and `install.ps1` state would be wrong at once. Pinned by reading the archive's
+  members back with `tar -t`, from outside the code that writes them.
+- **The manifest's shape** — schema, the eight fields and their types, no duplicate
+  `(name, backend)`. `parse_manifest` refuses each by name and the parametrised test
+  names the field.
+
+**And one the SERVICE now holds.** Bootstrap runs `<pack>/bin/crucible service install`
+through `wsl.exe --exec`, whose PATH is the guest's default and so cannot contain a
+directory created a minute earlier. `ExecStart` is absolute, so the unit starts either
+way; what would not resolve is a bare name inside the server. `crucible/service.py` now
+**appends** the program's own directory to the recorded PATH — appended and never
+prepended, because that directory also holds `python3`, `uvicorn` and half a dozen
+dependency scripts, and putting those in front of a host's own would change what every
+bare name means in order to fix nothing. It closes no live defect
+(`tasks.install_command()` resolves the script beside `sys.executable` before it looks
+at PATH); it makes "this is the PATH the service has" true of the process rather than
+of the installer. Three tests.
+
 ### 7.4 What was NOT done, and why
 
 - **No pack was built on the Mac.** `ssh mac` is reachable and the machine is `arm64` with
@@ -497,6 +525,26 @@ executes it.
   costs an 8 GB download and tens of minutes, and the runner is where the number matters.
 - **Nothing installs the `server` pack yet.** It is built, smoke-tested and published; the
   consumer is section 4's bootstrap sequence, which is the bootstrap agent's half.
+
+### 7.5 What the release carries after both halves
+
+`scripts/release.sh` cuts the tag and **six** assets now — the four it always did plus
+`install.sh` and `install.ps1` (4a), which are GENERATED from bootstrap's step list and
+whose staleness (`npm run gen:install -- --check`) refuses the cut. It also refuses a
+tag while `.github/workflows/envpacks.yml` is absent, because since 0.6.0 a release with
+no packs is one where every fresh machine's first `crucible install` fails
+`pack_not_published` — the worst kind of working release — and it lists the ten packs
+the tag will attempt, generated from `envpack.every_pack()`.
+
+`envpacks.yml` has three jobs: the 10-row pack matrix, the **rootfs** (4b) —
+`sdk/bootstrap/scripts/build-rootfs.sh` on `ubuntu-latest`, uploading both
+`crucible-rootfs-<version>.tar.zst` and the `.sha256` sibling `install.ps1` and
+`distro.ts` read the digest from, under exactly that name — and the manifest merge. The
+rootfs is not in the pack matrix: it has no recipe, no smoke import and no row in
+`envpacks.json`, and sharing the matrix would give every pack job a `docker` step it
+never runs. It needs `docker` and `zstd`, both on `ubuntu-latest`; a future image
+without one fails `rootfs_tool_missing` at the top of the job rather than four minutes
+in.
 
 ---
 

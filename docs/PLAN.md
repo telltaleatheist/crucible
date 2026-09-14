@@ -107,6 +107,35 @@ findings written into the manifests rather than around them: `qwen3.8:27b-24g` i
 Modelfile (404 on ollama.com — labelled stopgap, ruling owed), and Foundry's page reader
 pins a different GGUF projector than the one ruled.
 
+**Landed, 2026-09-14: phase 14's SERVER SIDE — an env comes off the release**
+(`PHASE14-ENVPACKS.md` sections 0-3, 5 and 7). Owen: *"we should use gh releases to
+download the environments we need to run it, just like we do in bookforge."*
+`crucible install <type>` **downloads** now: `envpacks.json` from this version's release,
+the parts joined and deleted one at a time, the sha256 of the reassembled whole, an unpack
+into `<key>.partial` and an atomic rename. `--build` is still there and is an ARGUMENT —
+nothing chooses it because a download failed, and every way a download can fail has a name
+(`pack_not_published`, `pack_manifest_unreadable`, `pack_download_failed`,
+`pack_sha_mismatch`, `pack_recipe_drift`, `pack_disk`, `pack_unpack_failed`). A pack is a
+python-build-standalone CPython 3.11.16 with one recipe installed INTO it, pinned once per
+backend with the sha256 read off that release's `SHA256SUMS`. `crucible envpack build` is
+the producing half; `.github/workflows/envpacks.yml` runs it on the tag, ten packs across
+two runners, and uploads the manifest LAST so a release whose manifest exists has every
+pack it names. `crucible doctor` prints each env's pack sha beside its recipe hash.
+
+- **Measured, on the card-free half of Owen's PC:** `asr`/cuda-linux is 2.86 GB unpacked,
+  1.29 GB as one part, 69 s to build and **12 s to install**; `server`/cuda-linux is 199 MB
+  unpacked, 55 MB packed, 18 s. Both smoke-tested by unpacking SOMEWHERE ELSE and running.
+- **What the real build found:** python-build-standalone bakes no absolute paths and **pip
+  does** — every console script's shebang is the installing interpreter's absolute path, so
+  a moved tree answers `bin/crucible --version` with *ENOENT naming the script*. The same
+  trap BookForge wrote up in `electron/rvc-bridge.ts`. Fixed rather than avoided (section 4
+  needs `bin/crucible` to work): every `bin/` entry that names the build tree is rewritten
+  to distlib's sh/Python polyglot resolved from `$0`.
+- **Owed:** no pack has been built on the Mac — there is no Crucible checkout on it, and
+  making one is a setup act rather than a test — so the four `mlx-darwin` packs and their
+  interpreter pin are proved by the first `macos-14` CI job and not before. The four torch
+  packs' runner-disk figures are labelled ESTIMATES in section 3.3.
+
 **Landed, 2026-09-14: phase 13, the operator door** (`PHASE13-OPERATOR.md`). Owen:
 *"not microservices. but crucible has its own ui. and it provides the token or whatever
 else we need to set it up on foundry or bookforge."* Everything a person does to a

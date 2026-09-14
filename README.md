@@ -43,13 +43,58 @@ CPU fallback.
 
 ## Install
 
-One conda env per host, not a shared one:
+### The envs come off the release — they are not built here
+
+`crucible install <type>` **downloads** a pre-built environment pack from this version's
+GitHub release and unpacks it (`docs/PHASE14-ENVPACKS.md`). A pack is a relocatable
+CPython 3.11 with that job type's recipe installed into it, split into parts under
+1900 MiB, with the sha256 of the reassembled whole in `envpacks.json`:
+
+```bash
+crucible install asr            # ~1.3 GB down, ~2.9 GB on disk, about a minute
+crucible install llm
+crucible install tts --narrator-engine higgs-v3
+crucible install rvc            # also installs denoise, which shares the env
+```
+
+Nothing about this depends on the machine's own Python, its version or its packages. A
+pack that the release does not carry is refused by name (`pack_not_published`) rather
+than built quietly, and `--build` is the explicit way to build one here from its recipe
+with pip:
+
+```bash
+crucible install asr --build    # the developer's path; minutes of pip instead of seconds
+crucible install asr --manifest-url file:///tmp/packs/envpacks.json   # a mirror, or a test
+```
+
+`crucible doctor` says which way each env arrived — `pack <sha>` or `built here` — beside
+the hash of the recipe it came from.
+
+### The server itself
 
 ```bash
 conda create -n crucible python=3.11 -y
 conda activate crucible
 pip install -e .            # add [test] for the test suite: pip install -e '.[test]'
 ```
+
+A conda env is how a DEVELOPER runs a checkout. A machine that only runs Crucible gets
+the `server` pack, which carries its own interpreter and needs no conda at all
+(`docs/PHASE14-ENVPACKS.md` section 4 — `@crucible/bootstrap`'s job).
+
+### Building the packs
+
+On the backend they target, one per command, each smoke-tested by unpacking it somewhere
+else and running it before it counts as an asset:
+
+```bash
+crucible envpack list                     # the ten (pack, backend) pairs a tag carries
+crucible envpack build asr --out packs    # -> packs/*.part00 and packs/envpacks.json
+crucible envpack build asr --out packs --check   # the parts still match, and the recipe
+```
+
+`.github/workflows/envpacks.yml` does this on every `v*` tag and uploads `envpacks.json`
+last, so a release whose manifest exists carries every pack that manifest names.
 
 ## Use
 
@@ -61,8 +106,10 @@ crucible token --show           # print the bearer token
 crucible serve                  # foreground; 127.0.0.1:7100 by default
 crucible service install        # …or run it as this machine's service (PHASE11-SERVICE.md);
                                 #   also start|stop|status|uninstall, all idempotent
-crucible install llm            # build the llm env for this host's backend
+crucible install llm            # download the llm env pack for this host's backend
 crucible install tts --narrator-engine higgs-v3   # ...and a tts env, one per engine
+crucible install llm --build    # ...or build it here from envs/llm/<backend>.txt instead
+crucible envpack build llm      # produce the pack a release carries (developer / CI)
 crucible capability             # what this host's card can hold, and why (dry run)
 crucible capability --write     # record that verdict in config.toml
 crucible models list            # model manifests and their standing here
@@ -135,11 +182,15 @@ config.toml        mode 0600 — server name, bind defaults, backend, and the to
 jobs/<id>/inputs/  the job's inputs, materialised before it is queued
 jobs/<id>/artifacts/   its outputs and their .provenance.json sidecars
 uploads/<blob_id>  blobs from POST /v1/uploads
-envs/llm/          the llm job type's venv, built by `crucible install llm`
-envs/tts-<engine>/ the tts job type's venv, one per narrator engine on cuda-linux
+envs/llm/          the llm job type's env, unpacked by `crucible install llm`
+envs/tts-<engine>/ the tts job type's env, one per narrator engine on cuda-linux
                    (one shared `envs/tts/` on mlx-darwin, where they can share)
-envs/<type>/       a worker job type's venv — `asr`, `align`, `rvc` — built by
-                   `crucible install <type>` from `envs/<type>/<backend>.txt`
+envs/<type>/       a worker job type's env — `asr`, `align`, `rvc` — unpacked by
+                   `crucible install <type>` from that release's pack, or built
+                   here with `--build` from `envs/<type>/<backend>.txt`
+envs/<key>.partial/    an unpack in flight; removed by the next install, never read
+downloads/         a pack's parts and the archive they join into, while one
+                   installs. Empty afterwards — peak extra disk is one part
 models/<id>/<backend>/  weights, stamped with the revision they were pulled at
 voices/<id>/<backend>/  the same for voices — a separate namespace on purpose
 rvc/<id>/<backend>/     the same for RVC models — a third namespace, because
@@ -302,7 +353,7 @@ two differ the backend block says so, and where it is silent the model's number 
 
 ```bash
 crucible init --enable-llm        # or add [jobs] enable_llm = true to an existing config
-crucible install llm              # build ~/.crucible/envs/llm and install the host recipe
+crucible install llm              # download ~/.crucible/envs/llm (--build to pip it here)
 crucible models list              # what this build ships and where each one stands here
 crucible models pull qwen3.5-9b   # ~19 GB from HuggingFace at the manifest's pinned sha
 crucible doctor                   # reports the env's presence and the versions installed
@@ -367,10 +418,17 @@ without one, a private repo is refused by name.
 #### Envs are recipes
 
 `envs/llm/cuda-linux.txt` (vLLM) and `envs/llm/mlx-darwin.txt` (mlx-lm) are pinned pip
-requirements. `crucible install llm` builds `~/.crucible/envs/llm/` as a venv from the
-server's own interpreter and installs the recipe for this host's backend from PyPI —
-heavy wheels never come from GitHub Releases. Engines are spawned from that venv, so the
-API server process never imports torch or mlx.
+requirements, and they are the source of truth in both directions: `crucible install llm
+--build` installs them into `~/.crucible/envs/llm/` with pip, and `crucible envpack build
+llm` installs the same file into a standalone CPython to PRODUCE the pack the default
+`crucible install llm` downloads. The manifest records the recipe's sha256, so a pack
+built from a recipe this build no longer has is refused `pack_recipe_drift` rather than
+treated as close enough. Engines are spawned from that env's python, so the API server
+process never imports torch or mlx.
+
+Heavy wheels still never come from GitHub Releases — they come from PyPI, at pack BUILD
+time, once per release rather than once per machine. What the release carries is the
+result.
 
 #### The accelerator guard
 
