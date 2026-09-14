@@ -6,13 +6,26 @@
 #   ./scripts/release.sh --dry-run       # build and check, create nothing
 #   ./scripts/release.sh --branch <name> # release a branch (see below)
 #
-# One version, one tag, one release, four assets:
+# One version, one tag, one release, six assets:
 #
 #   crucible-<ver>.tar.gz          the server sdist
 #   crucible-<ver>-py3-none-any.whl  the server wheel
 #   crucible-client-<ver>.tgz      the TypeScript SDK, installable by URL
 #   crucible-bootstrap-<ver>.tgz   the app-side installer/ensurer (PHASE5-APPS.md 6.0),
 #                                  peer-depending on the client at this exact version
+#   install.sh                     the standalone installer for Linux/WSL and macOS
+#   install.ps1                    the same for Windows (WSL2 first, then install.sh)
+#
+# The two installers are GENERATED from bootstrap's own step list
+# (PHASE14-ENVPACKS.md 4a), so an app-driven install and a hand install cannot
+# differ. A stale one refuses the cut.
+#
+# The ENVIRONMENT PACKS are not built here. `.github/workflows/envpacks.yml`
+# runs on the tag this creates and uploads them beside the four, because a pack
+# is built on the backend it targets and this script runs on one machine
+# (PHASE14-ENVPACKS.md section 3.3). What this script does about them is refuse
+# to cut a tag when that workflow is absent, and name the packs the tag will
+# attempt in the notes.
 #
 # The version is read from seven places and every one of them must agree:
 # crucible/__init__.py, pyproject.toml, sdk/ts/package.json, sdk/ts/src/version.ts (which
@@ -63,6 +76,25 @@ NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
 [ "$NODE_MAJOR" -ge 20 ] || fail "node $NODE_MAJOR is too old; the SDK needs 20+"
 python -c 'import build' 2>/dev/null || fail "python has no \`build\` module (pip install build)"
 gh auth status >/dev/null 2>&1 || fail "gh is not logged in (gh auth login)"
+
+# The packs are listed in the notes below and they are generated from
+# `crucible/envpack.py`, which is the one owner of what packs exist. A release
+# machine that cannot import the package would get notes that silently omit
+# them, which is worse than a refusal here.
+python -c 'import crucible.envpack' 2>/dev/null \
+  || fail "crucible is not importable in this python (pip install -e .); the notes list the packs this tag carries and are generated from crucible/envpack.py"
+
+# -------------------------------------------------- the packs have a builder
+#
+# A TAG IS WHAT BUILDS THE PACKS (.github/workflows/envpacks.yml runs on
+# `v*`), and since 0.6.0 `crucible install <type>` DOWNLOADS a pack by default
+# and refuses `pack_not_published` when the release has none. So a tag cut
+# without that workflow present is a release on which every fresh machine's
+# first install fails by name — the worst kind of working release. Refused
+# here rather than discovered by the first person to install it.
+ENVPACKS_WORKFLOW=".github/workflows/envpacks.yml"
+[ -f "$ENVPACKS_WORKFLOW" ] \
+  || fail "$ENVPACKS_WORKFLOW is not in this tree, so the tag would build no environment packs and \`crucible install\` would refuse every job type \`pack_not_published\` (PHASE14-ENVPACKS.md section 3.3)"
 
 # ------------------------------------------------------------------ the tree
 
@@ -149,6 +181,22 @@ echo "release: building the bootstrap"
 ( cd sdk/bootstrap && npm ci --no-audit --no-fund >/dev/null && npm run build >/dev/null )
 ( cd sdk/bootstrap && npm pack --silent --pack-destination "$OUT" >/dev/null )
 
+# THE TWO STANDALONE INSTALLERS (PHASE14-ENVPACKS.md 4a) are GENERATED from
+# bootstrap's own step list, so that an app-driven install and a hand install
+# cannot differ. A committed script that no longer matches that list is two
+# answers to "how is Crucible installed", which is the shape
+# docs/ARCHITECTURE.md section 1 is about - so a stale one refuses the cut
+# rather than shipping beside a bootstrapper it disagrees with.
+echo "release: the generated installers match bootstrap's step list"
+( cd sdk/bootstrap && npm run gen:install -- --check >/dev/null ) \
+  || fail "sdk/bootstrap/scripts/install.sh|.ps1 are stale; run `npm run gen:install` in sdk/bootstrap and commit them"
+INSTALL_SH="$REPO/sdk/bootstrap/scripts/install.sh"
+INSTALL_PS1="$REPO/sdk/bootstrap/scripts/install.ps1"
+for asset in "$INSTALL_SH" "$INSTALL_PS1"; do
+  [ -f "$asset" ] || fail "expected asset $asset was not generated"
+done
+
+
 SDIST="$OUT/crucible-$VERSION.tar.gz"
 WHEEL="$OUT/crucible-$VERSION-py3-none-any.whl"
 TGZ="$OUT/crucible-client-$VERSION.tgz"
@@ -183,13 +231,41 @@ npm install https://github.com/$REPO_SLUG/releases/download/$TAG/crucible-client
 npm install https://github.com/$REPO_SLUG/releases/download/$TAG/crucible-bootstrap-$VERSION.tgz
 \`\`\`"
 
+# --------------------------------------------------- what the packs will be
+#
+# NAMED IN THE NOTES, from `crucible envpack list`'s own source, so a reader of
+# the release page can tell a pack that was never meant to exist from one whose
+# CI job failed. The manifest (`envpacks.json`) is uploaded LAST by
+# `envpacks.yml`, so its presence is the release's own statement of what
+# actually built; this list is what was ATTEMPTED.
+PACK_LIST="$(python -c '
+from crucible import envpack
+for name, backend in envpack.every_pack():
+    print(f"- `{name}` / {backend}")
+')"
+NOTES_HEADER="$NOTES_HEADER
+
+### Environment packs
+
+\`crucible install <type>\` downloads a pack from this release and unpacks it; it
+builds nothing. \`.github/workflows/envpacks.yml\` runs on this tag and attempts:
+
+$PACK_LIST
+
+Each is \`crucible-env-<name>-<backend>-$VERSION.tar.zst\`, split into
+\`.part00\`… under 1900 MiB, with \`envpacks.json\` naming the sha256 of the
+reassembled whole. A pack missing from \`envpacks.json\` is one whose job did not
+finish; \`crucible install\` refuses it \`pack_not_published\` rather than building
+it quietly, and \`crucible envpack build <name>\` is the way to make it by hand."
+
 gh release create "$TAG" \
   --repo "$REPO_SLUG" \
   --target "$HEAD_SHA" \
   --title "$TAG" \
   --generate-notes \
   --notes "$NOTES_HEADER" \
-  "$SDIST" "$WHEEL" "$TGZ" "$BOOT"
+  "$SDIST" "$WHEEL" "$TGZ" "$BOOT" \
+  "$INSTALL_SH" "$INSTALL_PS1"
 
 echo "release: $TAG created"
 gh release view "$TAG" --repo "$REPO_SLUG" --json tagName,url,assets \
