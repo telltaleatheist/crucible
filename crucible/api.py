@@ -36,8 +36,9 @@ from starlette.background import BackgroundTask
 from starlette.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import API_VERSION, VERSION, accelerator, catalog, pairing
+from . import API_VERSION, VERSION, accelerator, catalog, pairing, upstreams
 from . import capability as capability_classes
+from . import settings as settings_module
 from .backend import CUDA_LINUX, Backend
 from .config import Config, load_config
 from .errors import ApiError
@@ -464,6 +465,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.state.store = JobStore(config, backend, registry)
     app.state.streams = StreamManager(residency)
     app.state.inflight = InFlight()
+    # The last few settings writes, for `/v1/activity` (PHASE15-HOST.md section
+    # 3.2). In memory and a restart forgets, like a task's record: this is a
+    # display of "who changed what just now" when two apps and a page all edit
+    # one server, not an audit log, and it never holds a key.
+    app.state.settings_history = settings_module.History()
     # In memory, and a restart forgets: a lease protects a resident model, and a
     # restarted server holds none (crucible/leases.py).
     app.state.leases = Leases()
@@ -645,7 +651,8 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         copy is the same defect one layer out, and is what section 4 means by
         "never a hard-coded list".
         """
-        record = config.capability
+        live: Config = request.app.state.config
+        record = live.capability
         if record is None:
             # Absent is its own answer and must not be dressed up as an empty
             # decision: a config written before `crucible capability` ran, or by a
@@ -658,7 +665,129 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 "on this host yet. Run `crucible capability --write` (or reinstall) "
                 "to decide, and read `GET /v1/info` for what it offers meanwhile",
             )
-        return {**record.to_dict(), "job_types": installable_job_type_rows()}
+        # EVERY ROW SAYS WHERE ITS WORK RUNS (PHASE15-HOST.md section 3.3), and
+        # the answer is read off `[routes]` — the one owner of it — rather than
+        # inferred from the row's `selected` carrying a slash. The two agree,
+        # because `crucible/settings.py` rewrites the record from the routes on
+        # every write that touches one; asking the routes is what makes them
+        # unable to disagree if a record ever went stale (R1).
+        document = record.to_dict()
+        for row in document["classes"]:
+            row["route"] = (
+                "upstream"
+                if live.route_model(row["capability"]) is not None
+                else "local"
+            )
+        return {**document, "job_types": installable_job_type_rows()}
+
+    # -------------------------------------------------------------- settings
+
+    @private.get("/settings")
+    async def get_settings(request: Request) -> dict[str, Any]:
+        """Where each class's work runs, and which upstreams are configured.
+
+        PHASE15-HOST.md section 3.1. Owen, 2026-09-14: *"Settings live in the
+        engine and nowhere else."* An app draws this document and writes
+        through `PUT`; it holds no key, no route and no model list of its own.
+
+        **A key is never in this answer.** `key_hint` is its last four
+        characters, which is enough to recognise WHICH key is there — the
+        question a person with two accounts asks — and nothing else. There is
+        no route on this server that returns one.
+        """
+        live: Config = request.app.state.config
+        return settings_module.document(live)
+
+    @private.put("/settings")
+    async def put_settings(request: Request) -> dict[str, Any]:
+        """A partial patch, applied whole or not at all, live without a restart.
+
+        PHASE15-HOST.md section 3.2. The order inside one request is the
+        contract's — upstreams, then routes, then the whole validated — which
+        is what lets an app configure an upstream AND route a class to it in
+        one call, the way section 5.2 tells it to.
+
+        **A refusal applies nothing.** `settings.resolve` builds the candidate
+        document in memory and raises before `settings.apply` writes a byte, so
+        a request refused for its routes does not leave a key behind on a
+        server whose operator believes it failed.
+
+        The answer is the whole `GET /v1/settings` document AFTER the write, so
+        a window never has to guess what took.
+        """
+        live: Config = request.app.state.config
+        # Read BEFORE the work, like the chat door: an unknown act is a 400
+        # rather than a write that happened and was then recorded under a name
+        # nobody knows.
+        act = read_act(request.headers)
+        try:
+            patch = json.loads(await request.body())
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ApiError(
+                400, "invalid_request", f"the settings body is not JSON: {exc}"
+            ) from None
+        resolved = settings_module.resolve(live, patch)
+        # Off the event loop: this writes a file and re-reads it, and a settings
+        # write must not stall a job's event stream.
+        await asyncio.to_thread(settings_module.apply, live, resolved)
+        if resolved.changed:
+            request.app.state.settings_history.record(
+                act=act,
+                client=_client_agent(request),
+                changed=resolved.changed,
+            )
+        return settings_module.document(live)
+
+    @private.post("/settings/upstreams/{name}/test")
+    async def test_upstream(request: Request, name: str) -> dict[str, Any]:
+        """Ask an upstream what it serves, with a key that may not be saved yet.
+
+        PHASE15-HOST.md section 3.2. The body is optional and carries
+        `{"key": …}` or `{"url": …}` to test BEFORE saving, which is the order a
+        person actually works in: paste, check it works, then save. With no
+        body the stored record is used.
+
+        **Unbilled, and never cached.** The answer is somebody else's and
+        changes without telling us; a stale list shown beside a key the
+        operator pasted ten seconds ago is exactly the moment they would
+        believe it.
+
+        `POST` and not `GET` because it takes a body carrying a secret, and a
+        secret in a query string is a secret in a log.
+        """
+        live: Config = request.app.state.config
+        upstreams.require_name(name, "the path")
+        raw = await request.body()
+        if raw.strip() == b"":
+            probe = None
+        else:
+            try:
+                probe = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise ApiError(
+                    400, "invalid_request", f"the test body is not JSON: {exc}"
+                ) from None
+        if probe is None or probe == {}:
+            record = live.upstream(name)
+            if record is None:
+                raise ApiError(
+                    400,
+                    "upstream_unconfigured",
+                    f"{name} is not configured on this server and the request "
+                    f"carried no {upstreams.UPSTREAM_FIELD[name]!r} to test "
+                    "with. Send one to check it before saving it",
+                    {
+                        "field": f"upstreams.{name}."
+                        f"{upstreams.UPSTREAM_FIELD[name]}",
+                        "upstream": name,
+                    },
+                )
+        else:
+            record = upstreams.record_from_patch(
+                name, probe, f"the test body for {name}"
+            )
+        client: httpx.AsyncClient = request.app.state.http
+        return {"models": await upstreams.list_models(client, record)}
 
     # ------------------------------------------------------------------ info
 
@@ -823,7 +952,13 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         `crucible/catalog.py`, which is the whole of it.
         """
         live: Config = request.app.state.config
-        return {"rows": catalog.rows(live, backend, residency)}
+        # `backend_kind` on every backend, not only where the list is empty
+        # (PHASE15-HOST.md section 3.5). A reader that had to infer "there are
+        # no rows because there is no card" from the emptiness would be
+        # guessing, and the same key on cuda-linux is what makes this a field
+        # rather than a marker for one mode.
+        return {"rows": catalog.rows(live, backend, residency),
+                "backend_kind": backend.kind}
 
     # ----------------------------------------------------------- accelerator
 
@@ -1092,6 +1227,17 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # translate, since both are a chat against the same 27B and the only
             # difference is a prompt it does not own.
             "chat": {"in_flight": len(inflight), "rows": inflight.rows()},
+            # WHO CHANGED THIS SERVER'S SETTINGS, AND WHEN (PHASE15-HOST.md
+            # section 3.2). Two apps and the operator page can all write the
+            # same engine, so "why is translate suddenly on Anthropic" needs an
+            # answer that is not "read three apps' logs". Newest first, the
+            # last `settings.HISTORY_LIMIT` of them, in memory.
+            #
+            # **The field paths, never the values of an upstream.** A route's
+            # model id is recorded because it is not a secret; an upstream
+            # entry records `set` or `removed` and nothing more, which is the
+            # whole of "a key appears in no activity record".
+            "settings": {"writes": request.app.state.settings_history.rows()},
             # THE INTENTION BEHIND THE CHATS, which no amount of looking at this
             # server could infer. A chat holds nothing and is over in seconds, so
             # between two blocks of a 2000-block translation this machine is idle
@@ -1190,7 +1336,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     # anything that would take that thing off the card. Everything else about
     # this server is unchanged.
 
-    @private.post("/models/{subject_id}/lease", status_code=201)
+    @private.post("/models/{subject_id:path}/lease", status_code=201)
     async def open_lease(
         request: Request, subject_id: str, body: LeaseOpen
     ) -> dict[str, Any]:
@@ -1219,6 +1365,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         a model.
         """
         leases: Leases = request.app.state.leases
+        _refuse_lease_on_an_upstream(subject_id)
         ttl_seconds = require_ttl(body.ttl_seconds)
         act = require_act_name(body.act.strip(), "a lease's `act`")
         # Whatever is on the card, of any kind. A lease NEVER loads anything — it
@@ -1480,6 +1627,14 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         store: JobStore = request.app.state.store
         leases: Leases = request.app.state.leases
         plugin = resolve(store.registry, body.type, config)
+        if body.model is not None:
+            # An upstream model is never resident and never on the lane, so
+            # `load-model` naming one is the same mistake a lease on one is,
+            # and gets the same name (PHASE15-HOST.md section 3.4). Checked
+            # before `resolve_model`, whose refusal would be
+            # `unknown_model` — true of a local catalog and wrong about what
+            # the caller actually did.
+            _refuse_lease_on_an_upstream(body.model)
         model = resolve_model(plugin, body.model)
         # Would this take the leased thing off the card while somebody has said
         # they are mid-run on it? Asked BEFORE the lane, and before
@@ -1631,14 +1786,24 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     @private.get("/openai/models")
     @openai.get("/models")
     async def openai_models(request: Request) -> dict[str, Any]:
-        """The resident model in OpenAI's list shape, or an empty list.
+        """The resident model in OpenAI's list shape, plus every routed upstream one.
 
         `resident_model` rather than `resident`: with a voice on the card there
         is no model to list, and narrator answers no OpenAI route.
+
+        **The upstream rows are the ROUTED ones and not a catalog**
+        (PHASE15-HOST.md section 3.4). This route answers *"what may I send as
+        `model`"*, and the answer is the resident thing plus whatever the
+        operator routed to — the upstream's whole catalog is a different
+        question with a different door,
+        `POST /v1/settings/upstreams/{name}/test`, and putting it here would
+        make a client believe this server had agreed to serve any of them.
         """
+        live: Config = request.app.state.config
         resident = residency.resident_model
+        data: list[dict[str, Any]] = _routed_upstream_rows(live)
         if resident is None:
-            return {"object": "list", "data": []}
+            return {"object": "list", "data": data}
         return {
             "object": "list",
             "data": [
@@ -1676,14 +1841,24 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     # thing it has to be able to see before it decides what to
                     # send. `null` means the engine's own default.
                     "defaults": resident.defaults.to_dict(),
-                }
+                },
+                *data,
             ],
         }
 
     @private.post("/openai/chat/completions")
     @openai.post("/chat/completions")
     async def openai_chat_completions(request: Request) -> Response:
-        """Proxied to the resident engine. Never loads one (section 5)."""
+        """Proxied to the resident engine, or forwarded to an upstream.
+
+        PHASE2-LLM.md section 5 is the local half and is unchanged in every
+        respect. PHASE15-HOST.md section 3.4 is the other: a `model` of the
+        form `<upstream>/<id>` goes to that upstream on the operator's account.
+
+        **The slash is the whole of the test**, and it works because a local
+        model id can never contain one — refused at manifest load,
+        `manifest_model_id_slash`. One character, one owner, no table.
+        """
         raw = await request.body()
         body = _chat_body(raw)
         requested = body.get("model")
@@ -1693,6 +1868,10 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 "model_required",
                 "a chat request must name a model; this server proxies only to the "
                 "model that is resident",
+            )
+        if upstreams.split_model(requested) is not None:
+            return await _forward_to_upstream(
+                request, requested, body, client_agent=_client_agent(request)
             )
         # The resident MODEL: a voice on the card is not something a chat
         # request can be proxied to, so this door's honest answer is the same
@@ -1757,7 +1936,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 )
             try:
                 upstream = await _post_unless_the_caller_leaves(
-                    client, url, forwarded, request
+                    client, url, forwarded, request, JSON_HEADERS
                 )
             except httpx.HTTPError as exc:
                 raise _engine_unreachable(resident, exc) from None
@@ -1917,7 +2096,11 @@ async def _watch_for_disconnect(request: Request) -> None:
 
 
 async def _post_unless_the_caller_leaves(
-    client: httpx.AsyncClient, url: str, body: bytes, request: Request
+    client: httpx.AsyncClient,
+    url: str,
+    body: bytes,
+    request: Request,
+    headers: dict[str, str],
 ) -> httpx.Response | None:
     """The upstream POST, raced against the caller hanging up.
 
@@ -1935,7 +2118,7 @@ async def _post_unless_the_caller_leaves(
     what closes the socket the engine is writing to — which is how the engine
     learns to stop.
     """
-    post = asyncio.create_task(client.post(url, content=body, headers=JSON_HEADERS))
+    post = asyncio.create_task(client.post(url, content=body, headers=headers))
     watch = asyncio.create_task(_watch_for_disconnect(request))
     try:
         done, _ = await asyncio.wait({post, watch}, return_when=asyncio.FIRST_COMPLETED)
@@ -2026,12 +2209,23 @@ def _restore_model_id(raw: bytes, resident: Any) -> bytes:
 
 
 def _restore_model_id_in_frame(frame: bytes, resident: Any) -> bytes:
-    """The same substitution inside one SSE frame of a streamed completion.
+    """The same substitution inside one SSE frame of a streamed completion."""
+    return _set_model_in_frame(frame, resident.model_id)
+
+
+def _set_model_in_frame(frame: bytes, model_id: str) -> bytes:
+    """Name `model_id` in every JSON `data:` chunk of one SSE frame.
 
     Only `data:` lines carrying a JSON chunk are touched, and only their `model`
     field. `data: [DONE]`, comments, and any line the engine frames some other
     way are passed through as they arrived: mid-stream there is no way to raise,
     and a frame Crucible does not recognise is the engine's to explain.
+
+    Two callers, one substitution: the local proxy puts Crucible's id back where
+    it wrote the engine's, and the upstream proxy puts `<upstream>/<model>` back
+    where it wrote the bare id. Same rule — **the id the caller asked for is the
+    id the answer names** — so it is one function rather than two that could
+    come to frame SSE differently.
     """
     lines = frame.split(b"\n")
     changed = False
@@ -2047,7 +2241,7 @@ def _restore_model_id_in_frame(frame: bytes, resident: Any) -> bytes:
             continue
         if not isinstance(chunk, dict) or "model" not in chunk:
             continue
-        chunk["model"] = resident.model_id
+        chunk["model"] = model_id
         lines[index] = b"data: " + json.dumps(chunk).encode("utf-8")
         changed = True
     return b"\n".join(lines) if changed else frame
@@ -2217,6 +2411,370 @@ async def _proxy_stream(
         # The sampling audit rides on the response headers, which is the one
         # place a streamed completion HAS to put it: there is nowhere in an SSE
         # body to add a field a client would not have to learn to skip.
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+            **extra_headers,
+        },
+    )
+
+
+# --------------------------------------------------- forwarding to an upstream
+#
+# PHASE15-HOST.md section 3.4. Owen, 2026-09-14: *"they dont have ollama
+# fallbacks or cloud anything at all … one contract, one SDK, one API, one
+# communication method."* The provider code left BookForge and Foundry; this is
+# where it landed, and `crucible/upstreams.py` holds everything that differs
+# between the three.
+#
+# WHAT THIS PATH DELIBERATELY DOES NOT DO. No lease, no lane, no settlement:
+# nothing was on the card, so there is nothing to ask about when the answer is
+# written. It DOES open an `inflight` record, because `/v1/activity` must be
+# able to say "translating on anthropic" — a chat that is invisible is the
+# defect `crucible/inflight.py` exists to have fixed, and where it runs does
+# not change that.
+#
+# AND IT NEVER RETRIES. A `429` comes back to the caller with the upstream's own
+# `Retry-After` and the CALLER waits. A request that reached the upstream may
+# already be billed, and a server that quietly sent it twice would be spending
+# somebody's money to smooth a graph.
+
+
+def _refuse_lease_on_an_upstream(subject_id: str) -> None:
+    """`lease_not_needed` — there is nothing on the card to hold in place.
+
+    PHASE15-HOST.md section 3.4. A lease is the promise not to MOVE what is
+    resident, and an upstream model is never resident: no load, no eviction,
+    nothing another job could take away. A server that accepted the lease would
+    be issuing a promise about a card the work never touches, and the client
+    that took it would hold the one lease this server has, refusing everybody
+    else's `load-model` for a run that is happening in somebody else's
+    datacentre.
+
+    Both doors that can name a model call this — `POST /v1/models/{id}/lease`
+    and a `load-model` job — because both mistakes come from the same wrong
+    belief and a client owed one sentence should not get two.
+    """
+    if upstreams.split_model(subject_id) is None:
+        return
+    raise ApiError(
+        409,
+        "lease_not_needed",
+        "an upstream model is never resident; send the chat",
+        {"model": subject_id},
+    )
+
+
+def _routed_upstream_rows(config: Config) -> list[dict[str, Any]]:
+    """Every distinct upstream model a route names, in `UPSTREAM_NAMES` order.
+
+    DISTINCT, because `translate` and `simplify` routed to the same Anthropic
+    model are one thing a client may send and two classes that send it;
+    `routed_for` is where the second fact goes. Two identical rows would make a
+    client's model picker show the same entry twice.
+
+    No `created`, no `max_model_len`, no `defaults`: this server did not load
+    it, cannot see its context window and has no manifest for it. Absent is the
+    honest value, and a client that sizes `max_tokens` against `max_model_len`
+    already skips the clamp when the field is missing (CLIENT-SURFACES.md 6.1).
+    """
+    routed_for: dict[str, list[str]] = {}
+    for entry in config.routes:
+        routed_for.setdefault(entry.model, []).append(entry.capability)
+    rows: list[dict[str, Any]] = []
+    for name in upstreams.UPSTREAM_NAMES:
+        for model, classes in routed_for.items():
+            if model.partition("/")[0] != name:
+                continue
+            rows.append(
+                {
+                    "id": model,
+                    "object": "model",
+                    "owned_by": name,
+                    "upstream": name,
+                    "routed_for": classes,
+                }
+            )
+    return rows
+
+
+def _upstream_unreachable(name: str, url: str, exc: Exception) -> ApiError:
+    return ApiError(
+        502,
+        "upstream_unreachable",
+        f"{name} did not answer at {url}: {type(exc).__name__}: {exc}",
+        {"upstream": name},
+    )
+
+
+def _rate_limited(name: str, response: httpx.Response, body: bytes) -> Response:
+    """The upstream's own 429, passed through with its own `Retry-After`.
+
+    Passed through rather than translated, because the only correct response to
+    a rate limit is for the thing that decided to make the request to decide
+    when to make it again. `Retry-After` is the upstream's number and this
+    server has no better one; it is copied when it is there and absent when it
+    is not, never invented.
+    """
+    headers: dict[str, str] = {}
+    retry_after = response.headers.get("retry-after")
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    return JSONResponse(
+        status_code=429,
+        headers=headers,
+        content=ApiError(
+            429,
+            "upstream_rate_limited",
+            f"{name} rate-limited this request: "
+            f"{upstreams.upstream_message(body)}. This server never retries a "
+            "billed request — the caller waits",
+            {
+                "upstream": name,
+                "retry_after": retry_after,
+                "upstream_status": response.status_code,
+            },
+        ).body(),
+    )
+
+
+def _upstream_rejected(name: str, status_code: int, body: bytes) -> ApiError:
+    """Anything the upstream refused, with the upstream's own words.
+
+    ONE name for every non-200 that is not a 429, and a `502` for all of them.
+    Section 3.4 spells out the `401` case; the rest — a model id the account
+    cannot reach, an overloaded region, a body the provider did not like — are
+    the same event from this server's side: *the hop failed and the upstream
+    said why*. `details.upstream_status` carries the real number, so nothing is
+    lost by not multiplying the names, and a client is never left reading a
+    Crucible refusal that sounds like Crucible's own fault without the
+    provider's sentence beside it.
+    """
+    return ApiError(
+        502,
+        "upstream_rejected",
+        f"{name} refused this request with {status_code}: "
+        f"{upstreams.upstream_message(body)}",
+        {"upstream": name, "upstream_status": status_code},
+    )
+
+
+def _set_model_in_response(raw: bytes, model_id: str) -> bytes:
+    """Name the id the CALLER asked for in a completion the upstream named its own.
+
+    Anthropic and OpenAI both echo the bare model name they were sent, and the
+    caller sent `<upstream>/<model>`. Crucible's id is the contract in both
+    directions (`_restore_model_id`'s rule, one hop further out).
+    """
+    try:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return raw
+    if not isinstance(body, dict):
+        return raw
+    body["model"] = model_id
+    return json.dumps(body).encode("utf-8")
+
+
+async def _forward_to_upstream(
+    request: Request,
+    requested: str,
+    body: dict[str, Any],
+    *,
+    client_agent: str | None,
+) -> Response:
+    """One chat, sent to the upstream the operator configured."""
+    live: Config = request.app.state.config
+    name, model_id = upstreams.require_upstream_model(requested)
+    record = live.upstream(name)
+    if record is None:
+        # 409 and not 404: the model id is well formed and this server knows
+        # the upstream — what is missing is the operator's key, which is a
+        # state of the server rather than a mistake in the request. The app
+        # that reads this shows its settings window, which is 5.2's whole
+        # point.
+        raise ApiError(
+            409,
+            "upstream_unconfigured",
+            f"{requested!r} names the {name} upstream and this server has no "
+            f"{upstreams.UPSTREAM_FIELD[name]} for it. Configure it with "
+            f"`PUT /v1/settings` — nothing here falls back to a local model, "
+            "because a route is a decision somebody made and not a guess this "
+            "server gets to improvise",
+            {"upstream": name, "model": requested},
+        )
+
+    forwarded = upstreams.forward_body(name, model_id, body)
+    sampling_headers = {
+        SAMPLING_HEADER: json.dumps(
+            forwarded.sources, separators=(",", ":"), sort_keys=True
+        )
+    }
+    url = upstreams.chat_url(record)
+    headers = upstreams.chat_headers(record)
+    client: httpx.AsyncClient = request.app.state.http
+    inflight: InFlight = request.app.state.inflight
+    # Before the work, so an unknown act is a 400 rather than a BILLED
+    # completion reported under a name nobody knows.
+    act = read_act(request.headers)
+    entry = inflight.open(act=act, model=requested, client=client_agent)
+    try:
+        if body.get("stream") is True:
+            return await _stream_from_upstream(
+                client,
+                record,
+                url,
+                headers,
+                forwarded,
+                requested,
+                sampling_headers,
+                when_relayed=_close_inflight(inflight, entry),
+            )
+        try:
+            upstream = await _post_unless_the_caller_leaves(
+                client, url, forwarded.body, request, headers
+            )
+        except httpx.HTTPError as exc:
+            raise _upstream_unreachable(name, url, exc) from None
+        if upstream is None:
+            # The caller hung up. Nothing reads this; it exists so the handler
+            # returns something that is not shaped like a completion.
+            return JSONResponse(
+                status_code=499,
+                content=ApiError(
+                    499,
+                    "client_disconnected",
+                    f"the caller closed the connection before {name} answered; "
+                    "the upstream request was cancelled with it",
+                ).body(),
+            )
+        payload = upstream.content
+        if upstream.status_code == 429:
+            return _rate_limited(name, upstream, payload)
+        if upstream.status_code != 200:
+            raise _upstream_rejected(name, upstream.status_code, payload)
+        if forwarded.translate_reply:
+            try:
+                document = json.loads(payload)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise ApiError(
+                    502,
+                    "upstream_rejected",
+                    f"{name} answered 200 with a body that is not JSON: {exc}",
+                    {"upstream": name, "upstream_status": 200},
+                ) from None
+            content = json.dumps(
+                upstreams.anthropic_to_openai(document, requested)
+            ).encode("utf-8")
+        else:
+            content = _set_model_in_response(payload, requested)
+        return Response(
+            content=content,
+            status_code=200,
+            media_type="application/json",
+            headers=sampling_headers,
+        )
+    except BaseException:
+        inflight.close(entry)
+        raise
+    finally:
+        # Only the non-streamed paths reach here with the record still open;
+        # the streamed one hands its close to the relay's end and returns
+        # above. `close` is idempotent (crucible/inflight.py), so the two
+        # cannot double-count and neither can leave a row behind.
+        if body.get("stream") is not True:
+            inflight.close(entry)
+
+
+def _close_inflight(inflight: InFlight, entry: Entry) -> Callable[[], Awaitable[None]]:
+    """The end of a streamed upstream completion. No settlement: no card moved."""
+
+    async def done() -> None:
+        inflight.close(entry)
+
+    return done
+
+
+async def _stream_from_upstream(
+    client: httpx.AsyncClient,
+    record: upstreams.UpstreamRecord,
+    url: str,
+    headers: dict[str, str],
+    forwarded: upstreams.Forwarded,
+    requested: str,
+    extra_headers: dict[str, str],
+    when_relayed: Callable[[], Awaitable[None]],
+) -> Response:
+    """A streamed completion from an upstream, in OpenAI chunk shape.
+
+    The upstream response is opened before anything is returned, so a refusal
+    comes back with its own status and body rather than as a 200 whose stream
+    turns out to be an error — the same rule `_proxy_stream` follows for the
+    local engine.
+
+    Anthropic's frames are a different protocol and are TRANSLATED
+    (`upstreams.AnthropicStreamTranslator`); OpenAI's and Ollama's are relayed
+    with one substitution, the `model` the caller asked for.
+    """
+    name = record.name
+    upstream_request = client.build_request(
+        "POST",
+        url,
+        content=forwarded.body,
+        headers=headers,
+        # No read deadline, for `_proxy_stream`'s reason: a completion emits a
+        # token at a time and may think for a long while before the first one.
+        timeout=httpx.Timeout(
+            connect=PROXY_CONNECT_TIMEOUT, read=None, write=60.0, pool=10.0
+        ),
+    )
+    try:
+        upstream = await client.send(upstream_request, stream=True)
+    except httpx.HTTPError as exc:
+        await when_relayed()
+        raise _upstream_unreachable(name, url, exc) from None
+
+    if upstream.status_code != 200:
+        payload = await upstream.aread()
+        await upstream.aclose()
+        if upstream.status_code == 429:
+            response = _rate_limited(name, upstream, payload)
+            response.background = BackgroundTask(when_relayed)
+            return response
+        await when_relayed()
+        raise _upstream_rejected(name, upstream.status_code, payload)
+
+    if forwarded.translate_reply:
+        translator = upstreams.AnthropicStreamTranslator(requested)
+
+        async def relay() -> AsyncIterator[bytes]:
+            async for chunk in upstream.aiter_bytes():
+                for frame in translator.feed(chunk):
+                    yield frame
+            for frame in translator.finish():
+                yield frame
+
+    else:
+
+        async def relay() -> AsyncIterator[bytes]:
+            # SSE frames end at a blank line, so the relay holds a partial
+            # frame until it has one. Whatever is left when the upstream stops
+            # is forwarded as it stands rather than swallowed.
+            buffer = b""
+            async for chunk in upstream.aiter_bytes():
+                buffer += chunk
+                while b"\n\n" in buffer:
+                    frame, buffer = buffer.split(b"\n\n", 1)
+                    yield _set_model_in_frame(frame, requested) + b"\n\n"
+            if buffer:
+                yield _set_model_in_frame(buffer, requested)
+
+    return _RelayResponse(
+        relay(),
+        upstream=upstream,
+        when_relayed=when_relayed,
+        status_code=200,
+        media_type="text/event-stream",
         headers={
             "Cache-Control": "no-store",
             "X-Accel-Buffering": "no",
