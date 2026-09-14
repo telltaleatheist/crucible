@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { decodeWslBytes, processRunner, splitLines } from '../src/index.js';
+import { decodeWslBytes, incompleteTailBytes, processRunner, segmentWslBytes, splitLines } from '../src/index.js';
 
 const NODE = process.execPath;
 
@@ -22,6 +22,44 @@ test('decodeWslBytes: UTF-8 from inside the distro passes through, BOM or not', 
 
 test('decodeWslBytes: an empty buffer is an empty string', () => {
   assert.equal(decodeWslBytes(Buffer.alloc(0)), '');
+});
+
+test('decodeWslBytes: BOTH encodings in ONE buffer, decoded per run — the defect the stream test caught', () => {
+  // A pipe hands over whatever chunking the OS felt like, and wsl.exe's own
+  // UTF-16 message can share a chunk with the guest's UTF-8 output. Deciding
+  // the encoding per buffer decoded "tail" as UTF-16 and printed 慴汩.
+  const mixed = Buffer.concat([
+    Buffer.from('there is no distribution\r\n', 'utf16le'),
+    Buffer.from('tail without newline', 'utf8'),
+  ]);
+  assert.equal(decodeWslBytes(mixed), 'there is no distributiontail without newline'.replace('distribution', 'distribution\r\n'));
+
+  const sandwich = Buffer.concat([
+    Buffer.from('Collecting torch\n', 'utf8'),
+    Buffer.from([0xff, 0xfe]),
+    Buffer.from('wsl: a message\r\n', 'utf16le'),
+    Buffer.from('déjà vu\n', 'utf8'),
+  ]);
+  assert.equal(decodeWslBytes(sandwich), 'Collecting torch\nwsl: a message\r\ndéjà vu\n');
+  assert.deepEqual(segmentWslBytes(sandwich).map((s) => s.encoding), ['utf8', 'utf16le', 'utf8']);
+});
+
+test('decodeWslBytes: a lone non-Latin code unit does not end a UTF-16 run', () => {
+  // `—` is 14 20 in UTF-16LE: a non-NUL high byte inside an otherwise ASCII
+  // message. One such pair must not split the run; two in a row (which is what
+  // UTF-8 looks like) must.
+  assert.equal(decodeWslBytes(Buffer.from('a — b\r\n', 'utf16le')), 'a — b\r\n');
+});
+
+test('incompleteTailBytes: half a UTF-16 code unit, or a split UTF-8 character, waits for the next chunk', () => {
+  const utf16 = Buffer.from('hello', 'utf16le');
+  assert.equal(incompleteTailBytes(utf16), 0);
+  assert.equal(incompleteTailBytes(utf16.subarray(0, 9)), 1, 'an odd UTF-16 tail holds one byte');
+  const utf8 = Buffer.from('déjà', 'utf8');
+  assert.equal(incompleteTailBytes(utf8), 0);
+  assert.equal(incompleteTailBytes(utf8.subarray(0, utf8.length - 1)), 1, 'half of à holds one byte');
+  assert.equal(incompleteTailBytes(Buffer.from('plain ascii', 'utf8')), 0, 'a complete line is never delayed');
+  assert.equal(incompleteTailBytes(Buffer.from('ends with newline\n', 'utf8')), 0);
 });
 
 test('splitLines: \\n, \\r\\n and a bare \\r (pip repainting its bar) all end a line', () => {
@@ -64,6 +102,22 @@ test('processRunner.stream hands over lines as they arrive, splitting on \\r too
     'stdout:tail without newline',
   ]);
   assert.deepEqual(seen.filter((s) => s.startsWith('stderr:')), ['stderr:WARNING: something']);
+});
+
+test('processRunner.stream: a character split across two chunks arrives whole', async () => {
+  const runner = processRunner();
+  const seen: string[] = [];
+  // Two writes, the second beginning in the middle of the UTF-16 code unit the
+  // first ended in, and a UTF-8 multi-byte character split the same way.
+  const script = [
+    'const u16 = Buffer.from("wsl message\\r\\n", "utf16le");',
+    'process.stdout.write(u16.subarray(0, 7));',
+    'process.stdout.write(Buffer.concat([u16.subarray(7), Buffer.from("déjà vu\\n", "utf8").subarray(0, 3)]));',
+    'process.stdout.write(Buffer.from("déjà vu\\n", "utf8").subarray(3));',
+  ].join(' ');
+  const result = await runner.stream([NODE, '-e', script], { timeoutMs: 20_000, onLine: (line) => seen.push(line) });
+  assert.equal(result.code, 0);
+  assert.deepEqual(seen, ['wsl message', 'déjà vu']);
 });
 
 test('processRunner: a call that never returns is a reported failure, not a hang', async () => {
