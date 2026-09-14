@@ -1,5 +1,5 @@
 {
-  "generated_from": "4e1784234ec92ddb41e7047434255af4d24f189a",
+  "generated_from": "f788fafa77ce36979ab7106e1249fb9b09c29d88",
   "schema": 1,
   "models": [
     {
@@ -64,8 +64,7 @@
       "minimum": true,
       "minimumFor": [
         "translate",
-        "simplify",
-        "analysis"
+        "simplify"
       ]
     }
   ]

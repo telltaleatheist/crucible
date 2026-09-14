@@ -188,13 +188,13 @@ def test_the_cleanup_model_is_the_bf16_ollama_tag() -> None:
 
 
 def test_the_27b_is_the_floor_for_the_three_classes_it_serves() -> None:
-    """Owen's tile rule: translate, simplify and analysis do not light below it."""
+    """Owen's tile rule: translate and simplify do not light below it; analysis has no floor."""
     row = next(r for r in _checked_in()["models"] if r["id"] == "qwen3.8-27b-4bit")
     assert row["local"]["kind"] == "ollama"
     assert row["local"]["tag"] == "qwen3.8:27b"
     assert row["local"]["downloadGB"] == 17.74
     assert row["minimum"] is True
-    assert row["minimumFor"] == ["translate", "simplify", "analysis"]
+    assert row["minimumFor"] == ["translate", "simplify"]
     assert set(row["minimumFor"]) <= set(row["classes"])
 
 
