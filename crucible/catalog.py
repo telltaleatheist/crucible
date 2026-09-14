@@ -56,7 +56,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import denoisemodels, lineup, rvcbase, weights
+from . import denoisemodels, lineup, llamacpp, rvcbase, weights
 from .alignmodels import load_all_align_manifests
 from .asrmodels import load_all_asr_manifests
 from .backend import Backend
@@ -67,9 +67,16 @@ from .residency import KIND_ALIGN, KIND_LLM, KIND_TTS, Residency
 from .rvcmodels import load_all_rvc_manifests
 from .voices import load_all_voices
 
-#: The five words a subject's `kind` may be, in the order `/v1/catalog` lists
+#: The six words a subject's `kind` may be, in the order `/v1/catalog` lists
 #: them. A tuple and not a set, because the order IS the catalog's order.
-KINDS: tuple[str, ...] = ("model", "voice", "rvc", "rvc-base", "denoise")
+#:
+#: `engine` arrived with PHASE15-HOST.md 3.10: on `llama-windows` the thing
+#: that serves a model is `llama-server.exe`, a zip on a GitHub release, and
+#: it is pulled, listed, reported installed and REMOVED exactly like weights
+#: rather than through a second mechanism with a second page panel. It is
+#: LAST because it exists on one backend and a reader scanning the list
+#: should meet the four universal kinds first.
+KINDS: tuple[str, ...] = ("model", "voice", "rvc", "rvc-base", "denoise", "engine")
 
 #: The one id `rvc-base` has. PHASE13-OPERATOR.md section 2: the base assets are
 #: the ENGINE's, not any model's, and there is one set of them — so the subject
@@ -212,6 +219,30 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
         )
     )
 
+    # --- engine. ONE, on ONE backend, and absent everywhere else: `cuda-linux`
+    # and `mlx-darwin` get their engine from a Python env that `crucible
+    # install` builds, and a row here for them would be a second answer to
+    # "how does this backend get its engine".
+    if backend.kind == llamacpp_backend():
+        build = llamacpp.build_for(backend.gpu.vendor)
+        found.append(
+            Subject(
+                kind=llamacpp.ENGINE_KIND,
+                id=llamacpp.LLAMA_CPP_ID,
+                name=f"llama.cpp {llamacpp.LLAMA_CPP_RELEASE} ({build})",
+                # The job type it SERVES. `llm` and not a sixth word: on this
+                # backend `pages` is an llm-class model like any other
+                # (PHASE3-VLM.md section 1, "there is no vlm-pages job type"),
+                # and the engine is what starts both.
+                job_type="llm",
+                expected_bytes=llamacpp.expected_bytes(build),
+                source=f"github:ggml-org/llama.cpp@{llamacpp.LLAMA_CPP_RELEASE}",
+                pull_command="crucible install llm",
+                installed=_installed_engine(config, build),
+                pull=_pull_engine(config, build),
+            )
+        )
+
     for separator in denoisemodels.load_all_denoise_manifests().values():
         if not separator.supports(backend.kind):
             continue
@@ -255,6 +286,30 @@ def _pull_archive(
     return lambda **kwargs: weights.pull_archive(config, manifest, spec, **kwargs)
 
 
+def llamacpp_backend() -> str:
+    """The one backend the `engine` subject exists on.
+
+    A function rather than an import of `backend.LLAMA_WINDOWS` at the top,
+    because `crucible/backend.py` is where that name lives and this module is
+    a READER: it asks, it does not hold a copy.
+    """
+    from .backend import LLAMA_WINDOWS
+
+    return LLAMA_WINDOWS
+
+
+def _installed_engine(
+    config: Config, build: str
+) -> Callable[[], weights.InstalledWeights | None]:
+    return lambda: llamacpp.installed(config, build)
+
+
+def _pull_engine(
+    config: Config, build: str
+) -> Callable[..., weights.InstalledWeights]:
+    return lambda **kwargs: llamacpp.pull(config, build, **kwargs)
+
+
 def _installed_denoise(
     config: Config, manifest: Any, spec: Any
 ) -> Callable[[], weights.InstalledWeights | None]:
@@ -292,6 +347,10 @@ def declared_ids() -> dict[str, list[str]]:
         "rvc": sorted(load_all_rvc_manifests()),
         "rvc-base": [RVC_BASE_ID],
         "denoise": sorted(denoisemodels.load_all_denoise_manifests()),
+        # Declared on every machine, because `declared_ids` is the question
+        # with the HOST taken out of it (a module written on a Mac installs
+        # on a PC). Whether THIS backend has the row is `subjects()`' answer.
+        llamacpp.ENGINE_KIND: [llamacpp.LLAMA_CPP_ID],
     }
 
 

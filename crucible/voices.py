@@ -297,6 +297,19 @@ class VoiceBackendSpec:
     def clips_from_request(self) -> bool:
         return self.clips == CLIPS_FROM_REQUEST
 
+    @property
+    def files(self) -> tuple[str, ...]:
+        """Empty: this backend fetches the WHOLE repo.
+
+        `crucible/weights.py`'s `WeightsSource` asks every spec this, and the
+        empty tuple is a real answer and not a gap — it is what "there is no
+        file to choose, the repository IS the weights" reads as. Only
+        `llama-windows` names files (one GGUF, and a projector beside it for a
+        vision model), because a GGUF repo holds twenty quantizations and
+        pulling all of them is hundreds of gigabytes.
+        """
+        return ()
+
     def to_dict(self) -> dict[str, Any]:
         clips: Any
         if self.clips is None or isinstance(self.clips, str):

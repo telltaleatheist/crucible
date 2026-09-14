@@ -17,6 +17,7 @@ from .base import (
     find_free_port,
     logs_dir,
 )
+from .llama_server import LlamaServerEngine
 from .mlx_lm import MlxLmEngine
 from .narrator import NarratorEngine
 from .vllm import VllmEngine
@@ -27,6 +28,7 @@ if TYPE_CHECKING:  # `crucible.narratorvoices` imports this package; no cycle at
 ENGINES: dict[str, type[SubprocessEngine]] = {
     VllmEngine.name: VllmEngine,
     MlxLmEngine.name: MlxLmEngine,
+    LlamaServerEngine.name: LlamaServerEngine,
 }
 
 #: The narrator engines this build can start. The keys are narrator's OWN engine
@@ -116,6 +118,13 @@ def engine_model_name(engine_name: str, model_dir: Path, model_id: str) -> str:
         # mlx-lm's /v1/models reports `str(Path(--model).resolve())`, so this must
         # be resolved too or readiness would compare two spellings of one path.
         return str(Path(model_dir).resolve())
+    if engine_name == LlamaServerEngine.name:
+        # `--alias <crucible id>` (PHASE15-HOST.md 7.4, item 3): llama-server
+        # would otherwise name the model after the GGUF file, so `/v1/models`
+        # would answer `Dots.Ocr-1.8B-Q8_0.gguf`. With the alias the name IS
+        # the Crucible id, which makes readiness "the name equals the id this
+        # server started" and the proxy verbatim — no rewrite, unlike mlx-lm.
+        return model_id
     raise EngineError(
         f"unknown engine {engine_name!r}; this build has {sorted(ENGINES)}"
     )
@@ -126,6 +135,7 @@ __all__ = [
     "NARRATOR_ENGINES",
     "Engine",
     "EngineError",
+    "LlamaServerEngine",
     "MlxLmEngine",
     "NarratorEngine",
     "SubprocessEngine",

@@ -77,11 +77,29 @@ class WeightsSubject(Protocol):
 
 @runtime_checkable
 class WeightsSource(Protocol):
-    """What this module needs from a backend block."""
+    """What this module needs from a backend block.
+
+    `files` is the one place "which files does this backend fetch" is
+    answered, and every spec answers it. An EMPTY tuple means *the repository
+    is the weights* — `snapshot_download` of the whole thing, which is what
+    every safetensors backend does and what this module did unconditionally
+    until PHASE15. A NON-EMPTY tuple means *these files and no others*, which
+    is what `llama-windows` needs: `unsloth/Qwen3.8-27B-GGUF` holds every
+    quantization, hundreds of gigabytes, and a row there IS one of them.
+
+    Two things read it and they must not be able to disagree: `pull` passes it
+    as `allow_patterns`, and `installed` requires every one of them present.
+    That second half is what makes `dots-ocr` report `installed: false` when
+    the text tower arrived and the vision projector did not (PHASE15-HOST.md
+    3.10, fact 2 — the mmproj is not optional), and what makes 3.5's *"the
+    catalog's `installed` list is the input to the host's weights migration"*
+    exact rather than approximately right.
+    """
 
     backend: str
     hf_repo: str
     revision: str
+    files: tuple[str, ...]
 
 
 class WeightsError(CrucibleError):
@@ -154,6 +172,19 @@ def stamp_path(
     return weights_dir(config, family, subject_id, backend_kind) / STAMP_NAME
 
 
+def missing_files(directory: Path, spec: WeightsSource) -> tuple[str, ...]:
+    """The files this spec NAMES that are not on disk, in the spec's order.
+
+    Empty for a spec that names none, which is every safetensors backend: the
+    repository is the weights and `snapshot_download` either wrote it or did
+    not. For `llama-windows` it is the whole of "is this subject complete" —
+    a `dots-ocr` directory holding the text tower and no `mmproj` is a
+    directory `llama-server` will start against, answer `/v1/models` from,
+    and then refuse every page (3.10, fact 2).
+    """
+    return tuple(name for name in spec.files if not (directory / name).is_file())
+
+
 def installed(
     config: Config, manifest: WeightsSubject, spec: WeightsSource
 ) -> InstalledWeights | None:
@@ -162,13 +193,21 @@ def installed(
     A stamp naming a different revision than the manifest pins is *not* installed:
     the manifest moved, and serving the old bytes under the new id would be a
     silent substitution.
+
+    A stamp beside a MISSING NAMED FILE is not installed either, and that is
+    not the same check wearing a second hat: the stamp says a pull finished,
+    and `spec.files` says what finishing means for this backend. A subject
+    whose mmproj was deleted by hand has a perfectly good stamp.
     """
     family = manifest.weights_family
+    directory = weights_dir(config, family, manifest.id, spec.backend)
     stamp = stamp_path(config, family, manifest.id, spec.backend)
     if not stamp.is_file():
         return None
     record = json.loads(stamp.read_text(encoding="utf-8"))
     if record["revision"] != spec.revision or record["hf_repo"] != spec.hf_repo:
+        return None
+    if missing_files(directory, spec):
         return None
     return InstalledWeights(
         path=weights_dir(config, family, manifest.id, spec.backend),
@@ -192,6 +231,20 @@ def require_installed(
     stamp = stamp_path(config, family, manifest.id, spec.backend)
     if stamp.is_file():
         record = json.loads(stamp.read_text(encoding="utf-8"))
+        if (
+            record["revision"] == spec.revision
+            and record["hf_repo"] == spec.hf_repo
+        ):
+            # The pin matches and the stamp is there, so what is wrong is a
+            # NAMED FILE that is not. Said as itself rather than as a pin
+            # mismatch, which is what the sentence below would claim.
+            absent = missing_files(directory, spec)
+            raise WeightsError(
+                f"{directory} is stamped for {spec.hf_repo}@{spec.revision[:12]} "
+                f"but {len(absent)} of the {len(spec.files)} file(s) it names "
+                f"are not there: {', '.join(absent)} — run `{command} "
+                f"{manifest.id} --force`"
+            )
         raise WeightsError(
             f"{directory} holds {record['hf_repo']}@{record['revision'][:12]}, but "
             f"{manifest.path.name} now pins {spec.hf_repo}@{spec.revision[:12]} — "
@@ -331,6 +384,19 @@ def pull(
     extra: dict[str, Any] = {}
     if on_progress is not None:
         extra["tqdm_class"] = reporting_tqdm(on_progress)
+    if spec.files:
+        # ONLY THE FILES THIS BACKEND NAMES. Without this a `llama-windows`
+        # row on `unsloth/Qwen3.8-27B-GGUF` fetches every quantization in the
+        # repo — hundreds of gigabytes for one 16 GB file. `allow_patterns`
+        # takes literal names as well as globs, and these are literal: the
+        # manifest names the file, so a pattern that matched two would be this
+        # module deciding which.
+        extra["allow_patterns"] = list(spec.files)
+        if on_line is not None:
+            on_line(
+                f"only {len(spec.files)} file(s) of that repo: "
+                + ", ".join(spec.files)
+            )
     try:
         snapshot_download(
             repo_id=spec.hf_repo,
@@ -367,6 +433,21 @@ def pull(
         ) from exc
 
     elapsed = time.monotonic() - started
+    # BEFORE THE STAMP. A stamp is this module's statement that the subject is
+    # complete, and writing one over a repo that answered for the text tower
+    # and not for the projector would make `installed` say yes about a server
+    # that will refuse every page. `allow_patterns` silently matches nothing
+    # when a name is wrong, so this is the only thing that catches a manifest
+    # with a typo in it.
+    absent = missing_files(target, spec)
+    if absent:
+        raise WeightsError(
+            f"{spec.hf_repo}@{spec.revision[:12]} was fetched but "
+            f"{len(absent)} of the file(s) {manifest.path.name} names for "
+            f"{spec.backend} are not in {target}: {', '.join(absent)}. Either "
+            "the manifest names a file this revision does not have, or the "
+            "download was incomplete; nothing is stamped either way"
+        )
     size = directory_bytes(target)
     record = {
         "family": manifest.weights_family,
@@ -374,6 +455,9 @@ def pull(
         "backend": spec.backend,
         "hf_repo": spec.hf_repo,
         "revision": spec.revision,
+        # What the pin MEANT on this backend, so a reader of the stamp alone
+        # can see that a repo was fetched in part and which part.
+        "files": list(spec.files),
         "bytes": size,
         "seconds": round(elapsed, 1),
         "pulled": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

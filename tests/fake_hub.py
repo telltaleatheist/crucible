@@ -41,6 +41,11 @@ class FakeHub:
         self.started = threading.Event()
         #: Every `(repo_id, revision)` this hub was asked for, in order.
         self.asked: list[tuple[str, str]] = []
+        #: The `allow_patterns` of each snapshot call, in order. `None` where
+        #: the caller asked for the whole repo.
+        self.allowed: list[list[str] | None] = []
+        #: Names this hub pretends the revision does not carry.
+        self.absent: set[str] = set()
         #: Files `hf_hub_download` should produce, by their path in the repo.
         #: A test that pulls an archive or a named-file set fills this in.
         self.files: dict[str, bytes] = {}
@@ -56,11 +61,27 @@ class FakeHub:
         token: str | None = None,
         max_workers: int = 1,
         tqdm_class: Any = None,
+        allow_patterns: Any = None,
         **_ignored: Any,
     ) -> str:
         self.asked.append((repo_id, revision))
+        self.allowed.append(None if allow_patterns is None else list(allow_patterns))
         target = Path(local_dir)
         target.mkdir(parents=True, exist_ok=True)
+        if allow_patterns is not None:
+            # THE REAL HUB BEHAVES LIKE THIS, and it is the half that matters
+            # for PHASE15 file-aware pulls: only the named files arrive, and a
+            # name the revision does not carry simply does not appear. No
+            # error, nothing. `self.absent` is how a test says "this repo does
+            # not have that one", which is exactly the case the post-check in
+            # `weights.pull` exists for.
+            for name in allow_patterns:
+                if name in self.absent:
+                    continue
+                path = target / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._stream(path, tqdm_class)
+            return str(target)
         (target / "config.json").write_text("{}\n", encoding="utf-8")
         self._stream(target / "model.safetensors", tqdm_class)
         return str(target)

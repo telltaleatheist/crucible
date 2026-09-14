@@ -27,12 +27,14 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    capability,
     API_VERSION,
     VERSION,
     capability,
     denoisemodels,
     envpack,
     jobenv,
+    llamacpp,
     narratorpatches,
     pairing,
     rvcbase,
@@ -764,11 +766,25 @@ INSTALLER_FOR: dict[str, str] = {
         for env, served in workerenv.JOB_TYPES_SERVED_BY_ENV.items()
         for job_type in served
     },
+    # `pages` is a CAPABILITY CLASS and not a job type — PHASE3-VLM.md section
+    # 1: *"there is no `vlm-pages` job type"*, dots.ocr is served through the
+    # same `llm` proxy as every text model, on every backend. So it has no
+    # installer of its own and never will, and naming it here is what turns
+    # `crucible install pages` (which PHASE15-HOST.md 3.5 writes out) from
+    # "there is no installer for 'pages'" into a sentence that says `llm`.
+    "pages": "llm",
 }
 
 
 def cmd_install(args: argparse.Namespace) -> int:
     if args.job_type not in INSTALLABLE_JOB_TYPES:
+        shared = INSTALLER_FOR.get(args.job_type)
+        if shared is not None:
+            return _fail(
+                f"job type {args.job_type!r} has no installer of its own: it "
+                f"shares {shared!r}'s engine, so installing {shared!r} is what "
+                f"builds it. Run `crucible install {shared}`"
+            )
         return _fail(
             f"there is no installer for job type {args.job_type!r}; this build "
             f"installs {sorted(INSTALLABLE_JOB_TYPES)}"
@@ -783,9 +799,11 @@ def cmd_install(args: argparse.Namespace) -> int:
         return _fail(f"no viable backend: {exc.reason}")
     if backend.kind != config.backend_kind:
         return _fail(
-            f"this host detects backend {backend.kind}, but {config.path} was "
-            f"initialised for {config.backend_kind}; re-run `crucible init --force`"
+            _backend_mismatch(config.backend_kind, backend)
+            + f" ({config.path}); re-run `crucible init --force`"
         )
+    if backend.kind == LLAMA_WINDOWS:
+        return _install_llama_windows(config, backend, args)
     # THE DEFAULT IS A DOWNLOAD (PHASE14-ENVPACKS.md section 3.1). `--build` is
     # the developer's path and an ARGUMENT: nothing below chooses it because a
     # download failed, and every way a download can fail has a name of its own.
@@ -826,6 +844,64 @@ def cmd_install(args: argparse.Namespace) -> int:
     for name in sorted(status.packages):
         if name in (spec.headline, "torch", "numpy", "transformers", "mlx"):
             print(f"  {name}=={status.packages[name]}")
+    return _capability_step(config, backend, args.job_type)
+
+
+def _install_llama_windows(
+    config: Config, backend: Backend, args: argparse.Namespace
+) -> int:
+    """`crucible install` on `llama-windows`. PHASE15-HOST.md 3.5 and 7.4 item 4.
+
+    THERE IS NO ENV ON THIS BACKEND. `llm` (and therefore `pages`, which
+    shares it) is served by `llama-server.exe` from the pinned llama.cpp
+    release — the `engine` subject — so `install llm` fetches that and
+    nothing else. The five Python job types are refused `needs_wsl` with
+    `capability.NEEDS_WSL_REASON`, which is already the sentence their
+    capability rows carry, so an operator reads one sentence and not two
+    spellings of it.
+
+    `--build` is refused rather than ignored: there is no recipe to build
+    from, and a flag that silently did the download instead would be a flag
+    whose name lies.
+    """
+    if args.job_type in capability.WSL_ONLY_JOB_TYPES:
+        return _fail(
+            f"needs_wsl: {args.job_type} — {capability.NEEDS_WSL_REASON}. "
+            f"The {LLAMA_WINDOWS} backend serves the llm classes and pages "
+            "from llama.cpp; tts, asr, align, rvc and denoise are Python "
+            "engines and run in the WSL2 guest"
+        )
+    if args.narrator_engine is not None:
+        return _fail(
+            "--narrator-engine names which tts env to build, and tts is not "
+            f"served on {LLAMA_WINDOWS}"
+        )
+    if args.build:
+        return _fail(
+            f"--build builds an env from a recipe, and {LLAMA_WINDOWS} has no "
+            "env: its engine is llama.cpp's own release, fetched at a pinned "
+            f"tag ({llamacpp.LLAMA_CPP_RELEASE}). Run without --build"
+        )
+    build = llamacpp.build_for(backend.gpu.vendor)
+    print(f"backend: {backend.kind} ({backend.gpu.name})")
+    print(f"engine:  llama.cpp {llamacpp.LLAMA_CPP_RELEASE} ({build})")
+    print(f"target:  {llamacpp.engine_dir(config)}")
+    for asset in llamacpp.assets_for(build):
+        print(f"  {asset.name}  {asset.bytes / 1e6:.0f} MB  sha256 {asset.sha256}")
+    started = time.monotonic()
+    try:
+        found = llamacpp.pull(
+            config,
+            build,
+            force=args.force,
+            on_line=(lambda line: print(f"  {line}")) if args.verbose else None,
+        )
+    except llamacpp.EngineSubjectError as exc:
+        return _fail(str(exc))
+    print(
+        f"installed in {time.monotonic() - started:.0f}s: {found.path} "
+        f"({found.bytes / 1e9:.2f} GB)"
+    )
     return _capability_step(config, backend, args.job_type)
 
 

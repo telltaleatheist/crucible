@@ -25,7 +25,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ... import accelerator, jobenv, weights
+from ... import accelerator, jobenv, llamacpp, weights
+from ...backend import LLAMA_WINDOWS
 from ...config import Config
 from ...engines import EngineError
 from ...errors import ApiError, JobError
@@ -44,12 +45,71 @@ from ...residency import (
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 
 __all__ = [
+    "LlmEngineStatus",
     "LoadModelJobType",
     "LoadParams",
     "Residency",
     "UnloadModelJobType",
+    "llm_engine_status",
     "model_rows",
 ]
+
+
+# --------------------------------------------- what serves a model, per backend
+#
+# THREE BACKENDS, TWO ANSWERS. On `cuda-linux` and `mlx-darwin` the thing that
+# serves a model is a Python env `crucible install llm` builds, and the engine
+# is a module inside it. On `llama-windows` it is `llama-server.exe` — a zip
+# from a pinned llama.cpp release, the `engine` SUBJECT (PHASE15-HOST.md 3.10,
+# fact 1) — and there is no env at all: `crucible/envpack.py` publishes no
+# `envs/llm/llama-windows.txt` and there is nothing for one to contain.
+#
+# Both answers are the same THREE facts — is it here, what do we say about it,
+# and what does the residency spawn — so they are one function returning them,
+# rather than a `backend_kind ==` at each of the four places that used to ask
+# `jobenv` directly.
+
+
+class LlmEngineStatus:
+    """Is this host's llm engine installed, what to say, and what to spawn."""
+
+    def __init__(self, installed: bool, detail: str, executable: "Any | None") -> None:
+        self.installed = installed
+        self.detail = detail
+        #: The interpreter (a Python env) or the binary (`llama-server.exe`)
+        #: `Residency.load` starts. `None` when nothing is installed.
+        self.executable = executable
+
+
+def llm_engine_status(config: Config, backend: Any) -> LlmEngineStatus:
+    """The one reader of "can this host start a model at all"."""
+    if backend.kind == LLAMA_WINDOWS:
+        build = llamacpp.build_for(backend.gpu.vendor)
+        found = llamacpp.installed(config, build)
+        if found is None:
+            return LlmEngineStatus(
+                installed=False,
+                detail=(
+                    f"llama.cpp {llamacpp.LLAMA_CPP_RELEASE} ({build}) is not "
+                    f"installed at {llamacpp.engine_dir(config)} — run "
+                    "`crucible install llm`"
+                ),
+                executable=None,
+            )
+        return LlmEngineStatus(
+            installed=True,
+            detail=(
+                f"llama.cpp {llamacpp.LLAMA_CPP_RELEASE} ({build}) at "
+                f"{found.path} ({found.bytes / 1e6:.0f} MB)"
+            ),
+            executable=llamacpp.server_path(config),
+        )
+    env = jobenv.env_status(config.home, jobenv.llm_env(backend.kind), backend.kind)
+    return LlmEngineStatus(
+        installed=env.installed,
+        detail=env.detail,
+        executable=None if not env.installed else jobenv.env_python(config.home, jobenv.llm_env(backend.kind)),
+    )
 
 
 class LoadParams(BaseModel):
@@ -155,7 +215,7 @@ def model_rows(
     `accelerator_busy`.
     """
     backend_kind = backend.kind
-    env = jobenv.env_status(config.home, jobenv.llm_env(backend_kind), backend_kind)
+    env = llm_engine_status(config, backend)
     # `resident_model`, not `resident`: one card holds one thing and that thing
     # may be a voice (PHASE3-TTS.md section 5). A voice on the card means no
     # model is resident, which is exactly what these rows should say — reading
@@ -332,19 +392,39 @@ def _require_loadable(
         host_total_bytes=backend.gpu.vram_bytes,
         host_name=backend.gpu.name,
     )
-    try:
-        env_spec = jobenv.llm_env(backend_kind)
-        python = jobenv.require_env(config.home, env_spec, backend_kind)
-    except jobenv.EnvError as exc:
-        raise ApiError(
-            409,
-            "env_missing",
-            f"cannot load {model_id!r}: {exc}",
-            {
-                "model": model_id,
-                "env": str(jobenv.env_dir(config.home, jobenv.llm_env(backend_kind))),
-            },
-        ) from None
+    if backend_kind == LLAMA_WINDOWS:
+        # NO ENV. The engine is `llama-server.exe` from the pinned llama.cpp
+        # release, and `env_missing` is still the right NAME for "this host
+        # cannot start anything yet" — one refusal for one fact, whichever
+        # form the engine takes on this backend.
+        engine = llm_engine_status(config, backend)
+        if not engine.installed:
+            raise ApiError(
+                409,
+                "env_missing",
+                f"cannot load {model_id!r}: {engine.detail}",
+                {
+                    "model": model_id,
+                    "env": str(llamacpp.engine_dir(config)),
+                },
+            )
+        python = engine.executable
+    else:
+        try:
+            env_spec = jobenv.llm_env(backend_kind)
+            python = jobenv.require_env(config.home, env_spec, backend_kind)
+        except jobenv.EnvError as exc:
+            raise ApiError(
+                409,
+                "env_missing",
+                f"cannot load {model_id!r}: {exc}",
+                {
+                    "model": model_id,
+                    "env": str(
+                        jobenv.env_dir(config.home, jobenv.llm_env(backend_kind))
+                    ),
+                },
+            ) from None
     try:
         installed = weights.require_installed(config, manifest, spec)
     except weights.WeightsError as exc:
@@ -391,9 +471,7 @@ class LoadModelJobType:
         return _model_provenance(self._config.backend_kind, model)
 
     def check(self, backend: Any) -> JobTypeStatus:
-        env = jobenv.env_status(
-            self._config.home, jobenv.llm_env(backend.kind), backend.kind
-        )
+        env = llm_engine_status(self._config, backend)
         if not env.installed:
             return JobTypeStatus(ready=False, detail=env.detail)
         rows = model_rows(self._config, backend, self._residency)

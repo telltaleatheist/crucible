@@ -607,7 +607,7 @@ class Residency:
                 weights_dir,
                 served,
                 port,
-                self._engine_args(manifest, spec),
+                self._engine_args(manifest, spec, weights_dir),
                 say,
                 timeout,
             )
@@ -900,15 +900,36 @@ class Residency:
             raise
 
     @staticmethod
-    def _engine_args(manifest: ModelManifest, spec: BackendSpec) -> list[str]:
+    def _engine_args(
+        manifest: ModelManifest, spec: BackendSpec, weights_dir: Path
+    ) -> list[str]:
         """The manifest's args plus what Crucible always sets.
 
         `--max-model-len` only goes to vLLM; mlx-lm takes the context from the
         model's own config and has no such flag (see engines/mlx_lm.py).
+
+        `llama-server` is the one engine that has to be told WHERE THE FILES
+        ARE, because its weights are named files inside a directory rather
+        than the directory itself: `-m <dir>/<file>`, `--mmproj <dir>/<mmproj>`
+        for a vision model, and `-c <context>`. The manifest carries
+        `--parallel 1` and nothing else — PHASE15-HOST.md 7.4 item 3: *"only
+        the server knows where it put the weights"*, so composing these in a
+        manifest would be a path with two owners.
         """
         args = list(spec.engine_args)
         if spec.engine == "vllm":
             args += ["--max-model-len", str(manifest.context_for(spec.backend))]
+        if spec.engine == "llama-server":
+            if spec.file is None:  # pragma: no cover - the loader requires it
+                raise EngineError(
+                    f"{manifest.path.name}'s {spec.backend} block names no "
+                    "`file`, and llama-server serves one GGUF. A block for "
+                    "this backend without a file is a block for nothing"
+                )
+            args = ["-m", str(weights_dir / spec.file)] + args
+            if spec.mmproj is not None:
+                args += ["--mmproj", str(weights_dir / spec.mmproj)]
+            args += ["-c", str(manifest.context_for(spec.backend))]
         return args
 
     def unload(self, subject_id: str) -> Resident:
