@@ -227,18 +227,22 @@ export class CrucibleBusy extends CrucibleRefused {
 }
 
 /**
- * The server's code for "somebody has said they are mid-run on this model".
+ * The server's code for "somebody has said they are mid-run on this".
  *
  * Exported for {@link SERVER_BUSY}'s reason: the mapping turns exactly this code
  * into a type, and a caller comparing `error.code` should compare against one
  * spelling of it.
+ *
+ * It is `leased` and not `model_leased`: since 2026-09-14 a lease names the
+ * resident thing of any kind, so a code naming one kind would be false whenever
+ * narrator or the aligner holds the card. {@link CrucibleLeased.kind} says which.
  */
-export const MODEL_LEASED = 'model_leased';
+export const LEASED = 'leased';
 
 /**
- * 409 `model_leased`: a client holds a lease on the resident model, so anything
- * that would take it off the card is refused until the lease is released or
- * expires.
+ * 409 `leased`: a client holds a lease on the resident model, voice or aligner,
+ * so anything that would take it off the card is refused until the lease is
+ * released or expires.
  *
  * **Why a lease exists at all.** A chat completion holds nothing on a Crucible —
  * no lane, no job, no claim — which is right for one chat and wrong for two
@@ -248,9 +252,12 @@ export const MODEL_LEASED = 'model_leased';
  * anywhere. The client is the only thing that knows a run is in progress, so it
  * says so.
  *
- * **What it does NOT refuse.** Chats (they are what the lease protects), and any
- * job that leaves the card's contents alone — `echo`, `asr`, `rvc`, `denoise`,
- * and the unloaders that can only unload some other kind. A lease is not a
+ * **What it does NOT refuse.** Chats (they are what the lease protects), any job
+ * that leaves the card's contents alone — `echo`, `asr`, `rvc`, `denoise`, and
+ * the unloaders that can only unload some other kind — and, on a voice or
+ * aligner lease, **the work the lease was taken for**: a `tts` render of the
+ * leased voice and an `align` on the leased aligner reuse what is resident
+ * instead of loading it, which is the whole reason to hold one. A lease is not a
  * reservation: the lane is still free and admission is still the door's.
  *
  * Its own type for {@link CrucibleBusy}'s reason — the body is not decoration. A
@@ -263,6 +270,15 @@ export const MODEL_LEASED = 'model_leased';
  */
 export class CrucibleLeased extends CrucibleRefused {
   readonly leaseId: string;
+  /**
+   * Which resident kind is held: `llm`, `tts` or `align`.
+   *
+   * On the refusal and not only on the lease, because a refusal arrives with no
+   * `resident` beside it and the kind is what says WHICH jobs this lease covers
+   * — `leased` on a `load-voice` means something different when a 27B is held
+   * than when narrator is.
+   */
+  readonly kind: string;
   /**
    * Who holds it — the lease's recorded `client`. Null = it did not say, and
    * never a guess, for the reason {@link CrucibleBusy.holder} is null.
@@ -286,6 +302,7 @@ export class CrucibleLeased extends CrucibleRefused {
     details: unknown,
     fields: {
       leaseId: string;
+      kind: string;
       holder: string | null;
       act: string;
       since: string;
@@ -294,6 +311,7 @@ export class CrucibleLeased extends CrucibleRefused {
   ) {
     super(status, code, serverMessage, details);
     this.leaseId = fields.leaseId;
+    this.kind = fields.kind;
     this.holder = fields.holder;
     this.act = fields.act;
     this.since = fields.since;
@@ -348,14 +366,15 @@ export function isServerSpecificRefusal(code: string): boolean {
  * - `job_type_disabled` — this server does not do this. Under PHASE9 the flag is
  *   set by what fits on the card at install, so it genuinely varies by machine:
  *   a 6 GB card has no `tts`, the 3090 Ti does.
- * - `model_not_resident` / `unknown_model` — residency is per server, and
- *   loading is the operator's act, not a job's (PHASE2). Another server may
- *   already hold it.
+ * - `model_not_resident` / `not_resident` / `unknown_model` — residency is per
+ *   server, and loading is the operator's act, not a job's (PHASE2). Another
+ *   server may already hold it. The bare `not_resident` is the lease door's,
+ *   which takes an id of any resident kind and so cannot name one.
  * - `stream_session_open` — this server already has its one session. Another
  *   server's streaming door may be free.
- * - `model_leased` — a client is mid-run on THIS machine's resident model.
- *   Another machine's card is not held by it, and a `waitFor: "any"` walk should
- *   try the next one rather than wait out somebody else's translation.
+ * - `leased` — a client is mid-run on THIS machine's resident model, voice or
+ *   aligner. Another machine's card is not held by it, and a `waitFor: "any"`
+ *   walk should try the next one rather than wait out somebody else's book.
  * - `env_missing` — the venv for this job type was never installed here.
  * - `accelerator_unreadable` is NOT here: it is a 5xx and arrives as
  *   {@link CrucibleAcceleratorUnreadable}, which must never be read as an answer
@@ -367,11 +386,12 @@ export function isServerSpecificRefusal(code: string): boolean {
  */
 const SERVER_SPECIFIC_REFUSALS: ReadonlySet<string> = new Set([
   SERVER_BUSY,
-  MODEL_LEASED,
+  LEASED,
   'engine_in_use',
   'stream_session_open',
   'job_type_disabled',
   'model_not_resident',
+  'not_resident',
   'unknown_model',
   'env_missing',
 ]);

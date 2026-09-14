@@ -630,6 +630,114 @@ def test_an_unheld_render_clears_the_card_and_the_next_one_reloads(
     assert len(narrator) == 2
 
 
+def test_a_voice_lease_turns_a_book_rendered_chapter_by_chapter_into_one_load(
+    rendered: Callable[..., list[dict[str, Any]]],
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+    narrator: list[Any],
+) -> None:
+    """What the previous two tests measured, now with the real holder.
+
+    The companion above holds the card with a chat in flight because until
+    2026-09-14 nothing else could: `POST /v1/models/{id}/lease` leased the
+    resident MODEL, and `Leases.open` was refused for a resident voice. So a book
+    rendered as ONE job loaded its voice once and a book rendered CHAPTER BY
+    CHAPTER — which is how the app actually works — paid a narrator load per
+    chapter. A lease may now name the resident thing of any kind, and this is
+    that cost measured with one: three chapters, one narrator.
+
+    The order is load, lease, render — a lease never loads, so the thing has to
+    be resident before its client can say it intends more of it.
+    """
+    fake_weights(VOICE)
+    run_job(tts_client, auth, type="load-voice", model=VOICE)
+    assert len(narrator) == 1
+
+    opened = tts_client.post(
+        f"/v1/models/{VOICE}/lease",
+        headers=auth,
+        json={"act": "tts", "ttl_seconds": 60},
+    )
+    assert opened.status_code == 201, opened.text
+    lease = opened.json()
+    assert lease["subject"] == VOICE
+    assert lease["kind"] == KIND_TTS
+    assert tts_client.get("/v1/activity", headers=auth).json()["lease"]["kind"] == (
+        KIND_TTS
+    )
+
+    for _ in range(3):
+        assert terminal(rendered())["event"] == "done"
+        assert len(narrator) == 1, "a leased voice is rendered against, not reloaded"
+        assert (
+            tts_client.get("/v1/health", headers=auth).json()["resident_kind"]
+            == KIND_TTS
+        )
+
+    released = tts_client.delete(f"/v1/leases/{lease['lease_id']}", headers=auth)
+    assert released.status_code == 204
+    # And the ruling still holds at the end of the book: the last holder let go.
+    assert tts_client.get("/v1/health", headers=auth).json()["resident_kind"] is None
+    assert len(narrator) == 1
+
+
+def test_a_voice_lease_refuses_the_jobs_that_would_evict_it(
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+) -> None:
+    """Including a render of a DIFFERENT voice, which is a narrator restart.
+
+    The rule is one sentence and the door applies it to every job: a lease
+    refuses what would take the leased thing off the card, and a render of
+    another voice does exactly that (`Residency.load_voice` evicts first).
+    """
+    fake_weights(VOICE)
+    run_job(tts_client, auth, type="load-voice", model=VOICE)
+    opened = tts_client.post(
+        f"/v1/models/{VOICE}/lease",
+        headers=auth,
+        json={"act": "tts", "ttl_seconds": 60},
+    )
+    assert opened.status_code == 201, opened.text
+
+    for body in (
+        {"type": "load-voice", "model": "mistborn"},
+        {"type": "load-voice", "model": VOICE},
+        {"type": "unload-voice", "model": VOICE},
+        {
+            "type": "tts",
+            "model": "mistborn",
+            "params": {"language": "en", "take": 0, "chunks": CHUNKS},
+        },
+    ):
+        response = tts_client.post("/v1/jobs", headers=auth, json=body)
+        assert response.status_code == 409, (body, response.text)
+        error = response.json()["error"]
+        assert error["code"] == "leased", body
+        assert error["details"]["kind"] == KIND_TTS
+        assert "the resident voice" in error["message"]
+
+    # `unload-model` and `unload-aligner` are NOT refused for the lease: each can
+    # only reach its own kind, so with a voice on the card they refuse
+    # `*_not_resident` on their own, and answering `leased` would report the
+    # wrong reason for the right outcome. This server has neither type enabled,
+    # so the whole matrix of kinds against types is `test_leases.py`'s.
+    echoed = tts_client.post(
+        "/v1/jobs",
+        headers=auth,
+        json={
+            "type": "echo",
+            "params": {"delay_ms": 0},
+            "inputs": {"x.bin": {"inline_base64": "YQ=="}},
+        },
+    )
+    assert echoed.json().get("error", {}).get("code") != "leased"
+
+
 def test_the_load_is_part_of_the_load(
     tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],

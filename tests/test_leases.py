@@ -23,12 +23,12 @@ from fastapi.testclient import TestClient
 
 from crucible.jobs import ALL_JOB_TYPES
 from crucible.leases import (
-    EVICTS_THE_RESIDENT_MODEL,
-    KEEPS_THE_RESIDENT_MODEL,
+    CARD_EFFECTS,
     MAX_TTL_SECONDS,
     MIN_TTL_SECONDS,
     Leases,
 )
+from crucible.residency import KIND_ALIGN, KIND_LLM, KIND_TTS
 
 from .conftest import parse_sse
 from .fake_engine import FakeEngine
@@ -140,7 +140,12 @@ def test_take_heartbeat_release_is_the_whole_life_of_a_lease(
     )
     assert opened.status_code == 201, opened.text
     lease = opened.json()
-    assert lease["model"] == MODEL
+    # The receipt names WHAT was leased and WHICH KIND it is. The kind is the
+    # server's reading of `Residency.resident`, never anything the client sent:
+    # the card holds one thing, so there is nothing to disambiguate.
+    assert lease["subject"] == MODEL
+    assert lease["kind"] == KIND_LLM
+    assert "model" not in lease
     assert lease["act"] == "translate"
     # The same name `/v1/activity` reports for a job's holder, from the same
     # reader: one column on a bench, one way of filling it.
@@ -171,18 +176,25 @@ def test_take_heartbeat_release_is_the_whole_life_of_a_lease(
 def test_activity_reports_the_open_lease_and_not_the_model_twice(
     resident_client: TestClient, auth: dict[str, str], clock: Clock
 ) -> None:
-    """`resident.id` already owns which model it is (R1)."""
+    """`resident.id` already owns which thing it is (R1). `kind` is not that.
+
+    The id is the duplication R1 forbids — the same document reports it one key
+    along. The KIND is carried because these same six fields are the `details` of
+    every `409 leased`, a document with no `resident` beside it at all, and the
+    kind is what says which jobs that refusal covers.
+    """
     lease = a_lease(resident_client, auth, act="clean")
     body = activity(resident_client, auth)
 
     assert body["lease"] == {
         "lease_id": lease["lease_id"],
+        "kind": KIND_LLM,
         "client": body["lease"]["client"],
         "act": "clean",
         "since": clock.moment.isoformat(),
         "expires_at": (clock.moment + timedelta(seconds=TTL)).isoformat(),
     }
-    assert "model" not in body["lease"]
+    assert "subject" not in body["lease"] and "model" not in body["lease"]
     assert body["resident"]["id"] == MODEL
 
     # A lease is not a reservation. The lane is free and this server will still
@@ -223,26 +235,39 @@ def test_a_restart_forgets_every_lease(
 # ---------------------------------------------------------------- the refusals
 
 
-def test_a_model_that_is_not_resident_cannot_be_leased(
+def test_a_thing_that_is_not_resident_cannot_be_leased(
     resident_client: TestClient, auth: dict[str, str]
 ) -> None:
-    """A lease promises not to move what is there; it never loads anything."""
+    """A lease promises not to move what is there; it never loads anything.
+
+    `not_resident` rather than `model_not_resident`: the door takes an id of any
+    resident kind now, so a code naming one kind would be false half the time.
+    """
     response = take(resident_client, auth, model=OTHER_MODEL)
     assert response.status_code == 409, response.text
     error = response.json()["error"]
-    assert error["code"] == "model_not_resident"
-    assert error["details"] == {"requested": OTHER_MODEL, "resident": MODEL}
+    assert error["code"] == "not_resident"
+    assert error["details"] == {
+        "requested": OTHER_MODEL,
+        "resident": MODEL,
+        "resident_kind": KIND_LLM,
+    }
+    # And it names what IS there, of whatever kind, so the client is not left to
+    # guess which of the two mistakes it made.
+    assert f"the resident model is {MODEL!r}" in error["message"]
 
 
-def test_leasing_an_empty_card_says_no_model_is_resident(
+def test_leasing_an_empty_card_says_nothing_is_resident(
     make_client: Callable[..., TestClient], auth: dict[str, str], fake_env: Path
 ) -> None:
     with make_client(enable_llm=True) as client:
         response = take(client, auth)
     assert response.status_code == 409
     error = response.json()["error"]
-    assert error["code"] == "model_not_resident"
+    assert error["code"] == "not_resident"
     assert error["details"]["resident"] is None
+    assert error["details"]["resident_kind"] is None
+    assert "nothing is" in error["message"]
 
 
 def test_an_act_that_is_not_a_capability_class_is_refused_by_name(
@@ -282,7 +307,7 @@ def test_a_ttl_outside_the_range_is_refused_at_both_ends_with_the_range(
     # Both ends of the range itself are fine. The model is loaded again between
     # the two, because releasing the first lease is a holder letting go and the
     # card is cleared behind it (Owen's ruling, crucible/settle.py) — so the
-    # second `POST .../lease` would otherwise be answered `model_not_resident`,
+    # second `POST .../lease` would otherwise be answered `not_resident`,
     # truthfully.
     for ttl in (MIN_TTL_SECONDS, MAX_TTL_SECONDS):
         if activity(resident_client, auth)["resident"] is None:
@@ -307,15 +332,17 @@ def test_one_lease_at_a_time_and_the_second_is_told_who_has_it(
     second = take(resident_client, auth, act="clean")
     assert second.status_code == 409, second.text
     error = second.json()["error"]
-    assert error["code"] == "model_leased"
+    assert error["code"] == "leased"
     assert error["details"] == {
         "lease_id": first["lease_id"],
+        "kind": KIND_LLM,
         "client": first["client"],
         "act": "translate",
         "since": first["since"],
         "expires_at": first["expires_at"],
     }
     assert MODEL in error["message"] and "translate" in error["message"]
+    assert "the resident model" in error["message"]
 
 
 def test_a_heartbeat_or_a_release_of_a_lease_nobody_has_is_a_404(
@@ -390,7 +417,7 @@ def test_a_lease_past_its_deadline_is_simply_not_open(
     refused = resident_client.post(
         "/v1/jobs", headers=auth, json={"type": "load-voice", "model": voice}
     )
-    assert refused.json().get("error", {}).get("code") != "model_leased"
+    assert refused.json().get("error", {}).get("code") != "leased"
 
     expired = resident_client.post(
         f"/v1/leases/{lease['lease_id']}/heartbeat", headers=auth
@@ -442,7 +469,7 @@ def test_a_lease_refuses_every_loader_that_would_move_the_model(
         response = resident_client.post("/v1/jobs", headers=auth, json=body)
         assert response.status_code == 409, (body, response.text)
         error = response.json()["error"]
-        assert error["code"] == "model_leased", body
+        assert error["code"] == "leased", body
         assert error["details"]["lease_id"] == lease["lease_id"]
         assert error["details"]["act"] == "translate"
 
@@ -490,7 +517,7 @@ def test_the_refusal_lands_before_the_lane_and_before_preflight(
         "/v1/jobs", headers=auth, json={"type": "load-voice", "model": voice}
     )
     assert response.status_code == 409, response.text
-    assert response.json()["error"]["code"] == "model_leased"
+    assert response.json()["error"]["code"] == "leased"
 
 
 def test_a_typo_in_the_job_type_still_wins_over_the_lease(
@@ -509,23 +536,28 @@ def test_a_typo_in_the_job_type_still_wins_over_the_lease(
 # --------------------------------------------------------------- the drift guard
 
 
-def test_every_job_type_this_build_knows_is_ruled_on(
-    resident_client: TestClient, auth: dict[str, str]
-) -> None:
-    """A new job type must say whether it can take the model off the card.
+def test_every_job_type_this_build_knows_is_ruled_on() -> None:
+    """A new job type must say what it does to the card.
 
-    This is the check that makes `EVICTS_THE_RESIDENT_MODEL` a fact with an owner
-    rather than a list somebody hoped was complete (R1). Without it, a job type
-    added next month that loads something would reopen exactly the hole the
-    lease was built to close, silently.
+    This is the check that makes `CARD_EFFECTS` a fact with an owner rather than
+    a table somebody hoped was complete (R1). Without it, a job type added next
+    month that loads something would reopen exactly the hole the lease was built
+    to close, silently.
     """
-    ruled = EVICTS_THE_RESIDENT_MODEL | KEEPS_THE_RESIDENT_MODEL
-    assert set(ALL_JOB_TYPES) == ruled, (
-        "every job type must be in exactly one of crucible/leases.py's two sets; "
-        f"unruled: {sorted(set(ALL_JOB_TYPES) - ruled)}, "
-        f"stale: {sorted(ruled - set(ALL_JOB_TYPES))}"
+    assert set(ALL_JOB_TYPES) == set(CARD_EFFECTS), (
+        "every job type must have a row in crucible/leases.py's CARD_EFFECTS; "
+        f"unruled: {sorted(set(ALL_JOB_TYPES) - set(CARD_EFFECTS))}, "
+        f"stale: {sorted(set(CARD_EFFECTS) - set(ALL_JOB_TYPES))}"
     )
-    assert not (EVICTS_THE_RESIDENT_MODEL & KEEPS_THE_RESIDENT_MODEL)
+    for job_type, effect in CARD_EFFECTS.items():
+        # A row that both loads and unloads would be a job this derivation
+        # cannot describe, and nothing in this build is one.
+        assert not (effect.makes_resident and effect.takes_off), job_type
+        # `reuses_what_it_names` is only ever a statement about what a job
+        # loads, so it cannot be true of a job that loads nothing.
+        assert not (effect.reuses_what_it_names and effect.makes_resident is None)
+        for kind in (effect.makes_resident, effect.takes_off):
+            assert kind in (None, KIND_LLM, KIND_TTS, KIND_ALIGN), job_type
 
 
 def test_an_unruled_job_type_is_named_rather_than_guessed_at(
@@ -538,9 +570,146 @@ def test_an_unruled_job_type_is_named_rather_than_guessed_at(
     is missing instead of picking one.
     """
     leases: Leases = resident_client.app.state.leases
-    leases.refuse_if_leased("some-new-job-type")  # no lease: no question
+    leases.refuse_if_leased("some-new-job-type", None)  # no lease: no question
 
     a_lease(resident_client, auth)
     with pytest.raises(Exception) as raised:
-        leases.refuse_if_leased("some-new-job-type")
+        leases.refuse_if_leased("some-new-job-type", None)
     assert getattr(raised.value, "code", None) == "lease_scope_unknown"
+    assert "CARD_EFFECTS" in str(raised.value)
+
+
+# ------------------------------------------------- the matrix, kind by kind
+#
+# What a lease refuses is DERIVED from `CARD_EFFECTS` rather than written down
+# as pairs — with three resident kinds there are thirty-three of them, and a
+# hand-kept list of thirty-three is a fact with thirty-three owners. So these
+# tests assert the PROPERTIES the derivation must have, over the whole matrix,
+# rather than re-typing the answers: a second copy of the answers would pass the
+# day the first copy is wrong.
+
+THE_LEASED_THING = "the-leased-thing"
+SOMETHING_ELSE = "something-else"
+
+
+def refused(kind: str, job_type: str, model: str | None) -> bool:
+    """Would a lease of `kind` on `THE_LEASED_THING` refuse this job?
+
+    Asked of `Leases` itself rather than through the API, so that the matrix is
+    exercised whole: getting all eleven job types resident in all three kinds
+    through the job door would be thirty-three server fixtures for one question.
+    The API half of the same rule is `test_tts_render.py` and `test_align_api.py`.
+    """
+    leases = Leases()
+    leases.open(
+        kind=kind,
+        subject=THE_LEASED_THING,
+        act="tts",
+        client=None,
+        ttl_seconds=TTL,
+    )
+    try:
+        leases.refuse_if_leased(job_type, model)
+    except Exception as refusal:
+        assert getattr(refusal, "code", None) == "leased", refusal
+        return True
+    return False
+
+
+def test_every_lease_refuses_every_loader_whatever_it_names() -> None:
+    """One card, one resident thing: a load evicts what is there, of any kind.
+
+    `load-model` and `load-voice` are refused even when they name the leased
+    thing itself, because both really do restart it — `Residency.load` evicts
+    before it starts and a Higgs voice change IS a worker restart.
+    """
+    for kind in (KIND_LLM, KIND_TTS, KIND_ALIGN):
+        for job_type in ("load-model", "load-voice"):
+            for model in (THE_LEASED_THING, SOMETHING_ELSE):
+                assert refused(kind, job_type, model), (kind, job_type, model)
+
+
+def test_a_lease_refuses_the_unloader_of_its_own_kind_and_no_other() -> None:
+    """An unloader reaches its own kind and nothing else.
+
+    With another kind resident it refuses `*_not_resident` on its own, so
+    refusing it `leased` would report the wrong reason for the right outcome.
+    """
+    unloaders = {
+        job_type: effect.takes_off
+        for job_type, effect in CARD_EFFECTS.items()
+        if effect.takes_off is not None
+    }
+    assert len(unloaders) == 3, unloaders
+    for kind in (KIND_LLM, KIND_TTS, KIND_ALIGN):
+        blocked = {
+            job_type
+            for job_type in unloaders
+            if refused(kind, job_type, THE_LEASED_THING)
+        }
+        assert blocked == {
+            job_type for job_type, takes in unloaders.items() if takes == kind
+        }, kind
+
+
+def test_the_only_job_a_lease_admits_on_its_own_subject_is_one_that_reuses_it() -> None:
+    """THE POINT OF THE WHOLE EXTENSION, as a property rather than two examples.
+
+    A lease admits a job that names its own subject exactly when that job type
+    REUSES what it finds resident — `tts` (`render.py`'s `_make_resident`) and
+    `align` (`align/__init__.py`'s `_session`). That is what turns a book
+    rendered chapter by chapter into one narrator load, and a book aligned
+    chapter by chapter into one aligner load.
+
+    And it is only ever on its OWN subject: the same job type naming anything
+    else evicts, and is refused.
+    """
+    for kind in (KIND_LLM, KIND_TTS, KIND_ALIGN):
+        admitted = {
+            job_type
+            for job_type, effect in CARD_EFFECTS.items()
+            if effect.makes_resident is not None
+            and not refused(kind, job_type, THE_LEASED_THING)
+        }
+        assert admitted == {
+            job_type
+            for job_type, effect in CARD_EFFECTS.items()
+            if effect.reuses_what_it_names and effect.makes_resident == kind
+        }, kind
+        for job_type in admitted:
+            assert refused(kind, job_type, SOMETHING_ELSE), (kind, job_type)
+
+
+def test_work_that_touches_nothing_is_admitted_under_every_kind() -> None:
+    """`echo` takes no accelerator; `asr`/`rvc`/`denoise` never evict anybody.
+
+    A lease is a refusal and not a reservation, so the lane stays open for all
+    four whichever kind is being held.
+    """
+    untouched = {
+        job_type
+        for job_type, effect in CARD_EFFECTS.items()
+        if effect.makes_resident is None and effect.takes_off is None
+    }
+    assert untouched == {"echo", "asr", "rvc", "denoise"}
+    for kind in (KIND_LLM, KIND_TTS, KIND_ALIGN):
+        for job_type in untouched:
+            for model in (THE_LEASED_THING, SOMETHING_ELSE, None):
+                assert not refused(kind, job_type, model), (kind, job_type)
+
+
+def test_a_model_lease_still_refuses_exactly_what_it_refused_before() -> None:
+    """The extension must not have loosened the case that was already ruled.
+
+    PHASE7-LANES.md section 5.2's table, as it stood on 2026-09-14 before a
+    lease could name a voice, read out of the derivation rather than out of a
+    set this file also owns.
+    """
+    blocked = {
+        job_type
+        for job_type in CARD_EFFECTS
+        # A render or an align names a subject of its own kind, never the
+        # leased model's id, so `SOMETHING_ELSE` is the honest reading here.
+        if refused(KIND_LLM, job_type, SOMETHING_ELSE)
+    }
+    assert blocked == {"load-model", "unload-model", "load-voice", "tts", "align"}

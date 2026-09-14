@@ -600,6 +600,77 @@ def test_an_unheld_aligner_is_cleared_and_the_next_job_pays_for_it(
     assert ops == ["load", "align", "load", "align"]
 
 
+def test_an_aligner_lease_turns_a_book_aligned_chapter_by_chapter_into_one_load(
+    ready: TestClient,
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The two tests above, with the real holder instead of the stand-in.
+
+    The resident aligner exists precisely so that hundreds of chunks pay ONE
+    load of a 1.7 GB checkpoint (PHASE4-AUDIO.md section 2). Within one job that
+    was always true; across a book aligned chapter by chapter it stopped being
+    true the moment the card began clearing itself, because the only thing that
+    could hold it — a lease — named the resident MODEL. Since 2026-09-14 a lease
+    names the resident thing of any kind, and this is the same three jobs held by
+    one: three chapters, one `load`.
+
+    There is no `load-aligner` door, so the first job is what makes it resident
+    and the lease is taken on what that left (`AlignJobType._session`).
+    """
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_TRANSCRIPT", str(transcript))
+    with holding_the_card(ready):
+        run_job(ready, auth)
+        opened = ready.post(
+            f"/v1/models/{MODEL}/lease",
+            headers=auth,
+            json={"act": "align", "ttl_seconds": 60},
+        )
+    assert opened.status_code == 201, opened.text
+    lease = opened.json()
+    assert lease["subject"] == MODEL
+    assert lease["kind"] == KIND_ALIGN
+    assert ready.get("/v1/activity", headers=auth).json()["lease"]["kind"] == KIND_ALIGN
+
+    run_job(ready, auth)
+    run_job(ready, auth)
+    assert ready.get("/v1/health", headers=auth).json()["resident_kind"] == KIND_ALIGN
+
+    assert ready.delete(f"/v1/leases/{lease['lease_id']}", headers=auth).status_code == (
+        204
+    )
+    assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
+
+    ops = [json.loads(line)["op"] for line in transcript.read_text().splitlines()]
+    assert ops == ["load", "align", "align", "align"]
+
+
+def test_an_aligner_lease_refuses_what_would_evict_it_and_admits_its_own_work(
+    ready: TestClient, auth: dict[str, str]
+) -> None:
+    """An `align` on the leased aligner reuses it; anything else is refused."""
+    with holding_the_card(ready):
+        run_job(ready, auth)
+        opened = ready.post(
+            f"/v1/models/{MODEL}/lease",
+            headers=auth,
+            json={"act": "align", "ttl_seconds": 60},
+        )
+    assert opened.status_code == 201, opened.text
+
+    refused = submit(ready, auth, type="unload-aligner", model=MODEL, params={})
+    assert refused.status_code == 409, refused.text
+    error = refused.json()["error"]
+    assert error["code"] == "leased"
+    assert error["details"]["kind"] == KIND_ALIGN
+    assert "the resident aligner" in error["message"]
+
+    # And the work the lease was taken for is admitted, which is the point.
+    assert submit(ready, auth).status_code == 202
+
+
 def test_a_resident_aligner_lights_up_its_own_row(
     ready: TestClient, auth: dict[str, str]
 ) -> None:

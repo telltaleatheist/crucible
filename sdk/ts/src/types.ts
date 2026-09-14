@@ -279,8 +279,21 @@ export interface ActivityChat {
  */
 export interface Lease {
   readonly leaseId: string;
-  /** The model it is held on, which is always the resident one. */
-  readonly model: string;
+  /**
+   * Which resident kind it holds: `llm`, `tts` or `align`.
+   *
+   * **The server decides this, never the caller.** The card holds one thing, so
+   * the id passed to {@link CrucibleClient.lease} identifies it without a kind
+   * and the server reads the kind off its own residency. A lease on a `tts` is
+   * what makes a book rendered chapter by chapter one narrator load instead of
+   * twenty.
+   */
+  readonly kind: string;
+  /**
+   * The id it is held on — a model, a voice or an aligner — which is always the
+   * resident one.
+   */
+  readonly subject: string;
   /** The holder's User-Agent, as `/v1/activity` reports it. Null = it did not say. */
   readonly client: string | null;
   /** What the run IS: a capability class name. Never null — a lease must say. */
@@ -294,12 +307,14 @@ export interface Lease {
 /**
  * The open lease, as `/v1/activity` reports it.
  *
- * {@link Lease} without the model, and that is not an omission: a lease is only
- * ever on the resident model, which the same read already reports as
+ * {@link Lease} without the subject, and that is not an omission: a lease is
+ * only ever on the resident thing, which the same read already reports as
  * `resident.id`. Repeating it would be one fact with two owners in one document
- * (ARCHITECTURE.md R1).
+ * (ARCHITECTURE.md R1). `kind` survives the trim because the same fields are a
+ * `leased` refusal's details, which arrive with no `resident` beside them and
+ * whose whole subject is which jobs the lease refuses.
  */
-export type ActivityLease = Omit<Lease, 'model'>;
+export type ActivityLease = Omit<Lease, 'subject'>;
 
 /** `GET /v1/activity` — what is on this server and how far along. */
 export interface Activity {
@@ -335,11 +350,13 @@ export interface Activity {
     readonly rows: readonly ActivityChat[];
   };
   /**
-   * The open model lease, or null.
+   * The open lease on whatever is resident, or null.
    *
-   * The intention behind the chats, which nothing about this server could
-   * infer. While it is non-null, a job that would move the model off the card
-   * is refused `model_leased` at the door — and nothing else changes.
+   * The intention behind the run, which nothing about this server could infer.
+   * While it is non-null, a job that would move the leased thing off the card is
+   * refused `leased` at the door — and nothing else changes, including the work
+   * the lease was taken for: a render of the leased voice is admitted, because
+   * it runs against what is already resident.
    */
   readonly lease: ActivityLease | null;
   readonly slots: { readonly accelerated: ActivitySlot };

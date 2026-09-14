@@ -21,7 +21,7 @@ import {
   CrucibleBusy,
   CrucibleLeased,
   CrucibleRefused,
-  MODEL_LEASED,
+  LEASED,
   SERVER_BUSY,
   CrucibleServerError,
   CrucibleUnreachable,
@@ -383,8 +383,8 @@ export class CrucibleClient {
   // ----------------------------------------------------------------- leases
 
   /**
-   * `POST /v1/models/{model}/lease` — say that a run against the resident model
-   * is in progress, so nothing takes it off the card underneath.
+   * `POST /v1/models/{subject}/lease` — say that a run against the resident
+   * thing is in progress, so nothing takes it off the card underneath.
    *
    * **Why this exists.** A chat completion holds nothing on a Crucible: no lane,
    * no job, no claim — deliberately, because a vLLM engine batches. That is
@@ -403,10 +403,26 @@ export class CrucibleClient {
    * }
    * ```
    *
-   * **The model must already be resident** — a lease promises not to move what
-   * is on the card and never loads anything, so an unloaded model is refused
-   * `model_not_resident`. **One lease at a time, per server**: a second is
-   * refused {@link CrucibleLeased}, naming the holder, exactly as a loader is.
+   * **It may name a model, a voice or an aligner.** The card holds one thing, so
+   * the id alone identifies it and the server supplies `kind` — there is nothing
+   * for the caller to state and nothing to get wrong. That is what a book
+   * rendered CHAPTER BY CHAPTER needs: without a lease on its voice each chapter
+   * loads narrator again, because the card is cleared the moment nothing holds
+   * it. Same for a book aligned chapter by chapter, and for a re-roll after a
+   * render.
+   *
+   * ```ts
+   * await crucible.job({ type: 'load-voice', model: 'mistborn' }).wait();
+   * const held = await crucible.lease('mistborn', { act: 'tts', ttlSeconds: 300 });
+   * for (const chapter of chapters) await crucible.render(chapter); // one load
+   * await crucible.release(held.leaseId);
+   * ```
+   *
+   * **It must already be resident** — a lease promises not to move what is on
+   * the card and never loads anything, so anything else is refused
+   * `not_resident` naming what IS resident, of whatever kind. **One lease at a
+   * time, per server**: a second is refused {@link CrucibleLeased}, naming the
+   * holder, exactly as a loader is.
    *
    * `ttlSeconds` is how long the lease outlives silence, not how long the run
    * is: heartbeat a short one rather than asking for a long one. The server
@@ -416,8 +432,11 @@ export class CrucibleClient {
    * finished run ends — a `finally` that releases frees the next client at once
    * instead of after the whole ttl.
    */
-  async lease(model: string, options: { act: string; ttlSeconds: number }): Promise<Lease> {
-    const id = requireText(model, 'model');
+  async lease(
+    subject: string,
+    options: { act: string; ttlSeconds: number },
+  ): Promise<Lease> {
+    const id = requireText(subject, 'subject');
     const act = requireText(options?.act, 'act');
     const ttlSeconds = options?.ttlSeconds;
     if (typeof ttlSeconds !== 'number' || !Number.isInteger(ttlSeconds)) {
@@ -436,7 +455,7 @@ export class CrucibleClient {
       },
       'lease',
     );
-    return { ...readLease(body, 'lease'), model: str(body, 'model', 'lease') };
+    return { ...readLease(body, 'lease'), subject: str(body, 'subject', 'lease') };
   }
 
   /**
@@ -1387,7 +1406,7 @@ export class CrucibleClient {
       // A caller shown "leased" has to be able to say who is mid-run, doing
       // what, and until when — and both doors that emit this code (a second
       // lease, and a loader that would evict) send the same shape.
-      if (code === MODEL_LEASED) return leasedRefusal(response.status, code, message, details);
+      if (code === LEASED) return leasedRefusal(response.status, code, message, details);
       return new CrucibleRefused(response.status, code, message, details);
     }
     return new CrucibleProtocolError(
@@ -2490,7 +2509,7 @@ function busyRefusal(
 }
 
 /**
- * Read a 409 `model_leased` body into {@link CrucibleLeased}.
+ * Read a 409 `leased` body into {@link CrucibleLeased}.
  *
  * A body that is not the v1 shape comes back as a {@link CrucibleProtocolError}
  * rather than degrading to a plain {@link CrucibleRefused}, for the reason
@@ -2508,6 +2527,7 @@ function leasedRefusal(
     const body = asObject(details, 'error.details');
     return new CrucibleLeased(status, code, message, details, {
       leaseId: str(body, 'lease_id', 'error.details'),
+      kind: str(body, 'kind', 'error.details'),
       holder: nullableStr(body, 'client', 'error.details'),
       act: str(body, 'act', 'error.details'),
       since: str(body, 'since', 'error.details'),
@@ -2519,10 +2539,11 @@ function leasedRefusal(
   }
 }
 
-/** The five fields a lease carries wherever it appears. */
+/** The six fields a lease carries wherever it appears. */
 function readLease(data: Json, where: string): ActivityLease {
   return {
     leaseId: str(data, 'lease_id', where),
+    kind: str(data, 'kind', where),
     client: nullableStr(data, 'client', where),
     act: str(data, 'act', where),
     since: str(data, 'since', where),

@@ -61,15 +61,24 @@ those three are settled.
   and the job reads, so `crucible doctor`'s denoise row stops saying "Crucible does not
   fetch them".
 
-**Landed 2026-09-14: the model lease** (`PHASE7-LANES.md` section 5.2). A chat holds
-nothing, so a server mid-way through a two-thousand-block translation reported itself idle
-between blocks and BookForge's `load-voice` evicted Foundry's translator at block 400. A
-timer would have been a fact standing in for a guess; the fact is that a client intends a
-run, so the client says so — `POST /v1/models/{id}/lease`, heartbeat, `DELETE`. While one
-is open the job types that would take the model off the card are refused `409
-model_leased` at the door (chats never are: they are what it protects). Expiry is read
-from the clock, never swept, and a restart forgets. In the SDK as `lease`/`heartbeat`/
-`release`, `Activity.lease` and the typed `CrucibleLeased`.
+**Landed 2026-09-14: the lease** (`PHASE7-LANES.md` section 5.2). A chat holds nothing, so
+a server mid-way through a two-thousand-block translation reported itself idle between
+blocks and BookForge's `load-voice` evicted Foundry's translator at block 400. A timer would
+have been a fact standing in for a guess; the fact is that a client intends a run, so the
+client says so — `POST /v1/models/{id}/lease`, heartbeat, `DELETE`. While one is open the
+jobs that would take the leased thing off the card are refused `409 leased` at the door
+(chats never are: they are what it protects). Expiry is read from the clock, never swept,
+and a restart forgets. In the SDK as `lease`/`heartbeat`/`release`, `Activity.lease` and the
+typed `CrucibleLeased`.
+
+**Extended the same day: a lease names the RESIDENT THING of any kind.** Leasing only the
+resident *model* turned the unload below into a regression it never asked for — a book
+rendered CHAPTER BY CHAPTER, which is how the app works, paid a narrator load per chapter,
+and a book aligned chapter by chapter paid an aligner load per chapter. The same route takes
+a voice id or an aligner id, the server reads the kind off its own residency (one card, one
+resident thing, so there is nothing for a client to disambiguate), and what a lease refuses
+is **derived** from one `CARD_EFFECTS` table — which is what lets a `tts` render of the
+leased voice, and an `align` on the leased aligner, be admitted rather than refused.
 
 **Landed 2026-09-14: the unload** (`PHASE7-LANES.md` section 5.3). Owen: *"Models should
 always be unloaded when we're done with them. Every time."* This **overrules
@@ -81,8 +90,12 @@ log and in a `note` event on the job that triggered it. No window, no timer and 
 key: a keep-warm minute is a fact standing in for a guess. What makes it safe rather than a
 44-second reload between every book is the lease above — so **a client that does not lease
 reloads its model between requests**, and BookForge's doors do not lease yet. A load is not
-a holder letting go, which leaves four `# RULING OWED:` in `crucible/settle.py`: the load
-door, the render door and the align door must each be able to lease what they load.
+a holder letting go, which left four `# RULING OWED:` in `crucible/settle.py`. **The render
+door's and the align door's are closed** by the extension above. The load door's is
+sharpened and still open — half of it was wrong (a lease is another holder, so it would not
+free a walked-away operator's card), and the half that remains is the window between a
+load's `done` and its client's own lease, which needs a `lease` block on the JOB wire and so
+**needs Owen**.
 
 **Landed 2026-09-14: the local form** (`PHASE9-CAPABILITY.md` section 7). Owen, via
 Foundry: these manifests are the catalog of record for Foundry's LOCAL lineup too, so "what

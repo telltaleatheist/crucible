@@ -894,7 +894,7 @@ releases when it is done.
 
 | route | answers | refuses |
 |---|---|---|
-| `POST /v1/models/{id}/lease` `{"act", "ttl_seconds"}` | `201 {lease_id, model, client, act, since, expires_at}` | `409 model_not_resident`, `400 unknown_act`, `400 invalid_ttl`, `409 model_leased` |
+| `POST /v1/models/{id}/lease` `{"act", "ttl_seconds"}` | `201 {lease_id, kind, subject, client, act, since, expires_at}` | `409 not_resident`, `400 unknown_act`, `400 invalid_ttl`, `409 leased` |
 | `POST /v1/leases/{lease_id}/heartbeat` | `200 {expires_at}` | `404 unknown_lease` |
 | `DELETE /v1/leases/{lease_id}` | `204` | `404 unknown_lease` |
 
@@ -909,40 +909,101 @@ releases when it is done.
 - `client` is `_client_agent(request)` — the same User-Agent, read by the same function,
   that `/v1/activity` reports for a job's holder. One column on a bench, one way of
   filling it. Null means *it did not say*.
-- **One lease at a time, per server.** One card, one resident model, one lease. A second
-  `POST` while one is open is refused `409 model_leased` naming the holder — the same code
-  and the same five details a loader gets, because it is the same fact.
+- **One lease at a time, per server.** One card, one resident thing, one lease. A second
+  `POST` while one is open is refused `409 leased` naming the holder — the same code and
+  the same six details a loader gets, because it is the same fact.
 
-`GET /v1/activity` grows `lease: {lease_id, client, act, since, expires_at} | null`.
-**No `model` field**, deliberately: a lease is only ever on the resident model, and the
+`GET /v1/activity` grows `lease: {lease_id, kind, client, act, since, expires_at} | null`.
+**No `subject` field**, deliberately: a lease is only ever on the resident thing, and the
 same read already reports that as `resident.id` (R1 — one fact, one owner). The lease's
-own `201` receipt does name it, because a receipt has no `resident` beside it.
+own `201` receipt does name it, because a receipt has no `resident` beside it. `kind`
+survives the same trim on purpose — see the next heading.
+
+#### A lease names the RESIDENT THING, of any kind (extended 2026-09-14)
+
+The first build of this leased the resident **model**, and §5.3's unload ruling turned that
+into a regression nobody asked for. The card is cleared the moment nothing holds it, so:
+
+| how a book is run | before the extension | after |
+|---|---|---|
+| one `tts` job | one narrator load | one narrator load |
+| **chapter by chapter** (what the app does) | **one narrator load per chapter** | one, under a voice lease |
+| a re-roll after a render | a second load | none, under a voice lease |
+| one `align` job | one aligner load | one aligner load |
+| **chapter by chapter** | **one aligner load per chapter** | one, under an aligner lease |
+
+A voice and an aligner are resident kinds (`crucible/residency.py`), and the lease is the
+one thing that can hold the card across jobs — so it has to be able to name them. It does,
+through the **same route**: `POST /v1/models/{id}/lease` takes a voice id or an aligner id
+as readily as a model id, because the question it asks does not change with the kind — *is
+this the thing on the card?*
+
+**The server supplies the kind; the client never states one.** There is exactly one
+candidate at the moment a lease is taken, because the card holds one thing. Model ids and
+voice ids really are separate namespaces (`Residency.is_resident` takes a kind precisely
+because nothing stops a voice being called `qwen3.5-9b`), but a collision cannot reach this
+door: only one of two colliding ids can be resident, and a lease is only ever on the
+resident one. A `kind` on the body would therefore be a field with no question to answer and
+a second owner of `resident.kind` (R1) — so there is no second route family and no second
+field, and the `409` becomes a kind-agnostic `not_resident` naming what IS resident, of
+whatever kind.
+
+`kind` IS on `lease` and on the refusal's details, and that is not the same call made twice:
+the id is what `resident.id` already owns, while the kind is what decides *which jobs this
+lease refuses* — and those same fields are the `details` of every `409 leased`, a document
+with no `resident` beside it at all.
 
 #### What it blocks, and what it does not
 
-While a lease is open, `POST /v1/jobs` refuses `409 model_leased` — **before the lane and
-before preflight** — the job types that can take the resident model off the card. Decided
-by reading what each does to `Residency`, not by what its name suggests
-(`crucible/leases.py`, `EVICTS_THE_RESIDENT_MODEL`):
+While a lease is open, `POST /v1/jobs` refuses `409 leased` — **before the lane and before
+preflight** — every job that would take the leased thing off the card.
 
-| refused | why |
-|---|---|
-| `load-model`, `load-voice` | load something else; one card, one resident thing |
-| `unload-model` | evicts by definition |
-| `tts` | **a render loads its own voice** if it is not resident, so it evicts exactly as `load-voice` does. Leaving it out would have left the hole open in the shape clients actually hit it — BookForge renders by submitting `tts`, not by loading a voice first |
-| `align` | loads an aligner, a third resident kind, which evicts the other two |
+**With three kinds the pairs are thirty-three, so they are DERIVED and not listed.** A
+hand-kept table of thirty-three rows is a fact with thirty-three owners, which is the shape
+ARCHITECTURE.md exists to stop. Instead each job type declares what it does to the card —
+`crucible/leases.py`'s `CARD_EFFECTS`, whose every field is read off what the job does to
+`Residency` rather than off its name:
 
-| admitted | why |
-|---|---|
-| **a chat, from anyone** | chats are what the lease protects; blocking them would protect the run from itself |
-| `echo` | never touches the accelerator |
-| `asr`, `rvc`, `denoise` | run the guard with **no** `reclaimable_bytes` — their own deliberate note: they never unload somebody's resident engine, they refuse instead |
-| `unload-voice`, `unload-aligner` | each can only unload its OWN kind, so with a model resident they refuse `not_resident` on their own and cannot reach the leased model |
+| job type | makes resident | reuses what it names | takes off |
+|---|---|---|---|
+| `load-model` | `llm` | no — `Residency.load` evicts before it starts | — |
+| `load-voice` | `tts` | no — a Higgs v3 voice change IS a worker restart | — |
+| `tts` | `tts` | **yes** — `render.py`'s `_make_resident` | — |
+| `align` | `align` | **yes** — `AlignJobType._session` | — |
+| `unload-model` | — | — | `llm` |
+| `unload-voice` | — | — | `tts` |
+| `unload-aligner` | — | — | `align` |
+| `echo`, `asr`, `rvc`, `denoise` | — | — | — |
 
-`tests/test_leases.py` proves every job type this build knows is in exactly one of the two
-sets, so a job type added later that touches the card is a failing test rather than a
-silently reopened hole. At runtime, an unruled type asked for **while a lease is open** is
-answered `500 lease_scope_unknown` naming the missing ruling, rather than guessed at.
+and `Lease.evicted_by(type, model)` is the whole rule, in two sentences:
+
+1. **A job that loads evicts whatever is there, of any kind** — one card, one resident thing
+   — *unless* it reuses what it names and what it names is exactly this lease's subject.
+2. **An unloader reaches its own kind and no other.** With another kind resident it refuses
+   `*_not_resident` on its own, so `leased` would report the wrong reason for the right
+   outcome.
+
+Read out, that gives:
+
+| lease on | refused | admitted |
+|---|---|---|
+| a **model** | `load-model`, `load-voice`, `unload-model`, `tts`, `align` | chats, `echo`, `asr`, `rvc`, `denoise`, `unload-voice`, `unload-aligner` |
+| a **voice** | `load-model`, `load-voice`, `unload-voice`, `align`, `tts` **of any other voice** | chats, `echo`, `asr`, `rvc`, `denoise`, `unload-model`, `unload-aligner`, **`tts` of the leased voice** |
+| an **aligner** | `load-model`, `load-voice`, `tts`, `unload-aligner`, `align` **of any other aligner** | chats, `echo`, `asr`, `rvc`, `denoise`, `unload-model`, `unload-voice`, **`align` on the leased aligner** |
+
+The model row is exactly what it was before the extension — the derivation did not loosen
+the case that was already ruled — and the two bold admissions are the whole point: they are
+what turn a chapter-by-chapter book into one load.
+
+**A chat, from anyone, is always admitted.** Chats are what the lease protects; blocking
+them would protect the run from itself.
+
+`tests/test_leases.py` proves every job type this build knows has a row in `CARD_EFFECTS`,
+so a job type added later that touches the card is a failing test rather than a silently
+reopened hole — and it asserts the matrix as PROPERTIES of the derivation rather than as a
+second copy of the answers, which would pass on the day the first copy is wrong. At runtime,
+an unruled type asked for **while a lease is open** is answered `500 lease_scope_unknown`
+naming the missing ruling, rather than guessed at.
 
 **It is a refusal, not a reservation.** A lease admits nothing, reserves no lane and does
 not change `slots.accelerated.accepts_work`: a leased server really will take a render
@@ -953,7 +1014,11 @@ while the lease will still be there when it does.
 
 **No exemption for the holder.** A lease is refused to everyone, its own client included:
 a run that wants the card to change releases first. An exemption would make *who asked*
-part of the answer, and this server cannot tell two runs from one client apart.
+part of the answer, and this server cannot tell two runs from one client apart. The
+chapter-by-chapter admission above is emphatically **not** an exemption of that shape — it
+is not about who asked but about what the job does: that render evicts nothing, so there is
+nothing to refuse it for, and a stranger's render of the same leased voice is admitted on
+exactly the same terms.
 
 #### Expiry, and what a restart forgets
 
@@ -975,14 +1040,16 @@ longer exists.
 
 #### The SDK
 
-`client.lease(model, {act, ttlSeconds}) → Lease`, `client.heartbeat(leaseId) → expiresAt`,
-`client.release(leaseId)`. `Activity.lease`. `model_leased` arrives as the typed
-`CrucibleLeased` (`leaseId`, `holder`, `act`, `since`, `expiresAt`, and a `leasedLine`
-getter rendering the one sentence a bench shows, like `CrucibleBusy.busyLine`), and is in
-`SERVER_SPECIFIC_REFUSALS` — another machine's card is not held by this run, so a
-`waitFor: "any"` walk should try the next one rather than wait out somebody else's
-translation. The SDK does **not** wait a lease out, for the reason it does not retry
-`server_busy`: a sleep loop in a client library is a queue with a policy nobody chose.
+`client.lease(subject, {act, ttlSeconds}) → Lease`, `client.heartbeat(leaseId) →
+expiresAt`, `client.release(leaseId)`. `Lease` carries `kind` and `subject`;
+`Activity.lease` carries `kind` and not `subject` (R1, as above). `leased` arrives as the
+typed `CrucibleLeased` (`leaseId`, `kind`, `holder`, `act`, `since`, `expiresAt`, and a
+`leasedLine` getter rendering the one sentence a bench shows, like `CrucibleBusy.busyLine`),
+and it and `not_resident` are in `SERVER_SPECIFIC_REFUSALS` — another machine's card is not
+held by this run, so a `waitFor: "any"` walk should try the next one rather than wait out
+somebody else's book. The SDK does **not** wait a lease out, for the reason it does not
+retry `server_busy`: a sleep loop in a client library is a queue with a policy nobody
+chose.
 
 ---
 
@@ -1036,10 +1103,19 @@ using the card"* would be five answers the day a sixth kind of holder arrives.
 and pays nothing; **BookForge's doors do not lease yet** (`electron/ai-bridge.ts`'s
 `crucible` provider loads nothing and leases nothing), so a BookForge cleanup against a
 Crucible today will find the model gone the moment its previous completion returned, and be
-answered `model_not_resident` until something submits another `load-model`. That is not a
-bug in the rule; it is the bill for not stating an intention, and the fix is a lease at
-BookForge's door, never an exception in the server. `tests/test_settle.py` pins it as a
-test rather than leaving it as a sentence.
+answered `not_resident` until something submits another `load-model`. That is not a bug in
+the rule; it is the bill for not stating an intention, and the fix is a lease at BookForge's
+door, never an exception in the server. `tests/test_settle.py` pins it as a test rather than
+leaving it as a sentence.
+
+**The same bill, one kind along, and this one is the app's daily path.** A book rendered as
+ONE `tts` job loads its voice once. A book rendered CHAPTER BY CHAPTER pays a narrator load
+per chapter, a book aligned chapter by chapter pays an aligner load per chapter, and a
+re-roll after a render pays another — unless a lease is open on that voice or that aligner.
+Since 2026-09-14 one can be (§5.2), so the bill is avoidable by stating the intention; it is
+**not** avoidable by this rule making an exception for a render, because *"one more chapter
+is coming"* is the client's fact and nothing in this server can see it.
+`tests/test_tts_render.py` and `tests/test_align_api.py` each measure both sides.
 
 #### A load is not a holder letting go
 
@@ -1050,23 +1126,35 @@ operator's next request, and neither the chat door nor the streaming door ever l
 back. A server whose `load-model` is a no-op is not a stricter server, it is a broken one.
 
 That is the rule read correctly rather than an exception to it — a load is the *start* of a
-resident thing's life. But it leaves four doors that have to say so, recorded as
-`# RULING OWED:` in `crucible/settle.py`:
+resident thing's life. It left four doors that had to say so, recorded as `# RULING OWED:`
+in `crucible/settle.py`. **Two of them are closed (2026-09-14)**, by §5.2's extension rather
+than by anything here changing:
 
-1. **`load-model` / `load-voice` must be able to lease in the same job**, atomically, so
-   nothing can slip between *"it is resident"* and *"somebody holds it"*. Until then a load
-   that is never used sits on the card until the next thing finishes.
-2. **The render door (`tts`) must be able to lease A VOICE.** A book rendered as one job
-   loads once and unloads at the end, which is right and is the shape BookForge uses. A
-   book rendered as twenty jobs is twenty narrators, and `POST /v1/models/{id}/lease` cannot
-   help because it leases the resident **model**.
-3. **The `align` door must be able to lease AN ALIGNER.** Sharper, because the resident
-   aligner exists precisely so hundreds of chunks pay one load (PHASE4-AUDIO.md section 2).
-   Within one job they still do; across a book aligned chapter by chapter they no longer do.
+1. **`load-model` / `load-voice` leasing in the same job — SHARPENED, STILL OPEN, and half
+   of the original note was wrong.** A lease would NOT free the operator who typed
+   `crucible load` and walked away, because a lease is **another holder** (fact 2): a load
+   that took one would hold the card for its whole ttl *and* refuse everybody else
+   meanwhile, which is strictly worse than a load that holds it quietly. *"Is this operator
+   done?"* is the one question this server cannot have an answer to, and `unload-model` is
+   the right shape for it. What is genuinely still open is narrower: the **window** between
+   a load's `done` and its own client's `POST /v1/models/{id}/lease`, in which a third
+   party's loader can evict what was just loaded. Closing it is a new shape on the JOB wire
+   — `lease: {act, ttl_seconds}` in a load's params, a `lease_id` on its `done` that its
+   client must then heartbeat, the first time a job returns a handle with a life of its own
+   — so it is a client-facing contract and **needs Owen**, not a settlement question.
+2. ~~**The render door (`tts`) must be able to lease A VOICE.**~~ **CLOSED.** It leases the
+   voice it made resident, through the one route, and a `tts` render of the leased voice is
+   admitted because it reuses what is on the card. A book rendered chapter by chapter is one
+   narrator load again.
+3. ~~**The `align` door must be able to lease AN ALIGNER.**~~ **CLOSED**, the same way and
+   for the sharper reason: the resident aligner exists precisely so hundreds of chunks pay
+   one load (PHASE4-AUDIO.md section 2), and a book aligned chapter by chapter now pays one
+   again.
 4. **The streaming door is safe only because `load-voice` is.** A session claims the card,
    so a session keeps the voice — but the gap between `load-voice` finishing and
    `POST /v1/tts/stream` opening is held by nothing, and survives today only because a load
-   is not a trigger.
+   is not a trigger. (A voice lease can now cover that gap; the streaming door still does
+   not take one, which is what keeps this note open.)
 
 #### It is SAID
 

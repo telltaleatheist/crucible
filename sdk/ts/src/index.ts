@@ -37,7 +37,7 @@ export {
   CrucibleServerError,
   CrucibleUnreachable,
   CrucibleVersionError,
-  MODEL_LEASED,
+  LEASED,
   SERVER_BUSY,
   isServerSpecificRefusal,
 } from './errors.js';

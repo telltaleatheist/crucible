@@ -1,6 +1,6 @@
 /**
- * Unit tests for the model lease: `lease`, `heartbeat`, `release`, the typed
- * `model_leased` refusal, and the `lease` field on the bench read.
+ * Unit tests for the lease: `lease`, `heartbeat`, `release`, the typed `leased`
+ * refusal, and the `lease` field on the bench read.
  *
  * WHAT A LEASE IS FOR, because these tests read oddly without it. A chat
  * completion holds nothing on a Crucible — no lane, no job, no claim — so a
@@ -28,7 +28,7 @@ import {
   CrucibleLeased,
   CrucibleProtocolError,
   CrucibleRefused,
-  MODEL_LEASED,
+  LEASED,
   isServerSpecificRefusal,
 } from '../src/index.js';
 
@@ -89,14 +89,15 @@ after(async () => {
 
 const LEASE = {
   lease_id: '9c1f',
-  model: 'qwen3.8-27b-4bit',
+  kind: 'llm',
+  subject: 'qwen3.8-27b-4bit',
   client: 'foundry/owens-pc crucible-client/0.5.0',
   act: 'translate',
   since: '2026-09-14T03:00:00+00:00',
   expires_at: '2026-09-14T03:02:00+00:00',
 };
 
-test('lease() names the model in the path and sends the act and ttl the server reads', async () => {
+test('lease() names the subject in the path and sends the act and ttl the server reads', async () => {
   answer(201, LEASE);
   const lease = await client().lease('qwen3.8-27b-4bit', { act: 'translate', ttlSeconds: 120 });
 
@@ -107,19 +108,62 @@ test('lease() names the model in the path and sends the act and ttl the server r
   assert.deepEqual(JSON.parse(lastBody), { act: 'translate', ttl_seconds: 120 });
 
   assert.equal(lease.leaseId, '9c1f');
-  assert.equal(lease.model, 'qwen3.8-27b-4bit');
+  // The subject and the kind: the id is what was asked for, the kind is the
+  // server's own reading of what is on the card. A caller states neither, and
+  // that is what lets one route lease a model, a voice or an aligner.
+  assert.equal(lease.subject, 'qwen3.8-27b-4bit');
+  assert.equal(lease.kind, 'llm');
   assert.equal(lease.act, 'translate');
   assert.equal(lease.client, 'foundry/owens-pc crucible-client/0.5.0');
   assert.equal(lease.expiresAt, '2026-09-14T03:02:00+00:00');
 });
 
-test('a model id with a slash or a space is escaped rather than pasted into the path', async () => {
-  answer(201, { ...LEASE, model: 'owen/model one' });
+test('a voice and an aligner lease through the same door, and say which they are', async () => {
+  // The regression this closes: the card is cleared the moment nothing holds
+  // it, so a book rendered CHAPTER BY CHAPTER paid a narrator load per chapter
+  // and a book aligned chapter by chapter paid an aligner load per chapter —
+  // the lease was the one thing that could have held them and it could only
+  // name a model. One route, one shape, three kinds.
+  answer(201, { ...LEASE, kind: 'tts', subject: 'mistborn', act: 'tts' });
+  const voice = await client().lease('mistborn', { act: 'tts', ttlSeconds: 300 });
+  assert.equal(lastPath, '/v1/models/mistborn/lease');
+  assert.equal(voice.kind, 'tts');
+  assert.equal(voice.subject, 'mistborn');
+  // The caller never states a kind: the card holds one thing, so the id alone
+  // identifies it and the server supplies the rest.
+  assert.deepEqual(JSON.parse(lastBody), { act: 'tts', ttl_seconds: 300 });
+
+  answer(201, { ...LEASE, kind: 'align', subject: 'qwen3-aligner', act: 'align' });
+  const aligner = await client().lease('qwen3-aligner', { act: 'align', ttlSeconds: 300 });
+  assert.equal(aligner.kind, 'align');
+  assert.equal(aligner.subject, 'qwen3-aligner');
+});
+
+test('a refusal on a voice lease says so, so a bench does not report the wrong card', async () => {
+  answer(409, {
+    error: {
+      ...LEASED_BODY.error,
+      details: { ...LEASED_BODY.error.details, kind: 'tts', act: 'tts' },
+    },
+  });
+  await assert.rejects(
+    client().submit({ type: 'load-model', model: 'qwen3.5-9b', params: {}, inputs: {} }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleLeased, `got ${String(error)}`);
+      assert.equal(error.kind, 'tts');
+      assert.equal(error.act, 'tts');
+      return true;
+    },
+  );
+});
+
+test('an id with a slash or a space is escaped rather than pasted into the path', async () => {
+  answer(201, { ...LEASE, subject: 'owen/model one' });
   await client().lease('owen/model one', { act: 'clean', ttlSeconds: 60 });
   assert.equal(lastPath, '/v1/models/owen%2Fmodel%20one/lease');
 });
 
-test('lease() insists on a model, an act and a whole number of seconds', async () => {
+test('lease() insists on a subject, an act and a whole number of seconds', async () => {
   const c = client();
   await assert.rejects(c.lease('', { act: 'clean', ttlSeconds: 60 }), CrucibleConfigError);
   await assert.rejects(c.lease('m', { act: '', ttlSeconds: 60 }), CrucibleConfigError);
@@ -178,12 +222,13 @@ test('a lease that is gone is a refusal, not a shrug', async () => {
 
 const LEASED_BODY = {
   error: {
-    code: 'model_leased',
+    code: 'leased',
     message:
       "'qwen3.8-27b-4bit' is leased by 'foundry/owens-pc crucible-client/0.5.0' for " +
       "'translate' since 2026-09-14T03:00:00+00:00",
     details: {
       lease_id: '9c1f',
+      kind: 'llm',
       client: 'foundry/owens-pc crucible-client/0.5.0',
       act: 'translate',
       since: '2026-09-14T03:00:00+00:00',
@@ -192,15 +237,16 @@ const LEASED_BODY = {
   },
 };
 
-test('model_leased arrives typed, with the one line a bench puts in front of a human', async () => {
+test('leased arrives typed, with the one line a bench puts in front of a human', async () => {
   answer(409, LEASED_BODY);
   await assert.rejects(
     client().submit({ type: 'load-voice', model: 'deathstalker', params: {}, inputs: {} }),
     (error: unknown) => {
       assert.ok(error instanceof CrucibleLeased, `got ${String(error)}`);
-      assert.equal(error.code, MODEL_LEASED);
+      assert.equal(error.code, LEASED);
       assert.equal(error.status, 409);
       assert.equal(error.leaseId, '9c1f');
+      assert.equal(error.kind, 'llm');
       assert.equal(error.holder, 'foundry/owens-pc crucible-client/0.5.0');
       assert.equal(error.act, 'translate');
       assert.equal(error.since, '2026-09-14T03:00:00+00:00');
@@ -233,7 +279,7 @@ test('a lease taken by a client that did not name itself renders as an unnamed c
   });
 });
 
-test('a model_leased body missing what a bench displays is a protocol error, not a quiet downgrade', async () => {
+test('a leased body missing what a bench displays is a protocol error, not a quiet downgrade', async () => {
   const { expires_at: _gone, ...withoutDeadline } = LEASED_BODY.error.details;
   answer(409, { error: { ...LEASED_BODY.error, details: withoutDeadline } });
   await assert.rejects(client().heartbeat('9c1f'), (error: unknown) => {
@@ -243,8 +289,11 @@ test('a model_leased body missing what a bench displays is a protocol error, not
   });
 });
 
-test('model_leased is about THIS machine, so a walk should try the next one', async () => {
-  assert.equal(isServerSpecificRefusal(MODEL_LEASED), true);
+test('leased is about THIS machine, so a walk should try the next one', async () => {
+  assert.equal(isServerSpecificRefusal(LEASED), true);
+  // And so is the lease door's own refusal, which names no kind because the
+  // door takes an id of any kind.
+  assert.equal(isServerSpecificRefusal('not_resident'), true);
 });
 
 // -------------------------------------------------------------- the bench read
@@ -263,6 +312,7 @@ const ACTIVITY = {
   chat: { in_flight: 1, rows: [{ id: 4, act: 'translate', model: 'qwen3.8-27b-4bit', client: 'foundry', since: '2026-09-14T03:01:00+00:00' }] },
   lease: {
     lease_id: '9c1f',
+    kind: 'llm',
     client: 'foundry/owens-pc crucible-client/0.5.0',
     act: 'translate',
     since: '2026-09-14T03:00:00+00:00',
@@ -277,14 +327,18 @@ test('the bench reads the lease, and the lease does not pretend to be a busy lan
   answer(200, ACTIVITY);
   const seen = await client().activity();
   assert.equal(seen.lease?.leaseId, '9c1f');
+  assert.equal(seen.lease?.kind, 'llm');
   assert.equal(seen.lease?.act, 'translate');
   assert.equal(seen.lease?.client, 'foundry/owens-pc crucible-client/0.5.0');
   assert.equal(seen.lease?.expiresAt, '2026-09-14T03:02:00+00:00');
   // A lease is a refusal, not a reservation: the lane is free and this server
   // will still take work that leaves the card's contents alone.
   assert.equal(seen.slots.accelerated.acceptsWork, true);
-  // Which model it is has one owner on this read, and it is `resident`.
+  // WHICH thing it is has one owner on this read, and it is `resident`. The
+  // KIND is carried anyway, because the same fields are a `leased` refusal's
+  // details, where there is no `resident` beside them.
   assert.equal(seen.resident?.id, 'qwen3.8-27b-4bit');
+  assert.equal('subject' in (seen.lease as object), false);
   assert.equal('model' in (seen.lease as object), false);
 });
 

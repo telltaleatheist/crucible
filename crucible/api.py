@@ -48,7 +48,7 @@ from .jobs.queue import JobStore
 from .jobs.tts.common import known_voice
 from .inflight import Entry, InFlight, read_act, require_act_name
 from .leases import Leases, require_ttl
-from .residency import Residency
+from .residency import KIND_NOUNS, Residency
 from .settle import Settlement
 from .sampling import SAMPLING_HEADER, Applied, apply_defaults
 from .ttsstream import (
@@ -137,6 +137,13 @@ class LeaseOpen(BaseModel):
     the thing `X-Crucible-Act` is refused for; a default `ttl_seconds` would be
     this server picking how long somebody else's run is, which is the one number
     only the client knows.
+
+    **There is no `kind`.** The id in the path is the resident thing's, of
+    whatever kind, and the card holds one thing — so the server reads the kind
+    off `Residency.resident` and a client has nothing to disambiguate. A `kind`
+    on the body would be a second owner of `resident.kind`, able to disagree with
+    it (R1), and would let a client be refused for spelling a fact it was never
+    asked to know.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -801,14 +808,17 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # between two blocks of a 2000-block translation this machine is idle
             # by every other measure here — and a `load-voice` submitted in that
             # gap used to evict the translator (crucible/leases.py). While this
-            # is non-null, the model on the card cannot be moved.
+            # is non-null, the thing on the card cannot be moved.
             #
             # It does NOT change `accepts_work` below. A lease is not a
             # reservation: this server will still take a job that does not need
             # the card's contents to change, and admission is still the door's.
             #
-            # No `model` field: a lease is only ever on the resident model, and
-            # `resident.id` above is already that fact's owner (R1).
+            # No `subject` field: a lease is only ever on the resident thing, and
+            # `resident.id` above is already that fact's owner (R1). `kind` IS
+            # carried, because the same six fields are a `409 leased`'s details —
+            # a document with no `resident` beside it — and the kind is what says
+            # which jobs the refusal covers.
             "lease": None if lease is None else lease.to_dict(),
             "slots": {
                 # ONE LANE TODAY, and it is named rather than counted so the
@@ -885,53 +895,72 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     # ---------------------------------------------------------------- leases
     #
     # PHASE7-LANES.md section 5.2. Three routes and no state worth the name: a
-    # client says it intends a run on the resident model, heartbeats while the
-    # run is alive, and releases when it is done. What that buys it is one
-    # refusal — `409 model_leased` at the job door for anything that would take
-    # the model off the card. Everything else about this server is unchanged.
+    # client says it intends a run on the resident thing — model, voice or
+    # aligner — heartbeats while the run is alive, and releases when it is done.
+    # What that buys it is one refusal — `409 leased` at the job door for
+    # anything that would take that thing off the card. Everything else about
+    # this server is unchanged.
 
-    @private.post("/models/{model_id}/lease", status_code=201)
+    @private.post("/models/{subject_id}/lease", status_code=201)
     async def open_lease(
-        request: Request, model_id: str, body: LeaseOpen
+        request: Request, subject_id: str, body: LeaseOpen
     ) -> dict[str, Any]:
-        """Take the one lease this server holds at a time.
+        """Take the one lease this server holds at a time, on ANY resident kind.
 
         The order of the checks is their specificity, which is the job door's
         rule: a bad ttl and an unknown act are true of the request whatever this
         server is doing, so a client with a typo is told about the typo rather
         than about somebody else's lease. Residency comes next, because leasing a
-        model that is not here is a different mistake from being too late for
+        thing that is not here is a different mistake from being too late for
         one that is.
+
+        **The id may name a model, a voice or an aligner** (PHASE7-LANES.md
+        section 5.2, extended 2026-09-14). The route keeps its `/models/` path
+        and its one route family, because the question it asks does not change
+        with the kind: *is this the thing on the card?* The card holds ONE thing,
+        so the kind is read off the residency rather than sent — and the
+        namespaces being separate (a voice may be called `qwen3.5-9b`) cannot
+        produce an ambiguity here, since only one of two colliding ids can be
+        resident at a time and a lease is only ever on the resident one.
+
+        Without this a book rendered chapter by chapter paid a narrator load per
+        chapter and a book aligned chapter by chapter paid an aligner load per
+        chapter, because the unload ruling clears the card the moment nothing
+        holds it and the lease — the one thing that can hold it — could only name
+        a model.
         """
         leases: Leases = request.app.state.leases
         ttl_seconds = require_ttl(body.ttl_seconds)
         act = require_act_name(body.act.strip(), "a lease's `act`")
-        # The resident MODEL, exactly as the chat door reads it: a voice on the
-        # card is not something a run of chat completions can be held against,
-        # so the honest answer there is the same `model_not_resident` an empty
-        # card gets. A lease NEVER loads anything — it is the promise not to
-        # move what is already there.
-        resident = residency.resident_model
-        if resident is None or resident.model_id != model_id:
+        # Whatever is on the card, of any kind. A lease NEVER loads anything — it
+        # is the promise not to move what is already there — so the honest answer
+        # to an id that is not resident is the same one an empty card gets, and
+        # it names what IS there so the client is not left guessing which of the
+        # two mistakes it made.
+        resident = residency.resident
+        if resident is None or resident.id != subject_id:
             raise ApiError(
                 409,
-                "model_not_resident",
-                f"{model_id!r} is not resident on this server; "
+                "not_resident",
+                f"{subject_id!r} is not resident on this server; "
                 + (
-                    f"{resident.model_id!r} is. "
+                    f"the resident {KIND_NOUNS[resident.kind]} is "
+                    f"{resident.id!r}. "
                     if resident is not None
-                    else "no model is. "
+                    else "nothing is. "
                 )
                 + "A lease promises not to move what is on the card; it never "
-                'loads anything — submit a {"type": "load-model"} job first, '
-                "then lease what it left resident.",
+                "loads anything — load it first (load-model, load-voice, or an "
+                "align job for an aligner), then lease what that left resident.",
                 {
-                    "requested": model_id,
-                    "resident": None if resident is None else resident.model_id,
+                    "requested": subject_id,
+                    "resident": None if resident is None else resident.id,
+                    "resident_kind": None if resident is None else resident.kind,
                 },
             )
         lease = leases.open(
-            model=model_id,
+            kind=resident.kind,
+            subject=subject_id,
             act=act,
             client=_client_agent(request),
             ttl_seconds=ttl_seconds,
@@ -1152,22 +1181,30 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         chat completion holds nothing, so a server mid-way through a
         two-thousand-block translation looks idle between two blocks; a client
         that says it intends a run takes a lease, and while one is open this
-        door refuses the job types that would move the model off the card. It
+        door refuses the jobs that would move the leased thing off the card. It
         does not refuse anything else — a lease is not a reservation, and the
-        lane is still free for work that leaves the card alone.
+        lane is still free for work that leaves the card alone, INCLUDING the
+        work the lease was taken for: a `tts` render of the leased voice and an
+        `align` on the leased aligner are admitted, because they run against
+        what is already resident rather than loading it again.
         """
         store: JobStore = request.app.state.store
         leases: Leases = request.app.state.leases
         plugin = resolve(store.registry, body.type, config)
         model = resolve_model(plugin, body.model)
-        # Would this take the resident model off the card while somebody has
-        # said they are mid-run on it? Asked BEFORE the lane, and before
+        # Would this take the leased thing off the card while somebody has said
+        # they are mid-run on it? Asked BEFORE the lane, and before
         # `server_busy`, because the two refusals have different lifetimes: the
         # lane frees in minutes and a client told "busy" will rightly come back,
         # while a lease will still be there when it does. Telling it the
         # transient reason first would send it away to be refused again for the
         # durable one (PHASE7-LANES.md section 5.2).
-        leases.refuse_if_leased(body.type)
+        #
+        # The resolved `model` goes with the type because the answer is not a
+        # property of the type alone: `tts` of the leased voice reuses what is
+        # resident and is admitted, `tts` of any other voice evicts it and is
+        # not (`Lease.evicted_by`).
+        leases.refuse_if_leased(body.type, model)
         # Is there room right now? The one question the server answers about
         # scheduling; the queue is the client's (ARCHITECTURE.md section 3).
         store.refuse_if_busy()

@@ -232,11 +232,14 @@ def holding_the_card(client: TestClient, act: str = "clean") -> Iterator[None]:
     so it has to be one.
 
     A chat completion in flight is the holder it takes, because it is the only
-    one of the four a test can hold with no resident MODEL to lease: the lane is
-    the thing under test, the claim belongs to a streaming session, and
-    `POST /v1/models/{id}/lease` is refused for a resident voice or aligner. That
-    is the gap the RULING OWED in `crucible/settle.py` names — when the render
-    and align doors can lease what they load, this helper is what they replace.
+    one of the four that can be held BEFORE the job runs. A lease is the honest
+    holder for a run of renders or aligns and since 2026-09-14 it can name a
+    voice or an aligner (`crucible/leases.py`) — but a lease never loads, so it
+    cannot be taken until the first job has made the thing resident, which is
+    exactly the window a test that wants to LOOK at what one job left for the
+    next is standing in. `test_tts_render.py` and `test_align_api.py` each carry
+    the real-lease version of the same measurement beside the tests that use
+    this.
 
     Nothing is faked: `Settlement.holder` reads this record through exactly the
     code path `/v1/activity` reports it from.

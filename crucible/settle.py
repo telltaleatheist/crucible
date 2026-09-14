@@ -42,10 +42,19 @@ discovered: **a run of chat completions with no lease open reloads its model.**
 Foundry leases a whole cleanup and pays nothing. BookForge's doors do not lease
 yet (`electron/ai-bridge.ts`'s `crucible` provider loads nothing and leases
 nothing), so a BookForge cleanup against a Crucible today will find the model
-gone the moment its previous chat returned, and be answered `model_not_resident`
+gone the moment its previous chat returned, and be answered `not_resident`
 until somebody submits another `load-model`. That is not a bug in this rule; it
 is the bill for not stating an intention, and the fix is a lease at BookForge's
 door, never an exception here.
+
+**The same bill, one kind along.** A book rendered as one `tts` job loads its
+voice once; a book rendered CHAPTER BY CHAPTER — which is how Owen works — pays a
+narrator load per chapter unless a lease is open on that voice, and a book
+aligned chapter by chapter pays an aligner load per chapter unless a lease is
+open on that aligner. Since 2026-09-14 a lease can name either
+(`crucible/leases.py`), so the bill is avoidable by stating the intention; it is
+not avoidable by this rule making an exception for a render, because "one more
+chapter is coming" is the client's fact and nothing here can see it.
 
 THE TRIGGER IS A HOLDER LETTING GO — AND A LOAD IS NOT A HOLDER LETTING GO
 --------------------------------------------------------------------------
@@ -61,22 +70,45 @@ That is not an exception to the rule — it is the rule read correctly. A load i
 the *start* of a resident thing's life. What ends it is the last holder letting
 go, and the doors below are the ones that have to say so:
 
-# RULING OWED: `load-model` and `load-voice` are the doors that must lease.
-#   Until a load can open a lease in the same job — atomically, so nothing can
-#   slip between "it is resident" and "somebody holds it" — a load that is never
-#   used sits on the card until the next thing finishes. The four facts cannot
-#   see an operator who typed `crucible load` and walked away, because that
-#   operator declared nothing. The lease is the declaration, and the load door is
-#   where it is missing.
-# RULING OWED: the render door (`tts`) must be able to lease A VOICE.
-#   A render loads its own voice, so a book rendered as one job loads once and
-#   unloads at the end, which is right. A book rendered as twenty jobs reloads
-#   twenty times, and the lease cannot help because `POST /v1/models/{id}/lease`
-#   leases the resident MODEL — `Leases.open` is refused for a resident voice.
-# RULING OWED: the `align` door must be able to lease AN ALIGNER.
-#   Same shape, and sharper: the resident aligner exists precisely so that
-#   hundreds of chunks pay one load (PHASE4-AUDIO.md section 2). Within one job
-#   they still do. Across a book aligned chapter by chapter they now do not.
+# RULING OWED, SHARPENED 2026-09-14 — and half of what it used to say was wrong.
+#   It read: `load-model` and `load-voice` must open a lease in the same job,
+#   atomically, because "a load that is never used sits on the card until the
+#   next thing finishes."
+#
+#   THE WRONG HALF. A lease would not free the operator who typed `crucible
+#   load` and walked away, because **a lease is another holder** — it is fact 2.
+#   A load that took one would hold the card for its whole ttl AND refuse
+#   everybody else meanwhile, which is strictly worse than a load that holds it
+#   quietly. Nothing here can free that card, because "is this operator done?"
+#   is the one question this server cannot have an answer to, and
+#   `LEAVES_IT_RESIDENT` is the ruling that a load's own end is not it. What that
+#   operator has is `unload-model`, and that is the right shape for it.
+#
+#   THE HALF THAT IS STILL OPEN is narrower and is a real race: the WINDOW
+#   between a load's `done` and its own client's `POST /v1/models/{id}/lease`. A
+#   book rendered chapter by chapter must `load-voice` and THEN lease, because
+#   the first chapter's `tts` job settles at its own end — a render is not
+#   `LEAVES_IT_RESIDENT`, and making it so would put the stranded card back one
+#   door along. In that window a third party's loader can evict what was just
+#   loaded, and the holder learns about it as a `not_resident` on its lease.
+#
+#   IT NEEDS OWEN, because closing it is a new shape on the JOB wire rather than
+#   a refinement of this rule: the load job would carry `lease: {act,
+#   ttl_seconds}` in its params and its `done` would hand back a `lease_id` its
+#   client must then heartbeat — the first time a job returns a handle with a
+#   life of its own. That is a client-facing contract (the SDK, BookForge,
+#   Foundry), not a settlement question, and it is not what tonight's regression
+#   needed.
+#
+# CLOSED 2026-09-14: the render door and the `align` door CAN lease.
+#   They lease by naming what they made resident, because a lease now names the
+#   RESIDENT THING of any kind rather than the resident model
+#   (`crucible/leases.py`, PHASE7-LANES.md section 5.2). A voice lease and an
+#   aligner lease refuse every job that would evict them and ADMIT the job they
+#   were taken for — a `tts` render of the leased voice, an `align` on the
+#   leased aligner — so a book rendered chapter by chapter pays one narrator
+#   load and a book aligned chapter by chapter pays one aligner load, which is
+#   what they cost before this rule and what they must cost after it.
 # RULING OWED: the streaming door is safe only because `load-voice` is.
 #   A session claims the card, so a session keeps the voice; but the gap between
 #   `load-voice` finishing and `POST /v1/tts/stream` opening is held by nothing.
@@ -127,11 +159,18 @@ SETTLEMENT_HOLDER = "the settlement clearing the card"
 
 #: The job types whose completion is NOT a moment to clear the card, because
 #: making something resident is the whole of what they do. See the module
-#: docstring's RULING OWED block — this is a statement about what a load MEANS,
-#: and the way out of it is a lease at the load door, not a second name here.
+#: docstring's RULING OWED block — this is a statement about what a load MEANS.
+#:
+#: **`tts` and `align` are deliberately NOT here**, although both make something
+#: resident: making it resident is not the whole of what they do, and a render
+#: that left its voice on the card would strand it exactly as an unused load
+#: does. What holds a voice across twenty chapters is a lease on that voice
+#: (`crucible/leases.py`), which is the client saying more is coming — the fact
+#: this file has no way to invent.
 #:
 #: Listed rather than derived, and `tests/test_settle.py` proves every name in it
-#: is a job type this build knows, so a rename is a failing test rather than a
+#: is a job type this build knows AND one that `CARD_EFFECTS` agrees makes
+#: something resident, so a rename is a failing test rather than a
 #: silently-never-exempt loader.
 LEAVES_IT_RESIDENT: frozenset[str] = frozenset({"load-model", "load-voice"})
 

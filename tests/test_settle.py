@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -299,10 +300,27 @@ def test_a_load_is_not_a_holder_letting_go(
     assert len(engines) == 2
 
 
-def test_every_exempt_name_is_a_job_type_this_build_knows(
-    ) -> None:
+def test_every_exempt_name_is_a_job_type_this_build_knows() -> None:
     """A rename must be a failing test, never a loader that silently settles."""
     assert LEAVES_IT_RESIDENT <= set(ALL_JOB_TYPES)
+
+
+def test_the_exempt_names_are_the_ones_whose_whole_content_is_being_resident() -> None:
+    """`LEAVES_IT_RESIDENT` is listed, and the list is tied to a second fact.
+
+    Every exempt name must be one `CARD_EFFECTS` agrees MAKES something resident
+    — an exemption for a job that loads nothing would be an exemption for
+    nothing. The converse is deliberately not asserted: `tts` and `align` make
+    something resident too and are NOT exempt, because making it resident is not
+    the whole of what they do, and a render that left its voice on the card
+    would strand it exactly as an unused load does. What holds a voice across
+    twenty chapters is a lease on that voice, not a second name here.
+    """
+    from crucible.leases import CARD_EFFECTS
+
+    for name in LEAVES_IT_RESIDENT:
+        assert CARD_EFFECTS[name].makes_resident is not None, name
+    assert {"tts", "align"} & LEAVES_IT_RESIDENT == set()
 
 
 def test_settling_an_empty_card_is_a_no_op_rather_than_a_refusal(
@@ -417,23 +435,8 @@ def test_a_lease_that_expires_unheld_clears_the_card_on_its_own_deadline(
     # Reached by moving the lease's deadline into the past rather than by
     # sleeping through a ttl, then firing the one-shot the way the loop does.
     leases = resident.app.state.leases
-    leases._lease = leases._lease.__class__(  # the same lease, already expired
-        **{
-            **{
-                field: getattr(leases._lease, field)
-                for field in (
-                    "id",
-                    "model",
-                    "act",
-                    "client",
-                    "since",
-                    "expires_at",
-                    "ttl_seconds",
-                )
-            },
-            "expires_at": leases._lease.since,
-        }
-    )
+    # The same lease, already expired.
+    leases._lease = replace(leases._lease, expires_at=leases._lease.since)
     assert leases.current() is None, "the lease is past its deadline"
     assert settlement.holder() is None
     assert settlement.settle("the lease expired and was not renewed") is not None

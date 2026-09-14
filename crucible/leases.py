@@ -33,17 +33,52 @@ WHAT A LEASE IS AND IS NOT
 --------------------------
 It is a refusal, not a reservation. Holding one does not admit anything, does not
 reserve the lane, and does not make this server accept a job it would otherwise
-refuse. It says exactly one thing: **while this is open, nothing may move the
-model off the card.** `slots.accelerated.accepts_work` is untouched, because a
-leased server really will take a render that does not need the card's contents to
-change — and it is `POST /v1/jobs` that still decides, as ever (R5).
+refuse. It says exactly one thing: **while this is open, nothing may take the
+leased thing off the card.** `slots.accelerated.accepts_work` is untouched,
+because a leased server really will take a render that does not need the card's
+contents to change — and it is `POST /v1/jobs` that still decides, as ever (R5).
 
 It does not gate chats. Chats are what it protects; a lease that blocked them
 would protect the run from itself.
 
-ONE AT A TIME, PER SERVER. There is one card and one resident model, so there is
-one lease. A second is refused `model_leased` naming the holder — the same
-refusal a loader gets, because it is the same fact.
+ONE AT A TIME, PER SERVER. There is one card and one resident thing, so there is
+one lease. A second is refused `leased` naming the holder — the same refusal a
+loader gets, because it is the same fact.
+
+A LEASE NAMES THE RESIDENT THING, OF ANY KIND
+---------------------------------------------
+**Extended 2026-09-14**, and it is the same hole one room along. A voice and an
+aligner are resident kinds too (`crucible/residency.py`), and the unload ruling
+clears the card the moment nothing holds it — so a book rendered as ONE `tts` job
+loaded its voice once, while the same book rendered **chapter by chapter**, which
+is how the app actually works, paid a narrator load per chapter. A book aligned
+chapter by chapter paid an aligner load per chapter, which is worse: the resident
+aligner exists precisely so hundreds of chunks pay one load (PHASE4-AUDIO.md
+section 2). The lease is the thing that prevents exactly that, and until tonight
+it could not reach either kind.
+
+So a lease names the **resident thing**, whatever kind it is, and
+`POST /v1/models/{id}/lease` takes a voice id or an aligner id as readily as a
+model id. **The server supplies the kind; the client never states one**, and no
+second route family is needed, because at the moment a lease is taken there is
+exactly ONE candidate: the card holds one thing. Model ids and voice ids are
+genuinely separate namespaces — `Residency.is_resident` takes a kind precisely
+because nothing stops a voice being called `qwen3.5-9b` — but a collision cannot
+reach this door, because only one of the two colliding things can be on the card,
+and the lease is only ever on what is on it. Adding a `kind` to the body would
+therefore be a field with no question to answer, and a second thing able to
+disagree with `resident.kind` (R1).
+
+WHAT A LEASE REFUSES IS DERIVED, NOT LISTED
+-------------------------------------------
+With three kinds the pairs are twenty-odd, and a hand-written list of them is a
+fact with as many owners as it has rows. So each job type declares what it does
+to the card — `CARD_EFFECTS` below — and `Lease.evicted_by` derives the answer
+for every (lease kind, job) pair from those two facts. That is what makes `tts`
+under a VOICE lease for the voice it names an **admission** rather than a
+refusal: it reuses what is resident instead of loading, which is the whole point
+of holding the lease. The same derivation, unchanged, still refuses `tts` under a
+MODEL lease, because there the render really does evict.
 
 EXPIRY IS READ, NEVER SWEPT. A lease past `expires_at` is simply not open. There
 is no background task, no timer and nothing to cancel: every read compares the
@@ -52,7 +87,7 @@ card the moment its ttl runs out, whether or not anything was watching. A
 heartbeat is what a live client sends instead of dying.
 
 IN MEMORY, AND A RESTART FORGETS. A lease is worth exactly as much as the
-residency it protects, and a restarted server holds no model — so carrying a
+residency it protects, and a restarted server holds nothing — so carrying a
 lease across a restart would protect nothing, and would hand the next operator a
 refusal whose subject no longer exists.
 """
@@ -66,6 +101,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .errors import ApiError
+from .residency import KIND_ALIGN, KIND_LLM, KIND_NOUNS, KIND_TTS
 
 #: The sane range for a ttl, in seconds, and the one the refusal states.
 #:
@@ -78,41 +114,69 @@ from .errors import ApiError
 MIN_TTL_SECONDS = 30
 MAX_TTL_SECONDS = 3600
 
-#: The job types that can take the resident model off the card, which is the
-#: whole set a lease refuses. Decided by reading what each one does to
-#: `Residency`, not by what its name suggests:
-#:
-#: - `load-model` / `load-voice` — load something else, which evicts (one card,
-#:   one resident thing: `Residency._evict`).
-#: - `unload-model` — evicts by definition.
-#: - `tts` — a render LOADS ITS VOICE if it is not already resident
-#:   (`crucible/jobs/tts/render.py`, `_engine_for`), so it evicts a model exactly
-#:   as `load-voice` does. Leaving it out would have left the hole open in the
-#:   shape clients actually hit it: BookForge renders by submitting `tts`, not by
-#:   loading a voice and then rendering.
-#: - `align` — loads an aligner, which is a third resident kind and evicts the
-#:   other two (`Residency.load_aligner`).
-EVICTS_THE_RESIDENT_MODEL: frozenset[str] = frozenset(
-    {"load-model", "unload-model", "load-voice", "tts", "align"}
-)
 
-#: The job types that cannot move the resident MODEL, and so are never refused
-#: for a lease. Listed rather than implied, so that `tests/test_leases.py` can
-#: prove every job type this build knows is in exactly one of the two sets — a
-#: new job type that touches the card is then a failing test rather than a hole.
-#:
-#: - `echo` — never touches the accelerator.
-#: - `asr` / `rvc` / `denoise` — run the guard with **no** `reclaimable_bytes`,
-#:   which is their own deliberate note: they never unload somebody's resident
-#:   engine to make room, they refuse instead.
-#: - `unload-voice` / `unload-aligner` — each can only unload its OWN kind. With
-#:   a model resident, `is_resident(KIND_TTS, ...)` is false and the job refuses
-#:   `not_resident` on its own, so it cannot reach the leased model to evict it.
-#:   Refusing them `model_leased` would report the wrong reason for the right
-#:   outcome.
-KEEPS_THE_RESIDENT_MODEL: frozenset[str] = frozenset(
-    {"echo", "asr", "rvc", "denoise", "unload-voice", "unload-aligner"}
-)
+@dataclass(frozen=True)
+class CardEffect:
+    """What one job type does to whatever is on the card.
+
+    Two facts and no opinion about leases, which is what lets one table answer
+    every (lease kind, job) pair without anybody writing the pairs down. Both are
+    decided by **reading what the job does to `Residency`**, never by what its
+    name suggests — that reading is in the comment beside each row.
+    """
+
+    #: The kind this job MAKES resident, or None if it makes nothing resident.
+    #: Loading anything evicts whatever was there, of any kind: one card, one
+    #: resident thing (`Residency._evict`).
+    makes_resident: str | None = None
+    #: True when this job REUSES a resident thing of `makes_resident` whose id it
+    #: names, instead of restarting it. `tts` and `align` do
+    #: (`render.py`'s `_make_resident`, `align/__init__.py`'s `_session`); the
+    #: two loaders deliberately do not — `load-voice` of the resident voice is a
+    #: full narrator restart, and `Residency.load` evicts before it starts.
+    reuses_what_it_names: bool = False
+    #: The kind this job can TAKE OFF the card by name, or None. An unloader can
+    #: only ever unload its own kind, and with another kind resident it refuses
+    #: `*_not_resident` on its own before reaching anything.
+    takes_off: str | None = None
+
+
+#: What each job type this build knows does to the card. **The one owner of that
+#: fact** — `tests/test_leases.py` proves every name in `ALL_JOB_TYPES` has a row
+#: here, so a job type added later that touches the card is a failing test rather
+#: than a silently reopened hole, and at runtime an unruled type asked for while a
+#: lease is open is answered `lease_scope_unknown` rather than guessed at.
+CARD_EFFECTS: dict[str, CardEffect] = {
+    # Loads a model. `Residency.load` calls `_evict` unconditionally — reloading
+    # the resident model really is a restart — so it never reuses.
+    "load-model": CardEffect(makes_resident=KIND_LLM),
+    # Loads a voice, the same way and for the same reason: a Higgs v3 voice
+    # change IS a worker restart (`Residency.load_voice`).
+    "load-voice": CardEffect(makes_resident=KIND_TTS),
+    # A render LOADS ITS VOICE if it is not already resident, so under a model
+    # lease it evicts exactly as `load-voice` does — leaving it out would have
+    # left the hole open in the shape clients actually hit it, since BookForge
+    # renders by submitting `tts`, not by loading a voice first. But
+    # `_make_resident` REUSES a voice it finds resident under its own id, which
+    # is what makes a chapter-by-chapter book under a voice lease one load.
+    "tts": CardEffect(makes_resident=KIND_TTS, reuses_what_it_names=True),
+    # Loads an aligner, the third resident kind, and reuses one it finds under
+    # its own id (`AlignJobType._session`) — the reason the resident aligner
+    # exists at all (PHASE4-AUDIO.md section 2).
+    "align": CardEffect(makes_resident=KIND_ALIGN, reuses_what_it_names=True),
+    # The three unloaders, each of which can reach its own kind and no other.
+    "unload-model": CardEffect(takes_off=KIND_LLM),
+    "unload-voice": CardEffect(takes_off=KIND_TTS),
+    "unload-aligner": CardEffect(takes_off=KIND_ALIGN),
+    # `echo` never touches the accelerator at all.
+    "echo": CardEffect(),
+    # `asr` / `rvc` / `denoise` run the accelerator guard with **no**
+    # `reclaimable_bytes`, which is their own deliberate note: they never unload
+    # somebody's resident engine to make room, they refuse instead.
+    "asr": CardEffect(),
+    "rvc": CardEffect(),
+    "denoise": CardEffect(),
+}
 
 
 def _utcnow() -> datetime:
@@ -152,10 +216,17 @@ def require_ttl(ttl_seconds: int) -> int:
 
 @dataclass(frozen=True)
 class Lease:
-    """One client's declared intention to keep using the resident model."""
+    """One client's declared intention to keep using the resident thing."""
 
     id: str
-    model: str
+    #: Which resident kind it holds — `llm`, `tts` or `align`. Read off
+    #: `Residency.resident` at the open, never sent by the client: the card holds
+    #: one thing, so there is nothing for the client to disambiguate.
+    kind: str
+    #: The resident thing's id. Named `subject` rather than `model` because it is
+    #: a voice id as often as a model id, and a field called `model` holding
+    #: `mistborn` is a fact that lies to everything downstream of it.
+    subject: str
     act: str
     client: str | None
     since: datetime
@@ -165,20 +236,68 @@ class Lease:
     #: differently.
     ttl_seconds: int
 
+    @property
+    def noun(self) -> str:
+        """`model` / `voice` / `aligner`, for a sentence a reader can act on."""
+        return KIND_NOUNS[self.kind]
+
     def expired(self, now: datetime) -> bool:
         return now >= self.expires_at
 
-    def to_dict(self) -> dict[str, Any]:
-        """The five fields `/v1/activity` reports and a refusal carries.
+    def evicted_by(self, job_type: str, model: str | None) -> bool:
+        """Would this job take THIS lease's subject off the card?
 
-        **No `model`**, and that is not an oversight: a lease is only ever on the
-        RESIDENT model, which `/v1/activity` already reports as `resident.id`.
-        Repeating it here would be one fact with two owners in a single document,
-        able to disagree the day anything is read out of order (R1). The lease's
-        own receipt does name it, because a receipt has no `resident` beside it.
+        The whole of what a lease refuses, derived from `CARD_EFFECTS` rather
+        than from a table of pairs. Two clauses, and each is one sentence of the
+        residency's own rule:
+
+        1. **A job that loads evicts whatever is there**, of any kind — one card,
+           one resident thing — *unless* it is a job that reuses what it names
+           and what it names is exactly this lease's subject. That exception is
+           the point of the whole extension: a `tts` render of the leased voice,
+           or an `align` on the leased aligner, runs against what is already on
+           the card and is admitted.
+        2. **An unloader reaches its own kind and no other.** With another kind
+           resident it refuses `*_not_resident` on its own, so refusing it
+           `leased` would report the wrong reason for the right outcome.
+
+        `model` is the job's subject as `resolve_model` settled it — a voice id
+        for `tts`, an aligner id for `align`. It is passed rather than looked up
+        because the job does not exist yet: this is asked at the door, before
+        `store.create`.
+        """
+        effect = CARD_EFFECTS[job_type]
+        if effect.makes_resident is not None:
+            reuses_the_leased_thing = (
+                effect.reuses_what_it_names
+                and effect.makes_resident == self.kind
+                and model == self.subject
+            )
+            if not reuses_the_leased_thing:
+                return True
+        return effect.takes_off == self.kind
+
+    def to_dict(self) -> dict[str, Any]:
+        """The six fields `/v1/activity` reports and a refusal carries.
+
+        **No `subject`**, and that is not an oversight: a lease is only ever on
+        the RESIDENT thing, which `/v1/activity` already reports as
+        `resident.id`. Repeating it here would be one fact with two owners in a
+        single document, able to disagree the day anything is read out of order
+        (R1). The lease's own receipt does name it, because a receipt has no
+        `resident` beside it.
+
+        **`kind` IS here**, which is not the same call made twice. The id is the
+        thing `resident.id` already owns; the kind is what decides *which jobs
+        this lease refuses*, and these same six fields are the `details` of every
+        `409 leased` — a document with no `resident` beside it at all. A bench
+        shown "leased" and refused a `load-voice` can say why from the refusal it
+        was handed, instead of needing a second read of a server whose card may
+        have moved since.
         """
         return {
             "lease_id": self.id,
+            "kind": self.kind,
             "client": self.client,
             "act": self.act,
             "since": self.since.isoformat(),
@@ -187,14 +306,7 @@ class Lease:
 
     def receipt(self) -> dict[str, Any]:
         """`201` — what the holder gets back, which names what it leased."""
-        return {
-            "lease_id": self.id,
-            "model": self.model,
-            "client": self.client,
-            "act": self.act,
-            "since": self.since.isoformat(),
-            "expires_at": self.expires_at.isoformat(),
-        }
+        return {**self.to_dict(), "subject": self.subject}
 
 
 class Leases:
@@ -236,17 +348,29 @@ class Leases:
     # ----------------------------------------------------------------- writes
 
     def open(
-        self, *, model: str, act: str, client: str | None, ttl_seconds: int
+        self,
+        *,
+        kind: str,
+        subject: str,
+        act: str,
+        client: str | None,
+        ttl_seconds: int,
     ) -> Lease:
-        """Take the lease, or refuse naming who has it."""
+        """Take the lease, or refuse naming who has it.
+
+        `kind` is the route's reading of `Residency.resident`, not anything the
+        client sent: one card, one resident thing, so there is nothing to
+        disambiguate and nothing for a client to get wrong.
+        """
         with self._lock:
             held = self._open_locked()
             if held is not None:
-                raise leased_error(held, f"leasing {model!r}")
+                raise leased_error(held, f"leasing {subject!r}")
             since = self._now()
             lease = Lease(
                 id=uuid.uuid4().hex,
-                model=model,
+                kind=kind,
+                subject=subject,
                 act=act,
                 client=client,
                 since=since,
@@ -279,14 +403,20 @@ class Leases:
 
     # ------------------------------------------------------------- refusals
 
-    def refuse_if_leased(self, job_type: str) -> None:
-        """Refuse a job that would evict the leased model, before the lane.
+    def refuse_if_leased(self, job_type: str, model: str | None) -> None:
+        """Refuse a job that would evict the leased thing, before the lane.
 
         Called at the job door rather than inside `Residency`, which is the same
         placement `server_busy` has and for the same reason: this is an ADMISSION
         question, and admission is answered where submissions arrive. The
         residency's job is to be the authority on what is on the card, not on who
         is allowed to ask for it to change.
+
+        `model` is the job's subject, already resolved by the door. It is needed
+        because the answer is not a property of the type alone: a `tts` render of
+        the leased voice is admitted and a `tts` render of any other voice is
+        refused, and that difference is the reason a book renders chapter by
+        chapter for one load.
         """
         held = self.current()
         if held is None:
@@ -294,26 +424,25 @@ class Leases:
             # type this module has never heard of. The question below only has
             # consequences while somebody is mid-run.
             return
-        if job_type in KEEPS_THE_RESIDENT_MODEL:
-            return
-        if job_type not in EVICTS_THE_RESIDENT_MODEL:
+        if job_type not in CARD_EFFECTS:
             # A job type this module has no ruling about, asked for while a
             # lease is open. Admitting it would silently reopen the hole and
             # refusing it would report a reason nobody decided, so it says
             # exactly what is wrong. `tests/test_leases.py` proves every type
-            # this build knows is in one of the two sets, so reaching this in
-            # production means a type was added without the ruling — and that is
-            # the one moment the ambiguity costs somebody a run.
+            # this build knows has a row, so reaching this in production means a
+            # type was added without the ruling — and that is the one moment the
+            # ambiguity costs somebody a run.
             raise ApiError(
                 500,
                 "lease_scope_unknown",
                 f"{job_type!r} is a job type crucible/leases.py has no ruling "
-                "about: nothing says whether it can take the resident model off "
-                "the card, so this server cannot tell whether the open lease "
-                "should refuse it. Add it to EVICTS_THE_RESIDENT_MODEL or to "
-                "KEEPS_THE_RESIDENT_MODEL",
+                "about: nothing says what it does to the card, so this server "
+                "cannot tell whether the open lease should refuse it. Give it a "
+                "row in CARD_EFFECTS",
                 {"type": job_type},
             )
+        if not held.evicted_by(job_type, model):
+            return
         raise leased_error(held, f"a {job_type} job")
 
     def _unknown_locked(self, lease_id: str) -> ApiError:
@@ -331,8 +460,9 @@ class Leases:
                 404,
                 "unknown_lease",
                 f"lease {lease_id} is no longer open: {why}. Take a new one with "
-                f"POST /v1/models/{lease.model}/lease — a client may re-lease a "
-                "model it let go of, provided nobody else took it meanwhile",
+                f"POST /v1/models/{lease.subject}/lease — a client may re-lease "
+                "a thing it let go of, provided nobody else took it and it is "
+                "still resident",
                 {"lease_id": lease_id, "reason": why},
             )
         return ApiError(
@@ -347,21 +477,27 @@ class Leases:
 
 
 def leased_error(lease: Lease, what: str) -> ApiError:
-    """`409 model_leased` — the one refusal, whoever asked for it.
+    """`409 leased` — the one refusal, whoever asked for it.
 
     A loader and a second lease get the SAME code and the same details, because
-    they are the same fact: somebody has said they are mid-run on this model.
+    they are the same fact: somebody has said they are mid-run on this thing.
     Splitting it into two codes would make a client handle one shape twice.
+
+    The code is `leased` and not `model_leased` because the leased thing is a
+    voice or an aligner as often as a model, and a client branching on
+    `model_leased` while narrator holds the card would be branching on a word
+    that is not true of what it was refused for.
     """
     who = "an unnamed client" if lease.client is None else repr(lease.client)
     return ApiError(
         409,
-        "model_leased",
-        f"{lease.model!r} is leased by {who} for {lease.act!r} since "
-        f"{lease.since.isoformat()}, until at least {lease.expires_at.isoformat()} "
-        f"— so {what} is refused rather than taking the model off the card "
-        "underneath a run in progress. A lease is the client saying it intends "
-        "more work on this model; wait for it to expire or be released, or use "
-        "another server. GET /v1/activity reports it as `lease`",
+        "leased",
+        f"{lease.subject!r} (the resident {lease.noun}) is leased by {who} for "
+        f"{lease.act!r} since {lease.since.isoformat()}, until at least "
+        f"{lease.expires_at.isoformat()} — so {what} is refused rather than "
+        f"taking the {lease.noun} off the card underneath a run in progress. A "
+        f"lease is the client saying it intends more work on this {lease.noun}; "
+        "wait for it to expire or be released, or use another server. "
+        "GET /v1/activity reports it as `lease`",
         lease.to_dict(),
     )
