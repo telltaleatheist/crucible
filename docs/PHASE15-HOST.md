@@ -571,20 +571,48 @@ everything we have configured for mac bookforge."*
 
 The Mac needs no host: `mlx-darwin` is a native backend, launchd supervises it, `install.sh`
 installs it, the pairing file (3.6) connects a local app. What "out of the box" is measured
-against is `crucible doctor` on the Mac Studio, read 2026-09-14 (crucible 0.6.0, M1 Ultra
-64 GB, macOS 26.3.1): **tts (Higgs via mlx-audio 0.4.8), llm, rvc, denoise READY, all
-seven voices fit**; and three classes that are NOT served on this backend today —
-`pages`, `asr`, `align` answer "this build ships none with a mlx-darwin block". Two defects
-seen in the same read: launchd's bare PATH has no ffmpeg, so `tts` is `job_type_not_ready`
-under the service even though the env is ready (the Phase 14 PATH-in-plist fix post-dates
-the Mac's plist); and a stale `tts env (orpheus)` that the Orpheus removal must delete on
-upgrade.
+against is the Mac Studio as read on 2026-09-14 (crucible 0.6.0, M1 Ultra 64 GB, macOS
+26.3.1) and the read-only audit that followed (`docs/MAC-PARITY-AUDIT-2026-09-14.md`):
 
-Owed, in order, and NOT built in this phase until the read-only audit reports: an
-`mlx-darwin` block for `asr` (mlx-whisper), `pages` (dots.ocr under mlx-vlm — Foundry's
-Mac path answered the parser's dialect), and `align` (only if an MLX aligner genuinely exists;
-"align has no Mac engine" is an honest capability answer and a guessed block is not); the
-Mac's upgrade off conda onto the release's server pack; `service install` re-run for the PATH.
+- **Served today, healthy:** `tts` (Higgs via mlx-audio 0.4.8, all seven voices renderable),
+  `llm` (9B and 27B fit), `rvc`, `denoise`. The `job_type_not_ready: tts: no ffmpeg` line in
+  the first read was a NON-LOGIN SSH SHELL's PATH, not the service's — the plist carries
+  `/opt/homebrew/bin` and the running process has it; `doctor` reports the shell it runs in.
+  Not a defect. (One improvement it exposes, owed: `doctor` should name the SERVICE's PATH
+  beside the shell's, since it wrote the plist and can read it back.) The "stale orpheus env"
+  was two doctor rows for ONE directory (`jobenv.tts_env()` resolves every engine name to the
+  one mlx-darwin env); nothing to delete, the row is already gone at HEAD.
+- **Not served, in ascending cost:**
+  - `align` — NEARLY FREE. Qwen3-ForcedAligner is plain torch and torch-on-Metal is already
+    how `rvc` runs on this backend; BookForge's Mac env for it is built, packed, published
+    (`qwen-align-env-macos-arm64.tar.gz`) and MEASURED (97x realtime warm on MPS, bf16,
+    2026-09-08); the weights are the identical repo+revision the cuda row pins. Owed: a
+    `mlx-darwin` block with its OWN measured `memory_bytes_estimate`, the recipe as that
+    env's freeze, the CI row, and the timestamp comparison `envs/align/mlx-darwin.md` asks for.
+  - `asr` — a SECOND ENGINE (`mlx-whisper`, CTranslate2 has no Metal), a second worker, NEW
+    model ids (different weights at one id would be a lie): `mlx-community/whisper-*-mlx`,
+    seven repos measured in the audit (large-v3 2.87 GiB, turbo 1.50 GiB). Nothing on the Mac
+    runs mlx-whisper today and BookForge's Mac ASR was CPU faster-whisper, so this is the gap
+    with the least standing work behind it.
+  - `pages` — the model, package and dialect are PROVEN on that machine (Foundry's Mac route:
+    `mlx-vlm 0.6.10` + `mlx-community/dots.ocr-4bit` @ `4ab989e4…`, 3.30 GiB, 0.80% CER,
+    ~27 s/page), but `mlx-darwin`'s one engine is `mlx-lm`, a text server that cannot read an
+    image. **DECIDED here: `BACKEND_ENGINES` stops being one engine per backend and becomes
+    one engine per (backend, class-family)** — `cuda-linux` already uses vLLM for both text and
+    pages; `mlx-darwin` gets `mlx-vlm`'s own server as the `pages` engine beside `mlx-lm` for
+    text, one env holding both (mlx-vlm's pins are satisfied by `envs/llm/mlx-darwin.txt`).
+    The lease and the four facts are per resident, not per engine, so nothing about
+    arbitration changes; what changes is the residency knowing which server class to start.
+- **Upgrade off conda** (Phase 14 deletes the conda requirement): the Mac's three job envs are
+  venvs PARENTED on the conda env's python, so removing conda first would kill them. Order is
+  the whole risk and the audit's §3 is the checklist: release exists → service stop →
+  `install.sh` (server pack; init skipped, token kept) → `install llm|tts|rvc` from packs →
+  `service install` FROM A LOGIN SHELL → capability write → doctor → only then delete the
+  conda env. Weights, voices, config and token survive untouched. `~/.crucible/hf-token.txt`
+  is a stray Crucible never read (`[hf] token` in config.toml is the door) — move or delete.
+- Also owed from the same read: `envs/rvc/mlx-darwin.txt`'s freeze (the real install
+  happened; its substitutions verified), and the `tts` zero-shot clip on the MLX arm, still
+  never exercised.
 
 ### 4.7 The engine switch — Windows ⇄ WSL2 is a control on the page, and a task
 
