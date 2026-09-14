@@ -18,6 +18,13 @@ without regenerating is red twice rather than shipped. Unlike the lineup's
 check nothing is ignored: a module carries no provenance key and its version is
 a hash of its own content, so a drifted version IS a drifted module.
 
+THE VENDORED COPY IS NEVER EDITED. An app vendors its `<app>.module.json`
+byte for byte (Foundry beside `foundry-lineup.json`, BookForge under
+`shared/crucible/`). When an app's needs change — a new class, a different
+model — the change starts in `modules/<app>.toml` HERE and reaches the app by
+re-vendor, never by a hand edit on the copy: the copy has no generator behind
+it, so an edit there is exactly the second owner this script exists to prevent.
+
 This script deliberately does NOT touch `foundry-lineup.json`. That file has
 its own generator and its own guard, and folding them together would mean one
 command whose two halves fail for unrelated reasons.
