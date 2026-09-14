@@ -18,11 +18,30 @@ does not have adds it HERE first, in its own commit, and says so.
 
 ## 0. What is decided, and what it corrects
 
+> **AMENDED 2026-09-14, later that evening — Owen:** *"the windows side should still host GPU
+> jobs even if WSL isnt present/workable. if the user cant or wont install WSL, we can still
+> run dots, qwen 9b, or whatever else from the windows side. just like it runs from the mac
+> side. it just wont have the benefits of sglang or vllm or whatever if they dont install
+> wsl."* And: *"in an ideal world, though, dots would run from the WSL side of crucible,
+> because we can parallelize it with VLLM. it gets significantly faster. but if they dont have
+> wsl, they can use windows crucible."*
+>
+> So **Windows IS a backend: `llama-windows`**, structurally what `mlx-darwin` is — a
+> per-model engine child the server spawns, leases, settles and kills — with `llama-server`
+> (llama.cpp) as the engine and GGUF as the weights. There is no `backend_kind = "none"`.
+> "Host mode" below means *a Crucible server running natively on Windows with the
+> `llama-windows` backend*; every sentence that said "no accelerator" is struck by this block
+> and rewritten in 3.5 and 3.10. What WSL adds on top is vLLM/SGLang (parallel page reading,
+> the faster text path) and the Python job types (`tts`, `asr`, `align`, `rvc`, `denoise`).
+> **The WSL engine is the preferred one on every Windows machine that can run it**: the host
+> (section 4) offers the WSL install as the upgrade from the first day, and migrates the
+> config into the guest when it arrives, exactly as before.
+
 **One server per machine, still.** The Windows half of this phase is NOT a second Crucible and
 NOT a relay. Two processes forwarding to each other would be a fact with two owners (two
 versions, two health states, a hop on the TTS stream). The server that answers `:7100` on a
-Windows machine is the WSL one when WSL is there, and a **host-mode** server (section 3.4)
-when it is not. Never both. Apps connect to the same address either way.
+Windows machine is the WSL one when WSL is there, and a **host-mode** server (`llama-windows`,
+section 3.5) when it is not. Never both. Apps connect to the same address either way.
 
 **Windows gets a presence.** WSL has no boot: nothing starts a distro at login, so today the
 engine is down after every reboot until an app happens to poke it, and when a clean stop left
@@ -60,7 +79,7 @@ servers is per app). The pairing line. Coordinate-on-connect (PHASE14 4a).
 | **route** | where a class's work runs on THIS server: `local` (the selected local model, as today) or an **upstream**. Only the four `llm` classes (`clean translate simplify analysis`) can route upstream in this phase; every other class is `local` and refuses anything else (`route_not_routable`). |
 | **upstream** | an HTTP chat-completions service the server forwards to on the operator's account: `anthropic`, `openai`, `ollama`. Exactly these three names. An upstream is configured (has what it needs to be called) or not. |
 | **upstream model** | a model id of the form `<upstream>/<model>`, e.g. `anthropic/claude-sonnet-5`, `openai/gpt-5`, `ollama/qwen3.5:9b`. The slash is what tells a chat request apart from a local model id; a local model id never contains `/` (checked at manifest load — `manifest_model_id_slash`). |
-| **host mode** | a server with `backend_kind = "none"`: no accelerator, no card job types, only `echo` and the upstream routes. What runs natively on a Windows machine without WSL. |
+| **host mode** | a Crucible server running natively on Windows, `backend_kind = "llama-windows"`: the llm classes and `pages` served by `llama-server` children from GGUF weights (3.10), plus `echo`, the settings door and the upstream routes. The Python job types (`tts asr align rvc denoise`) need WSL2 and say so. |
 | **the host** | `crucible host`, the Windows tray process (section 4). Not a server. |
 | **pairing file** | the pairing line (PHASE13 2.1) written to a user-only file on the machine the server runs on, so an app on the same machine connects without anyone typing (section 3.6). |
 
@@ -80,9 +99,9 @@ key = "sk-…"
 url = "http://192.168.68.20:11434"   # no key; ollama is reached by address
 ```
 
-- `backend_kind` gains the value `"none"` (host mode). `crucible init --backend none` is legal
-  only on win32 and is what `crucible host` runs; on linux/darwin it is refused
-  (`backend_none_not_here`) because those machines run the real server.
+- `backend_kind` gains the value `"llama-windows"` (host mode). `crucible init --backend
+  llama-windows` is legal only on win32 and is what `crucible host` runs; on linux/darwin it is
+  refused (`backend_not_here`), and `cuda-linux`/`mlx-darwin` on win32 are refused the same way.
 - A route's value is an upstream model id. `route = "local"` and an absent key mean the same
   thing; `"local"` is never written.
 - The upstream `model` in a route is the operator's to choose; the server does not ship a
@@ -169,10 +188,11 @@ Every row gains `route`:
   when the operator routes back.
 - `job_types` (PHASE13 3.2a) is unchanged: it lists the installed job types, and an upstream
   route installs nothing.
-- **In host mode** every card class answers `enabled: false, route: "local"` with the reason
-  `this machine has no accelerator backend; on Windows the engine runs inside WSL2 — install it
-  from the console` (one sentence, the same for every class, so an app shows it once). The
-  four llm classes may still route upstream and then answer `enabled: true`.
+- **In host mode** the llm classes and `pages` answer from the `llama-windows` fit table
+  (3.10: GGUF sizes against free VRAM, or the CPU sentence). The Python-job classes (`tts asr
+  align rvc denoise`) answer `enabled: false, route: "local"` with the one reason `this job
+  type needs the WSL2 engine (vLLM/SGLang); install it from the console`, the same sentence
+  for all five so an app shows it once. The four llm classes may still route upstream.
 
 ### 3.4 Chat completions forward to an upstream
 
@@ -203,22 +223,30 @@ Now:
   with the sentence "an upstream model is never resident; send the chat". Same for
   `{"type": "load-model"}` naming one.
 
-### 3.5 Host mode
+### 3.5 Host mode — the `llama-windows` backend
 
-- `crucible serve` no longer refuses win32 outright. `main()`'s refusal narrows to: on win32,
-  every verb runs, and `backend_kind` must be `"none"` — a config naming `cuda-linux` on win32
-  is refused `backend_not_here` (the CLI and the doctor both), because **Windows is never a
-  backend** and this keeps the sentence true.
-- Host mode has: `echo`, the settings door, the page, `/v1/setup`, `/v1/capability` (3.3's
-  host answer), `/v1/info` with `backend_kind: "none"`, chat completions to upstreams. It has no
-  `install` task (refused `no_backend`), no catalog subjects (`/v1/catalog` returns empty lists
-  and `backend_kind: "none"`), no accelerator (`/v1/accelerator` → `no_backend`), no lease.
-- `crucible doctor` in host mode prints the one line "backend: none — host mode on
-  windows/x86_64; the accelerator engine runs inside WSL2 (see `crucible host`)", then the
-  upstream lines.
-- Nothing in host mode is a stopgap for WSL. When WSL arrives, the host (section 4) moves the
-  config — token, routes, upstreams — into the guest and STOPS the host-mode server. The token
-  survives the move, so every app that paired stays paired.
+- `crucible serve` no longer refuses win32. `main()`'s refusal narrows to: on win32 every verb
+  runs and `backend_kind` must be `"llama-windows"`; any other kind on win32, or
+  `llama-windows` off win32, is `backend_not_here`, because a backend runs where its engine
+  runs and nowhere else.
+- `llama-windows` is a backend in the full sense `mlx-darwin` is: the residency, the lease,
+  the four facts and `settle.py`'s unload ruling all apply; a resident model IS a running
+  `llama-server` child; `load-model` spawns it, unload kills it; one child at a time. The
+  catalog for this backend lists GGUF variants (3.10 says which); `install` installs the
+  engine (the `engine` subject, 3.10) — there is no Python env pack for it, so `crucible
+  install llm` / `install pages` on this backend fetch the engine and nothing else, and
+  `install tts` (etc.) is refused `needs_wsl` with the sentence from 3.3.
+- Host mode has everything else this phase and the previous ones give a server: the
+  settings door, the page, `/v1/setup`, `/v1/catalog`, tasks, `/v1/accelerator` (nvidia-smi,
+  or `cpu` with the machine's RAM as the figure), `/v1/activity`, chat completions to a
+  resident child or to an upstream.
+- `crucible doctor` in host mode prints `backend: llama-windows on windows/x86_64 — llama.cpp
+  <tag> (cuda-12.4 | cpu)`, then the engine line, then the upstream lines.
+- Nothing in host mode is a stopgap for WSL, and WSL is the better engine (section 0's block:
+  parallel page reading under vLLM, the faster text path, the five Python job types). When WSL
+  arrives, the host (section 4) moves the config — token, routes, upstreams — into the guest
+  and STOPS the Windows server; its GGUF weights are deleted with it (the guest pulls its
+  own). The token survives the move, so every app that paired stays paired.
 
 ### 3.6 The pairing file
 
@@ -274,7 +302,9 @@ upstream's routed model / "an upstream model…" free text), three upstream card
 + Test + Save, OpenAI key + Test + Save, Ollama url + Test + Save; a configured card shows the
 hint and a Remove), the desktop allowance. Every control is a `PUT /v1/settings`; the panel
 re-reads the document the PUT returns. No local state. In host mode the page's Status panel
-says "host mode — no accelerator on this machine" and Job types / Catalog say what 3.5 says.
+says "llama-windows (llama.cpp <tag>, cuda | cpu) — install the WSL2 engine for faster page
+reading and text, and for TTS, ASR, alignment, RVC and denoise", and Job types / Catalog say
+what 3.5 says.
 
 ### 3.8 The SDK (`@crucible/client`)
 
@@ -289,7 +319,7 @@ Tests for each.
 pytest: settings GET/PUT with every refusal; key never in any response, log line or activity
 record; recompute-on-write; chat forwarding for each of the three upstreams against a fake
 upstream (streaming and not; Anthropic shape translation incl. system, max_tokens audit and
-tool-forced JSON); host mode's answers for every route above; `backend_not_here`; the pairing
+tool-forced JSON); host mode's answers for every class above; `backend_not_here`; `needs_wsl`; the pairing
 file. sdk/ts: the four methods and the types. The count goes UP from 1234 and is reported.
 
 ### 3.10 `llama-windows`: page reading on a Windows box without WSL (RULED 2026-09-14, evening)
@@ -305,14 +335,27 @@ model is the engine's, even on a CPU-only laptop (allowed, slow, and the capabil
 so). Rasterising, parsing, EPUB assembly stay in the app. (Foundry's NLI analysis worker falls
 on the engine's side of that line too — its own class, a later phase, noted in 6.)
 
-**What it is.** Host mode gains one small backend, `llama-windows`: a `llama-server` child the
-host-mode server spawns and kills, serving the `pages` class from the dots.ocr GGUF pair. It is
-NOT a Python env, NOT a pack, has no lease table of its own (one child at a time IS the
-arbitration; the host-mode server has no other card work), and it never serves `tts/asr/
-align/rvc/denoise`. `backend_kind` for such a server is still `"none"`; the child is a property
-of host mode, reported in `/v1/info` as `pages_engine: "llama-windows"`. The spec is Foundry's
-working launcher, handed over at `C:\tmp\foundry-page-reader-spec\` (README first — eight
-load-bearing facts; `page-reader.ts`'s header argues every constant).
+**What it is (as amended by section 0's block).** `llama-windows` is the Windows BACKEND:
+`backend_kind = "llama-windows"`, a `llama-server` child per resident model, spawned by
+`load-model`, leased and settled like any resident, killed on unload. It serves the four llm
+classes from GGUF text models and `pages` from the dots.ocr GGUF pair — dots first because
+Foundry's launcher is the spec, the text models by the same mechanism in the same build. It
+is NOT a Python env and NOT a pack (the engine is a zip from llama.cpp's release, the `engine`
+subject below), and it never serves `tts/asr/align/rvc/denoise` (those are Python job types;
+WSL). The spec is Foundry's working launcher, handed over at
+`C:\tmp\foundry-page-reader-spec\` (README first — eight load-bearing facts;
+`page-reader.ts`'s header argues every constant).
+
+**The catalog for `llama-windows`** (its own block per manifest, like `mlx-darwin`'s): `dots-ocr`
+→ the GGUF pair in fact 2; `qwen3.5-9b` → a Q8_0 GGUF of the same weights the `cuda-linux`
+row names; `qwen3.8-27b` → a Q4_K_M GGUF (the 27B on a 24 GB card only fits at 4-bit, which is
+the same binary-per-server sentence `translate` already carries). Each row records the HF repo,
+revision, file name(s), bytes and the floor, read from the repo once and recorded — the agent
+that lands this picks the repos, states them in section 7, and the manifests are the one
+owner. Fit is the row's floor against free VRAM; with no NVIDIA the row is `enabled: true` with
+the reason "cpu build — slow; runs on this machine's CPU" (Owen: a Crucible server runs on
+anything). A model whose GGUF is not published is simply absent from this backend's block —
+never a guessed row.
 
 **What Crucible decides that the app used to** (README's last section): whether this machine
 can bear it (the capability row: NVIDIA + free VRAM ≥ the row's floor → `enabled: true,
@@ -361,8 +404,9 @@ go.
    small card. Both recorded in section 7 by whoever runs it first; the doc says
    "unmeasured" until then, never a guessed number.
 
-**Exit for Foundry's package L:** `pages` answers `enabled: true` from a host-mode server on a
-clean no-WSL Windows box and a real page comes back parsed. Then `page-reader.ts` and every
+**Exit for Foundry's package L:** `pages` answers `enabled: true` from a `llama-windows` server
+on a clean no-WSL Windows box and a real page comes back parsed; for text, `clean` answers the
+same way from the 9B GGUF or an upstream. Then `page-reader.ts` and every
 "can this machine do it" line in Foundry go.
 
 ## 4. The host — `crucible host` on Windows
@@ -431,10 +475,10 @@ dependency) and its target is `pythonw.exe -m crucible.cli host`, not the `.cmd`
 
 ### 4.2 The menu
 
-`Crucible — running (WSL)` / `running (host mode)` / `stopped` / `installing…` as the title
+`Crucible — running (WSL)` / `running (llama-windows)` / `stopped` / `installing…` as the title
 line, then: **Open console** (the pairing line's URL with `#token=`, PHASE13 5.3 — the same
 hardened window rule applies to a browser: it is the default browser), **Install the
-accelerator engine (WSL2)…** (only when the distro is absent — runs section 4.3), **Restart
+WSL2 engine (faster pages and text; TTS, ASR…)…** (only when the distro is absent — runs section 4.3), **Restart
 engine**, **Stop engine**, **Open log**, **Quit** (stops the host; the WSL server keeps running
 because it is systemd's; in host mode the child server stops with it, and the menu says so).
 
