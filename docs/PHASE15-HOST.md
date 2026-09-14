@@ -877,6 +877,76 @@ unescaping), with a note when they differ saying that is normal. "No service
 installed" prints as `none recorded` beside where the definition would be,
 rather than as an absent line.
 
+### Mac staging — what T9 needs before the button
+
+Section 8's T9 asks the Mac's own server for `align`, `asr` and `pages` and
+then runs one job of each. None of that is true of the Mac today: its server
+runs the code from before this work, and `align` and `asr` have no env and no
+weights there. This is the exact sequence that gets it there. **Run it after
+the branch is merged, on Owen's word, and not before** — every step writes
+something on that machine.
+
+**One correction to carry into it, and it changes the method.** `docs/PLAN.md`
+records "no pack has been built on the Mac — there is no Crucible checkout on
+it". There is one: `/Volumes/Callisto/Projects/crucible`, on branch
+`feat/phase6-remote-render` at `22eccf0`, clean, with `origin` =
+`git@github-crucible:telltaleatheist/crucible.git`. The conda env `crucible`
+holds it as an **editable** install (`direct_url.json`:
+`{"editable": true, "url": "file:///Volumes/Callisto/Projects/crucible"}`), and
+`manifests_dir()` on that machine resolves to
+`/Volumes/Callisto/Projects/crucible/models`. So the Mac does not need a wheel
+built, scp'd and installed: **a `git pull` IS the deploy**, and it carries the
+manifests, the recipes and the new worker with it, because all three live
+beside the package rather than inside it. A wheel would in fact be worse than
+useless here — `[tool.setuptools.packages.find] include = ["crucible*"]` ships
+the package and `crucible/ui/` and nothing else, so a wheel install has no
+`models/`, no `asr/`, no `align/` and no `envs/`, and `manifests_dir()` refuses
+by name.
+
+Every command below is one `ssh mac '<cmd>'` unless it says otherwise. The env
+prefix `$C` is `/opt/homebrew/Caskroom/miniconda/base/envs/crucible` and `$R`
+is `/Volumes/Callisto/Projects/crucible`.
+
+| # | command | what it changes on the Mac |
+|---|---|---|
+| **M0** | `mount \| grep Callisto; /usr/bin/git -C $R status --short; launchctl list \| grep com.crucible` | **Nothing.** The three preconditions, checked before anything is written: the volume the editable install points at is mounted, the checkout is clean (a dirty checkout means somebody is working there and `--ff-only` will refuse anyway), and the service is loaded. A missing Callisto is the one failure that looks like a broken Crucible and is not. |
+| **M1** | `/usr/bin/git -C $R fetch origin && /usr/bin/git -C $R checkout <merged-branch> && /usr/bin/git -C $R pull --ff-only origin <merged-branch>` | **The code.** New: `envs/align/mlx-darwin.txt`, `envs/asr/mlx-darwin.txt`, seven `asr/mlx-whisper-*.toml`, `crucible/jobs/asr/mlx_worker.py`, `crucible/engines/mlx_vlm.py`. Changed: `align/qwen3-aligner.toml`, `envs/rvc/mlx-darwin.txt`, the loaders. No `pip install` — the install is editable, `pyproject.toml`'s dependencies are untouched by this work, and a `pip install -e .` would only rewrite a `.pth` that is already right. (If a later branch DOES change `[project] dependencies`, that is the one case: `$C/bin/python -m pip install -e $R`.) |
+| **M2** | `launchctl kickstart -k gui/501/com.crucible.serve` | **Restarts the server** on the new code. `-k` kills the running one first; `RunAtLoad` and the plist are untouched, so this is a restart and not a reinstall — in particular the **recorded PATH and the token are not rewritten**, which is exactly what must not happen here (`crucible service install` would rewrite the PATH with whatever shell ran it, and `ssh mac '<cmd>'` is the bare one). |
+| **M3** | `sleep 5; curl -s -H "Authorization: Bearer $(grep token $HOME/.crucible/config.toml \| cut -d\" -f2)" http://127.0.0.1:7100/v1/info \| head -c 400` | **Nothing.** Proves M1+M2 took: the server answers, and `capabilities` now lists `asr` with thirteen model ids where it listed six. If it does not answer, `tail ~/.crucible/logs/serve.log` says why and nothing below should be run. |
+| **M4** | `$C/bin/crucible install align --build --verbose` | **Builds `~/.crucible/envs/align/`** (a venv on the conda env's python) from `envs/align/mlx-darwin.txt` — 92 pins, ~2 GB with torch 2.14.0. `--build` is REQUIRED and not a preference: no release publishes an `align/mlx-darwin` pack yet (this branch adds the CI row; the pack appears on the next tag), so a plain `crucible install align` refuses `pack_not_published`. On success the command also **writes `[jobs] enable_align = true` into `config.toml`**, which is how the flag gets turned on — do not hand-edit it. |
+| **M5** | `$C/bin/crucible install asr --build --verbose` | **Builds `~/.crucible/envs/asr/`** from `envs/asr/mlx-darwin.txt` — 34 pins, ~2 GB (mlx-whisper declares torch). Same `--build` reason, same flag write (`enable_asr = true`). Its headline package is `mlx-whisper`, not `faster-whisper`; a doctor that says otherwise means M1 did not take. |
+| **M6** | `$C/bin/crucible models pull qwen3-aligner` | **~1.84 GB into `~/.crucible/models/qwen3-aligner/mlx-darwin/`** plus a `crucible-pull.json` stamp at revision `c7cbfc20…`. **It will re-download even though the snapshot is already in `~/.cache/huggingface/hub`**: `weights.pull` passes `local_dir=`, which writes the tree directly and does not read the shared cache. That is a network cost, not a defect, and it is the reason this step is minutes rather than seconds. |
+| **M7** | `$C/bin/crucible models pull mlx-whisper-large-v3-turbo` | **~1.61 GB into `~/.crucible/models/mlx-whisper-large-v3-turbo/mlx-darwin/`** at `a4aaeec0…`. **Turbo and not large-v3**, deliberately: measured at 25.4x realtime against large-v3's 6.3x for the same encoder, so T9's asr job finishes in a quarter of the time and proves exactly as much. Pull `mlx-whisper-large-v3` too only if T9 is meant to measure accuracy, which it is not. |
+| **M8** | *(skip — see below)* `$C/bin/crucible models pull dots-ocr` | **Would fetch ~3.5 GB and light nothing.** `models/dots-ocr.toml` has no `mlx-darwin` block, so the pull refuses `backend_unsupported` by name. Leave it out of the staging run; the page half of T9 cannot pass on this machine and the next row says what to do instead. |
+| **M9** | `$C/bin/crucible capability --write` | **Rewrites the `[capability]` record in `config.toml`** — the classes, the selected id per class and the reason. After M4–M7 this is what turns `align` and `asr` from "this build ships none with a mlx-darwin block" into `yes`, with `qwen3-aligner` and `mlx-whisper-large-v3-turbo` selected (best-first by declared size; turbo wins only if large-v3 was not pulled — if both are installed the record will name `mlx-whisper-large-v3`, which is correct and slower). |
+| **M10** | from a **login** shell: `ssh mac -t 'bash -lc "$C/bin/crucible doctor"'` | **Nothing.** The verification, and `-t 'bash -lc'` is not decoration: a plain `ssh mac '<cmd>'` gets `/usr/bin:/bin:/usr/sbin:/sbin` and would report `job tts: NOT READY — there is no ffmpeg on PATH` on a perfectly healthy host. Since this branch, the doctor prints **both** PATHs, so a run from either shell now shows the discrepancy rather than being misled by it. Expect `align env: ready`, `asr env: ready — mlx-whisper 0.4.3, …`, `capability align: yes`, `capability asr: yes`, and `healthy`. |
+
+**Then T9, with one stage of it struck.** `align` and `asr` will answer: submit
+one align job and one asr job against the Mac's server and record the figures
+(this repo's own measurements, for comparison: the aligner runs at about 77x
+realtime warm on 300-second chunks, `mlx-whisper-large-v3-turbo` at 25.4x on a
+900-second window).
+
+**`pages` will report `no` on the Mac and T9's third artifact cannot be
+produced.** That is not a staging failure and no amount of installing fixes it:
+`models/dots-ocr.toml` has no `mlx-darwin` block because mlx-vlm's own HTTP
+server does not put the image into the prompt (the run is above, in this
+section). T9 should be amended to two artifacts on the Mac, with the page
+reading proved on `cuda-linux` by T6 and on `llama-windows` by T7 as it already
+is. If the button is meant to *demonstrate* the Mac reading a page anyway, the
+only honest way today is Foundry's in-process `mlx-local` route, which is a
+different program and not Crucible answering.
+
+**What the staging does NOT do, and each is deliberate.** It does not run
+`crucible service install` (that would rewrite the recorded PATH from a
+non-login shell — the exact bug the audit found). It does not touch
+`~/.crucible/config.toml`'s token, `voices/`, `rvc/` or the three existing
+envs. It does not start the conda removal from the audit's §3 — that is a
+separate, ordered operation and doing it in the same session would put a 3 GB
+env rebuild in the middle of a test run. And it installs nothing on the Mac
+outside `~/.crucible/envs/{align,asr}` and `~/.crucible/models/`, both of which
+`crucible` owns.
+
 ### What a Mac still cannot do, and it is not on this list by accident
 
 `pages`, until the mlx-vlm defect above is fixed. Everything else in 4.6's
