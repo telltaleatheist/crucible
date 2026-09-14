@@ -218,6 +218,14 @@ Every row gains `route`:
   exactly the `model` an app sends to `/v1/openai/chat/completions`.
 - `reason` keeps the LOCAL sentence after "the local answer would be:", so nothing is lost
   when the operator routes back.
+- **How a client reads `route`, pinned for both apps (settled with Foundry 2026-09-14):** a
+  capability document in which NO row carries `route` comes from a server that predates this
+  phase, and every class on such a server IS local — that is a fact the document states, not
+  a default the client fills, and both apps read it as `local` (BookForge's helper and
+  Foundry's package K alike). A document in which SOME rows carry `route` and one does not is
+  a defect and is refused by name (`capability_route_missing`, naming the row); a row whose
+  `route` is present and not `local` | `upstream` is refused `capability_route_unknown`. API
+  version stays 1: the field is additive.
 - `job_types` (PHASE13 3.2a) is unchanged: it lists the installed job types, and an upstream
   route installs nothing.
 - **In host mode** the llm classes and `pages` answer from the `llama-windows` fit table
