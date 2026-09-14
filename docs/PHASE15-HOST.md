@@ -43,6 +43,16 @@ versions, two health states, a hop on the TTS stream). The server that answers `
 Windows machine is the WSL one when WSL is there, and a **host-mode** server (`llama-windows`,
 section 3.5) when it is not. Never both. Apps connect to the same address either way.
 
+**Control is Windows's; data is the card's (Owen, 2026-09-14: "the windows side will always
+configure the WSL side. the WSL side just orchestrates commands on behalf of windows").** The
+host on Windows is the ONLY thing that installs, starts, stops, updates and reconfigures the
+WSL engine — one install, one page, one config, one version, and the guest has no installer
+and no configuration page of its own. What Windows does NOT do is sit in the request path:
+the server that runs the card answers the apps directly on `:7100`, because a relay would be
+two server processes with two versions and two health states and a byte-copying hop on every
+stream, for nothing an app can see. The apps' contract is one address and one token either
+way.
+
 **Windows gets a presence.** WSL has no boot: nothing starts a distro at login, so today the
 engine is down after every reboot until an app happens to poke it, and when a clean stop left
 it down at 16:10 nothing noticed. The only process that can own "the engine is running" is one
@@ -443,6 +453,13 @@ the notification area. It is the front door Owen asked for. It owns exactly four
   recipes found on 2026-09-14 in order and by name: `systemctl --user start crucible`; if the
   user bus is absent, `systemctl restart user@1000` as root (`wsl -d crucible -u root`). If
   neither brings it up the tray shows "engine did not start — open the log", never a spinner.
+- **The LAN door.** The WSL server binds loopback and reaches the LAN only through a
+  Windows-side forward, so the host owns it: when the WSL engine is active the host keeps a
+  `netsh interface portproxy` (or WSL mirrored networking where present — the host detects
+  which, by name) from the machine's LAN addresses on `7100` to the guest, and removes it when
+  the engine stops. This is what makes `/v1/setup`'s LAN pairing lines true on Windows without
+  the user touching netsh; it needs admin once, prompted by name with the sentence that says
+  why.
 - **Watch.** `GET /v1/ping` every 15 s. Down → the same recipe once, then the tray state
   "engine stopped" with a Start item. It never loops on restart; the systemd unit's own
   `Restart=` handles crashes. (RULING RECORDED HERE: `service.py` moves to `Restart=always`
