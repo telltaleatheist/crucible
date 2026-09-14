@@ -91,6 +91,11 @@ LAUNCHD_LABEL = "com.crucible.serve"
 #: How long systemd waits before restarting a crashed server.
 RESTART_SECONDS = 5
 
+#: The console script `pip install -e .` puts beside the interpreter. **The unit
+#: runs THIS and never `python -m crucible`**, and that is not a style choice —
+#: see `console_script`.
+CONSOLE_SCRIPT = "crucible"
+
 
 class ServiceError(CrucibleError):
     """A service could not be installed, started, stopped or read. Names which."""
@@ -136,6 +141,49 @@ def definition_path(mechanism: str, home: Path) -> Path:
     if mechanism == LAUNCHD:
         return plist_path(home)
     raise ServiceError(f"there is no service mechanism called {mechanism!r}")
+
+
+def console_script(executable: str) -> str:
+    """The `crucible` console script beside this interpreter, or a refusal.
+
+    **MEASURED, on Owen's PC, 2026-09-13, by installing the unit this module's
+    first version generated.** It ran `python -m crucible serve`, and it
+    crash-looped:
+
+        ImportError: cannot import name 'load_all_voices' from
+        'crucible.voices' (unknown location)
+
+    A systemd user unit with no `WorkingDirectory` starts in `$HOME`, and
+    `$HOME` on that box holds the Linux checkout — a directory called
+    `crucible`. `python -m` puts the cwd on `sys.path`, so `crucible.voices`
+    resolved to `~/crucible/voices/`, the manifest DIRECTORY, as a namespace
+    package with `__file__ is None`, instead of to `crucible/voices.py`.
+    Reproduced exactly: from `$HOME`, `import crucible.voices` gives `__file__
+    None`; from `/` it gives the real module.
+
+    A console script cannot do that. Its `sys.path[0]` is the script's own
+    directory, never the cwd, so what it imports does not depend on where it was
+    started. `WorkingDirectory` is set as well (see the generators) — belt and
+    braces, because the two failures are different: one is about imports, the
+    other about where a relative path in a log line lands.
+
+    Refused by name when it is not there, rather than falling back to `python
+    -m`: a fallback here reinstates precisely the bug above, on the machine
+    where the checkout is in the home directory, which is the machine that has
+    it.
+    """
+    path = Path(executable).parent / CONSOLE_SCRIPT
+    if not path.is_file():
+        raise ServiceError(
+            f"there is no `{CONSOLE_SCRIPT}` console script at {path}. A service "
+            f"must run it rather than `{executable} -m crucible`, because `-m` "
+            "puts the working directory on sys.path and a user unit starts in "
+            "$HOME — where a directory named `crucible` (the checkout) shadows "
+            "the installed package and the server dies on an import. Install the "
+            f"package into the env that owns {executable} (`pip install -e .`) "
+            "and run this again"
+        )
+    return str(path)
 
 
 def mechanism_for(backend_kind: str) -> str:
@@ -234,13 +282,24 @@ def _one_line(where: str, value: str) -> str:
 def systemd_unit_text(
     *,
     server_name: str,
-    executable: str,
+    program: str,
     crucible_home: Path,
     host: str,
     port: int,
     path_value: str,
 ) -> str:
     """`~/.config/systemd/user/crucible.service`, exactly.
+
+    `program` is the **console script**, never `<python> -m crucible`. The
+    difference is an ImportError on Owen's PC and `console_script` is where the
+    whole finding is written down.
+
+    `WorkingDirectory` is `CRUCIBLE_HOME` and not the operator's `$HOME`, which
+    is where a user unit otherwise starts. A server's cwd should be its own
+    state directory: it is the only directory it owns, it is where every
+    relative path it writes belongs, and `$HOME` is a place whose contents
+    change with what the operator happens to have checked out — which is exactly
+    how the import bug above happened.
 
     `Restart=on-failure` and not `always`: a server that exited 0 was stopped on
     purpose, and restarting it would make `crucible service stop` a thing that
@@ -264,7 +323,8 @@ def systemd_unit_text(
         "\n"
         "[Service]\n"
         "Type=simple\n"
-        f"ExecStart={escape('the interpreter path', executable)} -m crucible serve"
+        f"WorkingDirectory={escape('CRUCIBLE_HOME', str(crucible_home))}\n"
+        f"ExecStart={escape('the crucible console script', program)} serve"
         f" --host {escape('the bind host', host)} --port {int(port)}\n"
         f"Environment=CRUCIBLE_HOME={escape('CRUCIBLE_HOME', str(crucible_home))}\n"
         f"Environment=PATH={escape('PATH', path_value)}\n"
@@ -278,7 +338,7 @@ def systemd_unit_text(
 
 def launchd_plist_text(
     *,
-    executable: str,
+    program: str,
     crucible_home: Path,
     host: str,
     port: int,
@@ -286,6 +346,11 @@ def launchd_plist_text(
     log_path: Path,
 ) -> str:
     """`~/Library/LaunchAgents/com.crucible.serve.plist`, exactly.
+
+    `program` is the console script and `WorkingDirectory` is `CRUCIBLE_HOME`,
+    both for `systemd_unit_text`'s reasons — a launchd agent's default cwd is
+    `/`, which does not have the PC's import problem today but is not a promise
+    anybody made, and a server's cwd is its own state directory either way.
 
     `KeepAlive` is a dict with `SuccessfulExit` false rather than a bare `<true/>`
     for `systemd_unit_text`'s reason: restart a crash, leave a deliberate stop
@@ -296,9 +361,7 @@ def launchd_plist_text(
     interleaved is the only way to see which request produced it.
     """
     arguments = [
-        _one_line("the interpreter path", executable),
-        "-m",
-        "crucible",
+        _one_line("the crucible console script", program),
         "serve",
         "--host",
         _one_line("the bind host", host),
@@ -334,6 +397,8 @@ def launchd_plist_text(
         "    <key>SuccessfulExit</key>\n"
         "    <false/>\n"
         "  </dict>\n"
+        "  <key>WorkingDirectory</key>\n"
+        f"  <string>{xml_escape(str(crucible_home))}</string>\n"
         "  <key>StandardOutPath</key>\n"
         f"  <string>{xml_escape(_one_line('the log path', str(log_path)))}</string>\n"
         "  <key>StandardErrorPath</key>\n"
@@ -559,6 +624,11 @@ def install(
 ) -> list[str]:
     """Write the definition and make the service run. Idempotent.
 
+    `executable` is the interpreter this process is running under, and what goes
+    into the definition is the **`crucible` console script beside it**, resolved
+    and refused by name here rather than assembled in the text generators — see
+    `console_script` for the ImportError that made that the rule.
+
     `path_value` defaults to the **installing shell's** PATH, which is the whole
     point of recording one — see the module docstring. It is a parameter so a
     test can pin it, not so a caller can invent one.
@@ -572,6 +642,7 @@ def install(
     # is the one owner of this fact, and a `from … import` here would make a
     # second one that nothing could replace or correct.
     recorded = hosttools.search_path() if path_value is None else path_value
+    program = console_script(executable)
     lines: list[str] = []
 
     if mechanism == SYSTEMD:
@@ -579,7 +650,7 @@ def install(
             unit_path(home),
             systemd_unit_text(
                 server_name=server_name,
-                executable=executable,
+                program=program,
                 crucible_home=crucible_home,
                 host=host,
                 port=port,
@@ -598,6 +669,7 @@ def install(
             f"systemd would not enable and start {UNIT_NAME}",
         )
         lines.append(f"enabled and started {UNIT_NAME}")
+        lines.append(f"runs: {program} serve")
         lines.append(f"PATH recorded: {recorded}")
         linger = read_linger(runner, user if user is not None else getpass.getuser())
         who = user if user is not None else getpass.getuser()
@@ -629,7 +701,7 @@ def install(
         path = write_definition(
             plist_path(home),
             launchd_plist_text(
-                executable=executable,
+                program=program,
                 crucible_home=crucible_home,
                 host=host,
                 port=port,
@@ -661,6 +733,7 @@ def install(
             f"launchd loaded {LAUNCHD_LABEL} but would not start it",
         )
         lines.append(f"loaded and started {LAUNCHD_LABEL} in {_domain()}")
+        lines.append(f"runs: {program} serve")
         lines.append(f"PATH recorded: {recorded}")
         lines.append(f"stdout and stderr: {log_path}")
         return lines
@@ -777,6 +850,7 @@ def stop(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
 
 
 __all__ = [
+    "CONSOLE_SCRIPT",
     "LAUNCHD",
     "LAUNCHD_LABEL",
     "Ran",
@@ -786,6 +860,7 @@ __all__ = [
     "ServiceError",
     "Status",
     "UNIT_NAME",
+    "console_script",
     "definition_path",
     "install",
     "launchd_plist_text",

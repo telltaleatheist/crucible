@@ -73,6 +73,20 @@ def user_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+def env_bin(home: Path, *, with_script: bool = True) -> Path:
+    """An env's `bin/` holding an interpreter and the `crucible` console script.
+
+    Both files, because `install` resolves the script from the interpreter's
+    directory and refuses by name when it is not there.
+    """
+    directory = home / "env" / "bin"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    if with_script:
+        (directory / "crucible").write_text("#!/bin/sh\n", encoding="utf-8")
+    return directory
+
+
 # ------------------------------------------------------- the generated text
 
 
@@ -84,7 +98,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/home/telltale/anaconda3/envs/crucible/bin/python -m crucible serve --host 127.0.0.1 --port 7100
+WorkingDirectory=/home/telltale/.crucible
+ExecStart=/home/telltale/anaconda3/envs/crucible/bin/crucible serve --host 127.0.0.1 --port 7100
 Environment=CRUCIBLE_HOME=/home/telltale/.crucible
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Restart=on-failure
@@ -99,7 +114,7 @@ def test_the_systemd_unit_is_exactly_this() -> None:
     assert (
         service.systemd_unit_text(
             server_name="crucible@owens-pc",
-            executable="/home/telltale/anaconda3/envs/crucible/bin/python",
+            program="/home/telltale/anaconda3/envs/crucible/bin/crucible",
             crucible_home=Path("/home/telltale/.crucible"),
             host="127.0.0.1",
             port=7100,
@@ -107,6 +122,15 @@ def test_the_systemd_unit_is_exactly_this() -> None:
         )
         == EXPECTED_UNIT
     )
+
+
+def test_the_unit_never_runs_python_dash_m() -> None:
+    """MEASURED on the PC: `python -m crucible` from a user unit started in
+    $HOME, which holds a checkout directory named `crucible`, and `-m` put the
+    cwd on sys.path — so `crucible.voices` resolved to the manifest DIRECTORY
+    and the unit crash-looped on an ImportError."""
+    assert "-m crucible" not in EXPECTED_UNIT
+    assert "WorkingDirectory=/home/telltale/.crucible" in EXPECTED_UNIT
 
 
 EXPECTED_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
@@ -117,9 +141,7 @@ EXPECTED_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
   <string>com.crucible.serve</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/telltale/miniforge3/envs/crucible/bin/python</string>
-    <string>-m</string>
-    <string>crucible</string>
+    <string>/Users/telltale/miniforge3/envs/crucible/bin/crucible</string>
     <string>serve</string>
     <string>--host</string>
     <string>127.0.0.1</string>
@@ -140,6 +162,8 @@ EXPECTED_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
     <key>SuccessfulExit</key>
     <false/>
   </dict>
+  <key>WorkingDirectory</key>
+  <string>/Users/telltale/.crucible</string>
   <key>StandardOutPath</key>
   <string>/Users/telltale/.crucible/logs/serve.log</string>
   <key>StandardErrorPath</key>
@@ -154,7 +178,7 @@ EXPECTED_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 def test_the_launchd_plist_is_exactly_this() -> None:
     assert (
         service.launchd_plist_text(
-            executable="/Users/telltale/miniforge3/envs/crucible/bin/python",
+            program="/Users/telltale/miniforge3/envs/crucible/bin/crucible",
             crucible_home=Path("/Users/telltale/.crucible"),
             host="127.0.0.1",
             port=7100,
@@ -170,7 +194,7 @@ def test_a_percent_in_a_systemd_value_is_doubled() -> None:
     something else entirely."""
     text = service.systemd_unit_text(
         server_name="crucible@box",
-        executable="/opt/py",
+        program="/opt/env/bin/crucible",
         crucible_home=Path("/home/o/100%/.crucible"),
         host="127.0.0.1",
         port=7100,
@@ -181,7 +205,7 @@ def test_a_percent_in_a_systemd_value_is_doubled() -> None:
 
 def test_a_plist_value_is_xml_escaped() -> None:
     text = service.launchd_plist_text(
-        executable="/opt/py",
+        program="/opt/env/bin/crucible",
         crucible_home=Path("/Users/o/a&b"),
         host="127.0.0.1",
         port=7100,
@@ -197,7 +221,7 @@ def test_a_line_break_in_a_value_is_refused_not_stripped(value: str) -> None:
     with pytest.raises(service.ServiceError) as caught:
         service.systemd_unit_text(
             server_name="crucible@box",
-            executable="/opt/py",
+            program="/opt/env/bin/crucible",
             crucible_home=Path("/home/o/.crucible"),
             host="127.0.0.1",
             port=7100,
@@ -229,7 +253,7 @@ def install_systemd(home: Path, runner: Runner, **overrides: Any) -> list[str]:
     options: dict[str, Any] = {
         "home": home,
         "server_name": "crucible@owens-pc",
-        "executable": "/opt/py",
+        "executable": str(env_bin(home) / "python"),
         "crucible_home": home / ".crucible",
         "host": "127.0.0.1",
         "port": 7100,
@@ -246,7 +270,8 @@ def test_install_writes_the_unit_reloads_and_enables(user_home: Path) -> None:
     lines = install_systemd(user_home, runner)
     unit = service.unit_path(user_home)
     assert unit.is_file()
-    assert "ExecStart=/opt/py -m crucible serve --host 127.0.0.1 --port 7100" in (
+    script = env_bin(user_home) / "crucible"
+    assert f"ExecStart={script} serve --host 127.0.0.1 --port 7100" in (
         unit.read_text(encoding="utf-8")
     )
     assert runner.calls[0] == ("systemctl", "--user", "daemon-reload")
@@ -275,6 +300,30 @@ def test_install_records_crucible_home_so_the_service_serves_one_config(
     install_systemd(user_home, runner, crucible_home=Path("/tmp/crucible-a1"))
     unit = service.unit_path(user_home).read_text(encoding="utf-8")
     assert "Environment=CRUCIBLE_HOME=/tmp/crucible-a1" in unit
+    # …and the cwd is that same directory, not the operator's $HOME, which is
+    # where the PC's ImportError came from.
+    assert "WorkingDirectory=/tmp/crucible-a1" in unit
+
+
+def test_install_refuses_when_there_is_no_console_script(user_home: Path) -> None:
+    """No fallback to `python -m crucible`: that is exactly the bug."""
+    bin_dir = env_bin(user_home, with_script=True)
+    (bin_dir / "crucible").unlink()
+    with pytest.raises(service.ServiceError) as caught:
+        service.install(
+            service.SYSTEMD,
+            home=user_home,
+            server_name="crucible@owens-pc",
+            executable=str(bin_dir / "python"),
+            crucible_home=user_home / ".crucible",
+            host="127.0.0.1",
+            port=7100,
+            runner=Runner(LINGER_ON),
+            path_value=PATH_VALUE,
+        )
+    message = str(caught.value)
+    assert "console script" in message
+    assert "sys.path" in message
 
 
 def test_install_prints_the_exact_linger_command_when_it_is_off(
@@ -315,7 +364,7 @@ def install_launchd(home: Path, runner: Runner, **overrides: Any) -> list[str]:
     options: dict[str, Any] = {
         "home": home,
         "server_name": "crucible@studio",
-        "executable": "/opt/py",
+        "executable": str(env_bin(home) / "python"),
         "crucible_home": home / ".crucible",
         "host": "127.0.0.1",
         "port": 7100,
@@ -567,11 +616,19 @@ def test_cli_service_install_writes_the_unit_for_this_config(
     capsys.readouterr()
     runner = Runner(LINGER_ON)
     monkeypatch.setattr(service, "subprocess_runner", runner)
+    # The console script is resolved from `sys.executable`, and whether the
+    # interpreter running the suite has one beside it is a fact about the
+    # machine rather than about this wiring. Pinned so the test asserts what
+    # the CLI PASSES, not what pip happened to install.
+    script = str(env_bin(user_home) / "crucible")
+    monkeypatch.setattr(service, "console_script", lambda executable: script)
     assert cli.main(["service", "install"]) == 0
     unit = service.unit_path(user_home).read_text(encoding="utf-8")
     config = load_config(home)
+    assert f"ExecStart={script} serve" in unit
     assert f"--host {config.host} --port {config.port}" in unit
     assert f"Environment=CRUCIBLE_HOME={config.home}" in unit
+    assert f"WorkingDirectory={config.home}" in unit
     assert f"({config.name})" in unit
     assert "mechanism: systemd" in capsys.readouterr().out
 
@@ -611,6 +668,9 @@ def test_cli_service_on_a_mac_uses_launchd(
     assert cli.main(["init"]) == 0
     capsys.readouterr()
     monkeypatch.setattr(service, "subprocess_runner", Runner())
+    monkeypatch.setattr(
+        service, "console_script", lambda executable: str(env_bin(user_home) / "crucible")
+    )
     assert cli.main(["service", "install"]) == 0
     assert service.plist_path(user_home).is_file()
     assert "mechanism: launchd" in capsys.readouterr().out

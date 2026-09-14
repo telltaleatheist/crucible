@@ -40,11 +40,16 @@ User-level on both, deliberately. A system unit would need root to install, woul
 a user with no conda env and no HuggingFace cache, and would put a server holding one
 operator's models outside that operator's control. The cost is `linger`, section 4.
 
-`ExecStart` is `<the installing interpreter> -m crucible serve --host <h> --port <p>`,
-with the host and port **read from `config.toml` at install time**. A config edited
-afterwards is not what the service serves until `install` is run again, and `install`
-says so when it finishes. The alternative — a unit that re-reads the config — is a unit
-whose behaviour changes without anybody installing anything.
+`ExecStart` is `<env>/bin/crucible serve --host <h> --port <p>` — **the console script,
+never `python -m crucible`**; section 3a is the measurement that settled that. The host
+and port are **read from `config.toml` at install time**. A config edited afterwards is
+not what the service serves until `install` is run again, and `install` says so when it
+finishes. The alternative — a unit that re-reads the config — is a unit whose behaviour
+changes without anybody installing anything.
+
+`WorkingDirectory` is `CRUCIBLE_HOME` on both mechanisms. A user unit otherwise starts in
+`$HOME` and a launchd agent in `/`; a server's cwd should be its own state directory,
+which is the only directory it owns and where every relative path it writes belongs.
 
 `Restart=on-failure` (and launchd's `KeepAlive: {SuccessfulExit: false}`) rather than
 `always`: a server that exited 0 was stopped on purpose, and restarting it would make
@@ -52,6 +57,32 @@ whose behaviour changes without anybody installing anything.
 a `bootout` and not a signal — an agent killed with SIGTERM exited unsuccessfully, so
 launchd would start it straight back up. The plist stays, so `RunAtLoad` brings it back
 at the next login and `start` brings it back now.
+
+## 3a. `python -m crucible` crash-looped the first real install
+
+**Measured on Owen's PC, 2026-09-13, by installing the unit this doc's first version
+described.** It ran `python -m crucible serve`, and the service came up and died, over and
+over:
+
+```
+ImportError: cannot import name 'load_all_voices' from 'crucible.voices' (unknown location)
+```
+
+A systemd user unit with no `WorkingDirectory` starts in `$HOME`. `$HOME` on that box
+holds the Linux checkout — a directory named `crucible`. And `python -m` puts the cwd on
+`sys.path`, so `crucible.voices` resolved to `~/crucible/voices/`, the **manifest
+directory**, as a namespace package with `__file__ is None`, instead of to
+`crucible/voices.py`. Reproduced exactly: from `$HOME`, `import crucible.voices` gives
+`__file__ None`; from `/`, the real module.
+
+Two fixes, both applied, because they answer two different questions:
+
+1. **`ExecStart` runs the console script.** A console script's `sys.path[0]` is the
+   script's own directory, never the cwd, so what it imports does not depend on where it
+   was started. `crucible/service.py` derives it from `sys.executable`'s directory and
+   **refuses by name when it is not there** — a fallback to `python -m` would reinstate
+   the bug on the one machine that has it.
+2. **`WorkingDirectory=<CRUCIBLE_HOME>`**, on the unit and on the plist.
 
 ## 3. The PATH is recorded, and this is the bug that made it necessary
 
@@ -82,6 +113,12 @@ Two things follow, and both are built:
 
 `crucible/hosttools.py` is the one owner of both — the PATH the server searched, and the
 sentence that names it.
+
+**On the PC the recorded PATH is about 2 KB of Windows**, dozens of `/mnt/c/...` entries
+arriving through WSL interop. That is correct and it is not to be "cleaned": it is the
+PATH the operator's shell actually had when `crucible doctor` passed in it, and trimming
+it to the entries that look Linux-shaped would be this server deciding which of somebody's
+tools count.
 
 **`CRUCIBLE_HOME` is recorded too, and it is not optional.** A service started without it
 serves `~/.crucible`, which on a host where the operator set `CRUCIBLE_HOME` is a
