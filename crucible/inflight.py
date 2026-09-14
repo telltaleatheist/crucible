@@ -66,6 +66,27 @@ ACT_HEADER = "X-Crucible-Act"
 ACT_NAMES: frozenset[str] = frozenset(entry.name for entry in CLASSES)
 
 
+def require_act_name(act: str, source: str, advice: str = "") -> str:
+    """The act, or a refusal by name. One validator, one vocabulary.
+
+    `source` names where the act came from — the header here, the lease body in
+    `crucible/leases.py` — so the sentence tells the caller which thing to fix.
+    A second copy of "is this a capability class" would be a second place for
+    the vocabulary to drift, and the two doors record the same field.
+    """
+    if act not in ACT_NAMES:
+        raise ApiError(
+            400,
+            "unknown_act",
+            f"{act!r} is not an act this server knows. {source} must name a "
+            f"capability class: {sorted(ACT_NAMES)}. It is refused rather than "
+            "recorded because a bench showing the wrong act name is worse than "
+            f"one showing none{advice}",
+            {"act": act, "known": sorted(ACT_NAMES)},
+        )
+    return act
+
+
 def read_act(headers: Any) -> str | None:
     """The act this request declares, or None because it did not say.
 
@@ -77,17 +98,9 @@ def read_act(headers: Any) -> str | None:
     act = raw.strip()
     if act == "":
         return None
-    if act not in ACT_NAMES:
-        raise ApiError(
-            400,
-            "unknown_act",
-            f"{act!r} is not an act this server knows. {ACT_HEADER} must name a "
-            f"capability class: {sorted(ACT_NAMES)}. It is refused rather than "
-            "recorded because a bench showing the wrong act name is worse than "
-            "one showing none — send no header if you would rather not say",
-            {"act": act, "known": sorted(ACT_NAMES)},
-        )
-    return act
+    return require_act_name(
+        act, ACT_HEADER, " — send no header if you would rather not say"
+    )
 
 
 @dataclass(frozen=True)

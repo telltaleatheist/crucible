@@ -45,7 +45,8 @@ from .jobs import (
 from .jobs.base import Job, validate_member_name
 from .jobs.queue import JobStore
 from .jobs.tts.common import known_voice
-from .inflight import InFlight, read_act
+from .inflight import InFlight, read_act, require_act_name
+from .leases import Leases, require_ttl
 from .residency import Residency
 from .sampling import SAMPLING_HEADER, Applied, apply_defaults
 from .ttsstream import (
@@ -124,6 +125,22 @@ class StreamOpen(BaseModel):
 
     voice: str = Field(min_length=1)
     language: str = Field(min_length=1)
+
+
+class LeaseOpen(BaseModel):
+    """`POST /v1/models/{id}/lease` — a client saying it intends a run.
+
+    Both fields are required and neither has a default, for the streaming door's
+    reason. A default `act` would put a name nobody chose on a bench, which is
+    the thing `X-Crucible-Act` is refused for; a default `ttl_seconds` would be
+    this server picking how long somebody else's run is, which is the one number
+    only the client knows.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    act: str = Field(min_length=1)
+    ttl_seconds: int
 
 
 class StreamOp(BaseModel):
@@ -281,6 +298,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.state.store = JobStore(config, backend, registry)
     app.state.streams = StreamManager(residency)
     app.state.inflight = InFlight()
+    # In memory, and a restart forgets: a lease protects a resident model, and a
+    # restarted server holds none (crucible/leases.py).
+    app.state.leases = Leases()
 
     Path(config.jobs_dir).mkdir(parents=True, exist_ok=True)
     Path(config.uploads_dir).mkdir(parents=True, exist_ok=True)
@@ -677,10 +697,12 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         store: JobStore = request.app.state.store
         streams: StreamManager = request.app.state.streams
         inflight: InFlight = request.app.state.inflight
+        leases: Leases = request.app.state.leases
         running = store.running
         queued = store.queued()
         resident = residency.resident
         session = streams.session
+        lease = leases.current()
 
         body: dict[str, Any] = {
             "server": {
@@ -759,6 +781,20 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # translate, since both are a chat against the same 27B and the only
             # difference is a prompt it does not own.
             "chat": {"in_flight": len(inflight), "rows": inflight.rows()},
+            # THE INTENTION BEHIND THE CHATS, which no amount of looking at this
+            # server could infer. A chat holds nothing and is over in seconds, so
+            # between two blocks of a 2000-block translation this machine is idle
+            # by every other measure here — and a `load-voice` submitted in that
+            # gap used to evict the translator (crucible/leases.py). While this
+            # is non-null, the model on the card cannot be moved.
+            #
+            # It does NOT change `accepts_work` below. A lease is not a
+            # reservation: this server will still take a job that does not need
+            # the card's contents to change, and admission is still the door's.
+            #
+            # No `model` field: a lease is only ever on the resident model, and
+            # `resident.id` above is already that fact's owner (R1).
+            "lease": None if lease is None else lease.to_dict(),
             "slots": {
                 # ONE LANE TODAY, and it is named rather than counted so the
                 # ancillary lane (PHASE7-LANES.md section 3) can appear beside it
@@ -830,6 +866,88 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # (PHASE9-CAPABILITY.md section 2.1).
             raise disabled_error("load-model", config)
         return model_rows(config, backend, residency)
+
+    # ---------------------------------------------------------------- leases
+    #
+    # PHASE7-LANES.md section 5.2. Three routes and no state worth the name: a
+    # client says it intends a run on the resident model, heartbeats while the
+    # run is alive, and releases when it is done. What that buys it is one
+    # refusal — `409 model_leased` at the job door for anything that would take
+    # the model off the card. Everything else about this server is unchanged.
+
+    @private.post("/models/{model_id}/lease", status_code=201)
+    async def open_lease(
+        request: Request, model_id: str, body: LeaseOpen
+    ) -> dict[str, Any]:
+        """Take the one lease this server holds at a time.
+
+        The order of the checks is their specificity, which is the job door's
+        rule: a bad ttl and an unknown act are true of the request whatever this
+        server is doing, so a client with a typo is told about the typo rather
+        than about somebody else's lease. Residency comes next, because leasing a
+        model that is not here is a different mistake from being too late for
+        one that is.
+        """
+        leases: Leases = request.app.state.leases
+        ttl_seconds = require_ttl(body.ttl_seconds)
+        act = require_act_name(body.act.strip(), "a lease's `act`")
+        # The resident MODEL, exactly as the chat door reads it: a voice on the
+        # card is not something a run of chat completions can be held against,
+        # so the honest answer there is the same `model_not_resident` an empty
+        # card gets. A lease NEVER loads anything — it is the promise not to
+        # move what is already there.
+        resident = residency.resident_model
+        if resident is None or resident.model_id != model_id:
+            raise ApiError(
+                409,
+                "model_not_resident",
+                f"{model_id!r} is not resident on this server; "
+                + (
+                    f"{resident.model_id!r} is. "
+                    if resident is not None
+                    else "no model is. "
+                )
+                + "A lease promises not to move what is on the card; it never "
+                'loads anything — submit a {"type": "load-model"} job first, '
+                "then lease what it left resident.",
+                {
+                    "requested": model_id,
+                    "resident": None if resident is None else resident.model_id,
+                },
+            )
+        lease = leases.open(
+            model=model_id,
+            act=act,
+            client=_client_agent(request),
+            ttl_seconds=ttl_seconds,
+        )
+        return lease.receipt()
+
+    @private.post("/leases/{lease_id}/heartbeat")
+    async def heartbeat_lease(request: Request, lease_id: str) -> dict[str, Any]:
+        """I am still here. Pushes the deadline out by the lease's own ttl.
+
+        A 404 here is not an error to log and continue past: it means this
+        client's run is no longer protected, and the card may move under it at
+        any moment. The body says whether the lease was released or expired,
+        which is the difference between "somebody took it from me" and "I stopped
+        talking for too long".
+        """
+        leases: Leases = request.app.state.leases
+        return {"expires_at": leases.heartbeat(lease_id).expires_at.isoformat()}
+
+    @private.delete("/leases/{lease_id}", status_code=204)
+    async def release_lease(request: Request, lease_id: str) -> Response:
+        """Give the card back before the ttl does it for you.
+
+        The usual end of a lease, and the one that matters: expiry is the
+        backstop for a client that died, not the way a finished run ends. A run
+        that releases frees the next client immediately instead of after up to an
+        hour of nothing happening.
+        """
+        leases: Leases = request.app.state.leases
+        leases.release(lease_id)
+        return Response(status_code=204)
 
     # ---------------------------------------------------------------- voices
 
@@ -997,10 +1115,27 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         submission never makes a directory, and before the inputs are
         materialised, so it never writes a client's megabytes to disk to delete
         them again.
+
+        **A lease is refused ahead of both** (PHASE7-LANES.md section 5.2). A
+        chat completion holds nothing, so a server mid-way through a
+        two-thousand-block translation looks idle between two blocks; a client
+        that says it intends a run takes a lease, and while one is open this
+        door refuses the job types that would move the model off the card. It
+        does not refuse anything else — a lease is not a reservation, and the
+        lane is still free for work that leaves the card alone.
         """
         store: JobStore = request.app.state.store
+        leases: Leases = request.app.state.leases
         plugin = resolve(store.registry, body.type, config)
         model = resolve_model(plugin, body.model)
+        # Would this take the resident model off the card while somebody has
+        # said they are mid-run on it? Asked BEFORE the lane, and before
+        # `server_busy`, because the two refusals have different lifetimes: the
+        # lane frees in minutes and a client told "busy" will rightly come back,
+        # while a lease will still be there when it does. Telling it the
+        # transient reason first would send it away to be refused again for the
+        # durable one (PHASE7-LANES.md section 5.2).
+        leases.refuse_if_leased(body.type)
         # Is there room right now? The one question the server answers about
         # scheduling; the queue is the client's (ARCHITECTURE.md section 3).
         store.refuse_if_busy()

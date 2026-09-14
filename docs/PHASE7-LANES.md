@@ -854,6 +854,136 @@ reader has not and never will. Sorting the three surfaces by *which door they al
 in BookForge* gets this right for free, and sorting them by "does it feel like streaming"
 gets correct-sentences wrong.
 
+### 5.2 The lease — a client says it intends a run
+
+**BUILT 2026-09-14.** Owen: *"it should follow the common standard as everything else in
+app."*
+
+Section 5.1 sorted the work this server holds into families. There is a third, and until
+tonight it held **nothing at all**:
+
+| kind of work | takes the lane | holds the claim | appears in `/v1/activity` |
+|---|---|---|---|
+| a job | yes | for its duration | `running` |
+| a streaming session | no | **yes** | `streaming` + `claim` |
+| a chat completion | no | no | `chat.rows` — a record, gating nothing |
+
+Holding nothing is the right answer for **one** chat and the wrong answer for **two
+thousand**. Foundry translates a book as a sequence of chat completions against a resident
+27B; each one takes seconds, and between any two of them this server is idle by every
+measure it publishes — lane free, no claim, `accepts_work: true`. So BookForge submits a
+`load-voice` at block 400 of 2000, the guard sees a card it may reclaim, **the translator
+is evicted, and Foundry's run dies in the middle with nothing having gone wrong
+anywhere.**
+
+#### The ruling: the fact is the client's intention, so the client states it
+
+The obvious patch is a timer — *refuse a loader if a chat finished within N seconds.* That
+is **a fact standing in for a guess**, which is the shape ARCHITECTURE.md's audit found
+seven times. A chat that ended eight seconds ago is evidence of nothing: the client may
+have finished the book, or crashed, or be about to send another nine hundred. N would be
+tuned against one workload and silently wrong for the next, in both directions — a loader
+refused forever because a dead client's last chat is inside the window, a run evicted
+because its next block was slow to arrive.
+
+The fact that actually exists is that **a client intends a run**, and only the client has
+it. So the client says so. It takes a lease, heartbeats while the run is alive, and
+releases when it is done.
+
+#### The wire
+
+| route | answers | refuses |
+|---|---|---|
+| `POST /v1/models/{id}/lease` `{"act", "ttl_seconds"}` | `201 {lease_id, model, client, act, since, expires_at}` | `409 model_not_resident`, `400 unknown_act`, `400 invalid_ttl`, `409 model_leased` |
+| `POST /v1/leases/{lease_id}/heartbeat` | `200 {expires_at}` | `404 unknown_lease` |
+| `DELETE /v1/leases/{lease_id}` | `204` | `404 unknown_lease` |
+
+- `act` is a **capability class name**, validated against the same vocabulary
+  `X-Crucible-Act` is, through the same function (`crucible/inflight.py`,
+  `require_act_name`). A lease that recorded `translat` would put a name nothing knows on
+  a bench, which is the defect Owen ruled out on 2026-09-13.
+- `ttl_seconds` is 30–3600, and the refusal **states the range**. Shorter than 30 s is a
+  lease that expires between two heartbeats — the eviction this exists to prevent, on a
+  schedule. Longer than an hour is a lease that outlives its own client's crash, which is
+  the one thing expiry is for.
+- `client` is `_client_agent(request)` — the same User-Agent, read by the same function,
+  that `/v1/activity` reports for a job's holder. One column on a bench, one way of
+  filling it. Null means *it did not say*.
+- **One lease at a time, per server.** One card, one resident model, one lease. A second
+  `POST` while one is open is refused `409 model_leased` naming the holder — the same code
+  and the same five details a loader gets, because it is the same fact.
+
+`GET /v1/activity` grows `lease: {lease_id, client, act, since, expires_at} | null`.
+**No `model` field**, deliberately: a lease is only ever on the resident model, and the
+same read already reports that as `resident.id` (R1 — one fact, one owner). The lease's
+own `201` receipt does name it, because a receipt has no `resident` beside it.
+
+#### What it blocks, and what it does not
+
+While a lease is open, `POST /v1/jobs` refuses `409 model_leased` — **before the lane and
+before preflight** — the job types that can take the resident model off the card. Decided
+by reading what each does to `Residency`, not by what its name suggests
+(`crucible/leases.py`, `EVICTS_THE_RESIDENT_MODEL`):
+
+| refused | why |
+|---|---|
+| `load-model`, `load-voice` | load something else; one card, one resident thing |
+| `unload-model` | evicts by definition |
+| `tts` | **a render loads its own voice** if it is not resident, so it evicts exactly as `load-voice` does. Leaving it out would have left the hole open in the shape clients actually hit it — BookForge renders by submitting `tts`, not by loading a voice first |
+| `align` | loads an aligner, a third resident kind, which evicts the other two |
+
+| admitted | why |
+|---|---|
+| **a chat, from anyone** | chats are what the lease protects; blocking them would protect the run from itself |
+| `echo` | never touches the accelerator |
+| `asr`, `rvc`, `denoise` | run the guard with **no** `reclaimable_bytes` — their own deliberate note: they never unload somebody's resident engine, they refuse instead |
+| `unload-voice`, `unload-aligner` | each can only unload its OWN kind, so with a model resident they refuse `not_resident` on their own and cannot reach the leased model |
+
+`tests/test_leases.py` proves every job type this build knows is in exactly one of the two
+sets, so a job type added later that touches the card is a failing test rather than a
+silently reopened hole. At runtime, an unruled type asked for **while a lease is open** is
+answered `500 lease_scope_unknown` naming the missing ruling, rather than guessed at.
+
+**It is a refusal, not a reservation.** A lease admits nothing, reserves no lane and does
+not change `slots.accelerated.accepts_work`: a leased server really will take a render
+that does not need the card's contents to change, and admission is still the door's (R5).
+The refusal is checked **ahead of `server_busy`** because the two have different
+lifetimes — the lane frees in minutes and a client told "busy" will rightly come back,
+while the lease will still be there when it does.
+
+**No exemption for the holder.** A lease is refused to everyone, its own client included:
+a run that wants the card to change releases first. An exemption would make *who asked*
+part of the answer, and this server cannot tell two runs from one client apart.
+
+#### Expiry, and what a restart forgets
+
+**There is no sweeper.** A lease past `expires_at` is simply not open: every read compares
+the stored instant to the clock (`Leases.current`), so a client that dies mid-run stops
+blocking the card the moment its ttl runs out, whether or not anything was watching. A
+heartbeat extends from *now* by the ttl the lease was opened with, so a live client always
+has its whole ttl left. A `404 unknown_lease` says **which** kind of gone the lease is —
+released, or expired — because "somebody took it from me" and "I stopped talking for too
+long" are different bugs in the holder.
+
+Releasing is the normal end and expiry is the backstop: a run that releases frees the next
+client at once instead of after up to an hour of nothing happening.
+
+**Leases live in memory and a restart forgets them.** A lease is worth exactly as much as
+the residency it protects, and a restarted server holds no model — so carrying one across
+a restart would protect nothing and hand the next operator a refusal whose subject no
+longer exists.
+
+#### The SDK
+
+`client.lease(model, {act, ttlSeconds}) → Lease`, `client.heartbeat(leaseId) → expiresAt`,
+`client.release(leaseId)`. `Activity.lease`. `model_leased` arrives as the typed
+`CrucibleLeased` (`leaseId`, `holder`, `act`, `since`, `expiresAt`, and a `leasedLine`
+getter rendering the one sentence a bench shows, like `CrucibleBusy.busyLine`), and is in
+`SERVER_SPECIFIC_REFUSALS` — another machine's card is not held by this run, so a
+`waitFor: "any"` walk should try the next one rather than wait out somebody else's
+translation. The SDK does **not** wait a lease out, for the reason it does not retry
+`server_busy`: a sleep loop in a client library is a queue with a policy nobody chose.
+
 ---
 
 ## 6. Admission across the seam

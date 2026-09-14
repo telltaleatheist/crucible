@@ -61,6 +61,16 @@ those three are settled.
   and the job reads, so `crucible doctor`'s denoise row stops saying "Crucible does not
   fetch them".
 
+**Landed 2026-09-14: the model lease** (`PHASE7-LANES.md` section 5.2). A chat holds
+nothing, so a server mid-way through a two-thousand-block translation reported itself idle
+between blocks and BookForge's `load-voice` evicted Foundry's translator at block 400. A
+timer would have been a fact standing in for a guess; the fact is that a client intends a
+run, so the client says so — `POST /v1/models/{id}/lease`, heartbeat, `DELETE`. While one
+is open the job types that would take the model off the card are refused `409
+model_leased` at the door (chats never are: they are what it protects). Expiry is read
+from the clock, never swept, and a restart forgets. In the SDK as `lease`/`heartbeat`/
+`release`, `Activity.lease` and the typed `CrucibleLeased`.
+
 **Landed 2026-09-14: the local form** (`PHASE9-CAPABILITY.md` section 7). Owen, via
 Foundry: these manifests are the catalog of record for Foundry's LOCAL lineup too, so "what
 can this machine run" has one owner. A `[local]` table on a model manifest (an Ollama tag,
