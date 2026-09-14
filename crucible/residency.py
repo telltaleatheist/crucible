@@ -36,7 +36,6 @@ from typing import Any, Callable, Iterator
 
 from .alignmodels import AlignBackendSpec, AlignManifest
 from .config import Config
-from .errors import ApiError, JobError
 from .engines import (
     EngineError,
     NarratorEngine,
@@ -47,6 +46,8 @@ from .engines import (
     engine_model_name,
     find_free_port,
 )
+from .errors import ApiError, JobError
+from .jobenv import tts_env
 from .manifests import (
     NO_DEFAULTS,
     BackendSpec,
@@ -655,7 +656,23 @@ class Residency:
         self._evict(say, manifest.id)
 
         log_path = engine_log_path(self._config.home, manifest.id)
-        engine = build_voice_engine(manifest.narrator_engine, python, log_path)
+        # THE SERVER'S OWN CONFIGURATION, from its two owners: the env recipe
+        # says which serving stack narrator will start (None where it starts
+        # none), the voice manifest says how wide it admits. Both are stated
+        # here rather than left to the engine to find, because narrator refuses
+        # each of them BY NAME and does it before it prints `ready` — the first
+        # real render died that way (HIGGS_STACK is not set, exit 3).
+        env_spec = tts_env(manifest.narrator_engine, spec.backend)
+        engine = build_voice_engine(
+            manifest.narrator_engine,
+            python,
+            log_path,
+            serving_stack=env_spec.serving_stack,
+            max_num_seqs=(
+                None if manifest.serving is None
+                else manifest.serving.max_num_seqs
+            ),
+        )
         # narrator answers no HTTP route, so this port is not a proxy target; it
         # is found and passed for the same reason every other engine's is, so
         # that an engine which does decide to bind something has a free one.

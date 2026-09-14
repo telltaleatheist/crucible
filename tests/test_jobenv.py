@@ -102,6 +102,40 @@ def test_every_tts_recipe_pins_the_same_narrator_commit() -> None:
     assert len(set(shas.values())) == 1, shas
 
 
+def test_the_serving_stack_is_the_recipe_s_and_only_cuda_higgs_has_one() -> None:
+    """`HIGGS_STACK` is refused by name by narrator and has no default there.
+
+    It is stated from the ENV SPEC rather than from the voice, because which
+    server narrator can start is a property of what the recipe installed:
+    `higgs-v3-cuda-linux.txt` carries `vllm-omni==0.28.0` and no SGLang at all.
+    `None` on the other two is a real answer, not a gap — on `mlx-darwin`
+    narrator renders in process and reads none of it, and `orpheus` loads vLLM
+    0.7.3 itself.
+    """
+    assert tts_env("higgs-v3", "cuda-linux").serving_stack == "vllm-omni"
+    assert tts_env("orpheus", "cuda-linux").serving_stack is None
+    assert tts_env("higgs-v3", "mlx-darwin").serving_stack is None
+    assert tts_env("orpheus", "mlx-darwin").serving_stack is None
+    assert llm_env("cuda-linux").serving_stack is None
+
+
+def test_the_stack_named_is_the_stack_the_recipe_installs() -> None:
+    """The two copies of one fact, compared. A recipe that swapped vllm-omni
+    for SGLang-Omni while this table still said `vllm-omni` would start a
+    server whose requests narrator is not building — not a crash, a book
+    rendered at whatever the dropped fields defaulted to."""
+    spec = tts_env("higgs-v3", "cuda-linux")
+    text = recipe_for(spec).read_text(encoding="utf-8")
+    installed = {
+        line.split("==")[0].strip()
+        for line in text.splitlines()
+        if "==" in line and not line.lstrip().startswith("#")
+    }
+    assert spec.serving_stack == "vllm-omni"
+    assert "vllm-omni" in installed
+    assert "sglang" not in installed
+
+
 def test_an_unpinned_requirement_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "cuda-linux.txt"
     path.write_text("# a comment\nvllm==0.29.0\ntorch>=2.0\n", encoding="utf-8")

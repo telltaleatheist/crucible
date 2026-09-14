@@ -72,6 +72,50 @@ MODULE = "narrator.serve"
 #: defaulting, which is why Crucible may set it and then trust the `ready` line.
 ENGINE_VARIABLE = "NARRATOR_ENGINE"
 
+#: WHAT A `higgs-v3` WORKER NEEDS BESIDES ITS ENGINE ID, and every one of them
+#: is refused BY NAME by narrator rather than defaulted. Crucible's first real
+#: `tts` render (2026-09-13) died on the first of them — `narrator (higgs-v3)
+#: exited 3` before `ready`, `HIGGS_STACK is not set` — because `environment()`
+#: named only NARRATOR_ENGINE and PYTHONUNBUFFERED.
+#:
+#:   HIGGS_STACK         which serving stack this process renders on.
+#:                       `served_common.serving_stack()` raises when it is
+#:                       unset, and is called from `HiggsV3Engine
+#:                       .detect_backend()` — a CLASSMETHOD `narrator.serve`
+#:                       calls before any voice loads, which is why the worker
+#:                       dies before `ready` rather than on the first chunk.
+#:                       The two stacks place sampling differently and size the
+#:                       frame cap against different context windows, so a
+#:                       guessed one is a book rendered at sampling nobody
+#:                       chose. STATED FROM THE ENV SPEC (`jobenv.tts_env`),
+#:                       because the stack is a property of what the recipe
+#:                       installed, not of the voice.
+#:   HIGGS_ENV           the prefix the SERVER runs out of. narrator's packaged
+#:                       `serve_higgs_v3.sh` builds CUDA_HOME, PATH,
+#:                       LD_LIBRARY_PATH and `$HIGGS_ENV/bin/vllm-omni` from it
+#:                       and refuses (exit 5) when it is unset. For Crucible it
+#:                       is the tts env's own venv root — the interpreter's
+#:                       `parent.parent`, CHECKED against `pyvenv.cfg` rather
+#:                       than assumed, because a path built by walking up from
+#:                       a binary is a guess until something confirms it.
+#:   HIGGS_MAX_NUM_SEQS  stage 0's admission width AND the width of narrator's
+#:                       own batch (`v3_served.serve_concurrency()`, which
+#:                       raises by name). STATED FROM THE VOICE MANIFEST's
+#:                       `[voice.serving]`.
+#:
+#: NARRATOR_HIGGS3_SERVE_SCRIPT is deliberately NOT here. narrator ships its own
+#: launcher as package data as of BookForge 0eeb0267 and runs it when no
+#: override is named; an operator's path into somebody's checkout is exactly
+#: what that commit removed the need for.
+STACK_VARIABLE = "HIGGS_STACK"
+ENV_PREFIX_VARIABLE = "HIGGS_ENV"
+MAX_NUM_SEQS_VARIABLE = "HIGGS_MAX_NUM_SEQS"
+
+#: The narrator engine those three belong to. A set of one, written as a
+#: constant so the refusals below read as a rule rather than as a special case:
+#: `orpheus` loads vLLM 0.7.3 in process and reads no `HIGGS_*` variable.
+HIGGS_V3 = "higgs-v3"
+
 #: How long `stop()` gives the `quit` action before falling back on SIGTERM.
 #: narrator's teardown releases CUDA from inside the process, and on a loaded
 #: SGLang-Omni that takes seconds rather than milliseconds.
@@ -113,9 +157,86 @@ class NarratorEngine(SubprocessEngine):
     question a reader has is always which.
     """
 
-    def __init__(self, narrator_engine: str, python: Path, log_path: Path) -> None:
+    def __init__(
+        self,
+        narrator_engine: str,
+        python: Path,
+        log_path: Path,
+        *,
+        serving_stack: str | None,
+        max_num_seqs: int | None,
+    ) -> None:
+        """`serving_stack` comes from the env spec, `max_num_seqs` from the
+        voice manifest, and for `higgs-v3` BOTH ARE REQUIRED HERE.
+
+        NEITHER HAS A DEFAULT, keyword-only and mandatory. `None` is a real
+        answer — "narrator starts no server out of this env" — and a default
+        would make FORGETTING to pass one indistinguishable from saying it,
+        which is precisely how a worker ends up spawned without HIGGS_STACK.
+        A caller must state both; `build_voice_engine` is where they come from.
+
+        Refused at CONSTRUCTION and not at spawn, because the alternative is a
+        worker that starts, reads 8.5 GB off disk and exits 3 before it says
+        `ready` — which is exactly how this was found. A refusal that arrives
+        before the process does names the missing thing instead of leaving a
+        reader to find `HIGGS_STACK is not set` at the end of an engine log.
+
+        `serving_stack` is None for `orpheus` and on `mlx-darwin`, where
+        narrator starts no server and reads none of these; see
+        `jobenv.tts_env`.
+        """
         super().__init__(python=python, log_path=log_path)
         self._narrator_engine = narrator_engine
+        self._serving_stack = serving_stack
+        self._max_num_seqs = max_num_seqs
+        if narrator_engine == HIGGS_V3 and serving_stack is not None:
+            # THE SERVED ARM. `serving_stack` set is what "narrator will start a
+            # server out of this env" means, and it is the one condition under
+            # which all three variables have a reader.
+            if max_num_seqs is None:
+                raise EngineError(
+                    f"cannot start {self.name} on the {serving_stack} stack "
+                    f"without {MAX_NUM_SEQS_VARIABLE}: it is stage 0's "
+                    "admission width and the width of narrator's own batch, "
+                    "and narrator refuses it by name "
+                    "(v3_served.serve_concurrency). It comes from the voice "
+                    "manifest's [voice.serving].max_num_seqs"
+                )
+            if max_num_seqs < 1:
+                raise EngineError(
+                    f"{MAX_NUM_SEQS_VARIABLE}={max_num_seqs} for {self.name} "
+                    "must be at least 1"
+                )
+            # `venv/bin/python` -> `venv`. CHECKED, not assumed: `pyvenv.cfg`
+            # is what makes a directory a venv, and handing narrator's launch
+            # script a prefix that is not one produces
+            # `$HIGGS_ENV/bin/vllm-omni: No such file` at the end of a launch
+            # rather than here.
+            root = Path(python).resolve().parent.parent
+            if not (root / "pyvenv.cfg").is_file():
+                raise EngineError(
+                    f"cannot start {self.name}: {ENV_PREFIX_VARIABLE} is the "
+                    "prefix its server runs out of, and the tts env python "
+                    f"{python} does not sit in one — {root / 'pyvenv.cfg'} is "
+                    "not there. narrator's launch script builds CUDA_HOME, "
+                    "PATH, LD_LIBRARY_PATH and the vllm-omni binary from that "
+                    "prefix and refuses when it is unset"
+                )
+            self._env_prefix: Path | None = root
+        elif serving_stack is not None:
+            # A STACK ON AN ENGINE THAT HAS NONE. `HIGGS_*` is Higgs v3's
+            # vocabulary; `orpheus` loads vLLM 0.7.3 in process and reads not
+            # one of these names. Silently dropping the value would leave the
+            # env recipe and this file disagreeing about what that env starts.
+            raise EngineError(
+                f"{self.name} was given serving_stack={serving_stack!r}, but "
+                f"only {HIGGS_V3!r} starts a server underneath narrator and "
+                "reads the HIGGS_* variables. Either the env recipe installed "
+                "a stack this engine cannot use, or jobenv.tts_env named one "
+                "it should not have"
+            )
+        else:
+            self._env_prefix = None
         #: One writer at a time. narrator holds a lock over its own stdout for
         #: the mirror-image reason (two half-written lines are not two messages);
         #: the render door and a cancel arriving from the queue thread are two
@@ -165,7 +286,29 @@ class NarratorEngine(SubprocessEngine):
         return [str(self._python), "-m", MODULE]
 
     def environment(self) -> dict[str, str]:
-        return {
+        """Everything narrator refuses to start without, and nothing else.
+
+        The three `HIGGS_*` variables are emitted ONLY on the arm that reads
+        them — a `higgs-v3` env whose recipe installs a serving stack. On
+        `mlx-darwin` narrator builds `HiggsV3MlxEngine` from
+        `HiggsV3MlxConfig`, neither of which reads `HIGGS_STACK` or
+        `HIGGS_MAX_NUM_SEQS` (the MLX `detect_backend()` returns 'mlx' off an
+        import), and there is no launch script for `HIGGS_ENV` to mean anything
+        to. Setting them there would be three levers read by nothing.
+
+        RULING OWED: WHAT ORPHEUS NEEDS ON `cuda-linux`. BookForge's spawn
+        (`electron/parallel-tts-bridge.ts` + `orpheus-worker-pool.ts`) hands
+        that worker an `ORPHEUS_*` set — the model/adapter directories, the EOS
+        levers, the per-voice caps, `VLLM_USE_V1=0` — and this engine states
+        none of it. It is NOT one variable, so it is not being guessed at
+        tonight: narrator's `serve/worker.py` reads its Orpheus configuration
+        from that environment and from the `load` message's `modelDir` /
+        `adapterDir` / `baseDir` / `caps`, and which of those Crucible owns is
+        the same question `load()` already defers on for `caps`. The first
+        `orpheus` job through Crucible will find it the way the first
+        `higgs-v3` job found this.
+        """
+        environment = {
             ENGINE_VARIABLE: self._narrator_engine,
             # narrator writes its progress to stderr and its protocol to stdout.
             # Without this, a pipe makes CPython block-buffer both, and a `ready`
@@ -173,6 +316,15 @@ class NarratorEngine(SubprocessEngine):
             # from here as a readiness timeout on an engine that was up.
             "PYTHONUNBUFFERED": "1",
         }
+        if self._env_prefix is not None:
+            # `__init__` refuses unless all three are answerable, so this block
+            # is all-or-nothing by construction rather than by three checks.
+            assert self._serving_stack is not None
+            assert self._max_num_seqs is not None
+            environment[STACK_VARIABLE] = self._serving_stack
+            environment[ENV_PREFIX_VARIABLE] = str(self._env_prefix)
+            environment[MAX_NUM_SEQS_VARIABLE] = str(self._max_num_seqs)
+        return environment
 
     def stdio(self, log_handle: Any) -> dict[str, Any]:
         """stdin and stdout stay pipes; only stderr goes to the log.

@@ -179,7 +179,7 @@ msgpack==1.2.2
 msgspec==0.21.1
 multidict==6.8.0
 mutagen==1.48.1
-narrator @ git+https://github.com/telltaleatheist/bookforge@770415db591e0af2cc650cf8c889224972e8906d#subdirectory=python
+narrator @ git+https://github.com/telltaleatheist/bookforge@0eeb0267ebf1bdb80e77091532ee42ede87ddf52#subdirectory=python
 nccl4py==0.5.0
 networkx==3.6.1
 ninja==1.13.2

@@ -53,15 +53,26 @@ def build_engine(engine_name: str, python: Path, log_path: Path) -> SubprocessEn
 
 
 def build_voice_engine(
-    narrator_engine: str, python: Path, log_path: Path
+    narrator_engine: str,
+    python: Path,
+    log_path: Path,
+    *,
+    serving_stack: str | None,
+    max_num_seqs: int | None,
 ) -> NarratorEngine:
     """The engine that serves a voice. Refuses an engine this build cannot run.
 
     One class for both narrator engines, because from Crucible's side they differ
-    only in which env the interpreter comes from and what `NARRATOR_ENGINE` says.
-    What runs underneath — SGLang-Omni on `cuda-linux`, mlx-audio in process on
-    `mlx-darwin` — is narrator's business, and Crucible learns which it got from
-    the `ready` line rather than deciding it here.
+    only in which env the interpreter comes from, what `NARRATOR_ENGINE` says and
+    — since 2026-09-13 — what the server underneath is configured with.
+
+    THE TWO EXTRA FACTS HAVE DIFFERENT OWNERS, which is why they arrive as two
+    arguments rather than one object: `serving_stack` belongs to the ENV RECIPE
+    (`jobenv.tts_env` — vllm-omni on `cuda-linux` because that is what the
+    recipe installs, None where narrator starts no server), `max_num_seqs`
+    belongs to the VOICE MANIFEST (`[voice.serving]`). Both are mandatory
+    keywords: `None` is a real answer and a default would hide a caller that
+    forgot.
     """
     if narrator_engine not in NARRATOR_ENGINES:
         raise EngineError(
@@ -69,7 +80,11 @@ def build_voice_engine(
             f"{sorted(NARRATOR_ENGINES)}"
         )
     return NarratorEngine(
-        narrator_engine=narrator_engine, python=python, log_path=log_path
+        narrator_engine=narrator_engine,
+        python=python,
+        log_path=log_path,
+        serving_stack=serving_stack,
+        max_num_seqs=max_num_seqs,
     )
 
 

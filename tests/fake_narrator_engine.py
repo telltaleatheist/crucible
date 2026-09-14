@@ -52,9 +52,29 @@ def install(monkeypatch: pytest.MonkeyPatch) -> list[FakeNarratorEngine]:
     """
     built: list[FakeNarratorEngine] = []
 
-    def build(narrator_engine: str, python: Path, log_path: Path) -> FakeNarratorEngine:
+    def build(
+        narrator_engine: str,
+        python: Path,
+        log_path: Path,
+        *,
+        serving_stack: str | None,
+        max_num_seqs: int | None,
+    ) -> FakeNarratorEngine:
+        # THE SERVER'S OWN CONFIGURATION IS TAKEN AND DROPPED, deliberately.
+        # The real `build_voice_engine` would check the interpreter sits in a
+        # venv (`pyvenv.cfg`) and emit HIGGS_STACK / HIGGS_ENV /
+        # HIGGS_MAX_NUM_SEQS; the env fixtures stamp a non-executable
+        # placeholder interpreter and the fake worker starts no vllm-omni, so
+        # there is nothing here for those three to configure. What they DO
+        # configure is asserted directly in `tests/test_narrator_engine.py`
+        # against a real venv-shaped directory. The signature is mirrored so a
+        # change to it fails here rather than silently passing a default.
         engine = FakeNarratorEngine(
-            narrator_engine=narrator_engine, python=python, log_path=log_path
+            narrator_engine=narrator_engine,
+            python=python,
+            log_path=log_path,
+            serving_stack=None,
+            max_num_seqs=None,
         )
         built.append(engine)
         return engine

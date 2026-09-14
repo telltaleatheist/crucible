@@ -41,6 +41,10 @@ min_chars_per_sec = 12.3
 safe_min_chars = 600
 safe_max_chars = 800
 
+[voice.serving]
+max_num_seqs = 16
+max_num_seqs_note = "vllm-omni's own stage-0 value, and a measured ceiling at 0.35 + 0.10."
+
 [voice.backends.cuda-linux]
 hf_repo = "owenmorgan/probe-higgs-v3"
 revision = "0123456789abcdef0123456789abcdef01234567"
@@ -64,6 +68,20 @@ def refused(text: str, voice_id: str = "probe") -> str:
 def swap(old: str, new: str) -> str:
     assert old in GOOD, f"the good manifest does not contain {old!r}"
     return GOOD.replace(old, new)
+
+
+#: The good manifest with the `[voice.serving]` table removed. `max_num_seqs`
+#: is a HIGGS_* variable and narrator's orpheus engine reads none of them, so a
+#: manifest that swaps the engine must drop the table with it or be refused for
+#: that rather than for whatever the test is about.
+SERVING_TABLE = GOOD[GOOD.index("[voice.serving]"):GOOD.index("[voice.backends")]
+
+
+def as_orpheus(text: str | None = None) -> str:
+    base = GOOD if text is None else text
+    return base.replace(
+        'narrator_engine = "higgs-v3"', 'narrator_engine = "orpheus"'
+    ).replace(SERVING_TABLE, "")
 
 
 # ------------------------------------------------------------------ the base
@@ -382,23 +400,78 @@ def test_a_partial_sampling_block_is_refused() -> None:
     assert "missing required key(s) ['top_k', 'top_p']" in message
 
 
-def test_orpheus_takes_no_top_k() -> None:
-    """The two engines' sampling vocabularies are not interchangeable."""
-    message = refused(
+# --------------------------------------------------------- [voice.serving]
+
+
+def test_the_serving_width_is_read() -> None:
+    voice = parse(GOOD)
+    assert voice.serving is not None
+    assert voice.serving.max_num_seqs == 16
+    assert "stage-0" in voice.serving.max_num_seqs_note
+    assert voice.to_dict()["serving"]["max_num_seqs"] == 16
+
+
+def test_a_higgs_voice_without_a_serving_table_is_refused() -> None:
+    """narrator refuses HIGGS_MAX_NUM_SEQS by name — it is stage 0's admission
+    width AND the width of narrator's own batch — so a manifest that does not
+    state it cannot start a server."""
+    message = refused(GOOD.replace(SERVING_TABLE, ""))
+    assert "[voice.serving]" in message
+    assert "max_num_seqs" in message
+
+
+def test_a_serving_width_below_one_is_refused() -> None:
+    assert "at least 1" in refused(swap("max_num_seqs = 16", "max_num_seqs = 0"))
+
+
+def test_a_serving_width_with_no_note_is_refused() -> None:
+    """The same contract `estimate_note` has, for the same reason: 16 is
+    contested by a live certificate that ran at 64."""
+    quoted = GOOD[GOOD.index("max_num_seqs_note = "):].splitlines()[0]
+    assert "carries no note" in refused(
+        GOOD.replace(quoted, 'max_num_seqs_note = "   "')
+    )
+
+
+def test_an_unknown_serving_key_is_refused() -> None:
+    assert "unknown key(s) ['stack']" in refused(
         swap(
-            'narrator_engine = "higgs-v3"',
-            'narrator_engine = "orpheus"',
+            "max_num_seqs = 16",
+            'stack = "vllm-omni"\nmax_num_seqs = 16',
         )
     )
+
+
+def test_an_orpheus_voice_may_not_declare_one() -> None:
+    """It reads no HIGGS_* variable, so the number would configure nothing —
+    a lever that reports success."""
+    message = refused(
+        GOOD.replace(
+            'narrator_engine = "higgs-v3"', 'narrator_engine = "orpheus"'
+        )
+    )
+    assert "reads no HIGGS_* variable" in message
+
+
+def test_every_shipped_higgs_voice_declares_one() -> None:
+    """Not a fixture: the real manifests. A voice that loads but cannot be
+    started is a row on /v1/voices that fails at the spawn."""
+    for voice in load_all_voices().values():
+        if voice.narrator_engine == "higgs-v3":
+            assert voice.serving is not None, voice.id
+            assert voice.serving.max_num_seqs >= 1, voice.id
+            assert voice.serving.max_num_seqs_note.strip(), voice.id
+
+
+def test_orpheus_takes_no_top_k() -> None:
+    """The two engines' sampling vocabularies are not interchangeable."""
+    message = refused(as_orpheus())
     assert "unknown key(s) ['top_k']" in message
 
 
 def test_an_orpheus_voice_at_its_own_default_needs_no_reason() -> None:
     voice = parse(
-        swap(
-            'narrator_engine = "higgs-v3"',
-            'narrator_engine = "orpheus"',
-        ).replace(
+        as_orpheus().replace(
             "sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }",
             "sampling = { temperature = 0.6, top_p = 0.8, min_p = 0.0, "
             "repetition_penalty = 1.1 }",

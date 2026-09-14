@@ -158,6 +158,27 @@ _PACE_OPTIONAL: dict[str, type] = {
     "safe_max_chars": int,
 }
 
+#: `[voice.serving]` — WHAT THE SERVER narrator STARTS IS CONFIGURED WITH.
+#:
+#: REQUIRED of every `higgs-v3` voice and REFUSED on an `orpheus` one, because
+#: narrator reads it on exactly one of those paths: `HIGGS_MAX_NUM_SEQS` is
+#: `v3_served.serve_concurrency()`, which refuses BY NAME when it is unset and
+#: is BOTH stage 0's admission width and the width of narrator's own batch.
+#: Orpheus reads no such variable, and a manifest carrying a number nothing
+#: reads is a lever that reports success.
+#:
+#: The NOTE is required with the number for the reason `estimate_note` is: 16
+#: is not an obvious value and it is CONTESTED — the deathstalker cap
+#: certificate was measured at width 64 — so the next person to touch it has to
+#: be able to find out where it came from without a git archaeology session.
+#: (The number itself stays OFF `/v1/voices`: it is engine tuning, the server's
+#: business, and a client has no decision to make with it — see
+#: `crucible/jobs/tts/common.py`'s `voice_rows`.)
+_SERVING_REQUIRED: dict[str, type] = {
+    "max_num_seqs": int,
+    "max_num_seqs_note": str,
+}
+
 _BACKEND_REQUIRED: dict[str, type] = {
     "hf_repo": str,
     "revision": str,
@@ -289,6 +310,28 @@ class VoiceBackendSpec:
 
 
 @dataclass(frozen=True)
+class Serving:
+    """`[voice.serving]` — the one number the SERVER under narrator is sized by.
+
+    Not `[voice.pace]`'s neighbour by accident, and not its twin either: pace
+    is what a CLIENT packs to and is published on `/v1/voices`; this is what
+    the ENGINE admits and is never published. It is per VOICE rather than per
+    backend because the value is a property of the stack narrator starts for
+    Higgs v3 and the card it starts it on, and every Higgs voice on a given
+    host shares both.
+    """
+
+    max_num_seqs: int
+    max_num_seqs_note: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "max_num_seqs": self.max_num_seqs,
+            "max_num_seqs_note": self.max_num_seqs_note,
+        }
+
+
+@dataclass(frozen=True)
 class Take:
     """One rung of the retake ladder: what take N means for this voice.
 
@@ -320,6 +363,10 @@ class VoiceManifest:
     language: str
     sample_rate: int
     pace: Pace
+    #: `[voice.serving]`, or None for a voice whose engine starts no server.
+    #: Required of every `higgs-v3` voice and refused on an `orpheus` one — see
+    #: `_SERVING_REQUIRED`.
+    serving: Serving | None
     backends: dict[str, VoiceBackendSpec]
     takes: tuple[Take, ...]
     path: Path
@@ -369,6 +416,7 @@ class VoiceManifest:
             "language": self.language,
             "sample_rate": self.sample_rate,
             "pace": self.pace.to_dict(),
+            "serving": None if self.serving is None else self.serving.to_dict(),
             "backends": {k: v.to_dict() for k, v in sorted(self.backends.items())},
             "takes": [take.to_dict() for take in self.takes],
         }
@@ -579,6 +627,62 @@ def _check_clips(where: str, block: dict[str, Any], kind: str) -> Any:
     return tuple(clips)
 
 
+def _check_serving(
+    path: Path, voice: dict[str, Any], narrator_engine: str
+) -> Serving | None:
+    """`[voice.serving]`: required for `higgs-v3`, refused for `orpheus`.
+
+    THE NUMBER narrator REFUSES TO RENDER WITHOUT. `HIGGS_MAX_NUM_SEQS` is
+    stage 0's `max_num_seqs` on the vllm-omni stack AND the width of narrator's
+    own batch (`v3_served.serve_concurrency()`, which raises by name when it is
+    unset — "a guessed width is either a server idling at 1 or a queue the
+    render never asked for"). Crucible states it from here.
+
+    REFUSED ON AN ORPHEUS VOICE rather than ignored. Orpheus reads no `HIGGS_*`
+    variable at all, so a number in that manifest would be a lever that reports
+    success — the exact shape of the defect the whole BookForge serving block
+    was until 2026-09-05, when it declared a configuration nothing applied.
+    """
+    where = f"{path.name} [voice.serving]"
+    block = voice.get("serving")
+    if narrator_engine != "higgs-v3":
+        if block is not None:
+            raise VoiceError(
+                f"{where}: narrator_engine is {narrator_engine!r}, which reads no "
+                "HIGGS_* variable, so a [voice.serving] table here configures "
+                "nothing. Delete it rather than leaving a lever that reports "
+                "success"
+            )
+        return None
+    if block is None:
+        raise VoiceError(
+            f"{path.name}: a higgs-v3 voice needs a [voice.serving] table with "
+            "max_num_seqs and max_num_seqs_note. narrator refuses to render "
+            "without HIGGS_MAX_NUM_SEQS (v3_served.serve_concurrency): it is the "
+            "server's admission width AND the width of narrator's own batch, and "
+            "there is no default"
+        )
+    if not isinstance(block, dict):
+        raise VoiceError(f"{where}: must be a table")
+    check_table(where, block, _SERVING_REQUIRED, {}, error=VoiceError)
+    if block["max_num_seqs"] < 1:
+        raise VoiceError(
+            f"{where}: max_num_seqs must be at least 1, got "
+            f"{block['max_num_seqs']}"
+        )
+    if block["max_num_seqs_note"].strip() == "":
+        raise VoiceError(
+            f"{where}: max_num_seqs carries no note. The number is contested — "
+            "the deathstalker cap certificate was measured at 64 while the "
+            "shipped width is 16 — so a reader of a /v1/voices row has to be "
+            "able to find out where it came from"
+        )
+    return Serving(
+        max_num_seqs=block["max_num_seqs"],
+        max_num_seqs_note=block["max_num_seqs_note"],
+    )
+
+
 def _check_takes(
     path: Path, document: dict[str, Any], narrator_engine: str
 ) -> tuple[Take, ...]:
@@ -647,7 +751,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
 
     scalars = {
         key: value for key, value in voice.items()
-        if key not in ("pace", "backends", "takes")
+        if key not in ("pace", "serving", "backends", "takes")
     }
     check_table(f"{path.name} [voice]", scalars, _VOICE_REQUIRED, {}, error=VoiceError)
 
@@ -686,6 +790,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
     if not isinstance(voice["pace"], dict):
         raise VoiceError(f"{path.name}: [voice.pace] must be a table")
     pace = _check_pace(f"{path.name} [voice.pace]", voice["pace"])
+    serving = _check_serving(path, voice, narrator_engine)
 
     if "backends" not in voice:
         raise VoiceError(f"{path.name}: missing every [voice.backends.<kind>] table")
@@ -795,6 +900,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
         language=voice["language"],
         sample_rate=voice["sample_rate"],
         pace=pace,
+        serving=serving,
         backends=backends,
         takes=takes,
         path=path,

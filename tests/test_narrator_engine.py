@@ -30,7 +30,13 @@ from crucible.engines import (
 from crucible.engines import base as engine_base
 from crucible.engines.base import SubprocessEngine as BaseEngine
 from crucible.engines.mlx_lm import MlxLmEngine
-from crucible.engines.narrator import ENGINE_VARIABLE, MODULE
+from crucible.engines.narrator import (
+    ENGINE_VARIABLE,
+    ENV_PREFIX_VARIABLE,
+    MAX_NUM_SEQS_VARIABLE,
+    MODULE,
+    STACK_VARIABLE,
+)
 from crucible.engines.vllm import VllmEngine
 from crucible.errors import JobCancelled
 from crucible.voices import NARRATOR_ENGINE_SAMPLING
@@ -69,6 +75,11 @@ def engine(tmp_path: Path) -> Iterator[FakeNarratorEngine]:
         narrator_engine="higgs-v3",
         python=Path(sys.executable),
         log_path=tmp_path / "engine-deathstalker.log",
+        # The wire, not the server: this engine's argv is the fake worker and
+        # no vllm-omni is started, so there is nothing for the three HIGGS_*
+        # variables to configure. They have their own tests below.
+        serving_stack=None,
+        max_num_seqs=None,
     )
     yield built
     try:
@@ -92,6 +103,8 @@ def test_the_argv_is_narrator_serve_and_nothing_else() -> None:
         narrator_engine="orpheus",
         python=Path("/opt/env/bin/python"),
         log_path=Path("/tmp/x.log"),
+        serving_stack=None,
+        max_num_seqs=None,
     )
     assert built.command(Path("/weights"), "owen", 7100, []) == [
         "/opt/env/bin/python",
@@ -104,15 +117,135 @@ def test_the_argv_is_narrator_serve_and_nothing_else() -> None:
     assert built.environment()[ENGINE_VARIABLE] == "orpheus"
 
 
+def a_venv(tmp_path: Path, name: str = "tts-higgs-v3") -> Path:
+    """A directory shaped like the env `crucible install tts` builds: a
+    `bin/python` under a root carrying `pyvenv.cfg`. That file is what makes a
+    venv a venv, and the engine checks for it rather than trusting the walk up
+    from a binary."""
+    root = tmp_path / name
+    (root / "bin").mkdir(parents=True)
+    (root / "pyvenv.cfg").write_text("home = /usr\n", encoding="utf-8")
+    python = root / "bin" / "python"
+    python.write_text("", encoding="utf-8")
+    return python
+
+
+def test_a_higgs_worker_is_told_the_stack_the_env_and_the_width(
+    tmp_path: Path,
+) -> None:
+    """The three variables narrator refuses by name, and the defect that found
+    them: Crucible's first real `tts` render exited 3 before `ready` with
+    `HIGGS_STACK is not set`."""
+    python = a_venv(tmp_path)
+    built = build_voice_engine(
+        "higgs-v3",
+        python,
+        tmp_path / "x.log",
+        serving_stack="vllm-omni",
+        max_num_seqs=16,
+    )
+    environment = built.environment()
+    assert environment[ENGINE_VARIABLE] == "higgs-v3"
+    assert environment["PYTHONUNBUFFERED"] == "1"
+    assert environment[STACK_VARIABLE] == "vllm-omni"
+    assert environment[ENV_PREFIX_VARIABLE] == str(python.parent.parent)
+    assert environment[MAX_NUM_SEQS_VARIABLE] == "16"
+
+
+def test_the_width_is_a_string_because_an_environment_holds_strings(
+    tmp_path: Path,
+) -> None:
+    built = build_voice_engine(
+        "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
+        serving_stack="vllm-omni", max_num_seqs=16)
+    for name, value in built.environment().items():
+        assert isinstance(value, str), name
+
+
+def test_a_higgs_worker_with_no_width_is_refused_by_name(tmp_path: Path) -> None:
+    with pytest.raises(EngineError) as caught:
+        build_voice_engine(
+            "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
+            serving_stack="vllm-omni", max_num_seqs=None)
+    assert MAX_NUM_SEQS_VARIABLE in str(caught.value)
+    assert "[voice.serving]" in str(caught.value)
+
+
+def test_a_width_below_one_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(EngineError) as caught:
+        build_voice_engine(
+            "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
+            serving_stack="vllm-omni", max_num_seqs=0)
+    assert "at least 1" in str(caught.value)
+
+
+def test_an_interpreter_that_is_not_in_a_venv_is_refused(tmp_path: Path) -> None:
+    """`HIGGS_ENV` is the prefix narrator's launch script builds CUDA_HOME,
+    PATH and the vllm-omni binary from. A prefix that is not a venv produces
+    `No such file` at the end of a launch instead of here."""
+    stray = tmp_path / "not-an-env" / "bin" / "python"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("", encoding="utf-8")
+    with pytest.raises(EngineError) as caught:
+        build_voice_engine(
+            "higgs-v3", stray, tmp_path / "x.log",
+            serving_stack="vllm-omni", max_num_seqs=16)
+    assert ENV_PREFIX_VARIABLE in str(caught.value)
+    assert "pyvenv.cfg" in str(caught.value)
+
+
+def test_an_arm_that_starts_no_server_is_told_none_of_the_three(
+    tmp_path: Path,
+) -> None:
+    """`mlx-darwin` renders in process (`HiggsV3MlxEngine` reads neither
+    HIGGS_STACK nor HIGGS_MAX_NUM_SEQS) and `orpheus` loads vLLM 0.7.3 itself.
+    Three levers read by nothing is how a Mac spawn ends up looking served."""
+    for engine_id in ("higgs-v3", "orpheus"):
+        built = build_voice_engine(
+            engine_id, a_venv(tmp_path, f"tts-{engine_id}"), tmp_path / "x.log",
+            serving_stack=None, max_num_seqs=16)
+        environment = built.environment()
+        assert environment[ENGINE_VARIABLE] == engine_id
+        for name in (STACK_VARIABLE, ENV_PREFIX_VARIABLE, MAX_NUM_SEQS_VARIABLE):
+            assert name not in environment, (engine_id, name)
+
+
+def test_a_stack_on_an_engine_that_has_none_is_refused(tmp_path: Path) -> None:
+    """HIGGS_* is Higgs v3's vocabulary. Dropping the value in silence would
+    leave the env recipe and the engine disagreeing about what that env
+    starts."""
+    with pytest.raises(EngineError) as caught:
+        build_voice_engine(
+            "orpheus", a_venv(tmp_path, "tts-orpheus"), tmp_path / "x.log",
+            serving_stack="vllm-omni", max_num_seqs=16)
+    assert "serving_stack='vllm-omni'" in str(caught.value)
+
+
+def test_the_two_facts_have_no_defaults(tmp_path: Path) -> None:
+    """A default would make FORGETTING to pass one indistinguishable from
+    saying `None`, which is exactly how a worker is spawned without
+    HIGGS_STACK."""
+    with pytest.raises(TypeError):
+        NarratorEngine(  # type: ignore[call-arg]
+            narrator_engine="higgs-v3",
+            python=a_venv(tmp_path),
+            log_path=tmp_path / "x.log",
+        )
+
+
 def test_the_engine_id_is_in_the_name_so_a_refusal_says_which() -> None:
-    built = build_voice_engine("higgs-v3", Path(sys.executable), Path("/tmp/x.log"))
+    built = build_voice_engine(
+        "higgs-v3", Path(sys.executable), Path("/tmp/x.log"),
+        serving_stack=None, max_num_seqs=None)
     assert built.name == "narrator (higgs-v3)"
     assert built.narrator_engine == "higgs-v3"
 
 
 def test_an_engine_this_build_cannot_start_is_refused_by_name() -> None:
     with pytest.raises(EngineError) as caught:
-        build_voice_engine("higgs-v2", Path(sys.executable), Path("/tmp/x.log"))
+        build_voice_engine(
+            "higgs-v2", Path(sys.executable), Path("/tmp/x.log"),
+            serving_stack=None, max_num_seqs=None)
     assert "unknown narrator engine 'higgs-v2'" in str(caught.value)
     assert "['higgs-v3', 'orpheus']" in str(caught.value)
 
@@ -370,6 +503,10 @@ def test_a_line_on_stdout_that_is_not_a_message_is_a_refusal_naming_it(
         narrator_engine="higgs-v3",
         python=Path(sys.executable),
         log_path=tmp_path / "chatty.log",
+        # This engine exercises the WIRE; it starts no server, so the
+        # three HIGGS_* variables have nothing to configure.
+        serving_stack=None,
+        max_num_seqs=None,
     )
     try:
         built.start(weights, "deathstalker", 0, [])
@@ -471,6 +608,10 @@ def test_a_worker_that_will_not_go_is_reported_and_never_sigkilled(
         narrator_engine="higgs-v3",
         python=Path(sys.executable),
         log_path=tmp_path / "deaf.log",
+        # This engine exercises the WIRE; it starts no server, so the
+        # three HIGGS_* variables have nothing to configure.
+        serving_stack=None,
+        max_num_seqs=None,
     )
     built.start(weights, "deathstalker", 0, [])
     built.ready(30.0)
@@ -518,6 +659,10 @@ def test_stopping_a_worker_that_ignores_sigterm_does_not_wedge_the_server(
         narrator_engine="higgs-v3",
         python=Path(sys.executable),
         log_path=tmp_path / "deaf2.log",
+        # This engine exercises the WIRE; it starts no server, so the
+        # three HIGGS_* variables have nothing to configure.
+        serving_stack=None,
+        max_num_seqs=None,
     )
     built.start(weights, "deathstalker", 0, [])
     built.ready(30.0)

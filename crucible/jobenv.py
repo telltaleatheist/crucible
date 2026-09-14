@@ -57,6 +57,42 @@ BACKEND_HEADLINE_PACKAGE: dict[str, str] = {
 #: Crucible's, and a doctor line naming it would be reporting a level down.
 NARRATOR_PACKAGE = "narrator"
 
+#: WHICH SERVING STACK EACH `cuda-linux` tts env STARTS, keyed by narrator
+#: engine. Read off the recipes, not chosen here:
+#:
+#:   higgs-v3   `envs/tts/higgs-v3-cuda-linux.txt` installs `vllm==0.28.0` and
+#:              `vllm-omni==0.28.0` and no SGLang at all, so the only stack
+#:              narrator can start out of that env is vllm-omni. (narrator has
+#:              a second one, `sglang-omni`, which BookForge's own WSL env
+#:              serves; a Crucible env that installed it would be a different
+#:              recipe and a different value here.)
+#:   orpheus    NOT PRESENT, deliberately. `NARRATOR_ENGINE=orpheus` loads vLLM
+#:              0.7.3 in process; there is no server underneath it and no
+#:              `HIGGS_*` variable is read on that path.
+#
+# RULING OWED: THIS REPO SAYS "SGLang-Omni" IN SEVEN PLACES AND INSTALLS
+# vllm-omni. `docs/PHASE3-TTS.md` section 4, `crucible/residency.py`'s warm-up
+# comment, `crucible/voices.py`'s own header and every voice manifest's
+# `estimate_note` describe narrator as starting SGLang-Omni on `cuda-linux`;
+# `envs/tts/higgs-v3-cuda-linux.txt` is a FROZEN, resolved set that installs
+# `vllm==0.28.0` + `vllm-omni==0.28.0` and no SGLang at all. The recipe is what
+# runs, so `vllm-omni` is what is stated here — that is the only reading under
+# which this file cannot lie.
+#
+# WHAT IS OWED IS WHICH ONE OWEN WANTS. BookForge's own catalog shipped
+# `stack: "sglang-omni"` on 2026-09-06 on measurements that favour it heavily
+# (same 50 chunks, one seed: vllm-omni at 16 in flight = 4 early stops, 13/50
+# damaged, 6 sustained voice switches, 10,752 chars/min; SGLang-Omni at 16 = 0,
+# 5/50, 0, 26,666). If Crucible is to match that, the recipe changes and this
+# table with it; if it is not, the prose above is stale and should be corrected
+# rather than left to disagree. The numbers that survive either way are the
+# memory estimates: SGLang at --mem-fraction-static 0.60 holds ~19 GB and
+# vllm-omni at 0.35 + 0.10 measured 18.7-19.2 GB, so the manifests' 19 GB is
+# right for the wrong reason and is not a hazard tonight.
+CUDA_LINUX_SERVING_STACK: dict[str, str] = {
+    "higgs-v3": "vllm-omni",
+}
+
 
 class EnvError(CrucibleError):
     """A job type's env is missing, or could not be built. Carries the reason."""
@@ -76,6 +112,20 @@ class EnvSpec:
     key: str
     recipe_name: str
     headline: str
+    #: WHICH SERVING STACK narrator will start UNDERNEATH ITSELF out of this
+    #: env, or None where it starts no server at all. `None` is not "unknown":
+    #: it means this env's engine renders IN PROCESS (the Mac's mlx-audio) or
+    #: has no stack concept (Orpheus, which loads vLLM itself).
+    #:
+    #: IT BELONGS TO THE RECIPE, which is why it is here rather than in the
+    #: voice manifest. A Higgs v3 voice does not choose vllm-omni over
+    #: SGLang-Omni — `higgs-v3-cuda-linux.txt` does, by installing
+    #: `vllm-omni==0.28.0` and nothing else. narrator refuses by name when
+    #: `HIGGS_STACK` is unset (`served_common.serving_stack`: the two stacks
+    #: place sampling differently and size the frame cap against different
+    #: context windows, so a guessed stack is a book rendered at sampling
+    #: nobody chose), and this is the fact Crucible states it from.
+    serving_stack: str | None = None
 
 
 def llm_env(backend_kind: str) -> EnvSpec:
@@ -112,7 +162,17 @@ def tts_env(narrator_engine: str, backend_kind: str) -> EnvSpec:
             key=f"tts-{narrator_engine}",
             recipe_name=f"{narrator_engine}-{backend_kind}",
             headline=NARRATOR_PACKAGE,
+            serving_stack=CUDA_LINUX_SERVING_STACK.get(narrator_engine),
         )
+    # mlx-darwin: NO SERVING STACK, and that is a fact about narrator rather
+    # than a gap here. On darwin `narrator.engine.registry` builds
+    # `HiggsV3MlxEngine` from `HiggsV3MlxConfig`, and neither reads
+    # `HIGGS_STACK` — `serving_stack()` is called only by the SERVED arm's
+    # `HiggsV3Engine.__post_init__` and its `detect_backend()`, while the MLX
+    # class's `detect_backend()` returns 'mlx' off an import. Setting the
+    # variable there would be a lever read by nothing, which is how a Mac spawn
+    # ends up looking like a served one (BookForge's `higgsSpawnEnv` refuses
+    # that shape by name for the same reason).
     return EnvSpec(
         job_type="tts",
         key="tts",

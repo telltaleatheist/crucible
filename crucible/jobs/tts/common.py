@@ -123,6 +123,12 @@ def voice_rows(
     server's, and publishing it invites a client to send it back. What a client
     gets is the shape it must pack to (`pace`, `max_chars`) and the identity it
     must record (`fingerprint`).
+
+    `[voice.serving].max_num_seqs` IS NOT ON THE ROW EITHER, by that same rule
+    and by the division-of-knowledge ruling behind it: it is how wide the
+    server admits, a Crucible-side configuration number, and a client has no
+    decision to make with it. It reaches narrator through the engine's
+    environment (`crucible/engines/narrator.py`) and stops there.
     """
     backend_kind = backend.kind
     rows: list[dict[str, Any]] = []
