@@ -23,6 +23,8 @@ export type {
 
 export {
   ACCELERATOR_UNREADABLE,
+  CAPABILITY_ROUTE_MISSING,
+  CAPABILITY_ROUTE_UNKNOWN,
   CAPABILITY_UNDECIDED,
   CrucibleAcceleratorUnreadable,
   CrucibleAuthError,
@@ -34,6 +36,7 @@ export {
   CrucibleLeased,
   CrucibleNotACrucible,
   CruciblePairingError,
+  CruciblePairingFileError,
   CrucibleProtocolError,
   CrucibleRefused,
   CrucibleServerError,
@@ -42,6 +45,7 @@ export {
   INVALID_PAIRING,
   LEASE_NOT_NEEDED,
   LEASED,
+  PAIRING_FILE_MALFORMED,
   ROUTE_BAD_MODEL,
   ROUTE_NOT_ROUTABLE,
   ROUTE_UPSTREAM_UNCONFIGURED,
@@ -66,6 +70,7 @@ export type { Pairing } from './pairing.js';
 export {
   CRUCIBLE_HOME_ENV,
   PAIRING_FILE,
+  WINDOWS_HOME_DIRNAME,
   cruciblePairingPath,
   readPairingFile,
 } from './pairing-file.js';

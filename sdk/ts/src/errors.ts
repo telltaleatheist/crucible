@@ -414,6 +414,33 @@ export class CruciblePairingError extends CrucibleError {
   }
 }
 
+/** The pairing FILE's one refusal (PHASE15-HOST.md 3.6). */
+export const PAIRING_FILE_MALFORMED = 'pairing_file_malformed';
+
+/**
+ * `<CRUCIBLE_HOME>/pairing` exists and is not what a writer of it writes.
+ *
+ * Separate from {@link CruciblePairingError}, which is about a LINE somebody
+ * pasted: this one is about a FILE on this machine, and the two have different
+ * answers. A bad pasted line means "check what you copied"; a bad file means
+ * "something other than `crucible init` wrote to the engine's own state", and
+ * the caller must not turn either into `null` — "there is no server here" would
+ * send somebody to install a second Crucible over a running one.
+ *
+ * The writer (`crucible/pairing.py`) enforces exactly one line; this is what
+ * the reader says when it finds more.
+ */
+export class CruciblePairingFileError extends CrucibleError {
+  readonly code = PAIRING_FILE_MALFORMED;
+  /** Where the file is, so the sentence names what to delete. */
+  readonly path: string;
+
+  constructor(path: string, detail: string) {
+    super(`${PAIRING_FILE_MALFORMED}: ${path} ${detail}`);
+    this.path = path;
+  }
+}
+
 /**
  * Would this refusal be different on a different server?
  *
@@ -572,6 +599,20 @@ export class CrucibleProtocolError extends CrucibleError {
     this.detail = detail;
   }
 }
+
+// ------------------------------------------- the capability document's route
+//
+// PHASE15-HOST.md section 3.3's last bullet, which is a READING RULE and not a
+// default: a capability document in which NO row carries `route` comes from a
+// server that predates phase 15, and every class on such a server IS local —
+// that is a fact the document states by its own vintage, not a value this
+// client fills in. A document in which SOME rows carry it and one does not is
+// a defect, and so is a `route` this vocabulary does not have.
+
+/** A document where some rows say `route` and one does not. Names the row. */
+export const CAPABILITY_ROUTE_MISSING = 'capability_route_missing';
+/** A `route` that is neither `local` nor `upstream`. */
+export const CAPABILITY_ROUTE_UNKNOWN = 'capability_route_unknown';
 
 // ---------------------------------------------- the settings door's refusals
 //

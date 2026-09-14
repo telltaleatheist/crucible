@@ -25,7 +25,7 @@
  * was going to await a server anyway pays nothing for it.
  */
 
-import { CrucibleError } from './errors.js';
+import { CrucibleError, CruciblePairingFileError } from './errors.js';
 import { parsePairing, type Pairing } from './pairing.js';
 
 /** The environment variable a server's home is overridden with. */
@@ -33,6 +33,13 @@ export const CRUCIBLE_HOME_ENV = 'CRUCIBLE_HOME';
 
 /** The file's name inside that home. One line, mode 0600. */
 export const PAIRING_FILE = 'pairing';
+
+/**
+ * The directory `%LOCALAPPDATA%\Crucible` — the Windows home, whose name is
+ * `crucible/config.py`'s `WINDOWS_HOME_DIRNAME` and `crucible/host/paths.py`'s
+ * `APPDATA_DIRNAME`. One word on both sides of the language boundary.
+ */
+export const WINDOWS_HOME_DIRNAME = 'Crucible';
 
 /** The three calls this module makes, proven to exist before it makes them. */
 interface NodeApis {
@@ -87,8 +94,22 @@ function loadNodeApis(): Promise<NodeApis> {
 }
 
 /**
- * Where a server on this machine keeps its pairing line, by the same rule the
- * server itself uses: `$CRUCIBLE_HOME`, else `~/.crucible`.
+ * Where a server on this machine keeps its pairing line, by the SAME rule the
+ * server itself uses — `crucible/config.py`'s `crucible_home()`, one function
+ * re-implemented here in the one language that cannot call it:
+ *
+ * 1. `$CRUCIBLE_HOME`, when it is set and non-empty. Every platform.
+ * 2. **win32:** `%LOCALAPPDATA%\Crucible\pairing` (PHASE15-HOST.md 3.6's
+ *    table). NOT `~/.crucible`: on Windows the server is the WSL guest's or
+ *    the host-mode child's, and the thing that writes a WINDOWS-side pairing
+ *    file is `crucible host`, whose per-machine root is that same
+ *    directory — `wsl`, `downloads` and `host` are already under it.
+ *    `LOCALAPPDATA` is READ and never assembled from a username, and unset is
+ *    REFUSED rather than guessed: a Windows session without it is broken in a
+ *    way that would make every path here wrong, and `~/.crucible` would be a
+ *    directory nothing writes to, so an app would report "no engine" about a
+ *    machine that is running one.
+ * 3. **linux/darwin:** `~/.crucible/pairing`.
  *
  * Exported because an app that can say WHERE it looked is more useful than one
  * that only says "not found".
@@ -99,6 +120,19 @@ export async function cruciblePairingPath(home?: string): Promise<string> {
   const override = process.env[CRUCIBLE_HOME_ENV];
   if (override !== undefined && override !== '') {
     return node.join(override, PAIRING_FILE);
+  }
+  if (process.platform === 'win32') {
+    const local = process.env['LOCALAPPDATA'];
+    if (local === undefined || local === '') {
+      throw new CrucibleError(
+        '%LOCALAPPDATA% is not set, so this Windows session cannot say where ' +
+          `Crucible's home is. Set ${CRUCIBLE_HOME_ENV} to the directory the ` +
+          'server was initialised with. It is never assembled from a username: ' +
+          'a roaming profile or a redirected AppData would make the guess wrong ' +
+          'and the answer ("no engine on this machine") a lie.',
+      );
+    }
+    return node.join(local, WINDOWS_HOME_DIRNAME, PAIRING_FILE);
   }
   return node.join(node.homedir(), '.crucible', PAIRING_FILE);
 }
@@ -128,7 +162,23 @@ export async function readPairingFile(home?: string): Promise<Pairing | null> {
     if (code === 'ENOENT' || code === 'ENOTDIR') return null;
     throw cause;
   }
-  const line = text.trim();
-  if (line === '') return null;
-  return parsePairing(line);
+  const lines = text
+    .split(/\r?\n/)
+    .map((each) => each.trim())
+    .filter((each) => each !== '');
+  if (lines.length === 0) return null;
+  if (lines.length > 1) {
+    // The WRITER enforces one line (`crucible/pairing.py`), so a second one
+    // means something else has been appending to this file — a shell
+    // redirect, a second installer, an editor. Which line is the server's is
+    // then a guess, and a guessed bearer token is a connect door that fails
+    // with an auth error nobody can explain. Named, like every other refusal.
+    throw new CruciblePairingFileError(
+      path,
+      `holds ${lines.length} lines and a pairing file holds exactly one. ` +
+        'Something other than `crucible init` has written to it; delete it ' +
+        'and re-run `crucible token --url`.',
+    );
+  }
+  return parsePairing(lines[0] as string);
 }

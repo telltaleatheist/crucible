@@ -10,6 +10,8 @@
 import { encodeBase64 } from './base64.js';
 import {
   ACCELERATOR_UNREADABLE,
+  CAPABILITY_ROUTE_MISSING,
+  CAPABILITY_ROUTE_UNKNOWN,
   CAPABILITY_UNDECIDED,
   CrucibleAcceleratorUnreadable,
   CrucibleAuthError,
@@ -186,6 +188,55 @@ export interface WriteArtifactsOptions extends EventsOptions {
   concurrency?: number;
 }
 
+/**
+ * A clock on a PROBE — `ping`, `info`, `capability`.
+ *
+ * The three calls an app makes to ask "is this server there, and what can it
+ * do", often about a machine that may be asleep. Foundry draws a tooltip from
+ * `capability()` and puts a 3 s clock on it, because a Mac Studio that has
+ * suspended its network answers nothing at all and a fetch with no deadline
+ * hangs until the OS gives up — minutes, behind a tooltip.
+ *
+ * Both fields are OPTIONAL and neither has a default: this client never puts a
+ * deadline on a call the caller did not put one on. Waiting forever is the
+ * platform's behaviour, a caller who wants otherwise says how long, and a
+ * number invented here would cancel somebody's slow-but-working probe.
+ *
+ * A timeout aborts with the platform's own `TimeoutError` DOMException and a
+ * caller's `signal` aborts with whatever reason they gave, so
+ * `error.name === 'TimeoutError'` and `'AbortError'` both stay true — the two
+ * are told apart by the caller, not merged here into one "it did not answer".
+ */
+export interface ProbeOptions {
+  /** The caller's own cancel. Composed with `timeoutMs` when both are given. */
+  signal?: AbortSignal;
+  /** Milliseconds before this probe is abandoned. Must be > 0. */
+  timeoutMs?: number;
+}
+
+/**
+ * `ProbeOptions` as a `RequestInit`. One place, so the three probes cannot
+ * come to compose a signal differently.
+ */
+function probeInit(options: ProbeOptions): RequestInit {
+  const init: RequestInit = { method: 'GET' };
+  const { signal, timeoutMs } = options;
+  if (timeoutMs !== undefined) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new CrucibleConfigError(
+        'timeoutMs',
+        `timeoutMs is ${String(timeoutMs)}; a probe's clock is a positive ` +
+          'number of milliseconds. Omit it for no deadline at all.',
+      );
+    }
+    const clock = AbortSignal.timeout(timeoutMs);
+    init.signal = signal === undefined ? clock : AbortSignal.any([signal, clock]);
+  } else if (signal !== undefined) {
+    init.signal = signal;
+  }
+  return init;
+}
+
 export class CrucibleClient {
   /** The server base URL, normalised: no trailing slash, no `/v1`. */
   readonly url: string;
@@ -214,9 +265,12 @@ export class CrucibleClient {
    * `GET /v1/ping`, unauthenticated. Answers "is there a Crucible here at all",
    * separately from "is my token right": a responder that is not a Crucible
    * throws {@link CrucibleNotACrucible}, not an auth error.
+   *
+   * Takes a {@link ProbeOptions} clock, like the other two probes: this is the
+   * call an app makes about a machine that may be asleep.
    */
-  async ping(): Promise<Ping> {
-    const response = await this.#fetch('/v1/ping', { method: 'GET' }, false);
+  async ping(options: ProbeOptions = {}): Promise<Ping> {
+    const response = await this.#fetch('/v1/ping', probeInit(options), false);
     const text = await response.text();
     if (!response.ok) {
       throw new CrucibleNotACrucible(this.url, `HTTP ${response.status}: ${excerpt(text)}`);
@@ -243,9 +297,13 @@ export class CrucibleClient {
 
   // ------------------------------------------------------------------- info
 
-  /** `GET /v1/info` — who this server is, what it runs on, what it can serve. */
-  async info(): Promise<ServerInfo> {
-    const body = await this.#json('/v1/info', { method: 'GET' }, 'info');
+  /**
+   * `GET /v1/info` — who this server is, what it runs on, what it can serve.
+   *
+   * Takes a {@link ProbeOptions} clock (PHASE15-HOST.md 3.8).
+   */
+  async info(options: ProbeOptions = {}): Promise<ServerInfo> {
+    const body = await this.#json('/v1/info', probeInit(options), 'info');
     const server = objectField(body, 'server', 'info');
     const host = objectField(body, 'host', 'info');
     const gpu = objectField(host, 'gpu', 'info.host');
@@ -293,8 +351,8 @@ export class CrucibleClient {
    * (`crucible capability --write`), and {@link info} still says what the
    * server offers meanwhile.
    */
-  async capability(): Promise<CapabilityRecord> {
-    const body = await this.#json('/v1/capability', { method: 'GET' }, 'capability');
+  async capability(options: ProbeOptions = {}): Promise<CapabilityRecord> {
+    const body = await this.#json('/v1/capability', probeInit(options), 'capability');
     return readCapabilityRecord(body);
   }
 
@@ -1860,24 +1918,62 @@ function readCapability(entry: Json, index: number): Capability {
 function readCapabilityRecord(body: Json): CapabilityRecord {
   const where = 'capability';
   const classes = asArray(field(body, 'classes', where), `${where}.classes`);
+  const rows = classes.map((entry, index) =>
+    asObject(entry, `${where}.classes[${index}]`),
+  );
+  // THE VINTAGE IS READ ONCE, FOR THE WHOLE DOCUMENT, and that is the whole
+  // content of PHASE15-HOST.md 3.3's last bullet: a document where NO row
+  // carries `route` comes from a server that predates phase 15, and every
+  // class on such a server IS local. That is a fact the document states by
+  // being what it is, not a value this client picks when one is missing —
+  // which is why the question is asked of the document and never of a row.
+  const anyRoute = rows.some((row) => row['route'] !== undefined);
   return {
     backendKind: str(body, 'backend_kind', where),
     totalBytes: num(body, 'total_bytes', where),
     desktopAllowanceBytes: num(body, 'desktop_allowance_bytes', where),
-    classes: classes.map((entry, index) =>
-      readCapabilityRow(asObject(entry, `${where}.classes[${index}]`), `${where}.classes[${index}]`),
+    classes: rows.map((row, index) =>
+      readCapabilityRow(row, `${where}.classes[${index}]`, anyRoute),
     ),
   };
 }
 
-function readCapabilityRow(entry: Json, where: string): CapabilityRow {
+function readCapabilityRow(
+  entry: Json,
+  where: string,
+  documentHasRoutes: boolean,
+): CapabilityRow {
+  const raw = entry['route'];
+  let route: 'local' | 'upstream';
+  if (raw === undefined) {
+    if (documentHasRoutes) {
+      // Some rows have it and this one does not, so the document cannot say
+      // where this class runs. Reading it as `local` would be inventing the
+      // one thing a routed server is about.
+      throw new CrucibleProtocolError(
+        `${CAPABILITY_ROUTE_MISSING}: ${where} has no "route", but other rows ` +
+          'in the same capability document do. A document either predates ' +
+          'phase 15 entirely (no row has it, and every class is local) or ' +
+          'states it on every row; a half-routed document says nothing ' +
+          `trustworthy about ${str(entry, 'capability', where)}.`,
+      );
+    }
+    route = 'local';
+  } else if (typeof raw !== 'string' || !ROUTES.includes(raw as 'local')) {
+    throw new CrucibleProtocolError(
+      `${CAPABILITY_ROUTE_UNKNOWN}: ${where}.route is ${JSON.stringify(raw)}, ` +
+        `which is not one of ${ROUTES.join(', ')}`,
+    );
+  } else {
+    route = raw as 'local' | 'upstream';
+  }
   return {
     capability: str(entry, 'capability', where),
     enabled: bool(entry, 'enabled', where),
     selected: str(entry, 'selected', where),
     reason: str(entry, 'reason', where),
     shortfallBytes: num(entry, 'shortfall_bytes', where),
-    route: oneOf(str(entry, 'route', where), ROUTES, `${where}.route`),
+    route,
   };
 }
 
@@ -3065,13 +3161,20 @@ function excerpt(text: string): string {
 /** The vocabulary `TaskState` closes over, for `oneOf`. */
 const TASK_STATES: readonly TaskState[] = ['running', 'done', 'failed', 'cancelled'];
 
-/** The five subject kinds. A sixth would be a contract change, not a surprise. */
+/**
+ * The six subject kinds. A seventh would be a contract change, not a surprise.
+ *
+ * `engine` joined them with PHASE15-HOST.md 3.10: on `llama-windows` the
+ * llama.cpp binaries are pulled and reported exactly like weights, so the
+ * page's Tasks and Catalog panels need no case for them.
+ */
 const SUBJECT_KINDS: readonly SubjectKind[] = [
   'model',
   'voice',
   'rvc',
   'rvc-base',
   'denoise',
+  'engine',
 ];
 
 /**

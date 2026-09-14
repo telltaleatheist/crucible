@@ -1440,7 +1440,20 @@ export interface ServerSetup {
 }
 
 /** The five things a subject can be. PHASE13-OPERATOR.md section 2. */
-export type SubjectKind = 'model' | 'voice' | 'rvc' | 'rvc-base' | 'denoise';
+export type SubjectKind =
+  | 'model'
+  | 'voice'
+  | 'rvc'
+  | 'rvc-base'
+  | 'denoise'
+  /**
+   * The llama.cpp binaries a `llama-windows` server runs its GGUF models
+   * with — `{kind: "engine", id: "llama-cpp"}` (PHASE15-HOST.md 3.10, fact 1).
+   * A subject like any other, so the page's Tasks panel shows the download
+   * with bytes exactly as it shows a weights pull; what makes it different is
+   * only that its bytes are a pinned release's zips rather than a repo's.
+   */
+  | 'engine';
 
 /**
  * One row of `GET /v1/catalog`: a pullable thing and where it stands here.
