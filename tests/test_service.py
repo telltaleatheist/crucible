@@ -293,6 +293,42 @@ def test_install_records_the_installing_shells_path(
     assert "Environment=PATH=/opt/homebrew/bin:/usr/bin" in unit
 
 
+def test_install_appends_the_servers_own_bin_to_the_recorded_path(
+    user_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Since 0.6.0 the server can arrive as an env pack, and then the shell
+    that runs `service install` is a `wsl.exe --exec` shell whose PATH cannot
+    contain a directory created a minute earlier. Recording it is what makes
+    "this is the PATH the service has" true of the process."""
+    monkeypatch.setattr(hosttools, "search_path", lambda: "/usr/bin:/bin")
+    install_systemd(user_home, Runner(LINGER_ON), path_value=None)
+    unit = service.unit_path(user_home).read_text(encoding="utf-8")
+    assert f"Environment=PATH=/usr/bin:/bin:{env_bin(user_home)}\n" in unit
+
+
+def test_the_servers_bin_is_appended_and_never_prepended(user_home: Path) -> None:
+    """It also holds `python3`, `uvicorn` and half a dozen dependency scripts.
+    In FRONT of a host's own, those would silently change what every bare name
+    means in order to fix nothing."""
+    recorded = service.path_including_program_dir(
+        "/opt/homebrew/bin:/usr/bin", str(env_bin(user_home) / "crucible")
+    )
+    assert recorded.startswith("/opt/homebrew/bin:/usr/bin:")
+    assert recorded.endswith(str(env_bin(user_home)))
+
+
+def test_a_bin_already_on_the_path_is_not_moved_to_the_back(
+    user_home: Path,
+) -> None:
+    """Idempotent: re-installing from a shell that HAS the pack on its PATH
+    must not demote it behind everything else."""
+    directory = str(env_bin(user_home))
+    before = f"{directory}:/usr/bin"
+    assert (
+        service.path_including_program_dir(before, f"{directory}/crucible") == before
+    )
+
+
 def test_install_records_crucible_home_so_the_service_serves_one_config(
     user_home: Path,
 ) -> None:

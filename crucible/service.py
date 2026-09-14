@@ -42,6 +42,20 @@ it searched whenever it reports a tool missing. Hardcoding a Homebrew prefix
 would fix one Mac, and would be a second owner of a fact the environment already
 holds.
 
+**The server's own `bin/` is APPENDED to that PATH, and only appended.** Since
+0.6.0 the server can arrive as an env pack (PHASE14-ENVPACKS.md), and then the
+shell that runs `crucible service install` is a `wsl.exe --exec` shell whose
+PATH is the guest's default — which cannot contain a directory that was created
+a minute earlier. Recording it is what makes "this is the PATH the service has"
+true of the process rather than of the installer. **Appended and never
+prepended**, because the pack's `bin/` also holds `python3`, `uvicorn` and half
+a dozen of its dependencies' scripts, and putting those in front of a host's
+own would silently change what every bare name means in order to fix nothing.
+This closes no live defect — `tasks.install_command()` resolves the script
+beside `sys.executable` before it ever looks at PATH — and is here so that a
+bare name inside the server resolves to the server's own neighbour instead of
+to nothing.
+
 `CRUCIBLE_HOME` is recorded for the same reason and it is not optional: a service
 started without it serves `~/.crucible`, which on a host where the operator set
 `CRUCIBLE_HOME` is a **different server with a different token**. The value
@@ -184,6 +198,21 @@ def console_script(executable: str) -> str:
             "and run this again"
         )
     return str(path)
+
+
+def path_including_program_dir(path_value: str, program: str) -> str:
+    """`path_value` with the server's own `bin/` at the END, once.
+
+    See the module docstring for why it is there and why it is appended rather
+    than prepended. Idempotent: a directory already on the PATH stays where it
+    is, so re-running `service install` from a shell that HAS the pack on its
+    PATH does not move it behind the rest.
+    """
+    directory = str(Path(program).resolve().parent)
+    entries = [entry for entry in path_value.split(os.pathsep) if entry != ""]
+    if directory in entries:
+        return path_value
+    return os.pathsep.join([*entries, directory])
 
 
 def mechanism_for(backend_kind: str) -> str:
@@ -643,6 +672,7 @@ def install(
     # second one that nothing could replace or correct.
     recorded = hosttools.search_path() if path_value is None else path_value
     program = console_script(executable)
+    recorded = path_including_program_dir(recorded, program)
     lines: list[str] = []
 
     if mechanism == SYSTEMD:
