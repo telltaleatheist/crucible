@@ -134,7 +134,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ... import accelerator
+from ... import accelerator, hosttools
 from ...config import Config
 from ...engines import EngineError, NarratorEngine
 from ...errors import ApiError, JobError
@@ -261,7 +261,8 @@ def _require_ffmpeg() -> str:
             "BookForge's assembly expects is a mono FLAC. The alternative is "
             "linking libsndfile into the server's own interpreter, which is a "
             "compiled audio dependency in a process that deliberately imports "
-            "no engine at all",
+            "no engine at all. " + hosttools.searched_note(),
+            {"path": hosttools.search_path()},
         )
     return found
 
@@ -574,7 +575,7 @@ class TtsJobType:
                 ready=False,
                 detail=(
                     "there is no ffmpeg on PATH, and tts encodes every chunk "
-                    "through it"
+                    "through it. " + hosttools.searched_note()
                 ),
             )
         rows = voice_rows(self._config, backend, self._residency)

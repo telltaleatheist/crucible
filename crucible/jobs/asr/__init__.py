@@ -61,13 +61,12 @@ gets the same answer.
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
-from ... import accelerator, weights, workerenv, workers
+from ... import accelerator, hosttools, weights, workerenv, workers
 from ...asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
 from ...config import Config
 from ...errors import ApiError, JobError
@@ -195,9 +194,11 @@ def ffmpeg_path() -> str | None:
 
     A module-level probe, for the reason `crucible/accelerator.py` gives about
     its own: a test replaces it and asserts on the refusal, instead of asserting
-    on whatever happens to be installed on the machine running the suite.
+    on whatever happens to be installed on the machine running the suite. The
+    search itself goes through `crucible/hosttools.py`, which is the one owner of
+    *which PATH was searched* — the fact every refusal below has to name.
     """
-    return shutil.which("ffmpeg")
+    return hosttools.which("ffmpeg")
 
 
 def _require_ffmpeg() -> str:
@@ -216,7 +217,9 @@ def _require_ffmpeg() -> str:
             "ffmpeg_missing",
             "there is no ffmpeg on this server's PATH, and asr decodes every input "
             "through it — faster-whisper's own PyAV decoder silently truncates some "
-            "m4b files, which ends a transcript hours early with no error",
+            "m4b files, which ends a transcript hours early with no error. "
+            + hosttools.searched_note(),
+            {"path": hosttools.search_path()},
         )
     return found
 

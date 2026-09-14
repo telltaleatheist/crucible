@@ -4,6 +4,7 @@
     crucible install    build a job type's env, then decide whether the card fits it
     crucible capability what this host can hold, and why; --write records it
     crucible serve      run the API in the foreground
+    crucible service    install/start/stop the machine service that runs `serve`
     crucible models     list and pull model weights
     crucible voices     list and pull voice weights
     crucible doctor     probe the host and every job type; exit 0 only when healthy
@@ -15,13 +16,23 @@ Exit codes: 0 success, 1 refused (named reason on stderr), 2 usage.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-from . import API_VERSION, VERSION, capability, jobenv, narratorpatches, weights, workerenv
+from . import (
+    API_VERSION,
+    VERSION,
+    capability,
+    jobenv,
+    narratorpatches,
+    service,
+    weights,
+    workerenv,
+)
 from .alignmodels import (
     AlignManifest,
     AlignManifestError,
@@ -178,6 +189,169 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     uvicorn.run(app, host=host, port=port, log_level=args.log_level)
     return EXIT_OK
+
+
+# ------------------------------------------------------------------ service
+
+
+def _service_context() -> tuple[Config, Backend, str] | int:
+    """Config, backend and this host's service mechanism, or a printed refusal.
+
+    The backend is DETECTED and compared against the config, exactly as
+    `install` and `capability` do, rather than read off the config alone. A
+    service is a promise that `crucible serve` will keep running on this host,
+    and `serve` itself refuses when the detected backend and the recorded one
+    disagree — so installing a unit in that state would install a unit that
+    cannot start.
+    """
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        return _fail(str(exc))
+    try:
+        backend = detect_backend()
+    except NoViableBackend as exc:
+        return _fail(f"no viable backend: {exc.reason}")
+    if backend.kind != config.backend_kind:
+        return _fail(
+            f"this host detects backend {backend.kind}, but {config.path} was "
+            f"initialised for {config.backend_kind}; re-run `crucible init --force`"
+        )
+    try:
+        mechanism = service.mechanism_for(backend.kind)
+    except service.ServiceError as exc:
+        return _fail(str(exc))
+    return config, backend, mechanism
+
+
+def cmd_service_install(args: argparse.Namespace) -> int:
+    """`crucible service install` — PHASE5-APPS.md 6.0, PHASE11-SERVICE.md.
+
+    Host and port come from `config.toml` AT INSTALL TIME and are baked into the
+    unit's `ExecStart`, which means a config edited afterwards is not what the
+    service serves until this is re-run. That is stated in the phase doc and
+    printed here, because the alternative — a unit that re-reads the config —
+    is a unit whose behaviour changes without anybody installing anything.
+    """
+    resolved = _service_context()
+    if isinstance(resolved, int):
+        return resolved
+    config, _backend, mechanism = resolved
+    try:
+        lines = service.install(
+            mechanism,
+            home=service.user_home(),
+            server_name=config.name,
+            executable=sys.executable,
+            crucible_home=config.home,
+            host=config.host,
+            port=config.port,
+            runner=service.subprocess_runner,
+        )
+    except service.ServiceError as exc:
+        return _fail(str(exc))
+    print(f"mechanism: {mechanism}")
+    for line in lines:
+        print(line)
+    print(
+        f"serving:  http://{config.host}:{config.port}/v1 — read from "
+        f"{config.path} now and written into the definition. Change either and "
+        "re-run `crucible service install`."
+    )
+    return EXIT_OK
+
+
+def cmd_service_uninstall(args: argparse.Namespace) -> int:
+    resolved = _service_context()
+    if isinstance(resolved, int):
+        return resolved
+    _config, _backend, mechanism = resolved
+    try:
+        lines = service.uninstall(
+            mechanism, home=service.user_home(), runner=service.subprocess_runner
+        )
+    except service.ServiceError as exc:
+        return _fail(str(exc))
+    for line in lines:
+        print(line)
+    return EXIT_OK
+
+
+def cmd_service_start(args: argparse.Namespace) -> int:
+    resolved = _service_context()
+    if isinstance(resolved, int):
+        return resolved
+    _config, _backend, mechanism = resolved
+    try:
+        lines = service.start(
+            mechanism, home=service.user_home(), runner=service.subprocess_runner
+        )
+    except service.ServiceError as exc:
+        return _fail(str(exc))
+    for line in lines:
+        print(line)
+    return EXIT_OK
+
+
+def cmd_service_stop(args: argparse.Namespace) -> int:
+    resolved = _service_context()
+    if isinstance(resolved, int):
+        return resolved
+    _config, _backend, mechanism = resolved
+    try:
+        lines = service.stop(
+            mechanism, home=service.user_home(), runner=service.subprocess_runner
+        )
+    except service.ServiceError as exc:
+        return _fail(str(exc))
+    for line in lines:
+        print(line)
+    return EXIT_OK
+
+
+def cmd_service_status(args: argparse.Namespace) -> int:
+    """Running or not, with the pid and the definition's path.
+
+    **Exit 0 only when it is running**, so a script can gate on it the way it
+    gates on `crucible doctor`. A service that is installed and stopped is a
+    server nothing can reach, and reporting that as success would make this verb
+    useless to the only thing that would automate it.
+    """
+    resolved = _service_context()
+    if isinstance(resolved, int):
+        return resolved
+    _config, _backend, mechanism = resolved
+    try:
+        state = service.status(
+            mechanism, service.user_home(), runner=service.subprocess_runner
+        )
+    except service.ServiceError as exc:
+        return _fail(str(exc))
+    if args.json:
+        print(json.dumps(state.to_dict(), indent=2))
+        return EXIT_OK if state.running else EXIT_REFUSED
+    print(f"mechanism:  {state.mechanism}")
+    print(
+        f"definition: {state.definition} "
+        f"({'present' if state.installed else 'NOT THERE'})"
+    )
+    print(f"running:    {'yes' if state.running else 'NO'}")
+    print(f"pid:        {state.pid if state.pid is not None else '-'}")
+    print(f"detail:     {state.detail}")
+    if state.mechanism == service.SYSTEMD:
+        # REPORTED, never assumed: `loginctl enable-linger` is the operator's,
+        # and without it this server dies with the session that installed it.
+        if state.linger is True:
+            linger = "on — this server survives a logout and starts at boot"
+        elif state.linger is False:
+            linger = (
+                "OFF — this server stops when your last session ends. "
+                f"`sudo loginctl enable-linger {getpass.getuser()}` grants it"
+            )
+        else:
+            linger = "UNKNOWN — loginctl could not be asked"
+        print(f"linger:     {linger}")
+    return EXIT_OK if state.running else EXIT_REFUSED
 
 
 # -------------------------------------------------------------- capability
@@ -1359,6 +1533,50 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=None, help="bind port (default from config)")
     serve.add_argument("--log-level", default="info", help="uvicorn log level")
     serve.set_defaults(func=cmd_serve)
+
+    service_parser = subparsers.add_parser(
+        "service",
+        help="the machine service that runs `crucible serve` (PHASE11-SERVICE.md)",
+        description=(
+            "A local Crucible is a service and no app owns it (Owen, 2026-09-13; "
+            "PHASE5-APPS.md section 6.0). On cuda-linux that is a systemd USER "
+            "unit, on mlx-darwin a launchd agent. Every verb is idempotent."
+        ),
+    )
+    service_commands = service_parser.add_subparsers(
+        dest="service_command", required=True
+    )
+
+    service_install = service_commands.add_parser(
+        "install",
+        help="write the unit or plist for this host, enable it and start it",
+    )
+    service_install.set_defaults(func=cmd_service_install)
+
+    service_uninstall = service_commands.add_parser(
+        "uninstall", help="stop the service, forget it, and remove its definition"
+    )
+    service_uninstall.set_defaults(func=cmd_service_uninstall)
+
+    service_start = service_commands.add_parser(
+        "start", help="make sure the installed service is running"
+    )
+    service_start.set_defaults(func=cmd_service_start)
+
+    service_stop = service_commands.add_parser(
+        "stop", help="stop the service without forgetting it"
+    )
+    service_stop.set_defaults(func=cmd_service_stop)
+
+    service_status = service_commands.add_parser(
+        "status",
+        help="running or not, with the pid and the unit/plist path; exit 0 only "
+        "when it is running",
+    )
+    service_status.add_argument(
+        "--json", action="store_true", help="machine-readable"
+    )
+    service_status.set_defaults(func=cmd_service_status)
 
     doctor = subparsers.add_parser("doctor", help="probe the host and the job types")
     doctor.add_argument("--json", action="store_true", help="machine-readable report")

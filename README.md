@@ -58,6 +58,8 @@ crucible doctor                 # probe the host; exit 0 only when healthy
 crucible doctor --json          # the same report, machine-readable
 crucible token --show           # print the bearer token
 crucible serve                  # foreground; 127.0.0.1:7100 by default
+crucible service install        # …or run it as this machine's service (PHASE11-SERVICE.md);
+                                #   also start|stop|status|uninstall, all idempotent
 crucible install llm            # build the llm env for this host's backend
 crucible install tts --narrator-engine higgs-v3   # ...and a tts env, one per engine
 crucible capability             # what this host's card can hold, and why (dry run)

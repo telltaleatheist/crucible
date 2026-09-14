@@ -70,13 +70,12 @@ the artifact is all-or-nothing and the cues are not.
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from ... import accelerator, weights, workerenv, workers
+from ... import accelerator, hosttools, weights, workerenv, workers
 from ...alignmodels import (
     AlignBackendSpec,
     AlignManifest,
@@ -240,9 +239,11 @@ def ffmpeg_path() -> str | None:
 
     A module-level probe, for the reason `crucible/accelerator.py` gives about
     its own: a test replaces it and asserts on the refusal, instead of asserting
-    on whatever happens to be installed on the machine running the suite.
+    on whatever happens to be installed on the machine running the suite. The
+    search goes through `crucible/hosttools.py`, the one owner of *which PATH
+    was searched* — which is what the refusals below have to name.
     """
-    return shutil.which("ffmpeg")
+    return hosttools.which("ffmpeg")
 
 
 def _require_ffmpeg() -> str:
@@ -254,7 +255,8 @@ def _require_ffmpeg() -> str:
             "there is no ffmpeg on this server's PATH, and align decodes every "
             "chunk through it to 16 kHz mono float32 — the rate the model's "
             "feature extractor was trained at, which is why it is not something a "
-            "client is asked to do",
+            "client is asked to do. " + hosttools.searched_note(),
+            {"path": hosttools.search_path()},
         )
     return found
 
@@ -354,7 +356,7 @@ class AlignJobType:
             return JobTypeStatus(
                 ready=False,
                 detail=f"{env.detail}; but there is no ffmpeg on PATH, and align "
-                "decodes every chunk through it",
+                "decodes every chunk through it. " + hosttools.searched_note(),
             )
         try:
             manifests = _manifests()
