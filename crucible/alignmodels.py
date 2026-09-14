@@ -20,17 +20,27 @@ directory is the job type**, which is how `asr/` already works, and it is the
 better arrangement: nothing can declare `job_type = "llm"` in `align/` and be
 half-believed by two loaders.
 
-Only `cuda-linux` is an align backend, for now
-----------------------------------------------
+Both backends run the same engine, and that is the point
+---------------------------------------------------------
 Qwen3-ForcedAligner is a torch model and torch has an MPS backend, so unlike
-`asr` there is no *architectural* reason the Mac cannot run this. What there is
-instead is no measurement: the bake-off that chose this aligner
-(229x realtime, 51/61 cues exact against WhisperX's 18x and 39) was run on the
-3090 Ti in WSL2, nobody has run it on Metal, and `bfloat16` on MPS is a different
-numerical path from `bfloat16` on CUDA. Shipping an `mlx-darwin` block would be
-asserting a result nobody has, so `envs/align/mlx-darwin.md` says that at length
-in the place somebody will look for the missing recipe, and a Mac gets
-`backend_unsupported` by name.
+`asr` the Mac needs no second engine, no second worker and no second set of
+weights: `ALIGN_BACKEND_ENGINES` maps both backends to `qwen3-forced-aligner`
+and `align/qwen3-aligner.toml` pins the identical repo and revision on both.
+What changes per backend is the DEVICE the worker is told to load onto, which
+`crucible/jobs/align/__init__.py` owns.
+
+Until 2026-09-14 this module shipped `cuda-linux` alone, and the reason it gave
+was that nobody had measured the aligner on Metal. Half of that is discharged
+and half is not, which is why both halves are written down here rather than one
+of them being quietly dropped: BookForge measured 97x realtime warm on MPS in
+bfloat16 on the M1 Ultra on 2026-09-08 (`electron/components/qwen-align-env.ts`)
+in the very env `envs/align/mlx-darwin.txt` is the freeze of — so the recipe is
+a real one — while the TIMESTAMP comparison `envs/align/mlx-darwin.md` asks for
+has still not been run. `bfloat16` on MPS is a different numerical path from
+`bfloat16` on CUDA, and until one chapter is aligned on both machines and the
+cues compared, nobody can say the two agree. The block ships because the engine,
+the env and the speed are real; the comparison is named as owed in that file and
+in `docs/PHASE15-HOST.md` 7c rather than implied to have happened.
 
 Why this is not `crucible/manifests.py`
 ---------------------------------------
@@ -51,15 +61,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .backend import CUDA_LINUX
+from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
 
 ALIGN_DIR_ENV = "CRUCIBLE_ALIGN_DIR"
 
-#: Which engine each backend is allowed to name. See the module docstring for
-#: why `mlx-darwin` is not in here and what it would take to put it there.
+#: Which engine each backend is allowed to name. ONE engine for both, which is
+#: the whole shape of this job type on the Mac — see the module docstring.
 ALIGN_BACKEND_ENGINES: dict[str, str] = {
     CUDA_LINUX: "qwen3-forced-aligner",
+    MLX_DARWIN: "qwen3-forced-aligner",
 }
 
 _MODEL_REQUIRED: dict[str, type] = {
@@ -253,11 +264,9 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AlignManif
         if kind not in ALIGN_BACKEND_ENGINES:
             raise AlignManifestError(
                 f"{where}: {kind!r} is not an align backend; the align backends are "
-                f"{sorted(ALIGN_BACKEND_ENGINES)}. Qwen3-ForcedAligner is a torch "
-                "model and torch has an MPS backend, so a Mac block is possible — "
-                "but nobody has measured this aligner on Metal, and a manifest is "
-                "not the place to assert a result nobody has "
-                "(envs/align/mlx-darwin.md)"
+                f"{sorted(ALIGN_BACKEND_ENGINES)}, and both run "
+                "'qwen3-forced-aligner' on the same weights. Windows is never a "
+                "backend (docs/PHASE15-HOST.md)"
             )
         if not isinstance(block, dict):
             raise AlignManifestError(f"{where}: must be a table")

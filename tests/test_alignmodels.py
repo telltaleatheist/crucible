@@ -64,19 +64,58 @@ def test_the_aligner_pulls_into_the_models_tree() -> None:
     assert load_align_manifest("qwen3-aligner").weights_family == "models"
 
 
-def test_there_is_no_mac_backend_yet() -> None:
-    assert sorted(ALIGN_BACKEND_ENGINES) == [CUDA_LINUX]
-    assert not load_align_manifest("qwen3-aligner").supports(MLX_DARWIN)
+def test_both_backends_run_the_same_engine_on_the_same_weights() -> None:
+    """The shape of `align` on the Mac: one engine, one checkpoint, two devices.
+
+    Not a second engine the way `asr` needs one — Qwen3-ForcedAligner is plain
+    torch and torch has an MPS backend — so a Mac block that pinned DIFFERENT
+    weights would be two aligners wearing one id.
+    """
+    assert sorted(ALIGN_BACKEND_ENGINES) == [CUDA_LINUX, MLX_DARWIN]
+    assert set(ALIGN_BACKEND_ENGINES.values()) == {"qwen3-forced-aligner"}
+    manifest = load_align_manifest("qwen3-aligner")
+    cuda, mac = manifest.spec(CUDA_LINUX), manifest.spec(MLX_DARWIN)
+    assert mac.hf_repo == cuda.hf_repo
+    assert mac.revision == cuda.revision
+    assert mac.dtype == cuda.dtype == "bfloat16"
 
 
-def test_the_missing_mac_recipe_explains_itself() -> None:
-    """`envs/align/mlx-darwin.md` is where somebody will look for the .txt."""
-    note = align_manifests_dir().parent / "envs" / "align" / "mlx-darwin.md"
-    assert note.is_file()
-    text = note.read_text(encoding="utf-8")
-    assert "nobody has measured" in text
-    # And it must not read as "this cannot work", which is `asr`'s reason.
-    assert "differs from `asr`" in text
+def test_the_mac_estimate_is_measured_and_not_the_cuda_one() -> None:
+    """Three of the four things cuda's declared 1.5 GiB names — the CUDA context
+    and the cuBLAS and cuDNN workspaces — do not exist on Metal, so a copy of
+    that number would be an allowance for hardware that is not there. This one
+    was watched on the M1 Ultra instead: the high-water of
+    `torch.mps.driver_allocated_memory()` over three 300-second chunks."""
+    manifest = load_align_manifest("qwen3-aligner")
+    mac = manifest.spec(MLX_DARWIN).memory_bytes_estimate
+    cuda = manifest.spec(CUDA_LINUX).memory_bytes_estimate
+    assert mac == 5_885_296_640
+    assert mac != cuda
+    # The measured figure is LARGER than cuda's arithmetic, which is the whole
+    # argument for measuring: the allocator's retained blocks are real memory a
+    # resident session holds for a whole book.
+    assert mac > cuda
+    # And the manifest says how it got there, so nobody reads it as a guess.
+    text = manifest.path.read_text(encoding="utf-8")
+    assert "MEASURED, on the machine it is for" in text
+    assert "driver_allocated_memory" in text
+
+
+def test_the_mac_recipe_is_there_and_its_note_says_what_is_still_owed() -> None:
+    """The .txt exists; the .md stops explaining an absence and names the one
+    thing that has NOT been done — comparing the timestamps."""
+    envs = align_manifests_dir().parent / "envs" / "align"
+    recipe = envs / "mlx-darwin.txt"
+    assert recipe.is_file()
+    pins = recipe.read_text(encoding="utf-8")
+    assert "qwen-asr==0.0.6" in pins
+    assert "torch==2.14.0" in pins
+    # It is a Mac recipe: nothing CUDA survived the read.
+    assert "nvidia-" not in pins
+    assert "triton==" not in pins
+    note = (envs / "mlx-darwin.md").read_text(encoding="utf-8")
+    assert "Compare the timestamps" in note
+    assert "97x realtime" in note
 
 
 # ------------------------------------------------------------------ refusals
@@ -122,21 +161,23 @@ def test_a_dtype_torch_does_not_have_is_refused() -> None:
     assert "AttributeError one model load later" in str(caught.value)
 
 
-def test_a_mac_block_is_refused_with_the_reason() -> None:
-    extra = GOOD + """
+def test_a_mac_block_parses_and_a_windows_one_does_not() -> None:
+    """The Mac is a backend now; Windows is never one."""
+    mac = GOOD + """
 [backends.mlx-darwin]
 engine = "qwen3-forced-aligner"
 hf_repo = "Qwen/Qwen3-ForcedAligner-0.6B"
 revision = "c7cbfc2048c462b0d63a45797104fc9db3ad62b7"
 dtype = "bfloat16"
-memory_bytes_estimate = 3446157280
+memory_bytes_estimate = 3434819552
 """
+    assert parse(mac).supports(MLX_DARWIN)
+
     with pytest.raises(AlignManifestError) as caught:
-        parse(extra)
+        parse(mac.replace("[backends.mlx-darwin]", "[backends.llama-windows]"))
     message = str(caught.value)
     assert "not an align backend" in message
-    # And the reason is "unmeasured", not "impossible".
-    assert "nobody has measured" in message
+    assert "Windows is never a backend" in message
 
 
 def test_the_id_and_the_filename_are_the_same_thing() -> None:

@@ -40,6 +40,15 @@
 #   tts-* 30 ESTIMATED from the recipe (torch + vllm + vllm-omni + narrator).
 #   llm   30 ESTIMATED from the recipe (torch + vllm).
 #
+#   The mlx-darwin row added 2026-09-14 is ESTIMATED the same way and
+#   labelled the same way — it has not been built on a runner:
+#
+#   align/mlx-darwin 12  ESTIMATED. The recipe is cuda's minus the 19
+#                        `nvidia-*`/`cuda-*` wheels and triton, which is most
+#                        of what makes the cuda align pack want 20 GB; what
+#                        is left is one macOS torch plus transformers,
+#                        librosa and gradio.
+#
 # The four ESTIMATES are labelled as estimates on purpose and none of them has
 # been built on a runner. If one does not fit, its job fails with the sentence
 # the summary repeats — build it on Owen's machine with
@@ -84,6 +93,7 @@ jobs:
           - { name: tts-higgs-v3, backend: cuda-linux,  runner: ubuntu-latest, needs_gb: 30 }
           - { name: server,       backend: mlx-darwin,  runner: macos-14,      needs_gb: 2 }
           - { name: rvc,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 20 }
+          - { name: align,        backend: mlx-darwin,  runner: macos-14,      needs_gb: 12 }
           - { name: llm,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 10 }
           - { name: tts,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 25 }
     steps:
