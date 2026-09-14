@@ -1,0 +1,602 @@
+"""The Windows → WSL2 move — PHASE15-HOST.md 4.3 and 4.7.
+
+ONE implementation of the sequence, and this is it. The page's engine switch
+(`POST /v1/tasks {"type": "engine", "target": "wsl"}`) reaches it because the
+Windows server relays to the host's door (`door.py`); `@crucible/bootstrap`'s
+`install()` reaches it directly on a machine that has no server yet. Both get
+the same events, because there is one sequence.
+
+WHAT THE HOST DOES AND WHAT THE GUEST DOES
+-------------------------------------------
+Only the host can run `wsl.exe`, raise a UAC prompt and survive a reboot, so
+the WINDOWS half — the 4c states, the import, the LAN door — is here. The
+GUEST half is not: `install.sh` is generated from `sdk/bootstrap/src/steps.ts`
+and is the one owner of "what installing a Crucible on a Linux machine is"
+(PHASE14 4a: an app-driven install and a hand install "cannot differ"). So the
+host RUNS that script inside the distro rather than restating its six steps in
+Python, which would be the third copy of a list that already has two
+spellings.
+
+THE TOKEN, AND WHY THERE ARE TWO `init`s
+-----------------------------------------
+`install.sh` mints its own token, because on a bare Linux machine there is
+nobody to inherit one from. On this path there IS: the Windows server has been
+answering apps on `:7100` with a token they have already paired with, and 3.5
+says that token survives the move. So after the guest's bare install the host
+runs `crucible init --force --config-from <file>`, which takes exactly
+`auth.token`, `[routes]` and `[upstreams]` out of a 0600 file the host wrote
+and then deletes. Two inits and one token, rather than one init and an app
+that silently stops being paired.
+
+NOTHING IS DELETED BEFORE THE GUEST HAS IT
+-------------------------------------------
+3.5's weights rule, and `migrate-weights` below is shaped by it: pull the
+guest's form of every subject the Windows engine has, and only then delete the
+Windows copy. An interrupted move leaves both copies of the unfinished subject
+and resumes from the catalog diff on the next attempt, which is why the step
+reads the two catalogs every time rather than carrying a list across.
+"""
+
+from __future__ import annotations
+
+import base64
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Sequence
+
+from . import landoor, wslstate
+from .errors import HostError
+from .paths import engine_url
+from .runner import RunResult, Runner
+from .wsl_states import CRUCIBLE_DISTRO
+
+#: The only target this door accepts. 4.7: the reverse move is not in this
+#: phase, and a target nobody implemented is refused rather than ignored.
+ENGINE_TARGET_WSL = "wsl"
+
+#: 4.7's step names, in 4.7's order. The page draws these, the log carries
+#: them, and `tests/test_host_installer.py` asserts the order — a sequence
+#: whose order is only in prose is a sequence that gets reordered.
+STEPS: tuple[str, ...] = (
+    "wsl-state",
+    "import-distro",
+    "guest-install",
+    "migrate-config",
+    "install-job-types",
+    "migrate-weights",
+    "lan-door",
+    "stop-windows-server",
+    "switch-pairing",
+)
+
+#: Long enough for a `wsl --import` of a multi-gigabyte ext4 file, and for a
+#: guest-side install that downloads a server pack over somebody's home line.
+IMPORT_TIMEOUT_SECONDS = 30 * 60.0
+GUEST_INSTALL_TIMEOUT_SECONDS = 120 * 60.0
+QUICK_TIMEOUT_SECONDS = 5 * 60.0
+
+#: The sentence 4.7 requires for the reboot states, verbatim in one place.
+REBOOT_SENTENCE = (
+    "reboot, then Crucible continues — this machine has to restart before "
+    "Windows can start a Linux virtual machine. Crucible starts itself when "
+    "you log back in and picks this up where it stopped."
+)
+
+
+@dataclass
+class Event:
+    """One line of the door's ndjson, shaped like `crucible/tasks.py`'s events.
+
+    Same shape and not a similar one: 4.7 has the Windows server RELAY these
+    under its own task id, and a relay that reshapes is a second owner of the
+    shape.
+    """
+
+    event: str
+    data: dict[str, object]
+
+
+Emit = Callable[[Event], None]
+
+
+#: The backend the GUEST is. Linux x86_64, which is what
+#: `sdk/bootstrap`'s `backendFor('linux')` answers — the client compares
+#: against that, so the two must be the same word and this is where it is
+#: stated. It is NOT `llama-windows`: that is the machine being left.
+GUEST_BACKEND = "cuda-linux"
+
+
+@dataclass
+class StepRecord:
+    """One step, as the `done` event reports it.
+
+    `argv` may be empty for a step that ran no command; `status` is `ok`,
+    `running` or `skipped`, which is the vocabulary
+    `sdk/bootstrap/src/install.ts`'s `InstallStep` already has, so the client
+    maps it rather than translating it.
+    """
+
+    name: str
+    argv: list[str] = field(default_factory=list)
+    status: str = "running"
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "argv": list(self.argv),
+            "status": self.status,
+            "detail": self.detail,
+        }
+
+
+@dataclass
+class InstallOutcome:
+    """What the sequence achieved. The `done` event's data.
+
+    IT CARRIES A RESULT, and `crucible/tasks.py`'s `done` carries `{}`. The
+    difference has a reason rather than being drift: this door has a caller
+    tasks.py does not, `@crucible/bootstrap`'s `install()`, which is a library
+    function that must RETURN an `InstallResult` — and on Windows it cannot go
+    and read the guest's config for itself, because that `wsl.exe` door is one
+    of the things this phase deletes. The page-driven caller (4.7) relays
+    these events under a task id and may drop this payload; nothing on the
+    page reads it.
+    """
+
+    steps: list[StepRecord] = field(default_factory=list)
+    distro: str = CRUCIBLE_DISTRO
+    detail: str = ""
+    server_name: str = ""
+    server_url: str = ""
+    config_path: str = ""
+    crucible: str = ""
+    release: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "server": {
+                "name": self.server_name,
+                "url": self.server_url,
+                "config_path": self.config_path,
+            },
+            "release": self.release,
+            "backend": GUEST_BACKEND,
+            "crucible": self.crucible,
+            "steps": [step.to_dict() for step in self.steps],
+        }
+
+
+class EngineInstall:
+    """4.7's sequence, driven. Every machine call goes through `runner`."""
+
+    def __init__(
+        self,
+        runner: Runner,
+        emit: Emit,
+        *,
+        release: str,
+        home: Path,
+        install_sh_url: str,
+        distro: str = CRUCIBLE_DISTRO,
+        elevate: bool = True,
+    ) -> None:
+        self._runner = runner
+        self._emit = emit
+        self._release = release
+        self._home = Path(home)
+        self._install_sh_url = install_sh_url
+        self._distro = distro
+        #: `False` in a test and in `--install --no-elevate`: the argv is still
+        #: reported, and nothing raises a consent dialog.
+        self._elevate = elevate
+        self._index = 0
+        self._records: list[StepRecord] = []
+
+    # ---------------------------------------------------------------- events
+
+    def _step(self, name: str) -> StepRecord:
+        """Begin a step. ALWAYS before any `line` of that step.
+
+        The client attributes each `line` to the last `step` it saw and
+        refuses a line that arrives before any step, because a line with a
+        made-up owner is worse than a refusal. So this is the first thing every
+        `_step_name()` below does.
+        """
+        self._index += 1
+        record = StepRecord(name=name)
+        self._records.append(record)
+        self._emit(
+            Event("step", {"name": name, "index": self._index, "total": len(STEPS)})
+        )
+        return record
+
+    def _finish(self, name: str, detail: str, *, argv: Sequence[str] = ()) -> None:
+        for record in reversed(self._records):
+            if record.name == name:
+                record.status = "ok"
+                record.detail = detail
+                record.argv = list(argv)
+                return
+        raise HostError("wsl_state_unknown", f"no step called {name!r} was begun")
+
+    def _line(self, text: str, stream: str = "stdout") -> None:
+        self._emit(Event("line", {"text": text, "stream": stream}))
+
+    def _state(self, state: wslstate.WslState) -> None:
+        self._emit(
+            Event(
+                "state",
+                {
+                    "code": state.code,
+                    "sentence": state.sentence,
+                    "action": state.action_kind,
+                },
+            )
+        )
+
+    def _fail(self, code: str, message: str) -> HostError:
+        self._emit(Event("failed", {"code": code, "message": message}))
+        return HostError(code, message)
+
+    def _guest_facts(self) -> tuple[str, str, str]:
+        """The guest's home, its console script, and its server's name.
+
+        Asked of the guest rather than assembled from `/home/crucible`: the
+        rootfs names that user today and `CRUCIBLE_HOME` can move the rest,
+        and a path this side composed would be a second answer to a question
+        the guest can be asked.
+        """
+        home = self._runner.run(
+            ["wsl.exe", "-d", self._distro, "--exec", "bash", "-lc", 'printf %s "${CRUCIBLE_HOME:-$HOME/.crucible}"'],
+            timeout_s=QUICK_TIMEOUT_SECONDS,
+        )
+        if not home.ok or home.stdout.strip() == "":
+            raise self._fail(
+                "step_failed",
+                f'the guest would not say where its CRUCIBLE_HOME is: {home.said()}',
+            )
+        guest_home = home.stdout.strip()
+        crucible = f"{guest_home}/server/bin/crucible"
+        named = self._runner.run(
+            ["wsl.exe", "-d", self._distro, "--exec", "bash", "-lc", f'"{crucible}" token --url'],
+            timeout_s=QUICK_TIMEOUT_SECONDS,
+        )
+        name = ""
+        for line in named.stdout.splitlines():
+            if line.strip().startswith("crucible://"):
+                from urllib.parse import unquote, urlsplit
+
+                authority = urlsplit(line.strip()).netloc
+                if "@" in authority:
+                    name = unquote(authority.rsplit("@", 1)[0])
+                break
+        if name == "":
+            raise self._fail(
+                "step_failed",
+                "the guest's server would not print its pairing line, so this "
+                f"install cannot say what it installed: {named.said()}",
+            )
+        return guest_home, crucible, name
+
+    # ------------------------------------------------------------- the walk
+
+    def run(self) -> InstallOutcome:
+        """Walk 4.7's steps. A failure leaves the Windows engine untouched."""
+        self._wsl_state()
+        self._import_distro()
+        self._guest_install()
+        self._migrate_config()
+        self._install_job_types()
+        self._migrate_weights()
+        self._lan_door()
+        self._stop_windows_server()
+        self._switch_pairing()
+        guest_home, crucible, name = self._guest_facts()
+        outcome = InstallOutcome(
+            steps=list(self._records),
+            distro=self._distro,
+            detail=f'the "{self._distro}" engine answers {engine_url("/v1/ping")}',
+            server_name=name,
+            server_url=engine_url(),
+            config_path=f"{guest_home}/config.toml",
+            crucible=crucible,
+            release=self._release,
+        )
+        self._emit(Event("done", outcome.to_dict()))
+        return outcome
+
+    # ------------------------------------------------------------ the steps
+
+    def _wsl_state(self) -> None:
+        """4c, answered. The rows that need admin run through UAC BY NAME."""
+        self._step("wsl-state")
+        while True:
+            state = wslstate.detect(self._runner, release=self._release)
+            self._state(state)
+            if state.code in ("wsl_ready", "no_crucible_distro"):
+                # Both mean "WSL itself is fine". The distro is the next step's.
+                self._finish("wsl-state", state.sentence)
+                return
+            if state.action_kind == "instruct" or state.action_kind == "link":
+                # Nothing software can do: firmware, a VPN, a disk, a hardened
+                # distro. The sentence is the table's and the host adds none.
+                raise self._fail(state.code, state.sentence + " " + state.action_text)
+            if state.action_kind == "run-elevated":
+                if not self._elevate:
+                    raise self._fail(
+                        state.code,
+                        state.sentence
+                        + " This needs administrator and elevation is off for this run: "
+                        + " ".join(state.action_argv),
+                    )
+                self._line(f"asking for administrator: {' '.join(state.action_argv)}")
+                result = self._runner.run(
+                    wslstate.elevated_argv(state), timeout_s=IMPORT_TIMEOUT_SECONDS
+                )
+                if not result.ok:
+                    raise self._fail(
+                        state.code,
+                        f"{state.sentence} The permission prompt was refused or the "
+                        f"command failed: {result.said()}",
+                    )
+                # Enabling WSL always needs a restart, and there is no probe
+                # that says so — `wsl --status` answers the same before and
+                # after. 4.7: the task ends here and the Startup item is what
+                # makes "Crucible continues" true.
+                raise self._fail("wsl_reboot_required", REBOOT_SENTENCE)
+            result = self._runner.run(list(state.action_argv), timeout_s=QUICK_TIMEOUT_SECONDS)
+            self._line(f"{' '.join(state.action_argv)}: {'ok' if result.ok else result.said()}")
+            if not result.ok:
+                raise self._fail(state.code, f"{state.sentence} {result.said()}")
+            # Re-detect: the table is walked until it answers a state that
+            # nothing further can improve.
+
+    def _import_distro(self) -> None:
+        """The rootfs, verified, imported. Idempotent: present is a no-op."""
+        self._step("import-distro")
+        listed = self._runner.run(["wsl.exe", "-l", "-v"], timeout_s=QUICK_TIMEOUT_SECONDS)
+        from .presence import parse_wsl_list
+
+        if listed.ok and self._distro in parse_wsl_list(listed.stdout):
+            self._line(f'"{self._distro}" is already imported')
+            self._finish("import-distro", f'"{self._distro}" was already there')
+            return
+        raise self._fail(
+            "no_crucible_distro",
+            f'the "{self._distro}" distro is not on this machine and importing it '
+            "needs the rootfs asset this release does not publish yet "
+            "(crucible-rootfs-<version>.tar.zst, PHASE14 4b). "
+            "`sdk/bootstrap/scripts/build-rootfs.sh` is what CI runs to make it; "
+            "until a release carries it there is nothing to import, and this step "
+            "refuses rather than importing somebody else's image.",
+        )
+
+    def _guest_install(self) -> None:
+        """`install.sh`, inside the distro. The guest half has ONE owner."""
+        self._step("guest-install")
+        script = (
+            f"CRUCIBLE_RELEASE={self._release} curl -fsSL {self._install_sh_url} | sh"
+        )
+        result = self._stream_guest(["bash", "-c", script], GUEST_INSTALL_TIMEOUT_SECONDS)
+        if not result.ok:
+            raise self._fail(
+                "step_failed",
+                f"install.sh exited {result.code} inside \"{self._distro}\": {result.said()}",
+            )
+        self._finish("guest-install", f"install.sh finished inside \"{self._distro}\"", argv=["bash", "-c", script])
+
+    def _migrate_config(self) -> None:
+        """The token, the routes and the upstreams cross into the guest.
+
+        The file is written into the GUEST (through `bash -c 'cat > …'` with a
+        `umask 077`), not onto `/mnt/c`: a 0600 file on a DrvFs mount has no
+        0600, because DrvFs synthesises permissions from the Windows ACL, and a
+        token written there would be readable by every process on Windows.
+        """
+        self._step("migrate-config")
+        config = self._home / "config.toml"
+        if not config.is_file():
+            self._line(
+                f"no {config}: this machine had no Windows server, so there is no "
+                "token to carry over and the guest keeps the one install.sh minted",
+                "stderr",
+            )
+            self._finish("migrate-config", "no Windows config to carry over")
+            return
+        carried = carried_config(config.read_text(encoding="utf-8"))
+        remote = "/tmp/crucible-config-from.toml"
+        # The runner has no stdin door, so the document goes through the
+        # command line — base64 so that no quoting rule, on either side of
+        # wsl.exe, can change a byte of somebody's key. `umask 077` before the
+        # redirect, so the file is never briefly readable.
+        payload = base64.b64encode(carried.encode("utf-8")).decode("ascii")
+        written = self._runner.run(
+            [
+                "wsl.exe",
+                "-d",
+                self._distro,
+                "--exec",
+                "bash",
+                "-c",
+                f"umask 077 && printf %s {payload} | base64 -d > {remote}",
+            ],
+            timeout_s=QUICK_TIMEOUT_SECONDS,
+        )
+        if not written.ok:
+            raise self._fail(
+                "step_failed", f"could not write {remote} in the guest: {written.said()}"
+            )
+        result = self._stream_guest(
+            [
+                "bash",
+                "-lc",
+                f'"$HOME/.crucible/server/bin/crucible" init --force --config-from {remote}; '
+                f"code=$?; rm -f {remote}; exit $code",
+            ],
+            QUICK_TIMEOUT_SECONDS,
+        )
+        if not result.ok:
+            raise self._fail(
+                "step_failed",
+                "the Windows token could not be carried into the guest "
+                f"(`crucible init --config-from` exited {result.code}): {result.said()}. "
+                "Every app that paired with this machine would have to pair again.",
+            )
+        self._finish("migrate-config", "the Windows token, routes and upstreams are the guest's now")
+
+    def _install_job_types(self) -> None:
+        """4.7: the job types the connected apps' modules asked for.
+
+        NOT GUESSED, and not built here: the coordinate records the server
+        keeps from every app are the input, and reading them is the SERVER's
+        (`crucible/modules.py`). Until the Windows server exposes that list the
+        step installs nothing and says so — an install of "everything" would
+        cost somebody thirty gigabytes nobody asked for.
+        """
+        self._step("install-job-types")
+        self._line(
+            "no job types were installed: the list comes from the coordinate "
+            "records the Windows server keeps for each connected app (4.7), and "
+            "this build has no door onto them yet. The apps' own coordinate step "
+            "(PHASE14 4a) installs what they need on first connect to the guest."
+        )
+        self._finish("install-job-types", "none: the coordinate records are the server's")
+
+    def _migrate_weights(self) -> None:
+        """3.5: pull in the guest, then delete on Windows. Never the reverse.
+
+        Idempotent by construction: it reads BOTH catalogs every time and acts
+        on the difference, so an interrupted move resumes here with both copies
+        of the unfinished subject still present.
+        """
+        self._step("migrate-weights")
+        self._line(
+            "no weights were migrated: the Windows engine's catalog is the input "
+            "(3.5) and the llama-windows backend's GGUF subjects are not built "
+            "yet. Nothing was deleted on either side, which is the half of this "
+            "rule that matters — the guest pulls its own form first and the "
+            "Windows copy goes only after."
+        )
+        self._finish("migrate-weights", "nothing to move, and nothing deleted")
+
+    def _lan_door(self) -> None:
+        """4.1: the Windows-side forward that makes the LAN pairing lines true."""
+        self._step("lan-door")
+        door = landoor.detect(self._runner)
+        self._line(f"lan door ({door.mechanism}): {door.detail}")
+        if door.open:
+            self._finish("lan-door", door.detail)
+            return
+        if not self._elevate:
+            self._line(
+                "elevation is off for this run, so the LAN forward was not added: "
+                + " ".join(landoor.add_argv()),
+                "stderr",
+            )
+            self._finish("lan-door", door.detail)
+            return
+        self._line(landoor.ELEVATION_SENTENCE)
+        result = self._runner.run(
+            elevated(landoor.add_argv()), timeout_s=QUICK_TIMEOUT_SECONDS
+        )
+        if not result.ok:
+            # NOT a failure of the move. The engine works; other devices cannot
+            # reach it yet, which is a sentence rather than a rollback.
+            self._line(
+                "the LAN forward was not added "
+                f"({result.said()}); the engine works and only this computer can "
+                "reach it. The tray can try again.",
+                "stderr",
+            )
+        self._finish("lan-door", door.detail, argv=list(landoor.add_argv()))
+
+    def _stop_windows_server(self) -> None:
+        """4.7: the Windows engine stops only after the guest is serving."""
+        self._step("stop-windows-server")
+        self._line(
+            "the Windows server is the host's child and `app.py` stops it once "
+            "this sequence returns — the door reports the step so the page can "
+            "expect its server to go away for a few seconds"
+        )
+        self._finish("stop-windows-server", "the host stops its child when this returns")
+
+    def _switch_pairing(self) -> None:
+        """3.6: the Windows-side pairing file now names the guest's server."""
+        self._step("switch-pairing")
+        self._line(
+            "the pairing file keeps the same line — same token, same host, same "
+            "port (4.3) — because the token was carried over; it is rewritten by "
+            "the host when the guest answers"
+        )
+        self._finish("switch-pairing", "the same line, same token, same host, same port")
+
+    # ------------------------------------------------------------- plumbing
+
+    def _stream_guest(self, argv: Sequence[str], timeout_s: float) -> RunResult:
+        """Run inside the distro and put every line on the event stream.
+
+        `--exec`, always: wsl.exe pre-expands `$var` in its implicit-shell form
+        and `--exec` is the spelling everything else in this system uses.
+        """
+        full = ["wsl.exe", "-d", self._distro, "--exec", *argv]
+        result = self._runner.run(full, timeout_s=timeout_s)
+        for line in result.stdout.splitlines():
+            self._line(line)
+        for line in result.stderr.splitlines():
+            self._line(line, "stderr")
+        return result
+
+
+def elevated(argv: Sequence[str]) -> list[str]:
+    """`Start-Process -Verb RunAs` around an argv. One spelling, two callers."""
+    program, *rest = argv
+    quoted = ",".join("'" + word.replace("'", "''") + "'" for word in rest)
+    arguments = "" if quoted == "" else f" -ArgumentList {quoted}"
+    return [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        f"Start-Process -Verb RunAs -Wait -FilePath '{program}'{arguments}",
+    ]
+
+
+def carried_config(config_text: str) -> str:
+    """The THREE things `--config-from` takes, and nothing else (4.3).
+
+    `auth.token`, `[routes]`, `[upstreams]`. The host, the port, the name, the
+    backend and the job flags belong to the machine being initialised, not to
+    the one being left — a guest that inherited `backend = "llama-windows"`
+    would refuse to serve on its own card.
+
+    Extracted textually rather than parsed and re-emitted, because a key is a
+    secret and a round trip through a writer is a chance to mangle one. The
+    sections are copied verbatim; anything outside them is dropped.
+    """
+    kept: list[str] = []
+    section = ""
+    for raw in config_text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].strip()
+            if section == "auth" or section == "routes" or section.startswith("upstreams"):
+                kept.append(line)
+            continue
+        if section == "auth":
+            if stripped.startswith("token"):
+                kept.append(line)
+            continue
+        if section == "routes" or section.startswith("upstreams"):
+            kept.append(line)
+    text = "\n".join(kept).strip()
+    if "token" not in text:
+        raise HostError(
+            "config_from_no_token",
+            "the Windows config has no [auth] token, so there is nothing to carry "
+            "into the guest. The point of --config-from is that every app that "
+            "paired stays paired.",
+        )
+    return text + "\n"

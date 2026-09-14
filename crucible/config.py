@@ -483,6 +483,18 @@ def write_config(
     #: `_capability_flag` gives an absent key, and the safe direction.
     enable_denoise: bool = False,
     capability: CapabilityRecord | None = None,
+    #: Whole top-level tables to copy in VERBATIM, or None.
+    #:
+    #: `crucible init --config-from` (PHASE15-HOST.md 4.3) is the one caller:
+    #: when the Windows host moves a Crucible into the WSL guest it carries
+    #: `[routes]` and `[upstreams]` across, and those tables' SHAPE belongs to
+    #: section 2 and to whatever reads them — not to this writer, which would
+    #: otherwise have to grow a parameter per upstream and a second
+    #: declaration of a document somebody else owns. Copied and never merged
+    #: key by key: a key this build does not know about is still the
+    #: operator's, and dropping it silently on an upgrade is how a
+    #: configuration quietly stops meaning what it said.
+    carried_tables: dict[str, Any] | None = None,
 ) -> Path:
     """Write config.toml at mode 0600 under a 0700 home. Returns the path.
 
@@ -512,6 +524,14 @@ def write_config(
     }
     if capability is not None:
         document["capability"] = capability.to_dict()
+    for name, table in (carried_tables or {}).items():
+        if name in document:
+            raise ConfigError(
+                f"carried_tables names [{name}], which this writer already owns. "
+                "A table with two writers is a table whose value depends on which "
+                "one ran last; carry the tables section 2 added and nothing else."
+            )
+        document[name] = table
     # Create with 0600 from the outset so the token is never briefly world-readable.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as handle:

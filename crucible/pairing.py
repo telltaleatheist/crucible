@@ -25,8 +25,14 @@ is what RFC 3986 says to produce.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Mapping, Sequence
 from urllib.parse import quote, urlsplit
 
+from .errors import CrucibleError
 from .interfaces import ipv4_addresses
 
 #: The scheme an app's connect door recognises. Not `http`, deliberately: the
@@ -84,4 +90,160 @@ def pairing_lines(name: str, urls: list[str], token: str) -> list[str]:
     return [pairing_line(name, url, token) for url in urls]
 
 
-__all__ = ["SCHEME", "pairing_line", "pairing_lines", "reachable_urls"]
+# ------------------------------------------------------------ the pairing FILE
+#
+# PHASE15-HOST.md 3.6. The line above is a string; this is where it is written
+# down so an app on the same machine can read it and never ask a person to type
+# a token. One line, trailing newline, user-only.
+#
+# WHERE, per platform, is 3.6's table and not this file's invention:
+#
+#   linux / darwin / inside the WSL guest   <CRUCIBLE_HOME>/pairing
+#   win32                                   %LOCALAPPDATA%\Crucible\pairing
+#
+# and `CRUCIBLE_HOME` in the environment overrides the directory on every
+# platform. On Windows the host runs WITH `CRUCIBLE_HOME` set to
+# `%LOCALAPPDATA%\Crucible`, so the two rules agree rather than compete.
+
+
+#: The file's name, everywhere. One word, one owner.
+PAIRING_FILENAME = "pairing"
+
+#: `icacls` is how a Windows file is given an ACL of one user. It ships with
+#: Windows, which is the whole reason it is used instead of pywin32: this pack
+#: (PHASE15 4.4) carries an interpreter, a wheel and a tray, and a COM/ACL
+#: dependency for one file that is written once is a dependency to build,
+#: pin and ship forever.
+ICACLS_TIMEOUT_SECONDS = 30.0
+
+
+class PairingFileError(CrucibleError):
+    """The pairing file could not be written with the permissions it needs."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+
+
+def pairing_file_path(home: Path) -> Path:
+    """`<home>/pairing`. The caller resolves `home`; 3.6 says which it is."""
+    return Path(home) / PAIRING_FILENAME
+
+
+def icacls_argv(path: Path, user: str) -> Sequence[str]:
+    """`icacls <file> /inheritance:r /grant:r <user>:(R,W)` — 4.4's exact line.
+
+    `/inheritance:r` REMOVES the inherited entries rather than adding one:
+    a file under `%LOCALAPPDATA%` inherits Administrators and SYSTEM, and a
+    grant without the removal would be a file with a token in it that three
+    principals can read. `/grant:r` replaces rather than accumulates, so
+    running this twice leaves one entry and not two.
+    """
+    return [
+        "icacls",
+        str(path),
+        "/inheritance:r",
+        "/grant:r",
+        f"{user}:(R,W)",
+    ]
+
+
+def _windows_user(env: Mapping[str, str]) -> str:
+    """`%USERNAME%`, read and never assembled. Refused by name when unset."""
+    user = env.get("USERNAME")
+    if user is None or user.strip() == "":
+        raise PairingFileError(
+            "pairing_acl_failed",
+            "USERNAME is not set, so there is no account to give the pairing "
+            "file to. It is read from the environment and never guessed.",
+        )
+    return user.strip()
+
+
+def write_pairing_file(
+    home: Path,
+    line: str,
+    *,
+    platform: str = sys.platform,
+    env: Mapping[str, str] | None = None,
+    run: "object | None" = None,
+) -> Path:
+    """Write the pairing line to `<home>/pairing`, readable by this user only.
+
+    On linux and darwin that is mode 0600, created 0600 from the outset so the
+    token is never briefly world-readable — the same rule and the same reason
+    as `config.write_config`.
+
+    On Windows a mode is not a thing, so the ACL is set with `icacls` (4.4).
+    **If that fails the file is DELETED**, because a pairing file is a bearer
+    token on disk and a token that everybody on the machine can read is worse
+    than no pairing file at all: the absent case is a fact an app knows how to
+    handle (3.6: "an absent file means no local server"), and the readable case
+    is a silent credential leak.
+
+    `run` is the subprocess runner, injectable, defaulting to
+    `subprocess.run` — the one legitimate default here, because it is the
+    platform's own and not a guess at a value.
+    """
+    environment = os.environ if env is None else env
+    directory = Path(home)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = pairing_file_path(directory)
+    body = line if line.endswith("\n") else line + "\n"
+
+    if platform == "win32":
+        path.write_text(body, encoding="utf-8", newline="\n")
+        user = _windows_user(environment)
+        runner = subprocess.run if run is None else run
+        completed = runner(  # type: ignore[operator]
+            list(icacls_argv(path, user)),
+            capture_output=True,
+            text=True,
+            timeout=ICACLS_TIMEOUT_SECONDS,
+        )
+        if completed.returncode != 0:
+            path.unlink(missing_ok=True)
+            raise PairingFileError(
+                "pairing_acl_failed",
+                f"icacls would not restrict {path} to {user} "
+                f"({(completed.stderr or completed.stdout or '').strip() or f'exit {completed.returncode}'}). "
+                "The file has been deleted rather than left with a bearer token "
+                "in it that anybody on this machine can read.",
+            )
+        return path
+
+    # POSIX: 0600 from the outset, under a 0700 home.
+    os.chmod(directory, 0o700)
+    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(handle, "wb") as stream:
+        stream.write(body.encode("utf-8"))
+    os.chmod(path, 0o600)
+    return path
+
+
+def read_pairing_file(home: Path) -> str | None:
+    """The line, or None when there is none.
+
+    None is a FACT and not a fallback (3.6): "no local server" is what the
+    caller does something about, and it is never an error and never a retry.
+    """
+    path = pairing_file_path(Path(home))
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8").strip()
+    return text or None
+
+
+__all__ = [
+    "PAIRING_FILENAME",
+    "SCHEME",
+    "PairingFileError",
+    "icacls_argv",
+    "pairing_file_path",
+    "pairing_line",
+    "pairing_lines",
+    "reachable_urls",
+    "read_pairing_file",
+    "write_pairing_file",
+]

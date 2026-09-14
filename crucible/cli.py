@@ -6,6 +6,7 @@
     crucible capability what this host can hold, and why; --write records it
     crucible serve      run the API in the foreground
     crucible service    install/start/stop the machine service that runs `serve`
+    crucible host       win32 only: the tray that owns this machine's engine
     crucible models     list and pull model weights
     crucible voices     list and pull voice weights
     crucible doctor     probe the host and every job type; exit 0 only when healthy
@@ -19,6 +20,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -89,7 +91,96 @@ def _fail(message: str) -> int:
     return EXIT_REFUSED
 
 
+# --------------------------------------------------------------------- host
+
+
+def cmd_host(args: argparse.Namespace) -> int:
+    """`crucible host` — PHASE15-HOST.md section 4. Windows only.
+
+    The verb is refused `host_windows_only` everywhere else, and that is not a
+    platform check standing in for a feature check: on Linux and macOS the
+    server runs ON the machine and its own service manager supervises it
+    (4.4, "no host on the Mac"). There is nothing for a tray to own.
+
+    Three shapes, and the two that are not the tray exit without starting one:
+
+      --install-startup   write the Startup item and print its path
+      --remove-startup    delete it, and say whether there was one
+      (bare)              the tray
+    """
+    from .host import startup as host_startup
+    from .host.errors import HostError
+    from .host.runner import ProcessRunner
+
+    if sys.platform != "win32":
+        return _fail(
+            "host_windows_only: `crucible host` is a Windows verb. On "
+            f"{sys.platform} the server runs on this machine and "
+            f"{'systemd' if sys.platform == 'linux' else 'launchd'} already "
+            "supervises it — `crucible service status` is the question you "
+            "are asking."
+        )
+
+    runner = ProcessRunner(sys.platform, os.environ)
+    try:
+        if args.install_startup:
+            outcome = host_startup.install(runner)
+            print(outcome.detail)
+            return EXIT_OK
+        if args.remove_startup:
+            outcome = host_startup.remove(runner)
+            print(outcome.detail)
+            return EXIT_OK
+    except HostError as exc:
+        return _fail(f"{exc.code}: {exc.message}")
+
+    from .host.app import run as run_host
+
+    try:
+        return run_host()
+    except HostError as exc:
+        return _fail(f"{exc.code}: {exc.message}")
+
+
 # --------------------------------------------------------------------- init
+
+
+def carried_from(path: Path) -> tuple[str, dict[str, Any]]:
+    """`--config-from`: the token, the routes and the upstreams, and NOTHING else.
+
+    PHASE15-HOST.md 4.3. The host writes this file at 0600 when it moves a
+    Windows Crucible into the WSL guest and deletes it afterwards; the point
+    of the flag is that the TOKEN survives, so every app that paired with this
+    machine stays paired.
+
+    Three things and no fourth. The host, the port, the name, the backend and
+    the job flags belong to the machine being INITIALISED, not to the one
+    being left — a guest that inherited `backend = "llama-windows"` would
+    refuse to serve on its own card, and a guest that inherited a desktop
+    allowance measured against somebody's iGPU would hold the wrong number.
+    """
+    import tomllib
+
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ConfigError(f"config_from_unreadable: {path} could not be read: {exc}")
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"config_from_unreadable: {path} is not TOML: {exc}")
+    auth = document.get("auth")
+    token = auth.get("token") if isinstance(auth, dict) else None
+    if not isinstance(token, str) or token.strip() == "":
+        raise ConfigError(
+            f"config_from_no_token: {path} has no [auth] token. The point of "
+            "--config-from is that the token survives the move; a file without "
+            "one carries nothing."
+        )
+    carried: dict[str, Any] = {}
+    for section in ("routes", "upstreams"):
+        value = document.get(section)
+        if isinstance(value, dict):
+            carried[section] = value
+    return token, carried
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -123,7 +214,18 @@ def cmd_init(args: argparse.Namespace) -> int:
     # already holds what it would otherwise have to read back out of the file.
     # A blank one is refused — a config with an empty token is a server nothing
     # can reach, and `load_config` would refuse it anyway.
-    if args.token is not None:
+    carried: dict[str, Any] = {}
+    if args.config_from is not None:
+        if args.token is not None:
+            return _fail(
+                "--config-from and --token both name a token, and two answers to "
+                "one question is not a thing this command picks between. Pass one."
+            )
+        try:
+            token, carried = carried_from(Path(args.config_from))
+        except ConfigError as exc:
+            return _fail(str(exc))
+    elif args.token is not None:
         token = args.token
         if token.strip() == "" or any(ch.isspace() for ch in token):
             return _fail("--token must be a non-empty string with no whitespace")
@@ -144,6 +246,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         enable_rvc=args.enable_rvc,
         enable_denoise=args.enable_denoise,
         desktop_allowance_bytes=desktop_allowance_bytes,
+        carried_tables=carried or None,
     )
     print(f"backend:  {backend.kind} ({backend.gpu.name}, {backend.detail})")
     print(f"config:   {written} (mode {config_mode(written)})")
@@ -163,9 +266,18 @@ def cmd_init(args: argparse.Namespace) -> int:
         f"{backend.gpu.vram_bytes / 1024 ** 3:.1f} GiB treated as this host's own "
         f"desktop, not somebody's job ({source})"
     )
+    if args.config_from is not None:
+        print(
+            f"carried:  the token and {sorted(carried) or 'no other table'} from "
+            f"{args.config_from} (4.3); every app that paired stays paired"
+        )
     print(
         "token:    "
-        + ("as given; " if args.token is not None else "minted; ")
+        + (
+            "carried; "
+            if args.config_from is not None
+            else ("as given; " if args.token is not None else "minted; ")
+        )
         + "print it with `crucible token --show`"
     )
     _print_pairing(
@@ -2005,6 +2117,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.set_defaults(func=cmd_init)
 
+    init.add_argument(
+        "--config-from",
+        metavar="FILE",
+        help=(
+            "take the token, [routes] and [upstreams] out of this TOML file "
+            "instead of minting a token (PHASE15-HOST.md 4.3). The host writes "
+            "it at 0600 when it moves a Windows Crucible into the WSL guest and "
+            "deletes it after, so every app that paired stays paired"
+        ),
+    )
+
     install = subparsers.add_parser(
         "install",
         help="download this job type's published env pack and unpack it "
@@ -2207,6 +2330,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     denoise_pull.set_defaults(func=cmd_denoise_pull)
 
+    host_parser = subparsers.add_parser(
+        "host",
+        help="win32 only: the tray that owns this machine's engine",
+        description=(
+            "The Windows presence (PHASE15-HOST.md section 4): a notification-area "
+            "icon that boots the WSL engine at login, watches it, and runs the move "
+            "from the Windows engine to WSL2 when the operator page asks. Refused "
+            "`host_windows_only` on Linux and macOS, where the service manager "
+            "already supervises the server."
+        ),
+    )
+    host_parser.add_argument(
+        "--install-startup",
+        action="store_true",
+        help="write the Startup shortcut and exit (this verb OWNS that file)",
+    )
+    host_parser.add_argument(
+        "--remove-startup",
+        action="store_true",
+        help="delete the Startup shortcut and exit",
+    )
+    host_parser.set_defaults(func=cmd_host, win32_ok=True)
+
     serve = subparsers.add_parser("serve", help="run the API in the foreground")
     serve.add_argument("--host", default=None, help="bind host (default from config)")
     serve.add_argument("--port", type=int, default=None, help="bind port (default from config)")
@@ -2280,11 +2426,33 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    if sys.platform == "win32":
-        print(f"crucible: {WINDOWS_REFUSAL}", file=sys.stderr)
-        return EXIT_REFUSED
+    """Every verb, with ONE gate on win32 and a reason for it.
+
+    The gate used to be total: `crucible` refused to do anything at all on
+    Windows, because vLLM and SGLang do not run there. PHASE15-HOST.md section
+    3.5 narrows it — `crucible host` is a Windows verb by definition, and
+    section 0's amendment makes `llama-windows` a real backend, so `serve`,
+    `init` and the rest run there too once the server half of that phase
+    lands.
+
+    Until it does, a subparser OPTS IN with `win32_ok=True` and everything
+    else keeps the old refusal. That is deliberately the smallest possible
+    change: the alternative — letting every verb through before the
+    `llama-windows` backend exists — would replace one honest refusal with a
+    `NoViableBackend` from somewhere deeper, which is the same "no" with a
+    worse sentence and a stack trace.
+    """
     parser = build_parser()
+    parser.set_defaults(win32_ok=False)
     args = parser.parse_args(argv)
+    if sys.platform == "win32" and not args.win32_ok:
+        print(
+            f"crucible: {WINDOWS_REFUSAL} `crucible host` is the Windows verb "
+            "(PHASE15-HOST.md section 4); the rest of the CLI runs inside the "
+            "WSL2 guest.",
+            file=sys.stderr,
+        )
+        return EXIT_REFUSED
     return int(args.func(args))
 
 
