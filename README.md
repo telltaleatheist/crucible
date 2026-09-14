@@ -8,6 +8,7 @@ converter resident on it. Crucible is the thing that gets hot. It runs the model
 never knows what an audiobook or a cleanup pass is.
 
 See `docs/DESIGN.md` for the architecture and `docs/PLAN.md` for the build order.
+An app that wants a Crucible on *this* machine uses `sdk/bootstrap/` (`@crucible/bootstrap`, `docs/PHASE12-BOOTSTRAP.md`): detect the host, install the server, make sure its service is running, read its config, ask its health — never a child process.
 
 **Status: every job type is built. Four of them have never met a GPU.**
 

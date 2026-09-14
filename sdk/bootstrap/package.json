@@ -1,0 +1,54 @@
+{
+  "name": "@crucible/bootstrap",
+  "version": "0.5.0",
+  "description": "The app-side installer and ensurer for a local Crucible: detect the host, install the server, make sure its service is running, report health. Zero runtime dependencies beyond @crucible/client.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Owen Morgan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/telltaleatheist/crucible.git",
+    "directory": "sdk/bootstrap"
+  },
+  "homepage": "https://github.com/telltaleatheist/crucible/tree/main/sdk/bootstrap",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && node scripts/stamp-module-type.mjs",
+    "build:test": "tsc -p tsconfig.test.json",
+    "test:unit": "npm run build && npm run build:test && node scripts/unit.mjs",
+    "test": "npm run test:unit"
+  },
+  "peerDependencies": {
+    "@crucible/client": "0.5.0"
+  },
+  "devDependencies": {
+    "@crucible/client": "file:../ts",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4"
+  }
+}

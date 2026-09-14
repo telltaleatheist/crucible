@@ -1,0 +1,145 @@
+# `@crucible/bootstrap`
+
+The app-side installer and ensurer for a **local** [Crucible](https://github.com/telltaleatheist/crucible).
+A local Crucible is a *service* on the machine and no app owns it (Owen, 2026-09-13,
+`docs/PHASE5-APPS.md` section 6.0); an app's whole job is to make sure this machine has
+one and make sure it is running. That is this package's whole surface:
+
+```ts
+import { detectHost, install, ensureRunning, readLocalConfig, health } from '@crucible/bootstrap';
+```
+
+It ships **with** the server, from this repo, at the server's version, cut by the same
+`scripts/release.sh` — so a bootstrapper is never paired with a server nobody tested it
+against. It peer-depends on `@crucible/client` at that exact version and on nothing else.
+Node 20+, and the Electron main process. ESM and CommonJS builds ship side by side.
+
+## Install
+
+From the GitHub Release, beside the client (there is no npm registry publish):
+
+```bash
+npm install https://github.com/telltaleatheist/crucible/releases/download/v0.5.0/crucible-client-0.5.0.tgz
+npm install https://github.com/telltaleatheist/crucible/releases/download/v0.5.0/crucible-bootstrap-0.5.0.tgz
+```
+
+Pin both URLs in `package.json`. Only the *app* half of an Electron product consumes this.
+An engine that runs where there is no app — Foundry's compiled binary — consumes an
+endpoint and never learns what a Crucible is.
+
+## Where the server lives
+
+Windows is never a backend. On win32 every verb reaches into a WSL2 distro through
+`wsl.exe -d <distro> --exec …`, and the distro is **required** — there is no default
+distro, because "the default" is whatever `wsl --set-default` last said and a server read
+from the wrong guest is the wrong server. `detectHost()` lists the distros so the app can
+choose. On macOS and Linux the verbs run on the machine itself. Anything else is refused.
+
+## The surface
+
+| Verb | Does | Refuses by name |
+|---|---|---|
+| `detectHost({distro?, condaRoots?})` | what this host (or its guest) has: `{platform, wsl, gpu, python, conda, refusals}` | `wsl_missing` (with `wsl --install -d Ubuntu` and the reboot note), `no_wsl_distro`, `wsl_read_failed`, `unsupported_platform`; and, as entries in `refusals` beside each null: `no_nvidia_driver`, `not_apple_silicon`, `no_conda`, `no_python` |
+| `install({distro?, jobTypes, home?, wheel, onLine, onStep?, bind?})` | interpreter → `pip install <wheel>` → `crucible init --token …` → `crucible install <type>`… → `crucible service install` → `crucible capability --write` | every `detectHost` refusal, `bad_job_type`, `wheel_missing`, `network_path`, `config_unreadable`, `config_missing_key`, and `step_failed` (a `BootstrapStepFailed` with the step, exit code, tail and the steps that finished) |
+| `ensureRunning({distro?, home?})` | `{running: true, pid, mechanism, definition, linger, enableLinger, started}` — a no-op when it already is | `service_not_installed`, `service_failed` (with the status output and where the logs are), `no_local_config`, and the interpreter refusals |
+| `readLocalConfig({distro?, home?})` | `{name, url, token, configPath, via}` from the server's own `config.toml` | `no_local_config`, `no_wsl_distro`, `wsl_read_failed`, `config_unreadable`, `config_missing_key` |
+| `health({distro?, home?, clientName?})` | the SDK's `Activity` from `GET /v1/activity` | `unreachable`, `wrong_token`, `not_a_crucible`, `version_mismatch`, plus everything `readLocalConfig` refuses |
+
+Every verb is idempotent. Every function takes an optional second argument, a `Runner`,
+which is the one door to the machine (`spawn`, `fs`); the tests script it and assert on the
+exact argv that would have run, and the real one is `processRunner()`.
+
+### What a refusal carries
+
+```ts
+try {
+  await ensureRunning({ distro: 'Ubuntu' });
+} catch (err) {
+  if (err instanceof BootstrapRefusal) {
+    err.code;     // 'service_not_installed'
+    err.message;  // the sentence
+    err.command;  // '/home/owen/anaconda3/envs/crucible/bin/crucible service install' — or null
+    err.detail;   // verbatim evidence (a status page, a stderr tail) — or null
+  }
+}
+```
+
+**A missing prerequisite is a named refusal carrying the exact command the host must run.**
+Elevation, a reboot, a sudo password — those are the app's to obtain. This package never
+attempts them, never falls back past them, and never guesses a value it could not read.
+
+### `install()`
+
+```ts
+await install({
+  distro: 'Ubuntu',
+  jobTypes: ['llm', { type: 'tts', narratorEngine: 'higgs-v3' }, 'asr', 'rvc', 'denoise'],
+  wheel: 'C:\\Users\\owen\\Downloads\\crucible-0.5.0-py3-none-any.whl',   // or the release URL
+  onLine: (line, stream, step) => log.append(`[${step}] ${line}`),
+  onStep: (step) => ui.setStep(step.name, step.status),
+});
+```
+
+- **The interpreter is found, never made.** `<conda>/envs/crucible/bin/python`, a 3.11,
+  with conda found by `test -x` at `~/anaconda3 | ~/miniconda3 | ~/miniforge3` in that
+  order (never `which`, so the conda whose `envs/` the interpreter lands in is the one
+  used). Absent, the refusal names the miniforge install and the `conda create` line.
+  `condaRoots` overrides the list for a host whose conda lives elsewhere.
+- **The wheel is the host's.** A release path or URL, passed as given; a Windows path is
+  mapped to `/mnt/<drive>/…` after the filesystem confirms it is not a mapped network
+  drive, which WSL2 does not mount.
+- **The token is minted here** and handed to `crucible init --token`, so the app already
+  holds what `readLocalConfig()` would read back. It is never logged: the step's recorded
+  argv spells it `<redacted>`, and `onLine` only sees what the step printed. `init` is
+  **skipped** when a config already exists, and that config's token is kept.
+- **Pulls are not part of install.** Weights are the app's, later, per model.
+- `home` is `CRUCIBLE_HOME` for every verb, spelled as the target spells it (a guest path
+  on win32). `bind` is `crucible init`'s `--host`/`--port`.
+- A failing step throws `BootstrapStepFailed`: `step`, `exitCode`, `tail` (the last 40
+  lines, stderr prefixed `! `), `stepsDone`. What finished stays on disk.
+
+### `ensureRunning()`
+
+Starting is `systemctl --user start` on cuda-linux and `launchctl kickstart` on
+mlx-darwin — reached through `crucible service start`, because the unit name and the
+launchd label are facts `crucible/service.py` owns. Nothing is ever spawned as a child.
+`linger` is reported, never granted: `false` means the server stops when the user's last
+session ends, and `enableLinger` is the `sudo loginctl enable-linger` line for the app to
+show.
+
+### `readLocalConfig()`
+
+BookForge's `electron/crucible/local.ts` rule, now owned here: the local server has ONE
+owner, `<CRUCIBLE_HOME>/config.toml`, the file the server itself reads. `$CRUCIBLE_HOME`,
+else `~/.crucible`, resolved *inside the guest* on win32. The connect address is derived
+from the bind address — `0.0.0.0` and `::` are reached at `127.0.0.1`, anything else as
+written. A missing file is `no_local_config`, a state the app shows, not an empty client.
+
+## The Windows/WSL facts, each with a test
+
+From Foundry's deleted launcher (`docs/FROM-FOUNDRY-WSL-VLLM.md` section 2), carried
+verbatim:
+
+- always `wsl.exe -d <distro> --exec …`, never the implicit shell (it pre-expands `$var`);
+- wsl.exe's own output is UTF-16LE with a BOM, the guest's is UTF-8, on the same handles —
+  decided per chunk by looking for NULs (`decodeWslBytes`);
+- every one-shot call has its own timeout, and a timeout is a reported failure;
+- argument arrays, never shell strings; backslashes doubled once, because wsl.exe halves
+  them once before bash exists (`wslArgv`);
+- `toWslPath` maps `C:\a\b` → `/mnt/c/a/b`, refuses UNC, and `realpath.native` catches
+  mapped drives (`guestPathFor`);
+- conda by `test -x` in order, never `which`;
+- prebuilt environment archives are unpacked by the distro's own tar through `/mnt`, never
+  through `\\wsl$` (`guestUnpackArgv`);
+- pip's `\r`-repainted progress is split into lines (`splitLines`).
+
+## Tests
+
+```bash
+npm run test:unit
+```
+
+Unit tests only, found rather than listed (`scripts/unit.mjs`). Every branch and every
+refusal runs against a scripted `Runner` and asserts the argv verbatim; the real runner's
+decoding, streaming, timeout and spawn-error paths run against `node` itself. Nothing in
+the suite touches a guest, a service manager or a GPU.
