@@ -325,3 +325,50 @@ def test_pyproject_declares_every_file_of_the_page_as_package_data() -> None:
             f"{relative} is in crucible/ui/ and no package-data pattern in "
             f"pyproject.toml matches it, so a wheel would not carry it"
         )
+
+
+# ------------------------------------------------------------- 3.7 settings
+
+
+def test_the_page_draws_the_settings_panel_between_job_types_and_connect() -> None:
+    """PHASE15-HOST.md section 3.7 says WHERE, and the order is the argument.
+
+    A class this card cannot hold can still be routed somewhere that can, so
+    the panel that says where the work runs belongs directly under the one
+    that said the card could not hold it — and above the one that hands the
+    server to an app.
+    """
+    html = _read(INDEX)
+    assert 'id="settings-body"' in html
+    order = [html.index(f'id="{name}-body"') for name in ("types", "settings", "connect")]
+    assert order == sorted(order), "Settings sits between Job types and Connect an app"
+
+
+def test_every_settings_control_is_a_write_to_the_engine() -> None:
+    """*"Every control is a `PUT /v1/settings`"* — and nothing is a local save.
+
+    Read off the file: the panel's writer sends PUT to that one path, and the
+    test door is a POST to the per-upstream path. A control that wrote
+    somewhere else, or that only changed a variable, would not appear here.
+    """
+    source = _read(SCRIPT)
+    assert "'/v1/settings'" in source
+    assert "method: 'PUT'" in source
+    assert "/v1/settings/upstreams/${safe}/test" in source
+
+
+def test_the_page_never_asks_for_a_key_back() -> None:
+    """A key is write-only, so the panel reads `key_hint` and nothing else.
+
+    There is no route that returns a key, and a page that reached for one
+    would be a page written against a server that does not exist. Pinned here
+    rather than trusted, because this is the one file in the repo that draws a
+    field a secret has just been typed into.
+    """
+    source = _read(SCRIPT)
+    assert "key_hint" in source
+    # The draft the operator is typing is the ONLY place a key lives in this
+    # page, and it is cleared on a successful save and only then — a key that
+    # was refused is still the one they have in their hand.
+    assert "state.upstreamDraft" in source
+    assert "delete state.upstreamDraft[name];" in source

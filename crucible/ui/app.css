@@ -805,3 +805,71 @@ textarea {
     transition: none;
   }
 }
+
+/* ---------------------------------------------------------------- settings */
+/*
+ * PHASE15-HOST.md section 3.7. Its own row shape rather than `.row`'s: that
+ * one is a four-column grid built for a catalog line (title, size, action),
+ * and a settings row is a label above a set of controls whose number changes
+ * with what is configured. Reusing it would have meant a grid whose columns
+ * mean something different per panel, which is how a stylesheet stops being
+ * readable.
+ */
+
+.setting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+.setting:first-of-type {
+  border-top: 0;
+}
+
+.setting-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.setting-name {
+  font-weight: 600;
+}
+
+.setting-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.setting-actions input,
+.setting-actions select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  min-width: 14rem;
+  max-width: 100%;
+}
+
+.setting-actions input:focus-visible,
+.setting-actions select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.setting > .note,
+.setting > .refusal {
+  flex-basis: 100%;
+  margin: 4px 0 0;
+}

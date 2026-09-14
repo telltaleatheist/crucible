@@ -71,6 +71,23 @@
     // element would be thrown away every four seconds.
     moduleText: '',
     engineChoice: {},
+    // The settings document, as the server last handed it over — never edited
+    // in place. Every control PUTs and replaces this whole object with what
+    // came back, which is section 3.7's "no local state": the panel shows the
+    // engine's answer, not its own idea of it.
+    settings: null,
+    // What is TYPED and not yet sent. This is not a second copy of the
+    // settings — nothing here is a setting until a PUT has taken it — and it
+    // has to live outside the DOM for `engineChoice`'s reason: Status is on a
+    // four-second timer that redraws the console, and a half-typed key inside
+    // an element would be thrown away under the operator's hands.
+    upstreamDraft: {},
+    routeDraft: {},
+    allowanceDraft: null,
+    // What each upstream answered `test` with, so the route pickers can offer
+    // real model ids. Not cached across a reload and never written to disk:
+    // the list is somebody else's and changes without telling us.
+    upstreamModels: {},
     lastStatusAt: 0,
     timer: null
   };
@@ -456,6 +473,16 @@
     } catch (refusal) {
       state.capability = null;
       setRefusal('capability', refusal);
+    }
+  }
+
+  async function loadSettings() {
+    try {
+      state.settings = await call('/v1/settings');
+      setRefusal('settings', null);
+    } catch (refusal) {
+      state.settings = null;
+      setRefusal('settings', refusal);
     }
   }
 
@@ -1201,7 +1228,444 @@
     return group;
   }
 
-  // ----------------------------------------------------------- 4. catalog
+  // ---------------------------------------------------------- 4. settings
+  //
+  // PHASE15-HOST.md section 3.7. Owen, 2026-09-14: *"Settings live in the
+  // engine and nowhere else."* This panel and BookForge's settings section
+  // and Foundry's card are three windows onto ONE store, which is why every
+  // control here is a `PUT /v1/settings` and why the panel redraws from the
+  // document the PUT hands back rather than from anything it remembers.
+
+  var UPSTREAM_LABELS = {
+    anthropic: 'Anthropic',
+    openai: 'OpenAI',
+    ollama: 'Ollama'
+  };
+
+  var UPSTREAM_ORDER = ['anthropic', 'openai', 'ollama'];
+
+  /** The field each upstream takes. The server owns this; the page reads it. */
+  function upstreamField(name) {
+    return name === 'ollama' ? 'url' : 'key';
+  }
+
+  /**
+   * Send one patch and take what comes back as the truth.
+   *
+   * A refusal is shown WHERE IT WAS EARNED — `details.field` is the dotted
+   * path the server refused, so the control that caused it is the one that
+   * says so, rather than a banner at the top of a panel with nine controls.
+   */
+  async function putSettings(patch, where) {
+    try {
+      state.settings = await call('/v1/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch)
+      });
+      setRefusal(where, null);
+      return true;
+    } catch (refusal) {
+      setRefusal(where, refusal);
+      return false;
+    } finally {
+      // Capability and the catalog both move when a route does, and the
+      // panels above this one draw from them. Re-read rather than patched in
+      // place: the server recomputed the record, and guessing what it decided
+      // would be a second opinion about the same write.
+      await loadCapability();
+      render();
+    }
+  }
+
+  function renderSettings() {
+    var body = document.getElementById('settings-body');
+    body.textContent = '';
+
+    var refusal = refusalBox(state.refusals.settings);
+    if (refusal) {
+      body.appendChild(refusal);
+    }
+    if (state.settings === null) {
+      if (!refusal) {
+        body.appendChild(el('p', { class: 'empty', text: 'reading…' }));
+      }
+      return;
+    }
+
+    body.appendChild(
+      el('p', { class: 'lead' }, [
+        'Where each kind of text work runs, and the accounts this engine may ' +
+          'spend. BookForge and Foundry draw these same rows — there is one ' +
+          'store and this is it.'
+      ])
+    );
+
+    body.appendChild(renderRouteRows());
+    body.appendChild(renderUpstreamCards());
+    body.appendChild(renderAllowance());
+  }
+
+  /** Every distinct upstream model something is already routed to. */
+  function routedModels() {
+    var found = [];
+    var routes = state.settings.routes;
+    for (var name in routes) {
+      if (!Object.prototype.hasOwnProperty.call(routes, name)) {
+        continue;
+      }
+      var row = routes[name];
+      if (row.route === 'upstream' && found.indexOf(row.model) < 0) {
+        found.push(row.model);
+      }
+    }
+    return found;
+  }
+
+  /** The ids `test` reported, as `<upstream>/<model>`, for configured ones. */
+  function testedModels() {
+    var found = [];
+    for (var index = 0; index < UPSTREAM_ORDER.length; index += 1) {
+      var name = UPSTREAM_ORDER[index];
+      if (!state.settings.upstreams[name].configured) {
+        continue;
+      }
+      var listed = state.upstreamModels[name];
+      if (!listed) {
+        continue;
+      }
+      for (var i = 0; i < listed.length; i += 1) {
+        found.push(name + '/' + listed[i]);
+      }
+    }
+    return found;
+  }
+
+  function renderRouteRows() {
+    var block = el('div', { class: 'block' }, [
+      el('p', { class: 'subhead', text: 'Where the work runs' })
+    ]);
+    var routes = state.settings.routes;
+    var names = Object.keys(routes).sort();
+    for (var index = 0; index < names.length; index += 1) {
+      block.appendChild(routeRow(names[index], routes[names[index]]));
+    }
+    return block;
+  }
+
+  function routeRow(name, row) {
+    var options = [];
+    // `local` always, and it says WHAT local means on this machine, so the
+    // choice is between two named things rather than between a word and a
+    // word (3.7). `nothing fits` is an answer, not an absence.
+    options.push({
+      value: 'local',
+      label: 'local — ' + (row.model === null ? 'nothing fits' : row.model)
+    });
+    var offered = routedModels();
+    var tested = testedModels();
+    for (var i = 0; i < tested.length; i += 1) {
+      if (offered.indexOf(tested[i]) < 0) {
+        offered.push(tested[i]);
+      }
+    }
+    if (row.route === 'upstream' && offered.indexOf(row.model) < 0) {
+      offered.push(row.model);
+    }
+    for (var j = 0; j < offered.length; j += 1) {
+      options.push({ value: offered[j], label: offered[j] });
+    }
+    options.push({ value: '', label: 'an upstream model…' });
+
+    var current = row.route === 'upstream' ? row.model : 'local';
+    var typing = Object.prototype.hasOwnProperty.call(state.routeDraft, name);
+    var select = el('select', {
+      id: 'route-' + name,
+      'aria-label': 'where ' + name + ' runs',
+      onchange: function (event) {
+        var picked = event.target.value;
+        if (picked === '') {
+          state.routeDraft[name] = '';
+          renderSettings();
+          return;
+        }
+        delete state.routeDraft[name];
+        var patch = { routes: {} };
+        patch.routes[name] = picked;
+        putSettings(patch, 'settings');
+      }
+    });
+    for (var k = 0; k < options.length; k += 1) {
+      var option = el('option', {
+        value: options[k].value,
+        text: options[k].label
+      });
+      if (!typing && options[k].value === current) {
+        option.selected = true;
+      }
+      if (typing && options[k].value === '') {
+        option.selected = true;
+      }
+      select.appendChild(option);
+    }
+
+    var pieces = [select];
+    if (typing) {
+      var free = el('input', {
+        id: 'route-free-' + name,
+        type: 'text',
+        spellcheck: 'false',
+        placeholder: 'anthropic/claude-sonnet-5',
+        'aria-label': 'an upstream model id for ' + name,
+        oninput: function (event) {
+          state.routeDraft[name] = event.target.value;
+        }
+      });
+      free.value = state.routeDraft[name];
+      pieces.push(free);
+      pieces.push(
+        el('button', {
+          class: 'button quiet',
+          type: 'button',
+          onclick: function () {
+            var typed = (state.routeDraft[name] || '').trim();
+            if (typed === '') {
+              return;
+            }
+            var patch = { routes: {} };
+            patch.routes[name] = typed;
+            putSettings(patch, 'settings').then(function (took) {
+              if (took) {
+                delete state.routeDraft[name];
+                renderSettings();
+              }
+            });
+          }
+        }, ['Route'])
+      );
+    }
+
+    return el('div', { class: 'setting' }, [
+      el('div', { class: 'setting-head' }, [
+        el('span', { class: 'setting-name', text: name }),
+        chip(row.route, row.route === 'upstream' ? 'warn' : 'ok')
+      ]),
+      el('div', { class: 'setting-actions' }, pieces)
+    ]);
+  }
+
+  function renderUpstreamCards() {
+    var block = el('div', { class: 'block' }, [
+      el('p', { class: 'subhead', text: 'Accounts this engine may spend' }),
+      el('p', { class: 'note' }, [
+        'A key is write-only: it is stored at mode 0600 beside this server’s ' +
+          'token and never read back. What is shown is its last four ' +
+          'characters, which is enough to recognise which one is there.'
+      ])
+    ]);
+    for (var index = 0; index < UPSTREAM_ORDER.length; index += 1) {
+      block.appendChild(upstreamCard(UPSTREAM_ORDER[index]));
+    }
+    return block;
+  }
+
+  function upstreamCard(name) {
+    var entry = state.settings.upstreams[name];
+    var field = upstreamField(name);
+    var draft = state.upstreamDraft[name] || '';
+
+    var input = el('input', {
+      id: 'upstream-' + name,
+      type: field === 'key' ? 'password' : 'text',
+      spellcheck: 'false',
+      autocomplete: 'off',
+      placeholder: field === 'key' ? 'paste a key' : 'http://host:11434',
+      'aria-label': UPSTREAM_LABELS[name] + ' ' + field,
+      oninput: function (event) {
+        state.upstreamDraft[name] = event.target.value;
+      }
+    });
+    input.value = draft;
+
+    var probe = function () {
+      var typed = draft.trim();
+      var body = typed === '' ? {} : {};
+      if (typed !== '') {
+        body[field] = typed;
+      }
+      return body;
+    };
+
+    var testButton = el('button', {
+      class: 'button quiet',
+      type: 'button',
+      onclick: async function () {
+        try {
+          var answer = await call(
+            settingsTestPath(name),
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(probe())
+            }
+          );
+          state.upstreamModels[name] = answer.models;
+          setRefusal('upstream-' + name, null);
+        } catch (refusal) {
+          // The three test refusals are ANSWERS to "does this work", so they
+          // are shown on this card rather than thrown at the panel. They are
+          // shown verbatim, because the words are the provider's.
+          delete state.upstreamModels[name];
+          setRefusal('upstream-' + name, refusal);
+        }
+        renderSettings();
+      }
+    }, ['Test']);
+
+    var saveButton = el('button', {
+      class: 'button primary',
+      type: 'button',
+      onclick: function () {
+        var typed = draft.trim();
+        if (typed === '') {
+          return;
+        }
+        var patch = { upstreams: {} };
+        patch.upstreams[name] = {};
+        patch.upstreams[name][field] = typed;
+        putSettings(patch, 'upstream-' + name).then(function (took) {
+          if (took) {
+            // The field is emptied on success and only on success: a key that
+            // was refused is still the one the operator has in their hand.
+            delete state.upstreamDraft[name];
+            renderSettings();
+          }
+        });
+      }
+    }, ['Save']);
+
+    var actions = [input, testButton, saveButton];
+    if (entry.configured) {
+      actions.push(
+        el('button', {
+          class: 'button quiet',
+          type: 'button',
+          onclick: function () {
+            var patch = { upstreams: {} };
+            patch.upstreams[name] = null;
+            putSettings(patch, 'upstream-' + name);
+          }
+        }, ['Remove'])
+      );
+    }
+
+    var head = [
+      el('span', { class: 'setting-name', text: UPSTREAM_LABELS[name] })
+    ];
+    if (entry.configured) {
+      head.push(chip('configured', 'ok'));
+      head.push(mono(field === 'key' ? entry.key_hint : entry.url));
+    } else {
+      head.push(chip('not configured'));
+    }
+
+    var card = el('div', { class: 'setting' }, [
+      el('div', { class: 'setting-head' }, head),
+      el('div', { class: 'setting-actions' }, actions)
+    ]);
+
+    var listed = state.upstreamModels[name];
+    if (listed) {
+      card.appendChild(
+        el('p', { class: 'note' }, [
+          listed.length === 0
+            ? UPSTREAM_LABELS[name] + ' answered, and lists no models.'
+            : UPSTREAM_LABELS[name] +
+              ' lists: ' +
+              listed.join(', ') +
+              '. Pick one in a row above.'
+        ])
+      );
+    }
+    var earned = refusalBox(state.refusals['upstream-' + name]);
+    if (earned) {
+      card.appendChild(earned);
+    }
+    return card;
+  }
+
+  // Written whole so `tests/test_ui_mount.py` can read it: a path built out
+  // of fragments is a path the drift guard cannot see.
+  function settingsTestPath(name) {
+    var safe = encodeURIComponent(name);
+    return `/v1/settings/upstreams/${safe}/test`;
+  }
+
+  function renderAllowance() {
+    var current = state.settings.desktop_allowance_bytes;
+    var draft =
+      state.allowanceDraft === null ? String(current) : state.allowanceDraft;
+    var input = el('input', {
+      id: 'allowance',
+      type: 'text',
+      inputmode: 'numeric',
+      spellcheck: 'false',
+      'aria-label': 'desktop allowance in bytes',
+      oninput: function (event) {
+        state.allowanceDraft = event.target.value;
+      }
+    });
+    input.value = draft;
+    return el('div', { class: 'block' }, [
+      el('p', { class: 'subhead', text: 'Desktop allowance' }),
+      el('p', { class: 'note' }, [
+        'VRAM this host’s own desktop holds that is not anybody’s job. It is ' +
+          'subtracted before a capability is decided, so changing it decides ' +
+          'them again — currently ' +
+          bytesText(current) +
+          '.'
+      ]),
+      el('div', { class: 'setting-actions' }, [
+        input,
+        el('button', {
+          class: 'button quiet',
+          type: 'button',
+          onclick: function () {
+            var typed = (state.allowanceDraft === null
+              ? String(current)
+              : state.allowanceDraft
+            ).trim();
+            if (!/^[0-9]+$/.test(typed)) {
+              setRefusal(
+                'settings',
+                new Refusal(
+                  0,
+                  'invalid_bytes',
+                  'the desktop allowance is a whole number of bytes, and ' +
+                    JSON.stringify(typed) +
+                    ' is not one. Nothing was sent.',
+                  null
+                )
+              );
+              renderSettings();
+              return;
+            }
+            putSettings(
+              { desktop_allowance_bytes: Number(typed) },
+              'settings'
+            ).then(function (took) {
+              if (took) {
+                state.allowanceDraft = null;
+                renderSettings();
+              }
+            });
+          }
+        }, ['Set'])
+      ])
+    ]);
+  }
+
+  // ----------------------------------------------------------- 5. catalog
 
   function renderCatalog() {
     var body = document.getElementById('catalog-body');
@@ -1378,7 +1842,7 @@
     return block;
   }
 
-  // ----------------------------------------------------------- 5. connect
+  // ----------------------------------------------------------- 6. connect
 
   function copyButton(label, text, id) {
     var button = el('button', {
@@ -1572,7 +2036,7 @@
     return block;
   }
 
-  // ----------------------------------------------------------- 6. service
+  // ----------------------------------------------------------- 7. service
 
   var SERVICE_COMMANDS = [
     ['crucible service status', 'is it installed, and is it up'],
@@ -1702,6 +2166,7 @@
     renderStatus();
     renderTasks();
     renderJobTypes();
+    renderSettings();
     renderCatalog();
     renderConnect();
     renderService();
@@ -1748,6 +2213,7 @@
       loadInfo(),
       loadActivity(),
       loadCapability(),
+      loadSettings(),
       loadCatalog()
     ]);
     await loadTasks();
