@@ -167,6 +167,13 @@ async function collect(session: TtsStreamSession): Promise<StreamEvent[]> {
   return events;
 }
 
+/** The ops posted on the session, in order — `say`, `cancel`, `cancel_all`. */
+function ops(): typeof seen {
+  return seen.filter(
+    (entry) => entry.method === 'POST' && entry.path === `/v1/tts/stream/${SESSION.session_id}`,
+  );
+}
+
 // ------------------------------------------------------------------ opening
 
 
@@ -233,7 +240,7 @@ test('say posts the op and answers the row id, never the audio', async () => {
   );
   const session = await client().stream({ voice: 'deathstalker', language: 'en' });
   assert.equal(await session.say('r1', 'He had been walking for some time.'), 'r1');
-  const op = JSON.parse(seen[1]!.body);
+  const op = JSON.parse(ops()[0]!.body);
   assert.deepEqual(op, {
     op: 'say',
     id: 'r1',
@@ -247,14 +254,15 @@ test('say sends the take it is given and refuses one that is not a rung', async 
   reset();
   serving(
     (response) => {
-      frame(response, 1, 'closed', { reason: 'done' });
+      frame(response, 1, 'ready', READY);
+      frame(response, 2, 'closed', { reason: 'done' });
       response.end();
     },
     () => ({ id: 'r1' }),
   );
   const session = await client().stream({ voice: 'deathstalker', language: 'en' });
   await session.say('r1', 'Rain.', 2);
-  assert.equal(JSON.parse(seen[1]!.body).take, 2);
+  assert.equal(JSON.parse(ops()[0]!.body).take, 2);
   await assert.rejects(() => session.say('r2', 'Rain.', -1));
   await assert.rejects(() => session.say('r3', 'Rain.', 1.5));
   await collect(session);
@@ -265,7 +273,8 @@ test('cancel answers what it cost, and an outcome this client does not know is a
   let outcome = 'aborting_batch';
   serving(
     (response) => {
-      frame(response, 1, 'closed', { reason: 'done' });
+      frame(response, 1, 'ready', READY);
+      frame(response, 2, 'closed', { reason: 'done' });
       response.end();
     },
     (body) => (JSON.parse(body).op === 'cancel' ? { id: 'r1', outcome } : { cancelled: 3 }),
@@ -293,7 +302,8 @@ test('close tolerates a session the grace window already closed', async () => {
     }
     if ((request.url ?? '').endsWith('/events')) {
       openSse(response);
-      frame(response, 1, 'closed', { reason: 'done' });
+      frame(response, 1, 'ready', READY);
+      frame(response, 2, 'closed', { reason: 'done' });
       response.end();
       return;
     }
@@ -420,14 +430,184 @@ test('an event kind this client does not know is a refusal, never a skip', async
   await assert.rejects(() => collect(session), CrucibleProtocolError);
 });
 
-test('a ready naming another voice is not this session s stream', async () => {
+test('a ready that disagrees with the open reply is not this session s stream', async () => {
+  // One fact, two copies, compared (ARCHITECTURE.md R1): the identity came back
+  // on the open reply and comes again on `ready`, and every field is checked.
+  // Refused from `stream()` itself now that the frame is read before it
+  // resolves — nobody is handed a session whose stream says something else.
+  for (const disagreeing of [
+    { ...READY, voice: 'mistborn' },
+    { ...READY, fingerprint: 'deathstalker@ffffffffffffffffffffffffffffffffffffffff' },
+    { ...READY, sample_rate: 22050 },
+    { ...READY, backend: 'mlx-darwin' },
+  ]) {
+    reset();
+    serving((response) => {
+      frame(response, 1, 'ready', disagreeing);
+      response.end();
+    });
+    await assert.rejects(
+      () => client().stream({ voice: 'deathstalker', language: 'en' }),
+      CrucibleProtocolError,
+    );
+    // The session the server is holding was put down, so the next open is not
+    // refused `stream_session_open` for a session this caller never had.
+    assert.equal(seen.filter((entry) => entry.method === 'DELETE').length, 1);
+  }
+});
+
+// ----------------------------------------------------------- resolves attached
+
+test('stream() resolves only after the event stream is attached and ready has arrived', async () => {
+  // The server refuses a `say` on a session whose stream has never been opened
+  // (`stream_not_attached`). Until 2026-09-14 the SDK attached lazily inside
+  // the iterator, so a caller could not know when its first `say` was allowed
+  // and BookForge polled the refusal away. Now the order on the wire is the
+  // proof: the events GET, then ready, then — and only then — the first op.
+  reset();
+  let readySent = false;
+  let sessionResponse: ServerResponse | null = null;
+  serving(
+    (response) => {
+      sessionResponse = response;
+      // `ready` arrives late, as it does from a real narrator that is still
+      // settling. A client that resolved on the open reply would say into
+      // nothing here.
+      setTimeout(() => {
+        frame(response, 1, 'ready', READY);
+        readySent = true;
+      }, 120);
+    },
+    () => ({ id: 'r1' }),
+  );
+  const session = await client().stream({ voice: 'deathstalker', language: 'en' });
+  assert.equal(readySent, true, 'stream() resolved before the server said ready');
+  await session.say('r1', 'Rain.');
+  const order = seen.map((entry) => `${entry.method} ${entry.path}`);
+  assert.deepEqual(order, [
+    'POST /v1/tts/stream',
+    `GET /v1/tts/stream/${SESSION.session_id}/events`,
+    `POST /v1/tts/stream/${SESSION.session_id}`,
+  ]);
+  await session.close();
+  // The fixture's DELETE does not end the stream the way the real server's
+  // does, so the `closed` frame is written by hand — a response left open here
+  // would hold the fixture's server up for Node's whole request timeout.
+  frame(sessionResponse!, 2, 'closed', { reason: 'the client closed the session' });
+  sessionResponse!.end();
+  assert.deepEqual(await collect(session), []);
+});
+
+test('a row said before the loop begins is not lost, and a broken loop resumes', async () => {
+  reset();
+  let sessionResponse: ServerResponse | null = null;
+  serving(
+    (response) => {
+      sessionResponse = response;
+      frame(response, 1, 'ready', READY);
+    },
+    (body) => {
+      // The audio for a `say` is emitted the moment the op lands — before the
+      // caller has iterated anything. It must wait in the stream, not vanish.
+      const op = JSON.parse(body);
+      frame(sessionResponse!, 2, 'audio', {
+        id: op.id, seq: 0, pcm_base64: pcmBytes([7, 8]), seconds: 0.1,
+      });
+      frame(sessionResponse!, 3, 'audio', {
+        id: op.id, seq: 1, pcm_base64: pcmBytes([9]), seconds: 0.05,
+      });
+      return { id: op.id };
+    },
+  );
+  const session = await client().stream({ voice: 'deathstalker', language: 'en' });
+  await session.say('r1', 'Rain.');
+
+  // First loop takes one chunk and breaks. Breaking detaches nothing.
+  const first: StreamEvent[] = [];
+  for await (const event of session) {
+    first.push(event);
+    break;
+  }
+  assert.equal(first.length, 1);
+  assert.equal(first[0]!.kind, 'audio');
+  assert.deepEqual(Array.from((first[0] as { pcm: Int16Array }).pcm), [7, 8]);
+
+  // The second loop picks up the chunk the first one left, from the same
+  // stream: no reattach, no replay, and `seq` carries straight on.
+  frame(sessionResponse!, 4, 'closed', { reason: 'done' });
+  sessionResponse!.end();
+  const rest = await collect(session);
+  assert.equal(rest.length, 1);
+  assert.equal((rest[0] as { seq: number }).seq, 1);
+  assert.equal(seen.filter((entry) => entry.path.endsWith('/events')).length, 1);
+});
+
+test('a stream that closes before it is ready is refused, with the server s reason', async () => {
   reset();
   serving((response) => {
-    frame(response, 1, 'ready', { ...READY, voice: 'mistborn' });
+    frame(response, 1, 'closed', { reason: 'narrator failed before the first row' });
+    response.end();
+  });
+  await assert.rejects(
+    () => client().stream({ voice: 'deathstalker', language: 'en' }),
+    (error: unknown) =>
+      error instanceof CrucibleProtocolError &&
+      /closed before it was ready: narrator failed/.test(error.message),
+  );
+  // The server closed it, so there is nothing left to put down: a DELETE here
+  // would only be refused `unknown_session`.
+  assert.equal(seen.filter((entry) => entry.method === 'DELETE').length, 0);
+});
+
+test('a stream that says anything else before ready is not one this client knows', async () => {
+  reset();
+  serving((response) => {
+    frame(response, 1, 'audio', { id: 'r1', seq: 0, pcm_base64: pcmBytes([1]), seconds: 0.1 });
+    response.end();
+  });
+  await assert.rejects(
+    () => client().stream({ voice: 'deathstalker', language: 'en' }),
+    (error: unknown) =>
+      error instanceof CrucibleProtocolError && /began with a audio frame/.test(error.message),
+  );
+});
+
+test('a second ready is a fault, not a re-announcement', async () => {
+  reset();
+  serving((response) => {
+    frame(response, 1, 'ready', READY);
+    frame(response, 2, 'ready', READY);
     response.end();
   });
   const session = await client().stream({ voice: 'deathstalker', language: 'en' });
-  await assert.rejects(() => collect(session), CrucibleProtocolError);
+  await assert.rejects(
+    () => collect(session),
+    (error: unknown) =>
+      error instanceof CrucibleProtocolError && /ready twice/.test(error.message),
+  );
+});
+
+test('a refusal to attach travels back from stream() by name', async () => {
+  reset();
+  handle = (request, response) => {
+    if ((request.url ?? '') === '/v1/tts/stream' && request.method === 'POST') {
+      json(response, 201, SESSION);
+      return;
+    }
+    if ((request.url ?? '').endsWith('/events')) {
+      json(response, 404, {
+        error: { code: 'unknown_session', message: 'there is no streaming session' },
+      });
+      return;
+    }
+    json(response, 404, {
+      error: { code: 'unknown_session', message: 'there is no streaming session' },
+    });
+  };
+  await assert.rejects(
+    () => client().stream({ voice: 'deathstalker', language: 'en' }),
+    (error: unknown) => error instanceof CrucibleRefused && error.code === 'unknown_session',
+  );
 });
 
 test('an id that does not follow the last one is a protocol error', async () => {

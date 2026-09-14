@@ -501,9 +501,19 @@ like a render job — and refuses `voice_not_resident` naming what *is* resident
 submitted while one is open is refused `engine_in_use`: narrator has one stdin and one
 stdout, and two conversations on it read each other's replies.
 
-**`say` answers with the row's id, not the audio.** The audio comes out of the iterator, and
-a `say` on a session whose stream has never been iterated is refused `stream_not_attached`
-rather than generating into nothing.
+**`say` answers with the row's id, not the audio.** The audio comes out of the iterator.
+
+**`stream()` resolves attached.** The server refuses a `say` on a session whose event stream
+has never been opened (`stream_not_attached` — a row said into nothing has nowhere for its
+audio to go), so the client opens the stream and reads the server's `ready` frame *before*
+`stream()` resolves. The example above is exactly the order it may be called in: the first
+`say` is never early, and there is no second call to make and no signal to wait for. Audio
+for a row said before the loop begins waits in the stream and comes out of the first
+iteration; breaking out of a `for await` detaches nothing, and a later loop resumes where the
+last one stopped. The `ready` frame is also checked, field by field, against what the open
+reply said — a stream announcing another voice, merge, sample rate or backend is a protocol
+error, not a session. (Until 2026-09-14 the stream attached lazily on the first iteration and
+a `say` before it was refused, which is what BookForge's polling stopgap was for.)
 
 **`cancel(id)` tells you what it cost.** `dropped` — the row had not reached the engine, so
 nothing was lost. `aborting_batch` — the engine is generating it, and narrator has no per-row

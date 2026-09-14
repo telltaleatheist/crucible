@@ -24,6 +24,22 @@
  * still emitting — because that is what the server sends and reordering them
  * here would defeat the whole point of a sub-sentence stream.
  *
+ * It is attached before the caller sees it
+ * ----------------------------------------
+ * The server refuses a `say` on a session whose event stream has never been
+ * opened (`stream_not_attached`, `crucible/ttsstream.py`'s `StreamSession.say`),
+ * because a row said into nothing has nowhere for its audio to go. Until
+ * 2026-09-14 this client attached its stream lazily, from inside the iterator,
+ * and swallowed the `ready` frame — so a caller could not know when its first
+ * `say` was allowed, this file's own example (`say` before `for await`) was
+ * refused by the real server, and BookForge had to poll the refusal away with a
+ * labelled stopgap. So `openTtsStream` now attaches the stream and reads the
+ * server's `ready` frame **before it resolves**: the first `say` is never early,
+ * and there is no second call to make and no signal to wait for. Frames the
+ * server emits before the caller starts iterating are not lost — they wait in
+ * the one stream the session holds, and the iterator picks them up from where
+ * `open` left off.
+ *
  * It reattaches on its own, and that is a deliberate difference
  * ------------------------------------------------------------
  * `events()` never reconnects: a job goes on running whether anybody is
@@ -152,8 +168,13 @@ export interface TtsStreamSession extends AsyncIterable<StreamEvent> {
 
   /**
    * Speak one row. Returns its id, **not its audio**: the audio comes out of
-   * the iterator. A session that has never had its stream iterated refuses
-   * this by name rather than generating into nothing.
+   * the iterator.
+   *
+   * It may be called the moment `stream()` resolves. The session's event stream
+   * is attached, and the server's `ready` frame read, before the session is
+   * handed over, so the server's `stream_not_attached` refusal — a row said
+   * into a session nobody is listening to — cannot be met by a caller of this
+   * client. Audio for a row said before iteration begins waits in the stream.
    *
    * `take` defaults to 0 here and has no default on the wire. 0 is the engine's
    * own sampling, which is what asking for nothing gets; anything above it is
@@ -176,7 +197,15 @@ export interface TtsStreamSession extends AsyncIterable<StreamEvent> {
   /** Stop every row. Returns how many were still live. Nothing is restarted. */
   cancelAll(): Promise<number>;
 
-  /** Close the session and free the voice. The iterator ends. */
+  /**
+   * Close the session and free the voice. The iterator ends on the server's
+   * `closed` frame.
+   *
+   * Breaking out of a `for await` does NOT close anything: the stream stays
+   * attached, the server never starts its grace window, and iterating again
+   * resumes exactly where the last loop stopped. A session is over when this is
+   * called, or when the server says so.
+   */
   close(): Promise<void>;
 }
 
@@ -219,14 +248,32 @@ export async function openTtsStream(
     { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ voice, language }) },
     'stream',
   );
-  return new Session(transport, {
+  const session = new Session(transport, {
     sessionId: str(body, 'session_id', 'stream'),
     voice: str(body, 'voice', 'stream'),
     fingerprint: str(body, 'fingerprint', 'stream'),
     sampleRate: num(body, 'sample_rate', 'stream'),
     backend: str(body, 'backend', 'stream'),
   });
+  try {
+    await session.attach();
+  } catch (cause) {
+    // The server is holding a session this caller will never be handed, and it
+    // is the ONE session the server allows: left alone it stays open until the
+    // grace window closes it, and a `stream()` retried inside that window is
+    // refused `stream_session_open` for a session nobody has. Closing it is a
+    // courtesy and its failure is not the news — the attach failure is.
+    await session.discard();
+    throw cause;
+  }
+  return session;
 }
+
+/**
+ * What the session's one stream yields, one level below the caller's events:
+ * their events, plus the `ready` frame that only {@link Session.attach} reads.
+ */
+type Pumped = StreamEvent | { readonly kind: 'ready' };
 
 interface Identity {
   sessionId: string;
@@ -244,7 +291,20 @@ class Session implements TtsStreamSession {
   readonly backend: string;
 
   readonly #transport: StreamTransport;
+  /**
+   * The session's one event stream, as a generator that is created once and
+   * drawn from twice: {@link attach} pulls it as far as the `ready` frame, and
+   * the public iterator pulls everything after. One instance is what makes a
+   * row said before iteration begins land in the loop rather than in a stream
+   * nobody holds — and what makes a second `for await` resume where the first
+   * one broke off, instead of replaying from an id it no longer knows.
+   */
+  readonly #pump: AsyncGenerator<Pumped, void, undefined>;
   #closed = false;
+  /** Whether the server's `ready` has been read. A second one is a fault. */
+  #ready = false;
+  /** The `closed` frame's reason, for the one error that arrives before ready. */
+  #closedReason: string | null = null;
 
   constructor(transport: StreamTransport, identity: Identity) {
     this.#transport = transport;
@@ -253,6 +313,45 @@ class Session implements TtsStreamSession {
     this.fingerprint = identity.fingerprint;
     this.sampleRate = identity.sampleRate;
     this.backend = identity.backend;
+    this.#pump = this.#run();
+  }
+
+  // ------------------------------------------------------------- attaching
+
+  /**
+   * Attach the event stream and wait for the server's `ready`. Called once,
+   * by {@link openTtsStream}, before the session is handed to anybody.
+   *
+   * Every way this can go wrong is the same failure the iterator would have
+   * met one call later, surfaced here instead: a refusal to attach travels
+   * back by name, an unreachable server is reattached for the grace window and
+   * then given up on, and a stream that says anything else before `ready` —
+   * or ends without saying it — is a conversation this client does not know.
+   */
+  async attach(): Promise<void> {
+    const step = await this.#pump.next();
+    if (step.done === true) {
+      throw new CrucibleProtocolError(
+        `session ${this.sessionId} closed before it was ready` +
+          (this.#closedReason === null ? '' : `: ${this.#closedReason}`),
+      );
+    }
+    if (step.value.kind !== 'ready') {
+      throw new CrucibleProtocolError(
+        `session ${this.sessionId}'s stream began with a ${step.value.kind} frame ` +
+          'rather than ready',
+      );
+    }
+  }
+
+  /**
+   * Put down a session {@link attach} could not finish opening: cancel the
+   * stream if one is held, and tell the server. Best effort — the failure
+   * being reported is the attach's, and a second one would only hide it.
+   */
+  async discard(): Promise<void> {
+    await this.#pump.return(undefined).catch(() => undefined);
+    await this.close().catch(() => undefined);
   }
 
   // ------------------------------------------------------------------ ops
@@ -316,6 +415,27 @@ class Session implements TtsStreamSession {
   // ------------------------------------------------------------- the audio
 
   async *[Symbol.asyncIterator](): AsyncGenerator<StreamEvent, void, undefined> {
+    for (;;) {
+      const step = await this.#pump.next();
+      if (step.done === true) return;
+      if (step.value.kind === 'ready') {
+        // `#read` refuses a second ready before it can get here; this is the
+        // type's last branch, kept as a refusal rather than a skip for the
+        // reason the unknown-event branch below gives.
+        throw new CrucibleProtocolError(`session ${this.sessionId} sent ready twice`);
+      }
+      yield step.value;
+    }
+  }
+
+  /**
+   * The one stream, attached and reattached for as long as the session lives.
+   *
+   * Everything the session ever reads off the wire comes through here, in one
+   * generator instance, so the cursor (`delivered`) and the drop clock are the
+   * session's and not a particular loop's.
+   */
+  async *#run(): AsyncGenerator<Pumped, void, undefined> {
     let delivered = 0;
     let droppedAt: number | null = null;
 
@@ -357,10 +477,10 @@ class Session implements TtsStreamSession {
           const event = frame.event ?? 'message';
           if (event === 'closed') {
             this.#closed = true;
+            this.#closedReason = str(asObject(parse(frame.data, event), event), 'reason', event);
             return;
           }
-          const yielded = this.#read(event, frame.data);
-          if (yielded !== null) yield yielded;
+          yield this.#read(event, frame.data);
         }
       } catch (cause) {
         // Sorting one kind of failure from the other, because they want
@@ -411,21 +531,39 @@ class Session implements TtsStreamSession {
     return stream;
   }
 
-  /** One frame, as the caller's event — or null for one they need not see. */
-  #read(event: string, data: string): StreamEvent | null {
+  /** One frame, as the caller's event — or the `ready` only `attach` reads. */
+  #read(event: string, data: string): Pumped {
     const body = asObject(parse(data, event), event);
     if (event === 'ready') {
-      // The identity is already on the session object, and it is checked rather
-      // than ignored: a `ready` naming another voice would mean this stream is
-      // not the session that was opened.
-      const voice = str(body, 'voice', 'ready');
-      if (voice !== this.voice) {
-        throw new CrucibleProtocolError(
-          `session ${this.sessionId} was opened on ${this.voice} and its stream ` +
-            `says ${voice}`,
-        );
+      if (this.#ready) {
+        throw new CrucibleProtocolError(`session ${this.sessionId} sent ready twice`);
       }
-      return null;
+      // The identity arrived twice — on the open reply, and again here — and
+      // one fact with two copies is compared, never trusted twice
+      // (ARCHITECTURE.md R1). A `ready` naming another voice, merge, rate or
+      // backend would mean this stream is not the session that was opened.
+      const said = {
+        voice: str(body, 'voice', 'ready'),
+        fingerprint: str(body, 'fingerprint', 'ready'),
+        sampleRate: num(body, 'sample_rate', 'ready'),
+        backend: str(body, 'backend', 'ready'),
+      };
+      const opened = {
+        voice: this.voice,
+        fingerprint: this.fingerprint,
+        sampleRate: this.sampleRate,
+        backend: this.backend,
+      };
+      for (const key of ['voice', 'fingerprint', 'sampleRate', 'backend'] as const) {
+        if (said[key] !== opened[key]) {
+          throw new CrucibleProtocolError(
+            `session ${this.sessionId} was opened with ${key} ${String(opened[key])} ` +
+              `and its stream's ready says ${String(said[key])}`,
+          );
+        }
+      }
+      this.#ready = true;
+      return { kind: 'ready' };
     }
     if (event === 'audio') {
       return {

@@ -1390,6 +1390,14 @@ export class CrucibleClient {
    * whole attention; a second is refused as `stream_session_open`, and a `tts`
    * render job submitted while one is open is refused as `engine_in_use`.
    *
+   * **It resolves attached.** The session's event stream is opened and the
+   * server's `ready` frame read and checked before this returns, so the
+   * example above is exactly the order it may be called in: the server's
+   * `stream_not_attached` refusal — a row said into a session nobody is
+   * listening to — is one a caller of this client cannot meet. (Until
+   * 2026-09-14 the stream attached lazily on the first iteration, and a `say`
+   * before it was refused.)
+   *
    * The session is its own `AsyncIterable` and it reattaches across a dropped
    * connection on its own — see `src/stream.ts` for why that differs from
    * {@link events}, which never reconnects.
