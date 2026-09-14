@@ -34,8 +34,11 @@ bf16 27B has a cuda-linux block too; the server will refuse to load it on a 24 G
 name (see 4), which is the point: the manifest says what the model needs, the host says
 what it has. `qwen3.8-27b-4bit` is the same 27B at int4 — the one that does fit 24 GB —
 and carries the 98304-token context of Owen's Ollama tag `qwen3.8:27b-24g`, so
-`context_default` is a per-model number and not a constant. Nothing else about a model's
-*use* belongs here: sampling is the client's, sent per request.
+`context_default` is a per-model number and not a constant.
+
+*(Section 9 amends the sentence that used to end this paragraph — "sampling is the
+client's, sent per request". It still is, and it still wins; but a manifest may now carry
+an optional `[defaults]` table for the knobs a request leaves out.)*
 
 A backend block may also carry a `context_default` of its own, and then that is the
 context that backend serves — `--max-model-len`, the `/v1/models` row, the resident
@@ -83,11 +86,11 @@ eviction of other people's processes, ever.
 
 | Route | Auth | Returns |
 |---|---|---|
-| `GET /v1/models` | yes | `[{id, family, params_b, revision, fingerprint, backend_supported, installed, resident, loadable, reason (when not loadable), memory_bytes_estimate, context_default, max_model_len}]` |
+| `GET /v1/models` | yes | `[{id, family, params_b, revision, fingerprint, backend_supported, installed, resident, loadable, reason (when not loadable), memory_bytes_estimate, context_default, max_model_len, defaults}]` |
 | `POST /v1/jobs {type: "load-model", model}` | yes | a normal job. Events: `queued`, `warming {message}` streamed from the engine's readiness (several), `done {resident: id}`. Refusals by name before queuing: `unknown_model`, `model_not_installed`, `backend_unsupported`, `accelerator_busy`, `insufficient_memory`, `env_missing`. |
 | `POST /v1/jobs {type: "unload-model", model}` | yes | a normal job; `done {resident: null}` — the same field the load reports, saying what is resident *now*, which after an unload is nothing. `model_not_resident` if it isn't. |
 | `POST /v1/openai/chat/completions` | yes | proxied to the resident engine, streaming or not, verbatim but for `model` (see below). `model` in the body must equal the resident id, else **409 `model_not_resident`** naming the resident model (or none). Never loads implicitly. |
-| `GET /v1/openai/models` | yes | the resident model in OpenAI's list shape (`{id, object, created, owned_by, engine_model_name, revision, fingerprint, max_model_len}`), or an empty list. |
+| `GET /v1/openai/models` | yes | the resident model in OpenAI's list shape (`{id, object, created, owned_by, engine_model_name, revision, fingerprint, max_model_len, defaults}`), or an empty list. |
 
 `revision` is the pin in **this host's** backend block, so a client records the same sha
 the puller used; it is `null` — not `""` — when `backend_supported` is false, because a
@@ -283,3 +286,106 @@ and all now in the code or the manifests:
   failed run destroyed the engine log that explained it, because
   `scripts/measure-llm-memory.sh` deleted its throwaway home on the way out. It keeps the
   log on a non-zero exit now.
+
+## 9. Per-model defaults, and who wins
+
+**This section is the contract for Foundry and BookForge.** Nothing it describes is
+required of a client, and nothing a client sends today stops working.
+
+A model manifest may carry an optional `[defaults]` table. It is what a chat request is
+answered with **for the knobs the request does not state**:
+
+```toml
+[defaults]
+thinking = false
+```
+
+### The precedence, in one table
+
+| The request | The manifest | What the engine is sent | `X-Crucible-Sampling` says |
+|---|---|---|---|
+| **states it** | anything | **the request's value** | `request` |
+| omits it | **states it** | **the manifest's value** | `manifest` |
+| omits it | omits it | *nothing is sent for that key* | `engine` |
+
+**A field the request states always wins.** The manifest fills gaps; it never wins an
+argument. Foundry sends `temperature` and `max_tokens` on every call it makes, and a
+proxy that started overriding them would change a shipping app's output on the day it
+deployed.
+
+An explicit `null` counts as **stated**: a client that wrote the key made a decision, and
+whether the engine likes the value is the engine's to say.
+
+### The keys, and why only these
+
+`temperature`, `top_p`, `top_k`, `max_tokens`, `repetition_penalty`, `thinking`. Those are
+the knobs **both** vLLM's and mlx-lm's OpenAI surfaces honour under exactly those names,
+and `thinking` is the one that is not a wire field at all — it becomes
+`chat_template_kwargs: {"enable_thinking": …}`, merged into whatever else the client put
+in that table rather than replacing it. An unknown key in `[defaults]` is a **refusal
+naming it** at manifest load, and so is a value outside the engines' range: a knob no
+engine reads would be a number in a file that looks like it is doing something.
+
+`[defaults]` is a **model-level** table, not per-backend. The reason a model wants
+`thinking = false` is what the model does with a prompt, which is the same on both cards.
+
+### What is reported, and where
+
+Every chat response — streamed or not, and on the engine's own 400 as well — carries:
+
+```
+X-Crucible-Sampling: {"max_tokens":"engine","repetition_penalty":"engine",
+                      "temperature":"request","thinking":"manifest",
+                      "top_k":"engine","top_p":"engine"}
+```
+
+All six keys, every time. A header and not a body field, because section 5's rule is that
+the proxy is verbatim in both directions except for `model` — and because there is nowhere
+in an SSE stream to put a field a client would not have to learn to skip.
+
+`GET /v1/models` and `GET /v1/openai/models` both carry a `defaults` object with all six
+keys, `null` where the model states none. For the **resident** model that object is read
+off the engine's own record rather than off the file, exactly as `max_model_len` is: the
+defaults are pinned at load, so a manifest edited under a running engine cannot make a row
+promise a temperature nothing is sending, and cannot change what a request in flight is
+answered with.
+
+**The bytes still pass through untouched when nothing applies.** The proxy re-serialises
+only when it actually added something (or when it has to substitute `model` on mlx-lm), so
+a request that states every knob this server knows about reaches the engine exactly as it
+was written — `response_format.json_schema.schema` included.
+
+### `qwen3.5-9b` ships `thinking = false`
+
+That is the model BookForge and Foundry both clean text with (BookForge's `cleanTextModel`;
+Foundry's clean / translate / simplify surface). Qwen3.5 reasons before it answers, and
+with a budget sized for a rewrite it spends the whole of it on `reasoning` and returns a
+message with **no `content` at all**. Both apps carry
+`chat_template_kwargs: {enable_thinking: false}` in their own code for exactly that reason
+— BookForge on every cleanup request, Foundry gated on a **regex over the model name**
+(`/^qwen3(\.|:|-|$)/i`), which is a rule that breaks the day a model is renamed.
+
+That is one fact with two owners in two repos (ARCHITECTURE.md R1), and the owner it
+belongs to is the thing that knows which weights are loaded — DESIGN.md section 3.1 already
+ruled the general case: *"everything that tunes an engine to a model lives in Crucible's own
+configuration, not on the wire."*
+
+**Nothing is retired on the wire.** An app that goes on sending the field is *stating* it,
+and a stated field wins. What changes for a client is that it no longer has to: a Crucible
+serving `qwen3.5-9b` turns thinking off whether or not the caller remembered, and the
+response header says which of them did it.
+
+### Ruling owed
+
+- **Should the other manifests state sampling defaults too?** `qwen3.8-27b` and its 4-bit
+  sibling state none, deliberately: Foundry sends its own temperature per act (translate,
+  simplify, analyse are three different numbers), and a default invented here would change
+  output nobody asked to change. But `dots-ocr` is a real candidate — the page reader sends
+  `temperature: 0` on every call *"because a layout answer is a measurement of a page"*
+  (CLIENT-SURFACES.md section 8), which is a property of the act and of the model rather
+  than of the client. Proceeding on the careful assumption: **only `thinking` on
+  `qwen3.5-9b`**, because that is the one where a client getting it wrong produces an empty
+  answer rather than a different one. Owen to rule on `dots-ocr`.
+- **Should a `[defaults]` deviation owe a written reason, the way a voice's `sampling` does
+  (`crucible/voices.py`)?** Not built. A voice's numbers deviate from an engine-level rule
+  Owen set; a model's defaults have no such rule to deviate from yet.

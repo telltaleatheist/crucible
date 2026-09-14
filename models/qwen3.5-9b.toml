@@ -19,6 +19,33 @@ context_default = 12288
 # that to a reviewer (crucible/manifests.py, PHASE3-VLM.md section 3).
 modalities = ["text"]
 
+# What a chat request that states nothing is answered with (PHASE2-LLM.md
+# section 9). A field the REQUEST states always wins; this only fills gaps.
+#
+# `thinking = false` — and this is the model's own property, not a preference.
+# Qwen3.5 reasons before it answers, and with a bounded budget it spends the
+# whole of it on `reasoning` and returns a message with **no `content` at all**.
+# The cleanup pass is the one that meets this: it is `qwen3.5-9b` that BookForge
+# and Foundry both use for clean-text (BookForge's `cleanTextModel`, Foundry's
+# clean/translate/simplify surface), it sends a `num_predict` budget sized for a
+# rewrite rather than for a reasoning trace, and both apps have carried
+# `chat_template_kwargs: {enable_thinking: false}` in their own code for exactly
+# this reason — BookForge's crucible provider sends it on EVERY cleanup request
+# (`electron/ai-bridge.ts`), and Foundry gates the same field on a regex over
+# the model name (`/^qwen3(\.|:|-|$)/i`), which is a rule that breaks the day a
+# model is renamed.
+#
+# That is one fact with two owners in two repos, and the owner it belongs to is
+# the thing that knows which weights are loaded (ARCHITECTURE.md R1, DESIGN.md
+# section 3.1). So it is declared here. Nothing is retired on the wire: an app
+# that goes on sending the field is stating it, and a stated field wins.
+#
+# Nothing else is set. Temperature, top_p and the rest are the CLIENT's for this
+# model — Foundry sends its own per act, and a number invented here would
+# quietly change a shipping app's output.
+[defaults]
+thinking = false
+
 [backends.cuda-linux]
 engine = "vllm"
 hf_repo = "Qwen/Qwen3.5-9B"

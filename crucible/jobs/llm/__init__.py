@@ -251,6 +251,18 @@ def model_rows(
             # `revision` and `memory_bytes_estimate` are: the number lives in a
             # backend block this manifest does not have.
             "max_model_len": max_model_len,
+            # What a chat request that states nothing will be answered with
+            # (PHASE2-LLM.md section 9). For the resident model this is the
+            # record the proxy is ACTUALLY applying, read off the engine's own
+            # row, for `max_model_len`'s reason directly above: a manifest
+            # edited under a running engine must not make this row promise a
+            # temperature nothing is sending. Every key is present and `null`
+            # means "this model states none, so the engine's own default".
+            "defaults": (
+                resident.defaults.to_dict()
+                if resident is not None and resident.model_id == manifest.id
+                else manifest.defaults.to_dict()
+            ),
         }
         if reason is not None:
             row["reason"] = reason

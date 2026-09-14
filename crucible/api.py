@@ -47,6 +47,7 @@ from .jobs.queue import JobStore
 from .jobs.tts.common import known_voice
 from .inflight import InFlight, read_act
 from .residency import Residency
+from .sampling import SAMPLING_HEADER, Applied, apply_defaults
 from .ttsstream import (
     StreamManager,
     StreamSession,
@@ -1097,6 +1098,13 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     # clamp entirely when it is absent (CLIENT-SURFACES.md
                     # section 6.1).
                     "max_model_len": resident.max_model_len,
+                    # What this engine will be sent for a knob the request
+                    # leaves out (PHASE2-LLM.md section 9). Here for
+                    # `max_model_len`'s reason: Foundry reads the OpenAI-shaped
+                    # listing rather than `/v1/models`, and the defaults are a
+                    # thing it has to be able to see before it decides what to
+                    # send. `null` means the engine's own default.
+                    "defaults": resident.defaults.to_dict(),
                 }
             ],
         }
@@ -1134,7 +1142,13 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                  else resident.model_id},
             )
 
-        forwarded = _forward_body(raw, body, resident)
+        # The manifest's gaps, filled — and the audit of what filled them
+        # (PHASE2-LLM.md section 9). `resident.defaults` is what the manifest
+        # said at LOAD time, not what it says now, for the same reason
+        # `max_model_len` comes off the engine's record.
+        applied = apply_defaults(body, resident.defaults)
+        sampling_headers = {SAMPLING_HEADER: applied.header()}
+        forwarded = _forward_body(raw, applied, resident)
         url = f"{resident.base_url}/v1/chat/completions"
         client: httpx.AsyncClient = request.app.state.http
         inflight: InFlight = request.app.state.inflight
@@ -1151,7 +1165,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             act=act, model=resident.model_id, client=_client_agent(request)
         ):
             if body.get("stream") is True:
-                return await _proxy_stream(client, url, forwarded, resident)
+                return await _proxy_stream(
+                    client, url, forwarded, resident, sampling_headers
+                )
             try:
                 upstream = await _post_unless_the_caller_leaves(
                     client, url, forwarded, request
@@ -1167,6 +1183,10 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 content=content,
                 status_code=upstream.status_code,
                 media_type=upstream.headers.get("content-type", "application/json"),
+                # On the engine's own refusal too: a 400 whose `max_tokens` came
+                # from the manifest is a 400 the manifest caused, and the reader
+                # needs that on the response that carries it.
+                headers=sampling_headers,
             )
 
     app.include_router(public)
@@ -1191,7 +1211,7 @@ def _chat_body(raw: bytes) -> dict[str, Any]:
     return body
 
 
-def _forward_body(raw: bytes, body: dict[str, Any], resident: Any) -> bytes:
+def _forward_body(raw: bytes, applied: Applied, resident: Any) -> bytes:
     """The client's chat body on its way to the engine.
 
     The proxy owns exactly one field (PHASE2-LLM.md section 5), so where the
@@ -1206,10 +1226,19 @@ def _forward_body(raw: bytes, body: dict[str, Any], resident: Any) -> bytes:
     to the resolved weights directory — one field has to change, so the document
     is re-serialised with `model` replaced in the position it already held.
     Nothing else is added, removed or reordered.
+
+    Since phase 2's section 9 there is a second reason to re-serialise: a
+    manifest default the request left room for. It is held to the same rule —
+    **the bytes pass through untouched unless something actually changed**, so a
+    request that states every knob this server knows about reaches the engine
+    exactly as it was written, grammar and all.
     """
-    if resident.engine_model_name == resident.model_id:
+    if not applied.changed and resident.engine_model_name == resident.model_id:
         return raw
-    return json.dumps({**body, "model": resident.engine_model_name}).encode("utf-8")
+    document = dict(applied.body)
+    if resident.engine_model_name != resident.model_id:
+        document["model"] = resident.engine_model_name
+    return json.dumps(document).encode("utf-8")
 
 
 async def _watch_for_disconnect(request: Request) -> None:
@@ -1391,7 +1420,11 @@ class _RelayResponse(StreamingResponse):
 
 
 async def _proxy_stream(
-    client: httpx.AsyncClient, url: str, body: bytes, resident: Any
+    client: httpx.AsyncClient,
+    url: str,
+    body: bytes,
+    resident: Any,
+    extra_headers: dict[str, str],
 ) -> Response:
     """Forward a streamed completion, SSE framing intact.
 
@@ -1433,6 +1466,7 @@ async def _proxy_stream(
             content=payload,
             status_code=upstream.status_code,
             media_type=upstream.headers.get("content-type", "application/json"),
+            headers=dict(extra_headers),
         )
 
     async def relay() -> AsyncIterator[bytes]:
@@ -1457,7 +1491,14 @@ async def _proxy_stream(
         upstream=upstream,
         status_code=200,
         media_type=upstream.headers.get("content-type", "text/event-stream"),
-        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        # The sampling audit rides on the response headers, which is the one
+        # place a streamed completion HAS to put it: there is nowhere in an SSE
+        # body to add a field a client would not have to learn to skip.
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+            **extra_headers,
+        },
     )
 
 

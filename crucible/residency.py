@@ -47,7 +47,13 @@ from .engines import (
     engine_model_name,
     find_free_port,
 )
-from .manifests import BackendSpec, ModelManifest, fingerprint
+from .manifests import (
+    NO_DEFAULTS,
+    BackendSpec,
+    ModelDefaults,
+    ModelManifest,
+    fingerprint,
+)
 from .voices import VoiceBackendSpec, VoiceManifest
 from .workers import WorkerError, WorkerSession
 
@@ -92,6 +98,12 @@ class ResidentModel:
     memory_bytes_estimate: int
     log_path: Path
     loaded_at: str
+    #: `[defaults]` as the manifest read at LOAD time, for `max_model_len`'s
+    #: reason one field up: a manifest edited while this engine is up must not
+    #: change what a request in flight is answered with, and the record is what
+    #: the door reports. `crucible/sampling.py` applies it; `NO_DEFAULTS` is a
+    #: model that states none, which is not the same as a field nobody set.
+    defaults: ModelDefaults = NO_DEFAULTS
 
     @property
     def id(self) -> str:
@@ -118,6 +130,10 @@ class ResidentModel:
             "revision": self.revision,
             "fingerprint": self.fingerprint,
             "max_model_len": self.max_model_len,
+            # What a request that states nothing will be answered with, read off
+            # the record rather than the file, so it cannot disagree with what
+            # the proxy is actually applying.
+            "defaults": self.defaults.to_dict(),
             "memory_bytes_estimate": self.memory_bytes_estimate,
             "log_path": str(self.log_path),
             "loaded_at": self.loaded_at,
@@ -606,6 +622,7 @@ class Residency:
             port=port,
             revision=spec.revision,
             max_model_len=context,
+            defaults=manifest.defaults,
             memory_bytes_estimate=spec.memory_bytes_estimate,
             log_path=log_path,
             loaded_at=_now(),

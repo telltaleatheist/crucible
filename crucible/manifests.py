@@ -58,6 +58,44 @@ MODALITIES: frozenset[str] = frozenset({"text", "image"})
 #: loads, serves, and then meets a real page with no reservation behind it.
 SKIP_MM_PROFILING = "--skip-mm-profiling"
 
+#: What a `[defaults]` table may state, and the type each key takes.
+#:
+#: **Only keys an engine actually honours.** Every one of these reaches vLLM's
+#: and mlx-lm's OpenAI chat surface under this exact name — `temperature`,
+#: `top_p`, `top_k`, `max_tokens` and `repetition_penalty` are sampling fields
+#: both accept, and `thinking` is the one that is not a wire field at all: it
+#: becomes `chat_template_kwargs: {"enable_thinking": …}`, which PHASE2-LLM.md
+#: section 5 already records as read per request by both engines.
+#:
+#: A key outside this table is a REFUSAL naming it, for the reason every other
+#: manifest key is: a `[defaults]` block with `temperture` in it must not load
+#: with no temperature and leave a reader believing one was set. And a knob no
+#: engine reads would be worse than useless — it would be a number in a file
+#: that looks like it is doing something.
+#:
+#: The float-typed keys accept an int too, because TOML reads `temperature = 0`
+#: as an integer and "zero temperature" is exactly the value a page reader
+#: wants. They are stored as floats.
+DEFAULTS_KEYS: dict[str, type] = {
+    "temperature": float,
+    "top_p": float,
+    "top_k": int,
+    "max_tokens": int,
+    "repetition_penalty": float,
+    "thinking": bool,
+}
+
+#: Which of those are sampling fields sent under their own name, in the order a
+#: row reports them. `thinking` is deliberately absent: it travels inside
+#: `chat_template_kwargs` and is applied by `crucible/sampling.py`.
+DEFAULTS_WIRE_KEYS: tuple[str, ...] = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "max_tokens",
+    "repetition_penalty",
+)
+
 _MODEL_REQUIRED: dict[str, type] = {
     "id": str,
     "family": str,
@@ -134,6 +172,60 @@ class BackendSpec:
 
 
 @dataclass(frozen=True)
+class ModelDefaults:
+    """`[defaults]` — what this model is answered with when a request is silent.
+
+    PHASE2-LLM.md section 9. Every field is `None` when the manifest did not
+    state it, and `None` means **the engine's own default**, never a value
+    Crucible picked: a server that filled one in would be substituting its guess
+    for the engine's measurement, and nothing in the answer would say so.
+
+    The precedence is one line and it is the whole contract: **a field the
+    request STATES wins; a field the request omits takes the manifest's; a field
+    neither states is the engine's.** `crucible/sampling.py` is the one place
+    that is applied, and it reports which of the three each effective value came
+    from, because a default that cannot be seen is a default nobody can debug.
+    """
+
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    max_tokens: int | None = None
+    repetition_penalty: float | None = None
+    thinking: bool | None = None
+
+    def stated(self) -> dict[str, Any]:
+        """Only the keys this manifest actually states, in `DEFAULTS_KEYS` order.
+
+        The distinction this method exists for: an absent key and a key set to
+        the engine's own value are different manifests, and only the second one
+        is a decision somebody made.
+        """
+        values: dict[str, Any] = {}
+        for key in DEFAULTS_KEYS:
+            value = getattr(self, key)
+            if value is not None:
+                values[key] = value
+        return values
+
+    def to_dict(self) -> dict[str, Any]:
+        """All six keys, `null` where this manifest states nothing.
+
+        Never the `stated()` subset: a row whose keys come and go would make
+        "this model has no default temperature" and "this build predates the
+        field" read the same, which is the mistake `[jobs] enable_*` had to be
+        rescued from in `crucible/config.py`.
+        """
+        return {key: getattr(self, key) for key in DEFAULTS_KEYS}
+
+
+#: A manifest that states nothing. Shared rather than rebuilt, and it is what
+#: every manifest without a `[defaults]` table carries — so the application code
+#: has no "is there a defaults table" branch at all.
+NO_DEFAULTS = ModelDefaults()
+
+
+@dataclass(frozen=True)
 class ModelManifest:
     id: str
     family: str
@@ -143,6 +235,12 @@ class ModelManifest:
     modalities: tuple[str, ...]
     backends: dict[str, BackendSpec]
     path: Path
+    #: `[defaults]`, or `NO_DEFAULTS` when the manifest has no such table. A
+    #: MODEL-level fact and not a per-backend one: the reason a model wants
+    #: `thinking = false` is what the model does with a prompt, which is the
+    #: same on both cards. If a backend ever needs its own, it needs its own
+    #: argument first.
+    defaults: ModelDefaults = NO_DEFAULTS
 
     #: Which subtree of `~/.crucible/` this thing's weights live under. A model id
     #: and a voice id are separate namespaces and must not be able to collide on
@@ -192,6 +290,7 @@ class ModelManifest:
             "params_b": self.params_b,
             "context_default": self.context_default,
             "modalities": list(self.modalities),
+            "defaults": self.defaults.to_dict(),
             "backends": {k: v.to_dict() for k, v in sorted(self.backends.items())},
         }
 
@@ -262,12 +361,86 @@ def check_table(
             )
 
 
+#: The bounds each `[defaults]` key is checked against, as (test, why). They are
+#: the engines' own ranges, and a value outside one is refused here rather than
+#: at the first request: a manifest is read at startup and a bad number in it
+#: should not become a 400 on somebody's book.
+_DEFAULT_BOUNDS: dict[str, tuple[Any, str]] = {
+    "temperature": (lambda v: v >= 0.0, "must be zero or more (0 is greedy)"),
+    "top_p": (lambda v: 0.0 < v <= 1.0, "must be above 0 and at most 1"),
+    "top_k": (
+        lambda v: v >= 1,
+        "must be at least 1; to leave top-k alone, omit the key rather than "
+        "writing a number that means 'off' on one engine and nothing on the other",
+    ),
+    "max_tokens": (lambda v: v >= 1, "must be at least 1"),
+    "repetition_penalty": (lambda v: v > 0.0, "must be above 0 (1.0 is no penalty)"),
+    "thinking": (lambda v: True, ""),
+}
+
+
+def _parse_defaults(table: Any, path: Path) -> ModelDefaults:
+    """`[defaults]`, validated as strictly as every other table in this file.
+
+    Unknown key: refusal naming it. Wrong type: refusal naming both. Out of
+    range: refusal naming the bound. An absent table is `NO_DEFAULTS`, which is
+    a statement — "this model states none" — and not an unknown.
+    """
+    where = f"{path.name} [defaults]"
+    if not isinstance(table, dict):
+        raise ManifestError(f"{where}: must be a table")
+    unknown = sorted(set(table) - set(DEFAULTS_KEYS))
+    if unknown:
+        raise ManifestError(
+            f"{where}: unknown key(s) {unknown}; this table takes exactly "
+            f"{sorted(DEFAULTS_KEYS)} — the only knobs both vLLM and mlx-lm "
+            "honour. A key no engine reads would be a number in a file that "
+            "looks like it is doing something"
+        )
+    if not table:
+        raise ManifestError(
+            f"{where}: the table is empty. A model that states no defaults says "
+            "so by having no [defaults] table at all; an empty one reads as a "
+            "decision somebody made and then forgot to write down"
+        )
+    values: dict[str, Any] = {}
+    for key, kind in DEFAULTS_KEYS.items():
+        if key not in table:
+            continue
+        value = table[key]
+        if kind is bool:
+            if not isinstance(value, bool):
+                raise ManifestError(
+                    f"{where}: {key} must be bool, got {type(value).__name__}"
+                )
+        elif kind is int:
+            # bool is a subclass of int; a bool where an int is wanted is wrong.
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ManifestError(
+                    f"{where}: {key} must be int, got {type(value).__name__}"
+                )
+        else:
+            # TOML reads `temperature = 0` as an int, and zero temperature is
+            # exactly what a page reader wants, so an int is accepted and
+            # stored as a float rather than refused on a technicality.
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ManifestError(
+                    f"{where}: {key} must be a number, got {type(value).__name__}"
+                )
+            value = float(value)
+        test, why = _DEFAULT_BOUNDS[key]
+        if not test(value):
+            raise ManifestError(f"{where}: {key} is {value!r} and {why}")
+        values[key] = value
+    return ModelDefaults(**values)
+
+
 def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManifest:
-    unknown = sorted(set(document) - {"model", "backends"})
+    unknown = sorted(set(document) - {"model", "backends", "defaults"})
     if unknown:
         raise ManifestError(
             f"{path.name}: unknown top-level table(s) {unknown}; a manifest has "
-            "exactly [model] and [backends.<kind>]"
+            "exactly [model], [backends.<kind>] and an optional [defaults]"
         )
     if "model" not in document:
         raise ManifestError(f"{path.name}: missing the [model] table")
@@ -410,6 +583,11 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
         modalities=tuple(modalities),
         backends=backends,
         path=path,
+        defaults=(
+            NO_DEFAULTS
+            if "defaults" not in document
+            else _parse_defaults(document["defaults"], path)
+        ),
     )
 
 
