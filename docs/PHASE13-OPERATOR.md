@@ -447,6 +447,67 @@ static mount is tested (`GET /` is HTML, `GET /ui/app.js` is JS, no `/v1` under 
   (`crucible token --url` on the server). 401 from any call → back to that field with the
   reason.
 
+### 4.1 BUILT, 2026-09-14 — and the decisions the building forced
+
+`crucible/ui/index.html`, `app.css`, `app.js`. Tests: `tests/test_ui_mount.py`.
+
+**`GET /` is a 307 to `/ui/`, and the page has one home.** `index.html` asks for
+`app.css` and `app.js` by RELATIVE name, which is what lets the same three bytes
+be served from any mount — and from `/` those names resolve to `/app.css` and
+`/app.js`, which nothing serves, so the page arrived unstyled and inert. Three
+ways out: register two more routes for the assets (one file at two URLs, and a
+third place to remember when a fourth file is added); write `/ui/` into the HTML
+(an absolute path, which pins the page to today's mount); or make `/ui/` the
+page's one home and have `/` say so. Only the last leaves a single owner of
+where the page lives. The pairing line survives it: a redirect whose target
+carries no fragment of its own keeps the request's, so
+`http://host:7100/#token=…` lands on `/ui/#token=…` signed in. The mount gained
+`html=True` so `/ui/` is the page; a miss under `/ui` is still a 404, so
+`/ui/v1/info` never answers with HTML.
+
+**Events are read with `fetch`, not `EventSource`.** Every `/v1` route needs a
+bearer token and an API version header and `EventSource` can send neither. The
+frame parsing in `app.js` is the SSE envelope the job stream already uses.
+
+**Status reads `/v1/setup` + `/v1/activity`, and takes the card from
+`/v1/info`'s `host.gpu`.** The page never asks for `?accelerator_probe=true`:
+that spawns `nvidia-smi` per read and Status is on a 4 s interval, which is the
+exact waste the route's own opt-in ruling exists to prevent. The card's
+identity — vendor, model, VRAM — is a static host fact and costs nothing.
+Live totals remain `GET /v1/accelerator`, for somebody who asks.
+
+**Job types read `/v1/capability` (3.2a) and `/v1/info`'s
+`capabilities[].job_type`.** Not `/v1/setup`'s `job_types` — see the correction
+in 3.1. A class that is off is drawn with the number that turned it off.
+
+**Orpheus appears in the `tts` engine picker, because the server lists it.** The
+deprecation ruling of 2026-09-14 is not this page's to apply: it draws
+`narrator_engines` and nothing else, so the day the table drops an engine the
+control drops it in the same tick. A page that filtered would be a second
+opinion about what this build ships.
+
+**Service draws the `crucible service …` lines, because `/v1/info` carries no
+service facts in this build.** The page tests the READ (`info.service`), never a
+version number, so a build that grows them is drawn without a page change.
+
+**Invalid module JSON is named by the page, as `invalid_json`, before anything
+is sent** — it is the browser's finding and not the server's, and dressing it as
+`invalid_module` would attribute a refusal to a server that was never asked. The
+server's own `invalid_module` (with its collected `details.problems`) is shown
+verbatim when it comes.
+
+**Pull and Install are DISABLED while a task runs**, because the door answers
+`409 task_busy` and a control that can only be refused teaches its operator that
+the page is broken. A pull of an installed subject is greyed with the reason on
+its `title`, for the same reason and 3.3's (`already_installed` is a refusal,
+not a skip). Every other refusal is shown where it was earned, code first; a
+`409 server_busy` additionally shows `details.who`, the server's own sentence
+about the holder.
+
+**The token lives in `localStorage` under `crucible.token`**, per origin. A
+`#token=` fragment is stored and then removed with `history.replaceState`; a
+401 from any call clears it and returns to the field with the refusal.
+
 ## 5. The apps
 
 ### 5.1 The connect door takes a pasted line

@@ -134,8 +134,12 @@ page the server serves itself.
   holds, rebuilds the registry with the same residency, and re-reads the four facts
   immediately before it — a holder found there fails the task `reload_refused` and
   leaves the env on disk (R6).
-- **`GET /` and `/ui/*`**, public, serving `crucible/ui/` as package data. The page
-  itself is the next commit; what landed is the mount.
+- **`GET /` and `/ui/*`**, public, serving `crucible/ui/` as package data. **The page
+  itself landed 2026-09-14** (section 4.1): three vanilla files, no build step and no
+  CDN, six sections each drawn from the read that owns it, every refusal shown with its
+  code beside the control that earned it — `/` now 307s to `/ui/` so the page's relative
+  references have one home, and `/v1/capability` grew a derived `job_types` (3.2a) so the
+  page carries no table of its own.
 - **`crucible token --url`**, and `init` / `service install` ending with the same lines.
   Two existing tests reverse deliberately: `init` used to assert the token never reached
   stdout, and it now rides in the pairing line in front of the person who just minted it.
