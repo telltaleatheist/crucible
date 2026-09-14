@@ -435,6 +435,49 @@ def test_the_parts_rejoin_to_exactly_the_archive_that_was_split(
 
 
 @needs_tar_zstd
+def test_the_archive_holds_the_pack_at_top_level_with_no_wrapper_directory(
+    tmp_path: Path,
+) -> None:
+    """A CONTRACT WITH `@crucible/bootstrap`, not an implementation detail.
+
+    `envpack.create_archive` tars the CONTENTS of the pack (`-C <root> … .`),
+    so unpacking into any directory fills it with `bin/` and `lib/`. Bootstrap
+    unpacks the `server` pack into `~/.crucible/server/` and then runs
+    `~/.crucible/server/bin/crucible` — a wrapper directory in the archive
+    would make that `~/.crucible/server/python/bin/crucible` and every path
+    bootstrap, the systemd unit and `install.ps1` state would be wrong at once,
+    in a way no test on either side would otherwise notice.
+
+    So the layout is asserted from OUTSIDE the code that produces it: the
+    archive's members are read with `tar -t`.
+    """
+    target = envpack.pack_target("asr", "cuda-linux")
+    out, entry = build_fake_pack(tmp_path, target, filler=1000, part_bytes=1 << 20)
+    joined = tmp_path / "whole.tar.zst"
+    with joined.open("wb") as handle:
+        for name in entry.parts:
+            handle.write((out / name).read_bytes())
+
+    import subprocess
+
+    listing = subprocess.run(
+        [shutil.which("tar") or "tar", "--zstd", "-tf", str(joined)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert listing.returncode == 0, listing.stderr
+    members = [
+        line.lstrip("./").rstrip("/")
+        for line in listing.stdout.splitlines()
+        if line.strip() not in ("", ".", "./")
+    ]
+    tops = {member.split("/", 1)[0] for member in members}
+    assert tops == {"bin", "lib"}, f"a wrapper directory appeared: {sorted(tops)}"
+    assert "bin/python" in members
+
+
+@needs_tar_zstd
 def test_download_joins_the_parts_and_deletes_each_one(tmp_path: Path) -> None:
     target = envpack.pack_target("asr", "cuda-linux")
     out, entry = build_fake_pack(tmp_path, target)
