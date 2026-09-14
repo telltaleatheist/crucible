@@ -528,6 +528,29 @@ host` is refused off win32 (`host_windows_only`); the menu model as a pure funct
 pairing-file switch. The tray itself is exercised by hand on Owen's PC and the doc records
 what was seen.
 
+### 4.6 The Mac — no host, and what "works out of the box" is measured against
+
+**Owen, 2026-09-14:** *"we'll have to make sure crucible works on mac as well. it wouldnt need a
+wsl sidecar for mac obviously. it would just function out of the box with mlx-audio and
+everything we have configured for mac bookforge."*
+
+The Mac needs no host: `mlx-darwin` is a native backend, launchd supervises it, `install.sh`
+installs it, the pairing file (3.6) connects a local app. What "out of the box" is measured
+against is `crucible doctor` on the Mac Studio, read 2026-09-14 (crucible 0.6.0, M1 Ultra
+64 GB, macOS 26.3.1): **tts (Higgs via mlx-audio 0.4.8), llm, rvc, denoise READY, all
+seven voices fit**; and three classes that are NOT served on this backend today —
+`pages`, `asr`, `align` answer "this build ships none with a mlx-darwin block". Two defects
+seen in the same read: launchd's bare PATH has no ffmpeg, so `tts` is `job_type_not_ready`
+under the service even though the env is ready (the Phase 14 PATH-in-plist fix post-dates
+the Mac's plist); and a stale `tts env (orpheus)` that the Orpheus removal must delete on
+upgrade.
+
+Owed, in order, and NOT built in this phase until the read-only audit reports: an
+`mlx-darwin` block for `asr` (mlx-whisper), `pages` (dots.ocr under mlx-vlm — Foundry's
+Mac path answered the parser's dialect), and `align` (only if an MLX aligner genuinely exists;
+"align has no Mac engine" is an honest capability answer and a guessed block is not); the
+Mac's upgrade off conda onto the release's server pack; `service install` re-run for the PATH.
+
 ## 5. The apps
 
 ### 5.1 Connect: three ways, in this order, all automatic
