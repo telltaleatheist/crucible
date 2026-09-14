@@ -1,8 +1,22 @@
-"""The static mount: `GET /` and `GET /ui/*`, public, and nothing else there.
+"""The operator page and the mount it lands in — PHASE13-OPERATOR.md 1, 3.7, 4.
 
-PHASE13-OPERATOR.md sections 1, 3.7 and 4. The PAGE is a separate build; what
-is tested here is the mount it lands in — that it is reachable without a token,
-that it cannot be walked out of, and that it does not shadow or leak the API.
+Two halves. The first is the MOUNT: that the door and the three files are
+reachable without a token, that the mount cannot be walked out of, and that it
+neither shadows nor leaks the API. The second is the PAGE ITSELF, read as text,
+because there is no browser here and the things worth pinning about a page that
+must work on a LAN with no route out are all readable from the bytes:
+
+* it asks for its own two files by RELATIVE name and reaches for no other host,
+  so a Mac with no internet renders it completely;
+* **every `/v1` path it calls is a route this app has.** That is the drift guard
+  between the page and the API (R1): the page is a client written in another
+  language in the same repo, and nothing but this compares the two. A route
+  renamed under it fails here with both spellings visible, rather than in a
+  browser nobody is watching;
+* it talks to its own server and nothing else — the `fetch` call sites are
+  pinned by name, so a CDN, an `EventSource` (which cannot carry the bearer
+  token) or an `XMLHttpRequest` added later is a failing test rather than a
+  page that is sometimes blank.
 
 WHY THE WHEEL IS ASSERTED THROUGH `importlib.resources` AND THE PYPROJECT
 -------------------------------------------------------------------------
@@ -20,6 +34,7 @@ proven there on every push.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from fnmatch import fnmatch
 from importlib.resources import files
@@ -31,8 +46,31 @@ from crucible.api import UI_DIR
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+INDEX = UI_DIR / "index.html"
+SCRIPT = UI_DIR / "app.js"
+STYLE = UI_DIR / "app.css"
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
 
 # ------------------------------------------------------------------- serving
+
+
+def test_the_door_sends_a_visitor_to_the_page_s_own_directory(
+    client: TestClient,
+) -> None:
+    """`GET /` is a 307 to `/ui/`, which is where the three files live.
+
+    The page asks for `app.css` and `app.js` by relative name, so it has one
+    home and `/` says where it is. A redirect whose target carries no fragment
+    of its own keeps the request's, which is what lets a pairing line's
+    `#token=…` arrive signed in.
+    """
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/ui/"
 
 
 def test_the_page_is_public_and_is_html(client: TestClient) -> None:
@@ -46,13 +84,31 @@ def test_the_page_is_public_and_is_html(client: TestClient) -> None:
 def test_the_mount_serves_the_page_s_own_files_without_a_token(
     client: TestClient,
 ) -> None:
-    response = client.get("/ui/index.html")
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/html")
+    for path in ("/ui/", "/ui/index.html"):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert response.headers["content-type"].startswith("text/html"), path
 
 
-def test_a_file_the_page_does_not_have_is_a_404(client: TestClient) -> None:
-    assert client.get("/ui/app.js").status_code == 404
+def test_the_two_files_the_page_asks_for_are_served_as_what_they_are(
+    client: TestClient,
+) -> None:
+    """A browser runs a script and applies a stylesheet by media type."""
+    script = client.get("/ui/app.js")
+    assert script.status_code == 200
+    assert script.headers["content-type"].split(";")[0] in (
+        "application/javascript",
+        "text/javascript",
+    )
+    style = client.get("/ui/app.css")
+    assert style.status_code == 200
+    assert style.headers["content-type"].startswith("text/css")
+
+
+def test_a_file_the_page_does_not_have_is_still_a_404(client: TestClient) -> None:
+    """`html=True` serves the directory's index; it does not swallow misses."""
+    assert client.get("/ui/app.ts").status_code == 404
+    assert client.get("/ui/nothing/here.js").status_code == 404
 
 
 def test_there_is_no_api_under_the_mount(client: TestClient) -> None:
@@ -76,14 +132,182 @@ def test_the_api_still_needs_its_token(client: TestClient) -> None:
     assert client.get("/v1/setup").status_code == 401
 
 
+# ------------------------------------------------------------ what it asks for
+
+
+def test_the_page_asks_for_exactly_its_own_two_files_by_relative_name() -> None:
+    """One stylesheet, one script, both relative. No third, no absolute path.
+
+    Relative is what lets the same bytes be served from any mount; an absolute
+    `/ui/app.js` would pin the page to today's mount and make `/` and `/ui/`
+    two different answers to where it lives.
+    """
+    html = _read(INDEX)
+    assert 'href="app.css"' in html
+    assert 'src="app.js"' in html
+    referenced = set(re.findall(r'(?:src|href)="([^"]+)"', html))
+    assert referenced == {"app.css", "app.js", "#main"}, referenced
+    for value in referenced:
+        assert not value.startswith("/"), value
+
+
+def test_no_file_of_the_page_reaches_for_another_host() -> None:
+    """No CDN, no font service, no analytics: the Mac may have no route out."""
+    for path in (INDEX, SCRIPT, STYLE):
+        text = _read(path)
+        for marker in ("http://", "https://", "//cdn", "@import", "url("):
+            assert marker not in text, f"{path.name} reaches out with {marker!r}"
+
+
+def test_the_page_uses_no_door_that_cannot_carry_the_token() -> None:
+    """`EventSource` sends no headers, and every /v1 route needs two.
+
+    Read off the CODE, with comments blanked: the file says at the top why it
+    does not use `EventSource`, and a guard that could not tell an explanation
+    from a call would forbid the explanation.
+    """
+    source = _strip_strings_and_comments(_read(SCRIPT))
+    for banned in (
+        "EventSource",
+        "XMLHttpRequest",
+        "WebSocket",
+        "importScripts",
+        "innerHTML",
+        "eval(",
+    ):
+        assert banned not in source, banned
+
+
+# ----------------------------------------------------- the page against the API
+
+
+def _strip_strings_and_comments(source: str) -> str:
+    """The code with every literal and comment blanked, for counting braces.
+
+    Comments first, so an apostrophe in prose is never read as a quote; there
+    are no regex literals in `app.js`, which is the one thing this cannot see
+    through and the reason the file does without them.
+    """
+    out: list[str] = []
+    index = 0
+    end = len(source)
+    while index < end:
+        char = source[index]
+        if char == "/" and index + 1 < end and source[index + 1] == "/":
+            newline = source.find("\n", index)
+            index = end if newline == -1 else newline
+            continue
+        if char == "/" and index + 1 < end and source[index + 1] == "*":
+            close = source.find("*/", index + 2)
+            index = end if close == -1 else close + 2
+            continue
+        if char in "'\"`":
+            quote = char
+            index += 1
+            while index < end:
+                if source[index] == "\\":
+                    index += 2
+                    continue
+                if source[index] == quote:
+                    index += 1
+                    break
+                index += 1
+            out.append('""')
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def test_the_page_s_braces_and_parentheses_balance() -> None:
+    """The cheapest proof a browser would parse it, with no browser here."""
+    code = _strip_strings_and_comments(_read(SCRIPT))
+    for opener, closer in (("{", "}"), ("(", ")"), ("[", "]")):
+        depth = 0
+        for char in code:
+            if char == opener:
+                depth += 1
+            elif char == closer:
+                depth -= 1
+                assert depth >= 0, f"{closer} before its {opener}"
+        assert depth == 0, f"{depth} unclosed {opener}"
+
+
+def test_the_page_talks_to_its_own_server_and_to_nothing_else() -> None:
+    """Both `fetch` call sites, pinned by the expression they are given.
+
+    One is the transport every read goes through; the other is the task event
+    stream, which cannot go through it because it must not read the body. A
+    third would be a fetch nobody had to write an Authorization header for.
+    """
+    code = _strip_strings_and_comments(_read(SCRIPT))
+    targets = re.findall(r"fetch\(\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\([^)]*\))?)", code)
+    assert sorted(targets) == ["path", "taskEventsPath(id)"], targets
+
+
+def _paths_the_page_calls() -> set[str]:
+    """Every `/v1/...` path literal in `app.js`, with `${…}` as a wildcard."""
+    source = _read(SCRIPT)
+    found = re.findall(
+        r"/v1(?:/(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z0-9_.\-]+))+", source
+    )
+    return {re.sub(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", "*", path) for path in found}
+
+
+def test_every_v1_path_the_page_calls_is_a_route_this_server_has(
+    client: TestClient,
+) -> None:
+    """THE DRIFT GUARD. A page is a client, and this is what compares it.
+
+    Read out of the file rather than out of a list kept beside it: a list
+    would be the second copy that goes stale, which is the whole shape
+    ARCHITECTURE.md R1 is about.
+    """
+    # The OpenAPI document rather than `app.routes`, because an included
+    # router is not a list of routes in every FastAPI version and the schema
+    # is: it is the app's own statement of what it serves, keyed by path.
+    known = {
+        re.sub(r"\{[A-Za-z_][A-Za-z0-9_]*\}", "*", path)
+        for path in client.app.openapi()["paths"]
+    }
+    called = _paths_the_page_calls()
+    # Not an empty assertion by accident: the page really does call these.
+    assert "/v1/setup" in called
+    assert "/v1/tasks/*/events" in called
+    missing = sorted(called - known)
+    assert missing == [], f"the page calls {missing}, which this API does not serve"
+
+
+def test_the_page_draws_every_section_it_was_asked_for() -> None:
+    """Section 4's six sections, each with somewhere to draw into."""
+    html = _read(INDEX)
+    for section in ("status", "tasks", "types", "catalog", "connect", "service"):
+        assert f'id="{section}-body"' in html, section
+
+
+def test_the_page_stores_the_token_and_takes_it_out_of_the_address() -> None:
+    """Section 1, read off the file: localStorage, and `replaceState`.
+
+    A fragment never reaches this server, which is why the token travels in
+    one — and it must not stay in the address bar, the back button or a
+    bookmark after it has been read.
+    """
+    source = _read(SCRIPT)
+    assert "localStorage" in source
+    assert "history.replaceState" in source
+    assert "'token'" in source
+
+
 # ------------------------------------------------------------- package data
 
 
 def test_the_page_resolves_through_the_package_not_a_repo_path() -> None:
     """`importlib.resources`, so this passes from an installed wheel too."""
-    resource = files("crucible").joinpath("ui").joinpath("index.html")
-    assert resource.is_file()
-    assert "<html" in resource.read_text(encoding="utf-8").lower()
+    for name in ("index.html", "app.css", "app.js"):
+        resource = files("crucible").joinpath("ui").joinpath(name)
+        assert resource.is_file(), name
+    index = files("crucible").joinpath("ui").joinpath("index.html")
+    assert "<html" in index.read_text(encoding="utf-8").lower()
     assert UI_DIR.is_dir()
 
 

@@ -25,7 +25,12 @@ from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar
 import httpx
 from fastapi import APIRouter, Depends, FastAPI, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.background import BackgroundTask
 from starlette.staticfiles import StaticFiles
@@ -1809,7 +1814,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     async def operator_page() -> Response:
-        """The page, or a named refusal saying the build is missing its data.
+        """The door, or a named refusal saying the build is missing its page.
 
         A wheel built without `[tool.setuptools.package-data]` would have an
         API and no page, and the honest report of that is a 503 that names the
@@ -1818,6 +1823,24 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         static file is missing. `tests/test_ui_mount.py` asserts this build
         HAS the directory, so the refusal below can only ever mean a broken
         package rather than a normal state.
+
+        **WHY THIS REDIRECTS RATHER THAN SERVING THE BYTES HERE (2026-09-14,
+        building section 4).** The page is three files and the other two are
+        its own: `index.html` asks for `app.css` and `app.js` by RELATIVE name,
+        which is what lets the same three bytes be served from any mount. Sent
+        from `/`, those names resolve to `/app.css` and `/app.js`, which are
+        not mounted — so the page would arrive unstyled and inert. The three
+        ways out were: serve the page at `/` and register two more routes for
+        its assets (one file reachable at two URLs, and a third place to
+        remember when a fourth file is added); put `/ui/` into the HTML
+        (an absolute path, which pins the page to this mount and makes it
+        unservable from anywhere else); or make `/ui/` the page's one home and
+        have `/` say so. The last is the only one that leaves a single owner of
+        where the page lives.
+
+        The pairing line's fragment survives it: a redirect whose target
+        carries no fragment of its own keeps the request's, in every browser,
+        so `http://host:7100/#token=…` lands on `/ui/#token=…` signed in.
         """
         index = UI_DIR / "index.html"
         if not index.is_file():
@@ -1828,10 +1851,15 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 "page ships as package data (`crucible/ui/`); a wheel built "
                 "without it serves the API and nothing else",
             )
-        return FileResponse(index, media_type="text/html")
+        return RedirectResponse("/ui/", status_code=307)
 
     if UI_DIR.is_dir():
-        app.mount("/ui", StaticFiles(directory=UI_DIR), name="ui")
+        # `html=True` so `/ui/` is the page rather than a 404 — it is the
+        # directory the page lives in, and the door above sends every visitor
+        # to it. It does NOT make a missing file fall back to the index: a path
+        # under `/ui` that is not a file is still a 404, which is what keeps
+        # `/ui/v1/info` from answering with HTML.
+        app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
     return app
 
 

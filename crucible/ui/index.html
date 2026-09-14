@@ -3,22 +3,115 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Crucible</title>
+    <title>Crucible — operator</title>
+    <link rel="stylesheet" href="app.css" />
   </head>
   <body>
-    <main>
-      <h1>Crucible operator page — built in the next commit</h1>
-      <p>
-        This file is the placeholder the static mount was built against
-        (PHASE13-OPERATOR.md section 4). The real page — status, tasks, job
-        types, catalog, connect an app, service — replaces it, with no build
-        step, no CDN and no framework.
-      </p>
-      <p>
-        The API is here and is unaffected: every <code>/v1/*</code> route needs
-        the bearer token. <code>crucible token --url</code> on this server
-        prints the pairing line that opens this page signed in.
-      </p>
+    <a class="skip" href="#main">Skip to the console</a>
+
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="identity">
+          <span class="wordmark">Crucible</span>
+          <span class="server-name" id="bar-name">operator console</span>
+        </div>
+        <div class="bar-state" id="bar-state"></div>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- Sign-in. Section 1: the token lives in this origin's localStorage,
+           a pairing line's `#token=` is stored and stripped, and a 401 from
+           any call comes back here with the reason. -->
+      <section class="gate" id="gate" hidden>
+        <h1>This server wants its token</h1>
+        <p class="gate-lead">
+          Every <code>/v1</code> route on this Crucible is behind a bearer
+          token. The page keeps it in this browser, for this address only, and
+          sends it with each read.
+        </p>
+        <form class="gate-form" id="gate-form">
+          <label class="field">
+            <span class="field-label">Bearer token</span>
+            <input
+              type="password"
+              id="gate-token"
+              name="token"
+              autocomplete="off"
+              spellcheck="false"
+              required
+            />
+          </label>
+          <button class="button primary" type="submit">Sign in</button>
+        </form>
+        <div class="gate-refusal" id="gate-refusal"></div>
+        <p class="gate-hint">
+          Where it comes from: run <code>crucible token --url</code> on the
+          server. That prints a pairing line per address — open one and this
+          page signs itself in.
+        </p>
+      </section>
+
+      <div class="console" id="console" hidden>
+        <section class="panel" id="panel-status" aria-labelledby="h-status">
+          <div class="panel-head">
+            <h2 id="h-status">Status</h2>
+            <div class="panel-tools">
+              <span class="stamp" id="status-stamp"></span>
+              <button class="button quiet" type="button" id="status-refresh">
+                Refresh
+              </button>
+            </div>
+          </div>
+          <div class="panel-body" id="status-body"></div>
+        </section>
+
+        <section class="panel" id="panel-tasks" aria-labelledby="h-tasks">
+          <div class="panel-head">
+            <h2 id="h-tasks">Tasks</h2>
+            <div class="panel-tools">
+              <span class="stamp">one at a time, per server</span>
+            </div>
+          </div>
+          <div class="panel-body" id="tasks-body"></div>
+        </section>
+
+        <section class="panel" id="panel-types" aria-labelledby="h-types">
+          <div class="panel-head">
+            <h2 id="h-types">Job types</h2>
+            <div class="panel-tools">
+              <span class="stamp">what this card was measured for</span>
+            </div>
+          </div>
+          <div class="panel-body" id="types-body"></div>
+        </section>
+
+        <section class="panel" id="panel-catalog" aria-labelledby="h-catalog">
+          <div class="panel-head">
+            <h2 id="h-catalog">Catalog</h2>
+            <div class="panel-tools">
+              <span class="stamp" id="catalog-stamp"></span>
+            </div>
+          </div>
+          <div class="panel-body" id="catalog-body"></div>
+        </section>
+
+        <section class="panel" id="panel-connect" aria-labelledby="h-connect">
+          <div class="panel-head">
+            <h2 id="h-connect">Connect an app</h2>
+          </div>
+          <div class="panel-body" id="connect-body"></div>
+        </section>
+
+        <section class="panel" id="panel-service" aria-labelledby="h-service">
+          <div class="panel-head">
+            <h2 id="h-service">Service</h2>
+          </div>
+          <div class="panel-body" id="service-body"></div>
+        </section>
+      </div>
     </main>
+
+    <script src="app.js"></script>
   </body>
 </html>
