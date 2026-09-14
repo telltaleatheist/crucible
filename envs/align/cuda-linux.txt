@@ -4,22 +4,13 @@
 # built from the server's own interpreter. Everything here comes from PyPI; heavy
 # wheels are never hosted on GitHub Releases (DESIGN.md section 5).
 #
-# WHERE THIS SET CAME FROM
-# ------------------------
-# Unlike `envs/asr/cuda-linux.txt`, this one is a real resolved set rather than a
-# chosen one — but it is a freeze of the WRONG ENV, and this notice is what says
-# so. It is `pip freeze` from Owen's existing WSL2 `qwen-align` conda environment
-# (Ubuntu, python 3.11.16, read 2026-09-13), which is the env that ran the
-# bake-off and every alignment BookForge has done. It is NOT a freeze of a
-# `crucible install align` run, because nobody has done one yet.
-#
-# The consequence is benign and self-announcing: `crucible doctor` calls the env
-# NOT READY if any pin here is absent or at another version, so the first person
-# to run `crucible install align` on a real host finds out immediately whether
-# pip in a venv agrees with what conda resolved. When it does, regenerate this
-# file from the truth and delete this notice:
-#
-#     ~/.crucible/envs/align/bin/python -m pip freeze
+# A RESOLVED SET, read from a real install
+# ----------------------------------------
+# What follows is `pip freeze` from `crucible install align` on
+# Owen's PC (WSL2, Ubuntu, python 3.11.16) on 2026-09-13: every package pip
+# resolved, at the version it resolved. The earlier notice that this file was a
+# CHOSEN set and not a measured one is discharged by that install; `crucible
+# doctor` checks the env against exactly these lines.
 #
 # WHY THE WEB PACKAGES ARE HERE
 # -----------------------------
@@ -34,7 +25,6 @@
 # CTranslate2; BookForge keeps them in separate processes precisely because
 # faster-whisper beside a torch worker corrupts CUDA state.
 
-qwen-asr==0.0.6
 
 # --- the set pip resolved under it, recorded exactly ---
 
@@ -61,8 +51,8 @@ fastapi==0.141.1
 filelock==3.32.5
 Flask==3.1.3
 fsspec==2026.7.0
-gradio_client==2.5.0
 gradio==6.17.3
+gradio_client==2.5.0
 groovy==0.1.2
 h11==0.16.0
 hf-gradio==0.4.1
@@ -110,14 +100,15 @@ platformdirs==4.11.7
 pooch==1.9.0
 psutil==7.2.2
 pycparser==3.0
-pydantic_core==2.46.5
 pydantic==2.13.5
+pydantic_core==2.46.5
 pydub==0.25.1
 Pygments==2.21.0
 python-dateutil==2.9.0.post0
 python-multipart==0.0.32
 pytz==2026.3.post1
 PyYAML==6.0.3
+qwen-asr==0.0.6
 qwen-omni-utils==0.0.9
 regex==2026.9.3
 requests==2.34.2
@@ -143,8 +134,8 @@ tqdm==4.70.0
 transformers==4.57.6
 triton==3.8.0
 typer==0.27.2
-typing_extensions==4.16.0
 typing-inspection==0.4.4
+typing_extensions==4.16.0
 urllib3==2.7.0
 uvicorn==0.52.4
 Werkzeug==3.1.8

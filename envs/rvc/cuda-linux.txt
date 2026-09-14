@@ -19,19 +19,13 @@
 # The commit is the one installed in Owen's working `bookforge-urvc` env, read
 # from its `direct_url.json` on 2026-09-13.
 #
-# THIS FILE IS NOT YET A RESOLVED SET, AND THAT IS DELIBERATE
-# ----------------------------------------------------------
-# `envs/llm/cuda-linux.txt` lists every package pip resolved on Owen's PC,
-# recorded exactly, because it was written after a real install. This one was
-# not. It is the set that was CHOSEN: the fork, the torch trio, and the libraries
-# whose versions Owen's working env actually holds — read from
-# `bookforge-urvc` on 2026-09-13, which is a WINDOWS conda env, and Windows is
-# never a Crucible backend. So the *versions* are measured and the *resolve* is
-# not, and `crucible doctor` calls the env NOT READY if pip disagrees with any
-# line of it. When the first real install lands, regenerate from the truth and
-# delete this notice:
-#
-#     ~/.crucible/envs/rvc/bin/python -m pip freeze
+# A RESOLVED SET, read from a real install
+# ----------------------------------------
+# What follows is `pip freeze` from `crucible install rvc` on
+# Owen's PC (WSL2, Ubuntu, python 3.11.16) on 2026-09-13: every package pip
+# resolved, at the version it resolved. The earlier notice that this file was a
+# CHOSEN set and not a measured one is discharged by that install; `crucible
+# doctor` checks the env against exactly these lines.
 #
 # One deliberate departure from that env while doing so: it holds
 # `torchaudio==2.7.1+cpu` beside a CUDA torch, which is where a hand-built env
@@ -50,28 +44,11 @@
 # (`rvc_base_models_missing`) when they are not under `~/.crucible/rvc-base/`,
 # and says which files it wanted.
 
---extra-index-url https://download.pytorch.org/whl/cu128
 
-ultimate-rvc @ git+https://github.com/telltaleatheist/ultimate-rvc@05cc3f1ba921f070e16eaf3e1f188073c31c0101
 
 # --- the torch trio, all cu128, all at one version ---
-torch==2.7.0+cu128
-torchvision==0.22.0+cu128
-torchaudio==2.7.0+cu128
 
 # --- what ultimate-rvc loads, at the versions Owen's working env holds ---
-faiss-cpu==1.10.0
-librosa==0.10.2
-local-attention==1.11.1
-numpy==2.2.5
-onnxruntime-gpu==1.27.0
-pedalboard==0.9.16
-rotary-embedding-torch==0.6.5
-scikit-learn==1.9.0
-soundfile==0.13.1
-soxr==0.5.0.post1
-torchcrepe==0.0.23
-transformers==4.49.0
 
 # --- the env's own ffmpeg and sox ---
 # urvc's convert path prefers an ffmpeg on PATH over anything it vendors, and
@@ -79,5 +56,114 @@ transformers==4.49.0
 # child's PATH for exactly that reason. These are ultimate-rvc's own declared
 # dependencies; they are pinned here so `crucible doctor` checks the two tools
 # that decision depends on rather than trusting them to be there.
-static-ffmpeg==3.0
+
+annotated-types==0.8.0
+audioread==3.1.0
+backports.tarfile==1.2.0
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+click==8.5.0
+cloudpickle==3.1.2
+cryptography==50.0.1
+decorator==5.3.1
+docutils==0.23
+einops==0.8.1
+faiss-cpu==1.10.0
+filelock==3.32.6
+flatbuffers==25.12.19
+fsspec==2026.7.0
+hf-xet==1.6.0
+huggingface_hub==0.36.2
+hyper-connections==0.4.11
+id==1.6.1
+idna==3.19
+importlib_metadata==9.0.1
+jaraco.classes==3.4.0
+jaraco.context==6.1.2
+jaraco.functools==4.6.0
+jeepney==0.9.0
+Jinja2==3.1.6
+joblib==1.6.0
+keyring==25.7.0
+lazy_loader==0.4
+librosa==0.10.2
+llvmlite==0.49.0
+local-attention==1.11.1
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+more-itertools==11.1.0
+mpmath==1.3.0
+msgpack==1.2.2
+narwhals==2.26.0
+networkx==3.6.1
+nh3==0.3.7
+numba==0.67.0
+numpy==2.2.5
+nvidia-cublas-cu12==12.8.3.14
+nvidia-cuda-cupti-cu12==12.8.57
+nvidia-cuda-nvrtc-cu12==12.8.61
+nvidia-cuda-runtime-cu12==12.8.57
+nvidia-cudnn-cu12==9.7.1.26
+nvidia-cufft-cu12==11.3.3.41
+nvidia-cufile-cu12==1.13.0.11
+nvidia-curand-cu12==10.3.9.55
+nvidia-cusolver-cu12==11.7.2.55
+nvidia-cusparse-cu12==12.5.7.53
+nvidia-cusparselt-cu12==0.6.3
+nvidia-nccl-cu12==2.26.2
+nvidia-nvjitlink-cu12==12.8.61
+nvidia-nvtx-cu12==12.8.55
+onnxruntime-gpu==1.27.0
+packaging==26.3
+pedalboard==0.9.16
+pillow==12.3.0
+platformdirs==4.11.8
+pooch==1.9.0
+progress==1.6.1
+protobuf==7.36.1
+pycparser==3.0
+pydantic==2.11.3
+pydantic_core==2.33.1
+pydub==0.25.1
+Pygments==2.21.0
+PyYAML==6.0.3
+readme_renderer==46.0
+regex==2026.9.10
+requests==2.32.4
+requests-toolbelt==1.0.0
+resampy==0.4.3
+rfc3986==2.0.0
+rich==15.0.0
+rotary-embedding-torch==0.6.5
+safetensors==0.8.0
+scikit-learn==1.9.0
+scipy==1.15.2
+SecretStorage==3.5.0
+shellingham==1.5.4
+soundfile==0.13.1
+sox==1.5.0
+soxr==0.5.0.post1
 static-sox==1.0.2
+static_ffmpeg==3.0
+sympy==1.14.0
+threadpoolctl==3.6.0
+tokenizers==0.21.4
+torch==2.7.0+cu128
+torch-einops-utils==0.1.25
+torchaudio==2.7.0+cu128
+torchcrepe==0.0.23
+torchvision==0.22.0+cu128
+tqdm==4.67.1
+transformers==4.49.0
+triton==3.3.0
+twine==7.0.0
+typed-ffmpeg==2.6.2
+typer==0.15.2
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+ultimate-rvc @ git+https://github.com/telltaleatheist/ultimate-rvc@05cc3f1ba921f070e16eaf3e1f188073c31c0101
+urllib3==2.7.0
+wget==3.2
+zipp==4.1.0

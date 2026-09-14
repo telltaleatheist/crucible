@@ -981,6 +981,40 @@ Pairing is deferred deliberately: it needs a new **unauthenticated** endpoint, w
 security surface added to solve a problem that exists only for machines nobody installed
 from here — and Owen administers all of his.
 
+### 7.1.1 The LOCAL server is never in the registry (BUILT 2026-09-13, BookForge `electron/crucible/local.ts`)
+
+(A) above says the client stores the token *per server entry*. For a REMOTE server that
+is the whole truth — a pasted token has no other home. For the server on the SAME machine
+it produced the defect ARCHITECTURE.md was written about: BookForge's registry held `wsl`
+→ `http://127.0.0.1:7100` with a **copy** of the token `crucible init` had minted, and
+`crucible init --force` mints a new one. Two owners of one fact, nothing comparing them,
+and the first symptom a 401 that names nothing.
+
+**Ruling taken (Owen's default, 2026-09-13 evening): the local server has one owner, its
+own `config.toml`.** A client reads `[server] host/port` and `[auth] token` from
+`$CRUCIBLE_HOME/config.toml` on every call and keeps no copy. On Windows the local server
+lives in WSL2, so the file is read through `wsl.exe -d <distro> --exec bash -c ...` —
+`--exec`, never the implicit shell, which pre-expands `$var` on the host — and the distro
+is the app's setting with no default. The connect address is derived from the bind
+address (`0.0.0.0`/`::` → `127.0.0.1`; a specific address as written): bind and connect
+are two facts and the file records only the first.
+
+Concretely, in every client:
+
+- the reserved server name **`local`** resolves to that file; it is never added and never
+  removed;
+- the registry holds **remote** servers only — adding a loopback URL is refused by name
+  (`local_is_not_registered`), and an entry from before the rule is refused at use
+  (`stale_local_entry`) with the repair in the message;
+- a machine with no local Crucible is a **named state** (`no_local_config`,
+  `no_wsl_distro`), shown as such, never an empty client.
+
+This does not change (C): when the bootstrapper installs a server it still mints the
+token and passes `crucible init --token <generated>` — it simply keeps no copy
+afterwards, and reads the file it just caused to be written. Foundry mirrors the same rule
+in its own settings (Bun parses TOML natively); the rule is the shared thing, the
+implementations are per language, as the server and the SDK already are.
+
 ### 7.2 The registry file is plaintext, deliberately
 
 Written down so that nobody earnestly encrypts it later without knowing what they are

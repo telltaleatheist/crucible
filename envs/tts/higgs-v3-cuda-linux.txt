@@ -32,7 +32,7 @@
 # direct_url.json), not against narrator's declared version, which does not move
 # when the sha does.
 #
-# WHY ONLY FOUR REQUIREMENTS
+# WHY THE CHOSEN SET WAS ONLY FOUR REQUIREMENTS (history; the resolved set below supersedes it)
 # --------------------------
 # narrator declares its own base dependencies, and it declares them as RANGES on
 # purpose: numpy is `>=1.26.4,<3` in the base and an exact number inside each
@@ -45,16 +45,13 @@
 # a working WSL env by narrator's own authors rather than picked — and lets pip
 # resolve the rest from narrator's metadata.
 #
-# THIS FILE IS NOT YET A RESOLVED SET, AND THAT IS DELIBERATE
-# ----------------------------------------------------------
-# The same notice `envs/asr/cuda-linux.txt` carries, for the same reason: it was
-# written on a machine with no free accelerator (the 3090 Ti was on an overnight
-# fine-tune) and nothing here has been installed anywhere. `crucible doctor`
-# calls the env NOT READY if any pin is absent or at another version, so the
-# first person to run the install finds out at once whether pip agreed. When it
-# does, regenerate this file from the truth and delete this notice:
-#
-#     ~/.crucible/envs/tts-higgs-v3/bin/python -m pip freeze
+# A RESOLVED SET, read from a real install
+# ----------------------------------------
+# What follows is `pip freeze` from `crucible install tts --narrator-engine higgs-v3` on
+# Owen's PC (WSL2, Ubuntu, python 3.11.16) on 2026-09-13: every package pip
+# resolved, at the version it resolved. The earlier notice that this file was a
+# CHOSEN set and not a measured one is discharged by that install; `crucible
+# doctor` checks the env against exactly these lines.
 #
 # TWO SITE-PACKAGES PATCHES ARE NOT EXPRESSIBLE HERE AND MUST BE RE-APPLIED
 # AFTER ANY UPGRADE OF THESE PINS:
@@ -67,13 +64,258 @@
 # doctor` reports both by name under `narrator_patches`, so an env that is
 # "ready" by its pins alone is not mistaken for one that will render correctly.
 
-narrator[higgs-v3-server] @ git+https://github.com/telltaleatheist/bookforge@770415db591e0af2cc650cf8c889224972e8906d#subdirectory=python
 
 # --- narrator's `higgs-v3-server` extra, restated so doctor verifies it ---
 # WSL `higgs3`: python 3.11, torch 2.13.0+cu130, vllm 0.28.0, vllm-omni 0.28.0.
 # This is the SERVED engine: narrator's v3 client is numpy + soundfile + urllib,
 # but the SGLang-Omni server it starts underneath itself is what holds the model,
 # so the env has to carry the whole stack.
+
+accelerate==1.12.0
+aenum==3.1.16
+agent-detector==2.0.0
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anthropic==1.5.0
+antlr4-python3-runtime==4.9.3
+anyio==4.15.1
+apache-tvm-ffi==0.1.11
+astor==0.8.1
+attrs==26.1.0
+av==18.1.0
+beautifulsoup4==4.15.0
+better-profanity==0.7.0
+blake3==1.0.9
+cache_dit==1.5.0
+cachetools==7.1.8
+cbor2==6.1.4
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+click==8.5.0
+cloudpickle==3.1.2
+compressed-tensors==0.17.0
+cosmos-guardrail==0.3.1
+cryptography==50.0.1
+cuda-bindings==13.4.1
+cuda-core==1.2.0
+cuda-pathfinder==1.8.1
+cuda-python==13.4.1
+cuda-tile==1.6.0
+cuda-toolkit==13.0.3.0
+defusedxml==0.7.1
+depyf==0.20.0
+detect-installer==0.2.1
+diffusers==0.40.0
+dill==0.4.1
+dnspython==2.8.0
+docopt==0.6.2
+docstring_parser==0.18.0
+EbookLib==0.20
+einops==0.8.2
+einx==0.4.3
+email-validator==2.3.0
+fa3_fwd==0.0.3
+fastapi==0.136.3
+fastapi-cli==0.0.32
+fastapi-cloud-cli==0.26.0
+fastar==0.12.0
+fastsafetensors==0.4.0
+filelock==3.32.6
+flashinfer-python==0.6.16.post3
+flatbuffers==25.12.19
+frozendict==2.4.7
+frozenlist==1.8.0
+fsspec==2026.7.0
+gguf==0.19.0
+googleapis-common-protos==1.75.3
+grpcio==1.83.1
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpcore2==2.12.0
+httptools==0.8.0
+httpx==0.28.1
+httpx2==2.12.0
+huggingface_hub==1.31.0
+humming-kernels==0.1.12
+idna==3.19
+ijson==3.5.1
+ImageIO==2.37.4
+imageio-ffmpeg==0.6.0
+importlib_metadata==9.0.1
+interegular==0.3.3
+iso639-lang==2.6.3
+janus==2.0.0
+Jinja2==3.1.6
+jiter==0.17.0
+jmespath==1.1.0
+joblib==1.6.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+kernels==0.14.1
+kernels-data==0.16.1
+lark==1.2.2
+lazy-loader==0.5
+llguidance==1.7.6
+llvmlite==0.47.0
+lm-format-enforcer==0.11.3
+loguru==0.7.3
+lxml==6.1.3
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mcp==2.2.0
+mcp-types==2.2.0
+mdurl==0.1.2
+mistral_common==1.11.7
+ml_dtypes==0.6.0
+model-hosting-container-standards==0.1.16
+more-itertools==11.1.0
+mpmath==1.3.0
+msgpack==1.2.2
+msgspec==0.21.1
+multidict==6.8.0
+mutagen==1.48.1
+narrator @ git+https://github.com/telltaleatheist/bookforge@770415db591e0af2cc650cf8c889224972e8906d#subdirectory=python
+nccl4py==0.5.0
+networkx==3.6.1
+ninja==1.13.2
+nltk==3.10.3
+num2words==0.5.14
+numba==0.65.0
+numpy==2.3.5
+nvidia-cublas==13.1.1.3
+nvidia-cuda-cccl==13.3.4.2.1
+nvidia-cuda-crt==13.4.59
+nvidia-cuda-cupti==13.0.85
+nvidia-cuda-nvcc==13.4.59
+nvidia-cuda-nvdisasm==13.4.49
+nvidia-cuda-nvrtc==13.0.88
+nvidia-cuda-runtime==13.0.96
+nvidia-cudnn-cu13==9.20.0.48
+nvidia-cudnn-frontend==1.29.0
+nvidia-cufft==12.0.0.61
+nvidia-cufile==1.15.1.6
+nvidia-curand==10.4.0.35
+nvidia-cusolver==12.0.4.66
+nvidia-cusparse==12.6.3.3
+nvidia-cusparselt-cu13==0.8.1
+nvidia-cutlass-dsl==4.6.2
+nvidia-cutlass-dsl-libs-base==4.6.2
+nvidia-cutlass-dsl-libs-core==4.6.2
+nvidia-cutlass-dsl-libs-cu12==4.6.2
+nvidia-cutlass-dsl-libs-cu13==4.6.2
+nvidia-ml-py==13.610.43
+nvidia-nccl-cu13==2.29.7
+nvidia-nvjitlink==13.4.52
+nvidia-nvshmem-cu13==3.4.5
+nvidia-nvtx==13.0.85
+nvidia-nvvm==13.4.59
+nvtx==0.2.15
+omegaconf==2.3.1
+onnxruntime==1.30.0
+openai==3.13.0
+openai-harmony==0.0.8
+openai-whisper==20250625
+opencv-python==5.0.0.93
+opencv-python-headless==5.0.0.93
+opentelemetry-api==1.44.0
+opentelemetry-exporter-otlp==1.44.0
+opentelemetry-exporter-otlp-proto-common==1.44.0
+opentelemetry-exporter-otlp-proto-grpc==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0
+opentelemetry-proto==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-semantic-conventions==0.65b0
+opentelemetry-semantic-conventions-ai==0.5.1
+outlines_core==0.2.14
+packaging==26.3
+partial-json-parser==0.2.1.1.post7
+peft==0.20.0
+pillow==12.3.0
+prettytable==3.18.0
+prometheus-fastapi-instrumentator==8.1.0
+prometheus_client==0.26.0
+propcache==0.5.2
+protobuf==6.33.6
+psutil==7.2.2
+py-cpuinfo==9.0.0
+pybase64==1.5.0
+pycountry==26.2.16
+pycparser==3.0
+pydantic==2.13.5
+pydantic-extra-types==2.11.1
+pydantic-settings==2.15.0
+pydantic_core==2.46.5
+Pygments==2.21.0
+PyJWT==2.14.0
+pynvvideocodec==2.0.4
+python-dotenv==1.2.3
+python-json-logger==4.2.0
+python-multipart==0.0.32
+PyYAML==6.0.3
+pyzmq==27.2.0
+quack-kernels==0.6.4
+referencing==0.37.0
+regex==2026.9.10
+requests==2.34.2
+retinaface-py==0.0.2
+rich==15.0.0
+rich-toolkit==0.20.5
+rignore==0.8.1
+rpds-py==2026.6.3
+safetensors==0.8.0
+scikit-image==0.26.0
+scipy==1.17.1
+sentencepiece==0.2.2
+sentry-sdk==2.69.1
+setproctitle==1.3.7
+shellingham==1.5.4
+six==1.17.0
+sniffio==1.3.1
+soundfile==0.14.0
+soupsieve==2.9.2
+sse-starlette==3.4.11
+starlette==1.6.0
+supervisor==4.3.0
+sympy==1.14.0
+tabulate==0.10.0
+tifffile==2026.3.3
+tiktoken==0.14.0
+tilelang==0.1.12
+tokenizers==0.22.2
+tokenspeed-mla==0.1.8
+tokenspeed-triton==3.8.10.post20260906
+tomlkit==0.15.1
 torch==2.13.0
+torch-einops-utils==0.1.25
+torch_c_dlpack_ext==0.1.5
+torchaudio==2.11.0
+torchcodec==0.16.0
+torchsde==0.2.6
+torchvision==0.28.0
+tqdm==4.70.1
+trampoline==0.1.2
+transformers==5.14.1
+triton==3.7.1
+truststore==0.10.4
+typer==0.27.2
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+Unidecode==1.4.0
+urllib3==2.7.0
+uvicorn==0.52.4
+uvloop==0.22.1
 vllm==0.28.0
 vllm-omni==0.28.0
+watchfiles==1.2.0
+wcwidth==0.8.3
+websockets==17.1
+x-transformers==2.28.4
+xgrammar==0.2.6
+yarl==1.24.5
+z3-solver==4.15.4.0
+zipp==4.1.0
