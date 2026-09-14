@@ -319,6 +319,79 @@ upstream (streaming and not; Anthropic shape translation incl. system, max_token
 tool-forced JSON); host mode's answers for every route above; `backend_not_here`; the pairing
 file. sdk/ts: the four methods and the types. The count goes UP from 1234 and is reported.
 
+### 3.10 `llama-windows`: page reading on a Windows box without WSL (RULED 2026-09-14, evening)
+
+**Owen (relayed by Foundry pc, verbatim):** *"i think that should go through crucible as well.
+at a bare minimum, a crucible server will run on absolutely anything. it's an extension of the
+foundry app … if it uses the GPU (as dots does), it should probably be crucible-side … crucible
+can decide if the user's system is even capable of running it … it should be a pass-through
+thin client UI for the crucible engine."*
+
+**The line is MODEL INFERENCE vs DETERMINISTIC WORK, not GPU vs CPU.** Anything that runs a
+model is the engine's, even on a CPU-only laptop (allowed, slow, and the capability row says
+so). Rasterising, parsing, EPUB assembly stay in the app. (Foundry's NLI analysis worker falls
+on the engine's side of that line too — its own class, a later phase, noted in 6.)
+
+**What it is.** Host mode gains one small backend, `llama-windows`: a `llama-server` child the
+host-mode server spawns and kills, serving the `pages` class from the dots.ocr GGUF pair. It is
+NOT a Python env, NOT a pack, has no lease table of its own (one child at a time IS the
+arbitration; the host-mode server has no other card work), and it never serves `tts/asr/
+align/rvc/denoise`. `backend_kind` for such a server is still `"none"`; the child is a property
+of host mode, reported in `/v1/info` as `pages_engine: "llama-windows"`. The spec is Foundry's
+working launcher, handed over at `C:\tmp\foundry-page-reader-spec\` (README first — eight
+load-bearing facts; `page-reader.ts`'s header argues every constant).
+
+**What Crucible decides that the app used to** (README's last section): whether this machine
+can bear it (the capability row: NVIDIA + free VRAM ≥ the row's floor → `enabled: true,
+selected: dots-ocr, reason: "cuda build, <n> GiB free"`; no NVIDIA → `enabled: true` with the
+reason "cpu build — slow; the model runs on this machine's CPU" — Owen: a Crucible server runs
+on anything; nothing else refuses it), which build to fetch, where the files live, when they
+go.
+
+**Facts the port MUST keep, and the two it changes:**
+
+1. **The build is PINNED, never listed at runtime.** Foundry read the llama.cpp release
+   listing and fell back to a pinned tag; here the tag is ONE constant (`LLAMA_CPP_RELEASE`,
+   beside `STANDALONE_PYTHON` in `envpack.py`, with the sha256 of each asset read from that
+   release's checksums or measured once and recorded — the doc says which). Windows + NVIDIA:
+   `llama-<tag>-bin-win-cuda-12.4-x64.zip` PLUS `cudart-llama-bin-win-cuda-12.4-x64.zip`
+   into one directory (the server does not start without the cudart DLLs); Windows without
+   NVIDIA: the CPU build. Fetched by a `pull` task of a new subject kind `engine` (`{kind:
+   "engine", id: "llama-cpp"}`) so the page's Tasks panel shows it like weights; refusals
+   `engine_download_failed`, `engine_sha_mismatch`, by name.
+2. **The weights** are the existing `pages` catalog subject (`dots-ocr` → `anthonym21/
+   dots.ocr-GGUF` @ `42ab310215a26d05ebe21ccc55f64db6c2bfc6ce`, `Dots.Ocr-1.8B-Q8_0.gguf` +
+   `mmproj-Dots.Ocr-F16.gguf`, 4.42 GB, ~5.9 GB needed) pulled through the catalog like any
+   subject. A pull that has the text tower and not the mmproj is INCOMPLETE and the subject
+   says `installed: false` — the mmproj is not optional.
+3. **The spawn**, verbatim from `ensurePageReader()`: `-m <gguf> --mmproj <mmproj> -c 16384
+   --parallel 1` on a port Crucible chooses (an ephemeral loopback port, not 8000). `-c 16384`
+   because a page at the app's dpi is up to ~8k image tokens plus the answer.
+4. **Readiness:** `GET /v1/models` on the child until it lists a model whose name ends in
+   `dots.ocr`; 5-minute timeout; stderr filtered; the fatal lines (OOM, missing DLL, bad
+   GGUF) end the wait early with `pages_engine_failed` and the line.
+5. **CHANGED — no adopting.** Foundry adopted a server already on port 8000 and never stopped
+   it. Crucible never adopts a process it did not start (that is a fact with two owners); the
+   child is on a port Crucible chose, so there is nothing to adopt. If the chosen port is
+   somehow taken the spawn is refused `port_in_use` by name.
+6. **Unload = kill the child**, 30 s graceful then kill. Keep-warm is the engine's existing
+   unload ruling (`settle.py`'s unload-every-time applies: the child stops when the last
+   `pages` job of a run settles), not an app timer.
+7. **The request** is the existing `pages` job wire (PHASE4's `vlm-pages`): the server
+   forwards each page as OpenAI chat completions with one `image_url` data-URI PNG and dots's
+   prompt, `max_tokens` from the model row, temperature 0; the answer (JSON, sometimes fenced)
+   is returned as the job's artifact exactly as the cuda-linux path returns it — the app's
+   parser (`parseDotsPage`) does not change. `confirmServedModel` is kept: a child whose
+   `/v1/models` name does not match is `pages_engine_wrong_model`.
+8. **UNMEASURED, and the first thing measured on a card:** whether the Q8 GGUF answers in the
+   parser's dialect exactly (the MLX and vLLM builds do); seconds per page on CPU and on a
+   small card. Both recorded in section 7 by whoever runs it first; the doc says
+   "unmeasured" until then, never a guessed number.
+
+**Exit for Foundry's package L:** `pages` answers `enabled: true` from a host-mode server on a
+clean no-WSL Windows box and a real page comes back parsed. Then `page-reader.ts` and every
+"can this machine do it" line in Foundry go.
+
 ## 4. The host — `crucible host` on Windows
 
 A Windows-only verb in the SAME package (nothing else to version), started at login, shown in
@@ -459,6 +532,7 @@ rollout plan already lists (`RunOptions.waitFor`, `hosted_placement_not_vendored
 - A Mac menu-bar host. launchd covers supervision; the pairing file covers connect.
 - Per-request cost or token accounting for upstreams. `/v1/activity` records the act and the
   model; a usage figure is the upstream's dashboard's until somebody asks for it here.
+- Foundry's NLI analysis worker as its own engine class (3.10's line puts it on the engine's side).
 - Routing any non-llm class upstream (a cloud TTS, a cloud ASR). `route_not_routable` is the
   door, and it opens when there is a reason.
 - Deleting BookForge's legacy local spawn layer (`'local'`, the WSL bridges, ollama's remaining
