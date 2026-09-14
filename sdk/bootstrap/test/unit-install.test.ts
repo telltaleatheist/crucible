@@ -7,6 +7,13 @@ import { interpreterScript } from '../src/host.js';
 import { CRUCIBLE_BIN, FakeRunner, GUEST_CONFIG, INTERPRETER_OK, PYTHON_BIN, refusal, type Expectation } from './fake.js';
 
 const W = (...argv: string[]): string[] => ['wsl.exe', '-d', 'Ubuntu', '--exec', ...argv];
+/** The guest, entered as root. `wsl.exe -u root` is not an escalation (linger.ts). */
+const R = (...argv: string[]): string[] => ['wsl.exe', '-d', 'Ubuntu', '-u', 'root', '--exec', ...argv];
+/** The two reads and the one write the linger step makes on win32. */
+const WHOAMI = { argv: ['wsl.exe', '-d', 'Ubuntu', '--exec', 'id', '-un'], stdout: 'owen\n' };
+const LINGER_ON = { argv: R('loginctl', 'show-user', 'owen', '-p', 'Linger'), stdout: 'Linger=yes\n' };
+const LINGER_OFF = { argv: R('loginctl', 'show-user', 'owen', '-p', 'Linger'), stdout: 'Linger=no\n' };
+const GRANT = { argv: R('loginctl', 'enable-linger', 'owen') };
 const INTERP = W('bash', '-c', interpreterScript(DEFAULT_CONDA_ROOTS));
 const READ = (argv: readonly string[]): boolean => argv[4] === 'bash' && (argv[6] ?? '').includes('config.toml');
 const CONFIG_OK = { argv: READ, stdout: `/home/owen/.crucible/config.toml\n${GUEST_CONFIG}` };
@@ -66,6 +73,9 @@ test('win32: the whole sequence, each step by name, the token redacted everywher
     { argv: W(CRUCIBLE_BIN, 'install', 'llm', '--verbose'), lines: [['  Collecting vllm', 'stdout'], ['installed in 400s', 'stdout']] },
     { argv: W(CRUCIBLE_BIN, 'install', 'tts', '--narrator-engine', 'higgs-v3', '--verbose'), lines: [['installed in 300s', 'stdout']] },
     { argv: W(CRUCIBLE_BIN, 'service', 'install'), lines: [['enabled and started crucible.service', 'stdout'], ['linger: OFF for owen', 'stdout']] },
+    WHOAMI,
+    LINGER_OFF,
+    GRANT,
     { argv: W(CRUCIBLE_BIN, 'capability', '--write'), lines: [['recorded in /home/owen/.crucible/config.toml', 'stdout']] },
     CONFIG_OK,
   ];
@@ -80,7 +90,7 @@ test('win32: the whole sequence, each step by name, the token redacted everywher
   runner.assertDrained();
 
   assert.deepEqual(result.steps.map((s) => `${s.name}:${s.status}`), [
-    'interpreter:ok', 'pip-install:ok', 'init:ok', 'install-llm:ok', 'install-tts:ok', 'service-install:ok', 'capability-write:ok',
+    'interpreter:ok', 'pip-install:ok', 'init:ok', 'install-llm:ok', 'install-tts:ok', 'service-install:ok', 'linger:ok', 'capability-write:ok',
   ]);
   assert.deepEqual(result.server, { name: 'crucible@owens-pc-wsl', url: 'http://127.0.0.1:7100', configPath: 'Ubuntu:/home/owen/.crucible/config.toml' });
   assert.equal('token' in result.server, false);
@@ -109,6 +119,8 @@ test('init is skipped when a config already exists, and its token is kept', asyn
     CONFIG_OK,
     { argv: W(CRUCIBLE_BIN, 'install', 'asr', '--verbose') },
     { argv: W(CRUCIBLE_BIN, 'service', 'install') },
+    WHOAMI,
+    LINGER_ON,
     { argv: W(CRUCIBLE_BIN, 'capability', '--write') },
     CONFIG_OK,
   ]);
@@ -202,6 +214,8 @@ test('{home} travels as `env CRUCIBLE_HOME=…` into every crucible verb, and {b
     { argv: (argv) => (argv[6] ?? '').startsWith("p='/srv/crucible'/config.toml"), code: 3, stderr: '/srv/crucible/config.toml' },
     { argv: (argv) => argv.slice(0, 8).join(' ') === E(CRUCIBLE_BIN, 'init').join(' ') && argv[8] === '--token' && argv.slice(10).join(' ') === '--host 0.0.0.0 --port 7200 --enable-echo' },
     { argv: E(CRUCIBLE_BIN, 'service', 'install') },
+    { argv: ['wsl.exe', '-d', 'Ubuntu', '--exec', 'env', 'CRUCIBLE_HOME=/srv/crucible', 'id', '-un'], stdout: 'owen\n' },
+    LINGER_ON,
     { argv: E(CRUCIBLE_BIN, 'capability', '--write') },
     { argv: READ, stdout: `/srv/crucible/config.toml\n${GUEST_CONFIG}` },
   ]);

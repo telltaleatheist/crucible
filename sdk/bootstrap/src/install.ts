@@ -11,6 +11,10 @@
  *                      SKIPPED when a config already exists (its token is kept)
  *   install-<type>     `crucible install <type> [--narrator-engine e] --verbose`
  *   service-install    `crucible service install`
+ *   linger             win32 only: `loginctl enable-linger <guest user>` as
+ *                      root, SKIPPED when it is already on. See `linger.ts`:
+ *                      `wsl.exe -u root` is how the guest is entered, not an
+ *                      escalation, so there is no elevation to hand over
  *   capability-write   `crucible capability --write`
  *
  * Pulls are NOT part of this: weights are the app's, later, per model.
@@ -30,6 +34,7 @@ import { randomBytes } from 'node:crypto';
 import { readLocalConfig, type LocalConfig } from './config.js';
 import { BootstrapRefusal, BootstrapStepFailed } from './errors.js';
 import { consoleScriptBeside, DEFAULT_CONDA_ROOTS, probeInterpreter } from './host.js';
+import { ensureLinger } from './linger.js';
 import { processRunner, type OutputStream, type Runner } from './runner.js';
 import { describeTarget, resolveTarget, streamOn, type Target } from './target.js';
 import { guestPathFor } from './wsl.js';
@@ -235,7 +240,25 @@ export async function install(options: InstallOptions, runner: Runner = processR
   // 5. service install
   await runStep('service-install', [crucible, 'service', 'install'], timeouts.quickMs);
 
-  // 6. capability --write
+  // 6. linger — win32 only, and DONE rather than reported. A systemd user unit
+  // dies with the user's last session without it, so a Crucible installed here
+  // and not lingering is a server that disappears the first time somebody logs
+  // out. `wsl.exe -u root` needs no password (measured 2026-09-14), so the
+  // thing this package used to hand over is one idempotent command it can
+  // simply run — and a guest that will not give root is a named refusal, which
+  // is the one hand-over that remains.
+  const linger = await ensureLinger(runner, target, env);
+  if (linger !== null) {
+    report({
+      name: 'linger',
+      argv: linger.argv,
+      status: linger.granted ? 'ok' : 'skipped',
+      detail: linger.detail,
+    });
+    if (linger.granted) done.push('linger');
+  }
+
+  // 7. capability --write
   await runStep('capability-write', [crucible, 'capability', '--write'], timeouts.quickMs);
 
   const config = await readLocalConfig(configOptions, runner);

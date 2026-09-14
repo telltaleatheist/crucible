@@ -55,7 +55,17 @@ export type BootstrapRefusalCode =
   /** The server refused the token its own config.toml holds. */
   | 'wrong_token'
   /** The server speaks a different major API version than the SDK this was built with. */
-  | 'version_mismatch';
+  | 'version_mismatch'
+  /**
+   * win32 only. The guest would not say whether its user lingers — no root
+   * through `wsl.exe -u root` (WSL1, or a distro with root disabled), or a
+   * `loginctl` that answered something else. The one hand-over that remains:
+   * "off" would grant something nobody asked for and "on" would promise a
+   * server that dies with the next logout, so neither is guessed.
+   */
+  | 'linger_unreadable'
+  /** win32 only. `loginctl enable-linger` ran as root and failed. */
+  | 'linger_failed';
 
 export interface BootstrapRefusalOptions {
   /** The exact command the host must run, when there is one. Never a guess. */

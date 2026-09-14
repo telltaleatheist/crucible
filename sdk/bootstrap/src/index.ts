@@ -20,6 +20,9 @@ export type { DetectOptions, GpuFacts, HostFacts, PythonFacts, WslFacts } from '
 export { install, mintToken, planJobTypes, DEFAULT_INSTALL_TIMEOUTS, INSTALLABLE_JOB_TYPES, JOB_TYPES } from './install.js';
 export type { InstallOptions, InstallResult, InstallStep, InstallTimeouts, JobType, JobTypeRequest } from './install.js';
 
+export { ensureLinger, lingerCommand, parseLinger } from './linger.js';
+export type { LingerOutcome } from './linger.js';
+
 export { ensureRunning, parseServiceStatus } from './service.js';
 export type { EnsureRunningOptions, RunningService, ServiceStatus } from './service.js';
 
@@ -42,7 +45,7 @@ export type { BootstrapRefusalCode, BootstrapRefusalOptions } from './errors.js'
 export { decodeWslBytes, processRunner, splitLines } from './runner.js';
 export type { OutputStream, RunOptions, RunResult, Runner, StreamOptions } from './runner.js';
 
-export { guestPathFor, guestUnpackArgv, networkPathBehind, parseWslList, shellQuote, toWslPath, wslArgv, wslListArgv } from './wsl.js';
+export { guestPathFor, guestUnpackArgv, networkPathBehind, parseWslList, shellQuote, toWslPath, wslArgv, wslListArgv, wslRootArgv } from './wsl.js';
 export type { WslDistro } from './wsl.js';
 
 export { parseToml, TomlError } from './toml.js';

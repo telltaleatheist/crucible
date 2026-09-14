@@ -40,8 +40,8 @@ choose. On macOS and Linux the verbs run on the machine itself. Anything else is
 | Verb | Does | Refuses by name |
 |---|---|---|
 | `detectHost({distro?, condaRoots?})` | what this host (or its guest) has: `{platform, wsl, gpu, python, conda, refusals}` | `wsl_missing` (with `wsl --install -d Ubuntu` and the reboot note), `no_wsl_distro`, `wsl_read_failed`, `unsupported_platform`; and, as entries in `refusals` beside each null: `no_nvidia_driver`, `not_apple_silicon`, `no_conda`, `no_python` |
-| `install({distro?, jobTypes, home?, wheel, onLine, onStep?, bind?})` | interpreter → `pip install <wheel>` → `crucible init --token …` → `crucible install <type>`… → `crucible service install` → `crucible capability --write` | every `detectHost` refusal, `bad_job_type`, `wheel_missing`, `network_path`, `config_unreadable`, `config_missing_key`, and `step_failed` (a `BootstrapStepFailed` with the step, exit code, tail and the steps that finished) |
-| `ensureRunning({distro?, home?})` | `{running: true, pid, mechanism, definition, linger, enableLinger, started}` — a no-op when it already is | `service_not_installed`, `service_failed` (with the status output and where the logs are), `no_local_config`, and the interpreter refusals |
+| `install({distro?, jobTypes, home?, wheel, onLine, onStep?, bind?})` | interpreter → `pip install <wheel>` → `crucible init --token …` → `crucible install <type>`… → `crucible service install` → (win32) `loginctl enable-linger` as root → `crucible capability --write` | every `detectHost` refusal, `bad_job_type`, `wheel_missing`, `network_path`, `config_unreadable`, `config_missing_key`, and `step_failed` (a `BootstrapStepFailed` with the step, exit code, tail and the steps that finished) |
+| `ensureRunning({distro?, home?})` | `{running: true, pid, mechanism, definition, linger, enableLinger, lingerStep, started}` — a no-op when it already is, except that linger is asked (and on win32 granted) either way | `service_not_installed`, `service_failed` (with the status output and where the logs are), `no_local_config`, `linger_unreadable`, `linger_failed`, and the interpreter refusals |
 | `readLocalConfig({distro?, home?})` | `{name, url, token, configPath, via}` from the server's own `config.toml` | `no_local_config`, `no_wsl_distro`, `wsl_read_failed`, `config_unreadable`, `config_missing_key` |
 | `health({distro?, home?, clientName?})` | the SDK's `Activity` from `GET /v1/activity` | `unreachable`, `wrong_token`, `not_a_crucible`, `version_mismatch`, plus everything `readLocalConfig` refuses |
 
@@ -103,9 +103,20 @@ await install({
 Starting is `systemctl --user start` on cuda-linux and `launchctl kickstart` on
 mlx-darwin — reached through `crucible service start`, because the unit name and the
 launchd label are facts `crucible/service.py` owns. Nothing is ever spawned as a child.
-`linger` is reported, never granted: `false` means the server stops when the user's last
-session ends, and `enableLinger` is the `sudo loginctl enable-linger` line for the app to
-show.
+**Linger is GRANTED on win32 and reported everywhere else.** A systemd user unit dies
+with the user's last session without it, so `running: true` about a non-lingering server
+is a promise that expires at the next logout. Inside WSL there is no elevation to hand
+over — `wsl.exe -u root` is how the guest is entered, not an escalation performed in it
+(measured 2026-09-14) — so this package reads linger as root and turns it on when it is
+off, reported as `lingerStep` with the exact argv. On native Linux `sudo` really is
+elevation and the host app really is the one that can obtain it, so there the fact is
+still reported and `enableLinger` is the line for the app to show. On macOS launchd has
+no linger question at all, and `lingerStep` is null.
+
+A guest that will not give root — WSL1, or a distro with the root account disabled — is
+the one hand-over that remains: `linger_unreadable`, with the command. Neither answer is
+guessed, because "off" would grant something nobody asked for and "on" would promise a
+server that dies with the next logout.
 
 ### `readLocalConfig()`
 

@@ -146,7 +146,33 @@ list per call, and that is what an app on that Mac must pass until section 6's r
 3. **Prebuilt environments.** `guestUnpackArgv` is the spelling; nothing calls it. The
    friend's install path (env archives as release assets, sha256 per part, stamp file,
    replace-only-your-own) needs a catalog and a downloader before it is a verb here.
-4. **`linger` off after `install()`.** `crucible service install` prints the
-   `sudo loginctl enable-linger` line; `ensureRunning()` reports it as `enableLinger`.
-   Whether the app shows it once, every launch, or offers to run it with elevation is the
-   app's call and is not made here.
+4. ~~**`linger` off after `install()`.**~~ **RULED, 2026-09-14, by measurement.** The
+   ruling had been framed as "whether the app shows the sudo line once, every launch, or
+   offers to run it with elevation", which assumed there was elevation to obtain. On
+   win32 there is not. Verified on Owen's PC:
+
+       wsl.exe -d Ubuntu -u root --exec id -u                          → 0
+       wsl.exe -d Ubuntu -u root --exec loginctl show-user telltale -p Linger
+                                                                       → Linger=yes
+
+   `-u root` is **which user wsl.exe starts the guest as** — no password, no sudo, no
+   prompt — so the thing being handed over was one idempotent command this package can
+   run itself, on a machine the app was already asked to install a server on. Handing a
+   person a `sudo` line for a command that needs no sudo is not caution; it is a step
+   somebody skips, and the consequence of skipping it is a Crucible that vanishes at the
+   next logout.
+
+   So on win32 `install()` and `ensureRunning()` read linger through `-u root` and grant
+   it when it is off, as a named step carrying the argv (`sdk/bootstrap/src/linger.ts`).
+   `enableLinger` is always null there and the elevated hand-over line is gone.
+   `ensureRunning()` asks **even when the service is already up**, because "running" and
+   "will still be running after this person logs out" are different facts and only the
+   second is what that verb is for.
+
+   **macOS and native Linux are untouched.** launchd has no linger question; on native
+   Linux `sudo` is real elevation, the host app is the one that can obtain it, and
+   PHASE11's reporting is still the right shape.
+
+   **The one hand-over that remains** is a guest that will not give root — WSL1, or a
+   distro with the root account disabled — which is `linger_unreadable` with the command,
+   never a guess in either direction.

@@ -35,10 +35,39 @@ import type { Runner } from './runner.js';
 
 export const WSL_EXE = 'wsl.exe';
 
+/**
+ * The transport's own rule, once: wsl.exe halves backslashes before bash
+ * exists, deterministic and quote-blind, so anything carrying one is doubled
+ * here. Both spellings of the crossing go through it — a second copy would be
+ * a second answer the first time one of them was edited.
+ */
+function forTheTransport(argv: readonly string[]): string[] {
+  return argv.map((arg) => arg.replace(/\\/g, '\\\\'));
+}
+
 /** `wsl.exe -d <distro> --exec <argv…>`, backslashes doubled for the transport. */
 export function wslArgv(distro: string, argv: readonly string[]): string[] {
   if (argv.length === 0) throw new Error('wslArgv: nothing to exec');
-  return [WSL_EXE, '-d', distro, '--exec', ...argv.map((arg) => arg.replace(/\\/g, '\\\\'))];
+  return [WSL_EXE, '-d', distro, '--exec', ...forTheTransport(argv)];
+}
+
+/**
+ * `wsl.exe -d <distro> -u root --exec <argv…>` — the guest, entered as root.
+ *
+ * NOT an escalation. `-u root` is which user wsl.exe starts the guest as, so
+ * there is no password, no sudo and no elevation prompt; measured on Owen's PC
+ * on 2026-09-14 (`wsl.exe -d Ubuntu -u root --exec id -u` prints `0`). That is
+ * the whole reason `crucible/../linger.ts` grants linger on win32 instead of
+ * handing a person a sudo line for a command that needs no sudo.
+ *
+ * It is a separate function rather than an option on {@link wslArgv}, because
+ * running as root is a decision with exactly two call sites and both are about
+ * linger. A boolean parameter would make every other call site's `false` look
+ * like a choice somebody weighed.
+ */
+export function wslRootArgv(distro: string, argv: readonly string[]): string[] {
+  if (argv.length === 0) throw new Error('wslRootArgv: nothing to exec');
+  return [WSL_EXE, '-d', distro, '-u', 'root', '--exec', ...forTheTransport(argv)];
 }
 
 /** `wsl.exe -l -v`: every distribution, its state, its version, and which is default. */
