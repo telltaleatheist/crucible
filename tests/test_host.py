@@ -366,6 +366,27 @@ def test_install_startup_is_idempotent_because_CreateShortcut_rewrites() -> None
     assert runner.calls[0] == runner.calls[1]
 
 
+def test_the_remove_script_is_powershell_that_parses(monkeypatch) -> None:
+    """A REAL DEFECT, found by running the verb on Owen's PC 2026-09-14.
+
+    The script was two adjacent strings with only the first an f-string, so
+    the second's escaped braces stayed doubled and PowerShell got
+    `} } else {` — "Unexpected token '}'", and a shortcut that could not be
+    removed. Reading it did not catch it; running it did. This asserts the
+    shape that was wrong: balanced, singled braces, in argv order.
+    """
+    script = startup.remove_argv(WINDOWS_ENV)[-1]
+    assert "}}" not in script and "{{" not in script
+    assert script.count("{") == script.count("}") == 2
+    assert script.startswith("if (Test-Path ")
+    assert "} else { Write-Output 'absent' }" in script
+
+
+def test_the_install_script_is_powershell_that_parses() -> None:
+    script = startup.install_argv(WINDOWS_ENV)[-1]
+    assert "}}" not in script and "{{" not in script
+
+
 def test_remove_startup_says_whether_there_was_one() -> None:
     there = Scripted(default=ok("removed\n"))
     assert startup.remove(there).changed is True

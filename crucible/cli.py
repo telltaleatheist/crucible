@@ -2189,6 +2189,13 @@ def build_parser() -> argparse.ArgumentParser:
     envpack_commands = envpack_parser.add_subparsers(
         dest="envpack_command", required=True
     )
+    # WIN32 RUNS THIS ONE. PHASE15-HOST.md 4.4: the `host` pack is built by
+    # `crucible envpack build host` on a `windows-latest` runner, which is the
+    # only way the Windows pack can exist at all — pip resolves wheels for the
+    # machine it runs on. `build_backend_kind()` is what refuses the wrong
+    # platform, by name and with the three backends in the sentence; the gate
+    # in `main()` must not get there first with a blanket "not on Windows".
+    envpack_parser.set_defaults(win32_ok=True)
 
     envpack_list = envpack_commands.add_parser(
         "list", help="every (pack, backend) a tag carries"

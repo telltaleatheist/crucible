@@ -135,8 +135,13 @@ def remove_argv(env: Mapping[str, str]) -> list[str]:
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        f"if (Test-Path {_ps_quote(str(lnk))}) {{ Remove-Item -Force {_ps_quote(str(lnk))}; "
-        "Write-Output 'removed' }} else { Write-Output 'absent' }",
+        # ONE f-string for the whole script, and every literal brace doubled.
+        # Written as two adjacent strings first, with only the first an
+        # f-string, it emitted `}} else {` — a PowerShell parse error, found
+        # by running the verb on a real machine rather than by reading it.
+        f"if (Test-Path {_ps_quote(str(lnk))}) {{ "
+        f"Remove-Item -Force {_ps_quote(str(lnk))}; Write-Output 'removed' "
+        f"}} else {{ Write-Output 'absent' }}",
     ]
 
 
