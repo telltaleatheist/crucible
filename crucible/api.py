@@ -37,7 +37,16 @@ from starlette.background import BackgroundTask
 from starlette.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import API_VERSION, VERSION, accelerator, catalog, pairing, upstreams, weights
+from . import (
+    API_VERSION,
+    VERSION,
+    accelerator,
+    catalog,
+    pages as pages_module,
+    pairing,
+    upstreams,
+    weights,
+)
 from . import capability as capability_classes
 from . import settings as settings_module
 from .backend import CUDA_LINUX, Backend
@@ -54,6 +63,7 @@ from .jobs import (
     voice_rows,
 )
 from .jobs.base import Job, validate_member_name
+from .manifests import ManifestError, load_manifest
 from .jobs.queue import JobStore
 from .jobs.tts.common import known_voice
 from .inflight import Entry, InFlight, read_act, require_act_name
@@ -870,7 +880,63 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # `load-model` and `unload-model`, neither of which is a capability.
             "job_types": sorted(store.registry),
             "capabilities": capabilities,
+            # WHICH ENGINE READS A PAGE HERE, AND WHAT A PAGE REQUEST IS
+            # (PHASE15-HOST.md 3.10). Two halves, and the second is the
+            # load-bearing one: `engine` is for an operator looking at a
+            # machine, and `request` is the prompt, the dpi, the pixel
+            # budget, the ceiling and the dialect — read from
+            # `crucible/pages.py` on EVERY backend, so a client builds the
+            # same bytes whether vLLM, llama.cpp or mlx-vlm is behind them.
+            #
+            # It is on the wire because page reading has no job type of its
+            # own (PHASE3-VLM.md section 1): the CLIENT builds the chat
+            # completion, and it was building it out of constants pinned in
+            # its own source — a prompt and a pixel budget are facts about
+            # the weights, and the division-of-knowledge ruling puts those
+            # here.
+            "pages_engine": _pages_engine(),
         }
+
+    def _pages_engine() -> dict[str, Any]:
+        """`pages_engine` for THIS host. Null engine where none is served."""
+        try:
+            manifest = load_manifest(pages_module.MODEL_ID)
+        except ManifestError as exc:
+            # A build whose page manifest will not read has no page engine,
+            # and says which file rather than answering an empty block.
+            return pages_module.engine_block(
+                engine=None,
+                installed=False,
+                detail=f"{pages_module.MODEL_ID}'s manifest will not read: {exc}",
+            )
+        if not manifest.supports(backend.kind):
+            return pages_module.engine_block(
+                engine=None,
+                installed=False,
+                detail=(
+                    f"{manifest.path.name} has no {backend.kind} block, so this "
+                    f"host reads no pages. It declares {sorted(manifest.backends)}"
+                ),
+            )
+        spec = manifest.spec(backend.kind)
+        found = weights.installed(config, manifest, spec)
+        if found is None:
+            return pages_module.engine_block(
+                engine=spec.engine,
+                installed=False,
+                detail=(
+                    f"{spec.engine} would serve {manifest.id} here, and its "
+                    f"weights are not pulled — `crucible models pull {manifest.id}`"
+                ),
+            )
+        return pages_module.engine_block(
+            engine=spec.engine,
+            installed=True,
+            detail=(
+                f"{spec.engine} serves {manifest.id} from {found.path} "
+                f"({found.bytes / 1e9:.2f} GB, {spec.hf_repo}@{spec.revision[:12]})"
+            ),
+        )
 
     @private.get("/health")
     async def health(request: Request) -> dict[str, Any]:
