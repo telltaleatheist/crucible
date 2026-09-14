@@ -1541,3 +1541,38 @@ def test_a_chat_in_flight_is_visible_and_still_does_not_take_the_lane(
     assert seen["slots"]["accelerated"]["busy"] == 0
     assert seen["slots"]["accelerated"]["accepts_work"] is True
     assert seen["running"] == []
+
+def test_the_openai_surface_is_also_mounted_where_openai_clients_look(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """`/openai/v1/models` and `/openai/v1/chat/completions` are the same doors as
+    `/v1/openai/...`, at the path every OpenAI client composes.
+
+    Found 2026-09-13 by the first real Foundry act against a Crucible: its
+    engine appends `/v1` to a base that does not end in a version, asked for
+    `/v1/openai/v1/models`, and got a 404 from a server that had the door. Same
+    handler, same token, same version header — only the path differs, and it is
+    the OTHER protocol's convention.
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    ours = llm_client.get("/v1/openai/models", headers=auth).json()
+    theirs = llm_client.get("/openai/v1/models", headers=auth).json()
+    assert theirs == ours
+    assert theirs["data"][0]["id"] == MODEL
+    # The same refusals, by the same names, at the new path.
+    no_model = llm_client.post("/openai/v1/chat/completions", headers=auth, json={"messages": []})
+    assert no_model.status_code == 400
+    assert no_model.json()["error"]["code"] == "model_required"
+    other = llm_client.post(
+        "/openai/v1/chat/completions", headers=auth, json={"model": "not-this-one", "messages": []}
+    )
+    assert other.status_code == 409
+    assert other.json()["error"]["code"] == "model_not_resident"
+    # And the same lock: no token, no door.
+    assert llm_client.get("/openai/v1/models").status_code == 401
+

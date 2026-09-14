@@ -330,6 +330,21 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     private = APIRouter(
         prefix="/v1", dependencies=[Depends(require_auth), Depends(require_api_version)]
     )
+    # THE OPENAI-COMPATIBLE SURFACE, WHERE OPENAI CLIENTS LOOK FOR IT. The two
+    # OpenAI-shaped routes below are also mounted at `/openai/v1/...`, because
+    # that is the shape every OpenAI client composes: a base URL, then `/v1/models`
+    # and `/v1/chat/completions`. Foundry's engine does exactly that (its
+    # `normaliseVllmEndpoint` appends `/v1` unless the base already ends in a
+    # version), and on 2026-09-13 the first real Foundry act against a Crucible
+    # asked for `/v1/openai/v1/models` and got a 404 — the door existed and no
+    # OpenAI client could reach it. Same handlers, same auth, same version
+    # header; nothing is duplicated but the path, and the path is the other
+    # protocol's convention rather than this API's. The SDK keeps `/v1/openai/*`,
+    # which is Crucible's own namespace for the same door.
+    openai = APIRouter(
+        prefix="/openai/v1",
+        dependencies=[Depends(require_auth), Depends(require_api_version)],
+    )
 
     # ------------------------------------------------------------------ ping
 
@@ -1059,6 +1074,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     # --------------------------------------------------------------- openai
 
     @private.get("/openai/models")
+    @openai.get("/models")
     async def openai_models(request: Request) -> dict[str, Any]:
         """The resident model in OpenAI's list shape, or an empty list.
 
@@ -1110,6 +1126,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         }
 
     @private.post("/openai/chat/completions")
+    @openai.post("/chat/completions")
     async def openai_chat_completions(request: Request) -> Response:
         """Proxied to the resident engine. Never loads one (section 5)."""
         raw = await request.body()
@@ -1191,6 +1208,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
 
     app.include_router(public)
     app.include_router(private)
+    app.include_router(openai)
     return app
 
 

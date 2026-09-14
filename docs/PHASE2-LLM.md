@@ -287,6 +287,16 @@ and all now in the code or the manifests:
   `scripts/measure-llm-memory.sh` deleted its throwaway home on the way out. It keeps the
   log on a non-zero exit now.
 
+## 8.1 Where OpenAI clients find the door (2026-09-13)
+
+The OpenAI-shaped routes are mounted twice: at `/v1/openai/models` and
+`/v1/openai/chat/completions` (Crucible's own namespace, what the SDK calls) and at
+`/openai/v1/models` and `/openai/v1/chat/completions` — the path every OpenAI client
+composes from a base URL. Same handlers, same token, same `X-Crucible-Api` header.
+Found by the first real Foundry act against a Crucible: its engine appends `/v1` to a
+base that does not end in a version, so `--endpoint http://host:7100/openai` (or
+`.../openai/v1`) is the base a Foundry — or curl, or any OpenAI SDK — points at.
+
 ## 9. Per-model defaults, and who wins
 
 **This section is the contract for Foundry and BookForge.** Nothing it describes is
