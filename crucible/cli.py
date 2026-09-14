@@ -1768,6 +1768,35 @@ def _job_type_reports(config: Config, backend: Backend) -> list[dict[str, Any]]:
     return reports
 
 
+def _llama_engine_report(
+    report: dict[str, Any], config: Config, backend: Backend
+) -> dict[str, Any]:
+    """`llama-windows`'s llm engine row: llama.cpp at the pinned tag.
+
+    Shaped like `_env_report`'s answer — `installed` and `detail`, and a
+    problem appended when it is not ready — so the printer below and every
+    JSON reader treat the two backends' engines the same way. What it is NOT
+    is an env: no recipe, no packages, no `pack_sha256`, and the provenance
+    that matters is the tag and which build this machine takes.
+    """
+    build = llamacpp.build_for(backend.gpu.vendor)
+    found = llamacpp.installed(config, build)
+    entry: dict[str, Any] = {
+        "installed": found is not None,
+        "engine": "llama-server",
+        "tag": llamacpp.LLAMA_CPP_RELEASE,
+        "build": build,
+        "path": str(llamacpp.engine_dir(config)),
+        "detail": llamacpp.doctor_line(config, backend.gpu.vendor),
+    }
+    if found is None:
+        report["problems"].append(f"llm_env: {entry['detail']}")
+    else:
+        entry["bytes"] = found.bytes
+        entry["pulled"] = found.pulled
+    return entry
+
+
 def _env_report(
     report: dict[str, Any], label: str, home: Path, spec: jobenv.EnvSpec,
     backend_kind: str,
@@ -2002,7 +2031,14 @@ def _doctor_report() -> dict[str, Any]:
             # this is how it says so out loud instead of looking like a choice.
             "flags_absent": list(config.flags_absent),
         }
-        if mode != "0o600":
+        # NOT ON WIN32. A Windows file has no POSIX mode: `os.chmod` there
+        # sets one read-only bit and `stat` reports 0o666 whatever the ACL
+        # says, so this check reads a number the OS does not enforce and
+        # reports a problem on every healthy Windows server. What restricts a
+        # file there is its ACL (`crucible/pairing.py`'s `icacls_argv`), and a
+        # doctor line about it is owed — recorded as owed rather than faked
+        # with a number that means nothing.
+        if sys.platform != "win32" and mode != "0o600":
             report["problems"].append(
                 f"config_permissions: {config.path} is mode {mode}; the token should "
                 "be readable only by its owner (chmod 600)"
@@ -2016,13 +2052,24 @@ def _doctor_report() -> dict[str, Any]:
     if config is not None and backend is not None:
         _capability_report(report, config, backend)
         if config.enable_llm:
-            report["llm_env"] = _env_report(
-                report,
-                "llm_env",
-                config.home,
-                jobenv.llm_env(backend.kind),
-                backend.kind,
-            )
+            # TWO SHAPES OF ENGINE, and `doctor` names each in its own terms
+            # (PHASE15-HOST.md 3.5, 7.4 item 5). On `cuda-linux` and
+            # `mlx-darwin` the llm engine is a Python env with a recipe and a
+            # provenance; on `llama-windows` it is llama.cpp's own release at
+            # a pinned tag, which has no recipe and no packages and whose
+            # provenance is the tag and the digests. Asking `jobenv` for an
+            # env that cannot exist was how this crashed the first time it ran
+            # on a real Windows box.
+            if backend.kind == LLAMA_WINDOWS:
+                report["llm_env"] = _llama_engine_report(report, config, backend)
+            else:
+                report["llm_env"] = _env_report(
+                    report,
+                    "llm_env",
+                    config.home,
+                    jobenv.llm_env(backend.kind),
+                    backend.kind,
+                )
         for job_type in workerenv.WORKER_JOB_TYPES:
             if not getattr(config, f"enable_{job_type}"):
                 continue
@@ -2152,7 +2199,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         env = report["llm_env"]
         if env is not None:
             mark = "ready" if env["installed"] else "NOT READY"
-            print(f"llm env: {mark} — {env['detail']}")
+            # 3.5's line: `backend: llama-windows on windows/x86_64 —
+            # llama.cpp <tag> (cuda-12.4 | cpu)`. Printed from the ROW rather
+            # than composed here, so the JSON and the text cannot disagree.
+            label = "engine " if env.get("engine") == "llama-server" else "llm env"
+            print(f"{label}: {mark} — {env['detail']}")
             if "provenance" in env:
                 print(f"         {_provenance_line(env['provenance'])}")
         for worker_env in report["worker_envs"]:

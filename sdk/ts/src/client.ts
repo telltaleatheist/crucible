@@ -167,6 +167,21 @@ export interface CrucibleClientOptions {
    * app queued a job.
    */
   clientName: string;
+  /**
+   * A deadline on EVERY call this client makes, in milliseconds.
+   *
+   * Optional, and there is no default: a client with no clock waits as long
+   * as the platform waits, which is what `fetch` does and what this package
+   * did before. An app that would rather give up says how long — BookForge's
+   * old seam aborted at 60 s and had to keep its own timer to do it.
+   *
+   * **A per-call `signal` REPLACES it rather than composing with it.** The
+   * two are different statements: the constructor's is "this app's patience",
+   * the call's is "this caller owns this request", and a caller that brought
+   * its own cancel has already decided. `timeoutMs` on a probe composes with
+   * it, because that one is explicitly a clock and not an owner.
+   */
+  timeoutMs?: number;
 }
 
 /** Options for {@link CrucibleClient.events}. */
@@ -247,6 +262,8 @@ export class CrucibleClient {
 
   readonly #token: string;
   readonly #userAgent: string;
+  /** The constructor's clock, or null: wait as long as the platform does. */
+  readonly #timeoutMs: number | null;
 
   constructor(options: CrucibleClientOptions) {
     const given = options as Partial<CrucibleClientOptions> | undefined;
@@ -257,6 +274,19 @@ export class CrucibleClient {
     this.#token = requireText(given.token, 'token');
     const clientName = requireText(given.clientName, 'clientName');
     this.#userAgent = `${clientName} crucible-client/${SDK_VERSION}`;
+    if (given.timeoutMs !== undefined) {
+      if (!Number.isFinite(given.timeoutMs) || given.timeoutMs <= 0) {
+        throw new CrucibleConfigError(
+          'timeoutMs',
+          `timeoutMs is ${String(given.timeoutMs)}; a deadline is a positive ` +
+            'number of milliseconds. Omit it to wait as long as the platform ' +
+            'waits.',
+        );
+      }
+      this.#timeoutMs = given.timeoutMs;
+    } else {
+      this.#timeoutMs = null;
+    }
   }
 
   // ------------------------------------------------------------------- ping
@@ -438,7 +468,21 @@ export class CrucibleClient {
     } catch (error) {
       const code = upstreamTestRefusal(error);
       if (code === null) throw error;
-      return { ok: false, code, message: (error as CrucibleError).message };
+      // THE SERVER'S OWN SENTENCE, not `error.message`, which every error
+      // class here prefixes with "crucible refused/failed the request". A
+      // settings window renders this beside the key field, and "crucible
+      // refused the request" about a key ANTHROPIC rejected names the wrong
+      // party — measured by BookForge. `serverMessage` is the sentence the
+      // server wrote, and the server writes it saying who did what.
+      const said = (error as { serverMessage?: unknown }).serverMessage;
+      return {
+        ok: false,
+        code,
+        message:
+          typeof said === 'string' && said !== ''
+            ? said
+            : (error as CrucibleError).message,
+      };
     }
   }
 
@@ -1517,14 +1561,22 @@ export class CrucibleClient {
       headers.set(API_HEADER, String(API_VERSION));
     }
     const target = `${this.url}${path}`;
+    // ONE PLACE, so no door can be built that forgets the clock. A call that
+    // brought its own `signal` keeps it untouched: the caller owning a
+    // request has already decided when it ends, and quietly ANDing a second
+    // deadline onto their cancel would end a stream they were still reading.
+    const timed =
+      this.#timeoutMs !== null && init.signal === undefined
+        ? { ...init, headers, signal: AbortSignal.timeout(this.#timeoutMs) }
+        : { ...init, headers };
     try {
-      return await fetch(target, { ...init, headers });
+      return await fetch(target, timed);
     } catch (cause) {
       // The caller cancelling is not the server dying. When the signal they
       // handed us is the reason the fetch rejected, the rejection is theirs and
       // travels back untouched (a DOM `AbortError`, or whatever reason they
       // passed to `abort`), so `error.name === 'AbortError'` still holds.
-      const signal = init.signal;
+      const signal = timed.signal;
       if (signal !== undefined && signal !== null && signal.aborted) throw cause;
       // Otherwise fetch rejects only for a transport failure; every HTTP status
       // resolves.

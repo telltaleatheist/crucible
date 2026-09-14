@@ -360,3 +360,124 @@ test('CRLF is one line, because a Windows editor is not a second server', async 
   const pairing = await readPairingFile(home);
   assert.equal(pairing?.token, 'tok3n');
 });
+
+// ---------------------------- 4. a clock at CONSTRUCTION, on every call
+
+test('timeoutMs on the constructor puts a deadline on every call', async () => {
+  answers(200, preRouteRecord());
+  stall = 5000;
+  const impatient = new CrucibleClient({
+    url: base,
+    token: 'the-token',
+    clientName: 'unit-phase15',
+    timeoutMs: 120,
+  });
+  const started = Date.now();
+  await assert.rejects(impatient.capability(), (error: unknown) => {
+    assert.equal((error as Error).name, 'TimeoutError');
+    return true;
+  });
+  // And it is not only the probes: the same clock is on an authed door that
+  // takes no options at all.
+  await assert.rejects(impatient.health(), (error: unknown) => {
+    assert.equal((error as Error).name, 'TimeoutError');
+    return true;
+  });
+  assert.ok(Date.now() - started < 4000);
+  stall = 0;
+});
+
+test("a per-call signal REPLACES the constructor's clock rather than racing it", async () => {
+  // Two different statements: the constructor's is this app's patience, the
+  // call's is "this caller owns this request". A second deadline quietly
+  // ANDed onto a caller's cancel would end a stream they were still reading.
+  answers(200, preRouteRecord());
+  stall = 400;
+  const impatient = new CrucibleClient({
+    url: base,
+    token: 'the-token',
+    clientName: 'unit-phase15',
+    timeoutMs: 50,
+  });
+  const patient = new AbortController();
+  const record = await impatient.capability({ signal: patient.signal });
+  assert.equal(record.classes.length, 11);
+  stall = 0;
+});
+
+test('no timeoutMs means no clock, and a bad one is refused at construction', async () => {
+  answers(200, preRouteRecord());
+  stall = 200;
+  const unhurried = new CrucibleClient({
+    url: base,
+    token: 'the-token',
+    clientName: 'unit-phase15',
+  });
+  assert.equal((await unhurried.capability()).classes.length, 11);
+  stall = 0;
+  for (const bad of [0, -1, Number.NaN]) {
+    assert.throws(
+      () =>
+        new CrucibleClient({
+          url: base,
+          token: 't',
+          clientName: 'x',
+          timeoutMs: bad,
+        }),
+      /timeoutMs/,
+    );
+  }
+});
+
+// ------------------- 5. testUpstream says WHO refused, in the server's words
+
+test("testUpstream relays the SERVER's sentence, not this client's wrapper", async () => {
+  // The defect: `error.message` is "crucible refused the request (…)", which
+  // a settings window renders beside the key field — naming Crucible for a
+  // key ANTHROPIC rejected.
+  answers(502, {
+    error: {
+      code: 'upstream_rejected',
+      message:
+        'anthropic rejected the credential this server sent it, with HTTP 401. ' +
+        "anthropic said: invalid x-api-key. This is the upstream's answer " +
+        "about the key, not Crucible's about your token",
+      details: { upstream: 'anthropic', upstream_status: 401 },
+    },
+  });
+  const result = await client().testUpstream('anthropic', { key: 'sk-ant-wrong' });
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error('unreachable');
+  assert.equal(result.code, 'upstream_rejected');
+  assert.ok(result.message.startsWith('anthropic rejected the credential'));
+  assert.ok(!result.message.includes('crucible refused'));
+  assert.ok(!result.message.includes('crucible failed'));
+});
+
+test('an unreachable upstream names the address that did not answer', async () => {
+  answers(502, {
+    error: {
+      code: 'upstream_unreachable',
+      message:
+        'nothing answered at http://192.168.68.20:11434/api/tags, which is ' +
+        'where this server reaches ollama: ConnectError: [Errno 111]',
+      details: { upstream: 'ollama', url: 'http://192.168.68.20:11434/api/tags' },
+    },
+  });
+  const result = await client().testUpstream('ollama', {
+    url: 'http://192.168.68.20:11434',
+  });
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error('unreachable');
+  assert.match(result.message, /192\.168\.68\.20:11434/);
+});
+
+test('a real auth failure of THIS server still throws, and is not a test refusal', async () => {
+  answers(401, {
+    error: { code: 'unauthorized', message: "that is not this server's token" },
+  });
+  await assert.rejects(client().testUpstream('anthropic', { key: 'k' }), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, 'unauthorized');
+    return true;
+  });
+});

@@ -385,11 +385,24 @@ test('cruciblePairingPath honours CRUCIBLE_HOME and the explicit home', async ()
   }
 });
 
-test('an empty pairing file is null, not a parse failure', async () => {
+test('an empty pairing file is a DEFECT, not an absence', async () => {
+  // Reversed 2026-09-14, measured by BookForge. `null` means "there is no
+  // server on this machine", which sends a connect door to "install one" -
+  // over a server that is running and whose installer truncated its own
+  // pairing file. The absent case is the file not being there and nothing
+  // else; `pairing_file_malformed` is what a file that exists and says
+  // nothing gets, the same name a file with two lines gets.
   const home = mkdtempSync(join(tmpdir(), 'crucible-pairing-'));
   try {
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, 'pairing'), '\n', 'utf8');
+    await assert.rejects(readPairingFile(home), (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'pairing_file_malformed');
+      assert.match((error as Error).message, /is empty/);
+      return true;
+    });
+    // And the absent case is still null, which is what the reversal is about.
+    rmSync(join(home, 'pairing'));
     assert.equal(await readPairingFile(home), null);
   } finally {
     rmSync(home, { recursive: true, force: true });

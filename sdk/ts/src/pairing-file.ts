@@ -166,7 +166,19 @@ export async function readPairingFile(home?: string): Promise<Pairing | null> {
     .split(/\r?\n/)
     .map((each) => each.trim())
     .filter((each) => each !== '');
-  if (lines.length === 0) return null;
+  if (lines.length === 0) {
+    // AN EMPTY FILE IS A DEFECT, NOT AN ABSENCE. `null` here means "there is
+    // no server on this machine", which sends an app's connect door to
+    // "install one" — over a server that is running and whose installer
+    // truncated its own pairing file. The absent case is the file not being
+    // there, and nothing else.
+    throw new CruciblePairingFileError(
+      path,
+      'is empty. A pairing file holds one line; an empty one means something ' +
+        'wrote it and did not finish. Delete it and re-run `crucible token ' +
+        '--url`, or restart the server, which rewrites it.',
+    );
+  }
   if (lines.length > 1) {
     // The WRITER enforces one line (`crucible/pairing.py`), so a second one
     // means something else has been appending to this file — a shell

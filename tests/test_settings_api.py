@@ -498,15 +498,32 @@ def test_test_refuses_unreachable_rejected_and_unconfigured(
             headers=auth,
             json={"key": OPENAI_KEY},
         )
-        assert rejected.status_code == 401
-        assert rejected.json()["error"]["code"] == "upstream_rejected"
+        # **502, NOT 401.** A 401 from a Crucible route means THIS server
+        # refused THIS client's bearer, and a client that saw one here would
+        # tell a person their Crucible token was wrong about a key the
+        # upstream rejected — measured by BookForge, 2026-09-14. The chat
+        # door already answers 502 for every non-2xx but 429 (7.2); this is
+        # the same decision at the other door.
+        assert rejected.status_code == 502
+        said = rejected.json()["error"]
+        assert said["code"] == "upstream_rejected"
+        # And the sentence names WHO did what.
+        assert "openai rejected the credential" in said["message"]
+        assert "not Crucible's about your token" in said["message"]
+        assert said["details"]["upstream_status"] == 401
         dead = upstream.url
 
     unreachable = settings_client.post(
         "/v1/settings/upstreams/ollama/test", headers=auth, json={"url": dead}
     )
     assert unreachable.status_code == 502
-    assert unreachable.json()["error"]["code"] == "upstream_unreachable"
+    said = unreachable.json()["error"]
+    assert said["code"] == "upstream_unreachable"
+    # It NAMES THE URL that did not answer, in the message and in details:
+    # "ollama did not answer" is unactionable when the operator has just
+    # typed an address.
+    assert dead in said["message"]
+    assert said["details"]["url"].startswith(dead)
 
 
 def test_test_of_an_upstream_this_server_does_not_know(settings_client, auth) -> None:

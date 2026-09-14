@@ -320,10 +320,11 @@ def _read_model_ids(record: UpstreamRecord, payload: Any) -> list[str]:
         raise ApiError(
             502,
             "upstream_unreachable",
-            f"{record.name} answered its model listing with a body this server "
-            f"cannot read: expected an object carrying a list, got "
-            f"{type(payload).__name__}",
-            {"upstream": record.name},
+            f"{record.name} answered {_models_url(record)} with a body this "
+            f"server cannot read: expected an object carrying a list, got "
+            f"{type(payload).__name__}. Something is at that address and it is "
+            f"not {record.name}",
+            {"upstream": record.name, "url": _models_url(record)},
         )
     found: list[str] = []
     for row in rows:
@@ -349,17 +350,30 @@ async def list_models(client: httpx.AsyncClient, record: UpstreamRecord) -> list
         raise ApiError(
             502,
             "upstream_unreachable",
-            f"{record.name} did not answer at {_models_url(record)}: "
-            f"{type(exc).__name__}: {exc}",
-            {"upstream": record.name},
+            f"nothing answered at {_models_url(record)}, which is where this "
+            f"server reaches {record.name}: {type(exc).__name__}: {exc}",
+            {"upstream": record.name, "url": _models_url(record)},
         ) from None
     if response.status_code != 200:
+        # **502, NOT 401**, and the difference is who is being talked about.
+        # A 401 from a Crucible route means THIS server refused THIS client's
+        # bearer token, and a client that saw one here would show a person
+        # "your Crucible token is wrong" about a key the upstream rejected.
+        # The chat door already answers 502 for every non-2xx but 429 (7.2);
+        # this is the same decision at the other door, so one code has one
+        # status.
         raise ApiError(
-            401,
+            502,
             "upstream_rejected",
-            f"{record.name} refused this server's credentials with "
-            f"{response.status_code}: {upstream_message(response.content)}",
-            {"upstream": record.name, "upstream_status": response.status_code},
+            f"{record.name} rejected the credential this server sent it, with "
+            f"HTTP {response.status_code}. {record.name} said: "
+            f"{upstream_message(response.content)}. This is the upstream's "
+            f"answer about the key, not Crucible's about your token",
+            {
+                "upstream": record.name,
+                "upstream_status": response.status_code,
+                "url": _models_url(record),
+            },
         )
     try:
         payload = response.json()
@@ -367,8 +381,9 @@ async def list_models(client: httpx.AsyncClient, record: UpstreamRecord) -> list
         raise ApiError(
             502,
             "upstream_unreachable",
-            f"{record.name} answered 200 with a body that is not JSON: {exc}",
-            {"upstream": record.name},
+            f"{record.name} answered {_models_url(record)} with 200 and a body "
+            f"that is not JSON: {exc}",
+            {"upstream": record.name, "url": _models_url(record)},
         ) from None
     return _read_model_ids(record, payload)
 
