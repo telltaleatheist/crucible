@@ -538,9 +538,9 @@ if (event.kind === 'restart') {
 }
 ```
 
-On a `higgs-v3` voice — which is every voice that ships — the batch width is 1, the in-flight
-row *is* the batch, and `restart` never fires. On Orpheus the ramp dispatches eight, so up to
-seven rows regenerate.
+On a `higgs-v3` voice — which is every voice that ships, and the only narrator engine a
+Crucible names — the batch width is 1, the in-flight row *is* the batch, and `restart` never
+fires. On an engine whose ramp dispatches N rows, up to N-1 of them regenerate.
 
 **A dropped connection is reattached for you**, with `Last-Event-ID`, for as long as the
 server's 15-second grace window could still be open. That is the one thing this SDK does that

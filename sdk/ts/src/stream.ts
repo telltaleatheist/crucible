@@ -131,8 +131,9 @@ export interface StreamRowDone {
  * `fromSeq`.
  *
  * It cannot happen on a `higgs-v3` voice, whose measured batch width is 1 — the
- * in-flight row IS the batch, so there is never a survivor. It can on Orpheus,
- * where the ramp dispatches eight.
+ * in-flight row IS the batch, so there is never a survivor. `higgs-v3` is the
+ * only narrator engine a Crucible names today, so this frame is written for the
+ * engine after it: one whose ramp dispatches more than one row at a time.
  */
 export interface StreamRestart {
   readonly kind: 'restart';

@@ -1466,8 +1466,10 @@ export interface InstallTaskRequest {
   readonly jobType: string;
   /**
    * Required for `tts` and refused for anything else: on `cuda-linux` there is
-   * one venv per narrator engine, because Orpheus pins vllm 0.7.3 and Higgs v3
-   * needs a far later torch.
+   * one venv per narrator engine, because each pins its own serving stack
+   * against its own torch and two of them cannot share one. The engines a
+   * server will accept are its `/v1/capability` row's `narratorEngines`, and
+   * there is no default even when that list holds one.
    */
   readonly narratorEngine?: string;
 }
