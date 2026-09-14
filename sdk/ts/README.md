@@ -52,6 +52,7 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 |---|---|---|
 | `ping()` | `GET /v1/ping` (no auth) | `Ping` |
 | `info()` | `GET /v1/info` | `ServerInfo` |
+| `capability()` | `GET /v1/capability` | `CapabilityRecord` — one verdict per class |
 | `health()` | `GET /v1/health` | `Health` |
 | `upload(bytes \| blob, {filename})` | `POST /v1/uploads` | `UploadResult` — `{blobId, bytes, sha256}` |
 | `submit({type, model?, params, inputs})` | `POST /v1/jobs` | the job id |
@@ -543,6 +544,34 @@ replaying would hand you audio with a hole in it, and both are yours to see.
 
 `close()` ends the session and frees the voice; the iterator ends on the server's `closed`
 frame either way.
+
+## `capability()`
+
+`GET /v1/capability` — what this server can hold, per capability class, and why not. The
+read to make *before* deciding what to ask for: phase 9 made the act-to-model mapping a
+per-host fact, so a 24 GB box serves `translate` with a 4-bit 27B and a 12 GB box does not
+serve it at all, and a client handed a model id by configuration is carrying one this server
+may have refused.
+
+```ts
+const record = await crucible.capability();
+const translate = record.classes.find((row) => row.capability === 'translate')!;
+if (translate.enabled) submitWith(translate.selected);   // the id this host picked
+else explain(translate.reason, translate.shortfallBytes); // "cannot", with the number
+```
+
+- **`enabled: false` is an answer, not an error.** A server that cannot translate says so
+  with the shortfall that decided it. `selected` is `''` and `shortfallBytes` is `0` where
+  they do not apply — the server's config is TOML, which has no null — so branch on
+  `enabled`, never on the emptiness of `selected`.
+- **it is a record, not an authority.** `[jobs] enable_*` stays the one owner of what the
+  server offers; this says what the numbers were when somebody decided. `totalBytes` is the
+  card the decision was made on, which is how a swapped GPU is noticed.
+- **a server that has decided nothing throws** `CrucibleCapabilityUndecided` (503
+  `capability_undecided`) rather than answering with empty rows, which would read as
+  "probed, and nothing fit". The fix is the operator's — `crucible capability --write` — and
+  `info()` still says what the server offers meanwhile. It extends `CrucibleServerError`, so
+  an existing 5xx handler still catches it.
 
 ## `accelerator()`
 

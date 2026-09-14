@@ -23,9 +23,11 @@ export type {
 
 export {
   ACCELERATOR_UNREADABLE,
+  CAPABILITY_UNDECIDED,
   CrucibleAcceleratorUnreadable,
   CrucibleAuthError,
   CrucibleBusy,
+  CrucibleCapabilityUndecided,
   CrucibleConfigError,
   CrucibleError,
   CrucibleLeased,
@@ -77,6 +79,8 @@ export type {
   CancelResult,
   CancelledData,
   Capability,
+  CapabilityRecord,
+  CapabilityRow,
   ChatMessage,
   ChatOptions,
   ChatResponse,

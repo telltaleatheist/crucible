@@ -10,8 +10,10 @@
 import { encodeBase64 } from './base64.js';
 import {
   ACCELERATOR_UNREADABLE,
+  CAPABILITY_UNDECIDED,
   CrucibleAcceleratorUnreadable,
   CrucibleAuthError,
+  CrucibleCapabilityUndecided,
   CrucibleConfigError,
   CrucibleError,
   CrucibleNotACrucible,
@@ -58,6 +60,8 @@ import {
   type AsrOptions,
   type CancelResult,
   type Capability,
+  type CapabilityRecord,
+  type CapabilityRow,
   type ChatMessage,
   type ChatOptions,
   type ChatResponse,
@@ -251,6 +255,28 @@ export class CrucibleClient {
         readCapability(asObject(entry, `info.capabilities[${index}]`), index),
       ),
     };
+  }
+
+  /**
+   * `GET /v1/capability` — what this server can hold, per capability class,
+   * and why not. PHASE9-CAPABILITY.md.
+   *
+   * The read to make before deciding what to ask for. A class is what a client
+   * wants — "a translate-class model", "a voice" — and the row is the server's
+   * answer: the concrete id it picked on this card, or `enabled: false` with the
+   * shortfall that decided it. A disabled class **is an answer**, not an error;
+   * render it as "this machine cannot do that", never as a fault.
+   *
+   * A server that has decided nothing — a config written before
+   * `crucible capability` ran — throws {@link CrucibleCapabilityUndecided}
+   * (503 `capability_undecided`) rather than answering with empty rows, which
+   * would read as "probed, and nothing fit". That is the operator's to fix
+   * (`crucible capability --write`), and {@link info} still says what the
+   * server offers meanwhile.
+   */
+  async capability(): Promise<CapabilityRecord> {
+    const body = await this.#json('/v1/capability', { method: 'GET' }, 'capability');
+    return readCapabilityRecord(body);
   }
 
   /** `GET /v1/health` — is the lane free, and how deep is the queue. */
@@ -1340,6 +1366,12 @@ export class CrucibleClient {
       if (code === ACCELERATOR_UNREADABLE) {
         return new CrucibleAcceleratorUnreadable(response.status, code, message);
       }
+      // The second, for the same reason: a host that has decided NOTHING is
+      // not a host that can do nothing, and a client must be able to tell the
+      // two apart without reading the message (PHASE9-CAPABILITY.md).
+      if (code === CAPABILITY_UNDECIDED) {
+        return new CrucibleCapabilityUndecided(response.status, code, message);
+      }
       return new CrucibleServerError(response.status, code, message);
     }
     if (response.status >= 400) {
@@ -1479,6 +1511,34 @@ function readCapability(entry: Json, index: number): Capability {
       unreadable: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/**
+ * `GET /v1/capability`'s record — `CapabilityRecord.to_dict()` in
+ * `crucible/config.py`. The rows arrive under `classes`, which is the wire's
+ * name for them and stays the member's: they ARE the capability classes.
+ */
+function readCapabilityRecord(body: Json): CapabilityRecord {
+  const where = 'capability';
+  const classes = asArray(field(body, 'classes', where), `${where}.classes`);
+  return {
+    backendKind: str(body, 'backend_kind', where),
+    totalBytes: num(body, 'total_bytes', where),
+    desktopAllowanceBytes: num(body, 'desktop_allowance_bytes', where),
+    classes: classes.map((entry, index) =>
+      readCapabilityRow(asObject(entry, `${where}.classes[${index}]`), `${where}.classes[${index}]`),
+    ),
+  };
+}
+
+function readCapabilityRow(entry: Json, where: string): CapabilityRow {
+  return {
+    capability: str(entry, 'capability', where),
+    enabled: bool(entry, 'enabled', where),
+    selected: str(entry, 'selected', where),
+    reason: str(entry, 'reason', where),
+    shortfallBytes: num(entry, 'shortfall_bytes', where),
+  };
 }
 
 function readModel(entry: Json, where: string): ModelDescriptor {

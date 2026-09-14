@@ -1237,6 +1237,66 @@ export interface AcceleratorState {
   readonly detail: string;
 }
 
+// -------------------------------------------------------------- capability
+
+/**
+ * One capability class's verdict, as `crucible capability` decided it on this
+ * host (PHASE9-CAPABILITY.md; `crucible/config.py`'s `CapabilityRow`).
+ *
+ * A class is what a client asks for — "a translate-class model", "a voice" —
+ * and this is the server's answer: the concrete thing it picked, or the number
+ * that stopped it. `enabled: false` **is an answer, not an error**: a server
+ * that cannot translate says so with the shortfall that decided it, and a
+ * client renders "this machine cannot do that" without it looking like a fault.
+ *
+ * `selected` is `''` and `shortfallBytes` is `0` where they do not apply,
+ * exactly as the server records them: its config is TOML, which has no null,
+ * and a key that came and went would make "nothing fit" and "this record
+ * predates the field" the same reading. Branch on `enabled`, never on the
+ * emptiness of `selected`.
+ */
+export interface CapabilityRow {
+  /** The class name a client asks by: `clean`, `translate`, `tts`, `asr`, … */
+  readonly capability: string;
+  readonly enabled: boolean;
+  /** The candidate that won, or `''` when none did. */
+  readonly selected: string;
+  /** Why, in the server's words, whichever way it went. Never empty. */
+  readonly reason: string;
+  /**
+   * How much more memory the SMALLEST candidate would have needed, or 0. The
+   * number that turned the class off, as a number and not only inside
+   * `reason` — a sentence is never load-bearing (ARCHITECTURE.md R4).
+   */
+  readonly shortfallBytes: number;
+}
+
+/**
+ * `GET /v1/capability` — what this server can hold, per class, and why not.
+ *
+ * The read a client makes before it decides what to ask for. Phase 9 made the
+ * act-to-model mapping a per-host fact: `crucible install` probes the card and
+ * picks the largest candidate that fits, so a 24 GB box serves `translate`
+ * with a 4-bit 27B and a 12 GB box does not serve it at all. A client handed a
+ * model id by configuration would be carrying one this server may have refused.
+ *
+ * **A record, not an authority.** `[jobs] enable_*` stays the one owner of
+ * what the server offers; this says what the numbers were when somebody
+ * decided. `totalBytes` is the card the decision was made on, so a reader can
+ * tell a stale record from a current one — which is how a swapped GPU is
+ * noticed without anybody writing down a date.
+ */
+export interface CapabilityRecord {
+  /** `cuda-linux` or `mlx-darwin`: the backend the decision was made for. */
+  readonly backendKind: string;
+  /** The pool the decision was made on — the card, or unified memory on a Mac. */
+  readonly totalBytes: number;
+  /** The host's own reserve, subtracted before any candidate was measured. */
+  readonly desktopAllowanceBytes: number;
+  /** One verdict per class, in the server's report order. */
+  readonly classes: readonly CapabilityRow[];
+}
+
 // --------------------------------------------------------------------- asr
 
 /**

@@ -415,6 +415,30 @@ export const ACCELERATOR_UNREADABLE = 'accelerator_unreadable';
 export class CrucibleAcceleratorUnreadable extends CrucibleServerError {}
 
 /**
+ * The server's code for "nothing has decided what this host can hold yet".
+ * Exported for the reason {@link ACCELERATOR_UNREADABLE} is: one spelling.
+ */
+export const CAPABILITY_UNDECIDED = 'capability_undecided';
+
+/**
+ * 503 `capability_undecided`: this server has no capability record — its config
+ * was written before `crucible capability` ran, or by a build that predates it.
+ *
+ * Its own type for the same one-conclusion reason as
+ * {@link CrucibleAcceleratorUnreadable}. Absent is its own answer and the
+ * server refuses to dress it up as an empty decision: empty rows would read as
+ * "probed, and nothing fit", which is the opposite news. A client that catches
+ * this knows the host has decided NOTHING — not that it can do nothing — and
+ * the fix is the operator's (`crucible capability --write`), not a retry.
+ * `GET /v1/info` still says what the server offers meanwhile.
+ *
+ * It is a {@link CrucibleServerError} — the status really is a 5xx and every
+ * handler that catches one still catches this — with a narrower name for the
+ * callers that need to act differently.
+ */
+export class CrucibleCapabilityUndecided extends CrucibleServerError {}
+
+/**
  * The server answered with a status the client accepts, but the payload is not
  * the shape API v1 promises: unparseable JSON, a missing field, or an SSE event
  * name that is not in the v1 vocabulary. A new event kind is a breaking change
