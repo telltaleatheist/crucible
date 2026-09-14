@@ -387,6 +387,9 @@ const ACTIVITY_WITH_SESSION = {
     chars: 903,
   },
   chat: { in_flight: 0, rows: [] },
+  // Nobody has said they are mid-run. Present and null, like `claim` above:
+  // an absent key would mean a build that does not speak the field.
+  lease: null,
   slots: { accelerated: { busy: 0, of: 1, queue_depth: 0, accepts_work: false } },
   running: [],
   queued: [],

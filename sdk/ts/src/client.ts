@@ -17,7 +17,9 @@ import {
   CrucibleNotACrucible,
   CrucibleProtocolError,
   CrucibleBusy,
+  CrucibleLeased,
   CrucibleRefused,
+  MODEL_LEASED,
   SERVER_BUSY,
   CrucibleServerError,
   CrucibleUnreachable,
@@ -50,6 +52,7 @@ import {
   type Activity,
   type ActivityChat,
   type ActivityJob,
+  type ActivityLease,
   type ActivityStreaming,
   type ArtifactWrite,
   type AsrOptions,
@@ -67,6 +70,7 @@ import {
   type JobRequest,
   type JobState,
   type JobStatus,
+  type Lease,
   type ModelDescriptor,
   type ModelInfo,
   type Ping,
@@ -289,6 +293,7 @@ export class CrucibleClient {
     const resident = nullableObject(body, 'resident', 'activity');
     const claim = nullableObject(body, 'claim', 'activity');
     const streaming = nullableObject(body, 'streaming', 'activity');
+    const lease = nullableObject(body, 'lease', 'activity');
     const chat = objectField(body, 'chat', 'activity');
     const slot = objectField(objectField(body, 'slots', 'activity'), 'accelerated', 'activity.slots');
     return {
@@ -315,6 +320,7 @@ export class CrucibleClient {
       warming: nullableStr(body, 'warming', 'activity'),
       claim: claim === null ? null : { heldBy: str(claim, 'held_by', 'activity.claim') },
       streaming: streaming === null ? null : readStreaming(streaming),
+      lease: lease === null ? null : readLease(lease, 'activity.lease'),
       chat: {
         inFlight: num(chat, 'in_flight', 'activity.chat'),
         rows: asArray(field(chat, 'rows', 'activity.chat'), 'activity.chat.rows').map(
@@ -346,6 +352,100 @@ export class CrucibleClient {
         (entry, index) => readActivityJob(asObject(entry, `activity.queued[${index}]`), `activity.queued[${index}]`),
       ),
     };
+  }
+
+  // ----------------------------------------------------------------- leases
+
+  /**
+   * `POST /v1/models/{model}/lease` — say that a run against the resident model
+   * is in progress, so nothing takes it off the card underneath.
+   *
+   * **Why this exists.** A chat completion holds nothing on a Crucible: no lane,
+   * no job, no claim — deliberately, because a vLLM engine batches. That is
+   * right for one chat and wrong for two thousand. A book translated block by
+   * block leaves the server idle by every published measure between any two
+   * blocks, and a `load-voice` submitted in one of those gaps evicts the
+   * translator mid-run. Only the client knows the run exists, so the client
+   * says so.
+   *
+   * ```ts
+   * const lease = await crucible.lease('qwen3.8-27b-4bit', { act: 'translate', ttlSeconds: 120 });
+   * const beat = setInterval(() => void crucible.heartbeat(lease.leaseId), 60_000);
+   * try { await translateTheBook(); } finally {
+   *   clearInterval(beat);
+   *   await crucible.release(lease.leaseId);
+   * }
+   * ```
+   *
+   * **The model must already be resident** — a lease promises not to move what
+   * is on the card and never loads anything, so an unloaded model is refused
+   * `model_not_resident`. **One lease at a time, per server**: a second is
+   * refused {@link CrucibleLeased}, naming the holder, exactly as a loader is.
+   *
+   * `ttlSeconds` is how long the lease outlives silence, not how long the run
+   * is: heartbeat a short one rather than asking for a long one. The server
+   * states its own range in the refusal (`invalid_ttl`).
+   *
+   * **Release it.** Expiry is the backstop for a client that died, not the way a
+   * finished run ends — a `finally` that releases frees the next client at once
+   * instead of after the whole ttl.
+   */
+  async lease(model: string, options: { act: string; ttlSeconds: number }): Promise<Lease> {
+    const id = requireText(model, 'model');
+    const act = requireText(options?.act, 'act');
+    const ttlSeconds = options?.ttlSeconds;
+    if (typeof ttlSeconds !== 'number' || !Number.isInteger(ttlSeconds)) {
+      throw new CrucibleConfigError(
+        'ttlSeconds',
+        'is required and must be a whole number of seconds; the server states ' +
+          'its own accepted range if this one is outside it',
+      );
+    }
+    const body = await this.#json(
+      `/v1/models/${encodeURIComponent(id)}/lease`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ act, ttl_seconds: ttlSeconds }),
+      },
+      'lease',
+    );
+    return { ...readLease(body, 'lease'), model: str(body, 'model', 'lease') };
+  }
+
+  /**
+   * `POST /v1/leases/{id}/heartbeat` — I am still here. Returns the new
+   * `expiresAt`.
+   *
+   * **A rejection here is not a log line.** `unknown_lease` means this run is no
+   * longer protected — the lease expired, or was released — and the card may
+   * move at any moment. The server's `details.reason` says which of the two.
+   */
+  async heartbeat(leaseId: string): Promise<string> {
+    const id = requireText(leaseId, 'leaseId');
+    const body = await this.#json(
+      `/v1/leases/${encodeURIComponent(id)}/heartbeat`,
+      { method: 'POST' },
+      'heartbeat',
+    );
+    return str(body, 'expires_at', 'heartbeat');
+  }
+
+  /**
+   * `DELETE /v1/leases/{id}` — give the card back.
+   *
+   * Answers 204 with no body, so there is nothing to return. Releasing a lease
+   * that is already gone is a refusal rather than a shrug: a client that thinks
+   * it still holds one has to be told it does not.
+   */
+  async release(leaseId: string): Promise<void> {
+    const id = requireText(leaseId, 'leaseId');
+    const response = await this.#fetch(
+      `/v1/leases/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+      true,
+    );
+    if (!response.ok) throw await this.#failure(response);
   }
 
   // ---------------------------------------------------------------- uploads
@@ -1251,6 +1351,11 @@ export class CrucibleClient {
       // needs to decide to try the next machine. Read once here rather than
       // re-parsed identically in every client.
       if (code === SERVER_BUSY) return busyRefusal(response.status, code, message, details);
+      // The second 4xx with a body worth reading, for the first one's reason.
+      // A caller shown "leased" has to be able to say who is mid-run, doing
+      // what, and until when — and both doors that emit this code (a second
+      // lease, and a loader that would evict) send the same shape.
+      if (code === MODEL_LEASED) return leasedRefusal(response.status, code, message, details);
       return new CrucibleRefused(response.status, code, message, details);
     }
     return new CrucibleProtocolError(
@@ -2313,6 +2418,47 @@ function busyRefusal(
     if (cause instanceof CrucibleProtocolError) return cause;
     throw cause;
   }
+}
+
+/**
+ * Read a 409 `model_leased` body into {@link CrucibleLeased}.
+ *
+ * A body that is not the v1 shape comes back as a {@link CrucibleProtocolError}
+ * rather than degrading to a plain {@link CrucibleRefused}, for the reason
+ * {@link busyRefusal} does: a caller would otherwise see "leased" and never
+ * learn that the holder and the deadline it was about to display had gone
+ * missing.
+ */
+function leasedRefusal(
+  status: number,
+  code: string,
+  message: string,
+  details: unknown,
+): CrucibleError {
+  try {
+    const body = asObject(details, 'error.details');
+    return new CrucibleLeased(status, code, message, details, {
+      leaseId: str(body, 'lease_id', 'error.details'),
+      holder: nullableStr(body, 'client', 'error.details'),
+      act: str(body, 'act', 'error.details'),
+      since: str(body, 'since', 'error.details'),
+      expiresAt: str(body, 'expires_at', 'error.details'),
+    });
+  } catch (cause) {
+    if (cause instanceof CrucibleProtocolError) return cause;
+    throw cause;
+  }
+}
+
+/** The five fields a lease carries wherever it appears. */
+function readLease(data: Json, where: string): ActivityLease {
+  return {
+    leaseId: str(data, 'lease_id', where),
+    client: nullableStr(data, 'client', where),
+    act: str(data, 'act', where),
+    since: str(data, 'since', where),
+    expiresAt: str(data, 'expires_at', where),
+  };
 }
 
 function readActivityJob(data: Json, where: string): ActivityJob {

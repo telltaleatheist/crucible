@@ -227,6 +227,91 @@ export class CrucibleBusy extends CrucibleRefused {
 }
 
 /**
+ * The server's code for "somebody has said they are mid-run on this model".
+ *
+ * Exported for {@link SERVER_BUSY}'s reason: the mapping turns exactly this code
+ * into a type, and a caller comparing `error.code` should compare against one
+ * spelling of it.
+ */
+export const MODEL_LEASED = 'model_leased';
+
+/**
+ * 409 `model_leased`: a client holds a lease on the resident model, so anything
+ * that would take it off the card is refused until the lease is released or
+ * expires.
+ *
+ * **Why a lease exists at all.** A chat completion holds nothing on a Crucible —
+ * no lane, no job, no claim — which is right for one chat and wrong for two
+ * thousand. A book translated block by block leaves the server looking idle
+ * between any two blocks, and a `load-voice` submitted in one of those gaps
+ * evicted the translator at block 400 of 2000 with nothing having gone wrong
+ * anywhere. The client is the only thing that knows a run is in progress, so it
+ * says so.
+ *
+ * **What it does NOT refuse.** Chats (they are what the lease protects), and any
+ * job that leaves the card's contents alone — `echo`, `asr`, `rvc`, `denoise`,
+ * and the unloaders that can only unload some other kind. A lease is not a
+ * reservation: the lane is still free and admission is still the door's.
+ *
+ * Its own type for {@link CrucibleBusy}'s reason — the body is not decoration. A
+ * caller shown this has to be able to say WHO is in the way, doing WHAT, and
+ * until when, without every client re-parsing the same shape.
+ *
+ * **This client does not wait it out**, exactly as it does not retry
+ * {@link CrucibleBusy}: a sleep loop in the SDK would be a queue with a policy
+ * nobody chose (ARCHITECTURE.md R5).
+ */
+export class CrucibleLeased extends CrucibleRefused {
+  readonly leaseId: string;
+  /**
+   * Who holds it — the lease's recorded `client`. Null = it did not say, and
+   * never a guess, for the reason {@link CrucibleBusy.holder} is null.
+   *
+   * Named `holder` rather than `client` because on a refusal the question is
+   * who is in the way; the `client` spelling belongs to the lease itself
+   * (`Lease.client`), where the question is whose lease it is.
+   */
+  readonly holder: string | null;
+  /** What the run IS: a capability class name. A lease must say, so never null. */
+  readonly act: string;
+  /** When the lease was taken. */
+  readonly since: string;
+  /** When it stops being open unless its holder heartbeats it. */
+  readonly expiresAt: string;
+
+  constructor(
+    status: number,
+    code: string,
+    serverMessage: string,
+    details: unknown,
+    fields: {
+      leaseId: string;
+      holder: string | null;
+      act: string;
+      since: string;
+      expiresAt: string;
+    },
+  ) {
+    super(status, code, serverMessage, details);
+    this.leaseId = fields.leaseId;
+    this.holder = fields.holder;
+    this.act = fields.act;
+    this.since = fields.since;
+    this.expiresAt = fields.expiresAt;
+  }
+
+  /**
+   * "leased: foundry, translate, until 2026-09-14T03:12:00+00:00" — the one line
+   * a bench puts in front of a human, here rather than in each client for the
+   * reason {@link CrucibleBusy.busyLine} is.
+   */
+  get leasedLine(): string {
+    const who = this.holder === null ? 'an unnamed client' : this.holder;
+    return `leased: ${who}, ${this.act}, until ${this.expiresAt}`;
+  }
+}
+
+/**
  * Would this refusal be different on a different server?
  *
  * The fact this answers has exactly one honest owner — the server that emits the
@@ -268,6 +353,9 @@ export function isServerSpecificRefusal(code: string): boolean {
  *   already hold it.
  * - `stream_session_open` — this server already has its one session. Another
  *   server's streaming door may be free.
+ * - `model_leased` — a client is mid-run on THIS machine's resident model.
+ *   Another machine's card is not held by it, and a `waitFor: "any"` walk should
+ *   try the next one rather than wait out somebody else's translation.
  * - `env_missing` — the venv for this job type was never installed here.
  * - `accelerator_unreadable` is NOT here: it is a 5xx and arrives as
  *   {@link CrucibleAcceleratorUnreadable}, which must never be read as an answer
@@ -279,6 +367,7 @@ export function isServerSpecificRefusal(code: string): boolean {
  */
 const SERVER_SPECIFIC_REFUSALS: ReadonlySet<string> = new Set([
   SERVER_BUSY,
+  MODEL_LEASED,
   'engine_in_use',
   'stream_session_open',
   'job_type_disabled',

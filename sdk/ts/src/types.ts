@@ -249,6 +249,48 @@ export interface ActivityChat {
   readonly since: string;
 }
 
+/**
+ * A client's declared intention to keep using the resident model.
+ *
+ * **The hole it fills.** A chat completion holds nothing — no lane, no job, no
+ * claim — deliberately, because the engine batches. That is right for one chat
+ * and wrong for two thousand: a book translated block by block leaves this
+ * server looking idle between any two blocks, and a `load-voice` submitted in
+ * one of those gaps used to take the translator off the card mid-run.
+ *
+ * A timer ("a chat was seen within N seconds") would be a fact standing in for
+ * a guess. The fact that exists is the client's intention, and only the client
+ * has it — so the client says so, heartbeats while the run is alive, and
+ * releases when it is done.
+ *
+ * **It is a refusal, not a reservation.** Holding one admits nothing and
+ * reserves no lane; {@link ActivitySlot.acceptsWork} is untouched. It says one
+ * thing: while it is open, nothing may move the model off the card.
+ */
+export interface Lease {
+  readonly leaseId: string;
+  /** The model it is held on, which is always the resident one. */
+  readonly model: string;
+  /** The holder's User-Agent, as `/v1/activity` reports it. Null = it did not say. */
+  readonly client: string | null;
+  /** What the run IS: a capability class name. Never null — a lease must say. */
+  readonly act: string;
+  /** When it was taken, in {@link ActivityJob.started}'s format. */
+  readonly since: string;
+  /** When it stops being open unless something heartbeats it. */
+  readonly expiresAt: string;
+}
+
+/**
+ * The open lease, as `/v1/activity` reports it.
+ *
+ * {@link Lease} without the model, and that is not an omission: a lease is only
+ * ever on the resident model, which the same read already reports as
+ * `resident.id`. Repeating it would be one fact with two owners in one document
+ * (ARCHITECTURE.md R1).
+ */
+export type ActivityLease = Omit<Lease, 'model'>;
+
 /** `GET /v1/activity` — what is on this server and how far along. */
 export interface Activity {
   readonly server: {
@@ -282,6 +324,14 @@ export interface Activity {
     readonly inFlight: number;
     readonly rows: readonly ActivityChat[];
   };
+  /**
+   * The open model lease, or null.
+   *
+   * The intention behind the chats, which nothing about this server could
+   * infer. While it is non-null, a job that would move the model off the card
+   * is refused `model_leased` at the door — and nothing else changes.
+   */
+  readonly lease: ActivityLease | null;
   readonly slots: { readonly accelerated: ActivitySlot };
   readonly running: readonly ActivityJob[];
   readonly queued: readonly ActivityJob[];
