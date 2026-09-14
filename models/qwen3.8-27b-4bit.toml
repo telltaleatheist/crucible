@@ -135,20 +135,16 @@ description = "The 27B standard for translation, simplification and analysis, qu
 # two doors"). Owen's tag, as ruled on 2026-09-13 via Foundry.
 #
 # ############################################################################
-# LABELLED STOPGAP — the tag is not a published tag. `qwen3.8:27b-24g` is
-# Owen's own Modelfile over the library's `qwen3.8:27b` (the num_ctx 98304 and
-# sampling described at the top of this file; `ollama show` reports
-# `parent_model: qwen3.8:27b`), and it is NOT on ollama.com:
-#   ollama.com/library/qwen3.8:27b-24g   -> 404   (2026-09-14)
-#   ollama.com/library/qwen3.8:27b       -> 200
-# So `ollama pull qwen3.8:27b-24g` fails on every machine but his, which
-# contradicts this key's own definition ("what `ollama pull` gets"). It is
-# written as ruled, and the ruling it waits on is one of two: the catalog names
-# the published parent `qwen3.8:27b` and Foundry keeps pinning num_ctx per
-# book on the ollama door (its SLOTS.md says it already does), OR the -24g
-# Modelfile is published under a namespace and the tag here gains that prefix.
-# Until one of those lands, this row is correct on Owen's PC and a pull failure
-# anywhere else — and the failure names the tag, so nothing is hidden.
+# THE PUBLISHED PARENT, ruled 2026-09-14 (Foundry-pc-1's recommendation, taken as
+# Owen's default until he says otherwise). Owen's own Ollama copy is `qwen3.8:27b-24g`,
+# a Modelfile over the library's `qwen3.8:27b` (`ollama show` reports
+# `parent_model: qwen3.8:27b`; num_ctx 98304 and the sampling at the top of this file)
+# and it is NOT on ollama.com (`/library/qwen3.8:27b-24g` -> 404, `/library/qwen3.8:27b`
+# -> 200, both checked 2026-09-14). A tag that pulls on one machine cannot be what a
+# friend's setup wizard offers, the model and projector blobs are the parent's own (the
+# Modelfile adds a 132-byte params layer), and Foundry pins num_ctx per book on its
+# ollama door, so the parent is named here. The alternative Owen may still choose is to
+# publish the Modelfile under a namespace; that is one line here and one re-vendor.
 # ############################################################################
 #
 # Every number, with where it came from and when:
@@ -167,7 +163,7 @@ description = "The 27B standard for translation, simplification and analysis, qu
 #                   no smaller model to fall back to, only a class that is off.
 [local]
 kind = "ollama"
-tag = "qwen3.8:27b-24g"
+tag = "qwen3.8:27b"
 download_bytes = 17_741_872_172
 needs_bytes = 19_241_872_172
 needs_basis = "declared"

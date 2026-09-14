@@ -688,7 +688,9 @@ def test_the_cleanup_model_is_the_bf16_tag_the_clean_text_ruling_names() -> None
 def test_the_27b_is_the_floor_for_translate_simplify_and_analysis() -> None:
     local = load_manifest("qwen3.8-27b-4bit").local
     assert isinstance(local, OllamaLocal)
-    assert local.tag == "qwen3.8:27b-24g"
+    # The PUBLISHED parent, not Owen's local `-24g` Modelfile over it (2026-09-14):
+    # a tag that pulls on one machine is not what a setup wizard offers.
+    assert local.tag == "qwen3.8:27b"
     assert local.download_bytes == 17_741_872_172
     assert local.minimum_for == ("translate", "simplify", "analysis")
 

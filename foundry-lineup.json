@@ -1,5 +1,5 @@
 {
-  "generated_from": "a7ab9af2f90e376f1fc5c9252c6267e512675c88",
+  "generated_from": "4e1784234ec92ddb41e7047434255af4d24f189a",
   "schema": 1,
   "models": [
     {
@@ -54,7 +54,7 @@
       "description": "The 27B standard for translation, simplification and analysis, quantized to fit a 24 GB card. The smallest model those three may run on.",
       "local": {
         "kind": "ollama",
-        "tag": "qwen3.8:27b-24g",
+        "tag": "qwen3.8:27b",
         "downloadGB": 17.74,
         "needsGB": {
           "value": 19.24,
