@@ -206,11 +206,51 @@ The recipes (`envs/<type>/<backend>.txt`) — they are the pack's source of trut
 `--build` path. The weights (HuggingFace, pulled by tasks). The service. The lease. The page.
 `crucible doctor`, which now also reports each env's pack sha beside its recipe hash.
 
+## 4b. A Crucible-owned WSL distro — IN SCOPE (Owen, 2026-09-14: "yes, lets do it. make it idiot proof")
+
+On Windows, bootstrap and `install.ps1` do not use the person's Ubuntu. They `wsl --import
+crucible <rootfs> <dir>` from a rootfs asset on the same release
+(`crucible-rootfs-<version>.tar.zst`: a minimal Ubuntu 24.04 base image with `[boot]
+systemd=true` and `[user] default=crucible` already in `/etc/wsl.conf`, the `crucible` user
+created, no password, `curl`/`tar`/`zstd` present, nothing else). Consequences, each the
+reason for it:
+
+- **No first-run prompt.** `wsl --install -d Ubuntu` launches an interactive username/password
+  dialog an app cannot answer; `--import` asks nothing.
+- **No collision.** A person's own distro (and Owen's, with everything in it) is never touched;
+  `local` on Owen's PC keeps reading his Ubuntu because his config is there. A machine with
+  BOTH is refused by name (`two_local_crucibles`) rather than guessed between.
+- **systemd is a fact, not a probe.** The image ships with it on; the "older install without
+  systemd" repair (4c) is for people who chose their own distro by hand.
+- **Idempotent.** A `crucible` distro already present is used, never re-imported; a partial
+  import (no `/etc/wsl.conf` marker) is unregistered and redone.
+- **The GPU is the host's driver.** WSL exposes the Windows NVIDIA driver into every distro;
+  nothing to install in the guest. `no_nvidia_driver` names the Windows download.
+
+The distro's name is `crucible`, its files live under `%LOCALAPPDATA%\Crucible\wsl\`, and
+`crucible service uninstall --distro` removes it entirely — a person can delete the whole
+thing with one command and their own WSL is exactly as it was.
+
+## 4c. Every WSL state, detected and answered by name (the idiot-proof table)
+
+| state | detected by | answer |
+|---|---|---|
+| no `wsl.exe` / WSL feature off | `wsl.exe --status` missing or errors | `Enable WSL` button: `wsl --install --no-distribution` under UAC (`Start-Process -Verb RunAs`); "restart, then open the app again"; resume at the next step |
+| virtualization disabled in firmware | `wsl --install` / `--status` error text (HCS_E_HYPERV_NOT_INSTALLED, `0x80370102`) | cannot be fixed by software: the two-line firmware instruction (enable VT-x / SVM), then Enable WSL again |
+| WSL1 only | `wsl --status` default version 1 | `wsl --set-default-version 2` (ours to run), then import |
+| WSL present, no `crucible` distro | `wsl -l -v` | import the rootfs (4b) — download with progress |
+| `crucible` distro present, not systemd | `/etc/wsl.conf` inside it | ours: write it as root, `wsl --terminate crucible` (only that distro — never `--shutdown`) |
+| a hand-chosen distro without systemd | same probe | say so and ask before writing `wsl.conf` and terminating THEIR distro |
+| no NVIDIA driver (guest has no `/dev/dxg` / `nvidia-smi`) | the existing probe | the driver download link; re-check button |
+| no network in the guest (VPN/proxy) | the rootfs / pack download fails with a network error | named refusal with the URL that failed; nothing else to do but say so |
+| not enough disk | pre-flight against `unpacked_bytes` + one part + rootfs | the number, before anything is downloaded |
+| `wsl -u root` refused (a hardened distro) | exit code on the linger step | the one remaining hand-over: the exact `loginctl` line |
+
+`install.ps1` and bootstrap share this table (one owner: the table is data in
+`sdk/bootstrap/src/wsl-states.ts`, and the script generator emits it).
+
 ## 6. Not in this phase, written so it is not forgotten
 
-- **A Crucible-owned WSL distro** (`wsl --import` from a rootfs asset on the same release):
-  removes the username/password prompt and the systemd question on fresh machines. A ruling
-  Owen has not given; the packs make it easy when he does (a rootfs is one more asset).
 - **Delta updates** between versions. A new version is a new pack; the old env dir is removed
   after the new one is stamped.
 - **A pack for Windows.** Windows is never a backend.
