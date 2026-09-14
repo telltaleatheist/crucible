@@ -1203,6 +1203,165 @@ this work. `sdk/ts`: 257, up from 235.
 
 ---
 
+### 7.6 What 7.4's list became, 2026-09-14 (late)
+
+Written by the agent that merged the host and Mac branches into this one and
+built the seven things 7.4 handed over. **Numbered 7.6 and not 7.5 because 7.5
+is already Tests** — 7.4's list said "§7 gains 7.5" and 7.5 was taken; the
+number moved rather than the section it would have replaced.
+
+#### Built
+
+| 7.4 item | what landed | where |
+|---|---|---|
+| 1 | the `engine` SUBJECT, pinned at `b10970`, both CUDA zips into one directory | `crucible/llamacpp.py` |
+| 2 | `weights.pull`/`installed` are FILE-AWARE through `BackendSpec.files` | `crucible/weights.py` |
+| 3 | `LlamaServerEngine`, `--alias`, the fatal-line early exit, 30 s then kill | `crucible/engines/llama_server.py` |
+| 4 | `install llm` fetches the engine; `install tts\|asr\|align\|rvc\|denoise` is `needs_wsl` | `crucible/cli.py` |
+| 5 | `doctor`'s engine row; `/v1/accelerator` was already there | `crucible/cli.py` |
+| 6 | `main()`'s win32 gate is GONE, not widened | `crucible/cli.py` |
+| 7 | 3.5a `DELETE /v1/catalog/{kind}/{id}`; 4.7 the `engine` task | `crucible/api.py`, `crucible/tasks.py` |
+| 3.10 f.7 | ONE page-request definition, published on `/v1/info` | `crucible/pages.py` |
+| 5.3a | a module names CLASSES; the server resolves them and reports `unmet` | `crucible/modules.py`, `crucible/tasks.py` |
+| 3.6 | `crucible serve` writes the pairing file too | `crucible/cli.py` |
+| — | the manifests move INSIDE the package (a wheel never carried them) | `pyproject.toml`, `crucible/` |
+
+**Refusals added, by name.** `engine_download_failed`, `engine_sha_mismatch`,
+`engine_not_installed`, `pages_engine_failed`, `port_in_use`,
+`subject_unknown`, `subject_not_installed`, `subject_in_use`,
+`subject_remove_failed`, `engine_target_unknown`, `engine_move_not_here`,
+`engine_move_needs_host`, `backend_not_here` (wired, having only existed as a
+sentence), `needs_wsl`, `pairing_file_malformed` (SDK),
+`capability_route_missing` and `capability_route_unknown` (SDK).
+
+**The env vars the host door needs.** `crucible/host/` had NONE, so this build
+names one: **`CRUCIBLE_HOST_DOOR`**, set by the host on the server it spawns,
+holding the door's base URL (`http://127.0.0.1:7101`). **Its presence IS the
+fact** that a host started this server, which is what 4.7's
+`engine_move_needs_host` turns on; a probe of 7101 would be the wrong
+question twice over, because something that is not a host can answer it and a
+host restarting its own door is still the host. **The token is NOT carried**:
+the door's bearer is the engine's own, which the server already holds, and a
+second copy in an environment variable would be a secret with two owners.
+Section 4.7 now says all of this.
+
+#### Decisions this build made, and the deviations
+
+- **`LLAMA_CPP_RELEASE` lives in `crucible/llamacpp.py`, not `envpack.py`.**
+  7.4 said "beside `STANDALONE_PYTHON`", and the reason given was the
+  pinned-download idiom. `envpack.py` is about Python packs; the engine
+  subject is not one, and putting a 400-line module's constant in another
+  module to be near a similar-looking constant is proximity standing in for
+  ownership. The NAME is 7.4's.
+- **The test door answers 502 `upstream_rejected`, not 401.** 3.2 says 401. A
+  401 from a Crucible route means THIS server refused THIS client's bearer,
+  and BookForge measured exactly the consequence: a bad Anthropic key drew
+  "crucible refused the request" beside the key field. 7.2 already decided
+  502 for every non-2xx but 429 at the chat door; this is the same decision
+  at the other one, so one code has one status.
+- **`crucible install pages` is refused, with the sentence that names `llm`.**
+  3.5 writes it as a command. `pages` is a capability CLASS and not a job
+  type (PHASE3-VLM.md section 1: there is no `vlm-pages` job type), so it has
+  no installer and never will; it joins `INSTALLER_FOR` the way `denoise`
+  did, and the refusal says which command works. The CLI's `choices=` still
+  lists only real job types, so `crucible install pages` gets argparse's
+  message rather than that one — the HTTP install task gets the good one.
+- **The stop deviates from `base.py`'s never-SIGKILL rule, on purpose.** That
+  rule is about CUDA inside WSL2 wedging the distro until Windows reboots.
+  This engine is native; 30 s graceful (`CTRL_BREAK_EVENT` to the child's own
+  group) then `terminate()`, and the reason is written where the deviation is
+  made.
+- **`config_permissions` is not checked on win32.** A Windows file has no
+  POSIX mode and `stat` reports 0o666 whatever the ACL says, so the check
+  reported a problem on every healthy Windows server the moment `doctor`
+  started running there. Owed: a `doctor` line that reads the ACL back.
+- **T9 is not in `scripts/testrun-phase15.sh`.** It drives the Mac's card over
+  ssh; a button on the PC whose blast radius reaches another machine's GPU is
+  a button that does not say what it does. Run it from the Mac.
+
+#### Measured, at last
+
+**S2 has run end to end on Owen's PC**, 2026-09-14, and the whole
+`llama-windows` stack answers short of starting the engine:
+
+| step | seconds | size |
+|---|---|---|
+| host pack built (`crucible envpack build host`) | 49 | 46 MB archived, 186 MB unpacked |
+| unpacked under `C:\tmp\phase15-testrun\host\` | 5 | — |
+| `crucible init --backend llama-windows --port 7101` | 3 | — |
+| `engine llama-cpp` (both CUDA zips, verified, unpacked) | 19 | 645 MB fetched, 1.17 GB on disk |
+| `models pull dots-ocr` (the GGUF pair) | 51 | 4.42 GB |
+| `models pull qwen3.5-9b` (ONE Q8 of a repo of quantizations) | 97 | 9.53 GB |
+| **S2 total** | **227** | **15 GB** |
+
+`crucible doctor` on that home reports **healthy**, with
+`engine: ready — llama.cpp b10970 (cuda-12.4)` and
+`job load-model: ready — loadable: ['dots-ocr', 'qwen3.5-9b']`. **S1 has run
+too**: `/home/telltale/crucible` is at this branch's HEAD, the unit restarted
+(through the root `user@1000` recipe — the user bus was absent, exactly the
+case 4.1 names), and `/v1/info` answers `pages_engine: {engine: "vllm",
+installed: true}` with the eight-key `request` block, while `/v1/capability`
+returns eleven rows all carrying `route`.
+
+Two things the first real Windows run found, which is what running it is for:
+`crucible doctor` asked `jobenv` for an `llm` env on a backend that has none
+and crashed, and the `config_permissions` check called every healthy Windows
+server unhealthy. Both fixed above.
+
+#### STILL UNMEASURED — tested once the GPU is free
+
+Every one of these needs a card and none of them has had one; 3.10's fact 8
+stands. The button's report ends with this list so the numbers can be pasted
+back here.
+
+- **seconds per page, dots under llama.cpp on Windows** — unmeasured, tested
+  once the GPU is free (T7).
+- **whether the Q8 GGUF answers in `parseDotsPage`'s dialect exactly** — the
+  MLX and vLLM builds do. Unmeasured, tested once the GPU is free (T7, whose
+  `shape.json` diff against T6's is the comparison).
+- **seconds per page, dots under vLLM on the 4090** — unmeasured, tested once
+  the GPU is free (T6).
+- **seconds per cleanup chunk, `qwen3.5-9b` Q8 under llama.cpp** —
+  unmeasured, tested once the GPU is free (T7).
+- **the three `llama-windows` `memory_bytes_estimate` figures** — still
+  DECLARED (the GGUF's size plus Foundry's 1.5 GB `OVERHEAD_GB`), not
+  measured. Unmeasured, tested once the GPU is free.
+- **`--alias` against a real `llama-server`** — the readiness check is "the
+  name equals the id this server started" and no llama-server has been
+  started by this build, on CPU or CUDA. Unmeasured, tested once the GPU is
+  free.
+- **the fatal-line table against real llama.cpp output** — the eight
+  substrings are Foundry's, and this build has matched them against strings
+  it wrote itself. Unmeasured, tested once the GPU is free.
+- **the engine task end to end** — no distro was imported and no host tray
+  was started, so 4.7's relay has been exercised only against a fake door.
+  T10 on a machine with the host running is the measurement; without it the
+  stage proves the refusal and says so.
+
+#### Tests
+
+Under the WSL lock, single files. New: `test_llama_engine.py` 29,
+`test_catalog_remove.py` 14, `test_engine_task.py` 15,
+`test_pages_request.py` 11, `test_module_needs.py` 11, `test_wheel.py` 5.
+Changed and re-run green: `test_cli.py` 30, `test_envpack.py` 81,
+`test_settings_api.py` 25, `test_upstream_chat.py` 26,
+`test_llama_windows.py` 19, `test_service.py` 54, `test_pairing_file.py` 11,
+`test_manifests.py` 93, `test_engine_readiness.py` 10, `test_capability.py`
+36, `test_catalog_route.py` 17, `test_modules.py`, `test_tasks_api.py`,
+`test_api.py`, `test_llm_api.py`, `test_ui_mount.py`, `test_activity.py`,
+`test_voices.py`, `test_tts_api.py`, `test_tts_render.py`, `test_jobenv.py`,
+`test_workerenv.py`, `test_rvcmodels.py`, `test_rvcbase.py`,
+`test_rvc_api.py`, `test_denoisemodels.py`, `test_denoise_api.py`,
+`test_asrmodels.py`, `test_alignmodels.py`, `test_align_api.py`,
+`test_asr_api.py`, `test_lineup.py`, `test_setup_route.py`. `test_host.py`
+87 on the **Windows** interpreter (86 passed, 1 skipped) — its subject is
+Windows and its platform is injected, so it runs on both.
+
+`sdk/bootstrap` 245. `sdk/ts` **290**, up from 257.
+
+**The full suite is still owed**, for 7.5's reason: a `train_lora.py` holds
+the VM. It is T2 on the button.
+
 ## 7b. What was built, 2026-09-14 — the host side
 
 Section 4 entirely, plus the pieces of 3.5/3.6 the host needs to exist. Sections 1-3 and 5 are

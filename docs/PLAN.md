@@ -325,6 +325,56 @@ both catalogs every round so a resume needs no state that survived the crash. A
 `subject_in_use` is waited out with its holder named and then fails BY THAT NAME — never
 skipped, because 3.5 says nothing is skipped and an unbounded wait would be a third ending.
 
+**Landed, 2026-09-14 (late): phase 15 is CODE-COMPLETE, and the button is written.**
+`PHASE15-HOST.md` section 7.6 is the record. The three branches are one — the host's
+(section 4) and the Mac's (7c) merged into this one — and the seven things 7.4 handed
+over are built: the `engine` subject at the pinned llama.cpp `b10970` with both CUDA
+zips verified before either is unpacked; a file-aware `weights.pull` that fetches ONE
+quantization out of a repo that holds twenty and calls a subject installed only when
+every file it names is present; `LlamaServerEngine` with `--alias`, a fatal-line early
+exit and a 30-second stop; `crucible install llm` fetching the engine and the five
+Python job types refused `needs_wsl`; `doctor`'s engine row; `main()`'s win32 gate
+DELETED rather than widened, with `backend_not_here` wired where a backend is actually
+read; `DELETE /v1/catalog/{kind}/{id}` (3.5a) with `subject_in_use` naming the holder;
+and the `engine` task (4.7), which the Windows server hands to the host's loopback door
+and relays under its own id.
+
+Four things arrived beside them, each because running the thing found it:
+
+- **A wheel never carried the manifests.** `packages.find = ["crucible*"]` shipped the
+  code and `crucible/ui/`; `models/ voices/ denoise/ rvc/ rvcbase/ align/ asr/ envs/`
+  sat BESIDE the package, so a fresh install answered `catalog_unreadable` — measured
+  on the Mac, and the phase-14 `server` pack unpacks that same wheel, so every install
+  that was not a developer's `pip install -e .` was broken. The directories moved INSIDE
+  the package, and `tests/test_wheel.py` builds a wheel, looks inside it, installs one
+  in a throwaway venv and calls all eight loaders there.
+- **ONE definition of a page request** (`crucible/pages.py`), published on
+  `GET /v1/info`'s `pages_engine.request`. Page reading has no job type, so the CLIENT
+  builds the chat completion — and it was building it out of constants pinned in
+  Foundry's source. A prompt and a pixel budget are facts about the weights. The prompt
+  is byte-identical to the handover copy and a test compares them.
+- **A module names CLASSES and the server resolves them** (5.3a), because the generator
+  resolving them meant posting the cuda-linux answer to a Mac. A class this engine has
+  disabled is `unmet` on the task, never a refusal of the module.
+- **`crucible serve` writes the pairing file**, so a server that existed before this
+  phase stops telling an app on its own machine that there is no engine there.
+
+**Staged and measured, 2026-09-14.** S2 ran end to end on the PC: the host pack built in
+49 s (46 MB archived, 186 MB unpacked), the engine subject fetched in 19 s (645 MB of
+zips, 1.17 GB unpacked), `dots-ocr` in 51 s (4.42 GB) and `qwen3.5-9b` in 97 s (9.53 GB,
+one Q8 out of a repo of quantizations) — 227 s and 15 GB in total, into a temporary home
+on port 7101 that touches nothing the machine already has. `crucible doctor` on it reads
+**healthy**, with `load-model: ready — loadable: ['dots-ocr', 'qwen3.5-9b']`. S1 ran too:
+the WSL server is at this branch's HEAD and answers `pages_engine` and eleven capability
+rows carrying `route`.
+
+**`scripts/testrun-phase15.sh` is the button** (section 8), with a `--dry-run` that
+prints every command and runs none. What is still owed is the CARD: seconds per page
+under llama.cpp and under vLLM, whether the Q8 answers in the parser's dialect, seconds
+per cleanup chunk, and the three declared `memory_bytes_estimate` figures. Every one of
+them is written in 7.6 as *unmeasured — tested once the GPU is free*, and the button's
+report ends with the list so the numbers go back into the doc rather than into a chat.
+
 So what is left is not code. It is **a card, and Owen's rulings on the five things below.**
 
 ### Owed, and only a free card discharges it
