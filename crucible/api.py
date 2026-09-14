@@ -30,10 +30,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import API_VERSION, VERSION, accelerator
+from . import API_VERSION, VERSION, accelerator, catalog, pairing
 from .backend import CUDA_LINUX, Backend
 from .config import Config
 from .errors import ApiError
+from .interfaces import InterfaceError
 from .jobs import (
     ALL_JOB_TYPES,
     build_registry,
@@ -304,6 +305,15 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.state.config = config
     app.state.backend = backend
     app.state.residency = residency
+    # WHERE THIS SERVER IS REALLY LISTENING, which the config alone cannot say:
+    # `crucible serve --host 0.0.0.0` overrides `[server] host` for that run, and
+    # `GET /v1/setup` would otherwise hand out pairing lines for the address the
+    # file remembers rather than the one uvicorn bound. `cmd_serve` overwrites
+    # these when it is given a flag; the config's values are the truth when it is
+    # not, which is every service-managed server (`crucible service install`
+    # bakes the config's host and port into the unit).
+    app.state.bind_host = config.host
+    app.state.bind_port = config.port
     app.state.store = JobStore(config, backend, registry)
     app.state.streams = StreamManager(residency)
     app.state.inflight = InFlight()
@@ -535,6 +545,77 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             "resident_models": residency.ids(),
             "resident_kind": residency.resident_kind,
         }
+
+    # ----------------------------------------------------------------- setup
+
+    @private.get("/setup")
+    async def setup(request: Request) -> dict[str, Any]:
+        """Everything an app needs to be pointed at this server, in one read.
+
+        PHASE13-OPERATOR.md section 3.1. Owen, 2026-09-14: *"crucible has its own
+        ui. and it provides the token or whatever else we need to set it up on
+        foundry or bookforge."* This is "whatever else we need".
+
+        **It returns the token, and that reveals nothing.** Every `/v1/*` route
+        is behind the bearer token, so the only caller who can read this is one
+        who already has it. What it buys is that nobody types a secret twice:
+        the operator page fetches this and draws a copyable pairing line, and
+        the person pasting that line into BookForge has not seen a token at all.
+
+        `urls` and `pairing` are the same list read two ways, and both are
+        derived rather than stored — the bind address this process actually
+        holds, made dialable (`crucible/pairing.py`). A wildcard bind becomes
+        one entry per non-loopback IPv4 interface; a concrete bind becomes
+        exactly one. Never a hostname lookup: an interface is a fact about this
+        host, a name is a fact about somebody else's resolver.
+
+        `job_types` repeats `/v1/info`'s list rather than making the page read
+        twice, and it repeats it from the same producer — `store.registry` — so
+        the two cannot disagree. After an install task's reload (3.4) both
+        answer the new list in the same tick.
+        """
+        live: Config = request.app.state.config
+        store: JobStore = request.app.state.store
+        host = request.app.state.bind_host
+        port = request.app.state.bind_port
+        try:
+            urls = pairing.reachable_urls(host, port)
+        except InterfaceError as exc:
+            # 503 and not an empty `urls`: an empty list reads as "reachable
+            # from nowhere", which is a claim about this host rather than a
+            # report that the question could not be asked (R3). The page shows
+            # the reason and the operator can still bind a concrete address.
+            raise ApiError(
+                503,
+                "interfaces_unreadable",
+                f"this server is bound to {host!r} and cannot list its own "
+                f"interfaces, so it cannot say where an app should reach it: "
+                f"{exc}",
+            ) from None
+        return {
+            "name": live.name,
+            "version": VERSION,
+            "backend": backend.kind,
+            "bind": f"http://{host}:{port}",
+            "urls": urls,
+            "token": live.token,
+            "pairing": pairing.pairing_lines(live.name, urls, live.token),
+            "job_types": sorted(store.registry),
+            "config_path": str(live.path),
+        }
+
+    # --------------------------------------------------------------- catalog
+
+    @private.get("/catalog")
+    async def catalog_route(request: Request) -> dict[str, Any]:
+        """Every subject this backend can hold, installed or not.
+
+        PHASE13-OPERATOR.md section 3.2. Every field is derived from something
+        this server already owns and no row is authored here — see
+        `crucible/catalog.py`, which is the whole of it.
+        """
+        live: Config = request.app.state.config
+        return {"rows": catalog.rows(live, backend, residency)}
 
     # ----------------------------------------------------------- accelerator
 

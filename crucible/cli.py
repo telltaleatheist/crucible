@@ -192,6 +192,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from .api import create_app  # imported here so `init`/`token` stay light
 
     app = create_app(config, backend)
+    # WHERE IT IS REALLY LISTENING, not where the file says. `--host` and
+    # `--port` override the config for this run, and `GET /v1/setup` builds its
+    # pairing lines from the bind address — so a server started
+    # `crucible serve --host 0.0.0.0` on a config that says `127.0.0.1` must
+    # hand out its interface addresses, not a loopback nobody else can dial.
+    app.state.bind_host = host
+    app.state.bind_port = port
 
     print(f"crucible {VERSION} (api {API_VERSION}) — {config.name}")
     print(f"backend: {backend.kind} ({backend.gpu.name})")
