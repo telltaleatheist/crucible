@@ -155,7 +155,12 @@ def test_token_url_lists_every_interface_of_a_wildcard_bind(
     capsys.readouterr()
     assert cli.main(["token", "--url"]) == 0
     printed = capsys.readouterr().out.strip().splitlines()
+    # The LOOPBACK line first, then every interface (PHASE15-HOST.md section
+    # 3.6). `reachable_urls` has no loopback entry for a wildcard bind, and
+    # the pairing file's one line is the loopback one — *"`crucible token
+    # --url` prints the same"* is only true if it is printed.
     assert [line.split("@")[-1] for line in printed] == [
+        f"127.0.0.1:7100/#{load_config(home).token}",
         f"10.0.0.4:7100/#{load_config(home).token}",
         f"100.64.0.3:7100/#{load_config(home).token}",
     ]

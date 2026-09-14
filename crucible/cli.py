@@ -61,6 +61,7 @@ from .config import (
     load_config,
     mint_token,
     write_config,
+    write_pairing_file,
 )
 from .errors import ConfigError, NoViableBackend
 from .interfaces import InterfaceError
@@ -168,6 +169,16 @@ def cmd_init(args: argparse.Namespace) -> int:
         + ("as given; " if args.token is not None else "minted; ")
         + "print it with `crucible token --show`"
     )
+    # THE PAIRING FILE (PHASE15-HOST.md section 3.6). Written here, at 0600,
+    # beside the config, so an app on this machine connects without anybody
+    # typing a token — and rewritten by `--force`, which mints a new one.
+    paired = write_pairing_file(
+        home,
+        name=args.name if args.name is not None else default_server_name(),
+        port=args.port,
+        token=token,
+    )
+    print(f"pairing:  {paired} (mode {config_mode(paired)})")
     _print_pairing(
         args.name if args.name is not None else default_server_name(),
         args.host,
@@ -294,6 +305,14 @@ def cmd_service_install(args: argparse.Namespace) -> int:
         f"{config.path} now and written into the definition. Change either and "
         "re-run `crucible service install`."
     )
+    # Section 3.6 again: a server installed as a service is the one an app is
+    # most likely to meet without a person present, so the file it reads is
+    # written here too — with the SAME token, so nothing that had paired is
+    # unpaired by installing a unit.
+    paired = write_pairing_file(
+        config.home, name=config.name, port=config.port, token=config.token
+    )
+    print(f"pairing:  {paired} (mode {config_mode(paired)})")
     _print_pairing(config.name, config.host, config.port, config.token)
     return EXIT_OK
 
@@ -443,7 +462,15 @@ def _write_capability(
             total_bytes=backend.gpu.vram_bytes,
             desktop_allowance_bytes=config.desktop_allowance_bytes,
             decisions=decisions,
+            # THE OPERATOR'S ROUTES SURVIVE A CAPABILITY WRITE, and they have
+            # to be passed for that to be true: `write_config` writes the whole
+            # document, so a `crucible install` that omitted them would unroute
+            # a server somebody configured this morning and put the local rows
+            # back over the upstream ones (PHASE15-HOST.md section 2).
+            routes={entry.capability: entry.model for entry in config.routes},
         ),
+        routes=config.routes,
+        upstreams=config.upstreams,
         **values,
     )
 
@@ -1858,7 +1885,16 @@ def _pairing_lines(name: str, host: str, port: int, token: str) -> list[str] | s
     has nothing else to print and exits 1, while `init` and `service install`
     have already succeeded and merely have one fewer thing to tell the
     operator.
+
+    **The loopback line comes first, always** (PHASE15-HOST.md section 3.6).
+    It is what `<CRUCIBLE_HOME>/pairing` holds, and *"`crucible token --url`
+    prints the same"* is only true if it is printed. On a `127.0.0.1` bind it
+    IS `reachable_urls`' one entry and is printed once; on a wildcard bind
+    `reachable_urls` has no loopback entry at all, and without this an app on
+    the server's own machine would be handed whichever interface the OS listed
+    first.
     """
+    loopback = pairing.pairing_line(name, f"http://{DEFAULT_HOST}:{port}", token)
     try:
         urls = pairing.reachable_urls(host, port)
     except InterfaceError as exc:
@@ -1871,7 +1907,11 @@ def _pairing_lines(name: str, host: str, port: int, token: str) -> list[str] | s
             f"bound to {host} and this host has no non-loopback IPv4 address, "
             "so nothing else can reach it yet"
         )
-    return pairing.pairing_lines(name, urls, token)
+    lines = [loopback]
+    for line in pairing.pairing_lines(name, urls, token):
+        if line not in lines:
+            lines.append(line)
+    return lines
 
 
 def _print_pairing(name: str, host: str, port: int, token: str) -> None:

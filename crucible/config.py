@@ -24,6 +24,7 @@ from typing import Any
 import tomli_w
 
 from .errors import ConfigError
+from .upstreams import UPSTREAM_FIELD, UPSTREAM_NAMES, UpstreamRecord
 
 CRUCIBLE_HOME_ENV = "CRUCIBLE_HOME"
 DEFAULT_HOST = "127.0.0.1"
@@ -99,6 +100,21 @@ def mint_token() -> str:
 
 def default_server_name() -> str:
     return f"crucible@{socket.gethostname()}"
+
+
+@dataclass(frozen=True)
+class RouteRecord:
+    """One `[routes]` entry: a capability class, and the upstream model it runs on.
+
+    PHASE15-HOST.md section 2. There is no record for a class that runs
+    LOCALLY: an absent key and `route = "local"` mean the same thing and
+    `"local"` is never written, so "is this class routed" is one question with
+    one answer — is there a record — rather than a value that could be spelled
+    two ways.
+    """
+
+    capability: str
+    model: str
 
 
 @dataclass(frozen=True)
@@ -196,6 +212,41 @@ class Config:
     #: guess: the refusal in `crucible/jobs/__init__.py` says "no selection has
     #: been recorded here" rather than inventing a reason for a disabled type.
     capability: CapabilityRecord | None = None
+    #: `[routes]` — where each routable class's work runs (PHASE15-HOST.md
+    #: section 2). Empty means every class is local, which is what every server
+    #: written before this phase says, so an old config needs no migration.
+    routes: tuple[RouteRecord, ...] = ()
+    #: `[upstreams.*]` — the services this server may forward a chat to on the
+    #: operator's account. PRESENT MEANS CONFIGURED: `load_config` refuses an
+    #: entry missing its one field, so nothing downstream has to ask twice.
+    upstreams: tuple[UpstreamRecord, ...] = ()
+
+    def route_model(self, capability: str) -> str | None:
+        """The upstream model this class runs on, or None because it runs local."""
+        for entry in self.routes:
+            if entry.capability == capability:
+                return entry.model
+        return None
+
+    def upstream(self, name: str) -> UpstreamRecord | None:
+        """This upstream's record, or None because nobody configured it."""
+        for entry in self.upstreams:
+            if entry.name == name:
+                return entry
+        return None
+
+    def classes_routed_to(self, name: str) -> tuple[str, ...]:
+        """Every class whose route names this upstream, in `[routes]` order.
+
+        What `upstream_in_use` reports: a caller removing a key is owed the list
+        of things that would stop working, in one refusal, rather than one
+        refusal per attempt.
+        """
+        return tuple(
+            entry.capability
+            for entry in self.routes
+            if entry.model.partition("/")[0] == name
+        )
 
     def adopt(self, fresh: "Config") -> None:
         """Take on a re-read of this same file, in place. **One Config per process.**
@@ -221,6 +272,15 @@ class Config:
         (`tests/test_tasks_api.py`). The immutability being
         protected is *"a config is not edited field by field from wherever"*, and
         that is intact: this replaces the whole document at once, from a file.
+
+        **ROUTES AND UPSTREAMS TRAVEL THE SAME WAY** (PHASE15-HOST.md section
+        2), and they are why this method matters twice as much as it did: a
+        `PUT /v1/settings` writes the file and then adopts it, so the chat door
+        forwards to the key that was pasted a millisecond ago without a
+        restart. The loop below is over `__dataclass_fields__` rather than a
+        list of names for exactly this reason — a field added to `Config` is
+        adopted on the day it is added, and a phase that forgot to extend a
+        hand-written list would leave half the server reading the old document.
 
         IDENTITY IS REFUSED, CAPABILITY IS ADOPTED. A fresh config from a
         different path or home is not a re-read of this one, it is a different
@@ -421,6 +481,115 @@ def _capability_record(table: dict[str, Any]) -> CapabilityRecord | None:
     )
 
 
+def _upstream_records(table: dict[str, Any]) -> tuple[UpstreamRecord, ...]:
+    """`[upstreams.*]`, in `UPSTREAM_NAMES` order, or a refusal naming the fault.
+
+    ABSENT IS THE ONLY WAY TO BE UNCONFIGURED. An entry that exists carries the
+    one field its upstream takes, or the config does not load — there is no
+    `[upstreams.anthropic]` with no key, because a record like that would make
+    `configured` a second fact beside the record's own existence and the two
+    would eventually disagree (ARCHITECTURE.md R1).
+
+    A whole `[upstreams]` table is optional: every config written before this
+    phase has none, and "this server forwards nowhere" is the honest reading of
+    that rather than a missing piece.
+    """
+    section = table.get("upstreams")
+    if section is None:
+        return ()
+    if not isinstance(section, dict):
+        raise ConfigError("config key upstreams must be a table")
+    unknown = sorted(set(section) - set(UPSTREAM_NAMES))
+    if unknown:
+        raise ConfigError(
+            f"config [upstreams]: unknown_upstream {unknown}; this server speaks "
+            f"to exactly {list(UPSTREAM_NAMES)}"
+        )
+    found: list[UpstreamRecord] = []
+    for name in UPSTREAM_NAMES:
+        entry = section.get(name)
+        if entry is None:
+            continue
+        if not isinstance(entry, dict):
+            raise ConfigError(f"config key upstreams.{name} must be a table")
+        wanted = UPSTREAM_FIELD[name]
+        extra = sorted(set(entry) - {wanted})
+        if extra:
+            raise ConfigError(
+                f"config [upstreams.{name}]: upstream_bad_field {extra}; this "
+                f"upstream is configured with a {wanted!r} and nothing else"
+            )
+        value = entry.get(wanted)
+        if not isinstance(value, str) or value.strip() == "":
+            raise ConfigError(
+                f"config is missing upstreams.{name}.{wanted}; an upstream "
+                "table that exists is one this server can call, and one it "
+                "cannot call must be absent instead"
+            )
+        if wanted == "key":
+            found.append(UpstreamRecord(name=name, key=value))
+        else:
+            found.append(UpstreamRecord(name=name, url=value.rstrip("/")))
+    return tuple(found)
+
+
+def _route_records(
+    table: dict[str, Any], upstreams: tuple[UpstreamRecord, ...]
+) -> tuple[RouteRecord, ...]:
+    """`[routes]`, validated against the upstreams that were just read.
+
+    A hand-edited config is refused HERE, with the same three names
+    `PUT /v1/settings` refuses by (PHASE15-HOST.md section 3.2), because a
+    server that started holding a route it cannot serve would spend the rest of
+    its life refusing one capability with a sentence about the wrong thing.
+
+    The order matters: upstreams first, then routes, exactly as one PUT applies
+    them, so a config file and a patch cannot disagree about whether a route is
+    servable.
+    """
+    from .capability import ROUTABLE_CLASSES
+
+    section = table.get("routes")
+    if section is None:
+        return ()
+    if not isinstance(section, dict):
+        raise ConfigError("config key routes must be a table")
+    configured = {entry.name for entry in upstreams}
+    found: list[RouteRecord] = []
+    for name in sorted(section):
+        if name not in ROUTABLE_CLASSES:
+            raise ConfigError(
+                f"config [routes]: route_not_routable {name!r}; only "
+                f"{list(ROUTABLE_CLASSES)} may run anywhere but this card"
+            )
+        model = section[name]
+        if not isinstance(model, str):
+            raise ConfigError(
+                f"config key routes.{name} must be a string, got "
+                f"{type(model).__name__}"
+            )
+        if model == "local":
+            raise ConfigError(
+                f"config [routes]: routes.{name} is \"local\", which is the "
+                "absence of a route and is never written; remove the key"
+            )
+        upstream_name, _, rest = model.partition("/")
+        if upstream_name not in UPSTREAM_NAMES or rest == "":
+            raise ConfigError(
+                f"config [routes]: route_bad_model {model!r} for {name}; a "
+                f"route's value is `<upstream>/<model>` with the upstream one "
+                f"of {list(UPSTREAM_NAMES)}"
+            )
+        if upstream_name not in configured:
+            raise ConfigError(
+                f"config [routes]: route_upstream_unconfigured — {name} is "
+                f"routed to {model!r} and [upstreams.{upstream_name}] is not in "
+                "this config. This server never holds a route it cannot serve"
+            )
+        found.append(RouteRecord(capability=name, model=model))
+    return tuple(found)
+
+
 def load_config(home: Path | None = None) -> Config:
     """Read config.toml. Raises ConfigError naming the missing piece."""
     root = home if home is not None else crucible_home()
@@ -435,6 +604,7 @@ def load_config(home: Path | None = None) -> Config:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"could not read {path}: {exc}") from exc
 
+    upstreams = _upstream_records(table)
     return Config(
         path=path,
         home=root,
@@ -457,6 +627,8 @@ def load_config(home: Path | None = None) -> Config:
             table, "accelerator", "desktop_allowance_bytes", int
         ),
         capability=_capability_record(table),
+        routes=_route_records(table, upstreams),
+        upstreams=upstreams,
     )
 
 
@@ -483,6 +655,14 @@ def write_config(
     #: `_capability_flag` gives an absent key, and the safe direction.
     enable_denoise: bool = False,
     capability: CapabilityRecord | None = None,
+    #: `[routes]` and `[upstreams.*]`. Defaulted to empty for the same reason
+    #: `enable_denoise` is defaulted: a caller written before this phase states
+    #: neither, and empty is what such a config already means. **Every caller
+    #: that REWRITES an existing config must pass the loaded values**, or the
+    #: rewrite silently unroutes a server — `cli._write_capability` does, and a
+    #: test pins it.
+    routes: tuple[RouteRecord, ...] = (),
+    upstreams: tuple[UpstreamRecord, ...] = (),
 ) -> Path:
     """Write config.toml at mode 0600 under a 0700 home. Returns the path.
 
@@ -491,6 +671,11 @@ def write_config(
     `--enable-*` flags at their word and probes nothing, so it has no verdict to
     write down. `crucible capability --write` and `crucible install` are the two
     doors that have one.
+
+    **A key lands in this file and nowhere else.** The document is created at
+    0600 under a 0700 home before a byte of it is written, which is the same
+    protection the token has had since phase 1 — PHASE15-HOST.md section 2:
+    *"a key here is no worse than the token"*.
     """
     home.mkdir(parents=True, exist_ok=True)
     os.chmod(home, 0o700)
@@ -512,6 +697,20 @@ def write_config(
     }
     if capability is not None:
         document["capability"] = capability.to_dict()
+    if routes:
+        # Only when there is one. An empty `[routes]` table and no table at all
+        # read the same, and writing the empty one would put a section in every
+        # config on earth to say nothing.
+        document["routes"] = {entry.capability: entry.model for entry in routes}
+    if upstreams:
+        document["upstreams"] = {
+            entry.name: (
+                {"key": entry.key}
+                if UPSTREAM_FIELD[entry.name] == "key"
+                else {"url": entry.url}
+            )
+            for entry in upstreams
+        }
     # Create with 0600 from the outset so the token is never briefly world-readable.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as handle:
@@ -522,3 +721,39 @@ def write_config(
 
 def config_mode(path: Path) -> str:
     return oct(stat.S_IMODE(path.stat().st_mode))
+
+
+def pairing_path(home: Path | None = None) -> Path:
+    """`<CRUCIBLE_HOME>/pairing` — the file an app on this machine reads."""
+    return (home if home is not None else crucible_home()) / "pairing"
+
+
+def write_pairing_file(home: Path, *, name: str, port: int, token: str) -> Path:
+    """One loopback pairing line, mode 0600, with a trailing newline.
+
+    PHASE15-HOST.md section 3.6. `crucible init`, `crucible service install`
+    and a token rotation all write it, and an app on the same machine reads it
+    instead of asking a person to type a secret it could have read.
+
+    **The line is always the loopback one**, whatever the server is bound to.
+    The file answers one question — *an app on THIS machine wants in* — and the
+    answer to that is never a LAN address: a wildcard-bound server has no
+    loopback entry in `reachable_urls` at all, so a file built from that list
+    would hand a local app whichever interface the OS happened to list first.
+
+    0600, like the config, because the line carries the token in its fragment.
+    On Windows `os.chmod` cannot express that and the host writes the file with
+    an ACL instead (section 4.3); the mode call is harmless there and the write
+    still happens, so this function has ONE body rather than a platform branch
+    that would let the two drift.
+    """
+    from .pairing import pairing_line
+
+    home.mkdir(parents=True, exist_ok=True)
+    path = pairing_path(home)
+    line = pairing_line(name, f"http://{DEFAULT_HOST}:{port}", token)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write((line + "\n").encode("utf-8"))
+    os.chmod(path, 0o600)
+    return path

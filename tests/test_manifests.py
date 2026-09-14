@@ -704,3 +704,18 @@ def test_the_page_reader_is_a_gguf_pair_at_a_pinned_sha() -> None:
     assert local.file == "Dots.Ocr-1.8B-Q8_0.gguf"
     assert local.mmproj == "mmproj-Dots.Ocr-F16.gguf"
     assert local.download_bytes == 1_894_530_336 + 2_524_495_808
+
+
+def test_a_model_id_with_a_slash_is_refused_by_name() -> None:
+    """`manifest_model_id_slash` — the slash belongs to upstream model ids.
+
+    PHASE15-HOST.md sections 1 and 3.4: the chat door tells
+    `anthropic/claude-sonnet-5` from a model on this card by that one
+    character, so no local id may contain it. The id regex already excluded it
+    as a side effect of its character class; the rule is now load-bearing on
+    another door, and a reader who broke it is owed the rule's name rather
+    than a regex.
+    """
+    text = GOOD.replace('id = "demo-1b"', 'id = "vendor/demo-1b"')
+    with pytest.raises(ManifestError, match="manifest_model_id_slash"):
+        parse_manifest(text, Path("vendor-demo-1b.toml"), "vendor/demo-1b")

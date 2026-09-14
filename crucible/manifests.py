@@ -758,6 +758,20 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
     check_table(f"{path.name} [model]", model, _MODEL_REQUIRED, _MODEL_OPTIONAL)
 
     model_id = model["id"]
+    if "/" in model_id:
+        # manifest_model_id_slash — PHASE15-HOST.md sections 1 and 3.4. The
+        # slash is how the chat door tells `anthropic/claude-sonnet-5` from a
+        # model on this card, and it can only do that while no local id has
+        # one. `_MODEL_ID` below already excludes it as a side effect of its
+        # character class; this says it by NAME, first, because the rule is now
+        # load-bearing on another door and a reader who broke it deserves to be
+        # told which rule they broke rather than shown a regex.
+        raise ManifestError(
+            f"{path.name}: manifest_model_id_slash — model.id {model_id!r} "
+            "contains '/', which is reserved: a model id with a slash is an "
+            "UPSTREAM model id (`<upstream>/<model>`), and the chat door tells "
+            "the two apart by that one character"
+        )
     if not _MODEL_ID.match(model_id):
         raise ManifestError(
             f"{path.name}: model.id {model_id!r} must be lower-case and start with "

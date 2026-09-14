@@ -105,6 +105,11 @@ POOL_NAME: dict[str, str] = {
     MLX_DARWIN: "unified memory",
 }
 
+#: Said in front of a class's LOCAL sentence when the operator has routed it
+#: upstream. The local answer is kept whole after it (section 3.3), so routing
+#: back loses nothing and a reader can see what this host would do on its own.
+LOCAL_ANSWER_PREFIX = "the local answer would be: "
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -186,6 +191,15 @@ class CapabilityClass:
     #: said out loud, so the operator is not left looking for a smaller variant
     #: that was never going to exist.
     binary_note: str = ""
+    #: May this class's work run somewhere other than this card
+    #: (PHASE15-HOST.md section 1)? True for exactly the four chat-shaped `llm`
+    #: classes. **Declared here rather than derived from `job_type == "llm"`**,
+    #: because `pages` is an `llm` job type and is NOT one of the four: it sends
+    #: page IMAGES to a vision model, and "forward it to Anthropic" is a
+    #: different feature with a different body that nobody has asked for. A
+    #: derivation would have made the two indistinguishable and routed the VLM
+    #: the first time somebody typed the wrong class name.
+    routable: bool = False
 
 
 #: Every capability class this build knows, in report order.
@@ -206,6 +220,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
     CapabilityClass(
         name="clean",
         job_type="llm",
+        routable=True,
         purpose="cleanup and the other 9B-class text work",
         noun="qwen3.5 variants",
         candidates=_from_catalog(load_all_manifests, family="qwen3.5"),
@@ -217,6 +232,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
     CapabilityClass(
         name="translate",
         job_type="llm",
+        routable=True,
         purpose="translation, which needs a 27B-class model",
         noun="qwen3.8 variants",
         candidates=_from_catalog(load_all_manifests, family="qwen3.8"),
@@ -250,6 +266,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
     CapabilityClass(
         name="simplify",
         job_type="llm",
+        routable=True,
         purpose="simplification, which runs on the same 27B translation needs",
         noun="qwen3.8 variants",
         candidates=_from_catalog(load_all_manifests, family="qwen3.8"),
@@ -261,6 +278,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
     CapabilityClass(
         name="analysis",
         job_type="llm",
+        routable=True,
         purpose="structured analysis answers, on the same 27B",
         noun="qwen3.8 variants",
         candidates=_from_catalog(load_all_manifests, family="qwen3.8"),
@@ -323,6 +341,14 @@ CLASSES: tuple[CapabilityClass, ...] = (
 
 #: By name, for a lookup that refuses rather than returns None on a typo.
 BY_NAME: dict[str, CapabilityClass] = {entry.name: entry for entry in CLASSES}
+
+#: The classes a route may name, in report order. Read off the table's own
+#: `routable` field, so `[routes]`, `PUT /v1/settings` and the operator page
+#: all ask ONE thing which classes those are (ARCHITECTURE.md R1). The day a
+#: fifth becomes routable, the flag moves and every door follows.
+ROUTABLE_CLASSES: tuple[str, ...] = tuple(
+    entry.name for entry in CLASSES if entry.routable
+)
 
 
 def classes_for_job_type(job_type: str) -> tuple[CapabilityClass, ...]:
@@ -524,19 +550,60 @@ def decide_all(
     )
 
 
+def routed_row(row: CapabilityRow, model: str) -> CapabilityRow:
+    """One class's row, as it reads once the operator has routed it upstream.
+
+    PHASE15-HOST.md section 3.3. `selected` becomes the upstream model id —
+    *"which is exactly the `model` an app sends to `/v1/openai/chat/completions`"*
+    — and `enabled` becomes true, because `PUT /v1/settings` refuses to store a
+    route whose upstream is unconfigured, so a stored route is always servable.
+
+    **The local sentence is kept whole**, after `the local answer would be: `.
+    Nothing is lost when the operator routes back: the row is rebuilt from
+    `decide()` on the next write, and until then a reader can still see what
+    this host would do on its own. `shortfall_bytes` is zeroed with the same
+    honesty — nothing is short of anything when the work is not on this card.
+    """
+    return CapabilityRow(
+        capability=row.capability,
+        enabled=True,
+        selected=model,
+        reason=(
+            f"routed to {model.partition('/')[0]}; "
+            f"{LOCAL_ANSWER_PREFIX}{row.reason}"
+        ),
+        shortfall_bytes=0,
+    )
+
+
 def record(
     backend_kind: str,
     *,
     total_bytes: int,
     desktop_allowance_bytes: int,
     decisions: tuple[Decision, ...],
+    routes: dict[str, str],
 ) -> CapabilityRecord:
-    """The decisions, in the shape `config.toml` keeps them."""
+    """The decisions, in the shape `config.toml` keeps them, routes applied.
+
+    `routes` is REQUIRED and has no default, which is the whole point of it
+    being a parameter. A default of `{}` would mean every caller that forgot it
+    silently unrouted the server on its next capability write — and the callers
+    are `crucible capability --write`, `crucible install` and
+    `PUT /v1/settings`, all three of which rewrite the record of a server an
+    operator may have routed hours ago (PHASE15-HOST.md section 2: capability
+    is recomputed and re-written on every settings write that touches a route).
+    """
+    rows = []
+    for decision in decisions:
+        row = decision.row()
+        model = routes.get(decision.capability)
+        rows.append(row if model is None else routed_row(row, model))
     return CapabilityRecord(
         backend_kind=backend_kind,
         total_bytes=total_bytes,
         desktop_allowance_bytes=desktop_allowance_bytes,
-        rows=tuple(decision.row() for decision in decisions),
+        rows=tuple(rows),
     )
 
 
@@ -559,6 +626,9 @@ def job_type_enabled(job_type: str, decisions: tuple[Decision, ...]) -> bool:
 __all__ = [
     "BY_NAME",
     "CLASSES",
+    "LOCAL_ANSWER_PREFIX",
+    "ROUTABLE_CLASSES",
+    "routed_row",
     "Candidate",
     "CapabilityClass",
     "CatalogCandidates",

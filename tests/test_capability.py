@@ -286,6 +286,7 @@ def test_the_capability_record_round_trips_through_config_toml(home: Path) -> No
         total_bytes=THREE_NINETY,
         desktop_allowance_bytes=CUDA_RESERVE,
         decisions=decisions,
+        routes={},
     )
     _write(home, capability=written)
     read_back = load_config(home).capability
@@ -611,6 +612,7 @@ def test_the_capability_route_answers_every_class_and_its_reason(
         decisions=capability.decide_all(
             "cuda-linux", total_bytes=total, desktop_allowance_bytes=allowance
         ),
+        routes={},
     )
     with make_client(capability=decided) as instance:
         body = instance.get("/v1/capability", headers=auth)
@@ -658,6 +660,7 @@ def test_the_route_says_which_job_type_each_class_feeds_and_what_builds_it(
         decisions=capability.decide_all(
             "cuda-linux", total_bytes=total, desktop_allowance_bytes=allowance
         ),
+        routes={},
     )
     with make_client(capability=decided) as instance:
         record = instance.get("/v1/capability", headers=auth).json()
