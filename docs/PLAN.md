@@ -35,7 +35,27 @@ would lie while a streaming session holds the card, the claim is released off th
 loop with no publisher, and the consumer is the SDK. Clients poll `GET /v1/activity` until
 those three are settled.
 
-So what is left is not code. It is **a card, and Owen's rulings on the six things below.**
+**Landed since, 2026-09-13 (overnight).** Four pieces, each in its own commit:
+
+- **`crucible service install|uninstall|start|stop|status`** — PHASE5-APPS.md 6.0's ruling
+  made real: a systemd user unit on `cuda-linux`, a launchd agent on `mlx-darwin`, every
+  verb idempotent, linger REPORTED rather than assumed. The first real install found two
+  things a doctor run could not: a unit gets a bare PATH (so `install` records the
+  installing shell's, and every "tool missing" refusal now names the PATH it searched) and
+  `python -m crucible` from `$HOME` imports the checkout's `crucible/` directory instead of
+  the package (so `ExecStart` runs the console script, in `CRUCIBLE_HOME`).
+  `docs/PHASE11-SERVICE.md`.
+- **Per-model `[defaults]`, applied on the chat door** — `qwen3.5-9b` ships
+  `thinking = false`, which both apps have been carrying in their own code. A field the
+  request states wins, a field it omits takes the manifest's, and every response says
+  which in `X-Crucible-Sampling`. PHASE2-LLM.md section 9 is the contract to hand Foundry.
+- **The `denoise` job type** — audio-separator sharing the rvc env, one audio file in, its
+  stems out, with the three invariants BookForge measured (native rate in, exactly one
+  primary stem, same length sample for sample). PHASE4-AUDIO.md section 4.2.
+- **urvc's base assets are pulled** — owed ruling 3 below, answered by reading the engine:
+  its own first-run downloader names a HuggingFace repo. `crucible rvc pull-base`.
+
+So what is left is not code. It is **a card, and Owen's rulings on the five things below.**
 
 ### Owed, and only a free card discharges it
 - `scripts/keeper-tts-live.sh` on the PC and the Mac: render a chapter, measure the peak,
