@@ -26,7 +26,7 @@ from crucible import accelerator, jobenv, residency as residency_module, weights
 from crucible.accelerator import GIB, ComputeApp
 from crucible.jobs import ALL_JOB_TYPES
 from crucible.residency import KIND_LLM, KIND_TTS, ResidentVoice
-from crucible.voices import load_voice
+from crucible.voices import NARRATOR_ENGINE_SAMPLING, load_voice
 
 from .conftest import FAKE_BACKEND, parse_sse
 
@@ -47,7 +47,7 @@ RECIPE_PINS = {"narrator": "0.1.0", "torch": "2.13.0"}
 def tts_recipes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "recipes"
     (root / "tts").mkdir(parents=True)
-    for engine in ("higgs-v3", "orpheus"):
+    for engine in sorted(NARRATOR_ENGINE_SAMPLING):
         (root / "tts" / f"{engine}-{FAKE_BACKEND.kind}.txt").write_text(
             "".join(f"{name}=={version}\n" for name, version in RECIPE_PINS.items()),
             encoding="utf-8",

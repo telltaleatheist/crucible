@@ -39,6 +39,7 @@ from crucible.engines.narrator import (
 )
 from crucible.engines.vllm import VllmEngine
 from crucible.errors import JobCancelled
+from crucible.ttsstream import STREAM_BATCH_WIDTH
 from crucible.narratorvoices import (
     DOCUMENT_VARIABLE,
     MLX_MODEL_VARIABLE,
@@ -51,6 +52,17 @@ from .fake_narrator_engine import FAKE_NARRATOR, FakeNarratorEngine
 from .test_voices import GOOD
 
 BATCH_TERMINAL = frozenset({"batch_done"})
+
+#: A narrator engine id this build does NOT name. Owen's ruling of 2026-09-14
+#: left `higgs-v3` as the only entry in `voices.NARRATOR_ENGINE_SAMPLING`, so
+#: two of `NarratorEngine`'s refusals — a voices document handed to an engine
+#: that reads none, and a serving stack given to an engine that starts none —
+#: can no longer be reached THROUGH `build_voice_engine`, which refuses an
+#: unnamed engine first. They are the rules the NEXT engine arrives into, they
+#: fire in the constructor, and so they are proved by constructing it directly.
+#: Deleting them instead would mean the second engine's first render finds out
+#: at the spawn what a constructor could have said.
+A_FUTURE_ENGINE = "an-engine-with-no-document"
 
 
 def a_document(
@@ -124,7 +136,7 @@ def up(engine: FakeNarratorEngine, weights: Path) -> FakeNarratorEngine:
 def test_the_argv_is_narrator_serve_and_nothing_else() -> None:
     """narrator takes no configuration on the command line, so neither does this."""
     built = NarratorEngine(
-        narrator_engine="orpheus",
+        narrator_engine=A_FUTURE_ENGINE,
         python=Path("/opt/env/bin/python"),
         log_path=Path("/tmp/x.log"),
         serving_stack=None,
@@ -139,7 +151,7 @@ def test_the_argv_is_narrator_serve_and_nothing_else() -> None:
     # The voice, the weights directory and the port are deliberately absent: the
     # first two ride the `load` message, and narrator binds nothing.
     assert "owen" not in built.command(Path("/weights"), "owen", 7100, [])
-    assert built.environment()[ENGINE_VARIABLE] == "orpheus"
+    assert built.environment()[ENGINE_VARIABLE] == A_FUTURE_ENGINE
 
 
 def a_venv(tmp_path: Path, name: str = "tts-higgs-v3") -> Path:
@@ -200,16 +212,24 @@ def test_a_higgs_worker_without_a_document_is_refused_by_name(
         assert "narratorvoices" in str(caught.value)
 
 
-def test_a_document_for_orpheus_is_refused_by_name(tmp_path: Path) -> None:
-    """orpheus takes its weights on the load message and reads no
-    NARRATOR_HIGGS_* variable; a document handed to it is a statement of where
-    the weights are that nothing reads."""
+def test_a_document_for_an_engine_that_reads_none_is_refused(tmp_path: Path) -> None:
+    """An engine outside `DOCUMENT_READERS` takes its weights on the load
+    message and reads no NARRATOR_HIGGS_* variable; a document handed to it is
+    a statement of where the weights are that nothing reads.
+
+    Constructed directly rather than through `build_voice_engine`: see
+    `A_FUTURE_ENGINE`."""
     with pytest.raises(EngineError) as caught:
-        build_voice_engine(
-            "orpheus", a_venv(tmp_path, "tts-orpheus"), tmp_path / "x.log",
-            serving_stack=None, max_num_seqs=None,
-            voices=a_document(tmp_path, tmp_path / "weights"))
-    assert "orpheus takes its weights on the load message" in str(caught.value)
+        NarratorEngine(
+            narrator_engine=A_FUTURE_ENGINE,
+            python=a_venv(tmp_path, "tts-future"),
+            log_path=tmp_path / "x.log",
+            serving_stack=None,
+            max_num_seqs=None,
+            voices=a_document(tmp_path, tmp_path / "weights"),
+        )
+    assert "takes its weights on the load message" in str(caught.value)
+    assert "'higgs-v3'" in str(caught.value)
 
 
 def test_the_width_is_a_string_because_an_environment_holds_strings(
@@ -261,25 +281,22 @@ def test_an_interpreter_that_is_not_in_a_venv_is_refused(tmp_path: Path) -> None
 def test_an_arm_that_starts_no_server_is_told_none_of_the_three(
     tmp_path: Path,
 ) -> None:
-    """`mlx-darwin` renders in process (`HiggsV3MlxEngine` reads neither
-    HIGGS_STACK nor HIGGS_MAX_NUM_SEQS) and `orpheus` loads vLLM 0.7.3 itself.
-    Three levers read by nothing is how a Mac spawn ends up looking served.
+    """`mlx-darwin` renders in process — `HiggsV3MlxEngine` reads neither
+    HIGGS_STACK nor HIGGS_MAX_NUM_SEQS, and there is no launch script for
+    HIGGS_ENV to mean anything to. Three levers read by nothing is how a Mac
+    spawn ends up looking served.
 
     The DOCUMENT is not one of the three: the MLX arm reads it exactly as the
     served arm does, which is what the keeper found on the Mac."""
-    for engine_id in ("higgs-v3", "orpheus"):
-        document = (
-            a_document(tmp_path, tmp_path / "weights") if engine_id == "higgs-v3"
-            else None
-        )
-        built = build_voice_engine(
-            engine_id, a_venv(tmp_path, f"tts-{engine_id}"), tmp_path / "x.log",
-            serving_stack=None, max_num_seqs=16, voices=document)
-        environment = built.environment()
-        assert environment[ENGINE_VARIABLE] == engine_id
-        for name in (STACK_VARIABLE, ENV_PREFIX_VARIABLE, MAX_NUM_SEQS_VARIABLE):
-            assert name not in environment, (engine_id, name)
-        assert (DOCUMENT_VARIABLE in environment) == (document is not None)
+    document = a_document(tmp_path, tmp_path / "weights")
+    built = build_voice_engine(
+        "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
+        serving_stack=None, max_num_seqs=16, voices=document)
+    environment = built.environment()
+    assert environment[ENGINE_VARIABLE] == "higgs-v3"
+    for name in (STACK_VARIABLE, ENV_PREFIX_VARIABLE, MAX_NUM_SEQS_VARIABLE):
+        assert name not in environment, name
+    assert environment[DOCUMENT_VARIABLE] == str(document.path)
 
 
 def test_a_stack_on_an_engine_that_has_none_is_refused(tmp_path: Path) -> None:
@@ -287,9 +304,14 @@ def test_a_stack_on_an_engine_that_has_none_is_refused(tmp_path: Path) -> None:
     leave the env recipe and the engine disagreeing about what that env
     starts."""
     with pytest.raises(EngineError) as caught:
-        build_voice_engine(
-            "orpheus", a_venv(tmp_path, "tts-orpheus"), tmp_path / "x.log",
-            serving_stack="vllm-omni", max_num_seqs=16, voices=None)
+        NarratorEngine(
+            narrator_engine=A_FUTURE_ENGINE,
+            python=a_venv(tmp_path, "tts-future"),
+            log_path=tmp_path / "x.log",
+            serving_stack="vllm-omni",
+            max_num_seqs=16,
+            voices=None,
+        )
     assert "serving_stack='vllm-omni'" in str(caught.value)
 
 
@@ -331,18 +353,25 @@ def test_an_engine_this_build_cannot_start_is_refused_by_name() -> None:
             "higgs-v2", Path(sys.executable), Path("/tmp/x.log"),
             serving_stack=None, max_num_seqs=None, voices=None)
     assert "unknown narrator engine 'higgs-v2'" in str(caught.value)
-    assert "['higgs-v3', 'orpheus']" in str(caught.value)
+    assert "['higgs-v3']" in str(caught.value)
 
 
 def test_every_engine_a_manifest_may_name_is_one_this_build_can_start() -> None:
-    """The two tables are written in two files and must not drift.
+    """The three tables are written in three files and must not drift.
 
     `crucible/voices.py` decides what a manifest's `narrator_engine` may say;
-    this file decides what `build_voice_engine` will start. A voice naming an
-    engine the second table lacks would pass every manifest check and fail at the
-    spawn, which is the worst possible place to find out.
+    `crucible/engines/__init__.py` decides what `build_voice_engine` will
+    start; `crucible/ttsstream.py` decides how wide the streaming door batches
+    it. A voice naming an engine the second table lacks would pass every
+    manifest check and fail at the spawn; one the third lacks would pass the
+    spawn and fail the first `say`. Both are the worst possible places to find
+    out, and both are a table somebody added a row to and not the others.
+
+    `tests/test_jobenv.py` compares the same list against the recipes on disk,
+    which is the fourth place an engine has to exist before it is real.
     """
     assert set(NARRATOR_ENGINE_SAMPLING) == set(NARRATOR_ENGINES)
+    assert set(NARRATOR_ENGINE_SAMPLING) == set(STREAM_BATCH_WIDTH)
 
 
 def test_there_is_no_base_url_and_saying_so_is_the_point(
@@ -461,17 +490,18 @@ def test_a_load_sends_narrators_own_message_and_returns_its_answer(
     assert "caps" not in message
 
 
-def test_an_orpheus_load_carries_the_weights_on_the_message(
+def test_a_load_with_no_document_carries_the_weights_on_the_message(
     tmp_path: Path,
     weights: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """orpheus takes `modelDir` on the load and has no document — the shape it
-    always had, kept byte for byte."""
+    """An engine outside `DOCUMENT_READERS` takes `modelDir` on the load — the
+    shape narrator's wire has always had, kept byte for byte for the engine
+    after `higgs-v3` (see `A_FUTURE_ENGINE`)."""
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_TRANSCRIPT", str(transcript))
     built = FakeNarratorEngine(
-        narrator_engine="orpheus",
+        narrator_engine=A_FUTURE_ENGINE,
         python=Path(sys.executable),
         log_path=tmp_path / "engine-owen.log",
         serving_stack=None,

@@ -160,8 +160,8 @@ SAMPLE_RATE = 24_000
 TONE_HZ = 440.0
 
 #: The `pads` and `edgeFadeMs` a real `loaded` line carries. Higgs v3 bakes no silence
-#: into a chunk and Orpheus does; Crucible must not care, and carrying the fields here
-#: is how "must not care" gets to be a tested claim rather than an assumption.
+#: into a chunk and another engine may; Crucible must not care, and carrying the fields
+#: here is how "must not care" gets to be a tested claim rather than an assumption.
 LOADED_PADS = {"head": 0.0, "tail": 0.0}
 LOADED_EDGE_FADE_MS = {"in": 5, "out": 5}
 
@@ -410,7 +410,8 @@ def _refuse_load_as_narrator_would(message: dict) -> str | None:
     narrator's, near enough that a Crucible-side test asserting on one would
     also match the real worker's.
 
-    `orpheus` keeps the message it always had: `modelDir` on the load, no
+    An engine outside `DOCUMENT_READERS` keeps the message narrator's wire
+    always had: `modelDir` on the load, no
     document at all.
     """
     if _engine != "higgs-v3":

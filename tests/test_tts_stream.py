@@ -675,9 +675,9 @@ def test_a_cancel_costs_its_batch_and_the_survivors_are_restarted(
 
     **This test patches the batch width**, and that is deliberate rather than
     convenient. Every voice this build ships declares `narrator_engine =
-    "higgs-v3"`, whose measured width is 1, so the survivor branch is
-    unreachable through a manifest today — and it is exactly the branch that
-    will run the day an Orpheus voice lands, where the ramp dispatches 8.
+    "higgs-v3"`, the only engine this build names and the one whose measured
+    width is 1, so the survivor branch is unreachable through a manifest today
+    — and it is exactly the branch that will run the day a wider engine lands.
     narrator has no per-row cancel: its `cancel` aborts everything in flight. So
     a cancel of one in-flight row costs its whole batch, and the rows nobody
     cancelled are resubmitted with a `restart` frame saying the audio already
@@ -993,9 +993,11 @@ def test_a_narrator_row_that_fails_on_its_own_is_reported_not_restarted(
 def test_the_batch_width_has_no_default_for_an_unmeasured_engine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Guessing 1 halves Orpheus; guessing 16 multiplies a cancel's cost."""
+    """A guess is wrong in both directions: too low halves throughput, too
+    high multiplies the cost of a cancel. The table has one row and the
+    refusal is what keeps the second engine from arriving without a
+    measurement."""
     assert ttsstream.batch_width_for("higgs-v3") == 1
-    assert ttsstream.batch_width_for("orpheus") == 8
     with pytest.raises(Exception) as caught:
         ttsstream.batch_width_for("some-engine-nobody-measured")
     assert getattr(caught.value, "code", None) == "unknown_narrator_engine"

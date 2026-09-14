@@ -71,17 +71,10 @@ def swap(old: str, new: str) -> str:
 
 
 #: The good manifest with the `[voice.serving]` table removed. `max_num_seqs`
-#: is a HIGGS_* variable and narrator's orpheus engine reads none of them, so a
-#: manifest that swaps the engine must drop the table with it or be refused for
-#: that rather than for whatever the test is about.
+#: is a HIGGS_* variable, so a manifest naming an engine that reads none of
+#: them must drop the table with it — and the fixture exists so a test about
+#: the missing table is not also a test about the engine.
 SERVING_TABLE = GOOD[GOOD.index("[voice.serving]"):GOOD.index("[voice.backends")]
-
-
-def as_orpheus(text: str | None = None) -> str:
-    base = GOOD if text is None else text
-    return base.replace(
-        'narrator_engine = "higgs-v3"', 'narrator_engine = "orpheus"'
-    ).replace(SERVING_TABLE, "")
 
 
 # ------------------------------------------------------------------ the base
@@ -162,7 +155,7 @@ def test_an_unknown_kind_is_refused() -> None:
 def test_an_unknown_narrator_engine_is_refused() -> None:
     message = refused(swap('narrator_engine = "higgs-v3"', 'narrator_engine = "xtts"'))
     assert "'xtts' is not one of narrator's engines" in message
-    assert "['higgs-v3', 'orpheus']" in message
+    assert "['higgs-v3']" in message
 
 
 def test_a_zero_sample_rate_is_refused() -> None:
@@ -442,17 +435,6 @@ def test_an_unknown_serving_key_is_refused() -> None:
     )
 
 
-def test_an_orpheus_voice_may_not_declare_one() -> None:
-    """It reads no HIGGS_* variable, so the number would configure nothing —
-    a lever that reports success."""
-    message = refused(
-        GOOD.replace(
-            'narrator_engine = "higgs-v3"', 'narrator_engine = "orpheus"'
-        )
-    )
-    assert "reads no HIGGS_* variable" in message
-
-
 def test_every_shipped_higgs_voice_declares_one() -> None:
     """Not a fixture: the real manifests. A voice that loads but cannot be
     started is a row on /v1/voices that fails at the spawn."""
@@ -461,24 +443,6 @@ def test_every_shipped_higgs_voice_declares_one() -> None:
             assert voice.serving is not None, voice.id
             assert voice.serving.max_num_seqs >= 1, voice.id
             assert voice.serving.max_num_seqs_note.strip(), voice.id
-
-
-def test_orpheus_takes_no_top_k() -> None:
-    """The two engines' sampling vocabularies are not interchangeable."""
-    message = refused(as_orpheus())
-    assert "unknown key(s) ['top_k']" in message
-
-
-def test_an_orpheus_voice_at_its_own_default_needs_no_reason() -> None:
-    voice = parse(
-        as_orpheus().replace(
-            "sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }",
-            "sampling = { temperature = 0.6, top_p = 0.8, min_p = 0.0, "
-            "repetition_penalty = 1.1 }",
-        )
-    )
-    assert voice.spec("cuda-linux").sampling_reason is None
-    assert voice.spec("cuda-linux").sampling == NARRATOR_ENGINE_SAMPLING["orpheus"]
 
 
 # -------------------------------------------------------------------- clips

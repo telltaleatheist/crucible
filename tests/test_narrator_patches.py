@@ -220,8 +220,8 @@ def test_no_venv_at_all_is_its_own_answer(tmp_path: Path) -> None:
 
 
 def test_the_patches_belong_to_the_higgs_env(tmp_path: Path) -> None:
-    """Orpheus's env needs neither: both are edits to the vllm-omni stack Higgs
-    v3 serves through."""
+    """Both are edits to the vllm-omni stack Higgs v3 serves through, so an
+    engine on another stack needs neither."""
     assert narratorpatches.PATCHED_ENGINE == "higgs-v3"
 
 

@@ -13,6 +13,7 @@ from crucible import cli, jobenv, pairing
 from crucible.config import config_path, load_config
 from crucible.errors import NoViableBackend
 from crucible.interfaces import InterfaceError
+from crucible.voices import NARRATOR_ENGINE_SAMPLING
 
 from .conftest import FAKE_BACKEND
 
@@ -236,7 +237,7 @@ def test_doctor_reports_one_tts_env_per_narrator_engine(
     assert cli.main(["doctor", "--json"]) == 1
     report = json.loads(capsys.readouterr().out)
     assert report["config"]["enable_tts"] is True
-    assert sorted(report["tts_envs"]) == ["higgs-v3", "orpheus"]
+    assert sorted(report["tts_envs"]) == ["higgs-v3"]
     for engine, entry in report["tts_envs"].items():
         assert entry["installed"] is False
         assert f"envs/tts-{engine}" in entry["detail"]
@@ -315,16 +316,19 @@ def test_this_build_ships_a_tts_recipe_for_every_env_a_voice_can_need(
 ) -> None:
     """One recipe per (narrator engine, backend), which is not one per backend.
 
-    Orpheus pins `vllm==0.7.3` for its per-request logits processors and Higgs v3
-    needs `vllm-omni` against a far later torch, so on cuda-linux the two cannot
-    share a venv. On mlx-darwin they genuinely do, and both names resolve to the
+    Each narrator engine pins its own serving stack against its own torch, so
+    on cuda-linux two of them cannot share a venv and the engine is in the env's
+    name. On mlx-darwin they genuinely do share, and every name resolves to the
     one `mlx-darwin` recipe.
+
+    `tests/test_jobenv.py`'s drift guard is the stronger form of this — it
+    compares the named engines against the recipe FILES in both directions.
     """
-    for engine in ("higgs-v3", "orpheus"):
+    for engine in sorted(NARRATOR_ENGINE_SAMPLING):
         assert jobenv.recipe_for(jobenv.tts_env(engine, "cuda-linux")).is_file()
     mac = {
         jobenv.recipe_for(jobenv.tts_env(engine, "mlx-darwin"))
-        for engine in ("higgs-v3", "orpheus")
+        for engine in sorted(NARRATOR_ENGINE_SAMPLING)
     }
     assert len(mac) == 1
 
@@ -339,7 +343,6 @@ def test_every_tts_recipe_pins_narrator_by_a_commit(home: Path, viable: None) ->
     """
     for spec in (
         jobenv.tts_env("higgs-v3", "cuda-linux"),
-        jobenv.tts_env("orpheus", "cuda-linux"),
         jobenv.tts_env("higgs-v3", "mlx-darwin"),
     ):
         recipe = jobenv.recipe_for(spec)
@@ -348,23 +351,23 @@ def test_every_tts_recipe_pins_narrator_by_a_commit(home: Path, viable: None) ->
         assert len(references["narrator"]) == 40
 
 
-def test_the_orpheus_recipe_pins_the_last_vllm_that_takes_a_logits_processor(
+def test_the_tts_recipes_pin_the_stack_each_arm_measured(
     home: Path, viable: None
 ) -> None:
-    """0.7.3 is a hard pin, not a floor: above it the EOS boost silently stops
-    applying, because V1 has no per-request logits processor at all."""
-    pins = jobenv.recipe_pins(
-        jobenv.recipe_for(jobenv.tts_env("orpheus", "cuda-linux"))
-    )
-    assert pins["vllm"] == "0.7.3"
-    assert pins["torch"] == "2.5.1"
+    """The numbers a `tts` env is only good at, restated where a change shows.
+
+    cuda-linux: vllm-omni 0.28.0 against vllm 0.28.0, which is the stack
+    `jobenv.CUDA_LINUX_SERVING_STACK` names and `HIGGS_STACK` tells narrator to
+    start. mlx-darwin: mlx-lm 0.31.3 (below it `GenerationBatch` does not
+    exist and the batched fast path refuses) and mlx-audio 0.4.8, whose ceiling
+    the recipe's own header now marks as owed a re-measurement.
+    """
     higgs = jobenv.recipe_pins(
         jobenv.recipe_for(jobenv.tts_env("higgs-v3", "cuda-linux"))
     )
     assert higgs["vllm"] == "0.28.0"
     assert higgs["vllm-omni"] == "0.28.0"
-    # And the Mac's one version of mlx-audio that can render Orpheus at all.
-    mac = jobenv.recipe_pins(jobenv.recipe_for(jobenv.tts_env("orpheus", "mlx-darwin")))
+    mac = jobenv.recipe_pins(jobenv.recipe_for(jobenv.tts_env("higgs-v3", "mlx-darwin")))
     assert mac["mlx-audio"] == "0.4.8"
     assert mac["mlx-lm"] == "0.31.3"
 
@@ -432,7 +435,7 @@ def test_doctor_runs_with_every_job_type_enabled(
 
     assert report["llm_env"]["installed"] is False
     assert "crucible install llm" in report["llm_env"]["detail"]
-    assert set(report["tts_envs"]) == {"higgs-v3", "orpheus"}
+    assert set(report["tts_envs"]) == {"higgs-v3"}
     assert [row["job_type"] for row in report["worker_envs"]] == [
         "align", "asr", "rvc",
     ]

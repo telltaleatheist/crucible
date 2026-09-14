@@ -5,9 +5,9 @@ reads *about* an env, which is what decides whether a load is refused with
 `env_missing`.
 
 The `tts` envs are here too, because their naming rule is the interesting half:
-`cuda-linux` has one venv per narrator engine and `mlx-darwin` has one for both
-(PHASE3-TTS.md section 4), and a rule with a branch in it is a rule that needs a
-test on each side.
+`cuda-linux` names one venv per narrator engine and `mlx-darwin` has one for
+every engine (PHASE3-TTS.md section 4), and a rule with a branch in it is a rule
+that needs a test on each side.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import pytest
 
 from crucible import jobenv
 from crucible.jobenv import (
+    BACKEND_HEADLINE_PACKAGE,
     EnvError,
     env_dir,
     env_status,
@@ -29,6 +30,22 @@ from crucible.jobenv import (
     require_env,
     tts_env,
 )
+from crucible.voices import NARRATOR_ENGINE_SAMPLING
+
+
+def tts_specs() -> list[jobenv.EnvSpec]:
+    """Every `tts` env this build can be asked to install, deduplicated.
+
+    Read off `NARRATOR_ENGINE_SAMPLING` and `BACKEND_HEADLINE_PACKAGE` rather
+    than typed out, so a test cannot keep passing about an engine the server
+    stopped naming — or quietly skip one it started naming.
+    """
+    seen: dict[str, jobenv.EnvSpec] = {}
+    for engine in sorted(NARRATOR_ENGINE_SAMPLING):
+        for backend in sorted(BACKEND_HEADLINE_PACKAGE):
+            spec = tts_env(engine, backend)
+            seen.setdefault(spec.recipe_name, spec)
+    return list(seen.values())
 
 
 def stamp_env(home: Path, backend_kind: str) -> Path:
@@ -81,23 +98,47 @@ def test_every_requirement_in_every_recipe_is_pinned() -> None:
             assert version, f"{backend}: {name} has no version"
 
 
+def test_the_engines_the_server_names_are_exactly_the_engines_with_a_recipe() -> None:
+    """THE DRIFT GUARD. A listed engine with no recipe is an unservable choice.
+
+    Crucible listed `orpheus` as a narrator engine from PHASE3-TTS.md until
+    Owen's ruling of 2026-09-14, and the operator page built on 2026-09-13 drew
+    its `tts` engine picker straight off that list — so the page offered an
+    engine the server would never serve. The defect was not the engine; it was
+    that the list of engines and the recipes on disk were two answers to "what
+    can this host install" with nothing comparing them (docs/ARCHITECTURE.md
+    section 1).
+
+    This is the comparison, in BOTH directions:
+
+    - every engine the server names resolves to a recipe FILE on every backend,
+      so no picker can offer a choice `crucible install tts` cannot build;
+    - every recipe file under `envs/tts/` is named by one of those pairs, so a
+      recipe for a deleted engine cannot linger and read as support for it.
+    """
+    named = sorted(NARRATOR_ENGINE_SAMPLING)
+    assert named, "a build that names no narrator engine can serve no voice"
+    for engine in named:
+        for backend in sorted(BACKEND_HEADLINE_PACKAGE):
+            recipe = recipe_for(tts_env(engine, backend))
+            assert recipe.is_file(), f"{engine} on {backend}: no {recipe.name}"
+    assert {spec.recipe_name for spec in tts_specs()} == {
+        path.stem for path in recipes_dir("tts").glob("*.txt")
+    }
+
+
 def test_every_tts_recipe_pins_the_same_narrator_commit() -> None:
     """narrator is ONE package, and a recipe is a statement about bytes.
 
-    The three `tts` recipes each carry their own direct reference because each
-    names a different extra, so the sha is written three times — and three
-    copies of one fact is the shape `docs/ARCHITECTURE.md` §1 names. A bump that
-    lands on two of the three gives a host whose Higgs env speaks one wire and
-    whose Orpheus env speaks another, and `crucible doctor` calls both installed
-    because each matches the recipe that built it.
+    Every `tts` recipe carries its own direct reference because each names a
+    different extra, so the sha is written once per recipe — and N copies of
+    one fact is the shape `docs/ARCHITECTURE.md` §1 names. A bump that lands on
+    some of them gives a host whose envs speak two wires, and `crucible doctor`
+    calls both installed because each matches the recipe that built it.
     """
     shas = {
         spec.recipe_name: jobenv.recipe_direct_references(recipe_for(spec))["narrator"]
-        for spec in (
-            tts_env("higgs-v3", "cuda-linux"),
-            tts_env("orpheus", "cuda-linux"),
-            tts_env("higgs-v3", "mlx-darwin"),
-        )
+        for spec in tts_specs()
     }
     assert len(set(shas.values())) == 1, shas
 
@@ -108,14 +149,15 @@ def test_the_serving_stack_is_the_recipe_s_and_only_cuda_higgs_has_one() -> None
     It is stated from the ENV SPEC rather than from the voice, because which
     server narrator can start is a property of what the recipe installed:
     `higgs-v3-cuda-linux.txt` carries `vllm-omni==0.28.0` and no SGLang at all.
-    `None` on the other two is a real answer, not a gap — on `mlx-darwin`
-    narrator renders in process and reads none of it, and `orpheus` loads vLLM
-    0.7.3 itself.
+    `None` on `mlx-darwin` is a real answer, not a gap: narrator renders in
+    process there and reads none of it. So is `None` for an engine with no row
+    in `CUDA_LINUX_SERVING_STACK` — one that loads its own runtime.
     """
     assert tts_env("higgs-v3", "cuda-linux").serving_stack == "vllm-omni"
-    assert tts_env("orpheus", "cuda-linux").serving_stack is None
     assert tts_env("higgs-v3", "mlx-darwin").serving_stack is None
-    assert tts_env("orpheus", "mlx-darwin").serving_stack is None
+    # An engine with no row in the table starts no server, and the lookup says
+    # so rather than raising. This is the shape the next engine arrives in.
+    assert tts_env("not-an-engine", "cuda-linux").serving_stack is None
     assert llm_env("cuda-linux").serving_stack is None
 
 

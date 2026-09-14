@@ -28,9 +28,13 @@ from crucible.narratorvoices import (
     voice_entry,
     write_document,
 )
-from crucible.voices import load_all_voices, parse_voice
+from crucible.voices import (
+    NARRATOR_ENGINE_SAMPLING,
+    load_all_voices,
+    parse_voice,
+)
 
-from .test_voices import GOOD, as_orpheus
+from .test_voices import GOOD
 
 CUDA = "cuda-linux"
 MLX = "mlx-darwin"
@@ -214,22 +218,14 @@ def test_a_zeroshot_voice_is_refused_by_name(tmp_path: Path) -> None:
     assert "section 6" in str(caught.value)
 
 
-def test_an_orpheus_manifest_gets_no_document() -> None:
-    """orpheus takes its weights on the load message and reads no
-    NARRATOR_HIGGS_* variable. The set of readers is the rule the residency
-    branches on, and the writer refuses anything outside it."""
+def test_the_document_readers_are_the_rule_the_writer_refuses_from() -> None:
+    """The set of readers is what the residency branches on and what the
+    writer refuses anything outside — and since Owen's ruling of 2026-09-14 it
+    holds every engine Crucible names, so nothing a manifest can say is
+    refused here today. The rule stays stated, because the engine after
+    `higgs-v3` is the one it is for."""
     assert DOCUMENT_READERS == frozenset({"higgs-v3"})
-    manifest = manifest_of(
-        as_orpheus().replace(
-            "sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }",
-            "sampling = { temperature = 0.6, top_p = 0.8, min_p = 0.0, "
-            "repetition_penalty = 1.1 }",
-        )
-    )
-    with pytest.raises(NarratorVoicesError) as caught:
-        voice_entry(manifest, manifest.spec(CUDA), Path("/w"))
-    assert "'orpheus'" in str(caught.value)
-    assert DOCUMENT_VARIABLE in str(caught.value)
+    assert DOCUMENT_READERS >= set(NARRATOR_ENGINE_SAMPLING)
 
 
 # ----------------------------------------------------------------- the file
