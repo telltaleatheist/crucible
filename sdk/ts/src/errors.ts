@@ -227,6 +227,53 @@ export class CrucibleBusy extends CrucibleRefused {
 }
 
 /**
+ * 409 `server_busy` from the OPERATOR door: something holds the card and an
+ * install may not start. PHASE13-OPERATOR.md section 3.3.
+ *
+ * **The same code as {@link CrucibleBusy} and a different shape**, which is not
+ * an accident and is not drift. `POST /v1/jobs` asks one question — *is the
+ * lane free?* — and there is exactly one kind of answer, a job. `POST /v1/tasks`
+ * asks a different one — *is anything at all using the card?* — and there are
+ * FOUR kinds of holder (`crucible/settle.py`): a job, a lease, a streaming
+ * claim, a chat in flight. Flattening those into the job shape would mean
+ * inventing a `job_id` for a lease, and giving them four codes would make a
+ * client learn four words for "not now".
+ *
+ * So the body says which, in `details.fact`, and carries that fact's OWN
+ * fields beside it — a job's are `POST /v1/jobs`' verbatim, a lease's are the
+ * ones a `409 leased` and a lease receipt already carry. `fact` is what the
+ * client discriminates on, and its presence is what tells this type from
+ * {@link CrucibleBusy}.
+ *
+ * {@link who} is the sentence the server wrote, and an app's row is expected to
+ * show it verbatim — *"held by foundry — translate, qwen3.8-27b-4bit"*. An
+ * operator shown a dead button with no name concludes the button is broken.
+ */
+export class CrucibleCardHeld extends CrucibleRefused {
+  /** `a job`, `a lease`, `the claim` or `a chat`. */
+  readonly fact: string;
+  /** Who, in the server's own words. Never null: a fact that holds has a holder. */
+  readonly who: string;
+
+  constructor(
+    status: number,
+    code: string,
+    serverMessage: string,
+    details: unknown,
+    fields: { fact: string; who: string },
+  ) {
+    super(status, code, serverMessage, details);
+    this.fact = fields.fact;
+    this.who = fields.who;
+  }
+
+  /** "held by a lease: 'foundry/owens-pc' for 'translate'" — one line, for a row. */
+  get heldLine(): string {
+    return `held by ${this.fact}: ${this.who}`;
+  }
+}
+
+/**
  * The server's code for "somebody has said they are mid-run on this".
  *
  * Exported for {@link SERVER_BUSY}'s reason: the mapping turns exactly this code
@@ -330,6 +377,44 @@ export class CrucibleLeased extends CrucibleRefused {
 }
 
 /**
+ * The code a malformed pairing line is refused with.
+ *
+ * Exported for {@link SERVER_BUSY}'s reason: a connect door comparing
+ * `error.code` should compare against one spelling of it.
+ */
+export const INVALID_PAIRING = 'invalid_pairing';
+
+/**
+ * A pasted `crucible://` line is not one. PHASE13-OPERATOR.md sections 2.1, 5.1.
+ *
+ * **Not a {@link CrucibleRefused}**, because no server refused anything: this
+ * is thrown by {@link parsePairing}, which is pure and runs before a client
+ * exists. It is also not a {@link CrucibleConfigError}, whose contract is "a
+ * required option of `new CrucibleClient` is missing" — a bad paste is a
+ * person's typo in a field, and a connect door shows it beside that field
+ * rather than in a configuration error.
+ *
+ * `line` is the line with its **fragment elided**, because the fragment is the
+ * token and this error is exactly the kind an app logs.
+ */
+export class CruciblePairingError extends CrucibleError {
+  readonly code = INVALID_PAIRING;
+  /** The offending line, with everything after `#` replaced by `…`. */
+  readonly line: string;
+  /** What was wrong with its shape. */
+  readonly detail: string;
+
+  constructor(detail: string, line: string) {
+    super(
+      `that is not a Crucible pairing line (${INVALID_PAIRING}): ${detail}` +
+        (line === '' ? '' : ` — got ${line}`),
+    );
+    this.detail = detail;
+    this.line = line;
+  }
+}
+
+/**
  * Would this refusal be different on a different server?
  *
  * The fact this answers has exactly one honest owner — the server that emits the
@@ -380,9 +465,21 @@ export function isServerSpecificRefusal(code: string): boolean {
  *   {@link CrucibleAcceleratorUnreadable}, which must never be read as an answer
  *   about the card at all.
  *
- * Everything else — `invalid_request`, `unknown_job_type`, `unknown_blob`,
- * `unknown_job`, `job_not_cancellable` — is about what was asked or about state
- * that only exists on the server already spoken to, and travels no better.
+ * Three more arrived with the operator door (PHASE13-OPERATOR.md section 3.3),
+ * and each is about THIS machine:
+ *
+ * - `task_busy` — this server is already running an operator task. Another
+ *   server's task lane is its own.
+ * - `already_installed` / `job_type_installed` — the weights or the env are on
+ *   THIS disk. A `waitFor: "any"` walk setting up a fleet should move to the
+ *   next machine rather than stop, because the next machine may well need it.
+ *
+ * Everything else — `invalid_request`, `unknown_job_type`, `unknown_subject`,
+ * `invalid_module`, `narrator_engine_required`, `narrator_engine_refused`,
+ * `unknown_blob`, `unknown_job`, `unknown_task`, `job_not_cancellable`,
+ * `not_running` — is about what was asked, or about state that only exists on
+ * the server already spoken to, and travels no better. A misspelled subject id
+ * is misspelled everywhere.
  */
 const SERVER_SPECIFIC_REFUSALS: ReadonlySet<string> = new Set([
   SERVER_BUSY,
@@ -394,6 +491,9 @@ const SERVER_SPECIFIC_REFUSALS: ReadonlySet<string> = new Set([
   'not_resident',
   'unknown_model',
   'env_missing',
+  'task_busy',
+  'already_installed',
+  'job_type_installed',
 ]);
 
 /** 5xx: the server broke. The client never retries one of these. */

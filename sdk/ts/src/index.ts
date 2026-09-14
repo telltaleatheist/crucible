@@ -28,19 +28,25 @@ export {
   CrucibleAuthError,
   CrucibleBusy,
   CrucibleCapabilityUndecided,
+  CrucibleCardHeld,
   CrucibleConfigError,
   CrucibleError,
   CrucibleLeased,
   CrucibleNotACrucible,
+  CruciblePairingError,
   CrucibleProtocolError,
   CrucibleRefused,
   CrucibleServerError,
   CrucibleUnreachable,
   CrucibleVersionError,
+  INVALID_PAIRING,
   LEASED,
   SERVER_BUSY,
   isServerSpecificRefusal,
 } from './errors.js';
+
+export { PAIRING_SCHEME, parsePairing } from './pairing.js';
+export type { Pairing } from './pairing.js';
 
 export {
   isStreamAudio,
@@ -61,7 +67,15 @@ export type {
   TtsStreamSession,
 } from './stream.js';
 
-export { API_VERSION, TERMINAL_EVENTS, isLlmCapability, isTtsCapability } from './types.js';
+export {
+  API_VERSION,
+  TASK_TERMINAL_STATES,
+  TERMINAL_EVENTS,
+  isLlmCapability,
+  isTaskBytesProgress,
+  isTaskLineProgress,
+  isTtsCapability,
+} from './types.js';
 export type {
   AcceleratorGpu,
   Activity,
@@ -81,6 +95,8 @@ export type {
   Capability,
   CapabilityRecord,
   CapabilityRow,
+  CatalogRow,
+  CrucibleModule,
   ChatMessage,
   ChatOptions,
   ChatResponse,
@@ -91,6 +107,7 @@ export type {
   FailedData,
   GpuInfo,
   Health,
+  InstallTaskRequest,
   JobCapability,
   JobEvent,
   JobFailure,
@@ -102,7 +119,9 @@ export type {
   LlmCapability,
   ModelDescriptor,
   ModelInfo,
+  ModuleTaskRequest,
   Ping,
+  PullTaskRequest,
   ProgressData,
   Provenance,
   QueuedData,
@@ -112,6 +131,18 @@ export type {
   RenderResult,
   ResponseFormat,
   ServerInfo,
+  ServerSetup,
+  SubjectKind,
+  TaskBytesProgress,
+  TaskCancelResult,
+  TaskEvent,
+  TaskLineProgress,
+  TaskProgressData,
+  TaskRequest,
+  TaskSkippedData,
+  TaskState,
+  TaskStatus,
+  TaskStepData,
   TerminalEventName,
   TtsCapability,
   UploadResult,

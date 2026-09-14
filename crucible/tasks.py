@@ -66,7 +66,7 @@ from .hosttools import searched_note, which
 from .jobs.base import utcnow
 from .settle import Held
 from .voices import NARRATOR_ENGINE_SAMPLING
-from .weights import PullCancelled
+from .weights import PullCancelled, WeightsError
 
 RUNNING = "running"
 DONE = "done"
@@ -781,7 +781,26 @@ class TaskStore:
             "step",
             {"name": f"pull {kind} {subject_id}", "index": index, "total": total},
         )
-        await asyncio.to_thread(self._pull_blocking, task, subject)
+        await self._pull(task, subject)
+
+    async def _pull(self, task: Task, subject: catalog.Subject) -> None:
+        """The download, with the hub's refusals given a name of their own.
+
+        `WeightsError` already says exactly what went wrong — a gated repo, a
+        revision the manifest names and the repo does not, a digest that did
+        not match — and it would otherwise reach a client as `task_failed`,
+        which is the generic bucket `crucible/errors.py` says this server does
+        not have. The message is the weights module's, verbatim.
+        """
+        try:
+            await asyncio.to_thread(self._pull_blocking, task, subject)
+        except WeightsError as exc:
+            raise ApiError(
+                500,
+                "pull_failed",
+                f"pulling {subject.kind} {subject.id!r} failed: {exc}",
+                {"kind": subject.kind, "id": subject.id},
+            ) from None
 
     def _pull_blocking(self, task: Task, subject: catalog.Subject) -> None:
         """**Worker thread.** The hub's download, reported and interruptible."""
@@ -976,7 +995,7 @@ class TaskStore:
                     },
                 )
                 continue
-            await asyncio.to_thread(self._pull_blocking, task, subject)
+            await self._pull(task, subject)
 
         if installs:
             index += 1

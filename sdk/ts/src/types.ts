@@ -1366,3 +1366,241 @@ export interface AsrOptions {
   /** Whether whisper emits per-word timestamps. Required, for the same reason. */
   readonly wordTimestamps: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// The operator door — PHASE13-OPERATOR.md section 3
+// ---------------------------------------------------------------------------
+//
+// Owen, 2026-09-14: *"crucible has its own ui. and it provides the token or
+// whatever else we need to set it up on foundry or bookforge."* Everything
+// below is that door's half of the wire, typed verbatim from section 3, and
+// every field name is the doc's.
+
+/**
+ * `GET /v1/setup` — everything an app needs to be pointed at this server.
+ *
+ * **It carries the token, and that reveals nothing**: the route is behind the
+ * bearer token, so the only caller who can read this already has it. What it
+ * buys is that nobody types a secret twice — the operator page draws a
+ * copyable {@link ServerSetup.pairing} line, and the person pasting it has not
+ * seen a token at all.
+ */
+export interface ServerSetup {
+  /** `crucible@mac-studio`. Contains an `@`, which is why pairing encodes it. */
+  readonly name: string;
+  readonly version: string;
+  /** `cuda-linux` or `mlx-darwin`. Windows is never a backend. */
+  readonly backend: string;
+  /** What this process bound, e.g. `http://0.0.0.0:7100`. Not dialable as-is. */
+  readonly bind: string;
+  /**
+   * The bind address made reachable: a wildcard bind becomes one entry per
+   * non-loopback IPv4 interface, a concrete bind becomes exactly one.
+   *
+   * Never a hostname lookup — an interface the host has is a fact, a name
+   * somebody else's DNS may resolve is not.
+   */
+  readonly urls: readonly string[];
+  readonly token: string;
+  /** One `crucible://` line per {@link ServerSetup.urls} entry, in order. */
+  readonly pairing: readonly string[];
+  /** `/v1/info`'s list, repeated so a page draws from one read. */
+  readonly jobTypes: readonly string[];
+  readonly configPath: string;
+}
+
+/** The five things a subject can be. PHASE13-OPERATOR.md section 2. */
+export type SubjectKind = 'model' | 'voice' | 'rvc' | 'rvc-base' | 'denoise';
+
+/**
+ * One row of `GET /v1/catalog`: a pullable thing and where it stands here.
+ *
+ * Every field is DERIVED on the server from something that already owns it —
+ * the weights stamp, the manifest, `crucible/lineup.py`, the residency — so a
+ * client reading this is reading those, not a second table.
+ */
+export interface CatalogRow {
+  readonly kind: SubjectKind;
+  readonly id: string;
+  /** The manifest's display name, or null where a manifest carries none. */
+  readonly name: string | null;
+  /** Which job type this subject belongs to: `llm`, `asr`, `align`, `tts`, … */
+  readonly jobType: string;
+  readonly installed: boolean;
+  /** Bytes on disk, or null when it is not installed. */
+  readonly installedBytes: number | null;
+  /**
+   * What a pull will fetch, where the manifest declares it — which is `rvc`,
+   * `rvc-base` and `denoise`, whose weights are named files with pinned
+   * digests. **Null for models and voices**, whose weights are a whole-repo
+   * snapshot no manifest sizes. Never an estimate.
+   */
+  readonly expectedBytes: number | null;
+  /**
+   * The capability classes this model is the FLOOR for — the smallest model
+   * the class may run on at all. Only ever non-empty on a `model`.
+   */
+  readonly floors: readonly string[];
+  /**
+   * Null on every row this build of the server can produce, and that is the
+   * honest value: no manifest schema carries a licence key, and reading one
+   * off a repo name would be a claim about somebody else's weights.
+   */
+  readonly license: string | null;
+  /** `hf:<repo>` — where the bytes come from. */
+  readonly source: string;
+  /** Is this the thing on the card right now? */
+  readonly resident: boolean;
+}
+
+/** One `pull`: fetch a subject's weights. Refused if it is already installed. */
+export interface PullTaskRequest {
+  readonly type: 'pull';
+  readonly kind: SubjectKind;
+  readonly id: string;
+}
+
+/** One `install`: build a job type's env, then make it live (section 3.4). */
+export interface InstallTaskRequest {
+  readonly type: 'install';
+  readonly jobType: string;
+  /**
+   * Required for `tts` and refused for anything else: on `cuda-linux` there is
+   * one venv per narrator engine, because Orpheus pins vllm 0.7.3 and Higgs v3
+   * needs a far later torch.
+   */
+  readonly narratorEngine?: string;
+}
+
+/**
+ * An app's statement of what it needs from a server, as the JSON file it
+ * vendors.
+ *
+ * **Keys are the server's, not camelCased, and that is deliberate.** The file
+ * is written by `scripts/gen-modules.py` in the crucible repo and vendored by
+ * each app byte for byte (PHASE13-OPERATOR.md section 5.4); posting it means
+ * posting exactly those bytes. A camelCased mirror here would make every app
+ * transform a file whose whole point is that it is not edited.
+ */
+export interface CrucibleModule {
+  readonly name: string;
+  /** Derived by the generator from the content, never typed by hand. */
+  readonly version: string;
+  readonly job_types: readonly {
+    readonly type: string;
+    readonly narrator_engine?: string;
+  }[];
+  readonly subjects: readonly {
+    readonly kind: SubjectKind;
+    readonly id: string;
+  }[];
+}
+
+/** One `module`: an ordered list of installs and pulls, validated whole. */
+export interface ModuleTaskRequest {
+  readonly type: 'module';
+  readonly module: CrucibleModule;
+}
+
+export type TaskRequest = PullTaskRequest | InstallTaskRequest | ModuleTaskRequest;
+
+/**
+ * A task has no `queued`: it is admitted and running in the same act, because
+ * a second submission is refused rather than parked (`task_busy`).
+ */
+export type TaskState = 'running' | 'done' | 'failed' | 'cancelled';
+
+export const TASK_TERMINAL_STATES = ['done', 'failed', 'cancelled'] as const;
+
+/** `GET /v1/tasks/{id}`. */
+export interface TaskStatus {
+  readonly taskId: string;
+  /** `pull`, `install` or `module`. */
+  readonly type: string;
+  /** The request body, echoed, in the server's own spelling. */
+  readonly request: Readonly<Record<string, unknown>>;
+  readonly state: TaskState;
+  readonly error: JobFailure | null;
+  readonly created: string;
+  readonly started: string;
+  readonly finished: string | null;
+}
+
+/** One step of a task. For a `module`, one per entry plus the reload. */
+export interface TaskStepData {
+  readonly name: string;
+  /** 1-based. */
+  readonly index: number;
+  readonly total: number;
+  /**
+   * What this server now offers, on the `reload` step only (section 3.4). A
+   * client is told rather than having to diff two `/v1/info` reads.
+   */
+  readonly jobTypes?: readonly string[];
+}
+
+/** A pull's progress: bytes of one file. `bytesTotal` is null if unstated. */
+export interface TaskBytesProgress {
+  readonly bytesDone: number;
+  readonly bytesTotal: number | null;
+  readonly file: string;
+}
+
+/**
+ * An install's progress: one line of the installer's own output.
+ *
+ * **It is not load-bearing** (ARCHITECTURE.md R4). It is pip's text, for a
+ * person to read in a scrolling pane; every fact a client acts on is a `step`,
+ * a `skipped`, a `done` or a `failed`.
+ */
+export interface TaskLineProgress {
+  readonly line: string;
+}
+
+export type TaskProgressData = TaskBytesProgress | TaskLineProgress;
+
+/** Narrow a `progress` frame to the installer's lines. */
+export function isTaskLineProgress(data: TaskProgressData): data is TaskLineProgress {
+  return 'line' in data;
+}
+
+/** Narrow a `progress` frame to a pull's byte counts. */
+export function isTaskBytesProgress(data: TaskProgressData): data is TaskBytesProgress {
+  return 'bytesDone' in data;
+}
+
+/** A module entry that was already true, so nothing was done for it. */
+export interface TaskSkippedData {
+  readonly reason: string;
+}
+
+/**
+ * One frame of `GET /v1/tasks/{id}/events`.
+ *
+ * `unknown` is here for the reason it is on {@link JobEvent}: the server's
+ * event vocabulary grows without moving `api_version`, and a client that threw
+ * on a kind it had never heard of would lose the whole stream rather than one
+ * frame. Strict about what it claims to understand, tolerant of what it makes
+ * no claim about.
+ */
+export type TaskEvent =
+  | { readonly id: number; readonly event: 'started'; readonly data: { readonly type: string } }
+  | { readonly id: number; readonly event: 'step'; readonly data: TaskStepData }
+  | { readonly id: number; readonly event: 'progress'; readonly data: TaskProgressData }
+  | { readonly id: number; readonly event: 'skipped'; readonly data: TaskSkippedData }
+  | { readonly id: number; readonly event: 'done'; readonly data: Readonly<Record<string, unknown>> }
+  | { readonly id: number; readonly event: 'failed'; readonly data: JobFailure }
+  | { readonly id: number; readonly event: 'cancelled'; readonly data: Readonly<Record<string, unknown>> }
+  | UnknownEvent;
+
+/** What `DELETE /v1/tasks/{id}` answers. `cancelling`, never `cancelled`. */
+export interface TaskCancelResult {
+  readonly taskId: string;
+  /**
+   * `cancelling`: the flag is set and the runner ends when it sees it — the
+   * next chunk for a pull, the SIGTERM landing for an install. Watch the
+   * stream for the `cancelled` event. Saying "cancelled" before a download
+   * thread had stopped would be the ambiguous answer R3 forbids.
+   */
+  readonly status: 'cancelling';
+}

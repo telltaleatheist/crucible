@@ -74,6 +74,14 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `stream(options)` | `POST /v1/tts/stream` and its three companions | a `TtsStreamSession` |
 | `accelerator()` | `GET /v1/accelerator` | `AcceleratorState` |
 | `asr(options)` | `POST /v1/jobs {type: "asr"}` | the job id |
+| `setup()` | `GET /v1/setup` | `ServerSetup` — urls, token, one pairing line per url |
+| `catalog()` | `GET /v1/catalog` | `CatalogRow[]` — every subject this backend can hold |
+| `submitTask(request)` | `POST /v1/tasks` | the task id |
+| `task(id)` | `GET /v1/tasks/{id}` | `TaskStatus` |
+| `tasks()` | `GET /v1/tasks` | `TaskStatus[]`, newest first |
+| `taskEvents(id, {lastEventId?})` | `GET /v1/tasks/{id}/events` | `AsyncIterable<TaskEvent>` |
+| `cancelTask(id)` | `DELETE /v1/tasks/{id}` | `TaskCancelResult` |
+| `parsePairing(line)` | *(pure — no server)* | `{name, url, token}` |
 
 Every authenticated call sends `Authorization: Bearer <token>` and `X-Crucible-Api: 1`.
 `ping()` deliberately sends neither, so it can tell "wrong token" from "not a Crucible".

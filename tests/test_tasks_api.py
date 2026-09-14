@@ -466,6 +466,7 @@ def test_a_pull_that_fails_says_so_with_the_hub_s_reason(
         events = run(client, auth, {"type": "pull", "kind": "model", "id": MODEL})
     failed = events[-1]
     assert failed["event"] == "failed"
+    assert failed["data"]["code"] == "pull_failed"
     assert "connection reset by peer" in failed["data"]["message"]
 
 

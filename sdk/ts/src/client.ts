@@ -19,6 +19,7 @@ import {
   CrucibleNotACrucible,
   CrucibleProtocolError,
   CrucibleBusy,
+  CrucibleCardHeld,
   CrucibleLeased,
   CrucibleRefused,
   LEASED,
@@ -47,6 +48,7 @@ import { readSseFrames } from './sse.js';
 import { openTtsStream, type StreamOptions, type TtsStreamSession } from './stream.js';
 import {
   API_VERSION,
+  TASK_TERMINAL_STATES,
   TERMINAL_EVENTS,
   type AcceleratorHolder,
   type AcceleratorResident,
@@ -62,6 +64,7 @@ import {
   type Capability,
   type CapabilityRecord,
   type CapabilityRow,
+  type CatalogRow,
   type ChatMessage,
   type ChatOptions,
   type ChatResponse,
@@ -85,6 +88,15 @@ import {
   type RenderOptions,
   type RenderResult,
   type ServerInfo,
+  type ServerSetup,
+  type SubjectKind,
+  type TaskCancelResult,
+  type TaskEvent,
+  type TaskProgressData,
+  type TaskRequest,
+  type TaskState,
+  type TaskStatus,
+  type TaskStepData,
   type UploadResult,
   type VoiceInfo,
   type VoiceKind,
@@ -1401,7 +1413,17 @@ export class CrucibleClient {
       // needs to say "GPU busy: foundry" and everything a `waitFor: "any"` walk
       // needs to decide to try the next machine. Read once here rather than
       // re-parsed identically in every client.
-      if (code === SERVER_BUSY) return busyRefusal(response.status, code, message, details);
+      // TWO SHAPES, ONE CODE, discriminated on `details.fact`. The job door
+      // answers `server_busy` about the lane, where the holder is always a
+      // job; the operator door (PHASE13-OPERATOR.md 3.3) answers it about the
+      // CARD, where the holder is one of four kinds and says which in `fact`.
+      // Read as a job, a lease-shaped body would come back a protocol error —
+      // a page told its server sent nonsense when it sent the contract.
+      if (code === SERVER_BUSY) {
+        return isHeldByAFact(details)
+          ? heldRefusal(response.status, code, message, details)
+          : busyRefusal(response.status, code, message, details);
+      }
       // The second 4xx with a body worth reading, for the first one's reason.
       // A caller shown "leased" has to be able to say who is mid-run, doing
       // what, and until when — and both doors that emit this code (a second
@@ -1467,6 +1489,198 @@ export class CrucibleClient {
       },
       options,
     );
+  }
+
+  // -------------------------------------------------------- the operator door
+  //
+  // PHASE13-OPERATOR.md section 3.6. Six methods, and every one of them exists
+  // because a person now administers a Crucible from a page it serves itself
+  // rather than from a shell on that machine. They are on this client and not
+  // in a second package for the reason there is one client at all: an app that
+  // can render a book on a server should not need a different object to ask
+  // that server what it has got.
+
+  /**
+   * `GET /v1/setup` — name, version, backend, every URL this server is
+   * reachable on, the token, and a `crucible://` pairing line per URL.
+   *
+   * **It returns the token**, which reveals nothing: only a caller that
+   * already has it can reach this route. What it buys is that nobody types a
+   * secret twice — hand {@link ServerSetup.pairing}`[0]` to another app's
+   * connect door and it fills in all three fields through
+   * {@link parsePairing}.
+   */
+  async setup(): Promise<ServerSetup> {
+    const body = await this.#json('/v1/setup', { method: 'GET' }, 'setup');
+    return {
+      name: str(body, 'name', 'setup'),
+      version: str(body, 'version', 'setup'),
+      backend: str(body, 'backend', 'setup'),
+      bind: str(body, 'bind', 'setup'),
+      urls: strArray(body, 'urls', 'setup'),
+      token: str(body, 'token', 'setup'),
+      pairing: strArray(body, 'pairing', 'setup'),
+      jobTypes: strArray(body, 'job_types', 'setup'),
+      configPath: str(body, 'config_path', 'setup'),
+    };
+  }
+
+  /**
+   * `GET /v1/catalog` — every subject this server's backend can hold,
+   * installed or not, with what the manifests already say about it.
+   *
+   * A subject with no block for this backend is ABSENT rather than listed as
+   * unsupported, so a row here is always something this machine could really
+   * have. Pull one with {@link submitTask}.
+   */
+  async catalog(): Promise<CatalogRow[]> {
+    const body = await this.#json('/v1/catalog', { method: 'GET' }, 'catalog');
+    const rows = asArray(field(body, 'rows', 'catalog'), 'catalog.rows');
+    return rows.map((row, index) =>
+      readCatalogRow(asObject(row, `catalog.rows[${index}]`), `catalog.rows[${index}]`),
+    );
+  }
+
+  /**
+   * `POST /v1/tasks` — pull a subject, install a job type, or post a module.
+   * Returns the task id; watch it with {@link taskEvents}.
+   *
+   * **One task at a time per server.** A second is refused `task_busy` naming
+   * the running one, and an `install` is additionally refused `server_busy`
+   * while anything holds the card, because it ends by reloading this server's
+   * job registry. Neither is retried here: queues belong to clients
+   * (ARCHITECTURE.md R5), and this client's contribution to backing off is
+   * telling the caller exactly what is in the way.
+   *
+   * A `pull` of something already installed is REFUSED (`already_installed`)
+   * rather than skipped; the same subject inside a `module` is SKIPPED. That
+   * asymmetry is deliberate and is written into section 3.3: a single pull is
+   * a person asking for one specific thing, and a module is an app saying what
+   * must be true.
+   */
+  async submitTask(request: TaskRequest): Promise<string> {
+    const body = await this.#json(
+      '/v1/tasks',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(taskPayload(request)),
+      },
+      'submitTask',
+    );
+    return str(body, 'task_id', 'submitTask');
+  }
+
+  /** `GET /v1/tasks/{id}`. */
+  async task(taskId: string): Promise<TaskStatus> {
+    const id = requireText(taskId, 'taskId');
+    const body = await this.#json(
+      `/v1/tasks/${encodeURIComponent(id)}`,
+      { method: 'GET' },
+      'task',
+    );
+    return {
+      taskId: str(body, 'task_id', 'task'),
+      type: str(body, 'type', 'task'),
+      request: asObject(field(body, 'request', 'task'), 'task.request'),
+      state: oneOf(str(body, 'state', 'task'), TASK_STATES, 'task.state'),
+      error: readFailureOrNull(field(body, 'error', 'task'), 'task.error'),
+      created: str(body, 'created', 'task'),
+      started: str(body, 'started', 'task'),
+      finished: nullableStr(body, 'finished', 'task'),
+    };
+  }
+
+  /**
+   * `GET /v1/tasks/{id}` for the last few tasks this server remembers, newest
+   * first. In memory, capped at fifty; a restart forgets them.
+   */
+  async tasks(): Promise<TaskStatus[]> {
+    const body = await this.#json('/v1/tasks', { method: 'GET' }, 'tasks');
+    const rows = asArray(field(body, 'tasks', 'tasks'), 'tasks.tasks');
+    return rows.map((row, index) =>
+      readTaskStatus(asObject(row, `tasks[${index}]`), `tasks[${index}]`),
+    );
+  }
+
+  /**
+   * `GET /v1/tasks/{id}/events` — the task's SSE stream, as typed events.
+   *
+   * {@link CrucibleClient.events}' contract exactly: the iterator ends after
+   * the first terminal event, a stream that closes without one throws
+   * {@link CrucibleUnreachable} rather than ending quietly, and `lastEventId`
+   * resumes without a gap.
+   */
+  async *taskEvents(
+    taskId: string,
+    options: EventsOptions = {},
+  ): AsyncGenerator<TaskEvent, void, undefined> {
+    const id = requireText(taskId, 'taskId');
+    const headers: Record<string, string> = { Accept: 'text/event-stream' };
+    if (options.lastEventId !== undefined) {
+      if (!Number.isInteger(options.lastEventId) || options.lastEventId < 0) {
+        throw new CrucibleConfigError(
+          'lastEventId',
+          `must be a non-negative integer, got ${String(options.lastEventId)}`,
+        );
+      }
+      headers['Last-Event-ID'] = String(options.lastEventId);
+    }
+    const response = await this.#fetch(
+      `/v1/tasks/${encodeURIComponent(id)}/events`,
+      { method: 'GET', headers },
+      true,
+    );
+    if (!response.ok) throw await this.#failure(response);
+    const stream = response.body;
+    if (stream === null) {
+      throw new CrucibleProtocolError(`the event stream for task ${id} carried no body`);
+    }
+
+    let previousId = options.lastEventId === undefined ? 0 : options.lastEventId;
+    try {
+      for await (const frame of readSseFrames(stream)) {
+        const event = readTaskEvent(frame.lastEventId, frame.event, frame.data);
+        if (event.id <= previousId) {
+          throw new CrucibleProtocolError(
+            `event id ${event.id} does not follow ${previousId} on task ${id}`,
+          );
+        }
+        previousId = event.id;
+        yield event;
+        if ((TASK_TERMINAL_STATES as readonly string[]).includes(event.event)) return;
+      }
+    } finally {
+      await stream.cancel().catch(() => undefined);
+    }
+
+    throw new CrucibleUnreachable(
+      this.url,
+      `the event stream for task ${id} ended after event ${previousId} without a ` +
+        'terminal event (done, failed or cancelled)',
+    );
+  }
+
+  /**
+   * `DELETE /v1/tasks/{id}` — cancel. Answers `cancelling`, never `cancelled`.
+   *
+   * A pull stops at its next chunk and its partial directory is removed; an
+   * install is SIGTERMed and its half-built env is left for a `--force`
+   * rebuild. Watch {@link taskEvents} for the `cancelled` event: a caller told
+   * "cancelled" before the download thread had stopped would be told a
+   * "maybe" (ARCHITECTURE.md R3).
+   */
+  async cancelTask(taskId: string): Promise<TaskCancelResult> {
+    const id = requireText(taskId, 'taskId');
+    const body = await this.#json(
+      `/v1/tasks/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+      'cancelTask',
+    );
+    return {
+      taskId: str(body, 'task_id', 'cancelTask'),
+      status: oneOf(str(body, 'status', 'cancelTask'), ['cancelling'], 'cancelTask.status'),
+    };
   }
 }
 
@@ -2508,6 +2722,37 @@ function busyRefusal(
   }
 }
 
+/** Is this `server_busy` the operator door's four-fact answer, or the lane's? */
+function isHeldByAFact(details: unknown): boolean {
+  return typeof details === 'object' && details !== null && 'fact' in details;
+}
+
+/**
+ * Read the operator door's 409 `server_busy` into {@link CrucibleCardHeld}.
+ *
+ * A body that is not the v1 shape comes back a {@link CrucibleProtocolError}
+ * rather than degrading to a plain refusal, for {@link busyRefusal}'s reason:
+ * a caller would otherwise be shown "busy" and never learn that the holder it
+ * was about to name had gone missing from the body.
+ */
+function heldRefusal(
+  status: number,
+  code: string,
+  message: string,
+  details: unknown,
+): CrucibleError {
+  try {
+    const body = asObject(details, 'error.details');
+    return new CrucibleCardHeld(status, code, message, details, {
+      fact: str(body, 'fact', 'error.details'),
+      who: str(body, 'who', 'error.details'),
+    });
+  } catch (cause) {
+    if (cause instanceof CrucibleProtocolError) return cause;
+    throw cause;
+  }
+}
+
 /**
  * Read a 409 `leased` body into {@link CrucibleLeased}.
  *
@@ -2614,4 +2859,202 @@ function describeCause(cause: unknown): string {
 function excerpt(text: string): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
+}
+
+// ------------------------------------------------- the operator door's readers
+
+/** The vocabulary `TaskState` closes over, for `oneOf`. */
+const TASK_STATES: readonly TaskState[] = ['running', 'done', 'failed', 'cancelled'];
+
+/** The five subject kinds. A sixth would be a contract change, not a surprise. */
+const SUBJECT_KINDS: readonly SubjectKind[] = [
+  'model',
+  'voice',
+  'rvc',
+  'rvc-base',
+  'denoise',
+];
+
+/**
+ * Task event names this build understands. Anything else arrives as
+ * {@link UnknownEvent}, for `EVENT_NAMES`' reason: the vocabulary grows
+ * without moving `api_version`, and a client that threw would lose the whole
+ * stream rather than one frame.
+ */
+const TASK_EVENT_NAMES = [
+  'started',
+  'step',
+  'progress',
+  'skipped',
+  'done',
+  'failed',
+  'cancelled',
+] as const;
+
+function readCatalogRow(row: Json, where: string): CatalogRow {
+  return {
+    kind: oneOf(str(row, 'kind', where), SUBJECT_KINDS, `${where}.kind`),
+    id: str(row, 'id', where),
+    name: nullableStr(row, 'name', where),
+    jobType: str(row, 'job_type', where),
+    installed: bool(row, 'installed', where),
+    installedBytes: nullableNum(row, 'installed_bytes', where),
+    expectedBytes: nullableNum(row, 'expected_bytes', where),
+    floors: strArray(row, 'floors', where),
+    license: nullableStr(row, 'license', where),
+    source: str(row, 'source', where),
+    resident: bool(row, 'resident', where),
+  };
+}
+
+function readTaskStatus(row: Json, where: string): TaskStatus {
+  return {
+    taskId: str(row, 'task_id', where),
+    type: str(row, 'type', where),
+    request: asObject(field(row, 'request', where), `${where}.request`),
+    state: oneOf(str(row, 'state', where), TASK_STATES, `${where}.state`),
+    error: readFailureOrNull(field(row, 'error', where), `${where}.error`),
+    created: str(row, 'created', where),
+    started: str(row, 'started', where),
+    finished: nullableStr(row, 'finished', where),
+  };
+}
+
+/**
+ * A `TaskRequest` in the server's spelling.
+ *
+ * Only the fields the type owns are sent, because the server refuses a `pull`
+ * carrying a `job_type` — a request with another type's fields is a client
+ * that has confused two requests, and the server would rather say so than run
+ * the wrong one. `narratorEngine` is omitted when absent rather than sent as
+ * `null`, since `null` would be a stated engine that is not one.
+ */
+function taskPayload(request: TaskRequest): Record<string, unknown> {
+  // Widened to a bag of optional unknowns rather than an intersection of the
+  // three arms: `Partial<Pull & Install & Module>` collapses to `never`,
+  // because their `type` literals cannot all hold at once. What is wanted here
+  // is "whatever the caller actually passed", which this says and that did not.
+  const given = request as {
+    type?: unknown;
+    kind?: unknown;
+    id?: unknown;
+    jobType?: unknown;
+    narratorEngine?: unknown;
+    module?: unknown;
+  };
+  const type = requireText(given.type, 'type');
+  if (type === 'pull') {
+    return {
+      type,
+      kind: oneOf(requireText(given.kind, 'kind'), SUBJECT_KINDS, 'kind'),
+      id: requireText(given.id, 'id'),
+    };
+  }
+  if (type === 'install') {
+    const payload: Record<string, unknown> = {
+      type,
+      job_type: requireText(given.jobType, 'jobType'),
+    };
+    if (given.narratorEngine !== undefined) {
+      payload['narrator_engine'] = requireText(given.narratorEngine, 'narratorEngine');
+    }
+    return payload;
+  }
+  if (type === 'module') {
+    if (given.module === undefined || given.module === null) {
+      throw new CrucibleConfigError('module', 'a module task needs the module document');
+    }
+    // Sent as it was handed over. The document is a file the app vendors byte
+    // for byte from the crucible repo's generator (PHASE13-OPERATOR.md 5.4);
+    // reshaping it here would make this client a second author of it.
+    return { type, module: given.module };
+  }
+  throw new CrucibleConfigError(
+    'type',
+    `must be 'pull', 'install' or 'module', got ${JSON.stringify(type)}`,
+  );
+}
+
+function readTaskEvent(rawId: string | null, rawName: string | null, rawData: string): TaskEvent {
+  if (rawId === null) {
+    throw new CrucibleProtocolError(`a task SSE frame carried no id: ${excerpt(rawData)}`);
+  }
+  const id = Number(rawId);
+  if (!Number.isInteger(id) || id < 1) {
+    throw new CrucibleProtocolError(
+      `task SSE frame id ${JSON.stringify(rawId)} is not a positive integer`,
+    );
+  }
+  if (rawName === null) {
+    throw new CrucibleProtocolError(`task SSE frame ${id} carried no event name`);
+  }
+  const name = rawName;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawData);
+  } catch {
+    throw new CrucibleProtocolError(
+      `task SSE frame ${id} (${name}) has non-JSON data: ${excerpt(rawData)}`,
+    );
+  }
+  const data = asObject(parsed, `task event ${id} (${name}) data`);
+  const where = `task event ${id} (${name})`;
+
+  if (!(TASK_EVENT_NAMES as readonly string[]).includes(name)) {
+    return { id, event: 'unknown', kind: name, data };
+  }
+  const known = name as (typeof TASK_EVENT_NAMES)[number];
+
+  switch (known) {
+    case 'started':
+      return { id, event: 'started', data: { type: str(data, 'type', where) } };
+    case 'step':
+      return { id, event: 'step', data: readTaskStep(data, where) };
+    case 'progress':
+      return { id, event: 'progress', data: readTaskProgress(data, where) };
+    case 'skipped':
+      return { id, event: 'skipped', data: { reason: str(data, 'reason', where) } };
+    case 'done':
+      return { id, event: 'done', data };
+    case 'failed':
+      return { id, event: 'failed', data: readFailure(data, where) };
+    case 'cancelled':
+      return { id, event: 'cancelled', data };
+  }
+}
+
+function readTaskStep(data: Json, where: string): TaskStepData {
+  const step: { name: string; index: number; total: number; jobTypes?: readonly string[] } = {
+    name: str(data, 'name', where),
+    index: num(data, 'index', where),
+    total: num(data, 'total', where),
+  };
+  // Only the `reload` step carries it (section 3.4), so its absence is not a
+  // missing field — it is a step that made nothing new reachable.
+  if ('job_types' in data) step.jobTypes = strArray(data, 'job_types', where);
+  return step;
+}
+
+/**
+ * One `progress` frame, of the TWO shapes a task's progress takes.
+ *
+ * A pull counts bytes and an install relays the installer's lines, and the
+ * server sends whichever is true rather than a merged shape with half its
+ * fields null. Which arrived is decided on the keys that are there — the same
+ * discrimination {@link isTaskBytesProgress} offers a caller — and a frame
+ * that is neither is a protocol error, not an empty progress.
+ */
+function readTaskProgress(data: Json, where: string): TaskProgressData {
+  if ('line' in data) return { line: str(data, 'line', where) };
+  if ('bytes_done' in data) {
+    return {
+      bytesDone: num(data, 'bytes_done', where),
+      bytesTotal: nullableNum(data, 'bytes_total', where),
+      file: str(data, 'file', where),
+    };
+  }
+  throw new CrucibleProtocolError(
+    `${where} is neither a pull's progress ({bytes_done, bytes_total, file}) nor ` +
+      "an install's ({line})",
+  );
 }
