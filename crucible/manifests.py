@@ -554,11 +554,11 @@ def manifests_dir() -> Path:
             )
         return path
     # models/ sits beside the crucible package in the checkout.
-    path = Path(__file__).resolve().parent.parent / "models"
+    path = Path(__file__).resolve().parent / "models"
     if not path.is_dir():
         raise ManifestError(
-            f"no model manifests at {path}; crucible must run from a checkout "
-            f"(pip install -e .) or ${MODELS_DIR_ENV} must point at the manifests"
+            f"no model manifests at {path}; they are package data and this "
+            f"install has lost them, or ${MODELS_DIR_ENV} must point at them"
         )
     return path
 

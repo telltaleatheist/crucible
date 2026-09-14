@@ -693,4 +693,4 @@ def test_the_zeroshot_voice_takes_its_clips_from_the_request() -> None:
 
 
 def test_the_shipped_manifests_are_the_directory_beside_the_package() -> None:
-    assert voices_dir() == Path(__file__).resolve().parent.parent / "voices"
+    assert voices_dir() == Path(__file__).resolve().parent.parent / "crucible" / "voices"

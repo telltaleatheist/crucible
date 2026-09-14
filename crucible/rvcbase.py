@@ -156,11 +156,11 @@ def rvc_base_declarations_dir() -> Path:
         if not path.is_dir():
             raise RvcBaseError(f"{RVC_BASE_DIR_ENV}={override!r} is not a directory")
         return path
-    path = Path(__file__).resolve().parent.parent / "rvcbase"
+    path = Path(__file__).resolve().parent / "rvcbase"
     if not path.is_dir():
         raise RvcBaseError(
-            f"no base-asset declaration at {path}; crucible must run from a "
-            f"checkout (pip install -e .) or ${RVC_BASE_DIR_ENV} must point at it"
+            f"no base-asset declaration at {path}; it is package data and this "
+            f"install has lost it, or ${RVC_BASE_DIR_ENV} must point at it"
         )
     return path
 

@@ -24,7 +24,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+# `build` is `tests/test_wheel.py`'s: that file BUILDS a wheel and looks
+# inside it, because the one defect it exists for is invisible to every
+# other kind of check (a `pip install -e .` makes the checkout the install).
+test = ["pytest>=8", "build>=1.0"]
 
 [project.scripts]
 crucible = "crucible.cli:main"
@@ -35,15 +38,47 @@ Homepage = "https://github.com/telltaleatheist/crucible"
 [tool.setuptools.packages.find]
 include = ["crucible*"]
 
-# THE OPERATOR PAGE TRAVELS WITH THE CODE THAT SERVES IT.
 # `crucible/ui/` is HTML, CSS and JS with no build step and no CDN
 # (PHASE13-OPERATOR.md section 4): the Mac may be on a LAN with no internet,
-# and a page that needs a CDN is a page that is sometimes blank. Declared here
-# because setuptools ships `.py` files and nothing else unless told, and a
-# wheel without this serves the API and answers `GET /` with `503 ui_missing`.
+# and a page that needs a CDN is a page that is sometimes blank. A wheel
+# without it serves the API and answers `GET /` with `503 ui_missing`.
 # `tests/test_ui_mount.py` asserts the declaration and the files agree.
 [tool.setuptools.package-data]
-crucible = ["ui/*", "ui/**/*"]
+# THE OPERATOR PAGE, AND THE MANIFESTS, TRAVEL WITH THE CODE THAT READS THEM.
+#
+# `ui/` was here first and for the reason above. The eight directories under
+# it joined on 2026-09-14, and they joined by MOVING INTO the package rather
+# than by being listed from outside it, because `packages.find` ships
+# `crucible*` and a sibling directory is not that however it is declared.
+#
+# The defect that forced it, measured: a wheel built from HEAD and installed
+# on the Mac answered `catalog_unreadable` and
+# `denoise_manifests_unreadable`, because `models/ voices/ denoise/ rvc/
+# rvcbase/ align/ asr/ envs/` sat beside the package in the checkout and
+# `pip install -e .` made that invisible — the checkout IS the install. The
+# phase-14 `server` pack unpacks that same wheel into python-build-standalone,
+# so every fresh install on every backend was a server with no catalog, and
+# the pack's own smoke test (`crucible --version`) could not see it.
+#
+# `$CRUCIBLE_MODELS_DIR` and its five siblings still override, for the reason
+# they always did: a developer pointing one build at another checkout's
+# manifests.
+#
+# `tests/test_wheel.py` BUILDS a wheel and asserts every one of these is in
+# it, because a glob that silently matches nothing is exactly how this was
+# broken for a year.
+crucible = [
+  "ui/*",
+  "ui/**/*",
+  "models/*.toml",
+  "voices/*.toml",
+  "denoise/*.toml",
+  "rvc/*.toml",
+  "rvcbase/*.toml",
+  "align/*.toml",
+  "asr/*.toml",
+  "envs/**/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

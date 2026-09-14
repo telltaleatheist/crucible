@@ -117,6 +117,19 @@ class RvcBackendSpec:
     archive_bytes: int
     memory_bytes_estimate: int
 
+    @property
+    def files(self) -> tuple[str, ...]:
+        """Empty, and NOT `(self.archive,)`.
+
+        `crucible/weights.py`'s `WeightsSource` asks every spec which files a
+        pull fetches and an `installed` requires, and this one is fetched by
+        `pull_archive`: the archive is downloaded, verified, UNPACKED and
+        removed, so naming it here would make `installed` look for a tarball
+        that is correctly gone. What proves this subject complete is
+        `pull_archive`'s own stamp, as it always was.
+        """
+        return ()
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "backend": self.backend,
@@ -180,11 +193,11 @@ def rvc_manifests_dir() -> Path:
         if not path.is_dir():
             raise RvcManifestError(f"{RVC_DIR_ENV}={override!r} is not a directory")
         return path
-    path = Path(__file__).resolve().parent.parent / "rvc"
+    path = Path(__file__).resolve().parent / "rvc"
     if not path.is_dir():
         raise RvcManifestError(
-            f"no RVC manifests at {path}; crucible must run from a checkout "
-            f"(pip install -e .) or ${RVC_DIR_ENV} must point at the manifests"
+            f"no RVC manifests at {path}; they are package data and this "
+            f"install has lost them, or ${RVC_DIR_ENV} must point at them"
         )
     return path
 

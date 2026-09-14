@@ -191,11 +191,11 @@ def align_manifests_dir() -> Path:
         if not path.is_dir():
             raise AlignManifestError(f"{ALIGN_DIR_ENV}={override!r} is not a directory")
         return path
-    path = Path(__file__).resolve().parent.parent / "align"
+    path = Path(__file__).resolve().parent / "align"
     if not path.is_dir():
         raise AlignManifestError(
-            f"no align manifests at {path}; crucible must run from a checkout "
-            f"(pip install -e .) or ${ALIGN_DIR_ENV} must point at the manifests"
+            f"no align manifests at {path}; they are package data and this "
+            f"install has lost them, or ${ALIGN_DIR_ENV} must point at them"
         )
     return path
 

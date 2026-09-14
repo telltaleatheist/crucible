@@ -791,7 +791,7 @@ def test_a_sample_rate_the_engine_disagrees_with_is_refused_not_resampled(
     # loader, the rows and the refusal are all the real ones.
     voices = tmp_path / "voices"
     voices.mkdir()
-    source = Path(__file__).resolve().parent.parent / "voices"
+    source = Path(__file__).resolve().parent.parent / "crucible" / "voices"
     for manifest in source.glob("*.toml"):
         shutil.copyfile(manifest, voices / manifest.name)
     text = (voices / f"{VOICE}.toml").read_text(encoding="utf-8")

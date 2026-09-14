@@ -212,11 +212,11 @@ def denoise_manifests_dir() -> Path:
                 f"{DENOISE_DIR_ENV}={override!r} is not a directory"
             )
         return path
-    path = Path(__file__).resolve().parent.parent / "denoise"
+    path = Path(__file__).resolve().parent / "denoise"
     if not path.is_dir():
         raise DenoiseManifestError(
-            f"no denoise manifests at {path}; crucible must run from a checkout "
-            f"(pip install -e .) or ${DENOISE_DIR_ENV} must point at the manifests"
+            f"no denoise manifests at {path}; they are package data and this "
+            f"install has lost them, or ${DENOISE_DIR_ENV} must point at them"
         )
     return path
 

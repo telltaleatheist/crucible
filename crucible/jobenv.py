@@ -267,11 +267,11 @@ def recipes_dir(job_type: str) -> Path:
                 f"{RECIPES_DIR_ENV}={override!r} holds no {job_type!r} directory"
             )
         return path
-    path = Path(__file__).resolve().parent.parent / "envs" / job_type
+    path = Path(__file__).resolve().parent / "envs" / job_type
     if not path.is_dir():
         raise EnvError(
-            f"no {job_type} env recipes at {path}; crucible must run from a "
-            f"checkout (pip install -e .) or ${RECIPES_DIR_ENV} must point at them"
+            f"no {job_type} env recipes at {path}; they are package data and "
+            f"this install has lost them, or ${RECIPES_DIR_ENV} must point at them"
         )
     return path
 

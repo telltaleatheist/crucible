@@ -360,6 +360,29 @@ def cmd_serve(args: argparse.Namespace) -> int:
     host = args.host if args.host is not None else config.host
     port = args.port if args.port is not None else config.port
 
+    # THE PAIRING FILE IS WRITTEN AT STARTUP TOO (PHASE15-HOST.md 3.6, amended
+    # 2026-09-14). `init` and `service install` wrote it and nothing else did,
+    # so a server that EXISTED before this phase had none and an app on its own
+    # machine was told there was no engine there — measured on the Mac after
+    # its upgrade. The line is written when it is absent OR when it does not
+    # match what this config says, because a rotated token, a renamed server
+    # or a moved port each leave a file that is worse than no file: it points
+    # an app at a door with the wrong key.
+    #
+    # The line is the CONFIG's, not this run's `--host`/`--port` overrides:
+    # 3.6's file answers "an app on THIS machine wants in", and a developer
+    # running `crucible serve --port 7999` for an afternoon must not repoint
+    # every app on the box at a server that is about to stop.
+    try:
+        _sync_pairing_file(config)
+    except pairing.PairingFileError as exc:
+        # NOT fatal, and NOT silent. The server is the thing being started and
+        # it works without this file; what the file changes is whether an app
+        # has to be told a token by hand. Refusing to serve over it would be
+        # the tail wagging the dog, and swallowing it would be a machine where
+        # connect quietly stopped working.
+        print(f"crucible: pairing file NOT written: {exc}", file=sys.stderr)
+
     from .api import create_app  # imported here so `init`/`token` stay light
 
     app = create_app(config, backend)
@@ -2190,6 +2213,24 @@ def _write_pairing_file(home: Path, *, name: str, port: int, token: str) -> Path
     return pairing.write_pairing_file(
         home, pairing.pairing_line(name, f"http://{DEFAULT_HOST}:{port}", token)
     )
+
+
+def _sync_pairing_file(config: Config) -> None:
+    """Write `<home>/pairing` when it is absent or does not match the config.
+
+    PHASE15-HOST.md 3.6, as amended: `crucible serve` is the third writer,
+    and it is the one that covers a server that already existed. Comparison
+    is on the LINE, which is exactly the four facts an app needs — name,
+    host, port, token — so there is no second notion of "matches" to keep in
+    step with the writer.
+    """
+    wanted = pairing.pairing_line(
+        config.name, f"http://{DEFAULT_HOST}:{config.port}", config.token
+    )
+    if pairing.read_pairing_file(config.home) == wanted:
+        return
+    written = pairing.write_pairing_file(config.home, wanted)
+    print(f"pairing:  {written} ({_pairing_permission(written)})")
 
 
 def _pairing_permission(path: Path) -> str:

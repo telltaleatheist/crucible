@@ -235,7 +235,7 @@ def test_a_backend_this_host_is_not_gets_nulls_and_not_zeroes(
     directory = tmp_path / "voices"
     directory.mkdir()
     (directory / "cuda-only.toml").write_text(
-        (Path(__file__).resolve().parent.parent / "voices" / "deathstalker.toml")
+        (Path(__file__).resolve().parent.parent / "crucible" / "voices" / "deathstalker.toml")
         .read_text(encoding="utf-8")
         .replace('id = "deathstalker"', 'id = "cuda-only"')
         .split("[voice.backends.mlx-darwin]")[0],
@@ -323,7 +323,7 @@ def test_a_voice_with_no_block_for_this_backend_is_refused(
     directory = tmp_path / "voices"
     directory.mkdir()
     (directory / "cuda-only.toml").write_text(
-        (Path(__file__).resolve().parent.parent / "voices" / "deathstalker.toml")
+        (Path(__file__).resolve().parent.parent / "crucible" / "voices" / "deathstalker.toml")
         .read_text(encoding="utf-8")
         .replace('id = "deathstalker"', 'id = "cuda-only"')
         .split("[voice.backends.mlx-darwin]")[0],

@@ -191,11 +191,11 @@ def asr_manifests_dir() -> Path:
         if not path.is_dir():
             raise AsrManifestError(f"{ASR_DIR_ENV}={override!r} is not a directory")
         return path
-    path = Path(__file__).resolve().parent.parent / "asr"
+    path = Path(__file__).resolve().parent / "asr"
     if not path.is_dir():
         raise AsrManifestError(
-            f"no ASR manifests at {path}; crucible must run from a checkout "
-            f"(pip install -e .) or ${ASR_DIR_ENV} must point at the manifests"
+            f"no ASR manifests at {path}; they are package data and this "
+            f"install has lost them, or ${ASR_DIR_ENV} must point at them"
         )
     return path
 

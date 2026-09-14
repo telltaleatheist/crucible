@@ -370,6 +370,18 @@ An absent file means "no local server" — a fact the app shows, not a fallback 
 a host exists on a machine (Owen's PC today), an app's "read `config.toml` through `wsl.exe`"
 door is how the WSL server gets registered, and that door is deleted when the host lands.
 
+**AMENDED 2026-09-14: `crucible serve` writes it too**, when it is absent or when it does
+not match the config (name, host, port, token). `init` and `service install` were the only
+writers, so a server that EXISTED before this phase had no pairing file and an app on its
+own machine was told there was no engine there — measured on the Mac Studio right after its
+upgrade. A file that exists and disagrees is worse than none, because it points an app at a
+door with the wrong key, so the comparison is on the LINE itself, which is exactly the four
+facts an app needs. The line written is the CONFIG's, never this run's `--host`/`--port`
+overrides: 3.6's file answers *"an app on THIS machine wants in"*, and a developer running
+`crucible serve --port 7999` for an afternoon must not repoint every app on the box at a
+server that is about to stop. A write that fails is PRINTED and does not stop the server —
+the file changes whether a person has to type a token, not whether the engine runs.
+
 **Where a READER looks, pinned** (added 2026-09-14 by the BookForge build of 5.1, which had to
 open the file before the host existed to write it — the preamble's rule: a name this file did
 not have is added here first). Two locations, in this order, and neither is a fallback for the
@@ -915,6 +927,27 @@ The engine (the CLI's `--endpoint`) is pointed at the Crucible server's `/openai
 text act, with `capability.selected` as the model — the same as a local act, which is the
 point. Hosted, the settings window in 5.2 is Foundry's card drawn from BookForge's registry
 selection (`FoundryHost.servers()`), so the two apps show one engine's settings.
+
+### 5.3a A module names CLASSES, and the SERVER resolves them for its backend (found 2026-09-14)
+
+Measured by Foundry against the Mac: foundry.module.json carries `qwen3.8-27b-4bit` and
+`dots-ocr` as resolved ids because gen-modules.py resolves a `[[needs]] class` to ONE id at
+generation time — the cuda-linux answer. Posted to the Mac, validate_module refuses the whole
+module `unknown_subject` (dots-ocr has no mlx-darwin block) and `qwen3.8-27b-4bit` is not what
+the Mac's capability selected (`qwen3.8-27b`). The generator was a second owner of a decision
+that is the server's (PHASE9: the capability record is the one place a class is resolved).
+
+Ruling: the module carries `needs` as CLASSES on the wire, unresolved:
+`{"name":"foundry","version":"…","job_types":[{"type":"llm"}],"needs":[{"class":"clean"},{"class":"translate"},{"class":"pages"}],"subjects":[{"kind":"voice","id":"higgs-default"}]}`.
+`subjects` keep explicit ids ONLY for genuine app choices (a voice, a whisper size, the rvc
+base). gen-modules.py checks every explicit id exists in SOME backend's block and every class
+exists, writes the JSON, resolves nothing. The server's `module` task resolves each class
+through ITS capability record (`selected`) and pulls that subject; a class this backend has
+DISABLED is not a refusal — the task result carries
+`unmet: [{"class":"pages","reason":"<the capability row's reason>"}]` and the app shows "not
+on this engine". An explicit subject the backend cannot hold is still `unknown_subject`. SDK:
+`ModuleResult.unmet`. Both apps re-vendor their module after the gen changes; coordinate shows
+`unmet` beside the pulls it made.
 
 ### 5.4 The single re-vendor (BookForge ← Foundry)
 

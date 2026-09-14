@@ -456,11 +456,11 @@ def voices_dir() -> Path:
             raise VoiceError(f"{VOICES_DIR_ENV}={override!r} is not a directory")
         return path
     # voices/ sits beside the crucible package in the checkout.
-    path = Path(__file__).resolve().parent.parent / "voices"
+    path = Path(__file__).resolve().parent / "voices"
     if not path.is_dir():
         raise VoiceError(
-            f"no voice manifests at {path}; crucible must run from a checkout "
-            f"(pip install -e .) or ${VOICES_DIR_ENV} must point at the manifests"
+            f"no voice manifests at {path}; they are package data and this "
+            f"install has lost them, or ${VOICES_DIR_ENV} must point at them"
         )
     return path
 
