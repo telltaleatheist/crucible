@@ -35,6 +35,16 @@ Homepage = "https://github.com/telltaleatheist/crucible"
 [tool.setuptools.packages.find]
 include = ["crucible*"]
 
+# THE OPERATOR PAGE TRAVELS WITH THE CODE THAT SERVES IT.
+# `crucible/ui/` is HTML, CSS and JS with no build step and no CDN
+# (PHASE13-OPERATOR.md section 4): the Mac may be on a LAN with no internet,
+# and a page that needs a CDN is a page that is sometimes blank. Declared here
+# because setuptools ships `.py` files and nothing else unless told, and a
+# wheel without this serves the API and answers `GET /` with `503 ui_missing`.
+# `tests/test_ui_mount.py` asserts the declaration and the files agree.
+[tool.setuptools.package-data]
+crucible = ["ui/*", "ui/**/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

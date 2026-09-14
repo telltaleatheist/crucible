@@ -28,6 +28,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.background import BackgroundTask
+from starlette.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import API_VERSION, VERSION, accelerator, catalog, pairing
@@ -64,6 +65,13 @@ API_HEADER = "X-Crucible-Api"
 TERMINAL_EVENTS = frozenset({"done", "failed", "cancelled"})
 KEEPALIVE_SECONDS = 15.0
 UPLOAD_CHUNK = 1024 * 1024
+
+#: Where the operator page lives, INSIDE the package, so one path works from a
+#: checkout and from an installed wheel alike. It ships as package data
+#: (`[tool.setuptools.package-data]` in pyproject.toml) rather than being found
+#: relative to a repo root, because a wheel installed on the Mac has no repo
+#: root and the page has to travel with the code that serves it.
+UI_DIR = Path(__file__).resolve().parent / "ui"
 
 #: The proxy waits on the engine, not on a clock it invented. A streamed
 #: completion has no read timeout at all (the engine emits a token at a time and
@@ -1714,6 +1722,46 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.include_router(public)
     app.include_router(private)
     app.include_router(openai)
+
+    # ------------------------------------------------------- the static page
+    #
+    # PHASE13-OPERATOR.md section 1 and section 4. `GET /` and `GET /ui/*` are
+    # the ONLY public surface besides `/v1/ping`, and they are public because
+    # there is no secret in any of them: the page asks for the token, or reads
+    # it out of the URL fragment a pairing line put there, and keeps it in the
+    # browser's own storage. A fragment never reaches this server, which is why
+    # the token travels in one.
+    #
+    # Mounted LAST, after every router, so nothing it serves can shadow a
+    # route. `/ui` cannot collide with `/v1` in any case — the two prefixes are
+    # disjoint and a test asserts that `/ui/v1/info` is a 404 from the static
+    # files rather than the API with an extra path segment.
+
+    @app.get("/", include_in_schema=False)
+    async def operator_page() -> Response:
+        """The page, or a named refusal saying the build is missing its data.
+
+        A wheel built without `[tool.setuptools.package-data]` would have an
+        API and no page, and the honest report of that is a 503 that names the
+        directory — not a 404, which reads as "there is no page here", and not
+        a crash at start-up, which would take the whole API down because a
+        static file is missing. `tests/test_ui_mount.py` asserts this build
+        HAS the directory, so the refusal below can only ever mean a broken
+        package rather than a normal state.
+        """
+        index = UI_DIR / "index.html"
+        if not index.is_file():
+            raise ApiError(
+                503,
+                "ui_missing",
+                f"this build has no operator page: {index} is not there. The "
+                "page ships as package data (`crucible/ui/`); a wheel built "
+                "without it serves the API and nothing else",
+            )
+        return FileResponse(index, media_type="text/html")
+
+    if UI_DIR.is_dir():
+        app.mount("/ui", StaticFiles(directory=UI_DIR), name="ui")
     return app
 
 
