@@ -903,6 +903,53 @@ Moves again: it now targets the Foundry sha AFTER their 5.3 lands, and carries t
 rollout plan already lists (`RunOptions.waitFor`, `hosted_placement_not_vendored` deletion,
 `slots?()` removal) plus the cloud card's replacement.
 
+## 8. THE BUTTON — the test run, staged so the card is held only for the measurements
+
+**Owen, 2026-09-14:** *"get everything ready so we can just hit a button and have the tests run, and
+when it's fully ready to test, ill release the card and let you know when its ready."*
+
+One script, `scripts/testrun-phase15.sh`, run from Git Bash on the PC with no arguments. It
+runs the stages below IN ORDER, stops at the first failure with the stage's name and the
+failing command's output, and writes `C:	mp\phase15-testrun\<timestamp>eport.md` as it goes
+so a stopped run still says what passed. Every stage prints its wall-clock seconds. Nothing
+in it asks a question; anything it needs (a key, a PDF page) is a file it looks for by name
+and reports SKIPPED by name when absent — never silently.
+
+**Staged BEFORE the button (no card, no VM memory beyond a single suite):**
+
+- S1 the live WSL clone `/home/telltale/crucible` fast-forwarded to the branch HEAD,
+  `pip install -e .` in its env, the service restarted, `/v1/info` answering the new build
+  (`pages_engine`, routes present in `/v1/capability`).
+- S2 the Windows side staged WITHOUT installing anything system-wide: the host pack built
+  (`crucible envpack build host`), unpacked under `C:	mp\phase15-testrun\host\`, a temp
+  `CRUCIBLE_HOME=C:	mp\phase15-testrun\home` initialised with `--backend llama-windows` on
+  port **7101** (7100 is the WSL server's); the `engine` subject and the `dots-ocr` GGUF pair
+  and the `qwen3.5-9b` GGUF PULLED into it (network and disk only — a pull never touches the
+  card); the Startup shortcut NOT written; no portproxy.
+- S3 BookForge's `dist/` current (`tsc` for electron, `ng build` for the renderer) and the
+  keepers green; Foundry's main at the sha they name, its own build green (theirs).
+- S4 the two pytest suites' inputs verified: the lock free, no trainer (Owen has released the
+  card by then — the script still checks and refuses by name).
+
+**The button, in order:**
+
+| # | stage | needs the card | pass = |
+|---|---|---|---|
+| T1 | `sdk/bootstrap npm test`, `sdk/ts npm test` | no | 0 failing |
+| T2 | pytest, main branch, under the lock | no (VM memory) | 0 failed, count reported |
+| T3 | pytest, mac branch worktree (until merged), under the lock | no | 0 failed; `test_lineup.py`'s 4 worktree-environmental failures listed by name and nothing else |
+| T4 | BookForge keepers (`node tools/run-keepers.js`) | no | all suites green |
+| T5 | upstream route end to end: if `C:	mp\phase15-testrunnthropic-key.txt` exists, `PUT /v1/settings` on the WSL server configures anthropic + routes `translate`, one chat completion through it, then the route is put back to local and the key REMOVED (`upstreams.anthropic: null`) — the key never stays on a test run | no | a completion came back; settings restored; SKIPPED by name if no key file |
+| T6 | dots under vLLM in WSL: submit a `vlm-pages` job for `C:	mp\phase15-testrun\page.pdf` (SKIPPED by name if absent) to the WSL server; record seconds/page and that the artifact parses in the {bbox,category,text} dialect | YES | one page parsed, figure recorded |
+| T7 | llama-windows: start the staged Windows server on 7101, `load-model dots-ocr`, the same page through the same job wire; the artifact byte-shape identical to T6's; then `load-model qwen3.5-9b` and one cleanup chunk; unload; stop the server | YES | both answered; seconds/page and seconds/chunk recorded; `/v1/activity` shows the acts |
+| T8 | the remove door: `DELETE /v1/catalog/model/qwen3.5-9b` on the staged Windows server, then `installed: false` in its catalog | no | 204 then false |
+| T9 | Mac: `ssh mac` — the Mac server's `/v1/capability` after ITS upgrade (7c) shows `align`, `asr`, `pages` enabled; one align job, one asr job, one page (the Mac's card, allowed) | Mac's card | three artifacts, figures recorded |
+| T10 | the engine task on this PC: `POST /v1/tasks {"type":"engine","target":"wsl"}` on the staged Windows server with the host's door running — on a machine that already has the distro this exercises detection + migrate-config + migrate-weights (the subject from T7 pulled in the guest, then deleted on Windows) and refuses the steps that do not apply, by name | no | task `done`; the Windows copy gone, the guest's present |
+
+Then Owen's in-app pass (BookForge, Foundry) — his, not the script's. The report's last
+section is the list of every figure that was "unmeasured" in sections 7/7b/7c and is now a
+number, ready to be pasted back into those sections.
+
 ## 6. Not in this phase, written so it is not forgotten
 
 - Removing the WSL engine / moving back to Windows (`engine` task with `target: "windows"`): an explicit operator act, not the switch.
