@@ -30,6 +30,7 @@ from . import (
     capability,
     denoisemodels,
     envpack,
+    hosttools,
     jobenv,
     narratorpatches,
     pairing,
@@ -1643,6 +1644,21 @@ def _doctor_report() -> dict[str, Any]:
         "tts_envs": {},
         "narrator_patches": [],
         "capability": None,
+        # THE TWO PATHS, because the Mac audit of 2026-09-14 found the same
+        # message twice and only one of the two readings was a defect. A
+        # `crucible doctor` over a non-login `ssh mac '<cmd>'` reported
+        # `job tts: NOT READY — there is no ffmpeg on PATH` while the service
+        # was healthy: ffmpeg was at /opt/homebrew/bin, the plist carried that
+        # directory, and `launchctl print` confirmed the running process had
+        # it. The doctor was right about the shell it was in and silent about
+        # the one that matters.
+        #
+        # Crucible WROTE the service's PATH, so it can read it back
+        # (`service.read_recorded_path`) and put the two side by side. `agree`
+        # is computed rather than left to the reader, and `null` when there is
+        # nothing to compare — three states, not a boolean that would make "no
+        # service" read as "they differ".
+        "path": None,
         "problems": [],
     }
 
@@ -1652,6 +1668,32 @@ def _doctor_report() -> dict[str, Any]:
     except NoViableBackend as exc:
         report["problems"].append(f"no_viable_backend: {exc.reason}")
         backend = None
+
+    shell_path = hosttools.search_path()
+    path_report: dict[str, Any] = {
+        "shell": shell_path,
+        "service": None,
+        "mechanism": None,
+        "definition": None,
+        "agree": None,
+    }
+    if backend is not None:
+        try:
+            mechanism = service.mechanism_for(backend.kind)
+        except service.ServiceError:
+            # A backend with no supervisor is not a defect here; `crucible
+            # service` is the door that refuses it by name.
+            mechanism = None
+        if mechanism is not None:
+            recorded = service.read_recorded_path(mechanism, service.user_home())
+            path_report["mechanism"] = mechanism
+            path_report["definition"] = str(
+                service.definition_path(mechanism, service.user_home())
+            )
+            path_report["service"] = recorded
+            if recorded is not None:
+                path_report["agree"] = recorded == shell_path
+    report["path"] = path_report
 
     try:
         config = load_config(home)
@@ -1789,6 +1831,33 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 f"gpu:     {gpu['vendor']} {gpu['name']} "
                 f"({gpu['vram_bytes'] / 1024 ** 3:.1f} GiB) — {backend['detail']}"
             )
+        path_entry = report["path"]
+        if path_entry is not None:
+            print(f"PATH (this shell):   {path_entry['shell'] or '(empty)'}")
+            if path_entry["service"] is None:
+                # Named, not omitted. "No service is installed" and "the
+                # service has no PATH" are different facts and a missing line
+                # would read as either.
+                where = path_entry["definition"]
+                print(
+                    "PATH (the service):  none recorded — no "
+                    f"{path_entry['mechanism'] or 'service'} definition at {where}"
+                    if where
+                    else "PATH (the service):  none recorded"
+                )
+            else:
+                print(f"PATH (the service):  {path_entry['service']}")
+                if path_entry["agree"] is False:
+                    # Not a PROBLEM: they differ on every correctly installed
+                    # host, because a login shell has more than a launchd
+                    # agent's recorded PATH needs. It is said out loud because
+                    # every line below this one was measured in the FIRST of
+                    # the two.
+                    print(
+                        "note:    the two differ, which is normal. Every line "
+                        "below is what THIS shell can see; the service sees "
+                        "the second one"
+                    )
         config = report["config"]
         if config is None:
             print("config:  MISSING")

@@ -42,6 +42,18 @@ it searched whenever it reports a tool missing. Hardcoding a Homebrew prefix
 would fix one Mac, and would be a second owner of a fact the environment already
 holds.
 
+**And `doctor` reads the recorded PATH back, beside its own.** The Mac audit of
+2026-09-14 found the same message a second time — `job tts: NOT READY — there
+is no ffmpeg on PATH` over `ssh mac '<cmd>'` — and this time the service was
+perfectly healthy: the plist carried `/opt/homebrew/bin`, `launchctl print`
+confirmed the running process had it, and the only thing missing a PATH was the
+non-login shell the operator happened to be typing in. Naming one PATH was
+therefore not enough; the reader's real question is *which of the two*, and
+Crucible is the thing that wrote the other one, so `read_recorded_path()` below
+answers it and `crucible doctor` prints both lines. `None` is a real answer —
+no service is installed — and is reported as that rather than as an empty
+PATH.
+
 **The server's own `bin/` is APPENDED to that PATH, and only appended.** Since
 0.6.0 the server can arrive as an env pack (PHASE14-ENVPACKS.md), and then the
 shell that runs `crucible service install` is a `wsl.exe --exec` shell whose
@@ -75,6 +87,7 @@ from __future__ import annotations
 
 import getpass
 import os
+import plistlib
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -469,6 +482,50 @@ class Status:
             "detail": self.detail,
             "linger": self.linger,
         }
+
+
+def read_recorded_path(mechanism: str, home: Path) -> str | None:
+    """The PATH the SERVICE was installed with, read back out of what we wrote.
+
+    Not what this process has — `crucible/hosttools.py` owns that — and not a
+    guess. It is parsed out of the unit or the plist because Crucible is what
+    put it there, so the two can never disagree about what the service will
+    see.
+
+    Three different `None`s are deliberately one `None`: no definition file, a
+    definition with no PATH in it (a unit written before 0.6.0), and a plist
+    this build cannot read. All three mean "there is no recorded PATH to
+    compare against", which is what a caller needs; the file's own path is
+    already on `Status.definition` for anybody who wants to look.
+
+    The plist is read with `plistlib` rather than a regex: `launchd_plist_text`
+    XML-escapes the value, and a PATH with an `&` in it would come back wrong
+    from anything that did not decode it.
+    """
+    path = definition_path(mechanism, home)
+    if not path.is_file():
+        return None
+    try:
+        if mechanism == LAUNCHD:
+            with path.open("rb") as handle:
+                document = plistlib.load(handle)
+            variables = document.get("EnvironmentVariables")
+            if not isinstance(variables, dict):
+                return None
+            value = variables.get("PATH")
+            return value if isinstance(value, str) else None
+        for line in path.read_text(encoding="utf-8").splitlines():
+            name, separator, value = line.partition("=")
+            if separator == "=" and name.strip() == "Environment":
+                key, is_pair, recorded = value.partition("=")
+                if is_pair == "=" and key == "PATH":
+                    # `systemd_unit_text` doubles every `%` because systemd
+                    # expands `%x` specifiers, so reading it back has to undo
+                    # exactly that and nothing else.
+                    return recorded.replace("%%", "%")
+        return None
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return None
 
 
 def parse_systemctl_show(text: str) -> dict[str, str]:
@@ -894,6 +951,7 @@ __all__ = [
     "definition_path",
     "install",
     "launchd_plist_text",
+    "read_recorded_path",
     "mechanism_for",
     "parse_launchctl_list",
     "parse_systemctl_show",
