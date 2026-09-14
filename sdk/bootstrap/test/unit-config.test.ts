@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { connectHost, localConfigPath, parseLocalConfig, readLocalConfig } from '../src/index.js';
-import { FakeRunner, GUEST_CONFIG, refusal } from './fake.js';
+import { FakeRunner, GUEST_CONFIG, refusal, WSL_LIST, WSL_LIST_WITH_CRUCIBLE } from './fake.js';
 
 test('connectHost: 0.0.0.0, :: and empty bind to loopback; a specific address is used as written', () => {
   assert.equal(connectHost('0.0.0.0'), '127.0.0.1');
@@ -97,9 +97,15 @@ test('an unsupported platform is refused by name before anything runs', async ()
 // ------------------------------------------------------------------ win32
 
 const READ_SCRIPT = 'p="${CRUCIBLE_HOME:-$HOME/.crucible}/config.toml"; if [ ! -f "$p" ]; then echo "$p" >&2; exit 3; fi; echo "$p"; cat "$p"';
+/**
+ * WHICH DISTRO comes first now (PHASE14 4b): the read asks `wsl -l -v`, and
+ * the `crucible` distro wins over the app's setting when it exists.
+ */
+const LIST = { argv: ['wsl.exe', '-l', '-v'], stdout: WSL_LIST };
 
 test('win32: read through wsl.exe -d <distro> --exec bash -c, resolving $CRUCIBLE_HOME in the guest', async () => {
   const runner = new FakeRunner({ platform: 'win32' }, [
+    LIST,
     { argv: ['wsl.exe', '-d', 'Ubuntu', '--exec', 'bash', '-c', READ_SCRIPT], stdout: `/home/owen/.crucible/config.toml\n${GUEST_CONFIG}` },
   ]);
   const config = await readLocalConfig({ distro: 'Ubuntu' }, runner);
@@ -112,6 +118,7 @@ test('win32: read through wsl.exe -d <distro> --exec bash -c, resolving $CRUCIBL
 
 test('win32: {home} is quoted into the script instead of the guest\'s $CRUCIBLE_HOME', async () => {
   const runner = new FakeRunner({ platform: 'win32' }, [
+    LIST,
     {
       argv: ['wsl.exe', '-d', 'Ubuntu', '--exec', 'bash', '-c', "p='/srv/crucible'/config.toml; if [ ! -f \"$p\" ]; then echo \"$p\" >&2; exit 3; fi; echo \"$p\"; cat \"$p\""],
       stdout: `/srv/crucible/config.toml\n${GUEST_CONFIG}`,
@@ -121,17 +128,46 @@ test('win32: {home} is quoted into the script instead of the guest\'s $CRUCIBLE_
   assert.equal(config.configPath, 'Ubuntu:/srv/crucible/config.toml');
 });
 
-test('win32: no distro named is no_wsl_distro, and nothing runs', async () => {
-  const runner = new FakeRunner({ platform: 'win32' }, []);
+test('win32: no crucible distro and no distro named is no_wsl_distro, and no config is read', async () => {
+  const runner = new FakeRunner({ platform: 'win32' }, [LIST]);
   const r = await refusal(readLocalConfig({}, runner));
   assert.equal(r.code, 'no_wsl_distro');
-  assert.match(r.message, /no default distro here on purpose/);
-  const blank = await refusal(readLocalConfig({ distro: '  ' }, runner));
-  assert.equal(blank.code, 'no_wsl_distro');
+  assert.match(r.message, /there is no "crucible" distro/);
+  runner.assertDrained();
+
+  const blank = new FakeRunner({ platform: 'win32' }, [LIST]);
+  assert.equal((await refusal(readLocalConfig({ distro: '  ' }, blank))).code, 'no_wsl_distro');
+});
+
+test('win32: the crucible distro wins over the app\'s setting, and both holding a config is refused', async () => {
+  const ours = new FakeRunner({ platform: 'win32' }, [
+    { argv: ['wsl.exe', '-l', '-v'], stdout: WSL_LIST_WITH_CRUCIBLE },
+    { argv: ['wsl.exe', '-d', 'Ubuntu', '--exec', 'bash', '-c', 'test -f "${CRUCIBLE_HOME:-$HOME/.crucible}/config.toml"'], code: 1 },
+    { argv: ['wsl.exe', '-d', 'crucible', '--exec', 'bash', '-c', READ_SCRIPT], stdout: `/home/crucible/.crucible/config.toml\n${GUEST_CONFIG}` },
+  ]);
+  const config = await readLocalConfig({ distro: 'Ubuntu' }, ours);
+  ours.assertDrained();
+  assert.equal(config.configPath, 'crucible:/home/crucible/.crucible/config.toml');
+
+  const both = new FakeRunner({ platform: 'win32' }, [
+    { argv: ['wsl.exe', '-l', '-v'], stdout: WSL_LIST_WITH_CRUCIBLE },
+    { argv: ['wsl.exe', '-d', 'Ubuntu', '--exec', 'bash', '-c', 'test -f "${CRUCIBLE_HOME:-$HOME/.crucible}/config.toml"'], code: 0 },
+  ]);
+  const r = await refusal(readLocalConfig({ distro: 'Ubuntu' }, both));
+  assert.equal(r.code, 'two_local_crucibles');
+  assert.match(r.message, /which one is `local` is not guessed here/);
+  both.assertDrained();
+
+  // {exact} is the way out, and it does not even list.
+  const exact = new FakeRunner({ platform: 'win32' }, [
+    { argv: ['wsl.exe', '-d', 'Ubuntu', '--exec', 'bash', '-c', READ_SCRIPT], stdout: `/home/owen/.crucible/config.toml\n${GUEST_CONFIG}` },
+  ]);
+  assert.equal((await readLocalConfig({ distro: 'Ubuntu', exact: true }, exact)).configPath, 'Ubuntu:/home/owen/.crucible/config.toml');
+  exact.assertDrained();
 });
 
 test('win32: exit 3 is no_local_config, naming the guest path', async () => {
-  const runner = new FakeRunner({ platform: 'win32' }, [{ argv: () => true, code: 3, stderr: '/home/owen/.crucible/config.toml\n' }]);
+  const runner = new FakeRunner({ platform: 'win32' }, [LIST, { argv: () => true, code: 3, stderr: '/home/owen/.crucible/config.toml\n' }]);
   const r = await refusal(readLocalConfig({ distro: 'Ubuntu' }, runner));
   assert.equal(r.code, 'no_local_config');
   assert.match(r.message, /\/home\/owen\/\.crucible\/config\.toml does not exist inside WSL distro "Ubuntu"/);
@@ -145,14 +181,14 @@ test('win32: wsl.exe not running at all is wsl_read_failed', async () => {
 });
 
 test('win32: any other exit is wsl_read_failed with the guest\'s stderr', async () => {
-  const runner = new FakeRunner({ platform: 'win32' }, [{ argv: () => true, code: 1, stderr: 'There is no distribution with the supplied name.' }]);
+  const runner = new FakeRunner({ platform: 'win32' }, [LIST, { argv: () => true, code: 1, stderr: 'There is no distribution with the supplied name.' }]);
   const r = await refusal(readLocalConfig({ distro: 'Nope' }, runner));
   assert.equal(r.code, 'wsl_read_failed');
   assert.match(r.message, /exit 1.*no distribution with the supplied name/);
 });
 
 test('win32: a guest that printed no path line is wsl_read_failed', async () => {
-  const runner = new FakeRunner({ platform: 'win32' }, [{ argv: () => true, code: 0, stdout: '' }]);
+  const runner = new FakeRunner({ platform: 'win32' }, [LIST, { argv: () => true, code: 0, stdout: '' }]);
   const r = await refusal(readLocalConfig({ distro: 'Ubuntu' }, runner));
   assert.equal(r.code, 'wsl_read_failed');
   assert.match(r.message, /printed no config path/);

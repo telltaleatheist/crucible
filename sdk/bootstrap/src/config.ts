@@ -25,6 +25,7 @@
  */
 import { posix as path } from 'node:path';
 
+import { resolveDistro } from './distro.js';
 import { BootstrapRefusal } from './errors.js';
 import { processRunner, type Runner } from './runner.js';
 import { describeTarget, resolveTarget, runOn, type Target } from './target.js';
@@ -55,8 +56,17 @@ export interface LocalConfig {
 }
 
 export interface LocalConfigOptions {
-  /** Required on win32. Ignored elsewhere. */
+  /**
+   * win32: the app's own WSL distro setting. **The `crucible` distro wins over
+   * it when one exists** (PHASE14-ENVPACKS.md 4b): that distro is Crucible's
+   * own, and an app that imported it is not then supposed to read a server out
+   * of somebody else's guest. A machine with both a `crucible` distro and a
+   * config inside this one is `two_local_crucibles`, refused by name.
+   * Ignored off win32.
+   */
   distro?: string;
+  /** win32: use `distro` verbatim and resolve nothing — the way out of `two_local_crucibles`. */
+  exact?: boolean;
   /**
    * `CRUCIBLE_HOME`, as the target spells it (a guest path on win32). Omit to
    * resolve it the way the server does: `$CRUCIBLE_HOME`, else `~/.crucible`.
@@ -167,7 +177,13 @@ export function guestReadScript(home: string | undefined): string {
  * `config_missing_key`.
  */
 export async function readLocalConfig(options: LocalConfigOptions = {}, runner: Runner = processRunner()): Promise<LocalConfig> {
-  const target = resolveTarget(runner, options.distro);
+  const distro = runner.platform === 'win32'
+    ? await resolveDistro(runner, {
+      ...(options.distro === undefined ? {} : { distro: options.distro }),
+      ...(options.exact === undefined ? {} : { exact: options.exact }),
+    })
+    : options.distro;
+  const target = resolveTarget(runner, distro);
   if (target.kind === 'wsl') return readThroughWsl(runner, target, options.home);
 
   const configPath = localConfigPath(runner.env, runner.homedir, options.home);

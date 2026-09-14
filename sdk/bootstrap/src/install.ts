@@ -1,27 +1,34 @@
 /**
- * `install()` — this host has a Crucible, at the version the host app handed
- * over, with the job types it asked for, running as this machine's service.
+ * `install()` — this host has a Crucible, at the release the app named, with
+ * the job types it asked for, running as this machine's service.
  *
- * The sequence, every step by name, every step idempotent:
+ * The sequence is `steps.ts`'s (PHASE14-ENVPACKS.md section 4), and this file
+ * WALKS that list rather than restating it, so the generated `install.sh`
+ * cannot describe a different install from the one an app performs:
  *
- *   interpreter        the server's Python 3.11 exists (refused by name if not)
- *   pip-install        `<python> -m pip install <wheel>` — the wheel the HOST
- *                      names, a release path or URL; never guessed
- *   init               `crucible init --token <minted here> --enable-<type>…`
- *                      SKIPPED when a config already exists (its token is kept)
- *   install-<type>     `crucible install <type> [--narrator-engine e] --verbose`
- *   service-install    `crucible service install`
- *   linger             win32 only: `loginctl enable-linger <guest user>` as
- *                      root, SKIPPED when it is already on. See `linger.ts`:
- *                      `wsl.exe -u root` is how the guest is entered, not an
- *                      escalation, so there is no elevation to hand over
- *   capability-write   `crucible capability --write`
+ *   host-facts       CRUCIBLE_HOME, the guest user, free disk, curl/tar/zstd
+ *   server-pack      download + verify + unpack the release's server pack into
+ *                    <CRUCIBLE_HOME>/server — the interpreter comes WITH it
+ *   init             <server>/bin/crucible init --token <minted here> --enable-<type>…
+ *                    SKIPPED when a config already exists (its token is kept)
+ *   install-<type>   <server>/bin/crucible install <type>
+ *   service-install  <server>/bin/crucible service install
+ *   linger           win32 only: `loginctl enable-linger <guest user>` as root
+ *   capability-write <server>/bin/crucible capability --write
+ *
+ * **There is no conda step and no pip step.** A fresh machine has no Python at
+ * all and does not need one: the server pack is a relocatable CPython with the
+ * crucible wheel already installed in it (PHASE14 section 1). `release` — a
+ * version string — replaced `wheel` and the conda options, and it defaults to
+ * this package's own version, which is the one legitimate default in here: the
+ * bootstrapper ships AT the server's version, so "which release" is not a
+ * question anybody has to answer.
  *
  * Pulls are NOT part of this: weights are the app's, later, per model.
  *
- * The token is minted on the client — `crucible init --token` — so the app
- * that installed the server already holds what `readLocalConfig()` would read
- * back. It is never logged: the argv reported for the init step spells it
+ * The token is minted on the client — `crucible init --token` — so the app that
+ * installed the server already holds what `readLocalConfig()` would read back.
+ * It is never logged: the argv reported for the init step spells it
  * `<redacted>`, and `onLine` only ever sees what the step printed.
  *
  * Every step's stdout and stderr stream to `onLine` as they arrive. A failing
@@ -32,12 +39,15 @@
 import { randomBytes } from 'node:crypto';
 
 import { readLocalConfig, type LocalConfig } from './config.js';
+import { resolveDistro } from './distro.js';
+import { backendFor, envpacksUrl, type PackBackend } from './envpacks.js';
 import { BootstrapRefusal, BootstrapStepFailed } from './errors.js';
-import { consoleScriptBeside, DEFAULT_CONDA_ROOTS, probeInterpreter } from './host.js';
 import { ensureLinger } from './linger.js';
+import { fetchManifest, installPack, probeGuest, refuseMissingTools, SERVER_SUBDIR } from './pack.js';
 import { processRunner, type OutputStream, type Runner } from './runner.js';
+import { installSteps, renderArgv, type RefName, type StepPlan } from './steps.js';
 import { describeTarget, resolveTarget, streamOn, type Target } from './target.js';
-import { guestPathFor } from './wsl.js';
+import { BOOTSTRAP_VERSION } from './version.js';
 
 /** The job types `crucible init --enable-<type>` knows, in the order the CLI lists them. */
 export const JOB_TYPES = ['echo', 'llm', 'asr', 'tts', 'align', 'rvc', 'denoise'] as const;
@@ -54,36 +64,40 @@ export const INSTALLABLE_JOB_TYPES: readonly JobType[] = ['llm', 'tts', 'asr', '
 export type JobTypeRequest = Exclude<JobType, 'tts'> | { type: 'tts'; narratorEngine: string };
 
 export interface InstallTimeouts {
-  /** The interpreter probe and every `crucible` verb that builds nothing. */
+  /** Every `crucible` verb that builds nothing, and the host probe. */
   quickMs: number;
-  /** `pip install <wheel>`. */
-  pipMs: number;
-  /** `crucible install <type>`, which builds a multi-gigabyte venv. */
+  /** The server pack: a multi-gigabyte download over somebody's home line. */
+  packMs: number;
+  /** `crucible install <type>`, which downloads a job env pack. */
   envMs: number;
 }
 
 export const DEFAULT_INSTALL_TIMEOUTS: InstallTimeouts = {
   quickMs: 5 * 60_000,
-  pipMs: 30 * 60_000,
-  envMs: 90 * 60_000,
+  packMs: 120 * 60_000,
+  envMs: 120 * 60_000,
 };
 
 export interface InstallOptions {
-  /** Required on win32. Ignored elsewhere. */
+  /** win32: the app's WSL distro setting. The `crucible` distro wins when it exists. */
   distro?: string;
+  /** win32: use `distro` verbatim, resolving nothing. The way out of `two_local_crucibles`. */
+  exact?: boolean;
   jobTypes: readonly JobTypeRequest[];
   /** `CRUCIBLE_HOME` for every `crucible` verb, as the target spells it. Omit for the server's default. */
   home?: string;
-  /** The release wheel: an absolute path on this machine, or an `http(s)://` URL. */
-  wheel: string;
+  /**
+   * Which release's packs to install. Defaults to {@link BOOTSTRAP_VERSION} —
+   * the bootstrapper ships at the server's version, so the default IS the
+   * answer rather than a guess at one.
+   */
+  release?: string;
   /** Every line a step prints, as it prints it. */
   onLine: (line: string, stream: OutputStream, step: string) => void;
   /** Optional: a step beginning, finishing, or being skipped. */
   onStep?: (step: InstallStep) => void;
   /** What `crucible init` should bind. Omit for the server's own defaults (127.0.0.1:7100). */
   bind?: { host?: string; port?: number };
-  /** Where to look for conda. Defaults to {@link DEFAULT_CONDA_ROOTS}. */
-  condaRoots?: readonly string[];
   timeouts?: Partial<InstallTimeouts>;
 }
 
@@ -99,6 +113,11 @@ export interface InstallResult {
   steps: InstallStep[];
   /** The server as its config now describes it. The token is not here; `readLocalConfig()` is. */
   server: { name: string; url: string; configPath: string };
+  /** Which release's packs are on this host, and which backend they are for. */
+  release: string;
+  backend: PackBackend;
+  /** `<CRUCIBLE_HOME>/server/bin/crucible`, as the target spells it. */
+  crucible: string;
 }
 
 /** A 32-byte urlsafe token — the same shape `crucible.config.mint_token` produces. */
@@ -156,12 +175,25 @@ export function planJobTypes(requests: readonly JobTypeRequest[]): Plan {
 }
 
 export async function install(options: InstallOptions, runner: Runner = processRunner()): Promise<InstallResult> {
-  const target = resolveTarget(runner, options.distro);
-  const plan = planJobTypes(options.jobTypes);
+  const release = options.release ?? BOOTSTRAP_VERSION;
+  const backend = backendFor(runner.platform);
+  const distro = runner.platform === 'win32'
+    ? await resolveDistro(runner, {
+      ...(options.distro === undefined ? {} : { distro: options.distro }),
+      ...(options.exact === undefined ? {} : { exact: options.exact }),
+    })
+    : undefined;
+  const target = resolveTarget(runner, distro);
+  const jobs = planJobTypes(options.jobTypes);
   const timeouts = { ...DEFAULT_INSTALL_TIMEOUTS, ...options.timeouts };
   const steps: InstallStep[] = [];
   const done: string[] = [];
   const env = options.home === undefined ? undefined : { CRUCIBLE_HOME: options.home };
+
+  const bind: string[] = [];
+  if (options.bind?.host !== undefined) bind.push('--host', options.bind.host);
+  if (options.bind?.port !== undefined) bind.push('--port', String(options.bind.port));
+  const plan: StepPlan = { enableFlags: jobs.enableFlags, installs: jobs.installs, bind, linger: target.kind === 'wsl' };
 
   const report = (step: InstallStep): InstallStep => {
     steps.push(step);
@@ -199,77 +231,104 @@ export async function install(options: InstallOptions, runner: Runner = processR
     options.onStep?.(step);
   };
 
-  // 1. interpreter
-  const interpreter = await probeInterpreter(runner, target, options.condaRoots ?? DEFAULT_CONDA_ROOTS);
-  const first = interpreter.refusals[0];
-  if (first !== undefined || interpreter.python === null) throw first ?? new Error('unreachable: no python and no refusal');
-  const python = interpreter.python.path;
-  report({ name: 'interpreter', argv: [], status: 'ok', detail: `Python ${interpreter.python.version} at ${python}` });
-  done.push('interpreter');
+  const configOptions = {
+    ...(distro === undefined ? {} : { distro, exact: true }),
+    ...(options.home === undefined ? {} : { home: options.home }),
+  };
+  const values: Partial<Record<RefName, string>> = { release, backend };
+  let crucible: string | null = null;
+  // Measured by `host-facts`, consumed by `server-pack`. Locals rather than a
+  // state object threaded through the walk: the sequence is a sequence, and
+  // the one step that reads them is the next one.
+  let manifest: Awaited<ReturnType<typeof fetchManifest>> | null = null;
+  let guest: Awaited<ReturnType<typeof probeGuest>> | null = null;
 
-  // 2. pip install <wheel>
-  const wheel = wheelArgument(runner, target, options.wheel);
-  await runStep('pip-install', [python, '-m', 'pip', 'install', wheel], timeouts.pipMs);
+  for (const step of installSteps(plan)) {
+    switch (step.name) {
+      case 'host-facts': {
+        guest = await probeGuest(runner, target, options.home);
+        refuseMissingTools(target, runner.platform, guest.missingTools);
+        values.home = guest.home;
+        values.user = guest.user;
+        report({
+          name: step.name,
+          argv: [],
+          status: 'ok',
+          detail: `${describeTarget(target)}: CRUCIBLE_HOME ${guest.home}, user ${guest.user}, `
+            + `${(guest.freeBytes / 1024 ** 3).toFixed(1)} GiB free`
+            + `${guest.server === null ? '' : `, server pack ${guest.server.release ?? 'unstamped'}`}`,
+        });
+        done.push(step.name);
 
-  // 3. init — skipped when a config is already there
-  const crucible = consoleScriptBeside(python);
-  const configOptions = { ...(options.distro === undefined ? {} : { distro: options.distro }), ...(options.home === undefined ? {} : { home: options.home }) };
-  let existing: LocalConfig | null = null;
-  try {
-    existing = await readLocalConfig(configOptions, runner);
-  } catch (err) {
-    if (!(err instanceof BootstrapRefusal) || err.code !== 'no_local_config') throw err;
+        // The pack fetch needs the manifest, and the manifest is fetched with
+        // the GUEST's curl — nothing here reaches the network itself, so a
+        // proxy or a VPN inside the distro is the guest's own answer.
+        manifest = await fetchManifest(runner, target, release, envpacksUrl(release), timeouts.quickMs);
+        break;
+      }
+      case 'server-pack': {
+        if (manifest === null || guest === null) throw new Error('unreachable: host-facts did not run before server-pack');
+        const packStep = report({ name: step.name, argv: [], status: 'running', detail: `${SERVER_SUBDIR} pack for ${backend}, release ${release}` });
+        const result = await installPack(runner, target, manifest, 'server', {
+          release,
+          backend,
+          home: guest.home,
+          freeBytes: guest.freeBytes,
+          installed: guest.server,
+          timeoutMs: timeouts.packMs,
+          onLine: (line, stream) => options.onLine(line, stream, step.name),
+        });
+        crucible = result.paths.crucible;
+        values.crucible = crucible;
+        packStep.status = result.skipped ? 'skipped' : 'ok';
+        packStep.detail = result.skipped
+          ? `${result.paths.dest} is already the ${release} pack (sha ${result.entry.sha256.slice(0, 12)}…)`
+          : `unpacked ${result.entry.parts.length} part(s) into ${result.paths.dest} (Python ${result.entry.python})`;
+        packStep.argv = result.skipped ? [] : [result.paths.crucible];
+        options.onStep?.(packStep);
+        if (!result.skipped) done.push(step.name);
+        break;
+      }
+      case 'init': {
+        let existing: LocalConfig | null = null;
+        try {
+          existing = await readLocalConfig(configOptions, runner);
+        } catch (err) {
+          if (!(err instanceof BootstrapRefusal) || err.code !== 'no_local_config') throw err;
+        }
+        if (existing !== null) {
+          report({ name: 'init', argv: [], status: 'skipped', detail: `config exists at ${existing.configPath}; its token is kept` });
+          break;
+        }
+        if (step.words === null) throw new Error('unreachable: the init step has no argv');
+        const token = mintToken();
+        const argv = renderArgv(step.words, { ...values, token });
+        const redacted = renderArgv(step.words, { ...values, token: '<redacted>' });
+        await runStep('init', argv, timeouts[step.timeout], redacted);
+        break;
+      }
+      case 'linger': {
+        const linger = await ensureLinger(runner, target, env);
+        if (linger !== null) {
+          report({ name: 'linger', argv: linger.argv, status: linger.granted ? 'ok' : 'skipped', detail: linger.detail });
+          if (linger.granted) done.push('linger');
+        }
+        break;
+      }
+      default: {
+        if (step.words === null) throw new Error(`unreachable: step ${step.name} has neither argv nor a handler`);
+        await runStep(step.name, renderArgv(step.words, values), timeouts[step.timeout]);
+      }
+    }
   }
-  if (existing !== null) {
-    report({ name: 'init', argv: [], status: 'skipped', detail: `config exists at ${existing.configPath}; its token is kept` });
-  } else {
-    const token = mintToken();
-    const bind: string[] = [];
-    if (options.bind?.host !== undefined) bind.push('--host', options.bind.host);
-    if (options.bind?.port !== undefined) bind.push('--port', String(options.bind.port));
-    const argv = [crucible, 'init', '--token', token, ...bind, ...plan.enableFlags];
-    const redacted = [crucible, 'init', '--token', '<redacted>', ...bind, ...plan.enableFlags];
-    await runStep('init', argv, timeouts.quickMs, redacted);
-  }
 
-  // 4. install <type>, one per type
-  for (const entry of plan.installs) {
-    await runStep(`install-${entry.type}`, [crucible, ...entry.argv], timeouts.envMs);
-  }
-
-  // 5. service install
-  await runStep('service-install', [crucible, 'service', 'install'], timeouts.quickMs);
-
-  // 6. linger — win32 only, and DONE rather than reported. A systemd user unit
-  // dies with the user's last session without it, so a Crucible installed here
-  // and not lingering is a server that disappears the first time somebody logs
-  // out. `wsl.exe -u root` needs no password (measured 2026-09-14), so the
-  // thing this package used to hand over is one idempotent command it can
-  // simply run — and a guest that will not give root is a named refusal, which
-  // is the one hand-over that remains.
-  const linger = await ensureLinger(runner, target, env);
-  if (linger !== null) {
-    report({
-      name: 'linger',
-      argv: linger.argv,
-      status: linger.granted ? 'ok' : 'skipped',
-      detail: linger.detail,
-    });
-    if (linger.granted) done.push('linger');
-  }
-
-  // 7. capability --write
-  await runStep('capability-write', [crucible, 'capability', '--write'], timeouts.quickMs);
-
+  if (crucible === null) throw new Error('unreachable: no server pack after the sequence');
   const config = await readLocalConfig(configOptions, runner);
-  return { steps, server: { name: config.name, url: config.url, configPath: config.configPath } };
-}
-
-/** The wheel as the target spells it: a URL verbatim, a path checked and (on win32) mapped into the guest. */
-export function wheelArgument(runner: Runner, target: Target, wheel: string): string {
-  if (/^https?:\/\//i.test(wheel)) return wheel;
-  if (!runner.fileExists(wheel)) {
-    throw new BootstrapRefusal('wheel_missing', `the wheel ${wheel} is not on this machine. The host names the release wheel; nothing here guesses one.`);
-  }
-  return target.kind === 'wsl' ? guestPathFor(runner, wheel) : wheel;
+  return {
+    steps,
+    server: { name: config.name, url: config.url, configPath: config.configPath },
+    release,
+    backend,
+    crucible,
+  };
 }

@@ -2,12 +2,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { ensureRunning, parseServiceStatus, DEFAULT_CONDA_ROOTS } from '../src/index.js';
-import { interpreterScript } from '../src/host.js';
-import { CRUCIBLE_BIN, FakeRunner, INTERPRETER_OK, refusal } from './fake.js';
+import { ensureRunning, parseServiceStatus } from '../src/index.js';
+import { guestProbeScript } from '../src/pack.js';
+import { CRUCIBLE_BIN, FakeRunner, GUEST_BARE, GUEST_INSTALLED, refusal, WSL_LIST } from './fake.js';
 
 const W = (...argv: string[]): string[] => ['wsl.exe', '-d', 'Ubuntu', '--exec', ...argv];
-const INTERP = { argv: W('bash', '-c', interpreterScript(DEFAULT_CONDA_ROOTS)), stdout: INTERPRETER_OK };
+/** win32: which distro, then what that distro has. There is no interpreter hunt any more. */
+const LIST = { argv: ['wsl.exe', '-l', '-v'], stdout: WSL_LIST };
+const PROBE = { argv: W('bash', '-c', guestProbeScript(undefined)), stdout: GUEST_INSTALLED };
 const STATUS = W(CRUCIBLE_BIN, 'service', 'status', '--json');
 const R = (...argv: string[]): string[] => ['wsl.exe', '-d', 'Ubuntu', '-u', 'root', '--exec', ...argv];
 const WHOAMI = { argv: W('id', '-un'), stdout: 'owen\n' };
@@ -43,7 +45,7 @@ test('parseServiceStatus: the shape crucible/service.py prints, and nothing loos
 });
 
 test('already running: one status read, no start, started false, linger reported', async () => {
-  const runner = new FakeRunner({ platform: 'win32' }, [INTERP, { argv: STATUS, code: 0, stdout: status() }, WHOAMI, LINGER_ON]);
+  const runner = new FakeRunner({ platform: 'win32' }, [LIST, PROBE, { argv: STATUS, code: 0, stdout: status() }, WHOAMI, LINGER_ON]);
   const result = await ensureRunning({ distro: 'Ubuntu' }, runner);
   runner.assertDrained();
   assert.deepEqual(result, {
@@ -66,7 +68,8 @@ test('already running: one status read, no start, started false, linger reported
 
 test('installed and stopped: `crucible service start`, then status again, started true', async () => {
   const runner = new FakeRunner({ platform: 'win32' }, [
-    INTERP,
+    LIST,
+    PROBE,
     { argv: STATUS, code: 1, stdout: status({ running: false, pid: null, detail: 'inactive/dead, unit file enabled' }) },
     { argv: START, stdout: 'started crucible.service\n' },
     { argv: STATUS, code: 0, stdout: status({ pid: 4242 }) },
@@ -84,7 +87,7 @@ test('win32: linger off is GRANTED, not handed over, and the result says so', as
   // `wsl.exe -u root` needs no password, so there is no elevation to hand to
   // the host app and the sudo line this used to return is the command itself.
   const runner = new FakeRunner({ platform: 'win32' }, [
-    INTERP, { argv: STATUS, stdout: status({ linger: false }) }, WHOAMI, LINGER_OFF, GRANT,
+    LIST, PROBE, { argv: STATUS, stdout: status({ linger: false }) }, WHOAMI, LINGER_OFF, GRANT,
   ]);
   const result = await ensureRunning({ distro: 'Ubuntu' }, runner);
   runner.assertDrained();
@@ -99,7 +102,8 @@ test('win32: a guest that will not give root is a named refusal with the command
   // The one hand-over that remains. "Off" would grant something nobody asked
   // for; "on" would promise a server that dies with the next logout.
   const runner = new FakeRunner({ platform: 'win32' }, [
-    INTERP,
+    LIST,
+    PROBE,
     { argv: STATUS, stdout: status({ linger: false }) },
     WHOAMI,
     { argv: R('loginctl', 'show-user', 'owen', '-p', 'Linger'), code: 1, stderr: 'wsl: root is not available in this distribution' },
@@ -113,7 +117,8 @@ test('win32: a guest that will not give root is a named refusal with the command
 
 test('win32: loginctl answering something else is unreadable, not a guess', async () => {
   const runner = new FakeRunner({ platform: 'win32' }, [
-    INTERP,
+    LIST,
+    PROBE,
     { argv: STATUS, stdout: status({ linger: false }) },
     WHOAMI,
     { argv: R('loginctl', 'show-user', 'owen', '-p', 'Linger'), code: 0, stdout: 'Failed to get user: No such process\n' },
@@ -124,7 +129,8 @@ test('win32: loginctl answering something else is unreadable, not a guess', asyn
 
 test('win32: a grant that fails is linger_failed, never a silent success', async () => {
   const runner = new FakeRunner({ platform: 'win32' }, [
-    INTERP,
+    LIST,
+    PROBE,
     { argv: STATUS, stdout: status({ linger: false }) },
     WHOAMI,
     LINGER_OFF,
@@ -137,7 +143,8 @@ test('win32: a grant that fails is linger_failed, never a silent success', async
 
 test('win32: the guest user is ASKED, never assumed from the Windows username', async () => {
   const runner = new FakeRunner({ platform: 'win32' }, [
-    INTERP,
+    LIST,
+    PROBE,
     { argv: STATUS, stdout: status({ linger: false }) },
     { argv: W('id', '-un'), stdout: 'telltale\n' },
     { argv: R('loginctl', 'show-user', 'telltale', '-p', 'Linger'), stdout: 'Linger=no\n' },
@@ -150,8 +157,8 @@ test('win32: the guest user is ASKED, never assumed from the Windows username', 
 
 test('launchd has no linger question: null, no command', async () => {
   const runner = new FakeRunner({ platform: 'darwin' }, [
-    { argv: ['bash', '-c', interpreterScript(DEFAULT_CONDA_ROOTS)], stdout: 'home=/Users/owen\nconda=/Users/owen/miniforge3\npython=/Users/owen/miniforge3/envs/crucible/bin/python\nversion=Python 3.11.13\n' },
-    { argv: ['/Users/owen/miniforge3/envs/crucible/bin/crucible', 'service', 'status', '--json'], stdout: status({ mechanism: 'launchd', definition: '/Users/owen/Library/LaunchAgents/com.crucible.serve.plist', linger: null, pid: 31426 }) },
+    { argv: ['bash', '-c', guestProbeScript(undefined)], stdout: 'home=/Users/owen/.crucible\nuser=owen\nfree_kib=9000000\ncrucible=/Users/owen/.crucible/server/bin/crucible\nversion=crucible 0.6.0\n' },
+    { argv: ['/Users/owen/.crucible/server/bin/crucible', 'service', 'status', '--json'], stdout: status({ mechanism: 'launchd', definition: '/Users/owen/Library/LaunchAgents/com.crucible.serve.plist', linger: null, pid: 31426 }) },
   ]);
   const result = await ensureRunning({}, runner);
   assert.equal(result.mechanism, 'launchd');
@@ -166,8 +173,8 @@ test('native linux: the fact is still REPORTED with the sudo line, and nothing i
   // `sudo` there is real elevation and the host app is the one that can obtain
   // it. Only WSL changed, and only because `-u root` is not an escalation.
   const runner = new FakeRunner({ platform: 'linux', homedir: '/home/owen' }, [
-    { argv: ['bash', '-c', interpreterScript(DEFAULT_CONDA_ROOTS)], stdout: 'home=/home/owen\nconda=/home/owen/miniforge3\npython=/home/owen/miniforge3/envs/crucible/bin/python\nversion=Python 3.11.13\n' },
-    { argv: ['/home/owen/miniforge3/envs/crucible/bin/crucible', 'service', 'status', '--json'], stdout: status({ linger: false }) },
+    { argv: ['bash', '-c', guestProbeScript(undefined)], stdout: 'home=/home/owen/.crucible\nuser=owen\nfree_kib=9000000\ncrucible=/home/owen/.crucible/server/bin/crucible\nversion=crucible 0.6.0\n' },
+    { argv: ['/home/owen/.crucible/server/bin/crucible', 'service', 'status', '--json'], stdout: status({ linger: false }) },
   ]);
   const result = await ensureRunning({}, runner);
   runner.assertDrained();
@@ -177,7 +184,7 @@ test('native linux: the fact is still REPORTED with the sudo line, and nothing i
 });
 
 test('not installed: service_not_installed naming the definition and `crucible service install`', async () => {
-  const runner = new FakeRunner({ platform: 'win32' }, [INTERP, { argv: STATUS, code: 1, stdout: status({ installed: false, running: false, pid: null, detail: 'inactive/dead, unit file not-found' }) }]);
+  const runner = new FakeRunner({ platform: 'win32' }, [LIST, PROBE, { argv: STATUS, code: 1, stdout: status({ installed: false, running: false, pid: null, detail: 'inactive/dead, unit file not-found' }) }]);
   const r = await refusal(ensureRunning({ distro: 'Ubuntu' }, runner));
   assert.equal(r.code, 'service_not_installed');
   assert.match(r.message, /\/home\/owen\/\.config\/systemd\/user\/crucible\.service does not exist/);
@@ -187,7 +194,8 @@ test('not installed: service_not_installed naming the definition and `crucible s
 
 test('start refusing is service_failed with its words and where the logs are', async () => {
   const runner = new FakeRunner({ platform: 'win32' }, [
-    INTERP,
+    LIST,
+    PROBE,
     { argv: STATUS, code: 1, stdout: status({ running: false, pid: null }) },
     { argv: START, code: 1, stderr: 'crucible: systemd would not start crucible.service: Job for crucible.service failed' },
   ]);
@@ -199,7 +207,8 @@ test('start refusing is service_failed with its words and where the logs are', a
 
 test('started and still not running is service_failed with the status detail', async () => {
   const runner = new FakeRunner({ platform: 'win32' }, [
-    INTERP,
+    LIST,
+    PROBE,
     { argv: STATUS, code: 1, stdout: status({ running: false, pid: null }) },
     { argv: START, stdout: 'started crucible.service\n' },
     { argv: STATUS, code: 1, stdout: status({ running: false, pid: null, detail: 'failed/failed, unit file enabled' }) },
@@ -210,16 +219,16 @@ test('started and still not running is service_failed with the status detail', a
 });
 
 test('status with no config behind it is no_local_config; any other non-status answer is service_failed', async () => {
-  const noConfig = new FakeRunner({ platform: 'win32' }, [INTERP, { argv: STATUS, code: 1, stderr: 'crucible: no config at /home/owen/.crucible/config.toml — run `crucible init`' }]);
+  const noConfig = new FakeRunner({ platform: 'win32' }, [LIST, PROBE, { argv: STATUS, code: 1, stderr: 'crucible: no config at /home/owen/.crucible/config.toml — run `crucible init`' }]);
   const n = await refusal(ensureRunning({ distro: 'Ubuntu' }, noConfig));
   assert.equal(n.code, 'no_local_config');
 
-  const garbage = new FakeRunner({ platform: 'win32' }, [INTERP, { argv: STATUS, code: 1, stderr: 'crucible: this host detects backend cuda-linux, but config was initialised for mlx-darwin' }]);
+  const garbage = new FakeRunner({ platform: 'win32' }, [LIST, PROBE, { argv: STATUS, code: 1, stderr: 'crucible: this host detects backend cuda-linux, but config was initialised for mlx-darwin' }]);
   const g = await refusal(ensureRunning({ distro: 'Ubuntu' }, garbage));
   assert.equal(g.code, 'service_failed');
   assert.match(g.message, /initialised for mlx-darwin/);
 
-  const dead = new FakeRunner({ platform: 'win32' }, [INTERP, { argv: STATUS, failure: 'wsl.exe did not answer within 60s' }]);
+  const dead = new FakeRunner({ platform: 'win32' }, [LIST, PROBE, { argv: STATUS, failure: 'wsl.exe did not answer within 60s' }]);
   const d = await refusal(ensureRunning({ distro: 'Ubuntu' }, dead));
   assert.equal(d.code, 'service_failed');
 });
@@ -227,7 +236,8 @@ test('status with no config behind it is no_local_config; any other non-status a
 test('{home} travels as env CRUCIBLE_HOME= on every verb', async () => {
   const E = (...argv: string[]): string[] => W('env', 'CRUCIBLE_HOME=/srv/c', ...argv);
   const runner = new FakeRunner({ platform: 'win32' }, [
-    INTERP,
+    LIST,
+    { argv: W('bash', '-c', guestProbeScript('/srv/c')), stdout: 'home=/srv/c\nuser=owen\nfree_kib=9000000\ncrucible=/home/owen/.crucible/server/bin/crucible\nversion=crucible 0.6.0\n' },
     { argv: E(CRUCIBLE_BIN, 'service', 'status', '--json'), code: 1, stdout: status({ running: false, pid: null }) },
     { argv: E(CRUCIBLE_BIN, 'service', 'start') },
     { argv: E(CRUCIBLE_BIN, 'service', 'status', '--json'), stdout: status() },
@@ -241,14 +251,18 @@ test('{home} travels as env CRUCIBLE_HOME= on every verb', async () => {
   runner.assertDrained();
 });
 
-test('no interpreter: the named refusal, nothing else asked', async () => {
-  const runner = new FakeRunner({ platform: 'win32' }, [{ argv: INTERP.argv, stdout: 'home=/home/owen\n' }]);
+test('no server pack: the named refusal, nothing else asked', async () => {
+  const runner = new FakeRunner({ platform: 'win32' }, [LIST, { argv: PROBE.argv, stdout: GUEST_BARE }]);
   const r = await refusal(ensureRunning({ distro: 'Ubuntu' }, runner));
-  assert.equal(r.code, 'no_conda');
+  assert.equal(r.code, 'no_server_pack');
+  assert.match(r.message, /\/home\/owen\/\.crucible\/server\/bin\/crucible/);
+  assert.match(r.message, /install\(\) downloads the server pack/);
   runner.assertDrained();
 });
 
-test('win32 without a distro is no_wsl_distro', async () => {
-  const r = await refusal(ensureRunning({}, new FakeRunner({ platform: 'win32' }, [])));
+test('win32 with no crucible distro and no {distro} is no_wsl_distro', async () => {
+  const runner = new FakeRunner({ platform: 'win32' }, [LIST]);
+  const r = await refusal(ensureRunning({}, runner));
   assert.equal(r.code, 'no_wsl_distro');
+  assert.match(r.message, /there is no "crucible" distro on this machine and no distro was named/);
 });

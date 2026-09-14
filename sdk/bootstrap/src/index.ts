@@ -14,11 +14,64 @@
  * should be a service. The token is never logged.
  */
 
-export { detectHost, DEFAULT_CONDA_ROOTS, SERVER_ENV_NAME, SERVER_PYTHON, WSL_NVIDIA_SMI } from './host.js';
-export type { DetectOptions, GpuFacts, HostFacts, PythonFacts, WslFacts } from './host.js';
+export { consoleScriptBeside, detectHost, parseNvidiaSmi, pickProbeDistro, WSL_NVIDIA_SMI } from './host.js';
+export type { DetectOptions, GpuFacts, HostFacts, WslFacts } from './host.js';
 
 export { install, mintToken, planJobTypes, DEFAULT_INSTALL_TIMEOUTS, INSTALLABLE_JOB_TYPES, JOB_TYPES } from './install.js';
 export type { InstallOptions, InstallResult, InstallStep, InstallTimeouts, JobType, JobTypeRequest } from './install.js';
+
+export {
+  backendFor,
+  envpacksUrl,
+  ENVPACKS_ASSET,
+  findPack,
+  packAssetName,
+  parseEnvpacks,
+  releaseAssetUrl,
+  RELEASE_REPO,
+  rootfsAssetName,
+  SERVER_PACK,
+} from './envpacks.js';
+export type { EnvPacks, PackBackend, PackEntry } from './envpacks.js';
+
+export {
+  CURL_ARGS,
+  DOWNLOADS_SUBDIR,
+  fetchManifest,
+  guestProbeScript,
+  installPack,
+  packPaths,
+  probeGuest,
+  requiredBytes,
+  requirePack,
+  SERVER_SUBDIR,
+  shaArgv,
+  STAMP_NAME,
+  TAR_ARGS,
+} from './pack.js';
+export type { GuestFacts, InstalledPack, PackInstallOptions, PackInstallResult, PackPaths } from './pack.js';
+
+export {
+  CRUCIBLE_DISTRO,
+  crucibleAppData,
+  ensureDistro,
+  importArgv,
+  listDistros,
+  readWslConf,
+  resolveDistro,
+  terminateArgv,
+  unregisterArgv,
+  writeWslConf,
+  WSL_CONF_MARKER,
+  WSL_CONF_TEXT,
+} from './distro.js';
+export type { DistroChoiceOptions, DistroOutcome, EnsureDistroOptions } from './distro.js';
+
+export { detectWslState, elevatedArgv, probeArgv, wslStates } from './wsl-states.js';
+export type { Evidence, ProbeKey, WslAction, WslState, WslStateDef, WslStateInputs } from './wsl-states.js';
+
+export { installSteps, renderArgv, renderSh, SHELL_VARIABLE } from './steps.js';
+export type { RefName, StepDef, StepPlan, Word } from './steps.js';
 
 export { ensureLinger, lingerCommand, parseLinger } from './linger.js';
 export type { LingerOutcome } from './linger.js';
@@ -42,8 +95,8 @@ export type { ActivityClient, HealthOptions } from './health.js';
 export { BootstrapRefusal, BootstrapStepFailed } from './errors.js';
 export type { BootstrapRefusalCode, BootstrapRefusalOptions } from './errors.js';
 
-export { decodeWslBytes, processRunner, splitLines } from './runner.js';
-export type { OutputStream, RunOptions, RunResult, Runner, StreamOptions } from './runner.js';
+export { decodeWslBytes, incompleteTailBytes, processRunner, segmentWslBytes, splitLines } from './runner.js';
+export type { OutputStream, RunOptions, RunResult, Runner, StreamOptions, WslSegment } from './runner.js';
 
 export { guestPathFor, guestUnpackArgv, networkPathBehind, parseWslList, shellQuote, toWslPath, wslArgv, wslListArgv, wslRootArgv } from './wsl.js';
 export type { WslDistro } from './wsl.js';

@@ -10,6 +10,12 @@
  * remove. `crucible service status --json` is the question; its exit code is
  * not read, because it is 1 for "installed and stopped" and the JSON says why.
  *
+ * WHICH CRUCIBLE, AND WHERE. On win32 the distro is resolved by `distro.ts`'s
+ * one rule — the `crucible` distro when there is one, else the app's setting —
+ * and the binary is the SERVER PACK's, `<CRUCIBLE_HOME>/server/bin/crucible`.
+ * A host with no pack is `no_server_pack`: there is no interpreter to go
+ * looking for, because the interpreter arrives in the pack.
+ *
  * LINGER IS GRANTED ON WIN32 AND REPORTED EVERYWHERE ELSE, and this is where it
  * matters most: without it a systemd user unit dies with the user's last
  * session, so `ensureRunning()` would answer `running: true` about a server
@@ -20,9 +26,10 @@
  * the host app really is the one that can obtain it, so there the fact is
  * still reported with the command and nothing is attempted.
  */
+import { resolveDistro } from './distro.js';
 import { BootstrapRefusal } from './errors.js';
-import { consoleScriptBeside, DEFAULT_CONDA_ROOTS, probeInterpreter } from './host.js';
 import { ensureLinger, type LingerOutcome } from './linger.js';
+import { probeGuest, requirePack } from './pack.js';
 import { processRunner, type Runner } from './runner.js';
 import { describeTarget, resolveTarget, runOn, type Target } from './target.js';
 
@@ -30,12 +37,12 @@ const STATUS_TIMEOUT_MS = 60_000;
 const START_TIMEOUT_MS = 2 * 60_000;
 
 export interface EnsureRunningOptions {
-  /** Required on win32. Ignored elsewhere. */
+  /** win32: the app's WSL distro setting. The `crucible` distro wins when it exists. */
   distro?: string;
+  /** win32: use `distro` verbatim, resolving nothing. */
+  exact?: boolean;
   /** `CRUCIBLE_HOME`, as the target spells it. Omit for the server's default. */
   home?: string;
-  /** Where to look for conda. Defaults to {@link DEFAULT_CONDA_ROOTS}. */
-  condaRoots?: readonly string[];
 }
 
 export interface RunningService {
@@ -110,11 +117,17 @@ export function parseServiceStatus(stdout: string): ServiceStatus | null {
 }
 
 export async function ensureRunning(options: EnsureRunningOptions = {}, runner: Runner = processRunner()): Promise<RunningService> {
-  const target = resolveTarget(runner, options.distro);
-  const interpreter = await probeInterpreter(runner, target, options.condaRoots ?? DEFAULT_CONDA_ROOTS);
-  const refusal = interpreter.refusals[0];
-  if (refusal !== undefined || interpreter.python === null) throw refusal ?? new Error('unreachable: no python and no refusal');
-  const crucible = consoleScriptBeside(interpreter.python.path);
+  const distro = runner.platform === 'win32'
+    ? await resolveDistro(runner, {
+      ...(options.distro === undefined ? {} : { distro: options.distro }),
+      ...(options.exact === undefined ? {} : { exact: options.exact }),
+    })
+    : options.distro;
+  const target = resolveTarget(runner, distro);
+  // THE SERVER PACK, not an interpreter found on the machine: there is nothing
+  // to find on a fresh host, and a host with no pack has no service either, so
+  // that is one named refusal rather than a hunt (PHASE14 section 0).
+  const crucible = requirePack(target, await probeGuest(runner, target, options.home)).crucible;
   const env = options.home === undefined ? undefined : { CRUCIBLE_HOME: options.home };
   const where = describeTarget(target);
 

@@ -151,11 +151,61 @@ shortfall_bytes = 0
 /** What `wsl.exe -l -v` printed on Owen's PC, decoded. */
 export const WSL_LIST = '  NAME      STATE           VERSION\r\n* Ubuntu    Running         2\r\n';
 
-/** The interpreter probe's answer on a host with anaconda3 and a 3.11 crucible env. */
-export const INTERPRETER_OK = 'home=/home/owen\nconda=/home/owen/anaconda3\npython=/home/owen/anaconda3/envs/crucible/bin/python\nversion=Python 3.11.9\n';
+/** What `wsl.exe -l -v` prints on a machine that also has the Crucible distro. */
+export const WSL_LIST_WITH_CRUCIBLE = '  NAME        STATE           VERSION\r\n* Ubuntu      Running         2\r\n  crucible    Stopped         2\r\n';
 
-export const CRUCIBLE_BIN = '/home/owen/anaconda3/envs/crucible/bin/crucible';
-export const PYTHON_BIN = '/home/owen/anaconda3/envs/crucible/bin/python';
+/** The guest probe's answer on a host with nothing installed yet. */
+export const GUEST_BARE = 'home=/home/owen/.crucible\nuser=owen\nfree_kib=400000000\n';
+
+/** The archive sha256 the fixture manifest names. 64 hex, like a real one. */
+export const PACK_SHA = 'a'.repeat(64);
+
+/** The guest probe's answer on a host whose server pack is already the fixture's. */
+export const GUEST_INSTALLED = `home=/home/owen/.crucible\nuser=owen\nfree_kib=400000000\n`
+  + `crucible=/home/owen/.crucible/server/bin/crucible\nversion=crucible 0.6.0\nsha256=${PACK_SHA}\nrelease=0.6.0\n`;
+
+/** `envpacks.json` for 0.6.0, as the release publishes it (two parts, both backends). */
+export const ENVPACKS_JSON = JSON.stringify({
+  schema: 1,
+  version: '0.6.0',
+  packs: [
+    {
+      name: 'server',
+      backend: 'cuda-linux',
+      python: '3.11.13',
+      bytes: 120_000_000,
+      sha256: PACK_SHA,
+      parts: ['crucible-env-server-cuda-linux-0.6.0.tar.zst.part00', 'crucible-env-server-cuda-linux-0.6.0.tar.zst.part01'],
+      unpacked_bytes: 400_000_000,
+    },
+    {
+      name: 'server',
+      backend: 'mlx-darwin',
+      python: '3.11.13',
+      bytes: 110_000_000,
+      sha256: 'b'.repeat(64),
+      parts: ['crucible-env-server-mlx-darwin-0.6.0.tar.zst.part00'],
+      unpacked_bytes: 380_000_000,
+    },
+    {
+      name: 'llm',
+      backend: 'cuda-linux',
+      python: '3.11.13',
+      bytes: 8_000_000_000,
+      sha256: 'c'.repeat(64),
+      parts: ['crucible-env-llm-cuda-linux-0.6.0.tar.zst.part00'],
+      recipe_sha256: 'd'.repeat(64),
+      unpacked_bytes: 9_000_000_000,
+    },
+  ],
+});
+
+/** The server pack's console script, where every install puts it. */
+export const CRUCIBLE_BIN = '/home/owen/.crucible/server/bin/crucible';
+/** Where the fixture's parts and reassembled archive land. */
+export const DOWNLOADS = '/home/owen/.crucible/downloads';
+export const ARCHIVE = `${DOWNLOADS}/crucible-env-server-cuda-linux-0.6.0.tar.zst`;
+export const DEST = '/home/owen/.crucible/server';
 
 export async function refusal<T>(promise: Promise<T>): Promise<{ code: string; message: string; command: string | null; detail: string | null; error: unknown }> {
   try {

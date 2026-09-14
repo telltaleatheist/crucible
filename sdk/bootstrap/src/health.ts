@@ -39,7 +39,11 @@ export interface HealthOptions extends LocalConfigOptions {
 
 export async function health(options: HealthOptions = {}, runner: Runner = processRunner()): Promise<Activity> {
   const config = await readLocalConfig(
-    { ...(options.distro === undefined ? {} : { distro: options.distro }), ...(options.home === undefined ? {} : { home: options.home }) },
+    {
+      ...(options.distro === undefined ? {} : { distro: options.distro }),
+      ...(options.exact === undefined ? {} : { exact: options.exact }),
+      ...(options.home === undefined ? {} : { home: options.home }),
+    },
     runner,
   );
   const clientName = options.clientName ?? `crucible-bootstrap/${BOOTSTRAP_VERSION}`;

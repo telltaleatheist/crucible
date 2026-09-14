@@ -17,6 +17,7 @@ test('the client is built on the config\'s url and token, with the caller\'s nam
   let built: { url: string; token: string; clientName: string } | null = null;
   const result = await health({
     distro: 'Ubuntu',
+    exact: true,
     clientName: 'bookforge',
     clientFactory: (options) => {
       built = options;
@@ -29,12 +30,12 @@ test('the client is built on the config\'s url and token, with the caller\'s nam
 
 test('with no clientName the bootstrap names itself, version included', async () => {
   let name = '';
-  await health({ distro: 'Ubuntu', clientFactory: (o) => { name = o.clientName; return { activity: async () => ACTIVITY }; } }, runner());
+  await health({ distro: 'Ubuntu', exact: true, clientFactory: (o) => { name = o.clientName; return { activity: async () => ACTIVITY }; } }, runner());
   assert.equal(name, `crucible-bootstrap/${BOOTSTRAP_VERSION}`);
 });
 
 test('no local config is that named state, before any client is built', async () => {
-  const r = await refusal(health({ distro: 'Ubuntu', clientFactory: () => assert.fail('no client should be built') }, new FakeRunner({ platform: 'win32' }, [{ argv: () => true, code: 3, stderr: '/home/owen/.crucible/config.toml' }])));
+  const r = await refusal(health({ distro: 'Ubuntu', exact: true, clientFactory: () => assert.fail('no client should be built') }, new FakeRunner({ platform: 'win32' }, [{ argv: () => true, code: 3, stderr: '/home/owen/.crucible/config.toml' }])));
   assert.equal(r.code, 'no_local_config');
 });
 
@@ -45,7 +46,7 @@ for (const [label, thrown, code, command] of [
   ['a version mismatch', new CrucibleVersionError('api_version', 'speak 2', 2, 1), 'version_mismatch', null],
 ] as const) {
   test(`${label} is ${code}`, async () => {
-    const r = await refusal(health({ distro: 'Ubuntu', clientFactory: () => ({ activity: async () => { throw thrown; } }) }, runner()));
+    const r = await refusal(health({ distro: 'Ubuntu', exact: true, clientFactory: () => ({ activity: async () => { throw thrown; } }) }, runner()));
     assert.equal(r.code, code);
     assert.equal(r.command, command);
     assert.equal((r.error as Error & { cause?: unknown }).cause, thrown);
@@ -55,5 +56,5 @@ for (const [label, thrown, code, command] of [
 
 test('any other error is the SDK\'s and is rethrown as it is', async () => {
   const other = new TypeError('fetch is not defined');
-  await assert.rejects(health({ distro: 'Ubuntu', clientFactory: () => ({ activity: async () => { throw other; } }) }, runner()), (err) => err === other);
+  await assert.rejects(health({ distro: 'Ubuntu', exact: true, clientFactory: () => ({ activity: async () => { throw other; } }) }, runner()), (err) => err === other);
 });

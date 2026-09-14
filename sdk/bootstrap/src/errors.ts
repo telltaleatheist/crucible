@@ -24,10 +24,22 @@ export type BootstrapRefusalCode =
   | 'no_nvidia_driver'
   /** darwin on something other than arm64. `mlx-darwin` is Apple Silicon only. */
   | 'not_apple_silicon'
-  /** No conda at any of the roots searched (`test -x`, in order). */
-  | 'no_conda'
-  /** Conda is there, but no `envs/crucible/bin/python` under it, or not a 3.11. */
-  | 'no_python'
+  /** The guest (or the Mac) lacks a tool the pack install needs: `curl`, `tar`, `zstd`, the sha tool. */
+  | 'guest_missing_tool'
+  /** No `<CRUCIBLE_HOME>/server/bin/crucible`: this machine has no server pack yet. `install()` puts one there. */
+  | 'no_server_pack'
+  /** `envpacks.json` for this release could not be fetched, or is not the manifest. */
+  | 'pack_manifest_unreadable'
+  /** The manifest has no pack for this (name, backend). Never a quiet build (PHASE14 section 2). */
+  | 'pack_not_published'
+  /** A part would not download. Carries the URL that failed. */
+  | 'pack_download_failed'
+  /** The reassembled archive's sha256 is not the manifest's. The archive is deleted. */
+  | 'pack_sha_mismatch'
+  /** Not enough free disk for `unpacked_bytes` + one part. Carries the numbers, before anything is fetched. */
+  | 'pack_disk'
+  /** `tar --zstd` would not unpack the archive. The `.partial` directory is left for reading. */
+  | 'pack_unpack_failed'
   /** No `config.toml` where the local server would keep one. A state, not a bug. */
   | 'no_local_config'
   /** The config exists and is not TOML, or could not be read. */
@@ -38,8 +50,24 @@ export type BootstrapRefusalCode =
   | 'network_path'
   /** A path that is not an absolute `X:\...` Windows path, so it has no `/mnt` spelling. */
   | 'not_a_windows_path'
-  /** The wheel the host named is not on disk. */
-  | 'wheel_missing'
+  /** WSL is there, WSL2 is not: the default version is 1 and no distro can run a Crucible. */
+  | 'wsl1_only'
+  /** The hypervisor is not available: virtualization is off in the firmware. Software cannot fix it. */
+  | 'virtualization_disabled'
+  /** Windows, WSL present, and no `crucible` distro imported yet. A state; `ensureDistro()` clears it. */
+  | 'no_crucible_distro'
+  /** The `crucible` distro exists without `[boot] systemd=true`. Ours to repair. */
+  | 'distro_not_systemd'
+  /** A distro somebody chose by hand has no systemd. Theirs; we ask before writing to it. */
+  | 'foreign_distro_not_systemd'
+  /** A `crucible` distro exists AND another distro holds a config. Which one is `local` is not guessed. */
+  | 'two_local_crucibles'
+  /** A `crucible` distro exists without the rootfs marker and with a config in it: not ours to re-import. */
+  | 'distro_unmarked'
+  /** `wsl --import` failed. Carries what wsl.exe said. */
+  | 'distro_import_failed'
+  /** The guest has no route to the release (a VPN, a proxy). Carries the URL that failed. */
+  | 'guest_no_network'
   /** A job type this build cannot install, or one spelled without what it needs. */
   | 'bad_job_type'
   /** One of `install()`'s steps exited non-zero. See {@link BootstrapStepFailed}. */
