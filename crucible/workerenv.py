@@ -35,9 +35,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from . import jobenv
 from .errors import CrucibleError
 
 RECIPES_DIR_ENV = "CRUCIBLE_WORKER_RECIPES_DIR"
+
+#: One name for the stamp, shared with `jobenv` (which declares it) so that a
+#: pack and a pip build cannot leave two different files behind.
+ENV_STAMP_NAME = jobenv.ENV_STAMP_NAME
 
 #: What `crucible doctor` and `crucible install <type>` report the version of: the
 #: one library the env exists for, so a half-built or wrong-backend env is obvious
@@ -100,6 +105,12 @@ class EnvStatus:
     detail: str
     python_version: str | None
     packages: dict[str, str]
+    #: The pack this env was unpacked from, or None when it was built here by
+    #: `crucible install --build`. `jobenv.EnvStatus` carries the same two
+    #: fields and says why at length; the two classes stay separate only until
+    #: the modules are merged (see this module's header).
+    pack_sha256: str | None = None
+    recipe_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -109,6 +120,8 @@ class EnvStatus:
             "detail": self.detail,
             "python_version": self.python_version,
             "packages": dict(self.packages),
+            "pack_sha256": self.pack_sha256,
+            "recipe_sha256": self.recipe_sha256,
         }
 
 
@@ -124,9 +137,13 @@ def worker_env_python(home: Path, job_type: str) -> Path:
     return worker_env_dir(home, job_type) / "bin" / "python"
 
 
-def _stamp_path(home: Path, job_type: str) -> Path:
-    """Written only after `pip install -r <recipe>` returns 0."""
-    return worker_env_dir(home, job_type) / "crucible-env.json"
+def stamp_path(home: Path, job_type: str) -> Path:
+    """Written after `pip install -r <recipe>` returns 0, or by a pack.
+
+    Public for `crucible/envpack.py`'s sake, and named after `jobenv`'s
+    constant so the two doors cannot write two different filenames.
+    """
+    return worker_env_dir(home, job_type) / ENV_STAMP_NAME
 
 
 def recipes_dir(job_type: str) -> Path:
@@ -307,7 +324,7 @@ def env_status(home: Path, job_type: str, backend_kind: str) -> EnvStatus:
             python_version=None,
             packages={},
         )
-    stamp = _stamp_path(home, job_type)
+    stamp = stamp_path(home, job_type)
     if not stamp.is_file():
         return EnvStatus(
             job_type=job_type,
@@ -321,6 +338,11 @@ def env_status(home: Path, job_type: str, backend_kind: str) -> EnvStatus:
             packages={},
         )
     record = json.loads(stamp.read_text(encoding="utf-8"))
+    # `.get` for these two alone: a stamp written before 0.6.0 predates env
+    # packs and carries neither. See `jobenv.env_status`, which says why at
+    # length — absent is an answer, not a default.
+    pack_sha256 = record.get("pack_sha256")
+    recipe_sha256 = record.get("recipe_sha256")
     if record["backend"] != backend_kind:
         return EnvStatus(
             job_type=job_type,
@@ -332,6 +354,8 @@ def env_status(home: Path, job_type: str, backend_kind: str) -> EnvStatus:
             ),
             python_version=record["python_version"],
             packages={},
+            pack_sha256=pack_sha256,
+            recipe_sha256=recipe_sha256,
         )
 
     present = installed_packages(home, job_type)
@@ -362,6 +386,8 @@ def env_status(home: Path, job_type: str, backend_kind: str) -> EnvStatus:
             ),
             python_version=record["python_version"],
             packages=present,
+            pack_sha256=pack_sha256,
+            recipe_sha256=recipe_sha256,
         )
     headline = HEADLINE_PACKAGE[job_type]
     if headline in references:
@@ -389,6 +415,8 @@ def env_status(home: Path, job_type: str, backend_kind: str) -> EnvStatus:
         ),
         python_version=record["python_version"],
         packages=present,
+        pack_sha256=pack_sha256,
+        recipe_sha256=recipe_sha256,
     )
 
 
@@ -418,7 +446,7 @@ def install_worker_env(
     """
     recipe = recipe_for(job_type, backend_kind)
     directory = worker_env_dir(home, job_type)
-    stamp = _stamp_path(home, job_type)
+    stamp = stamp_path(home, job_type)
 
     if directory.exists() and not force:
         existing = env_status(home, job_type, backend_kind)
@@ -475,6 +503,10 @@ def install_worker_env(
                 "job_type": job_type,
                 "backend": backend_kind,
                 "recipe": recipe.name,
+                # Both recorded on the `--build` path too; `jobenv.install_env`
+                # says why. `pack_sha256: null` means "built here".
+                "recipe_sha256": jobenv.recipe_sha256(recipe),
+                "pack_sha256": None,
                 "python_version": version,
                 "seconds": round(elapsed, 1),
             },

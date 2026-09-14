@@ -34,6 +34,7 @@ move.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -48,6 +49,13 @@ from typing import Any, Iterator
 from .errors import CrucibleError
 
 RECIPES_DIR_ENV = "CRUCIBLE_RECIPES_DIR"
+
+#: The file that says an env finished installing, whichever way it was
+#: installed. ONE name for both doors — `install_env` below writes it after pip
+#: returns 0, and `crucible/envpack.py` writes it into the `.partial` tree
+#: before the rename — because `env_status` is the only reader and there must
+#: not be two answers to "is this env there".
+ENV_STAMP_NAME = "crucible-env.json"
 
 #: What `crucible doctor` and `crucible install llm` report the version of. The
 #: engine module of each backend, so a wrong-backend env is obvious at a glance.
@@ -198,6 +206,15 @@ class EnvStatus:
     detail: str
     python_version: str | None
     packages: dict[str, str]
+    #: The sha256 of the PACK this env was unpacked from, or None when it was
+    #: built here by `crucible install --build`. Not a second way of saying
+    #: "installed": it says WHICH WAY, and `crucible doctor` prints it beside
+    #: the recipe hash so an env that came off a release and an env somebody
+    #: built at 2am are distinguishable without reading a JSON file.
+    pack_sha256: str | None = None
+    #: The sha256 of the recipe this env was installed from, as recorded at
+    #: install time. `doctor` compares it against the recipe on disk NOW.
+    recipe_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -206,6 +223,8 @@ class EnvStatus:
             "detail": self.detail,
             "python_version": self.python_version,
             "packages": dict(self.packages),
+            "pack_sha256": self.pack_sha256,
+            "recipe_sha256": self.recipe_sha256,
         }
 
 
@@ -221,9 +240,13 @@ def env_python(home: Path, spec: EnvSpec) -> Path:
     return env_dir(home, spec) / "bin" / "python"
 
 
-def _stamp_path(home: Path, spec: EnvSpec) -> Path:
-    """Written only after `pip install -r <recipe>` returns 0."""
-    return env_dir(home, spec) / "crucible-env.json"
+def stamp_path(home: Path, spec: EnvSpec) -> Path:
+    """Written only after `pip install -r <recipe>` returns 0, or by a pack.
+
+    Public because `crucible/envpack.py` is the second writer and the one place
+    that must not guess this path.
+    """
+    return env_dir(home, spec) / ENV_STAMP_NAME
 
 
 def recipes_dir(job_type: str) -> Path:
@@ -400,7 +423,7 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
             python_version=None,
             packages={},
         )
-    stamp = _stamp_path(home, spec)
+    stamp = stamp_path(home, spec)
     if not stamp.is_file():
         return EnvStatus(
             installed=False,
@@ -413,6 +436,12 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
             packages={},
         )
     record = json.loads(stamp.read_text(encoding="utf-8"))
+    # `.get` and not `[]` for these two alone: every stamp written before 0.6.0
+    # predates env packs and carries neither key. Absent means "built here,
+    # before anything recorded which recipe bytes it was built from", which is
+    # exactly what `doctor` prints — not a default standing in for a fact.
+    pack_sha256 = record.get("pack_sha256")
+    recipe_sha256 = record.get("recipe_sha256")
     if record["backend"] != backend_kind:
         return EnvStatus(
             installed=False,
@@ -423,6 +452,8 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
             ),
             python_version=record["python_version"],
             packages={},
+            pack_sha256=pack_sha256,
+            recipe_sha256=recipe_sha256,
         )
 
     present = installed_packages(home, spec)
@@ -451,6 +482,8 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
             detail=f"{directory} does not match {recipe.name}: " + "; ".join(wrong),
             python_version=record["python_version"],
             packages=present,
+            pack_sha256=pack_sha256,
+            recipe_sha256=recipe_sha256,
         )
     return EnvStatus(
         installed=True,
@@ -461,6 +494,8 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
         ),
         python_version=record["python_version"],
         packages=present,
+        pack_sha256=pack_sha256,
+        recipe_sha256=recipe_sha256,
     )
 
 
@@ -490,7 +525,7 @@ def install_env(
     """
     recipe = recipe_for(spec)
     directory = env_dir(home, spec)
-    stamp = _stamp_path(home, spec)
+    stamp = stamp_path(home, spec)
 
     if directory.exists() and not force:
         existing = env_status(home, spec, backend_kind)
@@ -542,7 +577,15 @@ def install_env(
             {
                 "backend": backend_kind,
                 "recipe": recipe.name,
+                # Recorded even on the `--build` path, so `doctor` can say a
+                # locally built env no longer matches the recipe bytes it was
+                # built from — the same question a pack answers with
+                # `pack_recipe_drift`, asked of an env nobody downloaded.
+                "recipe_sha256": recipe_sha256(recipe),
                 "python_version": version,
+                # A venv-built env has NO pack sha, and the key is written as
+                # null rather than left out: "built here" is an answer.
+                "pack_sha256": None,
                 "seconds": round(elapsed, 1),
             },
             indent=2,
@@ -551,6 +594,15 @@ def install_env(
         encoding="utf-8",
     )
     return env_status(home, spec, backend_kind)
+
+
+def recipe_sha256(path: Path, chunk: int = 1 << 20) -> str:
+    """The recipe file's SHA-256 — what ties an env to the bytes that built it."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(chunk), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _run(command: list[str], failure: str, on_line: Any) -> None:
