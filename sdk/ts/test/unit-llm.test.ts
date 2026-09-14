@@ -621,6 +621,94 @@ test('thinking must be a boolean and is refused by name when it is not', async (
   );
 });
 
+// ---------------------------------------------------------- X-Crucible-Act
+
+test('act is sent as X-Crucible-Act, and as a header rather than a body field', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  await client().chat({
+    model: 'qwen3.5-9b',
+    messages: [{ role: 'user', content: 'hi' }],
+    act: 'clean',
+  });
+  assert.equal(lastHeaders['x-crucible-act'], 'clean');
+  // The body is OpenAI's and is proxied to the engine verbatim; the act is
+  // Crucible's and stops at the proxy. A body field would reach the engine.
+  assert.ok(!('act' in JSON.parse(lastBody)), 'the act must not ride in the body');
+});
+
+test('chatStream sends the act too, beside the Accept it adds', async () => {
+  handle = (_request, response) => {
+    openSse(response);
+    response.write(contentChunk('lit.'));
+    response.write('data: [DONE]\n\n');
+    response.end();
+  };
+  const seen: string[] = [];
+  for await (const delta of client().chatStream({
+    model: 'qwen3.5-9b',
+    messages: [{ role: 'user', content: 'hi' }],
+    act: 'translate',
+  })) {
+    seen.push(delta);
+  }
+  assert.deepEqual(seen, ['lit.']);
+  assert.equal(lastHeaders['x-crucible-act'], 'translate');
+  assert.equal(lastHeaders['accept'], 'text/event-stream');
+});
+
+test('omitting act sends NO header, which is how the server records "did not say"', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  await client().chat({ model: 'qwen3.5-9b', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(
+    lastHeaders['x-crucible-act'],
+    undefined,
+    'a default act would put a name nobody chose on a bench',
+  );
+});
+
+test('an empty act is refused here rather than sent as a header saying nothing', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  await assert.rejects(
+    client().chat({
+      model: 'qwen3.5-9b',
+      messages: [{ role: 'user', content: 'hi' }],
+      act: '   ',
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleConfigError, `got ${String(error)}`);
+      assert.equal(error.option, 'act');
+      return true;
+    },
+  );
+});
+
+test('an act this server does not know is the SERVER\'s refusal, not a second vocabulary', async () => {
+  // The client keeps no copy of the capability classes: the server answers
+  // 400 `unknown_act` listing them, before the completion runs, and that
+  // sentence is what reaches the caller.
+  handle = (_request, response) =>
+    json(response, 400, {
+      error: {
+        code: 'unknown_act',
+        message: "'narrate' is not an act this server knows.",
+        details: { act: 'narrate', known: ['clean', 'translate'] },
+      },
+    });
+  await assert.rejects(
+    client().chat({
+      model: 'qwen3.5-9b',
+      messages: [{ role: 'user', content: 'hi' }],
+      act: 'narrate',
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleRefused, `got ${String(error)}`);
+      assert.equal(error.code, 'unknown_act');
+      return true;
+    },
+  );
+  assert.equal(lastHeaders['x-crucible-act'], 'narrate');
+});
+
 // -------------------------------------------------------------- provenance
 
 test('a provenance sidecar names the weights, not only the model', async () => {

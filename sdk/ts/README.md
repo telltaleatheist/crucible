@@ -235,11 +235,19 @@ ever evicted to make room.
 ### `chat()` and `chatStream()`
 
 Both take `{model, messages, temperature?, topP?, maxTokens?, stop?, seed?,
-responseFormat?, thinking?, signal?}` and post to `/v1/openai/chat/completions` with the
-bearer and `X-Crucible-Api` headers, like every other authenticated call. `model` and
+responseFormat?, thinking?, act?, signal?}` and post to `/v1/openai/chat/completions` with
+the bearer and `X-Crucible-Api` headers, like every other authenticated call. `model` and
 `messages` are required and refused by name when missing; every other knob is simply left
 out of the body when you do not pass it, so the engine's own default applies and this
 client invents nothing.
+
+`act` is the exception that is not a body field. A chat takes no lane and makes no job, so
+`GET /v1/activity` can only name what it is if you say: `act: 'translate'` is sent as
+`X-Crucible-Act` and recorded on the in-flight chat row. Omit it and no header is sent,
+which the server records as `null` — "it did not say" — because a default would put a name
+nobody chose on somebody's bench. The vocabulary is the server's (the capability classes
+`GET /v1/capability` answers with); a name it does not know comes back as its own
+`unknown_act`, listing them, before the completion runs.
 
 `chat()` returns `ChatResponse {id, model, content, finishReason, usage: {promptTokens,
 completionTokens, totalTokens}}` — OpenAI's `chat.completion` read down to the parts a

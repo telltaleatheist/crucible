@@ -869,6 +869,27 @@ export interface ChatOptions {
    * A model whose chat template does not know `enable_thinking` ignores it.
    */
   readonly thinking?: boolean;
+  /**
+   * What this chat IS, for `GET /v1/activity` — a capability class name, sent
+   * as the `X-Crucible-Act` header.
+   *
+   * A chat takes no lane and makes no job, so it is the one piece of work a
+   * server can only report if the client says what it is: Crucible cannot tell
+   * a `simplify` from a `translate`, since both are a chat against the same
+   * model and the only difference is a prompt it does not own. The act is
+   * recorded on the in-flight chat row and surfaces in
+   * {@link Activity.chat}`.rows[].act`.
+   *
+   * **Omit it and no header is sent**, which the server records as `null` —
+   * "it did not say". There is deliberately no default: a name nobody chose on
+   * a bench is the thing this header exists to prevent.
+   *
+   * The vocabulary is the server's — exactly the capability classes
+   * `GET /v1/capability` answers with — and this client does not keep a second
+   * copy of it. A name that is not one comes back as the server's own 400
+   * `unknown_act`, listing what it knows, BEFORE the completion runs.
+   */
+  readonly act?: string;
   /** Aborts the request. See the README: the abort surfaces as a DOM `AbortError`. */
   readonly signal?: AbortSignal;
 }

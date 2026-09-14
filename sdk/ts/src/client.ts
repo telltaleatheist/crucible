@@ -883,9 +883,22 @@ export class CrucibleClient {
       payload['chat_template_kwargs'] = { enable_thinking: given.thinking };
     }
 
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (given.act !== undefined) {
+      // A HEADER AND NOT A BODY FIELD, because the body is OpenAI's and is
+      // proxied to the engine verbatim; the act is Crucible's and stops at the
+      // proxy. Sent only when the caller says one: an absent header is how the
+      // server records "it did not say", and a default here would put a name
+      // nobody chose on somebody's bench. The name itself is the SERVER's
+      // vocabulary — it answers 400 `unknown_act` listing the capability
+      // classes, before the completion runs — so this client checks that a
+      // string was given and no more.
+      headers['X-Crucible-Act'] = requireText(given.act, 'act');
+    }
+
     const init: RequestInit = {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload),
     };
     // `exactOptionalPropertyTypes` forbids writing `signal: undefined`, and

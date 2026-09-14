@@ -360,6 +360,28 @@ defaults are pinned at load, so a manifest edited under a running engine cannot 
 promise a temperature nothing is sending, and cannot change what a request in flight is
 answered with.
 
+### What a caller may SEND on this door: `X-Crucible-Act`
+
+The one Crucible header the chat door reads. A chat takes no lane and makes no job, so it
+is the only piece of accelerator work a server cannot name for itself: Crucible cannot tell
+a `simplify` from a `translate`, since both are a chat against the same model and the only
+difference is a prompt it does not own. `crucible/inflight.py`'s `read_act` validates it
+against the capability classes and refuses an unknown name `400 unknown_act` **before the
+completion runs** — a bench showing the wrong act is worse than one showing none — and the
+value is recorded on the in-flight chat row that `GET /v1/activity` reports as
+`chat.rows[].act`. **An absent header records `null`**: "it did not say". There is no
+default, on either side of the wire.
+
+A header and not a body field, for section 5's reason: the body is OpenAI's and is proxied
+to the engine verbatim, and a Crucible field in it would reach the engine.
+
+`@crucible/client` sends it from `ChatOptions.act` on both `chat()` and `chatStream()`,
+added 2026-09-14. Until then the SDK had no way to say, so every chat through it reported
+`null` while Foundry's own `FOUNDRY_ENDPOINT_HEADERS` sent the header on the same door —
+the same fact reaching one door two ways, one of them mute. The SDK keeps **no copy of the
+vocabulary**: it checks that a non-empty string was given and lets the server's
+`unknown_act` (which lists what it knows) be the answer.
+
 **The bytes still pass through untouched when nothing applies.** The proxy re-serialises
 only when it actually added something (or when it has to substitute `model` on mlx-lm), so
 a request that states every knob this server knows about reaches the engine exactly as it
