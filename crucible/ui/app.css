@@ -359,7 +359,10 @@ textarea {
 }
 
 .subhead + .subhead,
-.block + .block {
+.block + .block,
+.rows + .subhead,
+.empty + .subhead,
+.refusal + .subhead {
   margin-top: 22px;
 }
 

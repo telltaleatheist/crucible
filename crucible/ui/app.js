@@ -65,6 +65,12 @@
     live: null,
     stream: null,
     revealToken: false,
+    // What the OPERATOR has typed or chosen, kept out of the DOM on purpose.
+    // Status is on a timer and the whole console is redrawn from it, so a
+    // half-typed module or a picked narrator engine that lived only in an
+    // element would be thrown away every four seconds.
+    moduleText: '',
+    engineChoice: {},
     lastStatusAt: 0,
     timer: null
   };
@@ -853,6 +859,9 @@
     box.appendChild(head);
 
     var cancel = el('button', {
+      // Ids on every control an operator can tab to, so the timed redraw can
+      // put the keyboard back where it found it (see `render`).
+      id: 'task-cancel',
       class: 'button danger',
       type: 'button',
       onclick: function () {
@@ -1146,10 +1155,22 @@
       });
     }
 
-    var chosen = null;
+    var wants = entry.narrator_engines.length > 0;
     var group = el('span', { class: 'controls' });
-    if (entry.narrator_engines.length) {
-      var select = el('select', { 'aria-label': 'narrator engine for ' + entry.job_type });
+    if (wants) {
+      // Which engine, from the server's list. The choice is kept in `state`
+      // because the console is redrawn on a timer and a value that lived only
+      // in the element would reset under the operator's hand.
+      if (state.engineChoice[entry.job_type] === undefined) {
+        state.engineChoice[entry.job_type] = entry.narrator_engines[0];
+      }
+      var select = el('select', {
+        id: 'engine-' + entry.job_type,
+        'aria-label': 'narrator engine for ' + entry.job_type,
+        onchange: function (event) {
+          state.engineChoice[entry.job_type] = event.target.value;
+        }
+      });
       for (var index = 0; index < entry.narrator_engines.length; index += 1) {
         select.appendChild(
           el('option', {
@@ -1158,19 +1179,20 @@
           })
         );
       }
-      chosen = select;
+      select.value = state.engineChoice[entry.job_type];
       group.appendChild(select);
     }
 
     group.appendChild(
       el('button', {
+        id: 'install-' + entry.job_type,
         class: 'button primary',
         type: 'button',
         disabled: state.running !== null,
         onclick: function () {
           var request = { type: 'install', job_type: entry.job_type };
-          if (chosen !== null) {
-            request.narrator_engine = chosen.value;
+          if (wants) {
+            request.narrator_engine = state.engineChoice[entry.job_type];
           }
           submit(request, 'install:' + entry.job_type);
         }
@@ -1285,6 +1307,7 @@
       // button that teaches somebody the page is broken.
       action.appendChild(
         el('button', {
+          id: 'pull-' + row.kind + '-' + row.id,
           class: 'button',
           type: 'button',
           disabled: true,
@@ -1297,6 +1320,7 @@
     } else {
       action.appendChild(
         el('button', {
+          id: 'pull-' + row.kind + '-' + row.id,
           class: 'button primary',
           type: 'button',
           disabled: state.running !== null,
@@ -1356,8 +1380,12 @@
 
   // ----------------------------------------------------------- 5. connect
 
-  function copyButton(label, text) {
-    var button = el('button', { class: 'button quiet', type: 'button' }, [label]);
+  function copyButton(label, text, id) {
+    var button = el('button', {
+      id: id,
+      class: 'button quiet',
+      type: 'button'
+    }, [label]);
     button.addEventListener('click', function () {
       if (!navigator.clipboard) {
         button.textContent = 'select it and copy';
@@ -1378,10 +1406,10 @@
     return button;
   }
 
-  function lineItem(text, label) {
+  function lineItem(text, label, id) {
     return el('div', { class: 'line-item' }, [
       el('span', { class: 'line-text', text: text }),
-      el('span', { class: 'line-actions' }, [copyButton(label, text)])
+      el('span', { class: 'line-actions' }, [copyButton(label, text, id)])
     ]);
   }
 
@@ -1410,7 +1438,9 @@
 
     var lines = el('div', { class: 'line-list' });
     for (var index = 0; index < setup.pairing.length; index += 1) {
-      lines.appendChild(lineItem(setup.pairing[index], 'Copy line'));
+      lines.appendChild(
+        lineItem(setup.pairing[index], 'Copy line', 'copy-pairing-' + index)
+      );
     }
     body.appendChild(lines);
 
@@ -1419,6 +1449,7 @@
       text: state.revealToken ? setup.token : maskOf(setup.token)
     });
     var reveal = el('button', {
+      id: 'token-reveal',
       class: 'button quiet',
       type: 'button',
       'aria-pressed': state.revealToken ? 'true' : 'false',
@@ -1442,7 +1473,7 @@
             masked,
             el('span', { class: 'line-actions' }, [
               reveal,
-              copyButton('Copy token', setup.token)
+              copyButton('Copy token', setup.token, 'copy-token')
             ])
           ])
         ]
@@ -1467,8 +1498,12 @@
       spellcheck: 'false',
       'aria-label': 'module JSON',
       placeholder:
-        'Paste an app’s module JSON here, or drop its .module.json file.'
+        'Paste an app’s module JSON here, or drop its .module.json file.',
+      oninput: function (event) {
+        state.moduleText = event.target.value;
+      }
     });
+    area.value = state.moduleText;
 
     var zone = el('div', { class: 'dropzone' }, [area]);
     zone.addEventListener('dragover', function (event) {
@@ -1486,18 +1521,20 @@
         return;
       }
       file.text().then(function (text) {
+        state.moduleText = text;
         area.value = text;
       });
     });
 
     var post = el('button', {
+      id: 'module-post',
       class: 'button primary',
       type: 'button',
       disabled: state.running !== null,
       onclick: function () {
         var parsed;
         try {
-          parsed = JSON.parse(area.value);
+          parsed = JSON.parse(state.moduleText);
         } catch (notJson) {
           // Named before the wire, because this one is the browser's finding
           // and not the server's; the server's own `invalid_module` looks
@@ -1599,7 +1636,9 @@
 
     var lines = el('div', { class: 'line-list' });
     for (var line = 0; line < state.setup.pairing.length; line += 1) {
-      lines.appendChild(lineItem(state.setup.pairing[line], 'Copy line'));
+      lines.appendChild(
+        lineItem(state.setup.pairing[line], 'Copy line', 'copy-service-' + line)
+      );
     }
     body.appendChild(
       el('div', { class: 'block' }, [
@@ -1642,13 +1681,41 @@
 
   // -------------------------------------------------------------- the page
 
+  /**
+   * Every section, rebuilt from state — and the keyboard put back where it
+   * was. Status is on a timer, so a redraw happens under whoever is using the
+   * page; a control that lost focus every four seconds would be unusable with
+   * a keyboard, which is the one way this console has to be operable.
+   */
   function render() {
+    var active = document.activeElement;
+    var focused = active && active.id ? active.id : null;
+    var caret = null;
+    if (focused !== null && active.setSelectionRange && active.type !== 'select-one') {
+      try {
+        caret = [active.selectionStart, active.selectionEnd];
+      } catch (unsupported) {
+        caret = null;
+      }
+    }
+
     renderStatus();
     renderTasks();
     renderJobTypes();
     renderCatalog();
     renderConnect();
     renderService();
+
+    if (focused !== null) {
+      var again = document.getElementById(focused);
+      if (again !== null) {
+        again.focus();
+        if (caret !== null && again.setSelectionRange) {
+          again.setSelectionRange(caret[0], caret[1]);
+        }
+      }
+    }
+
     var stamp = document.getElementById('status-stamp');
     stamp.textContent = state.activity
       ? 'read ' + new Date().toLocaleTimeString()
