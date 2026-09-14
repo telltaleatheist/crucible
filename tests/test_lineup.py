@@ -77,9 +77,9 @@ def test_the_checked_in_lineup_equals_the_generators_output() -> None:
 
 def test_the_checked_in_file_names_the_commit_it_was_generated_from() -> None:
     doc = _checked_in()
-    assert list(doc) == [lineup.PROVENANCE_KEY, "schema", "models"]
+    assert list(doc) == [lineup.PROVENANCE_KEY, "schema", "floors", "models"]
     assert _SHA.match(doc[lineup.PROVENANCE_KEY])
-    assert doc["schema"] == lineup.SCHEMA == 1
+    assert doc["schema"] == lineup.SCHEMA == 2
 
 
 def test_the_checked_in_file_is_exactly_what_render_writes() -> None:
@@ -320,7 +320,7 @@ def test_check_reads_a_broken_file_as_a_named_problem() -> None:
         "the checked-in file is not valid JSON: Expecting value: line 1 column 1 (char 0)"
     ]
     assert lineup.check("[]", fresh) == ["the checked-in file is not a JSON object"]
-    assert lineup.check('{"schema": 1}', fresh) == [
+    assert lineup.check('{"schema": 2}', fresh) == [
         "models: the checked-in file has no models list"
     ]
 
@@ -347,7 +347,51 @@ def test_check_ignores_provenance_and_nothing_else() -> None:
     fresh = lineup.document(rows, "0" * 40)
     other = lineup.document(rows, "f" * 40)
     assert lineup.check(lineup.render(other), fresh) == []
-    schema = dict(fresh, schema=2)
+    schema = dict(fresh, schema=3)
     assert lineup.check(lineup.render(schema), fresh) == [
-        "schema: checked in 2, generator says 1"
+        "schema: checked in 3, generator says 2"
     ]
+
+def test_floors_names_one_model_per_class_and_only_where_a_manifest_says_so() -> None:
+    """The catalog of record owns the floor, in one place a reader can ask.
+
+    Added 2026-09-14 after the fact grew a second owner: Foundry vendors this
+    file AND keeps its own additions, and its reader took the SMALLEST declared
+    floor across both — so a local row naming a 9B the translate floor silently
+    overruled this catalog on every machine that fits a 9B and not a 27B,
+    against Owen's ruling that translate and simplify take a 27B-class model, a
+    Crucible, or a cloud provider, never a 9B locally.
+    """
+    rows, _ = lineup.build()
+    table = lineup.floors(rows)
+    assert table == {"simplify": "qwen3.8-27b-4bit", "translate": "qwen3.8-27b-4bit"}
+    # Derived from the rows, never declared beside them.
+    for name, model in table.items():
+        row = next(r for r in rows if r["id"] == model)
+        assert name in row["minimumFor"]
+    # A class no manifest floors is absent, and that is its own answer: analysis
+    # carries no floor because Owen named translate and simplify.
+    assert "analysis" not in table
+    assert "clean" not in table and "pages" not in table
+
+
+def test_two_models_flooring_one_class_is_refused_rather_than_picked() -> None:
+    """"The smallest wins" is the rule that let a second owner overrule the
+    catalog; it has no place inside the owner either."""
+    rows = [
+        {"id": "small", "minimumFor": ["translate"]},
+        {"id": "large", "minimumFor": ["translate"]},
+    ]
+    with pytest.raises(lineup.LineupError) as raised:
+        lineup.floors(rows)
+    assert "two models floor the 'translate' class" in str(raised.value)
+    assert "'small'" in str(raised.value) and "'large'" in str(raised.value)
+
+
+def test_the_document_carries_the_floors_the_rows_state() -> None:
+    rows, _ = lineup.build()
+    doc = lineup.document(rows, "0" * 40)
+    assert doc["schema"] == 2
+    assert doc["floors"] == lineup.floors(rows)
+    assert list(doc) == ["generated_from", "schema", "floors", "models"]
+

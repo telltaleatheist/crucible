@@ -575,3 +575,27 @@ close, and the first vendoring will say so rather than let the two drift in sile
 Not on the wire. A Crucible never runs Ollama, so `/v1/models` does not carry `[local]`; the
 JSON file is that table's one door. `display` and `description` do travel, because they are
 facts about the model rather than about a machine that lacks a server.
+
+### 7.1 The floor has one owner, named (2026-09-14)
+
+`foundry-lineup.json` carries a top-level `floors` table — capability class to the model id
+that floors it — derived from the rows' own `minimumFor`, which is the manifest's `[local]
+minimum_for`. Schema 2.
+
+It was added because the fact had quietly grown a second owner. Foundry vendors this file and
+also keeps `model-lineup-local.json` for models it adds on its own, and its reader took the
+**smallest declared floor across both**. A local row naming a 9B the translate floor therefore
+overruled this catalog on every machine that fits a 9B and not a 27B — silently, and against
+Owen's ruling the same night: *"i think either they use the 27b or they use an api key for Claude
+or OpenAI"* — translate and simplify take a 27B-class model, a Crucible serving the class, or a
+cloud provider, never a 9B locally.
+
+**The rule: the catalog of record owns the floor for every class it floors.** A consumer that
+carries its own additions reads `floors` first, and a local row declaring a floor for a class named
+there is a contradiction to refuse by name, not a number to average in. A class ABSENT from
+`floors` has no floor from this catalog and a consumer may set its own — `analysis` is deliberately
+such a class.
+
+Inside the owner the same rule holds: two manifests flooring one class is a `LineupError` naming
+both, never a pick. "Smallest wins" cannot tell a legitimate smaller floor from one that
+contradicts a ruling, which is precisely how this was found.

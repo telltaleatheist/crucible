@@ -1,6 +1,10 @@
 {
-  "generated_from": "f788fafa77ce36979ab7106e1249fb9b09c29d88",
-  "schema": 1,
+  "generated_from": "3cd9d47ed9c10ba79af4fa0266a7fa82570559a1",
+  "schema": 2,
+  "floors": {
+    "simplify": "qwen3.8-27b-4bit",
+    "translate": "qwen3.8-27b-4bit"
+  },
   "models": [
     {
       "id": "dots-ocr",

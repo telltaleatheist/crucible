@@ -24,7 +24,8 @@ The shape, which Foundry's reader is built against
 --------------------------------------------------
     {
       "generated_from": "<crucible git sha>",
-      "schema": 1,
+      "schema": 2,
+      "floors": {"translate": "qwen3.8-27b-4bit", "simplify": "qwen3.8-27b-4bit"},
       "models": [
         {
           "id": "<crucible model id>",
@@ -52,6 +53,25 @@ would be a tile a picker has to grey out for a reason it cannot state.
 behind the file that carries it (the file lands in the next commit). `check`
 therefore compares everything BUT that key: a check that included it would go
 red on every commit, and a red guard is a broken guard.
+
+`floors` names, per capability class, THE model that floors it — the same fact
+`minimumFor` carries per row, gathered into one place a reader can ask. It was
+added 2026-09-14 because the fact had grown a second owner without anyone
+deciding it should. Foundry vendors this file AND keeps `model-lineup-local.json`
+for models it adds on its own, and its reader took the SMALLEST declared floor
+across both. So a local row declaring a 9B the translate floor silently overruled
+this catalog on every machine that fits a 9B and not a 27B — against Owen's
+ruling that translate and simplify need a 27B-class model, a Crucible serving
+the class, or a cloud provider, and never a 9B locally (2026-09-14). "Smallest
+wins" cannot tell a legitimate smaller floor from one that contradicts a ruling.
+
+So the rule this key states: **the catalog of record owns the floor for every
+class it floors.** A consumer that also carries its own additions reads `floors`
+first, and a local row declaring a floor for a class named here is a
+contradiction it should refuse by name rather than average in. A class absent
+from `floors` has no floor from this catalog and a consumer may set its own —
+`analysis` is deliberately such a class (Owen named translate and simplify, and
+analysis carries no floor).
 """
 
 from __future__ import annotations
@@ -73,7 +93,8 @@ from .manifests import (
 )
 
 #: Bumped when a row's shape changes in a way Foundry's reader must know about.
-SCHEMA = 1
+#: 2 (2026-09-14) added the top-level `floors` table.
+SCHEMA = 2
 
 #: Where the file lives: the repo root, beside `models/`.
 FILE_NAME = "foundry-lineup.json"
@@ -183,9 +204,36 @@ def build() -> tuple[list[dict[str, Any]], list[str]]:
     return rows, omitted
 
 
+def floors(rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Class to the model id that floors it, gathered from the rows themselves.
+
+    Derived, never declared: a class appears here because some row's
+    `minimumFor` names it, which is the manifest's `[local] minimum_for`. Two
+    rows flooring one class is a refusal rather than a pick — "the smallest
+    wins" is exactly the rule that let a second owner overrule this catalog
+    (see the module docstring), and it has no place inside the owner either.
+    """
+    found: dict[str, str] = {}
+    for row in rows:
+        for name in row["minimumFor"]:
+            if name in found:
+                raise LineupError(
+                    f"two models floor the {name!r} class: {found[name]!r} and "
+                    f"{row['id']!r}. A class has one floor; remove `minimum_for = "
+                    f"[\"{name}\"]` from one of their `[local]` tables."
+                )
+            found[name] = row["id"]
+    return dict(sorted(found.items()))
+
+
 def document(rows: list[dict[str, Any]], generated_from: str) -> dict[str, Any]:
     """The file's top level, in the order Foundry's reader was shown."""
-    return {PROVENANCE_KEY: generated_from, "schema": SCHEMA, "models": rows}
+    return {
+        PROVENANCE_KEY: generated_from,
+        "schema": SCHEMA,
+        "floors": floors(rows),
+        "models": rows,
+    }
 
 
 def render(doc: dict[str, Any]) -> str:
