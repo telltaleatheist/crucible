@@ -8,7 +8,7 @@
     crucible models     list and pull model weights
     crucible voices     list and pull voice weights
     crucible doctor     probe the host and every job type; exit 0 only when healthy
-    crucible token      print the bearer token (needs --show)
+    crucible token      print the bearer token (--show) or the pairing line (--url)
 
 Exit codes: 0 success, 1 refused (named reason on stderr), 2 usage.
 """
@@ -30,6 +30,7 @@ from . import (
     denoisemodels,
     jobenv,
     narratorpatches,
+    pairing,
     rvcbase,
     service,
     weights,
@@ -60,6 +61,7 @@ from .config import (
     write_config,
 )
 from .errors import ConfigError, NoViableBackend
+from .interfaces import InterfaceError
 from .jobs import ALL_JOB_TYPES, build_registry
 from .rvcmodels import RvcManifestError, load_all_rvc_manifests, load_rvc_manifest
 from .manifests import (
@@ -163,6 +165,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         "token:    "
         + ("as given; " if args.token is not None else "minted; ")
         + "print it with `crucible token --show`"
+    )
+    _print_pairing(
+        args.name if args.name is not None else default_server_name(),
+        args.host,
+        args.port,
+        token,
     )
     return EXIT_OK
 
@@ -284,6 +292,7 @@ def cmd_service_install(args: argparse.Namespace) -> int:
         f"{config.path} now and written into the definition. Change either and "
         "re-run `crucible service install`."
     )
+    _print_pairing(config.name, config.host, config.port, config.token)
     return EXIT_OK
 
 
@@ -1590,14 +1599,70 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 # -------------------------------------------------------------------- token
 
 
+def _pairing_lines(name: str, host: str, port: int, token: str) -> list[str] | str:
+    """The lines, or the sentence saying why there are none.
+
+    PHASE13-OPERATOR.md section 3.1. A refusal is returned rather than raised
+    because the two callers want different things done with it: `token --url`
+    has nothing else to print and exits 1, while `init` and `service install`
+    have already succeeded and merely have one fewer thing to tell the
+    operator.
+    """
+    try:
+        urls = pairing.reachable_urls(host, port)
+    except InterfaceError as exc:
+        return (
+            f"this host will not list its own interfaces, so there is no "
+            f"pairing line for a wildcard bind: {exc}"
+        )
+    if not urls:
+        return (
+            f"bound to {host} and this host has no non-loopback IPv4 address, "
+            "so nothing else can reach it yet"
+        )
+    return pairing.pairing_lines(name, urls, token)
+
+
+def _print_pairing(name: str, host: str, port: int, token: str) -> None:
+    """The one block `init`, `service install` and `token --url` all print.
+
+    Owen, 2026-09-14: nobody types a token twice. The line carries the name,
+    the address and the secret, so the person setting up BookForge pastes one
+    string into one field instead of reading three values off a terminal.
+    """
+    result = _pairing_lines(name, host, port, token)
+    if isinstance(result, str):
+        print(f"pairing: {result}", file=sys.stderr)
+        return
+    print("pairing: paste one of these into an app's Crucible server door —")
+    for line in result:
+        print(f"  {line}")
+
+
 def cmd_token(args: argparse.Namespace) -> int:
-    if not args.show:
-        return _fail("pass --show to print the bearer token")
+    """`crucible token --show` prints the secret; `--url` prints the whole door.
+
+    `--url` needs no `--show`, and that is not laxity: the flag's name says it
+    prints a URL, and the pairing line's whole purpose is to be handed to an
+    app. Requiring two flags to print one string would be a ceremony that
+    protects nothing — the token is already behind a file mode 0600 and a
+    terminal somebody is sitting at.
+    """
+    if not args.show and not args.url:
+        return _fail("pass --show to print the bearer token, or --url to print "
+                     "the pairing line an app's connect door takes")
     try:
         config = load_config()
     except ConfigError as exc:
         return _fail(str(exc))
-    print(config.token)
+    if args.show:
+        print(config.token)
+    if args.url:
+        result = _pairing_lines(config.name, config.host, config.port, config.token)
+        if isinstance(result, str):
+            return _fail(result)
+        for line in result:
+            print(line)
     return EXIT_OK
 
 
@@ -1627,8 +1692,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--token",
         default=None,
         help=(
-            "use this bearer token instead of minting one. For an installer that "
-            "mints on its own side (@crucible/bootstrap); never printed"
+            "use this bearer token instead of minting one. For an installer "
+            "that mints on its own side (@crucible/bootstrap). It still appears "
+            "in the pairing line this command ends with, which is the point of "
+            "that line"
         ),
     )
     init.add_argument(
@@ -1875,8 +1942,19 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--json", action="store_true", help="machine-readable report")
     doctor.set_defaults(func=cmd_doctor)
 
-    token = subparsers.add_parser("token", help="print the bearer token")
-    token.add_argument("--show", action="store_true", help="required; prints the secret")
+    token = subparsers.add_parser(
+        "token", help="print the bearer token, or the pairing line an app takes"
+    )
+    token.add_argument("--show", action="store_true", help="prints the secret")
+    token.add_argument(
+        "--url",
+        action="store_true",
+        help=(
+            "print the pairing line for each address this server is reachable "
+            "on — crucible://<name>@<host>:<port>/#<token>. It carries the "
+            "token, which is what the flag name says"
+        ),
+    )
     token.set_defaults(func=cmd_token)
 
     return parser

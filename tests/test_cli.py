@@ -7,9 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from crucible import cli, jobenv
+from urllib.parse import quote
+
+from crucible import cli, jobenv, pairing
 from crucible.config import config_path, load_config
 from crucible.errors import NoViableBackend
+from crucible.interfaces import InterfaceError
 
 from .conftest import FAKE_BACKEND
 
@@ -31,7 +34,13 @@ def test_init_writes_a_0600_config_with_a_token(
     assert config.backend_kind == "cuda-linux"
     assert config.enable_echo is True
     assert len(config.token) >= 40
-    assert config.token not in capsys.readouterr().out
+    # THE TOKEN IS NOW PRINTED, inside the pairing line, and that reverses what
+    # this test used to assert. PHASE13-OPERATOR.md section 3.5: `init` ends by
+    # printing the lines an app's connect door takes, because Owen's rule for
+    # the whole phase is that nobody types a token twice. It is printed to the
+    # terminal of the person who just minted it, on the machine they are
+    # sitting at — which is the one audience that already has it.
+    assert config.token in capsys.readouterr().out
 
 
 def test_init_refuses_to_clobber_an_existing_config(home: Path, viable: None) -> None:
@@ -115,9 +124,88 @@ def test_doctor_is_unhealthy_when_the_backend_changed(
     assert any("backend_changed" in problem for problem in report["problems"])
 
 
-def test_token_needs_show(home: Path, viable: None) -> None:
+def test_token_needs_show_or_url(home: Path, viable: None) -> None:
     assert cli.main(["init"]) == 0
     assert cli.main(["token"]) == 1
+
+
+def test_token_url_prints_one_pairing_line_per_address(
+    home: Path, viable: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """PHASE13-OPERATOR.md 3.5. A concrete bind is exactly one line."""
+    assert cli.main(["init", "--host", "127.0.0.1", "--port", "7100"]) == 0
+    capsys.readouterr()
+    assert cli.main(["token", "--url"]) == 0
+    printed = capsys.readouterr().out.strip().splitlines()
+    config = load_config(home)
+    assert printed == [
+        f"crucible://{quote(config.name, safe='')}@127.0.0.1:7100/#{config.token}"
+    ]
+
+
+def test_token_url_lists_every_interface_of_a_wildcard_bind(
+    home: Path,
+    viable: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(pairing, "ipv4_addresses", lambda: ["10.0.0.4", "100.64.0.3"])
+    assert cli.main(["init", "--host", "0.0.0.0"]) == 0
+    capsys.readouterr()
+    assert cli.main(["token", "--url"]) == 0
+    printed = capsys.readouterr().out.strip().splitlines()
+    assert [line.split("@")[-1] for line in printed] == [
+        f"10.0.0.4:7100/#{load_config(home).token}",
+        f"100.64.0.3:7100/#{load_config(home).token}",
+    ]
+
+
+def test_token_url_refuses_when_the_interfaces_cannot_be_read(
+    home: Path,
+    viable: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No line is better than a guessed one, and the reason is said out loud."""
+
+    def refuse() -> list[str]:
+        raise InterfaceError("getifaddrs(3) failed")
+
+    assert cli.main(["init", "--host", "0.0.0.0"]) == 0
+    monkeypatch.setattr(pairing, "ipv4_addresses", refuse)
+    capsys.readouterr()
+    assert cli.main(["token", "--url"]) == 1
+    assert "getifaddrs" in capsys.readouterr().err
+
+
+def test_service_install_ends_with_the_pairing_line(
+    home: Path,
+    viable: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """3.5's second line. The unit itself is `tests/test_service.py`'s."""
+    from crucible import service
+
+    assert cli.main(["init"]) == 0
+    monkeypatch.setattr(
+        service, "install", lambda *a, **k: ["unit:     /home/x/crucible.service"]
+    )
+    capsys.readouterr()
+    assert cli.main(["service", "install"]) == 0
+    out = capsys.readouterr().out
+    assert "pairing: paste one of these" in out
+    assert load_config(home).token in out
+
+
+def test_init_ends_with_the_pairing_line(
+    home: Path, viable: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["init"]) == 0
+    out = capsys.readouterr().out
+    assert "pairing:" in out
+    assert f"crucible://" in out
+    assert load_config(home).token in out
 
 
 def test_token_show_prints_the_token(
@@ -413,15 +501,23 @@ def test_init_takes_a_token_the_caller_minted(
 ) -> None:
     """`--token` is for `@crucible/bootstrap`, which mints on the app's side.
 
-    The token written is the one given, byte for byte, and it is still never
-    printed — the bootstrapper's whole reason for minting it itself is that it
-    must not have to read it back out of a log.
+    The token written is the one given, byte for byte.
+
+    **It now appears in the printed pairing line, and that reverses what this
+    test used to assert.** The old reasoning was that a bootstrapper which
+    mints its own token must never have to read it back out of a log — which
+    is still true, and is still why `--token` exists: the app already holds it
+    and reads nothing. What changed is that the OTHER audience for this
+    command's output is a person at a terminal who has just created a server
+    and needs to point an app at it, and PHASE13-OPERATOR.md section 3.5 rules
+    that they get one pasteable line rather than three values to transcribe.
+    `token: as given` still distinguishes the two cases in the summary.
     """
     given = "bootstrap-minted-" + "x" * 30
     assert cli.main(["init", "--token", given, "--enable-echo"]) == 0
     assert load_config(home).token == given
     out = capsys.readouterr().out
-    assert given not in out
+    assert f"#{given}" in out, "the given token rides in the pairing line"
     assert "token:    as given" in out
 
 
