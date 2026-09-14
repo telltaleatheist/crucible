@@ -93,7 +93,35 @@ export type BootstrapRefusalCode =
    */
   | 'linger_unreadable'
   /** win32 only. `loginctl enable-linger` ran as root and failed. */
-  | 'linger_failed';
+  | 'linger_failed'
+  /**
+   * win32 only. There is no `%LOCALAPPDATA%\Crucible\host\crucible.cmd` on this
+   * machine, so the process that owns the install sequence (PHASE15 4.3) is not
+   * here. The answer is `install.ps1`, which this refusal carries as `command`:
+   * a library does not download and run an elevated installer of its own accord.
+   */
+  | 'host_not_installed'
+  /** win32 only. The host pack IS installed and its loopback door did not answer. */
+  | 'host_unreachable'
+  /** win32 only. The host refused the engine token this side read from its config (401). */
+  | 'host_unauthorized'
+  /**
+   * win32 only. The host has no `[auth] token` to authorise its door with,
+   * which is only true before its first host-mode `crucible init` (503).
+   */
+  | 'host_no_token'
+  /**
+   * win32 only. An install is already in flight on this machine (409). There is
+   * one install per machine; the second caller waits rather than starting a
+   * second walk over the same distro.
+   */
+  | 'host_install_running'
+  /**
+   * win32 only. The host's stream ended without a `done` event, or broke the
+   * door's own contract (a line that is not JSON, an event with no name, a
+   * `done` missing a field). A truncated stream is not a success.
+   */
+  | 'host_install_failed';
 
 export interface BootstrapRefusalOptions {
   /** The exact command the host must run, when there is one. Never a guess. */

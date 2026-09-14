@@ -13,6 +13,14 @@
 # image and the `.sha256` sibling `install.ps1` and `distro.ts` read the digest
 # from, under exactly that name.
 #
+# A FOURTH builds the WINDOWS HOST pack (PHASE15-HOST.md 4.4) on
+# `windows-latest`. It IS a pack — it has a row in `envpacks.json` and
+# `install.ps1` fetches it by name — but it is not in the matrix either, for
+# the reason the matrix's own steps give: every step in there is written in
+# `sh` and reclaims disk with `sudo rm -rf`, and neither is a thing a Windows
+# runner does. One job with four Windows-shaped steps is honest; a matrix with
+# `if: runner.os` on half its steps is a matrix pretending to be one job.
+#
 # THE MANIFEST IS UPLOADED LAST, by a job that waits for every build. That is
 # the whole invariant of this file: a release whose `envpacks.json` exists has
 # every pack that manifest names. A build that fails leaves its pack out of the
@@ -236,6 +244,82 @@ jobs:
             "rootfs/crucible-rootfs-$version.tar.zst" \
             "rootfs/crucible-rootfs-$version.tar.zst.sha256"
 
+  host:
+    # The Windows host pack (PHASE15-HOST.md 4.4): a relocatable CPython with
+    # the crucible wheel, pystray and pillow in it. It carries BOTH halves of
+    # what runs on Windows — the tray, and the `llama-windows` server the tray
+    # starts — and it is the only Windows-native Python Crucible ever ships.
+    #
+    # `windows-latest` and nowhere else: pip resolves wheels for the machine it
+    # runs on, so a pack is built on the platform it targets, and
+    # `envpack.build_backend_kind()` refuses anything else by name.
+    name: host (llama-windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: this runner's tar can read and write zstd
+        # MEASURED on Owen's PC 2026-09-14: `C:\Windows\System32\tar.exe` is
+        # bsdtar 3.8.1 linked with libzstd 1.5.5, and no `zstd.exe` ships on
+        # Windows at all. `envpack.require_zstd_tar` asks that same question at
+        # build time; this step asks it FIRST so a runner image that changed
+        # fails at the top of the job with the version string in the log,
+        # rather than after a 50 MB interpreter download.
+        shell: pwsh
+        run: |
+          $version = (& tar.exe --version | Out-String)
+          Write-Host $version
+          if ($version -notmatch "libzstd") {
+            Write-Host "::error title=pack_no_zstd::this runner's tar carries no libzstd, so it cannot write a pack. $version"
+            exit 1
+          }
+
+      - name: install crucible
+        # `-e .` and not the wheel, for the matrix's reason: `envpack build`
+        # reads `pyproject.toml` out of the CHECKOUT and records its sha256 as
+        # the pack's `recipe_sha256`.
+        run: python -m pip install --upgrade pip build && python -m pip install -e .
+
+      - name: the build host targets the backend this job claims
+        shell: pwsh
+        run: |
+          $here = python -c "from crucible import envpack; print(envpack.build_backend_kind())"
+          Write-Host "runner builds $here, this job says llama-windows"
+          if ($here -ne "llama-windows") { exit 1 }
+
+      - name: build, smoke-test and split
+        # The smoke test is INSIDE this step: it unpacks the archive somewhere
+        # else and runs `crucible.cmd --version` from there, which is the only
+        # proof that the `%~dp0` shim survived the move — the Windows form of
+        # the relocation defect PHASE14 7.2a found on POSIX.
+        run: python -m crucible.cli envpack build host --out packs
+
+      - name: what it cost
+        shell: pwsh
+        run: Get-ChildItem packs | Format-Table -AutoSize
+
+      - name: upload the parts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem packs -Filter "*.part[0-9][0-9]" | ForEach-Object { $_.FullName }
+          gh release upload "$env:TAG" --clobber $parts
+
+      - name: keep this pack's manifest fragment
+        uses: actions/upload-artifact@v4
+        with:
+          name: envpack-fragment-host-llama-windows
+          path: packs/envpacks.json
+          if-no-files-found: error
+
   manifest:
     name: merge and upload envpacks.json
     runs-on: ubuntu-latest
@@ -243,7 +327,12 @@ jobs:
     # release then carries every pack that built, and `crucible install`
     # refuses the missing one by name. A manifest written only on a clean run
     # would make one failed job cost every pack in the matrix.
-    needs: pack
+    #
+    # `host` is in `needs` for a sharper reason than the matrix is: a manifest
+    # published WITHOUT the host pack's row is one where `install.ps1` — the
+    # first thing anybody runs on Windows — refuses `pack_not_published` on a
+    # release that otherwise looks complete.
+    needs: [pack, host]
     if: always()
     steps:
       - uses: actions/checkout@v4

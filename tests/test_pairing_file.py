@@ -11,12 +11,19 @@ from pathlib import Path
 import pytest
 
 from crucible import cli, pairing
-from crucible.config import (
-    config_mode,
-    load_config,
-    pairing_path,
-    write_pairing_file,
-)
+from crucible.config import config_mode, load_config
+from crucible.pairing import pairing_file_path
+
+
+def write_pairing_file(home: Path, *, name: str, port: int, token: str) -> Path:
+    """What `crucible init` does, spelled the same way it spells it.
+
+    The ONE writer is `crucible.pairing.write_pairing_file`, which takes a
+    LINE; turning (name, port, token) into the loopback line is
+    `cli._write_pairing_file`'s job, and this test calls that so the file
+    under test is the file the CLI writes.
+    """
+    return cli._write_pairing_file(home, name=name, port=port, token=token)
 
 
 def test_the_file_is_one_loopback_line_with_a_trailing_newline(
@@ -24,7 +31,7 @@ def test_the_file_is_one_loopback_line_with_a_trailing_newline(
 ) -> None:
     home = tmp_path / "home"
     path = write_pairing_file(home, name="crucible@pc", port=7100, token="tok3n")
-    assert path == pairing_path(home)
+    assert path == pairing_file_path(home)
     text = path.read_text(encoding="utf-8")
     assert text.endswith("\n")
     assert text.count("\n") == 1
@@ -65,12 +72,12 @@ def test_init_writes_it_and_force_rewrites_it_with_the_new_token(
         ).FAKE_BACKEND
     )
     assert cli.main(["init", "--token", "firsttoken"]) == 0
-    first = pairing_path(home).read_text(encoding="utf-8").strip()
+    first = pairing_file_path(home).read_text(encoding="utf-8").strip()
     assert first.endswith("#firsttoken")
     assert "pairing:" in capsys.readouterr().out
 
     assert cli.main(["init", "--force", "--token", "secondtoken"]) == 0
-    second = pairing_path(home).read_text(encoding="utf-8").strip()
+    second = pairing_file_path(home).read_text(encoding="utf-8").strip()
     assert second.endswith("#secondtoken")
     assert second != first
     # …and it agrees with the config it sits beside.
@@ -92,7 +99,7 @@ def test_token_url_prints_the_same_line_the_file_holds(
     capsys.readouterr()
     assert cli.main(["token", "--url"]) == 0
     printed = capsys.readouterr().out.splitlines()
-    assert pairing_path(home).read_text(encoding="utf-8").strip() == printed[0]
+    assert pairing_file_path(home).read_text(encoding="utf-8").strip() == printed[0]
 
 
 def test_the_loopback_line_is_printed_once_on_a_loopback_bind(

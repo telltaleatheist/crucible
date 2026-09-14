@@ -102,8 +102,8 @@ WorkingDirectory=/home/telltale/.crucible
 ExecStart=/home/telltale/anaconda3/envs/crucible/bin/crucible serve --host 127.0.0.1 --port 7100
 Environment=CRUCIBLE_HOME=/home/telltale/.crucible
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=2
 
 [Install]
 WantedBy=default.target
@@ -131,6 +131,33 @@ def test_the_unit_never_runs_python_dash_m() -> None:
     and the unit crash-looped on an ImportError."""
     assert "-m crucible" not in EXPECTED_UNIT
     assert "WorkingDirectory=/home/telltale/.crucible" in EXPECTED_UNIT
+
+
+def test_the_unit_restarts_always_and_the_reason_is_the_windows_host() -> None:
+    """RULING, PHASE15-HOST.md 4.1 (2026-09-14). This reverses `on-failure`.
+
+    The old reading was "a server that exited 0 was stopped on purpose, and
+    restarting it would break `crucible service stop`". systemd does not work
+    that way: `systemctl --user stop` puts the unit in the STOPPED state and
+    `Restart=` is not consulted for it, so `always` and `stop` coexist. What
+    `on-failure` bought instead was 2026-09-14's defect — a clean SIGTERM
+    exits 0, the engine stayed down, and on Windows nothing was watching.
+
+    `crucible host` now watches, and 4.1 says it must NOT reimplement the
+    restart loop ("the systemd unit's own `Restart=` handles crashes"). A
+    watcher that does not restart plus a unit that only restarts failures is
+    two halves of a job neither does — so the unit is the total half.
+    """
+    assert "Restart=always\n" in EXPECTED_UNIT
+    assert "Restart=on-failure" not in EXPECTED_UNIT
+    assert f"RestartSec={service.RESTART_SECONDS}\n" in EXPECTED_UNIT
+    assert service.RESTART_SECONDS == 2
+
+
+def test_the_launchd_agent_is_deliberately_not_changed_with_it() -> None:
+    """No host on the Mac (4.4), so `launchctl stop` is the only stop there is."""
+    assert "<key>SuccessfulExit</key>" in EXPECTED_PLIST
+    assert "<key>KeepAlive</key>\n  <true/>" not in EXPECTED_PLIST
 
 
 EXPECTED_PLIST = """<?xml version="1.0" encoding="UTF-8"?>

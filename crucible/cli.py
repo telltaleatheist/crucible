@@ -6,6 +6,7 @@
     crucible capability what this host can hold, and why; --write records it
     crucible serve      run the API in the foreground
     crucible service    install/start/stop the machine service that runs `serve`
+    crucible host       win32 only: the tray that owns this machine's engine
     crucible models     list and pull model weights
     crucible voices     list and pull voice weights
     crucible doctor     probe the host and every job type; exit 0 only when healthy
@@ -19,6 +20,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -44,7 +46,15 @@ from .alignmodels import (
     load_all_align_manifests,
 )
 from .asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
-from .backend import WINDOWS_REFUSAL, Backend, detect_backend
+from .backend import (
+    BACKEND_KINDS,
+    CUDA_LINUX,
+    LLAMA_WINDOWS,
+    WINDOWS_REFUSAL,
+    Backend,
+    backend_not_here,
+    detect_backend,
+)
 from .config import (
     CAPABILITY_FLAGS,
     CRUCIBLE_HOME_ENV,
@@ -61,7 +71,6 @@ from .config import (
     load_config,
     mint_token,
     write_config,
-    write_pairing_file,
 )
 from .errors import ConfigError, NoViableBackend
 from .interfaces import InterfaceError
@@ -90,7 +99,116 @@ def _fail(message: str) -> int:
     return EXIT_REFUSED
 
 
+# --------------------------------------------------------------------- host
+
+
+def cmd_host(args: argparse.Namespace) -> int:
+    """`crucible host` — PHASE15-HOST.md section 4. Windows only.
+
+    The verb is refused `host_windows_only` everywhere else, and that is not a
+    platform check standing in for a feature check: on Linux and macOS the
+    server runs ON the machine and its own service manager supervises it
+    (4.4, "no host on the Mac"). There is nothing for a tray to own.
+
+    Three shapes, and the two that are not the tray exit without starting one:
+
+      --install-startup   write the Startup item and print its path
+      --remove-startup    delete it, and say whether there was one
+      (bare)              the tray
+    """
+    from .host import startup as host_startup
+    from .host.errors import HostError
+    from .host.runner import ProcessRunner
+
+    if sys.platform != "win32":
+        return _fail(
+            "host_windows_only: `crucible host` is a Windows verb. On "
+            f"{sys.platform} the server runs on this machine and "
+            f"{'systemd' if sys.platform == 'linux' else 'launchd'} already "
+            "supervises it — `crucible service status` is the question you "
+            "are asking."
+        )
+
+    runner = ProcessRunner(sys.platform, os.environ)
+    try:
+        if args.install_startup:
+            outcome = host_startup.install(runner)
+            print(outcome.detail)
+            return EXIT_OK
+        if args.remove_startup:
+            outcome = host_startup.remove(runner)
+            print(outcome.detail)
+            return EXIT_OK
+    except HostError as exc:
+        return _fail(f"{exc.code}: {exc.message}")
+
+    from .host.app import run as run_host
+
+    try:
+        return run_host()
+    except HostError as exc:
+        return _fail(f"{exc.code}: {exc.message}")
+
+
 # --------------------------------------------------------------------- init
+
+
+def _backend_mismatch(recorded: str, backend: Backend) -> str:
+    """The ONE sentence a recorded backend gets when it is not this host's.
+
+    PHASE15-HOST.md section 3.5: *"a backend runs where its engine runs and
+    nowhere else"* — `llama-windows` off win32 is as wrong as `cuda-linux` on
+    it, and both are `backend_not_here`. `crucible init --backend`,
+    `crucible serve` and `crucible service install` all print this, so there
+    is one wording for one fact.
+
+    `WINDOWS_REFUSAL` is appended for the ONE mismatch it still describes: a
+    `cuda-linux` config found on a Windows host. That config is not wrong
+    about wanting vLLM — it is wrong about where vLLM runs, which is inside
+    the WSL2 guest — and that is worth saying once, here, where it is true.
+    """
+    sentence = backend_not_here(recorded, backend.kind, backend.platform)
+    if recorded == CUDA_LINUX and backend.kind == LLAMA_WINDOWS:
+        sentence = f"{sentence}. {WINDOWS_REFUSAL}"
+    return f"backend_not_here: {sentence}"
+
+
+def carried_from(path: Path) -> tuple[str, dict[str, Any]]:
+    """`--config-from`: the token, the routes and the upstreams, and NOTHING else.
+
+    PHASE15-HOST.md 4.3. The host writes this file at 0600 when it moves a
+    Windows Crucible into the WSL guest and deletes it afterwards; the point
+    of the flag is that the TOKEN survives, so every app that paired with this
+    machine stays paired.
+
+    Three things and no fourth. The host, the port, the name, the backend and
+    the job flags belong to the machine being INITIALISED, not to the one
+    being left — a guest that inherited `backend = "llama-windows"` would
+    refuse to serve on its own card, and a guest that inherited a desktop
+    allowance measured against somebody's iGPU would hold the wrong number.
+    """
+    import tomllib
+
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ConfigError(f"config_from_unreadable: {path} could not be read: {exc}")
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"config_from_unreadable: {path} is not TOML: {exc}")
+    auth = document.get("auth")
+    token = auth.get("token") if isinstance(auth, dict) else None
+    if not isinstance(token, str) or token.strip() == "":
+        raise ConfigError(
+            f"config_from_no_token: {path} has no [auth] token. The point of "
+            "--config-from is that the token survives the move; a file without "
+            "one carries nothing."
+        )
+    carried: dict[str, Any] = {}
+    for section in ("routes", "upstreams"):
+        value = document.get(section)
+        if isinstance(value, dict):
+            carried[section] = value
+    return token, carried
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -106,6 +224,15 @@ def cmd_init(args: argparse.Namespace) -> int:
         backend = detect_backend()
     except NoViableBackend as exc:
         return _fail(f"no viable backend: {exc.reason}")
+
+    # `--backend` STATES what the caller expects this host to be, and is
+    # checked against what it is. Section 2: *"`crucible init --backend
+    # llama-windows` is legal only on win32 … `cuda-linux`/`mlx-darwin` on
+    # win32 are refused the same way"*. `crucible host` passes it (4.3) so a
+    # host that somehow ran on the wrong machine says so here instead of
+    # writing a config the server would refuse to start from.
+    if args.backend is not None and args.backend != backend.kind:
+        return _fail(_backend_mismatch(args.backend, backend))
 
     # The host reserve is resolved HERE rather than by argparse, because it
     # depends on the backend that was just detected and on the size of its pool
@@ -124,7 +251,18 @@ def cmd_init(args: argparse.Namespace) -> int:
     # already holds what it would otherwise have to read back out of the file.
     # A blank one is refused — a config with an empty token is a server nothing
     # can reach, and `load_config` would refuse it anyway.
-    if args.token is not None:
+    carried: dict[str, Any] = {}
+    if args.config_from is not None:
+        if args.token is not None:
+            return _fail(
+                "--config-from and --token both name a token, and two answers to "
+                "one question is not a thing this command picks between. Pass one."
+            )
+        try:
+            token, carried = carried_from(Path(args.config_from))
+        except ConfigError as exc:
+            return _fail(str(exc))
+    elif args.token is not None:
         token = args.token
         if token.strip() == "" or any(ch.isspace() for ch in token):
             return _fail("--token must be a non-empty string with no whitespace")
@@ -145,6 +283,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         enable_rvc=args.enable_rvc,
         enable_denoise=args.enable_denoise,
         desktop_allowance_bytes=desktop_allowance_bytes,
+        carried_tables=carried or None,
     )
     print(f"backend:  {backend.kind} ({backend.gpu.name}, {backend.detail})")
     print(f"config:   {written} (mode {config_mode(written)})")
@@ -164,21 +303,30 @@ def cmd_init(args: argparse.Namespace) -> int:
         f"{backend.gpu.vram_bytes / 1024 ** 3:.1f} GiB treated as this host's own "
         f"desktop, not somebody's job ({source})"
     )
+    if args.config_from is not None:
+        print(
+            f"carried:  the token and {sorted(carried) or 'no other table'} from "
+            f"{args.config_from} (4.3); every app that paired stays paired"
+        )
     print(
         "token:    "
-        + ("as given; " if args.token is not None else "minted; ")
+        + (
+            "carried; "
+            if args.config_from is not None
+            else ("as given; " if args.token is not None else "minted; ")
+        )
         + "print it with `crucible token --show`"
     )
     # THE PAIRING FILE (PHASE15-HOST.md section 3.6). Written here, at 0600,
     # beside the config, so an app on this machine connects without anybody
     # typing a token — and rewritten by `--force`, which mints a new one.
-    paired = write_pairing_file(
+    paired = _write_pairing_file(
         home,
         name=args.name if args.name is not None else default_server_name(),
         port=args.port,
         token=token,
     )
-    print(f"pairing:  {paired} (mode {config_mode(paired)})")
+    print(f"pairing:  {paired} ({_pairing_permission(paired)})")
     _print_pairing(
         args.name if args.name is not None else default_server_name(),
         args.host,
@@ -202,9 +350,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         return _fail(f"no viable backend: {exc.reason}")
     if backend.kind != config.backend_kind:
         return _fail(
-            f"this host detects backend {backend.kind}, but {config.path} was "
-            f"initialised for {config.backend_kind}; re-run `crucible init --force` "
-            "on this host"
+            _backend_mismatch(config.backend_kind, backend)
+            + f" ({config.path}); re-run `crucible init --force` on this host"
         )
 
     host = args.host if args.host is not None else config.host
@@ -261,8 +408,8 @@ def _service_context() -> tuple[Config, Backend, str] | int:
         return _fail(f"no viable backend: {exc.reason}")
     if backend.kind != config.backend_kind:
         return _fail(
-            f"this host detects backend {backend.kind}, but {config.path} was "
-            f"initialised for {config.backend_kind}; re-run `crucible init --force`"
+            _backend_mismatch(config.backend_kind, backend)
+            + f" ({config.path}); re-run `crucible init --force`"
         )
     try:
         mechanism = service.mechanism_for(backend.kind)
@@ -309,10 +456,10 @@ def cmd_service_install(args: argparse.Namespace) -> int:
     # most likely to meet without a person present, so the file it reads is
     # written here too — with the SAME token, so nothing that had paired is
     # unpaired by installing a unit.
-    paired = write_pairing_file(
+    paired = _write_pairing_file(
         config.home, name=config.name, port=config.port, token=config.token
     )
-    print(f"pairing:  {paired} (mode {config_mode(paired)})")
+    print(f"pairing:  {paired} ({_pairing_permission(paired)})")
     _print_pairing(config.name, config.host, config.port, config.token)
     return EXIT_OK
 
@@ -1882,6 +2029,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 # -------------------------------------------------------------------- token
 
 
+def _write_pairing_file(home: Path, *, name: str, port: int, token: str) -> Path:
+    """`<CRUCIBLE_HOME>/pairing`, through the ONE writer (`crucible/pairing.py`).
+
+    PHASE15-HOST.md section 3.6. The file holds the LOOPBACK line whatever the
+    server is bound to — it answers *"an app on THIS machine wants in"*, and
+    the answer to that is never a LAN address — so this is where (name, port,
+    token) becomes that line; `pairing.write_pairing_file` owns everything
+    after it, including the Windows ACL.
+    """
+    return pairing.write_pairing_file(
+        home, pairing.pairing_line(name, f"http://{DEFAULT_HOST}:{port}", token)
+    )
+
+
+def _pairing_permission(path: Path) -> str:
+    """What restricts the file, said in the platform's own vocabulary.
+
+    A Windows file has no mode, and printing `config_mode`'s answer there
+    would report a number the OS does not enforce.
+    """
+    if sys.platform == "win32":
+        return "ACL: this user only"
+    return f"mode {config_mode(path)}"
+
+
 def _pairing_lines(name: str, host: str, port: int, token: str) -> list[str] | str:
     """The lines, or the sentence saying why there are none.
 
@@ -1981,6 +2153,18 @@ def build_parser() -> argparse.ArgumentParser:
         "init", help="detect the backend, mint a token, write config.toml"
     )
     init.add_argument("--force", action="store_true", help="replace an existing config")
+    init.add_argument(
+        "--backend",
+        default=None,
+        choices=sorted(BACKEND_KINDS),
+        help=(
+            "the backend this host is EXPECTED to be, checked against what it "
+            "detects. A backend runs where its engine runs and nowhere else "
+            "(PHASE15-HOST.md 3.5), so this never chooses one — it refuses "
+            "backend_not_here when the two disagree. `crucible host` passes "
+            "--backend llama-windows"
+        ),
+    )
     init.add_argument("--name", default=None, help="server name (default crucible@<hostname>)")
     init.add_argument("--host", default=DEFAULT_HOST, help=f"default bind host ({DEFAULT_HOST})")
     init.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"default port ({DEFAULT_PORT})")
@@ -2050,6 +2234,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.set_defaults(func=cmd_init)
 
+    init.add_argument(
+        "--config-from",
+        metavar="FILE",
+        help=(
+            "take the token, [routes] and [upstreams] out of this TOML file "
+            "instead of minting a token (PHASE15-HOST.md 4.3). The host writes "
+            "it at 0600 when it moves a Windows Crucible into the WSL guest and "
+            "deletes it after, so every app that paired stays paired"
+        ),
+    )
+
     install = subparsers.add_parser(
         "install",
         help="download this job type's published env pack and unpack it "
@@ -2111,6 +2306,12 @@ def build_parser() -> argparse.ArgumentParser:
     envpack_commands = envpack_parser.add_subparsers(
         dest="envpack_command", required=True
     )
+    # WIN32 RUNS THIS ONE, like every other verb since the gate in `main()`
+    # went. PHASE15-HOST.md 4.4: the `host` pack is built by `crucible envpack
+    # build host` on a `windows-latest` runner, which is the only way the
+    # Windows pack can exist at all — pip resolves wheels for the machine it
+    # runs on. `build_backend_kind()` is what refuses the wrong platform, by
+    # name and with the three backends in the sentence.
 
     envpack_list = envpack_commands.add_parser(
         "list", help="every (pack, backend) a tag carries"
@@ -2252,6 +2453,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     denoise_pull.set_defaults(func=cmd_denoise_pull)
 
+    host_parser = subparsers.add_parser(
+        "host",
+        help="win32 only: the tray that owns this machine's engine",
+        description=(
+            "The Windows presence (PHASE15-HOST.md section 4): a notification-area "
+            "icon that boots the WSL engine at login, watches it, and runs the move "
+            "from the Windows engine to WSL2 when the operator page asks. Refused "
+            "`host_windows_only` on Linux and macOS, where the service manager "
+            "already supervises the server."
+        ),
+    )
+    host_parser.add_argument(
+        "--install-startup",
+        action="store_true",
+        help="write the Startup shortcut and exit (this verb OWNS that file)",
+    )
+    host_parser.add_argument(
+        "--remove-startup",
+        action="store_true",
+        help="delete the Startup shortcut and exit",
+    )
+    host_parser.set_defaults(func=cmd_host)
+
     serve = subparsers.add_parser("serve", help="run the API in the foreground")
     serve.add_argument("--host", default=None, help="bind host (default from config)")
     serve.add_argument("--port", type=int, default=None, help="bind port (default from config)")
@@ -2325,9 +2549,29 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    if sys.platform == "win32":
-        print(f"crucible: {WINDOWS_REFUSAL}", file=sys.stderr)
-        return EXIT_REFUSED
+    """Every verb, on every platform. THERE IS NO PLATFORM GATE HERE.
+
+    There was, twice. First a total one: `crucible` refused to do anything at
+    all on Windows, because vLLM and SGLang do not run there. Then, for one
+    session, an opt-in flag (`win32_ok`) that let `host` and `envpack` through
+    and kept the refusal for everything else, because the `llama-windows`
+    backend was being built on another branch and a verb that reached a
+    missing backend would have printed a worse sentence.
+
+    Both are gone, because section 0's amendment and section 3.5 say what the
+    answer is: **Windows IS a backend**, every verb runs on win32, and the one
+    thing that must be true there is that `backend_kind` is `llama-windows`.
+    That is not a question about a verb, so it is not asked here — it is asked
+    where a backend is read, by `_backend_mismatch` (`init --backend`,
+    `serve`, `service install`), which refuses `backend_not_here` and names
+    both kinds. A platform test standing in for a backend test was the shape
+    R1 forbids: two owners for "can this machine do it".
+
+    `crucible host` still refuses off win32, by its own name
+    (`host_windows_only`), because a tray on a machine whose service manager
+    already supervises the server is a second owner of presence — a feature
+    check, not a platform one wearing a feature's clothes.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     return int(args.func(args))

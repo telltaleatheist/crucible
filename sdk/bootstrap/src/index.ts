@@ -25,6 +25,8 @@ export {
   envpacksUrl,
   ENVPACKS_ASSET,
   findPack,
+  HOST_BACKEND,
+  HOST_PACK,
   packAssetName,
   parseEnvpacks,
   releaseAssetUrl,
@@ -40,6 +42,7 @@ export {
   fetchManifest,
   guestProbeScript,
   installPack,
+  HOST_SUBDIR,
   packPaths,
   probeGuest,
   requiredBytes,
@@ -66,6 +69,35 @@ export {
   WSL_CONF_TEXT,
 } from './distro.js';
 export type { DistroChoiceOptions, DistroOutcome, EnsureDistroOptions } from './distro.js';
+
+export {
+  HOST_DOOR_PORT,
+  HOST_DOOR_URL,
+  HOST_ENTRY_POINT,
+  HOST_EVENT_KINDS,
+  HOST_INSTALL_PATH,
+  HOST_INSTALL_TARGET,
+  hostConfigPath,
+  hostInstallCommand,
+  hostInstalled,
+  hostPackDir,
+  hostToken,
+  requestHostInstall,
+} from './hostdoor.js';
+export type {
+  HostDoneData,
+  HostDoneStep,
+  HostEvent,
+  HostEventKind,
+  HostFailedData,
+  HostFetch,
+  HostInstallOptions,
+  HostInstallRequestBody,
+  HostLineData,
+  HostProgressData,
+  HostStateData,
+  HostStepData,
+} from './hostdoor.js';
 
 export { detectWslState, elevatedArgv, probeArgv, wslStates } from './wsl-states.js';
 export type { Evidence, ProbeKey, WslAction, WslState, WslStateDef, WslStateInputs } from './wsl-states.js';

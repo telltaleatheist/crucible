@@ -236,6 +236,60 @@ still owed on it is the engine subject and the child: see PHASE15-HOST.md sectio
 which records the pinned llama.cpp tag, its three asset digests and every decision the
 next build needs so nothing is derived twice.
 
+**Landed, 2026-09-14 (evening): phase 15's HOST SIDE — Windows gets a presence.**
+`PHASE15-HOST.md` section 4, and the pieces of 3.5/3.6 it needs to exist; section 7b of
+that file is the record. WSL has no boot — nothing starts a distro at login — so the
+engine was down after every reboot until an app happened to poke it, and a clean stop
+that afternoon left it down at 16:10 with nobody noticing. The only process that can own
+"the engine is running" is one that is itself running on Windows, and that is
+`crucible host`: a tray icon, a login item, a 15 s watch, and the loopback door
+(`POST /install` on 127.0.0.1:7101) that the operator page's engine switch and
+`@crucible/bootstrap` both drive, so the Windows→WSL2 move has ONE implementation.
+
+Four things in it are worth reading before the server half lands beside it:
+
+- **The 4c state table crosses into Python by GENERATION.** `crucible host` walks the same
+  ten rows `install.ps1` used to, and it is Python. Rather than a second hand-written copy,
+  `sdk/bootstrap/scripts/gen-install-scripts.ts` gained a third output —
+  `crucible/host/wsl_states.py` — and `npm run gen:install -- --check` refuses a drift in it
+  exactly as it does for the two scripts. Only the `means` predicates are spelled twice,
+  because they are code; a pytest asserts the two sets of codes are equal. It is the seam
+  `envpack.SMOKE_IMPORT` already has with `cli.INSTALLABLE_JOB_TYPES`.
+- **`install.ps1` stopped walking that table.** It installs the host and stops. The whole
+  sequence — the states, the UAC prompts by name, the import, the config move, the weights
+  rule, the switch-over — is the host's, which is what lets 4.7 make it a task the page
+  drives and what lets a reboot state be true (the login item is what resumes it).
+- **A third pack backend, `llama-windows`, and it was BUILT.** 64 s, 186 MB unpacked, 46 MB
+  archived, one part, `crucible.cmd --version` passing from a directory the build never
+  saw — while `Scripts\crucible.exe --version` from that same directory exits 1, which is
+  the whole reason the `%~dp0` shim exists. pip bakes the build tree's interpreter path
+  INTO the launcher binary, and unlike PHASE14 7.2a's POSIX form no shebang rewrite can
+  reach it. The interpreter pin was read from python-build-standalone's own SHA256SUMS,
+  which is also how the doc's `-shared-install_only` asset was found not to exist.
+- **`service.py` moves to `Restart=always`, and the reason is this phase.** `on-failure`
+  was chosen on the reading that restarting an exit-0 would break `crucible service stop`;
+  systemd does not work that way, and what `on-failure` actually bought was the 16:10
+  defect. The host now watches, and 4.1 says it must NOT reimplement the restart loop — so
+  the unit is the half that is total. The launchd agent is deliberately NOT changed with
+  it: there is no host on the Mac, so `launchctl stop` there is the only stop there is.
+
+`sdk/bootstrap` is at 245 tests from 191; `tests/test_host.py` adds 69, every one of which
+runs OFF Windows because the platform, the environment and every subprocess are injected —
+a suite that skipped its subject on the machine it runs on would pin nothing.
+
+**What the host side could not do, and is owed** (7b.6 is the list): no distro was imported
+and no install ran end to end, because `crucible-rootfs-<version>.tar.zst` is on no release
+yet; `install-job-types` and `migrate-weights` install and move NOTHING and say so on the
+event stream, because their inputs are the Windows server's coordinate records and catalog,
+which are the server half of this phase; there is no delete door for a Windows weights copy
+and the LAN forward was detected but not added, because `netsh` needs administrator and
+Owen's machine was to be read, not changed. **The delete door landed while this was being
+written** (3.5a, `DELETE /v1/catalog/{kind}/{id}`), so `migrate-weights` is real: pull in the
+guest, wait for the GUEST's catalog to say `installed`, then delete on Windows, re-diffing
+both catalogs every round so a resume needs no state that survived the crash. A
+`subject_in_use` is waited out with its holder named and then fails BY THAT NAME — never
+skipped, because 3.5 says nothing is skipped and an unbounded wait would be a third ending.
+
 So what is left is not code. It is **a card, and Owen's rulings on the five things below.**
 
 ### Owed, and only a free card discharges it

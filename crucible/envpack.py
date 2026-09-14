@@ -4,7 +4,10 @@ PHASE14-ENVPACKS.md. A **pack** is a relocatable, self-contained Python tree: a
 python-build-standalone CPython with one recipe's packages installed INTO it (not
 a venv beside it — a venv records the base interpreter's absolute path in
 `pyvenv.cfg` and in every console script's shebang, and does not survive a move).
-Unpacked anywhere, `<dir>/bin/python` runs.
+Unpacked anywhere, `<dir>/bin/python` runs — `<dir>/python.exe` on the one
+Windows pack, whose tree is python-build-standalone's Windows layout and has no
+`bin/` at all. `pack_python(root, backend_kind)` is the one place that knows
+which, so no caller ever spells either path (PHASE15 section 4.4).
 
 Two verbs live here and they point in opposite directions:
 
@@ -23,10 +26,13 @@ with, so the first thing it downloads has to carry its own python.
 Why zstd
 --------
 An 8 GB torch env unpacks in a fraction of gzip's time and compresses smaller.
-`tar` and `zstd` are the two tools a target needs, and both are present on
-Ubuntu >= 20.04 and on macOS 13+ (bsdtar links libarchive with zstd). A host
-without them is refused BY NAME (`pack_no_zstd`) rather than silently falling
-back to a format nobody built the asset in.
+`tar` and `zstd` are the two tools a POSIX target needs, and both are present
+on Ubuntu >= 20.04 and on macOS 13+. Windows needs ONE: its `tar.exe` is
+bsdtar with libzstd linked in, and no `zstd.exe` ships at all — so
+`require_zstd_tar` asks that tar whether it carries zstd instead of demanding
+a binary the OS does not have. A host that cannot unpack a pack is refused BY
+NAME (`pack_no_zstd`) rather than silently falling back to a format nobody
+built the asset in.
 
 Why parts
 ---------
@@ -49,6 +55,7 @@ than that.
 
 from __future__ import annotations
 
+import configparser
 import hashlib
 import json
 import os
@@ -65,7 +72,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from . import jobenv, workerenv
-from .backend import CUDA_LINUX, MLX_DARWIN
+from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
 from .errors import CrucibleError
 from .voices import NARRATOR_ENGINE_SAMPLING
 from .weights import ProgressHook, directory_bytes, sha256_of
@@ -75,6 +82,36 @@ from .weights import ProgressHook, directory_bytes, sha256_of
 #: It is not a job type and has no `envs/<type>/` recipe — `pyproject.toml` is
 #: what declares what goes into it, and `recipe_sha256` hashes that file.
 SERVER_PACK = "server"
+
+# `LLAMA_WINDOWS` — the THIRD backend, and WINDOWS IS ONE (PHASE15 section 0's
+# amendment, and 3.5). Structurally what `mlx-darwin` is: `llama-server`
+# children serving GGUF weights, with the llm classes and `pages` answering
+# from them. An earlier draft of 4.4 called this `host-windows` and called it
+# "a pack backend, never a `backend_kind`" — that was written at a moment when
+# Windows had no backend kind at all, and keeping it would have given one
+# machine two names, which is the exact R1 shape the amendment strikes.
+#
+# `crucible/backend.py` IS THE OWNER of the name, beside `CUDA_LINUX` and
+# `MLX_DARWIN`, and it is IMPORTED from there at the top of this module. This
+# module spelled the string itself for one session, because the two constants
+# landed on two branches at once; one name, one owner, so that spelling is
+# gone and `envpack.LLAMA_WINDOWS` is `backend.LLAMA_WINDOWS`.
+
+#: The one pack `llama-windows` publishes. Named for the directory it unpacks
+#: into, like every other pack: `%LOCALAPPDATA%\\Crucible\\host\\`. Its
+#: archive therefore falls straight out of the section 1 rule with no special
+#: case — `crucible-env-host-llama-windows-<version>.tar.zst`.
+HOST_PACK = "host"
+
+#: The tray's two packages, installed into the `host` pack AFTER the wheel and
+#: declared HERE rather than in `pyproject.toml`'s dependencies.
+#:
+#: They are Windows-tray-only — `pystray` draws the icon and menu (4.1/4.2) and
+#: `pillow` is what it renders the icon image with — and `pyproject.toml` is
+#: what EVERY pack's server half is built from, so putting them there would
+#: make every Linux and Mac server download and carry a GUI toolkit it can
+#: never open a window with. One list, one place, one reason.
+HOST_EXTRA_PACKAGES = ("pystray", "pillow")
 
 #: Split here. GitHub Releases refuses an asset over 2 GiB; 1900 MiB leaves room
 #: for the difference between a vendor's "2 GB" and 2 GiB without thinking about
@@ -137,6 +174,11 @@ class StandalonePython:
     single `python/` directory with `bin/python3`, relocatable by construction
     (relative rpaths, no absolute paths baked in) — and the full archive carries
     debug symbols and a build manifest nothing here reads.
+
+    `install_only` on WINDOWS is the same archive shape and a different tree:
+    `python/python.exe`, `python/pythonw.exe`, `python/Scripts/`, `python/Lib/`,
+    `python/DLLs/`, and no `bin/` whatsoever. That is why the interpreter is
+    asked for by `pack_python(root, backend_kind)` and never spelled inline.
     """
 
     python_version: str
@@ -152,8 +194,19 @@ class StandalonePython:
         )
 
 
-#: The interpreter each backend's packs are built on. Both digests were read
-#: from the release's own `SHA256SUMS` on 2026-09-14, not from a download.
+#: The interpreter each backend's packs are built on. All THREE digests were
+#: read from the release's own `SHA256SUMS` on 2026-09-14
+#: (https://github.com/astral-sh/python-build-standalone/releases/download/
+#: 20260901/SHA256SUMS), not from a download and not from memory.
+#:
+#: PHASE15 4.4 first wrote the Windows asset as
+#: `x86_64-pc-windows-msvc-SHARED-install_only` and then corrected itself from
+#: that file: the word "shared" appears ZERO times in the 20260901 SHA256SUMS
+#: (against 90 "static"), because the `-shared` infix is retired and the
+#: Windows `install_only` build IS the shared one. A pin nobody can download is
+#: a build that fails on the runner and nowhere else, so the name below is the
+#: one that is in the release and `tests/test_envpack.py` pins the absence of
+#: "-shared" so the doc's original spelling cannot creep back.
 #:
 #: 3.11 and not 3.12+, because `requires-python = ">=3.11"` is the floor the
 #: server declares and every recipe in `envs/` was resolved by pip against 3.11
@@ -172,6 +225,14 @@ STANDALONE_PYTHON: dict[str, StandalonePython] = {
         release="20260901",
         asset="cpython-3.11.16+20260901-aarch64-apple-darwin-install_only.tar.gz",
         sha256="50424fa409e8ae84b82a3052522f64695b47dff2158b70bb7358e0ebd6c085c9",
+    ),
+    # Same release and same CPython (3.11.16) as the two backends, which is the
+    # property that mattered: the host pack runs the same server code.
+    LLAMA_WINDOWS: StandalonePython(
+        python_version="3.11.16",
+        release="20260901",
+        asset="cpython-3.11.16+20260901-x86_64-pc-windows-msvc-install_only.tar.gz",
+        sha256="6be524fa6752af802146a4adc7d098565425b0b1c166e19a5a7a4c8cccb86bf6",
     ),
 }
 
@@ -215,7 +276,10 @@ class PackTarget:
     `name` is both the pack's name in the manifest and the directory under
     `~/.crucible/envs/` it unpacks into, which is what makes `install` a rename
     rather than a lookup. The server pack is the one exception and lands at
-    `~/.crucible/server/` (section 4).
+    `~/.crucible/server/` (section 4); the `host` pack is the second and lands
+    at `<home>/host/` — `%LOCALAPPDATA%\\Crucible\\host\\` on the machine that
+    has one (PHASE15 4.4). Neither is a job env, so neither belongs under
+    `envs/`, where `crucible doctor` reads every directory as one.
     """
 
     name: str
@@ -228,6 +292,8 @@ class PackTarget:
     def env_dir(self, home: Path) -> Path:
         if self.name == SERVER_PACK:
             return home / "server"
+        if self.name == HOST_PACK:
+            return home / "host"
         return home / "envs" / self.name
 
     def stamp_path(self, home: Path) -> Path:
@@ -281,6 +347,12 @@ def build_backend_kind() -> str:
     a GPU-less hosted runner builds the cuda-linux pack perfectly well, and
     requiring a card to build one would mean every release waits on Owen's
     desk.
+
+    Windows answers `llama-windows` — a backend in the full sense since
+    PHASE15 section 0's amendment, and the one whose engine is `llama-server`
+    rather than a pip package. ARM Windows answers nothing: there is no
+    `aarch64-pc-windows` interpreter pin and no runner, and it says so by name
+    rather than building x86 wheels on a machine that cannot run them.
     """
     system = sys.platform
     arch = platform.machine()
@@ -288,11 +360,18 @@ def build_backend_kind() -> str:
         return CUDA_LINUX
     if system == "darwin" and arch == "arm64":
         return MLX_DARWIN
+    # `platform.machine()` says `AMD64` on Windows and `x86_64` on Linux for
+    # the same silicon; both spellings are accepted because both are seen —
+    # CPython reads the former from the registry and the latter from `uname`.
+    if system == "win32" and arch in ("x86_64", "AMD64"):
+        return LLAMA_WINDOWS
     raise PackError(
         "pack_not_buildable_here",
         f"{system}/{arch} builds no Crucible pack; packs are built on Linux "
-        "x86_64 (cuda-linux) and Apple Silicon macOS (mlx-darwin). Windows is "
-        "never a backend",
+        "x86_64 (cuda-linux), Apple Silicon macOS (mlx-darwin) and Windows "
+        "x86_64 (llama-windows, the HOST pack — the tray, the installer and "
+        "a server whose engine is llama-server rather than a pip env). There "
+        "is no pack for this platform and arch",
     )
 
 
@@ -366,6 +445,36 @@ def pack_targets(backend_kind: str) -> dict[str, PackTarget]:
             f"{backend_kind!r} is not a Crucible backend; the backends are "
             f"{sorted(STANDALONE_PYTHON)}",
         )
+    if backend_kind == LLAMA_WINDOWS:
+        # ONE pack, and no job-type packs AT ALL — which is a fact about the
+        # ENGINE, not a gap. `llama-windows` serves its llm classes and
+        # `pages` from `llama-server` children over GGUF weights (PHASE15
+        # 3.10), and a `llama-server` is a binary Crucible spawns, not a pip
+        # env it installs; there is no `envs/llm/llama-windows.txt` and there
+        # is nothing for one to contain. The Python job types (`tts asr align
+        # rvc denoise`) need WSL2 on this machine and say so (3.5). Falling
+        # through to `_job_type_targets` would ask `jobenv` for recipes that
+        # do not exist and publish an empty-ish table by accident.
+        #
+        # Its recipe is `pyproject.toml` for the same reason the server
+        # pack's is: what goes into it is the wheel's own dependencies, and a
+        # second list of them would be the two-owners shape R1 is about. The
+        # tray's extras (`HOST_EXTRA_PACKAGES`) ride along with the wheel and
+        # are pinned by this module rather than by a recipe file.
+        return {
+            HOST_PACK: PackTarget(
+                name=HOST_PACK,
+                backend_kind=LLAMA_WINDOWS,
+                job_type=None,
+                narrator_engine=None,
+                recipe=server_recipe(),
+                # Smoke-tested by RUNNING `crucible.cmd --version`, like
+                # `server`, because the thing most likely to be broken is the
+                # shim that replaces pip's unrelocatable `.exe` launcher —
+                # and an import would not touch it.
+                smoke_import=None,
+            )
+        }
     targets = {
         SERVER_PACK: PackTarget(
             name=SERVER_PACK,
@@ -706,14 +815,69 @@ def _tool(name: str) -> str:
             "pack_no_zstd",
             f"no `{name}` on PATH. A pack is a zstd tarball, so `tar` and "
             "`zstd` are what a machine needs to unpack one — on Ubuntu "
-            "`apt-get install zstd`, on macOS they ship with the OS",
+            "`apt-get install zstd`, on macOS they ship with the OS, and on "
+            "Windows `tar.exe` is in C:\\Windows\\System32 and carries zstd "
+            "itself (see `require_zstd_tar`)",
         )
     return found
 
 
+#: What `tar --version` has to name on Windows before a pack is written with
+#: it. MEASURED on Owen's PC, 2026-09-14: `C:\\Windows\\System32\\tar.exe` is
+#: `bsdtar 3.8.1 - libarchive 3.8.1 … libzstd/1.5.5 …`, so the marker is in
+#: the first line. GNU tar prints `tar (GNU tar) 1.32` and names no library at
+#: all, which is exactly the machine this check is for.
+TAR_ZSTD_MARKER = "libzstd"
+
+
+def _require_tar_with_zstd(tar: str) -> None:
+    """On Windows the tar IS the zstd, so ask it rather than assuming it.
+
+    `--version` and not a trial compression: the probe runs before an
+    interpreter is fetched, and a machine that cannot write a pack should
+    learn so in a hundred milliseconds rather than after a pip run.
+    """
+    try:
+        probe = subprocess.run(
+            [tar, "--version"], capture_output=True, text=True, timeout=60
+        )
+    except OSError as exc:
+        raise PackError(
+            "pack_no_zstd", f"could not run `{tar} --version`: {exc}"
+        ) from None
+    reported = (probe.stdout or probe.stderr).strip().splitlines()
+    first = reported[0].strip() if reported else ""
+    if probe.returncode != 0 or TAR_ZSTD_MARKER not in first.lower():
+        raise PackError(
+            "pack_no_zstd",
+            f"`{tar}` reports {first or '(nothing)'!r}, which does not name "
+            f"{TAR_ZSTD_MARKER}. Windows ships no `zstd.exe`, so the tar that "
+            "writes a pack has to carry zstd itself — "
+            "C:\\Windows\\System32\\tar.exe does (bsdtar 3.8.1, libzstd "
+            "1.5.5, measured 2026-09-14). Put that one ahead of this one on "
+            "PATH. A GNU tar here would shell out to a `zstd` that is not "
+            "installed and fail at the compression step, which is after the "
+            "interpreter download and the pip run — the expensive end of the "
+            "build to find out at",
+        )
+
+
 def require_zstd_tar() -> None:
-    """Both tools, checked before anything is downloaded or built."""
-    _tool("tar")
+    """The tools, checked before anything is downloaded or built.
+
+    TWO ON POSIX AND ONE ON WINDOWS, and that is a measured difference rather
+    than a relaxation. Ubuntu's and macOS's `tar` reach zstd by launching the
+    `zstd` binary, so both have to be there. Windows 10/11 ship `tar.exe` —
+    bsdtar, with libzstd LINKED IN — and ship no `zstd.exe` at all, so
+    demanding one would refuse a build that the stock machine can do. What
+    replaces the demand is a question: `_require_tar_with_zstd` asks the tar
+    it found whether it carries zstd, because an old libarchive or a GNU tar
+    first on PATH is a real machine and must not reach the compression step.
+    """
+    tar = _tool("tar")
+    if sys.platform == "win32":
+        _require_tar_with_zstd(tar)
+        return
     _tool("zstd")
 
 
@@ -750,6 +914,66 @@ def _run(
         )
 
 
+def archive_argv(tar: str, root: Path, archive: Path) -> list[str]:
+    """The `tar` command line that WRITES a pack. TWO SPELLINGS, both measured.
+
+    They are not interchangeable and NEITHER IS A FALLBACK FOR THE OTHER —
+    each is the only one its tar understands:
+
+    * **POSIX** (`--use-compress-program "zstd -T0 -<level>"`). GNU tar reaches
+      zstd by launching the binary, and `-T0` (all cores) is a `zstd` CLI flag
+      that only exists on the command line. Untouched by the Windows work.
+    * **Windows** (`--zstd --options zstd:compression-level=<level>`). `tar.exe`
+      is bsdtar with libzstd linked in, so it compresses in-process and needs
+      no `zstd.exe` — which is what makes the stock machine able to build at
+      all, since Windows ships none. GNU tar has no `--options`.
+
+    Measured on Owen's PC, 2026-09-14: the Windows form round-trips (create
+    exit 0, extract exit 0, contents intact). No `zstd:threads`: libarchive's
+    `threads=0` means SINGLE-threaded, the opposite of the CLI's `-T0`, and
+    writing 0 in both spellings expecting the same thing is how a build gets
+    eight times slower without anybody noticing.
+
+    `ZSTD_BUILD_LEVEL` is the one owner of the level in both.
+    """
+    if sys.platform == "win32":
+        return [
+            tar,
+            "--zstd",
+            "--options",
+            f"zstd:compression-level={ZSTD_BUILD_LEVEL}",
+            "-C",
+            str(root),
+            "-cf",
+            str(archive),
+            ".",
+        ]
+    return [
+        tar,
+        "--use-compress-program",
+        f"zstd -T0 -{ZSTD_BUILD_LEVEL}",
+        "-C",
+        str(root),
+        "-cf",
+        str(archive),
+        ".",
+    ]
+
+
+def extract_argv(tar: str, archive: Path, into: Path) -> list[str]:
+    """The `tar` command line that READS a pack. ONE spelling, and checked.
+
+    `--zstd` on extract costs nothing on either tar: GNU tar launches the
+    `zstd` binary that `require_zstd_tar` already proved is there, and bsdtar
+    decompresses in-process — it accepts the flag in extract mode and would
+    have auto-detected the format without it (both measured 2026-09-14, exit
+    0). So the read path stays one argv, which is one fewer thing that can
+    differ between the machine that builds a pack and the machine that
+    installs it.
+    """
+    return [tar, "--zstd", "-xf", str(archive), "-C", str(into)]
+
+
 def create_archive(root: Path, archive: Path, *, on_line: Any = None) -> None:
     """`tar --zstd` the CONTENTS of `root` into `archive`.
 
@@ -760,16 +984,7 @@ def create_archive(root: Path, archive: Path, *, on_line: Any = None) -> None:
     require_zstd_tar()
     archive.parent.mkdir(parents=True, exist_ok=True)
     _run(
-        [
-            _tool("tar"),
-            "--use-compress-program",
-            f"zstd -T0 -{ZSTD_BUILD_LEVEL}",
-            "-C",
-            str(root),
-            "-cf",
-            str(archive),
-            ".",
-        ],
+        archive_argv(_tool("tar"), root, archive),
         "pack_build_failed",
         f"could not tar {root} into {archive}",
         on_line,
@@ -780,7 +995,7 @@ def extract_archive(archive: Path, into: Path, *, on_line: Any = None) -> None:
     """Unpack a pack archive into `into`, which must already exist."""
     require_zstd_tar()
     _run(
-        [_tool("tar"), "--zstd", "-xf", str(archive), "-C", str(into)],
+        extract_argv(_tool("tar"), archive, into),
         "pack_unpack_failed",
         f"could not unpack {archive.name} into {into}",
         on_line,
@@ -1076,13 +1291,14 @@ def install_pack(
         shutil.rmtree(partial, ignore_errors=True)
         archive.unlink(missing_ok=True)
         raise
-    python = partial / "bin" / "python"
+    python = pack_python(partial, target.backend_kind)
     if not python.is_file():
         shutil.rmtree(partial, ignore_errors=True)
         archive.unlink(missing_ok=True)
         raise PackError(
             "pack_unpack_failed",
-            f"{archive.name} unpacked without a bin/python. A pack is an "
+            f"{archive.name} unpacked without a "
+            f"{python.relative_to(partial).as_posix()}. A pack is an "
             "interpreter with an env installed into it; this archive is "
             "something else",
         )
@@ -1205,6 +1421,11 @@ def relocate_console_scripts(root: Path) -> list[str]:
     12.3 — and nothing in Crucible symlinks into a pack: the service unit names
     the real path.
 
+    THE TWO POSIX BACKENDS ONLY. `llama-windows` has no `bin/` and no shebang
+    to rewrite; `build_pack` calls `write_cmd_shims` there instead, and this
+    function is not reached. Nothing here was changed for Windows, because
+    changing it would be changing what the two shipping backends do.
+
     Returns the names it rewrote, so a build can say so.
     """
     bin_dir = root / "bin"
@@ -1234,8 +1455,168 @@ def relocate_console_scripts(root: Path) -> list[str]:
     return rewritten
 
 
-def _pack_python(root: Path) -> Path:
-    return root / "bin" / "python"
+def pack_python(root: Path, backend_kind: str) -> Path:
+    """The interpreter inside a pack, whichever layout the pack has.
+
+    PUBLIC because PHASE15 4.4 names it: python-build-standalone's Windows
+    `install_only` tree is `python.exe` / `pythonw.exe` / `Scripts\\` / `Lib\\`
+    / `DLLs\\` and has NO `bin/`, so a build, an install and a smoke test that
+    each spell `root / "bin" / "python"` are three places that have to learn
+    the same thing and two of them will not. One function, every caller.
+
+    An unknown backend is refused rather than guessed at. Guessing `bin/python`
+    would produce "unpacked without a bin/python" for a tree that is perfectly
+    fine, which is a refusal that sends its reader to the wrong file.
+    """
+    if backend_kind == LLAMA_WINDOWS:
+        return root / "python.exe"
+    if backend_kind in (CUDA_LINUX, MLX_DARWIN):
+        return root / "bin" / "python"
+    raise PackError(
+        "pack_not_buildable_here",
+        f"{backend_kind!r} has no pack layout; the pack backends are "
+        f"{sorted(STANDALONE_PYTHON)}",
+    )
+
+
+#: The `.cmd` shim's text, and the reason it exists at all.
+#:
+#: **7.2a's defect has no POSIX answer on Windows.** pip does not write a
+#: shebang script into `Scripts\\`; it writes `Scripts\\<name>.exe`, a launcher
+#: BINARY with the building interpreter's absolute path embedded inside the
+#: executable. A move breaks it exactly as it breaks a shebang, and a shebang
+#: rewrite cannot reach it — there is no text to rewrite. So the pack ships a
+#: `.cmd` beside `python.exe` and the `.exe` launchers stay only as the dead
+#: weight pip left: nothing in Crucible calls them (PHASE15 4.4).
+#:
+#: `%~dp0` is the directory of the running batch file, WITH a trailing
+#: backslash — the Windows spelling of `$(dirname -- "$0")/`, which is why
+#: `"%~dp0python.exe"` and not `"%~dp0\\python.exe"`. It is quoted because
+#: `%LOCALAPPDATA%` contains the user's name and a user named "Owen Morgan"
+#: would otherwise split the command in two.
+#:
+#: CRLF, not LF. `cmd.exe`'s batch parser is line-oriented on CRLF; an LF-only
+#: `.cmd` misparses labels and can swallow its own last line, and the failure
+#: shows up as a shim that silently does nothing rather than as a syntax error.
+CMD_SHIM_HEADER = "@echo off\r\n"
+
+
+def cmd_shim_text(module: str, function: str) -> str:
+    """The two lines of one shim, for `module:function`.
+
+    `-m <module>` when the function is `main`, because that is the form the
+    console script and the module agree on: `crucible.cli` ends in
+    `if __name__ == "__main__": raise SystemExit(main())`, so running it as a
+    script and calling its `main` are the same act, and `-m` keeps the shim
+    readable enough that an operator can see what it does.
+
+    When the function is NOT named `main`, `-m` would run the module's own
+    `__main__` behaviour — usually nothing at all — and the shim would exit 0
+    having done none of the work the entry point names. That is the worst
+    shape of failure there is, so the other form is spelled out in full and
+    calls the function by name.
+    """
+    if function == "main":
+        line = f'"%~dp0python.exe" -m {module} %*'
+    else:
+        line = (
+            f'"%~dp0python.exe" -c "import sys; from {module} import '
+            f'{function}; sys.exit({function}())" %*'
+        )
+    return CMD_SHIM_HEADER + line + "\r\n"
+
+
+def _console_entry_points(root: Path) -> dict[str, tuple[str, str]]:
+    """`{script name: (module, function)}`, READ from the pack's own metadata.
+
+    Not hardcoded, and not guessed from the script's name. `crucible` is
+    `crucible.cli:main` and `pip3.11` is `pip._internal.cli.main:main`; a table
+    in this file would be a second owner of something `pyproject.toml` and
+    every dependency already declare, and it would go stale the first time a
+    dependency added a script.
+    """
+    site = root / "Lib" / "site-packages"
+    found: dict[str, tuple[str, str]] = {}
+    for metadata in sorted(site.glob("*.dist-info/entry_points.txt")):
+        # `delimiters=("=",)` because configparser's default also splits on
+        # `:`, and `crucible = crucible.cli:main` has one of each.
+        parser = configparser.ConfigParser(delimiters=("=",))
+        # Entry point names are case-sensitive; configparser lowercases keys
+        # unless told not to.
+        parser.optionxform = str  # type: ignore[method-assign, assignment]
+        try:
+            parser.read_string(metadata.read_text(encoding="utf-8"))
+        except (configparser.Error, UnicodeDecodeError) as exc:
+            raise PackError(
+                "pack_build_failed",
+                f"{metadata} is not a readable entry_points.txt: {exc}",
+            ) from None
+        if not parser.has_section("console_scripts"):
+            continue
+        for name, spec in parser.items("console_scripts"):
+            # `name = module:function [extra]` — the extras marker is pip's
+            # business and is not part of what we call.
+            target = spec.split("[", 1)[0].strip()
+            module, separator, function = target.partition(":")
+            if not separator or not module.strip() or not function.strip():
+                raise PackError(
+                    "pack_build_failed",
+                    f"{metadata} declares console script {name!r} as "
+                    f"{spec!r}, which is not `module:function`. A shim cannot "
+                    "be written for an entry point nobody can read, and "
+                    "writing none would ship a pack whose command is missing",
+                )
+            found[name] = (module.strip(), function.strip())
+    return found
+
+
+def write_cmd_shims(root: Path) -> list[str]:
+    """`<pack>\\<name>.cmd` for every console script, beside `python.exe`.
+
+    The Windows half of `relocate_console_scripts`, and a different act for the
+    reason `CMD_SHIM_HEADER` gives: there is no shebang to rewrite, only an
+    `.exe` with an absolute path compiled into it.
+
+    BESIDE `python.exe` — at the pack ROOT, not in `Scripts\\` — so the shim's
+    `%~dp0python.exe` resolves without climbing, and so `install.ps1` and the
+    Startup shortcut name `<pack>\\crucible.cmd` with no subdirectory in it.
+
+    The NAMES come from `Scripts\\*.exe`, because that is the authority on what
+    pip actually created in this tree; the MODULE comes from the installed
+    distributions' `entry_points.txt`. A script pip wrote that no metadata
+    explains is refused rather than skipped: skipping it would ship a pack
+    missing a command, and the person who finds out is the operator.
+
+    Returns the names it wrote, like `relocate_console_scripts`.
+    """
+    scripts = root / "Scripts"
+    if not scripts.is_dir():
+        raise PackError(
+            "pack_build_failed",
+            f"{root} has no Scripts\\ directory; pip installs console script "
+            "launchers there on Windows, so this tree is not one pip has "
+            "installed into",
+        )
+    declared = _console_entry_points(root)
+    written: list[str] = []
+    for launcher in sorted(scripts.glob("*.exe")):
+        name = launcher.stem
+        entry = declared.get(name)
+        if entry is None:
+            raise PackError(
+                "pack_build_failed",
+                f"{launcher} exists and no dist-info in {root} declares a "
+                f"console script called {name!r}, so there is nothing to "
+                f"point a {name}.cmd at. The pack's contents and its metadata "
+                "disagree, and shipping the half that works is how a command "
+                "goes missing quietly",
+            )
+        module, function = entry
+        (root / f"{name}.cmd").write_text(
+            cmd_shim_text(module, function), encoding="utf-8", newline=""
+        )
+        written.append(name)
+    return written
 
 
 def build_pack(
@@ -1274,14 +1655,16 @@ def build_pack(
         say,
     )
     root = workspace / "python"
-    if not _pack_python(root).is_file():
+    interpreter_path = pack_python(root, target.backend_kind)
+    if not interpreter_path.is_file():
         raise PackError(
             "pack_build_failed",
-            f"{pin.asset} did not unpack to a python/bin/python under "
+            f"{pin.asset} did not unpack to a "
+            f"python/{interpreter_path.relative_to(root).as_posix()} under "
             f"{workspace}; the pinned asset's layout is not install_only's",
         )
 
-    python = str(_pack_python(root))
+    python = str(interpreter_path)
     say("installing pip and wheel")
     _run(
         [python, "-m", "pip", "install", "--upgrade", "pip", "wheel"],
@@ -1289,7 +1672,7 @@ def build_pack(
         f"could not upgrade pip in {root}",
         say,
     )
-    if target.name == SERVER_PACK:
+    if target.name in (SERVER_PACK, HOST_PACK):
         wheel = _build_wheel(out, say)
         say(f"installing {wheel.name}")
         _run(
@@ -1298,6 +1681,19 @@ def build_pack(
             f"could not install {wheel} into {root}",
             say,
         )
+        if target.name == HOST_PACK:
+            # AFTER the wheel, so a resolver conflict between the tray and the
+            # server's own pins fails while the server is already the thing
+            # installed — and so the log reads in the order the pack was
+            # assembled. See `HOST_EXTRA_PACKAGES` for why they are not
+            # dependencies of the wheel.
+            say(f"installing the tray: {', '.join(HOST_EXTRA_PACKAGES)}")
+            _run(
+                [python, "-m", "pip", "install", *HOST_EXTRA_PACKAGES],
+                "pack_build_failed",
+                f"could not install {HOST_EXTRA_PACKAGES} into {root}",
+                say,
+            )
     else:
         say(f"installing {target.recipe}")
         _run(
@@ -1320,8 +1716,12 @@ def build_pack(
             f"{pin.python_version}",
         )
 
-    rewritten = relocate_console_scripts(root)
-    say(f"relocated {len(rewritten)} console script(s): {', '.join(rewritten)}")
+    if target.backend_kind == LLAMA_WINDOWS:
+        shimmed = write_cmd_shims(root)
+        say(f"wrote {len(shimmed)} .cmd shim(s): {', '.join(shimmed)}")
+    else:
+        rewritten = relocate_console_scripts(root)
+        say(f"relocated {len(rewritten)} console script(s): {', '.join(rewritten)}")
     _prune(root)
     unpacked_bytes = directory_bytes(root)
     archive = out / target.archive_name(version)
@@ -1417,21 +1817,46 @@ def smoke_test(
         into = Path(temporary) / "pack"
         into.mkdir()
         extract_archive(archive, into, on_line=None)
-        python = _pack_python(into)
+        python = pack_python(into, target.backend_kind)
         if not python.is_file():
             raise PackError(
                 "pack_smoke_failed",
-                f"{archive.name} unpacked without a bin/python",
+                f"{archive.name} unpacked without a "
+                f"{python.relative_to(into).as_posix()}",
             )
         if target.name == SERVER_PACK:
             command = [str(into / "bin" / "crucible"), "--version"]
             what = "bin/crucible --version"
+        elif target.name == HOST_PACK:
+            # THE WHOLE POINT OF THE SHIM, proved by running it from a tree
+            # that is not the one it was written in. The `.exe` pip left in
+            # `Scripts\` still names the build tree's interpreter and is dead
+            # weight; `crucible.cmd` finds its neighbour through `%~dp0`, and
+            # this is the only thing that can tell the two apart.
+            #
+            # `crucible envpack build host` is refused off win32, so this
+            # branch is only ever reached on Windows. No `shell=True`: a
+            # batch file handed to `CreateProcess` by its full name is run
+            # through cmd.exe for us, measured 2026-09-14 — and `shell=True`
+            # would hand the path to a command line that splits on the space
+            # in `C:\Users\Owen Morgan\...`.
+            command = [str(into / "crucible.cmd"), "--version"]
+            what = "crucible.cmd --version"
         else:
             assert target.smoke_import is not None
             command = [str(python), "-c", f"import {target.smoke_import}"]
             what = f"import {target.smoke_import}"
         completed = subprocess.run(
-            command, capture_output=True, text=True, timeout=600
+            command,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            # FROM SOMEWHERE THAT IS NOT THE BUILD TREE, explicitly. A shim
+            # that resolved its interpreter relative to the CURRENT directory
+            # rather than to its own would pass a test run from `<out>/.build`
+            # and fail on the operator's machine; running it with the temp
+            # unpack as the working directory is what closes that.
+            cwd=temporary,
         )
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout).strip().splitlines()

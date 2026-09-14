@@ -14,8 +14,17 @@
  */
 import { BootstrapRefusal } from './errors.js';
 
-/** The two backends. Windows is never one (DESIGN.md section 2). */
-export type PackBackend = 'cuda-linux' | 'mlx-darwin';
+/**
+ * The backends a pack is built for.
+ *
+ * `llama-windows` is the Windows one (PHASE15-HOST.md section 0's amendment
+ * and 3.5): a Crucible running natively on Windows with llama-server as its
+ * engine. Its one pack, `host`, carries the tray AND that server.
+ * `backendFor()` never returns it, because on win32 BOOTSTRAP is talking about
+ * the WSL guest, which is Linux — the Windows pack is `install.ps1`'s and the
+ * host's, never a guest install's.
+ */
+export type PackBackend = 'cuda-linux' | 'mlx-darwin' | 'llama-windows';
 
 /** The repository every asset comes from. One owner for the URL shape. */
 export const RELEASE_REPO = 'telltaleatheist/crucible';
@@ -25,6 +34,10 @@ export const ENVPACKS_ASSET = 'envpacks.json';
 
 /** The server's own pack: the name in the manifest's `packs[].name`. */
 export const SERVER_PACK = 'server';
+
+/** The Windows host's pack (PHASE15-HOST.md 4.4), and the backend it is for. */
+export const HOST_PACK = 'host';
+export const HOST_BACKEND: PackBackend = 'llama-windows';
 
 /** One pack, as the manifest describes it. */
 export interface PackEntry {

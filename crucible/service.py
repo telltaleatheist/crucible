@@ -102,8 +102,12 @@ LAUNCHD = "launchd"
 UNIT_NAME = "crucible.service"
 LAUNCHD_LABEL = "com.crucible.serve"
 
-#: How long systemd waits before restarting a crashed server.
-RESTART_SECONDS = 5
+#: How long systemd waits before restarting a stopped server. Two seconds and
+#: not five: with `Restart=always` (see `systemd_unit_text`) this is also the
+#: gap a person waits after `Restart engine` on the host's menu, and five
+#: seconds of a tray saying "starting…" for a restart that takes one is a
+#: number chosen for a crash loop being read as a number chosen for a person.
+RESTART_SECONDS = 2
 
 #: The console script `pip install -e .` puts beside the interpreter. **The unit
 #: runs THIS and never `python -m crucible`**, and that is not a style choice —
@@ -330,11 +334,30 @@ def systemd_unit_text(
     change with what the operator happens to have checked out — which is exactly
     how the import bug above happened.
 
-    `Restart=on-failure` and not `always`: a server that exited 0 was stopped on
-    purpose, and restarting it would make `crucible service stop` a thing that
-    does not work. `WantedBy=default.target` is the user-session equivalent of
-    multi-user; `loginctl enable-linger` is what makes that survive a logout, and
-    it is the operator's to grant — see `read_linger`.
+    **`Restart=always`, and this reverses an earlier reading of the same
+    question** (RULING, PHASE15-HOST.md 4.1, 2026-09-14). The old comment here
+    said `on-failure` "because a server that exited 0 was stopped on purpose,
+    and restarting it would make `crucible service stop` a thing that does not
+    work". The first half of that is not true of systemd and the second half
+    does not follow from it. `systemctl --user stop` puts the unit in the
+    STOPPED state, and `Restart=` is not consulted for a unit systemd itself
+    stopped — so `always` and `stop` coexist. What `on-failure` actually bought
+    was the defect of 2026-09-14: a clean `SIGTERM` (a `wsl --terminate`, an
+    OOM killer's polite half, a shutdown that raced the guest) exits 0, and the
+    engine then stayed down at 16:10 with nothing noticing, because on Windows
+    nothing was watching. `crucible host` is now the thing that watches, and the
+    unit's own `Restart=` is what it deliberately does NOT reimplement (4.1:
+    "It never loops on restart; the systemd unit's own `Restart=` handles
+    crashes") — so the unit has to be the half that is total.
+
+    The launchd agent below keeps `SuccessfulExit: false` and is NOT changed
+    with it. There is no host on the Mac (4.4) and therefore no second watcher
+    to divide the work with; `launchctl stop` there really is the only way a
+    person stops one, and `KeepAlive: true` would undo it.
+
+    `WantedBy=default.target` is the user-session equivalent of multi-user;
+    `loginctl enable-linger` is what makes that survive a logout, and it is the
+    operator's to grant — see `read_linger`.
 
     `%` is doubled because systemd expands `%x` specifiers in a unit file, and a
     PATH or a home directory with a percent sign in it would otherwise reach the
@@ -357,7 +380,7 @@ def systemd_unit_text(
         f" --host {escape('the bind host', host)} --port {int(port)}\n"
         f"Environment=CRUCIBLE_HOME={escape('CRUCIBLE_HOME', str(crucible_home))}\n"
         f"Environment=PATH={escape('PATH', path_value)}\n"
-        "Restart=on-failure\n"
+        "Restart=always\n"
         f"RestartSec={RESTART_SECONDS}\n"
         "\n"
         "[Install]\n"
@@ -381,9 +404,14 @@ def launchd_plist_text(
     `/`, which does not have the PC's import problem today but is not a promise
     anybody made, and a server's cwd is its own state directory either way.
 
-    `KeepAlive` is a dict with `SuccessfulExit` false rather than a bare `<true/>`
-    for `systemd_unit_text`'s reason: restart a crash, leave a deliberate stop
-    alone. `RunAtLoad` is what starts it at login.
+    `KeepAlive` is a dict with `SuccessfulExit` false rather than a bare
+    `<true/>`: restart a crash, leave a deliberate stop alone. This is NO
+    LONGER what the systemd unit does — see the ruling in `systemd_unit_text` —
+    and the difference is deliberate rather than an oversight: that unit is
+    watched by `crucible host`, which distinguishes "systemd stopped it" from
+    "it died", and this agent is watched by nobody, so `launchctl stop` on the
+    Mac is the only stop there is and `KeepAlive: true` would undo it.
+    `RunAtLoad` is what starts it at login.
 
     Both streams go to one file, because they are one narrative: uvicorn logs
     requests on one and a traceback arrives on the other, and reading them

@@ -689,6 +689,18 @@ def write_config(
     #: test pins it.
     routes: tuple[RouteRecord, ...] = (),
     upstreams: tuple[UpstreamRecord, ...] = (),
+    #: Whole top-level tables to copy in VERBATIM, or None.
+    #:
+    #: `crucible init --config-from` (PHASE15-HOST.md 4.3) is the one caller:
+    #: when the Windows host moves a Crucible into the WSL guest it carries
+    #: `[routes]` and `[upstreams]` across, and those tables' SHAPE belongs to
+    #: section 2 and to whatever reads them — not to this writer, which would
+    #: otherwise have to grow a parameter per upstream and a second
+    #: declaration of a document somebody else owns. Copied and never merged
+    #: key by key: a key this build does not know about is still the
+    #: operator's, and dropping it silently on an upgrade is how a
+    #: configuration quietly stops meaning what it said.
+    carried_tables: dict[str, Any] | None = None,
 ) -> Path:
     """Write config.toml at mode 0600 under a 0700 home. Returns the path.
 
@@ -737,6 +749,18 @@ def write_config(
             )
             for entry in upstreams
         }
+    # Carried tables go in AFTER `routes`/`upstreams`, so a caller that states a
+    # table twice — once as the typed parameter, once as a carried copy — is
+    # refused rather than silently having one of the two win.
+    for table_name, table in (carried_tables or {}).items():
+        if table_name in document:
+            raise ConfigError(
+                f"carried_tables names [{table_name}], which this writer already "
+                "owns. A table with two writers is a table whose value depends on "
+                "which one ran last; carry the tables section 2 added and nothing "
+                "else."
+            )
+        document[table_name] = table
     # Create with 0600 from the outset so the token is never briefly world-readable.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as handle:
@@ -749,37 +773,13 @@ def config_mode(path: Path) -> str:
     return oct(stat.S_IMODE(path.stat().st_mode))
 
 
-def pairing_path(home: Path | None = None) -> Path:
-    """`<CRUCIBLE_HOME>/pairing` — the file an app on this machine reads."""
-    return (home if home is not None else crucible_home()) / "pairing"
-
-
-def write_pairing_file(home: Path, *, name: str, port: int, token: str) -> Path:
-    """One loopback pairing line, mode 0600, with a trailing newline.
-
-    PHASE15-HOST.md section 3.6. `crucible init`, `crucible service install`
-    and a token rotation all write it, and an app on the same machine reads it
-    instead of asking a person to type a secret it could have read.
-
-    **The line is always the loopback one**, whatever the server is bound to.
-    The file answers one question — *an app on THIS machine wants in* — and the
-    answer to that is never a LAN address: a wildcard-bound server has no
-    loopback entry in `reachable_urls` at all, so a file built from that list
-    would hand a local app whichever interface the OS happened to list first.
-
-    0600, like the config, because the line carries the token in its fragment.
-    On Windows `os.chmod` cannot express that and the host writes the file with
-    an ACL instead (section 4.3); the mode call is harmless there and the write
-    still happens, so this function has ONE body rather than a platform branch
-    that would let the two drift.
-    """
-    from .pairing import pairing_line
-
-    home.mkdir(parents=True, exist_ok=True)
-    path = pairing_path(home)
-    line = pairing_line(name, f"http://{DEFAULT_HOST}:{port}", token)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write((line + "\n").encode("utf-8"))
-    os.chmod(path, 0o600)
-    return path
+# THE PAIRING FILE lives in `crucible/pairing.py` and nowhere else.
+#
+# It was briefly written twice — once here (POSIX, `os.chmod` 0600) and once
+# there (both platforms, with `icacls` on Windows) — because two builds of
+# PHASE15 section 3.6 landed on two branches. Two writers of one file is two
+# answers to "who may read this token", so the POSIX-only one is gone and
+# `pairing.write_pairing_file` / `pairing.pairing_file_path` are the names.
+# `crucible init` and `crucible service install` call them through
+# `cli._write_pairing_file`, which is what turns (name, port, token) into the
+# loopback LINE those functions write.
