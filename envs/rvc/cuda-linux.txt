@@ -21,7 +21,7 @@
 #
 # A RESOLVED SET, read from a real install
 # ----------------------------------------
-# What follows is `pip freeze` from `crucible install rvc` on
+# What follows is `pip freeze` from `crucible install rvc --force` (audio-separator in) on
 # Owen's PC (WSL2, Ubuntu, python 3.11.16) on 2026-09-13: every package pip
 # resolved, at the version it resolved. The earlier notice that this file was a
 # CHOSEN set and not a measured one is discharged by that install; `crucible
@@ -74,7 +74,6 @@
 # PyTorch's own index, not PyPI. `pip freeze` prints the local version but not the
 # index it came from; without this line the resolved set is unresolvable.
 --extra-index-url https://download.pytorch.org/whl/cu128
-audio-separator==0.31.1
 
 # --- the env's own ffmpeg and sox ---
 # urvc's convert path prefers an ffmpeg on PATH over anything it vendors, and
@@ -83,16 +82,21 @@ audio-separator==0.31.1
 # dependencies; they are pinned here so `crucible doctor` checks the two tools
 # that decision depends on rather than trusting them to be there.
 
+absl-py==2.5.0
 annotated-types==0.8.0
+audio-separator==0.31.1
 audioread==3.1.0
 backports.tarfile==1.2.0
+beartype==0.18.5
 certifi==2026.7.22
 cffi==2.1.1
 charset-normalizer==3.5.1
 click==8.5.0
 cloudpickle==3.1.2
 cryptography==50.0.1
+Cython==3.3.0
 decorator==5.3.1
+diffq==0.2.4
 docutils==0.23
 einops==0.8.1
 faiss-cpu==1.10.0
@@ -111,6 +115,7 @@ jaraco.functools==4.6.0
 jeepney==0.9.0
 Jinja2==3.1.6
 joblib==1.6.0
+julius==0.2.8
 keyring==25.7.0
 lazy_loader==0.4
 librosa==0.10.2
@@ -119,6 +124,8 @@ local-attention==1.11.1
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 mdurl==0.1.2
+ml_collections==1.1.0
+ml_dtypes==0.6.0
 more-itertools==11.1.0
 mpmath==1.3.0
 msgpack==1.2.2
@@ -141,6 +148,8 @@ nvidia-cusparselt-cu12==0.6.3
 nvidia-nccl-cu12==2.26.2
 nvidia-nvjitlink-cu12==12.8.61
 nvidia-nvtx-cu12==12.8.55
+onnx-weekly==1.24.0.dev20260914
+onnx2torch-py313==1.6.0
 onnxruntime-gpu==1.27.0
 packaging==26.3
 pedalboard==0.9.16
@@ -164,10 +173,12 @@ rfc3986==2.0.0
 rich==15.0.0
 rotary-embedding-torch==0.6.5
 safetensors==0.8.0
+samplerate==0.1.0
 scikit-learn==1.9.0
 scipy==1.15.2
 SecretStorage==3.5.0
 shellingham==1.5.4
+six==1.17.0
 soundfile==0.13.1
 sox==1.5.0
 soxr==0.5.0.post1
