@@ -168,8 +168,24 @@ def test_info_advertises_every_asr_model(
     row = next(r for r in by_type["asr"]["models"] if r["id"] == MODEL)
     assert row["revision"] == load_asr_manifest(MODEL).spec(FAKE_BACKEND.kind).revision
     assert row["source"] == "Systran/faster-whisper-base"
+    assert row["installed"] is False
     # Nothing is ever resident for asr: the worker loads, transcribes, exits.
     assert row["resident"] is False
+
+
+def test_info_says_installed_once_an_asr_model_is_pulled(
+    asr_client: TestClient, auth: dict[str, str], asr_weights: Callable[[str], Path]
+) -> None:
+    """`installed` is the puller's stamp at the pinned revision, per model: one
+    pulled whisper does not make the others installed."""
+    asr_weights(MODEL)
+    capabilities = asr_client.get("/v1/info", headers=auth).json()["capabilities"]
+    by_type = {entry["job_type"]: entry for entry in capabilities}
+    rows = {row["id"]: row for row in by_type["asr"]["models"]}
+    assert rows[MODEL]["installed"] is True
+    assert rows[BIG_MODEL]["installed"] is False
+    # Still never resident, pulled or not.
+    assert rows[MODEL]["resident"] is False
 
 
 def test_asr_is_off_unless_the_config_says_otherwise(

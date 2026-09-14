@@ -284,7 +284,8 @@ def _align_provenance(backend_kind: str, model: str | None) -> dict[str, Any] | 
     }
 
 
-def _descriptors(backend_kind: str, residency: Residency) -> list[ModelDescriptor]:
+def _descriptors(config: Config, residency: Residency) -> list[ModelDescriptor]:
+    backend_kind = config.backend_kind
     rows: list[ModelDescriptor] = []
     for manifest in _manifests().values():
         if manifest.supports(backend_kind):
@@ -294,13 +295,18 @@ def _descriptors(backend_kind: str, residency: Residency) -> list[ModelDescripto
                 spec.hf_repo,
                 spec.memory_bytes_estimate,
             )
+            # The same predicate `check` and `_require_loadable` read: the
+            # puller's stamp, at the revision this host's block pins.
+            installed = weights.installed(config, manifest, spec) is not None
         else:
-            revision, source, estimate = "", "", 0
+            # A backend this manifest has no block for has nothing to install.
+            revision, source, estimate, installed = "", "", 0, False
         rows.append(
             ModelDescriptor(
                 id=manifest.id,
                 revision=revision,
                 source=source,
+                installed=installed,
                 # Unlike `asr`, this one can be true: the aligner stays on the
                 # card between jobs, which is the whole point of section 2.
                 resident=residency.is_resident(KIND_ALIGN, manifest.id),
@@ -330,7 +336,7 @@ class AlignJobType:
     # ----------------------------------------------------------- describing
 
     def describe_models(self) -> list[ModelDescriptor]:
-        return _descriptors(self._config.backend_kind, self._residency)
+        return _descriptors(self._config, self._residency)
 
     def model_provenance(self, model: str | None) -> dict[str, Any] | None:
         if model is None:
@@ -753,7 +759,7 @@ class UnloadAlignerJobType:
         return self._residency
 
     def describe_models(self) -> list[ModelDescriptor]:
-        return _descriptors(self._config.backend_kind, self._residency)
+        return _descriptors(self._config, self._residency)
 
     def model_provenance(self, model: str | None) -> dict[str, Any] | None:
         return _align_provenance(self._config.backend_kind, model)

@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from crucible import accelerator, jobenv, residency as residency_module, weights
 from crucible.accelerator import GIB, ComputeApp
+from crucible.jobs import ALL_JOB_TYPES
 from crucible.residency import KIND_LLM, KIND_TTS, ResidentVoice
 from crucible.voices import load_voice
 
@@ -263,6 +264,34 @@ def test_info_carries_the_voice_rows_verbatim(
     capability = [c for c in info["capabilities"] if c["job_type"] == "tts"]
     assert len(capability) == 1
     assert capability[0]["models"] == tts_client.get("/v1/voices", headers=auth).json()
+
+
+def test_the_voice_types_describe_installed_as_the_voices_route_does(
+    tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path]
+) -> None:
+    """`load-voice`, `unload-voice` and `tts` describe their voices with
+    DESIGN.md section 4's row — the one `resolve_model` and `crucible doctor`
+    read, since `/v1/info` carries `/v1/voices`' richer row instead — and that
+    row's `installed` is the same stamp `/v1/voices` reads, not a second
+    opinion (ARCHITECTURE.md R1). Per voice: one pulled voice does not make
+    the others installed, and pulled is not resident."""
+    store = tts_client.app.state.store
+    names = sorted(name for name, capability in ALL_JOB_TYPES.items() if capability == "tts")
+    assert names == ["load-voice", "tts", "unload-voice"]
+    for name in names:
+        rows = {d.id: d.to_dict() for d in store.registry[name].describe_models()}
+        assert rows[VOICE]["installed"] is False
+        assert rows["sigma"]["installed"] is False
+    fake_weights(VOICE)
+    served = {row["id"]: row for row in tts_client.get("/v1/voices", headers=auth).json()}
+    for name in names:
+        rows = {d.id: d.to_dict() for d in store.registry[name].describe_models()}
+        assert rows[VOICE]["installed"] is True
+        assert rows[VOICE]["resident"] is False
+        assert rows["sigma"]["installed"] is False
+        for voice_id, row in rows.items():
+            assert row["installed"] is served[voice_id]["installed"], voice_id
+            assert row["resident"] is served[voice_id]["resident"], voice_id
 
 
 def test_the_voices_are_listed_in_id_order(

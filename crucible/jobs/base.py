@@ -30,11 +30,20 @@ def utcnow() -> str:
 
 @dataclass(frozen=True)
 class ModelDescriptor:
-    """One model a job type can serve, as advertised by GET /info."""
+    """One model a job type can serve, as advertised by GET /info.
+
+    DESIGN.md section 4's row. `installed` and `resident` are two facts and
+    neither implies the other: `installed` is "the weights are on disk at the
+    revision the manifest pins" — the puller's own stamp, read by the same
+    predicate the doctor and the load path read — and `resident` is "an engine
+    is serving it right now". It joined the row on 2026-09-14, when a puller
+    reading `/v1/info` to decide whether to pull found the row could not say.
+    """
 
     id: str
     revision: str
     source: str
+    installed: bool
     resident: bool
     vram_bytes: int
 
@@ -43,6 +52,7 @@ class ModelDescriptor:
             "id": self.id,
             "revision": self.revision,
             "source": self.source,
+            "installed": self.installed,
             "resident": self.resident,
             "vram_bytes": self.vram_bytes,
         }

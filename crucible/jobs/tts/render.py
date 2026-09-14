@@ -551,7 +551,7 @@ class TtsJobType:
 
     def describe_models(self) -> list[ModelDescriptor]:
         """The voices. `model` on the wire is the voice id (section 6)."""
-        return describe_voices(self._config.backend_kind, self._residency)
+        return describe_voices(self._config, self._residency)
 
     def model_provenance(self, model: str | None) -> dict[str, Any] | None:
         return voice_provenance(self._config.backend_kind, model)

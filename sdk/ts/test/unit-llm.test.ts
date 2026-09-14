@@ -306,6 +306,7 @@ const INFO = {
           id: 'faster-whisper-base',
           revision: 'ebe41f70d5b6a1f3c2e9d8a7b6c5d4e3f2a1b0c9',
           source: 'Systran/faster-whisper-base',
+          installed: true,
           resident: false,
           vram_bytes: 1685651456,
         },
@@ -342,7 +343,8 @@ test("info() reads the llm capability's rows with the /models reader", async () 
     },
   ]);
 
-  // The other capabilities keep DESIGN.md section 4's row, unchanged.
+  // The other capabilities keep DESIGN.md section 4's row — `installed` and
+  // `resident` both, and neither read as the other.
   const asr = info.capabilities.find((capability) => capability.jobType === 'asr');
   assert.ok(asr !== undefined && !isLlmCapability(asr));
   assert.deepEqual(asr.models, [
@@ -350,6 +352,7 @@ test("info() reads the llm capability's rows with the /models reader", async () 
       id: 'faster-whisper-base',
       revision: 'ebe41f70d5b6a1f3c2e9d8a7b6c5d4e3f2a1b0c9',
       source: 'Systran/faster-whisper-base',
+      installed: true,
       resident: false,
       vramBytes: 1685651456,
     },

@@ -246,6 +246,29 @@ def test_info_gains_an_llm_capability(
     )
 
 
+def test_the_lifecycle_types_describe_installed_as_the_models_route_does(
+    llm_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path]
+) -> None:
+    """`load-model` and `unload-model` describe their models with DESIGN.md
+    section 4's row — the one `resolve_model` and `crucible doctor` read — and
+    that row's `installed` is the same stamp `/v1/models` reads, not a second
+    opinion (ARCHITECTURE.md R1)."""
+    store = llm_client.app.state.store
+    for name in ("load-model", "unload-model"):
+        rows = {d.id: d.to_dict() for d in store.registry[name].describe_models()}
+        assert rows[MODEL]["installed"] is False
+        assert rows[BIG_MODEL]["installed"] is False
+    fake_weights(MODEL)
+    served = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
+    for name in ("load-model", "unload-model"):
+        rows = {d.id: d.to_dict() for d in store.registry[name].describe_models()}
+        assert rows[MODEL]["installed"] is True
+        assert rows[BIG_MODEL]["installed"] is False
+        for model_id, row in rows.items():
+            assert row["installed"] is served[model_id]["installed"], model_id
+            assert row["resident"] is served[model_id]["resident"], model_id
+
+
 def test_the_llm_capability_rows_are_the_models_rows(
     llm_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path]
 ) -> None:

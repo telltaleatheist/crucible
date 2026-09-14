@@ -65,6 +65,7 @@ from ...denoisemodels import (
     denoise_models_root,
     load_all_denoise_manifests,
 )
+from ...denoisemodels import installed as model_installed
 from ...denoisemodels import missing as missing_model_files
 from ...errors import ApiError, JobError
 from ...manifests import fingerprint
@@ -298,8 +299,18 @@ class DenoiseJobType:
                     f"{spec.hf_repo}:{spec.model_path}",
                     spec.memory_bytes_estimate,
                 )
+                # The puller's own stamp at this pin, which is the fact a
+                # puller reading this row wants: "do I need to pull". It is a
+                # narrower fact than `check`'s `_missing_files`, which is
+                # presence — a checkpoint somebody copied in by hand runs, and
+                # `crucible denoise list` reports it as `present` and not
+                # `installed` for exactly that reason. One word, one meaning.
+                installed = (
+                    model_installed(self._config.home, manifest, spec) is not None
+                )
             else:
-                revision, source, estimate = "", "", 0
+                # A backend this manifest has no block for has nothing to install.
+                revision, source, estimate, installed = "", "", 0, False
             rows.append(
                 ModelDescriptor(
                     id=manifest.id,
@@ -307,6 +318,7 @@ class DenoiseJobType:
                     # The repo AND the file: one repo holds every UVR model
                     # there is, so the repo alone would identify none of them.
                     source=source,
+                    installed=installed,
                     # Nothing is ever resident for `denoise`: one job, one load,
                     # one exit. Holding the separator across jobs would be a
                     # third kind of resident thing and a ruling nobody has made.

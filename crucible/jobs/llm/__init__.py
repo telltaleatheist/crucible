@@ -120,13 +120,18 @@ def _descriptors(
             revision = spec.revision
             source = spec.hf_repo
             estimate = spec.memory_bytes_estimate
+            # The same predicate `model_rows` and `_require_loadable` read: the
+            # puller's stamp, at the revision this host's block pins.
+            installed = weights.installed(config, manifest, spec) is not None
         else:
-            revision, source, estimate = "", "", 0
+            # A backend this manifest has no block for has nothing to install.
+            revision, source, estimate, installed = "", "", 0, False
         rows.append(
             ModelDescriptor(
                 id=manifest.id,
                 revision=revision,
                 source=source,
+                installed=installed,
                 resident=residency.is_resident(KIND_LLM, manifest.id),
                 vram_bytes=estimate,
             )

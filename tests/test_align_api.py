@@ -190,6 +190,20 @@ def test_info_advertises_the_aligner(
     row = next(r for r in by_type["align"]["models"] if r["id"] == MODEL)
     assert row["revision"] == load_align_manifest(MODEL).spec(FAKE_BACKEND.kind).revision
     assert row["source"] == "Qwen/Qwen3-ForcedAligner-0.6B"
+    assert row["installed"] is False
+    assert row["resident"] is False
+
+
+def test_info_says_installed_once_the_aligner_is_pulled(
+    align_client: TestClient, auth: dict[str, str], align_weights: Callable[[str], Path]
+) -> None:
+    """`installed` is the puller's stamp at the pinned revision, and it is not
+    `resident`: pulled weights sit on disk with nothing serving them."""
+    align_weights(MODEL)
+    capabilities = align_client.get("/v1/info", headers=auth).json()["capabilities"]
+    by_type = {entry["job_type"]: entry for entry in capabilities}
+    row = next(r for r in by_type["align"]["models"] if r["id"] == MODEL)
+    assert row["installed"] is True
     assert row["resident"] is False
 
 

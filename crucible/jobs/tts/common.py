@@ -78,8 +78,17 @@ def known_voice(voice_id: str) -> VoiceManifest:
     return manifest
 
 
-def describe_voices(backend_kind: str, residency: Residency) -> list[ModelDescriptor]:
-    """`/v1/info` capabilities rows — DESIGN.md section 4's shape."""
+def describe_voices(config: Config, residency: Residency) -> list[ModelDescriptor]:
+    """The voices as DESIGN.md section 4's row — what the registry reads.
+
+    `/v1/info`'s `tts` capability carries `voice_rows` verbatim instead
+    (PHASE3-TTS.md section 8); this is the row `resolve_model` and `crucible
+    doctor` read through `describe_models()`. It takes the Config rather than
+    the backend kind alone because `installed` is the puller's stamp under
+    `config.home`, and it is the same predicate `voice_rows` and
+    `require_loadable` read — one fact, one reader (ARCHITECTURE.md R1).
+    """
+    backend_kind = config.backend_kind
     rows: list[ModelDescriptor] = []
     for manifest in load_voices().values():
         if manifest.supports(backend_kind):
@@ -89,13 +98,18 @@ def describe_voices(backend_kind: str, residency: Residency) -> list[ModelDescri
                 spec.hf_repo,
                 spec.memory_bytes_estimate,
             )
+            # The same predicate `voice_rows` and `require_loadable` read: the
+            # puller's stamp, at the revision this host's block pins.
+            installed = weights.installed(config, manifest, spec) is not None
         else:
-            revision, source, estimate = "", "", 0
+            # A backend this manifest has no block for has nothing to install.
+            revision, source, estimate, installed = "", "", 0, False
         rows.append(
             ModelDescriptor(
                 id=manifest.id,
                 revision=revision,
                 source=source,
+                installed=installed,
                 resident=residency.is_resident(KIND_TTS, manifest.id),
                 vram_bytes=estimate,
             )

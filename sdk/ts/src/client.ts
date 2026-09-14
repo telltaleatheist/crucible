@@ -1546,6 +1546,7 @@ function readModel(entry: Json, where: string): ModelDescriptor {
     id: str(entry, 'id', where),
     revision: str(entry, 'revision', where),
     source: str(entry, 'source', where),
+    installed: bool(entry, 'installed', where),
     resident: bool(entry, 'resident', where),
     vramBytes: num(entry, 'vram_bytes', where),
   };

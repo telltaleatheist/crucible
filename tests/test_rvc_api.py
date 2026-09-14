@@ -220,8 +220,22 @@ def test_info_advertises_every_rvc_model(
     assert row["source"] == (
         "owenmorgan/owen-morgan-bookforge:rvc/deathstalker_rvc_v1.tar.gz"
     )
+    assert row["installed"] is False
     # Nothing is ever resident: the whole design is a process that exits.
     assert row["resident"] is False
+
+
+def test_info_says_installed_once_an_rvc_model_is_pulled(
+    rvc_client: TestClient, auth: dict[str, str], rvc_weights: Callable[[str], Path]
+) -> None:
+    """`installed` is the puller's stamp at the pinned revision, per model."""
+    rvc_weights(MODEL)
+    capabilities = rvc_client.get("/v1/info", headers=auth).json()["capabilities"]
+    by_type = {entry["job_type"]: entry for entry in capabilities}
+    rows = {row["id"]: row for row in by_type["rvc"]["models"]}
+    assert rows[MODEL]["installed"] is True
+    assert rows["sigma"]["installed"] is False
+    assert rows[MODEL]["resident"] is False
 
 
 def test_rvc_is_off_unless_the_config_says_otherwise(

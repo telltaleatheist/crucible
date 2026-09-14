@@ -259,13 +259,20 @@ class AsrJobType:
                     spec.hf_repo,
                     spec.memory_bytes_estimate,
                 )
+                # The same predicate `check` and `_require_loadable` read: the
+                # puller's stamp, at the revision this host's block pins.
+                installed = (
+                    weights.installed(self._config, manifest, spec) is not None
+                )
             else:
-                revision, source, estimate = "", "", 0
+                # A backend this manifest has no block for has nothing to install.
+                revision, source, estimate, installed = "", "", 0, False
             rows.append(
                 ModelDescriptor(
                     id=manifest.id,
                     revision=revision,
                     source=source,
+                    installed=installed,
                     # Nothing is ever resident for `asr`: the worker loads the
                     # model, transcribes one file and exits. The aligner is the
                     # job type that stays resident across a book, and it is

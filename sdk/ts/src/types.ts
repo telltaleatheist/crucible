@@ -19,11 +19,21 @@ export interface Ping {
   readonly apiVersion: number;
 }
 
-/** One model a job type can serve, as advertised by `GET /v1/info`. */
+/**
+ * One model a job type can serve, as advertised by `GET /v1/info` — DESIGN.md
+ * section 4's row, for every capability but `llm` and `tts`.
+ *
+ * `installed` and `resident` are two facts and neither implies the other:
+ * `installed` is "the weights are on disk at the revision the manifest pins"
+ * (the puller's own stamp), `resident` is "an engine is serving it right now".
+ * A puller reading this row to decide whether to pull reads `installed`; a
+ * client deciding whether a job will start without a load reads `resident`.
+ */
 export interface ModelDescriptor {
   readonly id: string;
   readonly revision: string;
   readonly source: string;
+  readonly installed: boolean;
   readonly resident: boolean;
   readonly vramBytes: number;
 }

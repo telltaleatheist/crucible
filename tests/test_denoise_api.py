@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 from crucible import accelerator, workerenv
 from crucible.accelerator import GIB
-from crucible.denoisemodels import load_denoise_manifest
+from crucible.denoisemodels import load_denoise_manifest, stamp_name
 from crucible.jobs import denoise as denoise_job
 
 from .conftest import FAKE_BACKEND, parse_sse
@@ -86,6 +86,45 @@ def model_files(home: Path) -> Path:
     (root / manifest.model_filename).write_bytes(b"not a checkpoint")
     (root / manifest.config_filename).write_bytes(b"not a config")
     return root
+
+
+@pytest.fixture
+def pulled_model(model_files: Path) -> Path:
+    """The files AND the puller's stamp, at exactly the pin the manifest names.
+
+    `model_files` alone is what a hand-copied checkpoint looks like — it runs,
+    and `crucible denoise list` calls it `present`; only the stamp makes it
+    `installed`. The record is the shape `weights.pull_files` writes, one stamp
+    per set because the directory is flat (`denoisemodels.stamp_name`).
+    """
+    manifest = load_denoise_manifest(MODEL)
+    spec = manifest.spec(FAKE_BACKEND.kind)
+    (model_files / stamp_name(manifest)).write_text(
+        json.dumps(
+            {
+                "label": manifest.id,
+                "hf_repo": spec.hf_repo,
+                "revision": spec.revision,
+                "files": [
+                    {
+                        "source": spec.model_path,
+                        "target": manifest.model_filename,
+                        "sha256": spec.model_sha256,
+                    },
+                    {
+                        "source": spec.config_path,
+                        "target": manifest.config_filename,
+                        "sha256": spec.config_sha256,
+                    },
+                ],
+                "bytes": 28,
+                "seconds": 1.0,
+                "pulled": "2026-09-14T00:00:00+0000",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return model_files
 
 
 @pytest.fixture
@@ -156,8 +195,31 @@ def test_info_advertises_denoise(
     # The repo AND the file: one repo holds every UVR model there is.
     assert rows[0]["source"] == f"{spec.hf_repo}:{spec.model_path}"
     assert rows[0]["revision"] == spec.revision
+    assert rows[0]["installed"] is False
     # Nothing is ever resident: one job, one load, one exit.
     assert rows[0]["resident"] is False
+
+
+def test_info_says_installed_only_for_the_puller_s_own_stamp(
+    denoise_client: TestClient, auth: dict[str, str], model_files: Path
+) -> None:
+    """Presence is not installation. A checkpoint somebody copied in runs
+    (`_require_model_files` checks presence) and is still not `installed`: the
+    row answers the puller's question — "do I need to pull" — and a file with
+    no stamp is one nobody pulled at any pin."""
+    info = denoise_client.get("/v1/info", headers=auth).json()
+    by_type = {entry["job_type"]: entry for entry in info["capabilities"]}
+    assert by_type["denoise"]["models"][0]["installed"] is False
+
+
+def test_info_says_installed_once_the_separator_is_pulled(
+    denoise_client: TestClient, auth: dict[str, str], pulled_model: Path
+) -> None:
+    info = denoise_client.get("/v1/info", headers=auth).json()
+    by_type = {entry["job_type"]: entry for entry in info["capabilities"]}
+    row = by_type["denoise"]["models"][0]
+    assert row["installed"] is True
+    assert row["resident"] is False
 
 
 def test_denoise_is_off_unless_the_config_says_otherwise(
