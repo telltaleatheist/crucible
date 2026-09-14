@@ -1758,6 +1758,33 @@ export class CrucibleClient {
   }
 
   /**
+   * `DELETE /v1/catalog/{kind}/{id}` — remove an installed subject's files.
+   *
+   * PHASE15-HOST.md 3.5a. The door the weights rule needs: a subject is never
+   * stored twice on one machine, so when a second engine has its own copy the
+   * first one's goes — and whoever asks must never reach into the server's
+   * layout to do it. Answers nothing on success (204).
+   *
+   * **An app does not call this on a user's behalf without saying so on
+   * screen.** 3.5a is explicit that neither BookForge nor Foundry calls it in
+   * this phase; the host does, and an operator does from the page.
+   *
+   * Refused by name, and each name is a different thing to do about it:
+   * `subject_unknown` (404), `subject_not_installed` (409),
+   * `subject_in_use` (409, `details.who` says what is holding it) and
+   * `subject_remove_failed` (500, `details.path` says which file would not
+   * go). None is retried here.
+   */
+  async removeSubject(kind: SubjectKind, id: string): Promise<void> {
+    const path =
+      `/v1/catalog/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`;
+    const response = await this.#fetch(path, { method: 'DELETE' }, true);
+    if (!response.ok) throw await this.#failure(response);
+    // 204, and reading the body is what makes the connection reusable.
+    await response.text();
+  }
+
+  /**
    * `POST /v1/tasks` — pull a subject, install a job type, or post a module.
    * Returns the task id; watch it with {@link taskEvents}.
    *

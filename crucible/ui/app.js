@@ -1722,6 +1722,24 @@
     }
   }
 
+  async function removeSubject(row) {
+    // DELETE, then re-read. The page holds no local state about what is
+    // installed (`render` draws `state.catalog` and nothing else), so the
+    // re-read is not a refresh for tidiness — it IS how the row learns what
+    // happened, and it is what shows a `subject_in_use` refusal beside a row
+    // that is still there.
+    var path =
+      '/v1/catalog/' + encodeURIComponent(row.kind) + '/' + encodeURIComponent(row.id);
+    try {
+      await call(path, { method: 'DELETE' });
+      setRefusal('catalog', null);
+    } catch (refusal) {
+      setRefusal('catalog', refusal);
+    }
+    await loadCatalog();
+    render();
+  }
+
   function catalogRow(row) {
     var block = el('div', { class: 'row' });
 
@@ -1780,6 +1798,41 @@
             'already_installed; re-fetch it deliberately on the server with ' +
             '--force'
         }, ['Pull'])
+      );
+      // REMOVE, on installed rows only (PHASE15-HOST.md 3.5a). Offered
+      // rather than greyed, unlike Pull above, because there IS something
+      // this can do — and refused by name when there is not, which is the
+      // case the confirmation below cannot know about: a resident model, an
+      // open lease, a task naming it.
+      //
+      // ONE CONFIRMATION, and it names the bytes. This is the only act on
+      // this page nobody can undo: everything else either downloads
+      // something again or restarts something. `confirm` and not a modal of
+      // our own, for the page's whole reason — no build step, no framework,
+      // and a browser's own dialog is the one thing every browser draws the
+      // same.
+      action.appendChild(
+        el('button', {
+          id: 'remove-' + row.kind + '-' + row.id,
+          class: 'button',
+          type: 'button',
+          disabled: row.resident || state.running !== null,
+          title: row.resident
+            ? 'it is on the card right now; unload it first'
+            : 'delete this subject\'s files from this server',
+          onclick: function () {
+            var size = bytesText(row.installed_bytes);
+            var what = (row.name === null ? row.id : row.name) + ' (' + row.kind + ')';
+            var question =
+              'Remove ' + what + ' from this server?' +
+              (size === null ? '' : ' This frees ' + size + '.') +
+              '\n\nThe files are deleted. Getting them back is another download.';
+            if (!window.confirm(question)) {
+              return;
+            }
+            removeSubject(row);
+          }
+        }, ['Remove'])
       );
     } else {
       action.appendChild(

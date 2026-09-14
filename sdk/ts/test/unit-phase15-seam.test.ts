@@ -33,6 +33,10 @@ import {
   CAPABILITY_ROUTE_UNKNOWN,
   CrucibleClient,
   CruciblePairingFileError,
+  SUBJECT_IN_USE,
+  SUBJECT_NOT_INSTALLED,
+  SUBJECT_REMOVE_FAILED,
+  SUBJECT_UNKNOWN,
   CrucibleProtocolError,
   PAIRING_FILE_MALFORMED,
   WINDOWS_HOME_DIRNAME,
@@ -45,6 +49,8 @@ import {
 let reply: { status: number; body: unknown } = { status: 500, body: {} };
 /** Milliseconds the fixture waits before answering. The sleeping Mac. */
 let stall = 0;
+let lastMethod = '';
+let lastPath = '';
 
 let server: Server;
 let base = '';
@@ -59,12 +65,21 @@ function answers(status: number, body: unknown): void {
 }
 
 function json(response: ServerResponse, status: number, body: unknown): void {
+  if (status === 204) {
+    // A 204 carries no body and no content type, which is what the route
+    // really answers and what `removeSubject` has to cope with.
+    response.writeHead(204);
+    response.end();
+    return;
+  }
   response.writeHead(status, { 'Content-Type': 'application/json' });
   response.end(JSON.stringify(body));
 }
 
 before(async () => {
   server = createServer((request, response) => {
+    lastMethod = request.method ?? '';
+    lastPath = request.url ?? '';
     if (stall > 0) {
       const timer = setTimeout(() => json(response, reply.status, reply.body), stall);
       request.on('aborted', () => clearTimeout(timer));
@@ -480,4 +495,46 @@ test('a real auth failure of THIS server still throws, and is not a test refusal
     assert.equal((error as { code?: string }).code, 'unauthorized');
     return true;
   });
+});
+
+// --------------------------- 6. removeSubject — PHASE15-HOST.md 3.5a
+
+test('removeSubject DELETEs the subject and resolves on 204', async () => {
+  answers(204, null);
+  await client().removeSubject('model', 'qwen3.5-9b');
+  assert.equal(lastMethod, 'DELETE');
+  assert.equal(lastPath, '/v1/catalog/model/qwen3.5-9b');
+});
+
+test('a kind or id with a slash in it cannot walk out of the route', async () => {
+  answers(204, null);
+  await client().removeSubject('model' as never, 'a/b');
+  assert.equal(lastPath, '/v1/catalog/model/a%2Fb');
+});
+
+test('each of the four refusals arrives by name', async () => {
+  const cases: Array<[number, string]> = [
+    [404, SUBJECT_UNKNOWN],
+    [409, SUBJECT_NOT_INSTALLED],
+    [409, SUBJECT_IN_USE],
+    [500, SUBJECT_REMOVE_FAILED],
+  ];
+  for (const [status, code] of cases) {
+    answers(status, {
+      error: { code, message: 'no', details: { who: 'the card', path: '/x' } },
+    });
+    await assert.rejects(
+      client().removeSubject('model', 'qwen3.5-9b'),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, code);
+        return true;
+      },
+    );
+  }
+});
+
+test('the engine subject is removable like any other', async () => {
+  answers(204, null);
+  await client().removeSubject('engine', 'llama-cpp');
+  assert.equal(lastPath, '/v1/catalog/engine/llama-cpp');
 });

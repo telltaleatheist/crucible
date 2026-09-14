@@ -256,6 +256,101 @@ def require_installed(
     )
 
 
+class RemoveFailed(WeightsError):
+    """A subject's files would not go. Carries the path that refused.
+
+    Its own type because PHASE15-HOST.md 3.5a gives it its own name and its
+    own `details.path`: "this subject is not installed" and "this file is
+    locked by something" are different things to do about, and a caller told
+    one about the other deletes the wrong problem.
+    """
+
+    def __init__(self, path: Path, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+
+
+def _remove(path: Path) -> None:
+    """One file or one tree, with the failure named by its own path."""
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+    except OSError as exc:
+        raise RemoveFailed(
+            path, f"{path} would not be removed: {type(exc).__name__}: {exc}"
+        ) from None
+
+
+def _prune_empty(directory: Path, stop: Path) -> None:
+    """Remove `directory` and its empty parents, up to but not past `stop`.
+
+    3.5a: *"and the subject's directory if it is then empty"*. A directory
+    left behind is not a failure — it is a directory — so this never raises
+    for one that is not empty; what it refuses to do is climb past the tree
+    this module owns.
+    """
+    current = directory
+    while current != stop and stop in current.parents:
+        try:
+            next(current.iterdir())
+        except StopIteration:
+            try:
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
+            continue
+        except OSError:
+            return
+        return
+
+
+def remove(config: Config, manifest: WeightsSubject, spec: WeightsSource) -> Path:
+    """Delete this subject's weights for this backend. Returns what went.
+
+    PHASE15-HOST.md 3.5a, and it is the door the host's weights migration
+    needs so that it never reaches into this module's layout from outside
+    (`crucible/host/catalog.py` says why at length).
+
+    **The whole backend directory**, not a file list, and the difference is
+    only visible on `llama-windows`: that backend's directory holds exactly
+    the files its spec names plus the stamp, so removing the directory and
+    removing the named files are the same act with one fewer way to leave a
+    stamp behind. Every other backend's directory IS the snapshot.
+
+    What it does NOT touch is another backend's copy of the same subject. A
+    machine that ran `cuda-linux` yesterday and `llama-windows` today has
+    two, and 3.5's migration deletes one of them.
+    """
+    directory = weights_dir(config, manifest.weights_family, manifest.id, spec.backend)
+    _remove(directory)
+    _prune_empty(
+        directory.parent, weights_root(config, manifest.weights_family)
+    )
+    return directory
+
+
+def remove_files(
+    target_root: Path,
+    targets: Sequence[str],
+    *,
+    stamp_name: str = STAMP_NAME,
+) -> Path:
+    """Delete a NAMED FILE SET and its stamp, leaving the directory alone.
+
+    The counterpart of `pull_files`, and the reason it cannot be `remove`:
+    `~/.crucible/denoise-models/` holds every separator in one flat directory
+    (`crucible/denoisemodels.py` says why), so removing the directory would
+    remove somebody else's model. One stamp per set, one removal per set.
+    """
+    for name in targets:
+        _remove(_safe_target(target_root, name))
+    _remove(target_root / stamp_name)
+    return target_root
+
+
 def hf_token(config: Config) -> str | None:
     """`$HF_TOKEN`, else `[hf] token` in config.toml, else None."""
     from_env = os.environ.get(HF_TOKEN_ENV)

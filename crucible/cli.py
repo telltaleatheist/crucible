@@ -27,10 +27,10 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    capability,
     API_VERSION,
     VERSION,
     capability,
+    catalog,
     denoisemodels,
     envpack,
     hosttools,
@@ -75,7 +75,7 @@ from .config import (
     mint_token,
     write_config,
 )
-from .errors import ConfigError, NoViableBackend
+from .errors import ConfigError, CrucibleError, NoViableBackend
 from .interfaces import InterfaceError
 from .jobs import ALL_JOB_TYPES, build_registry
 from .rvcmodels import RvcManifestError, load_all_rvc_manifests, load_rvc_manifest
@@ -1277,6 +1277,67 @@ def _models_config() -> tuple[Config, Backend] | int:
     except NoViableBackend as exc:
         return _fail(f"no viable backend: {exc.reason}")
     return config, backend
+
+
+def cmd_remove(args: argparse.Namespace) -> int:
+    """`crucible remove <kind> <id>` — PHASE15-HOST.md 3.5a, from a terminal.
+
+    REFUSES IDENTICALLY TO THE DOOR, and it does so by asking the same
+    questions in the same order: an unknown kind or id first (true whatever
+    this server is doing), then not-installed, then in-use. What it CANNOT
+    ask is whether a running server holds the subject — that is a fact about
+    a process this command is not inside, and the names it would need
+    (`Residency`, `Leases`, the task store) live in one. So it asks the two
+    it can and says so: on a machine with a server running, the door is the
+    one to use, and `DELETE /v1/catalog/{kind}/{id}` is what the host calls.
+    """
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        return _fail(str(exc))
+    try:
+        backend = detect_backend()
+    except NoViableBackend as exc:
+        return _fail(f"no viable backend: {exc.reason}")
+    if backend.kind != config.backend_kind:
+        return _fail(
+            _backend_mismatch(config.backend_kind, backend)
+            + f" ({config.path}); re-run `crucible init --force`"
+        )
+    subject = catalog.find(config, backend, args.kind, args.id)
+    if subject is None:
+        return _fail(
+            f"subject_unknown: this server has no {args.kind} called "
+            f"{args.id!r} for {backend.kind}. `crucible catalog` lists every "
+            "subject it can hold"
+        )
+    found = subject.installed()
+    if found is None:
+        return _fail(
+            f"subject_not_installed: {args.kind} {args.id!r} is not installed "
+            "on this server, so there is nothing to remove"
+        )
+    try:
+        gone = subject.remove()
+    except weights.RemoveFailed as exc:
+        return _fail(f"subject_remove_failed: {exc}")
+    except CrucibleError as exc:
+        return _fail(f"subject_remove_failed: {type(exc).__name__}: {exc}")
+    if args.json:
+        print(json.dumps(
+            {
+                "kind": args.kind,
+                "id": args.id,
+                "path": str(gone),
+                "bytes_freed": found.bytes,
+            },
+            indent=2,
+        ))
+    else:
+        print(f"removed:  {args.kind} {args.id}")
+        print(f"path:     {gone}")
+        print(f"freed:    {found.bytes / 1e9:.2f} GB")
+    return EXIT_OK
 
 
 def cmd_models_list(args: argparse.Namespace) -> int:
@@ -2605,6 +2666,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="machine-readable"
     )
     capability_parser.set_defaults(func=cmd_capability)
+
+    remove = subparsers.add_parser(
+        "remove",
+        help="delete an installed subject's files (PHASE15-HOST.md 3.5a)",
+    )
+    remove.add_argument(
+        "kind",
+        choices=list(catalog.KINDS),
+        help="the subject kind, as `crucible catalog` and GET /v1/catalog spell it",
+    )
+    remove.add_argument("id", help="the subject id, e.g. qwen3.5-9b")
+    remove.add_argument(
+        "--json", action="store_true", help="machine-readable"
+    )
+    remove.set_defaults(func=cmd_remove)
 
     models = subparsers.add_parser("models", help="list and pull model weights")
     model_commands = models.add_subparsers(dest="models_command", required=True)

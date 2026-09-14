@@ -15,6 +15,7 @@ import hashlib
 import json
 import secrets
 import shutil
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -36,12 +37,12 @@ from starlette.background import BackgroundTask
 from starlette.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import API_VERSION, VERSION, accelerator, catalog, pairing, upstreams
+from . import API_VERSION, VERSION, accelerator, catalog, pairing, upstreams, weights
 from . import capability as capability_classes
 from . import settings as settings_module
 from .backend import CUDA_LINUX, Backend
 from .config import Config, load_config
-from .errors import ApiError
+from .errors import ApiError, CrucibleError
 from .interfaces import InterfaceError
 from .jobs import (
     ALL_JOB_TYPES,
@@ -470,6 +471,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     # display of "who changed what just now" when two apps and a page all edit
     # one server, not an audit log, and it never holds a key.
     app.state.settings_history = settings_module.History()
+    # The last few subject removals, for `/v1/activity` (3.5a). In memory and
+    # a restart forgets, like the settings history: deleting gigabytes is the
+    # one catalog act nobody can undo, so it is the one that most needs to say
+    # who asked.
+    app.state.removals = catalog.Removals()
     # In memory, and a restart forgets: a lease protects a resident model, and a
     # restarted server holds none (crucible/leases.py).
     app.state.leases = Leases()
@@ -964,6 +970,161 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         return {"rows": catalog.rows(live, backend, residency),
                 "backend_kind": backend.kind}
 
+    @private.delete("/catalog/{kind}/{subject_id}", status_code=204)
+    async def catalog_remove(
+        request: Request, kind: str, subject_id: str
+    ) -> Response:
+        """Delete an installed subject's files. PHASE15-HOST.md 3.5a.
+
+        THE DOOR THE WEIGHTS RULE NEEDS. 3.5: a subject is never stored twice
+        on one machine, so when the guest has its own copy the Windows one
+        goes — and the host must never reach into `crucible/weights.py`'s
+        layout from outside to do it, because a layout with two owners is the
+        shape ARCHITECTURE.md R1 is about. So the server that owns the disk
+        owns the deletion, and this is how it is asked.
+
+        THE ORDER OF THE REFUSALS IS THE JOB DOOR'S: what is wrong with the
+        REQUEST first (an unknown kind or id is true whatever this server is
+        doing), then what is wrong with this server's STATE. A caller who
+        misspelled a subject id and was told "it is in use" would fix the
+        wrong thing.
+        """
+        live: Config = request.app.state.config
+        if kind not in catalog.KINDS:
+            raise ApiError(
+                404,
+                "subject_unknown",
+                f"{kind!r} is not a subject kind; they are {list(catalog.KINDS)}",
+                {"kind": kind, "id": subject_id},
+            )
+        subject = catalog.find(live, backend, kind, subject_id)
+        if subject is None:
+            raise ApiError(
+                404,
+                "subject_unknown",
+                f"this server has no {kind} called {subject_id!r} for "
+                f"{backend.kind}. GET /v1/catalog lists every subject it can hold",
+                {"kind": kind, "id": subject_id},
+            )
+        found = subject.installed()
+        if found is None:
+            raise ApiError(
+                409,
+                "subject_not_installed",
+                f"{kind} {subject_id!r} is not installed on this server, so "
+                "there is nothing to remove. Refused rather than answered 204: "
+                "a caller told 'done' about a subject that was never there "
+                "would believe a migration had deleted something",
+                {"kind": kind, "id": subject_id},
+            )
+        who = _subject_holder(request, subject)
+        if who is not None:
+            raise ApiError(
+                409,
+                "subject_in_use",
+                f"{kind} {subject_id!r} cannot be removed: {who['who']}. "
+                "Deleting the files under a running engine would leave it "
+                "serving a model that is no longer on the disk",
+                who,
+            )
+        try:
+            gone = subject.remove()
+        except weights.RemoveFailed as exc:
+            raise ApiError(
+                500,
+                "subject_remove_failed",
+                str(exc),
+                {"kind": kind, "id": subject_id, "path": str(exc.path)},
+            ) from None
+        except (CrucibleError, OSError) as exc:
+            raise ApiError(
+                500,
+                "subject_remove_failed",
+                f"removing {kind} {subject_id!r} failed: "
+                f"{type(exc).__name__}: {exc}",
+                {"kind": kind, "id": subject_id, "path": str(found.path)},
+            ) from None
+        request.app.state.removals.record(
+            kind=kind,
+            subject_id=subject_id,
+            bytes_freed=found.bytes,
+            act=read_act(request.headers),
+            client=request.headers.get("user-agent"),
+        )
+        print(
+            f"crucible: removed {kind} {subject_id} ({found.bytes / 1e9:.2f} GB) "
+            f"from {gone}",
+            file=sys.stderr,
+        )
+        return Response(status_code=204)
+
+    def _subject_holder(request: Request, subject: catalog.Subject) -> dict | None:
+        """Why this subject may not be deleted right now, or None.
+
+        THREE HOLDS, and each is read from the thing that owns it rather than
+        inferred: the RESIDENCY (this subject is the thing on the card), the
+        LEASES (a client has said it intends a run on it), and the TASK STORE
+        (a pull or a module naming it is in flight). The four facts'
+        `Settlement.holder` is deliberately NOT what is asked — it answers
+        "is the card busy at all", and a `denoise` separator on disk is not
+        made undeletable by a `tts` render.
+        """
+        resident = residency.resident
+        if resident is not None and resident.id == subject.id:
+            return {
+                "kind": subject.kind,
+                "id": subject.id,
+                "who": (
+                    f"it is the {KIND_NOUNS[resident.kind]} on the card right "
+                    "now; unload it first"
+                ),
+                "fact": "resident",
+            }
+        lease = request.app.state.leases.current()
+        if lease is not None and lease.subject == subject.id:
+            return {
+                "kind": subject.kind,
+                "id": subject.id,
+                "who": (
+                    f"{lease.client or 'a client'} holds a lease on it "
+                    f"until {lease.expires_at.isoformat()}"
+                ),
+                "fact": "lease",
+                **lease.receipt(),
+            }
+        running = request.app.state.tasks.running
+        if running is not None and _task_names(running, subject):
+            return {
+                "kind": subject.kind,
+                "id": subject.id,
+                "who": f"task {running.id} ({running.type}) names it",
+                "fact": "task",
+                "task_id": running.id,
+            }
+        return None
+
+    def _task_names(task: Any, subject: catalog.Subject) -> bool:
+        """Does this running task name this subject? Read off its REQUEST.
+
+        The request is the task's own echo of what was asked (`Task.request`),
+        so this needs no second table of which task types touch which
+        subjects — a `pull` names one, a `module` names a list, and an
+        `install` names none.
+        """
+        body = task.request
+        if body.get("kind") == subject.kind and body.get("id") == subject.id:
+            return True
+        module = body.get("module")
+        if isinstance(module, dict):
+            for entry in module.get("subjects", []) or []:
+                if (
+                    isinstance(entry, dict)
+                    and entry.get("kind") == subject.kind
+                    and entry.get("id") == subject.id
+                ):
+                    return True
+        return False
+
     # ----------------------------------------------------------- accelerator
 
     @private.get("/accelerator")
@@ -1242,6 +1403,12 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # entry records `set` or `removed` and nothing more, which is the
             # whole of "a key appears in no activity record".
             "settings": {"writes": request.app.state.settings_history.rows()},
+            # WHAT WAS DELETED, AND BY WHOM (PHASE15-HOST.md 3.5a). The host's
+            # weights migration deletes a Windows copy once the guest has its
+            # own, and a person looking at a machine with less on it than they
+            # remember needs an answer that is not "read the host's log".
+            # Newest first, in memory, the last `Removals.LIMIT`.
+            "catalog": {"removals": request.app.state.removals.rows()},
             # THE INTENTION BEHIND THE CHATS, which no amount of looking at this
             # server could infer. A chat holds nothing and is over in seconds, so
             # between two blocks of a 2000-block translation this machine is idle

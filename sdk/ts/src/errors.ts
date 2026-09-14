@@ -614,6 +614,21 @@ export const CAPABILITY_ROUTE_MISSING = 'capability_route_missing';
 /** A `route` that is neither `local` nor `upstream`. */
 export const CAPABILITY_ROUTE_UNKNOWN = 'capability_route_unknown';
 
+// ------------------------------------------- the catalog's removal refusals
+//
+// PHASE15-HOST.md 3.5a. Four names because they are four different things to
+// do about: fix the id, stop asking, close what is holding it, or look at the
+// path that would not go.
+
+/** `DELETE /v1/catalog/{kind}/{id}`: no such kind, or no such id here (404). */
+export const SUBJECT_UNKNOWN = 'subject_unknown';
+/** It is a subject this server can hold and it does not hold it (409). */
+export const SUBJECT_NOT_INSTALLED = 'subject_not_installed';
+/** Resident, leased, or named by a running task (409). `details.who` says. */
+export const SUBJECT_IN_USE = 'subject_in_use';
+/** The files would not go (500). `details.path` is the one that refused. */
+export const SUBJECT_REMOVE_FAILED = 'subject_remove_failed';
+
 // ---------------------------------------------- the settings door's refusals
 //
 // PHASE15-HOST.md sections 3.2 and 3.4, as constants so a caller switches on a

@@ -53,7 +53,9 @@ in front of somebody about to spend twenty minutes on a download.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from . import denoisemodels, lineup, llamacpp, rvcbase, weights
@@ -63,6 +65,7 @@ from .backend import Backend
 from .config import Config
 from .errors import ApiError, CrucibleError
 from .manifests import load_all_manifests
+from .jobs.base import utcnow
 from .residency import KIND_ALIGN, KIND_LLM, KIND_TTS, Residency
 from .rvcmodels import load_all_rvc_manifests
 from .voices import load_all_voices
@@ -119,6 +122,10 @@ class Subject:
     pull_command: str
     installed: Callable[[], weights.InstalledWeights | None]
     pull: Callable[..., weights.InstalledWeights]
+    #: Delete this subject's files and return what went (PHASE15-HOST.md
+    #: 3.5a). Bound per subject for `installed` and `pull`'s reason: the
+    #: alternative is a third `match kind:` that goes stale on its own.
+    remove: Callable[[], Path]
 
 
 def subjects(config: Config, backend: Backend) -> list[Subject]:
@@ -163,6 +170,7 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
                     pull_command=f"crucible models pull {manifest.id}",
                     installed=_installed_weights(config, manifest, spec),
                     pull=_pull_weights(config, manifest, spec),
+                    remove=_remove_weights(config, manifest, spec),
                 )
             )
 
@@ -181,6 +189,7 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
                 pull_command=f"crucible voices pull {voice.id}",
                 installed=_installed_weights(config, voice, spec),
                 pull=_pull_weights(config, voice, spec),
+                remove=_remove_weights(config, voice, spec),
             )
         )
 
@@ -199,6 +208,7 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
                 pull_command=f"crucible rvc pull {model.id}",
                 installed=_installed_weights(config, model, spec),
                 pull=_pull_archive(config, model, spec),
+                remove=_remove_weights(config, model, spec),
             )
         )
 
@@ -216,6 +226,9 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
             pull_command=rvcbase.PULL_COMMAND,
             installed=lambda: rvcbase.installed(config, assets),
             pull=lambda **kwargs: rvcbase.pull(config, assets, **kwargs),
+            remove=lambda: weights.remove_files(
+                rvcbase.base_root(config), assets.targets
+            ),
         )
     )
 
@@ -240,6 +253,7 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
                 pull_command="crucible install llm",
                 installed=_installed_engine(config, build),
                 pull=_pull_engine(config, build),
+                remove=lambda: llamacpp.remove(config),
             )
         )
 
@@ -258,6 +272,7 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
                 pull_command=f"{denoisemodels.PULL_COMMAND} {separator.id}",
                 installed=_installed_denoise(config, separator, spec),
                 pull=_pull_denoise(config, separator, spec),
+                remove=_remove_denoise(config, separator),
             )
         )
     return found
@@ -308,6 +323,23 @@ def _pull_engine(
     config: Config, build: str
 ) -> Callable[..., weights.InstalledWeights]:
     return lambda **kwargs: llamacpp.pull(config, build, **kwargs)
+
+
+def _remove_weights(
+    config: Config, manifest: Any, spec: Any
+) -> Callable[[], Path]:
+    return lambda: weights.remove(config, manifest, spec)
+
+
+def _remove_denoise(config: Config, manifest: Any) -> Callable[[], Path]:
+    # ONE FLAT DIRECTORY holds every separator, so the SET goes and the
+    # directory stays (`crucible/denoisemodels.py` says why there is a stamp
+    # per model rather than one at the root).
+    return lambda: weights.remove_files(
+        denoisemodels.denoise_models_root(config.home),
+        (manifest.model_filename, manifest.config_filename),
+        stamp_name=denoisemodels.stamp_name(manifest),
+    )
 
 
 def _installed_denoise(
@@ -442,8 +474,58 @@ def rows(config: Config, backend: Backend, residency: Residency) -> list[dict[st
     return built
 
 
+class Removals:
+    """The last few subject removals, for `/v1/activity`. In memory.
+
+    PHASE15-HOST.md 3.5a: *"recorded in `/v1/activity` with the act"*. The
+    same shape and the same reasoning as `settings.History` — a display of
+    "who deleted what just now" when the host, the page and an operator can
+    all reach the same server, not an audit log, and a restart forgets it.
+    Deleting several gigabytes is the one catalog act nobody can undo, so it
+    is the one that most needs to say who asked.
+    """
+
+    #: How many are kept. A person looking at this is asking about the last
+    #: few minutes; a log is somebody else's job.
+    LIMIT = 20
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._rows: list[dict[str, Any]] = []
+
+    def record(
+        self,
+        *,
+        kind: str,
+        subject_id: str,
+        bytes_freed: int | None,
+        act: str | None,
+        client: str | None,
+    ) -> None:
+        row = {
+            "at": utcnow(),
+            "kind": kind,
+            "id": subject_id,
+            # What the catalog said the subject weighed before it went. None
+            # where the stamp did not record one; never a guess and never a
+            # re-measurement of a directory that no longer exists.
+            "bytes_freed": bytes_freed,
+            # Null means the client did not say, exactly as on a chat row.
+            "act": act,
+            "client": client,
+        }
+        with self._lock:
+            self._rows.append(row)
+            del self._rows[: -self.LIMIT]
+
+    def rows(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(reversed(self._rows))
+
+
 __all__ = [
     "KINDS",
+    "Removals",
     "RVC_BASE_ID",
     "Subject",
     "declared_ids",
