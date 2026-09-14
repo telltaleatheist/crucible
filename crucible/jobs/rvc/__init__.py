@@ -32,18 +32,26 @@ Three details that are not obvious, all measured, each enforced at one line
   knowledge: the server does it, the client never sees it, and the model reload
   it costs is the server's problem to reduce later. See `worker.py`.
 
-The base models are the one asset with no manifest
---------------------------------------------------
+The base models are the engine's, and Crucible pulls them now
+-------------------------------------------------------------
 urvc needs a contentvec embedder and an rmvpe/fcpe pitch predictor before it can
-convert anything, and they are not per-model — they are the engine's. BookForge
-ships them as a 388 MB tarball on a **GitHub release**, which DESIGN.md section 5
-refuses as a source of weights, and urvc's own first-run downloader is exactly
-what `URVC_SKIP_INIT=1` turns off. So Crucible does not fetch them, and it does
-not pretend to: it looks for them under `~/.crucible/rvc-base/` and refuses by
-name (`rvc_base_models_missing`) with the two paths it wants, rather than running
-a job that dies inside the engine with a message about a missing checkpoint.
-Giving them a manifest of their own needs an HF home for them first, and that is
-a decision about where Owen publishes rather than one this file can make.
+convert anything, and they are not per-model — they are the engine's. This file
+used to say Crucible did not fetch them and could not, because the only source
+written down anywhere was a 388 MB tarball on a **GitHub release** in BookForge,
+which DESIGN.md section 5 refuses as a source of weights.
+
+That was wrong about the world rather than about the rule. urvc's own first-run
+downloader — the one `URVC_SKIP_INIT=1` turns off — fetches them from a
+HuggingFace repo, which DESIGN.md allows, and `crucible/rvcbase.py` now pins
+that repo at a revision with a digest per file. `crucible rvc pull-base` places
+them under `~/.crucible/rvc-base/`, and a job without them is still refused by
+name (`rvc_base_models_missing`) — but the refusal now names a command that
+works. PLAN.md's owed ruling 3, discharged.
+
+**Which files are needed is `rvcbase`'s to say, not this file's.** It used to be
+a tuple here, and that tuple was already wrong: it checked for the embedder's
+weights and not for the `config.json` beside them, without which transformers
+will not load the directory at all.
 """
 
 from __future__ import annotations
@@ -53,7 +61,7 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ... import accelerator, weights, workerenv, workers
+from ... import accelerator, rvcbase, weights, workerenv, workers
 from ...config import Config
 from ...errors import ApiError, JobError
 from ...manifests import fingerprint
@@ -112,21 +120,30 @@ ENGINE_ENVIRONMENT: dict[str, str] = {
     "PYTHONUNBUFFERED": "1",
 }
 
-#: The base assets urvc loads before it can convert a single file, relative to
-#: the models root. Checked by existence rather than by digest: Crucible did not
-#: put them there and has nothing to check them against, so what it can honestly
-#: say is whether they are present.
-BASE_ASSETS: tuple[str, ...] = (
-    "rvc/embedders/contentvec/pytorch_model.bin",
-    "rvc/predictors/rmvpe.pt",
-)
-
 WORKER_SCRIPT = Path(__file__).resolve().parent / "worker.py"
 
 
 def rvc_base_dir(config: Config) -> Path:
     """Where urvc's shared base assets live. See the module docstring."""
-    return config.home / "rvc-base"
+    return rvcbase.base_root(config)
+
+
+def _base_assets() -> "rvcbase.RvcBaseAssets":
+    """The declared set, or a 500 naming why this build cannot read its own.
+
+    Read per call rather than at import: `crucible doctor` and a job both ask,
+    the file is 2 KB, and a module-level load would make an unreadable
+    declaration an ImportError at server start instead of a refusal with a
+    reason in it.
+    """
+    try:
+        return rvcbase.load_rvc_base()
+    except rvcbase.RvcBaseError as exc:
+        raise ApiError(
+            500,
+            "rvc_base_declaration_unreadable",
+            f"this server cannot read its base-asset declaration: {exc}",
+        ) from None
 
 
 class RvcParams(BaseModel):
@@ -206,20 +223,27 @@ def _params(params: dict[str, Any]) -> RvcParams:
 
 def _require_base_assets(config: Config) -> Path:
     """urvc's shared base assets, or `rvc_base_models_missing` by name."""
+    assets = _base_assets()
     root = rvc_base_dir(config)
-    missing = [name for name in BASE_ASSETS if not (root / name).is_file()]
-    if missing:
+    absent = rvcbase.missing(config, assets)
+    if absent:
         raise ApiError(
             409,
             "rvc_base_models_missing",
-            f"ultimate-rvc needs its shared base assets and this host has none: "
-            f"{[str(root / name) for name in missing]} are not there. They are the "
-            "engine's, not any model's, and Crucible does not fetch them — "
-            "BookForge ships them on a GitHub release, which is not a source this "
-            "server pulls weights from, and urvc's own first-run downloader is "
-            "what URVC_SKIP_INIT turns off. Put a urvc models tree at "
-            f"{root} (it needs rvc/embedders and rvc/predictors) and try again",
-            {"root": str(root), "missing": sorted(missing)},
+            f"ultimate-rvc needs its shared base assets and this host is missing "
+            f"{[str(root / name) for name in absent]}. They are the engine's, not "
+            f"any model's — the same files urvc's own first-run downloader would "
+            f"have fetched, which URVC_SKIP_INIT turns off. Run "
+            f"`{rvcbase.PULL_COMMAND}` to place them "
+            f"({assets.total_bytes / 1e9:.2f} GB from "
+            f"{assets.hf_repo}@{assets.revision[:12]}, verified file by file)",
+            {
+                "root": str(root),
+                "missing": sorted(absent),
+                "hf_repo": assets.hf_repo,
+                "revision": assets.revision,
+                "command": rvcbase.PULL_COMMAND,
+            },
         )
     return root
 
@@ -322,13 +346,16 @@ class RvcJobType:
         if not env.installed:
             return JobTypeStatus(ready=False, detail=env.detail)
         root = rvc_base_dir(self._config)
-        missing = [name for name in BASE_ASSETS if not (root / name).is_file()]
-        if missing:
+        try:
+            absent = rvcbase.missing(self._config, _base_assets())
+        except ApiError as exc:
+            return JobTypeStatus(ready=False, detail=exc.message)
+        if absent:
             return JobTypeStatus(
                 ready=False,
                 detail=(
                     f"{env.detail}; but urvc's base assets are not at {root}: "
-                    f"{sorted(missing)} missing"
+                    f"{sorted(absent)} missing — `{rvcbase.PULL_COMMAND}`"
                 ),
             )
         try:

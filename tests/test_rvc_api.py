@@ -24,7 +24,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, workerenv
+from crucible import accelerator, rvcbase, workerenv
 from crucible.accelerator import GIB, ComputeApp
 from crucible.jobs import rvc as rvc_job
 from crucible.rvcmodels import load_rvc_manifest
@@ -125,17 +125,20 @@ def rvc_weights(home: Path) -> Callable[[str], Path]:
 
 @pytest.fixture
 def base_assets(home: Path) -> Path:
-    """The contentvec embedder and the rmvpe predictor, as empty files.
+    """Every declared base asset, as an empty file.
 
-    They are the engine's rather than any model's, Crucible does not fetch them,
-    and what it checks is presence — so presence is what the fixture provides.
+    Read off `rvcbase`'s declaration rather than listed here, which is the whole
+    point of that file existing: the set that is pulled and the set that is
+    checked for are one list, so a fixture cannot quietly test a shorter one.
+    (It used to list two, and the job used to check for two — and the pair of
+    them missed the `config.json` transformers needs beside the embedder.)
     """
-    root = home / "rvc-base" / "rvc"
-    (root / "embedders" / "contentvec").mkdir(parents=True)
-    (root / "embedders" / "contentvec" / "pytorch_model.bin").write_bytes(b"")
-    (root / "predictors").mkdir(parents=True)
-    (root / "predictors" / "rmvpe.pt").write_bytes(b"")
-    return root.parent
+    root = home / "rvc-base"
+    for target in rvcbase.load_rvc_base().targets:
+        path = root / target
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+    return root
 
 
 @pytest.fixture

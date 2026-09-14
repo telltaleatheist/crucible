@@ -13,11 +13,18 @@ if it were a model.
 kinds would let a `crucible voices pull` overwrite a 19 GB model with an 8.5 GB
 checkpoint and leave a stamp that reads as installed to either.
 
-Two shapes of pull, and the second one exists because of how a real repo is laid
-out: `pull` snapshot-downloads a whole repo, which is what a model or a voice is;
-`pull_archive` fetches ONE file, verifies its SHA-256 against the manifest and
-unpacks it, which is what an RVC model is (see `crucible/rvcmodels.py`). Both
-write the same stamp, so nothing downstream has to know which one ran.
+Three shapes of pull, and each of the second two exists because of how a real
+repo is laid out rather than because anybody wanted another shape:
+
+* `pull` snapshot-downloads a whole repo, which is what a model or a voice is.
+* `pull_archive` fetches ONE file, verifies its SHA-256 against the manifest and
+  unpacks it, which is what an RVC model is (see `crucible/rvcmodels.py`).
+* `pull_files` fetches NAMED files and places each one exactly where an engine
+  looks for it, which is what ultimate-rvc's shared base assets are: four files
+  scattered through a repo that also holds six pretrained GAN checkpoints, read
+  back from a tree with different names (see `crucible/rvcbase.py`).
+
+All three write the same stamp, so nothing downstream has to know which ran.
 """
 
 from __future__ import annotations
@@ -31,7 +38,7 @@ import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, Sequence, runtime_checkable
 
 from .config import Config
 from .errors import CrucibleError
@@ -427,6 +434,217 @@ def pull_archive(
     if on_line is not None:
         on_line(f"unpacked {size / 1e9:.2f} GB in {elapsed:.0f}s at {target}")
     result = installed(config, manifest, spec)
+    if result is None:  # pragma: no cover - the stamp was just written
+        raise WeightsError(f"wrote {stamp} but it does not read back as installed")
+    return result
+
+
+# ------------------------------------------------- named files, placed exactly
+
+
+@runtime_checkable
+class FileSource(Protocol):
+    """One file to fetch by path, verify, and put somewhere specific.
+
+    The third shape of pull, and the reason it exists is a layout nobody chose:
+    ultimate-rvc's shared base assets are four files scattered through one
+    HuggingFace repo that also holds six pretrained GAN checkpoints, and the
+    engine reads them from a tree of its own with different names and different
+    directories (`crucible/rvcbase.py`). `pull` would fetch the whole repo;
+    `pull_archive` has nothing to unpack. This fetches exactly what is named and
+    puts each file exactly where the engine looks.
+    """
+
+    source: str
+    target: str
+    sha256: str
+    bytes: int
+
+
+def files_installed(
+    target_root: Path, hf_repo: str, revision: str
+) -> InstalledWeights | None:
+    """The stamped file set at `target_root`, or None.
+
+    A stamp naming a different repo or revision is *not* installed, for
+    `installed`'s reason: the declaration moved, and serving the old bytes under
+    the new pin would be a silent substitution. Every target is checked for
+    presence too — a stamp beside a file somebody deleted is a stamp that lies.
+    """
+    stamp = target_root / STAMP_NAME
+    if not stamp.is_file():
+        return None
+    record = json.loads(stamp.read_text(encoding="utf-8"))
+    if record.get("hf_repo") != hf_repo or record.get("revision") != revision:
+        return None
+    for entry in record.get("files", []):
+        if not (target_root / entry["target"]).is_file():
+            return None
+    return InstalledWeights(
+        path=target_root,
+        hf_repo=record["hf_repo"],
+        revision=record["revision"],
+        bytes=record["bytes"],
+        pulled=record["pulled"],
+    )
+
+
+def _safe_target(target_root: Path, target: str) -> Path:
+    """`target_root/target`, or a refusal if it would land outside it."""
+    root = target_root.resolve()
+    destination = (root / target).resolve()
+    if destination != root and root not in destination.parents:
+        raise WeightsError(
+            f"{target!r} would be written outside {target_root}. A declared "
+            "target is a path inside the tree the engine reads, never a way to "
+            "write somewhere else"
+        )
+    return target_root / target
+
+
+def pull_files(
+    config: Config,
+    *,
+    hf_repo: str,
+    revision: str,
+    files: Sequence[FileSource],
+    target_root: Path,
+    label: str,
+    force: bool = False,
+    on_line: Callable[[str], None] | None = None,
+) -> InstalledWeights:
+    """Fetch each named file at one revision, verify it, and place it.
+
+    **Every digest is checked before ANY file is placed.** The same rule
+    `pull_archive` follows and for the same reason: a half-placed set is a tree
+    an engine will happily start against, and the failure then arrives inside
+    somebody's book rather than here. Files land in a staging directory under
+    the target root, are hashed there, and are moved into place only once all of
+    them have passed.
+
+    `label` is what the progress lines call this set, because a caller pulling
+    "ultimate-rvc's base assets" should not read lines about a model id.
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.errors import (
+            EntryNotFoundError,
+            GatedRepoError,
+            RepositoryNotFoundError,
+            RevisionNotFoundError,
+        )
+    except ImportError as exc:  # pragma: no cover - a dependency, not a condition
+        raise WeightsError(
+            f"huggingface_hub is not importable in {config.name}'s interpreter: {exc}"
+        ) from exc
+
+    if not files:
+        raise WeightsError(
+            f"{label} declares no files; a set with nothing in it is not a set"
+        )
+
+    existing = files_installed(target_root, hf_repo, revision)
+    if existing is not None and not force:
+        return existing
+
+    target_root.mkdir(parents=True, exist_ok=True)
+    stamp = target_root / STAMP_NAME
+    if stamp.exists():
+        # Removed FIRST: from here until the new stamp is written this tree is
+        # honestly "not installed", so a run interrupted half way cannot be read
+        # as a complete set by anything downstream.
+        stamp.unlink()
+    staging = target_root / ".crucible-files"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+
+    token = hf_token(config)
+    if on_line is not None:
+        on_line(
+            f"pulling {len(files)} file(s) of {label} from "
+            f"{hf_repo}@{revision[:12]} -> {target_root} "
+            f"({'with' if token else 'without'} an HF token)"
+        )
+    started = time.monotonic()
+    fetched: list[tuple[FileSource, Path, Path]] = []
+    try:
+        for entry in files:
+            destination = _safe_target(target_root, entry.target)
+            try:
+                downloaded = hf_hub_download(
+                    repo_id=hf_repo,
+                    filename=entry.source,
+                    revision=revision,
+                    local_dir=str(staging),
+                    token=token,
+                )
+            except GatedRepoError as exc:
+                raise WeightsError(
+                    f"{hf_repo} is gated and this server has no HF token that "
+                    f"opens it (set ${HF_TOKEN_ENV} or [hf] token in "
+                    f"{config.path}): {exc}"
+                ) from exc
+            except RepositoryNotFoundError as exc:
+                raise WeightsError(
+                    f"{hf_repo} is private or does not exist; if it is private "
+                    f"set ${HF_TOKEN_ENV} or [hf] token in {config.path}: {exc}"
+                ) from exc
+            except RevisionNotFoundError as exc:
+                raise WeightsError(
+                    f"{hf_repo} has no revision {revision}; {label} pins a commit "
+                    f"that repo does not have: {exc}"
+                ) from exc
+            except EntryNotFoundError as exc:
+                raise WeightsError(
+                    f"{hf_repo}@{revision[:12]} has no file {entry.source!r}; "
+                    f"{label} names a path that revision does not hold: {exc}"
+                ) from exc
+            except Exception as exc:
+                raise WeightsError(
+                    f"pulling {hf_repo}:{entry.source} failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+
+            digest = sha256_of(Path(downloaded))
+            if digest != entry.sha256:
+                raise WeightsError(
+                    f"{entry.source} from {hf_repo}@{revision[:12]} hashes to "
+                    f"{digest}, but {label} pins {entry.sha256}. NOTHING was "
+                    "placed. Either the declaration is wrong or these are not "
+                    "the bytes it names, and both are worse than no weights"
+                )
+            if on_line is not None:
+                on_line(f"  verified {entry.target} ({digest[:12]})")
+            fetched.append((entry, Path(downloaded), destination))
+
+        total = 0
+        for entry, downloaded, destination in fetched:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                destination.unlink()
+            shutil.move(str(downloaded), str(destination))
+            total += destination.stat().st_size
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    elapsed = time.monotonic() - started
+    record = {
+        "label": label,
+        "hf_repo": hf_repo,
+        "revision": revision,
+        "files": [
+            {"source": entry.source, "target": entry.target, "sha256": entry.sha256}
+            for entry in files
+        ],
+        "bytes": total,
+        "seconds": round(elapsed, 1),
+        "pulled": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    stamp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    if on_line is not None:
+        on_line(f"placed {total / 1e9:.2f} GB in {elapsed:.0f}s at {target_root}")
+    result = files_installed(target_root, hf_repo, revision)
     if result is None:  # pragma: no cover - the stamp was just written
         raise WeightsError(f"wrote {stamp} but it does not read back as installed")
     return result

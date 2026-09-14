@@ -52,8 +52,13 @@ So what is left is not code. It is **a card, and Owen's rulings on the six thing
 2. **`capped` on narrator's wire.** The frame cap never leaves the engine, so the `chunk`
    event cannot tell a long sentence from a runaway — the one thing it exists to tell.
    Not a two-line change: it touches the generation loop that renders his books.
-3. **Where do urvc's base assets live?** `rvc` refuses by name rather than fetching them
-   from a GitHub release, which DESIGN.md section 5 forbids as a source for weights.
+3. ~~**Where do urvc's base assets live?**~~ **ANSWERED, 2026-09-13, by reading the
+   engine instead of guessing.** urvc's own first-run downloader (the one
+   `URVC_SKIP_INIT` turns off) fetches them from `JackismyShephard/ultimate-rvc` on
+   HuggingFace, which DESIGN.md section 5 allows. `rvcbase/ultimate-rvc.toml` pins that
+   repo at a revision with a digest per file and `crucible rvc pull-base` places them.
+   This was a question about the world, not a ruling — Owen can overturn the source, but
+   nothing is waiting on him.
 4. **Publish the promoted fine-tune merges.** The HF revisions are older merges than the
    arms the catalog measured; the caps survive that gap, the pace bands do not.
 5. **The take ladder.** Its steps are server config and its judgment is the client's — the
@@ -189,12 +194,12 @@ the `external-gpu-job.lock` convention. Denoise, separation and Resemble are nam
 deferred there, with the reason: their contract is sample-exact and cannot be asserted
 against a fake engine.
 
-**All three job types and the probe are built.** What is left of this phase, written down in
-PHASE4-AUDIO.md where it belongs: **urvc's base assets have no source Crucible will pull
-from** (BookForge hosts them on a GitHub release, which DESIGN.md section 5 refuses, and
-urvc's own first-run downloader is what `URVC_SKIP_INIT` turns off), so `rvc` refuses by
-name until somebody puts a models tree at `~/.crucible/rvc-base/`. Everything else is
-measurement rather than construction: every `memory_bytes_estimate` in `align/` and `rvc/`
+**All three job types and the probe are built, and `denoise` joined them on 2026-09-13**
+(section 4.2: audio-separator in the rvc env, one audio file in, its stems out).
+**urvc's base assets now have a source Crucible pulls from** — urvc's own downloader
+names a HuggingFace repo, so `rvcbase/ultimate-rvc.toml` pins it and `crucible rvc
+pull-base` places all four files, digests verified before any is placed. What is left of
+this phase is measurement rather than construction: every `memory_bytes_estimate` in `align/` and `rvc/`
 is COMPUTED and says so in the file, `envs/rvc/*.txt` are chosen rather than resolved sets,
 and `envs/align/mlx-darwin.md` says exactly what would earn the Mac an align backend.
 

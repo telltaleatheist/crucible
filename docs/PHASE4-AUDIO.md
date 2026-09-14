@@ -461,15 +461,50 @@ version and says nothing about the commit, so checking it there would compare a 
 `0.5.11` and call every correctly built env broken. `crucible doctor` names the commit, not
 the version, for the same reason.
 
-**The base assets have no manifest, and Crucible does not fetch them.** urvc needs a
-contentvec embedder and an rmvpe pitch predictor — about 540 MB, the engine's rather than
-any model's — before it can convert anything. BookForge ships them on a **GitHub release**,
-which DESIGN.md section 5 refuses as a weights source, and urvc's own first-run downloader
-is exactly what `URVC_SKIP_INIT=1` turns off. Rather than invent a source or run an
-initialiser nobody has tested, the job type looks under `~/.crucible/rvc-base/` and refuses
-by name (`rvc_base_models_missing`) naming the two files it wanted. **This is the one open
-gap in phase 4**, and closing it is a decision about where Owen publishes them, not one this
-code can make.
+**The base assets are pulled from the engine's own repo — PLAN.md's owed ruling 3, now
+discharged.** urvc needs a contentvec embedder and a pitch predictor before it can convert
+anything; they are the engine's rather than any model's, and this section used to say
+Crucible could not fetch them, because the only source written down anywhere was a 388 MB
+tarball on a **GitHub release** in BookForge, which DESIGN.md section 5 refuses as a
+weights source.
+
+That was wrong about the world rather than about the rule. Read out of the installed fork
+on 2026-09-13 — `ultimate_rvc/rvc/lib/tools/prerequisites_download.py`, which **is** the
+first-run downloader `URVC_SKIP_INIT=1` turns off:
+
+```python
+url_base = "https://huggingface.co/JackismyShephard/ultimate-rvc/resolve/main/Resources"
+models_list    = [("predictors/", ["rmvpe.pt", "fcpe.pt"])]
+embedders_list = [("embedders/contentvec/", ["pytorch_model.bin", "config.json"]), ...]
+```
+
+So the engine's own upstream is HuggingFace, which DESIGN.md allows, and what Crucible
+pulls are exactly the bytes urvc would have fetched for itself, from the repo it would
+have fetched them from — at a **pinned revision** instead of `main`, with a sha256 per
+file. (The ancestral upstreams a general RVC tutorial names — `lengyue233/content-vec-best`,
+`lj1995/VoiceConversionWebUI` — are *not* what this fork downloads, and pinning them would
+be pinning a different provenance than the engine's own.)
+
+`rvcbase/ultimate-rvc.toml` is the declaration and `crucible/rvcbase.py` the loader.
+**`crucible rvc pull-base`** places all four files under `~/.crucible/rvc-base/`, where
+the job has always looked, verifying every digest **before placing any file** — a
+half-placed base tree is one urvc will start against and fail inside, hours later, in
+somebody's book. A job without them is still refused by name
+(`rvc_base_models_missing`), and the refusal now names a command that works.
+
+Two things this fixed on the way past. **`fcpe.pt` is pulled too**, because `f0_method` is
+a job parameter and a client may legitimately ask for it — urvc's own prerequisite list
+fetches both predictors, and so does this. And **`config.json` is pulled beside the
+embedder's weights**: the job's old hardcoded check named two files and missed it, without
+which `transformers` will not load the embedder directory at all. Which files are needed
+is now `rvcbase`'s to say and the job reads it (R1), so those two lists cannot drift again.
+
+### Ruling owed
+
+- **What else does a conversion fetch at run time?** `torchcrepe` downloads its own weights
+  on first use, so `f0_method: "crepe"` may still reach the network inside a job. Not
+  measured, and not pulled here: the crepe predictors are that library's rather than
+  urvc's, and every BookForge recipe uses `rmvpe`. The first `crepe` run settles it.
 
 Each job composes its own `URVC_MODELS_DIR` out of symlinks — the shared base assets plus
 **one** model — under the job's scratch. One model and not all seven, because urvc resolves
@@ -580,11 +615,13 @@ that one has no upstream to name at all.
 
 ### Ruling owed
 
-- **Should `crucible denoise pull` exist?** The manifest already carries everything a
-  puller needs, and the same machinery would discharge `rvc`'s base assets (PLAN.md's owed
-  ruling 3). Proceeding on the careful assumption that **the refusal is enough for now**,
-  because the alternative was to invent a second downloader beside `crucible/weights.py`
-  in the same commit as a new job type.
+- **Should `crucible denoise pull` exist?** It should, and the machinery now exists:
+  `weights.pull_files` was written for `rvc`'s base assets in the commit after this one
+  (section 4.1), the manifest already carries the repo, the revision, both source paths
+  and both digests, and the target directory is flat. It is a small follow-up rather than
+  an open question — the reason it is not in this commit is that inventing a second
+  downloader beside `crucible/weights.py` in the same commit as a new job type was the
+  wrong order to do two things in.
 - **Does audio-separator reach the network even when both files are present?**
   `list_supported_model_files` fetches `download_checks.json`, and `load_model` fetches
   `mdx_model_data.json` / `vr_model_data.json`, each skipped only when the file is already

@@ -141,9 +141,11 @@ models/<id>/<backend>/  weights, stamped with the revision they were pulled at
 voices/<id>/<backend>/  the same for voices — a separate namespace on purpose
 rvc/<id>/<backend>/     the same for RVC models — a third namespace, because
                         `sigma` is both a voice id and an RVC model id
-rvc-base/          urvc's shared contentvec and rmvpe assets. The one thing
-                   Crucible does NOT fetch; `rvc` refuses by name without them
+rvc-base/          urvc's shared embedder and pitch predictors — the engine's
+                   rather than any model's, placed by `crucible rvc pull-base`
                    (PHASE4-AUDIO.md section 4.1)
+denoise-models/    audio-separator's model_file_dir: the separator checkpoint
+                   and its YAML config, under the names the library resolves by
 logs/engine-<id>.log    one engine's stdout and stderr, command line first
 logs/<type>-<job id>.log  one worker's stderr, for `asr` and `rvc` — one file per
                         job, because their workers live and die with one. The
@@ -694,10 +696,18 @@ Three things worth knowing before you send params:
 Batching — 96 files per recycled process — is the server's and never crosses the wire. It is
 a **memory** bound, not a throughput choice: proven necessary on a 64 GB Mac.
 
-One thing it will tell you it needs: urvc's shared base assets (a contentvec embedder and an
-rmvpe predictor) under `~/.crucible/rvc-base/`. They are the engine's rather than any
-model's and Crucible does not fetch them; a job without them is refused by name with the
-paths it wanted.
+One thing it needs before the first conversion: urvc's shared base assets — the contentvec
+embedder and the rmvpe/fcpe predictors, the engine's rather than any model's.
+
+```bash
+crucible rvc pull-base              # ~0.6 GB, four files, each digest verified
+```
+
+They come from the repo urvc's **own** first-run downloader uses
+(`JackismyShephard/ultimate-rvc`, read out of the installed fork), at a pinned revision
+instead of `main`. Every digest is checked before any file is placed, because a
+half-placed base tree is one urvc starts against and fails inside. A job without them is
+still refused by name — the refusal names this command.
 
 ### `denoise`
 

@@ -1,0 +1,70 @@
+# ultimate-rvc's shared base assets — the engine's, not any model's.
+#
+# PHASE4-AUDIO.md section 4.1. urvc cannot convert a single file without a
+# content embedder and a pitch predictor, and they are not per-model: every RVC
+# voice in the catalog uses the same ones. Until now Crucible refused a job by
+# name when they were absent and had nothing to tell the operator except "put a
+# urvc models tree here", because the only source anybody knew of was a GitHub
+# release in BookForge — which DESIGN.md section 5 refuses as a source of
+# weights. That was PLAN.md's owed ruling 3.
+#
+# THE SOURCE IS THE ENGINE'S OWN, AND IT IS ON HUGGINGFACE
+# --------------------------------------------------------
+# Read out of the installed fork on 2026-09-13, not guessed and not taken from
+# a general RVC tutorial:
+#
+#   ultimate_rvc/rvc/lib/tools/prerequisites_download.py
+#     url_base = "https://huggingface.co/JackismyShephard/ultimate-rvc/resolve/main/Resources"
+#     models_list    = [("predictors/", ["rmvpe.pt", "fcpe.pt"])]
+#     embedders_list = [("embedders/contentvec/", ["pytorch_model.bin", "config.json"]), ...]
+#
+# That file IS the first-run downloader `URVC_SKIP_INIT=1` turns off, so these
+# are exactly the bytes the engine would have fetched for itself, from the repo
+# it would have fetched them from — at a pinned revision instead of `main`.
+#
+# The ancestral upstreams (`lengyue233/content-vec-best` for contentvec,
+# `lj1995/VoiceConversionWebUI` for rmvpe) are NOT what this fork downloads, and
+# pinning those would be pinning a different provenance than the engine's own.
+#
+# `targets` are where urvc looks, read from `ultimate_rvc/common.py`:
+# `RVC_MODELS_DIR = $URVC_MODELS_DIR/rvc`, `EMBEDDER_MODELS_DIR = <that>/embedders`,
+# predictors under `<that>/predictors`. `crucible/jobs/rvc/_stage_models` symlinks
+# `rvc/embedders` and `rvc/predictors` out of this tree into each job's own root.
+#
+# The digests are the files' sha256: HuggingFace's LFS oid IS the sha256 for the
+# three large ones, read from the API at this revision; `config.json` is a plain
+# 1,459-byte git blob, so its digest was computed from the bytes the API served.
+
+[engine]
+id = "ultimate-rvc"
+hf_repo = "JackismyShephard/ultimate-rvc"
+# `main` as the HuggingFace API served it on 2026-09-13.
+revision = "ae5f32aa957a1047f523ebd4226022db646bd512"
+
+[[files]]
+source = "Resources/embedders/contentvec/pytorch_model.bin"
+target = "rvc/embedders/contentvec/pytorch_model.bin"
+sha256 = "d8dd400e054ddf4e6be75dab5a2549db748cc99e756a097c496c099f65a4854e"
+bytes = 378342945
+why = "the contentvec embedder every conversion extracts content features with"
+
+[[files]]
+source = "Resources/embedders/contentvec/config.json"
+target = "rvc/embedders/contentvec/config.json"
+sha256 = "26162f0b6f15d07f0d9e7b1abcaed943f17baf621927bb25f0e0b15fa59dcfa8"
+bytes = 1459
+why = "transformers loads the embedder from a directory, and refuses one with no config"
+
+[[files]]
+source = "Resources/predictors/rmvpe.pt"
+target = "rvc/predictors/rmvpe.pt"
+sha256 = "6d62215f4306e3ca278246188607209f09af3dc77ed4232efdd069798c4ec193"
+bytes = 181184272
+why = "the pitch predictor every tuned BookForge recipe names (f0_method rmvpe)"
+
+[[files]]
+source = "Resources/predictors/fcpe.pt"
+target = "rvc/predictors/fcpe.pt"
+sha256 = "8544427eebbf2baef6213cc9a05057e46961617a8e5bd96975a0d42da6a09059"
+bytes = 43362881
+why = "the other predictor urvc's own prerequisite list fetches; f0_method is a job parameter, so a client may legitimately ask for it and must not meet a missing file"

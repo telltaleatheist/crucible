@@ -29,6 +29,7 @@ from . import (
     capability,
     jobenv,
     narratorpatches,
+    rvcbase,
     service,
     weights,
     workerenv,
@@ -1061,6 +1062,48 @@ def cmd_rvc_pull(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_rvc_pull_base(args: argparse.Namespace) -> int:
+    """`crucible rvc pull-base` — the engine's shared assets, at a pinned sha.
+
+    Its own verb rather than a step inside `crucible install rvc`, for the
+    reason every other weights pull is its own verb: installing an env and
+    fetching 600 MB of weights are different acts with different failure modes,
+    and `crucible install llm` does not pull a 19 GB model either. One set, one
+    command, one owner (PHASE4-AUDIO.md section 4.1).
+    """
+    resolved = _models_config()
+    if isinstance(resolved, int):
+        return resolved
+    config, _backend = resolved
+    try:
+        assets = rvcbase.load_rvc_base()
+    except rvcbase.RvcBaseError as exc:
+        return _fail(str(exc))
+    print(
+        f"{assets.id}: {assets.hf_repo}@{assets.revision[:12]}, "
+        f"{len(assets.files)} file(s), {assets.total_bytes / 1e9:.2f} GB"
+    )
+    for entry in assets.files:
+        print(f"  {entry.target} — {entry.why}")
+    try:
+        result = rvcbase.pull(
+            config, assets, force=args.force, on_line=lambda line: print(f"  {line}")
+        )
+    except weights.WeightsError as exc:
+        return _fail(str(exc))
+    absent = rvcbase.missing(config, assets)
+    if absent:
+        # Unreachable unless something removed a file between the place and
+        # this read; said out loud rather than reported as success, because the
+        # next thing to look at this tree is a job that will fail inside urvc.
+        return _fail(
+            f"the pull finished but {sorted(absent)} are not under "
+            f"{rvcbase.base_root(config)}"
+        )
+    print(f"{assets.id}: {result.bytes / 1e9:.2f} GB at {result.path}")
+    return EXIT_OK
+
+
 # ------------------------------------------------------------------- doctor
 
 
@@ -1576,6 +1619,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="re-pull even if it is already installed"
     )
     rvc_pull.set_defaults(func=cmd_rvc_pull)
+
+    rvc_pull_base = rvc_commands.add_parser(
+        "pull-base",
+        help="fetch ultimate-rvc's shared base assets (the embedder and the "
+        "pitch predictors) — the engine's, not any model's",
+    )
+    rvc_pull_base.add_argument(
+        "--force", action="store_true", help="re-pull even if they are already there"
+    )
+    rvc_pull_base.set_defaults(func=cmd_rvc_pull_base)
 
     serve = subparsers.add_parser("serve", help="run the API in the foreground")
     serve.add_argument("--host", default=None, help="bind host (default from config)")
