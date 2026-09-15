@@ -8,6 +8,9 @@ the card, and Crucible's whole point is that it never puts one there.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 from crucible import accelerator
@@ -130,6 +133,159 @@ def test_crucible_s_own_engine_is_not_foreign(monkeypatch: pytest.MonkeyPatch) -
         # back, so the guard counts it as free.
         reclaimable_bytes=20 * GIB,
     )
+
+
+#: narrator's real shape, off `~/.crucible/logs/engine-zeroshot.log` on the PC:
+#: *"server pid 3053 (group 3053, owner 3022)"*. 3022 is the launcher Crucible
+#: itself spawned with `start_new_session=True`, so it leads session 3022 and
+#: group 3022; 3053 is the serving child, which put itself in a group of its
+#: own and is the process actually holding the card. 4001 is a trainer Owen
+#: started from his login shell, which is in nobody's session but its own.
+NARRATOR_PROCESSES = {
+    3022: (3022, 3022),  # the launcher: group leader and session leader
+    3053: (3053, 3022),  # the serving child: its own group, our session
+    4001: (4001, 4001),  # somebody else entirely
+}
+
+
+def test_the_serving_child_of_our_own_narrator_is_not_foreign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The residency holds ONE pid per resident thing — the process Crucible
+    spawned — and narrator's launcher is not what holds the card. Its serving
+    child is, in a process group of its own, and on a cuda-linux host whose
+    driver does name compute apps that child read as somebody else's job
+    holding 18 GiB of the card Crucible had just loaded it onto."""
+    fake_cuda(
+        monkeypatch,
+        apps=[ComputeApp(pid=3053, name="sglang::scheduler", used_bytes=18 * GIB)],
+        free_bytes=6 * GIB,
+    )
+    monkeypatch.setattr(
+        accelerator, "probe_process_table", lambda: dict(NARRATOR_PROCESSES)
+    )
+    guard(
+        "cuda-linux",
+        model_id="zeroshot",
+        need_bytes=18 * GIB,
+        owned_pids=frozenset({3022}),
+        desktop_allowance_bytes=0,
+        reclaimable_bytes=18 * GIB,
+    )
+
+
+def test_a_trainer_in_its_own_session_is_still_somebody_else_s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The expansion is by LEADERSHIP, and the one mistake it must not make is
+    calling a sibling ours. pid 4001 shares nothing with 3022."""
+    fake_cuda(
+        monkeypatch,
+        apps=[ComputeApp(pid=4001, name="python train_lora.py", used_bytes=13 * GIB)],
+        free_bytes=11 * GIB,
+    )
+    monkeypatch.setattr(
+        accelerator, "probe_process_table", lambda: dict(NARRATOR_PROCESSES)
+    )
+    with pytest.raises(ApiError) as caught:
+        guard(
+            "cuda-linux",
+            model_id="zeroshot",
+            need_bytes=18 * GIB,
+            owned_pids=frozenset({3022}),
+            desktop_allowance_bytes=0,
+        )
+    assert caught.value.code == "accelerator_busy"
+    assert caught.value.details["processes"][0]["pid"] == 4001
+
+
+def test_a_pid_that_leads_nothing_claims_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Crucible whose engine was NOT put in a session of its own must not
+    sweep in its own login shell's other children. Here the owned pid 5100 is
+    in group 5000 and session 5000 and leads neither, so the expansion adds
+    nothing and 5200 — its sibling — is still foreign."""
+    fake_cuda(
+        monkeypatch,
+        apps=[ComputeApp(pid=5200, name="python train_lora.py", used_bytes=13 * GIB)],
+        free_bytes=11 * GIB,
+    )
+    monkeypatch.setattr(
+        accelerator,
+        "probe_process_table",
+        lambda: {5000: (5000, 5000), 5100: (5000, 5000), 5200: (5000, 5000)},
+    )
+    with pytest.raises(ApiError) as caught:
+        guard(
+            "cuda-linux",
+            model_id="zeroshot",
+            need_bytes=18 * GIB,
+            owned_pids=frozenset({5100}),
+            desktop_allowance_bytes=0,
+        )
+    assert caught.value.code == "accelerator_busy"
+
+
+def test_the_process_table_is_not_read_when_every_app_is_already_ours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under WSL2 the list is empty, which is every load on the PC. Reading a
+    few hundred `/proc` entries to attribute nothing would be work done on the
+    hot path for no answer."""
+    fake_cuda(monkeypatch, apps=[], free_bytes=22 * GIB)
+
+    def refuse() -> dict[int, tuple[int, int]]:
+        raise AssertionError("the guard read /proc with nothing to attribute")
+
+    monkeypatch.setattr(accelerator, "probe_process_table", refuse)
+    guard(
+        "cuda-linux",
+        model_id="qwen3.5-9b",
+        need_bytes=20 * GIB,
+        desktop_allowance_bytes=3 * GIB,
+    )
+
+
+def test_a_proc_that_will_not_parse_is_unreadable_and_never_all_foreign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same class of failure as a driver that will not answer, and the same
+    refusal. Proceeding would mean treating every process on the card as
+    somebody else's."""
+    fake_cuda(
+        monkeypatch,
+        apps=[ComputeApp(pid=3053, name="sglang::scheduler", used_bytes=18 * GIB)],
+        free_bytes=6 * GIB,
+    )
+
+    def broken() -> dict[int, tuple[int, int]]:
+        raise ProbeError("could not parse /proc/3053/stat")
+
+    monkeypatch.setattr(accelerator, "probe_process_table", broken)
+    with pytest.raises(ApiError) as caught:
+        guard(
+            "cuda-linux",
+            model_id="zeroshot",
+            need_bytes=18 * GIB,
+            owned_pids=frozenset({3022}),
+            desktop_allowance_bytes=0,
+        )
+    assert caught.value.code == "accelerator_unreadable"
+
+
+def test_the_process_table_reads_this_very_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parse itself, against the real `/proc` where there is one: the test
+    runner's own pid must be in the table with the session `os.getsid` reports.
+    Skipped where there is no `/proc`, which is the two non-cuda backends."""
+    if not Path("/proc").is_dir():
+        pytest.skip("no /proc on this host")
+    table = accelerator.probe_process_table()
+    mine = os.getpid()
+    assert mine in table
+    assert table[mine] == (os.getpgid(mine), os.getsid(mine))
 
 
 # ------------------------------------------------------------ accelerator_busy

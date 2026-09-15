@@ -21,7 +21,8 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import residency as residency_module
+from crucible import accelerator, residency as residency_module
+from crucible.accelerator import GIB
 from crucible.jobs import asr as asr_jobs
 from crucible.residency import KIND_TTS
 
@@ -697,6 +698,94 @@ def test_a_resident_zeroshot_voice_renders_like_any_other(
     ) as stream:
         events = parse_sse(line for line in stream.iter_lines())
     assert terminal(events)["data"]["rendered"] == len(CHUNKS)
+
+
+def wsl2_card_holding_our_own_engine(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The PC's card as it read at 07:30 on 2026-09-15, mid-incident.
+
+    18.1 GiB of 24 in use, and an EMPTY compute-app list — which is what the
+    WSL2 driver shim answers even while a process inside that same VM holds the
+    card. The 18.1 GiB is narrator serving the resident voice; nothing else is
+    on the machine. Returns a list that grows by one every time the guard looks
+    at the card, so a test can assert that it did not.
+    """
+    looks: list[int] = []
+
+    def compute_apps() -> list[Any]:
+        looks.append(1)
+        return []
+
+    monkeypatch.setattr(accelerator, "probe_compute_apps", compute_apps)
+    monkeypatch.setattr(
+        accelerator, "probe_vram", lambda: (24 * GIB - 18_100 * 1024 ** 2, 24 * GIB)
+    )
+    return looks
+
+
+def test_a_render_on_the_resident_voice_never_asks_the_card_for_room(
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+) -> None:
+    """Measured on the PC, 2026-09-15 07:30. `load-voice zeroshot` succeeded,
+    `/v1/activity` reported it resident with its clip's digest, and the render
+    of that same voice came back `409 accelerator_busy: cannot load
+    'zeroshot': 18.1 GiB of the 24.0 GiB card is in use by a process this
+    host's driver will not name`.
+
+    The 18.1 GiB was Crucible's OWN narrator, serving `zeroshot`. The door had
+    recognised the voice as resident — otherwise `_require_renderable` would
+    have refused `voice_kind_unsupported` one line earlier — and then ran the
+    LOAD guard anyway over a load it was never going to perform. On
+    mlx-darwin the identical sequence rendered, because nothing there is
+    unattributed.
+
+    A clips voice because that is what was measured; the rule is about
+    residency and not about the kind."""
+    fake_weights("zeroshot")
+    run_job(
+        tts_client, auth, type="load-voice", model="zeroshot",
+        params={"reference": {"data": wav_base64(4.0), "transcript": "Rain."}},
+    )
+    looks = wsl2_card_holding_our_own_engine(monkeypatch)
+
+    response = submit(
+        tts_client, auth, type="tts", model="zeroshot",
+        params={"language": "en", "take": 0, "chunks": CHUNKS},
+    )
+    assert response.status_code == 202, response.json()
+    with tts_client.stream(
+        "GET", f"/v1/jobs/{response.json()['job_id']}/events", headers=auth
+    ) as stream:
+        events = parse_sse(line for line in stream.iter_lines())
+    assert terminal(events)["data"]["rendered"] == len(CHUNKS)
+    # Not merely "it was not refused": the door never looked at the card at
+    # all, in the preflight or in the lane. A guard that still ran and happened
+    # to pass would be the same bug waiting on a bigger voice.
+    assert looks == []
+
+
+def test_a_render_of_a_voice_that_is_not_resident_still_asks(
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+) -> None:
+    """The other half of the same rule, so the fix above cannot read as "the
+    render door stopped guarding". Nothing is resident, the card reads exactly
+    as it did in the incident, and the render — which would have to LOAD — is
+    refused by name."""
+    fake_weights(VOICE)
+    wsl2_card_holding_our_own_engine(monkeypatch)
+
+    response = submit(
+        tts_client, auth, type="tts", model=VOICE,
+        params={"language": "en", "take": 0, "chunks": CHUNKS},
+    )
+    assert response.status_code == 409, response.json()
+    assert response.json()["error"]["code"] == "accelerator_busy"
 
 
 # ---------------------------------------------------------------- refusals

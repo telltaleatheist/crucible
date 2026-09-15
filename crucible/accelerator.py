@@ -58,6 +58,27 @@ compute app in the list accounts for, beyond `desktop_allowance_bytes` (the host
 desktop's own graphics memory, a declared host fact in config.toml, not a fudge
 factor), is refused as `accelerator_busy` naming the amount. On a headless Linux
 box the allowance is 0 and the sum is exact.
+
+The child of our child is still ours
+------------------------------------
+`owned_pids` is what the residency holds handles for, which is ONE pid per
+resident thing: the process Crucible itself spawned. narrator is not one
+process. Its launcher starts a serving child of its own and says so in
+`~/.crucible/logs/engine-<voice>.log` — *"server pid 3053 (group 3053, owner
+3022)"* — and the child is what holds the card. On a cuda-linux host whose
+driver DOES name compute apps (a native Linux box, where this list is not
+blind), that child appears in the list as a pid nobody owns, holding 18 GiB,
+and the guard refuses Crucible's own engine as somebody else's job.
+
+So on cuda-linux the owned set is expanded through `/proc` before it is used:
+every process whose session leader, or whose process-group leader, is a pid
+Crucible owns. **Leaders only, deliberately.** Both spawners —
+`engines/base.py` and `workers.py` — use `start_new_session=True`, so the pid
+Crucible holds IS the leader of its own session and group and every descendant
+inherits that session however it re-groups itself. Expanding through a pid that
+leads nothing would instead sweep in its siblings — the trainer Owen started
+from the same login shell — and call them ours, which is the one mistake this
+module exists to prevent.
 """
 
 from __future__ import annotations
@@ -65,6 +86,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .backend import (
@@ -203,6 +225,64 @@ def probe_compute_apps() -> list[ComputeApp]:
             used = None
         apps.append(ComputeApp(pid=pid, name=name, used_bytes=used))
     return apps
+
+
+def probe_process_table() -> dict[int, tuple[int, int]]:
+    """`{pid: (process group id, session id)}` for every process `/proc` shows.
+
+    A probe like the others, and module-level for the same reason: a test says
+    what the process tree looks like instead of forking one.
+
+    Fields 5 and 6 of `/proc/<pid>/stat`, counted from after the last `)` — the
+    comm field is parenthesised and may itself contain spaces and parentheses,
+    so it is found from the RIGHT and never by splitting the line. A process
+    that exits between the listing and the read is skipped rather than raising:
+    it is not on the card either.
+
+    Empty where there is no `/proc`. That is not a silent fallback — the caller
+    uses this only to ADD pids to the owned set, so an empty table leaves the
+    set exactly as the residency stated it, which is the behaviour every
+    non-Linux backend has always had.
+    """
+    table: dict[int, tuple[int, int]] = {}
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return table
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue  # it exited while we were reading the directory
+        try:
+            fields = stat[stat.rindex(")") + 2 :].split()
+            # fields[0] state, [1] ppid, [2] pgrp, [3] session
+            table[int(entry.name)] = (int(fields[2]), int(fields[3]))
+        except (ValueError, IndexError):
+            raise ProbeError(f"could not parse {entry / 'stat'}: {stat!r}") from None
+    return table
+
+
+def expand_owned_pids(
+    owned_pids: frozenset[int], table: dict[int, tuple[int, int]]
+) -> frozenset[int]:
+    """`owned_pids` plus every process under a session or group one of them LEADS.
+
+    See this module's "the child of our child is still ours". Leadership is the
+    whole of the rule: a pid is expanded through only where it is the leader of
+    that session or that group, so a Crucible spawned without its own session
+    claims nothing it did not start.
+    """
+    sessions = {pid for pid in owned_pids if table.get(pid, (0, 0))[1] == pid}
+    groups = {pid for pid in owned_pids if table.get(pid, (0, 0))[0] == pid}
+    if not sessions and not groups:
+        return owned_pids
+    return owned_pids | {
+        pid
+        for pid, (group, session) in table.items()
+        if session in sessions or group in groups
+    }
 
 
 def probe_vram() -> tuple[int, int]:
@@ -462,6 +542,28 @@ def guard(
             "accelerator_unreadable",
             f"cannot load {model_id!r}: {exc}",
         ) from None
+
+    if backend_kind == CUDA_LINUX and any(
+        app.pid not in owned_pids for app in state.compute_apps
+    ):
+        # THE CHILD OF OUR CHILD IS STILL OURS (this module's docstring). The
+        # residency holds one pid per resident thing — narrator's launcher —
+        # and the process actually on the card is the serving child it starts
+        # in a group of its own. Only reached when some listed app is not
+        # already accounted for, which under WSL2 (an empty list) is never, so
+        # the common path reads no `/proc` at all.
+        try:
+            owned_pids = expand_owned_pids(owned_pids, probe_process_table())
+        except ProbeError as exc:
+            # A `/proc` that will not parse is the same class of failure as a
+            # driver that will not answer, and it lands in the same refusal: a
+            # guard that cannot tell our processes from somebody else's must
+            # not proceed as if every one of them were foreign.
+            raise ApiError(
+                409,
+                "accelerator_unreadable",
+                f"cannot load {model_id!r}: {exc}",
+            ) from None
 
     not_ours = [app for app in state.compute_apps if app.pid not in owned_pids]
 

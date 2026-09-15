@@ -15,6 +15,11 @@ front of the lane, it loads the right one and emits `warming` exactly as
 `load-voice` does. (The streaming door, being a connection rather than a job,
 goes back to behaving like chat.)
 
+**And the accelerator guard belongs to that load and to nothing else.** A
+render of the voice that is already on the card loads nothing, so neither
+`preflight` nor `_make_resident` asks the card whether there is room for it;
+asking would refuse the resident voice on the strength of its own VRAM.
+
 **The model judges, this server forwards, the client orders.** `chunk {index,
 seconds, chars, chars_per_sec, tokens, capped, take, guard}`. The first seven are
 Crucible's own measurements of the bytes that arrived — it still measures, and it
@@ -615,10 +620,31 @@ class TtsJobType:
         # the lane instead of being refused here (PHASE3-TTS.md section 7).
         self._residency.refuse_if_claimed("a tts render")
         _require_ffmpeg()
+        resident = self._residency.is_resident(KIND_TTS, model)
         _, spec, _ = _require_renderable(
-            self._config, self._backend, model, checked,
-            self._residency.is_resident(KIND_TTS, model),
+            self._config, self._backend, model, checked, resident
         )
+        if resident:
+            # A RENDER ON THE VOICE THAT IS ALREADY ON THE CARD LOADS NOTHING,
+            # so there is nothing for the LOAD guard to guard. `_make_resident`
+            # has always known this — it returns the resident engine before it
+            # reaches the guard — and this door had not caught up, so the
+            # cheapest render there is was the one refused.
+            #
+            # It was not theoretical. Measured on the PC, 2026-09-15 07:30:
+            # `load-voice zeroshot` succeeded, `/v1/activity` reported it
+            # resident, and the render of that same voice came back
+            # `409 accelerator_busy: cannot load 'zeroshot': 18.1 GiB of the
+            # 24.0 GiB card is in use by a process this host's driver will not
+            # name`. The 18.1 GiB was narrator SERVING `zeroshot` — the guard
+            # asked whether there was room to load a voice that was already
+            # loaded, `reclaimable_bytes(excluding=model)` is 0 for exactly
+            # that voice (unloading it frees nothing you are about to need),
+            # and under WSL2 our own engine is unattributed. The same sequence
+            # rendered on mlx-darwin, where nothing is unattributed. A cap the
+            # card cannot hold is still refused — by `_make_resident`, on the
+            # load it would actually perform.
+            return
         accelerator.guard(
             self._config.backend_kind,
             model_id=model,
