@@ -67,8 +67,8 @@ def _toks(s: str) -> list[str]:
     return [t for t in (_norm(w) for w in s.split()) if t]
 
 
-def load_original():
-    """Lift `coarse_align` out of the script without importing it.
+def load_original(name: str = "coarse_align"):
+    """Lift one function out of the script without importing it.
 
     The script imports faster-whisper, torch and friends at module scope and is
     written to be run, not imported. Extracting the one function by AST keeps
@@ -80,12 +80,12 @@ def load_original():
         (
             node
             for node in tree.body
-            if isinstance(node, ast.FunctionDef) and node.name == "coarse_align"
+            if isinstance(node, ast.FunctionDef) and node.name == name
         ),
         None,
     )
     assert fn is not None, (
-        f"{ORIGINAL} no longer defines coarse_align. Either it was renamed — in "
+        f"{ORIGINAL} no longer defines {name}. Either it was renamed — in "
         "which case this suite must follow it — or the aligner was restructured "
         "and the port needs re-reading against whatever replaced it."
     )
@@ -97,7 +97,7 @@ def load_original():
     }
     module = ast.Module(body=[fn], type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(ORIGINAL), "exec"), namespace)
-    return namespace["coarse_align"]
+    return namespace[name]
 
 
 def stream(text: str, step: float = 0.5) -> list[tuple[str, float]]:
@@ -171,5 +171,59 @@ def test_the_port_returns_exactly_what_the_original_returns() -> None:
 
     assert not divergences, (
         "the port and the original no longer agree:\n  "
+        + "\n  ".join(divergences[:10])
+    )
+
+
+def test_snap_boundaries_matches_the_original_too() -> None:
+    """The `write` stage's seam placement, held to the same standard.
+
+    Randomised seams and silences rather than chosen ones: the conservative
+    rules (clip to the window, bound by neighbours, nearest wins) interact, and
+    the combinations that break a port are not the ones anybody writes by hand.
+    """
+    original = load_original("snap_boundaries")
+    from crucible.jobs.alignlongform import cues as ported
+
+    rng = random.Random(11)
+    divergences: list[str] = []
+    for case in range(200):
+        n = rng.randint(2, 8)
+        starts = [0.0]
+        ends: list[float] = []
+        t = 0.0
+        for _ in range(n):
+            t += rng.uniform(1.0, 6.0)
+            ends.append(round(t, 3))
+            starts.append(round(t, 3))
+        starts = starts[:n]
+        # Silences scattered near and far from the seams.
+        silences = []
+        for e in ends[:-1]:
+            if rng.random() < 0.7:
+                a = round(e + rng.uniform(-1.5, 1.0), 3)
+                silences.append((a, round(a + rng.uniform(0.05, 3.0), 3)))
+        silences.sort()
+        window = rng.choice([0.25, 0.5, 1.0, 2.0])
+
+        o_starts, o_ends, o_stats = original(
+            list(starts), list(ends), list(silences), window
+        )
+        p_starts, p_ends, p_stats = ported.snap_boundaries(
+            list(starts), list(ends), list(silences), window
+        )
+        if [round(x, 9) for x in o_starts] != [round(x, 9) for x in p_starts]:
+            divergences.append(f"case {case}: starts differ")
+        if [round(x, 9) for x in o_ends] != [round(x, 9) for x in p_ends]:
+            divergences.append(f"case {case}: ends differ")
+        if o_stats["snapped"] != p_stats.snapped:
+            divergences.append(
+                f"case {case}: snapped {o_stats['snapped']} vs {p_stats.snapped}"
+            )
+        if o_stats["considered"] != p_stats.considered:
+            divergences.append(f"case {case}: considered differs")
+
+    assert not divergences, (
+        "snap_boundaries no longer matches the original:\n  "
         + "\n  ".join(divergences[:10])
     )
