@@ -28,6 +28,7 @@ from crucible import accelerator, jobenv, residency as residency_module, weights
 from crucible.accelerator import GIB, ComputeApp
 from crucible.jobs import ALL_JOB_TYPES
 from crucible.residency import KIND_LLM, KIND_TTS, ResidentVoice
+from crucible.settle import SETTLEMENT_HOLDER
 from crucible.voices import NARRATOR_ENGINE_SAMPLING, load_voice
 
 from .conftest import FAKE_BACKEND, a_clearance_to_hold, parse_sse, wav_base64
@@ -599,6 +600,9 @@ def test_unloading_the_voice_the_settlement_is_clearing_is_the_same_intent(
     )
     clearing.start()
     assert reached.wait(timeout=10), "the settlement never reached the engine"
+    # The state T6 arrived in, pinned: the card IS claimed, and by the holder
+    # whose name was in the 409. This is what makes the 202 below the fix.
+    assert residency.claimed_by == SETTLEMENT_HOLDER
 
     response = submit(tts_client, auth, type="unload-voice", model=VOICE)
     assert response.status_code == 202, response.json()

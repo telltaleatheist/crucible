@@ -26,6 +26,7 @@ from crucible import accelerator, jobenv
 from crucible.accelerator import GIB, ComputeApp
 from crucible import residency as residency_module
 from crucible.manifests import load_manifest
+from crucible.settle import SETTLEMENT_HOLDER
 
 from .conftest import (
     FAKE_BACKEND,
@@ -980,6 +981,9 @@ def test_unloading_what_the_settlement_is_clearing_is_the_same_intent(
     )
     clearing.start()
     assert reached.wait(timeout=10), "the settlement never reached the engine"
+    # The state T6 arrived in, pinned: the card IS claimed, and by the holder
+    # whose name was in the 409. This is what makes the 202 below the fix.
+    assert llm_client.app.state.residency.claimed_by == SETTLEMENT_HOLDER
 
     # THE MOMENT T6 FAILED IN. Admitted, not refused.
     response = submit(llm_client, auth, type="unload-model", model=MODEL)
