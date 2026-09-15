@@ -8,10 +8,19 @@ vLLM. So this loads the model, sends ONE chunk of the kind BookForge's
 cleanup pass sends, and prints the figure.
 
 **IT OWNS THE RESIDENCY.** Crucible never loads a model to answer a chat
-request, so this loads one by name; and it unloads it at the end, in a
-`finally`, so the card is free for the stage after this one. Found by the
-first Windows run, 2026-09-14: a script that loads and never unloads leaves a
-`llama-server` holding the card for as long as the server lives.
+request, so this loads one by name; and it unloads it at the end, so the card
+is free for the stage after this one. Found by the first Windows run,
+2026-09-14: a script that loads and never unloads leaves a `llama-server`
+holding the card for as long as the server lives.
+
+**THE CHUNK IS RECORDED BEFORE THE UNLOAD IS ATTEMPTED**, the same split
+`scripts/read_one_page.py` carries and for the same reason (T6, 2026-09-15):
+the unload used to run in a `finally`, so its refusal got to speak before the
+answer it was tidying up after had been written, and a measured chunk was lost
+to a failed tidy-up. A measurement is written and printed the moment it
+exists; the unload afterwards can only add a line. And `model_not_resident`
+from that unload is not a failure at all — the card is clear of the model,
+which is exactly what the unload asked for.
 
 `thinking: false` travels in `chat_template_kwargs`, which is what BookForge's
 crucible provider sends on every cleanup request and what
@@ -51,6 +60,41 @@ PROMPT = (
 )
 
 
+#: The unload refusal that is NOT a failure: the card is already clear of the
+#: model, which is the whole of what the unload asked for. Every other code is
+#: a real failure of the tidy-up. See `scripts/read_one_page.py`, same ruling.
+ALREADY_CLEAR = "model_not_resident"
+
+
+def error_code(detail: str) -> str | None:
+    """The `error.code` in a Crucible refusal or a failed job, if it has one.
+
+    Read as a FIELD and never matched as a substring of a message: the caller
+    branches on this, and a branch taken on the server's prose breaks the next
+    time somebody improves a sentence.
+    """
+    try:
+        payload = json.loads(detail)
+    except json.JSONDecodeError:
+        return None
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    return code if isinstance(code, str) else None
+
+
+class Refused(Exception):
+    """A Crucible door or job said no, carrying the code it said it by."""
+
+    def __init__(self, what: str, detail: str, *, status: int | None = None) -> None:
+        self.detail = detail
+        self.status = status
+        self.code = error_code(detail)
+        where = "" if status is None else f"HTTP {status} "
+        super().__init__(f"{what}: {where}{detail[:600]}")
+
+
 def post(url: str, token: str, body: dict, timeout: float) -> dict:
     request = urllib.request.Request(
         url,
@@ -66,10 +110,11 @@ def post(url: str, token: str, body: dict, timeout: float) -> dict:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise SystemExit(
-            f"{url} refused: HTTP {exc.code} "
-            f"{exc.read().decode('utf-8', 'replace')[:600]}"
-        )
+        raise Refused(
+            f"{url} refused",
+            exc.read().decode("utf-8", "replace"),
+            status=exc.code,
+        ) from None
     except (urllib.error.URLError, OSError) as exc:
         raise SystemExit(f"{url} did not answer: {type(exc).__name__}: {exc}")
 
@@ -91,9 +136,9 @@ def run_job(base: str, token: str, request: dict, timeout: float) -> dict:
             break
         time.sleep(2.0)
     if status["status"] != "done":
-        raise SystemExit(
-            f"{request['type']} {request.get('model', '')} "
-            f"{status['status']}: {json.dumps(status)[:600]}"
+        raise Refused(
+            f"{request['type']} {request.get('model', '')} {status['status']}",
+            json.dumps(status),
         )
     return status
 
@@ -112,48 +157,76 @@ def main() -> int:
     base = args.server.rstrip("/")
 
     started = time.monotonic()
-    run_job(base, args.token, {"type": "load-model", "model": args.model}, args.timeout)
+    try:
+        run_job(
+            base, args.token, {"type": "load-model", "model": args.model}, args.timeout
+        )
+    except Refused as exc:
+        # Nothing measured, nothing on the card: the ordinary "could not even
+        # start" exit, not a result to record.
+        raise SystemExit(str(exc)) from None
     load_seconds = time.monotonic() - started
 
-    cleaning: BaseException | None = None
+    # THE CHUNK, AND EVERY FIGURE IT PRODUCES, BEFORE THE CARD IS TIDIED UP.
+    # See the module docstring: a `finally` here spoke before the answer it was
+    # tidying up after had been written down.
+    cleaning: SystemExit | Refused | None = None
     try:
-        started = time.monotonic()
-        answer = post(
-            f"{base}/v1/openai/chat/completions",
+        clean_one_chunk(base, args.token, args.model, out, load_seconds, args.timeout)
+    except (SystemExit, Refused) as exc:
+        cleaning = exc
+        print(f"THE CLEANUP FAILED: {exc}", file=sys.stderr)
+
+    # THE CARD IS RELEASED WHATEVER HAPPENED: a llama-server still holding the
+    # card is a test run that broke the next stage.
+    tidying: Exception | None = None
+    print(f"unload-model {args.model}")
+    try:
+        run_job(
+            base,
             args.token,
-            {
-                "model": args.model,
-                "temperature": 0,
-                "max_tokens": 512,
-                # See the module docstring: without this the budget goes
-                # entirely on reasoning and the message comes back with no
-                # content.
-                "chat_template_kwargs": {"enable_thinking": False},
-                "messages": [
-                    {"role": "system", "content": PROMPT},
-                    {"role": "user", "content": CHUNK},
-                ],
-            },
+            {"type": "unload-model", "model": args.model},
             args.timeout,
         )
-        seconds = time.monotonic() - started
-    except BaseException as exc:
-        cleaning = exc
-        raise
-    finally:
-        # THE CARD IS RELEASED WHATEVER HAPPENED, and a failed unload never
-        # overwrites the failure already on its way out.
-        try:
-            run_job(
-                base,
-                args.token,
-                {"type": "unload-model", "model": args.model},
-                args.timeout,
-            )
-        except SystemExit as exc:
-            if cleaning is None:
-                raise
-            print(f"AND THE UNLOAD FAILED TOO: {exc}", file=sys.stderr)
+        print("  unloaded")
+    except Refused as exc:
+        if exc.code == ALREADY_CLEAR:
+            print(f"  the card was already clear of {args.model}")
+        else:
+            tidying = exc
+            print(f"THE UNLOAD FAILED: {exc}", file=sys.stderr)
+    except SystemExit as exc:
+        tidying = RuntimeError(str(exc))
+        print(f"THE UNLOAD FAILED: {exc}", file=sys.stderr)
+
+    if cleaning is not None:
+        return 1
+    return 1 if tidying is not None else 0
+
+
+def clean_one_chunk(
+    base: str, token: str, model: str, out: Path, load_seconds: float, timeout: float
+) -> None:
+    """Send the chunk and RECORD it — the artifact and the figures, in one go."""
+    started = time.monotonic()
+    answer = post(
+        f"{base}/v1/openai/chat/completions",
+        token,
+        {
+            "model": model,
+            "temperature": 0,
+            "max_tokens": 512,
+            # See the module docstring: without this the budget goes entirely
+            # on reasoning and the message comes back with no content.
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [
+                {"role": "system", "content": PROMPT},
+                {"role": "user", "content": CHUNK},
+            ],
+        },
+        timeout,
+    )
+    seconds = time.monotonic() - started
     (out / "cleanup.json").write_text(json.dumps(answer, indent=2), encoding="utf-8")
 
     content = answer["choices"][0]["message"].get("content") or ""
@@ -165,12 +238,11 @@ def main() -> int:
         )
     joined = "situation" in content and "situa-" not in content
     print(f"server:          {base}")
-    print(f"model:           {args.model}")
+    print(f"model:           {model}")
     print(f"seconds to load: {load_seconds:.1f}")
     print(f"seconds/chunk:   {seconds:.1f}")
     print(f"joined the broken word: {joined}")
     print(f"artifacts:       {out}")
-    return 0
 
 
 if __name__ == "__main__":

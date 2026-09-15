@@ -25,8 +25,22 @@ Crucible never loads a model to answer a chat request — it refuses
 read submits the `load-model` job itself, waits for its `done`, asks, and
 submits `unload-model` so the card is released. T6 pointed at the WSL server
 without `--load` and got that refusal; the server was right and this script
-was wrong. The unload runs in a `finally`, because a llama-server still
-holding 6 GB after a failed read is what breaks the NEXT stage.
+was wrong. The unload always runs, because a llama-server still holding 6 GB
+after a failed read is what breaks the NEXT stage.
+
+**THE READ IS RECORDED BEFORE THE UNLOAD IS ATTEMPTED** (the second T6 run,
+2026-09-15). It was not, and the consequence was the whole stage: the page WAS
+read, `unload-model` came back `409 engine_in_use` because the server's own
+settlement had already begun clearing the card, the `finally` raised, and that
+refusal was the only thing the report carried — no `answer.json`, no
+seconds/page, no block count, for a page that had been read successfully. The
+server's half of that is fixed (`crucible/settle.py`: a clearance of the same
+model is the same intent, not a conflict); this script's half is that a
+measurement is written and printed the moment it exists, and the tidy-up
+afterwards can only ADD a line. The exit code follows the same split: a failed
+READ is a failure, and so is an unload that failed for any reason other than
+the card already being clear of the model — which is not a failure at all, it
+is the thing the unload asked for.
 
 RASTERISING IS THE APP'S WORK (3.10: *"rasterising, parsing, EPUB assembly
 stay in the app"*), so a PNG is taken as it is and a PDF needs `pypdfium2` —
@@ -54,6 +68,41 @@ from crucible import pages  # noqa: E402
 #: number for "could not even try", so a caller can tell a SKIP from a FAIL
 #: without parsing a sentence.
 EXIT_CANNOT_TRY = 2
+
+#: The unload refusal that is NOT a failure. `unload-model` for a model that is
+#: not resident means the card is already clear of it, which is the whole of
+#: what the unload was asking for — so it is reported and the run carries on.
+#: Every other code is a real failure of the tidy-up.
+ALREADY_CLEAR = "model_not_resident"
+
+
+def error_code(detail: str) -> str | None:
+    """The `error.code` in a Crucible refusal or a failed job, if it has one.
+
+    Read as a FIELD and never matched as a substring of a message: the caller
+    branches on this, and a branch taken on the server's prose is a branch that
+    breaks the next time somebody improves a sentence.
+    """
+    try:
+        payload = json.loads(detail)
+    except json.JSONDecodeError:
+        return None
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    return code if isinstance(code, str) else None
+
+
+class Refused(Exception):
+    """A Crucible door or job said no, carrying the code it said it by."""
+
+    def __init__(self, what: str, detail: str, *, status: int | None = None) -> None:
+        self.detail = detail
+        self.status = status
+        self.code = error_code(detail)
+        where = "" if status is None else f"HTTP {status} "
+        super().__init__(f"{what}: {where}{detail[:600]}")
 
 
 def rasterise(path: Path) -> bytes:
@@ -103,9 +152,11 @@ def post(url: str, token: str, body: dict, timeout: float) -> dict:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise SystemExit(
-            f"{url} refused: HTTP {exc.code} {exc.read().decode('utf-8', 'replace')[:600]}"
-        )
+        raise Refused(
+            f"{url} refused",
+            exc.read().decode("utf-8", "replace"),
+            status=exc.code,
+        ) from None
     except (urllib.error.URLError, OSError) as exc:
         raise SystemExit(f"{url} did not answer: {type(exc).__name__}: {exc}")
 
@@ -131,9 +182,9 @@ def run_job(base: str, token: str, request: dict, timeout: float) -> dict:
             break
         time.sleep(2.0)
     if status["status"] != "done":
-        raise SystemExit(
-            f"{request['type']} {request.get('model', '')} "
-            f"{status['status']}: {json.dumps(status)[:600]}"
+        raise Refused(
+            f"{request['type']} {request.get('model', '')} {status['status']}",
+            json.dumps(status),
         )
     return status
 
@@ -207,47 +258,79 @@ def main() -> int:
     if args.load:
         started = time.monotonic()
         print(f"load-model {pages.MODEL_ID}")
-        run_job(
-            base,
-            args.token,
-            {"type": "load-model", "model": pages.MODEL_ID},
-            args.timeout,
-        )
+        try:
+            run_job(
+                base,
+                args.token,
+                {"type": "load-model", "model": pages.MODEL_ID},
+                args.timeout,
+            )
+        except Refused as exc:
+            # Nothing has been measured and nothing is on the card: this is the
+            # ordinary "could not even start" exit, not a result to record.
+            raise SystemExit(str(exc)) from None
         print(f"  loaded in {time.monotonic() - started:.1f}s")
 
-    reading: BaseException | None = None
+    # THE READ, AND EVERYTHING IT PRODUCES, BEFORE THE CARD IS TIDIED UP. Not a
+    # `finally` around the read: a `finally` runs before the block's own value
+    # is used, so the unload got to speak first and its refusal replaced a page
+    # that had been read. The measurement is written and printed HERE; the
+    # unload below can only add a line to it.
+    reading: SystemExit | Refused | None = None
     try:
-        body = pages.request_body(pages.data_uri(png))
-        started = time.monotonic()
-        answer = post(
-            f"{base}/v1/openai/chat/completions", args.token, body, args.timeout
-        )
-        seconds = time.monotonic() - started
-    except BaseException as exc:
+        read_the_page(base, args.token, png, out, args.timeout)
+    except (SystemExit, Refused) as exc:
         reading = exc
-        raise
-    finally:
-        if args.load:
-            # THE CARD IS RELEASED WHATEVER HAPPENED. A page that came back
-            # truncated, or in the wrong dialect, is a result to record; a
-            # llama-server still holding 6 GB afterwards is a test run that
-            # broke the next stage.
-            print(f"unload-model {pages.MODEL_ID}")
-            try:
-                run_job(
-                    base,
-                    args.token,
-                    {"type": "unload-model", "model": pages.MODEL_ID},
-                    args.timeout,
-                )
-            except SystemExit as exc:
-                # A failed unload must not OVERWRITE the failure that is
-                # already on its way out — the reason the page could not be
-                # read is the one a person needs. Both are said; the first one
-                # is the one that exits.
-                if reading is None:
-                    raise
-                print(f"AND THE UNLOAD FAILED TOO: {exc}", file=sys.stderr)
+        print(f"THE READ FAILED: {exc}", file=sys.stderr)
+
+    tidying: Refused | None = None
+    if args.load:
+        # THE CARD IS RELEASED WHATEVER HAPPENED. A page that came back
+        # truncated, or in the wrong dialect, is a result to record; a
+        # llama-server still holding 6 GB afterwards is a test run that broke
+        # the next stage.
+        print(f"unload-model {pages.MODEL_ID}")
+        try:
+            run_job(
+                base,
+                args.token,
+                {"type": "unload-model", "model": pages.MODEL_ID},
+                args.timeout,
+            )
+            print("  unloaded")
+        except Refused as exc:
+            if exc.code == ALREADY_CLEAR:
+                # NOT A FAILURE. The card is clear of the model, which is what
+                # this asked for — the server's settlement having got there
+                # first is the server doing its job.
+                print(f"  the card was already clear of {pages.MODEL_ID}")
+            else:
+                tidying = exc
+                print(f"THE UNLOAD FAILED: {exc}", file=sys.stderr)
+        except SystemExit as exc:
+            # The server stopped answering. A real failure of the tidy-up, and
+            # still not a reason to lose the page that was already recorded.
+            tidying = Refused("unload-model", str(exc))
+            print(f"THE UNLOAD FAILED: {exc}", file=sys.stderr)
+
+    if reading is not None:
+        return 1
+    return 1 if tidying is not None else 0
+
+
+def read_the_page(
+    base: str, token: str, png: bytes, out: Path, timeout: float
+) -> None:
+    """Read the page and RECORD it — the artifacts and the figures, in one go.
+
+    Every measurement this stage exists for is written to disk and printed from
+    inside here, so that by the time it returns there is nothing left for a
+    later failure to lose.
+    """
+    body = pages.request_body(pages.data_uri(png))
+    started = time.monotonic()
+    answer = post(f"{base}/v1/openai/chat/completions", token, body, timeout)
+    seconds = time.monotonic() - started
     (out / "answer.json").write_text(json.dumps(answer, indent=2), encoding="utf-8")
 
     choice = answer["choices"][0]
@@ -268,7 +351,6 @@ def main() -> int:
     print(f"categories:    {categories}")
     print(f"dialect:       {pages.DIALECT} — parsed")
     print(f"artifacts:     {out}")
-    return 0
 
 
 if __name__ == "__main__":
