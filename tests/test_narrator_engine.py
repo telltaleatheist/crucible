@@ -34,13 +34,16 @@ from crucible.engines.narrator import (
     ENGINE_VARIABLE,
     ENV_PREFIX_VARIABLE,
     MAX_NUM_SEQS_VARIABLE,
+    HIGGS_V3_MLX_WEIGHTS_GB,
     MLX_BATCH_VARIABLE,
-    MLX_RENDER_WIDTH,
+    MLX_CACHE_LIMIT_VARIABLE,
+    MLX_MEM_BUDGET_VARIABLE,
+    MLX_TIERS,
     MODULE,
     STACK_VARIABLE,
     EngineWouldNotStop,
     higgs_env_prefix,
-    mlx_render_width_for,
+    mlx_render_profile,
 )
 from crucible.engines.vllm import VllmEngine
 from crucible.errors import JobCancelled
@@ -68,6 +71,15 @@ BATCH_TERMINAL = frozenset({"batch_done"})
 #: Deleting them instead would mean the second engine's first render finds out
 #: at the spawn what a constructor could have said.
 A_FUTURE_ENGINE = "an-engine-with-no-document"
+
+#: owens-mac-studio's unified memory, which is what the in-process arm's tier is
+#: chosen by. Stated rather than probed: this suite runs on Windows and Linux
+#: too, and a test whose answer depends on the machine it runs on cannot assert
+#: a row of a measured table.
+A_64_GIB_MAC = 64 * 1024 * 1024 * 1024
+#: A Mac under the `moderate` band's 28,000 MiB floor — the row BookForge's
+#: table calls `light`.
+A_16_GIB_MAC = 16 * 1024 * 1024 * 1024
 
 
 def a_document(
@@ -121,6 +133,7 @@ def engine(tmp_path: Path, weights: Path) -> Iterator[FakeNarratorEngine]:
         # The document IS read, by the fake exactly as by narrator: a load
         # names a voice in it or is refused.
         voices=a_document(tmp_path, weights),
+        mlx_total_bytes=A_64_GIB_MAC,
     )
     yield built
     try:
@@ -147,6 +160,7 @@ def test_the_argv_is_narrator_serve_and_nothing_else() -> None:
         serving_stack=None,
         max_num_seqs=None,
         voices=None,
+        mlx_total_bytes=None,
     )
     assert built.command(Path("/weights"), "owen", 7100, []) == [
         "/opt/env/bin/python",
@@ -188,6 +202,7 @@ def test_a_higgs_worker_is_told_the_stack_the_env_and_the_width(
         serving_stack="vllm-omni",
         max_num_seqs=16,
         voices=document,
+        mlx_total_bytes=None,
     )
     environment = built.environment()
     assert environment[ENGINE_VARIABLE] == "higgs-v3"
@@ -213,7 +228,7 @@ def test_a_higgs_worker_without_a_document_is_refused_by_name(
         with pytest.raises(EngineError) as caught:
             build_voice_engine(
                 "higgs-v3", python, tmp_path / "x.log",
-                serving_stack=stack, max_num_seqs=16, voices=None)
+                serving_stack=stack, max_num_seqs=16, voices=None, mlx_total_bytes=None)
         assert DOCUMENT_VARIABLE in str(caught.value)
         assert "narratorvoices" in str(caught.value)
 
@@ -233,6 +248,7 @@ def test_a_document_for_an_engine_that_reads_none_is_refused(tmp_path: Path) -> 
             serving_stack=None,
             max_num_seqs=None,
             voices=a_document(tmp_path, tmp_path / "weights"),
+            mlx_total_bytes=None,
         )
     assert "takes its weights on the load message" in str(caught.value)
     assert "'higgs-v3'" in str(caught.value)
@@ -244,7 +260,8 @@ def test_the_width_is_a_string_because_an_environment_holds_strings(
     built = build_voice_engine(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
         serving_stack="vllm-omni", max_num_seqs=16,
-        voices=a_document(tmp_path, tmp_path / "weights"))
+        voices=a_document(tmp_path, tmp_path / "weights"),
+        mlx_total_bytes=None)
     for name, value in built.environment().items():
         assert isinstance(value, str), name
 
@@ -254,7 +271,8 @@ def test_a_higgs_worker_with_no_width_is_refused_by_name(tmp_path: Path) -> None
         build_voice_engine(
             "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
             serving_stack="vllm-omni", max_num_seqs=None,
-            voices=a_document(tmp_path, tmp_path / "weights"))
+            voices=a_document(tmp_path, tmp_path / "weights"),
+            mlx_total_bytes=None)
     assert MAX_NUM_SEQS_VARIABLE in str(caught.value)
     assert "[voice.serving]" in str(caught.value)
 
@@ -264,7 +282,8 @@ def test_a_width_below_one_is_refused(tmp_path: Path) -> None:
         build_voice_engine(
             "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
             serving_stack="vllm-omni", max_num_seqs=0,
-            voices=a_document(tmp_path, tmp_path / "weights"))
+            voices=a_document(tmp_path, tmp_path / "weights"),
+            mlx_total_bytes=None)
     assert "at least 1" in str(caught.value)
 
 
@@ -315,7 +334,8 @@ def test_the_prefix_is_the_env_the_stack_is_in_not_the_one_it_symlinks_to(
     built = build_voice_engine(
         "higgs-v3", python, tmp_path / "x.log",
         serving_stack="vllm-omni", max_num_seqs=16,
-        voices=a_document(tmp_path, tmp_path / "weights"))
+        voices=a_document(tmp_path, tmp_path / "weights"),
+        mlx_total_bytes=None)
     prefix = built.environment()[ENV_PREFIX_VARIABLE]
     assert prefix == str(venv)
     assert higgs_env_prefix(python) == venv
@@ -339,7 +359,8 @@ def test_a_conda_env_is_its_own_prefix(tmp_path: Path) -> None:
     built = build_voice_engine(
         "higgs-v3", python, tmp_path / "x.log",
         serving_stack="vllm-omni", max_num_seqs=16,
-        voices=a_document(tmp_path, tmp_path / "weights"))
+        voices=a_document(tmp_path, tmp_path / "weights"),
+        mlx_total_bytes=None)
     assert built.environment()[ENV_PREFIX_VARIABLE] == str(conda)
     assert higgs_env_prefix(python) == conda
 
@@ -356,7 +377,8 @@ def test_an_interpreter_that_is_not_in_a_venv_is_refused(tmp_path: Path) -> None
         build_voice_engine(
             "higgs-v3", stray, tmp_path / "x.log",
             serving_stack="vllm-omni", max_num_seqs=16,
-            voices=a_document(tmp_path, tmp_path / "weights"))
+            voices=a_document(tmp_path, tmp_path / "weights"),
+            mlx_total_bytes=None)
     assert ENV_PREFIX_VARIABLE in str(caught.value)
     assert "pyvenv.cfg" in str(caught.value)
     assert "conda-meta" in str(caught.value)
@@ -378,7 +400,8 @@ def test_an_arm_that_starts_no_server_is_told_none_of_the_three(
     document = a_document(tmp_path, tmp_path / "weights")
     built = build_voice_engine(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
-        serving_stack=None, max_num_seqs=16, voices=document)
+        serving_stack=None, max_num_seqs=16, voices=document,
+        mlx_total_bytes=A_64_GIB_MAC)
     environment = built.environment()
     assert environment[ENGINE_VARIABLE] == "higgs-v3"
     for name in (STACK_VARIABLE, ENV_PREFIX_VARIABLE, MAX_NUM_SEQS_VARIABLE):
@@ -399,13 +422,74 @@ def test_the_arm_that_starts_no_server_is_told_its_batch_width(
     document = a_document(tmp_path, tmp_path / "weights")
     built = build_voice_engine(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
-        serving_stack=None, max_num_seqs=16, voices=document)
+        serving_stack=None, max_num_seqs=16, voices=document,
+        mlx_total_bytes=A_64_GIB_MAC)
     environment = built.environment()
-    assert environment[MLX_BATCH_VARIABLE] == str(MLX_RENDER_WIDTH["higgs-v3"])
+    assert environment[MLX_BATCH_VARIABLE] == "64"
     # STATED, not derived from the manifest: `max_num_seqs=16` above is the
     # served arm's vLLM admission width and means nothing to a Metal backend,
     # so the two numbers must not be the same number by accident.
     assert environment[MLX_BATCH_VARIABLE] != str(16)
+
+
+def test_the_width_and_the_budget_come_from_one_row(tmp_path: Path) -> None:
+    """THE SECOND HALF OF THAT DEFECT. The first fix stated the width alone and
+    left the budget at narrator's own 42 GB default — the number BookForge's
+    `extreme` tier sends, which is right on a 64 GB Mac and a promise of swap on
+    a 16 GB one. The width is a CEILING narrator narrows against the budget
+    (`_mlx_width_for_depth`), so a width from this machine and a budget from
+    somebody else's is one fact with two owners (docs/ARCHITECTURE.md).
+
+    All three come off one `MlxTier`, and the third is the pinned buffer cache:
+    narrator's headroom is `budget - weights - cache`, so a budget taken from
+    the row while the cache keeps narrator's 8 GB default is two rows in one
+    sum."""
+    document = a_document(tmp_path, tmp_path / "weights")
+    environment = build_voice_engine(
+        "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
+        serving_stack=None, max_num_seqs=16, voices=document,
+        mlx_total_bytes=A_64_GIB_MAC).environment()
+    # BookForge's `extreme` row, which is what a 64 GB Mac resolves to and what
+    # every figure at `MLX_TIERS` was measured at.
+    assert environment[MLX_BATCH_VARIABLE] == "64"
+    assert environment[MLX_MEM_BUDGET_VARIABLE] == "42"
+    assert environment[MLX_CACHE_LIMIT_VARIABLE] == "8"
+
+
+def test_a_smaller_mac_gets_a_smaller_row(tmp_path: Path) -> None:
+    """THE WHOLE REASON THE TABLE IS A TABLE. A hardcoded 64 is the 64 GB
+    machine's answer given to every machine; the tier is chosen by BANDS of the
+    host's own memory, exactly as BookForge's `orpheusAutoSuggestion` chooses it
+    on darwin with no VRAM to read."""
+    document = a_document(tmp_path, tmp_path / "weights")
+    environment = build_voice_engine(
+        "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
+        serving_stack=None, max_num_seqs=16, voices=document,
+        mlx_total_bytes=A_16_GIB_MAC).environment()
+    # BookForge's `light` row. The cache limit is 3 and not narrator's default
+    # 8 for an arithmetic reason rather than a stylistic one: 13 - 8.5 - 8 is
+    # negative and narrator refuses that load by name.
+    assert environment[MLX_BATCH_VARIABLE] == "24"
+    assert environment[MLX_MEM_BUDGET_VARIABLE] == "13"
+    assert environment[MLX_CACHE_LIMIT_VARIABLE] == "3"
+
+
+def test_every_tier_can_hold_its_own_weights_and_cache() -> None:
+    """narrator's `_mlx_kv_headroom_gb` raises when `budget - weights - cache`
+    is not positive — after it has read 8.5 GB off disk. A row that cannot pass
+    that sum is a row nobody can render on, so it is caught here, on the table,
+    rather than on a Mac nobody has yet."""
+    for engine, rows in MLX_TIERS.items():
+        assert rows[-1].min_total_mib == 0, engine
+        for row in rows:
+            headroom = (
+                row.mem_budget_gb - HIGGS_V3_MLX_WEIGHTS_GB - row.cache_limit_gb
+            )
+            assert headroom > 0, f"{engine} {row.name}"
+        # Highest band first, so the walk in `mlx_render_profile` takes the
+        # best row a machine clears rather than the first one written down.
+        floors = [row.min_total_mib for row in rows]
+        assert floors == sorted(floors, reverse=True), engine
 
 
 def test_the_served_arm_is_not_told_the_mlx_width(tmp_path: Path) -> None:
@@ -417,10 +501,55 @@ def test_the_served_arm_is_not_told_the_mlx_width(tmp_path: Path) -> None:
     document = a_document(tmp_path, tmp_path / "weights")
     built = build_voice_engine(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
-        serving_stack="vllm-omni", max_num_seqs=16, voices=document)
+        serving_stack="vllm-omni", max_num_seqs=16, voices=document,
+        mlx_total_bytes=None)
     environment = built.environment()
-    assert MLX_BATCH_VARIABLE not in environment
+    for name in (
+        MLX_BATCH_VARIABLE, MLX_MEM_BUDGET_VARIABLE, MLX_CACHE_LIMIT_VARIABLE
+    ):
+        assert name not in environment, name
     assert environment[MAX_NUM_SEQS_VARIABLE] == "16"
+
+
+def test_the_served_arm_is_refused_a_memory_figure(tmp_path: Path) -> None:
+    """The mirror of `test_a_stack_on_an_engine_that_has_none_is_refused`: a
+    served narrator's memory is its launcher's two GPU fractions, so a unified
+    memory figure there is a second answer to "how much may this have" that
+    nothing reads."""
+    document = a_document(tmp_path, tmp_path / "weights")
+    with pytest.raises(EngineError) as caught:
+        build_voice_engine(
+            "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
+            serving_stack="vllm-omni", max_num_seqs=16, voices=document,
+            mlx_total_bytes=A_64_GIB_MAC)
+    assert "mlx_total_bytes" in str(caught.value)
+    assert "launcher's GPU fractions" in str(caught.value)
+
+
+def test_the_in_process_arm_without_a_memory_figure_is_refused_by_name(
+    tmp_path: Path,
+) -> None:
+    """No default, and 42 GB is not a safe one — it is a 64 GB machine's
+    number. A Mac whose memory Crucible could not read gets a refusal naming
+    the probe, not the Mac Studio's row."""
+    document = a_document(tmp_path, tmp_path / "weights")
+    with pytest.raises(EngineError) as caught:
+        build_voice_engine(
+            "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
+            serving_stack=None, max_num_seqs=16, voices=document,
+            mlx_total_bytes=None)
+    assert MLX_BATCH_VARIABLE in str(caught.value)
+    assert MLX_MEM_BUDGET_VARIABLE in str(caught.value)
+    assert "probe_unified_memory" in str(caught.value)
+
+
+def test_an_unreadable_memory_figure_is_refused_rather_than_banded() -> None:
+    """A zero or a float is not a small Mac; it is a probe that did not answer,
+    and banding it would put the `light` row on a machine nobody measured."""
+    for figure in (0, -1, 42.5, None):
+        with pytest.raises(EngineError) as caught:
+            mlx_render_profile("higgs-v3", figure)  # type: ignore[arg-type]
+        assert "probe_unified_memory" in str(caught.value)
 
 
 def test_an_engine_with_no_measured_mlx_width_is_refused_by_name() -> None:
@@ -429,7 +558,7 @@ def test_an_engine_with_no_measured_mlx_width_is_refused_by_name() -> None:
     answer that cost this server a measured 7x — so an unmeasured engine is
     refused rather than quietly rendered one chunk at a time."""
     with pytest.raises(EngineError) as caught:
-        mlx_render_width_for(A_FUTURE_ENGINE)
+        mlx_render_profile(A_FUTURE_ENGINE, A_64_GIB_MAC)
     assert A_FUTURE_ENGINE in str(caught.value)
     assert MLX_BATCH_VARIABLE in str(caught.value)
 
@@ -447,6 +576,7 @@ def test_an_engine_that_reads_no_higgs_vocabulary_is_told_no_mlx_width(
         serving_stack=None,
         max_num_seqs=None,
         voices=None,
+        mlx_total_bytes=None,
     )
     assert MLX_BATCH_VARIABLE not in built.environment()
 
@@ -463,14 +593,16 @@ def test_a_stack_on_an_engine_that_has_none_is_refused(tmp_path: Path) -> None:
             serving_stack="vllm-omni",
             max_num_seqs=16,
             voices=None,
+            mlx_total_bytes=None,
         )
     assert "serving_stack='vllm-omni'" in str(caught.value)
 
 
-def test_the_three_facts_have_no_defaults(tmp_path: Path) -> None:
+def test_the_four_facts_have_no_defaults(tmp_path: Path) -> None:
     """A default would make FORGETTING to pass one indistinguishable from
     saying `None`, which is exactly how a worker is spawned without
-    HIGGS_STACK — or, since 2026-09-14, without a voices document."""
+    HIGGS_STACK — or, since 2026-09-14, without a voices document, or, since
+    2026-09-15, with a batch width the machine's memory did not choose."""
     python = a_venv(tmp_path)
     with pytest.raises(TypeError):
         NarratorEngine(  # type: ignore[call-arg]
@@ -486,6 +618,15 @@ def test_the_three_facts_have_no_defaults(tmp_path: Path) -> None:
             serving_stack=None,
             max_num_seqs=None,
         )
+    with pytest.raises(TypeError):
+        NarratorEngine(  # type: ignore[call-arg]
+            narrator_engine="higgs-v3",
+            python=python,
+            log_path=tmp_path / "x.log",
+            serving_stack=None,
+            max_num_seqs=None,
+            voices=a_document(tmp_path, tmp_path / "weights"),
+        )
 
 
 def test_the_engine_id_is_in_the_name_so_a_refusal_says_which(
@@ -494,7 +635,8 @@ def test_the_engine_id_is_in_the_name_so_a_refusal_says_which(
     built = build_voice_engine(
         "higgs-v3", Path(sys.executable), Path("/tmp/x.log"),
         serving_stack=None, max_num_seqs=None,
-        voices=a_document(tmp_path, tmp_path / "weights"))
+        voices=a_document(tmp_path, tmp_path / "weights"),
+        mlx_total_bytes=A_64_GIB_MAC)
     assert built.name == "narrator (higgs-v3)"
     assert built.narrator_engine == "higgs-v3"
 
@@ -503,7 +645,7 @@ def test_an_engine_this_build_cannot_start_is_refused_by_name() -> None:
     with pytest.raises(EngineError) as caught:
         build_voice_engine(
             "higgs-v2", Path(sys.executable), Path("/tmp/x.log"),
-            serving_stack=None, max_num_seqs=None, voices=None)
+            serving_stack=None, max_num_seqs=None, voices=None, mlx_total_bytes=None)
     assert "unknown narrator engine 'higgs-v2'" in str(caught.value)
     assert "['higgs-v3']" in str(caught.value)
 
@@ -659,6 +801,7 @@ def test_a_load_with_no_document_carries_the_weights_on_the_message(
         serving_stack=None,
         max_num_seqs=None,
         voices=None,
+        mlx_total_bytes=None,
     )
     try:
         up(built, weights)
@@ -721,6 +864,7 @@ def test_the_fake_worker_refuses_a_model_dir_exactly_as_narrator_does(
         serving_stack=None,
         max_num_seqs=None,
         voices=a_document(tmp_path, weights),
+        mlx_total_bytes=A_64_GIB_MAC,
     )
     try:
         up(built, weights)
@@ -920,6 +1064,7 @@ def test_a_line_on_stdout_that_is_not_a_message_is_a_refusal_naming_it(
         serving_stack=None,
         max_num_seqs=None,
         voices=a_document(tmp_path, tmp_path / "weights"),
+        mlx_total_bytes=A_64_GIB_MAC,
     )
     try:
         built.start(weights, "deathstalker", 0, [])
@@ -1026,6 +1171,7 @@ def test_a_worker_that_will_not_go_is_reported_and_never_sigkilled(
         serving_stack=None,
         max_num_seqs=None,
         voices=a_document(tmp_path, tmp_path / "weights"),
+        mlx_total_bytes=A_64_GIB_MAC,
     )
     built.start(weights, "deathstalker", 0, [])
     built.ready(30.0)
@@ -1078,6 +1224,7 @@ def test_stopping_a_worker_that_ignores_sigterm_does_not_wedge_the_server(
         serving_stack=None,
         max_num_seqs=None,
         voices=a_document(tmp_path, tmp_path / "weights"),
+        mlx_total_bytes=A_64_GIB_MAC,
     )
     built.start(weights, "deathstalker", 0, [])
     built.ready(30.0)

@@ -107,7 +107,7 @@ ENGINE_VARIABLE = "NARRATOR_ENGINE"
 #:                       `[voice.serving]`.
 #:
 #: NARRATOR_HIGGS3_MLX_BATCH is the same question on the OTHER arm and it is
-#: below, at `MLX_RENDER_WIDTH`, not here: the three above are the served arm's
+#: below, at `MLX_TIERS`, not here: the three above are the served arm's
 #: and this one is `mlx-darwin`'s, where narrator starts no server and batches
 #: in process. It is not stated from the voice manifest — `max_num_seqs` is a
 #: vLLM stage-0 admission width measured on a 24 GB card and means nothing to a
@@ -172,45 +172,159 @@ HIGGS_V3 = "higgs-v3"
 #: budgeter to do its job rather than promising the memory.
 #:
 #: A TABLE KEYED BY ENGINE, like `ttsstream.STREAM_BATCH_WIDTH`, and for its
-#: reason: the width must be MEASURED and there is deliberately no default. A
+#: reason: the numbers must be MEASURED and there is deliberately no default. A
 #: second narrator engine on this arm adds a row after somebody measures it;
-#: until then `mlx_render_width_for` refuses it by name, because a guessed width
+#: until then `mlx_render_profile` refuses it by name, because a guessed width
 #: is wrong in both directions — too low renders a book one chunk at a time
 #: while every variable looks configured, too high asks for memory the machine
 #: does not have.
 #:
-#: OWED, and deliberately not guessed here: the MEMORY BUDGET. narrator's own
-#: default is 42 GB (`mlx_mem_budget_gb`), which is what these numbers were
-#: measured against on a 64 GB machine and what BookForge's `extreme` tier
-#: sends. On a smaller Mac 42 is too much and the width above would not narrow
-#: enough, so the budget wants deriving from the capability's own
-#: `total_bytes` less its desktop allowance — the same absorption
-#: PHASE9-CAPABILITY.md section 5 has BookForge's tier table queued for. Setting
-#: it here from a number nobody measured would be the guess this table exists
-#: to refuse.
+#: THE WIDTH IS NOT ONE NUMBER, AND 64 ALONE WAS HALF A DECISION. The first fix
+#: for the 7x (2026-09-15, `MLX_RENDER_WIDTH = {"higgs-v3": 64}`) copied the
+#: CONSTANT BookForge's 64 GB Mac happens to ask for and left the budget at
+#: narrator's own 42 GB default — right on that machine and wrong on any other,
+#: which is `docs/ARCHITECTURE.md`'s one-fact-two-owners exactly. BookForge
+#: never hardcoded 64: `electron/higgs-spawn.ts:higgsMlxBatchEnv` reads
+#: `orpheusMemoryProfile(resolveConcreteOrpheusTier(null, null))` and emits the
+#: WIDTH and the MEMORY BUDGET out of the same tier row, in the same breath,
+#: because narrator narrows a deep batch's width against that budget
+#: (`_mlx_width_for_depth`). So the row is ported here whole, and the tier is
+#: chosen the way BookForge's `orpheusAutoSuggestion` chooses it on darwin with
+#: no VRAM to read: by BANDS of the machine's own total memory.
+#:
+#: THE BANDS AND THE ROWS ARE BookForge'S, TRANSCRIBED (`electron/
+#: orpheus-memory.ts`, `MLX_TIERS` + the darwin branch of
+#: `orpheusAutoSuggestion`). They are measured on an M1 Ultra against real book
+#: sentences and nothing here re-derives them:
+#:
+#:     >= 60 GiB   extreme   width 64   budget 42 GB   cache 8 GB
+#:     >= 44 GiB   fast      width 72   budget 34 GB   cache 8 GB
+#:     >= 28 GiB   moderate  width 48   budget 22 GB   cache 6 GB
+#:      < 28 GiB   light     width 24   budget 13 GB   cache 3 GB
+#:
+#: `fast` IS WIDER THAN `extreme` AND THAT IS NOT A TYPO. BookForge's extreme
+#: row went 96 -> 64 on 2026-09-01 (Owen's call) because continuous batching
+#: keeps the KV cache at full depth permanently, so the 55 GB "worst case"
+#: became the steady state; the budget came down 55 -> 42 with it. `fast` was
+#: never re-measured and keeps its 72. Transcribing the table means transcribing
+#: that, not tidying it into a monotone.
+#:
+#: WHAT CRUCIBLE CANNOT LEARN, and does not pretend to. BookForge's tier is also
+#: a SETTING (Settings -> memory tier) and carries an `autoCeiling` that
+#: ratchets DOWN after an out-of-memory failure, persisted per machine in
+#: `orpheus-memory.json`. A Crucible server has neither, so this is the band
+#: alone — the same answer BookForge gives on a fresh install with the tier left
+#: on `auto`. An operator who needs a different one sets
+#: `NARRATOR_HIGGS3_MLX_BATCH` in the environment narrator inherits, which is
+#: the override BookForge honours too.
 MLX_BATCH_VARIABLE = "NARRATOR_HIGGS3_MLX_BATCH"
-MLX_RENDER_WIDTH = {HIGGS_V3: 64}
+MLX_MEM_BUDGET_VARIABLE = "NARRATOR_HIGGS3_MLX_MEM_BUDGET_GB"
+MLX_CACHE_LIMIT_VARIABLE = "HIGGS_MLX_CACHE_LIMIT_GB"
+
+#: The resident Higgs v3 weights on the MLX arm, as narrator's own backend
+#: counts them (`HiggsV3MlxEngine.MLX_WEIGHTS_GB`). Read here for ONE purpose —
+#: proving a row's budget can hold the weights and the pinned cache before a
+#: process exists — and never to size anything: the sizing is narrator's.
+HIGGS_V3_MLX_WEIGHTS_GB = 8.5
 
 
-def mlx_render_width_for(narrator_engine: str) -> int:
-    """`MLX_RENDER_WIDTH` for this engine, or a refusal naming it.
+@dataclass(frozen=True)
+class MlxTier:
+    """One row of the transcribed table: a memory band and what it buys.
 
-    No default, for `ttsstream.batch_width_for`'s reason written one arm over:
-    an engine nobody has measured a render width for is an engine whose
-    batching is unknown, and 1 is not a safe answer — it is the answer that
-    cost this server a 7x.
+    THE THREE NUMBERS TRAVEL TOGETHER. narrator's headroom arithmetic is
+    `budget - weights - cache` (`_mlx_kv_headroom_gb`), so a budget taken from
+    one row while the cache keeps narrator's default is two rows' worth of
+    memory in one sum — which is how a plausible pair produces a load that
+    refuses. They are one row here for the same reason the width and the budget
+    are one decision.
     """
-    width = MLX_RENDER_WIDTH.get(narrator_engine)
-    if width is None:
+
+    name: str
+    #: The band's floor, in MiB of total memory, compared the way BookForge
+    #: compares it (`os.totalmem()` rounded to MiB against 60_000 / 44_000 /
+    #: 28_000). The last row's floor is 0: it is what is left.
+    min_total_mib: int
+    #: `NARRATOR_HIGGS3_MLX_BATCH` — a CEILING to ask for, never an allocation.
+    #: narrator narrows it per slice (`_mlx_width_for_depth`); Owen's Streicher
+    #: render ran 62 of the 64 it asked for.
+    width: int
+    #: `NARRATOR_HIGGS3_MLX_MEM_BUDGET_GB` — the whole batch's unified-memory
+    #: budget, weights and pinned cache included.
+    mem_budget_gb: float
+    #: `HIGGS_MLX_CACHE_LIMIT_GB` — the pinned MLX buffer cache. BookForge emits
+    #: only two of its row's three numbers for Higgs and leaves this at
+    #: narrator's 8 GB default; that is fine on the 64 GB Mac (the row says 8)
+    #: and is arithmetically impossible on the `light` row, where 13 - 8.5 - 8
+    #: is negative and narrator refuses the load by name. All three come off the
+    #: row here, which is the port rather than a departure from it.
+    cache_limit_gb: float
+
+
+MLX_TIERS: dict[str, tuple[MlxTier, ...]] = {
+    HIGGS_V3: (
+        MlxTier("extreme", 60_000, 64, 42.0, 8.0),
+        MlxTier("fast", 44_000, 72, 34.0, 8.0),
+        MlxTier("moderate", 28_000, 48, 22.0, 6.0),
+        MlxTier("light", 0, 24, 13.0, 3.0),
+    ),
+}
+
+
+def mlx_render_profile(narrator_engine: str, total_bytes: int) -> MlxTier:
+    """The `MLX_TIERS` row this machine's memory selects, or a refusal.
+
+    No default anywhere, for `ttsstream.batch_width_for`'s reason written one
+    arm over: an engine nobody has measured a render width for is an engine
+    whose batching is unknown, and 1 is not a safe answer — it is the answer
+    that cost this server a 7x. Nor is the MACHINE guessed at: a Mac whose
+    memory Crucible could not read is refused here rather than handed the 64 GB
+    machine's row.
+    """
+    rows = MLX_TIERS.get(narrator_engine)
+    if rows is None:
         raise EngineError(
-            f"no measured MLX render width for narrator engine "
-            f"{narrator_engine!r}; this build knows "
-            f"{sorted(MLX_RENDER_WIDTH)}. {MLX_BATCH_VARIABLE} is the width "
-            "narrator's in-process backend batches at and it defaults to 1 — "
-            "one chunk at a time — so leaving it unset is a measured 7x, not a "
-            "safe fallback"
+            f"no measured MLX render tiers for narrator engine "
+            f"{narrator_engine!r}; this build knows {sorted(MLX_TIERS)}. "
+            f"{MLX_BATCH_VARIABLE} is the width narrator's in-process backend "
+            "batches at and it defaults to 1 — one chunk at a time — so "
+            "leaving it unset is a measured 7x, not a safe fallback"
         )
-    return width
+    if not isinstance(total_bytes, int) or total_bytes <= 0:
+        raise EngineError(
+            f"cannot choose an MLX render tier for {narrator_engine!r} from "
+            f"total_bytes={total_bytes!r}: the tier is a BAND of this "
+            f"machine's own memory ({MLX_BATCH_VARIABLE} and "
+            f"{MLX_MEM_BUDGET_VARIABLE} come out of the same row), and "
+            "`accelerator.probe_unified_memory` is what reads it. A machine "
+            "whose memory could not be read gets no row — the 64 GB Mac's is "
+            "not a safe stand-in for a 16 GB one"
+        )
+    total_mib = round(total_bytes / (1024 * 1024))
+    for row in rows:
+        if total_mib >= row.min_total_mib:
+            break
+    else:  # unreachable: the last row's floor is 0
+        raise EngineError(
+            f"the {narrator_engine!r} MLX tier table has no row for "
+            f"{total_mib} MiB; its last row must have a floor of 0"
+        )
+    headroom = row.mem_budget_gb - HIGGS_V3_MLX_WEIGHTS_GB - row.cache_limit_gb
+    if headroom <= 0:
+        # THE TABLE ITSELF IS WRONG, and it is caught here rather than at a
+        # load. narrator raises the same sum from inside the process
+        # (`_mlx_kv_headroom_gb`) after it has read 8.5 GB of weights off disk;
+        # a row that cannot hold its own weights and cache is a row nobody can
+        # render on, and saying so before the process exists names the row.
+        raise EngineError(
+            f"the {narrator_engine!r} MLX tier {row.name!r} budgets "
+            f"{row.mem_budget_gb:g} GB, which cannot hold "
+            f"{HIGGS_V3_MLX_WEIGHTS_GB:g} GB of weights plus a "
+            f"{row.cache_limit_gb:g} GB pinned buffer cache "
+            f"({MLX_CACHE_LIMIT_VARIABLE}) — narrator refuses that sum at load "
+            "and there is no KV left to batch with"
+        )
+    return row
 
 #: How long `stop()` gives the `quit` action before falling back on SIGTERM.
 #: narrator's teardown releases CUDA from inside the process, and on a loaded
@@ -358,18 +472,21 @@ class NarratorEngine(SubprocessEngine):
         serving_stack: str | None,
         max_num_seqs: int | None,
         voices: VoicesDocument | None,
+        mlx_total_bytes: int | None,
     ) -> None:
         """`serving_stack` comes from the env spec, `max_num_seqs` from the
-        voice manifest, `voices` from `narratorvoices.write_document`, and for
-        `higgs-v3` ALL THREE ARE REQUIRED HERE — the first two on the served
-        arm, the document on both.
+        voice manifest, `voices` from `narratorvoices.write_document`,
+        `mlx_total_bytes` from the accelerator probe, and for `higgs-v3` ALL
+        FOUR ARE REQUIRED HERE — the first two on the served arm, the memory on
+        the in-process one, the document on both.
 
         NONE HAS A DEFAULT, keyword-only and mandatory. `None` is a real
         answer — "narrator starts no server out of this env", "this engine
-        reads no document" — and a default would make FORGETTING to pass one
-        indistinguishable from saying it, which is precisely how a worker ends
-        up spawned without HIGGS_STACK. A caller must state all three;
-        `build_voice_engine` is where they come from.
+        reads no document", "this is not the in-process arm" — and a default
+        would make FORGETTING to pass one indistinguishable from saying it,
+        which is precisely how a worker ends up spawned without HIGGS_STACK. A
+        caller must state all four; `build_voice_engine` is where they come
+        from.
 
         Refused at CONSTRUCTION and not at spawn, because the alternative is a
         worker that starts, reads 8.5 GB off disk and exits 3 before it says
@@ -382,6 +499,9 @@ class NarratorEngine(SubprocessEngine):
         `jobenv.CUDA_LINUX_SERVING_STACK`. `voices` is None for an engine
         outside `narratorvoices.DOCUMENT_READERS` — one whose weights ride the
         `load` message and which reads no `NARRATOR_HIGGS_*` variable.
+        `mlx_total_bytes` is None on every arm that is NOT the in-process one,
+        and refused there, because a memory figure handed to an engine that
+        renders through a server configures nothing.
         """
         super().__init__(python=python, log_path=log_path)
         self._narrator_engine = narrator_engine
@@ -456,20 +576,47 @@ class NarratorEngine(SubprocessEngine):
         if narrator_engine == HIGGS_V3 and serving_stack is None:
             # THE IN-PROCESS ARM — `mlx-darwin`. It starts no server, so none of
             # the three above has a reader here; what it DOES have is a batch
-            # width, and narrator's default for it is 1. Resolved at
+            # width AND the memory budget that width is narrowed against, and
+            # narrator's defaults for them are 1 and 42 GB. Resolved at
             # CONSTRUCTION for this file's stated reason: a refusal that arrives
             # before the process does names the missing thing, and the
             # alternative — a worker that starts and renders a whole book one
-            # chunk at a time — announces nothing at all.
-            self._mlx_render_width: int | None = mlx_render_width_for(
-                narrator_engine
+            # chunk at a time, or one that budgets 42 GB on a 16 GB machine —
+            # announces nothing at all.
+            if mlx_total_bytes is None:
+                raise EngineError(
+                    f"cannot start {self.name} on the in-process arm without "
+                    "the machine's total memory: the batch width "
+                    f"({MLX_BATCH_VARIABLE}) and the budget it is narrowed "
+                    f"against ({MLX_MEM_BUDGET_VARIABLE}) come out of ONE "
+                    "measured row chosen by that figure, and narrator's own "
+                    "defaults for them are 1 — one chunk at a time, a measured "
+                    "7x — and 42 GB, which is a 64 GB machine's number. "
+                    "`accelerator.probe_unified_memory` reads it and "
+                    "`residency.load_voice` passes it"
+                )
+            self._mlx_tier: MlxTier | None = mlx_render_profile(
+                narrator_engine, mlx_total_bytes
             )
         else:
             # Every other arm reads no `NARRATOR_HIGGS3_MLX_*` variable: the
             # served arm renders through vllm-omni, and an engine that is not
             # `higgs-v3` owes its own set here (see `environment`) rather than
             # inheriting Higgs's vocabulary.
-            self._mlx_render_width = None
+            if mlx_total_bytes is not None:
+                # A MEMORY FIGURE FOR AN ARM THAT SIZES NOTHING FROM IT, refused
+                # the way a stack on an in-process engine is: the served arm's
+                # memory is the launch script's two GPU fractions, and a second
+                # statement of "how much memory may this have" that nothing
+                # reads is the lever-that-reports-success shape again.
+                raise EngineError(
+                    f"{self.name} was given mlx_total_bytes={mlx_total_bytes}, "
+                    "but only the in-process arm (a higgs-v3 engine whose env "
+                    "starts no serving stack) sizes a batch from this "
+                    "machine's memory. A served narrator's memory is its "
+                    "launcher's GPU fractions"
+                )
+            self._mlx_tier = None
         #: One writer at a time. narrator holds a lock over its own stdout for
         #: the mirror-image reason (two half-written lines are not two messages);
         #: the render door and a cancel arriving from the queue thread are two
@@ -538,8 +685,16 @@ class NarratorEngine(SubprocessEngine):
         above states was only half true: the served arm was told its width and
         the in-process arm was told nothing, which is not the same as "reads
         none of these" — it is a 7x, measured on owens-mac-studio and written
-        down at `MLX_RENDER_WIDTH`. Emitted only here, because the served arm
-        reads it no more than the MLX arm reads `HIGGS_STACK`.
+        down at `MLX_TIERS`. Emitted only here, because the served arm reads it
+        no more than the MLX arm reads `HIGGS_STACK`.
+
+        AND IT IS THREE VARIABLES, not one. The width is a ceiling narrator
+        narrows against `NARRATOR_HIGGS3_MLX_MEM_BUDGET_GB`, whose own headroom
+        is that budget less the weights less `HIGGS_MLX_CACHE_LIMIT_GB` — so
+        they are one decision and come off one `MlxTier` row, chosen by this
+        machine's own memory. Stating the width alone (which is what the first
+        fix did) is asking a budgeter to do its job while telling it the
+        budget of a machine somebody else owns.
 
         A SECOND ENGINE WILL OWE ITS OWN SET HERE, and finding it is that
         engine's first job rather than something guessed in advance: narrator's
@@ -563,12 +718,25 @@ class NarratorEngine(SubprocessEngine):
             environment[STACK_VARIABLE] = self._serving_stack
             environment[ENV_PREFIX_VARIABLE] = str(self._env_prefix)
             environment[MAX_NUM_SEQS_VARIABLE] = str(self._max_num_seqs)
-        if self._mlx_render_width is not None:
-            # A CEILING TO ASK FOR, never a promise to allocate: narrator
-            # narrows it per slice against its own memory budget
-            # (`_mlx_width_for_depth`). `__init__` refuses an engine with no
-            # measured width, so this is a number rather than a guess.
-            environment[MLX_BATCH_VARIABLE] = str(self._mlx_render_width)
+        if self._mlx_tier is not None:
+            # ONE ROW, THREE VARIABLES, and that is the whole point of the row.
+            # The width is a CEILING TO ASK FOR, never a promise to allocate:
+            # narrator narrows it per slice against the budget below
+            # (`_mlx_width_for_depth`), and the budget's own headroom is
+            # `budget - weights - cache`, so stating two of the three and
+            # letting narrator default the third is two rows' worth of memory in
+            # one sum. `__init__` refuses an engine with no measured row and a
+            # machine with no readable memory, so these are numbers rather than
+            # guesses.
+            environment[MLX_BATCH_VARIABLE] = str(self._mlx_tier.width)
+            # `:g` rather than `str()`: narrator parses these with `float()`
+            # either way, and "42" is what BookForge's own spawn writes, so a
+            # log line or a `/proc/<pid>/environ` read from the two arms of one
+            # fleet compares without a reader wondering what the `.0` means.
+            environment[MLX_MEM_BUDGET_VARIABLE] = f"{self._mlx_tier.mem_budget_gb:g}"
+            environment[MLX_CACHE_LIMIT_VARIABLE] = (
+                f"{self._mlx_tier.cache_limit_gb:g}"
+            )
         if self._voices is not None:
             # NARRATOR_HIGGS_VOICES on both Higgs arms, plus the MLX arm's base
             # weights when the document has a voice that loads them. The

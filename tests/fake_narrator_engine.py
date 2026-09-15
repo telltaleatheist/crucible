@@ -26,6 +26,18 @@ from crucible.narratorvoices import VoicesDocument
 
 FAKE_NARRATOR = Path(__file__).resolve().parent / "fake_narrator.py"
 
+#: What the fake worker's machine claims to have, so the engine takes the
+#: IN-PROCESS branch on every host the suite runs on.
+#:
+#: STATED RATHER THAN PROBED, and rather than `None`. `residency.load_voice`
+#: passes the real figure only on `mlx-darwin`, so on the Windows and Linux
+#: boxes this suite runs on it would arrive as `None` — and `None` on a
+#: `higgs-v3` engine whose env starts no serving stack is a refusal by name
+#: (the whole point of the argument). A constant here keeps every
+#: residency test on the arm the fake worker actually imitates, and 64 GiB is
+#: owens-mac-studio's, so the row it selects is the row the fleet runs.
+FAKE_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
+
 
 class FakeNarratorEngine(NarratorEngine):
     """The real engine, started on the fake worker."""
@@ -61,7 +73,13 @@ def install(monkeypatch: pytest.MonkeyPatch) -> list[FakeNarratorEngine]:
         serving_stack: str | None,
         max_num_seqs: int | None,
         voices: VoicesDocument | None,
+        mlx_total_bytes: int | None,
     ) -> FakeNarratorEngine:
+        # THE MACHINE'S MEMORY IS TAKEN AND REPLACED, not dropped: what
+        # residency computed is right for the HOST, and this suite runs on
+        # hosts that are not Macs. `FAKE_TOTAL_BYTES` puts the engine on the
+        # in-process arm everywhere, which is the arm the fake worker imitates.
+        #
         # THE SERVER'S OWN CONFIGURATION IS TAKEN AND DROPPED, deliberately.
         # The real `build_voice_engine` would read the interpreter's prefix
         # off disk (`higgs_env_prefix`) and emit HIGGS_STACK / HIGGS_ENV /
@@ -83,6 +101,7 @@ def install(monkeypatch: pytest.MonkeyPatch) -> list[FakeNarratorEngine]:
             serving_stack=None,
             max_num_seqs=None,
             voices=voices,
+            mlx_total_bytes=FAKE_TOTAL_BYTES,
         )
         built.append(engine)
         return engine

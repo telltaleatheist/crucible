@@ -92,6 +92,7 @@ def build_voice_engine(
     serving_stack: str | None,
     max_num_seqs: int | None,
     voices: "VoicesDocument | None",
+    mlx_total_bytes: int | None,
 ) -> NarratorEngine:
     """The engine that serves a voice. Refuses an engine this build cannot run.
 
@@ -100,15 +101,25 @@ def build_voice_engine(
     — since 2026-09-13 — what the server underneath is configured with, and
     — since 2026-09-14 — which document names its voices.
 
-    THE THREE EXTRA FACTS HAVE DIFFERENT OWNERS, which is why they arrive as
-    three arguments rather than one object: `serving_stack` belongs to the ENV
+    THE FOUR EXTRA FACTS HAVE DIFFERENT OWNERS, which is why they arrive as
+    four arguments rather than one object: `serving_stack` belongs to the ENV
     RECIPE (`jobenv.tts_env` — vllm-omni on `cuda-linux` because that is what
     the recipe installs, None where narrator starts no server), `max_num_seqs`
-    belongs to the VOICE MANIFEST (`[voice.serving]`), and `voices` is the
+    belongs to the VOICE MANIFEST (`[voice.serving]`), `voices` is the
     document `crucible/narratorvoices.py` wrote from that manifest and the
     pulled weights for THIS load (None for an engine that resolves no voice by
-    name — `narratorvoices.DOCUMENT_READERS`). All are mandatory keywords:
-    `None` is a real answer and a default would hide a caller that forgot.
+    name — `narratorvoices.DOCUMENT_READERS`), and `mlx_total_bytes` belongs to
+    the MACHINE (`accelerator.probe_unified_memory`, None off the in-process
+    arm). All are mandatory keywords: `None` is a real answer and a default
+    would hide a caller that forgot.
+
+    THE LAST ONE IS THE MACHINE'S AND NOT THE VOICE'S, which is why it is not in
+    the manifest beside `max_num_seqs`. The served arm's width is a property of
+    the card the voice was certified on and travels with the voice; the
+    in-process arm's is a property of how much unified memory THIS Mac has, and
+    the same voice renders at 64 rows on a 64 GB machine and 24 on a small one
+    (`narrator.MLX_TIERS`). Putting it in the manifest would make one number
+    answer two questions.
     """
     if narrator_engine not in NARRATOR_ENGINES:
         raise EngineError(
@@ -122,6 +133,7 @@ def build_voice_engine(
         serving_stack=serving_stack,
         max_num_seqs=max_num_seqs,
         voices=voices,
+        mlx_total_bytes=mlx_total_bytes,
     )
 
 

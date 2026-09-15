@@ -35,7 +35,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from .accelerator import probe_unified_memory
 from .alignmodels import AlignBackendSpec, AlignManifest
+from .backend import MLX_DARWIN
 from .config import Config
 from .engines import (
     STOP_TIMEOUT_SECONDS,
@@ -818,6 +820,19 @@ class Residency:
                 else manifest.serving.max_num_seqs
             ),
             voices=voices,
+            # THE MACHINE'S OWN MEMORY, on the arm that sizes a batch from it.
+            # `mlx-darwin` renders in process out of unified memory, and
+            # narrator's batch width and memory budget come out of ONE measured
+            # row of `engines.narrator.MLX_TIERS` chosen by this figure — the
+            # port of BookForge's `orpheusMemoryProfile` tier, which its Mac
+            # spawn has read since 2026-09-05. Read HERE rather than cached at
+            # start-up because it is one `sysctl` on a path that is already
+            # minutes long, and probed on no other backend: a served narrator's
+            # memory is its launcher's GPU fractions, and the engine refuses a
+            # figure it would not read.
+            mlx_total_bytes=(
+                probe_unified_memory()[1] if spec.backend == MLX_DARWIN else None
+            ),
         )
         # narrator answers no HTTP route, so this port is not a proxy target; it
         # is found and passed for the same reason every other engine's is, so
