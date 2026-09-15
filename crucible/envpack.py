@@ -103,6 +103,11 @@ SERVER_PACK = "server"
 #: case — `crucible-env-host-llama-windows-<version>.tar.zst`.
 HOST_PACK = "host"
 
+#: The one console script `pyproject.toml` declares, and the only command any
+#: pack of ours exists to carry. A pack without it is not a pack of Crucible,
+#: whatever else pip put in it (`write_cmd_shims`).
+OWN_CONSOLE_SCRIPT = "crucible"
+
 #: The tray's two packages, installed into the `host` pack AFTER the wheel and
 #: declared HERE rather than in `pyproject.toml`'s dependencies.
 #:
@@ -1619,6 +1624,26 @@ def write_cmd_shims(root: Path) -> list[str]:
             cmd_shim_text(module, function), encoding="utf-8", newline=""
         )
         written.append(name)
+    if OWN_CONSOLE_SCRIPT not in written:
+        # MEASURED 2026-09-15, building the host pack on Owen's PC: with
+        # `PYTHONPATH` pointing at the source checkout, the pack's pip found
+        # the repo's `crucible.egg-info`, reported "Requirement already
+        # satisfied: crucible", installed every DEPENDENCY and not the wheel,
+        # and this function wrote twelve shims for other people's commands
+        # and none for the one the pack exists to carry. The failure then
+        # surfaced two steps later as `FileNotFoundError: [WinError 2]` out of
+        # the smoke test — a traceback about a path, for a pack that is simply
+        # empty of Crucible.
+        raise PackError(
+            "pack_build_failed",
+            f"{root}\\Scripts has no {OWN_CONSOLE_SCRIPT}.exe, so the pack "
+            f"carries {len(written)} other command(s) and not its own: "
+            f"{', '.join(written) or 'none'}. pip installed this tree's "
+            "dependencies and not the crucible wheel — the usual cause is a "
+            "`PYTHONPATH` or a `*.egg-info` that made pip believe crucible "
+            "was already satisfied. Build with crucible INSTALLED, not on a "
+            "path.",
+        )
     return written
 
 
@@ -1849,6 +1874,19 @@ def smoke_test(
             assert target.smoke_import is not None
             command = [str(python), "-c", f"import {target.smoke_import}"]
             what = f"import {target.smoke_import}"
+        entry = Path(command[0])
+        if entry.parent == into and not entry.is_file():
+            # A pack missing the very command this test runs must say THAT,
+            # not raise `FileNotFoundError: [WinError 2]` out of subprocess
+            # and leave a person reading a traceback about a path (measured
+            # 2026-09-15). `write_cmd_shims` now refuses this at build time;
+            # this is the second door, for an archive built elsewhere.
+            raise PackError(
+                "pack_smoke_failed",
+                f"{archive.name} unpacked into {into} and there is no "
+                f"{entry.name} in it, so the pack carries no command. A pack "
+                "that does not pass is not an asset",
+            )
         completed = subprocess.run(
             command,
             capture_output=True,

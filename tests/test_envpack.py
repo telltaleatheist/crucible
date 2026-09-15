@@ -1126,6 +1126,39 @@ def test_a_launcher_no_metadata_explains_is_refused_rather_than_skipped(
     assert "mystery" in caught.value.message
 
 
+def test_a_pack_that_carries_everyone_elses_command_but_not_its_own_is_refused(
+    tmp_path: Path,
+) -> None:
+    """MEASURED 2026-09-15, the first real host-pack build on Owen's PC.
+
+    With `PYTHONPATH` pointing at the source checkout, the pack's pip found
+    the repo's `crucible.egg-info`, said "Requirement already satisfied:
+    crucible", installed every DEPENDENCY and not the wheel. Twelve shims were
+    written — `fastapi`, `uvicorn`, `httpx`, `tqdm` … — and none for
+    `crucible`, and the build reported success. The 46 MB asset that came out
+    was a Python with Crucible's dependencies in it and no Crucible.
+    """
+    root = fake_windows_pack(
+        tmp_path,
+        entry_points=(
+            "[console_scripts]\n"
+            "uvicorn = uvicorn.main:main\n"
+            "httpx = httpx:main\n"
+        ),
+        scripts=("uvicorn", "httpx"),
+    )
+    with pytest.raises(PackError) as caught:
+        envpack.write_cmd_shims(root)
+    assert caught.value.code == "pack_build_failed"
+    assert "crucible.exe" in caught.value.message
+    # The cause is named, because it is not one a person guesses from a list
+    # of twelve shims that all look right.
+    assert "egg-info" in caught.value.message
+    assert "uvicorn, httpx" in caught.value.message or "httpx, uvicorn" in caught.value.message
+    # And nothing was written: a half-shimmed tree is not a better outcome.
+    assert not (root / "uvicorn.cmd").exists() or not (root / "crucible.cmd").exists()
+
+
 def test_a_tree_pip_never_installed_into_is_refused(tmp_path: Path) -> None:
     root = tmp_path / "pack"
     root.mkdir()
