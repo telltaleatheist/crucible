@@ -346,6 +346,15 @@ def server_recipe() -> Path:
     return path
 
 
+#: `recipe_sha256` is `jobenv`'s, NOT `weights.sha256_of`. It hashes the
+#: recipe's LINE-ENDING-NORMALISED bytes, so the column in `envpacks.json` is a
+#: property of the RECIPE and not of the checkout a runner happened to build
+#: from — measured 2026-09-15, and written up in that function. One name, one
+#: implementation: the pack manifest, the env stamp and `crucible doctor`'s
+#: drift line are the same fact and must not be able to disagree.
+recipe_digest = jobenv.recipe_sha256
+
+
 def build_backend_kind() -> str:
     """Which backend's packs THIS machine can build, from platform and arch only.
 
@@ -544,6 +553,9 @@ class PackEntry:
     bytes: int
     sha256: str
     parts: tuple[str, ...]
+    #: `recipe_digest()`, NOT `sha256_of()`: line-ending-normalised, so this
+    #: field is a property of the recipe and not of the checkout it was built
+    #: from. See that function for the measurement.
     recipe_sha256: str
     unpacked_bytes: int
 
@@ -1162,7 +1174,7 @@ def check_recipe(entry: PackEntry, target: PackTarget) -> None:
     env that reads as broken the moment anybody asks — and, worse, an env whose
     numbers differ from the ones a manifest's memory estimates were measured on.
     """
-    here = sha256_of(target.recipe)
+    here = recipe_digest(target.recipe)
     if here != entry.recipe_sha256:
         raise PackError(
             "pack_recipe_drift",
@@ -1771,7 +1783,7 @@ def build_pack(
         bytes=size,
         sha256=digest,
         parts=tuple(part.name for part in parts),
-        recipe_sha256=sha256_of(target.recipe),
+        recipe_sha256=recipe_digest(target.recipe),
         unpacked_bytes=unpacked_bytes,
     )
     write_manifest_entry(out, version, entry)

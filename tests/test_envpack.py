@@ -553,6 +553,75 @@ def test_a_pack_built_from_this_recipe_passes() -> None:
     envpack.check_recipe(entry, target)  # no refusal
 
 
+# ------------- `recipe_sha256` is the RECIPE's, not the checkout's
+#
+# MEASURED 2026-09-15: the same commit of `pyproject.toml` hashed to
+# `1ab85cc3…` from the main checkout and `cc4fda38…` from a worktree of that
+# same commit, while `git hash-object` said both were blob `5ef53a3`. CRLF
+# versus LF, on a machine with `core.autocrlf=true`. Left alone, `--check`
+# refuses packs that are perfectly correct and CI disagrees with a desk about
+# a manifest neither of them is wrong about.
+
+
+def test_a_recipe_hashes_THE_SAME_whatever_line_endings_it_arrived_with(
+    tmp_path: Path,
+) -> None:
+    """The half that fixes the defect."""
+    body = "torch==2.5.1\nvllm==0.7.3\nnumpy==1.26.4\n"
+    lf = tmp_path / "lf.txt"
+    crlf = tmp_path / "crlf.txt"
+    lf.write_bytes(body.encode())
+    crlf.write_bytes(body.replace("\n", "\r\n").encode())
+    assert lf.read_bytes() != crlf.read_bytes(), "the two files really do differ"
+    assert jobenv.recipe_sha256(lf) == jobenv.recipe_sha256(crlf)
+    # And the value is the LF one, which is what every Linux and macOS runner
+    # that has already published a manifest computed. A rule that agreed with
+    # neither existing side would invalidate every released `envpacks.json`.
+    import hashlib
+
+    assert jobenv.recipe_sha256(crlf) == hashlib.sha256(body.encode()).hexdigest()
+
+
+def test_a_real_edit_STILL_changes_the_recipe_hash(tmp_path: Path) -> None:
+    """The half that keeps it a hash.
+
+    Normalising a line ENDING cannot erase what is on the line, so every edit
+    a recipe can receive — a pin moved, a package added, a line removed — is
+    still a different digest.
+    """
+    first = tmp_path / "a.txt"
+    first.write_bytes(b"torch==2.5.1\r\nvllm==0.7.3\r\n")
+    moved = tmp_path / "b.txt"
+    moved.write_bytes(b"torch==2.6.0\r\nvllm==0.7.3\r\n")
+    added = tmp_path / "c.txt"
+    added.write_bytes(b"torch==2.5.1\r\nvllm==0.7.3\r\nnumpy==1.26.4\r\n")
+    removed = tmp_path / "d.txt"
+    removed.write_bytes(b"torch==2.5.1\r\n")
+    digests = {jobenv.recipe_sha256(p) for p in (first, moved, added, removed)}
+    assert len(digests) == 4
+
+
+def test_the_pack_manifest_and_the_env_stamp_are_the_SAME_hasher() -> None:
+    """One fact, one owner. `envpacks.json`'s column, `env.json`'s stamp and
+    `crucible doctor`'s drift line are the same question, and a second
+    implementation of it is a second answer waiting to happen — which is
+    exactly how the CRLF defect reached a released manifest."""
+    assert envpack.recipe_digest is jobenv.recipe_sha256
+
+
+def test_the_published_server_recipe_hash_is_the_normalised_one() -> None:
+    """v0.6.0's `envpacks.json` carries `cc4fda38…` for `server` on both
+    backends — the LF digest, because both runners check out LF. So the fix
+    makes this desk AGREE with the published manifest rather than needing it
+    re-cut; before it, a `--check` here computed `1ab85cc3…` and refused."""
+    target = envpack.pack_target("server", "cuda-linux")
+    assert target.recipe.name == "pyproject.toml"
+    normalised = target.recipe.read_bytes().replace(b"\r\n", b"\n")
+    import hashlib
+
+    assert jobenv.recipe_sha256(target.recipe) == hashlib.sha256(normalised).hexdigest()
+
+
 # ------------------------------------------------------- a pack, end to end
 
 

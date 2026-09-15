@@ -626,13 +626,50 @@ def install_env(
     return env_status(home, spec, backend_kind)
 
 
-def recipe_sha256(path: Path, chunk: int = 1 << 20) -> str:
-    """The recipe file's SHA-256 — what ties an env to the bytes that built it."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(chunk), b""):
-            digest.update(block)
-    return digest.hexdigest()
+#: The one line-ending rule. A recipe is a TEXT declaration, so a CR before a
+#: LF is an artefact of the checkout the file arrived in and never a fact about
+#: what the env contains.
+_CRLF = b"\r\n"
+_LF = b"\n"
+
+
+def recipe_sha256(path: Path) -> str:
+    """The recipe's SHA-256 over LINE-ENDING-NORMALISED bytes.
+
+    What ties an env — and a pack — to the declaration that built it. **THE ONE
+    IMPLEMENTATION:** `envpack.build_pack`/`check_recipe` (the `recipe_sha256`
+    column of `envpacks.json`), `workerenv`'s env stamp and `crucible doctor`'s
+    drift line all come here, because a fact with two owners is a fact that
+    will eventually disagree with itself, and this one already did.
+
+    MEASURED 2026-09-15, which is why the normalisation is here at all: the
+    same commit of `pyproject.toml` hashed to `1ab85cc3…` from the main
+    checkout and `cc4fda38…` from a worktree of that SAME commit, while
+    `git hash-object` said both were blob `5ef53a3`. The difference was CRLF
+    versus LF — this machine has `core.autocrlf=true` and the working file
+    predates the repo's `.gitattributes` — and the consequence is a false
+    alarm in both directions: `crucible envpack build <name> --check` refusing
+    a pack that is perfectly correct, and a Linux CI runner and a Windows desk
+    disagreeing about a manifest neither of them is wrong about.
+
+    **NORMALISE, DO NOT HASH THE GIT BLOB.** `git hash-object` would be the
+    exact answer for a recipe in a checkout and NO answer at all for the case
+    that matters most: `crucible/envs/*.txt` ship inside the installed wheel,
+    where there is no repository, no index and no `git` to ask — and
+    `check_recipe()` runs on an operator's machine against precisely that copy.
+    A digest that needed a checkout would turn `pack_recipe_drift` into
+    `git-not-found` on every machine that is not a developer's.
+
+    ONLY CRLF → LF. A lone `\\r` is not a line ending any of these toolchains
+    writes, so it stays and counts as content; every real edit — a version
+    pinned differently, a package added, a line removed — still changes the
+    digest, because normalising a line ENDING cannot erase what is on the line.
+
+    Read whole rather than in chunks: a recipe is a few KB of text (the largest
+    is under 4 KB), and a chunked reader would have to carry a CR across every
+    boundary to get the same answer.
+    """
+    return hashlib.sha256(path.read_bytes().replace(_CRLF, _LF)).hexdigest()
 
 
 def _run(command: list[str], failure: str, on_line: Any) -> None:
