@@ -153,18 +153,91 @@ def pairing_line_authority(line: str) -> str | None:
     return authority or None
 
 
-def recipe_argv(name: str, distro: str = CRUCIBLE_DISTRO) -> list[str]:
-    """The argv for a named recipe. Unknown names are a programming error."""
-    if name == RECIPE_USER_UNIT_START:
-        return ["wsl.exe", "-d", distro, "--exec", "systemctl", "--user", "start", "crucible"]
-    if name == RECIPE_USER_UNIT_RESTART:
-        return [
-            "wsl.exe", "-d", distro, "--exec", "systemctl", "--user", "restart", "crucible"
-        ]
+def guest_uid_argv(distro: str) -> list[str]:
+    """`id -u` inside a distro — the uid the user manager belongs to.
+
+    READ, never assumed. `user@1000` is a fact about the rootfs 4b builds and
+    nothing else: a distro a person installed years ago can run Crucible as
+    any uid, and `/run/user/1001` is not `/run/user/1000`. `id` needs no bus,
+    no session and no unit, so it answers in exactly the state where every
+    `systemctl --user` call does not, which is what makes it the right thing
+    to ask first.
+    """
+    return ["wsl.exe", "-d", distro, "--exec", "id", "-u"]
+
+
+def runtime_dir(uid: str) -> str:
+    """`/run/user/<uid>` — where the user manager's bus socket lives."""
+    return f"/run/user/{uid}"
+
+
+def user_systemctl_argv(distro: str, uid: str, verb: str) -> list[str]:
+    """One `systemctl --user <verb> crucible.service`, with the bus findable.
+
+    **MEASURED 2026-09-15, 07:34-07:35, and this prefix is the whole fix.**
+    `systemctl restart user@1000` as root created `/run/user/1000/bus`, so the
+    socket now exists — and a `wsl.exe --exec` session still could not reach
+    it, because such a session gets no logind seat and therefore no
+    `XDG_RUNTIME_DIR`, and systemctl looks for the bus at
+    `$XDG_RUNTIME_DIR/bus` and nowhere else. From the same kind of session,
+    `XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active crucible.service`
+    answered `active`.
+
+    7b.8 read the same failure and blamed the socket; the socket was half of
+    it. A missing environment variable and a missing socket say the identical
+    sentence — `Failed to connect to bus: No such file or directory` — which
+    is why this was found by setting the variable rather than by reading the
+    message again.
+
+    `env VAR=value cmd` and not a shell string: `--exec` is what stops wsl.exe
+    pre-expanding `$XDG_RUNTIME_DIR` on the WINDOWS side, where it is empty
+    (BookForge's `wsl-exe-implicit-shell-trap`), and `env` is how a value
+    reaches a process without a shell to set it.
+    """
+    return [
+        "wsl.exe", "-d", distro, "--exec",
+        "env", f"XDG_RUNTIME_DIR={runtime_dir(uid)}",
+        "systemctl", "--user", verb, UNIT_NAME,
+    ]
+
+
+#: The recipes that talk to the USER manager, and so cannot be built at all
+#: until the guest's uid has been read.
+USER_MANAGER_RECIPES: frozenset[str] = frozenset(
+    {RECIPE_USER_UNIT_START, RECIPE_USER_UNIT_RESTART}
+)
+
+
+def recipe_argv(
+    name: str, distro: str = CRUCIBLE_DISTRO, uid: str | None = None
+) -> list[str]:
+    """The argv for a named recipe. Unknown names are a programming error.
+
+    `uid` is REQUIRED for the two that talk to the user manager, and the
+    caller reads it (`guest_uid`) before asking: a recipe built with a guessed
+    runtime directory is a recipe that reports `Failed to connect to bus` on a
+    machine whose bus is fine. `user-bus-restart` does not take one — it is a
+    SYSTEM-manager call, and see below for why its `user@1000` is a fact
+    rather than an assumption.
+    """
+    if name in USER_MANAGER_RECIPES:
+        if uid is None:
+            raise ValueError(
+                f"{name!r} needs the guest's uid: it runs `systemctl --user`, "
+                "which needs XDG_RUNTIME_DIR, which is /run/user/<uid>. Read "
+                "it with `guest_uid()` and refuse the recipe when it cannot "
+                "be read, rather than assuming 1000"
+            )
+        verb = "start" if name == RECIPE_USER_UNIT_START else "restart"
+        return user_systemctl_argv(distro, uid, verb)
     if name == RECIPE_USER_BUS_RESTART:
         # As ROOT: this restarts the user manager that owns the bus the user
-        # unit needs. uid 1000 is the rootfs's `crucible` user (4b creates
-        # exactly one non-root user), and 4.1 names this command literally.
+        # unit needs. `user@1000` stays LITERAL, and after the uid was made a
+        # read everywhere else that is worth a sentence: this recipe can only
+        # ever run in the distro Crucible IMPORTED (`recipe_permitted`), whose
+        # rootfs 4b builds with exactly one non-root user, so 1000 here is a
+        # fact about a rootfs this project makes and not an assumption about
+        # somebody's machine. 4.1 names the command literally for that reason.
         return ["wsl.exe", "-d", distro, "-u", "root", "--exec", "systemctl", "restart", "user@1000"]
     raise ValueError(
         f"no recipe called {name!r}; the recovery recipes are {RECIPES} and the "
@@ -207,24 +280,26 @@ def recipe_permitted(name: str, distro: str) -> bool:
     return distro == CRUCIBLE_DISTRO or name not in DESTRUCTIVE_RECIPES
 
 
-def unit_enabled_argv(distro: str) -> list[str]:
+def unit_enabled_argv(distro: str, uid: str) -> list[str]:
     """`systemctl --user is-enabled crucible.service`, inside a distro.
 
     PHASE17 2.5's probe: consent names a distro, and this is what turns that
     name into the fact the owner needs — *is there a unit here this
-    orchestrator can restart*. It is asked as the ORDINARY user and not
-    through `-u root`, because the thing that makes it fail on a distro in the
-    state 7b.8 measured is a missing user D-Bus, and the root door onto the
-    same manager (`systemctl --user -M <user>@`) was measured failing for the
-    same cause on the same machine the same night. A second probe that cannot
-    succeed when the first failed is a second round trip for nothing; what the
-    first one SAID is carried into the log instead, because "Failed to connect
-    to bus" is the sentence that tells a person what to repair.
+    orchestrator can restart*.
+
+    It is asked as the ORDINARY user with the runtime directory set, and not
+    through `-u root`: 7b.8's root door onto the same manager
+    (`systemctl --user -M <user>@`) was measured failing on the same machine
+    the same night, and on 2026-09-15 the plain call with
+    `XDG_RUNTIME_DIR=/run/user/<uid>` was measured ANSWERING on the very
+    distro the root door could not reach. One probe, the one that works.
+
+    When it does not answer, what it SAID goes in the log, because
+    `Failed to connect to bus: No such file or directory` is the sentence that
+    tells a person what to repair — and it is now the sentence for a genuinely
+    absent socket only, the missing-variable half of it having been removed.
     """
-    return [
-        "wsl.exe", "-d", distro, "--exec",
-        "systemctl", "--user", "is-enabled", UNIT_NAME,
-    ]
+    return user_systemctl_argv(distro, uid, "is-enabled")
 
 
 #: What `is-enabled` prints when the unit EXISTS. `disabled` is in here and
@@ -356,6 +431,13 @@ class PresenceWatcher:
         self.held_distro: str | None = None
         #: One recovery per down-edge (4.1). Cleared when a ping succeeds.
         self._recovery_spent = False
+        #: The guest's uid, READ ONCE and cached only on success. Every
+        #: `systemctl --user` call needs `/run/user/<uid>` on it (measured
+        #: 2026-09-15), and a uid is a property of a rootfs rather than of a
+        #: moment, so asking twice would be two `wsl.exe` round trips for one
+        #: answer. Cached only on success, so a distro that was unreachable
+        #: once is asked again.
+        self._uid: str | None = None
 
     # ------------------------------------------------------------- probes
 
@@ -429,6 +511,38 @@ class PresenceWatcher:
                 return FoundEngine(distro=name, line=line)
         return None
 
+    def guest_uid(self) -> str | None:
+        """The uid Crucible runs as in this distro, or None with the reason logged.
+
+        Read once. There is NO default: a machine whose `id -u` cannot be
+        reached is a machine whose `systemctl --user` cannot be reached
+        either, and answering 1000 anyway would turn "this distro did not
+        respond" into "the bus is broken" — two different repairs, one
+        message.
+        """
+        if self._uid is not None:
+            return self._uid
+        result = self._runner.run(
+            guest_uid_argv(self._distro), timeout_s=GUEST_READ_TIMEOUT_SECONDS
+        )
+        text = result.stdout.strip()
+        if not text.isdigit():
+            self._log.write(
+                f'uid: could not read the user id in "{self._distro}" '
+                f"({result.said()}); nothing that needs XDG_RUNTIME_DIR can be "
+                "built, and 1000 is not assumed"
+            )
+            return None
+        self._uid = text
+        self._log.write(
+            f'uid: "{self._distro}" answers id -u = {text}, so '
+            f"XDG_RUNTIME_DIR={runtime_dir(text)} (measured 2026-09-15: a "
+            "wsl.exe --exec session gets no logind seat and therefore no "
+            "XDG_RUNTIME_DIR, and systemctl looks for the bus at "
+            "$XDG_RUNTIME_DIR/bus and nowhere else)"
+        )
+        return text
+
     def probe_unit(self) -> UnitProbe:
         """Is there a `crucible.service` in this distro that could be restarted?
 
@@ -443,8 +557,16 @@ class PresenceWatcher:
         unit that is merely `disabled`, and a disabled unit is still a unit
         `systemctl --user restart` starts. What it PRINTED is the answer.
         """
+        uid = self.guest_uid()
+        if uid is None:
+            return UnitProbe(
+                False,
+                "",
+                f'the user id in "{self._distro}" could not be read, so '
+                f"{UNIT_NAME} could not be asked about",
+            )
         result = self._runner.run(
-            unit_enabled_argv(self._distro), timeout_s=RECIPE_TIMEOUT_SECONDS
+            unit_enabled_argv(self._distro, uid), timeout_s=RECIPE_TIMEOUT_SECONDS
         )
         state = result.stdout.strip().splitlines()[0].strip() if result.stdout.strip() else ""
         if state in UNIT_STATES:
@@ -577,7 +699,19 @@ class PresenceWatcher:
                     "does not widen this."
                 )
                 continue
-            argv = recipe_argv(name, self._distro)
+            uid: str | None = None
+            if name in USER_MANAGER_RECIPES:
+                uid = self.guest_uid()
+                if uid is None:
+                    # NOT an attempt with a guessed uid. `guest_uid` has
+                    # already logged what the distro said.
+                    self._log.write(
+                        f"recovery {name}: NOT RUN — it needs "
+                        "XDG_RUNTIME_DIR=/run/user/<uid> and the uid could "
+                        "not be read"
+                    )
+                    continue
+            argv = recipe_argv(name, self._distro, uid)
             result = self._runner.run(argv, timeout_s=RECIPE_TIMEOUT_SECONDS)
             self._log.write(
                 f"recovery {name}: {'ok' if result.ok else result.said()}"
@@ -602,8 +736,23 @@ class PresenceWatcher:
         rather than pretending. That distro's engine is a `found` one anyway,
         and a `found` engine never reaches this method.
         """
+        uid = self.guest_uid()
+        if uid is None:
+            # The working door cannot be built at all. `RECIPES` is still
+            # tried, because `user-bus-restart` needs no uid and is exactly
+            # the recipe for a user manager that is not answering — where it
+            # is permitted at all (`recipe_permitted`).
+            self._log.write(
+                f"restart {RECIPE_USER_UNIT_RESTART}: NOT RUN — it needs "
+                "XDG_RUNTIME_DIR=/run/user/<uid> and the uid could not be "
+                "read; escalating to the recovery recipes"
+            )
+            if self.recover(all_recipes=True):
+                self._recovery_spent = False
+                return True
+            return False
         result = self._runner.run(
-            recipe_argv(RECIPE_USER_UNIT_RESTART, self._distro),
+            recipe_argv(RECIPE_USER_UNIT_RESTART, self._distro, uid),
             timeout_s=RECIPE_TIMEOUT_SECONDS,
         )
         self._log.write(

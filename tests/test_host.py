@@ -267,8 +267,10 @@ def test_the_install_item_reads_as_an_upgrade_not_as_an_absence() -> None:
 
 def test_the_boot_recipe_and_the_two_recovery_recipes_are_exactly_4_1s() -> None:
     assert presence.wsl_boot_argv() == ["wsl.exe", "-d", "crucible", "--exec", "true"]
-    assert presence.recipe_argv(presence.RECIPE_USER_UNIT_START) == [
-        "wsl.exe", "-d", "crucible", "--exec", "systemctl", "--user", "start", "crucible",
+    assert presence.recipe_argv(presence.RECIPE_USER_UNIT_START, uid="1000") == [
+        "wsl.exe", "-d", "crucible", "--exec",
+        "env", "XDG_RUNTIME_DIR=/run/user/1000",
+        "systemctl", "--user", "start", "crucible.service",
     ]
     assert presence.recipe_argv(presence.RECIPE_USER_BUS_RESTART) == [
         "wsl.exe", "-d", "crucible", "-u", "root", "--exec", "systemctl", "restart", "user@1000",
@@ -283,7 +285,7 @@ def test_every_wsl_call_uses_exec_so_wsl_exe_cannot_pre_expand_a_variable() -> N
     """BookForge's `wsl-exe-implicit-shell-trap`: without `--exec`, wsl.exe
     expands `$var` on the WINDOWS side before bash ever sees it."""
     for name in presence.RECIPES:
-        assert "--exec" in presence.recipe_argv(name)
+        assert "--exec" in presence.recipe_argv(name, uid="1000")
     assert "--exec" in presence.wsl_boot_argv()
 
 
@@ -314,7 +316,10 @@ def test_a_distro_probe_that_will_not_answer_is_unknown_and_never_absent(
 def test_the_boot_spends_both_recipes_and_then_says_it_did_not_start(
     host_log: log.HostLog,
 ) -> None:
-    runner = Scripted(answers={"-l -v": ok("  crucible  Stopped  2\n")}, pings=[])
+    runner = Scripted(
+        answers={"-l -v": ok("  crucible  Stopped  2\n"), "id -u": ok("1000\n")},
+        pings=[],
+    )
     watcher = presence.PresenceWatcher(
         runner, host_log, boot_wait_s=2.0, monotonic=ticking(), sleep=lambda _s: None
     )
@@ -322,7 +327,7 @@ def test_the_boot_spends_both_recipes_and_then_says_it_did_not_start(
     assert result.engine is Engine.FAILED
     assert "both recipes were spent" in result.detail
     ran = [" ".join(call) for call in runner.calls]
-    assert any("systemctl --user start crucible" in line for line in ran)
+    assert any("systemctl --user start crucible.service" in line for line in ran)
     assert any("systemctl restart user@1000" in line for line in ran)
 
 
@@ -2064,13 +2069,13 @@ def test_a_wsl_unit_restart_is_the_working_door_and_not_a_recovery(
 ) -> None:
     """`boot()` on a RUNNING engine pings, succeeds and changes nothing — a
     button that did nothing precisely when it was most obviously pressed."""
-    runner = Scripted(pings=[200])
+    runner = Scripted(answers={"id -u": ok("1000\n")}, pings=[200])
     with FakeEngine() as engine:
         host = _orchestrator(tmp_path, runner, Owner.WSL_UNIT, engine, monkeypatch)
         seen: list[str] = []
         host.restart_engine(lambda event: seen.append(event.event))
     argvs = [" ".join(call) for call in runner.calls]
-    assert any("systemctl --user restart crucible" in argv for argv in argvs), argvs
+    assert any("systemctl --user restart crucible.service" in argv for argv in argvs), argvs
     assert seen[-1] == "done"
 
 
@@ -2117,12 +2122,12 @@ def test_a_restarted_engine_is_CLAIMED_AGAIN_because_it_forgot(
 def test_the_tray_and_the_page_reach_ONE_restart(tmp_path: Path, monkeypatch) -> None:
     """A person clicking Restart and a page posting `engine-restart` must not
     get two different restarts."""
-    runner = Scripted(pings=[200])
+    runner = Scripted(answers={"id -u": ok("1000\n")}, pings=[200])
     with FakeEngine() as engine:
         host = _orchestrator(tmp_path, runner, Owner.WSL_UNIT, engine, monkeypatch)
         host.on_click(menu.RESTART_ENGINE)
     assert any(
-        "systemctl --user restart crucible" in " ".join(call) for call in runner.calls
+        "systemctl --user restart crucible.service" in " ".join(call) for call in runner.calls
     )
 
 
@@ -2337,14 +2342,18 @@ def test_consent_plus_a_readable_unit_is_owner_wsl_unit(
 ) -> None:
     """The claim lands, and it is a TRUE statement: there is a unit behind it."""
     runner = Scripted(
-        answers={"-l -v": ok(OWENS_PC_LIST), "is-enabled": ok("enabled\n")},
+        answers={
+            "-l -v": ok(OWENS_PC_LIST),
+            "id -u": ok("1000\n"),
+            "is-enabled": ok("enabled\n"),
+        },
         pings=[200],
     )
     watcher = _consented_watcher(runner, host_log)
     result = watcher.boot()
     assert result.engine is Engine.RUNNING
     assert result.owner is Owner.WSL_UNIT
-    assert presence.unit_enabled_argv("Ubuntu") in runner.calls
+    assert presence.unit_enabled_argv("Ubuntu", "1000") in runner.calls
     assert "owner=wsl-unit" in host_log.path.read_text(encoding="utf-8")
 
 
@@ -2357,6 +2366,7 @@ def test_a_unit_that_merely_exists_counts_and_the_exit_code_does_not(
         runner = Scripted(
             answers={
                 "-l -v": ok(OWENS_PC_LIST),
+                "id -u": ok("1000\n"),
                 "is-enabled": RunResult(
                     code=1, stdout=f"{state}\n", stderr="", failure=None
                 ),
@@ -2381,6 +2391,7 @@ def test_consent_with_an_unreadable_unit_stays_found_and_says_why(
             "-l -v --running": ok(OWENS_PC_LIST),
             "-l -v": ok(OWENS_PC_LIST),
             "cat ": ok(GUEST_LINE),
+            "id -u": ok("1000\n"),
             "is-enabled": bad("Failed to connect to bus: No such file or directory"),
         },
         pings=[200],
@@ -2401,6 +2412,7 @@ def test_a_unit_that_is_not_there_at_all_stays_found(tmp_path: Path) -> None:
             "-l -v --running": ok(OWENS_PC_LIST),
             "-l -v": ok(OWENS_PC_LIST),
             "cat ": ok(GUEST_LINE),
+            "id -u": ok("1000\n"),
             "is-enabled": RunResult(
                 code=1, stdout="not-found\n", stderr="", failure=None
             ),
@@ -2428,11 +2440,11 @@ def test_the_destructive_recipe_is_refused_in_a_distro_crucible_did_not_import(
     )
 
     host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
-    runner = Scripted(answers={"-l -v": ok(OWENS_PC_LIST)}, pings=[])
+    runner = Scripted(answers={"-l -v": ok(OWENS_PC_LIST), "id -u": ok("1000\n")}, pings=[])
     watcher = _consented_watcher(runner, host_log)
     assert watcher.recover(all_recipes=True) is False
     ran = [" ".join(call) for call in runner.calls]
-    assert any("systemctl --user start crucible" in line for line in ran)
+    assert any("systemctl --user start crucible.service" in line for line in ran)
     assert not any("user@1000" in line for line in ran), "the act, not a drawing"
     written = (tmp_path / "host.log").read_text(encoding="utf-8")
     assert "orchestrator_recipe_not_ours" in written
@@ -2442,13 +2454,13 @@ def test_the_imported_distro_still_gets_both_recipes(tmp_path: Path) -> None:
     """Consent narrows nothing: `crucible` is Crucible's own rootfs and the
     cost of restarting its user manager is the restart."""
     host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
-    runner = Scripted(pings=[])
+    runner = Scripted(answers={"id -u": ok("1000\n")}, pings=[])
     watcher = presence.PresenceWatcher(
         runner, host_log, monotonic=ticking(), sleep=lambda _s: None
     )
     assert watcher.recover(all_recipes=True) is False
     ran = [" ".join(call) for call in runner.calls]
-    assert any("systemctl --user start crucible" in line for line in ran)
+    assert any("systemctl --user start crucible.service" in line for line in ran)
     assert any("user@1000" in line for line in ran)
 
 
@@ -2456,10 +2468,10 @@ def test_a_consented_engine_restart_goes_through_the_unit(tmp_path: Path) -> Non
     """PHASE17 4.2 for the owner consent produces: the working door first, and
     the escalation still refuses the one recipe that is not ours to run."""
     host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
-    runner = Scripted(answers={"-l -v": ok(OWENS_PC_LIST)}, pings=[200])
+    runner = Scripted(answers={"-l -v": ok(OWENS_PC_LIST), "id -u": ok("1000\n")}, pings=[200])
     watcher = _consented_watcher(runner, host_log)
     assert watcher.restart_wsl_unit() is True
-    assert presence.recipe_argv("user-unit-restart", "Ubuntu") in runner.calls
+    assert presence.recipe_argv("user-unit-restart", "Ubuntu", "1000") in runner.calls
     assert not any("user@1000" in " ".join(call) for call in runner.calls)
 
 
@@ -2489,3 +2501,230 @@ def test_consent_claims_the_engine_it_was_given(tmp_path: Path, monkeypatch) -> 
         assert host.claim() is True
         assert len(engine.claims) == 1
         assert "force" not in engine.claims[0]
+
+
+# --------------------------- the runtime directory: the other half of the bus
+#
+# MEASURED 2026-09-15, 07:34-07:35. `systemctl restart user@1000` as root
+# created /run/user/1000/bus, and a `wsl.exe --exec` session STILL could not
+# reach it: such a session gets no logind seat, so no XDG_RUNTIME_DIR, and
+# systemctl looks for the bus at $XDG_RUNTIME_DIR/bus and nowhere else. With
+# the variable set, `is-active crucible.service` answered `active` on the same
+# distro in the same minute. 7b.8 read the same sentence and blamed the socket;
+# a missing variable and a missing socket say exactly the same thing.
+
+
+def test_every_user_manager_call_carries_the_runtime_directory() -> None:
+    """One builder, so the probe, the recipes and Stop cannot drift apart."""
+    assert presence.user_systemctl_argv("Ubuntu", "1000", "is-enabled") == [
+        "wsl.exe", "-d", "Ubuntu", "--exec",
+        "env", "XDG_RUNTIME_DIR=/run/user/1000",
+        "systemctl", "--user", "is-enabled", "crucible.service",
+    ]
+    assert presence.unit_enabled_argv("Ubuntu", "1000") == (
+        presence.user_systemctl_argv("Ubuntu", "1000", "is-enabled")
+    )
+    assert presence.recipe_argv(presence.RECIPE_USER_UNIT_START, "crucible", "1000") == [
+        "wsl.exe", "-d", "crucible", "--exec",
+        "env", "XDG_RUNTIME_DIR=/run/user/1000",
+        "systemctl", "--user", "start", "crucible.service",
+    ]
+    assert presence.recipe_argv(presence.RECIPE_USER_UNIT_RESTART, "Ubuntu", "1000") == [
+        "wsl.exe", "-d", "Ubuntu", "--exec",
+        "env", "XDG_RUNTIME_DIR=/run/user/1000",
+        "systemctl", "--user", "restart", "crucible.service",
+    ]
+    # `env VAR=value cmd` under `--exec`: no shell, so wsl.exe cannot
+    # pre-expand the variable on the Windows side, where it is empty.
+    for argv in (
+        presence.user_systemctl_argv("Ubuntu", "1000", "stop"),
+        presence.recipe_argv(presence.RECIPE_USER_UNIT_START, "Ubuntu", "1000"),
+    ):
+        assert "--exec" in argv
+        assert "$XDG_RUNTIME_DIR" not in " ".join(argv)
+
+
+def test_the_uid_is_READ_and_never_assumed(host_log: log.HostLog) -> None:
+    """A distro a person installed can run Crucible as any uid, and
+    /run/user/1001 is not /run/user/1000."""
+    runner = Scripted(answers={"id -u": ok("1001\n")})
+    watcher = presence.PresenceWatcher(
+        runner, host_log, distro="Ubuntu", consented=True, sleep=lambda _s: None
+    )
+    assert presence.guest_uid_argv("Ubuntu") == [
+        "wsl.exe", "-d", "Ubuntu", "--exec", "id", "-u",
+    ]
+    assert watcher.guest_uid() == "1001"
+    assert presence.runtime_dir("1001") == "/run/user/1001"
+    # READ ONCE: a uid is a property of a rootfs, not of a moment.
+    assert watcher.guest_uid() == "1001"
+    assert sum(1 for call in runner.calls if "id" in call) == 1
+
+
+def test_a_uid_that_cannot_be_read_is_not_1000(tmp_path: Path) -> None:
+    """Answering 1000 anyway would turn "this distro did not respond" into
+    "the bus is broken" — two different repairs, one message."""
+    host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
+    runner = Scripted(answers={"id -u": bad("There is no distribution with the supplied name.")})
+    watcher = presence.PresenceWatcher(
+        runner, host_log, distro="Ubuntu", consented=True, sleep=lambda _s: None
+    )
+    assert watcher.guest_uid() is None
+    written = (tmp_path / "host.log").read_text(encoding="utf-8")
+    assert "1000 is not assumed" in written
+    assert "There is no distribution with the supplied name." in written
+    # And nothing was built out of a guess.
+    assert not any("XDG_RUNTIME_DIR" in " ".join(call) for call in runner.calls)
+
+
+def test_a_user_manager_recipe_refuses_to_be_built_without_a_uid() -> None:
+    """A programming error, and it says which read is owed."""
+    for name in presence.USER_MANAGER_RECIPES:
+        with pytest.raises(ValueError) as caught:
+            presence.recipe_argv(name, "Ubuntu")
+        assert "XDG_RUNTIME_DIR" in str(caught.value)
+        assert "1000" in str(caught.value)
+
+
+def test_user_bus_restart_needs_no_uid_and_keeps_its_literal_1000() -> None:
+    """It can only run in the distro Crucible IMPORTED, whose rootfs 4b builds
+    with exactly one non-root user — a fact about our own rootfs, not an
+    assumption about somebody's machine."""
+    assert presence.recipe_argv(presence.RECIPE_USER_BUS_RESTART, "crucible") == [
+        "wsl.exe", "-d", "crucible", "-u", "root",
+        "--exec", "systemctl", "restart", "user@1000",
+    ]
+    assert presence.RECIPE_USER_BUS_RESTART not in presence.USER_MANAGER_RECIPES
+
+
+def test_the_probe_asks_with_the_runtime_directory_and_answers(
+    host_log: log.HostLog,
+) -> None:
+    """The measured fix, end to end: uid read, variable set, unit answers."""
+    runner = Scripted(
+        answers={
+            "-l -v": ok(OWENS_PC_LIST),
+            "id -u": ok("1000\n"),
+            "is-enabled": ok("enabled\n"),
+        },
+        pings=[200],
+    )
+    watcher = presence.PresenceWatcher(
+        runner,
+        host_log,
+        distro="Ubuntu",
+        consented=True,
+        monotonic=ticking(),
+        sleep=lambda _s: None,
+    )
+    result = watcher.boot()
+    assert result.owner is Owner.WSL_UNIT
+    assert presence.unit_enabled_argv("Ubuntu", "1000") in runner.calls
+    assert any(
+        "XDG_RUNTIME_DIR=/run/user/1000" in " ".join(call) for call in runner.calls
+    )
+
+
+def test_a_socket_that_is_truly_absent_is_still_found_with_the_reason(
+    tmp_path: Path,
+) -> None:
+    """The variable is set and the bus still is not there. That sentence now
+    means one thing instead of two, and it is kept verbatim."""
+    host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
+    runner = Scripted(
+        answers={
+            "-l -v --running": ok(OWENS_PC_LIST),
+            "-l -v": ok(OWENS_PC_LIST),
+            "cat ": ok(GUEST_LINE),
+            "id -u": ok("1000\n"),
+            "is-enabled": bad("Failed to connect to bus: No such file or directory"),
+        },
+        pings=[200],
+    )
+    watcher = presence.PresenceWatcher(
+        runner,
+        host_log,
+        distro="Ubuntu",
+        consented=True,
+        monotonic=ticking(),
+        sleep=lambda _s: None,
+    )
+    assert watcher.boot().owner is Owner.FOUND
+    written = (tmp_path / "host.log").read_text(encoding="utf-8")
+    assert "Failed to connect to bus: No such file or directory" in written
+    assert "stays owner=found" in written
+
+
+def test_an_unreadable_uid_leaves_the_owner_found_and_runs_no_recipe(
+    tmp_path: Path,
+) -> None:
+    host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
+    runner = Scripted(
+        answers={
+            "-l -v --running": ok(OWENS_PC_LIST),
+            "-l -v": ok(OWENS_PC_LIST),
+            "cat ": ok(GUEST_LINE),
+            "id -u": bad("no such distribution"),
+        },
+        pings=[200],
+    )
+    watcher = presence.PresenceWatcher(
+        runner,
+        host_log,
+        distro="Ubuntu",
+        consented=True,
+        monotonic=ticking(),
+        sleep=lambda _s: None,
+    )
+    probe = watcher.probe_unit()
+    assert probe.readable is False
+    assert "could not be read" in probe.detail
+    assert watcher.boot().owner is Owner.FOUND
+    assert not any("systemctl" in " ".join(call) for call in runner.calls)
+
+
+def test_a_recovery_that_needs_a_uid_is_SKIPPED_and_never_guessed(
+    tmp_path: Path,
+) -> None:
+    """And `user-bus-restart` still runs where it is permitted: it needs no
+    uid, and a user manager that is not answering is exactly its subject."""
+    host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
+    runner = Scripted(answers={"id -u": bad("nothing")}, pings=[])
+    watcher = presence.PresenceWatcher(
+        runner, host_log, monotonic=ticking(), sleep=lambda _s: None
+    )
+    assert watcher.recover(all_recipes=True) is False
+    ran = [" ".join(call) for call in runner.calls]
+    assert not any("systemctl --user" in line for line in ran)
+    assert any("systemctl restart user@1000" in line for line in ran)
+    written = (tmp_path / "host.log").read_text(encoding="utf-8")
+    assert "NOT RUN" in written
+
+
+def test_the_menus_stop_carries_the_runtime_directory_too(tmp_path: Path) -> None:
+    """Found while fixing the probe: Stop had the identical defect, and a Stop
+    that reports ok having stopped nothing is worse than one that refuses."""
+    runner = Scripted(answers={"id -u": ok("1000\n")})
+    context = _context(tmp_path, runner)
+    context.watcher = presence.PresenceWatcher(
+        runner, context.log, distro="Ubuntu", consented=True, sleep=lambda _s: None
+    )
+    context.presence = presence.Presence(
+        Distro.PRESENT, Engine.RUNNING, "up", Owner.WSL_UNIT
+    )
+    app_module.Host(context)._stop_engine()
+    assert presence.user_systemctl_argv("Ubuntu", "1000", "stop") in runner.calls
+
+
+def test_a_stop_with_no_uid_touches_nothing(tmp_path: Path) -> None:
+    runner = Scripted(answers={"id -u": bad("nothing")})
+    context = _context(tmp_path, runner)
+    context.watcher = presence.PresenceWatcher(
+        runner, context.log, distro="Ubuntu", consented=True, sleep=lambda _s: None
+    )
+    context.presence = presence.Presence(
+        Distro.PRESENT, Engine.RUNNING, "up", Owner.WSL_UNIT
+    )
+    app_module.Host(context)._stop_engine()
+    assert not any("systemctl" in " ".join(call) for call in runner.calls)
+    assert "stop: NOT RUN" in (tmp_path / "host.log").read_text(encoding="utf-8")

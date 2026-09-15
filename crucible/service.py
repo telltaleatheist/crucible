@@ -375,9 +375,37 @@ def systemd_unit_text(
     `%` is doubled because systemd expands `%x` specifiers in a unit file, and a
     PATH or a home directory with a percent sign in it would otherwise reach the
     service as something else entirely.
+
+    **`Environment=` VALUES ARE QUOTED, AND THAT IS NOT COSMETIC.** `Environment=`
+    is the one directive here that takes a SPACE-SEPARATED LIST of assignments,
+    so an unquoted value containing a space is not one value with a space in it
+    — it is the first word, and then a second assignment systemd cannot parse.
+    On WSL the installing shell's PATH carries the Windows PATH through interop
+    (`/mnt/c/Program Files/Git/usr/bin`), so owens-pc's unit was rejected word by
+    word, MEASURED 2026-09-14 23:27:02 in the journal:
+
+        crucible.service:12: Invalid environment assignment, ignoring:
+        Files/Git/mingw64/bin:/mnt/c/Program
+
+    and the service ran with the bare PATH the whole recorded-PATH mechanism
+    above exists to prevent — silently, because the line that survives the
+    splitting is a valid `PATH=` and the unit starts. A double quote or a
+    backslash inside the value is refused rather than escaped: systemd's quoting
+    has its own backslash rules, and a value that needs them is a value whose
+    meaning has already stopped being obvious.
     """
     def escape(where: str, value: str) -> str:
         return _one_line(where, value).replace("%", "%%")
+
+    def environment(name: str, where: str, value: str) -> str:
+        if '"' in value or "\\" in value:
+            raise ServiceError(
+                f"{where} contains a double quote or a backslash ({value!r}); a "
+                "systemd `Environment=` value is quoted so that a space in it "
+                "stays part of one assignment, and those two characters have "
+                "their own meaning inside those quotes"
+            )
+        return f'Environment="{name}={escape(where, value)}"\n'
 
     return (
         "[Unit]\n"
@@ -391,9 +419,9 @@ def systemd_unit_text(
         f"WorkingDirectory={escape('CRUCIBLE_HOME', str(crucible_home))}\n"
         f"ExecStart={escape('the crucible console script', program)} serve"
         f" --host {escape('the bind host', host)} --port {int(port)}\n"
-        f"Environment=CRUCIBLE_HOME={escape('CRUCIBLE_HOME', str(crucible_home))}\n"
-        f"Environment=PATH={escape('PATH', path_value)}\n"
-        "Restart=always\n"
+        + environment("CRUCIBLE_HOME", "CRUCIBLE_HOME", str(crucible_home))
+        + environment("PATH", "PATH", path_value)
+        + "Restart=always\n"
         f"RestartSec={RESTART_SECONDS}\n"
         "\n"
         "[Install]\n"
@@ -544,13 +572,23 @@ def read_recorded_path(mechanism: str, home: Path) -> str | None:
             return value if isinstance(value, str) else None
         for line in path.read_text(encoding="utf-8").splitlines():
             name, separator, value = line.partition("=")
-            if separator == "=" and name.strip() == "Environment":
-                key, is_pair, recorded = value.partition("=")
-                if is_pair == "=" and key == "PATH":
-                    # `systemd_unit_text` doubles every `%` because systemd
-                    # expands `%x` specifiers, so reading it back has to undo
-                    # exactly that and nothing else.
-                    return recorded.replace("%%", "%")
+            if separator != "=" or name.strip() != "Environment":
+                continue
+            value = value.strip()
+            # QUOTED SINCE 2026-09-15, and both shapes are read. A unit written
+            # before that carries `Environment=PATH=...` bare, and it is on
+            # disk until the operator reinstalls the service — a reader that
+            # knew only the new shape would answer "no recorded PATH" for a
+            # service that has one, which is the third `None` above pretending
+            # to be the second.
+            if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+                value = value[1:-1]
+            key, is_pair, recorded = value.partition("=")
+            if is_pair == "=" and key == "PATH":
+                # `systemd_unit_text` doubles every `%` because systemd
+                # expands `%x` specifiers, so reading it back has to undo
+                # exactly that and nothing else.
+                return recorded.replace("%%", "%")
         return None
     except (OSError, ValueError, plistlib.InvalidFileException):
         return None

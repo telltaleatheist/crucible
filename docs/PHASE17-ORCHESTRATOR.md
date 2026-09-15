@@ -211,11 +211,53 @@ unit is still a unit `systemctl --user restart` starts, so what it PRINTED is
 read against `UNIT_STATES` and `not-found` is the one answer that means there is
 nothing to manage. And **there is one probe, not two** — 7b.8 measured the root
 door onto the same manager (`systemctl --user -M <user>@`) failing on the same
-machine, in the same minute, for the same cause (a `systemd --user` that never
-got a bus), so a second call that cannot succeed when the first failed is a
-round trip for nothing. What the first one *said* goes in the log instead,
-because `Failed to connect to bus: No such file or directory` is the sentence
-that tells a person what to repair.
+machine in the same minute, and the paragraph below shows the plain call
+ANSWERING on that same distro once it is given the runtime directory. One
+probe, and it is the one that works. What it *says* when it does not answer
+goes in the log verbatim.
+
+**THE BUS NEEDS `XDG_RUNTIME_DIR`, AND THAT IS THE WHOLE OF THE PROBE — measured
+2026-09-15, 07:34-07:35.** `systemctl restart user@1000` as root created
+`/run/user/1000/bus`, so the socket 7b.4c and 7b.8 went looking for now exists —
+and a `wsl.exe --exec` session **still could not reach it**. Such a session gets
+no logind seat, so it has no `XDG_RUNTIME_DIR`, and systemctl looks for the bus
+at `$XDG_RUNTIME_DIR/bus` and nowhere else. From the same kind of session,
+`XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active crucible.service`
+answered `active`.
+
+So every user-manager call the orchestrator makes — the probe, `user-unit-start`,
+`user-unit-restart`, and the menu's Stop — is built by ONE function,
+`user_systemctl_argv()`:
+
+```
+wsl.exe -d <distro> --exec env XDG_RUNTIME_DIR=/run/user/<uid> systemctl --user <verb> crucible.service
+```
+
+`env VAR=value cmd` under `--exec`, because `--exec` is what stops wsl.exe
+pre-expanding the variable on the WINDOWS side, where it is empty, and `env` is
+how a value reaches a process with no shell to set it.
+
+**The uid is READ, once, and 1000 is never assumed** — `wsl -d <distro> --exec id -u`,
+cached on success only. A distro a person installed years ago can run Crucible
+as any uid, and `/run/user/1001` is not `/run/user/1000`. `id` needs no bus, no
+session and no unit, so it answers in exactly the state where every
+`systemctl --user` call does not, which is what makes it the right thing to ask
+first. When it cannot be read, nothing is built out of a guess: the probe
+answers not-readable (so the owner stays `found`), a recovery that needs it is
+logged `NOT RUN` and skipped, and Stop refuses and touches nothing.
+
+`user-bus-restart` keeps its literal `user@1000` and takes no uid. It is a
+SYSTEM-manager call, and it can only ever run in the distro Crucible IMPORTED,
+whose rootfs 4b builds with exactly one non-root user — so 1000 there is a fact
+about a rootfs this project makes, not an assumption about somebody's machine.
+
+**This is a correction to 7b.8's reading, and worth keeping as one.** 7b.8 saw
+`Failed to connect to bus: No such file or directory` from three different
+doors and concluded the socket was missing. A missing socket and a missing
+`XDG_RUNTIME_DIR` produce the *identical* sentence, so the message could not
+tell them apart and re-reading it never would have. It was found by setting the
+variable. The sentence still appears, verbatim, in the log when the socket is
+genuinely absent — and now it means one thing.
 
 **CONSENT NEVER WIDENS DESTRUCTION, and that is the half of this ruling that
 matters most.** `user-bus-restart` (`systemctl restart user@1000` as root) stays

@@ -722,8 +722,10 @@ distro = "Ubuntu"
 ```
 
 With it, `probe_distro()` looks for THAT name (so it reads `present`), and a
-running engine there becomes `wsl-unit` **if `systemctl --user is-enabled
-crucible.service` answers inside it** — the claim then lands and `engine-restart`
+running engine there becomes `wsl-unit` **if
+`env XDG_RUNTIME_DIR=/run/user/<uid> systemctl --user is-enabled crucible.service`
+answers inside it** (the uid READ with `id -u`, never assumed — and see the
+correction to the measurement below) — the claim then lands and `engine-restart`
 goes through the unit. If the unit cannot be read the owner stays `found` and the
 log says what systemctl said, because consent is permission and not evidence.
 Without the setting nothing changes: `found`, watched, never claimed.
@@ -776,6 +778,21 @@ wsl -d Ubuntu --exec bash -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is
 wsl -d Ubuntu -u root --exec systemctl --user -M telltale@ is-active crucible.service
   -> Failed to retrieve unit state: Transport endpoint is not connected
 ```
+
+> **CORRECTED 2026-09-15, 07:34-07:35, and the correction is the fix.** The
+> three failures below were read as *the socket is missing*. They are not that,
+> or not only that. `systemctl restart user@1000` as root created
+> `/run/user/1000/bus` — and a `wsl.exe --exec` session STILL could not reach
+> it, because such a session gets no logind seat and therefore no
+> `XDG_RUNTIME_DIR`, and systemctl looks for the bus at `$XDG_RUNTIME_DIR/bus`
+> and nowhere else. **A missing socket and a missing variable print the
+> identical sentence**, which is why re-reading the message could never have
+> separated them. Measured on the same distro in the same minute:
+> `XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active crucible.service`
+> answered `active`. Every user-manager call the orchestrator makes now carries
+> that prefix, with the uid read by `id -u` (PHASE17 2.5). The second line
+> below says *"XDG_RUNTIME_DIR was ALREADY set"* — it was set in the shell the
+> measurement was typed in, and not in the `--exec` process that ran systemctl.
 
 So the root-side `-M <user>@` door — the one 4.1 was owed as a written recipe — **does not
 work here either**, and the reason is not the missing `XDG_RUNTIME_DIR` 7b.4c blamed: a
@@ -2189,7 +2206,11 @@ if it is not there. The latest release is **v0.5.0** and it publishes three asse
 wheel, the sdist and `crucible-client-0.5.0.tgz`. There is no `envpacks.json`, no rootfs and
 no host pack on ANY release, and `install.ps1`'s own default is `-Release 0.6.0`, a tag that
 does not exist yet. So the pack was BUILT here (`crucible envpack build host`, 54 s, CPU
-only) and `install.ps1`'s steps 5–7 were then performed verbatim against it: join the parts,
+only — and **`C:\Windows\System32` must come before Git's `usr\bin` on PATH**,
+or the build reaches `pack_no_zstd` after the interpreter download and the pip
+run: Git for Windows ships GNU tar 1.32, which names no libzstd and would shell
+out to a `zstd.exe` Windows does not have, while System32's bsdtar 3.8.1 carries
+libzstd 1.5.5. Hit for real on 2026-09-15 from a Git Bash shell) and `install.ps1`'s steps 5–7 were then performed verbatim against it: join the parts,
 verify the sha against the manifest the build wrote, unpack beside, prove `crucible.cmd`
 runs, move into place, stamp, `crucible host --install-startup`, `Start-Process -WindowStyle
 Hidden pythonw.exe -m crucible.cli host`. **7b.6's owed item is unchanged and is now the

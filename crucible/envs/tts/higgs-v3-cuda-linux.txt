@@ -59,23 +59,41 @@
 # CHOSEN set and not a measured one is discharged by that install; `crucible
 # doctor` checks the env against exactly these lines.
 #
-# TWO SITE-PACKAGES PATCHES ARE NOT EXPRESSIBLE HERE AND MUST BE RE-APPLIED
-# AFTER ANY UPGRADE OF THESE PINS:
+# TWO SITE-PACKAGES PATCHES ARE NOT EXPRESSIBLE HERE, AND INSTALLING THIS FILE
+# RE-APPLIES THEM:
 #
-#   work/patch_vllm.py       without it every voice-clone request is HTTP 400
-#   work/patch_tail_trim.py  without it every chunk ends in ~240 ms of audible
-#                            garbage
+#   patches/patch_vllm.py    without it every voice-clone request is HTTP 400
+#   patches/patch_sentinel_filter.py
+#                            without it every chunk ends in ~240 ms of audible
+#                            garbage AND narrator's sentinel proof refuses the
+#                            load, because the record-per-invocation report it
+#                            reads is written by the patched file
 #
-# pip cannot express a patch to somebody else's installed package. `crucible
-# doctor` reports both by name under `narrator_patches`, so an env that is
-# "ready" by its pins alone is not mistaken for one that will render correctly.
+# pip cannot express a patch to somebody else's installed package — worse, pip
+# UNDOES one, by writing the distribution's own file over the edit. So
+# `jobenv.install_env` runs both appliers after pip and before it stamps the
+# env, and `crucible/narratorpatches.py` re-checks the result and refuses the
+# install if the markers are not there. `crucible doctor` reports both by name
+# under `narrator_patches` for an env installed some other way.
+#
+# THIS PARAGRAPH USED TO SAY "MUST BE RE-APPLIED AFTER ANY UPGRADE OF THESE
+# PINS" and name nobody who would. MEASURED 2026-09-15: `crucible install tts
+# --narrator-engine higgs-v3 --build --force` at 07:34 restored both files
+# pristine, and every Higgs load from 07:46 failed at narrator's sentinel proof
+# with a 0-byte report — from the same pins, the same recipe and the same
+# narrator sha that had rendered at 07:23. It also named `work/patch_tail_trim.py`,
+# retired 2026-09-05 and superseded by the sentinel filter.
 
 
 # --- narrator's `higgs-v3-server` extra, restated so doctor verifies it ---
 # WSL `higgs3`: python 3.11, torch 2.13.0+cu130, vllm 0.28.0, vllm-omni 0.28.0.
 # This is the SERVED engine: narrator's v3 client is numpy + soundfile + urllib,
-# but the SGLang-Omni server it starts underneath itself is what holds the model,
-# so the env has to carry the whole stack.
+# but the vllm-omni server it starts underneath itself is what holds the model,
+# so the env has to carry the whole stack. (It said SGLang-Omni until
+# 2026-09-15, which is the OTHER Higgs stack — `serve_higgs_sgl.sh`, a different
+# launch line and a different request body. This recipe pins `vllm-omni==0.28.0`
+# and `EnvSpec.serving_stack` reads `vllm-omni` off it; the prose was the only
+# copy that disagreed.)
 
 accelerate==1.12.0
 aenum==3.1.16

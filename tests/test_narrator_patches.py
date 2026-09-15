@@ -8,6 +8,7 @@ markers BookForge measured on the certifying box.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,14 @@ V2_STAGE = (
     "    ...\n"
     "logger.warning('final=%s, window=%d frames', final, window)\n"
 )
+
+
+@dataclass(frozen=True)
+class Ran:
+    """What `apply`'s `runner` returns — the two fields it reads, and no more."""
+
+    returncode: int
+    stdout: str
 
 
 def env_with(tmp_path: Path, **files: str) -> Path:
@@ -248,3 +257,140 @@ def test_a_v2_env_is_reported_stale_rather_than_applied(tmp_path: Path) -> None:
     found = rows(env_with(tmp_path, **{"higgs-sentinel-filter": V2_STAGE}))
     assert found["higgs-sentinel-filter"]["status"] == STALE
     assert not found["higgs-sentinel-filter"]["applied"]
+
+
+# ------------------------------------------------------------ applying them
+
+
+def test_the_vendored_appliers_write_the_markers_the_table_greps_for() -> None:
+    """The two copies of one fact, compared.
+
+    `envs/tts/patches/*.py` are byte-identical copies of BookForge's
+    `electron/scripts/higgs/`, because narrator's wheel does not carry them and a
+    Crucible server must not need a BookForge checkout. A copy can drift, and the
+    way it would drift invisibly is the pair below disagreeing: a script that
+    writes one marker and a table that greps for another leaves `apply` running
+    the patch and then refusing the install it just fixed.
+
+    Read out of the script's source rather than by importing it: importing runs
+    a module that expects an env prefix in argv.
+    """
+    for patch in NARRATOR_PATCHES:
+        source = narratorpatches.script_path(patch).read_text(encoding="utf-8")
+        assert f'REL = "{patch.rel_path}"' in source, patch.id
+        assert f'MARKER = "{patch.marker}"' in source, patch.id
+        if patch.absent_marker is not None:
+            assert f'ABSENT_MARKER = "{patch.absent_marker}"' in source, patch.id
+
+
+def test_apply_runs_one_script_per_applicable_patch_and_proves_the_result(
+    tmp_path: Path,
+) -> None:
+    """The happy path: pip reverted both files, `apply` puts them back.
+
+    The fake runner writes what the real scripts write, so `check` — the same
+    function `crucible doctor` calls — is what decides the install succeeded.
+    """
+    env = env_with(
+        tmp_path,
+        **{
+            "vllm-negative-token-id": PRISTINE_INPUT_PROCESSOR,
+            "higgs-sentinel-filter": "codes = codes[:, :-1]\n",
+        },
+    )
+    packages = env / "lib" / "python3.11" / "site-packages"
+    written: dict[str, str] = {
+        "vllm-negative-token-id": PATCHED_INPUT_PROCESSOR,
+        "higgs-sentinel-filter": PATCHED_STAGE,
+    }
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str]) -> Ran:
+        seen.append(argv)
+        for patch in NARRATOR_PATCHES:
+            if argv[1].endswith(patch.script):
+                (packages / patch.rel_path).write_text(
+                    written[patch.id], encoding="utf-8"
+                )
+        return Ran(0, "PATCHED\n")
+
+    result = narratorpatches.apply(
+        env, Path("python"), CUDA_PINS, runner=runner
+    )
+    assert [row["status"] for row in result] == [APPLIED, APPLIED]
+    # One invocation per patch, each handed the ENV DIRECTORY — the scripts glob
+    # `<prefix>/lib/python*/site-packages` off it rather than being told a
+    # python version.
+    assert len(seen) == len(NARRATOR_PATCHES)
+    assert all(argv[2] == str(env) for argv in seen)
+
+
+def test_apply_refuses_when_the_env_still_does_not_carry_the_patch(
+    tmp_path: Path,
+) -> None:
+    """A script that exits 0 and changes nothing must not stamp the env.
+
+    This is the regression of 2026-09-15 one layer in: the exit code is the
+    script's own idea of success, and the thing that has to be true is the marker
+    `crucible doctor` greps for tomorrow. `apply` re-checks, so the two are one
+    fact and `jobenv.install_env` raises before it writes the stamp.
+    """
+    env = env_with(
+        tmp_path,
+        **{
+            "vllm-negative-token-id": PRISTINE_INPUT_PROCESSOR,
+            "higgs-sentinel-filter": "codes = codes[:, :-1]\n",
+        },
+    )
+    with pytest.raises(narratorpatches.PatchError) as raised:
+        narratorpatches.apply(
+            env, Path("python"), CUDA_PINS, runner=lambda argv: Ran(0, "")
+        )
+    assert "still does not carry them" in str(raised.value)
+    assert MISSING in str(raised.value)
+
+
+def test_apply_quotes_a_failing_script_rather_than_swallowing_it(
+    tmp_path: Path,
+) -> None:
+    """`ANCHOR_NOT_FOUND` means upstream moved the code this patch edits.
+
+    The scripts say so on stderr and exit 2 rather than skipping quietly, and the
+    refusal has to carry that word out to the operator: the patch must be
+    re-derived against the new version, which is not something a retry fixes.
+    """
+    env = env_with(tmp_path, **{"vllm-negative-token-id": "moved on\n"})
+    with pytest.raises(narratorpatches.PatchError) as raised:
+        narratorpatches.apply(
+            env,
+            Path("python"),
+            CUDA_PINS,
+            runner=lambda argv: Ran(2, "ANCHOR_NOT_FOUND\n"),
+        )
+    assert "ANCHOR_NOT_FOUND" in str(raised.value)
+    assert "vllm-negative-token-id" in str(raised.value)
+
+
+def test_apply_runs_nothing_on_a_backend_whose_recipe_has_no_vllm_stack(
+    tmp_path: Path,
+) -> None:
+    """The Mac again: nothing to patch is not a failure, and not a no-op lie.
+
+    `mlx-darwin`'s tts recipe pins neither distribution, so `apply` runs neither
+    script — and the rows it returns still say `not_applicable` by name, so an
+    install there records the same answer `crucible doctor` gives.
+    """
+    seen: list[list[str]] = []
+
+    def runner(argv: list[str]) -> Ran:
+        seen.append(argv)
+        return Ran(0, "")
+
+    result = narratorpatches.apply(
+        tmp_path / "env",
+        Path("python"),
+        {"mlx-lm": "0.31.3", "mlx-audio": "0.4.8"},
+        runner=runner,
+    )
+    assert seen == []
+    assert [row["status"] for row in result] == [NOT_APPLICABLE, NOT_APPLICABLE]

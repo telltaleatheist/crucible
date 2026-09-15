@@ -100,8 +100,8 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/telltale/.crucible
 ExecStart=/home/telltale/anaconda3/envs/crucible/bin/crucible serve --host 127.0.0.1 --port 7100
-Environment=CRUCIBLE_HOME=/home/telltale/.crucible
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment="CRUCIBLE_HOME=/home/telltale/.crucible"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
 Restart=always
 RestartSec=2
 
@@ -227,7 +227,7 @@ def test_a_percent_in_a_systemd_value_is_doubled() -> None:
         port=7100,
         path_value="/usr/bin",
     )
-    assert "Environment=CRUCIBLE_HOME=/home/o/100%%/.crucible" in text
+    assert 'Environment="CRUCIBLE_HOME=/home/o/100%%/.crucible"' in text
 
 
 def test_a_plist_value_is_xml_escaped() -> None:
@@ -317,7 +317,7 @@ def test_install_records_the_installing_shells_path(
     runner = Runner(LINGER_ON)
     install_systemd(user_home, runner, path_value=None)
     unit = service.unit_path(user_home).read_text(encoding="utf-8")
-    assert "Environment=PATH=/opt/homebrew/bin:/usr/bin" in unit
+    assert 'Environment="PATH=/opt/homebrew/bin:/usr/bin' in unit
 
 
 def test_install_appends_the_servers_own_bin_to_the_recorded_path(
@@ -330,7 +330,7 @@ def test_install_appends_the_servers_own_bin_to_the_recorded_path(
     monkeypatch.setattr(hosttools, "search_path", lambda: "/usr/bin:/bin")
     install_systemd(user_home, Runner(LINGER_ON), path_value=None)
     unit = service.unit_path(user_home).read_text(encoding="utf-8")
-    assert f"Environment=PATH=/usr/bin:/bin:{env_bin(user_home)}\n" in unit
+    assert f'Environment="PATH=/usr/bin:/bin:{env_bin(user_home)}"\n' in unit
 
 
 def test_the_servers_bin_is_appended_and_never_prepended(user_home: Path) -> None:
@@ -362,7 +362,7 @@ def test_install_records_crucible_home_so_the_service_serves_one_config(
     runner = Runner(LINGER_ON)
     install_systemd(user_home, runner, crucible_home=Path("/tmp/crucible-a1"))
     unit = service.unit_path(user_home).read_text(encoding="utf-8")
-    assert "Environment=CRUCIBLE_HOME=/tmp/crucible-a1" in unit
+    assert 'Environment="CRUCIBLE_HOME=/tmp/crucible-a1' in unit
     # …and the cwd is that same directory, not the operator's $HOME, which is
     # where the PC's ImportError came from.
     assert "WorkingDirectory=/tmp/crucible-a1" in unit
@@ -690,7 +690,7 @@ def test_cli_service_install_writes_the_unit_for_this_config(
     config = load_config(home)
     assert f"ExecStart={script} serve" in unit
     assert f"--host {config.host} --port {config.port}" in unit
-    assert f"Environment=CRUCIBLE_HOME={config.home}" in unit
+    assert f'Environment="CRUCIBLE_HOME={config.home}"' in unit
     assert f"WorkingDirectory={config.home}" in unit
     assert f"({config.name})" in unit
     assert "mechanism: systemd" in capsys.readouterr().out
@@ -874,3 +874,68 @@ def test_cli_service_refuses_without_a_config(
     monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_BACKEND)
     assert cli.main(["service", "status"]) == 1
     assert "crucible init" in capsys.readouterr().err
+
+
+def test_a_space_in_the_path_stays_one_environment_assignment() -> None:
+    """The WSL defect of 2026-09-14, in the generator that caused it.
+
+    `Environment=` is the one directive here that takes a SPACE-SEPARATED LIST of
+    assignments, so an unquoted value with a space in it is not one value — it is
+    a first word and then fragments systemd rejects. On owens-pc the installing
+    shell's PATH carries the Windows PATH through WSL interop
+    (`/mnt/c/Program Files/Git/usr/bin`), and the journal read:
+
+        crucible.service:12: Invalid environment assignment, ignoring:
+        Files/Git/mingw64/bin:/mnt/c/Program
+
+    The service then ran with the bare PATH that the whole recorded-PATH
+    mechanism exists to prevent, and it ran SILENTLY, because the fragment that
+    survives the split is still a valid `PATH=` and the unit starts.
+    """
+    windows_path = "/usr/bin:/mnt/c/Program Files/Git/usr/bin:/mnt/c/Windows"
+    text = service.systemd_unit_text(
+        server_name="crucible@owens-pc-wsl",
+        program="/home/telltale/anaconda3/envs/crucible/bin/crucible",
+        crucible_home=Path("/home/telltale/.crucible"),
+        host="127.0.0.1",
+        port=7100,
+        path_value=windows_path,
+    )
+    assert f'Environment="PATH={windows_path}"\n' in text
+    # And the whole value is ONE line: nothing below the quote may look like a
+    # second assignment to the parser.
+    line = next(l for l in text.splitlines() if l.startswith('Environment="PATH'))
+    assert line.count('"') == 2 and line.endswith('"')
+
+
+def test_a_quote_in_an_environment_value_is_refused_rather_than_escaped() -> None:
+    """systemd's own quoting has backslash rules, and a value that needs them is
+    a value whose meaning has stopped being obvious. Refuse by name."""
+    for awkward in ['/usr/bin:/opt/a"b', "/usr/bin:/opt/a" + chr(92) + "b"]:
+        with pytest.raises(service.ServiceError) as caught:
+            service.systemd_unit_text(
+                server_name="crucible@box",
+                program="/opt/env/bin/crucible",
+                crucible_home=Path("/home/o/.crucible"),
+                host="127.0.0.1",
+                port=7100,
+                path_value=awkward,
+            )
+        assert "double quote or a backslash" in str(caught.value)
+
+
+def test_an_unquoted_unit_from_an_older_build_still_reads_back(
+    user_home: Path,
+) -> None:
+    """The units on disk today are the bare shape, and they have a PATH.
+
+    A reader that knew only the quoted form would answer `None` for a service
+    that has a recorded PATH — the "no recording" answer standing in for "I
+    could not parse it", which is the same silence one layer out.
+    """
+    unit = service.unit_path(user_home)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(
+        "[Service]\nEnvironment=PATH=/usr/local/bin:/usr/bin\n", encoding="utf-8"
+    )
+    assert service.read_recorded_path("systemd", user_home) == "/usr/local/bin:/usr/bin"

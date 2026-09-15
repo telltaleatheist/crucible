@@ -50,6 +50,7 @@ from .paths import (
     log_path,
     previous_log_path,
 )
+from . import presence as presence_module
 from .presence import Presence, PresenceWatcher
 from .runner import ProcessRunner, Runner
 from ..tasks import HOST_DOOR_ENV
@@ -743,17 +744,27 @@ class Host:
         if self._c.presence.distro is Distro.PRESENT:
             # `systemctl --user stop`, which `Restart=always` respects: the
             # unit is STOPPED, not exited (the ruling in crucible/service.py).
+            #
+            # Through the SAME builder as the recipes and the probe, because
+            # it had the same defect and would have failed the same silent
+            # way: a `wsl.exe --exec` session gets no XDG_RUNTIME_DIR, so
+            # `systemctl --user` cannot find the bus (measured 2026-09-15).
+            # Found while fixing the probe; a Stop that reports `ok` having
+            # stopped nothing is worse than a Stop that refuses.
+            uid = self._c.watcher.guest_uid()
+            if uid is None:
+                self._c.log.write(
+                    "stop: NOT RUN — `systemctl --user stop` needs "
+                    "XDG_RUNTIME_DIR=/run/user/<uid> and the uid could not "
+                    "be read; the engine is untouched"
+                )
+                return
             result = self._c.runner.run(
-                [
-                    "wsl.exe",
-                    "-d",
+                presence_module.user_systemctl_argv(
                     self._c.watcher._distro,  # noqa: SLF001
-                    "--exec",
-                    "systemctl",
-                    "--user",
+                    uid,
                     "stop",
-                    "crucible",
-                ],
+                ),
                 timeout_s=60.0,
             )
             self._c.log.write(f"stop: {'ok' if result.ok else result.said()}")

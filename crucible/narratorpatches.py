@@ -2,10 +2,41 @@
 
 PHASE3-TTS.md section 4: the `higgs-v3` tts env needs two site-packages patches
 re-applied after any upgrade of its pins, and `crucible doctor` reports them by
-name. They are not Crucible's patches and this module does not apply them — it
-**checks** them, which is the useful half: an env whose pins all match is
-reported ready, and a reader has no way to tell that from an env that will render
-every chunk with 240 ms of garbage on the end.
+name. This module **applies** them (`apply`, run by `jobenv.install_env` after
+pip) and **checks** them (`check`, run by `crucible doctor`).
+
+IT ONLY CHECKED UNTIL 2026-09-15, AND THAT IS THE BUG THIS PARAGRAPH IS FOR
+---------------------------------------------------------------------------
+"Must be re-applied after any upgrade of these pins" — said by the recipe, by
+this module's old docstring and by PHASE3-TTS.md — named no one who would do it,
+and nobody did. `crucible install tts --narrator-engine higgs-v3 --build --force`
+deletes the env and pip-installs the recipe, which restores BOTH files pristine;
+the install then reported success and `crucible doctor` reported the patches
+`missing` in the same breath, from two commands nobody runs together.
+
+MEASURED on owens-pc, 2026-09-15: a rebuild at 07:34 replaced
+`vllm_omni/.../higgs_audio_v3.py`, and from 07:46 every Higgs load failed at
+narrator's sentinel proof — `/tmp/narrator-higgs3-<pid>-<hash>.log.sentinel.jsonl
+holds no records`, the file 0 bytes, because the code that writes a record per
+invocation had just been uninstalled. Renders at 07:23 from the same recipe, the
+same pins and the same narrator sha worked. A build that reverts a required patch
+and calls itself installed is the defect; the fix is that the build applies it and
+refuses to finish if `check` then disagrees.
+
+THE APPLIERS ARE VENDORED, AND WHY THAT IS THE LESSER EVIL
+-----------------------------------------------------------
+`envs/tts/patches/patch_vllm.py` and `envs/tts/patches/patch_sentinel_filter.py`
+are byte-identical copies of BookForge's `electron/scripts/higgs/`, the scripts
+every measurement in `electron/data/higgs-models.json` was taken against. They
+are copies for the same reason the table below is one: a Crucible server must not
+need a BookForge checkout, and narrator's wheel does not carry them (it ships
+`engine/higgs/launch/` and nothing else). **The owed move is narrator shipping
+its own patches** — the engine that requires a patched server is the honest owner
+of the patch — and it is owed on the same ruling as extracting narrator into its
+own repo (PHASE3-TTS.md section 4). Until then the copies are pinned by content:
+`tests/test_narrator_patches.py` reads `REL`/`MARKER`/`ABSENT_MARKER` out of each
+script and asserts they are the table's, so the two halves cannot drift apart in
+silence, and `git hash-object` compares a copy to BookForge's blob by hand.
 
 Why the table is duplicated rather than imported
 ------------------------------------------------
@@ -68,6 +99,7 @@ pristine stage processor and zero times once the filter patch is in.
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -110,6 +142,10 @@ class NarratorPatch:
     #: Present only in the CURRENT version of the patch. Marker present and this
     #: absent is an env carrying an older one, which is reported STALE.
     stale_marker: str | None
+    #: The applier in `envs/tts/patches/`, run as `<env python> <script> <env>`.
+    #: Every script is idempotent and refuses by name (`ANCHOR_NOT_FOUND`) when
+    #: upstream has moved the code it edits, rather than skipping quietly.
+    script: str
     why: str
 
 
@@ -121,6 +157,7 @@ NARRATOR_PATCHES: tuple[NarratorPatch, ...] = (
         marker="min_input_id != -100",
         absent_marker=None,
         stale_marker=None,
+        script="patch_vllm.py",
         why=(
             "vLLM 0.28's blanket negative-token-id rejection fires on vllm-omni's "
             "audio placeholder (-100), so every voice-clone request returns HTTP "
@@ -136,6 +173,7 @@ NARRATOR_PATCHES: tuple[NarratorPatch, ...] = (
         marker="_filter_sentinel_frames",
         absent_marker="[:, :-1]",
         stale_marker="HIGGS_SENTINEL_REPORT",
+        script="patch_sentinel_filter.py",
         why=(
             "without it every rendered chunk ends with ~240 ms of audible garbage "
             "— the ramp-down sentinels are substituted with codec code 0, which is "
@@ -148,6 +186,99 @@ NARRATOR_PATCHES: tuple[NarratorPatch, ...] = (
 #: The narrator engine these belong to. They are both edits to the vllm-omni
 #: stack Higgs v3 serves through, so an engine on another stack needs neither.
 PATCHED_ENGINE = "higgs-v3"
+
+#: Where the vendored appliers live. Shipped by `pyproject.toml`'s
+#: `crucible = ["envs/**/*"]`, so a wheel carries them; `tests/test_wheel.py`
+#: is what keeps that glob from silently matching nothing.
+SCRIPTS_DIR = Path(__file__).resolve().parent / "envs" / "tts" / "patches"
+
+
+class PatchError(RuntimeError):
+    """A patch could not be applied, or was not there after applying it."""
+
+
+def script_path(patch: NarratorPatch) -> Path:
+    """The applier for this patch, or `PatchError` naming the missing file."""
+    path = SCRIPTS_DIR / patch.script
+    if not path.is_file():
+        raise PatchError(
+            f"the applier for {patch.id} is not installed: {path} is not there. "
+            "A wheel built without `envs/**/*` has the recipes and not the "
+            "patches, which is an env that installs and does not render"
+        )
+    return path
+
+
+def apply(
+    env_dir: Path,
+    python: Path,
+    recipe_pins: dict[str, str],
+    *,
+    on_line: Any = None,
+    runner: Any = None,
+) -> list[dict[str, Any]]:
+    """Re-apply every patch this env's recipe makes applicable, then prove it.
+
+    Called by `jobenv.install_env` AFTER pip and BEFORE the stamp is written, so
+    an env that is stamped installed is an env whose patches are in. pip is what
+    reverts them — it writes the distribution's own file over the edit — so this
+    is the only place the two can be kept in step.
+
+    `recipe_pins` selects the same way `check` does: a patch whose distribution
+    the recipe does not install is not run at all, so `mlx-darwin` (no `vllm`,
+    no `vllm-omni`) gets neither and is not called broken for it.
+
+    THE PROOF IS `check`, NOT THE EXIT CODE. Each script prints `PATCHED` or
+    `ALREADY_PATCHED` and exits 0, and its own idea of success is the anchor it
+    replaced — not the marker `crucible doctor` will grep for tomorrow. Running
+    the checker over the result is what makes those one fact; anything short of
+    `applied` raises, because an env that pip built and nobody patched is
+    exactly the failure this function exists for.
+
+    `runner` is for tests: a callable taking the argv and returning an object
+    with `returncode` and `stdout`. The default runs it.
+    """
+    run = runner if runner is not None else _run_script
+    for patch in NARRATOR_PATCHES:
+        if patch.distribution not in recipe_pins:
+            continue
+        argv = [str(python), str(script_path(patch)), str(env_dir)]
+        result = run(argv)
+        for line in (result.stdout or "").splitlines():
+            if on_line is not None:
+                on_line(line)
+        if result.returncode != 0:
+            raise PatchError(
+                f"could not apply {patch.id} to {env_dir}: "
+                f"`{' '.join(argv)}` exited {result.returncode}\n"
+                + (result.stdout or "").strip()
+            )
+
+    rows = check(env_dir, recipe_pins)
+    unsound = [row for row in rows if row["status"] not in SOUND_STATUSES]
+    if unsound:
+        raise PatchError(
+            "the patches were applied and the env still does not carry them: "
+            + "; ".join(
+                f"{row['id']} is {row['status']} — {row['detail']}"
+                for row in unsound
+            )
+        )
+    return rows
+
+
+def _run_script(argv: list[str]) -> Any:
+    # stderr JOINED to stdout: the scripts say `NOT_FOUND`, `AMBIGUOUS` and
+    # `ANCHOR_NOT_FOUND` on stderr and `PATCHED` on stdout, and the refusal this
+    # function raises has to quote whichever one it was.
+    return subprocess.run(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=300,
+        check=False,
+    )
 
 
 def site_packages(env_dir: Path) -> Path | None:

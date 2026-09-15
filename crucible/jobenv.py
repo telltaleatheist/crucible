@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from . import narratorpatches
 from .errors import CrucibleError
 
 RECIPES_DIR_ENV = "CRUCIBLE_RECIPES_DIR"
@@ -564,6 +565,35 @@ def install_env(
         f"could not install {recipe} into {directory}",
         on_line,
     )
+
+    # THE TWO SITE-PACKAGES PATCHES pip CANNOT EXPRESS, RE-APPLIED HERE.
+    #
+    # pip has just written vllm-omni's own `higgs_audio_v3.py` over the edit
+    # narrator's sentinel proof reads, which is what made every Higgs load on
+    # owens-pc fail from 07:46 on 2026-09-15 after a `--build --force` at 07:34
+    # — the proof found a 0-byte report because the code that writes records was
+    # gone. Before this call the recipe said the patches "must be re-applied"
+    # and named nobody to do it; `crucible doctor` then reported them `missing`
+    # from a command nobody runs after an install.
+    #
+    # ONLY FOR `tts`. Both patches edit the vLLM stack, and the `llm` env pins
+    # `vllm` too — patching an LLM server's input processor to admit token -100
+    # is not a thing anyone asked for. `narratorpatches` then selects again by
+    # the recipe's own pins, so `mlx-darwin`'s tts env (no vllm, no vllm-omni)
+    # runs neither and is not called broken for it.
+    #
+    # BEFORE THE STAMP, and it raises: an env that is stamped installed is an
+    # env whose patches are in, or there is no stamp.
+    if spec.job_type == "tts":
+        try:
+            narratorpatches.apply(
+                directory, python, recipe_pins(recipe), on_line=on_line
+            )
+        except narratorpatches.PatchError as exc:
+            # Re-raised as this module's error so the CLI refuses by name
+            # rather than showing a traceback. No stamp has been written, so
+            # the env this leaves behind is one nothing downstream trusts.
+            raise EnvError(str(exc)) from exc
 
     version = subprocess.run(
         [str(python), "-c", "import sys; print('.'.join(map(str, sys.version_info[:3])))"],
