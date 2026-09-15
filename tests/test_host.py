@@ -24,12 +24,13 @@ from typing import Callable, Mapping, Sequence
 
 import pytest
 
+from crucible.host import app as app_module
 from crucible.host import catalog as catalog_module
 from crucible.host import door as door_module
 from crucible.host import installer, landoor, log, menu, paths, presence, startup, wslstate
 from crucible.host.catalog import CatalogRefusal, Subject
 from crucible.host.errors import HOST_ERROR_CODES, HostError
-from crucible.host.menu import Distro, Engine
+from crucible.host.menu import Distro, Engine, Owner
 from crucible.host.runner import RunResult
 from crucible.host.wsl_states import WSL_STATE_CODES, WSL_STATES
 
@@ -174,11 +175,18 @@ def test_a_log_line_is_timestamped_and_returned(host_log: log.HostLog) -> None:
 
 
 def test_every_cell_of_the_distro_by_engine_table_has_a_title_and_an_item_set() -> None:
-    """4.1's table, walked EXHAUSTIVELY. Fifteen cells, not a sample."""
+    """4.1's table, walked EXHAUSTIVELY. Fifteen cells, not a sample.
+
+    The owner here is the one the pair IMPLIED before ownership was a fact of
+    its own (2026-09-15): the distro said which server this machine runs and
+    the host had started it either way. `FOUND` is the case the pair could not
+    express, and it has its own cells below.
+    """
     seen: set[str] = set()
     for distro in Distro:
+        owner = Owner.WSL_UNIT if distro is Distro.PRESENT else Owner.HOST_CHILD
         for engine in Engine:
-            model = menu.menu_model(distro, engine)
+            model = menu.menu_model(distro, engine, owner)
             assert model.title.startswith("Crucible — ")
             seen.add(model.title)
             ids = [item.item_id for item in model.items]
@@ -201,29 +209,55 @@ def test_every_cell_of_the_distro_by_engine_table_has_a_title_and_an_item_set() 
 
 def test_the_title_names_the_backend_after_section_zeros_amendment() -> None:
     """`host mode` was a title from before Windows had a backend. It has one."""
-    running = menu.menu_model(Distro.ABSENT, Engine.RUNNING)
+    running = menu.menu_model(Distro.ABSENT, Engine.RUNNING, Owner.HOST_CHILD)
     assert running.title == "Crucible — running (llama-windows)"
     assert "host mode" not in running.title
 
 
 def test_quits_label_says_what_quitting_costs_and_it_differs_by_server() -> None:
-    assert menu.menu_model(Distro.PRESENT, Engine.RUNNING).item(menu.QUIT).label == (
+    assert menu.menu_model(Distro.PRESENT, Engine.RUNNING, Owner.WSL_UNIT).item(menu.QUIT).label == (
         "Quit (the engine keeps running)"
     )
-    assert menu.menu_model(Distro.ABSENT, Engine.RUNNING).item(menu.QUIT).label == (
+    assert menu.menu_model(Distro.ABSENT, Engine.RUNNING, Owner.HOST_CHILD).item(menu.QUIT).label == (
         "Quit (stops the engine)"
     )
 
 
 def test_an_unreadable_wsl_still_offers_the_install_and_never_claims_a_server() -> None:
     """Reading `unknown` as `absent` would import a SECOND distro."""
-    model = menu.menu_model(Distro.UNKNOWN, Engine.RUNNING)
+    model = menu.menu_model(Distro.UNKNOWN, Engine.RUNNING, Owner.NONE)
     assert model.item(menu.INSTALL_ENGINE) is not None
     assert "WSL unreadable" in model.title
 
 
+# -------------------------------- 4.2 an engine the host did NOT start (FOUND)
+#
+# Added 2026-09-15, by the first real run on Owen's PC: a machine whose
+# Crucible lives in `Ubuntu` answers `distro=absent` and `ping=200` at the
+# same time, and the pair alone reads that as "no server here".
+
+
+def test_an_engine_the_host_found_is_named_by_that_and_not_by_a_backend() -> None:
+    model = menu.menu_model(Distro.ABSENT, Engine.RUNNING, Owner.FOUND)
+    assert model.title == "Crucible — running (found on this machine)"
+    assert "llama-windows" not in model.title
+
+
+def test_the_host_offers_no_verb_that_would_act_on_an_engine_it_did_not_start() -> None:
+    model = menu.menu_model(Distro.ABSENT, Engine.RUNNING, Owner.FOUND)
+    # ABSENT would normally OFFER the WSL install; a machine that already has
+    # an engine must not be invited to import a second distro.
+    assert model.item(menu.INSTALL_ENGINE) is None
+    assert model.item(menu.RESTART_ENGINE).enabled is False
+    assert model.item(menu.STOP_ENGINE).enabled is False
+    # What it may still do: look at it, and read the log.
+    assert model.item(menu.OPEN_CONSOLE).enabled is True
+    assert model.item(menu.OPEN_LOG).enabled is True
+    assert model.item(menu.QUIT).label == "Quit (the engine keeps running)"
+
+
 def test_the_install_item_reads_as_an_upgrade_not_as_an_absence() -> None:
-    label = menu.menu_model(Distro.ABSENT, Engine.RUNNING).item(menu.INSTALL_ENGINE).label
+    label = menu.menu_model(Distro.ABSENT, Engine.RUNNING, Owner.HOST_CHILD).item(menu.INSTALL_ENGINE).label
     assert label.startswith("Install the WSL2 engine")
     assert "TTS" in label
 
@@ -300,11 +334,11 @@ def test_the_watch_spends_ONE_recovery_per_down_edge_and_then_stops(
     watcher = presence.PresenceWatcher(
         runner, host_log, monotonic=ticking(), sleep=lambda _s: None
     )
-    first = watcher.poll(Distro.PRESENT)
+    first = watcher.poll(Distro.PRESENT, Owner.WSL_UNIT)
     assert first.engine is Engine.STOPPED
     recoveries = sum("systemctl" in " ".join(call) for call in runner.calls)
     runner.calls.clear()
-    second = watcher.poll(Distro.PRESENT)
+    second = watcher.poll(Distro.PRESENT, Owner.WSL_UNIT)
     assert second.engine is Engine.STOPPED
     assert recoveries > 0
     assert not any("systemctl" in " ".join(call) for call in runner.calls)
@@ -325,11 +359,272 @@ def test_a_successful_ping_restores_the_recovery_budget(host_log: log.HostLog) -
     watcher = presence.PresenceWatcher(
         runner, host_log, monotonic=ticking(), sleep=lambda _s: None
     )
-    watcher.poll(Distro.ABSENT)  # down: spends the budget
-    watcher.poll(Distro.ABSENT)  # up: restores it
+    watcher.poll(Distro.ABSENT, Owner.HOST_CHILD)  # down: spends the budget
+    watcher.poll(Distro.ABSENT, Owner.HOST_CHILD)  # up: restores it
     runner.calls.clear()
-    third = watcher.poll(Distro.ABSENT)
+    third = watcher.poll(Distro.ABSENT, Owner.HOST_CHILD)
     assert third.engine is Engine.STOPPED
+
+
+# ------------------------------- 4.1 the engine hunt, the hold, and ownership
+#
+# All four of these pin something the first real run on Owen's PC found
+# (2026-09-15). They are written with the shape of THAT machine: a distro
+# called `Ubuntu` that is running and holds the engine, and no distro called
+# `crucible` at all.
+
+
+OWENS_PC_LIST = "  NAME      STATE           VERSION\n* Ubuntu    Running         2\n"
+GUEST_LINE = "crucible://crucible%40owens-pc-wsl@127.0.0.1:7100/#a-token\n"
+
+
+def test_the_hunt_only_asks_distros_that_are_ALREADY_running() -> None:
+    """Asking a stopped distro anything BOOTS it, and the host boots no VM it
+    does not own."""
+    assert presence.wsl_running_argv() == ["wsl.exe", "-l", "-v", "--running"]
+    assert "--exec" in presence.guest_pairing_argv("Ubuntu")
+    # The guest's `$CRUCIBLE_HOME` must be expanded by BASH and not by
+    # wsl.exe, which is what `--exec` buys (wsl-exe-implicit-shell-trap).
+    assert "${CRUCIBLE_HOME:-$HOME/.crucible}" in " ".join(
+        presence.guest_pairing_argv("Ubuntu")
+    )
+
+
+def test_a_pairing_lines_authority_is_read_after_the_LAST_at_sign() -> None:
+    """The name is percent-encoded so this cannot be ambiguous; rsplit is the
+    reader's half of that contract."""
+    assert presence.pairing_line_authority(GUEST_LINE) == "127.0.0.1:7100"
+    assert presence.pairing_line_authority("http://127.0.0.1:7100/") is None
+    assert presence.pairing_line_authority("not a line") is None
+
+
+def test_an_engine_in_a_distro_crucible_does_not_own_is_FOUND_and_named(
+    host_log: log.HostLog,
+) -> None:
+    runner = Scripted(
+        answers={"-l -v --running": ok(OWENS_PC_LIST), "cat ": ok(GUEST_LINE)},
+        pings=[200],
+    )
+    watcher = presence.PresenceWatcher(runner, host_log, sleep=lambda _s: None)
+    result = watcher.adopt(Distro.ABSENT)
+    assert result.engine is Engine.RUNNING
+    assert result.owner is Owner.FOUND
+    assert '"Ubuntu"' in result.detail
+    assert watcher.found is not None
+    assert watcher.found.distro == "Ubuntu"
+    assert watcher.found.line.strip() == GUEST_LINE.strip()
+    # Nothing was started, and nothing was booted.
+    assert runner.spawned == []
+    assert not any("--exec true" in " ".join(call) for call in runner.calls)
+
+
+def test_an_engine_answering_somewhere_else_is_not_this_machines(
+    host_log: log.HostLog,
+) -> None:
+    """A distro holding a Crucible bound to another port is not the engine the
+    host is watching, and adopting its line would hand apps a wrong address."""
+    elsewhere = "crucible://crucible%40x@127.0.0.1:7999/#t\n"
+    runner = Scripted(
+        answers={"-l -v --running": ok(OWENS_PC_LIST), "cat ": ok(elsewhere)}
+    )
+    watcher = presence.PresenceWatcher(runner, host_log, sleep=lambda _s: None)
+    assert watcher.find_engine() is None
+    result = watcher.adopt(Distro.ABSENT)
+    assert result.owner is Owner.FOUND
+    assert "no line to copy" in result.detail
+
+
+def test_a_found_engine_going_down_runs_NO_recipe_at_all(
+    host_log: log.HostLog,
+) -> None:
+    """It was not started here, so there is no unit to call and no child to
+    respawn. The one thing the host can do is say so."""
+    runner = Scripted(pings=[])
+    watcher = presence.PresenceWatcher(
+        runner, host_log, monotonic=ticking(), sleep=lambda _s: None
+    )
+    result = watcher.poll(Distro.ABSENT, Owner.FOUND)
+    assert result.engine is Engine.STOPPED
+    assert result.owner is Owner.FOUND
+    assert "nothing here to restart" in result.detail
+    assert not any("systemctl" in " ".join(call) for call in runner.calls)
+    assert runner.spawned == []
+
+
+def test_the_host_holds_the_distro_open_because_units_do_not_keep_a_VM_alive(
+    host_log: log.HostLog,
+) -> None:
+    """7b.4c, measured: a distro terminates seconds after the last wsl.exe
+    session ends, `Restart=always` and linger notwithstanding."""
+    assert presence.keepalive_argv("Ubuntu") == [
+        "wsl.exe", "-d", "Ubuntu", "--exec", "sleep", "infinity",
+    ]
+    runner = Scripted()
+    watcher = presence.PresenceWatcher(runner, host_log, sleep=lambda _s: None)
+    first = watcher.hold("Ubuntu")
+    assert runner.spawned == [presence.keepalive_argv("Ubuntu")]
+    # Idempotent while it lives: a second hold is the same session.
+    assert watcher.hold("Ubuntu") is first
+    assert len(runner.spawned) == 1
+    # Dead: the watch takes it again rather than waiting for the next login.
+    first.terminate()
+    again = watcher.rehold()
+    assert again is not first
+    assert len(runner.spawned) == 2
+    watcher.release()
+    assert watcher.held is None
+    assert watcher.rehold() is None
+
+
+# ------------------------- 4.1 what `crucible host` does at start, by branch
+#
+# Section 0 is ONE SERVER PER MACHINE, and until 2026-09-15 the host could
+# make that false by itself: with no distro NAMED `crucible` it spawned the
+# `llama-windows` child without ever asking whether something was already
+# answering on 7100.
+
+
+def real_grantee_env() -> dict[str, str]:
+    """`WINDOWS_ENV`, with the ACL grantee this machine actually has.
+
+    `icacls` really runs when the suite runs ON Windows, and `%USERNAME%` is
+    the one value in the fixture that has to be TRUE rather than plausible.
+    Measured on Owen's PC, 2026-09-15: the profile directory is `tellt` and
+    the account is `telltale` — which is the exact reason `pairing.py` and
+    `paths.py` READ that variable instead of assembling a name from a path,
+    and the fixture's fabricated `tellt` is what proved it
+    (`No mapping between account names and security IDs was done`).
+    """
+    env = dict(WINDOWS_ENV)
+    if os.name == "nt":
+        env["USERNAME"] = os.environ["USERNAME"]
+    return env
+
+
+def _context(tmp_path: Path, runner: Scripted) -> app_module.HostContext:
+    host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
+    watcher = presence.PresenceWatcher(
+        runner, host_log, monotonic=ticking(), sleep=lambda _s: None
+    )
+    return app_module.HostContext(
+        runner=runner,
+        log=host_log,
+        home=tmp_path,
+        watcher=watcher,
+        presence=presence.Presence(
+            Distro.UNKNOWN, Engine.STARTING, "starting", Owner.NONE
+        ),
+    )
+
+
+def test_a_machine_that_already_answers_gets_NO_second_server(tmp_path: Path) -> None:
+    """Owen's PC, exactly: `wsl -l -v` lists Ubuntu and no crucible, and
+    `GET /v1/ping` answers 200 because the engine is inside Ubuntu."""
+    runner = Scripted(
+        answers={
+            "-l -v --running": ok(OWENS_PC_LIST),
+            "-l -v": ok(OWENS_PC_LIST),
+            "cat ": ok(GUEST_LINE),
+        },
+        pings=[200, 200],
+    )
+    context = _context(tmp_path, runner)
+    result = app_module.Host(context).start()
+    assert result.distro is Distro.ABSENT
+    assert result.engine is Engine.RUNNING
+    assert result.owner is Owner.FOUND
+    # The one thing that must not have happened.
+    assert not any("serve" in " ".join(call) for call in runner.spawned)
+    assert not any("init" in " ".join(call) for call in runner.calls)
+    # …and the one thing that must have: the distro is held open (7b.4c).
+    assert presence.keepalive_argv("Ubuntu") in runner.spawned
+
+
+def test_with_nothing_answering_and_no_distro_the_host_mode_child_still_starts(
+    tmp_path: Path,
+) -> None:
+    """The guard is a LOOK, not a refusal: a machine with no engine still gets
+    the `llama-windows` one."""
+    pack = tmp_path / "pack"
+    pack.mkdir()
+    (pack / paths.CONSOLE_CMD).write_text("@echo off\n", encoding="utf-8")
+    env = dict(WINDOWS_ENV)
+    env["LOCALAPPDATA"] = str(tmp_path)
+    runner = Scripted(answers={"-l -v": ok(OWENS_PC_LIST)}, pings=[None], env=env)
+    context = _context(tmp_path, runner)
+    # `console_cmd_path` is <LOCALAPPDATA>/Crucible/host/crucible.cmd; on a
+    # POSIX test box that path does not exist, which is the FAILED branch —
+    # and FAILED is still "the host started nothing", which is what is pinned.
+    result = app_module.Host(context).start()
+    assert result.owner is Owner.NONE
+    assert result.engine is Engine.FAILED
+    assert "Reinstall with install.ps1" in result.detail
+
+
+def test_a_guest_engines_pairing_line_is_COPIED_and_never_composed(
+    tmp_path: Path,
+) -> None:
+    """3.6: the Windows file is the host's COPY of the guest's line. Composing
+    one here would carry the HOST's token at the GUEST's address — a file that
+    exists and disagrees, which 3.6 calls worse than none."""
+    (tmp_path / "config.toml").write_text(
+        '[server]\nname = "crucible@owens-pc"\n[auth]\ntoken = "the-wrong-one"\n',
+        encoding="utf-8",
+    )
+    runner = Scripted(
+        answers={
+            "-l -v --running": ok(OWENS_PC_LIST),
+            "-l -v": ok(OWENS_PC_LIST),
+            "cat ": ok(GUEST_LINE),
+        },
+        pings=[200, 200],
+        env=real_grantee_env(),
+    )
+    context = _context(tmp_path, runner)
+    app_module.Host(context).start()
+    app_module._write_pairing(context)
+    written = (tmp_path / "pairing").read_text(encoding="utf-8")
+    assert written == GUEST_LINE
+    assert "the-wrong-one" not in written
+
+
+def test_a_guest_engine_whose_line_cannot_be_read_writes_NO_file(
+    tmp_path: Path,
+) -> None:
+    runner = Scripted(
+        answers={
+            "-l -v --running": ok(OWENS_PC_LIST),
+            "-l -v": ok(OWENS_PC_LIST),
+            "cat ": bad("No such file or directory"),
+        },
+        pings=[200, 200],
+    )
+    context = _context(tmp_path, runner)
+    app_module.Host(context).start()
+    app_module._write_pairing(context)
+    assert not (tmp_path / "pairing").exists()
+    assert "worse than no file" in (tmp_path / "host.log").read_text(encoding="utf-8")
+
+
+def test_the_host_refuses_to_restart_or_stop_an_engine_it_did_not_start(
+    tmp_path: Path,
+) -> None:
+    runner = Scripted(
+        answers={
+            "-l -v --running": ok(OWENS_PC_LIST),
+            "-l -v": ok(OWENS_PC_LIST),
+            "cat ": ok(GUEST_LINE),
+        },
+        pings=[200, 200],
+    )
+    context = _context(tmp_path, runner)
+    host = app_module.Host(context)
+    host.start()
+    runner.calls.clear()
+    host.on_click(menu.STOP_ENGINE)
+    host.on_click(menu.RESTART_ENGINE)
+    assert not any("systemctl" in " ".join(call) for call in runner.calls)
+    assert context.presence.engine is Engine.RUNNING
 
 
 # ------------------------------------------------------------- 4.1 startup

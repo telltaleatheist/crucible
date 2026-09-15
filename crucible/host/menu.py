@@ -47,6 +47,43 @@ class Engine(str, Enum):
     INSTALLING = "installing"
 
 
+class Owner(str, Enum):
+    """WHO started the engine that is answering — added 2026-09-15, first real run.
+
+    4.1's pair was `(distro, engine)`, and on the machine the host was written
+    for that is enough: the distro says which server this machine runs, and
+    the host started it either way. Owen's PC is not that machine. It runs a
+    Crucible engine inside `Ubuntu` — installed by hand, before any of this
+    existed — so the distro probe answers `absent` (there is no distro NAMED
+    `crucible`) while `GET /v1/ping` on 7100 answers 200. With only the pair,
+    the host reads that as "no WSL server here" and starts the `llama-windows`
+    child, which is a SECOND server on a machine that already has one (section
+    0: one server per machine) and a second claimant on port 7100. It then
+    pings, gets the OTHER server's answer, and reports `running` about a child
+    that lost the bind.
+
+    So the fact the pair could not carry is ownership, and it has three values:
+
+    - `WSL_UNIT` — the guest's unit, in the distro Crucible owns. The host
+      booted it and may restart and stop it.
+    - `HOST_CHILD` — the `llama-windows` server this process spawned. The host
+      owns the process itself and Quit takes it down.
+    - `FOUND` — an engine that was already answering when the host started.
+      The host did not start it, cannot name a unit for it, and therefore
+      **never restarts, stops, or replaces it** — the menu offers neither verb,
+      and the WSL install is not offered either, because importing a distro
+      onto a machine that already has an engine is the one mistake here that
+      pressing the button again cannot undo.
+
+    `NONE` is the absence of an engine, not a fourth kind of one.
+    """
+
+    NONE = "none"
+    WSL_UNIT = "wsl-unit"
+    HOST_CHILD = "host-child"
+    FOUND = "found"
+
+
 #: The ids every item carries. A click handler and a test name an item by its
 #: id, never by its label — labels are prose and change.
 OPEN_CONSOLE = "open-console"
@@ -87,7 +124,7 @@ class MenuModel:
         return None
 
 
-def title_for(distro: Distro, engine: Engine) -> str:
+def title_for(distro: Distro, engine: Engine, owner: Owner) -> str:
     """The title line, exactly as 4.1's table spells it."""
     if engine is Engine.INSTALLING:
         return "Crucible — installing…"
@@ -97,6 +134,13 @@ def title_for(distro: Distro, engine: Engine) -> str:
         return "Crucible — engine did not start — open the log"
     if engine is Engine.STOPPED:
         return "Crucible — stopped"
+    # An engine the host FOUND is named by that and not by a backend: the
+    # distro probe said `absent` (there is no distro Crucible owns) and the
+    # backend the thing on 7100 runs is not a fact this host has. Saying
+    # "running (llama-windows)" here would be the host naming a server it did
+    # not start after a server it did not start it as.
+    if owner is Owner.FOUND:
+        return "Crucible — running (found on this machine)"
     # RUNNING, and WHICH server it is, is the fact 4.1 says the menu must say.
     # `unknown` cannot claim either: the distro probe is what would have told
     # us, and it did not answer.
@@ -111,8 +155,11 @@ def title_for(distro: Distro, engine: Engine) -> str:
     return "Crucible — running (WSL unreadable)"
 
 
-def quit_label(distro: Distro) -> str:
+def quit_label(distro: Distro, owner: Owner) -> str:
     """What quitting costs, in the label, because it differs by which server."""
+    if owner is Owner.FOUND:
+        # Not this process's child, whatever the distro probe said.
+        return "Quit (the engine keeps running)"
     if distro is Distro.ABSENT:
         # The host-mode server is this process's CHILD (4.1), so it goes too.
         return "Quit (stops the engine)"
@@ -121,16 +168,20 @@ def quit_label(distro: Distro) -> str:
     return "Quit"
 
 
-def menu_model(distro: Distro, engine: Engine) -> MenuModel:
+def menu_model(distro: Distro, engine: Engine, owner: Owner) -> MenuModel:
     """4.2's menu for this state. Pure: no clock, no environment, no I/O."""
     busy = engine is Engine.INSTALLING
     running = engine is Engine.RUNNING
+    #: An engine this host did not start is one it does not act on. Every verb
+    #: that would change it is absent or disabled, because the host has no
+    #: unit to stop, no child to kill, and no right to replace it.
+    found = owner is Owner.FOUND
     items: list[MenuItem] = [
         # Nothing to open when nothing answers: the URL comes from the pairing
         # file (3.6) and points at a server that is up.
         MenuItem(OPEN_CONSOLE, "Open console", running),
     ]
-    if distro in (Distro.ABSENT, Distro.UNKNOWN):
+    if distro in (Distro.ABSENT, Distro.UNKNOWN) and not found:
         items.append(
             MenuItem(
                 INSTALL_ENGINE,
@@ -143,12 +194,12 @@ def menu_model(distro: Distro, engine: Engine) -> MenuModel:
             # Restart is offered in every state except while an install holds
             # the machine — including FAILED, which is precisely the state a
             # person wants to retry from after fixing whatever the log said.
-            MenuItem(RESTART_ENGINE, "Restart engine", not busy),
-            MenuItem(STOP_ENGINE, "Stop engine", running),
+            MenuItem(RESTART_ENGINE, "Restart engine", not busy and not found),
+            MenuItem(STOP_ENGINE, "Stop engine", running and not found),
             # Always: the log is the one thing that is useful when everything
             # else is not.
             MenuItem(OPEN_LOG, "Open log", True),
-            MenuItem(QUIT, quit_label(distro), True),
+            MenuItem(QUIT, quit_label(distro, owner), True),
         ]
     )
-    return MenuModel(title=title_for(distro, engine), items=tuple(items))
+    return MenuModel(title=title_for(distro, engine, owner), items=tuple(items))

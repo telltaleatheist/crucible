@@ -31,10 +31,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
+from urllib.parse import urlsplit
 
 from .log import HostLog
-from .menu import Distro, Engine
-from .paths import engine_url
+from .menu import Distro, Engine, Owner
+from .paths import ENGINE_HOST, ENGINE_PORT, engine_url
 from .runner import Child, RunResult, Runner
 from .wsl_states import CRUCIBLE_DISTRO
 
@@ -50,6 +51,8 @@ WSL_LIST_TIMEOUT_SECONDS = 20.0
 WSL_BOOT_TIMEOUT_SECONDS = 120.0
 #: A systemctl call inside a booted distro.
 RECIPE_TIMEOUT_SECONDS = 60.0
+#: `cat` of one small file inside a distro that is ALREADY running.
+GUEST_READ_TIMEOUT_SECONDS = 30.0
 
 #: The recipes, by the names 4.1 gives them. The VALUE is the argv, so a test
 #: asserts the command rather than trusting the prose next to it.
@@ -70,6 +73,71 @@ def wsl_boot_argv(distro: str = CRUCIBLE_DISTRO) -> list[str]:
 
 def wsl_list_argv() -> list[str]:
     return ["wsl.exe", "-l", "-v"]
+
+
+def wsl_running_argv() -> list[str]:
+    """`wsl -l -v --running` — the distros that are ALREADY up.
+
+    The list the engine hunt (`find_engine`) is allowed to walk. Asking a
+    STOPPED distro anything boots it, and booting somebody else's distro to
+    find out whether it holds a Crucible is a side effect the host has no
+    business having. `-l -v` and not `-l`, because `--running` alone prints a
+    different shape and `parse_wsl_list` would then need a second parser.
+    """
+    return ["wsl.exe", "-l", "-v", "--running"]
+
+
+def guest_pairing_argv(distro: str) -> list[str]:
+    """`cat` the guest's own pairing file (3.6), from Windows.
+
+    `--exec bash -lc` and not `wsl.exe -d X bash -c`: the implicit-shell form
+    lets wsl.exe pre-expand `$CRUCIBLE_HOME` on the WINDOWS side, where it is
+    empty (BookForge's `wsl-exe-implicit-shell-trap.md`). `installer.py` reads
+    the guest's home with the same line for the same reason.
+    """
+    return [
+        "wsl.exe",
+        "-d",
+        distro,
+        "--exec",
+        "bash",
+        "-lc",
+        'cat "${CRUCIBLE_HOME:-$HOME/.crucible}/pairing"',
+    ]
+
+
+def keepalive_argv(distro: str) -> list[str]:
+    """Hold a distro open — 7b.4c, measured on the button's night.
+
+    **A WSL distro terminates seconds after the last `wsl.exe` session ends,
+    even with systemd units running and linger enabled.** A `Restart=always`
+    unit does not keep the VM alive, because the VM is not something the guest
+    can hold; only a process on the WINDOWS side can. 4.1 had the host run
+    `wsl -d crucible --exec true` and then let go, which boots the distro and
+    then lets the thing it is watching disappear on its own.
+
+    So the host holds one session open for as long as a WSL engine is meant to
+    be the engine. `sleep infinity` because it is the one command that costs
+    nothing and cannot exit: the process the host really wants is the wsl.exe
+    on ITS side, and the guest-side sleep is only what gives that something to
+    wait for.
+    """
+    return ["wsl.exe", "-d", distro, "--exec", "sleep", "infinity"]
+
+
+def pairing_line_authority(line: str) -> str | None:
+    """The `host:port` a `crucible://` line points at, or None if it is not one.
+
+    Only the authority, and only after the LAST `@`: the name in the userinfo
+    is percent-encoded precisely so that a name containing `@` cannot make
+    this ambiguous (`crucible/pairing.py`), and `rsplit` is the half of that
+    contract the reader owes.
+    """
+    parts = urlsplit(line.strip())
+    if parts.scheme != "crucible":
+        return None
+    authority = parts.netloc.rsplit("@", 1)[-1]
+    return authority or None
 
 
 def recipe_argv(name: str, distro: str = CRUCIBLE_DISTRO) -> list[str]:
@@ -115,12 +183,25 @@ def parse_wsl_list(text: str) -> list[str]:
 
 
 @dataclass(frozen=True)
+class FoundEngine:
+    """An engine that was already answering, and the distro it turned out to be in."""
+
+    distro: str
+    #: The guest's OWN pairing line, read out of its home. 3.6: the Windows
+    #: file is the host's COPY of the guest's line, never a second composition
+    #: of one — a line composed here would carry the HOST's token, and the
+    #: engine would refuse every app that read it.
+    line: str
+
+
+@dataclass(frozen=True)
 class Presence:
-    """The pair 4.1 names, plus the sentence the log and the tray show."""
+    """The pair 4.1 names, plus who owns it and the sentence the log shows."""
 
     distro: Distro
     engine: Engine
     detail: str
+    owner: Owner
 
 
 class PresenceWatcher:
@@ -151,6 +232,14 @@ class PresenceWatcher:
         #: The host-mode child, when this machine has no distro. The host owns
         #: it; 4.2's Quit label says so.
         self.child: Child | None = None
+        #: The engine that was already answering when the host started, if
+        #: there was one. Set by `adopt`, read by the pairing write and by the
+        #: hold — a `FOUND` engine is still in a distro, and that distro still
+        #: has to be held open (7b.4c).
+        self.found: FoundEngine | None = None
+        #: The held `wsl.exe` session (7b.4c) and the distro it holds.
+        self.held: Child | None = None
+        self.held_distro: str | None = None
         #: One recovery per down-edge (4.1). Cleared when a ping succeeds.
         self._recovery_spent = False
 
@@ -182,6 +271,76 @@ class PresenceWatcher:
         """
         return self._runner.get(engine_url("/v1/ping"), timeout_s=PING_TIMEOUT_SECONDS) is not None
 
+    def read_guest_pairing(self, distro: str) -> str | None:
+        """The guest's pairing line, or None when that distro has no engine.
+
+        3.6's rule made real: *"the Windows file is the host's COPY of the
+        guest's line, because the guest's own home is inside the distro where
+        no Windows app looks."* The line is checked against the address the
+        host watches before it is believed — a distro holding a Crucible that
+        answers somewhere else is not this machine's engine.
+        """
+        read = self._runner.run(
+            guest_pairing_argv(distro), timeout_s=GUEST_READ_TIMEOUT_SECONDS
+        )
+        if not read.ok:
+            return None
+        line = read.stdout.strip()
+        if pairing_line_authority(line) != f"{ENGINE_HOST}:{ENGINE_PORT}":
+            return None
+        return line
+
+    def find_engine(self) -> FoundEngine | None:
+        """Which RUNNING distro holds the engine that is answering on 7100.
+
+        Asked only of distros that are already up (`wsl_running_argv`), so the
+        hunt never boots one. A machine where the answer is None still HAS an
+        engine — something answered the ping — it is just not one the host can
+        read a pairing line out of, and that is a sentence rather than a
+        guess.
+        """
+        listed = self._runner.run(
+            wsl_running_argv(), timeout_s=WSL_LIST_TIMEOUT_SECONDS
+        )
+        if not listed.ok:
+            self._log.write(f"find-engine: wsl -l -v --running: {listed.said()}")
+            return None
+        for name in parse_wsl_list(listed.stdout):
+            line = self.read_guest_pairing(name)
+            if line is not None:
+                self._log.write(
+                    f'find-engine: the engine on {engine_url()} is the "{name}" '
+                    "distro's, and this host did not start it"
+                )
+                return FoundEngine(distro=name, line=line)
+        return None
+
+    def adopt(self, distro: Distro) -> Presence:
+        """An engine was already answering. Watch it; never replace it.
+
+        Section 0 is one server per machine, and the host starting a second
+        one would make that false in the most expensive way — two claimants on
+        7100, and a ping that cannot tell which of them answered.
+        """
+        self.found = self.find_engine()
+        self._recovery_spent = False
+        if self.found is None:
+            return Presence(
+                distro,
+                Engine.RUNNING,
+                f"something already answers on {engine_url('/v1/ping')} and this "
+                "host did not start it; no running distro holds a pairing line "
+                "for that address, so there is no line to copy",
+                Owner.FOUND,
+            )
+        return Presence(
+            distro,
+            Engine.RUNNING,
+            f'the engine on {engine_url()} is the "{self.found.distro}" distro\'s '
+            "and this host did not start it",
+            Owner.FOUND,
+        )
+
     # -------------------------------------------------------------- boot
 
     def boot(self) -> Presence:
@@ -190,7 +349,7 @@ class PresenceWatcher:
         if distro is not Distro.PRESENT:
             # Nothing to boot. The host-mode server is `app.py`'s to start,
             # because it is a child this object does not own until it is told.
-            return Presence(distro, Engine.STOPPED, detail)
+            return Presence(distro, Engine.STOPPED, detail, Owner.NONE)
         self._log.write(f"boot: {detail}")
         started = self._runner.run(
             wsl_boot_argv(self._distro), timeout_s=WSL_BOOT_TIMEOUT_SECONDS
@@ -199,18 +358,26 @@ class PresenceWatcher:
             self._log.write(f"boot: wsl --exec true failed: {started.said()}")
         if self._wait_for_ping(self._boot_wait_s):
             self._recovery_spent = False
-            return Presence(distro, Engine.RUNNING, "the engine answered /v1/ping")
+            return Presence(
+                distro, Engine.RUNNING, "the engine answered /v1/ping", Owner.WSL_UNIT
+            )
         self._log.write(
             f"boot: nothing on {engine_url('/v1/ping')} after {self._boot_wait_s:.0f}s; "
             "running the recovery recipes"
         )
         if self.recover(all_recipes=True):
             self._recovery_spent = False
-            return Presence(distro, Engine.RUNNING, "a recovery recipe brought it up")
+            return Presence(
+                distro,
+                Engine.RUNNING,
+                "a recovery recipe brought it up",
+                Owner.WSL_UNIT,
+            )
         return Presence(
             distro,
             Engine.FAILED,
             "the distro booted and the engine did not start; both recipes were spent",
+            Owner.NONE,
         )
 
     def _wait_for_ping(self, seconds: float) -> bool:
@@ -251,21 +418,40 @@ class PresenceWatcher:
 
     # ------------------------------------------------------------- watch
 
-    def poll(self, distro: Distro) -> Presence:
+    def poll(self, distro: Distro, owner: Owner) -> Presence:
         """One watch tick. 4.1: ping; down → one recovery; then `stopped`."""
         if self.ping():
             self._recovery_spent = False
-            return Presence(distro, Engine.RUNNING, "the engine answered /v1/ping")
+            return Presence(
+                distro, Engine.RUNNING, "the engine answered /v1/ping", owner
+            )
+        if owner is Owner.FOUND:
+            # The host did not start it, so it has no recipe for it: there is
+            # no unit it may call by name and no child it may respawn. Saying
+            # so is the whole of what it can do, and it is more than running
+            # somebody else's systemctl would be.
+            return Presence(
+                distro,
+                Engine.STOPPED,
+                "the engine this host found is no longer answering; it was not "
+                "started here, so there is nothing here to restart",
+                Owner.FOUND,
+            )
         if self._recovery_spent:
-            return Presence(distro, Engine.STOPPED, "the engine is not answering")
+            return Presence(
+                distro, Engine.STOPPED, "the engine is not answering", owner
+            )
         self._recovery_spent = True
         if distro is Distro.PRESENT:
             if self.recover(all_recipes=False):
-                return Presence(distro, Engine.RUNNING, "a recovery brought it back")
+                return Presence(
+                    distro, Engine.RUNNING, "a recovery brought it back", owner
+                )
             return Presence(
                 distro,
                 Engine.STOPPED,
                 f"{RECIPE_USER_UNIT_START} did not bring it back; use Restart engine",
+                owner,
             )
         # No distro: the child is ours, and whether it is alive is a question
         # with an answer rather than a probe.
@@ -276,7 +462,46 @@ class PresenceWatcher:
             "the host-mode server is running and not answering"
             if alive
             else "the host-mode server is not running",
+            owner,
         )
+
+    # -------------------------------------------------------- holding it open
+
+    def hold(self, distro: str) -> Child:
+        """Hold a distro open, per 7b.4c. Idempotent while the session lives."""
+        if self.held is not None and self.held.poll() is None:
+            if self.held_distro == distro:
+                return self.held
+            self.release()
+        self.held = self._runner.spawn(keepalive_argv(distro))
+        self.held_distro = distro
+        self._log.write(
+            f'hold: "{distro}" is held open by pid {self.held.pid} — a distro '
+            "terminates seconds after the last wsl.exe session ends, whatever "
+            "its units say (7b.4c)"
+        )
+        return self.held
+
+    def rehold(self) -> Child | None:
+        """Take the hold again if it died. Called from the watch, every tick."""
+        if self.held_distro is None:
+            return None
+        if self.held is not None and self.held.poll() is None:
+            return self.held
+        self._log.write(f'hold: the session on "{self.held_distro}" ended; taking it again')
+        distro, self.held, self.held_distro = self.held_distro, None, None
+        return self.hold(distro)
+
+    def release(self) -> None:
+        """Let the distro go. Quit's job, and the hold's own re-take."""
+        if self.held is None:
+            return
+        if self.held.poll() is None:
+            self.held.terminate()
+            self.held.wait(10.0)
+        self._log.write(f'hold: released "{self.held_distro}"')
+        self.held = None
+        self.held_distro = None
 
     def stop_child(self, timeout_s: float = 20.0) -> RunResult | None:
         """Stop the host-mode child, if there is one. Used by Quit and by 4.3."""

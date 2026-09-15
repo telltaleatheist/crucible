@@ -36,7 +36,7 @@ from .catalog import CatalogPort, GuestCatalog, HttpCatalog
 from .door import InstallDoor, serve
 from .errors import HostError
 from .log import HostLog
-from .menu import Distro, Engine
+from .menu import Distro, Engine, Owner
 from .paths import (
     CONSOLE_CMD,
     ENGINE_PORT,
@@ -224,18 +224,46 @@ class Host:
     # -------------------------------------------------------------- presence
 
     def start(self) -> Presence:
-        """Boot whichever server this machine runs, and say which."""
+        """Boot whichever server this machine runs, and say which.
+
+        **The ping comes FIRST on a machine with no Crucible distro**, and
+        that order is the fix the first real run demanded (2026-09-15). Owen's
+        PC runs a Crucible inside `Ubuntu`, installed by hand long before any
+        of this: the distro probe truthfully answers `absent`, and the old
+        order read that as "no server here" and spawned the `llama-windows`
+        child onto a port another Crucible already held. Section 0 is one
+        server per machine, and the cheapest way to keep that true is to look
+        before starting anything.
+        """
         distro, detail = self._c.watcher.probe_distro()
         self._c.log.write(f"presence: {detail}")
         if distro is Distro.PRESENT:
             self._c.presence = self._c.watcher.boot()
+        elif self._c.watcher.ping():
+            self._c.presence = self._c.watcher.adopt(distro)
         else:
             self._c.presence = self._start_host_mode(distro)
         self._c.log.write(
             f"presence: {self._c.presence.distro.value}/"
-            f"{self._c.presence.engine.value} — {self._c.presence.detail}"
+            f"{self._c.presence.engine.value}/{self._c.presence.owner.value} — "
+            f"{self._c.presence.detail}"
         )
+        self._hold()
         return self._c.presence
+
+    def _hold(self) -> None:
+        """7b.4c: hold the distro the engine is in, or it goes away by itself."""
+        if self._c.presence.owner is Owner.WSL_UNIT:
+            name = self._c.watcher._distro  # noqa: SLF001 - one object, one loop
+        elif (
+            self._c.presence.owner is Owner.FOUND
+            and self._c.watcher.found is not None
+        ):
+            name = self._c.watcher.found.distro
+        else:
+            # A host-mode child is a Windows process; there is no VM to hold.
+            return
+        self._c.watcher.hold(name)
 
     def _start_host_mode(self, distro: Distro) -> Presence:
         """The `llama-windows` server, as this process's child."""
@@ -247,6 +275,7 @@ class Host:
                 Engine.FAILED,
                 f"there is no {CONSOLE_CMD} in {host_pack_dir(env)}, so this host "
                 "has no server to start. Reinstall with install.ps1.",
+                Owner.NONE,
             )
         config = self._c.home / "config.toml"
         if not config.is_file():
@@ -255,22 +284,34 @@ class Host:
                 f"init: {'ok' if first.ok else first.said()}"
             )
             if not first.ok:
-                return Presence(distro, Engine.FAILED, f"crucible init: {first.said()}")
+                return Presence(
+                    distro, Engine.FAILED, f"crucible init: {first.said()}", Owner.NONE
+                )
         self._c.watcher.respawn_host_mode(
             server_argv(env), server_environment(env)
         )
         if self._c.watcher._wait_for_ping(30.0):  # noqa: SLF001 - one object, one loop
-            return Presence(distro, Engine.RUNNING, "the Windows engine answered /v1/ping")
+            return Presence(
+                distro,
+                Engine.RUNNING,
+                "the Windows engine answered /v1/ping",
+                Owner.HOST_CHILD,
+            )
         return Presence(
             distro,
             Engine.FAILED,
             "the Windows engine did not answer within 30 s — open the log",
+            Owner.NONE,
         )
 
     # ------------------------------------------------------------------ menu
 
     def model(self) -> menu.MenuModel:
-        return menu.menu_model(self._c.presence.distro, self._c.presence.engine)
+        return menu.menu_model(
+            self._c.presence.distro,
+            self._c.presence.engine,
+            self._c.presence.owner,
+        )
 
     def on_click(self, item_id: str) -> None:
         self._c.log.write(f"menu: {item_id}")
@@ -282,14 +323,36 @@ class Host:
             # host's door. One door, one sequence, one place a person watches.
             open_console(self._c.home, self._c.log)
         elif item_id == menu.RESTART_ENGINE:
+            if self._refuse_acting_on_a_found_engine("restart"):
+                return
             self._c.presence = self._c.watcher.boot()
+            self._hold()
         elif item_id == menu.STOP_ENGINE:
+            if self._refuse_acting_on_a_found_engine("stop"):
+                return
             self._stop_engine()
         elif item_id == menu.OPEN_LOG:
             open_log(self._c.log)
         elif item_id == menu.QUIT:
             self.quit()
         self._refresh()
+
+    def _refuse_acting_on_a_found_engine(self, verb: str) -> bool:
+        """An engine the host did not start is one it does not act on.
+
+        The menu already disables both verbs (4.2's model), and this is the
+        second half of the same rule: a disabled item is a drawing, and the
+        thing that must not happen is the ACT. `systemctl --user stop
+        crucible` sent into somebody's own distro because a click arrived
+        anyway is exactly the class of surprise this host exists to avoid.
+        """
+        if self._c.presence.owner is not Owner.FOUND:
+            return False
+        self._c.log.write(
+            f"menu: refusing to {verb} an engine this host did not start "
+            "(owner=found)"
+        )
+        return True
 
     def _stop_engine(self) -> None:
         if self._c.presence.distro is Distro.PRESENT:
@@ -312,7 +375,10 @@ class Host:
         else:
             self._c.watcher.stop_child()
         self._c.presence = Presence(
-            self._c.presence.distro, Engine.STOPPED, "stopped from the menu"
+            self._c.presence.distro,
+            Engine.STOPPED,
+            "stopped from the menu",
+            self._c.presence.owner,
         )
 
     def _refresh(self) -> None:
@@ -328,7 +394,12 @@ class Host:
         """4.1's watch. One recovery per down-edge, then a state with a name."""
         while not self._stop.wait(self._c.watcher.watch_s):
             before = self._c.presence.engine
-            self._c.presence = self._c.watcher.poll(self._c.presence.distro)
+            self._c.presence = self._c.watcher.poll(
+                self._c.presence.distro, self._c.presence.owner
+            )
+            # 7b.4c: the hold is what keeps the VM there at all, so it is
+            # taken again the tick after it dies rather than at the next login.
+            self._c.watcher.rehold()
             if self._c.presence.engine is not before:
                 self._c.log.write(
                     f"watch: {before.value} -> {self._c.presence.engine.value} — "
@@ -338,9 +409,14 @@ class Host:
 
     def quit(self) -> None:
         self._stop.set()
-        if self._c.presence.distro is not Distro.PRESENT:
+        # The hold goes first: it is this process's session, and a wsl.exe
+        # left running after the tray is gone is a VM nothing owns.
+        self._c.watcher.release()
+        if self._c.presence.owner is Owner.HOST_CHILD:
             # In host mode the server is this process's child and 4.2's Quit
-            # label already said it goes too.
+            # label already said it goes too. An engine the host FOUND is not
+            # its child even though the distro probe said `absent`, which is
+            # why this asks the owner and not the distro.
             self._c.watcher.stop_child()
         if self._icon is not None:
             self._icon.stop()  # type: ignore[attr-defined]
@@ -370,7 +446,7 @@ def run(argv: list[str] | None = None) -> int:
         log=log,
         home=home,
         watcher=watcher,
-        presence=Presence(Distro.UNKNOWN, Engine.STARTING, "starting"),
+        presence=Presence(Distro.UNKNOWN, Engine.STARTING, "starting", Owner.NONE),
     )
     host = Host(context)
     host.start()
@@ -438,31 +514,80 @@ def _sequence(context: HostContext) -> Callable[[Callable[[installer.Event], Non
     return run_sequence
 
 
-def _write_pairing(context: HostContext) -> None:
-    """3.6: the Windows-side pairing file, ACL'd to this user.
+def _guest_line(context: HostContext) -> str | None:
+    """The line the GUEST wrote, copied — 3.6, and not a second composition.
 
-    Written from the CONFIG the running server has, not composed: the name,
-    the port and the token are all its, and a second composer of a pairing
-    line is a second owner of the format.
+    *"The Windows file is the host's COPY of the guest's line, because the
+    guest's own home is inside the distro where no Windows app looks."* The
+    old code composed a line here out of the host's OWN `config.toml`, which
+    on a machine whose engine is the guest's is a different token entirely —
+    a file that exists and disagrees, which 3.6 says is worse than none
+    because it points an app at a door with the wrong key.
     """
-    from ..pairing import PairingFileError, pairing_line, write_pairing_file
+    owner = context.presence.owner
+    if owner is Owner.WSL_UNIT:
+        return context.watcher.read_guest_pairing(
+            context.watcher._distro  # noqa: SLF001 - one object, one loop
+        )
+    if owner is Owner.FOUND:
+        return None if context.watcher.found is None else context.watcher.found.line
+    return None
+
+
+def _host_mode_line(context: HostContext) -> str | None:
+    """The host-mode child's line, composed from the config the host wrote.
+
+    The one case where composing is right: this server's config IS the host's
+    config, so there is one owner of those four facts and not two.
+    """
+    from ..pairing import pairing_line
 
     import tomllib
 
     path = context.home / "config.toml"
     if not path.is_file():
         context.log.write("pairing: no config yet, so no pairing file")
-        return
+        return None
     try:
         document = tomllib.loads(path.read_text(encoding="utf-8"))
-        server = document["server"]
-        line = pairing_line(
-            server["name"],
+        return pairing_line(
+            document["server"]["name"],
             engine_url(),
             document["auth"]["token"],
         )
     except (OSError, KeyError, tomllib.TOMLDecodeError) as exc:
         context.log.write(f"pairing: {path} could not be read ({exc})")
+        return None
+
+
+def _write_pairing(context: HostContext) -> None:
+    """3.6: the Windows-side pairing file, ACL'd to this user.
+
+    WHERE THE LINE COMES FROM IS DECIDED BY WHO OWNS THE ENGINE, and that is
+    the correction the first real run forced. Two owners, two sources, and no
+    fallback between them: a guest engine's line is READ out of the guest, a
+    host-mode child's line is COMPOSED from the host's own config, and when
+    there is no engine at all there is no file — which 3.6 calls a fact an app
+    knows how to handle.
+    """
+    from ..pairing import PairingFileError, write_pairing_file
+
+    owner = context.presence.owner
+    if owner in (Owner.WSL_UNIT, Owner.FOUND):
+        line = _guest_line(context)
+        if line is None:
+            context.log.write(
+                "pairing: the engine on this machine is a guest's and its own "
+                "pairing line could not be read, so nothing was written — a "
+                "file with the wrong token is worse than no file (3.6)"
+            )
+            return
+    elif owner is Owner.HOST_CHILD:
+        line = _host_mode_line(context)
+        if line is None:
+            return
+    else:
+        context.log.write("pairing: there is no engine on this machine, so no file")
         return
     try:
         written = write_pairing_file(context.home, line, env=context.runner.env)
