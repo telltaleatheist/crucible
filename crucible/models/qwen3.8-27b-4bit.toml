@@ -294,4 +294,42 @@ hf_repo = "unsloth/Qwen3.8-27B-GGUF"
 revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
 file = "Qwen3.8-27B-UD-Q4_K_M.gguf"
 memory_bytes_estimate = 17_964_440_224
+# THE CONTEXT THIS BACKEND SERVES, 2026-09-15. It used to be absent, and the
+# model's 98304 stood in — and 98304 is the ONE number in this file that is
+# explicitly a Mac fact: the [model] comment calls it "Owen's `qwen3.8:27b-24g`
+# working context, which `mlx-darwin` serves on 64 GB of unified memory". It was
+# reaching a 24 GB Windows card by omission, the same shape as the mlx-darwin
+# omission fixed in models/qwen3.5-9b.toml today.
+#
+# THE FILE'S OWN ESTIMATE IS THE PROOF, which is why this is a contradiction
+# rather than a judgement call. `llama-server` is the one engine Crucible passes
+# a context to besides vLLM — `-c <context_default>`, `Residency._engine_args` —
+# so the inherited value was going to be spent for real. Against the estimate
+# directly above:
+#
+#   the GGUF itself   17_964_440_224 - 1_500_000_000 = 16_464_440_224 B
+#   KV per token, 27B (64 layers / interval 4 = 16 full-attention layers,
+#     from the arithmetic in models/qwen3.8-27b.toml)      65_536 B
+#   KV at  16_384      16_384 x 65_536 =  1_073_741_824 B  -> inside the 1.5 GB
+#   KV at  98_304      98_304 x 65_536 =  6_442_450_944 B  -> 4.9 GB OVER it
+#
+# So the 1.5 GB KV allowance this block declares — and the "16.7 GiB against
+# 19.5 GiB available, it fits" that the comment above concludes from it — is
+# arithmetic for 16384 and for nothing else. At 98304 the real demand is
+# 22_906_891_168 B = 21.33 GiB against that same 19.5 GiB, which does not fit.
+# The estimate was not stale; the context line was missing under it.
+#
+# 16384 and not another number: it is what makes the estimate above true as
+# written, and it is independently what the other two llama-windows blocks in
+# this catalog serve — dots-ocr.toml declares it outright ("Foundry's working
+# launcher verbatim"), and BookForge's text-server.ts runs THIS model
+# (`qwen38-27b-awq-int4`, translate/simplify/analysis) at max-model-len 16384 on
+# a card of this size. `memory_bytes_estimate` therefore does not move, and that
+# it does not have to is the point.
+#
+# NOTHING HAS RUN THIS BLOCK. No Windows host has served this model, so this is
+# a correction to a declared value on paper, not a regression fix — but a value
+# whose own file disproves it is not one to leave for the first Windows load to
+# discover.
+context_default = 16384
 engine_args = ["--parallel", "1"]
