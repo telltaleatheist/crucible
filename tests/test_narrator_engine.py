@@ -34,9 +34,13 @@ from crucible.engines.narrator import (
     ENGINE_VARIABLE,
     ENV_PREFIX_VARIABLE,
     MAX_NUM_SEQS_VARIABLE,
+    MLX_BATCH_VARIABLE,
+    MLX_RENDER_WIDTH,
     MODULE,
     STACK_VARIABLE,
+    EngineWouldNotStop,
     higgs_env_prefix,
+    mlx_render_width_for,
 )
 from crucible.engines.vllm import VllmEngine
 from crucible.errors import JobCancelled
@@ -380,6 +384,71 @@ def test_an_arm_that_starts_no_server_is_told_none_of_the_three(
     for name in (STACK_VARIABLE, ENV_PREFIX_VARIABLE, MAX_NUM_SEQS_VARIABLE):
         assert name not in environment, name
     assert environment[DOCUMENT_VARIABLE] == str(document.path)
+
+
+def test_the_arm_that_starts_no_server_is_told_its_batch_width(
+    tmp_path: Path,
+) -> None:
+    """THE DEFECT THIS EXISTS FOR (owens-mac-studio, 2026-09-15). "Reads none
+    of the three" was read as "reads nothing", and the in-process arm has a
+    width of its own: `NARRATOR_HIGGS3_MLX_BATCH`, which narrator defaults to 1
+    — one chunk at a time. A `thirdreich` book rendered at 1.99x realtime where
+    the same machine measures 13.97x at 64. The width is not optional and its
+    absence is silent, which is why it is asserted here rather than left to the
+    absence test above."""
+    document = a_document(tmp_path, tmp_path / "weights")
+    built = build_voice_engine(
+        "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
+        serving_stack=None, max_num_seqs=16, voices=document)
+    environment = built.environment()
+    assert environment[MLX_BATCH_VARIABLE] == str(MLX_RENDER_WIDTH["higgs-v3"])
+    # STATED, not derived from the manifest: `max_num_seqs=16` above is the
+    # served arm's vLLM admission width and means nothing to a Metal backend,
+    # so the two numbers must not be the same number by accident.
+    assert environment[MLX_BATCH_VARIABLE] != str(16)
+
+
+def test_the_served_arm_is_not_told_the_mlx_width(tmp_path: Path) -> None:
+    """The mirror of the test above, and the rule this file keeps in both
+    directions: a variable goes to the arm that reads it. narrator's served arm
+    renders through vllm-omni and never constructs `HiggsV3MlxEngine`, so an
+    MLX batch ceiling there would be the inert lever `[voice.serving]`'s own
+    refusal is written against."""
+    document = a_document(tmp_path, tmp_path / "weights")
+    built = build_voice_engine(
+        "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
+        serving_stack="vllm-omni", max_num_seqs=16, voices=document)
+    environment = built.environment()
+    assert MLX_BATCH_VARIABLE not in environment
+    assert environment[MAX_NUM_SEQS_VARIABLE] == "16"
+
+
+def test_an_engine_with_no_measured_mlx_width_is_refused_by_name() -> None:
+    """`ttsstream.batch_width_for`'s rule, one arm over: the width must be
+    MEASURED and there is no default. 1 is not a safe answer here — it is the
+    answer that cost this server a measured 7x — so an unmeasured engine is
+    refused rather than quietly rendered one chunk at a time."""
+    with pytest.raises(EngineError) as caught:
+        mlx_render_width_for(A_FUTURE_ENGINE)
+    assert A_FUTURE_ENGINE in str(caught.value)
+    assert MLX_BATCH_VARIABLE in str(caught.value)
+
+
+def test_an_engine_that_reads_no_higgs_vocabulary_is_told_no_mlx_width(
+    tmp_path: Path,
+) -> None:
+    """`NARRATOR_HIGGS3_MLX_BATCH` is Higgs v3's name, like `HIGGS_STACK`. An
+    engine outside that vocabulary owes its own set (see `environment`) and is
+    not refused for lacking a row in a table that is not about it."""
+    built = NarratorEngine(
+        narrator_engine=A_FUTURE_ENGINE,
+        python=Path("/opt/env/bin/python"),
+        log_path=Path("/tmp/x.log"),
+        serving_stack=None,
+        max_num_seqs=None,
+        voices=None,
+    )
+    assert MLX_BATCH_VARIABLE not in built.environment()
 
 
 def test_a_stack_on_an_engine_that_has_none_is_refused(tmp_path: Path) -> None:
@@ -773,6 +842,49 @@ def test_a_cancel_is_sent_and_the_run_is_reported_as_cancelled(
         ):
             pass
     assert '"action": "cancel"' in transcript.read_text(encoding="utf-8")
+
+
+def test_an_engine_that_ignores_the_cancel_outlasts_its_grace_and_is_named(
+    engine: FakeNarratorEngine,
+    weights: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE BOUND ON THE COOPERATION, and the measurement that put it there.
+
+    The test above proves Crucible's half: the cancel is SENT. It says nothing
+    about what happens when narrator does not act on it — and on 2026-09-15 that
+    is exactly what a render of `thirdreich` on the Mac did. narrator's stdin
+    reader set its flag, as it always has; the arm the render door drives never
+    read it; and this method waited, with the job saying `cancelling` and the
+    card held, for the eleven minutes it took to render the rest of the book.
+
+    NO SILENCE TIMEOUT COULD HAVE ENDED IT. narrator was talking the whole time —
+    a `batch_item` every twenty seconds, each one resetting the silence clock. A
+    silence timeout asks "is this process alive"; the only useful question here
+    is "did it hear me", and that needs its own clock, started at the cancel and
+    never reset by a line.
+    """
+    monkeypatch.setattr("crucible.engines.narrator.CANCEL_GRACE_SECONDS", 0.5)
+    monkeypatch.setenv("CRUCIBLE_FAKE_IGNORE_CANCEL", "1")
+    monkeypatch.setenv("CRUCIBLE_FAKE_ROW_DELAY_MS", "80")
+    up(engine, weights)
+    engine.load(voice="deathstalker", weights_dir=weights, warm=True)
+    with pytest.raises(EngineWouldNotStop) as caught:
+        for _ in engine.converse(
+            {
+                "action": "generate_batch",
+                "language": "en",
+                "items": [{"i": index, "text": "a sentence"} for index in range(40)],
+            },
+            terminal=BATCH_TERMINAL,
+            # Far longer than the grace, so what ends this can only be the
+            # cancel's own clock.
+            silence_timeout=60.0,
+            cancelled=lambda: True,
+        ):
+            pass
+    assert "was sent a cancel" in str(caught.value)
+    assert "does not read that flag" in str(caught.value)
 
 
 def test_a_line_on_stdout_that_is_not_a_message_is_a_refusal_naming_it(

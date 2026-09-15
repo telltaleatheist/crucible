@@ -106,6 +106,13 @@ ENGINE_VARIABLE = "NARRATOR_ENGINE"
 #:                       raises by name). STATED FROM THE VOICE MANIFEST's
 #:                       `[voice.serving]`.
 #:
+#: NARRATOR_HIGGS3_MLX_BATCH is the same question on the OTHER arm and it is
+#: below, at `MLX_RENDER_WIDTH`, not here: the three above are the served arm's
+#: and this one is `mlx-darwin`'s, where narrator starts no server and batches
+#: in process. It is not stated from the voice manifest — `max_num_seqs` is a
+#: vLLM stage-0 admission width measured on a 24 GB card and means nothing to a
+#: Metal backend — but from a table of widths measured on THIS arm.
+#:
 #: NARRATOR_HIGGS3_SERVE_SCRIPT is deliberately NOT here. narrator ships its own
 #: launcher as package data as of BookForge 0eeb0267 and runs it when no
 #: override is named; an operator's path into somebody's checkout is exactly
@@ -131,6 +138,80 @@ MAX_NUM_SEQS_VARIABLE = "HIGGS_MAX_NUM_SEQS"
 #: `higgs-v3` is the only engine Crucible names at all.
 HIGGS_V3 = "higgs-v3"
 
+#: THE IN-PROCESS ARM'S RENDER WIDTH — `mlx-darwin`'s counterpart of
+#: `HIGGS_MAX_NUM_SEQS`, and the one variable this file used to leave unset on
+#: that arm.
+#:
+#: WHAT IT COST TO LEAVE IT UNSET (measured on owens-mac-studio, 2026-09-15).
+#: narrator's `HiggsV3MlxEngine.BATCH_SIZE` is `mlx_batch_ceiling()`, which is
+#: **1 unless this variable asks for more** — "so an unconfigured process
+#: renders exactly as it did single-row" (`engine/higgs/mlx_backend.py`). At 1,
+#: `render_many` takes `_render_many_serial` and the Mac renders one chunk at a
+#: time. BookForge's own darwin worker has always asked for a width
+#: (`electron/higgs-spawn.ts:higgsMlxBatchEnv` -> the memory tier's 64) and
+#: Crucible never learned to, so every render that moved from the app to this
+#: server silently lost the batch. Owen's `thirdreich` book was running at
+#: 2.9 chunks/min where the same machine did ~130 raw sent/min in September
+#: (BookForge 626980a2, deathstalker at MLX batch 62).
+#:
+#: THE CURVE, one voice (`thirdreich`), one corpus (16 and 64 chunks of 521-572
+#: chars, the voice's own 500-700 band), one resident load per run, this env's
+#: own interpreter:
+#:
+#:     width  1   1,799 chars/min   1.99x realtime   (what this file shipped)
+#:     width 16   6,749 chars/min   7.43x realtime   3.75x
+#:     width 32   9,662 chars/min  10.78x realtime   5.37x
+#:     width 64  12,579 chars/min  13.97x realtime   6.99x
+#:
+#: 64 IS THE NUMBER FOR THE SAME REASON 16 IS THE SERVED ARM'S: it is the width
+#: the throughput was measured at, and it is the width BookForge's Mac has been
+#: asking for since 2026-09-05. It is a CEILING and not an allocation —
+#: narrator's `_mlx_width_for_depth` narrows it against
+#: `NARRATOR_HIGGS3_MLX_MEM_BUDGET_GB` when a slice is deep (Owen's Streicher
+#: render ran 62 of the 64 it asked for), so asking for 64 is asking the
+#: budgeter to do its job rather than promising the memory.
+#:
+#: A TABLE KEYED BY ENGINE, like `ttsstream.STREAM_BATCH_WIDTH`, and for its
+#: reason: the width must be MEASURED and there is deliberately no default. A
+#: second narrator engine on this arm adds a row after somebody measures it;
+#: until then `mlx_render_width_for` refuses it by name, because a guessed width
+#: is wrong in both directions — too low renders a book one chunk at a time
+#: while every variable looks configured, too high asks for memory the machine
+#: does not have.
+#:
+#: OWED, and deliberately not guessed here: the MEMORY BUDGET. narrator's own
+#: default is 42 GB (`mlx_mem_budget_gb`), which is what these numbers were
+#: measured against on a 64 GB machine and what BookForge's `extreme` tier
+#: sends. On a smaller Mac 42 is too much and the width above would not narrow
+#: enough, so the budget wants deriving from the capability's own
+#: `total_bytes` less its desktop allowance — the same absorption
+#: PHASE9-CAPABILITY.md section 5 has BookForge's tier table queued for. Setting
+#: it here from a number nobody measured would be the guess this table exists
+#: to refuse.
+MLX_BATCH_VARIABLE = "NARRATOR_HIGGS3_MLX_BATCH"
+MLX_RENDER_WIDTH = {HIGGS_V3: 64}
+
+
+def mlx_render_width_for(narrator_engine: str) -> int:
+    """`MLX_RENDER_WIDTH` for this engine, or a refusal naming it.
+
+    No default, for `ttsstream.batch_width_for`'s reason written one arm over:
+    an engine nobody has measured a render width for is an engine whose
+    batching is unknown, and 1 is not a safe answer — it is the answer that
+    cost this server a 7x.
+    """
+    width = MLX_RENDER_WIDTH.get(narrator_engine)
+    if width is None:
+        raise EngineError(
+            f"no measured MLX render width for narrator engine "
+            f"{narrator_engine!r}; this build knows "
+            f"{sorted(MLX_RENDER_WIDTH)}. {MLX_BATCH_VARIABLE} is the width "
+            "narrator's in-process backend batches at and it defaults to 1 — "
+            "one chunk at a time — so leaving it unset is a measured 7x, not a "
+            "safe fallback"
+        )
+    return width
+
 #: How long `stop()` gives the `quit` action before falling back on SIGTERM.
 #: narrator's teardown releases CUDA from inside the process, and on a loaded
 #: SGLang-Omni that takes seconds rather than milliseconds.
@@ -140,6 +221,27 @@ QUIT_GRACE_SECONDS = 30.0
 #: missed deadline. Not a timeout on anything: a row that takes ninety seconds is
 #: a row that is being generated.
 POLL_SECONDS = 0.5
+
+#: How long a cooperative cancel may go UNANSWERED before the engine is declared
+#: unstoppable. Measured on the Mac, 2026-09-15: a `tts` render of `thirdreich`
+#: was cancelled at chunk 38 of 89, the door recorded `cancelling`, this file
+#: sent `{"action": "cancel"}` — and narrator went on retiring rows for eleven
+#: more minutes, because the arm Crucible's render door drives
+#: (`serve/worker.py:_emit_guarded_batch`, the `render_many` ladder) never read
+#: the flag its stdin reader had set. Every other arm did.
+#:
+#: NOT A SILENCE TIMEOUT, and it is the opposite case to
+#: `RENDER_SILENCE_TIMEOUT_SECONDS`. A silence timeout asks "is this process
+#: alive"; this asks "did it hear me". narrator was talking the whole time — a
+#: `batch_item` every twenty seconds, each one resetting the silence clock — so
+#: no liveness check could ever have ended it.
+#:
+#: THE CLOCK STARTS AT THE CANCEL AND IS NOT RESET BY A LINE, for the same
+#: reason. It is generous enough that a narrator which honours the cancel
+#: between chunks always beats it (one chunk's render is ~20 s on MLX, and a
+#: chunk part-way up the retake ladder may be a second render behind that), and
+#: short enough that the operator who pressed stop is not waiting on a book.
+CANCEL_GRACE_SECONDS = 120.0
 
 #: How long a `load` may go without narrator saying anything at all. It is a
 #: SILENCE timeout and any line resets it, the same discipline `crucible/
@@ -202,6 +304,25 @@ def higgs_env_prefix(python: Path) -> Path:
         "CUDA_HOME, PATH, LD_LIBRARY_PATH and the vllm-omni binary from that "
         "prefix and refuses when it is unset"
     )
+
+
+class EngineWouldNotStop(EngineError):
+    """narrator was sent a cancel, kept working, and outlasted the grace.
+
+    An `EngineError` on purpose, so every `except EngineError` already written
+    against this wire keeps its meaning: the streaming door closes the session
+    and names the engine (`ttsstream.py`), and the settlement then takes the
+    card back through the one unload door. What the subclass adds is a caller
+    that wants to say something sharper — the render door, which turns it into
+    the cancel the operator asked for rather than into a failed render, and
+    which takes the voice off the card BY NAME rather than leaving it resident
+    behind a lease that would otherwise keep it there.
+
+    IT IS THE ENGINE'S FAULT AND IT IS NAMED AS SUCH. A process that reads a
+    cancel (its stdin reader does, and sets a flag) and then renders another
+    fifty chunks is not a slow engine, it is one whose flag nothing reads. The
+    only honest thing to do with it is to stop it.
+    """
 
 
 @dataclass(frozen=True)
@@ -332,6 +453,23 @@ class NarratorEngine(SubprocessEngine):
             )
         else:
             self._env_prefix = None
+        if narrator_engine == HIGGS_V3 and serving_stack is None:
+            # THE IN-PROCESS ARM — `mlx-darwin`. It starts no server, so none of
+            # the three above has a reader here; what it DOES have is a batch
+            # width, and narrator's default for it is 1. Resolved at
+            # CONSTRUCTION for this file's stated reason: a refusal that arrives
+            # before the process does names the missing thing, and the
+            # alternative — a worker that starts and renders a whole book one
+            # chunk at a time — announces nothing at all.
+            self._mlx_render_width: int | None = mlx_render_width_for(
+                narrator_engine
+            )
+        else:
+            # Every other arm reads no `NARRATOR_HIGGS3_MLX_*` variable: the
+            # served arm renders through vllm-omni, and an engine that is not
+            # `higgs-v3` owes its own set here (see `environment`) rather than
+            # inheriting Higgs's vocabulary.
+            self._mlx_render_width = None
         #: One writer at a time. narrator holds a lock over its own stdout for
         #: the mirror-image reason (two half-written lines are not two messages);
         #: the render door and a cancel arriving from the queue thread are two
@@ -393,6 +531,16 @@ class NarratorEngine(SubprocessEngine):
         import), and there is no launch script for `HIGGS_ENV` to mean anything
         to. Setting them there would be three levers read by nothing.
 
+        THAT ARM HAS A WIDTH OF ITS OWN, and until 2026-09-15 this method left
+        it unset. `NARRATOR_HIGGS3_MLX_BATCH` is what `HiggsV3MlxEngine` reads
+        instead of `HIGGS_MAX_NUM_SEQS`, it defaults to **1**, and at 1
+        `render_many` renders one chunk at a time. So the symmetry the paragraph
+        above states was only half true: the served arm was told its width and
+        the in-process arm was told nothing, which is not the same as "reads
+        none of these" — it is a 7x, measured on owens-mac-studio and written
+        down at `MLX_RENDER_WIDTH`. Emitted only here, because the served arm
+        reads it no more than the MLX arm reads `HIGGS_STACK`.
+
         A SECOND ENGINE WILL OWE ITS OWN SET HERE, and finding it is that
         engine's first job rather than something guessed in advance: narrator's
         `serve/worker.py` reads each engine's configuration from the
@@ -415,6 +563,12 @@ class NarratorEngine(SubprocessEngine):
             environment[STACK_VARIABLE] = self._serving_stack
             environment[ENV_PREFIX_VARIABLE] = str(self._env_prefix)
             environment[MAX_NUM_SEQS_VARIABLE] = str(self._max_num_seqs)
+        if self._mlx_render_width is not None:
+            # A CEILING TO ASK FOR, never a promise to allocate: narrator
+            # narrows it per slice against its own memory budget
+            # (`_mlx_width_for_depth`). `__init__` refuses an engine with no
+            # measured width, so this is a number rather than a guess.
+            environment[MLX_BATCH_VARIABLE] = str(self._mlx_render_width)
         if self._voices is not None:
             # NARRATOR_HIGGS_VOICES on both Higgs arms, plus the MLX arm's base
             # weights when the document has a voice that loads them. The
@@ -639,6 +793,12 @@ class NarratorEngine(SubprocessEngine):
         would take the voice off the card for the next job. `JobCancelled` is
         raised once the terminal message has been seen, so the caller learns the
         run was cancelled rather than that it finished short.
+
+        **And the cooperation is now BOUNDED.** `CANCEL_GRACE_SECONDS` after the
+        cancel goes out, a narrator that has not reached a terminal message is
+        answered with `EngineWouldNotStop` instead of being waited on forever.
+        Until 2026-09-15 this method trusted the contract completely, and the
+        contract was not kept: see that constant for the measurement.
         """
         self.send(message)
         return self._until(terminal, silence_timeout, cancelled)
@@ -654,10 +814,27 @@ class NarratorEngine(SubprocessEngine):
             raise EngineError(f"{self.name} is not running")
         deadline = time.monotonic() + silence_timeout
         cancel_sent = False
+        #: Set when the cancel goes out and NEVER reset by a line — see
+        #: `CANCEL_GRACE_SECONDS`. A narrator that ignores the cancel is a
+        #: narrator that is still talking, so the silence clock above cannot see
+        #: it; this is the only clock that can.
+        cancel_deadline = 0.0
         while True:
             if cancelled is not None and cancelled() and not cancel_sent:
                 self.send({"action": "cancel"})
                 cancel_sent = True
+                cancel_deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+            if cancel_sent and time.monotonic() >= cancel_deadline:
+                raise EngineWouldNotStop(
+                    f"{self.name} was sent a cancel {CANCEL_GRACE_SECONDS:.0f}s "
+                    "ago and has not finished what it was doing. Its stdin "
+                    "reader sets a flag the moment a cancel lands, so an engine "
+                    "still working after this long is one whose rendering arm "
+                    "does not read that flag — this is the wire's contract "
+                    "being broken, not a slow render. Last "
+                    f"{LOG_TAIL_LINES} lines of {self.log_path}:\n"
+                    + self.log_tail()
+                )
             try:
                 item = self._inbox.get(timeout=POLL_SECONDS)
             except queue.Empty:
