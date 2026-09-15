@@ -103,8 +103,9 @@ def build_voice_engine(
 
     THE FOUR EXTRA FACTS HAVE DIFFERENT OWNERS, which is why they arrive as
     four arguments rather than one object: `serving_stack` belongs to the ENV
-    RECIPE (`jobenv.tts_env` — vllm-omni on `cuda-linux` because that is what
-    the recipe installs, None where narrator starts no server), `max_num_seqs`
+    RECIPE (`jobenv.tts_env` — sglang-omni on `cuda-linux` since Owen's ruling
+    of 2026-09-15, because that is what the recipe installs; None where narrator
+    starts no server), `max_num_seqs`
     belongs to the VOICE MANIFEST (`[voice.serving]`), `voices` is the
     document `crucible/narratorvoices.py` wrote from that manifest and the
     pulled weights for THIS load (None for an engine that resolves no voice by

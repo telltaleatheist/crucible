@@ -361,42 +361,70 @@ def test_the_tts_recipes_pin_the_stack_each_arm_measured(
 ) -> None:
     """The numbers a `tts` env is only good at, restated where a change shows.
 
-    cuda-linux: vllm-omni 0.28.0 against vllm 0.28.0, which is the stack
-    `jobenv.CUDA_LINUX_SERVING_STACK` names and `HIGGS_STACK` tells narrator to
-    start. mlx-darwin: mlx-lm 0.31.3 (below it `GenerationBatch` does not
-    exist and the batched fast path refuses) and mlx-audio 0.4.8, whose ceiling
-    the recipe's own header now marks as owed a re-measurement.
+    cuda-linux: sglang-omni 0.1.4 against sglang 0.5.18 and torch 2.13.0, which
+    is the stack `jobenv.CUDA_LINUX_SERVING_STACK` names and `HIGGS_STACK`
+    tells narrator to start. It was vllm-omni 0.28.0 until Owen's ruling of
+    2026-09-15 — "we dont use vllm-omni. we use sglang. vllm-omni doesnt work
+    for higgs" — and the versions here are the `sglomni` env's own, read off
+    the machine every night-3 measurement was taken on.
+
+    mlx-darwin: mlx-lm 0.31.3 (below it `GenerationBatch` does not exist and
+    the batched fast path refuses) and mlx-audio 0.4.8, whose ceiling the
+    recipe's own header now marks as owed a re-measurement.
     """
     higgs = jobenv.recipe_pins(
         jobenv.recipe_for(jobenv.tts_env("higgs-v3", "cuda-linux"))
     )
-    assert higgs["vllm"] == "0.28.0"
-    assert higgs["vllm-omni"] == "0.28.0"
+    assert higgs["sglang-omni"] == "0.1.4"
+    assert higgs["sglang"] == "0.5.18"
+    assert higgs["torch"] == "2.13.0"
+    # The flashinfer pair, which is what needs the CUDA 13 toolkit inside the
+    # wheel and the two symlinks beside it.
+    assert higgs["flashinfer-python"] == "0.6.17"
+    assert higgs["flashinfer-jit-cache"] == "0.6.17+cu130"
+    # AND NOT THE STACK OWEN RULED OUT. A recipe carrying both would be an env
+    # that resolves torch twice and serves whichever won.
+    assert "vllm" not in higgs
+    assert "vllm-omni" not in higgs
     mac = jobenv.recipe_pins(jobenv.recipe_for(jobenv.tts_env("higgs-v3", "mlx-darwin")))
     assert mac["mlx-audio"] == "0.4.8"
     assert mac["mlx-lm"] == "0.31.3"
 
 
-def test_doctor_reports_the_two_site_packages_patches_by_name(
+def test_doctor_reports_the_two_site_packages_patches_as_NOT_APPLICABLE(
     home: Path, viable: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """pip cannot express an edit to somebody else's installed package.
+    """pip cannot express an edit to somebody else's installed package — and
+    since 2026-09-15 there is no such package in the `tts` env to edit.
 
-    An env whose pins all match is reported ready, and a reader has no way to
-    tell that from an env that will render every chunk with 240 ms of garbage on
-    the end — so the patches are their own rows and their own problems.
+    Both patches are fixes to the vLLM stack: the negative-token-id rejection in
+    `vllm` and the sentinel filter in `vllm_omni`. Owen ruled that Higgs does
+    not render on vllm-omni at all, so `higgs-v3-cuda-linux.txt` installs
+    sglang-omni and neither distribution is present. SGLang-Omni has its own
+    stage processor and needs no patch, which `sgl_served`'s header and
+    BookForge's own installer both state in as many words.
+
+    SO THE ROWS STAY AND THE PROBLEMS GO. They are still reported, by name, so
+    a reader can see that the question was asked and answered — but a doctor
+    that called this env unpatched would be calling a sound env broken, which
+    is exactly what it did to the Mac until 2026-09-13. `NOT_APPLICABLE` is in
+    `SOUND_STATUSES` for that reason.
     """
     assert cli.main(["init", "--enable-tts"]) == 0
     capsys.readouterr()
+    # Still 1: the `tts` env is not installed in this home. That is the env
+    # row's problem, not the patches'.
     assert cli.main(["doctor", "--json"]) == 1
     report = json.loads(capsys.readouterr().out)
     rows = {entry["id"]: entry for entry in report["narrator_patches"]}
     assert sorted(rows) == ["higgs-sentinel-filter", "vllm-negative-token-id"]
     for entry in rows.values():
         assert entry["applied"] is False
-        assert entry["status"] == "no_env"
-    assert any("HTTP 400" in problem for problem in report["problems"])
-    assert any("240 ms of audible garbage" in problem for problem in report["problems"])
+        assert entry["status"] == "not_applicable"
+    assert not any("HTTP 400" in problem for problem in report["problems"])
+    assert not any(
+        "240 ms of audible garbage" in problem for problem in report["problems"]
+    )
 
 
 def test_doctor_runs_with_every_job_type_enabled(

@@ -1,235 +1,256 @@
-# crucible `tts` env — narrator's `higgs-v3` engine on cuda-linux.
+# crucible `tts` env - narrator's `higgs-v3` engine on cuda-linux, SGLang-Omni.
 #
 # Installed by `crucible install tts --narrator-engine higgs-v3` into
-# ~/.crucible/envs/tts-higgs-v3/ as a venv built from the server's own
-# interpreter. The server process never imports any of this: narrator is started
-# as a subprocess of this venv's python (`python -m narrator.serve`, with
-# NARRATOR_ENGINE=higgs-v3).
+# ~/.crucible/envs/tts-higgs-v3/. The server process never imports any of this:
+# narrator is started as a subprocess of this env's python
+# (`python -m narrator.serve`, with NARRATOR_ENGINE=higgs-v3).
 #
-# WHY THERE IS AN ENV PER NARRATOR ENGINE HERE AND NOT PER BACKEND
-# ----------------------------------------------------------------
-# `llm` has one env per host. `tts` on cuda-linux is named per narrator engine,
-# and the reason is in narrator's dependency matrix rather than in Crucible's
-# design: each engine pins its own serving stack against its own torch — this
-# one needs `vllm==0.28.0` plus `vllm-omni==0.28.0`. narrator's own
-# pyproject.toml says so in as many words — "Installing any two into one env
-# resolves torch twice and breaks whichever loses" — and its extras are
-# mutually exclusive for exactly that reason. So this file is the
-# `higgs-v3-server` extra. On mlx-darwin the engines share an env, and there is
-# one recipe there.
-#
-# SINCE 2026-09-14 THIS IS THE ONLY cuda-linux tts RECIPE. Owen's ruling that
-# day removed `orpheus` from the engines Crucible names (see
-# `crucible/voices.py`'s `NARRATOR_ENGINE_SAMPLING`), and
-# `envs/tts/orpheus-cuda-linux.txt` went with it. The per-engine NAMING stays,
-# because the next engine needs its own file here and not an edit to this one.
-#
-# NARRATOR IS PINNED BY GIT SHA, AND THAT IS AN OWED RULING RATHER THAN A HACK
 # ---------------------------------------------------------------------------
-# narrator is not on PyPI. It is `python/narrator` in the BookForge repo: a
-# proper installable package whose `engine/` and `serve/` know nothing about
-# audiobooks, but whose `compat/` and `assemble/` do, and which is versioned with
-# the app. PHASE3-TTS.md section 4: **extracting narrator into its own repo is an
-# owed ruling for Owen**, and until he makes it this pin is the honest
-# arrangement rather than a workaround — a server is then never surprised by a
-# commit somebody pushed to `main` this afternoon.
+# THIS RECIPE SERVED vllm-omni UNTIL 2026-09-15. IT DOES NOT ANY MORE.
+# ---------------------------------------------------------------------------
 #
-# `crucible doctor` verifies it against the COMMIT pip recorded (PEP 610's
-# direct_url.json), not against narrator's declared version, which does not move
-# when the sha does.
+# Owen, 2026-09-15: "we dont use vllm-omni. we use sglang. vllm-omni doesnt work
+# for higgs."
 #
-# WHY THE CHOSEN SET WAS ONLY FOUR REQUIREMENTS (history; the resolved set below supersedes it)
-# --------------------------
-# narrator declares its own base dependencies, and it declares them as RANGES on
-# purpose: numpy is `>=1.26.4,<3` in the base and an exact number inside each
-# env's extra, because pinning 1.26.4 at the base would have `pip install -e
-# python/` downgrade numpy underneath a torch built against 2.x. Restating those
-# ranges here as exact versions would mean Crucible pinning numbers it did not
-# choose, cannot verify from this machine, and would have to re-guess on every
-# narrator bump. So this recipe carries the direct reference and the three pins
-# narrator's `higgs-v3-server` extra states EXACTLY — every one of them read off
-# a working WSL env by narrator's own authors rather than picked — and lets pip
-# resolve the rest from narrator's metadata.
+# That is a ruling about CORRECTNESS, not a preference between two working
+# stacks, and the measurement behind it is the training side's of 2026-09-05 -
+# the same 50 packed chunks of *Working Towards the Fuhrer*, the same merged
+# checkpoint (ckpt-1080), the same sampling, one seed, scored by whisper
+# coverage / skipped words / insertion rate / early stop plus 3 s ECAPA windows
+# for mid-chunk voice switches (orpheus-finetune/HIGGS_FIELD_NOTES.md 4n):
 #
-# A RESOLVED SET, read from a real install
-# ----------------------------------------
-# What follows is `pip freeze` from `crucible install tts --narrator-engine higgs-v3` on
-# Owen's PC (WSL2, Ubuntu, python 3.11.16) on 2026-09-13: every package pip
-# resolved, at the version it resolved. The earlier notice that this file was a
-# CHOSEN set and not a measured one is discharged by that install; `crucible
-# doctor` checks the env against exactly these lines.
+#     engine, in flight        early stops  damaged/50  switches  chars/min
+#     vllm-omni 0.28.0, 1           0            5          0        1,064
+#     vllm-omni 0.28.0, 16          4           13          6       10,752
+#     SGLang-Omni 0.1.4, 16         0            5          0       26,666
 #
-# TWO SITE-PACKAGES PATCHES ARE NOT EXPRESSIBLE HERE, AND INSTALLING THIS FILE
-# RE-APPLIES THEM:
+# vllm-omni's damage is its BATCHED TALKER and not the model or the text: the
+# same build at width 1 is clean, and the corruption lands on the NEWEST batch
+# row (the request that prefills while others decode, which vLLM's condense
+# moves when an earlier row retires). The truncations Owen heard, the gibberish
+# and the sustained voice switches are all that one defect. BookForge's own
+# catalog flipped to `stack: "sglang-omni"` on 2026-09-06 on these numbers;
+# Crucible rendered on the other stack for nine days because this file installed
+# it, which is the divergence the 2026-09-15 narrator-seam audit found.
 #
-#   patches/patch_vllm.py    without it every voice-clone request is HTTP 400
-#   patches/patch_sentinel_filter.py
-#                            without it every chunk ends in ~240 ms of audible
-#                            garbage AND narrator's sentinel proof refuses the
-#                            load, because the record-per-invocation report it
-#                            reads is written by the patched file
+# THE vllm-omni RECIPE IS REPLACED RATHER THAN KEPT BESIDE THIS ONE. A second
+# recipe that serves Higgs on vllm-omni is a supported way to render a damaged
+# book, and Crucible does not keep one. Nothing is lost: BookForge's catalog
+# keeps the vllm-omni knobs beside its sglang block so a flip is one word,
+# narrator keeps both backends and both launchers, and this file's own history
+# holds the resolved vllm-omni set.
 #
-# pip cannot express a patch to somebody else's installed package — worse, pip
-# UNDOES one, by writing the distribution's own file over the edit. So
-# `jobenv.install_env` runs both appliers after pip and before it stamps the
-# env, and `crucible/narratorpatches.py` re-checks the result and refuses the
-# install if the markers are not there. `crucible doctor` reports both by name
-# under `narrator_patches` for an env installed some other way.
+# ---------------------------------------------------------------------------
+# WHY THERE IS AN ENV PER NARRATOR ENGINE HERE AND NOT PER BACKEND
+# ---------------------------------------------------------------------------
+# `llm` has one env per host. `tts` on cuda-linux is named per narrator engine,
+# because each engine pins its own serving stack against its own torch.
+# narrator's own pyproject.toml says so in as many words - "Installing any two
+# into one env resolves torch twice and breaks whichever loses" - and its extras
+# are mutually exclusive for exactly that reason. This file is the
+# `higgs-v3-sgl` extra. On mlx-darwin the engines share an env and there is one
+# recipe there.
 #
-# THIS PARAGRAPH USED TO SAY "MUST BE RE-APPLIED AFTER ANY UPGRADE OF THESE
-# PINS" and name nobody who would. MEASURED 2026-09-15: `crucible install tts
-# --narrator-engine higgs-v3 --build --force` at 07:34 restored both files
-# pristine, and every Higgs load from 07:46 failed at narrator's sentinel proof
-# with a 0-byte report — from the same pins, the same recipe and the same
-# narrator sha that had rendered at 07:23. It also named `work/patch_tail_trim.py`,
-# retired 2026-09-05 and superseded by the sentinel filter.
+# ---------------------------------------------------------------------------
+# THIS ENV IS PYTHON 3.12, AND THAT IS NOT A DETAIL
+# ---------------------------------------------------------------------------
+# sglang-omni 0.1.4 pulls torch 2.13.0+cu130 and flashinfer against a 3.12
+# interpreter. The vllm-omni env was 3.11, and `jobenv.install_env` built every
+# env with `sys.executable -m venv` - the SERVER'S interpreter, which on
+# owens-pc is python 3.11.16. So this recipe cannot be built by the machinery
+# that built the last one, and `EnvSpec.python_version` is what carries the
+# requirement: an install that cannot find a 3.12 REFUSES BY NAME rather than
+# building a 3.11 env that pip then fails to fill.
+#
+# BookForge builds the same stack as a SEPARATE CONDA ENV (`sglomni`) for the
+# same reason, and its installer's first line is "Never touches higgs3".
+#
+# ---------------------------------------------------------------------------
+# TWO THINGS pip CANNOT EXPRESS, AND NEITHER IS A PATCH
+# ---------------------------------------------------------------------------
+#  1. flashinfer JIT-builds its attention kernels with the CUDA 13 nvcc that
+#     ships INSIDE the pip wheel, and only once that directory looks like a
+#     toolkit: `lib64 -> lib` and `libcudart.so -> libcudart.so.13` inside
+#     <env>/lib/python3.12/site-packages/nvidia/cu13, which is also what
+#     CUDA_HOME must point at. `serve_higgs_sgl.sh` points at them;
+#     `crucible/narratorpatches.py` creates and checks them, the same
+#     after-pip-and-before-the-stamp discipline the vllm-omni patches had.
+#  2. `flashinfer-jit-cache` is published on flashinfer's OWN per-CUDA index and
+#     is on no PyPI, hence the `--extra-index-url` below. Without it the server
+#     still starts and compiles its kernels at every cold start instead.
+#
+# THERE ARE NO SITE-PACKAGES PATCHES ON THIS STACK. The two the vllm-omni env
+# needed (the negative-token-id fix and the sentinel filter) are edits to
+# vllm/vllm_omni. SGLang-Omni has its own stage processor and needs neither,
+# which is a real difference between the stacks rather than an omission - and it
+# is why `crucible doctor` reports no patch rows here.
+#
+# ---------------------------------------------------------------------------
+# A RESOLVED SET, READ FROM THE ENV THAT ACTUALLY WORKS
+# ---------------------------------------------------------------------------
+# What follows is `pip list --format=freeze` from the `sglomni` conda env on
+# owens-pc (WSL2, Ubuntu, python 3.12.14) on 2026-09-15 - the env every night-3
+# measurement above was taken against - with `pip`, `setuptools` and `wheel`
+# dropped (the venv brings its own and `install_env` upgrades them) and
+# narrator's direct reference added. Owen's instruction was "look at the old
+# bookforge config. mirror it. it should be exact", and this is that env's own
+# answer rather than a guess at what SGLang needs.
+#
+# `uv` IS ON THE LIST ON PURPOSE. BookForge's installer pip-installs uv into the
+# env and resolves sglang-omni with `uv pip install --prerelease=allow`, because
+# that dependency set does not resolve under plain pip's strategy. A FULLY
+# PINNED set needs no resolution strategy, so plain pip can install this file -
+# but uv is in the working env and dropping it would make this list something
+# other than what was measured.
+#
+# NARRATOR'S PIN CARRIES THE LAUNCHER. It must be at or after bookforge
+# edca6c22, which is the commit that ships `serve_higgs_sgl.sh` as package data.
+# Before it, `sgl_served` had only the operator override and refused to start
+# without a path into a BookForge checkout - so an older pin here is an env that
+# installs cleanly and cannot serve.
 
+# flashinfer publishes per-CUDA wheels on its own index and none on PyPI. The
+# cu130 build is the one that matches torch 2.13.0+cu130 above.
+--extra-index-url https://flashinfer.ai/whl/cu130/
 
-# --- narrator's `higgs-v3-server` extra, restated so doctor verifies it ---
-# WSL `higgs3`: python 3.11, torch 2.13.0+cu130, vllm 0.28.0, vllm-omni 0.28.0.
-# This is the SERVED engine: narrator's v3 client is numpy + soundfile + urllib,
-# but the vllm-omni server it starts underneath itself is what holds the model,
-# so the env has to carry the whole stack. (It said SGLang-Omni until
-# 2026-09-15, which is the OTHER Higgs stack — `serve_higgs_sgl.sh`, a different
-# launch line and a different request body. This recipe pins `vllm-omni==0.28.0`
-# and `EnvSpec.serving_stack` reads `vllm-omni` off it; the prose was the only
-# copy that disagreed.)
-
-accelerate==1.12.0
-aenum==3.1.16
-agent-detector==2.0.0
+accelerate==1.14.0
+addict==2.4.0
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.3
 aiosignal==1.4.0
+airportsdata==20260905
 annotated-doc==0.0.5
 annotated-types==0.8.0
-anthropic==1.5.0
-antlr4-python3-runtime==4.9.3
+anthropic==1.4.0
 anyio==4.15.1
 apache-tvm-ffi==0.1.11
-astor==0.8.1
+asttokens==3.0.2
 attrs==26.1.0
 av==18.1.0
-beautifulsoup4==4.15.0
-better-profanity==0.7.0
-blake3==1.0.9
-cache_dit==1.5.0
-cachetools==7.1.8
-cbor2==6.1.4
+blobfile==3.0.0
+brotli==1.2.0
+build==1.6.0
+cache_dit==1.3.0
+cdifflib==1.2.9
 certifi==2026.7.22
 cffi==2.1.1
 charset-normalizer==3.5.1
 click==8.5.0
 cloudpickle==3.1.2
-compressed-tensors==0.17.0
-cosmos-guardrail==0.3.1
+compressed-tensors==0.18.1a20260903
 cryptography==50.0.1
-cuda-bindings==13.4.1
-cuda-core==1.2.0
+cuda-bindings==13.3.1
+cuda-core==1.0.1
 cuda-pathfinder==1.8.1
-cuda-python==13.4.1
-cuda-tile==1.6.0
+cuda-python==13.3.1
+cuda-tile==1.6.0rc5
 cuda-toolkit==13.0.3.0
-defusedxml==0.7.1
-depyf==0.20.0
-detect-installer==0.2.1
-diffusers==0.40.0
+datasets==5.0.1
+decorator==5.3.1
+diffusers==0.37.0
 dill==0.4.1
-dnspython==2.8.0
-docopt==0.6.2
+diskcache==5.6.3
+distro==1.9.0
 docstring_parser==0.18.0
-EbookLib==0.20
-einops==0.8.2
+dots.tts==0.2.1
+easydict==1.13
+editdistance==0.8.1
+einops==0.9.0.dev0
 einx==0.4.3
-email-validator==2.3.0
-fa3_fwd==0.0.3
-fastapi==0.136.3
-fastapi-cli==0.0.32
-fastapi-cloud-cli==0.26.0
-fastar==0.12.0
-fastsafetensors==0.4.0
-filelock==3.32.6
-flashinfer-python==0.6.16.post3
+executing==2.2.1
+fastapi==0.141.1
+filelock==3.32.5
+flash-attn-4==4.0.0b19
+flashinfer-jit-cache==0.6.17+cu130
+flashinfer-python==0.6.17
 flatbuffers==25.12.19
 frozendict==2.4.7
 frozenlist==1.8.0
-fsspec==2026.7.0
+fsspec==2026.6.0
 gguf==0.19.0
-googleapis-common-protos==1.75.3
+GPUtil==1.4.0
+gradio==6.26.0
+gradio_client==2.6.1
+groovy==0.1.2
 grpcio==1.83.1
+grpcio-health-checking==1.82.0rc2
+grpcio-reflection==1.82.0rc2
 h11==0.16.0
-hf-xet==1.6.0
+hf-gradio==0.4.1
+hf-xet==1.6.1a0
 httpcore==1.0.9
 httpcore2==2.12.0
-httptools==0.8.0
 httpx==0.28.1
 httpx2==2.12.0
-huggingface_hub==1.31.0
-humming-kernels==0.1.12
+huggingface_hub==1.30.0
+humming-kernels==0.1.10
+hydra-core==1.4.0.dev9
 idna==3.19
-ijson==3.5.1
-ImageIO==2.37.4
-imageio-ffmpeg==0.6.0
+imageio==2.36.0
+imageio-ffmpeg==0.5.1
 importlib_metadata==9.0.1
+importlib_resources==7.1.0
+inflect==7.5.0
+iniconfig==2.3.0
 interegular==0.3.3
-iso639-lang==2.6.3
-janus==2.0.0
+ipython==9.17.1
+ipython_pygments_lexers==1.1.1
+jedi==0.20.0
 Jinja2==3.1.6
-jiter==0.17.0
-jmespath==1.1.0
+jiter==0.16.0
+jiwer==4.0.0
 joblib==1.6.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 kernels==0.14.1
 kernels-data==0.16.1
-lark==1.2.2
+langcodes==3.5.1
+language_data==1.4.0
+lark==1.3.1
 lazy-loader==0.5
-llguidance==1.7.6
+librosa==1.0.0
+lingua-language-detector==2.2.0
+llguidance==1.8.0
 llvmlite==0.47.0
-lm-format-enforcer==0.11.3
+logger==1.4
 loguru==0.7.3
-lxml==6.1.3
+lxml==7.0.0b1
+marisa-trie==1.4.1
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3
-mcp==2.2.0
-mcp-types==2.2.0
+matplotlib-inline==0.2.2
 mdurl==0.1.2
 mistral_common==1.11.7
 ml_dtypes==0.6.0
-model-hosting-container-standards==0.1.16
+modelscope==1.39.1
+modelscope-hub==0.4.0
+mooncake-transfer-engine-cuda13==0.3.13.post1
 more-itertools==11.1.0
 mpmath==1.3.0
 msgpack==1.2.2
 msgspec==0.21.1
-multidict==6.8.0
-mutagen==1.48.1
-# THIS PIN IS A CAPABILITY, NOT JUST A VERSION. Crucible's take ladder sends a
-# rung as `sampling` on every `generate_batch` item, and only a narrator
-# carrying `narrator/engine/item_sampling.py` reads it; an older one drops the
-# key in SILENCE and renders take 0. Measured 2026-09-15: this pin was
-# 0eeb0267, one day too old, and two render jobs at take 0 and take 1 returned
-# byte-identical audio. The refusal that now catches it (`sampling_not_wired`,
-# off `itemSampling` on narrator's ready line) makes a stale pin loud rather
-# than wrong -- but loud still means the ladder does not run, so re-resolve
-# this to a bookforge commit at or after fbc235bf when bumping the env.
-narrator @ git+https://github.com/telltaleatheist/bookforge@95d11238328b6a2eebbb9412f13cc3d5cf4039c0#subdirectory=python
+multidict==6.7.1
+multiprocess==0.70.19
+narrator @ git+https://github.com/telltaleatheist/bookforge@edca6c22e5ab19862655c8d84f60c99d7963cffc#subdirectory=python
+narwhals==2.25.0
 nccl4py==0.5.0
+nemo_text_processing==1.2.0
+nest-asyncio==1.6.0
 networkx==3.6.1
 ninja==1.13.2
-nltk==3.10.3
-num2words==0.5.14
-numba==0.65.0
+nixl-cu13==1.4.1
+numba==0.65.1
 numpy==2.3.5
 nvidia-cublas==13.1.1.3
-nvidia-cuda-cccl==13.3.4.2.1
-nvidia-cuda-crt==13.4.59
+nvidia-cuda-cccl==13.3.4.1.2rc1
+nvidia-cuda-crt==13.4.46rc1
 nvidia-cuda-cupti==13.0.85
-nvidia-cuda-nvcc==13.4.59
-nvidia-cuda-nvdisasm==13.4.49
+nvidia-cuda-nvcc==13.4.46rc1
+nvidia-cuda-nvdisasm==13.4.46rc1
 nvidia-cuda-nvrtc==13.0.88
 nvidia-cuda-runtime==13.0.96
 nvidia-cudnn-cu13==9.20.0.48
-nvidia-cudnn-frontend==1.29.0
+nvidia-cudnn-frontend==1.28.0
 nvidia-cufft==12.0.0.61
 nvidia-cufile==1.15.1.6
 nvidia-curand==10.4.0.35
@@ -241,114 +262,133 @@ nvidia-cutlass-dsl-libs-base==4.6.2
 nvidia-cutlass-dsl-libs-core==4.6.2
 nvidia-cutlass-dsl-libs-cu12==4.6.2
 nvidia-cutlass-dsl-libs-cu13==4.6.2
+nvidia-mathdx==25.6.0
 nvidia-ml-py==13.610.43
 nvidia-nccl-cu13==2.29.7
-nvidia-nvjitlink==13.4.52
+nvidia-nvjitlink==13.4.46rc1
 nvidia-nvshmem-cu13==3.4.5
 nvidia-nvtx==13.0.85
-nvidia-nvvm==13.4.59
-nvtx==0.2.15
-omegaconf==2.3.1
-onnxruntime==1.30.0
-openai==3.13.0
-openai-harmony==0.0.8
+nvidia-nvvm==13.4.46rc1
+omegaconf==2.4.0.dev15
+onnxruntime==1.29.0
+openai==2.6.1
+openai-harmony==0.0.4
 openai-whisper==20250625
-opencv-python==5.0.0.93
-opencv-python-headless==5.0.0.93
-opentelemetry-api==1.44.0
-opentelemetry-exporter-otlp==1.44.0
-opentelemetry-exporter-otlp-proto-common==1.44.0
-opentelemetry-exporter-otlp-proto-grpc==1.44.0
-opentelemetry-exporter-otlp-proto-http==1.44.0
-opentelemetry-proto==1.44.0
-opentelemetry-sdk==1.44.0
-opentelemetry-semantic-conventions==0.65b0
-opentelemetry-semantic-conventions-ai==0.5.1
-outlines_core==0.2.14
+orjson==3.12.0
+outlines==0.1.11
+outlines_core==0.1.26
 packaging==26.3
+pandas==3.0.5
+parso==0.8.7
 partial-json-parser==0.2.1.1.post7
-peft==0.20.0
+pexpect==4.9.0
 pillow==12.3.0
-prettytable==3.18.0
-prometheus-fastapi-instrumentator==8.1.0
+platformdirs==4.11.7
+pluggy==1.6.0
+pooch==1.9.0
 prometheus_client==0.26.0
+prompt_toolkit==3.0.53
 propcache==0.5.2
 protobuf==6.33.6
 psutil==7.2.2
-py-cpuinfo==9.0.0
+ptyprocess==0.7.0
+pure_eval==0.2.3
+py-spy==0.4.2
+pyarrow==25.0.1
 pybase64==1.5.0
 pycountry==26.2.16
 pycparser==3.0
-pydantic==2.13.5
+pycryptodomex==3.23.0
+pydantic==2.14.0b1
 pydantic-extra-types==2.11.1
-pydantic-settings==2.15.0
-pydantic_core==2.46.5
+pydantic_core==2.48.0
+pydub==0.25.1
+pyelftools==0.33
 Pygments==2.21.0
-PyJWT==2.14.0
-pynvvideocodec==2.0.4
-python-dotenv==1.2.3
-python-json-logger==4.2.0
+pynini==2.1.6.post1
+pyproject_hooks==1.2.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+python-dateutil==2.9.0.post0
 python-multipart==0.0.32
+pytz==2026.3.post1
 PyYAML==6.0.3
 pyzmq==27.2.0
 quack-kernels==0.6.4
+qwen-vl-utils==0.0.11
+RapidFuzz==3.14.6
 referencing==0.37.0
-regex==2026.9.10
+regex==2026.9.3
 requests==2.34.2
-retinaface-py==0.0.2
 rich==15.0.0
-rich-toolkit==0.20.5
-rignore==0.8.1
 rpds-py==2026.6.3
+s3prl==0.4.18
+sacremoses==0.2.0
+safehttpx==0.1.7
 safetensors==0.8.0
-scikit-image==0.26.0
-scipy==1.17.1
+scikit-learn==1.9.0
+scipy==1.18.1
+semantic-version==2.10.0
 sentencepiece==0.2.2
-sentry-sdk==2.69.1
 setproctitle==1.3.7
+sgl-deep-ep==0.1.0
+sgl-deep-gemm==0.1.5.post3
+sglang==0.5.18
+sglang-kernel==0.4.6.post1
+sglang-omni==0.1.4
 shellingham==1.5.4
+silero-vad==6.2.1
 six==1.17.0
+smg-grpc-proto==0.4.16
+smg-grpc-servicer==0.9.1
 sniffio==1.3.1
-soundfile==0.14.0
-soupsieve==2.9.2
-sse-starlette==3.4.11
+soundfile==0.13.1
+sox==1.5.0
+soxr==1.1.0
+stack-data==0.6.3
 starlette==1.6.0
-supervisor==4.3.0
 sympy==1.14.0
 tabulate==0.10.0
-tifffile==2026.3.3
+threadpoolctl==3.6.0
 tiktoken==0.14.0
-tilelang==0.1.12
-tokenizers==0.22.2
+tilelang==0.1.11
+timm==1.0.16
+tokenizers==0.23.0rc0
 tokenspeed-mla==0.1.8
-tokenspeed-triton==3.8.10.post20260906
-tomlkit==0.15.1
+tokenspeed-triton==3.8.10.post20260721
+tomlkit==0.14.0
 torch==2.13.0
 torch-einops-utils==0.1.25
 torch_c_dlpack_ext==0.1.5
+torch_memory_saver==0.0.10b2
 torchaudio==2.11.0
-torchcodec==0.16.0
-torchsde==0.2.6
+torchcodec==0.15.0
+torchdiffeq==0.2.5
 torchvision==0.28.0
-tqdm==4.70.1
-trampoline==0.1.2
-transformers==5.14.1
+tqdm==4.70.0
+traitlets==5.16.1
+transformers==5.12.1
 triton==3.7.1
 truststore==0.10.4
+typeguard==4.6.0
 typer==0.27.2
 typing-inspection==0.4.4
 typing_extensions==4.16.0
-Unidecode==1.4.0
 urllib3==2.7.0
+uv==0.12.10
 uvicorn==0.52.4
 uvloop==0.22.1
-vllm==0.28.0
-vllm-omni==0.28.0
 watchfiles==1.2.0
 wcwidth==0.8.3
 websockets==17.1
+WeTextProcessing==1.2.0
+wget==3.2
+wrapt==2.4.1rc1
 x-transformers==2.28.4
-xgrammar==0.2.6
+xgrammar==0.2.1
+xxhash==4.0.1
 yarl==1.24.5
 z3-solver==4.15.4.0
+zhon==2.1.1
 zipp==4.1.0
+zstandard==0.25.0

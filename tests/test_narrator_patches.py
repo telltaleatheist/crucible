@@ -123,13 +123,28 @@ def test_a_recipe_that_adds_the_stack_starts_being_checked_on_its_own(
     ] == APPLIED
 
 
-def test_the_shipped_cuda_recipe_makes_both_patches_applicable() -> None:
-    """The fixture above is only honest if the real recipe agrees with it."""
+def test_the_shipped_cuda_recipe_makes_NEITHER_patch_applicable() -> None:
+    """THE STACK FLIP OF 2026-09-15 TURNED THIS TEST INSIDE OUT, and that is
+    the right answer rather than a loosened one.
+
+    Both patches edit the vLLM stack — the negative-token-id fix in `vllm` and
+    the sentinel filter in `vllm_omni`. Owen ruled that Higgs does not render on
+    vllm-omni at all ("we dont use vllm-omni. we use sglang. vllm-omni doesnt
+    work for higgs"), so `higgs-v3-cuda-linux.txt` now installs sglang-omni and
+    neither distribution is there to patch.
+
+    WHAT MATTERS IS THAT THEY REPORT `not_applicable` AND NOT `missing`.
+    SGLang-Omni has its own stage processor and needs no patch — `sgl_served`'s
+    header and BookForge's installer both say so in as many words — so a
+    `crucible doctor` that called this env unpatched would be calling a sound
+    env broken, which is exactly what it did to the Mac until 2026-09-13. The
+    selection is by the recipe's own pins, so this needed no code change; this
+    test is what proves that."""
     from crucible import jobenv
 
     pins = jobenv.recipe_pins(jobenv.recipe_for(jobenv.tts_env("higgs-v3", "cuda-linux")))
     for patch in NARRATOR_PATCHES:
-        assert patch.distribution in pins, patch.id
+        assert patch.distribution not in pins, patch.id
 
 
 def test_the_shipped_mac_recipe_makes_neither_applicable() -> None:

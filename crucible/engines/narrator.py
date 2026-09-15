@@ -158,8 +158,62 @@ ENGINE_VARIABLE = "NARRATOR_ENGINE"
 #: `modelDir` on the `load` message by name, so a worker with no document
 #: cannot load any voice at all.
 STACK_VARIABLE = "HIGGS_STACK"
-ENV_PREFIX_VARIABLE = "HIGGS_ENV"
 MAX_NUM_SEQS_VARIABLE = "HIGGS_MAX_NUM_SEQS"
+
+#: THE ENV PREFIX VARIABLE IS THE STACK'S, NOT ONE NAME FOR BOTH — and each
+#: launcher reads ONLY its own.
+#:
+#: `serve_higgs_v3.sh` builds CUDA_HOME, PATH, LD_LIBRARY_PATH and
+#: `$HIGGS_ENV/bin/vllm-omni` out of `HIGGS_ENV` and exits 5 when it is unset.
+#: `serve_higgs_sgl.sh` does the identical job out of `HIGGS_SGL_ENV` — and
+#: DEFAULTS IT to `$HOME/anaconda3/envs/sglomni` rather than refusing, because
+#: the script is also run by hand on the machine it was transcribed from.
+#:
+#: THAT DEFAULT IS WHY THIS IS A TABLE AND NOT A CONSTANT. Sending the SGLang
+#: launcher `HIGGS_ENV` would set a variable it never reads, leave
+#: `HIGGS_SGL_ENV` unset, and send it looking for `sgl-omni` inside a conda env
+#: that does not exist on a Crucible host — `exit 5`, several minutes after a
+#: load began, naming a directory nobody configured. BookForge's `higgsSpawnEnv`
+#: branches on exactly this and emits `HIGGS_SGL_ENV` + `NARRATOR_HIGGS_SGL_
+#: SERVE_SCRIPT` on one arm and `HIGGS_ENV` + `NARRATOR_HIGGS3_SERVE_SCRIPT` on
+#: the other, with the comment that nothing from the vllm-omni half comes along.
+#:
+#: The BINARY is per stack for the same reason: it is the most direct evidence
+#: on disk that a directory is the tree the stack was installed into, and the
+#: two stacks install different ones.
+STACK_ENV_PREFIX_VARIABLE: dict[str, str] = {
+    "vllm-omni": "HIGGS_ENV",
+    "sglang-omni": "HIGGS_SGL_ENV",
+}
+STACK_LAUNCH_BINARY: dict[str, str] = {
+    "vllm-omni": "vllm-omni",
+    "sglang-omni": "sgl-omni",
+}
+
+#: The vllm-omni arm's name, kept as a module constant because `crucible doctor`
+#: and the tests refer to it and because it is what `higgs_env_prefix`'s refusal
+#: says when no stack is in hand.
+ENV_PREFIX_VARIABLE = STACK_ENV_PREFIX_VARIABLE["vllm-omni"]
+
+
+def env_prefix_variable_for(serving_stack: str) -> str:
+    """`HIGGS_ENV` or `HIGGS_SGL_ENV`, or a refusal naming the stack.
+
+    No default. A stack this build does not know is a launcher whose variables
+    nobody here has read, and guessing one of the two would configure the wrong
+    server — or, on the SGLang arm, no server at all while its own hardcoded
+    conda default takes over.
+    """
+    variable = STACK_ENV_PREFIX_VARIABLE.get(serving_stack)
+    if variable is None:
+        raise EngineError(
+            f"no env-prefix variable for serving stack {serving_stack!r}; this "
+            f"build knows {sorted(STACK_ENV_PREFIX_VARIABLE)}. Each launcher "
+            "reads only its own name for the prefix it runs out of, and the "
+            "SGLang one DEFAULTS to a conda env rather than refusing — so a "
+            "guess here is a server started out of a directory nobody named"
+        )
+    return variable
 
 #: The narrator engine those three belong to. Written as a constant so the
 #: refusals below read as a rule rather than as a special case: they are the
@@ -412,11 +466,13 @@ LOAD_SILENCE_TIMEOUT_SECONDS = 900.0
 #: CUDA_HOME and puts `$HIGGS_ENV/bin` on PATH — so the prefix is the tree the
 #: STACK is installed into, and this path is the most direct evidence on disk
 #: that a directory is that tree.
-LAUNCH_BINARY = ("bin", "vllm-omni")
+#: The vllm-omni arm's, kept for callers with no stack in hand. The per-stack
+#: answer is `STACK_LAUNCH_BINARY`, which is what `higgs_env_prefix` reads.
+LAUNCH_BINARY = ("bin", STACK_LAUNCH_BINARY["vllm-omni"])
 
 
-def higgs_env_prefix(python: Path) -> Path:
-    """`$HIGGS_ENV` for a tts env, READ off the env rather than inferred.
+def higgs_env_prefix(python: Path, serving_stack: str) -> Path:
+    """`$HIGGS_ENV` / `$HIGGS_SGL_ENV` for a tts env, READ off the env.
 
     THE DEFECT THIS EXISTS FOR (live WSL server, 2026-09-14): every `tts` job
     failed at engine start with `HIGGS_ENV is the prefix its server runs out
@@ -438,28 +494,35 @@ def higgs_env_prefix(python: Path) -> Path:
 
     What is read, in the order the evidence answers the launcher's question:
 
-    * `bin/vllm-omni` — the file the script execs. Definitive on all three
-      layouts, and the only one that says the STACK is here and not merely a
-      python.
+    * `bin/<the stack's server>` — the file the script execs, `vllm-omni` or
+      `sgl-omni`. Definitive on all three layouts, and the only one that says
+      the STACK is here and not merely a python. It is the stack's OWN binary
+      since 2026-09-15: looking for vllm-omni inside an SGLang env would find
+      nothing and fall through to the weaker checks below, so the one piece of
+      evidence that actually distinguishes a stack tree from a bare venv would
+      never fire on the stack Owen renders on.
     * `pyvenv.cfg` — a venv. Its own prefix, never its parent's.
     * `conda-meta/` — a conda env, which is its own prefix.
 
     Anything else is refused BY NAME here rather than at the end of a launch,
-    where it reads as `$HIGGS_ENV/bin/vllm-omni: No such file`.
+    where it reads as `$HIGGS_ENV/bin/vllm-omni: No such file` — or, on the
+    SGLang arm, as a launcher quietly taking its own hardcoded conda default.
     """
+    variable = env_prefix_variable_for(serving_stack)
+    binary = STACK_LAUNCH_BINARY[serving_stack]
     root = Path(python).parent.parent
-    if (root / LAUNCH_BINARY[0] / LAUNCH_BINARY[1]).exists():
+    if (root / "bin" / binary).exists():
         return root
     if (root / "pyvenv.cfg").is_file():
         return root
     if (root / "conda-meta").is_dir():
         return root
     raise EngineError(
-        f"{ENV_PREFIX_VARIABLE} is the prefix narrator's server runs out of, "
+        f"{variable} is the prefix narrator's server runs out of, "
         f"and {root} — the prefix of the tts env python {python} — is not "
-        f"one: it carries no {'/'.join(LAUNCH_BINARY)}, no pyvenv.cfg (a venv) "
+        f"one: it carries no bin/{binary}, no pyvenv.cfg (a venv) "
         "and no conda-meta/ (a conda env). narrator's launch script builds "
-        "CUDA_HOME, PATH, LD_LIBRARY_PATH and the vllm-omni binary from that "
+        f"CUDA_HOME, PATH, LD_LIBRARY_PATH and the {binary} binary from that "
         "prefix and refuses when it is unset"
     )
 
@@ -598,7 +661,8 @@ class NarratorEngine(SubprocessEngine):
             # there. `higgs_env_prefix` is where the two ways this was wrong
             # are written down; its refusal names this engine here.
             try:
-                self._env_prefix: Path | None = higgs_env_prefix(python)
+                self._env_prefix: Path | None = higgs_env_prefix(
+                    python, serving_stack)
             except EngineError as refusal:
                 raise EngineError(
                     f"cannot start {self.name}: {refusal}"
@@ -760,7 +824,12 @@ class NarratorEngine(SubprocessEngine):
             assert self._serving_stack is not None
             assert self._max_num_seqs is not None
             environment[STACK_VARIABLE] = self._serving_stack
-            environment[ENV_PREFIX_VARIABLE] = str(self._env_prefix)
+            # THE STACK'S OWN NAME FOR ITS PREFIX. `HIGGS_ENV` on vllm-omni,
+            # `HIGGS_SGL_ENV` on SGLang-Omni — see `STACK_ENV_PREFIX_VARIABLE`
+            # for why sending the wrong one is worse than sending none.
+            environment[env_prefix_variable_for(self._serving_stack)] = str(
+                self._env_prefix
+            )
             environment[MAX_NUM_SEQS_VARIABLE] = str(self._max_num_seqs)
         if self._mlx_tier is not None:
             # ONE ROW, THREE VARIABLES, and that is the whole point of the row.

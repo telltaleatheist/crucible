@@ -87,14 +87,16 @@ NARRATOR_PACKAGE = "narrator"
 #: lookup below is `.get()` for that reason, and `None` is the answer rather
 #: than a missing key.
 #
-# RULING OWED: THIS REPO SAYS "SGLang-Omni" IN SEVEN PLACES AND INSTALLS
-# vllm-omni. `docs/PHASE3-TTS.md` section 4, `crucible/residency.py`'s warm-up
-# comment, `crucible/voices.py`'s own header and every voice manifest's
-# `estimate_note` describe narrator as starting SGLang-Omni on `cuda-linux`;
-# `envs/tts/higgs-v3-cuda-linux.txt` is a FROZEN, resolved set that installs
-# `vllm==0.28.0` + `vllm-omni==0.28.0` and no SGLang at all. The recipe is what
-# runs, so `vllm-omni` is what is stated here — that is the only reading under
-# which this file cannot lie.
+# THE RULING LANDED, AND THE PROSE WAS RIGHT ALL ALONG. Until 2026-09-15 this
+# repo said "SGLang-Omni" in seven places and INSTALLED vllm-omni:
+# `docs/PHASE3-TTS.md` section 4, `crucible/residency.py`'s warm-up comment,
+# `crucible/voices.py`'s own header and every voice manifest's `estimate_note`
+# described narrator as starting SGLang-Omni on `cuda-linux`, while
+# `envs/tts/higgs-v3-cuda-linux.txt` installed `vllm==0.28.0` + `vllm-omni==
+# 0.28.0` and no SGLang at all. This table stated `vllm-omni`, because the
+# RECIPE is what runs and that was the only reading under which this file could
+# not lie. The recipe now installs the stack the prose always claimed, so the
+# two agree by being made to agree rather than by one of them being softened.
 #
 # WHAT IS OWED IS WHICH ONE OWEN WANTS. BookForge's own catalog shipped
 # `stack: "sglang-omni"` on 2026-09-06 on measurements that favour it heavily
@@ -107,44 +109,64 @@ NARRATOR_PACKAGE = "narrator"
 # vllm-omni at 0.35 + 0.10 measured 18.7-19.2 GB, so the manifests' 19 GB is
 # right for the wrong reason and is not a hazard tonight.
 #
-# ── IT IS ALSO THE ANSWER TO A QUESTION OWEN ASKED ON 2026-09-15 ─────────────
+# ── OWEN RULED ON 2026-09-15, AND THE ANSWER IS SGLang ──────────────────────
+#
+# He was asked which one he wanted, having been shown the measurement above:
+#
+#   "we dont use vllm-omni. we use sglang. vllm-omni doesnt work for higgs."
+#
+# So this is not a preference between two working stacks. vllm-omni is BROKEN
+# for Higgs — its batched talker corrupts the newest batch row, which is the
+# truncations, the gibberish and the sustained voice switches all at once — and
+# a recipe that serves Higgs on it is a supported way to render a damaged book.
+# The recipe is REPLACED rather than kept beside a second one, and this table
+# says the stack that recipe installs.
+#
+# ── WHAT THE OTHER HALF OF THE QUESTION WAS, AND ITS ANSWER ─────────────────
 #
 # "is wsl crucible using sglang with batching set to exactly what it was before
-# we set up crucible?" — and the two halves of that have different answers, so
-# they are written down separately rather than averaged into one.
+# we set up crucible?" The two halves had different answers and both are worth
+# keeping now that one of them has been fixed.
 #
-# THE BATCHING: YES. `HIGGS_MAX_NUM_SEQS` is stage 0's admission width AND the
-# width of narrator's own batch on BOTH stacks (`v3_served.serve_concurrency`,
+# THE BATCHING: YES, IT ALWAYS WAS. `HIGGS_MAX_NUM_SEQS` is stage 0's admission
+# width on vllm-omni, `--tts_engine.factory.max_running_requests` on SGLang, AND
+# the width of narrator's own batch on both (`v3_served.serve_concurrency`,
 # which `sgl_served.py` deliberately shares rather than naming a second
 # variable). BookForge states 16 from its catalog; every voice manifest here
 # states 16 from `[voice.serving]`, carrying BookForge's own measurement note
-# verbatim. The number was ported, not re-derived, and nothing on this arm ever
+# verbatim. That number was ported, not re-derived, and nothing on this arm ever
 # ran at a width nobody chose.
 #
-# THE STACK: NO. This is the OTHER one. On the shipped catalog BookForge renders
-# Higgs on SGLang-Omni and has since 2026-09-06; a Crucible `tts` job on
-# `cuda-linux` renders on vllm-omni, whose measured cost on the same 50 chunks
-# is the line above — 4 early stops, 13/50 damaged and 6 sustained voice
-# switches against 0, 5/50 and 0, at 40% of the throughput. That is a quality
-# difference and not only a speed one, and it is the largest single divergence
-# between the two narrator seams.
+# THE STACK: NO, AND THAT IS WHAT THIS CHANGE FIXES. Crucible rendered on
+# vllm-omni for the nine days between BookForge's flip and this ruling.
 #
-# TWO THINGS HAVE TO MOVE TOGETHER TO CLOSE IT, which is why it is a ruling and
-# not a one-word edit here. The recipe must install the `sglomni` stack (python
-# 3.12 + torch 2.13.0+cu130 + sglang-omni 0.1.4 — a SEPARATE env from
-# vllm-omni's python 3.11 + vllm 0.28.0, which is why BookForge keeps two), and
-# narrator must ship `serve_higgs_sgl.sh` the way it now ships
-# `serve_higgs_v3.sh`: today that launcher exists only in BookForge's
-# `electron/scripts/higgs/`, so `NARRATOR_HIGGS_SGL_SERVE_SCRIPT` would have to
-# name a path into a BookForge checkout — the exact dependency BookForge
-# 0eeb0267 removed for the other stack. The three `HIGGS_SGL_*` knobs are NOT
-# the blocker: that script defaults `HIGGS_SGL_MEM_FRACTION` to 0.60,
+# THE THREE `HIGGS_SGL_*` KNOBS ARE STILL UNSET HERE AND STILL INERT, for the
+# reason the `HIGGS_*` table in `engines/narrator.py` gives about its own six:
+# `serve_higgs_sgl.sh` defaults `HIGGS_SGL_MEM_FRACTION` to 0.60,
 # `HIGGS_SGL_MAX_NEW_TOKENS` to 7500 and `HIGGS_SGL_CUDA_GRAPH_MAX_BS` to
-# `$HIGGS_MAX_NUM_SEQS` itself, which are the catalog's three values, so graphs
-# would be captured at exactly the admitted width without Crucible saying a
-# word.
+# `$HIGGS_MAX_NUM_SEQS` ITSELF — never sglang's own default — and those are the
+# catalog's three values. So CUDA graphs are captured at exactly the admitted
+# width without Crucible saying a word.
 CUDA_LINUX_SERVING_STACK: dict[str, str] = {
-    "higgs-v3": "vllm-omni",
+    "higgs-v3": "sglang-omni",
+}
+
+#: THE INTERPRETER AN ENV MUST BE BUILT WITH, where that is not the server's own.
+#:
+#: `install_env` builds a venv from `sys.executable` — the interpreter the
+#: Crucible server itself runs on, 3.11.16 on owens-pc — and for every env but
+#: one that is right. The SGLang-Omni `tts` env is the exception: sglang-omni
+#: 0.1.4 pulls torch 2.13.0+cu130 and flashinfer against PYTHON 3.12, and
+#: BookForge builds it as a separate conda env for the same reason.
+#:
+#: A TABLE KEYED BY RECIPE, because the requirement belongs to what is installed
+#: rather than to the job type or the backend: `higgs-v3-cuda-linux.txt` needs
+#: 3.12 today and a future recipe for the same job type may not.
+#:
+#: Absent means "the server's own interpreter", which is a real answer and the
+#: one every other env gives.
+RECIPE_PYTHON: dict[str, str] = {
+    "higgs-v3-cuda-linux": "3.12",
 }
 
 
@@ -180,6 +202,14 @@ class EnvSpec:
     #: context windows, so a guessed stack is a book rendered at sampling
     #: nobody chose), and this is the fact Crucible states it from.
     serving_stack: str | None = None
+    #: `major.minor` the env must be BUILT with, or None for the server's own
+    #: interpreter. From `RECIPE_PYTHON`, keyed by the recipe — see that table.
+    #:
+    #: NOT A PREFERENCE. An env built at the wrong version does not install
+    #: wrongly, it fails to install at all (there is no torch 2.13.0+cu130 wheel
+    #: for 3.11 on this axis), and it fails several GB in. `install_env` refuses
+    #: BY NAME before `venv` runs instead.
+    python_version: str | None = None
 
 
 def llm_env(backend_kind: str) -> EnvSpec:
@@ -211,12 +241,14 @@ def tts_env(narrator_engine: str, backend_kind: str) -> EnvSpec:
             f"{sorted(BACKEND_HEADLINE_PACKAGE)}"
         )
     if backend_kind == "cuda-linux":
+        recipe_name = f"{narrator_engine}-{backend_kind}"
         return EnvSpec(
             job_type="tts",
             key=f"tts-{narrator_engine}",
-            recipe_name=f"{narrator_engine}-{backend_kind}",
+            recipe_name=recipe_name,
             headline=NARRATOR_PACKAGE,
             serving_stack=CUDA_LINUX_SERVING_STACK.get(narrator_engine),
+            python_version=RECIPE_PYTHON.get(recipe_name),
         )
     # mlx-darwin: NO SERVING STACK, and that is a fact about narrator rather
     # than a gap here. On darwin `narrator.engine.registry` builds
@@ -548,6 +580,46 @@ def require_env(home: Path, spec: EnvSpec, backend_kind: str) -> Path:
 # ------------------------------------------------------------------ install
 
 
+def interpreter_for(spec: EnvSpec) -> str:
+    """The python that builds this env's venv, or a refusal naming the version.
+
+    TWO SOURCES, BOTH CHECKED, NEITHER A FALLBACK FOR THE OTHER. A venv inherits
+    the version of the interpreter that made it, so this decides what the env IS
+    and there is no substituting one version for another:
+
+      * the SERVER'S OWN interpreter, when it already is the wanted version (and
+        always, for a spec that wants none — every env but the SGLang `tts` one);
+      * `python<major.minor>` on PATH, which is how a distro and a `uv python
+        install` both present one.
+
+    A spec that names a version this host cannot produce is REFUSED BY NAME,
+    before `venv` runs. The alternative is a 3.11 env that pip fails to fill
+    several GB in with a wheel-compatibility error naming neither the env nor
+    the reason — which is the same shape as every other defect this file
+    refuses early.
+    """
+    wanted = spec.python_version
+    if wanted is None:
+        return sys.executable
+    running = ".".join(map(str, sys.version_info[:2]))
+    if running == wanted:
+        return sys.executable
+    named = shutil.which(f"python{wanted}")
+    if named is not None:
+        return named
+    raise EnvError(
+        f"the {spec.key} env must be built with python {wanted} and this host "
+        f"offers neither: the Crucible server runs on {running} "
+        f"({sys.executable}) and there is no `python{wanted}` on PATH. "
+        f"{spec.recipe_name}.txt pins a stack that has no wheels for "
+        f"{running} — sglang-omni 0.1.4 and torch 2.13.0+cu130 are built "
+        f"against {wanted} — so a venv from this interpreter would install "
+        "nothing and say so several GB in. Put a "
+        f"python{wanted} on PATH (`uv python install {wanted}`, a distro "
+        f"package, or a conda env) and run the install again"
+    )
+
+
 def install_env(
     home: Path,
     spec: EnvSpec,
@@ -583,7 +655,7 @@ def install_env(
         shutil.rmtree(directory)
 
     _run(
-        [sys.executable, "-m", "venv", str(directory)],
+        [interpreter_for(spec), "-m", "venv", str(directory)],
         f"could not create the venv at {directory}",
         on_line,
     )

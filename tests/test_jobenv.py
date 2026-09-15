@@ -148,12 +148,14 @@ def test_the_serving_stack_is_the_recipe_s_and_only_cuda_higgs_has_one() -> None
 
     It is stated from the ENV SPEC rather than from the voice, because which
     server narrator can start is a property of what the recipe installed:
-    `higgs-v3-cuda-linux.txt` carries `vllm-omni==0.28.0` and no SGLang at all.
+    `higgs-v3-cuda-linux.txt` carries `sglang-omni==0.1.4` and no vllm-omni at
+    all, since Owen's ruling of 2026-09-15 ("we dont use vllm-omni. we use
+    sglang. vllm-omni doesnt work for higgs").
     `None` on `mlx-darwin` is a real answer, not a gap: narrator renders in
     process there and reads none of it. So is `None` for an engine with no row
     in `CUDA_LINUX_SERVING_STACK` — one that loads its own runtime.
     """
-    assert tts_env("higgs-v3", "cuda-linux").serving_stack == "vllm-omni"
+    assert tts_env("higgs-v3", "cuda-linux").serving_stack == "sglang-omni"
     assert tts_env("higgs-v3", "mlx-darwin").serving_stack is None
     # An engine with no row in the table starts no server, and the lookup says
     # so rather than raising. This is the shape the next engine arrives in.
@@ -165,7 +167,10 @@ def test_the_stack_named_is_the_stack_the_recipe_installs() -> None:
     """The two copies of one fact, compared. A recipe that swapped vllm-omni
     for SGLang-Omni while this table still said `vllm-omni` would start a
     server whose requests narrator is not building — not a crash, a book
-    rendered at whatever the dropped fields defaulted to."""
+    rendered at whatever the dropped fields defaulted to.
+
+    THIS TEST IS WHY THE FLIP IS ONE EDIT AND NOT A SEARCH. It failed the
+    moment the recipe changed and passed again only when the table did."""
     spec = tts_env("higgs-v3", "cuda-linux")
     text = recipe_for(spec).read_text(encoding="utf-8")
     installed = {
@@ -173,9 +178,67 @@ def test_the_stack_named_is_the_stack_the_recipe_installs() -> None:
         for line in text.splitlines()
         if "==" in line and not line.lstrip().startswith("#")
     }
-    assert spec.serving_stack == "vllm-omni"
-    assert "vllm-omni" in installed
-    assert "sglang" not in installed
+    assert spec.serving_stack == "sglang-omni"
+    assert "sglang-omni" in installed
+    assert "sglang" in installed
+    # AND NOT A TRACE OF THE OTHER ONE. Owen's ruling is that vllm-omni does
+    # not work for Higgs, so an env that carries it is an env that can render a
+    # damaged book — the recipe is replaced, never kept beside a second file.
+    assert "vllm-omni" not in installed
+    assert "vllm" not in installed
+
+
+def test_only_the_sglang_tts_env_wants_an_interpreter_of_its_own() -> None:
+    """`RECIPE_PYTHON` is keyed by RECIPE because the requirement belongs to
+    what is installed. sglang-omni 0.1.4 pulls torch 2.13.0+cu130 against
+    python 3.12; every other env is the server's own interpreter, and `None`
+    says exactly that."""
+    assert tts_env("higgs-v3", "cuda-linux").python_version == "3.12"
+    assert tts_env("higgs-v3", "mlx-darwin").python_version is None
+    assert llm_env("cuda-linux").python_version is None
+    assert llm_env("mlx-darwin").python_version is None
+
+
+def test_an_env_wanting_an_interpreter_this_host_lacks_is_refused_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refused BEFORE `venv` runs. A venv inherits its maker's version, so a
+    3.11 interpreter cannot produce a 3.12 env — it produces a 3.11 one that
+    pip fails to fill several GB in, with a wheel-compatibility error naming
+    neither the env nor the reason."""
+    monkeypatch.setattr(jobenv.shutil, "which", lambda name: None)
+    monkeypatch.setattr(jobenv.sys, "version_info", (3, 11, 16))
+    with pytest.raises(EnvError) as caught:
+        jobenv.interpreter_for(tts_env("higgs-v3", "cuda-linux"))
+    message = str(caught.value)
+    assert "python 3.12" in message
+    assert "3.11" in message
+    # It names the way out rather than only the problem.
+    assert "uv python install 3.12" in message
+
+
+def test_an_interpreter_of_the_wanted_version_on_path_is_used() -> None:
+    """The second of the two sources, and the only one a host that is not
+    already running 3.12 can offer."""
+    spec = tts_env("higgs-v3", "cuda-linux")
+
+    def which(name: str) -> str | None:
+        return "/usr/bin/python3.12" if name == "python3.12" else None
+
+    import unittest.mock as mock
+    with mock.patch.object(jobenv.shutil, "which", which):
+        with mock.patch.object(jobenv.sys, "version_info", (3, 11, 16)):
+            assert jobenv.interpreter_for(spec) == "/usr/bin/python3.12"
+
+
+def test_a_spec_wanting_no_version_takes_the_servers_own_interpreter() -> None:
+    """Every env but one, and it is not a fallback: `None` is the answer that
+    says "this env is whatever Crucible itself runs on"."""
+    assert jobenv.interpreter_for(llm_env("cuda-linux")) == jobenv.sys.executable
+    assert (
+        jobenv.interpreter_for(tts_env("higgs-v3", "mlx-darwin"))
+        == jobenv.sys.executable
+    )
 
 
 def test_an_unpinned_requirement_is_refused(tmp_path: Path) -> None:

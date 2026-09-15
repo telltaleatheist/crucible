@@ -33,6 +33,8 @@ from crucible.engines.mlx_lm import MlxLmEngine
 from crucible.engines.narrator import (
     ENGINE_VARIABLE,
     ENV_PREFIX_VARIABLE,
+    STACK_ENV_PREFIX_VARIABLE,
+    env_prefix_variable_for,
     MAX_NUM_SEQS_VARIABLE,
     HIGGS_V3_MLX_WEIGHTS_GB,
     MLX_BATCH_VARIABLE,
@@ -199,7 +201,7 @@ def test_a_higgs_worker_is_told_the_stack_the_env_and_the_width(
         "higgs-v3",
         python,
         tmp_path / "x.log",
-        serving_stack="vllm-omni",
+        serving_stack="sglang-omni",
         max_num_seqs=16,
         voices=document,
         mlx_total_bytes=None,
@@ -207,8 +209,11 @@ def test_a_higgs_worker_is_told_the_stack_the_env_and_the_width(
     environment = built.environment()
     assert environment[ENGINE_VARIABLE] == "higgs-v3"
     assert environment["PYTHONUNBUFFERED"] == "1"
-    assert environment[STACK_VARIABLE] == "vllm-omni"
-    assert environment[ENV_PREFIX_VARIABLE] == str(python.parent.parent)
+    assert environment[STACK_VARIABLE] == "sglang-omni"
+    assert environment[env_prefix_variable_for("sglang-omni")] == str(
+        python.parent.parent)
+    # AND NOT the other stack's name, which that launcher never reads.
+    assert ENV_PREFIX_VARIABLE not in environment
     assert environment[MAX_NUM_SEQS_VARIABLE] == "16"
     # The fourth thing, on both arms: where narrator resolves the voice.
     assert environment[DOCUMENT_VARIABLE] == str(document.path)
@@ -224,7 +229,7 @@ def test_a_higgs_worker_without_a_document_is_refused_by_name(
     NARRATOR_HIGGS_VOICES document, on both arms, so an engine with none can
     load nothing — and says so before a process exists."""
     python = a_venv(tmp_path)
-    for stack in ("vllm-omni", None):
+    for stack in ("sglang-omni", None):
         with pytest.raises(EngineError) as caught:
             build_voice_engine(
                 "higgs-v3", python, tmp_path / "x.log",
@@ -259,7 +264,7 @@ def test_the_width_is_a_string_because_an_environment_holds_strings(
 ) -> None:
     built = build_voice_engine(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
-        serving_stack="vllm-omni", max_num_seqs=16,
+        serving_stack="sglang-omni", max_num_seqs=16,
         voices=a_document(tmp_path, tmp_path / "weights"),
         mlx_total_bytes=None)
     for name, value in built.environment().items():
@@ -270,7 +275,7 @@ def test_a_higgs_worker_with_no_width_is_refused_by_name(tmp_path: Path) -> None
     with pytest.raises(EngineError) as caught:
         build_voice_engine(
             "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
-            serving_stack="vllm-omni", max_num_seqs=None,
+            serving_stack="sglang-omni", max_num_seqs=None,
             voices=a_document(tmp_path, tmp_path / "weights"),
             mlx_total_bytes=None)
     assert MAX_NUM_SEQS_VARIABLE in str(caught.value)
@@ -281,7 +286,7 @@ def test_a_width_below_one_is_refused(tmp_path: Path) -> None:
     with pytest.raises(EngineError) as caught:
         build_voice_engine(
             "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
-            serving_stack="vllm-omni", max_num_seqs=0,
+            serving_stack="sglang-omni", max_num_seqs=0,
             voices=a_document(tmp_path, tmp_path / "weights"),
             mlx_total_bytes=None)
     assert "at least 1" in str(caught.value)
@@ -308,7 +313,7 @@ def a_venv_on_a_conda_env(tmp_path: Path) -> Path:
     (venv / "pyvenv.cfg").write_text(
         f"home = {conda / 'bin'}\nexecutable = {base}\n", encoding="utf-8"
     )
-    (venv / "bin" / "vllm-omni").write_text("", encoding="utf-8")
+    (venv / "bin" / "sgl-omni").write_text("", encoding="utf-8")
     python = venv / "bin" / "python"
     try:
         python.symlink_to(base)
@@ -333,17 +338,17 @@ def test_the_prefix_is_the_env_the_stack_is_in_not_the_one_it_symlinks_to(
     venv = python.parent.parent
     built = build_voice_engine(
         "higgs-v3", python, tmp_path / "x.log",
-        serving_stack="vllm-omni", max_num_seqs=16,
+        serving_stack="sglang-omni", max_num_seqs=16,
         voices=a_document(tmp_path, tmp_path / "weights"),
         mlx_total_bytes=None)
-    prefix = built.environment()[ENV_PREFIX_VARIABLE]
+    prefix = built.environment()[env_prefix_variable_for("sglang-omni")]
     assert prefix == str(venv)
-    assert higgs_env_prefix(python) == venv
+    assert higgs_env_prefix(python, "sglang-omni") == venv
     # Said the other way round, because this is the value that was emitted:
     # the conda env the venv was built from is not the prefix.
     assert str(python.resolve().parent.parent) != prefix
     # And what the launcher would exec is under the prefix that was emitted.
-    assert (Path(prefix) / "bin" / "vllm-omni").is_file()
+    assert (Path(prefix) / "bin" / "sgl-omni").is_file()
 
 
 def test_a_conda_env_is_its_own_prefix(tmp_path: Path) -> None:
@@ -358,11 +363,11 @@ def test_a_conda_env_is_its_own_prefix(tmp_path: Path) -> None:
     python.write_text("", encoding="utf-8")
     built = build_voice_engine(
         "higgs-v3", python, tmp_path / "x.log",
-        serving_stack="vllm-omni", max_num_seqs=16,
+        serving_stack="sglang-omni", max_num_seqs=16,
         voices=a_document(tmp_path, tmp_path / "weights"),
         mlx_total_bytes=None)
-    assert built.environment()[ENV_PREFIX_VARIABLE] == str(conda)
-    assert higgs_env_prefix(python) == conda
+    assert built.environment()[env_prefix_variable_for("sglang-omni")] == str(conda)
+    assert higgs_env_prefix(python, "sglang-omni") == conda
 
 
 def test_an_interpreter_that_is_not_in_a_venv_is_refused(tmp_path: Path) -> None:
@@ -376,13 +381,13 @@ def test_an_interpreter_that_is_not_in_a_venv_is_refused(tmp_path: Path) -> None
     with pytest.raises(EngineError) as caught:
         build_voice_engine(
             "higgs-v3", stray, tmp_path / "x.log",
-            serving_stack="vllm-omni", max_num_seqs=16,
+            serving_stack="sglang-omni", max_num_seqs=16,
             voices=a_document(tmp_path, tmp_path / "weights"),
             mlx_total_bytes=None)
-    assert ENV_PREFIX_VARIABLE in str(caught.value)
+    assert env_prefix_variable_for("sglang-omni") in str(caught.value)
     assert "pyvenv.cfg" in str(caught.value)
     assert "conda-meta" in str(caught.value)
-    assert "vllm-omni" in str(caught.value)
+    assert "sgl-omni" in str(caught.value)
     # The engine it could not start is named, not just the prefix it read.
     assert "narrator (higgs-v3)" in str(caught.value)
 
@@ -404,7 +409,8 @@ def test_an_arm_that_starts_no_server_is_told_none_of_the_three(
         mlx_total_bytes=A_64_GIB_MAC)
     environment = built.environment()
     assert environment[ENGINE_VARIABLE] == "higgs-v3"
-    for name in (STACK_VARIABLE, ENV_PREFIX_VARIABLE, MAX_NUM_SEQS_VARIABLE):
+    for name in (STACK_VARIABLE, MAX_NUM_SEQS_VARIABLE,
+                 *STACK_ENV_PREFIX_VARIABLE.values()):
         assert name not in environment, name
     assert environment[DOCUMENT_VARIABLE] == str(document.path)
 
@@ -501,7 +507,7 @@ def test_the_served_arm_is_not_told_the_mlx_width(tmp_path: Path) -> None:
     document = a_document(tmp_path, tmp_path / "weights")
     built = build_voice_engine(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
-        serving_stack="vllm-omni", max_num_seqs=16, voices=document,
+        serving_stack="sglang-omni", max_num_seqs=16, voices=document,
         mlx_total_bytes=None)
     environment = built.environment()
     for name in (
@@ -520,7 +526,7 @@ def test_the_served_arm_is_refused_a_memory_figure(tmp_path: Path) -> None:
     with pytest.raises(EngineError) as caught:
         build_voice_engine(
             "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
-            serving_stack="vllm-omni", max_num_seqs=16, voices=document,
+            serving_stack="sglang-omni", max_num_seqs=16, voices=document,
             mlx_total_bytes=A_64_GIB_MAC)
     assert "mlx_total_bytes" in str(caught.value)
     assert "launcher's GPU fractions" in str(caught.value)
@@ -590,12 +596,12 @@ def test_a_stack_on_an_engine_that_has_none_is_refused(tmp_path: Path) -> None:
             narrator_engine=A_FUTURE_ENGINE,
             python=a_venv(tmp_path, "tts-future"),
             log_path=tmp_path / "x.log",
-            serving_stack="vllm-omni",
+            serving_stack="sglang-omni",
             max_num_seqs=16,
             voices=None,
             mlx_total_bytes=None,
         )
-    assert "serving_stack='vllm-omni'" in str(caught.value)
+    assert "serving_stack='sglang-omni'" in str(caught.value)
 
 
 def test_the_four_facts_have_no_defaults(tmp_path: Path) -> None:
