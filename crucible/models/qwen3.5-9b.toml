@@ -129,22 +129,35 @@ memory_bytes_estimate = 20_950_548_480
 # THE CONTEXT THIS BACKEND SERVES, RECOVERED 2026-09-15 rather than re-chosen.
 #
 # This line used to be absent and the model's own 12288 stood in for it, on the
-# stated grounds that 12288 was "the cleanup context BookForge asks for". That
-# was the wrong one of BookForge's two numbers. 12288 is what Foundry pins on
-# OLLAMA, and only for a model larger than 15B:
-# `docs/CLIENT-SURFACES.md` records `numCtxMaxForModel` as **16384 for <=15B,
-# else 12288**, so even the Ollama path gives a 9B 16384. The vLLM server
-# BookForge actually ran for this checkpoint served 16384 from its first commit
-# and never changed it — `electron/scripts/vllm/serve_text_vllm.sh`,
-# `VLLM_TEXT_MAX_MODEL_LEN:-16384` at bookforge cd222229, unchanged through
-# 2212708d and e23aabcd — and its comment says why: *"Foundry pins num_ctx 12288
-# on Ollama (its longest system prompt + block + answer); 16384 covers that with
-# headroom for a long block."*
+# stated grounds that 12288 was "the cleanup context BookForge asks for".
 #
-# So 12288 here was BELOW Foundry's own cleanup ceiling for this model, which is
-# a 400 from the server on a long block rather than a slow answer. Both recovered
-# sources — the launcher that was in service, and Foundry's own per-size cap —
-# say 16384, so that is what this backend serves.
+# WHERE 12288 ACTUALLY CAME FROM, chased 2026-09-15 because the first answer
+# given here was wrong. It is NOT Foundry's: Foundry's Ollama context is
+# `DEFAULT_NUM_CTX = 8192` (`src/translate/ollama.ts`) and clean-text's ceiling
+# is `CTX_MAX = 16384` (`src/clean/runner.ts`) — neither is 12288. It is
+# BOOKFORGE'S OWN, from `electron/ai-bridge.ts`'s `numCtxMaxForModel`, the
+# pre-Crucible AI-cleanup door's Ollama ceiling, which is size-tiered:
+#
+#     <=15B            16384   "Q4_K_M weights are <= ~9.5 GiB, leaving room
+#                               for a taller KV cache"
+#     >15B or UNKNOWN  12288   "tuned for 32B Q4_K_M (~18.5 GiB weights +
+#                               ~3 GiB KV)"
+#
+# So 12288 is the 32B-class tier, and it reached a 9B. BookForge's own function
+# would have given this model 16384: its regex reads `9b` out of the id and 9 is
+# under 15. The number was not wrong where it was written — it was the right
+# function's WRONG TIER, carried across without the tier.
+#
+# THREE INDEPENDENT SOURCES SAY 16384 FOR THIS MODEL, and no source says 12288:
+#   * `electron/scripts/vllm/serve_text_vllm.sh` — `VLLM_TEXT_MAX_MODEL_LEN
+#     :-16384` in its FIRST commit (bookforge cd222229), unchanged through
+#     2212708d and e23aabcd. This is the server that actually ran.
+#   * `ai-bridge.ts`'s own <=15B tier, above.
+#   * Foundry's `CTX_MAX = 16384`, the ceiling of clean-text — which is the act
+#     that actually runs through this model.
+#
+# So 12288 here was BELOW the ceiling of the act being served, which is a 400
+# from the server on a long block rather than a slow answer.
 #
 # IT FITS, BY THE MEASUREMENT ALREADY IN THIS FILE. vLLM refuses to start when
 # the KV pool cannot hold one full-length sequence; the pool at util 0.84 was
@@ -154,7 +167,7 @@ memory_bytes_estimate = 20_950_548_480
 #
 # `[model] context_default` stays 12288 and is NOT this number: it is what the
 # other two backends serve, and `llama-windows` is the llama.cpp form of the
-# Ollama path the 12288 came from in the first place.
+# quantized Ollama path `ai-bridge.ts` tuned that tier for in the first place.
 #
 # The one thing 16384 is not is HEADROOM over Foundry's cleanup ceiling, and
 # `docs/PHASE9-CAPABILITY.md` already records that as a live defect in its own
