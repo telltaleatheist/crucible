@@ -333,10 +333,23 @@ def test_the_page_manifest_pins_a_revision_and_not_a_branch() -> None:
     assert spec.revision == "c0111ce6bc07803dbc267932ffef0ae3a51dc951"
 
 
-def test_the_page_manifest_has_no_mac_block() -> None:
-    """`mlx-local` is the Mac's only page-reading route and this does not touch it."""
+def test_the_page_manifest_serves_two_backends_and_no_mac_block() -> None:
+    """A page is read on the card or on Windows — never on the Mac, and why.
+
+    `llama-windows` joined `cuda-linux` here on 2026-09-14 (PHASE15-HOST.md
+    3.10): llama.cpp over the SAME two GGUF files the `[local]` table already
+    names. There is still no `mlx-darwin` block, and section 4.6's measurement
+    is the reason rather than an absence of one — mlx-vlm's own HTTP server,
+    the only thing Crucible can drive, never expands the image into the prompt
+    (`prompt_tokens=216` for a page worth 3_450 image tokens) and answers every
+    page with one `Picture` box covering the sheet. A block here would light
+    `pages: yes` on every Mac for an answer that is well-formed and wrong.
+    Foundry's in-process `mlx-local` route is the half that works and this does
+    not touch it.
+    """
     manifest = load_manifest(PAGE_MODEL)
-    assert sorted(manifest.backends) == ["cuda-linux"]
+    assert sorted(manifest.backends) == ["cuda-linux", "llama-windows"]
+    assert "mlx-darwin" not in manifest.backends
 
 
 def test_the_page_model_fits_a_24_gib_card() -> None:

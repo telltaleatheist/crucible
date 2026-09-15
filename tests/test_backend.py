@@ -1,4 +1,4 @@
-"""Backend detection: both viable hosts and the refusals."""
+"""Backend detection: the three viable hosts and the refusals."""
 
 from __future__ import annotations
 
@@ -8,7 +8,14 @@ import sys
 import pytest
 
 from crucible import backend as backend_module
-from crucible.backend import CUDA_LINUX, MLX_DARWIN, detect_backend, nvidia_smi_path
+from crucible.backend import (
+    CUDA_LINUX,
+    LLAMA_WINDOWS,
+    MLX_DARWIN,
+    backend_not_here,
+    detect_backend,
+    nvidia_smi_path,
+)
 from crucible.errors import NoViableBackend
 
 
@@ -71,11 +78,42 @@ def test_linux_without_nvidia_smi_is_refused(monkeypatch: pytest.MonkeyPatch) ->
     assert backend_module.WSL_NVIDIA_SMI in caught.value.reason
 
 
-def test_windows_is_never_a_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_win32_detects_llama_windows_and_cuda_linux_is_the_one_refused_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows IS a backend, and it is `llama-windows` (PHASE15-HOST.md 0, 3.5).
+
+    This replaces `test_windows_is_never_a_backend`, which pinned the sentence
+    section 0's AMENDED block struck — Owen, 2026-09-14: *"the windows side
+    should still host GPU jobs even if WSL isnt present/workable … just like it
+    runs from the mac side."* So `detect_backend()` on win32 answers rather than
+    raising, and the refusal that survives is the NARROWER one from 3.5: a
+    backend runs where its engine runs and nowhere else, so a `cuda-linux`
+    config found on a Windows host is `backend_not_here` — and THAT is the one
+    place vLLM/SGLang's absence on win32 is still said.
+    """
     monkeypatch.setattr(backend_module.sys, "platform", "win32")
-    with pytest.raises(NoViableBackend) as caught:
-        detect_backend()
-    assert "WSL2" in caught.value.reason
+    monkeypatch.setattr(backend_module.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(
+        backend_module,
+        "probe_nvidia_smi",
+        lambda: ("NVIDIA GeForce RTX 3090 Ti", 25_757_220_864),
+    )
+    monkeypatch.setattr(backend_module, "nvidia_smi_path", lambda: r"C:\Windows\nvidia-smi.exe")
+
+    detected = detect_backend()
+    assert detected.kind == LLAMA_WINDOWS
+    assert detected.platform == "windows"
+    assert detected.gpu.vendor == "nvidia"
+    assert detected.gpu.vram_bytes == 25_757_220_864
+
+    # The refusal a `cuda-linux` config gets on this host, by name. The CLI
+    # prefixes it with the error code (`tests/test_host.py`); the sentence is
+    # this module's.
+    sentence = backend_not_here(CUDA_LINUX, detected.kind, detected.platform)
+    assert CUDA_LINUX in sentence and LLAMA_WINDOWS in sentence
+    assert "A backend runs where its engine runs" in sentence
+    assert "WSL2" in backend_module.WINDOWS_REFUSAL
 
 
 def test_unknown_platform_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:

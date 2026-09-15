@@ -954,7 +954,7 @@ def test_crucible_host_is_refused_off_win32_by_name(capsys, monkeypatch) -> None
     assert "systemd" in said
 
 
-def test_there_is_no_platform_gate_left_in_main(monkeypatch) -> None:
+def test_there_is_no_platform_gate_left_in_main(monkeypatch, tmp_path: Path) -> None:
     """Section 3.5: on win32 EVERY verb runs, and the backend must be right.
 
     The opt-in `win32_ok` flag is gone with the gate it narrowed: a platform
@@ -962,15 +962,31 @@ def test_there_is_no_platform_gate_left_in_main(monkeypatch) -> None:
     do it". What proves it here is that a win32 `doctor` reaches its own
     code — it fails on a config it cannot find, not on a sentence about
     Windows — and that no subparser carries the flag any more.
+
+    `CRUCIBLE_HOME` and the backend are INJECTED, for this file's own reason
+    (its module docstring: every test in here runs OFF Windows, so the
+    platform, the environment and every subprocess are given rather than
+    found). Pretending to be win32 makes `crucible_home()` ask for
+    `%LOCALAPPDATA%`, which no Linux session has — that refusal is correct and
+    is pinned in `test_llama_windows.py`; it is simply not what this test is
+    about. `detect_backend` is stubbed for the same reason: on a win32
+    `sys.platform` it would shell out to the host's nvidia-smi, and on a
+    machine without one `detect_windows` reaches `ctypes.windll`.
     """
     from crucible import cli
-    from crucible.errors import ConfigError
+    from crucible.errors import ConfigError, NoViableBackend
 
     parser = cli.build_parser()
     assert "win32_ok" not in vars(parser.parse_args(["doctor"]))
     assert "win32_ok" not in vars(parser.parse_args(["host"]))
 
     monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        cli, "detect_backend", lambda: (_ for _ in ()).throw(
+            NoViableBackend("no card in this test")
+        )
+    )
     monkeypatch.setattr(
         cli, "load_config", lambda *a, **k: (_ for _ in ()).throw(
             ConfigError("no config here")
