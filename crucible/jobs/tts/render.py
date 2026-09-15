@@ -141,8 +141,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ... import accelerator, hosttools
 from ...config import Config
-from ...engines import EngineError, NarratorEngine
-from ...errors import ApiError, JobError
+from ...engines import EngineError, EngineWouldNotStop, NarratorEngine
+from ...errors import ApiError, JobCancelled, JobError
 from ...narratorvoices import take_sampling
 from ...residency import KIND_TTS, Residency, describe_resident
 from ...voices import VoiceError, VoiceManifest
@@ -690,10 +690,37 @@ class TtsJobType:
                     f"{voice_id!r} was loaded but nothing is resident; "
                     + describe_resident(self._residency, KIND_TTS, "no voice is"),
                 )
-            self._render(
-                ctx, params, engine, resident.sample_rate, ffmpeg,
-                take_sampling(manifest, params.take),
-            )
+            try:
+                self._render(
+                    ctx, params, engine, resident.sample_rate, ffmpeg,
+                    take_sampling(manifest, params.take),
+                )
+            except EngineWouldNotStop as exc:
+                # THE CANCEL WAS REAL AND THE ENGINE IS NOT. `_until` already
+                # sent the cancel and waited `CANCEL_GRACE_SECONDS` for it to be
+                # acted on; reaching here means narrator is still rendering a
+                # book nobody is going to read, on a card nobody can have back
+                # while it does. So the voice comes off.
+                #
+                # THROUGH THE ONE UNLOAD DOOR, not a second teardown.
+                # `Residency.unload` is what `unload-voice` calls and what
+                # `crucible/settle.py` calls when the last holder lets go; this
+                # job holds a `may_mutate=True` claim on THIS thread, which is
+                # exactly the claim that door lets through. What is different
+                # here is only the TRIGGER: the settlement clears a card nobody
+                # holds, and this clears one whose engine broke the wire — so it
+                # happens even when a lease would have kept the voice resident,
+                # because a lease is a promise about the next render and this
+                # engine can no longer serve one.
+                ctx.note(str(exc))
+                self._residency.unload(voice_id)
+                # Cancelled, not failed. The operator asked for a stop and got
+                # one; the artifacts already written stay fetchable, which is
+                # what a client draining after a stop reads.
+                raise JobCancelled(
+                    f"job {job.id} was cancelled and {voice_id!r} had to be "
+                    "taken off the card to make it stop"
+                ) from None
 
     def _make_resident(
         self,
@@ -879,6 +906,22 @@ class TtsJobType:
                 # `JobCancelled` at that point instead, which is how a cancelled
                 # render is reported as cancelled rather than as a short success.
                 # Breaking out here would abandon the generator before it could.
+                continue
+            if kind == "stopped":
+                # NARRATOR'S ANSWER TO THE CANCEL THIS DOOR SENT, and it carries
+                # nothing. Refused by name until 2026-09-15, which turned every
+                # cancelled render into `narrator_protocol: narrator sent a
+                # 'stopped' message` — a FAILED job where the operator had asked
+                # for a cancelled one, and a failure blamed on the engine for
+                # answering a question Crucible asked it.
+                #
+                # WHEREVER IT LANDS. narrator's main loop acknowledges the cancel
+                # after the in-flight batch ends, so on the real wire it arrives
+                # AFTER `batch_done` — which means it is still sitting in the
+                # inbox when the NEXT conversation on this engine starts, and
+                # that conversation would refuse it too. The streaming door has
+                # always ignored it (`ttsstream.py:_on_message`); this door is
+                # the one that had not caught up.
                 continue
             if kind != "batch_item":
                 # `batch_chunk` is the streaming door's and cannot arrive here —

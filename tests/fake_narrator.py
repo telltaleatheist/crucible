@@ -142,6 +142,30 @@ must not be bent into passing test fixtures through it:
                                   (`serve/worker.py`), where a row that failed is told
                                   apart from one that worked by having a `message` and
                                   no `data`.
+    CRUCIBLE_FAKE_ROW_DELAY_MS    milliseconds of REAL time one WHOLE (non-streamed)
+                                  row costs. Default 0, because a fake that is slow
+                                  by default makes every suite slow. It is the
+                                  whole-row twin of CRUCIBLE_FAKE_CHUNK_DELAY_MS
+                                  and exists for the same reason: the render door
+                                  sends no `stream` flag anywhere, so a cancel of a
+                                  RENDER has nowhere to land unless a row takes
+                                  measurable time. Without it a cancel test on that
+                                  door proves only that a batch nobody interrupted
+                                  completes.
+    CRUCIBLE_FAKE_IGNORE_CANCEL   read the cancel and keep rendering anyway — the
+                                  real narrator, exactly, until 2026-09-15. Its
+                                  stdin reader set the flag the moment a cancel
+                                  landed and the arm Crucible's render door drives
+                                  (`serve/worker.py:_emit_guarded_batch`) never read
+                                  it, so a cancelled render of `thirdreich` went on
+                                  retiring rows for eleven minutes with the door
+                                  saying `cancelling` the whole time. A fake that
+                                  cannot reproduce that cannot test the bound
+                                  Crucible now puts on the cooperation
+                                  (`engines/narrator.py:CANCEL_GRACE_SECONDS`).
+                                  The `stopped` acknowledgement is still sent: this
+                                  is an engine that HEARD and did not act, which is
+                                  the failure, rather than one that went deaf.
     CRUCIBLE_FAKE_CHUNK_MS        milliseconds of audio per streamed sub-sentence
                                   chunk. Default 200.
     CRUCIBLE_FAKE_CHUNK_DELAY_MS  milliseconds of REAL time to spend on each of
@@ -443,6 +467,9 @@ def _emit_whole_row(text: str, row: int | None) -> None:
     """One row answered in a single message — the render door's shape."""
     if _told_to_fail(row):
         return
+    delay = _env_float("CRUCIBLE_FAKE_ROW_DELAY_MS", 0.0) / 1000.0
+    if delay > 0:
+        time.sleep(delay)
     seconds, capped, chars = _duration_for(text)
     payload, _ = tone(seconds)
     fields = {
@@ -524,6 +551,17 @@ def _interleave(rows: list[Iterator[None]]) -> None:
         live = still
 
 
+def _ignores_the_cancel() -> bool:
+    """Is this process standing in for a narrator whose ladder never read the flag?
+
+    See CRUCIBLE_FAKE_IGNORE_CANCEL in the module docstring. It gates only the
+    WHOLE-row arm, which is the render door's, because that is the arm the real
+    hole was in — the streamed arm honoured its cancel then and honours it now,
+    and a knob that broke both would be modelling a narrator that never existed.
+    """
+    return os.environ.get("CRUCIBLE_FAKE_IGNORE_CANCEL") == "1"
+
+
 def _run_generate(message: dict) -> None:
     text = message.get("text", "")
     if message.get("stream"):
@@ -550,7 +588,7 @@ def _run_batch(message: dict) -> None:
     whole = [item for item in ordered if not item.get("stream")]
 
     for item in whole:
-        if _cancelled.is_set():
+        if _cancelled.is_set() and not _ignores_the_cancel():
             send("batch_item", i=item.get("i"), message="cancelled")
             continue
         _emit_whole_row(item.get("text", ""), item.get("i"))

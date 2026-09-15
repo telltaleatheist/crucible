@@ -1237,6 +1237,200 @@ def test_the_residency_is_torn_down_when_the_server_stops(
     assert engine.pids == frozenset()
 
 
+# ------------------------------------------------------------------ cancel
+#
+# OWEN HIT THIS LIVE, 2026-09-15. A `tts` render of `thirdreich` was cancelled on
+# the Mac at chunk 38 of 89. The door answered `200 {"status": "cancelling"}`,
+# and NOTHING acted on it: the job stayed `running`, progress went on rising,
+# `/v1/activity` went on reporting `resident: thirdreich` and
+# `claim: {held_by: "tts job cd2dac93..."}`, and the render finished the book.
+#
+# The cancel was lost in narrator, not here: `serve/worker.py`'s
+# `_emit_guarded_batch` — the `render_many` ladder, the only batch arm this door
+# drives — never read the flag its own stdin reader sets. Crucible's half was
+# right and is unchanged: `_until` sends `{"action": "cancel"}`, the claim is a
+# `with` block, and `JobStore._settle` runs for a cancelled job exactly as for a
+# finished one. What is NEW here is that the cooperation is BOUNDED
+# (`CANCEL_GRACE_SECONDS`), because a server cannot hold a card hostage to an
+# engine's goodwill — and because the narrator in every installed tts env today
+# still predates the fix.
+
+
+def _wait_for(
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    job_id: str,
+    predicate: Callable[[dict[str, Any]], bool],
+    what: str,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = tts_client.get(f"/v1/jobs/{job_id}", headers=auth).json()
+        if predicate(state):
+            return state
+        time.sleep(0.02)
+    raise AssertionError(f"job {job_id} never {what}; last state {state}")
+
+
+def _start_a_slow_render(
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+) -> str:
+    """Submit a render whose rows take measurable time, and wait for the lane."""
+    fake_weights(VOICE)
+    chunks = [
+        {"index": index, "text": f"Sentence number {index} of the chapter."}
+        for index in range(12)
+    ]
+    response = submit(
+        tts_client,
+        auth,
+        type="tts",
+        model=VOICE,
+        params={"language": "en", "take": 0, "chunks": chunks},
+    )
+    assert response.status_code == 202, response.json()
+    job_id = response.json()["job_id"]
+    # Not "running" — `running` is set before the voice is even loaded, and a
+    # cancel that landed there would be answered by the load rather than by the
+    # render loop. Waiting for the first artifact puts the cancel INSIDE the
+    # batch, which is where the hole was.
+    _wait_for(
+        tts_client, auth, job_id,
+        lambda state: bool(state["artifacts"]),
+        "rendered a first chunk",
+    )
+    return job_id
+
+
+def test_a_cancelled_render_stops_within_one_chunk(
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole of what a cancel must do, asserted in one place.
+
+    The job reaches `cancelled` while rows are still outstanding; the claim on
+    narrator's wire is released; the voice is off the card — a cancelled job goes
+    through the SAME settlement a finished one does (`crucible/settle.py`), which
+    is the answer to "I stopped it and the model is still loaded"; and the
+    artifacts already written are still fetchable, which is what BookForge reads
+    when it drains after a stop.
+    """
+    fake_narrator_engine.steer(monkeypatch, row_delay_ms=120)
+    job_id = _start_a_slow_render(tts_client, auth, fake_weights)
+
+    cancelled = tts_client.delete(f"/v1/jobs/{job_id}", headers=auth)
+    assert cancelled.status_code == 200, cancelled.json()
+    assert cancelled.json()["status"] == "cancelling"
+
+    state = _wait_for(
+        tts_client, auth, job_id,
+        lambda state: state["status"] in ("done", "failed", "cancelled"),
+        "reached a terminal state",
+    )
+    assert state["status"] == "cancelled", state.get("error") or state
+    # Stopped, not finished: rows were still owed when it ended.
+    assert 0 < len(state["artifacts"]) < 12, state["artifacts"]
+
+    residency = tts_client.app.state.residency
+    assert residency.claimed_by is None, "the claim outlived the job"
+    assert residency.resident is None, "the voice is still on the card"
+
+    # Artifacts already produced stay fetchable. `.flac` names are the chunk
+    # indices, so the first one written is the lowest index present.
+    name = sorted(n for n in state["artifacts"] if n.endswith(".flac"))[0]
+    fetched = tts_client.get(f"/v1/jobs/{job_id}/artifacts/{name}", headers=auth)
+    assert fetched.status_code == 200
+    assert fetched.content[:4] == b"fLaC", name
+
+
+def test_a_narrator_that_ignores_the_cancel_is_taken_off_the_card(
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE BOUND. An engine that hears the cancel and keeps working is stopped.
+
+    This is the Mac's narrator exactly: its stdin reader set the flag and its
+    rendering arm never read it. Crucible cannot fix that engine from here, and
+    it must not wait on it either — a render door that trusts an engine's
+    goodwill completely is a door that can hold the card for a whole book after
+    the operator pressed stop.
+
+    So the wait is bounded, and crossing the bound is the engine's failure and is
+    named as one: the voice comes off the card THROUGH THE SAME UNLOAD DOOR the
+    settlement uses, and the job still ends `cancelled`, because a cancel is what
+    the operator asked for and they are not owed a `failed`.
+    """
+    monkeypatch.setattr("crucible.engines.narrator.CANCEL_GRACE_SECONDS", 1.0)
+    fake_narrator_engine.steer(monkeypatch, row_delay_ms=120, ignore_cancel=1)
+    job_id = _start_a_slow_render(tts_client, auth, fake_weights)
+
+    assert tts_client.delete(f"/v1/jobs/{job_id}", headers=auth).status_code == 200
+
+    state = _wait_for(
+        tts_client, auth, job_id,
+        lambda state: state["status"] in ("done", "failed", "cancelled"),
+        "reached a terminal state",
+    )
+    assert state["status"] == "cancelled", state.get("error") or state
+
+    residency = tts_client.app.state.residency
+    assert residency.claimed_by is None
+    assert residency.resident is None, (
+        "an engine that would not stop must not be left resident: nothing else "
+        "is ever going to take it off the card"
+    )
+
+    # SAID, not merely done — a `note` on the job's own stream, so a reader who
+    # finds the next render paying a load can see why.
+    events = parse_sse(
+        line
+        for line in tts_client.get(
+            f"/v1/jobs/{job_id}/events", headers=auth
+        ).text.splitlines()
+    )
+    notes = [e["data"]["message"] for e in events if e["event"] == "note"]
+    assert any("was sent a cancel" in note for note in notes), events
+
+
+def test_cancelling_a_finished_render_is_refused_by_name(
+    rendered: Callable[..., list[dict[str, Any]]],
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+) -> None:
+    """Not a fault, and not a silent success either: a named 409.
+
+    A client draining after a stop can race its own cancel against the job's
+    end, so this has to be an ANSWER rather than a fault — and it is one:
+    `job_not_cancellable`, saying what the job already is. Nothing is retried,
+    nothing is re-run, and the artifacts are exactly where they were.
+    """
+    assert terminal(rendered())["event"] == "done"
+    response = tts_client.delete(f"/v1/jobs/{rendered.job_id}", headers=auth)
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "job_not_cancellable"
+    assert "already done" in response.json()["error"]["message"]
+
+
+def test_cancelling_an_unknown_job_is_refused_by_name(
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+) -> None:
+    response = tts_client.delete("/v1/jobs/notajob", headers=auth)
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "unknown_job"
+
+
 def test_nothing_in_this_module_touched_a_real_engine_module() -> None:
     """The double replaces the argv and nothing else."""
     assert residency_module.build_voice_engine.__module__ == (

@@ -1025,6 +1025,69 @@ the whole reason whole-m4b alignment cannot run on this PC today. The SDK fetche
 artifact as its `artifact` event lands and writes `<index>.flac` where assembly and resume
 look, overlapped with the next chunk's generation.
 
+### 6a. Cancel — what it stops, and what happens to the voice
+
+*Added 2026-09-15, after Owen cancelled a live render and it did not stop.* The question this
+answers is his: **does a cancel bring the model down?** It does. A cancelled render reaches
+the same place a finished one does.
+
+`DELETE /v1/jobs/{id}` answers `200 {"status": "cancelling"}` for a running job — `cancelling`
+and not `cancelled`, because the door has recorded an intention and the work has not stopped
+yet. What makes the intention real:
+
+1. **The render loop observes it between chunks.** `JobContext.cancelled` is read every
+   `POLL_SECONDS` inside `NarratorEngine._until`, which sends narrator one
+   `{"action": "cancel"}` — not a hang-up (the engine would go on generating into nothing) and
+   not a kill (the voice would come off the card for the next job). narrator's stdin reader
+   sets its flag at once and its rendering arm reads it between chunks, so **the worst-case
+   latency is one render in flight: one take, about twenty seconds on MLX**, and up to one
+   retake rung behind that if the ladder was part-way up a chunk.
+   *Interrupting INSIDE a chunk is possible and is deliberately not done:* the MLX
+   `render_audio` has a per-step `should_stop`, but a take stopped mid-decode looks to
+   `GuardPlan` exactly like a take that FAILED, so the ladder would spend a retake on the very
+   chunk the cancel is abandoning. Teaching it the difference is a change inside the ladder,
+   which PHASE6 section 8 says must be re-measured against the Mistborn pause map. Twenty
+   seconds does not buy that.
+2. **The rows never rendered come back as ordinary per-row failures** carrying
+   `message: "cancelled"`, and `batch_done` arrives as always. `_until` then raises
+   `JobCancelled`, so the run is reported as cancelled rather than as a short success.
+3. **The claim is released and the card is settled.** The claim on narrator's wire is a `with`
+   block around the whole render, so it goes on any exit. The lane then runs the SAME
+   `Settlement.settle_for_job` a finished job runs (`crucible/settle.py`) — cancelled is not a
+   special case and gets no second teardown — which clears the card the moment the last of the
+   four holders lets go. So: **a cancel of a leaseless render takes the voice off the card**,
+   and a cancel while a lease names that voice leaves it resident, exactly as a completed
+   render would. The lease is the only thing that keeps it, and that is the operator's own
+   declared intention, not this door's.
+4. **Artifacts already produced stay fetchable**, with their provenance sidecars, for as long
+   as any other job's. That is what BookForge reads when it drains after a stop.
+
+**The cooperation is bounded** (`CANCEL_GRACE_SECONDS`, 120 s). An engine that hears the
+cancel and keeps working is answered with `EngineWouldNotStop`, its voice is taken off the
+card through the one unload door, a `note` event says so on the job's stream, and the job
+still ends `cancelled` — the operator asked for a stop and is not owed a `failed`. The bound
+exists because this is not hypothetical: on 2026-09-15 a render of `thirdreich` on the Mac was
+cancelled at chunk 38 of 89 and finished the book, because narrator's `_emit_guarded_batch` —
+the `render_many` ladder, the only batch arm this door drives — never read the flag its own
+stdin reader had set. **No silence timeout could have caught it:** narrator was talking the
+whole time, a `batch_item` every twenty seconds, each one resetting the silence clock. A
+silence timeout asks whether a process is alive; this asks whether it heard, and that needs
+its own clock, started at the cancel and never reset by a line.
+
+**Cancelling a job that has already finished is a named refusal, not a fault**:
+`409 job_not_cancellable`, saying what the job already is. A client draining after a stop can
+race its own cancel against the job's end, so it has to be an ANSWER — nothing is re-run and
+no artifact moves. An unknown id is `404 unknown_job`.
+
+**The other job types do not share this hole, and the reason is worth stating.** `asr`,
+`align`, `rvc` and `denoise` all reach their work through `crucible/workers.py`, whose reading
+loop TERMINATES the worker process when `cancelled()` goes true — they are Crucible's own
+subprocesses and killing one costs a reload nobody else was using. `echo` calls
+`ctx.raise_if_cancelled()` per input. `llm` and `pages` are proxied requests rather than jobs
+and are cancelled by the client hanging up. Only `tts` is cooperative, because only `tts` has
+an engine holding a voice that the next job wants left where it is — which is exactly why it
+is the one that needed a bound.
+
 ## 7. The streaming door — a session, an event stream, and posts
 
 The Listen path, the in-app Play button, and the browser extension Owen uses every Sunday.

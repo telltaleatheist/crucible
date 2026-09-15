@@ -790,6 +790,26 @@ This is not a security boundary. Everything holding one token is one trust domai
 (DESIGN.md section 8), and a client that lies about its name is lying to a bench widget.
 It is an identification, and it is described as one.
 
+### What `claim` and `resident` say after a cancel
+
+*Added 2026-09-15.* A cancelled job leaves this endpoint exactly where a finished one does,
+and the two rows a reader watches are the same two: `claim` goes to `null` the moment the
+job's `with residency.claimed(...)` block exits, and `resident` follows through the ONE
+settlement the lane runs for every terminal job — `Settlement.settle_for_job`, which clears
+the card when the last of the four holders (the lane, the lease, the claim, the chats) lets
+go. **Cancelled is not a special case and has no teardown of its own.** So a cancel of a
+leaseless render ends with `claim: null` and `resident: null`; a cancel while a lease names
+that voice ends with `claim: null` and the voice still resident, which is the lease doing
+exactly what it is for.
+
+What this row could NOT say, and now can: on 2026-09-15 a cancelled render on the Mac went on
+reporting `resident: thirdreich` and `claim: {held_by: "tts job cd2dac93…"}` for eleven
+minutes after the DELETE, because the engine never stopped and so the job never ended.
+`/v1/activity` was telling the truth — the claim really was held. The fix is in the render
+door and its bound on a cooperative cancel (PHASE3-TTS.md section 6a), not here; this
+paragraph exists so the next reader of a stuck `claim` knows it is reporting a real hold and
+goes looking at the job, not at the endpoint.
+
 ### What it must not become
 
 `/v1/activity` reports. It does not admit, reserve, claim or lock. A client reading "slot

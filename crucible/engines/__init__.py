@@ -27,7 +27,7 @@ from .base import (
 from .llama_server import LlamaServerEngine
 from .mlx_lm import MlxLmEngine
 from .mlx_vlm import MlxVlmEngine
-from .narrator import NarratorEngine
+from .narrator import EngineWouldNotStop, NarratorEngine
 from .vllm import VllmEngine
 
 if TYPE_CHECKING:  # `crucible.narratorvoices` imports this package; no cycle at runtime
@@ -166,6 +166,7 @@ __all__ = [
     "STOP_TIMEOUT_SECONDS",
     "Engine",
     "EngineError",
+    "EngineWouldNotStop",
     "LlamaServerEngine",
     "MlxLmEngine",
     "MlxVlmEngine",

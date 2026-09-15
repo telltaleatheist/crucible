@@ -224,6 +224,25 @@ class JobContext:
             self._store.append_event, self._job, "warming", {"message": message}
         )
 
+    def note(self, message: str) -> None:
+        """Emit a `note {message}` event — a fact about the MACHINE, not the work.
+
+        The same event the lane already appends when a settlement could not
+        clear the card (`crucible/jobs/queue.py:_settle`), given a door a job
+        type can reach. A job says `progress` about what it is doing and
+        `warming` about a load; a note is for the thing that happened AROUND the
+        job and that a reader of its stream would otherwise never learn — "the
+        engine would not stop, so its voice was taken off the card" being the
+        one that asked for it (2026-09-15).
+
+        It is not a terminal event and does not end a stream.
+        """
+        if not isinstance(message, str):
+            raise TypeError(f"a note must be a string, got {message!r}")
+        self._loop.call_soon_threadsafe(
+            self._store.append_event, self._job, "note", {"message": message}
+        )
+
     def chunk(
         self,
         *,
