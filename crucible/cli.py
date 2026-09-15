@@ -2189,16 +2189,30 @@ def _doctor_report() -> dict[str, Any]:
                 jobenv.env_dir(config.home, patched_spec),
                 jobenv.recipe_pins(jobenv.recipe_for(patched_spec)),
             )
-            # AND THE TWO CUDA SYMLINKS, on cuda-linux only. Reported in the
-            # same rows for the same reason, and needed MORE here than the
-            # patches are: the SGLang stack has no site-packages patches at all,
-            # so without these this section would be empty on the very host
-            # whose env has the one thing that can be silently missing.
-            if backend.kind == "cuda-linux":
+            # AND THE TWO CUDA SYMLINKS, on cuda-linux, WHEN THERE IS AN ENV TO
+            # ASK ABOUT. Reported in the same rows for the same reason, and
+            # needed MORE here than the patches are: the SGLang stack has no
+            # site-packages patches at all, so without these this section would
+            # be empty on the very host whose env holds the one thing that can
+            # be silently missing.
+            #
+            # GATED ON THE ENV EXISTING, and that gate is the point rather than
+            # an optimisation. With no `tts` env installed the links cannot be
+            # there, and saying so would raise TWO problems — "lib64 is missing"
+            # and "lib/libcudart.so is missing" — for one cause the env row
+            # already states in full ("no venv at ... run `crucible install
+            # tts`"). Three sentences about one fact is how a reader ends up
+            # chasing the wrong one. The patches avoid this a different way
+            # (`not_applicable`, when the recipe does not install what they
+            # edit); this recipe DOES pin nvidia-cuda-runtime-cu13, so the
+            # honest answer is not "not applicable" but "not yet asked".
+            patched_env = jobenv.env_dir(config.home, patched_spec)
+            if (
+                backend.kind == "cuda-linux"
+                and narratorpatches.site_packages(patched_env) is not None
+            ):
                 report["narrator_patches"].extend(
-                    narratorpatches.check_cuda_toolkit_links(
-                        jobenv.env_dir(config.home, patched_spec)
-                    )
+                    narratorpatches.check_cuda_toolkit_links(patched_env)
                 )
             for entry in report["narrator_patches"]:
                 # `applied` is not the test. Both patches edit the vLLM stack,
