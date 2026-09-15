@@ -127,7 +127,23 @@ Running off the loop means admission can move underneath it, so the settlement
 **claims the card** for the duration, exactly as a render does, and re-reads the
 four facts under that claim. A job that reaches the lane while the claim is up is
 refused `engine_in_use` by `Residency._refuse_mutation_if_claimed` rather than
-racing a dying engine. The window that remains is the one this server already
+racing a dying engine.
+
+WITH ONE EXCEPTION, AND IT IS NOT A LOOSENING (T6, 2026-09-15). An
+`unload-model` / `unload-voice` / `unload-aligner` for **the very subject this
+settlement is clearing** is not a second holder — it is this settlement, asked
+for by name. On a live card the page reader loaded `dots-ocr`, read its page,
+and its own `finally` unload landed milliseconds after the last chat completion
+triggered the clearance; it came back `409 engine_in_use`, held by *"the
+settlement clearing the card"*, and the failed tidy-up overwrote the page that
+had just been read. So the claim now says what it is FOR (`clears=True`), the
+three unload doors ask `Residency.being_cleared` first, and such a job is
+admitted and waits the clearance out (`Residency.await_clearance`), ending
+`done` on the empty card it asked for. Every other holder — a lease, a session,
+a render's claim, a running job — refuses exactly what it refused before, under
+exactly the name it used.
+
+The window that remains is the one this server already
 has everywhere: a job whose `preflight` passed before the claim went up and whose
 `enqueue` landed after the re-read fails loudly at the mutation instead of being
 refused at the door. That is R3-shaped (a loud wrong answer, never a quiet one)
@@ -373,7 +389,15 @@ class Settlement:
                 # `may_mutate=True` binds the claim to THIS thread, which is what
                 # lets the unload below through `_refuse_mutation_if_claimed`
                 # while every other thread is refused by name.
-                self._residency.claim(SETTLEMENT_HOLDER, may_mutate=True)
+                #
+                # `clears=True` says what this claim is FOR, and it is the fix
+                # T6 found (`crucible/residency.py`, `being_cleared`): an
+                # `unload-...` for the very thing this is taking off the card is
+                # the same intent as this settlement, not a second holder, and
+                # must be answered rather than refused `engine_in_use`.
+                self._residency.claim(
+                    SETTLEMENT_HOLDER, may_mutate=True, clears=True
+                )
             except JobError:
                 # Somebody claimed the card between the read above and here. They
                 # are using it, which is the answer this was asking for.

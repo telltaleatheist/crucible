@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .base import (
+    STOP_TIMEOUT_SECONDS,
     Engine,
     EngineError,
     SubprocessEngine,
@@ -162,6 +163,7 @@ def engine_model_name(engine_name: str, model_dir: Path, model_id: str) -> str:
 __all__ = [
     "ENGINES",
     "NARRATOR_ENGINES",
+    "STOP_TIMEOUT_SECONDS",
     "Engine",
     "EngineError",
     "LlamaServerEngine",

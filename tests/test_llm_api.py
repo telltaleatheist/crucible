@@ -27,7 +27,12 @@ from crucible.accelerator import GIB, ComputeApp
 from crucible import residency as residency_module
 from crucible.manifests import load_manifest
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
+from .conftest import (
+    FAKE_BACKEND,
+    FAKE_MAC_BACKEND,
+    a_clearance_to_hold,
+    parse_sse,
+)
 from .fake_engine import ANSWER, DELTAS, TOOL_CALL, FakeEngine
 
 MODEL = "qwen3.5-9b"
@@ -931,6 +936,127 @@ def test_unloading_a_model_that_is_not_resident_is_refused(
     response = submit(llm_client, auth, type="unload-model", model=BIG_MODEL)
     assert response.status_code == 409
     assert response.json()["error"]["details"]["resident"] == MODEL
+
+
+# ------------------------------- unloading what is already being unloaded
+#
+# T6, 2026-09-15, on a live card. The page was read, the settlement began
+# clearing `dots-ocr` the instant the last chat completion finished, and the
+# same client's `unload-model dots-ocr` — a few milliseconds behind it, in a
+# `finally` — came back `409 engine_in_use`, *"held by 'the settlement clearing
+# the card'"*. The stage failed on its own tidying up and its message overwrote
+# the page it had just read.
+#
+# The three tests below are the whole ruling: the settlement is the same intent
+# and is answered; every other holder is a conflict and is still refused, by the
+# name it was refused by before.
+
+
+def test_unloading_what_the_settlement_is_clearing_is_the_same_intent(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """T6's exact race: the clearance is under way and the client's unload lands.
+
+    It is `done` with the card clear, because that is what the client asked for
+    and it is what happened. `engine_in_use` would be naming the client's own
+    tidying up as somebody else's conversation.
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    reached, release = a_clearance_to_hold(engines[0])
+
+    settlement = llm_client.app.state.settlement
+    settled: list[Any] = []
+    clearing = threading.Thread(
+        target=lambda: settled.append(
+            settlement.settle_quietly("the last chat completion finished")
+        ),
+        name="the-settlement",
+        daemon=True,
+    )
+    clearing.start()
+    assert reached.wait(timeout=10), "the settlement never reached the engine"
+
+    # THE MOMENT T6 FAILED IN. Admitted, not refused.
+    response = submit(llm_client, auth, type="unload-model", model=MODEL)
+    assert response.status_code == 202, response.json()
+    job_id = response.json()["job_id"]
+
+    release.set()
+    clearing.join(timeout=30)
+    assert not clearing.is_alive()
+    assert settled[0] is not None and settled[0].subject_id == MODEL
+
+    with llm_client.stream(
+        "GET", f"/v1/jobs/{job_id}/events", headers=auth
+    ) as stream:
+        events = parse_sse(line for line in stream.iter_lines())
+    assert events[-1]["event"] == "done", events[-1]
+    assert events[-1]["data"]["resident"] is None
+    # And the card really is clear — the job did not merely say so.
+    assert llm_client.get("/v1/health", headers=auth).json()["resident_models"] == []
+    assert engines[0].stopped is True
+
+
+def test_unloading_under_a_holder_that_is_using_the_card_is_still_engine_in_use(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """The refusal keeps its whole meaning for a genuinely different holder.
+
+    A streaming session is on narrator's one stdin and one stdout. Taking the
+    engine off the card now ends its conversation mid-sentence, which is exactly
+    what `engine_in_use` is for — and it is unchanged.
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    residency = llm_client.app.state.residency
+    residency.claim("tts stream abc123", may_mutate=False)
+    try:
+        response = submit(llm_client, auth, type="unload-model", model=MODEL)
+    finally:
+        residency.release("tts stream abc123")
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["code"] == "engine_in_use"
+    assert error["details"]["held_by"] == "tts stream abc123"
+    # Nothing was taken off the card on the way past.
+    assert engines[0].stopped is False
+
+
+def test_unloading_under_another_client_s_lease_is_still_leased(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """The other holder that refuses an unload, and by its own name.
+
+    A lease is a client saying it has more work on this model. That refusal is
+    `leased` and is answered before the type's preflight is even asked, so the
+    clearance exception cannot reach it.
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    lease = llm_client.post(
+        f"/v1/models/{MODEL}/lease",
+        headers=auth,
+        json={"act": "clean", "ttl_seconds": 60},
+    )
+    assert lease.status_code == 201, lease.text
+
+    response = submit(llm_client, auth, type="unload-model", model=MODEL)
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "leased"
+    assert engines[0].stopped is False
 
 
 def test_health_says_warming_while_a_load_is_in_flight(

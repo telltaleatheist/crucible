@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -29,7 +30,8 @@ from crucible.jobs import ALL_JOB_TYPES
 from crucible.residency import KIND_LLM, KIND_TTS, ResidentVoice
 from crucible.voices import NARRATOR_ENGINE_SAMPLING, load_voice
 
-from .conftest import FAKE_BACKEND, parse_sse, wav_base64
+from .conftest import FAKE_BACKEND, a_clearance_to_hold, parse_sse, wav_base64
+from .fake_engine import FakeEngine
 
 VOICE = "deathstalker"
 OTHER_VOICE = "thirdreich"
@@ -559,12 +561,80 @@ def test_a_reference_carrying_a_key_this_door_does_not_know_is_refused(
 def test_unloading_a_voice_that_is_not_resident_is_refused(
     tts_client: TestClient, auth: dict[str, str]
 ) -> None:
+    """Contract (c), unchanged by the clearance exception below: an unload for a
+    card that is simply empty is `voice_not_resident`, at the door."""
     response = submit(tts_client, auth, type="unload-voice", model=VOICE)
     assert response.status_code == 409
     error = response.json()["error"]
     assert error["code"] == "voice_not_resident"
     assert "no voice is" in error["message"]
     assert error["details"] == {"requested": VOICE, "resident": None}
+
+
+def test_unloading_the_voice_the_settlement_is_clearing_is_the_same_intent(
+    tts_client: TestClient, auth: dict[str, str], tmp_path: Path
+) -> None:
+    """T6's finding, on the voice door (PHASE15-HOST.md section 8, 2026-09-15).
+
+    A render's client hits this exactly as the page reader did: the settlement
+    clears the voice the moment the render job ends, and the client's own
+    `unload-voice` — the one in its `finally` — lands inside that moment.
+    Refusing it `engine_in_use` names the client's own tidying up as somebody
+    else's conversation on narrator's wire, which it is not.
+    """
+    residency = tts_client.app.state.residency
+    engine = FakeEngine(Path("python"), tmp_path / "engine-narrator.log")
+    residency._resident = resident_voice(VOICE)
+    residency._engine = engine
+    reached, release = a_clearance_to_hold(engine)
+
+    settlement = tts_client.app.state.settlement
+    settled: list[Any] = []
+    clearing = threading.Thread(
+        target=lambda: settled.append(
+            settlement.settle_quietly("the render job finished")
+        ),
+        name="the-settlement",
+        daemon=True,
+    )
+    clearing.start()
+    assert reached.wait(timeout=10), "the settlement never reached the engine"
+
+    response = submit(tts_client, auth, type="unload-voice", model=VOICE)
+    assert response.status_code == 202, response.json()
+    job_id = response.json()["job_id"]
+
+    release.set()
+    clearing.join(timeout=30)
+    assert not clearing.is_alive()
+    assert settled[0] is not None and settled[0].subject_id == VOICE
+
+    with tts_client.stream(
+        "GET", f"/v1/jobs/{job_id}/events", headers=auth
+    ) as stream:
+        events = parse_sse(line for line in stream.iter_lines())
+    assert events[-1]["event"] == "done", events[-1]
+    assert events[-1]["data"]["resident"] is None
+    assert tts_client.get("/v1/health", headers=auth).json()["resident_models"] == []
+    assert engine.stopped is True
+
+
+def test_unloading_a_voice_under_a_holder_using_the_card_is_still_engine_in_use(
+    tts_client: TestClient, auth: dict[str, str]
+) -> None:
+    """And the refusal keeps its whole meaning for a genuinely different holder."""
+    residency = tts_client.app.state.residency
+    residency._resident = resident_voice(VOICE)
+    residency.claim("tts stream abc123", may_mutate=False)
+    try:
+        response = submit(tts_client, auth, type="unload-voice", model=VOICE)
+    finally:
+        residency.release("tts stream abc123")
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["code"] == "engine_in_use"
+    assert error["details"]["held_by"] == "tts stream abc123"
+    assert residency.resident_voice is not None
 
 
 # --------------------------------------------------- the shared residency

@@ -297,6 +297,12 @@ class UnloadVoiceJobType:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs a voice")
         validated_params(UnloadVoiceParams, params, self.name)
+        if self._residency.being_cleared(model):
+            # The same intent, already under way — `unload-model`'s finding
+            # (T6, 2026-09-15), and a render's client hits it the same way: the
+            # settlement clears the voice the moment the render job ends, and
+            # the client's own `unload-voice` lands inside that moment.
+            return
         self._residency.refuse_if_claimed(f"unloading {model!r}")
         if not self._residency.is_resident(KIND_TTS, model):
             raise ApiError(
@@ -312,6 +318,13 @@ class UnloadVoiceJobType:
         model = job.model
         if model is None:  # unreachable: resolve_model requires one
             raise JobError("model_required", f"{self.name} needs a voice")
+        if self._residency.await_clearance(model):
+            # The settlement got there first, which is the card this job asked
+            # for. Same terminal shape as an unload this job did itself.
+            ctx.progress(0.0, f"unloading {model}")
+            ctx.progress(1.0, f"{model} is unloaded — the card was cleared of it")
+            ctx.done_extra(resident=self._residency.resident_id)
+            return
         if not self._residency.is_resident(KIND_TTS, model):
             # Checked before `unload()` rather than caught from it: the holder
             # unloads by id alone, and a model sharing a voice's id would be

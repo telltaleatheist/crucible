@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import threading
 import wave
 from contextlib import contextmanager
 from pathlib import Path
@@ -251,6 +252,27 @@ def holding_the_card(client: TestClient, act: str = "clean") -> Iterator[None]:
         act=act, model="a test holding the card", client=None
     ):
         yield
+
+
+def a_clearance_to_hold(engine: FakeEngine) -> tuple[threading.Event, threading.Event]:
+    """Make `engine.stop()` block, so a clearance can be caught mid-flight.
+
+    Returns `(reached, release)`: `reached` is set once the settlement is inside
+    the engine's stop — the exact state PHASE15-HOST.md section 8's T6 saw an
+    `unload-model` arrive in, 2026-09-15 — and `release` lets it finish. Two
+    events and no sleep, because what is being tested is a state and not a
+    duration.
+    """
+    reached, release = threading.Event(), threading.Event()
+    stop = engine.stop
+
+    def held_stop() -> None:
+        reached.set()
+        assert release.wait(timeout=30), "the test never released the clearance"
+        stop()
+
+    engine.stop = held_stop  # type: ignore[method-assign]
+    return reached, release
 
 
 def parse_sse(lines: Iterator[str]) -> list[dict[str, Any]]:

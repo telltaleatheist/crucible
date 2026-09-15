@@ -804,6 +804,11 @@ class UnloadAlignerJobType:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs an aligner")
         _params(UnloadAlignerParams, params, self.name)
+        if self._residency.being_cleared(model):
+            # And the same exception they make (T6, 2026-09-15): the settlement
+            # clearing this very aligner is not a second holder, it is this
+            # request already happening.
+            return
         # The same refusal `unload-model` and `unload-voice` already make: taking
         # anything off the card while somebody holds it ends their conversation
         # mid-sentence, and `Residency.unload` refuses it anyway — from inside the
@@ -823,6 +828,13 @@ class UnloadAlignerJobType:
         model = job.model
         if model is None:  # unreachable: resolve_model requires one
             raise JobError("model_required", f"{self.name} needs an aligner")
+        if self._residency.await_clearance(model):
+            # The settlement got there first, which is the card this job asked
+            # for. Same terminal shape as an unload this job did itself.
+            ctx.progress(0.0, f"unloading {model}")
+            ctx.progress(1.0, f"{model} is unloaded — the card was cleared of it")
+            ctx.done_extra(resident=self._residency.resident_id)
+            return
         if not self._residency.is_resident(KIND_ALIGN, model):
             # Checked before `unload()` rather than caught from it: the holder
             # unloads by id alone, and a voice sharing an aligner's id would be

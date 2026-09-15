@@ -28,6 +28,7 @@ owner, and the mutators refuse by name while somebody else has it.
 from __future__ import annotations
 
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -37,6 +38,7 @@ from typing import Any, Callable, Iterator
 from .alignmodels import AlignBackendSpec, AlignManifest
 from .config import Config
 from .engines import (
+    STOP_TIMEOUT_SECONDS,
     EngineError,
     NarratorEngine,
     SubprocessEngine,
@@ -79,6 +81,16 @@ KIND_ALIGN = "align"
 #: spends most of it reading weights and capturing CUDA graphs; narrator on
 #: `cuda-linux` spends it starting SGLang-Omni, measured at about 110 s.
 DEFAULT_READY_TIMEOUT_SECONDS = 900.0
+
+#: How long an unload job waits out a clearance of its own subject that is
+#: already under way (`Residency.await_clearance`).
+#:
+#: The engine's OWN SIGTERM deadline plus a margin, and derived rather than
+#: chosen: the waiter is waiting for the settlement to release the card, and the
+#: settlement cannot release it until `SubprocessEngine.stop()` either returns or
+#: gives up at `STOP_TIMEOUT_SECONDS`. A number equal to that deadline would race
+#: the `EngineError` it raises and report a wedge that was about to resolve.
+CLEARANCE_TIMEOUT_SECONDS = STOP_TIMEOUT_SECONDS + 30.0
 
 
 @dataclass(frozen=True)
@@ -296,7 +308,18 @@ class Residency:
         #: The thread a mutating claimant took the card on, or None when the
         #: claimant declared it will not mutate. See `claim`.
         self._claim_thread: int | None = None
-        self._claim_lock = threading.Lock()
+        #: True while the current claim is held in order to TAKE THE RESIDENT
+        #: THING OFF the card, rather than to use it. Only the settlement claims
+        #: that way (`crucible/settle.py`). See `being_cleared`.
+        self._claim_clears = False
+        #: The subject a clearing claim took off the card, while the card has
+        #: stayed empty since — *why* the card is empty, which is a different
+        #: fact from *that* it is. Written at the one door everything comes off
+        #: the card through (`unload`). See `being_cleared`.
+        self._cleared: str | None = None
+        #: A Condition and not a Lock, because a claim is now something a thread
+        #: can WAIT OUT (`await_clearance`) as well as something it reads.
+        self._claim_lock = threading.Condition()
 
     # ------------------------------------------------- the exclusive claim
     #
@@ -335,8 +358,15 @@ class Residency:
         finally:
             self.release(holder)
 
-    def claim(self, holder: str, *, may_mutate: bool) -> None:
+    def claim(self, holder: str, *, may_mutate: bool, clears: bool = False) -> None:
         """Take the card. `may_mutate` is a promise about what will be done to it.
+
+        `clears` is a promise of a different kind — *"this claim exists in order
+        to take the resident thing OFF the card"* — and only the settlement
+        makes it (`crucible/settle.py`). It is what lets `being_cleared` tell a
+        holder that is using the card from one that is emptying it, so an
+        `unload-...` for the very thing being cleared is answered as the same
+        intent instead of refused `engine_in_use`.
 
         The two claimants are not alike, and the flag is what keeps the guard
         honest for both rather than being loosened until it fits the looser one:
@@ -365,6 +395,7 @@ class Residency:
                 )
             self._claim = holder
             self._claim_thread = threading.get_ident() if may_mutate else None
+            self._claim_clears = clears
 
     def release(self, holder: str) -> None:
         with self._claim_lock:
@@ -378,6 +409,83 @@ class Residency:
                 )
             self._claim = None
             self._claim_thread = None
+            self._claim_clears = False
+            # Whoever is waiting out a clearance is waiting for exactly this.
+            self._claim_lock.notify_all()
+
+    # ------------------------------------------ the card being cleared of it
+    #
+    # A CLEARING CLAIM IS NOT A FOREIGN HOLDER. Found by PHASE15-HOST.md section
+    # 8's T6 on a live card, 2026-09-15: the settlement started clearing
+    # `dots-ocr` the instant the last chat completion finished, the same client's
+    # own `unload-model dots-ocr` landed a few milliseconds later, and it was
+    # refused `engine_in_use` — held by *"the settlement clearing the card"*. The
+    # refusal's whole meaning is *"somebody else is using this and taking it off
+    # the card would end their conversation mid-sentence"*, and none of that is
+    # true of a settlement: it is doing the very thing the request asked for.
+    #
+    # So the three unload doors ask this first. Everything else the claim
+    # refuses, it still refuses by name.
+
+    def being_cleared(self, subject_id: str) -> bool:
+        """`subject_id` is on its way off the card, or is off it because it was.
+
+        True in two states, because a client's `unload-...` can arrive in
+        either — the window is milliseconds wide and both halves of it are the
+        same answer:
+
+        - a clearing claim is up and `subject_id` is what is on the card, or
+        - the card is empty, and it is empty BECAUSE a clearing claim took
+          `subject_id` off it and nothing has been on it since.
+
+        False for everything else, including a claim held to USE the card. That
+        one is a genuinely different holder and `refuse_if_claimed` says so.
+        """
+        with self._claim_lock:
+            return self._being_cleared(subject_id)
+
+    def _being_cleared(self, subject_id: str) -> bool:
+        """`being_cleared`, for a caller already holding `_claim_lock`."""
+        resident = self._resident
+        if resident is None:
+            return self._cleared == subject_id
+        return self._claim_clears and resident.id == subject_id
+
+    def await_clearance(
+        self, subject_id: str, *, timeout: float = CLEARANCE_TIMEOUT_SECONDS
+    ) -> bool:
+        """Wait out a clearance of `subject_id`. **Never the event loop.**
+
+        True when the card is clear of `subject_id` because the clearance did
+        it: the unload job that asked has nothing left to do and is `done`.
+        False when no clearance of `subject_id` is under way at all — the
+        ordinary case, and the caller unloads it itself. False too when a
+        clearance was under way and DECLINED to unload (a holder appeared under
+        its claim), because then the thing is still on the card and unloading it
+        is still this job's work.
+
+        A CLEARANCE THAT NEVER FINISHES IS NOT WAITED OUT QUIETLY. The timeout
+        is longer than the engine's own SIGTERM deadline, so reaching it means
+        something is wedged, and that is raised rather than turned into a second
+        unload on top of the first.
+        """
+        with self._claim_lock:
+            if not self._being_cleared(subject_id):
+                return False
+            deadline = time.monotonic() + timeout
+            while self._claim_clears:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise JobError(
+                        "engine_in_use",
+                        f"waited {timeout:.0f}s for the card to be cleared of "
+                        f"{subject_id!r} and it has not been. It is still held "
+                        f"by {self._claim!r}, which is longer than the engine's "
+                        "own SIGTERM deadline: something is wedged, and "
+                        "unloading on top of it would make it worse",
+                    )
+                self._claim_lock.wait(remaining)
+            return self._resident is None and self._cleared == subject_id
 
     def refuse_if_claimed(self, what: str) -> None:
         """The same refusal as an HTTP 409, for a preflight to make before queuing.
@@ -976,6 +1084,13 @@ class Residency:
         self._resident = None
         self._engine = None
         self._session = None
+        with self._claim_lock:
+            # WHY the card is now empty, recorded here because this is the one
+            # door everything comes off it through. A clearance leaves the
+            # subject's name behind so an `unload-...` that arrives a moment
+            # late is answered as the same intent (`being_cleared`); any other
+            # unload wipes it, because the emptiness now has a different cause.
+            self._cleared = subject_id if self._claim_clears else None
         if engine is not None:
             engine.stop()
         if session is not None:

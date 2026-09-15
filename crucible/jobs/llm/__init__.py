@@ -600,6 +600,14 @@ class UnloadModelJobType:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs a model")
         _params(UnloadParams, params, self.name)
+        if self._residency.being_cleared(model):
+            # THE SAME INTENT, ALREADY UNDER WAY (T6, 2026-09-15). The
+            # settlement began clearing this very model the instant the last
+            # chat finished, and this request is that chat's own client tidying
+            # up after itself. Admitted: `run` waits the clearance out and
+            # reports the empty card it asked for. Only a holder that is USING
+            # the card is a conflict, and the line below still says so.
+            return
         self._residency.refuse_if_claimed(f"unloading {model!r}")
         if not self._residency.is_resident(KIND_LLM, model):
             raise ApiError(
@@ -616,6 +624,14 @@ class UnloadModelJobType:
         if model is None:  # unreachable: resolve_model requires one
             raise JobError("model_required", f"{self.name} needs a model")
         ctx.progress(0.0, f"unloading {model}")
+        if self._residency.await_clearance(model):
+            # The settlement got there first. That is the card this job asked
+            # for, so it is `done` in the same shape an unload it did itself
+            # would be — a client that loads, uses and unloads is never told
+            # its own tidying up failed.
+            ctx.progress(1.0, f"{model} is unloaded — the card was cleared of it")
+            ctx.done_extra(resident=self._residency.resident_id)
+            return
         if not self._residency.is_resident(KIND_LLM, model):
             # Checked before `unload()` rather than caught from it: the holder
             # unloads by id alone, and a voice sharing a model's id would be
