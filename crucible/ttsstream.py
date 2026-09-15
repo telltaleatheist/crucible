@@ -96,8 +96,9 @@ from typing import Any, Callable
 from .engines import EngineError, NarratorEngine
 from .jobs.base import utcnow
 from .errors import ApiError, JobCancelled, JobError
+from .narratorvoices import take_sampling
 from .residency import KIND_TTS, Residency, describe_resident
-from .voices import NARRATOR_ENGINE_SAMPLING, VoiceError, VoiceManifest
+from .voices import VoiceError, VoiceManifest
 
 __all__ = [
     "GRACE_SECONDS",
@@ -210,6 +211,12 @@ class _Row:
     id: str
     text: str
     take: int
+    #: This row's rung, in narrator's per-item spelling, or None at take 0 —
+    #: which means "the loaded voice's own sampling" and is sent as no key at
+    #: all. Resolved from the voice's ladder when the `say` was accepted, so a
+    #: row that is resubmitted after a cancel (`restart`) goes back out under
+    #: the numbers it was asked for rather than the voice's default.
+    sampling: dict[str, Any] | None
     #: narrator's `i`. The client's ids are strings and narrator's batch keys are
     #: positions, so the session allocates one per row and never reuses it — a
     #: reused slot would land a resubmitted row's audio under the id of the row
@@ -469,8 +476,14 @@ class StreamSession:
     def start(self) -> None:
         self._worker.start()
 
-    def say(self, row_id: str, text: str, take: int) -> str:
+    def say(
+        self, row_id: str, text: str, take: int, sampling: dict[str, Any] | None
+    ) -> str:
         """Accept one row. **Event loop only.** Returns the row's id.
+
+        `sampling` is the take's rung, already resolved by `require_sayable`
+        against this voice's ladder — never a client's numbers, which do not
+        exist on this wire.
 
         202 and the row's id, not the audio: a client that wants the audio reads
         the stream. A client that never opened one is refused here by name rather
@@ -504,7 +517,10 @@ class StreamSession:
                     "name",
                     {"session_id": self.id, "id": row_id},
                 )
-            row = _Row(id=row_id, text=text, take=take, slot=self._next_slot)
+            row = _Row(
+                id=row_id, text=text, take=take, sampling=sampling,
+                slot=self._next_slot,
+            )
             self._next_slot += 1
             self._rows[row_id] = row
             self._pending.append(row_id)
@@ -655,12 +671,20 @@ class StreamSession:
         `stream: true` on every item is the difference between this door and the
         render door, which sends no `stream` flag anywhere and takes narrator's
         pre-existing whole-row path byte for byte.
+
+        **A batch here may MIX rungs**, unlike the render door's, where one
+        `take` governs the whole job: rows arrive one `say` at a time and each
+        carries its own. narrator's per-item channel is per item precisely for
+        this; the MLX arm splits its slab by sampling group rather than
+        rendering anyone at another row's numbers.
         """
         request = {
             "action": "generate_batch",
             "language": self.language,
             "items": [
-                {"i": row.slot, "text": row.text, "stream": True} for row in batch
+                {"i": row.slot, "text": row.text, "stream": True}
+                | ({} if row.sampling is None else {"sampling": row.sampling})
+                for row in batch
             ],
         }
         cancelled_mid_batch = False
@@ -1204,46 +1228,42 @@ class StreamManager:
 
 
 def require_streamable(manifest: VoiceManifest, backend_kind: str) -> None:
-    """The two refusals the streaming door shares with the render door.
+    """What the streaming door refuses about the voice itself.
 
-    Both are about what can be asked of narrator at this pin rather than about
-    this host, so they are stated once here and the wording is the render door's.
+    **A zero-shot voice is no longer refused here** (2026-09-14). It was, as
+    `voice_kind_unsupported`, because narrator's load message carried no
+    reference clips and Crucible had no way to condition one. The load door
+    now carries the clip (`params.reference`, section 5), and this door NEVER
+    LOADS — it refuses `voice_not_resident` for anything that is not already
+    on the card — so a `zeroshot` session can only ever attach to a voice that
+    was loaded with its clip. There is nothing left here to refuse: refusing
+    the kind anyway would make the load unusable by the one client that most
+    wants it, the browser extension, whose whole path is this door.
     """
-    if manifest.kind == "zeroshot":
-        raise ApiError(
-            400,
-            "voice_kind_unsupported",
-            f"voice {manifest.id!r} is a zeroshot voice, and narrator's serve "
-            "wire carries no reference clips on its load message. Crucible will "
-            "not stream one rather than stream it in the base model's voice and "
-            "call that success",
-            {"voice": manifest.id, "kind": manifest.kind},
-        )
     if not manifest.supports(backend_kind):  # pragma: no cover — it is resident
         raise ApiError(
             400,
             "backend_unsupported",
             f"voice {manifest.id!r} has no {backend_kind} block",
         )
-    spec = manifest.spec(backend_kind)
-    default = NARRATOR_ENGINE_SAMPLING[manifest.narrator_engine]
-    if spec.sampling != default:
-        raise ApiError(
-            409,
-            "sampling_not_wired",
-            f"voice {manifest.id!r} declares sampling {spec.sampling} on "
-            f"{spec.backend}, which is not the {manifest.narrator_engine} default "
-            f"{default}. narrator's only sampling channel is "
-            "`register_voice_caps`, whose key vocabulary is its older engine's "
-            "and which raises on a key it does not know, so Crucible cannot "
-            "ask for this and will not stream at the default instead "
-            "(PHASE3-TTS.md section 4)",
-            {"voice": manifest.id, "sampling": spec.sampling, "engine_default": default},
-        )
+    # A VOICE WHOSE TAKE-0 SAMPLING DEVIATES IS NO LONGER REFUSED HERE. It was,
+    # as `sampling_not_wired`, on the grounds that narrator's only sampling
+    # channel was `register_voice_caps` and its vocabulary was the older
+    # engine's. That stopped being true twice: take 0's sampling reaches
+    # narrator through the voices document Crucible writes at every load
+    # (section 4), and a rung above 0 reaches it per item (`require_sayable`
+    # below). The refusal is deleted rather than kept as a name nothing raises.
 
 
-def require_sayable(manifest: VoiceManifest, take: int) -> None:
-    """What a `say` may ask for. The render door's rules, one row at a time."""
+def require_sayable(
+    manifest: VoiceManifest, take: int
+) -> dict[str, Any] | None:
+    """What a `say` may ask for, and the rung it resolves to.
+
+    The render door's rules, one row at a time. Returns the take's sampling in
+    narrator's per-item spelling, or `None` at take 0 — which is the loaded
+    voice's own sampling and is what sending no key means.
+    """
     try:
         manifest.take(take)
     except VoiceError as exc:
@@ -1255,13 +1275,4 @@ def require_sayable(manifest: VoiceManifest, take: int) -> None:
             str(exc),
             {"voice": manifest.id, "take": take, "takes": len(manifest.takes)},
         ) from None
-    if take != 0:
-        raise ApiError(
-            409,
-            "sampling_not_wired",
-            f"take {take} of {manifest.id!r} deviates from the "
-            f"{manifest.narrator_engine} default and Crucible has no channel to "
-            "narrator for it. Take 0 is the engine's own sampling, which is what "
-            "asking for nothing gets (PHASE3-TTS.md section 4)",
-            {"voice": manifest.id, "take": take},
-        )
+    return take_sampling(manifest, take)

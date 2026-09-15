@@ -266,12 +266,12 @@ class StreamOp(BaseModel):
         {"op": "cancel_all"}
         {"op": "close"}
 
-    `take` is **required** on `say` and has no default here, even though every
-    voice in this build declares exactly one take and anything above 0 is refused
-    as `sampling_not_wired`. The SDK's `say(id, text, take?)` defaults it to 0 in
-    the caller's own code, which is a client choosing; a default on the wire would
-    be the server choosing, and the day a ladder is wired that becomes a render at
-    a take nobody asked for.
+    `take` is **required** on `say` and has no default here. The SDK's
+    `say(id, text, take?)` defaults it to 0 in the caller's own code, which is a
+    client choosing; a default on the wire would be the server choosing, and now
+    that the five fine-tunes declare a second rung that would be a render at a
+    take nobody asked for. A take past the end of the voice's ladder is
+    `unknown_take` and is never clamped.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -1401,6 +1401,15 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     "id": resident.id,
                     "since": resident.loaded_at,
                     "memory_bytes_estimate": resident.memory_bytes_estimate,
+                    # WHICH CLIP, for a zero-shot voice. `zeroshot` is ONE
+                    # voice id and any number of recordings — BookForge keeps
+                    # its clips in a userData directory and the extension
+                    # keeps its own in the browser — so the id alone is two
+                    # clients each assuming the resident one is theirs. Null
+                    # for every other kind and for a model, and always
+                    # present: an absent key would mean "this build does not
+                    # say" (PHASE3-TTS.md section 5).
+                    "reference": getattr(resident, "reference", None),
                 }
             ),
             # `warming` is neither running nor queued and a bench that ignored it
@@ -1767,7 +1776,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         session = streams.get(session_id)
         if body.op == "say":
             manifest = known_voice(session.voice)
-            require_sayable(manifest, body.take)
+            sampling = require_sayable(manifest, body.take)
             if len(body.text) > session.max_chars:
                 # The cap certificate, refused rather than re-split: chunking is
                 # the client's (PHASE3-TTS.md section 1), and a server that
@@ -1782,7 +1791,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     "a refusal and not a re-split",
                     {"voice": session.voice, "max_chars": session.max_chars},
                 )
-            return {"id": session.say(body.id, body.text, body.take)}
+            return {"id": session.say(body.id, body.text, body.take, sampling)}
         if body.op == "cancel":
             return {"id": body.id, "outcome": session.cancel(body.id)}
         if body.op == "cancel_all":

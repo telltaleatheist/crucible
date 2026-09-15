@@ -19,6 +19,16 @@ later:
     insufficient_memory  free memory is below the manifest's estimate
     voice_not_resident   (unload) that voice is not the one that is loaded
 
+And three this door added on 2026-09-14, when a zero-shot voice became loadable
+(PHASE3-TTS.md section 5's amendment; before it, `kind = "zeroshot"` was
+refused outright because narrator's load message carried no clip):
+
+    reference_required     the voice is `kind = "zeroshot"` and the load
+                           carries no `params.reference`
+    reference_not_allowed  a checkpoint or token voice carries one
+    reference_malformed    it is not base64, not a readable WAV, has no
+                           transcript, or is over narrator's 30-second budget
+
 **`model` on the wire is the voice id.** DESIGN.md's word for the thing that
 produces the bytes is `model`, and for `tts` that thing is the voice — which for
 Higgs is the literal truth rather than a pun: a v3 voice *is* the merged
@@ -47,6 +57,7 @@ from .common import (
     describe_voices,
     known_voice,
     require_loadable,
+    require_reference,
     validated_params,
     voice_provenance,
     voice_rows,
@@ -63,12 +74,44 @@ __all__ = [
 ]
 
 
+class ReferenceInput(BaseModel):
+    """`params.reference` — the clip a zero-shot voice is loaded with.
+
+    Validated for SHAPE here and for CONTENT in
+    `crucible/voicereference.py:parse_reference`, which is where the base64,
+    the RIFF header and the 30-second budget are checked and where the
+    duration is measured. The split is the same one every other door makes:
+    pydantic says what the object is, the module says whether it is usable.
+
+    No `seconds`: the server is holding the bytes and reads the duration off
+    the header, and a number the client states about audio the server has is a
+    fact with two owners.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: The wav's bytes, base64, no `data:` prefix.
+    data: str
+    #: The BOOK-EXACT text spoken in the clip — never an ASR guess. narrator
+    #: refuses a clip without one at construction.
+    transcript: str
+    #: A short label, for whoever reads `/v1/info` and wants to know which of
+    #: their clips is resident. Optional; the digest is always there.
+    name: str | None = None
+
+
 class LoadVoiceParams(BaseModel):
     """`params` for a load-voice job. Unknown keys are refused, not ignored."""
 
     model_config = ConfigDict(extra="forbid")
 
     timeout_s: float = Field(default=DEFAULT_READY_TIMEOUT_SECONDS, ge=30, le=7200)
+    #: Required when the voice's kind is `zeroshot` (`reference_required`),
+    #: refused on any other kind (`reference_not_allowed`). Not a pydantic
+    #: rule because which it is depends on the MANIFEST rather than on the
+    #: body, and a refusal that cannot name the voice is a refusal a client
+    #: has to guess at.
+    reference: ReferenceInput | None = None
 
 
 class UnloadVoiceParams(BaseModel):
@@ -129,11 +172,15 @@ class LoadVoiceJobType:
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs a voice")
-        validated_params(LoadVoiceParams, params, self.name)
+        validated = validated_params(LoadVoiceParams, params, self.name)
         # A streaming session holds the resident engine, and loading over it
         # would SIGTERM narrator mid-sentence (PHASE3-TTS.md section 7).
         self._residency.refuse_if_claimed(f"loading {model!r}")
-        _, spec, _ = require_loadable(self._config, self._backend, model)
+        manifest, spec, _ = require_loadable(self._config, self._backend, model)
+        # Before the card is asked about and before anything is queued: whether
+        # this load carries what this KIND of voice needs is a fact about the
+        # request, and the client can fix it without waiting for a job.
+        require_reference(manifest, validated.reference)
         accelerator.guard(
             self._config.backend_kind,
             model_id=model,
@@ -162,6 +209,12 @@ class LoadVoiceJobType:
             manifest, spec, (python, installed) = require_loadable(
                 self._config, self._backend, model
             )
+            # Parsed again here rather than carried from `preflight`: a job is
+            # a document that survives the process, and re-deriving the clip
+            # from the body it holds is what makes the job the one source. The
+            # bytes are not decoded twice in any way that matters — one wav,
+            # once, as the lane picks the job up.
+            reference = require_reference(manifest, params.reference)
         except ApiError as exc:
             raise JobError(exc.code, exc.message) from None
 
@@ -188,13 +241,21 @@ class LoadVoiceJobType:
                 spec,
                 installed.path,
                 python,
+                reference=reference,
                 timeout=params.timeout_s,
                 on_progress=ctx.warming,
             )
         except EngineError as exc:
             raise JobError("engine_failed", str(exc)) from None
         ctx.progress(1.0, f"{model} is resident")
-        ctx.done_extra(resident=resident.voice_id, fingerprint=resident.fingerprint)
+        # `reference` on `done` for the same reason it is on the residency
+        # report: two clients loading `zeroshot` see one voice id, and the
+        # digest is the only thing that says whose clip won.
+        ctx.done_extra(
+            resident=resident.voice_id,
+            fingerprint=resident.fingerprint,
+            reference=resident.reference,
+        )
 
 
 # --------------------------------------------------------------- unload job

@@ -37,10 +37,14 @@ catalog's camelCase is the WIRE), and nothing it does not read is written:
                      `default` for `kind = "token"` — narrator's name for the
                      model's own voice, which Crucible calls a token voice
                      (PHASE3-TTS.md section 2's third kind).
-    checkpointDir    the pulled directory, checkpoint voices only. narrator
+    checkpointDir    the pulled directory — a checkpoint voice's merged
+                     weights, or a zeroshot voice's BASE weights. narrator
                      checks the directory's required files itself at the load
                      message (`v3_served.checkpoint_serve_target`), before any
                      server starts.
+    clips            the reference a `load-voice` carried, as narrator's own
+                     `[{path, transcript, seconds}]` — zeroshot voices only,
+                     and required of them. See `crucible/voicereference.py`.
     maxChars         the backend block's `max_chars` — CHARACTERS, and the one
                      field narrator refuses a checkpoint voice without.
     targetChars      `[voice.pace].target_chars`, when declared.
@@ -72,20 +76,22 @@ for an absent key is `catalog`, which is what a manifest number is; the
 manifest has no such field and inventing `placeholder` for a token voice would
 be Crucible labelling a measurement it did not take); `scene` (v2 only);
 `allowedControls` / `maxReferenceSeconds` (narrator's engine defaults, which
-no manifest overrides); `clips` (a zeroshot voice is refused below, and
-PHASE3-TTS.md section 6 says what narrator owes before that changes);
-`_overrideNote` (BookForge's own post-mortem marker for a directory that is
-not the catalog's, and under Crucible the directory is always the pin's).
+no manifest overrides); `_overrideNote` (BookForge's own post-mortem marker for
+a directory that is not the catalog's, and under Crucible the directory is
+always the pin's).
 
-TWO KINDS ARE REFUSED HERE, by name, before any engine starts:
+**`zeroshot` STOPPED BEING REFUSED HERE on 2026-09-14.** It was, on the
+grounds that "a Crucible zeroshot voice's clips are either `from-request` or
+files in a refs repo nothing has laid out, and an entry naming files Crucible
+has not checked is a load that dies inside narrator". The load door now carries
+the clip (`crucible/voicereference.py`, PHASE3-TTS.md section 5), Crucible
+writes the file itself, and the entry names a path this process just wrote — so
+the reason is gone and so is the refusal. What replaced it is the pair of
+refusals above `voice_entry`: a zeroshot voice with no clip, and a clip on a
+voice that is not one.
 
-- `zeroshot`. The document CAN carry `clips`, and BookForge writes them, but a
-  Crucible zeroshot voice's clips are either `from-request` (they arrive with a
-  job, not at load) or files in a pulled refs repo that nothing in this build
-  has laid out for narrator yet. Writing a clips entry that names files
-  Crucible has not checked is a load that dies inside narrator after the
-  refusal could have been made here. The render door already refuses the kind
-  as `voice_kind_unsupported`; this is the same refusal at the load door.
+ONE KIND IS STILL REFUSED HERE, by name, before any engine starts:
+
 - `token` on `cuda-linux`. narrator's served arm exports `HIGGS_MODEL_DIR`
   only for a checkpoint voice and UNSETS it otherwise, and its launch script
   then serves "the base snapshot out of the HF cache" (`serve_higgs_v3.sh`:
@@ -97,6 +103,19 @@ TWO KINDS ARE REFUSED HERE, by name, before any engine starts:
   for a `default` voice — until then `higgs-default` loads on `mlx-darwin`
   only, where `NARRATOR_HIGGS3_MLX_MODEL` names the base weights and this
   module sets it to the pulled directory.
+
+  **A lead on that ruling, found while wiring zeroshot (2026-09-14) and NOT
+  acted on.** narrator's document reader passes `checkpointDir` into
+  `DefaultVoice` as well as into `ClipsVoice`, and the served arm exports
+  whatever `checkpoint_dir` the config ends up with — so writing the pulled
+  base directory as a `default` voice's `checkpointDir` would very likely make
+  the served arm start on the bytes Crucible pinned, which is the whole of
+  what the refusal above is waiting for. It is the same move this module now
+  makes for `clips`. It is NOT made for `token` here, because the two cases
+  differ in what has been tested and in whose decision it is: a zeroshot load
+  is a new door being built to a written plan, and re-pointing `higgs-default`
+  is a behaviour change to a shipped smoke voice on an arm nobody has run it
+  on. Owen's ruling, with this lead in front of him.
 """
 
 from __future__ import annotations
@@ -108,6 +127,7 @@ from typing import Any
 
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .engines.base import EngineError
+from .voicereference import ClipEntry, VoiceReference, place
 from .voices import VoiceBackendSpec, VoiceManifest
 
 #: The variable narrator reads the document's PATH from
@@ -135,9 +155,14 @@ DOCUMENT_NAME = "narrator-higgs-voices.json"
 #: the next engine is what separates them again.
 DOCUMENT_READERS: frozenset[str] = frozenset({"higgs-v3"})
 
-#: Crucible's voice kinds -> narrator's `kind` values. `zeroshot` is absent on
-#: purpose (refused in `voice_entry`, see the module docstring).
-_KIND_ON_THE_WIRE: dict[str, str] = {"checkpoint": "checkpoint", "token": "default"}
+#: Crucible's voice kinds -> narrator's `kind` values. `zeroshot` became
+#: `clips` on 2026-09-14, when the load door grew a channel for the clip — see
+#: the module docstring.
+_KIND_ON_THE_WIRE: dict[str, str] = {
+    "checkpoint": "checkpoint",
+    "zeroshot": "clips",
+    "token": "default",
+}
 
 #: The manifest's sampling keys -> the document's. The inverse of narrator's
 #: `config._SAMPLING_KEYS`, minus `repetitionPenalty`, which no Higgs manifest
@@ -239,13 +264,65 @@ def _sampling_entry(manifest: VoiceManifest, spec: VoiceBackendSpec) -> dict[str
     return entry
 
 
+def take_sampling(manifest: VoiceManifest, take: int) -> dict[str, Any] | None:
+    """The rung's sampling in narrator's PER-ITEM spelling, or None for take 0.
+
+    The document's `sampling` (above) is the voice's take-0 numbers and is
+    written per LOAD. A rung is per RENDER, and since 2026-09-14 narrator has a
+    channel for it: an item of `generate` / `generate_batch` may carry
+    `sampling: {temperature?, topP?, topK?, repetitionPenalty?}`, which the
+    engine lays OVER its resolved sampling key by key
+    (`narrator/engine/item_sampling.py`). So this returns **only the keys the
+    rung declares** — `[[voice.takes]]` take 1 is one line, `temperature =
+    0.7`, and it means "take 0, but cooler". Sending the other two back at
+    take 0's values would say the same thing, but it would also be Crucible
+    restating numbers it was not asked about, and the first partial rung that
+    meant something else would be applied wrong.
+
+    **None for take 0, and None is not an empty object.** An item with no
+    `sampling` key renders at the voice's loaded default, which IS take 0;
+    sending `{}` would be Crucible asking for a rung with nothing in it, which
+    narrator refuses as `sampling_malformed` — correctly.
+
+    The translation is `_SAMPLING_ON_THE_WIRE`, the same map the document uses,
+    because the per-item channel deliberately took the document's spelling: two
+    names for one lever is the shape `docs/ARCHITECTURE.md`'s audit found seven
+    times.
+    """
+    rung = manifest.take(take)
+    if not rung.overrides:
+        return None
+    entry: dict[str, Any] = {}
+    for key, value in rung.overrides.items():
+        wire = _SAMPLING_ON_THE_WIRE.get(key)
+        if wire is None:  # pragma: no cover — `_check_takes` allows no other key
+            raise NarratorVoicesError(
+                f"{manifest.path.name} [[voice.takes]][{take}] names {key!r}, and "
+                f"narrator's per-item sampling has no such lever; it takes "
+                f"{sorted(_SAMPLING_ON_THE_WIRE)}"
+            )
+        entry[wire] = int(value) if wire == "topK" else float(value)
+    return entry
+
+
 def voice_entry(
-    manifest: VoiceManifest, spec: VoiceBackendSpec, weights_dir: Path
+    manifest: VoiceManifest,
+    spec: VoiceBackendSpec,
+    weights_dir: Path,
+    clip: ClipEntry | None = None,
 ) -> dict[str, Any]:
     """One document entry, from one manifest and the directory its weights are in.
 
     Pure: nothing is read from disk and nothing is written. `write_document`
     is the side effect, and this is what a test asserts field by field.
+
+    `clip` is the reference the `load-voice` carried, already written to disk
+    by `voicereference.place` — required of a `zeroshot` voice and refused on
+    any other kind, the same pair of rules the load door states as
+    `reference_required` / `reference_not_allowed`. Stated twice on purpose:
+    the door refuses before a job is queued, and this refuses before a process
+    is started, and the second is what a caller reaching `write_document`
+    another way still gets.
     """
     if manifest.narrator_engine not in DOCUMENT_READERS:
         raise NarratorVoicesError(
@@ -254,14 +331,26 @@ def voice_entry(
             f"{sorted(DOCUMENT_READERS)} resolve a voice by name in one"
         )
     kind = _KIND_ON_THE_WIRE.get(manifest.kind)
-    if kind is None:
+    if kind is None:  # pragma: no cover — every kind in VOICE_KINDS is mapped
         raise NarratorVoicesError(
             f"voice {manifest.id!r} is a {manifest.kind} voice, and this build "
-            "writes no document entry for one: its reference clips are either "
-            "carried by a request or in a refs repo nothing has laid out for "
-            "narrator, and an entry naming files Crucible has not checked is a "
-            "load that dies inside narrator instead of here (PHASE3-TTS.md "
-            "section 6)"
+            f"writes no document entry for one; it knows "
+            f"{sorted(_KIND_ON_THE_WIRE)}"
+        )
+    if kind == "clips" and clip is None:
+        raise NarratorVoicesError(
+            f"voice {manifest.id!r} is a zeroshot voice and no reference clip "
+            "was placed for this load. The base weights without a reference are "
+            "the model's own voice, which is a DIFFERENT voice — 12 % of the "
+            "narrator ceiling — and rendering a book in it under this id would "
+            "be reported as success"
+        )
+    if kind != "clips" and clip is not None:
+        raise NarratorVoicesError(
+            f"voice {manifest.id!r} is a {manifest.kind} voice and a reference "
+            f"clip was placed for it ({clip.path}). A checkpoint's voice is in "
+            "its weights and a token voice's is in the engine; narrator would "
+            "clone from the clip and ignore the weights this load names"
         )
     if kind == "default" and spec.backend == CUDA_LINUX:
         raise NarratorVoicesError(
@@ -277,8 +366,25 @@ def voice_entry(
         )
 
     entry: dict[str, Any] = {"kind": kind}
-    if kind == "checkpoint":
+    if kind in ("checkpoint", "clips"):
+        # `checkpointDir` FOR A CLIPS VOICE TOO, and it is not a stretch of the
+        # key: narrator's own reader builds `ClipsVoice(checkpoint_dir=...)`
+        # from it and both arms then load THAT directory —
+        # `HiggsV3Config.__post_init__` adopts the voice's checkpoint and the
+        # served arm exports it as `HIGGS_MODEL_DIR`; the MLX builder passes
+        # `checkpoint or model_dir_from_env()`. For a zero-shot voice the
+        # directory is the BASE weights Crucible pulled at the manifest's pin,
+        # which is exactly the thing the `token`-on-cuda-linux refusal below
+        # exists because it could not name. Written rather than omitted for
+        # that reason: omit it and the served arm serves "the base snapshot out
+        # of the HF cache", which is a fingerprint naming bytes nobody read.
         entry["checkpointDir"] = str(weights_dir)
+    if clip is not None:
+        # narrator's own clip row, verbatim. One clip and not a list of one by
+        # accident: vllm-omni takes EXACTLY ONE reference ("multi-shot voice
+        # clone is not supported"), so several clips are pre-joined into one
+        # wav by whoever cut them, and this wire carries the one.
+        entry["clips"] = [clip.to_dict()]
     entry["maxChars"] = spec.max_chars
     pace = manifest.pace
     if pace.target_chars is not None:
@@ -295,7 +401,11 @@ def voice_entry(
 
 
 def write_document(
-    home: Path, manifest: VoiceManifest, spec: VoiceBackendSpec, weights_dir: Path
+    home: Path,
+    manifest: VoiceManifest,
+    spec: VoiceBackendSpec,
+    weights_dir: Path,
+    reference: VoiceReference | None = None,
 ) -> VoicesDocument:
     """Write the document for THIS load — one voice, the one being loaded.
 
@@ -304,8 +414,14 @@ def write_document(
     listing others would be a list of claims about stamps nobody re-checked at
     this load. Overwritten in place: the previous load's document is exactly
     the stale thing a post-mortem must not find.
+
+    A `reference` is written to disk here, beside the document and in the same
+    breath, because narrator calls `os.path.isfile` on every clip path the
+    document names: two files, one moment, or the load fails inside the engine
+    for a reason that was knowable here.
     """
-    entry = voice_entry(manifest, spec, weights_dir)
+    clip = None if reference is None else place(home, reference)
+    entry = voice_entry(manifest, spec, weights_dir, clip)
     path = document_path(home)
     path.parent.mkdir(parents=True, exist_ok=True)
     document = {manifest.id: entry}
@@ -325,6 +441,7 @@ __all__ = [
     "NarratorVoicesError",
     "VoicesDocument",
     "document_path",
+    "take_sampling",
     "voice_entry",
     "write_document",
 ]

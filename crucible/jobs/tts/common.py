@@ -20,6 +20,7 @@ from ... import accelerator, jobenv, weights
 from ...config import Config
 from ...errors import ApiError
 from ...residency import KIND_TTS, Residency
+from ...voicereference import ReferenceError, VoiceReference, parse_reference
 from ...voices import VoiceBackendSpec, VoiceError, VoiceManifest, load_all_voices
 from ..base import ModelDescriptor
 
@@ -28,10 +29,64 @@ __all__ = [
     "known_voice",
     "load_voices",
     "require_loadable",
+    "require_reference",
     "validated_params",
     "voice_provenance",
     "voice_rows",
 ]
+
+
+def require_reference(
+    manifest: VoiceManifest, reference: Any
+) -> VoiceReference | None:
+    """The clip this load may carry, or the first of three refusals by name.
+
+    PHASE3-TTS.md section 5's amendment. A zero-shot voice IS base weights plus
+    a recording, so a load without one has nothing to clone from — the base
+    model's own voice is a DIFFERENT voice and would be rendered under this
+    id — and a load of anything else WITH one is asking the engine to ignore
+    the weights it just named.
+
+        reference_required     kind is `zeroshot` and none was sent
+        reference_not_allowed  any other kind, and one was
+        reference_malformed    not base64, not a WAV, no transcript, too long
+
+    `reference` is the validated `ReferenceInput` (or None) rather than the raw
+    body: shape is pydantic's and content is `voicereference`'s.
+    """
+    if manifest.kind == "zeroshot":
+        if reference is None:
+            raise ApiError(
+                400,
+                "reference_required",
+                f"voice {manifest.id!r} is a zeroshot voice: it is the base "
+                "weights conditioned on a recording, and this load carries no "
+                "`params.reference`. Send "
+                '`{"data": "<base64 wav>", "transcript": "<the book-exact text '
+                'spoken in it>"}`. Without one the engine would come up in the '
+                "model's own voice — a different speaker at 12 % of the "
+                "narrator ceiling — under this voice's id",
+                {"voice": manifest.id, "kind": manifest.kind},
+            )
+    elif reference is not None:
+        raise ApiError(
+            400,
+            "reference_not_allowed",
+            f"voice {manifest.id!r} is a {manifest.kind} voice and this load "
+            "carries a `params.reference`. A checkpoint's voice is in its "
+            "weights and a token voice's is in the engine; a reference here "
+            "would clone from the clip and leave the weights this load names "
+            "doing nothing",
+            {"voice": manifest.id, "kind": manifest.kind},
+        )
+    if reference is None:
+        return None
+    try:
+        return parse_reference(reference.model_dump())
+    except ReferenceError as exc:
+        raise ApiError(
+            400, exc.code, str(exc), {"voice": manifest.id}
+        ) from None
 
 
 def load_voices() -> dict[str, VoiceManifest]:
@@ -219,7 +274,24 @@ def voice_rows(
                 "estimate_basis": basis,
                 "max_chars": max_chars,
                 "sample_rate": manifest.sample_rate,
+                # How many rungs this voice's ladder has, so a client can ask
+                # how many takes exist BEFORE it submits one — `take: N` is
+                # refused as `unknown_take` past the end and never clamped,
+                # and a client spreading N candidates across the ladder (which
+                # is what BookForge's Correct Sentences does) has to know N.
+                # The rungs' NUMBERS are deliberately not here, for the same
+                # reason `sampling` is not: they are engine tuning, they are
+                # the server's, and publishing them invites a client to send
+                # them back.
                 "takes": len(manifest.takes),
+                # Whether a `load-voice` for this row must carry a reference
+                # clip (`params.reference`) — true for a zeroshot voice and
+                # false for every other kind. On the row so a picker can show
+                # the clip field before the load is refused
+                # (`reference_required`), and derived from `kind` rather than
+                # left for a client to derive, because "which kinds need one"
+                # is the server's rule.
+                "needs_reference": manifest.kind == "zeroshot",
                 "pace": manifest.pace.to_dict(),
             }
         )

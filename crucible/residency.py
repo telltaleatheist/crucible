@@ -56,6 +56,7 @@ from .manifests import (
     fingerprint,
 )
 from .narratorvoices import DOCUMENT_READERS, write_document
+from .voicereference import VoiceReference
 from .voices import VoiceBackendSpec, VoiceManifest
 from .workers import WorkerError, WorkerSession
 
@@ -166,6 +167,11 @@ class ResidentVoice:
     memory_bytes_estimate: int
     log_path: Path
     loaded_at: str
+    #: What a zero-shot voice is conditioned on, `{name, sha256, seconds}`, or
+    #: None for every other kind. A `zeroshot` row that said only `zeroshot`
+    #: would be two clients looking at one word and each assuming it was their
+    #: clip; the digest is what lets either of them tell.
+    reference: dict[str, Any] | None = None
 
     @property
     def id(self) -> str:
@@ -183,6 +189,9 @@ class ResidentVoice:
             "memory_bytes_estimate": self.memory_bytes_estimate,
             "log_path": str(self.log_path),
             "loaded_at": self.loaded_at,
+            # Always present, `null` for a voice that is not conditioned on a
+            # clip — an absent key would mean "this build does not say".
+            "reference": self.reference,
         }
 
 
@@ -645,6 +654,7 @@ class Residency:
         weights_dir: Path,
         python: Path,
         *,
+        reference: VoiceReference | None = None,
         timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
         on_progress: Callable[[str], None] | None = None,
     ) -> ResidentVoice:
@@ -653,6 +663,11 @@ class Residency:
         A Higgs v3 voice change IS a full worker restart — the voice is the merged
         checkpoint the engine was started on — so there is no cheaper path here
         than the one a model takes, and none is pretended at.
+
+        `reference` is the clip a zero-shot voice is conditioned on: required of
+        one, refused on any other kind, and refused by `voice_entry` below
+        rather than here, so there is one statement of that rule and the load
+        door's own `reference_required` is the same rule made earlier.
         """
         self._refuse_mutation_if_claimed(f"load {manifest.id}")
 
@@ -679,7 +694,9 @@ class Residency:
         # reads no document and is handed none.
         env_spec = tts_env(manifest.narrator_engine, spec.backend)
         voices = (
-            write_document(self._config.home, manifest, spec, weights_dir)
+            write_document(
+                self._config.home, manifest, spec, weights_dir, reference
+            )
             if manifest.narrator_engine in DOCUMENT_READERS
             else None
         )
@@ -739,6 +756,7 @@ class Residency:
             memory_bytes_estimate=spec.memory_bytes_estimate,
             log_path=log_path,
             loaded_at=_now(),
+            reference=None if reference is None else reference.to_report(),
         )
         say(f"{manifest.id} is resident")
         return self._resident

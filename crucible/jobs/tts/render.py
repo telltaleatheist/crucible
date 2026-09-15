@@ -138,6 +138,7 @@ from ... import accelerator, hosttools
 from ...config import Config
 from ...engines import EngineError, NarratorEngine
 from ...errors import ApiError, JobError
+from ...narratorvoices import take_sampling
 from ...residency import KIND_TTS, Residency, describe_resident
 from ...voices import VoiceError, VoiceManifest
 from .. import asr
@@ -268,31 +269,40 @@ def _require_ffmpeg() -> str:
 
 
 def _require_renderable(
-    config: Config, backend: Any, voice_id: str, params: TtsParams
+    config: Config, backend: Any, voice_id: str, params: TtsParams, resident: bool
 ) -> tuple[VoiceManifest, Any, Any]:
     """Everything a render needs, or the first refusal, by name.
 
     The order is `require_loadable`'s and then this door's own three: what the
     voice IS, what the ladder can honour, and whether the text fits the cap
     certificate. Each of them is cheap and none of them needs the card.
+
+    `resident` is whether this voice is the one already on the card. It bears
+    on exactly one refusal — see below.
     """
     manifest, spec, interpreter = require_loadable(config, backend, voice_id)
 
-    if manifest.kind == "zeroshot":
-        # narrator's `load` message carries `voice`, `modelDir`, `adapterDir`,
-        # `baseDir`, `caps` and `warm` — and no reference clips. There is
-        # therefore no channel on this wire for the thing a zero-shot voice IS,
-        # and rendering one would mean conditioning on nothing: a whole book in
-        # the base model's voice, reported as success. PHASE3-TTS.md section 6
-        # records what narrator owes before this can be lifted.
+    if manifest.kind == "zeroshot" and not resident:
+        # A RENDER JOB LOADS ITS OWN VOICE (section 6's one asymmetry with
+        # `llm`), and since 2026-09-14 a zero-shot load needs the reference
+        # clip that `load-voice` carries in `params.reference`. This job has
+        # no such field — `language`, `take` and `chunks` are the whole of its
+        # params — and inventing a second channel for clips here would be two
+        # doors owning one fact. So this refusal NARROWED rather than being
+        # deleted: a zero-shot voice that is already resident was loaded with
+        # its clip and renders like any other, and one that is not is refused
+        # because this door cannot load it. (It used to refuse the KIND
+        # outright, on the true-at-the-time grounds that narrator's load
+        # message carried no clips at all.)
         raise ApiError(
             400,
             "voice_kind_unsupported",
-            f"voice {voice_id!r} is a zeroshot voice, and narrator's serve wire "
-            "carries no reference clips on its load message. Crucible will not "
-            "render one rather than render it in the base model's voice and call "
-            "that success",
-            {"voice": voice_id, "kind": manifest.kind},
+            f"voice {voice_id!r} is a zeroshot voice and is not resident. A "
+            "render job loads its own voice, and a zero-shot load needs the "
+            "reference clip only `load-voice` carries (`params.reference`): "
+            "rendering without it would be a whole book in the base model's "
+            "voice, reported as success. Load it first, then render",
+            {"voice": voice_id, "kind": manifest.kind, "resident": False},
         )
 
     # TAKE 0's SAMPLING IS THE MANIFEST'S, AND IT REACHES NARRATOR. Not through
@@ -307,6 +317,14 @@ def _require_renderable(
     # a `sampling_not_wired` refusal; it was unreachable with the shipped
     # manifests and, once the document existed, false.)
 
+    # AND A TAKE ABOVE 0 NOW REACHES IT TOO, per item. narrator's
+    # `generate_batch` items carry `sampling` since 2026-09-14
+    # (`narrator/engine/item_sampling.py`), which the engine lays over the
+    # voice's loaded numbers key by key — so the rung is resolved here, on the
+    # server, and sent as numbers. (Until that channel existed this was a
+    # `sampling_not_wired` refusal, whose one meaning was "there is no
+    # channel". There is one. The name is gone from the contract and from the
+    # code rather than kept as a refusal nothing can raise.)
     try:
         manifest.take(params.take)
     except VoiceError as exc:
@@ -319,22 +337,6 @@ def _require_renderable(
             str(exc),
             {"voice": voice_id, "take": params.take, "takes": len(manifest.takes)},
         ) from None
-    if params.take != 0:
-        # Reachable only for a voice that declares a ladder. No manifest in this
-        # build does, so this is not dead code so much as a refusal waiting for
-        # its manifest: a rung is PER RENDER, the voices document is written
-        # PER LOAD, and narrator has no per-request sampling channel on
-        # `generate_batch` — so a take above 0 has no way to reach the engine
-        # without a reload, and a reload per take is not a ladder.
-        raise ApiError(
-            409,
-            "sampling_not_wired",
-            f"take {params.take} of {voice_id!r} deviates from take 0's sampling "
-            "and Crucible has no per-request channel to narrator for it: the "
-            "voices document carries one sampling per load, and narrator's "
-            "generate_batch takes none (PHASE3-TTS.md section 4)",
-            {"voice": voice_id, "take": params.take},
-        )
 
     over = [
         {"index": chunk.index, "chars": len(chunk.text)}
@@ -604,7 +606,10 @@ class TtsJobType:
         # the lane instead of being refused here (PHASE3-TTS.md section 7).
         self._residency.refuse_if_claimed("a tts render")
         _require_ffmpeg()
-        _, spec, _ = _require_renderable(self._config, self._backend, model, checked)
+        _, spec, _ = _require_renderable(
+            self._config, self._backend, model, checked,
+            self._residency.is_resident(KIND_TTS, model),
+        )
         accelerator.guard(
             self._config.backend_kind,
             model_id=model,
@@ -629,7 +634,8 @@ class TtsJobType:
         try:
             ffmpeg = _require_ffmpeg()
             manifest, spec, (python, installed) = _require_renderable(
-                self._config, self._backend, voice_id, params
+                self._config, self._backend, voice_id, params,
+                self._residency.is_resident(KIND_TTS, voice_id),
             )
         except ApiError as exc:
             raise JobError(exc.code, exc.message) from None
@@ -649,7 +655,10 @@ class TtsJobType:
                     f"{voice_id!r} was loaded but nothing is resident; "
                     + describe_resident(self._residency, KIND_TTS, "no voice is"),
                 )
-            self._render(ctx, params, engine, resident.sample_rate, ffmpeg)
+            self._render(
+                ctx, params, engine, resident.sample_rate, ffmpeg,
+                take_sampling(manifest, params.take),
+            )
 
     def _make_resident(
         self,
@@ -710,8 +719,14 @@ class TtsJobType:
         engine: NarratorEngine,
         sample_rate: int,
         ffmpeg: str,
+        sampling: dict[str, Any] | None,
     ) -> None:
         """One `generate_batch`, and one FLAC per row as the row retires.
+
+        `sampling` is the requested take's rung, already resolved against this
+        voice's ladder and already in narrator's per-item spelling — `None` at
+        take 0, which is the loaded voice's own sampling and is what sending no
+        key means.
 
         **The whole job is one batch.** How many rows the engine runs at once is
         engine tuning and belongs to the server (section 7 says so about the
@@ -738,8 +753,18 @@ class TtsJobType:
             # rows; sub-sentence chunks are the streaming door's, and asking for
             # them here would mean reassembling audio the engine already had in
             # one piece.
+            # THE RUNG RIDES ON EVERY ITEM, or on none of them. It is one take
+            # per job (`take` is a job-level parameter), so every row carries
+            # the same numbers; per ITEM rather than per REQUEST because that
+            # is where narrator's channel is — `generate_batch` itself takes no
+            # sampling, and a batch may legitimately mix rungs, which is what
+            # Correct Sentences will do when it spreads N candidates across the
+            # ladder. At take 0 the key is ABSENT, not `{}`: absent means "the
+            # voice's loaded sampling", which is what take 0 is.
             "items": [
-                {"i": chunk.index, "text": chunk.text} for chunk in params.chunks
+                {"i": chunk.index, "text": chunk.text}
+                | ({} if sampling is None else {"sampling": sampling})
+                for chunk in params.chunks
             ],
         }
 
