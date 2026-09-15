@@ -551,7 +551,7 @@ the date it was read.
 |---|---|---|---|
 | `qwen3.5-9b` | `qwen3.5:9b-bf16` — bf16 because that is the clean-text ruling | 19.32 GB (`/api/tags`, 2026-09-14) | 20.82 GB |
 | `qwen3.8-27b-4bit` | `qwen3.8:27b-24g` (Q4_K_M); `minimum_for = translate, simplify, analysis` | 17.74 GB | 19.24 GB |
-| `dots-ocr` | `anthonym21/dots.ocr-GGUF` @ `42ab3102…`: `Dots.Ocr-1.8B-Q8_0.gguf` + `mmproj-Dots.Ocr-F16.gguf` | 4.42 GB (tree API, LFS sizes) | 5.92 GB |
+| `dots-ocr` | `ggml-org/dots.ocr-GGUF` @ `2c093a32…`: `dots.ocr-Q8_0.gguf` + `mmproj-dots.ocr-Q8_0.gguf` | 3.24 GB (tree API, LFS sizes) | 4.74 GB |
 
 **Found 1 — the 27B tag is not a published tag.** `qwen3.8:27b-24g` is Owen's own Modelfile
 over the library's `qwen3.8:27b` (num_ctx 98304 and his sampling baked in; `ollama show` says
@@ -564,11 +564,19 @@ does), or the Modelfile is published under a namespace and the tag gains that pr
 bytes are the same either way: the model and projector blobs are the parent's; a Modelfile
 adds a 132-byte params layer.
 
-**Found 2 — Foundry's page reader pins a different pair.** `page-reader.ts` names
-`ggml-org/dots.ocr-GGUF` with a **Q8_0** projector (1.34 GB); the ruling names anthonym21's
-**F16** projector (2.52 GB, regenerated 2026-03-23 from a corrected converter per that repo's
-README). Same model, two repos, two projectors — the exact defect this section exists to
-close, and the first vendoring will say so rather than let the two drift in silence.
+**Found 2 — Foundry's page reader pins a different pair. SETTLED 2026-09-15, BY A
+MEASUREMENT, IN FOUNDRY'S FAVOUR.** The ruling named anthonym21's **F16** projector (2.52 GB)
+against `page-reader.ts`'s `ggml-org/dots.ocr-GGUF` **Q8_0** pair (1.34 GB projector). T7
+pulled the ruled pair onto the live Windows machine and `llama-server` exited at `clip_init`:
+`Key not found: clip.vision.projector.scale_factor`. That key is read for
+`PROJECTOR_TYPE_DOTS_OCR` with no `required = false` (`tools/mtmd/clip.cpp:1542` at the pinned
+`b10970`, and byte-identical at `b10950`), and the anthonym21 projector's header does not
+carry it — it carries the old `clip.vision.spatial_merge_size` instead, because, as that
+repo's README says below the regeneration note, those GGUFs want the **`anthony-maio/llama.cpp`
+fork**. The `ggml-org` pair — from the org that merged PR #17575 — carries
+`clip.vision.projector.scale_factor = 2`, so the catalog moved to it and the two apps are one
+combination again. Full evidence in `crucible/models/dots-ocr.toml`'s `[local]` comment and
+PHASE15-HOST.md 7.6 ("third defect").
 
 ### 7.5 What it is not
 

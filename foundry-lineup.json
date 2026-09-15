@@ -1,5 +1,5 @@
 {
-  "generated_from": "3cd9d47ed9c10ba79af4fa0266a7fa82570559a1",
+  "generated_from": "60f57c68a06d32e880d9f96042967499f64a54f5",
   "schema": 2,
   "floors": {
     "simplify": "qwen3.8-27b-4bit",
@@ -15,13 +15,13 @@
       "description": "The page reader: a 3B vision-language model that turns a rasterised page into its text and layout. Two files on a machine without Crucible — the text tower and its vision projector.",
       "local": {
         "kind": "gguf",
-        "hf_repo": "anthonym21/dots.ocr-GGUF",
-        "revision": "42ab310215a26d05ebe21ccc55f64db6c2bfc6ce",
-        "file": "Dots.Ocr-1.8B-Q8_0.gguf",
-        "mmproj": "mmproj-Dots.Ocr-F16.gguf",
-        "downloadGB": 4.42,
+        "hf_repo": "ggml-org/dots.ocr-GGUF",
+        "revision": "2c093a32ca360a396bc6d87d60408636130b9d9b",
+        "file": "dots.ocr-Q8_0.gguf",
+        "mmproj": "mmproj-dots.ocr-Q8_0.gguf",
+        "downloadGB": 3.24,
         "needsGB": {
-          "value": 5.92,
+          "value": 4.74,
           "basis": "declared"
         }
       },

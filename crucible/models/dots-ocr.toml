@@ -73,18 +73,85 @@ description = "The page reader: a 3B vision-language model that turns a rasteris
 # loader refuses a `[local]` GGUF on an `image` model that has no `mmproj` for
 # exactly that reason.
 #
-# Every number, with where it came from and when (all read from the hub's API
-# on 2026-09-14, at the pinned sha):
-#   hf_repo/revision  anthonym21/dots.ocr-GGUF @ 42ab310215a26d05ebe21ccc55f64db6c2bfc6ce
-#                     GET /api/models/anthonym21/dots.ocr-GGUF/refs -> main = that sha
-#                     (no tags, no other branches). The repo's README records
-#                     that `mmproj-Dots.Ocr-F16.gguf` was regenerated on
-#                     2026-03-23 from a corrected DotsOCR converter and the text
-#                     GGUFs did not change; the pin is that state.
-#   file              Dots.Ocr-1.8B-Q8_0.gguf     1_894_530_336 B  (tree API, LFS size)
-#   mmproj            mmproj-Dots.Ocr-F16.gguf    2_524_495_808 B  (tree API, LFS size)
-#   download_bytes    4_419_026_144 — the two, added.
-#   needs_bytes       5_919_026_144 — download + 1_500_000_000, DECLARED, the same
+# ##########################################################################
+# THE PAIR MOVED ON 2026-09-15, AND A MEASUREMENT IS WHY.
+#
+# What this table used to name was `anthonym21/dots.ocr-GGUF` @
+# `42ab310215a26d05ebe21ccc55f64db6c2bfc6ce` — `Dots.Ocr-1.8B-Q8_0.gguf` plus
+# `mmproj-Dots.Ocr-F16.gguf`. T7 pulled exactly those two files onto the live
+# Windows machine, `llama-server` started, and it exited before it served:
+#
+#   E clip_init: failed to load model '...mmproj-Dots.Ocr-F16.gguf':
+#     Key not found: clip.vision.projector.scale_factor
+#   E srv load_model: failed to load multimodal model
+#   E srv llama_server: exiting due to model loading error
+#   (C:\tmp\phase15-testrun\home\logs\engine-dots-ocr.log, 2026-09-15 00:27)
+#
+# THE KEY IS THE WHOLE FAULT, and both halves of it were read off the bytes
+# rather than reasoned about:
+#
+#   * The pulled `mmproj-Dots.Ocr-F16.gguf` (GGUF v3, 388 tensors, 25 kv) has
+#     NO `clip.vision.projector.scale_factor`. It carries
+#     `clip.vision.spatial_merge_size = 2` instead — the OLD spelling, which
+#     upstream llama.cpp reads for qwen2vl-family projectors and never for
+#     this one.
+#   * `tools/mtmd/clip.cpp` at the pinned `b10970`, case
+#     `PROJECTOR_TYPE_DOTS_OCR` (line 1542):
+#       get_u32(KEY_PROJ_SCALE_FACTOR, hparams.n_merge);
+#     with NO `required = false` third argument, where every optional read in
+#     that function passes one. `KEY_PROJ_SCALE_FACTOR` is
+#     `"clip.vision.projector.scale_factor"` (`tools/mtmd/clip-impl.h:61`).
+#     So for dots.ocr the key is MANDATORY, and a projector without it is
+#     refused at `clip_init` before a single page is seen.
+#
+# THE PIN DOES NOT MOVE — THE PROJECTOR DOES. The same line is byte-identical
+# at `b10950`, Foundry's own fallback build (`page-reader.ts`,
+# `PINNED_RELEASE`), so this is not a regression between two builds and no
+# choice of upstream tag makes that file load. The reason is in the repo's own
+# README, which this manifest previously quoted only half of: after the
+# 2026-03-23 regeneration note it says *"Requires a llama.cpp build with
+# DotsOCR support. At the moment, use: anthony-maio/llama.cpp"* — a FORK. Those
+# GGUFs were converted by a fork's converter for that fork's loader. Pinning
+# them against `ggml-org/llama.cpp` was pinning two halves of two different
+# projects.
+#
+# WHAT IS PINNED NOW is llama.cpp's own conversion, from the org that merged
+# dots.ocr support (PR #17575, the PR `page-reader.ts` cites) — and it is ALSO
+# the pair Foundry named before it started reading this catalog, so the two
+# apps come back to ONE combination rather than a third:
+#
+#   foundry @ 06efb83, app/electron/page-reader.ts (the constants Wave 61
+#   package E deleted when the catalog became the owner):
+#     const HF_REPO     = 'ggml-org/dots.ocr-GGUF';
+#     const MODEL_FILE  = 'dots.ocr-Q8_0.gguf';
+#     const MMPROJ_FILE = 'mmproj-dots.ocr-Q8_0.gguf';
+#
+# Its projector carries the key. Read from the file's own header over a range
+# request on 2026-09-15 (GGUF v3, 304 tensors, 24 kv):
+#     clip.projector_type = dots_ocr
+#     clip.vision.projector.scale_factor = 2
+#     clip.vision.image_min_pixels = 3136
+#     clip.vision.image_max_pixels = 11289600
+# and `clip.vision.spatial_merge_size` is absent, which is the same fact from
+# the other side: this is the conversion upstream's reader was written for.
+#
+# Every number, with where it came from and when (hub API, 2026-09-15, at the
+# pinned sha):
+#   hf_repo/revision  ggml-org/dots.ocr-GGUF @ 2c093a32ca360a396bc6d87d60408636130b9d9b
+#                     GET /api/models/ggml-org/dots.ocr-GGUF/refs -> main = that
+#                     sha (no tags, no other branches); the repo's lastModified
+#                     is 2026-04-05, so this is a settled repository and not one
+#                     being re-cut under the pin.
+#   file              dots.ocr-Q8_0.gguf          1_894_530_272 B  (tree API, LFS size)
+#                     sha256 6f2db1a75215893760b7c7185d52f11715d2e0cb7bff9cefd3f6d409fa1de7e9
+#   mmproj            mmproj-dots.ocr-Q8_0.gguf   1_344_068_512 B  (tree API, LFS size)
+#                     sha256 20d3d35bea3a64ead0b4b213f8db0de136e174bb5b75b8e85786c51e8e822423
+#                     (the LFS oid IS the sha256; nothing in this schema pins a
+#                     digest, so it is recorded here and the revision is what
+#                     the puller enforces)
+#   download_bytes    3_238_598_784 — the two, added. 1.18 GB LESS than the pair
+#                     it replaces.
+#   needs_bytes       4_738_598_784 — download + 1_500_000_000, DECLARED, the same
 #                     discipline as the two Ollama rows (Foundry's `OVERHEAD_GB`).
 #                     What the 1.5 GB has to cover here: KV at the 32768 context
 #                     this manifest serves is 28_672 B/token x 32_768 = 0.94 GB
@@ -92,21 +159,29 @@ description = "The page reader: a 3B vision-language model that turns a rasteris
 #                     vision tower's activations for one ~3_450-token page are
 #                     the rest. Not watched on a card.
 #
-# FOUNDRY TODAY NAMES A DIFFERENT PAIR, and this block is the copy that will
-# expose it: `app/electron/page-reader.ts` pins `ggml-org/dots.ocr-GGUF` with
-# `dots.ocr-Q8_0.gguf` (1_894_530_272 B) + `mmproj-dots.ocr-Q8_0.gguf`
-# (1_344_068_512 B), a Q8_0 projector against the F16 one ruled here. Same
-# model, two repos, two projectors — one fact with two owners. The manifest is
-# the catalog of record and Foundry's keeper compares by content, so the first
-# vendoring says so rather than letting the two drift in silence.
+# WHY THE Q8_0 PROJECTOR AND NOT THE F16 ONE IN THE SAME REPO. The repo also
+# holds `mmproj-dots.ocr-f16.gguf` (2_526_296_992 B, sha256
+# f462429dbf41729379df4252f84331c9646d80e53f092ccccfd2cb922a3b544e), and its
+# header carries `clip.vision.projector.scale_factor = 2` as well — it would
+# load. The Q8_0 one is chosen because it is what Foundry shipped, which is
+# the whole point of this change: ONE combination true in both apps, restored
+# rather than invented. The general guidance this file used to cite — that an
+# mmproj is small and quantising it costs more than it saves — was written
+# about projectors of a few hundred megabytes, and dots.ocr's vision tower is
+# 1.2 B parameters; here F16 costs 1.18 GB of download and 1.18 GB of card.
+# If the Q8 projector turns out to read pages worse, THAT is the measurement
+# that moves this line — `mmproj-dots.ocr-f16.gguf` at the same revision, and
+# nothing else changes. It is not a fallback and nothing selects it at
+# runtime; it is the next pin if a page says so.
+# ##########################################################################
 [local]
 kind = "gguf"
-hf_repo = "anthonym21/dots.ocr-GGUF"
-revision = "42ab310215a26d05ebe21ccc55f64db6c2bfc6ce"
-file = "Dots.Ocr-1.8B-Q8_0.gguf"
-mmproj = "mmproj-Dots.Ocr-F16.gguf"
-download_bytes = 4_419_026_144
-needs_bytes = 5_919_026_144
+hf_repo = "ggml-org/dots.ocr-GGUF"
+revision = "2c093a32ca360a396bc6d87d60408636130b9d9b"
+file = "dots.ocr-Q8_0.gguf"
+mmproj = "mmproj-dots.ocr-Q8_0.gguf"
+download_bytes = 3_238_598_784
+needs_bytes = 4_738_598_784
 needs_basis = "declared"
 
 [backends.cuda-linux]
@@ -296,13 +371,14 @@ engine_args = [
 # `llama-windows` is Crucible USING that form, so a second pin here would be
 # ARCHITECTURE.md R1's defect written on purpose in one file.
 #
-# `memory_bytes_estimate` is `[local] needs_bytes` — 4.42 GB of weights plus
+# `memory_bytes_estimate` is `[local] needs_bytes` — 3.24 GB of weights plus
 # Foundry's own 1.5 GB OVERHEAD_GB for KV at `-c 16384` and the runner's
-# buffers. DECLARED, not measured: no Windows box has run this yet (Owen's
-# card is off-limits while a fine-tune holds it), and section 3.10's fact 8
-# says so out loud — seconds per page and whether the Q8 answers in the
-# parser's dialect are both UNMEASURED and are the first two things measured
-# on a card.
+# buffers. DECLARED, not measured: no Windows box has served a page yet, and
+# section 3.10's fact 8 says so out loud — seconds per page and whether the Q8
+# answers in the parser's dialect are both UNMEASURED and are the first two
+# things measured on a card. T7 got as far as the spawn on 2026-09-15 and the
+# projector refused to load (the block above), which is a measurement of the
+# PIN and not of the model.
 #
 # `-c 16384` and `--parallel 1` are Foundry's working launcher verbatim
 # (`ensurePageReader()`): a page at the app's 200 dpi is up to ~8k image
@@ -312,10 +388,10 @@ engine_args = [
 # only the server knows where it put the weights.
 [backends.llama-windows]
 engine = "llama-server"
-hf_repo = "anthonym21/dots.ocr-GGUF"
-revision = "42ab310215a26d05ebe21ccc55f64db6c2bfc6ce"
-file = "Dots.Ocr-1.8B-Q8_0.gguf"
-mmproj = "mmproj-Dots.Ocr-F16.gguf"
-memory_bytes_estimate = 5_919_026_144
+hf_repo = "ggml-org/dots.ocr-GGUF"
+revision = "2c093a32ca360a396bc6d87d60408636130b9d9b"
+file = "dots.ocr-Q8_0.gguf"
+mmproj = "mmproj-dots.ocr-Q8_0.gguf"
+memory_bytes_estimate = 4_738_598_784
 context_default = 16384
 engine_args = ["--parallel", "1"]

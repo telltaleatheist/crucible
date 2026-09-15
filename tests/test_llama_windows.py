@@ -172,8 +172,8 @@ def test_every_llama_windows_row_names_the_one_file_it_is() -> None:
 def test_the_page_reader_names_its_projector_and_the_text_models_do_not() -> None:
     """Fact 2: half a vision model is a model that loads and then cannot see."""
     dots = load_manifest("dots-ocr").spec(LLAMA_WINDOWS)
-    assert dots.mmproj == "mmproj-Dots.Ocr-F16.gguf"
-    assert dots.files == ("Dots.Ocr-1.8B-Q8_0.gguf", "mmproj-Dots.Ocr-F16.gguf")
+    assert dots.mmproj == "mmproj-dots.ocr-Q8_0.gguf"
+    assert dots.files == ("dots.ocr-Q8_0.gguf", "mmproj-dots.ocr-Q8_0.gguf")
     for model_id in ("qwen3.5-9b", "qwen3.8-27b-4bit"):
         spec = load_manifest(model_id).spec(LLAMA_WINDOWS)
         assert spec.mmproj is None, model_id
@@ -195,6 +195,29 @@ def test_the_page_reader_pins_the_same_pair_the_local_form_names() -> None:
     assert spec.revision == local.revision
     assert spec.file == local.file
     assert spec.mmproj == local.mmproj
+
+
+def test_the_projector_comes_from_the_same_project_as_the_binary() -> None:
+    """T7's third defect (PHASE15-HOST.md 7.6), pinned so it cannot come back.
+
+    The catalog pinned `anthonym21/dots.ocr-GGUF`, whose own README says its
+    files want the `anthony-maio/llama.cpp` FORK. Its projector carries the
+    older `clip.vision.spatial_merge_size` and not
+    `clip.vision.projector.scale_factor`, which `clip.cpp` reads for
+    `PROJECTOR_TYPE_DOTS_OCR` with no `required = false` — so `llama-server`
+    exited at `clip_init` and no upstream tag makes that file load.
+
+    The invariant is not "this exact sha" (a revision may move for a good
+    reason); it is that the GGUF conversion and the loader come from ONE
+    project. `crucible/llamacpp.py` fetches `ggml-org/llama.cpp`, so the
+    weights are `ggml-org`'s conversion of them.
+    """
+    spec = load_manifest("dots-ocr").spec(LLAMA_WINDOWS)
+    assert spec.hf_repo.split("/")[0] == "ggml-org", (
+        f"the page reader's GGUFs come from {spec.hf_repo}, but the engine is "
+        "ggml-org/llama.cpp; a third party's conversion may not carry the keys "
+        "this build requires"
+    )
 
 
 def test_a_file_on_a_backend_that_pulls_a_whole_repo_is_refused() -> None:

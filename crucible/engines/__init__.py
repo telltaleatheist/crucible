@@ -149,7 +149,7 @@ def engine_model_name(engine_name: str, model_dir: Path, model_id: str) -> str:
     if engine_name == LlamaServerEngine.name:
         # `--alias <crucible id>` (PHASE15-HOST.md 7.4, item 3): llama-server
         # would otherwise name the model after the GGUF file, so `/v1/models`
-        # would answer `Dots.Ocr-1.8B-Q8_0.gguf`. With the alias the name IS
+        # would answer `dots.ocr-Q8_0.gguf`. With the alias the name IS
         # the Crucible id, which makes readiness "the name equals the id this
         # server started" and the proxy verbatim — no rewrite, unlike mlx-lm.
         return model_id

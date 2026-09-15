@@ -12,7 +12,7 @@ THE FOUR THINGS THIS FILE DECIDES, AND WHY
 -------------------------------------------
 1. **`--alias <crucible id>`** (7.4's recorded decision). llama-server names
    the model it serves after the GGUF file unless told otherwise, which would
-   make `/v1/models` answer `Dots.Ocr-1.8B-Q8_0.gguf`. With the alias the name
+   make `/v1/models` answer `dots.ocr-Q8_0.gguf`. With the alias the name
    is the Crucible id, so `engine_model_name()` returns the id, the OpenAI
    proxy forwards `model` VERBATIM (no rewrite, unlike mlx-lm), and readiness
    becomes *"the name equals the id this server started"* rather than 3.10

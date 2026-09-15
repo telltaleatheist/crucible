@@ -532,11 +532,21 @@ go.
    NVIDIA: the CPU build. Fetched by a `pull` task of a new subject kind `engine` (`{kind:
    "engine", id: "llama-cpp"}`) so the page's Tasks panel shows it like weights; refusals
    `engine_download_failed`, `engine_sha_mismatch`, by name.
-2. **The weights** are the existing `pages` catalog subject (`dots-ocr` → `anthonym21/
-   dots.ocr-GGUF` @ `42ab310215a26d05ebe21ccc55f64db6c2bfc6ce`, `Dots.Ocr-1.8B-Q8_0.gguf` +
-   `mmproj-Dots.Ocr-F16.gguf`, 4.42 GB, ~5.9 GB needed) pulled through the catalog like any
+2. **The weights** are the existing `pages` catalog subject (`dots-ocr` → `ggml-org/
+   dots.ocr-GGUF` @ `2c093a32ca360a396bc6d87d60408636130b9d9b`, `dots.ocr-Q8_0.gguf` +
+   `mmproj-dots.ocr-Q8_0.gguf`, 3.24 GB, ~4.74 GB needed) pulled through the catalog like any
    subject. A pull that has the text tower and not the mmproj is INCOMPLETE and the subject
    says `installed: false` — the mmproj is not optional.
+
+   **THE PROJECTOR MUST BE A CONVERSION THIS BUILD CAN READ, and that is a fact about the
+   pin, not about llama.cpp.** For `PROJECTOR_TYPE_DOTS_OCR`, `clip.cpp` reads
+   `clip.vision.projector.scale_factor` as MANDATORY (`get_u32(KEY_PROJ_SCALE_FACTOR,
+   hparams.n_merge)` — no `required = false`; `tools/mtmd/clip.cpp:1542` at `b10970`, the
+   same at `b10950`), so a projector converted for a fork that used the older
+   `clip.vision.spatial_merge_size` spelling is refused at `clip_init` and the server exits
+   before it serves. That is what 7.6's third defect was, and it is why this pin is
+   `ggml-org`'s own conversion rather than a third party's. **The llama.cpp pin did NOT move
+   and must not be moved for this**: no upstream tag loads the other file.
 3. **The spawn**, verbatim from `ensurePageReader()`: `-m <gguf> --mmproj <mmproj> -c 16384
    --parallel 1` on a port Crucible chooses (an ephemeral loopback port, not 8000). `-c 16384`
    because a page at the app's dpi is up to ~8k image tokens plus the answer.
@@ -1438,6 +1448,91 @@ New tests: `test_accelerator.py` +8 (24 in the file), `test_llama_engine.py`
 +2 with one CORRECTED — `test_a_busy_windows_card_is_still_accelerator_busy`
 asserted the defect and is now
 `test_a_full_windows_card_is_refused_for_the_room_and_not_for_the_company`.
+
+#### What T7 found on the live card, 2026-09-15 (third defect)
+
+With the guard fixed, the third press got all the way to the spawn. The
+child started and then exited, and for once nothing in this repo was wrong:
+
+> ```
+> llama-server.exe -m ...\models\dots-ocr\llama-windows\Dots.Ocr-1.8B-Q8_0.gguf
+>   --parallel 1 --mmproj ...\models\dots-ocr\llama-windows\mmproj-Dots.Ocr-F16.gguf ...
+> E clip_init: failed to load model '...mmproj-Dots.Ocr-F16.gguf':
+>   Key not found: clip.vision.projector.scale_factor
+> E srv load_model: failed to load multimodal model
+> E srv llama_server: exiting due to model loading error
+> ```
+> (`C:\tmp\phase15-testrun\home\logs\engine-dots-ocr.log`, 00:27)
+
+**The catalog pinned two halves of two different projects.** Read off the
+bytes, both sides:
+
+* The pulled `mmproj-Dots.Ocr-F16.gguf` (GGUF v3, 388 tensors, 25 kv) has NO
+  `clip.vision.projector.scale_factor`. It carries
+  `clip.vision.spatial_merge_size = 2` — the older spelling, which upstream
+  reads for qwen2vl-family projectors and never for this one.
+* `tools/mtmd/clip.cpp` at the pinned `b10970`, case
+  `PROJECTOR_TYPE_DOTS_OCR`, line 1542: `get_u32(KEY_PROJ_SCALE_FACTOR,
+  hparams.n_merge);` — no `required = false`, where every optional read in
+  that function passes one. `KEY_PROJ_SCALE_FACTOR` is
+  `"clip.vision.projector.scale_factor"` (`clip-impl.h:61`).
+
+**The llama.cpp pin does not move.** That line is byte-identical at `b10950`
+— Foundry's own `PINNED_RELEASE` — so this is not a regression between two
+builds and no choice of upstream tag makes that file load. The reason is in
+the anthonym21 README, which the manifest had quoted only half of: under the
+2026-03-23 regeneration note it says *"Requires a llama.cpp build with
+DotsOCR support. At the moment, use: anthony-maio/llama.cpp"* — **a fork**.
+Those GGUFs were converted by a fork's converter for that fork's loader.
+
+**Fixed in `crucible/models/dots-ocr.toml`** (`[local]` and
+`[backends.llama-windows]`, which name one pair by design):
+
+| | was | now |
+|---|---|---|
+| repo @ rev | `anthonym21/dots.ocr-GGUF` @ `42ab3102…` | `ggml-org/dots.ocr-GGUF` @ `2c093a32ca360a396bc6d87d60408636130b9d9b` |
+| text tower | `Dots.Ocr-1.8B-Q8_0.gguf` 1,894,530,336 B | `dots.ocr-Q8_0.gguf` 1,894,530,272 B (sha256 `6f2db1a7…fa1de7e9`) |
+| projector | `mmproj-Dots.Ocr-F16.gguf` 2,524,495,808 B (sha256 `b65a1db5…f6970de8`) | `mmproj-dots.ocr-Q8_0.gguf` 1,344,068,512 B (sha256 `20d3d35b…8e822423`) |
+| download | 4,419,026,144 (4.42 GB) | 3,238,598,784 (3.24 GB) |
+| needs / estimate | 5,919,026,144 (5.92 GB) | 4,738,598,784 (4.74 GB) |
+
+The new projector's header, read over a range request on 2026-09-15 (GGUF v3,
+304 tensors, 24 kv): `clip.projector_type = dots_ocr`,
+**`clip.vision.projector.scale_factor = 2`**, `clip.vision.image_min_pixels =
+3136`, `clip.vision.image_max_pixels = 11289600`, and no
+`clip.vision.spatial_merge_size` — the same fact from the other side.
+
+**It is also Foundry's pair, which is the point.** PHASE9-CAPABILITY.md 7.4's
+"Found 2" was this disagreement written down before it cost anything: the
+constants Wave 61 package E deleted from `app/electron/page-reader.ts` (foundry
+@ `06efb83`) were `ggml-org/dots.ocr-GGUF` / `dots.ocr-Q8_0.gguf` /
+`mmproj-dots.ocr-Q8_0.gguf`. The catalog is the owner and Foundry reads it, so
+this closes the fact with two owners by moving the owner to the half that
+works, not by inventing a third pin. The same repo's `mmproj-dots.ocr-f16.gguf`
+(2,526,296,992 B) also carries the key and would load; the Q8_0 one is pinned
+because it is what both apps once shipped, and if a page proves the quantised
+projector reads worse, THAT measurement moves the line to the f16 file at the
+same revision. Nothing selects between them at runtime.
+
+`foundry-lineup.json` regenerated (`scripts/gen-foundry-lineup.py`), and
+`docs/PHASE9-CAPABILITY.md` 7.4's table and Found 2 say the pair is settled.
+
+Tests updated for the pin: `test_manifests.py`, `test_lineup.py`,
+`test_llama_windows.py`, `test_llama_engine.py` — the filenames and sizes were
+asserted in four files, which is what kept the change honest.
+
+**Owen pulls; this build did not.** The home is an environment variable, not a
+flag (`CRUCIBLE_HOME`, `crucible/config.py`), and `remove` comes FIRST: the two
+superseded files sit in
+`C:\tmp\phase15-testrun\home\models\dots-ocr\llama-windows\` and the new spec
+does not name them, so a bare pull leaves 4.42 GB of a fork's GGUFs beside the
+3.24 GB that works and `directory_bytes` reports the sum.
+
+```powershell
+$env:CRUCIBLE_HOME = 'C:\tmp\phase15-testrun\home'
+crucible remove model dots-ocr     # the subject's whole directory
+crucible models pull dots-ocr      # the pair above, at the pinned revision
+```
 
 #### STILL UNMEASURED — tested once the GPU is free
 

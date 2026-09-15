@@ -354,16 +354,16 @@ def test_dots_ocr_with_the_text_tower_and_no_mmproj_is_NOT_installed(
     config = _config(tmp_path / "home")
     manifest = load_manifest("dots-ocr")
     spec = manifest.spec(LLAMA_WINDOWS)
-    assert spec.files == ("Dots.Ocr-1.8B-Q8_0.gguf", "mmproj-Dots.Ocr-F16.gguf")
+    assert spec.files == ("dots.ocr-Q8_0.gguf", "mmproj-dots.ocr-Q8_0.gguf")
 
     hub = FakeHub(chunks=1)
-    hub.absent = {"mmproj-Dots.Ocr-F16.gguf"}
+    hub.absent = {"mmproj-dots.ocr-Q8_0.gguf"}
     monkeypatch.setattr(
         "huggingface_hub.snapshot_download", hub.snapshot_download, raising=False
     )
     with pytest.raises(WeightsError) as caught:
         weights.pull(config, manifest, spec)
-    assert "mmproj-Dots.Ocr-F16.gguf" in str(caught.value)
+    assert "mmproj-dots.ocr-Q8_0.gguf" in str(caught.value)
     # NOTHING IS STAMPED, so nothing reads back as installed.
     assert weights.installed(config, manifest, spec) is None
 
@@ -381,12 +381,12 @@ def test_a_named_file_deleted_after_the_pull_makes_the_subject_not_installed(
     found = weights.pull(config, manifest, spec)
     assert weights.installed(config, manifest, spec) is not None
 
-    (found.path / "mmproj-Dots.Ocr-F16.gguf").unlink()
+    (found.path / "mmproj-dots.ocr-Q8_0.gguf").unlink()
     assert weights.installed(config, manifest, spec) is None
     with pytest.raises(WeightsError) as caught:
         weights.require_installed(config, manifest, spec)
     # The sentence is about the FILE, not about a pin that did not move.
-    assert "mmproj-Dots.Ocr-F16.gguf" in str(caught.value)
+    assert "mmproj-dots.ocr-Q8_0.gguf" in str(caught.value)
     assert "now pins" not in str(caught.value)
 
 
@@ -473,10 +473,10 @@ def test_the_spawn_line_is_facts_3_and_the_alias_decision(tmp_path: Path) -> Non
     spec = manifest.spec(LLAMA_WINDOWS)
     weights_dir = tmp_path / "dots"
     args = Residency._engine_args(manifest, spec, weights_dir)
-    assert args[:2] == ["-m", str(weights_dir / "Dots.Ocr-1.8B-Q8_0.gguf")]
+    assert args[:2] == ["-m", str(weights_dir / "dots.ocr-Q8_0.gguf")]
     assert "--mmproj" in args
     assert args[args.index("--mmproj") + 1] == str(
-        weights_dir / "mmproj-Dots.Ocr-F16.gguf"
+        weights_dir / "mmproj-dots.ocr-Q8_0.gguf"
     )
     assert args[args.index("-c") + 1] == "16384"
     assert "--parallel" in args and args[args.index("--parallel") + 1] == "1"

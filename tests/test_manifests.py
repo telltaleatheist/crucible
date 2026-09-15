@@ -763,11 +763,11 @@ def test_the_27b_is_the_floor_for_translate_and_simplify_not_analysis() -> None:
 def test_the_page_reader_is_a_gguf_pair_at_a_pinned_sha() -> None:
     local = load_manifest("dots-ocr").local
     assert isinstance(local, GgufLocal)
-    assert local.hf_repo == "anthonym21/dots.ocr-GGUF"
-    assert local.revision == "42ab310215a26d05ebe21ccc55f64db6c2bfc6ce"
-    assert local.file == "Dots.Ocr-1.8B-Q8_0.gguf"
-    assert local.mmproj == "mmproj-Dots.Ocr-F16.gguf"
-    assert local.download_bytes == 1_894_530_336 + 2_524_495_808
+    assert local.hf_repo == "ggml-org/dots.ocr-GGUF"
+    assert local.revision == "2c093a32ca360a396bc6d87d60408636130b9d9b"
+    assert local.file == "dots.ocr-Q8_0.gguf"
+    assert local.mmproj == "mmproj-dots.ocr-Q8_0.gguf"
+    assert local.download_bytes == 1_894_530_272 + 1_344_068_512
 
 
 def test_a_model_id_with_a_slash_is_refused_by_name() -> None:
