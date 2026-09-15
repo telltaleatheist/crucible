@@ -359,7 +359,10 @@ def test_a_stream_that_ends_with_no_terminal_event_is_a_FAILURE(
         )
         finished = wait_for(server, auth, accepted.json()["task_id"])
     assert finished["state"] == "failed"
-    assert finished["error"]["code"] == "engine_move_needs_host"
+    # NOT `engine_move_needs_host`: a host answered. The door's other caller
+    # (`sdk/bootstrap/src/hostdoor.ts`) already calls this ending
+    # `host_install_failed`, and one door has one set of names.
+    assert finished["error"]["code"] == "host_install_failed"
     assert "without saying whether" in finished["error"]["message"]
 
 
@@ -384,22 +387,34 @@ def test_the_host_s_own_refusal_code_travels_rather_than_being_flattened(
     assert finished["error"]["code"] == "host_install_running"
 
 
-def test_a_door_that_does_not_answer_is_engine_move_needs_host(
+def test_a_door_that_does_not_answer_is_host_unreachable(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The variable says a host is there; the connection says it is not."""
+    """The variable says a host is there; the connection says it is not.
+
+    **T10, 2026-09-14.** The POST is ACCEPTED — with the door set, 4.7 hands
+    the move to the host and relays its events, so there is nothing to refuse
+    at submit time and the failure is named IN THE TASK. Which is a different
+    failure from `engine_move_needs_host`, and now says so: *start your
+    host's door again*, not *start a host*.
+    """
     with FakeDoor() as dead:
         url = dead.url
     with windows_client(make_client, monkeypatch, url) as server:
         accepted = server.post(
             "/v1/tasks", headers=auth, json={"type": "engine", "target": "wsl"}
         )
+        # The submit itself is a 202 and says nothing about the door: reading
+        # the POST body for the refusal is what T10's stage got wrong.
+        assert accepted.status_code == 202
+        assert "error" not in accepted.json()
         finished = wait_for(server, auth, accepted.json()["task_id"])
     assert finished["state"] == "failed"
-    assert finished["error"]["code"] == "engine_move_needs_host"
-    assert "not running" in finished["error"]["message"]
+    assert finished["error"]["code"] == "host_unreachable"
+    assert "not answering" in finished["error"]["message"]
+    assert url.rstrip("/") in finished["error"]["message"]
 
 
 def test_it_is_one_task_at_a_time_like_every_other(

@@ -109,6 +109,30 @@ HOST_DOOR_ENV = "CRUCIBLE_HOST_DOOR"
 #: and reads newline-delimited JSON back.
 HOST_DOOR_PATH = "/install"
 
+#: THREE ENDINGS OF ONE DOOR, THREE NAMES — and they are not this module's
+#: names, they are the door's (PHASE15-HOST.md 4.3 and 4.7).
+#:
+#: **Found by the first Windows run, 2026-09-14 (T10).** All three used to be
+#: `engine_move_needs_host`, which made one code carry three different facts
+#: with three different answers: *start a host* (there is none),
+#: *start your host's door again* (there is one and it is dead), and *read the
+#: host's log* (it answered and then abandoned the stream). The door's OTHER
+#: caller — `@crucible/bootstrap`'s `requestHostInstall`, `sdk/bootstrap/src/
+#: hostdoor.ts` — already had two of those names, so this side takes THEM
+#: rather than inventing a third set for the same door (ARCHITECTURE.md R1:
+#: one owner per name on the wire).
+#:
+#:     no `$CRUCIBLE_HOST_DOOR`     `engine_move_needs_host`  (this side only)
+#:     connection refused/timeout   `host_unreachable`
+#:     a stream with no terminal    `host_install_failed`
+#:     a `failed` event             the code IT carries, verbatim
+#:     an HTTP refusal, no code     `engine_move_needs_host` — unchanged, and
+#:                                  for its own reason: something answered
+#:                                  7101 and it is not behaving like a host,
+#:                                  which is the same fact as "no host here".
+HOST_UNREACHABLE = "host_unreachable"
+HOST_INSTALL_FAILED = "host_install_failed"
+
 #: How long the server waits for the host to ACCEPT the move. The sequence
 #: itself takes as long as it takes — a distro import and a pack download —
 #: and is read line by line with no deadline of its own, because a deadline
@@ -1065,7 +1089,7 @@ class TaskStore:
         if terminal is None:
             raise ApiError(
                 502,
-                "engine_move_needs_host",
+                HOST_INSTALL_FAILED,
                 f"the host's door at {door}{HOST_DOOR_PATH} closed its stream "
                 "without saying whether the move finished. Nothing here can "
                 "tell a completed install from an abandoned one, so it is "
@@ -1143,10 +1167,12 @@ class TaskStore:
         except (urllib.error.URLError, OSError) as exc:
             raise ApiError(
                 502,
-                "engine_move_needs_host",
+                HOST_UNREACHABLE,
                 f"the host's door at {door}{HOST_DOOR_PATH} did not answer: "
-                f"{type(exc).__name__}: {exc}. The host is named by "
-                f"${HOST_DOOR_ENV} and is not running, or not running any more",
+                f"{type(exc).__name__}: {exc}. A host started this server "
+                f"(${HOST_DOOR_ENV} is set) and its door is not answering "
+                "now. Start it from the Startup item, or run `crucible host` "
+                "from the host pack, and press it again",
                 {"door": door},
             ) from None
         return terminal
