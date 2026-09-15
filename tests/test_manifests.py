@@ -257,7 +257,15 @@ SHIPPED = ["dots-ocr", "qwen3.5-9b", "qwen3.8-27b", "qwen3.8-27b-4bit"]
 #: carries the 32768 a rasterised page needs (PHASE3-VLM.md section 4).
 CONTEXTS = {
     "dots-ocr": 32768,
-    "qwen3.5-9b": 12288,
+    # 16384 SINCE 2026-09-15, and 12288 had no claimant left. It reached the file
+    # as BookForge's `numCtxMaxForModel` 32B tier ("tuned for 32B Q4_K_M")
+    # landing on a 9B — the right function's wrong tier. cuda-linux and
+    # mlx-darwin were each moved first, leaving 12288 standing as
+    # "llama-windows's number alone"; that did not survive either, because the
+    # `<=15B` tier's premise is "Q4_K_M weights are <= ~9.5 GiB" and the Q8_0
+    # GGUF that block names is 9.53 GB. So the number moved to [model] and both
+    # overrides were deleted — see BACKEND_CONTEXTS, which no longer names it.
+    "qwen3.5-9b": 16384,
     "qwen3.8-27b": 12288,
     "qwen3.8-27b-4bit": 98304,
 }
@@ -283,15 +291,18 @@ BACKENDS = {
 #: there, MEASURED 2026-09-12, so its cuda-linux block carries 16384.
 BACKEND_CONTEXTS = {
     ("qwen3.8-27b-4bit", "cuda-linux"): 16384,
-    # The context BookForge's vLLM launcher served this checkpoint at from its
-    # first commit and never changed (`VLLM_TEXT_MAX_MODEL_LEN:-16384`), and the
-    # cap Foundry's own `numCtxMaxForModel` gives a model of this size. The
-    # model-level 12288 is the OLLAMA number and stays where the other two
-    # backends read it.
-    ("qwen3.5-9b", "cuda-linux"): 16384,
+    # AND ON WINDOWS, for a different reason that lands on the same number: the
+    # llama-windows block was INHERITING 98304, which is a fact about the Mac's
+    # unified memory and was never argued for a 24 GB card (crucible e49871d).
+    ("qwen3.8-27b-4bit", "llama-windows"): 16384,
     # `-c 16384` is Foundry's launcher verbatim: a page at 200 dpi is up to
     # ~8k image tokens plus the answer (PHASE15-HOST.md 3.10, fact 3).
     ("dots-ocr", "llama-windows"): 16384,
+    # `qwen3.5-9b` USED TO BE HERE, on cuda-linux, and is deliberately not any
+    # more: all three of its backends now inherit one 16384 from [model]. An
+    # override that merely restates the inherited value is a second place to
+    # change a number, which is how 12288 came to mean two different things on
+    # two backends in the first place. See CONTEXTS above.
 }
 
 
