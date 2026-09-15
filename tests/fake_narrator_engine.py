@@ -63,8 +63,8 @@ def install(monkeypatch: pytest.MonkeyPatch) -> list[FakeNarratorEngine]:
         voices: VoicesDocument | None,
     ) -> FakeNarratorEngine:
         # THE SERVER'S OWN CONFIGURATION IS TAKEN AND DROPPED, deliberately.
-        # The real `build_voice_engine` would check the interpreter sits in a
-        # venv (`pyvenv.cfg`) and emit HIGGS_STACK / HIGGS_ENV /
+        # The real `build_voice_engine` would read the interpreter's prefix
+        # off disk (`higgs_env_prefix`) and emit HIGGS_STACK / HIGGS_ENV /
         # HIGGS_MAX_NUM_SEQS; the env fixtures stamp a non-executable
         # placeholder interpreter and the fake worker starts no vllm-omni, so
         # there is nothing here for those three to configure. What they DO

@@ -36,6 +36,7 @@ from crucible.engines.narrator import (
     MAX_NUM_SEQS_VARIABLE,
     MODULE,
     STACK_VARIABLE,
+    higgs_env_prefix,
 )
 from crucible.engines.vllm import VllmEngine
 from crucible.errors import JobCancelled
@@ -156,9 +157,10 @@ def test_the_argv_is_narrator_serve_and_nothing_else() -> None:
 
 def a_venv(tmp_path: Path, name: str = "tts-higgs-v3") -> Path:
     """A directory shaped like the env `crucible install tts` builds: a
-    `bin/python` under a root carrying `pyvenv.cfg`. That file is what makes a
-    venv a venv, and the engine checks for it rather than trusting the walk up
-    from a binary."""
+    `bin/python` under a root carrying `pyvenv.cfg`. That file is one of the
+    three things `higgs_env_prefix` reads to confirm a prefix is a prefix; the
+    real env on the PC carries `bin/vllm-omni` as well (see
+    `a_venv_on_a_conda_env`)."""
     root = tmp_path / name
     (root / "bin").mkdir(parents=True)
     (root / "pyvenv.cfg").write_text("home = /usr\n", encoding="utf-8")
@@ -262,9 +264,86 @@ def test_a_width_below_one_is_refused(tmp_path: Path) -> None:
     assert "at least 1" in str(caught.value)
 
 
+def a_venv_on_a_conda_env(tmp_path: Path) -> Path:
+    """THE LIVE WSL LAYOUT, which is what broke on 2026-09-14.
+
+    `workerenv.install_worker_env` builds the tts env with `sys.executable -m
+    venv`, and on that box the server's own interpreter is a CONDA env — so
+    `~/.crucible/envs/tts-higgs-v3/bin/python` is a symlink into
+    `~/anaconda3/envs/crucible/bin`, and the conda env at the other end has no
+    `pyvenv.cfg` because no conda env ever has one. The stack (`vllm-omni`,
+    and the `nvidia/cu13` tree CUDA_HOME is built from) is installed in the
+    VENV, so the venv is the prefix and the symlink is a dead end."""
+    conda = tmp_path / "anaconda3" / "envs" / "crucible"
+    (conda / "bin").mkdir(parents=True)
+    (conda / "conda-meta").mkdir()
+    base = conda / "bin" / "python3.11"
+    base.write_text("", encoding="utf-8")
+
+    venv = tmp_path / ".crucible" / "envs" / "tts-higgs-v3"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(
+        f"home = {conda / 'bin'}\nexecutable = {base}\n", encoding="utf-8"
+    )
+    (venv / "bin" / "vllm-omni").write_text("", encoding="utf-8")
+    python = venv / "bin" / "python"
+    try:
+        python.symlink_to(base)
+    except OSError as refused:  # a host that cannot make one at all
+        pytest.skip(f"this layout is a symlink and this host refused one: {refused}")
+    return python
+
+
+def test_the_prefix_is_the_env_the_stack_is_in_not_the_one_it_symlinks_to(
+    tmp_path: Path,
+) -> None:
+    """The 2026-09-14 regression: every `tts` job on the live WSL server died
+    at engine start because the prefix was taken from `Path(python)
+    .resolve()`, which follows a venv's `bin/python` symlink out of the env
+    and into the base interpreter — then demanded a `pyvenv.cfg` there, which
+    a conda env never has.
+
+    `$HIGGS_ENV/bin/vllm-omni` is the file narrator's launcher execs and
+    `$HIGGS_ENV/lib/python3.11/site-packages/nvidia/cu13` is its CUDA_HOME;
+    both are in the VENV. The base interpreter's prefix has neither."""
+    python = a_venv_on_a_conda_env(tmp_path)
+    venv = python.parent.parent
+    built = build_voice_engine(
+        "higgs-v3", python, tmp_path / "x.log",
+        serving_stack="vllm-omni", max_num_seqs=16,
+        voices=a_document(tmp_path, tmp_path / "weights"))
+    prefix = built.environment()[ENV_PREFIX_VARIABLE]
+    assert prefix == str(venv)
+    assert higgs_env_prefix(python) == venv
+    # Said the other way round, because this is the value that was emitted:
+    # the conda env the venv was built from is not the prefix.
+    assert str(python.resolve().parent.parent) != prefix
+    # And what the launcher would exec is under the prefix that was emitted.
+    assert (Path(prefix) / "bin" / "vllm-omni").is_file()
+
+
+def test_a_conda_env_is_its_own_prefix(tmp_path: Path) -> None:
+    """A conda env has `conda-meta/` and no `pyvenv.cfg`. Handed one directly
+    — the shape `crucible install` produces when the tts env IS a conda env
+    rather than a venv on top of one — the prefix is that env itself, not a
+    parent walked to in search of a file conda does not write."""
+    conda = tmp_path / "anaconda3" / "envs" / "tts-higgs-v3"
+    (conda / "bin").mkdir(parents=True)
+    (conda / "conda-meta").mkdir()
+    python = conda / "bin" / "python"
+    python.write_text("", encoding="utf-8")
+    built = build_voice_engine(
+        "higgs-v3", python, tmp_path / "x.log",
+        serving_stack="vllm-omni", max_num_seqs=16,
+        voices=a_document(tmp_path, tmp_path / "weights"))
+    assert built.environment()[ENV_PREFIX_VARIABLE] == str(conda)
+    assert higgs_env_prefix(python) == conda
+
+
 def test_an_interpreter_that_is_not_in_a_venv_is_refused(tmp_path: Path) -> None:
     """`HIGGS_ENV` is the prefix narrator's launch script builds CUDA_HOME,
-    PATH and the vllm-omni binary from. A prefix that is not a venv produces
+    PATH and the vllm-omni binary from. A directory that is no kind of env —
+    no `bin/vllm-omni`, no `pyvenv.cfg`, no `conda-meta/` — produces
     `No such file` at the end of a launch instead of here."""
     stray = tmp_path / "not-an-env" / "bin" / "python"
     stray.parent.mkdir(parents=True)
@@ -276,6 +355,10 @@ def test_an_interpreter_that_is_not_in_a_venv_is_refused(tmp_path: Path) -> None
             voices=a_document(tmp_path, tmp_path / "weights"))
     assert ENV_PREFIX_VARIABLE in str(caught.value)
     assert "pyvenv.cfg" in str(caught.value)
+    assert "conda-meta" in str(caught.value)
+    assert "vllm-omni" in str(caught.value)
+    # The engine it could not start is named, not just the prefix it read.
+    assert "narrator (higgs-v3)" in str(caught.value)
 
 
 def test_an_arm_that_starts_no_server_is_told_none_of_the_three(

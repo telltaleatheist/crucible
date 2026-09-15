@@ -97,10 +97,10 @@ ENGINE_VARIABLE = "NARRATOR_ENGINE"
 #:                       `serve_higgs_v3.sh` builds CUDA_HOME, PATH,
 #:                       LD_LIBRARY_PATH and `$HIGGS_ENV/bin/vllm-omni` from it
 #:                       and refuses (exit 5) when it is unset. For Crucible it
-#:                       is the tts env's own venv root — the interpreter's
-#:                       `parent.parent`, CHECKED against `pyvenv.cfg` rather
-#:                       than assumed, because a path built by walking up from
-#:                       a binary is a guess until something confirms it.
+#:                       is THE TTS ENV ITSELF — `higgs_env_prefix()` below,
+#:                       which derives it from the interpreter Crucible was
+#:                       handed and confirms it by reading what is on disk
+#:                       there.
 #:   HIGGS_MAX_NUM_SEQS  stage 0's admission width AND the width of narrator's
 #:                       own batch (`v3_served.serve_concurrency()`, which
 #:                       raises by name). STATED FROM THE VOICE MANIFEST's
@@ -146,6 +146,62 @@ POLL_SECONDS = 0.5
 #: workers.py` uses: narrator on `cuda-linux` starts SGLang-Omni underneath
 #: itself, which is minutes of weight reading before the `loaded` line.
 LOAD_SILENCE_TIMEOUT_SECONDS = 900.0
+
+#: The binary `serve_higgs_v3.sh` execs, relative to `$HIGGS_ENV`. The launcher
+#: also builds `$HIGGS_ENV/lib/python3.11/site-packages/nvidia/cu13` as
+#: CUDA_HOME and puts `$HIGGS_ENV/bin` on PATH — so the prefix is the tree the
+#: STACK is installed into, and this path is the most direct evidence on disk
+#: that a directory is that tree.
+LAUNCH_BINARY = ("bin", "vllm-omni")
+
+
+def higgs_env_prefix(python: Path) -> Path:
+    """`$HIGGS_ENV` for a tts env, READ off the env rather than inferred.
+
+    THE DEFECT THIS EXISTS FOR (live WSL server, 2026-09-14): every `tts` job
+    failed at engine start with `HIGGS_ENV is the prefix its server runs out
+    of, and the tts env python .../envs/tts-higgs-v3/bin/python does not sit
+    in one — /home/telltale/anaconda3/envs/crucible/pyvenv.cfg is not there`.
+    Two mistakes, one line (`Path(python).resolve().parent.parent`, a7ab9af):
+
+    1. **`.resolve()` walked out of the env.** `workerenv.install_worker_env`
+       builds the env with `sys.executable -m venv`, and a venv's `bin/python`
+       is a SYMLINK to the interpreter it was built from — here the conda env
+       the server itself runs in. Resolving it therefore lands on the BASE
+       interpreter's prefix, which is not the env Crucible installed vllm-omni
+       into. The prefix is where the env IS, so the symlink is not followed.
+    2. **`pyvenv.cfg` was made the definition of a prefix.** A conda env has
+       none (it has `conda-meta/`), and a relocatable pack (`envpack`) is a
+       standalone CPython with neither — so the check refused two of the three
+       layouts Crucible can be pointed at, and the one it refused tonight was
+       the base of the very venv it had just walked into.
+
+    What is read, in the order the evidence answers the launcher's question:
+
+    * `bin/vllm-omni` — the file the script execs. Definitive on all three
+      layouts, and the only one that says the STACK is here and not merely a
+      python.
+    * `pyvenv.cfg` — a venv. Its own prefix, never its parent's.
+    * `conda-meta/` — a conda env, which is its own prefix.
+
+    Anything else is refused BY NAME here rather than at the end of a launch,
+    where it reads as `$HIGGS_ENV/bin/vllm-omni: No such file`.
+    """
+    root = Path(python).parent.parent
+    if (root / LAUNCH_BINARY[0] / LAUNCH_BINARY[1]).exists():
+        return root
+    if (root / "pyvenv.cfg").is_file():
+        return root
+    if (root / "conda-meta").is_dir():
+        return root
+    raise EngineError(
+        f"{ENV_PREFIX_VARIABLE} is the prefix narrator's server runs out of, "
+        f"and {root} — the prefix of the tts env python {python} — is not "
+        f"one: it carries no {'/'.join(LAUNCH_BINARY)}, no pyvenv.cfg (a venv) "
+        "and no conda-meta/ (a conda env). narrator's launch script builds "
+        "CUDA_HOME, PATH, LD_LIBRARY_PATH and the vllm-omni binary from that "
+        "prefix and refuses when it is unset"
+    )
 
 
 @dataclass(frozen=True)
@@ -253,22 +309,15 @@ class NarratorEngine(SubprocessEngine):
                     f"{MAX_NUM_SEQS_VARIABLE}={max_num_seqs} for {self.name} "
                     "must be at least 1"
                 )
-            # `venv/bin/python` -> `venv`. CHECKED, not assumed: `pyvenv.cfg`
-            # is what makes a directory a venv, and handing narrator's launch
-            # script a prefix that is not one produces
-            # `$HIGGS_ENV/bin/vllm-omni: No such file` at the end of a launch
-            # rather than here.
-            root = Path(python).resolve().parent.parent
-            if not (root / "pyvenv.cfg").is_file():
+            # `<env>/bin/python` -> `<env>`, confirmed by what is on disk
+            # there. `higgs_env_prefix` is where the two ways this was wrong
+            # are written down; its refusal names this engine here.
+            try:
+                self._env_prefix: Path | None = higgs_env_prefix(python)
+            except EngineError as refusal:
                 raise EngineError(
-                    f"cannot start {self.name}: {ENV_PREFIX_VARIABLE} is the "
-                    "prefix its server runs out of, and the tts env python "
-                    f"{python} does not sit in one — {root / 'pyvenv.cfg'} is "
-                    "not there. narrator's launch script builds CUDA_HOME, "
-                    "PATH, LD_LIBRARY_PATH and the vllm-omni binary from that "
-                    "prefix and refuses when it is unset"
-                )
-            self._env_prefix: Path | None = root
+                    f"cannot start {self.name}: {refusal}"
+                ) from refusal
         elif serving_stack is not None:
             # A STACK ON AN ENGINE THAT HAS NONE. `HIGGS_*` is Higgs v3's
             # vocabulary, and an engine that renders in process reads not one
