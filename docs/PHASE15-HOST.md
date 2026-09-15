@@ -1207,33 +1207,55 @@ a 24 GB card with a 3 GiB allowance, nothing configured):
 
 ### 7.3 Measured, and unmeasured
 
-- **UNMEASURED, and deliberately: everything that needs the card.** Owen ruled the GPU
-  off limits while a fine-tune holds it. No `llama-server` has been started by this
-  build, on CPU or CUDA. So: seconds per page under the Q8 GGUF, whether the Q8 answers
-  in `parseDotsPage`'s dialect exactly, and seconds per page under vLLM on the 4090 are
-  all **unmeasured — tested once the GPU is free** (3.10's fact 8 stands unchanged).
-- **T6's first run on a live card, 2026-09-15 00:01, run `20260914-235923`** — one figure
-  measured and the rest destroyed by a defect, which is why they are listed as such
-  rather than quietly left blank:
+- **MEASURED on the card, 2026-09-15.** The button ran. Everything this section listed
+  as needing a card has a number, and **3.10's fact 8 is answered** — that section still
+  carries the old sentence and is owed the correction.
 
-  | figure | T6 |
-  |---|---|
-  | `load-model dots-ocr`, `cuda-linux` / vLLM in WSL | **99.3 s** |
-  | seconds/page | **not recorded** — under 5 s by the server journal (the load job's last `done` poll at 00:01:03, `POST /v1/openai/chat/completions 200 OK` at 00:01:08), which is a bound read off timestamps and NOT a measurement |
-  | blocks parsed | **not recorded** |
-  | dialect | **not recorded** |
+  | figure | `cuda-linux` / vLLM in WSL (T6) | `llama-windows` / llama.cpp (T7) |
+  |---|---|---|
+  | `load-model dots-ocr` | **73.1 s** (a first run measured 99.3 s) | **6.2 s** |
+  | seconds/page | **4.5** | **3.7** |
+  | blocks parsed | **11** | **11** |
+  | categories | `List-item`, `Section-header`, `Text` | the same three |
+  | dialect | `dots-json`, parsed | `dots-json`, parsed |
+  | unload | clean | clean |
 
-  The page WAS read — the journal has the `200 OK` — but `scripts/read_one_page.py`
-  unloaded in a `finally`, the server refused that unload `409 engine_in_use` because
-  its own settlement had already begun clearing the card, and the refusal replaced the
-  result before `answer.json` had been written. Both halves are fixed:
-  `crucible/settle.py` (a clearance of the same model is the same intent, answered, not
-  a conflict — `tests/test_llm_api.py`, `tests/test_tts_api.py`) and the stage, which
-  now records and prints what it measured before it tidies up. **Re-run T6 to fill the
-  three blank rows**; the load figure above stands.
-- **The three `llama-windows` `memory_bytes_estimate` figures are DECLARED**, not
-  measured: the GGUF's own size plus 1.5 GB, which is Foundry's `OVERHEAD_GB` and the
-  same number every `[local] needs_bytes` in `models/` declares.
+  The card is an **RTX 3090 Ti** — in WSL2 for T6, the same card from Windows for T7.
+  Earlier drafts of this section said "the 4090"; that was never this machine. Runs
+  `20260915-003456` (T6) and `20260915-004350` (T7).
+
+  **The two artifacts are byte-identical.** `t6/shape.json` and `t7/shape.json` — eleven
+  objects, each `{bbox, category, text}` with a four-number bbox — `diff` clean. That is
+  T7's stated pass criterion met, and it is the answer to *whether the Q8 GGUF answers in
+  `parseDotsPage`'s dialect exactly*: it does, on the same page, to the byte.
+
+  `llama-server`'s own timing for that page: prompt **2 595 tokens in 1.26 s**
+  (2 058 tok/s), **657 output tokens in 2.44 s** (269 tok/s).
+
+- **`qwen3.5-9b` Q8 under llama.cpp (T7)**: load **10.2 s**, **1.3 s** per cleanup
+  chunk, and the chunk came back with the broken word joined. The completion names
+  `model: qwen3.5-9b` and `system_fingerprint: b10970-bfdc32183`, which is **`--alias`
+  proven against a real `llama-server`** rather than against a string this build wrote.
+
+- **T6's first run, 2026-09-15 00:01, run `20260914-235923`** — kept because the defect
+  it found is why the figures above exist. The page WAS read (the journal has the
+  `200 OK`) but `scripts/read_one_page.py` unloaded in a `finally`, the server refused
+  that unload `409 engine_in_use` because its own settlement had already begun clearing
+  the card, and the refusal replaced the result before `answer.json` had been written.
+  Both halves fixed in **e34271d**: `crucible/settle.py` (a clearance of the same model
+  is the same intent, answered, not a conflict — `tests/test_llm_api.py`,
+  `tests/test_tts_api.py`) and the stage, which now records and prints what it measured
+  before it tidies up. The re-run is the T6 column above.
+
+- **The three `llama-windows` `memory_bytes_estimate` figures are still DECLARED** (the
+  GGUF's own size plus 1.5 GB, Foundry's `OVERHEAD_GB` and the same number every
+  `[local] needs_bytes` in `models/` declares), and **one of the three now has a
+  measurement beside it**. With `dots-ocr` resident the card read **~6.7 GB total**
+  against a **2.5 GB** desktop baseline, so **≈4.2 GB** for the Q8 text tower plus the
+  Q8 projector — under the declared 4 738 598 784 (4.74 GB), which is the direction an
+  estimate should err. `qwen3.5-9b` (declared 11 027 502 048) is **measured only as a
+  load that succeeded; bytes owed**. `qwen3.8-27b-4bit` (declared 17 964 440 224) was
+  never loaded.
 - **Read from the HuggingFace API on 2026-09-14** (tree API, LFS size):
   `unsloth/Qwen3.5-9B-GGUF` @ `3885219b6810b007914f3a7950a8d1b469d598a5`,
   `Qwen3.5-9B-Q8_0.gguf` 9 527 502 048 B;
@@ -1303,7 +1325,8 @@ Run under the WSL lock, single files, because a `train_lora.py` run holds the VM
 `test_llama_windows.py` (19), plus `test_ui_mount.py`, `test_manifests.py` and
 `test_capability.py` re-run green after their fixtures learned `route` and `gpu_vendor`.
 **The full suite is owed and is scheduled after the training run** — it was 1234 before
-this work. `sdk/ts`: 257, up from 235.
+this work. `sdk/ts`: 257, up from 235. (Both were settled on 2026-09-15: the suite is
+green and `sdk/ts` is 299 — 7.6's Tests block.)
 
 ---
 
@@ -1534,35 +1557,93 @@ crucible remove model dots-ocr     # the subject's whole directory
 crucible models pull dots-ocr      # the pair above, at the pinned revision
 ```
 
-#### STILL UNMEASURED — tested once the GPU is free
+That sequence was run on 2026-09-15 and **the first line did not do what this
+paragraph says it does** — see T8's second finding below. The old pair is
+still there.
 
-Every one of these needs a card and none of them has had one; 3.10's fact 8
-stands. The button's report ends with this list so the numbers can be pasted
-back here.
+#### The button ran — 2026-09-15, the card released
 
-- **seconds per page, dots under llama.cpp on Windows** — unmeasured, tested
-  once the GPU is free (T7).
-- **whether the Q8 GGUF answers in `parseDotsPage`'s dialect exactly** — the
-  MLX and vLLM builds do. Unmeasured, tested once the GPU is free (T7, whose
-  `shape.json` diff against T6's is the comparison).
-- **seconds per page, dots under vLLM on the 4090** — unmeasured, tested once
-  the GPU is free (T6).
-- **seconds per cleanup chunk, `qwen3.5-9b` Q8 under llama.cpp** —
-  unmeasured, tested once the GPU is free (T7).
-- **the three `llama-windows` `memory_bytes_estimate` figures** — still
-  DECLARED (the GGUF's size plus Foundry's 1.5 GB `OVERHEAD_GB`), not
-  measured. Unmeasured, tested once the GPU is free.
-- **`--alias` against a real `llama-server`** — the readiness check is "the
-  name equals the id this server started" and no llama-server has been
-  started by this build, on CPU or CUDA. Unmeasured, tested once the GPU is
-  free.
-- **the fatal-line table against real llama.cpp output** — the eight
-  substrings are Foundry's, and this build has matched them against strings
-  it wrote itself. Unmeasured, tested once the GPU is free.
-- **the engine task end to end** — no distro was imported and no host tray
-  was started, so 4.7's relay has been exercised only against a fake door.
-  T10 on a machine with the host running is the measurement; without it the
-  stage proves the refusal and says so.
+Owen released the card at ~23:00 on the 14th and the whole list below stopped
+being a list of intentions. The figures are in **7.3** (T6/T7), **7c** (T9)
+and this section's Tests block (T1/T2/T4); what follows is what each
+"unmeasured" line became.
+
+| was unmeasured | now |
+|---|---|
+| seconds/page, dots under llama.cpp on Windows | **3.7** (T7) |
+| whether the Q8 GGUF answers in `parseDotsPage`'s dialect exactly | **it does** — `t7/shape.json` and `t6/shape.json` `diff` clean, eleven `{bbox, category, text}` objects |
+| seconds/page, dots under vLLM (on an RTX 3090 Ti, not a 4090) | **4.5** (T6) |
+| seconds per cleanup chunk, `qwen3.5-9b` Q8 under llama.cpp | **1.3** (T7) |
+| `--alias` against a real `llama-server` | **proven** — readiness passed on both loads and the completion names `model: qwen3.5-9b` |
+
+**Three of the old lines are only PARTLY answered, and say so:**
+
+- **the three `memory_bytes_estimate` figures** — `dots-ocr` measured at
+  ≈4.2 GB against a declared 4.74 (7.3); `qwen3.5-9b` **measured only as a
+  load that succeeded, bytes owed**; `qwen3.8-27b-4bit` never loaded.
+- **the fatal-line table against real llama.cpp output** — the early exit
+  DID fire on real output, at 00:27 on the projector defect above
+  (`srv llama_server: exiting due to model loading error`, `engine_failed`
+  with the last 40 lines). That is one path of eight. The other seven
+  substrings are still Foundry's, matched only against strings this build
+  wrote.
+- **the engine task end to end** — T10 **PASS, 4 s**, after the naming fix
+  (**10908f5**: `host_unreachable` / `host_install_failed`, and
+  `engine_move_needs_host` reserved for the case where there is no door at
+  all). What it proves is that the task is accepted and handed to the door.
+  **The move itself is still unmeasured**: no distro was imported and no host
+  tray was started, so migrate-config and migrate-weights have run against
+  fake servers only (7b.4b) and nothing on this machine has witnessed the
+  order between two live catalogs.
+
+#### What T8 found — two stage-order facts, both owed
+
+T8 (the remove door) is **PASS, 1 s**, and on the way it turned up two things
+that are about the ORDER of the run rather than about the door:
+
+1. **T8 before a T7 re-run removes the model T7 needs.** `DELETE
+   /v1/catalog/model/qwen3.5-9b` does exactly what it says, and the next T7
+   then refuses `model_not_installed` by name (run `20260915-004132`). Fixing
+   it was a re-pull: **9.53 GB in 88 s, 109 MB/s**. The stage list in §8 is
+   written T7-then-T8 and must stay that way, or T8 needs to put back what it
+   takes.
+2. **`crucible remove model dots-ocr` left the superseded files behind.**
+   Remove follows the CURRENT spec's file names, so on the staged home it
+   deleted the pair the new `ggml-org` pin names and left the old
+   `anthonym21` `Dots.Ocr-1.8B-Q8_0.gguf` / `mmproj-Dots.Ocr-F16.gguf` sitting
+   in the same directory — 4.42 GB that `directory_bytes` still counts and
+   nothing will ever load. 3.5a says a subject's whole directory goes; the
+   implementation reads the spec instead. **Owed.**
+
+#### The Higgs door, on the card
+
+Not a button stage — the TTS half of `cuda-linux`, checked the same night
+with the `owen` voice, because a card that reads pages should also be shown to
+render.
+
+| | |
+|---|---|
+| take-0 render job | **166 s** including the engine load; **11.3 s** of audio for 150 characters |
+| SGLang on the card | **20.0 GB** at `--mem-fraction-static 0.6` — the 19 GB estimate stands, now measured |
+| take-1 render job | **140 s**, and **byte-identical to take 0** |
+| `take: 2` | refused `unknown_take` |
+| zero-shot load | refused `engine_failed: … does not carry generation_config.json` (a base checkpoint) — **open** |
+
+**The byte-identical take is two facts, not one.** The tts env's pinned
+narrator (`0eeb0267`) predates the per-item sampling channel, so the take
+never reached the engine; the handshake and a `sampling_not_wired` guard are
+restored (**a6c34f2**, **fe709ff**) and the env re-pin is blocked on Owen
+pushing BookForge's branch. Underneath that, narrator seeds `1234 + index`,
+so **same-take re-rolls are byte-identical by design** — a per-take seed is
+being built. Neither of those is the guard failing; both are it working and
+saying so.
+
+#### The narrator `HIGGS_ENV` prefix regression
+
+`a7ab9af` put a prefix in front of `HIGGS_ENV` that the serve script could not
+resolve; fixed in **96980ce**, which is the HEAD the `20260915-001145` stage
+ran at. Recorded here rather than in a BookForge doc because this night's run
+is what found it.
 
 #### Tests
 
@@ -1585,8 +1666,19 @@ Windows and its platform is injected, so it runs on both.
 
 `sdk/bootstrap` 245. `sdk/ts` **290**, up from 257.
 
-**The full suite is still owed**, for 7.5's reason: a `train_lora.py` holds
-the VM. It is T2 on the button.
+**The full suite is no longer owed — T2 ran, 2026-09-15.** `sdk/bootstrap`
+**245 pass**, `sdk/ts` **299 pass**, 33 s (T1, run `20260914-231608`). The
+full pytest in WSL under the lock found **three stale tests and nothing else**,
+all three stale for a reason this phase created:
+
+| test | why it was wrong |
+|---|---|
+| `test_backend.py::test_windows_is_never_a_backend` | superseded by 3.5 — Windows IS the `llama-windows` backend now |
+| `test_host.py::test_there_is_no_platform_gate_left_in_main` | needed `CRUCIBLE_HOME` on Linux: without `%LOCALAPPDATA%` `crucible_home()` refuses, by design |
+| `test_vlm_pages.py::test_the_page_manifest_has_no_mac_block` | asserted one backend block; `dots-ocr` now has two |
+
+Green after **1a0d387**. T4 — BookForge's keepers — is green too, once the
+prompt-vendor tier was written (BookForge `392f20c3`).
 
 ## 7b. What was built, 2026-09-14 — the host side
 
@@ -1821,6 +1913,31 @@ time; `subject_in_use` is retried three times and then succeeds; held forever fa
 with the holder; a pull that never lands leaves the Windows copy alone; and a non-`in_use`
 refusal keeps both copies.
 
+### 7b.4c Two facts about 4.1's presence, measured on the button's night (2026-09-15)
+
+Neither was written down anywhere, both change what the tray has to do, and
+both were found by needing the WSL server up for T6 rather than by reading
+`presence.py`.
+
+- **The distro terminates seconds after the last `wsl.exe` session ends, even
+  with systemd units running.** A `Restart=always` unit and an enabled-linger
+  user do not keep the VM alive; only a HELD PROCESS does. 4.1 says the host
+  runs `wsl -d crucible --exec true` at start and then watches `/v1/ping` —
+  that boots the distro and then lets go of it, so the thing it is watching
+  goes away on its own. **The tray owns this**: something of the host's has to
+  stay attached for as long as the WSL engine is meant to be the engine. 4.1 is
+  owed the sentence.
+- **Linger was OFF on this machine.** `loginctl enable-linger telltale`, run as
+  root, is now done. That is a precondition 4.3 should set and check, not
+  something a person discovers when the unit is not there.
+- **The user bus is unreachable from a `wsl.exe --exec` session.**
+  `systemctl --user …` answers "Failed to connect to bus", which is 4.1's
+  `user-unit-start` recipe failing in exactly the case it exists for — so the
+  unit could not be restarted from Windows at all tonight and the server was
+  run as a held process instead. The `user-bus-restart` recipe
+  (`systemctl restart user@1000` as root) is the one that works from there;
+  what is missing is the recipe written out as commands. **§4 is owed it.**
+
 ### 7b.5 Decisions, where the doc left a choice
 
 - **`distro = unknown` is a state and not a synonym for `absent`.** `wsl.exe` failing to
@@ -1888,9 +2005,9 @@ refusal keeps both copies.
 - **`crucible host` was not run through the CLI verb itself** — only its objects, from a
   harness, so that nothing wrote to the real `%LOCALAPPDATA%` or Startup folder. The verb's
   refusal off win32 IS tested.
-- **The full pytest suite was not re-measured at the end.** A training run held the WSL VM
-  (the suite refuses beside one, by rule), so the number below is the last clean measurement
-  plus this file's own, and is owed a confirming run.
+- ~~**The full pytest suite was not re-measured at the end.**~~ **Done, 2026-09-15** — T2
+  ran under the lock once the trainer let go, found three stale tests and nothing else, and
+  is green after `1a0d387`. See 7.6's Tests block.
 
 ### 7b.7 Tests
 
@@ -1899,7 +2016,8 @@ refusal keeps both copies.
 | `sdk/bootstrap` `npm test` | 191 | **245** |
 | `tests/test_host.py` | — | **85 passed, 1 skipped** |
 | `tests/test_envpack.py` | 45 passed / 14 skipped | **67 passed / 14 skipped** |
-| pytest, whole tree minus `tests/test_lineup.py` | 1234 (reported) / 1215 measured here | **owed** — a LoRA trainer (pid 557, mistborn, step 1015/5978) held the VM through every attempt |
+| pytest, whole tree minus `tests/test_lineup.py` | 1234 (reported) / 1215 measured here | **GREEN, 2026-09-15** (T2, under the lock, after `1a0d387`) — the LoRA trainer that held the VM through every earlier attempt was gone by then |
+| `sdk/ts` `npm test` | 290 | **299** (T1) |
 
 `tests/test_lineup.py` fails on this checkout for a reason that is not this phase's: it is a
 git WORKTREE, its `.git` is a file pointing at a Windows path, and `git rev-parse` inside WSL
@@ -1926,10 +2044,10 @@ nothing. All fifteen cells of 4.1's `(distro, engine)` table are walked, not sam
 
 Section 4.6 listed three unserved classes in ascending cost and one owed
 improvement. Two of the three now run, the third is measured and deliberately
-not shipped, and the improvement landed. Everything below was done on
-2026-09-14 against the Mac Studio (M1 Ultra, 64 GiB unified, macOS 26.3.1); no
-number here is a guess, and where a figure is absent this section says
-"unmeasured" rather than inventing one.
+not shipped, and the improvement landed. Everything below was done against the
+Mac Studio (M1 Ultra, 64 GiB unified, macOS 26.3.1) on 2026-09-14, except the
+T9 block at the end, which is 2026-09-15; no number here is a guess, and where
+a figure is absent this section says "unmeasured" rather than inventing one.
 
 ### `align` — served
 
@@ -2068,7 +2186,8 @@ then runs one job of each. None of that is true of the Mac today: its server
 runs the code from before this work, and `align` and `asr` have no env and no
 weights there. This is the exact sequence that gets it there. **Run it after
 the branch is merged, on Owen's word, and not before** — every step writes
-something on that machine.
+something on that machine. **(It was run on 2026-09-15 and T9 followed it; the
+record is at the end of this section.)**
 
 **One correction to carry into it, and it changes the method.** `docs/PLAN.md`
 records "no pack has been built on the Mac — there is no Crucible checkout on
@@ -2130,6 +2249,32 @@ separate, ordered operation and doing it in the same session would put a 3 GB
 env rebuild in the middle of a test run. And it installs nothing on the Mac
 outside `~/.crucible/envs/{align,asr}` and `~/.crucible/models/`, both of which
 `crucible` owns.
+
+### T9 — the M-steps ran, and so did T9, 2026-09-15
+
+Run from the Mac, as 7.6 decided it had to be. The M-steps above took the
+checkout, the two envs and the two weight sets; **T9 itself ran in 94 s**:
+
+| job | engine | measured |
+|---|---|---|
+| `asr` | `mlx-whisper-large-v3-turbo` | **27 s** on a 15-second clip, **including the engine start**; the transcript is correct verbatim |
+| `align` | `qwen3-aligner` | **49 s**; `alignment.json` 2 509 B |
+
+**And the refusal held where it matters**: `vad_filter: true` came back
+`vad_unsupported_by_engine` on mlx-whisper, off the BACKEND and before the env
+and weights checks, exactly as this section says it should. That is the one
+value in the wire that is refused rather than quietly differing, and it is now
+refused on a live server rather than in a test.
+
+**`pages` was struck from T9 before the run, not failed during it** — the
+mlx-vlm finding above is why, and nothing about the run changes it. Two
+artifacts came back, which is what an amended T9 asks for.
+
+**Both of this section's "unmeasured" lines still stand.** T9 is one clip and
+one chunk on one machine; it is not the ALIGN TIMESTAMP COMPARISON (nobody has
+aligned a chapter on both machines and diffed the cues) and it is not ASR
+ACCURACY (nobody has put a book through both engines). `envs/align/mlx-darwin.md`
+and `envs/asr/mlx-darwin.md` still say what those comparisons are.
 
 ### What a Mac still cannot do, and it is not on this list by accident
 
