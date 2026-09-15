@@ -6,7 +6,8 @@
     crucible capability what this host can hold, and why; --write records it
     crucible serve      run the API in the foreground
     crucible service    install/start/stop the machine service that runs `serve`
-    crucible host       win32 only: the tray that owns this machine's engine
+    crucible orchestrator  win32 only: the tray that manages this machine's engine
+                        (`crucible host` is the same verb, deprecated)
     crucible models     list and pull model weights
     crucible voices     list and pull voice weights
     crucible doctor     probe the host and every job type; exit 0 only when healthy
@@ -107,8 +108,16 @@ def _fail(message: str) -> int:
 # --------------------------------------------------------------------- host
 
 
-def cmd_host(args: argparse.Namespace) -> int:
-    """`crucible host` — PHASE15-HOST.md section 4. Windows only.
+def cmd_orchestrator(args: argparse.Namespace) -> int:
+    """`crucible orchestrator` — PHASE15 section 4, PHASE17. Windows only.
+
+    **`crucible host` is the same verb**, kept as an argparse alias and
+    deprecated in PHASE17-ORCHESTRATOR.md section 7 rather than in code: the
+    Startup shortcut installed on Owen's PC on 2026-09-15 has
+    `-m crucible.cli host` baked into it, and `--install-startup` still writes
+    exactly that string, so a pack rebuilt after tonight starts the tray the
+    shortcut already points at. The alias goes when a release changes the
+    shortcut, and that is not tonight.
 
     The verb is refused `host_windows_only` everywhere else, and that is not a
     platform check standing in for a feature check: on Linux and macOS the
@@ -127,7 +136,7 @@ def cmd_host(args: argparse.Namespace) -> int:
 
     if sys.platform != "win32":
         return _fail(
-            "host_windows_only: `crucible host` is a Windows verb. On "
+            "host_windows_only: `crucible orchestrator` is a Windows verb. On "
             f"{sys.platform} the server runs on this machine and "
             f"{'systemd' if sys.platform == 'linux' else 'launchd'} already "
             "supervises it — `crucible service status` is the question you "
@@ -2874,14 +2883,21 @@ def build_parser() -> argparse.ArgumentParser:
     denoise_pull.set_defaults(func=cmd_denoise_pull)
 
     host_parser = subparsers.add_parser(
-        "host",
-        help="win32 only: the tray that owns this machine's engine",
+        "orchestrator",
+        # `host` KEPT, and it is the spelling the installed Startup shortcut
+        # uses (PHASE17-ORCHESTRATOR.md section 7). Deprecated in the doc, not
+        # in code, so tonight's tray survives a pack rebuild.
+        aliases=["host"],
+        help="win32 only: the tray that manages this machine's engine",
         description=(
-            "The Windows presence (PHASE15-HOST.md section 4): a notification-area "
-            "icon that boots the WSL engine at login, watches it, and runs the move "
-            "from the Windows engine to WSL2 when the operator page asks. Refused "
-            "`host_windows_only` on Linux and macOS, where the service manager "
-            "already supervises the server."
+            "The Windows ORCHESTRATOR (PHASE15-HOST.md section 4, PHASE17): a "
+            "notification-area icon that boots this machine's engine at login, "
+            "claims it, watches it, restarts it, and runs the move from the "
+            "Windows engine to WSL2 when the operator page asks. It serves zero "
+            "job types and carries no data — control is Windows's, data is the "
+            "card's. Refused `host_windows_only` on Linux and macOS, where the "
+            "service manager already supervises the server. `crucible host` is "
+            "the same verb and is deprecated."
         ),
     )
     host_parser.add_argument(
@@ -2894,7 +2910,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="delete the Startup shortcut and exit",
     )
-    host_parser.set_defaults(func=cmd_host)
+    host_parser.set_defaults(func=cmd_orchestrator)
 
     serve = subparsers.add_parser("serve", help="run the API in the foreground")
     serve.add_argument("--host", default=None, help="bind host (default from config)")

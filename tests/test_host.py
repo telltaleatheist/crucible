@@ -1015,8 +1015,49 @@ def test_the_done_payload_carries_every_field_the_bootstrap_client_requires() ->
 # ----------------------------------------------------------------- 4.3 door
 
 
+@dataclass
+class FakeOrchestrator:
+    """An `OrchestratorPort` whose three answers are written down.
+
+    The door is a TRANSPORT and every decision it serves is made in `app.py`
+    (`menu.py`'s rule, one level out), so the transport is tested without
+    building a tray.
+    """
+
+    name: str = "crucible-orchestrator@test"
+    document: dict = field(default_factory=lambda: {"role": "orchestrator"})
+    not_ours: bool = False
+    restarts: list[str] = field(default_factory=list)
+
+    def info(self) -> dict:
+        return self.document
+
+    def check_restartable(self) -> None:
+        if self.not_ours:
+            raise HostError("engine_not_ours", "watched and never acted on")
+
+    def restart_engine(self, emit) -> None:
+        self.restarts.append("restarted")
+        emit(installer.Event("done", {"engine": "http://127.0.0.1:7100"}))
+
+
+def a_door(
+    host_log: log.HostLog,
+    sequence=lambda _emit: None,
+    *,
+    token="t",
+    orchestrator: FakeOrchestrator | None = None,
+) -> door_module.OrchestratorDoor:
+    return door_module.OrchestratorDoor(
+        host_log,
+        sequence,
+        token=(token if callable(token) else (lambda: token)),
+        orchestrator=orchestrator or FakeOrchestrator(),
+    )
+
+
 def test_the_door_refuses_a_wrong_bearer_and_a_missing_one(host_log: log.HostLog) -> None:
-    door = door_module.InstallDoor(host_log, lambda _emit: None, token=lambda: "right")
+    door = a_door(host_log, token="right")
     assert door.authorised("Bearer right") is True
     assert door.authorised("Bearer wrong") is False
     assert door.authorised(None) is False
@@ -1026,14 +1067,14 @@ def test_the_door_refuses_a_wrong_bearer_and_a_missing_one(host_log: log.HostLog
 def test_no_config_yet_is_host_no_token_and_not_an_authorisation_failure(
     host_log: log.HostLog,
 ) -> None:
-    door = door_module.InstallDoor(host_log, lambda _emit: None, token=lambda: None)
+    door = a_door(host_log, token=lambda: None)
     with pytest.raises(HostError) as caught:
         door.authorised("Bearer anything")
     assert caught.value.code == "host_no_token"
 
 
 def test_one_install_on_a_machine(host_log: log.HostLog) -> None:
-    door = door_module.InstallDoor(host_log, lambda _emit: None, token=lambda: "t")
+    door = a_door(host_log)
     assert door.claim() is True
     assert door.claim() is False, "host_install_running"
     door.release()
@@ -1043,7 +1084,7 @@ def test_one_install_on_a_machine(host_log: log.HostLog) -> None:
 def test_the_door_is_loopback_and_an_argument_cannot_put_it_on_the_lan(
     host_log: log.HostLog,
 ) -> None:
-    door = door_module.InstallDoor(host_log, lambda _emit: None, token=lambda: "t")
+    door = a_door(host_log)
     with pytest.raises(HostError) as caught:
         door_module.serve(door, host="0.0.0.0")
     assert caught.value.code == "host_unauthorized"
@@ -1061,7 +1102,7 @@ def test_the_door_streams_ndjson_and_terminates_even_when_the_sequence_throws(
         emit(installer.Event("line", {"text": "hello", "stream": "stdout"}))
         raise RuntimeError("something threw before the sequence could say so")
 
-    door = door_module.InstallDoor(host_log, sequence, token=lambda: "tok")
+    door = a_door(host_log, sequence, token="tok")
     server = door_module.serve(door, host="127.0.0.1", port=0)
     port = server.server_address[1]
     try:
@@ -1086,7 +1127,7 @@ def test_the_door_refuses_a_target_it_does_not_move_to(host_log: log.HostLog) ->
     import urllib.error
     import urllib.request
 
-    door = door_module.InstallDoor(host_log, lambda _emit: None, token=lambda: "tok")
+    door = a_door(host_log, token="tok")
     server = door_module.serve(door, host="127.0.0.1", port=0)
     port = server.server_address[1]
     try:
@@ -1118,7 +1159,7 @@ def test_the_extra_fields_bootstrap_sends_are_accepted_and_not_refused(
         seen.append("ran")
         emit(installer.Event("done", {"server": {}, "release": "", "backend": "", "crucible": "", "steps": []}))
 
-    door = door_module.InstallDoor(host_log, sequence, token=lambda: "tok")
+    door = a_door(host_log, sequence, token="tok")
     server = door_module.serve(door, host="127.0.0.1", port=0)
     port = server.server_address[1]
     try:

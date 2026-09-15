@@ -60,6 +60,16 @@ RECIPE_USER_UNIT_START = "user-unit-start"
 RECIPE_USER_BUS_RESTART = "user-bus-restart"
 RECIPE_HOST_MODE_RESPAWN = "host-mode-respawn"
 
+#: PHASE17 4.2's `wsl-unit` restart, and it is NOT in `RECIPES`.
+#:
+#: The two in `RECIPES` are RECOVERIES — things to try when an engine that
+#: should be up is not. This is the working door into a unit that IS up, which
+#: is what a restart asks for: `boot()` on a running engine pings, succeeds
+#: immediately and changes nothing, so a restart built out of it would be a
+#: button that does nothing whenever it is most obviously pressed. The
+#: escalation from here IS `RECIPES`, in order, exactly as `boot()` escalates.
+RECIPE_USER_UNIT_RESTART = "user-unit-restart"
+
 
 def wsl_boot_argv(distro: str = CRUCIBLE_DISTRO) -> list[str]:
     """`wsl -d crucible --exec true` — 4.1's boot.
@@ -144,12 +154,19 @@ def recipe_argv(name: str, distro: str = CRUCIBLE_DISTRO) -> list[str]:
     """The argv for a named recipe. Unknown names are a programming error."""
     if name == RECIPE_USER_UNIT_START:
         return ["wsl.exe", "-d", distro, "--exec", "systemctl", "--user", "start", "crucible"]
+    if name == RECIPE_USER_UNIT_RESTART:
+        return [
+            "wsl.exe", "-d", distro, "--exec", "systemctl", "--user", "restart", "crucible"
+        ]
     if name == RECIPE_USER_BUS_RESTART:
         # As ROOT: this restarts the user manager that owns the bus the user
         # unit needs. uid 1000 is the rootfs's `crucible` user (4b creates
         # exactly one non-root user), and 4.1 names this command literally.
         return ["wsl.exe", "-d", distro, "-u", "root", "--exec", "systemctl", "restart", "user@1000"]
-    raise ValueError(f"no recipe called {name!r}; the recipes are {RECIPES}")
+    raise ValueError(
+        f"no recipe called {name!r}; the recovery recipes are {RECIPES} and the "
+        f"restart is {RECIPE_USER_UNIT_RESTART!r}"
+    )
 
 
 RECIPES: tuple[str, ...] = (RECIPE_USER_UNIT_START, RECIPE_USER_BUS_RESTART)
@@ -408,6 +425,39 @@ class PresenceWatcher:
                 return True
             if not all_recipes:
                 return False
+        return False
+
+    def restart_wsl_unit(self) -> bool:
+        """PHASE17 4.2's `wsl-unit` restart: the working door, then `RECIPES`.
+
+        `systemctl --user restart crucible` is one command and it is the
+        whole of a restart on a distro whose user bus works. When it does not
+        bring the engine back, the escalation is 4.1's two recovery recipes in
+        the order 4.1 names them — the SAME order `boot()` uses, because they
+        are the same two facts about the same user manager.
+
+        On a distro whose bus is unreachable (7b.8 measured exactly that on
+        Owen's Ubuntu) none of the three can work, and this returns False
+        rather than pretending. That distro's engine is a `found` one anyway,
+        and a `found` engine never reaches this method.
+        """
+        result = self._runner.run(
+            recipe_argv(RECIPE_USER_UNIT_RESTART, self._distro),
+            timeout_s=RECIPE_TIMEOUT_SECONDS,
+        )
+        self._log.write(
+            f"restart {RECIPE_USER_UNIT_RESTART}: {'ok' if result.ok else result.said()}"
+        )
+        if self._wait_for_ping(self._boot_wait_s):
+            self._recovery_spent = False
+            return True
+        self._log.write(
+            f"restart: nothing on {engine_url('/v1/ping')} after "
+            f"{self._boot_wait_s:.0f}s; escalating to the recovery recipes"
+        )
+        if self.recover(all_recipes=True):
+            self._recovery_spent = False
+            return True
         return False
 
     def respawn_host_mode(self, argv: Sequence[str], env: dict[str, str]) -> Child:

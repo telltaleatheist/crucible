@@ -28,12 +28,14 @@ import threading
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
-from .. import VERSION
+from .. import API_VERSION, VERSION
+from .. import peer as peer_module
+from ..pairing import parse_pairing_line
 from . import installer, menu, startup
 from .catalog import CatalogPort, GuestCatalog, HttpCatalog
-from .door import InstallDoor, serve
+from .door import OrchestratorDoor, serve
 from .errors import HostError
 from .log import HostLog
 from .menu import Distro, Engine, Owner
@@ -80,6 +82,63 @@ class HostContext:
     watcher: PresenceWatcher
     presence: Presence
     release: str = DEFAULT_RELEASE
+    #: PHASE17 3.2: what this orchestrator calls itself, on its `/v1/ping`
+    #: and in the claim it makes. Composed once, at startup, from the machine
+    #: name — the same shape `crucible init` gives a server.
+    name: str = ""
+
+
+def orchestrator_name() -> str:
+    """`crucible-orchestrator@<machine>` — PHASE17 3.2.
+
+    Lower-cased, because a name that differs from the same machine's engine
+    name only by the case Windows reports is a name two log lines disagree
+    about. The hostname and nothing assembled: `socket.gethostname()` is what
+    `crucible init` reads for the engine's own name.
+    """
+    import socket
+
+    return f"crucible-orchestrator@{socket.gethostname().lower()}"
+
+
+ORCHESTRATOR_GPU = {"vendor": "none", "name": "", "vram_bytes": 0}
+"""What an accelerator block says about a process that plays nothing.
+
+Not omitted and not null: a client reading `host.gpu.vram_bytes` must get a
+number, and the true number is zero. PHASE17 1: "what accelerator does the
+thing that plays nothing have" has exactly one honest answer.
+"""
+
+#: PHASE15 4.1a's owner enum, as PHASE17 3.2 spells it on the wire.
+OWNER_ON_THE_WIRE = {
+    Owner.WSL_UNIT: peer_module.OWNER_WSL_UNIT,
+    Owner.HOST_CHILD: peer_module.OWNER_CHILD,
+    Owner.FOUND: peer_module.OWNER_FOUND,
+}
+
+
+def engine_token(context: "HostContext") -> str | None:
+    """The ENGINE's bearer, from whichever source this machine's owner says.
+
+    PHASE15 4.1a's rule, reused verbatim and for the same reason there is no
+    fallback between the two sources: a guest engine's token lives in the line
+    the orchestrator COPIED out of the distro, and a host-mode child's is the
+    one in the config the orchestrator itself wrote. Reading the wrong one
+    gives a 401 against a door that is working perfectly.
+    """
+    owner = context.presence.owner
+    if owner in (Owner.WSL_UNIT, Owner.FOUND):
+        line = _guest_line(context)
+        if line is None:
+            return None
+        try:
+            return parse_pairing_line(line).token
+        except ValueError as exc:
+            context.log.write(f"claim: the guest's pairing line will not parse ({exc})")
+            return None
+    if owner is Owner.HOST_CHILD:
+        return read_token(context.home)
+    return None
 
 
 def read_token(home: Path) -> str | None:
@@ -212,14 +271,35 @@ def open_log(log: HostLog) -> None:
     log.write(f"the log is {log.path}")
 
 
+def _step(name: str, index: int, total: int = 2) -> "installer.Event":
+    """One `step` event, in the shape `crucible/tasks.py` relays verbatim.
+
+    Spelled here rather than inline so the restart cannot drift from the
+    move's shape: 4.7 says *"a relay that reshapes is a second owner of the
+    shape"*, and two sequences emitting two nearly-identical dicts is how a
+    shape acquires a second owner without anybody deciding to give it one.
+    """
+    return installer.Event("step", {"name": name, "index": index, "total": total})
+
+
 class Host:
-    """The loop. Started by `crucible host`, stopped by its Quit item."""
+    """The orchestrator's loop. Started by `crucible orchestrator`, stopped by Quit.
+
+    It is the ORCHESTRATOR (PHASE17): the one process on this machine with a
+    role of its own, managing exactly one engine and serving no job types. The
+    class and its package keep the name `host` — PHASE17 section 7 records why
+    the rename stops at the wire.
+    """
 
     def __init__(self, context: HostContext) -> None:
         self._c = context
         self._icon: object | None = None
         self._stop = threading.Event()
         self._door_server: object | None = None
+        #: Whether THIS process holds a claim on this machine's engine
+        #: (PHASE17 2.1). Not "whether the engine is claimed" — that is the
+        #: engine's fact and it is read from `/v1/info`, never mirrored here.
+        self._claimed = False
 
     # -------------------------------------------------------------- presence
 
@@ -304,6 +384,236 @@ class Host:
             Owner.NONE,
         )
 
+    # ----------------------------------------------------------- the relation
+
+    def claim(self) -> bool:
+        """Tell this machine's engine that this orchestrator manages it.
+
+        **A `found` engine is NEVER claimed** (PHASE15 4.1a, PHASE17 2.1).
+        The orchestrator did not start it, has no unit it may name and no
+        child it may kill, so a claim would be a statement that is not true:
+        `managed_by` would name a door that refuses every verb the field
+        implies. It is watched, and that is the whole of the relation with it.
+
+        A claim that fails is a LINE IN THE LOG and never a crash. An engine
+        that will not be claimed is still an engine, and a tray that died
+        telling it so would take the watch with it; the next down-to-up edge
+        tries again.
+        """
+        owner = self._c.presence.owner
+        if owner is Owner.FOUND:
+            self._c.log.write(
+                "claim: the engine on this machine was already answering when "
+                "this orchestrator started, so it is watched and not claimed "
+                "(owner=found, PHASE15 4.1a)"
+            )
+            return False
+        if owner not in (Owner.WSL_UNIT, Owner.HOST_CHILD):
+            return False
+        token = engine_token(self._c)
+        if token is None:
+            self._c.log.write(
+                "claim: this machine's engine token could not be read, so no "
+                "claim was made - an engine is not less of an engine for "
+                "being unclaimed"
+            )
+            return False
+        try:
+            answer = peer_module.claim_engine(
+                engine_url(),
+                token,
+                self._orchestrator_ref(),
+                api_version=API_VERSION,
+            )
+        except peer_module.PeerCallFailed as exc:
+            self._c.log.write(f"claim: {exc.code}: {exc.message}")
+            return False
+        self._c.log.write(
+            f"claim: {engine_url()} is managed by {self._c.name} "
+            f"(owner={OWNER_ON_THE_WIRE[owner]}, claimed {answer.get('claimed')})"
+        )
+        self._claimed = True
+        return True
+
+    def release_claim(self) -> None:
+        """Drop the claim on the way out (PHASE17 2.2).
+
+        A tray that exits leaving `managed_by` pointing at a door that no
+        longer answers is PHASE15 3.6's "a file that exists and disagrees is
+        worse than none", one layer up.
+        """
+        if not self._claimed:
+            return
+        token = engine_token(self._c)
+        if token is None:
+            return
+        try:
+            peer_module.release_engine(
+                engine_url(),
+                token,
+                self._orchestrator_ref(),
+                api_version=API_VERSION,
+            )
+            self._c.log.write(f"claim: released {engine_url()}")
+        except peer_module.PeerCallFailed as exc:
+            # Quitting is not a thing that fails. An engine that could not be
+            # told is an engine whose `managed_by` is stale until it restarts,
+            # which is a display and not a behaviour.
+            self._c.log.write(f"claim: release did not land: {exc.code}: {exc.message}")
+        self._claimed = False
+
+    def _orchestrator_ref(self) -> peer_module.Orchestrator:
+        return peer_module.Orchestrator(
+            name=self._c.name, url=door_url(""), version=VERSION
+        )
+
+    @property
+    def name(self) -> str:
+        """`OrchestratorPort`. What `/v1/ping` on the door calls this process."""
+        return self._c.name
+
+    def info(self) -> dict[str, Any]:
+        """PHASE17 3.2 - this orchestrator, and its engine READ THROUGH.
+
+        The engine's `/v1/info` is re-read on EVERY request and nothing is
+        cached. A cached capability list is this system's one defect in a
+        third place: the engine pulls a model, the orchestrator keeps
+        answering yesterday's list, and a client picks a model the engine has
+        and is told it does not.
+
+        When the engine cannot be read, `capabilities` is `[]` and the
+        engine's `name` and `backend` are `null` - the orchestrator does not
+        invent an answer for a server that did not give one. `engine.url`
+        still names where it should be, because that is a fact about this
+        machine rather than about the engine's health.
+        """
+        import platform as platform_module
+
+        owner = self._c.presence.owner
+        engine: dict[str, Any] | None = None
+        capabilities: list[Any] = []
+        if owner in OWNER_ON_THE_WIRE:
+            engine = {
+                "name": None,
+                "url": engine_url(),
+                "backend": None,
+                "owner": OWNER_ON_THE_WIRE[owner],
+            }
+            token = engine_token(self._c)
+            if token is not None:
+                try:
+                    read = peer_module.read_info(
+                        engine_url(), token, api_version=API_VERSION
+                    )
+                except peer_module.PeerCallFailed as exc:
+                    self._c.log.write(f"info: the engine did not answer: {exc.code}")
+                else:
+                    server = read.get("server")
+                    host = read.get("host")
+                    if isinstance(server, dict):
+                        engine["name"] = server.get("name")
+                    if isinstance(host, dict):
+                        engine["backend"] = host.get("backend")
+                    rows = read.get("capabilities")
+                    capabilities = rows if isinstance(rows, list) else []
+        return {
+            "server": {
+                "name": self._c.name,
+                "version": VERSION,
+                "api_version": API_VERSION,
+            },
+            "host": {
+                "platform": sys.platform,
+                "arch": platform_module.machine(),
+                "backend": peer_module.BACKEND_ORCHESTRATOR,
+                "gpu": dict(ORCHESTRATOR_GPU),
+            },
+            "role": peer_module.ROLE_ORCHESTRATOR,
+            # ZERO, and that is the DEFINITION of the role rather than a
+            # property of this machine. An orchestrator serves none.
+            "job_types": [],
+            "engine": engine,
+            "capabilities": capabilities,
+        }
+
+    def check_restartable(self) -> None:
+        """`OrchestratorPort`. 4.1a's rule, refused before anything opens."""
+        if self._c.presence.owner is Owner.FOUND:
+            raise HostError(
+                "engine_not_ours",
+                "the engine on this machine was already answering when this "
+                "orchestrator started: it did not start it, has no unit it "
+                "may name and no child it may kill. Restarting it would mean "
+                "guessing, and on the machine this rule was found on the "
+                "guess (`systemctl restart user@1000`) would have killed a "
+                "five-thousand-step LoRA trainer. Restart it where it was "
+                "started (PHASE15-HOST.md 4.1a).",
+            )
+
+    def restart_engine(self, emit: Callable[[installer.Event], None]) -> None:
+        """PHASE17 4.2 - restart by the owner-appropriate means.
+
+        ONE implementation, two callers: the door's `POST /restart` and the
+        tray's own Restart item both arrive here, so a person and a page
+        cannot get two different restarts.
+        """
+        self.check_restartable()
+        owner = self._c.presence.owner
+        if owner is Owner.WSL_UNIT:
+            emit(_step("restart the guest's unit", 1))
+            came_back = self._c.watcher.restart_wsl_unit()
+        elif owner is Owner.HOST_CHILD:
+            emit(_step("respawn the Windows engine", 1))
+            came_back = self._respawn_child()
+        else:
+            # No engine at all. A restart from here is a START, which is what
+            # a person pressing Restart on a stopped machine is asking for,
+            # and `start()` is the one place that decides which server this
+            # machine runs.
+            emit(_step("start this machine's engine", 1))
+            self.start()
+            came_back = self._c.presence.engine is Engine.RUNNING
+        emit(_step("wait for /v1/ping", 2))
+        if not came_back:
+            emit(
+                installer.Event(
+                    "failed",
+                    {
+                        "code": "engine_did_not_return",
+                        "message": (
+                            "the engine was restarted and nothing answered "
+                            f"{engine_url('/v1/ping')}. The orchestrator's log "
+                            "says which recipe was tried; the engine's own log "
+                            "says why it did not come up."
+                        ),
+                    },
+                )
+            )
+            self._c.presence = Presence(
+                self._c.presence.distro,
+                Engine.FAILED,
+                "a restart did not bring it back",
+                owner,
+            )
+            self._refresh()
+            return
+        self._c.presence = Presence(
+            self._c.presence.distro, Engine.RUNNING, "restarted", owner
+        )
+        # A restarted engine has forgotten who manages it (PHASE17 2.3), so
+        # the claim is re-asserted here rather than waited for.
+        self._claimed = False
+        self.claim()
+        self._refresh()
+        emit(installer.Event("done", {"engine": engine_url()}))
+
+    def _respawn_child(self) -> bool:
+        """`host-mode-respawn`, as a RESTART: stop this one, then start one."""
+        self._c.watcher.stop_child()
+        env = dict(self._c.runner.env)
+        self._c.watcher.respawn_host_mode(server_argv(env), server_environment(env))
+        return self._c.watcher._wait_for_ping(30.0)  # noqa: SLF001 - one object, one loop
+
     # ------------------------------------------------------------------ menu
 
     def model(self) -> menu.MenuModel:
@@ -325,7 +635,14 @@ class Host:
         elif item_id == menu.RESTART_ENGINE:
             if self._refuse_acting_on_a_found_engine("restart"):
                 return
-            self._c.presence = self._c.watcher.boot()
+            # PHASE17 4.2: ONE restart, whether a person clicks it or the page
+            # posts `engine-restart`. Before this the tray called `boot()`,
+            # which on a RUNNING engine pings, succeeds and changes nothing —
+            # a button that did nothing precisely when it was most obviously
+            # pressed. The events go to the log, because a tray has no stream.
+            self.restart_engine(
+                lambda event: self._c.log.write(f"restart {event.event}: {event.data}")
+            )
             self._hold()
         elif item_id == menu.STOP_ENGINE:
             if self._refuse_acting_on_a_found_engine("stop"):
@@ -405,10 +722,21 @@ class Host:
                     f"watch: {before.value} -> {self._c.presence.engine.value} — "
                     f"{self._c.presence.detail}"
                 )
+                # PHASE17 2.3: a claim is LIVE state and an engine that
+                # restarted has forgotten. Every down-to-up edge re-asserts
+                # it, which is why nothing has to be remembered on disk — the
+                # relation is re-stated within one 15-second tick instead.
+                if self._c.presence.engine is Engine.RUNNING:
+                    self._claimed = False
+                    self.claim()
                 self._refresh()
 
     def quit(self) -> None:
         self._stop.set()
+        # BEFORE the hold and before the child: while the engine is still
+        # answering. A release sent to a server this process is about to stop
+        # would be a release nobody hears.
+        self.release_claim()
         # The hold goes first: it is this process's session, and a wsl.exe
         # left running after the tray is gone is a VM nothing owns.
         self._c.watcher.release()
@@ -447,15 +775,24 @@ def run(argv: list[str] | None = None) -> int:
         home=home,
         watcher=watcher,
         presence=Presence(Distro.UNKNOWN, Engine.STARTING, "starting", Owner.NONE),
+        name=orchestrator_name(),
     )
+    log.write(f"role: orchestrator, as {context.name} (PHASE17-ORCHESTRATOR.md)")
     host = Host(context)
     host.start()
     _write_pairing(context)
+    # AFTER the presence and AFTER the pairing file, because the claim needs
+    # both: the owner decides whether a claim is made at all (a `found` engine
+    # is never claimed), and on a machine whose engine is a guest's, the only
+    # place that engine's token exists on the Windows side is the line the
+    # pairing step just copied.
+    host.claim()
 
-    door = InstallDoor(
+    door = OrchestratorDoor(
         log,
         _sequence(context),
-        token=lambda: read_token(context.home),
+        token=lambda: engine_token(context),
+        orchestrator=host,
     )
     try:
         serve(door)

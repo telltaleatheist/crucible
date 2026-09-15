@@ -426,6 +426,31 @@ def read_peer(
     )
 
 
+def read_info(
+    engine_url: str,
+    token: str,
+    *,
+    api_version: int,
+    timeout_s: float = CLAIM_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """`GET /v1/info` on the engine — what the orchestrator READS THROUGH.
+
+    PHASE17 3.2: the orchestrator's own `/v1/info` carries the engine's
+    `capabilities` block **verbatim and uncached**, re-read on every request.
+    A cached capability list is this system's one defect in a third place: the
+    engine pulls a model, the orchestrator keeps answering yesterday's list,
+    and a client picks a model the engine has and is told it does not.
+    """
+    return _call(
+        f"{normalise_url(engine_url)}/v1/info",
+        token,
+        "GET",
+        None,
+        api_version=api_version,
+        timeout_s=timeout_s,
+    )
+
+
 __all__ = [
     "BACKEND_ORCHESTRATOR",
     "CLAIM_PATH",
@@ -446,6 +471,7 @@ __all__ = [
     "ROLE_ORCHESTRATOR",
     "claim_engine",
     "normalise_url",
+    "read_info",
     "read_peer",
     "release_engine",
 ]

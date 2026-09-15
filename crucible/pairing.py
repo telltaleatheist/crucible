@@ -28,9 +28,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from .errors import CrucibleError
 from .interfaces import ipv4_addresses
@@ -88,6 +89,48 @@ def pairing_line(name: str, url: str, token: str) -> str:
 def pairing_lines(name: str, urls: list[str], token: str) -> list[str]:
     """One line per URL, in the same order. The `pairing` field of `/v1/setup`."""
     return [pairing_line(name, url, token) for url in urls]
+
+
+@dataclass(frozen=True)
+class Pairing:
+    """The four facts a pairing line carries, read back out of one."""
+
+    name: str
+    url: str
+    token: str
+
+
+def parse_pairing_line(line: str) -> Pairing:
+    """The inverse of {@link pairing_line}. Raises `ValueError` on anything else.
+
+    Added by PHASE17, which needs the TOKEN out of a line for the first time:
+    the orchestrator claims its engine with the engine's own bearer, and on a
+    machine whose engine is a guest's, the only place that token exists on the
+    Windows side is the line the orchestrator copied (PHASE15 3.6, 4.1a).
+
+    `rsplit` on the LAST `@` is the half of the contract the reader owes —
+    {@link pairing_line} percent-encodes the name precisely so a name
+    containing `@` cannot make the authority ambiguous, and
+    `crucible/host/presence.py`'s `pairing_line_authority` already reads it
+    the same way. The URL comes back as `http://<authority>`, which is where
+    the server is; the line itself carries no scheme for it, because a
+    Crucible is HTTP and the `crucible://` scheme belongs to the line.
+    """
+    parts = urlsplit(line.strip())
+    if parts.scheme != SCHEME:
+        raise ValueError(
+            f"{line.strip()[:60]!r} is not a {SCHEME}:// pairing line"
+        )
+    name, _, authority = parts.netloc.rpartition("@")
+    if name == "" or authority == "":
+        raise ValueError(
+            "a pairing line is `crucible://<name>@<host>:<port>/#<token>`; "
+            f"{parts.netloc!r} has no name or no authority"
+        )
+    token = unquote(parts.fragment)
+    if token == "":
+        raise ValueError("a pairing line's fragment is its token, and this one is empty")
+    return Pairing(name=unquote(name), url=f"http://{authority}", token=token)
 
 
 # ------------------------------------------------------------ the pairing FILE
@@ -237,12 +280,14 @@ def read_pairing_file(home: Path) -> str | None:
 
 __all__ = [
     "PAIRING_FILENAME",
+    "Pairing",
     "SCHEME",
     "PairingFileError",
     "icacls_argv",
     "pairing_file_path",
     "pairing_line",
     "pairing_lines",
+    "parse_pairing_line",
     "reachable_urls",
     "read_pairing_file",
     "write_pairing_file",
