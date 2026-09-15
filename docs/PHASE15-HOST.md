@@ -302,6 +302,19 @@ Now:
   settings door, the page, `/v1/setup`, `/v1/catalog`, tasks, `/v1/accelerator` (nvidia-smi,
   or `cpu` with the machine's RAM as the figure), `/v1/activity`, chat completions to a
   resident child or to an upstream.
+  - **AND THE LOAD GUARD, which is the same probe (T7, first Windows run, 2026-09-14).**
+    `crucible/accelerator.py`'s `read_state` was the last hand-written list of backends on
+    the load path, so `load-model dots-ocr` on a staged `llama-windows` server came back
+    `409 accelerator_unreadable: 'llama-windows' is not a Crucible backend`. It reads the
+    card the Windows way now: `nvidia-smi` for the compute apps and the free/total figures
+    when this host has an NVIDIA driver, `GlobalMemoryStatusEx`'s available/total RAM when
+    it has none. Two deliberate differences from the other two backends, each for a reason
+    stated in that file: **detection tolerates a broken driver and the guard does not** (a
+    card Crucible cannot read is `accelerator_unreadable`, never a fall back to "here is
+    all of your RAM"), and the **`unattributed_bytes` check does not run here** — it exists
+    for WSL2's blind compute-app list, while a Windows desktop always holds VRAM that
+    belongs to no compute app, so running it would refuse every load on a machine that is
+    merely displaying a desktop.
 - `crucible doctor` in host mode prints `backend: llama-windows on windows/x86_64 — llama.cpp
   <tag> (cuda-12.4 | cpu)`, then the engine line, then the upstream lines.
 - Nothing in host mode is a stopgap for WSL, and WSL is the better engine (section 0's block:
@@ -868,6 +881,29 @@ update to download the necessary models and wheels."*
   the host. **The TOKEN is not carried.** The door's bearer is the ENGINE's token, which
   the server already holds in its own config; a second copy in an environment variable
   would be a secret with two owners and one more place for it to be stale.
+  **A DOOR THAT IS SET IS A TASK THAT IS ACCEPTED (T10, first Windows run, 2026-09-14).**
+  With `CRUCIBLE_HOST_DOOR` set there is nothing to refuse at submit time — the server
+  hands the move to the host and relays — so `POST /v1/tasks` answers `202 {"task_id":
+  …}` and **every failure of the door is named in the task's own events**, never in the
+  POST body. A client that reads the POST body for the refusal will read a success; it
+  reads `/v1/tasks/{id}` or `/v1/tasks/{id}/events` instead. `engine_move_needs_host` is
+  the POST-time refusal and it means exactly one thing: the variable is not set.
+
+  **One door, one set of names.** The three other endings are named by
+  `@crucible/bootstrap`'s `requestHostInstall` (4.3), which calls the SAME door, and the
+  server uses THOSE names rather than a second set of its own:
+
+  | ending | code | where |
+  | --- | --- | --- |
+  | `$CRUCIBLE_HOST_DOOR` is not set | `engine_move_needs_host` | 409 at the POST |
+  | connection refused / timeout | `host_unreachable` | the task's `failed` event |
+  | the stream ends with no terminal event | `host_install_failed` | the task's `failed` event |
+  | the host sent a `failed` event | the code IT carries, verbatim | the task's `failed` event |
+
+  An HTTP refusal whose body this server cannot read stays `engine_move_needs_host`, for
+  its own reason: something answered 7101 and it is not behaving like a host, which is
+  the same fact as there being no host there.
+
 - The task's steps are the state table + the step list + the migrate step of 4.3, in order:
   detect the WSL state → the named answer for it (feature enable / `wsl --install` / reboot /
   kernel update / import the Crucible distro) → server pack in the guest → move the config →
