@@ -59,7 +59,7 @@ plays nothing have" has exactly one honest answer.
 ```
 POST /v1/peer/claim          (on the ENGINE)
 Authorization: Bearer <the shared token>
-X-Crucible-Api-Version: 1
+X-Crucible-Api: 1
 
 {"orchestrator": {"name": "crucible-orchestrator@owens-pc", "url": "http://127.0.0.1:7101", "version": "0.6.0"}}
 ```
@@ -87,7 +87,7 @@ direction: *"a caller that can reach the engine can reach this and nothing else 
 | code | status | when |
 |---|---|---|
 | `peer_token_mismatch` | 401 | the bearer is absent, malformed, or not this engine's token |
-| `peer_version_incompatible` | 426 | `X-Crucible-Api-Version`'s major differs from the engine's |
+| `peer_version_incompatible` | 426 | `X-Crucible-Api`'s major differs from the engine's, or is absent |
 | `peer_already_managed` | 409 | a DIFFERENT orchestrator url holds the claim, and `force` was not sent |
 
 The first two are `unauthorized` and `api_version_mismatch` with the relation's name on them,
@@ -244,7 +244,7 @@ The orchestrator restarts **by the owner-appropriate means**, and the owner is 4
 
 | `owner` | what it does |
 |---|---|
-| `wsl-unit` | the working door into the guest's unit — boot the distro, wait for `/v1/ping`, and on failure PHASE15 4.1's two named recipes in order (`user-unit-start`, then `user-bus-restart`) |
+| `wsl-unit` | `user-unit-restart` — `systemctl --user restart crucible` in the distro, then wait for `/v1/ping`; on failure, PHASE15 4.1's two recovery recipes in 4.1's order (`user-unit-start`, then `user-bus-restart`). **`user-unit-restart` is NOT in `RECIPES`**: those are recoveries for an engine that should be up, and a restart built out of `boot()` would ping a running engine, succeed and change nothing — a button that did nothing precisely when it was most obviously pressed |
 | `child` | terminate the child and spawn `crucible serve` again (`host-mode-respawn`) |
 | `found` | **refused `engine_not_ours`** |
 

@@ -113,7 +113,7 @@ class Orchestrator:
 
     `version` is the orchestrator's SOFTWARE version, for an operator reading
     a page and for a log line. The API version is not in here: it travels in
-    `X-Crucible-Api-Version` on the claim, where every other call already
+    `X-Crucible-Api` on the claim, where every other call already
     carries it, and a second copy in the body would be a fact with two owners.
     """
 
