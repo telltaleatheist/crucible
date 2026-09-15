@@ -1088,6 +1088,83 @@ and are cancelled by the client hanging up. Only `tts` is cooperative, because o
 an engine holding a voice that the next job wants left where it is — which is exactly why it
 is the one that needed a bound.
 
+### 6b. What a render costs — the measurements, and the 7x that was missing
+
+*Added 2026-09-15, after Owen's `thirdreich` book ran on the Mac at 2.9 chunks/min where
+that machine has done ~130 raw sentences/min since September.*
+
+**The defect, and it was one line of environment.** narrator's in-process backend reads its
+batch ceiling from `NARRATOR_HIGGS3_MLX_BATCH`, and `mlx_batch_ceiling()` answers **1** when
+it is unset — "so an unconfigured process renders exactly as it did single-row"
+(`engine/higgs/mlx_backend.py`). At 1, `render_many` takes `_render_many_serial` and a book
+renders one chunk at a time. `crucible/engines/narrator.py:environment()` emitted the three
+`HIGGS_*` variables on the served arm and, on `mlx-darwin`, nothing at all: **"reads none of
+the three" had been read as "reads nothing"**. BookForge's own darwin worker has asked for a
+width since 2026-09-05 (`electron/higgs-spawn.ts:higgsMlxBatchEnv`, the memory tier's 64), so
+the throughput did not regress on the Mac — it was lost at the seam, by every render that
+moved out of the app and into this server.
+
+**How it was found, without guessing.** The live process's environment held exactly
+`NARRATOR_ENGINE` and `NARRATOR_HIGGS_VOICES`; `engine-thirdreich.log` carried **zero**
+`MLX batch generating` lines (that heartbeat is `_render_many_rounds`'s and the serial arm
+has none); and the job's own artifacts gave the rate off their durations and mtimes — 33
+chunks, 959.3 s of audio in 479 s, **2.003x realtime**, flat from a 4.9 s chunk (2.35x) to a
+50.5 s one (1.93x). Flat is the load-bearing part: per-chunk overhead is negligible, so wall
+time is proportional to audio and the only lever is width.
+
+**The curve** — owens-mac-studio (M1 Ultra, 64 GB), voice `thirdreich`, one resident load per
+run, 16 and 64 chunks of 521-572 chars (inside the voice's own 500-700 band), driven through
+`generate_batch` exactly as section 6 drives it (`take: 0`, one rung, no `stream` flag):
+
+| `NARRATOR_HIGGS3_MLX_BATCH` | chars/min | realtime | vs width 1 |
+|---|---|---|---|
+| unset → **1** | 1,799 | 1.99x | 1.00x |
+| 16 | 6,749 | 7.43x | 3.75x |
+| 32 | 9,662 | 10.78x | 5.37x |
+| 64 | 12,579 | 13.97x | **6.99x** |
+
+For scale, `cuda-linux` at `HIGGS_MAX_NUM_SEQS = 16` measures 11,387-11,584 chars/min
+(`voices/thirdreich.toml`, owens-pc 2026-09-05). **At its own width the Mac is the faster of
+the two arms**, which is the opposite of what the 13-14 sent/min readout suggested, and the
+reason the readout was never evidence about the machine.
+
+**The fix states the width, and states it from a measured table.** `MLX_RENDER_WIDTH` in
+`crucible/engines/narrator.py` is keyed by narrator engine for
+`ttsstream.STREAM_BATCH_WIDTH`'s reason — the width must be MEASURED and there is no default
+— and `mlx_render_width_for` refuses an engine with no row. It is deliberately **not** read
+off the voice manifest's `[voice.serving].max_num_seqs`: that number is a vLLM stage-0
+admission width measured against a 24 GB card and it means nothing to a Metal backend, so
+using it here would have bought 3.75x of the 7x and called it the answer.
+
+**Three things this does not claim.**
+
+- **It is a ceiling, not an allocation.** `_mlx_width_for_depth` narrows each slice against
+  narrator's memory budget; Owen's Streicher render asked 64 and ran 62.
+- **The audio is not the same audio.** The serial arm seeds per chunk; a slab draws ONE
+  `mx.random.seed` from its first row's lane. Widening therefore changes the draw, so a book
+  half-rendered at width 1 and resumed at width 64 is not byte-identical across the join.
+  That is inherent to the backend, not to this change.
+- **The `maxChars` certificate is still single-row.** narrator says so itself at load
+  ("batched Higgs MLX rendering is UNCERTIFIED"), and nothing measured says whether width
+  moves the safe chunk length. The served arm has carried the same open question since
+  2026-09-05 (`max_num_seqs_note`: the deathstalker cap certificate ran at 64).
+
+**Owed, and deliberately not guessed:** the memory budget. `NARRATOR_HIGGS3_MLX_MEM_BUDGET_GB`
+is left at narrator's own 42 GB default — what these numbers were measured against on a 64 GB
+machine — and wants deriving from the capability's `total_bytes` less its desktop allowance
+before a smaller Mac runs this. That is the absorption PHASE9-CAPABILITY.md section 5 already
+has queued for BookForge's tier table.
+
+**Two suspects ruled out with evidence, not opinion**, since both were live theories on the
+day. (1) *The tts env rebuild wiped site-packages patches*, as it had on the PC that morning:
+`crucible/narratorpatches.py` states that both patches are edits to the vLLM stack and that
+`envs/tts/mlx-darwin.txt` pins neither — confirmed on the machine, which has no `vllm` and no
+`vllm-omni` installed and matches its recipe exactly (`mlx 0.32.2`, `mlx-audio 0.4.8`,
+`mlx-lm 0.31.3`). There is nothing on that arm to patch. (2) *The take added to
+`_mlx_batch_groups`' key over-splits the batch*: the render door sends one take and one
+sampling for the whole job (section 6's `items` comprehension), so the key is constant across
+every row — and at `BATCH_SIZE = 1` `render_many` never reaches the grouper at all.
+
 ## 7. The streaming door — a session, an event stream, and posts
 
 The Listen path, the in-app Play button, and the browser extension Owen uses every Sunday.
