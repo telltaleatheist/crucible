@@ -8,6 +8,11 @@ than competing for it. There is no eviction of other people's processes, ever.
                  Then `nvidia-smi --query-gpu=memory.free` against the manifest's
                  estimate — short is `insufficient_memory`, naming both numbers.
     mlx-darwin   the same two questions asked of free unified memory.
+    llama-windows the same two questions asked of the Windows driver, or — on a
+                 machine with no NVIDIA driver at all — of system RAM, which is
+                 where a GGUF on the CPU allocates from (PHASE15-HOST.md 3.5:
+                 *"`/v1/accelerator` (nvidia-smi, or `cpu` with the machine's
+                 RAM as the figure)"*).
 
 Every probe is a module-level function so a test can replace it and assert on the
 refusal instead of on the machine it happens to run on.
@@ -34,8 +39,15 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
-from .backend import CUDA_LINUX, MLX_DARWIN, nvidia_smi_path
-from .errors import ApiError, CrucibleError
+from .backend import (
+    BACKEND_KINDS,
+    CUDA_LINUX,
+    LLAMA_WINDOWS,
+    MLX_DARWIN,
+    nvidia_smi_path,
+    physical_memory_figures,
+)
+from .errors import ApiError, CrucibleError, NoViableBackend
 
 GIB = 1024 ** 3
 
@@ -216,6 +228,65 @@ def probe_unified_memory() -> tuple[int, int]:
     return available, int(total_text.stdout.strip())
 
 
+def probe_system_memory() -> tuple[int, int]:
+    """(available bytes, total bytes) of a cardless Windows host's RAM.
+
+    The pool figure for `llama-windows` with no NVIDIA driver: a GGUF on the
+    CPU allocates from system RAM. `backend.physical_memory_figures` is the one
+    owner of the question; this wraps its refusal in the probe's own type so
+    every caller of `read_state` catches ONE exception class.
+    """
+    try:
+        return physical_memory_figures()
+    except NoViableBackend as exc:
+        raise ProbeError(str(exc)) from exc
+
+
+def read_windows_state(desktop_allowance_bytes: int) -> AcceleratorState:
+    """What `llama-windows` is measuring: the card, or this machine's RAM.
+
+    PHASE15-HOST.md 3.5. **The two arms are chosen by whether this host has an
+    NVIDIA driver at all**, which is the same question `backend.detect_windows`
+    asks at start-up — with one deliberate difference, stated rather than left
+    to be discovered:
+
+    `detect_windows` NEVER REFUSES (Owen: *"a crucible server will run on
+    absolutely anything"*), so an nvidia-smi that is present but will not
+    answer leaves it reporting the CPU build. The GUARD must not do that. A
+    card Crucible cannot read is `accelerator_unreadable` — never "here is all
+    of your RAM, help yourself", which is what silently falling back to the CPU
+    arm would mean on a machine whose card is busy with somebody else's work.
+    So detection tolerates a broken driver and the guard does not, and the only
+    road to the RAM arm is a host with no nvidia-smi on it anywhere.
+    """
+    if nvidia_smi_path() is None:
+        available, total = probe_system_memory()
+        return AcceleratorState(
+            backend=LLAMA_WINDOWS,
+            total_bytes=total,
+            free_bytes=available,
+            compute_apps=(),
+            detail=(
+                f"{available / GIB:.1f} GiB of {total / GIB:.1f} GiB system "
+                "memory available; no NVIDIA driver on this host, so the pool "
+                "is RAM and llama.cpp runs on the CPU"
+            ),
+        )
+    apps = tuple(probe_compute_apps())
+    free, total = probe_vram()
+    return AcceleratorState(
+        backend=LLAMA_WINDOWS,
+        total_bytes=total,
+        free_bytes=free,
+        compute_apps=apps,
+        detail=(
+            f"{free / GIB:.1f} GiB free of {total / GIB:.1f} GiB, "
+            f"{len(apps)} compute app(s), desktop allowance "
+            f"{desktop_allowance_bytes / GIB:.1f} GiB"
+        ),
+    )
+
+
 # -------------------------------------------------------------------- state
 
 
@@ -247,9 +318,11 @@ def read_state(backend_kind: str, desktop_allowance_bytes: int) -> AcceleratorSt
                 "available (free + inactive + speculative + purgeable)"
             ),
         )
+    if backend_kind == LLAMA_WINDOWS:
+        return read_windows_state(desktop_allowance_bytes)
     raise ProbeError(
         f"{backend_kind!r} is not a Crucible backend; the backends are "
-        f"{CUDA_LINUX!r} and {MLX_DARWIN!r}"
+        f"{', '.join(repr(kind) for kind in BACKEND_KINDS)}"
     )
 
 
@@ -361,10 +434,20 @@ def guard(
             },
         )
 
-    # Only on a discrete card. On Apple Silicon "used unified memory" is the OS,
-    # the browser and the editor — the machine doing its job, not a compute
-    # process squatting on an accelerator. There the free figure is the whole
-    # check, which is what section 4 asks for on mlx-darwin.
+    # Only on cuda-linux. On Apple Silicon "used unified memory" is the OS, the
+    # browser and the editor — the machine doing its job, not a compute process
+    # squatting on an accelerator. There the free figure is the whole check,
+    # which is what section 4 asks for on mlx-darwin.
+    #
+    # AND NOT ON `llama-windows`, for a different reason that lands in the same
+    # place. This check exists because the WSL2 driver shim answers
+    # `--query-compute-apps` with an empty list even while a process in that VM
+    # holds the card; the WINDOWS driver has no such hole — it names its compute
+    # apps — while a Windows desktop always holds VRAM that belongs to no
+    # compute app at all (the compositor, the browser, every window on screen).
+    # Running it here would refuse every load on a machine that is simply
+    # displaying a desktop, so the compute-app list and the free figure are the
+    # whole check on this backend.
     stray = (
         unattributed_bytes(state, desktop_allowance_bytes, reclaimable_bytes)
         if backend_kind == CUDA_LINUX

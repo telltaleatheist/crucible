@@ -193,8 +193,8 @@ def _sysctl(name: str) -> str:
     return value
 
 
-def physical_memory_bytes() -> int:
-    """This Windows machine's installed RAM, from the OS.
+def physical_memory_figures() -> tuple[int, int]:
+    """(available, total) bytes of this Windows machine's RAM, from the OS.
 
     `GlobalMemoryStatusEx` through ctypes, for `crucible/interfaces.py`'s
     reason: it is the question the OS answers, it is stdlib, and the
@@ -203,6 +203,13 @@ def physical_memory_bytes() -> int:
     GGUF on the CPU allocates from system RAM exactly as a model on a Mac
     allocates from unified memory, so the capability arithmetic reads the same
     shape on both.
+
+    BOTH figures, from ONE call, because two callers want different halves of
+    the same answer and asking twice would let them disagree: capability sizes
+    a model against the TOTAL (what this machine could ever hold) and the
+    accelerator guard sizes a load against the AVAILABLE (what it can hold
+    right now). `ullAvailPhys` is the free figure `nvidia-smi
+    --query-gpu=memory.free` is on a card.
     """
     import ctypes
 
@@ -227,7 +234,12 @@ def physical_memory_bytes() -> int:
             "how much memory it has — and a capability decided from a guessed "
             "pool is a capability nobody can trust"
         )
-    return int(status.ullTotalPhys)
+    return int(status.ullAvailPhys), int(status.ullTotalPhys)
+
+
+def physical_memory_bytes() -> int:
+    """This Windows machine's installed RAM. The TOTAL half of the figures."""
+    return physical_memory_figures()[1]
 
 
 def detect_windows(arch: str) -> Backend:

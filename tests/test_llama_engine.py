@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from crucible import llamacpp, weights
+from crucible import accelerator, llamacpp, weights
 from crucible.backend import Backend, Gpu
 from crucible.config import Config
 from crucible.engines import ENGINES, LlamaServerEngine, engine_model_name
@@ -30,6 +30,8 @@ from crucible.engines.llama_server import (
     PORT_IN_USE,
     fatal_reason,
 )
+from crucible.errors import ApiError
+from crucible.jobs.llm import LoadModelJobType
 from crucible.manifests import load_manifest
 from crucible.residency import Residency
 from crucible.weights import WeightsError
@@ -558,3 +560,140 @@ def test_stopping_an_engine_that_never_started_does_nothing(tmp_path: Path) -> N
     )
     engine.stop()
     assert engine.pids == frozenset()
+
+
+# ------------------------------------------- the accelerator on this backend
+#
+# THE T7 DEFECT, 2026-09-14. The first real Windows run of section 8's button
+# got `409 accelerator_unreadable: cannot load 'dots-ocr': 'llama-windows' is
+# not a Crucible backend; the backends are 'cuda-linux' and 'mlx-darwin'` at
+# `POST /v1/jobs {"type": "load-model"}`. Windows had been made a backend
+# everywhere except in `accelerator.read_state`, whose two-arm `if` was the
+# last hand-written list of backends on the load path. These tests are the one
+# that was missing: a load that reaches the card on a fake `llama-windows`
+# accelerator and is not refused for being on Windows.
+
+
+def _fake_card(monkeypatch, *, free: int, total: int, apps=()) -> None:
+    """A Windows host WITH an NVIDIA driver, answering these figures."""
+    monkeypatch.setattr(
+        accelerator, "nvidia_smi_path", lambda: r"C:\Windows\System32\nvidia-smi.exe"
+    )
+    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: list(apps))
+    monkeypatch.setattr(accelerator, "probe_vram", lambda: (free, total))
+
+
+def test_the_guard_reads_a_llama_windows_card_instead_of_denying_the_backend(
+    monkeypatch,
+) -> None:
+    """T7's refusal, gone. `llama-windows` is a backend to the guard too."""
+    _fake_card(monkeypatch, free=20 * GIB, total=24 * GIB)
+    state = accelerator.guard(
+        LLAMA_WINDOWS,
+        model_id="dots-ocr",
+        need_bytes=6 * GIB,
+        desktop_allowance_bytes=3 * GIB,
+    )
+    assert state.backend == LLAMA_WINDOWS
+    assert state.free_bytes == 20 * GIB
+    assert state.total_bytes == 24 * GIB
+    assert "20.0 GiB free of 24.0 GiB" in state.detail
+
+
+def test_the_refusal_for_a_backend_that_really_is_not_one_names_all_three() -> None:
+    """The list a fourth backend is added to, in ONE place."""
+    with pytest.raises(accelerator.ProbeError) as caught:
+        accelerator.read_state("cuda-windows", 0)
+    said = str(caught.value)
+    assert "cuda-linux" in said and "mlx-darwin" in said and LLAMA_WINDOWS in said
+
+
+def test_a_cardless_windows_host_measures_system_memory(monkeypatch) -> None:
+    """3.5: *"nvidia-smi, or `cpu` with the machine's RAM as the figure"*."""
+    monkeypatch.setattr(accelerator, "nvidia_smi_path", lambda: None)
+    monkeypatch.setattr(
+        accelerator, "probe_system_memory", lambda: (18 * GIB, 32 * GIB)
+    )
+    state = accelerator.read_state(LLAMA_WINDOWS, 3 * GIB)
+    assert (state.free_bytes, state.total_bytes) == (18 * GIB, 32 * GIB)
+    assert state.compute_apps == ()
+    assert "system memory" in state.detail and "CPU" in state.detail
+
+
+def test_a_windows_driver_that_will_not_answer_is_unreadable_and_never_ram(
+    monkeypatch,
+) -> None:
+    """The one place the guard and `detect_windows` deliberately disagree.
+
+    Detection tolerates a broken driver because a server must start on
+    anything; the guard does not, because "I cannot see the card" turning into
+    "here is 32 GiB of RAM" would start a model on somebody else's GPU.
+    """
+    monkeypatch.setattr(
+        accelerator, "nvidia_smi_path", lambda: r"C:\Windows\System32\nvidia-smi.exe"
+    )
+
+    def refuses() -> tuple[int, int]:
+        raise accelerator.ProbeError("nvidia-smi exited 255: driver/library mismatch")
+
+    monkeypatch.setattr(accelerator, "probe_vram", refuses)
+    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
+    called: list[str] = []
+    monkeypatch.setattr(
+        accelerator,
+        "probe_system_memory",
+        lambda: called.append("ram") or (18 * GIB, 32 * GIB),
+    )
+    with pytest.raises(ApiError) as caught:
+        accelerator.guard(
+            LLAMA_WINDOWS, model_id="dots-ocr", need_bytes=6 * GIB
+        )
+    assert caught.value.code == "accelerator_unreadable"
+    assert "driver/library mismatch" in caught.value.message
+    assert called == []
+
+
+def test_a_busy_windows_card_is_still_accelerator_busy(monkeypatch) -> None:
+    """Windows being a backend does not soften section 4: nothing is evicted."""
+    _fake_card(
+        monkeypatch,
+        free=2 * GIB,
+        total=24 * GIB,
+        apps=[accelerator.ComputeApp(pid=4242, name="python.exe", used_bytes=20 * GIB)],
+    )
+    with pytest.raises(ApiError) as caught:
+        accelerator.guard(
+            LLAMA_WINDOWS, model_id="dots-ocr", need_bytes=6 * GIB
+        )
+    assert caught.value.code == "accelerator_busy"
+    assert "4242" in caught.value.message
+
+
+def test_a_load_preflight_passes_on_a_fake_llama_windows_accelerator(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """T7's sequence, up to the point where a real card would be touched.
+
+    Engine installed, both GGUFs installed, a fake card with room: the
+    preflight of `{"type": "load-model", "model": "dots-ocr"}` returns rather
+    than refusing. Nothing here spawns a `llama-server`.
+    """
+    payloads = {
+        "server.zip": _zip_bytes({"llama-server.exe": b"MZ the server"}),
+        "cudart.zip": _zip_bytes({"cudart64_12.dll": b"MZ the runtime"}),
+    }
+    config, release = _stage(tmp_path, monkeypatch, payloads)
+    llamacpp.pull(config, llamacpp.CUDA_BUILD, fetch=release.fetch)
+
+    manifest = load_manifest("dots-ocr")
+    hub = FakeHub(chunks=1)
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download", hub.snapshot_download, raising=False
+    )
+    weights.pull(config, manifest, manifest.spec(LLAMA_WINDOWS))
+
+    _fake_card(monkeypatch, free=20 * GIB, total=24 * GIB)
+    backend = _windows_backend()
+    job_type = LoadModelJobType(config, backend, Residency(config))
+    assert job_type.check(backend).ready
+    job_type.preflight("dots-ocr", {})
