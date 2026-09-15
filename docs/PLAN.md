@@ -454,6 +454,53 @@ ocean rented Linux droplet with a powerful gpu."*
   string broke `install.ps1`'s parse. The generator now emits ASCII and refuses any
   character it has no spelling for.
 
+## Phase 17: orchestrator and engine — contract in `docs/PHASE17-ORCHESTRATOR.md`
+
+**Built 2026-09-15.** Owen: *"Create a relationship/handshake between crucible installs
+where one is the [orchestrator] and one the [worker]… The [orchestrator] is a hollow
+orchestrator, the [worker] does the heavy lifting… If there's no wsl, the windows copy is
+the [worker]"*, and the names, ruled the same night: **"orchestrator and engine. we'll go
+with that."** Never master/slave.
+
+It is not new machinery. `crucible host` has been an orchestrator since it shipped — it
+decides which server a machine runs, boots it, holds its distro open, watches it, writes
+its pairing file. What it never had was a NAME for the relation, so nothing on the wire
+said which of two Crucible processes was which and no app, page or test could ask.
+
+- **`role` is per PROCESS, never per install.** `engine` (serves job types on a backend;
+  everything that exists today) or `orchestrator` (backend kind `orchestrator`, zero job
+  types, manages exactly one engine). A Windows machine with no WSL runs BOTH from one
+  install, as two processes.
+- **The claim.** `POST /v1/peer/claim` on the engine, bearer = the shared token, and the
+  engine answers its own `/v1/info` with `managed_by`. `DELETE` releases; `GET /v1/peer`
+  is `{role, managed_by, uptime_s}`. Refusals are the relation's own —
+  `peer_token_mismatch` (401), `peer_version_incompatible` (426), `peer_already_managed`
+  (409, naming who holds it; `force` only through the page). A claim is a STATEMENT OF
+  FACT, not a permission: nothing consults it before doing anything.
+- **It is never persisted.** A claim on disk outlives the orchestrator that made it, which
+  is ARCHITECTURE.md's one shape. The relation is re-asserted at presence-detection and on
+  every down-to-up edge of the 15 s watch instead.
+- **A `found` engine is never claimed**, from 4.1a's rule: the orchestrator did not start
+  it, so `managed_by` would name a door that refuses every verb the field implies.
+- **`engine-restart`** joins `engine` as a task on the engine's door that the ORCHESTRATOR
+  runs — unit via `systemctl --user restart`, child by respawn, `found` refused
+  `engine_not_ours`. Its last event may never arrive, because the relay runs in the
+  process being restarted; the client re-reads `/v1/info`, as the move's switch-over
+  already taught it to.
+- **The apps keep ONE address per machine and it is the ENGINE's.** `info()` gains `role`,
+  `managedBy` and `engine`; `engineOf(info)` is the whole of the new rule — null means
+  "talk here", an `EngineRef` means "follow it ONCE with the same token", and an
+  orchestrator with no engine throws `orchestrator_has_no_engine`. API version stays 1: a
+  document with no `role` reads as an engine, which is PHASE15 3.3's vintage rule applied
+  again.
+- **Uninstall does NOT go through the relation**, and `docs/INSTALL-UNINSTALL.md` §6.2
+  already ruled it: the flag is `--wsl-too`, it runs the guest's own uninstall through
+  `wsl.exe` by distro name, and a door served BY the orchestrator cannot survive stopping
+  the orchestrator.
+- **NOT renamed:** the Python package is still `crucible/host/`. It is imported by cli,
+  api, tasks, uninstall, envpack and the suite, and a rename touching all of them to change
+  a word no wire and no operator sees is the opposite of cheap (PHASE17 section 7).
+
 ## Phase 1: handshake (DONE)
 
 **A1. Server skeleton** (`crucible/`, Python)

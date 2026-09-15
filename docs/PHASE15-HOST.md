@@ -18,6 +18,13 @@ does not have adds it HERE first, in its own commit, and says so.
 
 ## 0. What is decided, and what it corrects
 
+> **SUPERSEDED IN PART, 2026-09-15 — `docs/PHASE17-ORCHESTRATOR.md`.** Section 4's host
+> IS an orchestrator, and Phase 17 gives that relation a name, a `role` on `/v1/info`,
+> a claim (`POST /v1/peer/claim`) and a second task (`engine-restart`). Nothing below is
+> withdrawn — one server per machine, control is Windows's and data is the card's, the
+> apps keep one address — and `crucible host` keeps working as an alias for
+> `crucible orchestrator`. Read PHASE17 before touching section 4.
+
 > **AMENDED 2026-09-14, later that evening — Owen:** *"the windows side should still host GPU
 > jobs even if WSL isnt present/workable. if the user cant or wont install WSL, we can still
 > run dots, qwen 9b, or whatever else from the windows side. just like it runs from the mac
@@ -586,7 +593,16 @@ on a clean no-WSL Windows box and a real page comes back parsed; for text, `clea
 same way from the 9B GGUF or an upstream. Then `page-reader.ts` and every
 "can this machine do it" line in Foundry go.
 
-## 4. The host — `crucible host` on Windows
+## 4. The host is the ORCHESTRATOR (PHASE17) — `crucible orchestrator` on Windows
+
+> **Renamed 2026-09-15 by `docs/PHASE17-ORCHESTRATOR.md`.** Everything this section
+> describes is the orchestrator half of the relation Phase 17 names: it manages exactly
+> one engine, serves ZERO job types, and never carries a byte of anybody's data. The
+> verb is `crucible orchestrator`, with **`crucible host` kept as an alias** (PHASE17
+> section 7 says why, and why the Python package stays `crucible/host/`). The word
+> "host" below should be read as "orchestrator" throughout; PHASE17 adds the claim
+> (2.1), the `role`/`engine` fields on its door's `/v1/info` (3.2) and the
+> `engine-restart` task (4.2) to what is written here.
 
 A Windows-only verb in the SAME package (nothing else to version), started at login, shown in
 the notification area. It is the front door Owen asked for. It owns exactly four things:

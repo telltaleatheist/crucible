@@ -7,6 +7,14 @@ GPU with a language model, a vision-language model, a TTS model, an aligner or a
 converter resident on it. Crucible is the thing that gets hot. It runs the models. It
 never knows what an audiobook or a cleanup pass is.
 
+**Two roles, and the word for each.** A Crucible process is an **engine** — it serves job
+types on a backend (`cuda-linux`, `mlx-darwin`, `llama-windows`) — or an **orchestrator**:
+a hollow thing that keeps time and plays nothing, managing exactly one engine and carrying
+no data at all. On Windows the tray (`crucible orchestrator`, formerly `crucible host`) is
+the orchestrator and the WSL2 guest is the engine; a Mac or a rented box is an engine with
+no orchestrator. Apps always hold ONE address per machine and it is the engine's. See
+`docs/PHASE17-ORCHESTRATOR.md`.
+
 See `docs/DESIGN.md` for the architecture and `docs/PLAN.md` for the build order.
 An app that wants a Crucible on *this* machine uses `sdk/bootstrap/` (`@crucible/bootstrap`, `docs/PHASE12-BOOTSTRAP.md`): detect the host, install the server, make sure its service is running, read its config, ask its health — never a child process.
 
@@ -60,7 +68,7 @@ curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/
 ```
 
 ```powershell
-# Windows: the host, which then installs the WSL2 engine from its own menu
+# Windows: the ORCHESTRATOR, which then installs the WSL2 engine from its own menu
 irm https://github.com/telltaleatheist/crucible/releases/latest/download/install.ps1 | iex
 
 # and off again, the Windows half and the guest with it
@@ -130,6 +138,8 @@ last, so a release whose manifest exists carries every pack that manifest names.
 ```bash
 crucible init --enable-echo     # detect the backend, mint a token, write the config
 crucible doctor                 # probe the host; exit 0 only when healthy
+crucible orchestrator           # win32: the tray that manages this machine's engine
+                                # (`crucible host` is the same verb, deprecated)
 crucible doctor --json          # the same report, machine-readable
 crucible token --show           # print the bearer token
 crucible serve                  # foreground; 127.0.0.1:7100 by default
