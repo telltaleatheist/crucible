@@ -43,6 +43,35 @@ CPU fallback.
 
 ## Install
 
+### One line, per machine
+
+Every sequence, in both directions, is `docs/INSTALL-UNINSTALL.md`. The short of it:
+
+```bash
+# Linux with an NVIDIA card, or macOS on Apple Silicon
+curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh | sh
+
+# a rented Linux GPU box, reached over the network — the bearer token is the lock
+curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh \
+  | sh -s -- --token "$CRUCIBLE_TOKEN" --host 0.0.0.0 --install llm --min-free-gib 60
+
+# and off again, keeping the weights
+curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh | sh -s -- --uninstall
+```
+
+```powershell
+# Windows: the host, which then installs the WSL2 engine from its own menu
+irm https://github.com/telltaleatheist/crucible/releases/latest/download/install.ps1 | iex
+
+# and off again, the Windows half and the guest with it
+irm https://github.com/telltaleatheist/crucible/releases/latest/download/install.ps1 -OutFile install.ps1
+.\install.ps1 -Uninstall -WslToo
+```
+
+`crucible uninstall --dry-run` prints every step and touches nothing; `--json` is the same
+plan for an app. Weights are KEPT unless `--purge-weights`, and the bearer token is not —
+`config.toml` goes on every uninstall, so a reinstall re-pairs.
+
 ### The envs come off the release — they are not built here
 
 `crucible install <type>` **downloads** a pre-built environment pack from this version's

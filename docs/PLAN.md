@@ -414,6 +414,46 @@ So what is left is not code. It is **a card, and Owen's rulings on the five thin
 6. **Does a resident model ever unload itself?** Proposed: no, and the Servers row shows
    what is resident and for how long (PHASE5-APPS.md section 7).
 
+**Landed, 2026-09-15: a machine can be taken OFF, and a rented one can be put ON.**
+Two routes `docs/INSTALL-UNINSTALL.md` now owns end to end, both from Owen the night
+before: *"make sure there's an uninstall route for crucible as well … I'll probably
+uninstall it on the pc (wsl and windows) and fully reinstall end to end as a test. Same
+with Mac. And it should have a cli install route as well, so I can install it on a digital
+ocean rented Linux droplet with a powerful gpu."*
+
+- **`crucible uninstall`** (`crucible/uninstall.py`) is `sdk/bootstrap/src/steps.ts` read
+  upwards, step by named step, with `--dry-run`, `--json` and `--purge-weights`. Weights
+  are KEPT by default with their size said out loud (3.5: they are the expensive part);
+  it deletes only what it can NAME, so a stray under `CRUCIBLE_HOME` is reported rather
+  than swept and `<home>` goes only when it is EMPTY; it never removes the relocatable
+  interpreter it is running from, which is the wrapper's to remove afterwards. A step it
+  cannot do is refused by name, and "there was nothing there" is not a failure —
+  uninstalling a half-clean machine has to work. `--wsl-too` runs the guest's own
+  uninstall inside the `crucible` distro and never unregisters it, and never names Owen's
+  Ubuntu at all. **The bearer token always goes** (`config.toml` is removed
+  unconditionally), so every round trip is also a rotation and every app re-pairs.
+- **`install.sh --uninstall` / `install.ps1 -Uninstall`** call the verb and then remove
+  the pack it deliberately cannot. **`install.sh` gains the droplet route**: `--token`,
+  `--host`/`--port` (a rented box is reached over the network; the bearer is the lock),
+  `--install <type>` from the published packs, `--from-source <ref>` as a ROUTE and never
+  a fallback, and prerequisites refused BY NAME before anything is downloaded —
+  `no_nvidia_smi`, `no_nvidia_driver`, `no_cuda_arch`, `cuda_arch_too_old` (7.0 floor),
+  `no_ffmpeg` (only when a type that decodes audio was asked for), `disk_too_small`
+  against the operator's own `--min-free-gib`. 4a still holds: a bare `curl … | sh`
+  performs byte for byte the install it did before.
+- **RULED for both apps** (§6.1): the Uninstall door exists for a server this app can
+  prove is THIS machine's — one it installed, one this machine's pairing file names, or
+  the Windows host on `127.0.0.1:7101` — and NEVER for a registry entry. A connect code
+  says where a server is, not whose machine it is on, and a loopback-looking address
+  proves nothing behind a tunnel. The surface is the CLI on every OS (`crucible.cmd` under
+  `%LOCALAPPDATA%\Crucible\host\` on Windows, `<home>/server/bin/crucible` elsewhere); the
+  host's `POST /install` door is NOT extended, because a door served by the host cannot
+  survive stopping the host.
+- **A defect found by running the parser rather than by reading it:** Windows PowerShell
+  5.1 reads a BOM-less `.ps1` as the ANSI code page, so an em dash inside a `Die "…"`
+  string broke `install.ps1`'s parse. The generator now emits ASCII and refuses any
+  character it has no spelling for.
+
 ## Phase 1: handshake (DONE)
 
 **A1. Server skeleton** (`crucible/`, Python)
