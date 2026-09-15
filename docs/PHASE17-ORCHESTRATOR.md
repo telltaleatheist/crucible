@@ -451,6 +451,14 @@ that does not. The last event of a `POST /quit` never arrives, for 4.3's reason
 and unlike a restart there is nothing left afterwards to re-read, which is why
 this is a verb with an empty answer rather than a task.
 
+**The owed item now has a witness — measured 2026-09-15, 08:05–08:25.** Stopping
+the installed tray (pid 45504) with `taskkill /PID` and no `/F` **did nothing in
+25 s**, and wrote **no line to the log**: nothing handles the WM_CLOSE a
+console-less `pythonw` never sees, so the polite stop is not merely unclean, it
+is a no-op that looks like a hang. `/F` was needed, and `/F` runs none of
+`quit()`. That is the paragraph above, measured rather than reasoned, and it
+raises `POST /quit` from tidy to the only stop this process has.
+
 ## 5. The shapes a machine can be
 
 | machine | processes | roles |
@@ -521,3 +529,48 @@ with a readable unit means `wsl-unit` and a claim, a named distro whose unit can
 means `found` with the reason, and `user-bus-restart` refused in a distro Crucible did not
 import whatever the setting says. `sdk/ts/test/unit-phase17-orchestrator.test.ts` — the three fields,
 the vintage rule, and `engineOf`'s three answers.
+
+### First live claim on Owen's PC — 2026-09-15, 08:05–08:25
+
+The relation off the fakes and onto the machine it was written for: the real tray, the
+real `Ubuntu`, the engine Owen has always run by hand. **Not a card measurement** — no
+job was submitted and nothing was loaded.
+
+**What was run.** A host pack built from **958ddab** in a detached worktree
+(`0da51e6d…`; `C:\Windows\System32` must precede Git's `usr\bin` on PATH or the build
+reaches `pack_no_zstd`, PHASE15 7b.8), installed over the running tray — **pid 45504 →
+23052**. Consent was written first, in `%LOCALAPPDATA%\Crucible\config.toml`:
+
+```toml
+[orchestrator]
+distro = "Ubuntu"
+```
+
+**The branch the log took**, which is 2.5 and 4.1a in order and each step conditional on
+the one before: consent → **uid 1000**, read with `id -u` and not assumed → the unit
+probe answered for `crucible.service` → owner **`wsl-unit`** → the distro held open →
+**the claim**.
+
+**Read back, on the wire.**
+
+| | |
+|---|---|
+| `7101 GET /v1/ping` | `200 {name: crucible-orchestrator@owens-pc, role: orchestrator}` |
+| `7101 GET /v1/info` | `role: orchestrator`, `job_types: []`, `engine {name: crucible@owens-pc-wsl, url: http://127.0.0.1:7100, backend: cuda-linux, owner: wsl-unit}`, **7 capabilities read through** |
+| `7100 GET /v1/peer` | `managed_by {name: crucible-orchestrator@owens-pc, url: http://127.0.0.1:7101}` |
+| pairing file | **byte-identical, 95 B**, before and after — rewritten by the new tray to the same bytes |
+
+So 3.2's document, 2.1's claim and 3.1's `managed_by` were each read from the process that
+owns them, on a machine whose engine is somebody else's distro. **5's third row is no
+longer this PC**: with consent it is the first — orchestrator plus `cuda-linux` engine,
+`owner: wsl-unit`, claimed.
+
+**What this run did NOT prove**, and none of it by oversight:
+
+- **`engine-restart` (4.2) through the relation on a live tray.** Built and covered by
+  `tests/test_engine_restart.py`, exercised here only as far as the owner that permits it.
+- **The engine MOVE (4.1).** No distro has been imported on this machine; migrate-config
+  and migrate-weights have still run against fakes only (PHASE15 7b.4b).
+- **The Windows child-engine shape** (5's second row, `owner: child`). It needs a machine
+  with no WSL, and this one has WSL.
+- **`POST /quit`.** Not built; §4.4 now has the measurement that says why it must be.

@@ -1408,6 +1408,38 @@ a 24 GB card with a 3 GiB allowance, nothing configured):
   `Qwen3.8-27B-UD-Q4_K_M.gguf` 16 464 440 224 B. `dots-ocr` reuses the pin its `[local]`
   table already carries.
 
+- **THE MORNING CARD WINDOW, 2026-09-15 07:23–07:34 — TTS on `cuda-linux`.** Owen released
+  the card a second time. The narrative is in 7.6's two new blocks; these are the numbers.
+
+  | figure | measured |
+  |---|---|
+  | `owen` take 0 | **11.30 s** of audio, **264 174 B** — byte-identical to 00:07's take 0, and that is the SEED, not the channel |
+  | `owen` take 1 | **12.02 s**, **275 887 B** — different bytes; the per-item rung reaches SGLang |
+  | `take: 2` | `400 unknown_take`, unchanged |
+  | zero-shot `load-voice` | **116 s** — the FIRST on `cuda-linux`; `/v1/activity` then carries `resident.reference {name, sha256, seconds: 15.12}` |
+  | `unload-voice` | **3 s**; the card back to **2 170 MiB** |
+  | a render whose voice is not resident | **138–145 s**, the reload included |
+  | `install tts --narrator-engine higgs-v3 --build --force` | **~3.5 min**, rc 0 — and every load after it failed (7.6) |
+  | the re-do after the patch fix | **137 s** |
+  | `load-voice owen`, under the systemd unit | **118 s** |
+  | one-sentence render, under the unit | **3.9 s** for **4.78 s** of audio; **96** sentinel records |
+  | full pytest under the lock (T2, after the rebuild) | **PASS, 415 s** |
+
+  Each render pays for a reload because **the settlement clears the voice after every
+  leaseless job**. The linger ruling is owed, and 138–145 s against 3.9 s is what it costs.
+
+  The banner under the unit reads **`vLLM server version 0.28.0`**, which is the version
+  PHASE3-TTS.md §4's recipe pins. **There never was a 0.29.0 Higgs env**; any line that
+  says otherwise is wrong.
+
+- **Still unmeasured after that window**, each for a reason rather than by oversight:
+  the **engine move end to end** — no distro has been imported, so 7.6's T10 line is
+  unchanged; the **Windows child-engine path with an orchestrator**, which needs a machine
+  with no WSL and this one has WSL; **`engine-restart` through the relation on a live
+  tray**, built and tested against fakes only (PHASE17 §8); the **`recipe_sha256` CRLF
+  dependence**, a finding and not yet a fix; and **a full Higgs render through BookForge's
+  own render path**, which is Owen's in-app pass and not a script's.
+
 ### 7.4 NOT built, and every fact the next build would otherwise derive twice
 
 The `llama-windows` backend EXISTS — kind, detection, catalog rows, capability. What it
@@ -1772,7 +1804,7 @@ render.
 | SGLang on the card | **20.0 GB** at `--mem-fraction-static 0.6` — the 19 GB estimate stands, now measured |
 | take-1 render job | **140 s**, and **byte-identical to take 0** |
 | `take: 2` | refused `unknown_take` |
-| zero-shot load | refused `engine_failed: … does not carry generation_config.json` (a base checkpoint) — **open** |
+| zero-shot load | refused `engine_failed: … does not carry generation_config.json` (a base checkpoint) — **no longer open**: a zero-shot load with a clip and its transcript went through in 116 s the next morning (below). Why the evening's attempt reached a base checkpoint at all was not established |
 
 **The byte-identical take is two facts, not one.** The tts env's pinned
 narrator (`0eeb0267`) predates the per-item sampling channel, so the take
@@ -1781,7 +1813,8 @@ restored (**a6c34f2**, **fe709ff**) and the env re-pin is blocked on Owen
 pushing BookForge's branch. Underneath that, narrator seeds `1234 + index`,
 so **same-take re-rolls are byte-identical by design** — a per-take seed is
 being built. Neither of those is the guard failing; both are it working and
-saying so.
+saying so. **The re-pin happened the next morning and take 1 then differed** —
+the block after next.
 
 #### The narrator `HIGGS_ENV` prefix regression
 
@@ -1789,6 +1822,80 @@ saying so.
 resolve; fixed in **96980ce**, which is the HEAD the `20260915-001145` stage
 ran at. Recorded here rather than in a BookForge doc because this night's run
 is what found it.
+
+#### The takes reached the engine — 2026-09-15, 07:23–07:30
+
+The card came free a second time and the two open lines above stopped being open — one
+answered, one superseded by a load that worked and whose cause was not chased. The tts venv's
+narrator was re-pinned to **95d11238** by hand (`pip install --no-deps` — the env's
+versions are the recipe's, and a dependency resolve would move them), and for this
+window the engine ran as a **detached process**, not under the unit.
+
+| | |
+|---|---|
+| `owen` take 0 | **11.30 s** of audio, **264 174 B** — byte-identical to 00:07's take 0 |
+| `owen` take 1 | **12.02 s**, **275 887 B** — different bytes |
+| `take: 2` | `400 unknown_take` |
+
+That pair is the handshake read off the bytes rather than off a log. Take 0 still
+matches the night's take 0 because narrator seeds `1234 + index`, so a re-roll of the
+SAME take is byte-identical **by design**; take 1 differs, which is the per-item rung
+reaching SGLang and the **`itemTake` handshake passing**. The `sampling_not_wired`
+guard did not fire. A per-take seed — what would make take 0 itself re-rollable — is
+still owed.
+
+**The first zero-shot load on `cuda-linux`.** `load-voice zeroshot` with the
+owen-morgan clip and its transcript: **done in 116 s**, and `/v1/activity` then carried
+`resident.reference {name, sha256, seconds: 15.12}` — a fact the server reports about
+what it is holding, not a filename a client remembered.
+
+**The zero-shot RENDER was then refused `409 accelerator_busy` by our own narrator** —
+18.1 GiB unattributed, which was the SGLang that same load had just started. Two
+halves, both fixed in **a87badab**:
+
+- **A render on a voice that is already resident never runs the load guard.** The guard
+  decides whether there is room to bring something onto the card; a job that brings
+  nothing has nothing to ask.
+- **On `cuda-linux`, `guard()` expands the set of OWNED pids** through the session and
+  group leaders of our own children, read from `/proc`. A worker our engine started is
+  ours whether or not it is our direct child; the old set could not say so, and 3.5's
+  `unattributed_bytes` check therefore read our own weights as a stranger's.
+  `llama-windows` and `mlx-darwin` are untouched — this is a rule about what "ours"
+  means on the one backend that has a process tree to read.
+
+`unload-voice` **3 s**, the card back to **2 170 MiB**. Every render in this window cost
+**138–145 s** including a reload, because **the settlement clears the voice after each
+leaseless job** (7.3). That number is the linger ruling's price, stated in seconds.
+
+#### A REBUILD WIPED THE TWO SITE-PACKAGES PATCHES — 07:30–07:34
+
+`crucible install tts --narrator-engine higgs-v3 --build --force` returned **rc 0** in
+~3.5 minutes, and then **every Higgs load failed**:
+
+```
+engine_failed: … Higgs v3 sentinel proof: … holds no records
+```
+
+pip had reinstalled **`vllm` 0.28.0 and `vllm-omni` 0.28.0 pristine**, and pristine is
+the defect. The two patches in PHASE3-TTS.md §4's table live in site-packages —
+**`higgs-sentinel-filter`** (without it every chunk ends in ~240 ms of audible garbage)
+and **`vllm-negative-token-id`** (without it every voice-clone request is HTTP 400) —
+and **nothing re-applied them after the pip run**. `doctor` CHECKED them, which is why
+the failure was legible at all; checking is not applying, and a build that leaves the
+env unpatched while reporting success is a fact with two owners.
+
+Fixed in **958ddab** and **7e29922**: `narratorpatches.apply()` runs the vendored
+appliers **after pip and before the stamp**, so a recipe that installed is a recipe that
+is patched; and `service.py` quotes its `Environment=`.
+
+**Verified under the unit, not beside it.** Rebuild **137 s**; `load-voice owen`
+**118 s**; a one-sentence render **3.9 s** for **4.78 s** of audio; **96 sentinel
+records** in the proof; banner **`vLLM server version 0.28.0`**.
+
+**The on-disk unit still carries the unquoted `PATH`** it was written with before
+`service.py` was fixed. It has to be regenerated **from Owen's login shell** — a unit
+written out of a `wsl.exe --exec` session inherits that session's PATH, which is not
+his. **Owed.**
 
 #### Tests
 
@@ -1824,6 +1931,10 @@ all three stale for a reason this phase created:
 
 Green after **1a0d387**. T4 — BookForge's keepers — is green too, once the
 prompt-vendor tier was written (BookForge `392f20c3`).
+
+**T2 again, 2026-09-15 morning, after the rebuild and the patch fix: PASS, 415 s.**
+Run under the WSL lock with no trainer on the card, because the whole point of running
+it there is that the patch appliers now run inside the install path the suite exercises.
 
 ## 7b. What was built, 2026-09-14 — the host side
 
@@ -2083,6 +2194,31 @@ both were found by needing the WSL server up for T6 rather than by reading
   (`systemctl restart user@1000` as root) is the one that works from there;
   what is missing is the recipe written out as commands. **§4 is owed it.**
 
+  **CORRECTED, measured 2026-09-15 07:34–07:35.** That diagnosis was half right
+  and the half it got wrong is the half that mattered. Both were true at once:
+  the socket WAS missing — `systemctl restart user@1000` as root created
+  `/run/user/1000/bus` — and a `wsl.exe --exec` session **still could not reach
+  it afterwards**, because such a session gets no logind seat and therefore no
+  `XDG_RUNTIME_DIR`, and systemctl looks for the bus at `$XDG_RUNTIME_DIR/bus`
+  and nowhere else. **A missing socket and a missing variable print the
+  identical sentence**, so re-reading the message would never have separated
+  them; it was found by setting the variable. The working form from such a
+  session is
+
+  ```
+  wsl.exe -d Ubuntu --exec env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user <verb> crucible.service
+  ```
+
+  — `env VAR=value cmd` under `--exec`, because `--exec` is what stops wsl.exe
+  pre-expanding the variable on the Windows side where it is empty. With it,
+  `systemctl --user -M telltale@ start crucible.service` brought the unit up
+  **active**, and the serve's parent is `systemd --user`. `user-bus-restart` is
+  **not** the recipe that works from there and is not needed for the ordinary
+  case; it stays refused in any distro Crucible did not import
+  (PHASE17 §2.5), for the reason it always had. §4's recipe is written out as
+  commands in PHASE17 §2.5's `user_systemctl_argv()`, and the uid is **read**
+  (`id -u`), never assumed.
+
 ### 7b.5 Decisions, where the doc left a choice
 
 - **`distro = unknown` is a state and not a synonym for `absent`.** `wsl.exe` failing to
@@ -2290,6 +2426,16 @@ Foundry's reader was not exercised (BookForge's and the SDK's were). And the eng
 host found is still the hand-held `crucible serve` in `Ubuntu`, not a systemd unit the host
 can restart: the unit exists and is enabled, linger is on, and its user bus is unreachable
 until `user@1000` is restarted — which must not happen while the trainer is in that distro.
+
+**The last sentence was corrected the same morning.** Restarting `user@1000` as root (once
+the trainer was off the card, 07:34) did create `/run/user/1000/bus` — and did **not** by
+itself make the unit reachable from a `wsl.exe --exec` session, which needs
+`XDG_RUNTIME_DIR` as well. Both facts, and why one error message covers both, are in
+7b.4c's CORRECTED bullet; the recipe is PHASE17 §2.5's. With it the unit started
+(`systemctl --user -M telltale@ start crucible.service` → active, the serve's parent
+`systemd --user`), so **this host's engine is now a unit it can restart**, and 4.1a's
+`found` owner on this machine is a matter of CONSENT (PHASE17 §2.5) rather than of a bus
+that cannot be reached.
 
 ## 7c. What was built — the Mac
 
