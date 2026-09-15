@@ -544,6 +544,37 @@ class NarratorEngine(SubprocessEngine):
             f"(backend {message.get('backend')})"
         )
 
+    def announced_item_sampling(self) -> bool:
+        """Did the narrator on the other end of this wire say it parses a rung?
+
+        `itemSampling: true` on the `ready` line means this narrator BUILD reads
+        `sampling` off a `generate_batch` item — the channel a take ladder needs
+        (`narrator/engine/item_sampling.py`). A narrator without the key has no
+        such channel: its `_resolve_row` reads `item['voice']` and nothing else,
+        so a rung is DROPPED IN SILENCE and take N renders at take 0.
+
+        Measured 2026-09-15, which is why this exists. Two `tts` render jobs on
+        voice `owen` — one 150-char sentence, take 0 and take 1, whose rung is
+        `temperature = 0.7` — produced byte-identical 264,174-byte artifacts,
+        and the run's own narrator log said `Applied extra_params:
+        {'temperature': 0.8, ...}`. Crucible had built the item correctly; the
+        env's pinned narrator (`envs/tts/higgs-v3-cuda-linux.txt`, bookforge
+        0eeb0267) predated the channel by a day. The recipe's pin and this
+        file's belief about it were one fact with two owners and nothing
+        comparing them (docs/ARCHITECTURE.md). This is the comparison.
+
+        False when the process is not up yet, which is not a claim about the
+        build: callers ask it AFTER `ready`, with the engine in hand.
+
+        It answers only "is there a channel". Whether the LOADED ENGINE has a
+        particular lever is narrator's own answer, per row, and already has a
+        name — `sampling_not_supported`.
+        """
+        message = self._ready_message
+        if message is None:
+            return False
+        return message.get("itemSampling") is True
+
     def readiness_description(self) -> str:
         return "print a ready line on stdout"
 

@@ -321,10 +321,15 @@ def _require_renderable(
     # `generate_batch` items carry `sampling` since 2026-09-14
     # (`narrator/engine/item_sampling.py`), which the engine lays over the
     # voice's loaded numbers key by key — so the rung is resolved here, on the
-    # server, and sent as numbers. (Until that channel existed this was a
-    # `sampling_not_wired` refusal, whose one meaning was "there is no
-    # channel". There is one. The name is gone from the contract and from the
-    # code rather than kept as a refusal nothing can raise.)
+    # server, and sent as numbers.
+    #
+    # `sampling_not_wired` SURVIVES, with a different subject. It used to mean
+    # "the contract has no channel", and that is what stopped being true. It now
+    # means "the narrator on this wire has no channel", which is asked of the
+    # live process in `_render` rather than assumed here — because the tts env
+    # pins narrator by commit and a pin is allowed to be older than the channel.
+    # On 2026-09-15 it was, and two takes of one sentence came back byte-
+    # identical. The check needs the engine, so it is not in this function.
     try:
         manifest.take(params.take)
     except VoiceError as exc:
@@ -737,6 +742,39 @@ class TtsJobType:
         read-ahead window it cannot see. Rows come back **out of order**, which
         is why nothing below indexes by position.
         """
+        # A RUNG NEEDS A NARRATOR THAT HAS THE CHANNEL, and that is asked, not
+        # assumed. `sampling_not_wired` came back on 2026-09-15 with a new
+        # meaning. It used to say "narrator's `generate_batch` takes no sampling"
+        # — a statement about the CONTRACT, which stopped being true when
+        # `narrator/engine/item_sampling.py` landed, so it was deleted. It now
+        # says "the narrator ON THIS WIRE has no such channel", which is a
+        # statement about a PROCESS and can never stop being possible: the tts
+        # env pins narrator by commit, and a pin is allowed to be old.
+        #
+        # It was old. Two render jobs that night — voice `owen`, one sentence,
+        # take 0 and take 1 (`temperature = 0.7`) — returned byte-identical
+        # 264,174-byte artifacts, because the env's narrator (bookforge
+        # 0eeb0267) read `item['voice']` and dropped `item['sampling']` without
+        # a word. Crucible built the item right and reported a take that had
+        # not happened. A wrong take delivered as a success is the failure this
+        # job type exists to make impossible, so it refuses instead.
+        #
+        # Only above take 0. Take 0 sends no `sampling` key at all, which every
+        # narrator ever built renders correctly — it is the loaded voice's own
+        # sampling — so an old narrator keeps serving the takes it can serve.
+        if sampling is not None and not engine.announced_item_sampling():
+            raise JobError(
+                "sampling_not_wired",
+                f"take {params.take} resolves to sampling {sampling}, and the "
+                f"narrator serving this voice did not announce `itemSampling` "
+                f"on its ready line — it has no per-item sampling channel, so "
+                f"it would render take 0 and this job would report take "
+                f"{params.take}. Re-resolve the tts env's narrator pin "
+                f"(envs/tts/*.txt) to a bookforge commit that carries "
+                f"narrator/engine/item_sampling.py, reinstall the env, and "
+                f"reload the voice. Take 0 renders on this narrator as it is.",
+            )
+
         by_index = {chunk.index: chunk for chunk in params.chunks}
         expected = set(by_index)
         answered: set[int] = set()

@@ -419,10 +419,14 @@ def test_a_failed_chunk_is_reported_and_its_neighbours_still_land(
 #
 # PHASE3-TTS.md section 3, wired through on 2026-09-14. The client asks for
 # take N; the server resolves what N MEANS for this voice and sends narrator
-# the numbers on each item. A temperature never travels on the app's wire, and
-# a rung above 0 is no longer refused (`sampling_not_wired` is gone from the
-# contract and from this code): narrator's `generate_batch` items carry
-# `sampling` since `narrator/engine/item_sampling.py`.
+# the numbers on each item. A temperature never travels on the app's wire.
+#
+# `sampling_not_wired` did not go away — it changed subject. It used to mean
+# "the contract has no channel", which `narrator/engine/item_sampling.py` made
+# false. It now means "the narrator ON THIS WIRE has no channel", asked of the
+# live process, because the tts env pins narrator by COMMIT and a pin may be
+# older than the channel. On 2026-09-15 it was, and the last two tests in this
+# block are that night written down.
 
 
 @pytest.fixture
@@ -500,6 +504,62 @@ def test_a_rung_narrator_cannot_honour_fails_that_row_by_name(
     for row in done["failed"]:
         assert row["message"].startswith("sampling_not_supported:")
         assert "temperature" in row["message"]
+
+
+def test_a_narrator_without_the_channel_refuses_the_rung_instead_of_rendering_take_zero(
+    rendered: Callable[..., list[dict[str, Any]]],
+    sampling_log: Callable[[], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE TEST THAT WOULD HAVE CAUGHT 2026-09-15.
+
+    Crucible resolves the rung and writes it onto every item — the two tests
+    above prove that, and they passed all along. What nothing proved is that
+    the narrator ON THE OTHER END reads it. The tts env pins narrator by commit
+    (`envs/tts/higgs-v3-cuda-linux.txt`), and that night the pin was bookforge
+    0eeb0267 — one day older than `narrator/engine/item_sampling.py`. That
+    narrator's `_resolve_row` reads `item['voice']` and nothing else, so the
+    rung was dropped WITHOUT A WORD.
+
+    The measurement: two render jobs, voice `owen`, the same 150-char sentence,
+    take 0 and take 1 (rung 1 = `temperature = 0.7`). Both `0.flac` artifacts
+    came back byte-identical — 264,174 bytes, 11.30 s — and the run's narrator
+    log said `Applied extra_params: {'temperature': 0.8, ...}`, which is take
+    0's. Crucible reported a successful take 1 that never happened.
+
+    So the handshake carries the fact now (`itemSampling` on `ready`) and this
+    job asks before it sends. A wrong take delivered as a success is the one
+    outcome this job type may not produce.
+    """
+    fake_narrator_engine.steer(monkeypatch, no_item_sampling=1)
+    events = rendered(take=1)
+
+    assert terminal(events)["event"] == "failed"
+    error = terminal(events)["data"]["error"]
+    assert error["code"] == "sampling_not_wired"
+    assert "{'temperature': 0.7}" in error["message"]
+    assert "did not announce `itemSampling`" in error["message"]
+    # And it refused BEFORE the wire, so no row was rendered at the wrong rung.
+    assert sampling_log() == []
+
+
+def test_take_zero_still_renders_on_a_narrator_without_the_channel(
+    rendered: Callable[..., list[dict[str, Any]]],
+    sampling_log: Callable[[], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal is scoped to a rung, not to the narrator.
+
+    Take 0 sends no `sampling` key at all, and "no key" is what every narrator
+    ever built already does correctly — it renders at the loaded voice's own
+    sampling, which IS take 0. Refusing take 0 too would strand every render on
+    an old pin to protect a ladder it was not climbing.
+    """
+    fake_narrator_engine.steer(monkeypatch, no_item_sampling=1)
+    events = rendered(take=0)
+
+    assert terminal(events)["data"]["rendered"] == len(CHUNKS)
+    assert all(row["sampling"] is None for row in sampling_log())
 
 
 # ------------------------------------------------------- the zero-shot load

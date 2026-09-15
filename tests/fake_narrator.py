@@ -120,6 +120,15 @@ must not be bent into passing test fixtures through it:
                                   what Crucible put on the wire, because narrator
                                   does not echo sampling back and a fake that did
                                   would be a fake asserting about itself.
+    CRUCIBLE_FAKE_NO_ITEM_SAMPLING
+                                  omit `itemSampling` from the `ready` line, which is
+                                  what a narrator built before
+                                  `engine/item_sampling.py` looks like: it has no
+                                  per-item sampling channel and DROPS a rung without
+                                  a word. That is not hypothetical — the tts env was
+                                  pinned to one on 2026-09-15 and two takes of one
+                                  sentence came back byte-identical. Default: the
+                                  key is sent, because this fake parses a rung.
     CRUCIBLE_FAKE_SAMPLING_LEVERS a comma-separated subset of the four levers this
                                   fake honours; anything else is
                                   `sampling_not_supported` for that ROW. Default:
@@ -693,7 +702,15 @@ def main() -> int:
         while True:
             time.sleep(0.1)
 
-    send("ready", device="fake", backend="fake")
+    # `itemSampling` by default, because this fake DOES parse a rung
+    # (`_refuse_sampling_as_narrator_would`) and a handshake that hid that would
+    # be a fake lying about itself. Withheld on demand, which is the only way to
+    # test the narrator that caused this: one pinned a day before
+    # `engine/item_sampling.py`, which dropped every rung in silence.
+    if os.environ.get("CRUCIBLE_FAKE_NO_ITEM_SAMPLING") == "1":
+        send("ready", device="fake", backend="fake")
+    else:
+        send("ready", device="fake", backend="fake", itemSampling=True)
 
     for line in sys.stdin:
         line = line.strip()
