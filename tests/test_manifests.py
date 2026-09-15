@@ -283,6 +283,12 @@ BACKENDS = {
 #: there, MEASURED 2026-09-12, so its cuda-linux block carries 16384.
 BACKEND_CONTEXTS = {
     ("qwen3.8-27b-4bit", "cuda-linux"): 16384,
+    # The context BookForge's vLLM launcher served this checkpoint at from its
+    # first commit and never changed (`VLLM_TEXT_MAX_MODEL_LEN:-16384`), and the
+    # cap Foundry's own `numCtxMaxForModel` gives a model of this size. The
+    # model-level 12288 is the OLLAMA number and stays where the other two
+    # backends read it.
+    ("qwen3.5-9b", "cuda-linux"): 16384,
     # `-c 16384` is Foundry's launcher verbatim: a page at 200 dpi is up to
     # ~8k image tokens plus the answer (PHASE15-HOST.md 3.10, fact 3).
     ("dots-ocr", "llama-windows"): 16384,

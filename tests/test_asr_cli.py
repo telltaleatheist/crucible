@@ -104,7 +104,8 @@ def test_models_list_covers_both_manifest_directories(
         # Whisper's window is 30 seconds of audio and is not a knob, so an ASR
         # row has no context at all rather than a number nobody set.
         assert rows[model_id]["context_default"] is None
-    assert rows["qwen3.5-9b"]["context_default"] == 12288
+    # cuda-linux serves 16384 — BookForge's launcher value, recovered 2026-09-15.
+    assert rows["qwen3.5-9b"]["context_default"] == 16384
 
 
 def test_pulling_an_unknown_model_names_every_manifest(

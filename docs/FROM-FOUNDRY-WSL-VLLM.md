@@ -45,6 +45,15 @@ and that launcher was never walked the way this one was. Its thirteen flags were
 compared against the manifests on 2026-09-15. Twelve were already here, inert, or
 deliberately different. **One was a real omission:**
 
+**The decode-depth measurement was already on disk and is NOT re-run.** `docs/TEXT-SERVER.md`
+in the BookForge repo carries it, and bookforge commit `2212708d` is where it was taken:
+the Pokemon book, 1,001 blocks, 2026-09-08, Qwen3.5-9B-bf16 under WSL on the 3090 Ti —
+**458 blocks/min against Ollama's 110, 4.2x**, with **7 requests decoding and 3 more queued
+for KV capacity out of Foundry's twelve in flight**, weights 18.26 GiB, pool 3.3 GB =
+22,420 tokens at util 0.90, prefix-cache hit rate 95%. That run was made with
+`--limit-mm-per-prompt '{"image":0,"video":0}'` in the launcher, i.e. **tower-less**, which
+is the configuration the fix above restores.
+
 | BookForge's flag | what Crucible had | verdict |
 |---|---|---|
 | `--limit-mm-per-prompt '{"image":0,"video":0}'` | nothing | **DEGRADING — fixed.** Its header says why: *"the vision tower is never used by a text pass, so the multimodal limits are set to zero and vLLM skips loading and profiling it."* Crucible carried the **profiling** half (`--skip-mm-profiling`, with its own measured 1.90 GiB) and not the **loading** half, so every load of `qwen3.5-9b` and `qwen3.8-27b-4bit` read a vision tower onto the card and held it: 912_020_960 B and 921_460_192 B, summed from each backend's own pinned safetensors headers. Both manifests now carry `--language-model-only`, vLLM 0.29's own name for the same thing, and `crucible/manifests.py` refuses it beside `modalities = [... "image"]` — a sharper refusal than its partner's, because a page reader without a tower does not fail, it ANSWERS. |
@@ -53,13 +62,25 @@ deliberately different. **One was a real omission:**
 | `VLLM_ATTENTION_BACKEND=FLASH_ATTN`, `VLLM_DISABLE_FLASHINFER_PREFILL=1` | nothing | **INERT, AND DEAD WHERE THEY ARE.** Neither name appears in `vllm/envs.py` in 0.29.0 **or** in the 0.28.0 the BookForge env actually runs; 0.29 moved backend selection to `AttentionConfig.backend`. They are two variables nobody reads. The sampler half of that same comment is real, and Crucible already carries it as `VLLM_USE_FLASHINFER_SAMPLER=0` — met independently, 2026-09-12. |
 | `CUDA_HOME`/`CUDA_PATH`/`PATH`/`LD_LIBRARY_PATH` at the wheel's `nvidia/cu13` | nothing | **INERT HERE, for a reason worth keeping.** It exists to give FlashInfer's sampler an nvcc to JIT with. Crucible answers the same failure by not asking for that sampler at all (`engines/vllm.py`), which needs no toolkit in the env. |
 | `--no-enable-log-requests` | nothing | **COSMETIC.** Log volume in the engine's own file. |
-| `--max-model-len 16384` | `context_default = 12288` | **A NARROWING, AND NOT MINE TO CHANGE.** BookForge's comment: *"Foundry pins num_ctx 12288 on Ollama (its longest system prompt + block + answer); 16384 covers that with headroom for a long block."* Crucible took the Ollama number. The failure mode is loud — Foundry's `fitsWindow` refuses a block before sending it — but a block that used to fit now will not. Raising it changes the KV arithmetic at util 0.84, and the manifest records that 0.79 already fails to start with `No available memory for the cache blocks`, so this is a MEASUREMENT on a card and Owen's call, not an edit. |
+| `--max-model-len 16384` | `context_default = 12288` | **A NARROWING — RECOVERED AND FIXED.** Owen, 2026-09-15: *"we made the measurements previously… it was already configured to use vllm before so the configuration is in the git history."* It is. `VLLM_TEXT_MAX_MODEL_LEN:-16384` is in the launcher's FIRST commit (bookforge `cd222229`) and is unchanged through `2212708d` and `e23aabcd`; `docs/CLIENT-SURFACES.md` independently records Foundry's `numCtxMaxForModel` as **16384 for <=15B, else 12288**, so even the Ollama cap gives a 9B 16384 and the 12288 taken from it applied to a model larger than this one. `qwen3.5-9b`'s cuda-linux block now carries `context_default = 16384`; the model-level 12288 stays for the backends that are the Ollama/llama.cpp form. It fits by the measurement already in the manifest — the pool at util 0.84 is 27,443 tokens against a 16,384 sequence — and the tower fix widens that margin. |
 | `--dtype`, `--max-num-seqs 16`, `--gpu-memory-utilization` | all present | Carried. The utilisation is deliberately 0.84 rather than BookForge's 0.90 and the manifest holds the measurement that says why. |
 
-`qwen3.8-27b` in bf16 has neither `--max-num-seqs` nor either multimodal flag. It is the
-one text manifest left as written: its block records a deliberate choice about the second,
-says nothing about the first, and nothing Owen owns can load 56 GiB of weights. Both are
-noted rather than fixed.
+`qwen3.8-27b` in bf16 had neither `--max-num-seqs` nor either multimodal flag. The history
+settles the first: `git log -p` over that manifest across every commit that ever touched it
+(`b1faab6`, `cdf9841`, `4e17842`, `4473b53`) never adds or removes the flag, so vLLM's
+default of 128 was **never a decision, only an absence** — and BookForge ran `maxNumSeqs: 16`
+on both its profiles, the 27B included. It now carries 16. The multimodal flags are still
+absent and still deliberate: that block's own note says nothing in it has been measured with
+an image profiled in, and nothing Owen owns can hold 56 GiB to measure it on.
+
+`thinking` was **never stated per model anywhere**, and the record says why it did not need
+to be: Foundry decides it from the served NAME. `docs/TEXT-SERVER.md` point 2 —
+*"Foundry's `takesThinkField` (`src/translate/ollama.ts`) is `/^qwen3(\.|:|-|$)/i` over the
+last path segment, and it is what sends `chat_template_kwargs.enable_thinking=false`"* — and
+all three Crucible ids match that regex. `qwen3.5-9b`'s `[defaults] thinking = false` is the
+FIRST time it was ever written per model, added here rather than recovered. Extending it to
+the two 27Bs would be consistent with `crucible/sampling.py`'s own argument that the server
+should own this fact, but it is not a restoration of anything, so it is left for Owen.
 
 ## 2. Belongs to the bootstrapper (`@crucible/bootstrap`, unbuilt) and to `local.ts`
 

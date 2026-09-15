@@ -220,9 +220,11 @@ context_default = 16384
 # on a card where the note above records that 0.85 utilisation already buys a KV
 # pool smaller than one 16384-token sequence needs.
 #
-# `memory_bytes_estimate` was measured with the tower resident, is not re-taken
-# here, and is therefore a conservative over-estimate until it is. Same note as
-# the 9B's, same direction, same debt.
+# `memory_bytes_estimate` is unaffected and no re-measurement is owed, for the
+# reason `models/qwen3.5-9b.toml` sets out at length: utilisation is a budget
+# vLLM fills, so freeing the tower at a fixed `--gpu-memory-utilization` moves
+# 0.86 GiB from weights into the KV pool rather than off the card. The estimate
+# is the engine's share of that budget and does not move; the pool does.
 engine_args = [
     "--gpu-memory-utilization", "0.86",
     "--max-num-seqs", "16",

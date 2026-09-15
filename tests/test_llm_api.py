@@ -200,8 +200,10 @@ def test_models_lists_every_manifest_with_its_standing(
     assert row["installed"] is False
     assert row["resident"] is False
     assert row["loadable"] is False
-    assert row["context_default"] == 12288
-    assert row["max_model_len"] == 12288
+    # 16384 on this backend: the context BookForge's launcher served, not the
+    # 12288 Foundry pins on Ollama for a model larger than this one.
+    assert row["context_default"] == 16384
+    assert row["max_model_len"] == 16384
     assert row["memory_bytes_estimate"] > 0
     assert "no weights at" in row["reason"]
 
@@ -479,9 +481,9 @@ def test_the_openai_listing_reports_the_context_the_engine_was_started_with(
     run_job(llm_client, auth, type="load-model", model=MODEL)
     entry = llm_client.get("/v1/openai/models", headers=auth).json()["data"][0]
     assert entry["id"] == MODEL
-    assert entry["max_model_len"] == 12288
+    assert entry["max_model_len"] == 16384
     # The same number vLLM was handed as --max-model-len.
-    assert engines[0].args[-2:] == ["--max-model-len", "12288"]
+    assert engines[0].args[-2:] == ["--max-model-len", "16384"]
 
 
 def test_max_model_len_follows_the_engine_and_context_default_follows_the_manifest(

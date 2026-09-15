@@ -122,9 +122,46 @@ revision = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
 # The whole usable window on this card is roughly 0.80 to 0.88.
 #
 # Owen's ruling, 2026-09-12: "we dont need a big kv cache ... just dont fill the
-# card to the top with kv cache." Smaller util is the lever; `context_default`
-# stays 12288, which is the cleanup context BookForge asks for.
+# card to the top with kv cache." Smaller util is the lever, and the context
+# below is now the one the working launcher served rather than the one Ollama
+# was capped at.
 memory_bytes_estimate = 20_950_548_480
+# THE CONTEXT THIS BACKEND SERVES, RECOVERED 2026-09-15 rather than re-chosen.
+#
+# This line used to be absent and the model's own 12288 stood in for it, on the
+# stated grounds that 12288 was "the cleanup context BookForge asks for". That
+# was the wrong one of BookForge's two numbers. 12288 is what Foundry pins on
+# OLLAMA, and only for a model larger than 15B:
+# `docs/CLIENT-SURFACES.md` records `numCtxMaxForModel` as **16384 for <=15B,
+# else 12288**, so even the Ollama path gives a 9B 16384. The vLLM server
+# BookForge actually ran for this checkpoint served 16384 from its first commit
+# and never changed it — `electron/scripts/vllm/serve_text_vllm.sh`,
+# `VLLM_TEXT_MAX_MODEL_LEN:-16384` at bookforge cd222229, unchanged through
+# 2212708d and e23aabcd — and its comment says why: *"Foundry pins num_ctx 12288
+# on Ollama (its longest system prompt + block + answer); 16384 covers that with
+# headroom for a long block."*
+#
+# So 12288 here was BELOW Foundry's own cleanup ceiling for this model, which is
+# a 400 from the server on a long block rather than a slow answer. Both recovered
+# sources — the launcher that was in service, and Foundry's own per-size cap —
+# say 16384, so that is what this backend serves.
+#
+# IT FITS, BY THE MEASUREMENT ALREADY IN THIS FILE. vLLM refuses to start when
+# the KV pool cannot hold one full-length sequence; the pool at util 0.84 was
+# measured at 27,443 tokens, which holds 16,384 with room over. The
+# `--language-model-only` line below frees 0.85 GiB of vision tower into that
+# same pool, so the margin is wider now than when the 27,443 was taken.
+#
+# `[model] context_default` stays 12288 and is NOT this number: it is what the
+# other two backends serve, and `llama-windows` is the llama.cpp form of the
+# Ollama path the 12288 came from in the first place.
+#
+# The one thing 16384 is not is HEADROOM over Foundry's cleanup ceiling, and
+# `docs/PHASE9-CAPABILITY.md` already records that as a live defect in its own
+# right: `foundry/src/clean/runner.ts` is `CTX_MAX = 16384` too, so the two are
+# exactly equal with nothing between them. That is Foundry's ceiling to move,
+# not this server's floor to guess at, and it is the same on every model.
+context_default = 16384
 # `--max-num-seqs 16`: the number of CUDA graphs vLLM captures follows it. At the
 # default the 9B captured 51 graphs; at 16 it captures 7 piecewise + 2 full, in
 # 5 s and 0.09 GiB. Sixteen concurrent requests is also more than this one-model
@@ -189,10 +226,16 @@ memory_bytes_estimate = 20_950_548_480
 # something to do in the same change that adds a flag. The next load on a card
 # is what should retire it.
 #
-# `memory_bytes_estimate` above was MEASURED WITH THE TOWER RESIDENT and has not
-# been re-taken. It is therefore now an OVER-estimate by about the tower, which
-# is the safe direction — admission refuses a load that would have fit, never
-# admits one that will not — but it is stale, and re-measuring it is owed.
+# `memory_bytes_estimate` ABOVE STILL STANDS, and nothing is owed on it. An
+# earlier draft of this comment called it stale because it was measured with the
+# tower resident; that was wrong, and the reason is the arithmetic written
+# fifty lines up. `--gpu-memory-utilization` is a BUDGET, not a demand, and vLLM
+# sizes the KV pool to fill whatever the budget leaves: KV = util x 23.99 GiB -
+# non-KV. Take 0.85 GiB of vision tower out of non-KV at a FIXED utilisation and
+# the pool grows by 0.85 GiB; the engine's share of the card does not move. That
+# is the whole point of the change — it buys DEPTH, not headroom — and it is why
+# the measured peak share of 19.52 GiB is still what the guard must be able to
+# give. What the tower fix changes is the 1.09 GiB pool, which roughly doubles.
 engine_args = [
     "--dtype", "bfloat16",
     "--gpu-memory-utilization", "0.84",

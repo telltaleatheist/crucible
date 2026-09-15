@@ -54,7 +54,31 @@ engine = "vllm"
 hf_repo = "Qwen/Qwen3.8-27B"
 revision = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 memory_bytes_estimate = 56_368_313_144
-engine_args = ["--dtype", "bfloat16", "--gpu-memory-utilization", "0.85"]
+# `--max-num-seqs 16`: RECOVERED 2026-09-15, not chosen here. This block carried
+# no admission width at all and therefore ran at vLLM 0.29's default of 128
+# (`config/scheduler.py`, `DEFAULT_MAX_NUM_SEQS`). The history says that was
+# never a decision: `git log -p` over this file across all four commits that
+# touched it — b1faab6, cdf9841, 4e17842, 4473b53 — never adds or removes the
+# flag, so 128 was simply never set rather than deliberately kept.
+#
+# Sixteen is what every other vLLM block in this catalog serves, and the reason
+# is measured on the 9B and belongs to the family rather than to the checkpoint:
+# the number of CUDA graphs vLLM captures follows this flag, and at the default
+# the 9B captured 51 of them and paged at 87 s for ONE. It is also the width
+# BookForge's own text server ran both its profiles at
+# (`electron/text-server.ts`, `maxNumSeqs: 16` on the 9B and the 27B alike),
+# and it is still above the twelve Foundry keeps in flight.
+#
+# The multimodal flags are deliberately NOT here, unlike the other two text
+# manifests. That is the choice the note above records — nothing in this block
+# has been measured with an image profiled in, and no machine Owen owns can hold
+# 56 GiB of weights to measure it on — so it is left as written. The day this
+# block is measured is the day to revisit it.
+engine_args = [
+    "--dtype", "bfloat16",
+    "--gpu-memory-utilization", "0.85",
+    "--max-num-seqs", "16",
+]
 
 [backends.mlx-darwin]
 engine = "mlx-lm"
