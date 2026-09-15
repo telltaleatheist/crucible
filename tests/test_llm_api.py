@@ -799,10 +799,15 @@ def test_the_4bit_27b_actually_loads_on_a_free_24_gib_card(
     # compressed-tensors W4A16 carries its own, and `dtype auto` is what it wants.
     # `--max-model-len` is the cuda-linux block's own 16384, not the model's
     # 98304: on a 24 GB card 98304 of KV is 7.9 GiB that is not there.
+    # `--language-model-only` is BookForge's `--limit-mm-per-prompt 0`, carried
+    # across on 2026-09-15: this checkpoint is multimodal, the `llm` lane sends it
+    # nothing but text, and without the flag vLLM reads 921_460_192 B of vision
+    # tower onto the card and holds it for the life of the engine.
     assert engines[0].args == [
         "--gpu-memory-utilization", "0.86",
         "--max-num-seqs", "16",
         "--skip-mm-profiling",
+        "--language-model-only",
         "--max-model-len", "16384",
     ]
 

@@ -143,11 +143,62 @@ memory_bytes_estimate = 20_950_548_480
 # It does not make the engine text-only, it only stops it RESERVING for an image.
 # Nothing in Crucible sends one today. If the `llm` proxy is ever given image
 # input, this line must come out and the utilisation be measured again.
+#
+# `--language-model-only`: AND THIS IS THE LINE THAT MAKES IT TEXT-ONLY. It is
+# BookForge's, carried across rather than re-derived, and it was missing here
+# until 2026-09-15 — the one knob the Foundry/BookForge handover lost.
+# `electron/scripts/vllm/serve_text_vllm.sh` serves this same checkpoint with
+# `--limit-mm-per-prompt '{"image":0,"video":0}'` and says why in its own header:
+# *"the multimodal limits are set to zero and vLLM skips loading and profiling
+# it."* Crucible carried the PROFILING half above and not the LOADING half, so
+# until this line the vision tower was read onto the card on every load and sat
+# there for the life of the engine, unreachable by a lane that sends only text.
+#
+# WHAT IT IS WORTH, read from the pinned weights themselves rather than guessed
+# (`model.safetensors.index.json` at revision c2022362, every `model.visual.*`
+# tensor's byte length summed out of the shard headers, 2026-09-15):
+#
+#     total weights          19_306_216_416 B   17.98 GiB
+#     the vision tower          912_020_960 B    0.85 GiB
+#     language model only    18_394_195_456 B   17.13 GiB
+#
+# 0.85 GiB on a card whose whole usable utilisation window is 0.80-0.88, and
+# whose measured KV pool at 0.84 is 1.09 GiB. Freeing the tower at the same
+# utilisation very nearly DOUBLES the pool, which is the number that decides how
+# many of Foundry's twelve in-flight requests decode instead of queue.
+#
+# WHY THIS SPELLING AND NOT BOOKFORGE'S. `--language-model-only` is vLLM 0.29's
+# own name for exactly BookForge's intent — `MultiModalConfig.language_model_only`:
+# *"disables all multimodal inputs by setting all modality limits to 0.
+# Equivalent to setting --limit-mm-per-prompt to 0 for every modality."* The
+# difference is that BookForge's spelling ENUMERATES the modalities it knows
+# about, so a checkpoint that grows a third one is quietly half-covered; this one
+# enumerates nothing. Same decision, stated where it cannot go out of date.
+#
+# THE MECHANISM IS REAL AND WAS READ, not assumed (vllm 0.29.0 in the pinned llm
+# env): `config/multimodal.py`'s `get_limit_per_prompt` returns 0 for every
+# modality under this flag and 999 without it; `model_executor/models/
+# interfaces.py:374` wraps a tower whose every modality is limited to 0 in
+# `no_init_weights`, so its parameters are never allocated; and
+# `model_executor/models/qwen3_5.py:513` is where THIS checkpoint builds
+# `self.visual` inside that context manager. Without the flag the tower loads.
+#
+# `--skip-mm-profiling` STAYS, and is now expected to be redundant rather than
+# wrong: with every limit at 0 there is no dummy image left to profile. It is a
+# measured line (the A/B above) and unmeasuring it on a deduction is not
+# something to do in the same change that adds a flag. The next load on a card
+# is what should retire it.
+#
+# `memory_bytes_estimate` above was MEASURED WITH THE TOWER RESIDENT and has not
+# been re-taken. It is therefore now an OVER-estimate by about the tower, which
+# is the safe direction — admission refuses a load that would have fit, never
+# admits one that will not — but it is stale, and re-measuring it is owed.
 engine_args = [
     "--dtype", "bfloat16",
     "--gpu-memory-utilization", "0.84",
     "--max-num-seqs", "16",
     "--skip-mm-profiling",
+    "--language-model-only",
 ]
 
 [backends.mlx-darwin]

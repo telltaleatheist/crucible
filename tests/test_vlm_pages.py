@@ -36,6 +36,7 @@ from fastapi.testclient import TestClient
 from crucible import residency as residency_module
 from crucible.manifests import (
     MODALITIES,
+    LANGUAGE_MODEL_ONLY,
     SKIP_MM_PROFILING,
     ManifestError,
     load_manifest,
@@ -290,6 +291,49 @@ def test_a_text_only_model_keeps_the_flag_and_keeps_the_1_9_gib() -> None:
     for text_only in ("qwen3.5-9b", "qwen3.8-27b-4bit"):
         args = load_manifest(text_only).spec("cuda-linux").engine_args
         assert SKIP_MM_PROFILING in args
+
+
+def test_an_image_model_may_not_be_served_language_model_only() -> None:
+    """The same crossing as above, for the flag that deletes the tower.
+
+    Sharper than its partner, and the message says so. `--skip-mm-profiling` on
+    an image model ends in an OOM somebody sees. `--language-model-only` ends in
+    a READING: the engine loads without a vision tower, the page goes in, and a
+    well-formed answer about nothing comes back. That is the failure
+    `engines/mlx_vlm.py` refuses to ship a manifest for, and it must not be
+    reachable by editing a TOML either.
+    """
+    with pytest.raises(ManifestError) as caught:
+        parse_manifest(
+            _manifest(
+                modalities='["text", "image"]',
+                engine_args=f'["--trust-remote-code", "{LANGUAGE_MODEL_ONLY}"]',
+            ),
+            Path("demo-1b.toml"),
+            "demo-1b",
+        )
+    message = str(caught.value)
+    assert LANGUAGE_MODEL_ONLY in message
+    assert "modalities declares 'image'" in message
+    assert "demo-1b.toml [backends.cuda-linux]" in message
+
+
+def test_the_text_models_do_not_load_a_vision_tower_they_never_use() -> None:
+    """BookForge's `--limit-mm-per-prompt 0`, carried across at last.
+
+    Both text checkpoints this build serves on cuda-linux are multimodal, and the
+    `llm` lane sends them nothing but text. Measured from their own pinned
+    safetensors headers on 2026-09-15, the tower is 912_020_960 B on the 9B and
+    921_460_192 B on the 4-bit 27B — on a card whose whole usable utilisation
+    window is 0.80 to 0.88.
+
+    `qwen3.8-27b` in bf16 is deliberately absent from this list; its own block
+    records why, and nothing Owen owns can load it.
+    """
+    for text_only in ("qwen3.5-9b", "qwen3.8-27b-4bit"):
+        manifest = load_manifest(text_only)
+        assert "image" not in manifest.modalities, text_only
+        assert LANGUAGE_MODEL_ONLY in manifest.spec("cuda-linux").engine_args
 
 
 # ------------------------------------------------------- the dots.ocr manifest

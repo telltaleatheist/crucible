@@ -36,6 +36,31 @@ guest's `config.toml` through `wsl.exe`.
 | Measured environments pinned | every `envs/*/*.txt` is a resolved set from a real install as of 2026-09-13 (`1ec936d`, `b751319`), with the interpreter and package count stamped in `crucible-env.json`. |
 | Adopt a server already on the port, never own it | **Not carried, on purpose.** Crucible refuses a stranger on its port. A Crucible has no business driving an engine it did not start: it cannot know the weights, the args or the owner (`model-identity-belongs-to-crucible`). The adopt case Foundry had — a user's hand-run vLLM — is what `--endpoint` on Foundry's own door is for; it never goes through a Crucible. |
 
+## 1b. What this file MISSED, found 2026-09-15
+
+This document was written from **Foundry's** launcher, and Foundry only ever served
+dots.ocr. The TEXT models were BookForge's — `electron/text-server.ts` and
+`electron/scripts/vllm/serve_text_vllm.sh`, measured on the same card on 2026-09-08 —
+and that launcher was never walked the way this one was. Its thirteen flags were
+compared against the manifests on 2026-09-15. Twelve were already here, inert, or
+deliberately different. **One was a real omission:**
+
+| BookForge's flag | what Crucible had | verdict |
+|---|---|---|
+| `--limit-mm-per-prompt '{"image":0,"video":0}'` | nothing | **DEGRADING — fixed.** Its header says why: *"the vision tower is never used by a text pass, so the multimodal limits are set to zero and vLLM skips loading and profiling it."* Crucible carried the **profiling** half (`--skip-mm-profiling`, with its own measured 1.90 GiB) and not the **loading** half, so every load of `qwen3.5-9b` and `qwen3.8-27b-4bit` read a vision tower onto the card and held it: 912_020_960 B and 921_460_192 B, summed from each backend's own pinned safetensors headers. Both manifests now carry `--language-model-only`, vLLM 0.29's own name for the same thing, and `crucible/manifests.py` refuses it beside `modalities = [... "image"]` — a sharper refusal than its partner's, because a page reader without a tower does not fail, it ANSWERS. |
+| `--enable-prefix-caching` | nothing | **INERT.** `config/cache.py` in the pinned vLLM 0.29.0: `enable_prefix_caching: bool = True`. Read, not assumed. |
+| `--mamba-cache-dtype` / `--mamba-ssm-cache-dtype` / `--kv-cache-dtype`, all `auto` | nothing | **INERT.** `auto` is the default for all three (`config/cache.py`), and BookForge's own header calls them *"THE DEPTH KNOBS, exposed and UNMEASURED"* — an env var with no value chosen for it yet, not a setting. |
+| `VLLM_ATTENTION_BACKEND=FLASH_ATTN`, `VLLM_DISABLE_FLASHINFER_PREFILL=1` | nothing | **INERT, AND DEAD WHERE THEY ARE.** Neither name appears in `vllm/envs.py` in 0.29.0 **or** in the 0.28.0 the BookForge env actually runs; 0.29 moved backend selection to `AttentionConfig.backend`. They are two variables nobody reads. The sampler half of that same comment is real, and Crucible already carries it as `VLLM_USE_FLASHINFER_SAMPLER=0` — met independently, 2026-09-12. |
+| `CUDA_HOME`/`CUDA_PATH`/`PATH`/`LD_LIBRARY_PATH` at the wheel's `nvidia/cu13` | nothing | **INERT HERE, for a reason worth keeping.** It exists to give FlashInfer's sampler an nvcc to JIT with. Crucible answers the same failure by not asking for that sampler at all (`engines/vllm.py`), which needs no toolkit in the env. |
+| `--no-enable-log-requests` | nothing | **COSMETIC.** Log volume in the engine's own file. |
+| `--max-model-len 16384` | `context_default = 12288` | **A NARROWING, AND NOT MINE TO CHANGE.** BookForge's comment: *"Foundry pins num_ctx 12288 on Ollama (its longest system prompt + block + answer); 16384 covers that with headroom for a long block."* Crucible took the Ollama number. The failure mode is loud — Foundry's `fitsWindow` refuses a block before sending it — but a block that used to fit now will not. Raising it changes the KV arithmetic at util 0.84, and the manifest records that 0.79 already fails to start with `No available memory for the cache blocks`, so this is a MEASUREMENT on a card and Owen's call, not an edit. |
+| `--dtype`, `--max-num-seqs 16`, `--gpu-memory-utilization` | all present | Carried. The utilisation is deliberately 0.84 rather than BookForge's 0.90 and the manifest holds the measurement that says why. |
+
+`qwen3.8-27b` in bf16 has neither `--max-num-seqs` nor either multimodal flag. It is the
+one text manifest left as written: its block records a deliberate choice about the second,
+says nothing about the first, and nothing Owen owns can load 56 GiB of weights. Both are
+noted rather than fixed.
+
 ## 2. Belongs to the bootstrapper (`@crucible/bootstrap`, unbuilt) and to `local.ts`
 
 These are Windows-side facts about driving the guest, and they are exactly the machinery

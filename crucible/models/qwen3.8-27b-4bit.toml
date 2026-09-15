@@ -199,10 +199,35 @@ context_default = 16384
 # default the 9B captured 51 of them and paged at 87 s each), the second stops
 # vLLM budgeting for an image on a multimodal checkpoint the `llm` lane never
 # sends one to.
+#
+# `--language-model-only` is the 9B's too, and read `models/qwen3.5-9b.toml` for
+# the mechanism and the provenance: it is BookForge's
+# `--limit-mm-per-prompt '{"image":0,"video":0}'` in vLLM 0.29's own vocabulary,
+# it was missing from both manifests until 2026-09-15, and without it the vision
+# tower is read onto the card by a lane that will only ever send text.
+#
+# IT COSTS MORE HERE THAN ON THE 9B, not less, and the reason is the
+# quantization. Summed from this backend's own pinned weights (the single
+# `model.safetensors`' header at revision 5a2ee524, 2026-09-15):
+#
+#     total weights          18_568_108_256 B   17.29 GiB
+#     the vision tower          921_460_192 B    0.86 GiB
+#
+# The AWQ INT4 recipe quantizes the LANGUAGE model; the tower comes across at
+# its own precision, so it is very nearly the same absolute size as the bf16
+# 9B's — 0.86 GiB against 0.85 — while the model it is attached to is less than
+# half the size. Five per cent of this checkpoint is a tower nothing asks for,
+# on a card where the note above records that 0.85 utilisation already buys a KV
+# pool smaller than one 16384-token sequence needs.
+#
+# `memory_bytes_estimate` was measured with the tower resident, is not re-taken
+# here, and is therefore a conservative over-estimate until it is. Same note as
+# the 9B's, same direction, same debt.
 engine_args = [
     "--gpu-memory-utilization", "0.86",
     "--max-num-seqs", "16",
     "--skip-mm-profiling",
+    "--language-model-only",
 ]
 
 [backends.mlx-darwin]

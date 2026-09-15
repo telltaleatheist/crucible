@@ -143,6 +143,27 @@ MODALITIES: frozenset[str] = frozenset({"text", "image"})
 #: loads, serves, and then meets a real page with no reservation behind it.
 SKIP_MM_PROFILING = "--skip-mm-profiling"
 
+#: vLLM's flag for "this model is served text-only", and the SECOND half of the
+#: pair above rather than a variation on it.
+#:
+#: `--skip-mm-profiling` stops the engine RESERVING for an image;
+#: `--language-model-only` stops it READING THE VISION TOWER AT ALL. vLLM 0.29
+#: implements it by returning 0 from `MultiModalConfig.get_limit_per_prompt` for
+#: every modality, which puts the tower's construction inside `no_init_weights`
+#: (`model_executor/models/interfaces.py`) so its parameters are never allocated.
+#: On the two multimodal text checkpoints this build serves that is 912_020_960 B
+#: and 921_460_192 B of weights the `llm` lane can never reach — BookForge's
+#: `--limit-mm-per-prompt '{"image":0,"video":0}'` said in vLLM's own vocabulary.
+#:
+#: IT IS REFUSED BESIDE `image` FOR A WORSE REASON THAN ITS PARTNER IS. A model
+#: advertised for images and started with `--skip-mm-profiling` meets a page with
+#: nothing reserved and falls over — loudly, eventually. One started
+#: `--language-model-only` has no tower to show the page to, so it ANSWERS: a
+#: well-formed reading of a page the model never saw, which is the exact failure
+#: `engines/mlx_vlm.py` refuses to ship a manifest for. A wrong answer nothing
+#: records is the one outcome this loader exists to make impossible.
+LANGUAGE_MODEL_ONLY = "--language-model-only"
+
 #: What a `[defaults]` table may state, and the type each key takes.
 #:
 #: **Only keys an engine actually honours.** Every one of these reaches vLLM's
@@ -1039,6 +1060,19 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
                 f"server serves text-only; take it out and measure "
                 f"--gpu-memory-utilization again with the image profiled in "
                 f"(PHASE3-VLM.md section 3)"
+            )
+        if "image" in modalities and LANGUAGE_MODEL_ONLY in engine_args:
+            # The same crossing of the two tables, and the sharper of the two.
+            # This flag does not shrink a budget, it deletes the vision tower:
+            # the engine starts, `/v1/models` answers, a page goes in and a
+            # reading comes back that the model produced without ever seeing it.
+            raise ManifestError(
+                f"{where}: engine_args carries {LANGUAGE_MODEL_ONLY!r} while "
+                f"[model] modalities declares 'image'. That flag makes vLLM skip "
+                f"loading the vision tower, so this engine would answer every "
+                f"page from the text alone — a well-formed reading of something "
+                f"it was never shown. It belongs only to a model this server "
+                f"serves text-only"
             )
         backend_context = block.get("context_default")
         if backend_context is not None and backend_context <= 0:

@@ -420,7 +420,57 @@ def test_the_4bit_27b_does_not_force_a_dtype() -> None:
         "--gpu-memory-utilization", "0.86",
         "--max-num-seqs", "16",
         "--skip-mm-profiling",
+        "--language-model-only",
     )
+
+
+# ------------------------------------------- the text lane never loads a tower
+#
+# BOTH TEXT MODELS THIS BUILD CAN ACTUALLY SERVE ON A 24 GiB CARD ARE MULTIMODAL
+# CHECKPOINTS, and the `llm` lane sends them nothing but text. Without
+# `--language-model-only` vLLM reads the vision tower onto the card anyway and
+# holds it for the life of the engine: 912_020_960 B on the 9B and 921_460_192 B
+# on the 4-bit 27B, summed from each backend's own pinned safetensors headers on
+# 2026-09-15.
+#
+# This is BookForge's configuration, not a new idea — `electron/scripts/vllm/
+# serve_text_vllm.sh` has served the same 9B with `--limit-mm-per-prompt
+# '{"image":0,"video":0}'` since 2026-09-08, and its header says the intent out
+# loud. The handover carried the PROFILING flag and lost the LOADING one; these
+# tests are what stop it being lost again.
+#
+# `--skip-mm-profiling` is asserted beside it deliberately. The two are not the
+# same flag: one stops vLLM RESERVING for an image, the other stops it READING
+# the tower, and the manifests carry a measured reason for each.
+
+
+def test_the_text_models_are_served_language_model_only() -> None:
+    """A lane that sends only text does not pay for a vision tower.
+
+    Pinned per model rather than looped over every manifest, because the third
+    27B — `qwen3.8-27b` in bf16 — deliberately does NOT carry these flags, and a
+    loop would either fail on it or need an exception list that hides it. Its own
+    block records the choice: nothing there has been measured with an image
+    profiled in, and it cannot load on either of Owen's machines, so it is left
+    as written and named here instead of silently swept in.
+    """
+    for model_id in ("qwen3.5-9b", "qwen3.8-27b-4bit"):
+        args = load_manifest(model_id).spec("cuda-linux").engine_args
+        assert "--language-model-only" in args, model_id
+        assert "--skip-mm-profiling" in args, model_id
+
+
+def test_the_page_reader_is_never_language_model_only() -> None:
+    """The one model that IS shown an image must keep its tower.
+
+    The same flag that is right for the text lane is catastrophic here and would
+    not error: dots.ocr would load without a vision tower and answer about a page
+    it was never shown. `modalities` naming `image` is the fact that makes it
+    wrong, so that is what this asserts against.
+    """
+    manifest = load_manifest("dots-ocr")
+    assert "image" in manifest.modalities
+    assert "--language-model-only" not in manifest.spec("cuda-linux").engine_args
 
 
 def test_the_manifests_directory_is_beside_the_package() -> None:
