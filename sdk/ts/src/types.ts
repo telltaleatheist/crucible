@@ -1659,6 +1659,15 @@ export interface ModuleTaskRequest {
  * A server that was not started by a host refuses `engine_move_needs_host`;
  * a server that is not a Windows one refuses `engine_move_not_here`.
  *
+ * **Those two are the only refusals you get from the SUBMIT.** When a host
+ * DID start the server, there is nothing to refuse at submit time — the
+ * server hands the move over and relays — so the POST answers with a task id
+ * and every failure of the door is named in the task's own `failed` event:
+ * `host_unreachable` (the door did not answer: start the host again),
+ * `host_install_failed` (the stream ended without saying whether the move
+ * finished: read the host's log), or the code the host's own `failed` event
+ * carried, verbatim. Read the task, not the submit.
+ *
  * `target` is `'wsl'` and nothing else in this phase: moving BACK to Windows
  * is an explicit operator act (section 6) and is refused
  * `engine_target_unknown` rather than half-done.
