@@ -165,9 +165,14 @@ memory_bytes_estimate = 20_950_548_480
 # `--language-model-only` line below frees 0.85 GiB of vision tower into that
 # same pool, so the margin is wider now than when the 27,443 was taken.
 #
-# `[model] context_default` stays 12288 and is NOT this number: it is what the
-# other two backends serve, and `llama-windows` is the llama.cpp form of the
-# quantized Ollama path `ai-bridge.ts` tuned that tier for in the first place.
+# `[model] context_default` stays 12288 and is NOT this number. CORRECTED
+# 2026-09-15: this used to say 12288 was "what the other two backends serve",
+# and that sentence was only ever true of ONE of them. It argued `llama-windows`
+# — the llama.cpp form of the quantized Ollama path `ai-bridge.ts` tuned that
+# tier for in the first place — and said nothing whatever about `mlx-darwin`,
+# which was inheriting 12288 by omission rather than by any reasoning about a
+# Mac. The mlx block now carries its own 16384 and says why; 12288 survives here
+# as `llama-windows`'s number alone, and that is now the only claim made for it.
 #
 # The one thing 16384 is not is HEADROOM over Foundry's cleanup ceiling, and
 # `docs/PHASE9-CAPABILITY.md` already records that as a live defect in its own
@@ -270,7 +275,67 @@ revision = "27cdb77d9381d508abfe5d4e06bcb95471e312ac"
 # 17.86 GB, because MLX memory-maps the weights and not every page stays
 # resident — RSS is a floor, not the requirement. Computed weights + KV would
 # have said 19.22 GB, 6% under the truth.)
-memory_bytes_estimate = 20_378_749_158
+#
+# THE ESTIMATE IS THAT MEASURED PEAK PLUS THE KV THE WIDER CONTEXT BELOW ADDS.
+# The measurement was taken at 12198 tokens; this backend now declares 16384, so
+# the 4186 tokens between them owe their KV and nothing else:
+#
+#   per token, from config.json (32 layers, `full_attention_interval` 4, so 8
+#   full-attention layers; the other 24 are gated-delta-net, whose recurrent
+#   state is per-SEQUENCE and does not grow with length):
+#       2 (K and V) x 4 kv heads x 256 head_dim x 2 bytes = 4096 B per layer
+#       4096 x 8 full layers                              = 32_768 B per token
+#   (4186 tokens) x 32_768 B                              = 137_166_848 B
+#   20_378_749_158 + 137_166_848                          = 20_515_916_006
+#
+# That formula is not invented here: it is the one already written out in
+# models/qwen3.8-27b.toml, which derives 65_536 B/token for the 27B from the
+# same config fields and says the two share an attention shape. The 9B has half
+# the layers, so half the per-token KV.
+#
+# WHAT IS COMPUTED AND WHAT IS NOT. The 137 MB is exact. What is REASONED is
+# that nothing else in the measured peak moves: the 1.16 GB by which the peak
+# exceeded computed weights+KV is activations and allocator overhead, and
+# mlx-lm prefills a prompt in fixed-size chunks, so a longer context is MORE
+# chunks rather than bigger ones. That is the design mlx-lm is known to have and
+# it is consistent with the measurement, but it was not re-read from mlx-lm's
+# source for this change and no new load was taken — Owen holds both cards.
+# If that reasoning is wrong and the whole 2.47 GB rise scaled with length, the
+# honest upper bound would be 21.23 GB. The gap between the two is 0.7 GB on a
+# machine with 43 GB spare, so it changes no admission decision today; the next
+# load on the Mac should re-take the peak and replace this line with a
+# measurement, the way the 27B block says its own computed pair is a floor.
+memory_bytes_estimate = 20_515_916_006
+# THE CONTEXT THIS BACKEND SERVES, 2026-09-15. It used to be absent, and the
+# model's 12288 stood in — inherited by OMISSION, never chosen for a Mac. The
+# cuda-linux comment above that was read as justifying it argues `llama-windows`
+# and names no other backend.
+#
+# 12288 is BookForge's `numCtxMaxForModel` 32B tier (`>15B or unrecognized`,
+# "tuned for 32B Q4_K_M") reaching a 9B. Its own `<=15B` tier is 16384 and this
+# model's id matches it. Four independent records say 16384 for these exact
+# weights and none says 12288: that tier; `electron/scripts/vllm/
+# serve_text_vllm.sh`'s `VLLM_TEXT_MAX_MODEL_LEN:-16384`; `electron/
+# text-server.ts`'s pinned `qwen35-9b-bf16` profile, which serves
+# `Qwen/Qwen3.5-9B` @ `c2022362` at max-model-len 16384 (CLIENT-SURFACES.md
+# section on the text server); and Foundry's `CTX_MAX = 16384`, the ceiling of
+# clean-text, which is the act that actually runs through this model on the Mac.
+#
+# Being BELOW that ceiling is the defect: Foundry sizes a request as
+# `max_model_len - (ceil(chars/2.5) + 256)`, so a 12288 here spends a long
+# block's budget 4096 tokens short of what the client was built to ask for.
+# 16384 makes them equal. It is NOT headroom over the client's ceiling, and must
+# not be raised further to manufacture some — that is Foundry's ceiling to move,
+# and `docs/PHASE9-CAPABILITY.md` already records it as a defect in its own right.
+#
+# NOTE WHAT THIS FLAG DOES AND DOES NOT DO HERE. mlx-lm has no `--max-model-len`
+# and `Residency._engine_args` sends that flag to vLLM only, so this number
+# never reaches the engine: mlx-lm takes its context from the model's own config
+# (`max_position_embeddings` 262144). It is the number Crucible REPORTS as
+# `max_model_len`/`context_default` and that clients size against, and on 64 GB
+# the machine was never the constraint. So this line does not enable anything the
+# Mac could not already do — it stops the server under-reporting what it serves.
+context_default = 16384
 engine_args = []
 
 # ---------------------------------------------------------------------------
