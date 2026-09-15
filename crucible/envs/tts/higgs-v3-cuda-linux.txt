@@ -73,8 +73,17 @@
 #     toolkit: `lib64 -> lib` and `libcudart.so -> libcudart.so.13` inside
 #     <env>/lib/python3.12/site-packages/nvidia/cu13, which is also what
 #     CUDA_HOME must point at. `serve_higgs_sgl.sh` points at them;
-#     `crucible/narratorpatches.py` creates and checks them, the same
+#     `crucible/narratorpatches.py` creates and checks them
+#     (`ensure_cuda_toolkit_links` / `check_cuda_toolkit_links`), the same
 #     after-pip-and-before-the-stamp discipline the vllm-omni patches had.
+#
+#     TRUE SINCE 2026-09-15 AND NOT BEFORE. Both links were made BY HAND on
+#     owens-pc to get the first SGLang env up, and this paragraph described the
+#     machinery that would do it for a day before any existed. `crucible doctor`
+#     now prints a row per link on cuda-linux, which matters more here than the
+#     patch rows do: this stack has no site-packages patches at all, so without
+#     them that whole section is empty on the one host where the one thing that
+#     can be silently missing lives.
 #  2. `flashinfer-jit-cache` is published on flashinfer's OWN per-CUDA index and
 #     is on no PyPI, hence the `--extra-index-url` below. Without it the server
 #     still starts and compiles its kernels at every cold start instead.

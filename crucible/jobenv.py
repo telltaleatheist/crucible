@@ -704,6 +704,29 @@ def install_env(
             # the env this leaves behind is one nothing downstream trusts.
             raise EnvError(str(exc)) from exc
 
+    # AND THE TWO SYMLINKS pip CANNOT EXPRESS EITHER — cuda-linux only.
+    #
+    # flashinfer JIT-builds SGLang's attention kernels with the nvcc inside the
+    # pip wheel and only does so once that directory looks like a toolkit
+    # (`lib64` beside `lib`, an unsuffixed `libcudart.so`). CUDA_HOME points at
+    # the same directory and `serve_higgs_sgl.sh` exports it.
+    #
+    # THE FAILURE IS LATE AND LOOKS LIKE HEALTH, which is why this is here and
+    # not in a setup note. Nothing fails at install: pip is happy, the env
+    # stamps installed, and this stack has no site-packages patches for
+    # `doctor` to report on. It goes wrong at the first render on a card. Both
+    # links were created BY HAND on owens-pc on 2026-09-15, and the recipe has
+    # claimed ever since that this module "creates and checks them" — a sentence
+    # that was true of nothing until now.
+    #
+    # `cuda-linux` ONLY: `mlx-darwin`'s tts env has no CUDA in it, and asking it
+    # for an nvidia directory would call a working Mac env broken.
+    if spec.job_type == "tts" and backend_kind == "cuda-linux":
+        try:
+            narratorpatches.ensure_cuda_toolkit_links(directory, on_line=on_line)
+        except narratorpatches.PatchError as exc:
+            raise EnvError(str(exc)) from exc
+
     version = subprocess.run(
         [str(python), "-c", "import sys; print('.'.join(map(str, sys.version_info[:3])))"],
         capture_output=True,

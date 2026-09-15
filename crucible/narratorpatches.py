@@ -99,6 +99,7 @@ pristine stage processor and zero times once the filter patch is in.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -374,4 +375,145 @@ def _row(patch: NarratorPatch, status: str, detail: str) -> dict[str, Any]:
         "path": patch.rel_path,
         "detail": detail,
         "why": patch.why,
+    }
+
+
+# ---------------------------------------------------------------------------
+# THE OTHER THING pip CANNOT EXPRESS: a directory that must LOOK like a toolkit
+# ---------------------------------------------------------------------------
+#
+# Not a patch, and deliberately not forced into `NarratorPatch`. A patch is an
+# edit to a file, identified by a marker inside it; these are two symlinks, and
+# `marker`, `absent_marker` and `stale_marker` would all be meaningless fields
+# on them. Same discipline, same moment in the install, different shape.
+#
+# WHAT THEY ARE FOR. flashinfer JIT-builds SGLang's attention kernels using the
+# CUDA 13 nvcc that ships inside the pip wheel, and it will only do so once that
+# directory looks like a real toolkit install — `lib64` beside `lib`, and an
+# unsuffixed `libcudart.so`. `CUDA_HOME` points at the same directory and
+# `serve_higgs_sgl.sh` exports it.
+#
+# WHY THEIR ABSENCE IS DANGEROUS RATHER THAN OBVIOUS. Nothing fails at install
+# time; pip is perfectly happy. The env stamps installed, `crucible doctor`
+# reports no patch rows for this stack (it has none), and the failure arrives
+# later at the first render on a card — which is the knob-whose-absence-looks-
+# like-health shape this project has now paid for several times.
+#
+# THEY WERE CREATED BY HAND on owens-pc on 2026-09-15 to get the first SGLang
+# env working, and `envs/tts/higgs-v3-cuda-linux.txt` has claimed since that day
+# that "`crucible/narratorpatches.py` creates and checks them". That sentence
+# was aspirational: nothing here did. This is that sentence becoming true.
+
+#: Inside the env's `site-packages`. The wheel that provides it is
+#: `nvidia-cuda-runtime-cu13`, which the cuda-linux tts recipe pins.
+CUDA_TOOLKIT_REL = "nvidia/cu13"
+
+#: `(link, target)`, both relative to {@link CUDA_TOOLKIT_REL}. The target is
+#: written VERBATIM as a relative symlink, so the pair survives the env being
+#: moved or the whole guest being copied — an absolute target would point at the
+#: path the env was built at.
+CUDA_TOOLKIT_LINKS: tuple[tuple[str, str], ...] = (
+    ("lib64", "lib"),
+    ("lib/libcudart.so", "libcudart.so.13"),
+)
+
+#: Why any of this matters, in one sentence, for the row `doctor` prints.
+CUDA_TOOLKIT_WHY = (
+    "flashinfer JIT-builds SGLang's attention kernels with the nvcc inside the "
+    "pip wheel and only does so when that directory looks like a toolkit; "
+    "without these the install still succeeds and the first render on a card is "
+    "where it goes wrong"
+)
+
+
+def _toolkit_dir(env_dir: Path) -> Path | None:
+    packages = site_packages(env_dir)
+    return None if packages is None else packages / CUDA_TOOLKIT_REL
+
+
+def ensure_cuda_toolkit_links(env_dir: Path, on_line: Any = None) -> None:
+    """Create the two symlinks, idempotently. Raises `PatchError` by name.
+
+    Called after pip and BEFORE the stamp, for the same reason `apply` is: an
+    env that is stamped installed is one whose links are in, or there is no
+    stamp.
+
+    A link that already points where it should is left alone and said so. One
+    that exists and points somewhere ELSE is REFUSED rather than replaced —
+    somebody or something put it there on purpose, and silently overwriting it
+    would destroy the evidence of whatever did.
+    """
+    toolkit = _toolkit_dir(env_dir)
+    if toolkit is None:
+        raise PatchError(
+            f"{env_dir} has no venv site-packages, so the CUDA toolkit directory "
+            f"{CUDA_TOOLKIT_REL} cannot be found. The env was not built."
+        )
+    if not toolkit.is_dir():
+        raise PatchError(
+            f"{toolkit} is not there. The cuda-linux tts recipe pins "
+            "nvidia-cuda-runtime-cu13, which is what provides it, so an env "
+            "without it did not install what the recipe asked for."
+        )
+    for link_rel, target in CUDA_TOOLKIT_LINKS:
+        link = toolkit / link_rel
+        if link.is_symlink():
+            current = os.readlink(link)
+            if current == target:
+                if on_line is not None:
+                    on_line(f"cuda toolkit: {link_rel} -> {target} already there")
+                continue
+            raise PatchError(
+                f"{link} is a symlink to {current!r}, not {target!r}. Crucible did "
+                "not put it there and will not replace it — remove it by hand if "
+                "it is wrong, so that whatever created it is not hidden."
+            )
+        if link.exists():
+            raise PatchError(
+                f"{link} exists and is not a symlink. It should be a link to "
+                f"{target!r}; a real file or directory here is somebody else's "
+                "doing and is not overwritten."
+            )
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target)
+        if on_line is not None:
+            on_line(f"cuda toolkit: {link_rel} -> {target} created")
+
+
+def check_cuda_toolkit_links(env_dir: Path) -> list[dict[str, Any]]:
+    """One row per link, in the shape `doctor` already prints for patches."""
+    toolkit = _toolkit_dir(env_dir)
+    rows: list[dict[str, Any]] = []
+    for link_rel, target in CUDA_TOOLKIT_LINKS:
+        row_id = f"cuda-toolkit-{link_rel.replace('/', '-')}"
+        if toolkit is None:
+            rows.append(_link_row(row_id, link_rel, NO_ENV, "no venv site-packages"))
+            continue
+        if not toolkit.is_dir():
+            rows.append(_link_row(
+                row_id, link_rel, NO_FILE, f"{CUDA_TOOLKIT_REL} is not in this env"))
+            continue
+        link = toolkit / link_rel
+        if not link.is_symlink():
+            rows.append(_link_row(
+                row_id, link_rel, MISSING,
+                f"{link_rel} is not a symlink to {target!r}"))
+            continue
+        current = os.readlink(link)
+        rows.append(_link_row(
+            row_id, link_rel,
+            APPLIED if current == target else STALE,
+            f"{link_rel} -> {current!r}"
+            + ("" if current == target else f", expected {target!r}")))
+    return rows
+
+
+def _link_row(row_id: str, rel: str, status: str, detail: str) -> dict[str, Any]:
+    return {
+        "id": row_id,
+        "status": status,
+        "applied": status == APPLIED,
+        "path": f"{CUDA_TOOLKIT_REL}/{rel}",
+        "detail": detail,
+        "why": CUDA_TOOLKIT_WHY,
     }

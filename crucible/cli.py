@@ -2189,6 +2189,17 @@ def _doctor_report() -> dict[str, Any]:
                 jobenv.env_dir(config.home, patched_spec),
                 jobenv.recipe_pins(jobenv.recipe_for(patched_spec)),
             )
+            # AND THE TWO CUDA SYMLINKS, on cuda-linux only. Reported in the
+            # same rows for the same reason, and needed MORE here than the
+            # patches are: the SGLang stack has no site-packages patches at all,
+            # so without these this section would be empty on the very host
+            # whose env has the one thing that can be silently missing.
+            if backend.kind == "cuda-linux":
+                report["narrator_patches"].extend(
+                    narratorpatches.check_cuda_toolkit_links(
+                        jobenv.env_dir(config.home, patched_spec)
+                    )
+                )
             for entry in report["narrator_patches"]:
                 # `applied` is not the test. Both patches edit the vLLM stack,
                 # which `mlx-darwin`'s recipe does not install, and a Mac that
