@@ -116,7 +116,8 @@ const VOICE_ROW = {
   estimate_basis: 'declared',
   max_chars: 800,
   sample_rate: 24000,
-  takes: 1,
+  takes: 2,
+  needs_reference: false,
   pace: {
     pace_chars_per_sec: 16.64,
     max_chars_per_sec: 21.63,
@@ -132,6 +133,7 @@ const UNSUPPORTED_VOICE_ROW = {
   ...VOICE_ROW,
   id: 'mac-only-voice',
   kind: 'zeroshot',
+  needs_reference: true,
   backend_supported: false,
   installed: false,
   loadable: false,
@@ -178,7 +180,8 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
       estimateBasis: 'declared',
       maxChars: 800,
       sampleRate: 24000,
-      takes: 1,
+      takes: 2,
+      needsReference: false,
       pace: {
         paceCharsPerSec: 16.64,
         maxCharsPerSec: 21.63,
@@ -208,7 +211,10 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
       maxChars: null,
       // These three are facts about the voice and survive the missing block.
       sampleRate: 24000,
-      takes: 1,
+      takes: 2,
+      // A zero-shot row says a load must carry a clip, whatever this host can
+      // serve: it is a fact about the KIND, not about the backend block.
+      needsReference: true,
       pace: {
         paceCharsPerSec: 15.0,
         maxCharsPerSec: 20.0,
@@ -311,6 +317,61 @@ test('loadVoice and unloadVoice post their own job types and return the job id',
     params: {},
     inputs: {},
   });
+});
+
+test('loadVoice carries a zero-shot reference in params, and omits an absent name', async () => {
+  // PHASE3-TTS.md § 5. The clip is the CLIENT's — a per-client choice like the
+  // voice pick — so it travels with the load. `name` is omitted rather than
+  // sent as null when there is none: the load door forbids unknown keys and a
+  // null label is not a label.
+  answers(200, { job_id: 'job-load-zeroshot-1' });
+  await client().loadVoice('zeroshot', {
+    reference: { data: 'UklGRiQAAABXQVZF', transcript: 'He had been walking.' },
+  });
+  assert.deepEqual(JSON.parse(lastBody), {
+    type: 'load-voice',
+    model: 'zeroshot',
+    params: {
+      reference: { data: 'UklGRiQAAABXQVZF', transcript: 'He had been walking.' },
+    },
+    inputs: {},
+  });
+
+  answers(200, { job_id: 'job-load-zeroshot-2' });
+  await client().loadVoice('zeroshot', {
+    reference: {
+      data: 'UklGRiQAAABXQVZF',
+      transcript: 'He had been walking.',
+      name: 'the stranger',
+    },
+  });
+  assert.deepEqual(JSON.parse(lastBody).params, {
+    reference: {
+      data: 'UklGRiQAAABXQVZF',
+      transcript: 'He had been walking.',
+      name: 'the stranger',
+    },
+  });
+});
+
+test('loadVoice refuses a reference with no data or no transcript by name', async () => {
+  // Refused HERE, before a round trip, for the reason narrator states about
+  // the transcript: a clone conditioned on an absent one is a whole book in a
+  // subtly wrong voice, reported as success.
+  answers(200, { job_id: 'never-submitted' });
+  for (const [reference, option] of [
+    [{ data: '', transcript: 'Rain.' }, 'reference.data'],
+    [{ data: 'UklGRiQAAABXQVZF', transcript: '   ' }, 'reference.transcript'],
+  ] as const) {
+    await assert.rejects(
+      client().loadVoice('zeroshot', { reference }),
+      (error: unknown) => {
+        assert.ok(error instanceof CrucibleConfigError, `got ${String(error)}`);
+        assert.equal(error.option, option);
+        return true;
+      },
+    );
+  }
 });
 
 test('loadVoice and unloadVoice refuse an empty voice id by name', async () => {

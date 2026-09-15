@@ -177,9 +177,17 @@ export interface TtsStreamSession extends AsyncIterable<StreamEvent> {
    * into a session nobody is listening to — cannot be met by a caller of this
    * client. Audio for a row said before iteration begins waits in the stream.
    *
-   * `take` defaults to 0 here and has no default on the wire. 0 is the engine's
-   * own sampling, which is what asking for nothing gets; anything above it is
-   * refused as `sampling_not_wired` until narrator grows a sampling channel.
+   * `take` defaults to 0 here and has no default on the wire. 0 is the voice's
+   * own sampling, which is what asking for nothing gets; take N is the Nth rung
+   * of that voice's ladder, resolved by the SERVER into the numbers it sends
+   * the engine. A temperature never travels on this wire. How many rungs a
+   * voice has is {@link VoiceInfo.takes}, and a take past the end is
+   * `unknown_take` — never clamped.
+   *
+   * **Rows in one session may be at different takes.** Which is the point: a
+   * retake must not reuse the settings that produced the problem, so spread
+   * your candidates across the rungs rather than re-rolling take 0 (Owen's
+   * ruling, 2026-09-14).
    */
   say(id: string, text: string, take?: number): Promise<string>;
 

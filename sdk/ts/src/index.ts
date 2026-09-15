@@ -149,6 +149,7 @@ export type {
   JobStatus,
   Lease,
   LlmCapability,
+  LoadVoiceOptions,
   ModelDescriptor,
   ModelInfo,
   ModuleTaskRequest,
@@ -188,6 +189,7 @@ export type {
   VoiceInfo,
   VoiceKind,
   VoicePace,
+  VoiceReference,
   WarmingData,
   WrittenArtifact,
 } from './types.js';

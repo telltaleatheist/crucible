@@ -1058,10 +1058,73 @@ export interface VoiceInfo {
    * coincidence that becomes a hard-coded number if it is not written down.
    */
   readonly sampleRate: number;
-  /** How many rungs this voice's take ladder has. Never null. */
+  /**
+   * How many rungs this voice's take ladder has. Never null, never below 1 —
+   * take 0 exists whether or not the manifest says so.
+   *
+   * **Ask before you submit.** A `take` past the end is refused
+   * (`unknown_take`) and never clamped, so a client spreading N candidates
+   * across the ladder reads this to know where it ends. What each rung MEANS
+   * is deliberately not published: the numbers are engine tuning, they are the
+   * server's, and publishing them invites a client to send them back.
+   */
   readonly takes: number;
+  /**
+   * Whether loading this voice requires a reference clip
+   * ({@link LoadVoiceOptions.reference}) — true for a `zeroshot` voice, false
+   * for every other kind. Read it to decide whether to show a clip picker;
+   * loading without one is refused `reference_required`, and loading a
+   * checkpoint WITH one is refused `reference_not_allowed`.
+   */
+  readonly needsReference: boolean;
   /** Never null: the whole block, because a client that packs needs all of it. */
   readonly pace: VoicePace;
+}
+
+/**
+ * The recording a zero-shot voice is cloned from, sent with
+ * {@link CrucibleClient.loadVoice} (PHASE3-TTS.md section 5).
+ *
+ * A zero-shot voice is the base weights plus somebody's voice: the weights are
+ * the server's, pulled at the manifest's pin, and the CLIP is yours — a
+ * per-client choice like the voice pick itself. It travels with the load,
+ * which is the one moment it is needed.
+ */
+export interface VoiceReference {
+  /**
+   * The wav's bytes, base64, with **no `data:` prefix and no whitespace**. A
+   * RIFF/WAVE container: the server reads its header, both of narrator's arms
+   * want a wav, and anything else is `reference_malformed`.
+   *
+   * At most 30 seconds of audio — narrator's own cap, above which vllm-omni
+   * answers "Reference audio too long". Two ~14 s clips joined into one wav is
+   * the practical maximum, and a same-BOOK clip is worth far more than a
+   * second one.
+   */
+  readonly data: string;
+  /**
+   * The BOOK-EXACT text spoken in the clip, and **never an ASR guess**.
+   * Required: narrator refuses a clip without one at construction, because a
+   * clone conditioned on a wrong or absent transcript is a whole book in a
+   * subtly wrong voice, reported as success.
+   */
+  readonly transcript: string;
+  /**
+   * A short label for whoever reads the server's `/v1/activity` and wants to
+   * know which of their clips is resident. Optional — the server always
+   * reports a sha256 of the audio beside it, which is what tells two clients
+   * apart when neither sent a name.
+   */
+  readonly name?: string;
+}
+
+/** What {@link CrucibleClient.loadVoice} takes beyond the voice id. */
+export interface LoadVoiceOptions {
+  /**
+   * Required when the voice's row says {@link VoiceInfo.needsReference};
+   * refused on any other kind.
+   */
+  readonly reference?: VoiceReference;
 }
 
 /**

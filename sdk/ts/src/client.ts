@@ -81,6 +81,7 @@ import {
   type JobState,
   type JobStatus,
   type Lease,
+  type LoadVoiceOptions,
   type ModelDescriptor,
   type ModelInfo,
   type Ping,
@@ -1143,12 +1144,37 @@ export class CrucibleClient {
    * narrator engine is not installed (`env_missing`).
    *
    * Nothing loads a voice implicitly anywhere else.
+   *
+   * **A zero-shot voice takes its reference clip here** (PHASE3-TTS.md section
+   * 5). It is the base weights plus somebody's recording, and the recording is
+   * yours rather than the server's — so pass
+   * {@link LoadVoiceOptions.reference} whenever the voice's row says
+   * {@link VoiceInfo.needsReference}. Three more refusals come with it, all
+   * before the job is queued: `reference_required` (a zero-shot load with no
+   * clip — the engine would otherwise come up in the model's OWN voice under
+   * this id), `reference_not_allowed` (a clip on a checkpoint, whose voice is
+   * in its weights) and `reference_malformed` (not base64, not a readable WAV,
+   * no transcript, or over narrator's 30-second budget).
+   *
+   * Once it is loaded, a zero-shot voice is the resident voice and nothing
+   * downstream knows it was cloned: {@link render} and {@link stream} name it
+   * like any other. Which clip is resident is on the server's `/v1/activity`,
+   * as the clip's `name` and a sha256 of its audio.
    */
-  async loadVoice(voice: string): Promise<string> {
+  async loadVoice(voice: string, options?: LoadVoiceOptions): Promise<string> {
+    const reference = options?.reference;
     return this.submit({
       type: 'load-voice',
       model: requireText(voice, 'voice'),
-      params: {},
+      params: reference === undefined ? {} : {
+        reference: {
+          data: requireText(reference.data, 'reference.data'),
+          transcript: requireText(reference.transcript, 'reference.transcript'),
+          // Omitted rather than sent as null when there is none: the load door
+          // forbids unknown keys and a null label is not a label.
+          ...(reference.name === undefined ? {} : {name: reference.name}),
+        },
+      },
       inputs: {},
     });
   }
@@ -1212,9 +1238,9 @@ export class CrucibleClient {
    * Refused before the job is queued, by name: `unknown_model`,
    * `invalid_params`, `ffmpeg_missing`, `backend_unsupported`, `env_missing`,
    * `voice_not_installed`, `accelerator_busy`, `insufficient_memory`,
-   * `voice_kind_unsupported` (a zero-shot voice, whose reference clips have no
-   * channel on narrator's load message), `sampling_not_wired`, `unknown_take`,
-   * and `chunk_too_long`.
+   * `voice_kind_unsupported` (a zero-shot voice that is not already resident:
+   * a render job loads its own voice, and a zero-shot load needs the clip only
+   * {@link loadVoice} carries), `unknown_take`, and `chunk_too_long`.
    *
    * The `chunk_too_long` cap is **not** re-checked here. It is per (voice,
    * backend) and it lives on the voice row ({@link VoiceInfo.maxChars}); a
@@ -2506,6 +2532,7 @@ function readVoiceInfo(entry: Json, where: string): VoiceInfo {
     // and a client that packs cannot be handed half a pace block.
     sampleRate: num(entry, 'sample_rate', where),
     takes: num(entry, 'takes', where),
+    needsReference: bool(entry, 'needs_reference', where),
     pace: readVoicePace(objectField(entry, 'pace', where), `${where}.pace`),
   };
 }
