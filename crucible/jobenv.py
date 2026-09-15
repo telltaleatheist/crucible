@@ -106,6 +106,43 @@ NARRATOR_PACKAGE = "narrator"
 # memory estimates: SGLang at --mem-fraction-static 0.60 holds ~19 GB and
 # vllm-omni at 0.35 + 0.10 measured 18.7-19.2 GB, so the manifests' 19 GB is
 # right for the wrong reason and is not a hazard tonight.
+#
+# ── IT IS ALSO THE ANSWER TO A QUESTION OWEN ASKED ON 2026-09-15 ─────────────
+#
+# "is wsl crucible using sglang with batching set to exactly what it was before
+# we set up crucible?" — and the two halves of that have different answers, so
+# they are written down separately rather than averaged into one.
+#
+# THE BATCHING: YES. `HIGGS_MAX_NUM_SEQS` is stage 0's admission width AND the
+# width of narrator's own batch on BOTH stacks (`v3_served.serve_concurrency`,
+# which `sgl_served.py` deliberately shares rather than naming a second
+# variable). BookForge states 16 from its catalog; every voice manifest here
+# states 16 from `[voice.serving]`, carrying BookForge's own measurement note
+# verbatim. The number was ported, not re-derived, and nothing on this arm ever
+# ran at a width nobody chose.
+#
+# THE STACK: NO. This is the OTHER one. On the shipped catalog BookForge renders
+# Higgs on SGLang-Omni and has since 2026-09-06; a Crucible `tts` job on
+# `cuda-linux` renders on vllm-omni, whose measured cost on the same 50 chunks
+# is the line above — 4 early stops, 13/50 damaged and 6 sustained voice
+# switches against 0, 5/50 and 0, at 40% of the throughput. That is a quality
+# difference and not only a speed one, and it is the largest single divergence
+# between the two narrator seams.
+#
+# TWO THINGS HAVE TO MOVE TOGETHER TO CLOSE IT, which is why it is a ruling and
+# not a one-word edit here. The recipe must install the `sglomni` stack (python
+# 3.12 + torch 2.13.0+cu130 + sglang-omni 0.1.4 — a SEPARATE env from
+# vllm-omni's python 3.11 + vllm 0.28.0, which is why BookForge keeps two), and
+# narrator must ship `serve_higgs_sgl.sh` the way it now ships
+# `serve_higgs_v3.sh`: today that launcher exists only in BookForge's
+# `electron/scripts/higgs/`, so `NARRATOR_HIGGS_SGL_SERVE_SCRIPT` would have to
+# name a path into a BookForge checkout — the exact dependency BookForge
+# 0eeb0267 removed for the other stack. The three `HIGGS_SGL_*` knobs are NOT
+# the blocker: that script defaults `HIGGS_SGL_MEM_FRACTION` to 0.60,
+# `HIGGS_SGL_MAX_NEW_TOKENS` to 7500 and `HIGGS_SGL_CUDA_GRAPH_MAX_BS` to
+# `$HIGGS_MAX_NUM_SEQS` itself, which are the catalog's three values, so graphs
+# would be captured at exactly the admitted width without Crucible saying a
+# word.
 CUDA_LINUX_SERVING_STACK: dict[str, str] = {
     "higgs-v3": "vllm-omni",
 }
