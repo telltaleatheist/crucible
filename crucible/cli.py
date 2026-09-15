@@ -11,6 +11,7 @@
     crucible voices     list and pull voice weights
     crucible doctor     probe the host and every job type; exit 0 only when healthy
     crucible token      print the bearer token (--show) or the pairing line (--url)
+    crucible uninstall  install, run backwards; weights kept unless --purge-weights
 
 Exit codes: 0 success, 1 refused (named reason on stderr), 2 usage.
 """
@@ -40,6 +41,7 @@ from . import (
     pairing,
     rvcbase,
     service,
+    uninstall,
     weights,
     workerenv,
 )
@@ -2310,6 +2312,107 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return EXIT_OK if report["healthy"] else EXIT_REFUSED
 
 
+# ---------------------------------------------------------------- uninstall
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    """`crucible uninstall` — `crucible/uninstall.py` is where the whole of it is.
+
+    This function does three things and no fourth: build the plan, run it
+    unless `--dry-run`, and print it. Every decision — the order, what is
+    kept, what is refused by name — belongs to the module, because the module
+    is what the tests exercise and what `install.sh --uninstall` reaches
+    through this verb.
+
+    **The home is `crucible_home()` and never a flag.** `CRUCIBLE_HOME` is the
+    one owner of where a server's state is, on every platform
+    (`crucible/config.py`), and a `--home` here would be a second way to name
+    it — which on a command that deletes directories is the difference between
+    one answer and two.
+
+    **The backend is READ, not detected.** `detect_backend()` probes a card,
+    and an uninstall must run on a machine whose driver has already gone, whose
+    config has already been half-removed by an interrupted run, or which simply
+    has no GPU free tonight. What the plan reports is `[backend] kind` out of
+    the config when there is a config, and `null` when there is not.
+    """
+    try:
+        home = crucible_home()
+        built = uninstall.plan(
+            home=home,
+            platform=sys.platform,
+            env=os.environ,
+            runner=service.subprocess_runner,
+            purge_weights=args.purge_weights,
+            wsl_too=args.wsl_too,
+        )
+    except CrucibleError as exc:
+        return _fail(str(exc))
+
+    if not args.dry_run:
+        built = uninstall.run(built)
+
+    if args.json:
+        print(json.dumps(built.to_dict(), indent=2))
+        return EXIT_OK if not built.fatal else EXIT_REFUSED
+
+    print(f"home:      {built.home}")
+    print(f"platform:  {built.platform} ({built.mechanism})")
+    print(
+        "backend:   "
+        + (
+            built.backend_kind
+            if built.backend_kind is not None
+            else "unrecorded — this home has no readable config.toml"
+        )
+    )
+    print(
+        "mode:      "
+        + (
+            "DRY RUN — nothing below has been touched"
+            if built.dry_run
+            else "live"
+        )
+    )
+    print(f"weights:   {'PURGED' if built.purge_weights else 'kept unless named below'}")
+    print("")
+    for step in built.steps:
+        size = f"  [{uninstall.gib(step.bytes)}]" if step.bytes else ""
+        mark = {
+            uninstall.REMOVE: "remove",
+            uninstall.STOP: "stop  ",
+            uninstall.KEEP: "keep  ",
+        }[step.action]
+        if step.refused is not None:
+            mark = "SKIP  " if not step.refused.fatal else "FAILED"
+        print(f"{mark}  {step.name:<26} {step.target}{size}")
+        print(f"          {step.what}")
+        if step.refused is not None:
+            print(f"          {step.refused.code}: {step.refused.message}")
+        for line in step.detail:
+            print(f"          {line}")
+    kept = built.kept()
+    print("")
+    if kept["weights_bytes"]:
+        print(
+            f"kept:      {uninstall.gib(kept['weights_bytes'])} of weights. "
+            "`--purge-weights` is what deletes them."
+        )
+    if not built.dry_run:
+        print(f"freed:     {uninstall.gib(built.removed_bytes())}")
+    if built.fatal:
+        return _fail(
+            "uninstall_incomplete: "
+            + "; ".join(
+                f"{step.name} — {step.refused.code}"
+                for step in built.fatal
+                if step.refused is not None
+            )
+            + ". Everything else was removed"
+        )
+    return EXIT_OK
+
+
 # -------------------------------------------------------------------- token
 
 
@@ -2842,6 +2945,54 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="machine-readable"
     )
     service_status.set_defaults(func=cmd_service_status)
+
+    uninstall_parser = subparsers.add_parser(
+        "uninstall",
+        help="undo an install, in the inverse order; weights are KEPT unless "
+        "--purge-weights",
+        description=(
+            "The exact inverse of `install.sh` / `crucible install`, step by "
+            "named step: stop the server, remove the service, remove the job "
+            "envs, the pairing file, the config and the working state — and "
+            "then keep the weights, which are the expensive part "
+            "(PHASE15-HOST.md 3.5), unless --purge-weights says otherwise. "
+            "It asks nothing: the flags decide. It removes nothing outside "
+            "$CRUCIBLE_HOME and the service entry it wrote, nothing it cannot "
+            "name, and never the relocatable interpreter it is running from — "
+            "`install.sh --uninstall` removes that after this returns."
+        ),
+    )
+    uninstall_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print every step and touch nothing. The plan is the SAME object "
+        "the real run performs, so there is no second description of what "
+        "would happen",
+    )
+    uninstall_parser.add_argument(
+        "--purge-weights",
+        action="store_true",
+        help=(
+            "also delete the six subject directories — models, voices, rvc, "
+            "rvc-base, denoise-models, engines. Tens of gigabytes, and a "
+            "reinstall re-downloads every byte"
+        ),
+    )
+    uninstall_parser.add_argument(
+        "--wsl-too",
+        action="store_true",
+        help=(
+            f"win32 only: first run the guest's own `crucible uninstall` inside "
+            f"the {uninstall.CRUCIBLE_DISTRO!r} distro, with these same flags. "
+            "Refused by name when that distro is not there. The distro itself "
+            "is never unregistered — every other distro on the machine is "
+            "yours, and so is that decision"
+        ),
+    )
+    uninstall_parser.add_argument(
+        "--json", action="store_true", help="machine-readable; the shape an app reads"
+    )
+    uninstall_parser.set_defaults(func=cmd_uninstall)
 
     doctor = subparsers.add_parser("doctor", help="probe the host and the job types")
     doctor.add_argument("--json", action="store_true", help="machine-readable report")
