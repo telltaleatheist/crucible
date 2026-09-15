@@ -559,6 +559,52 @@ def test_a_rung_narrator_cannot_honour_fails_that_row_by_name(
     assert "sampling_not_supported:" in error["message"]
 
 
+def test_a_narrator_without_the_channel_refuses_a_rung_and_still_says_take_zero(
+    streaming_server: Callable[..., Any], auth: dict[str, str], tmp_path: Path
+) -> None:
+    """The render door's 2026-09-15 hole, on this door, which had it too.
+
+    The env pins narrator by commit. That night the pin (bookforge 0eeb0267)
+    predated `narrator/engine/item_sampling.py`, so the narrator read an item's
+    `voice` and dropped its `sampling` without a word — two render jobs at take
+    0 and take 1 returned byte-identical audio. This door sends the rung
+    through the same `generate_batch` items, so it would have lied the same
+    way, one row at a time.
+
+    `say` asks the live engine now. Refused per ROW and only above take 0: take
+    0 sends no `sampling` key, which every narrator ever built renders
+    correctly, so the session stays usable for the takes it can serve.
+    """
+    log = tmp_path / "sampling.jsonl"
+    with streaming_server(sampling_log=str(log), no_item_sampling=1) as base:
+        session = opened(base, auth)
+        with listen(base, auth, session["session_id"]) as stream:
+            stream.wait_for(lambda s: s.of("ready"), "the ready frame")
+
+            refused = post_op(
+                base, auth, session["session_id"], op="say", id="r1",
+                text="Rain fell on the road.", take=1,
+            )
+            assert refused.status_code == 409, refused.text
+            error = refused.json()["error"]
+            assert error["code"] == "sampling_not_wired"
+            assert "did not announce `itemSampling`" in error["message"]
+
+            accepted = post_op(
+                base, auth, session["session_id"], op="say", id="r0",
+                text="Rain fell on the road.", take=0,
+            )
+            assert accepted.status_code == 202, accepted.text
+            stream.wait_for(lambda s: s.of("done"), "the take-0 row to retire")
+
+    rows = [
+        json.loads(line)
+        for line in log.read_text(encoding="utf-8").splitlines() if line
+    ]
+    # Only the take-0 row ever reached the wire, and it carried no rung.
+    assert [row["sampling"] for row in rows] == [None]
+
+
 def test_say_has_no_default_take_on_the_wire(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:

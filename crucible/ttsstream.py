@@ -498,6 +498,29 @@ class StreamSession:
                 f"GET /v1/tts/stream/{self.id}/events first",
                 {"session_id": self.id},
             )
+        # THE SAME RUNG CHECK THE RENDER DOOR MAKES, for the same reason and
+        # against the same narrator. `require_sayable` resolved this take
+        # against the ladder, but resolving a rung is not delivering it: a
+        # narrator built before `narrator/engine/item_sampling.py` reads an
+        # item's `voice` and nothing else, so the rung is dropped in silence and
+        # the row comes back at take 0 under take N's name. Measured on the
+        # render door 2026-09-15 (two takes, byte-identical audio); this door
+        # sends the rung through the very same `generate_batch` items, so it had
+        # the very same hole. Refused per ROW, which is this door's grain, and
+        # only above take 0 — take 0 sends no key and every narrator renders
+        # that correctly.
+        if sampling is not None and not self._engine.announced_item_sampling():
+            raise ApiError(
+                409,
+                "sampling_not_wired",
+                f"take {take} resolves to sampling {sampling}, and the narrator "
+                f"serving session {self.id} did not announce `itemSampling` on "
+                f"its ready line — it has no per-item sampling channel, so this "
+                f"row would be rendered at take 0 and reported as take {take}. "
+                f"Re-resolve the tts env's narrator pin to a bookforge commit "
+                f"carrying narrator/engine/item_sampling.py. Take 0 says fine.",
+                {"session_id": self.id, "id": row_id, "take": take},
+            )
         with self._state:
             if self._closing is not None:
                 raise ApiError(
@@ -1252,7 +1275,13 @@ def require_streamable(manifest: VoiceManifest, backend_kind: str) -> None:
     # engine's. That stopped being true twice: take 0's sampling reaches
     # narrator through the voices document Crucible writes at every load
     # (section 4), and a rung above 0 reaches it per item (`require_sayable`
-    # below). The refusal is deleted rather than kept as a name nothing raises.
+    # below).
+    #
+    # `sampling_not_wired` still exists, one door along, saying something else:
+    # not "the contract has no channel" but "the narrator on this wire has
+    # none". `say` asks the live engine (2026-09-15), because the tts env pins
+    # narrator by commit and a pin may predate the channel. This function is
+    # about the MANIFEST and has no engine, which is why the check is not here.
 
 
 def require_sayable(
