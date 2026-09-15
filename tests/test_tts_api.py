@@ -14,6 +14,7 @@ the shared residency's behaviour across both kinds.
 
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -28,7 +29,7 @@ from crucible.jobs import ALL_JOB_TYPES
 from crucible.residency import KIND_LLM, KIND_TTS, ResidentVoice
 from crucible.voices import NARRATOR_ENGINE_SAMPLING, load_voice
 
-from .conftest import FAKE_BACKEND, parse_sse
+from .conftest import FAKE_BACKEND, parse_sse, wav_base64
 
 VOICE = "deathstalker"
 OTHER_VOICE = "thirdreich"
@@ -168,7 +169,11 @@ def test_a_voice_with_everything_in_place_is_loadable(
     assert row["language"] == "en"
     assert row["sample_rate"] == 24000
     assert row["max_chars"] == 800
-    assert row["takes"] == 1
+    # TWO rungs since 2026-09-14 — take 0 and the measured 0.7 — and the row
+    # carries the COUNT so a client can spread N candidates across the ladder
+    # without guessing where it ends.
+    assert row["takes"] == 2
+    assert row["needs_reference"] is False
     assert row["estimate_basis"] == "declared"
     assert row["fingerprint"] == f"{VOICE}@{row['revision']}"
     assert row["pace"]["pace_chars_per_sec"] == 16.64
@@ -408,6 +413,132 @@ def test_unknown_params_are_refused(
     response = submit(
         tts_client, auth, type="load-voice", model=VOICE,
         params={"temperature": 0.7},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_params"
+
+
+# ------------------------------------------------- the zero-shot reference
+#
+# PHASE3-TTS.md section 5's amendment (2026-09-14). A zero-shot voice is the
+# base weights plus a recording: the weights are Crucible's and the CLIP is
+# the client's, so it travels on the load. Every refusal below is made before
+# the job is queued — the client can fix any of them without waiting for a
+# lane.
+
+
+ZEROSHOT = "zeroshot"
+
+
+def load_zeroshot(
+    client: TestClient, auth: dict[str, str], **reference: Any
+) -> dict[str, Any]:
+    """Submit a `load-voice` for the zero-shot voice and return the response."""
+    params: dict[str, Any] = {}
+    if reference:
+        params["reference"] = reference
+    return submit(client, auth, type="load-voice", model=ZEROSHOT, params=params)
+
+
+def test_the_zeroshot_row_says_it_needs_a_reference(
+    tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path]
+) -> None:
+    """On the row so a picker can show the clip field before the load is
+    refused, and derived from `kind` by the SERVER, because which kinds need
+    one is the server's rule and not a client's inference."""
+    fake_weights(ZEROSHOT)
+    listed = rows(tts_client, auth)
+    assert listed[ZEROSHOT]["needs_reference"] is True
+    assert listed[ZEROSHOT]["kind"] == "zeroshot"
+    for voice_id, row in listed.items():
+        assert row["needs_reference"] is (row["kind"] == "zeroshot"), voice_id
+
+
+def test_a_zeroshot_load_with_no_reference_is_refused_by_name(
+    tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path],
+    idle_card: None,
+) -> None:
+    """Without one the engine would come up in the model's OWN voice — a
+    different speaker at 12 % of the narrator ceiling — under this id."""
+    fake_weights(ZEROSHOT)
+    response = load_zeroshot(tts_client, auth)
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "reference_required"
+    assert "params.reference" in error["message"]
+    assert error["details"]["kind"] == "zeroshot"
+
+
+def test_a_reference_on_a_checkpoint_voice_is_refused_by_name(
+    tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path],
+    idle_card: None,
+) -> None:
+    """A checkpoint's voice is in its weights; narrator would clone from the
+    clip and leave those weights doing nothing, under their fingerprint."""
+    fake_weights(VOICE)
+    response = submit(
+        tts_client, auth, type="load-voice", model=VOICE,
+        params={"reference": {"data": wav_base64(3.0), "transcript": "Rain."}},
+    )
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "reference_not_allowed"
+    assert error["details"]["kind"] == "checkpoint"
+
+
+@pytest.mark.parametrize(
+    "reference, expected",
+    [
+        pytest.param(
+            {"data": "not base64 at all!!", "transcript": "Rain."},
+            "not base64",
+            id="not-base64",
+        ),
+        pytest.param(
+            {"data": base64.b64encode(b"nothing like a wav").decode("ascii"),
+             "transcript": "Rain."},
+            "not a readable WAV",
+            id="not-a-wav",
+        ),
+        pytest.param(
+            {"data": wav_base64(31.0), "transcript": "Rain."},
+            "caps a reference at 30 s",
+            id="over-the-budget",
+        ),
+        pytest.param(
+            {"data": wav_base64(3.0), "transcript": "   "},
+            "BOOK-EXACT text",
+            id="no-transcript",
+        ),
+    ],
+)
+def test_a_reference_that_is_not_one_is_refused_by_name(
+    tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path],
+    idle_card: None, reference: dict[str, Any], expected: str,
+) -> None:
+    """One code for every way the clip itself is unusable, and the message
+    names the field. The 30-second cap is narrator's own
+    (`v3_served.MAX_REFERENCE_SECONDS`; vllm-omni answers HTTP 400 above it),
+    checked here so the refusal names the clip rather than arriving from
+    inside an engine that has already started."""
+    fake_weights(ZEROSHOT)
+    response = load_zeroshot(tts_client, auth, **reference)
+    assert response.status_code == 400, response.json()
+    error = response.json()["error"]
+    assert error["code"] == "reference_malformed"
+    assert expected in error["message"]
+
+
+def test_a_reference_carrying_a_key_this_door_does_not_know_is_refused(
+    tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path],
+    idle_card: None,
+) -> None:
+    """`seconds` in particular: the server is holding the bytes and reads the
+    duration off the header, so a client stating one would be a second owner
+    of a fact the server already has."""
+    fake_weights(ZEROSHOT)
+    response = load_zeroshot(
+        tts_client, auth, data=wav_base64(3.0), transcript="Rain.", seconds=3.0
     )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_params"

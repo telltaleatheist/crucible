@@ -13,6 +13,7 @@ success.
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -25,15 +26,18 @@ from crucible.narratorvoices import (
     MLX_MODEL_VARIABLE,
     NarratorVoicesError,
     document_path,
+    take_sampling,
     voice_entry,
     write_document,
 )
+from crucible.voicereference import ClipEntry, parse_reference, reference_path
 from crucible.voices import (
     NARRATOR_ENGINE_SAMPLING,
     load_all_voices,
     parse_voice,
 )
 
+from .conftest import wav_bytes
 from .test_voices import GOOD
 
 CUDA = "cuda-linux"
@@ -204,18 +208,134 @@ def test_a_checkpoint_voice_on_the_mlx_arm_never_sets_the_base_weights(
     assert document.base_weights is None
 
 
-def test_a_zeroshot_voice_is_refused_by_name(tmp_path: Path) -> None:
-    """The render door refuses the kind as `voice_kind_unsupported`; this is
-    the same refusal at the load door, before an entry naming files Crucible
-    has not checked reaches narrator."""
-    text = BOTH_ARMS.replace('kind = "checkpoint"', 'kind = "zeroshot"').replace(
-        "max_chars = 800\n", 'max_chars = 800\nclips = "from-request"\n'
-    )
-    manifest = manifest_of(text)
+# ------------------------------------------------------ the zero-shot clip
+
+
+ZEROSHOT = BOTH_ARMS.replace('kind = "checkpoint"', 'kind = "zeroshot"').replace(
+    "max_chars = 800\n", 'max_chars = 800\nclips = "from-request"\n'
+)
+
+
+def a_clip(tmp_path: Path) -> ClipEntry:
+    """A clip that has been placed — the shape `write_document` hands on."""
+    path = tmp_path / "clip.wav"
+    path.write_bytes(b"RIFF....WAVE")   # never opened: `voice_entry` is pure
+    return ClipEntry(path=path, transcript="He had been walking.", seconds=8.4)
+
+
+def test_a_zeroshot_entry_is_narrators_clips_kind_with_the_placed_clip(
+    tmp_path: Path,
+) -> None:
+    """narrator's name for a reference clone is `clips`, and the clip row is
+    its own `{path, transcript, seconds}` — the three keys
+    `config.load_voices` reads, no more. `checkpointDir` is written too, and
+    it is the BASE weights Crucible pulled: narrator's reader hands it to
+    `ClipsVoice(checkpoint_dir=...)`, the served arm exports it as
+    HIGGS_MODEL_DIR and the MLX arm loads it, so a zero-shot render happens on
+    the bytes this voice's revision names rather than on whatever base
+    snapshot the HuggingFace cache holds."""
+    manifest = manifest_of(ZEROSHOT)
+    weights = tmp_path / "voices" / "probe" / CUDA
+    clip = a_clip(tmp_path)
+    entry = voice_entry(manifest, manifest.spec(CUDA), weights, clip)
+    assert entry["kind"] == "clips"
+    assert entry["checkpointDir"] == str(weights)
+    assert entry["clips"] == [
+        {
+            "path": str(clip.path),
+            "transcript": "He had been walking.",
+            "seconds": 8.4,
+        }
+    ]
+
+
+def test_a_zeroshot_voice_with_no_clip_is_refused_by_name(tmp_path: Path) -> None:
+    """The base weights without a reference are the model's OWN voice — a
+    different speaker at 12 % of the narrator ceiling — and rendering a book
+    in it under this id would be reported as success."""
+    manifest = manifest_of(ZEROSHOT)
     with pytest.raises(NarratorVoicesError) as caught:
         voice_entry(manifest, manifest.spec(CUDA), tmp_path)
-    assert "zeroshot" in str(caught.value)
-    assert "section 6" in str(caught.value)
+    assert "zeroshot voice and no reference clip" in str(caught.value)
+
+
+def test_a_clip_on_a_voice_that_is_not_zeroshot_is_refused_by_name(
+    tmp_path: Path,
+) -> None:
+    """A checkpoint's voice is in its weights. narrator would clone from the
+    clip and leave those weights doing nothing, under their fingerprint."""
+    manifest = manifest_of(BOTH_ARMS)
+    with pytest.raises(NarratorVoicesError) as caught:
+        voice_entry(manifest, manifest.spec(CUDA), tmp_path, a_clip(tmp_path))
+    assert "reference clip was placed for it" in str(caught.value)
+
+
+def test_write_document_places_the_wav_beside_the_document(tmp_path: Path) -> None:
+    """narrator calls `os.path.isfile` on every clip path in the document, so
+    the two are written in one breath or the load dies inside the engine for a
+    reason that was knowable here."""
+    manifest = manifest_of(ZEROSHOT)
+    reference = parse_reference(
+        {"data": base64.b64encode(wav_bytes(2.0)).decode("ascii"),
+         "transcript": "He had been walking.", "name": "stranger"}
+    )
+    document = write_document(
+        tmp_path, manifest, manifest.spec(CUDA), tmp_path / "w", reference
+    )
+    clip = document.voices["probe"]["clips"][0]
+    assert Path(clip["path"]) == reference_path(tmp_path)
+    assert Path(clip["path"]).read_bytes() == reference.audio
+    assert clip["seconds"] == pytest.approx(2.0)
+    assert clip["transcript"] == "He had been walking."
+
+
+# ------------------------------------------------------------ the rungs
+
+
+LADDER = BOTH_ARMS + """
+[[voice.takes]]
+
+[[voice.takes]]
+temperature = 0.7
+reason = "measured: a different draw, not a better setting"
+"""
+
+
+def test_take_zero_sends_no_sampling_at_all() -> None:
+    """Absent is not an empty object and not a fallback: an item with no
+    `sampling` renders at the voice's loaded default, which IS take 0.
+    `{}` would be Crucible asking for a rung with nothing in it, which
+    narrator refuses as `sampling_malformed` — correctly."""
+    assert take_sampling(manifest_of(LADDER), 0) is None
+    assert take_sampling(manifest_of(BOTH_ARMS), 0) is None
+
+
+def test_a_rung_carries_only_the_keys_it_declares() -> None:
+    """`temperature = 0.7` means 'take 0, but cooler'. The engine lays the
+    rung OVER its resolved sampling key by key, so the two keys the rung is
+    silent about keep take 0's values — and Crucible restating them would be
+    the server answering a question it was not asked."""
+    assert take_sampling(manifest_of(LADDER), 1) == {"temperature": 0.7}
+
+
+def test_a_rung_is_spelled_the_way_the_document_spells_it() -> None:
+    """One vocabulary for the levers, per `item_sampling.py`'s own docstring:
+    the per-item channel took the document's camelCase deliberately, because
+    a second spelling would be two names for one fact."""
+    text = LADDER.replace(
+        'temperature = 0.7\nreason', 'temperature = 0.7\ntop_p = 0.9\ntop_k = 40\nreason'
+    )
+    assert take_sampling(manifest_of(text), 1) == {
+        "temperature": 0.7, "topP": 0.9, "topK": 40,
+    }
+    assert isinstance(take_sampling(manifest_of(text), 1)["topK"], int)
+
+
+def test_a_take_past_the_ladder_raises_the_manifests_own_refusal() -> None:
+    """`unknown_take`'s text, from `VoiceManifest.take`. Never clamped."""
+    with pytest.raises(Exception) as caught:
+        take_sampling(manifest_of(LADDER), 2)
+    assert "has no take 2" in str(caught.value)
 
 
 def test_the_document_readers_are_the_rule_the_writer_refuses_from() -> None:
@@ -277,16 +397,21 @@ def test_every_shipped_higgs_voice_writes_an_entry_on_the_arm_it_can(
     """The catalog as shipped, through the real writer, so a manifest that
     grew a shape the writer cannot state fails here rather than at the first
     load of that voice. Which (voice, arm) pairs are refused is stated, not
-    tolerated: zeroshot on either arm, a token voice on cuda-linux."""
+    tolerated: since 2026-09-14 that is a token voice on cuda-linux and
+    nothing else — a zeroshot voice writes an entry now, given its clip."""
     refused: list[tuple[str, str]] = []
     written: list[tuple[str, str]] = []
+    clip = a_clip(tmp_path)
     for voice_id, manifest in sorted(load_all_voices().items()):
         if manifest.narrator_engine not in DOCUMENT_READERS:
             continue
         for backend, spec in sorted(manifest.backends.items()):
             weights = tmp_path / "voices" / voice_id / backend
             try:
-                entry = voice_entry(manifest, spec, weights)
+                entry = voice_entry(
+                    manifest, spec, weights,
+                    clip if manifest.kind == "zeroshot" else None,
+                )
             except NarratorVoicesError:
                 refused.append((voice_id, backend))
                 continue
@@ -298,11 +423,10 @@ def test_every_shipped_higgs_voice_writes_an_entry_on_the_arm_it_can(
                 "topP": spec.sampling["top_p"],
                 "topK": int(spec.sampling["top_k"]),
             }
-            if manifest.kind == "checkpoint":
+            if manifest.kind in ("checkpoint", "zeroshot"):
                 assert entry["checkpointDir"] == str(weights)
     assert written, "no Higgs voice in the catalog wrote an entry"
+    assert ("zeroshot", CUDA) in written and ("zeroshot", MLX) in written
     for voice_id, backend in refused:
         manifest = load_all_voices()[voice_id]
-        assert manifest.kind == "zeroshot" or (
-            manifest.kind == "token" and backend == CUDA
-        ), (voice_id, backend)
+        assert manifest.kind == "token" and backend == CUDA, (voice_id, backend)

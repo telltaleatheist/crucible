@@ -140,7 +140,13 @@ def post_op(
 
 
 def say(base: str, auth: dict[str, str], session_id: str, row: str, text: str) -> None:
-    response = post_op(base, auth, session_id, op="say", id=row, text=text, take=0)
+    say_at_take(base, auth, session_id, row, text, 0)
+
+
+def say_at_take(
+    base: str, auth: dict[str, str], session_id: str, row: str, text: str, take: int
+) -> None:
+    response = post_op(base, auth, session_id, op="say", id=row, text=text, take=take)
     assert response.status_code == 202, response.text
     assert response.json() == {"id": row}
 
@@ -496,6 +502,61 @@ def test_a_take_above_the_ladder_is_never_clamped(
             )
             assert response.status_code == 400, response.text
             assert response.json()["error"]["code"] == "unknown_take"
+
+
+def test_a_row_at_take_one_carries_that_rungs_numbers_and_take_zero_carries_none(
+    streaming_server: Callable[..., Any], auth: dict[str, str], tmp_path: Path
+) -> None:
+    """The ladder, one row at a time. deathstalker's rung 1 is one line,
+    `temperature = 0.7`; take 0 sends no `sampling` key at all, because absent
+    means "the loaded voice's own sampling", which IS take 0.
+
+    **A batch here may MIX rungs** — rows arrive one `say` at a time and each
+    carries its own, which is what Correct Sentences spreading N candidates
+    across the ladder looks like on this door — so both rows go into one
+    session and the log is keyed by the row's slot."""
+    log = tmp_path / "sampling.jsonl"
+    with streaming_server(sampling_log=str(log)) as base:
+        session = opened(base, auth)
+        with listen(base, auth, session["session_id"]) as stream:
+            stream.wait_for(lambda s: s.of("ready"), "the ready frame")
+            for row, take in (("r0", 0), ("r1", 1)):
+                response = post_op(
+                    base, auth, session["session_id"], op="say", id=row,
+                    text="Rain fell on the road.", take=take,
+                )
+                assert response.status_code == 202, response.text
+            stream.wait_for(
+                lambda s: len({data["id"] for data in s.of("done")}) == 2,
+                "both rows to retire",
+            )
+    rows = [
+        json.loads(line)
+        for line in log.read_text(encoding="utf-8").splitlines() if line
+    ]
+    # Slot 0 is the first `say` and slot 1 the second: the session allocates
+    # one per row and never reuses one.
+    assert {row["i"]: row["sampling"] for row in rows} == {
+        0: None, 1: {"temperature": 0.7},
+    }
+
+
+def test_a_rung_narrator_cannot_honour_fails_that_row_by_name(
+    streaming_server: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    """narrator's per-row refusal, carried across as this row's `error` frame
+    by name and not interpreted. `sampling_not_supported` is the engine
+    saying it has no such lever — the MLX arm has no repetition penalty — and
+    it is a different fact from `sampling_malformed`, which is a typo."""
+    with streaming_server(sampling_levers="topP") as base:
+        session = opened(base, auth)
+        with listen(base, auth, session["session_id"]) as stream:
+            stream.wait_for(lambda s: s.of("ready"), "the ready frame")
+            say_at_take(base, auth, session["session_id"], "r1", "Rain.", 1)
+            stream.wait_for(lambda s: s.of("error"), "the row's error frame")
+            error = stream.of("error")[0]
+    assert error["id"] == "r1"
+    assert "sampling_not_supported:" in error["message"]
 
 
 def test_say_has_no_default_take_on_the_wire(

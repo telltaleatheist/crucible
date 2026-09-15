@@ -6,7 +6,10 @@ test can see or touch a real `~/.crucible`.
 
 from __future__ import annotations
 
+import base64
+import io
 import json
+import wave
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -275,6 +278,30 @@ def parse_sse(lines: Iterator[str]) -> list[dict[str, Any]]:
     return events
 
 
+def wav_bytes(seconds: float, rate: int = 24000) -> bytes:
+    """A real, minimal, silent mono PCM16 WAV of `seconds`.
+
+    Real because `crucible/voicereference.py` reads the duration out of the
+    RIFF header rather than taking a client's word for it, so a test that
+    handed it a made-up blob would be testing the refusal path and nothing
+    else. `wave` writes it, `wave` reads it: one standard-library container,
+    no fixture file in the repo, and the duration is arithmetic a reader can
+    check.
+    """
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(b"\x00\x00" * int(rate * seconds))
+    return buffer.getvalue()
+
+
+def wav_base64(seconds: float, rate: int = 24000) -> str:
+    """`wav_bytes`, encoded the way `params.reference.data` carries it."""
+    return base64.b64encode(wav_bytes(seconds, rate)).decode("ascii")
+
+
 __all__ = [
     "FAKE_BACKEND",
     "FAKE_MAC_BACKEND",
@@ -282,4 +309,6 @@ __all__ = [
     "holding_the_card",
     "parse_sse",
     "mint_token",
+    "wav_base64",
+    "wav_bytes",
 ]

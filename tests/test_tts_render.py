@@ -12,6 +12,7 @@ about the server's own logic is.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -25,7 +26,7 @@ from crucible.jobs import asr as asr_jobs
 from crucible.residency import KIND_TTS
 
 from . import fake_narrator_engine
-from .conftest import holding_the_card, parse_sse
+from .conftest import holding_the_card, parse_sse, wav_base64, wav_bytes
 from .test_tts_api import (  # noqa: F401 — imported to be used as fixtures
     fake_env,
     fake_weights,
@@ -414,6 +415,217 @@ def test_a_failed_chunk_is_reported_and_its_neighbours_still_land(
     assert sorted(row["index"] for row in events_of(events, "chunk")) == [41, 43]
 
 
+# ------------------------------------------------------------ the take ladder
+#
+# PHASE3-TTS.md section 3, wired through on 2026-09-14. The client asks for
+# take N; the server resolves what N MEANS for this voice and sends narrator
+# the numbers on each item. A temperature never travels on the app's wire, and
+# a rung above 0 is no longer refused (`sampling_not_wired` is gone from the
+# contract and from this code): narrator's `generate_batch` items carry
+# `sampling` since `narrator/engine/item_sampling.py`.
+
+
+@pytest.fixture
+def sampling_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Callable[[], list[dict[str, Any]]]:
+    """What the fake worker was asked to render each row under.
+
+    Read off a file the fake appends to rather than off a reply, because
+    narrator does NOT echo sampling back — a fake that did would let a test
+    assert about the fake instead of about the wire.
+    """
+    path = tmp_path / "sampling.jsonl"
+    fake_narrator_engine.steer(monkeypatch, sampling_log=str(path))
+
+    def read() -> list[dict[str, Any]]:
+        if not path.is_file():
+            return []
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+
+    return read
+
+
+def test_take_zero_sends_no_sampling_key_at_all(
+    rendered: Callable[..., list[dict[str, Any]]],
+    sampling_log: Callable[[], list[dict[str, Any]]],
+) -> None:
+    """Absent means "the voice's loaded sampling", which IS take 0. Sending
+    `{}` would be asking for a rung with nothing in it, which narrator refuses
+    as `sampling_malformed` — correctly."""
+    events = rendered(take=0)
+    assert terminal(events)["data"]["rendered"] == len(CHUNKS)
+    rows = sampling_log()
+    assert sorted(row["i"] for row in rows) == [41, 42, 43]
+    assert all(row["sampling"] is None for row in rows), rows
+
+
+def test_take_one_sends_that_rungs_numbers_on_every_item(
+    rendered: Callable[..., list[dict[str, Any]]],
+    sampling_log: Callable[[], list[dict[str, Any]]],
+) -> None:
+    """deathstalker's rung 1 is one line, `temperature = 0.7`, and it means
+    "take 0, but cooler": only the key the rung declares travels, and the
+    engine lays it over its resolved sampling. One take per job, so every row
+    carries the same numbers — but PER ITEM, because that is where narrator's
+    channel is and because the streaming door mixes rungs in one batch."""
+    events = rendered(take=1)
+    assert terminal(events)["data"]["rendered"] == len(CHUNKS)
+    rows = sampling_log()
+    assert sorted(row["i"] for row in rows) == [41, 42, 43]
+    assert all(row["sampling"] == {"temperature": 0.7} for row in rows), rows
+    # And the measurement still says which take it was.
+    assert {row["take"] for row in events_of(events, "chunk")} == {1}
+
+
+def test_a_rung_narrator_cannot_honour_fails_that_row_by_name(
+    rendered: Callable[..., list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """narrator refuses a rung PER ROW — `sampling_malformed` when it is not a
+    sampling, `sampling_not_supported` when this engine has no such lever (the
+    MLX arm has no repetition penalty) — and Crucible carries the message
+    across as that row's error, by name, without interpreting it. The other
+    rows are not collateral: a failed chunk is reported and the run
+    continues."""
+    fake_narrator_engine.steer(monkeypatch, sampling_levers="topP")
+    events = rendered(take=1)
+    done = terminal(events)["data"]
+    assert done["rendered"] == 0
+    assert sorted(row["index"] for row in done["failed"]) == [41, 42, 43]
+    for row in done["failed"]:
+        assert row["message"].startswith("sampling_not_supported:")
+        assert "temperature" in row["message"]
+
+
+# ------------------------------------------------------- the zero-shot load
+#
+# PHASE3-TTS.md section 5's amendment. These go through the whole load: the
+# API, the lane, the residency, the real engine and its pipes, the document
+# and the wav Crucible writes, and `tests/fake_narrator.py` making narrator's
+# own refusals about both (an absent clip file, a clip with no transcript).
+
+
+def test_a_zeroshot_voice_loads_with_its_clip_and_the_wav_is_on_disk(
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    home: Path,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+) -> None:
+    """The whole seam. narrator resolves a Higgs v3 voice by NAME in the
+    document, and it calls `os.path.isfile` on every clip path that document
+    names — so a Crucible that wrote one without the other would fail here,
+    which is what the fake worker's own refusals are for."""
+    weights = fake_weights("zeroshot")
+    events = run_job(
+        tts_client, auth, type="load-voice", model="zeroshot",
+        params={"reference": {
+            "data": wav_base64(8.4), "transcript": "He had been walking.",
+            "name": "the stranger",
+        }},
+    )
+    done = terminal(events)
+    assert done["event"] == "done", done
+    assert done["data"]["resident"] == "zeroshot"
+    # The digest, so two clients loading `zeroshot` can tell whose clip won.
+    reference = done["data"]["reference"]
+    assert reference["name"] == "the stranger"
+    assert reference["seconds"] == pytest.approx(8.4)
+    assert reference["sha256"] == hashlib.sha256(wav_bytes(8.4)).hexdigest()
+
+    document = json.loads(
+        (home / "narrator-higgs-voices.json").read_text(encoding="utf-8")
+    )
+    entry = document["zeroshot"]
+    assert entry["kind"] == "clips"
+    # The BASE weights Crucible pulled, not whatever the HuggingFace cache
+    # holds: narrator hands `checkpointDir` to `ClipsVoice(checkpoint_dir=)`
+    # and the served arm exports it as HIGGS_MODEL_DIR.
+    assert entry["checkpointDir"] == str(weights)
+    clip = entry["clips"][0]
+    assert clip["transcript"] == "He had been walking."
+    assert Path(clip["path"]).read_bytes() == wav_bytes(8.4)
+
+
+def test_the_resident_report_says_which_clip_is_loaded(
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+) -> None:
+    """`zeroshot` is one voice id and any number of clips, so the id alone
+    would be two clients each assuming the resident one is theirs.
+
+    `/v1/activity` and not `/v1/info`: this is the "what is this machine
+    doing" report, which is where the RESIDENT thing is described. A
+    `/v1/voices` row says `resident: true` and nothing more, because a row is
+    a statement about the manifest and the host, not about the load."""
+    fake_weights("zeroshot")
+    run_job(
+        tts_client, auth, type="load-voice", model="zeroshot",
+        params={"reference": {
+            "data": wav_base64(4.0), "transcript": "Rain.", "name": "rain-01",
+        }},
+    )
+    resident = tts_client.get("/v1/activity", headers=auth).json()["resident"]
+    assert resident["kind"] == "tts"
+    assert resident["id"] == "zeroshot"
+    assert resident["reference"]["name"] == "rain-01"
+    assert resident["reference"]["seconds"] == pytest.approx(4.0)
+    assert resident["reference"]["sha256"] == hashlib.sha256(
+        wav_bytes(4.0)
+    ).hexdigest()
+
+
+def test_a_resident_checkpoint_voice_reports_a_null_reference(
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+) -> None:
+    """Always present, null for a voice that is not conditioned on a clip: an
+    absent key would mean "this build does not say"."""
+    fake_weights(VOICE)
+    run_job(tts_client, auth, type="load-voice", model=VOICE)
+    resident = tts_client.get("/v1/activity", headers=auth).json()["resident"]
+    assert resident["id"] == VOICE
+    assert resident["reference"] is None
+
+
+def test_a_resident_zeroshot_voice_renders_like_any_other(
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+) -> None:
+    """Owen, 2026-09-14: a zero-shot voice "should effectively be treated as a
+    model, for all intents and purposes, except the route it takes to retrieve
+    and return the audio". Once it is on the card, nothing downstream knows it
+    was cloned from a clip."""
+    fake_weights("zeroshot")
+    run_job(
+        tts_client, auth, type="load-voice", model="zeroshot",
+        params={"reference": {
+            "data": wav_base64(4.0), "transcript": "Rain.",
+        }},
+    )
+    response = submit(
+        tts_client, auth, type="tts", model="zeroshot",
+        params={"language": "en", "take": 0, "chunks": CHUNKS},
+    )
+    assert response.status_code == 202, response.json()
+    with tts_client.stream(
+        "GET", f"/v1/jobs/{response.json()['job_id']}/events", headers=auth
+    ) as stream:
+        events = parse_sse(line for line in stream.iter_lines())
+    assert terminal(events)["data"]["rendered"] == len(CHUNKS)
+
+
 # ---------------------------------------------------------------- refusals
 
 
@@ -457,11 +669,18 @@ def test_a_chunk_over_the_cap_is_refused_rather_than_re_split(
     assert "index 0 is 900" in error["message"]
 
 
-def test_a_zeroshot_voice_is_refused_because_its_clips_have_no_wire(
+def test_a_zeroshot_voice_that_is_not_resident_is_refused_because_this_door_cannot_load_it(
     tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],  # noqa: F811
 ) -> None:
+    """A render job loads its own voice, and a zero-shot load needs the clip
+    that only `load-voice` carries (`params.reference`). This job's params are
+    `language`, `take` and `chunks`, and a second channel for clips here would
+    be two doors owning one fact — so the refusal NARROWED on 2026-09-14 to
+    "and is not resident" rather than being deleted. It used to refuse the
+    KIND outright, on the true-at-the-time grounds that narrator's load
+    message carried no clips at all."""
     fake_weights("zeroshot")
     response = submit(
         tts_client,
@@ -473,7 +692,9 @@ def test_a_zeroshot_voice_is_refused_because_its_clips_have_no_wire(
     assert response.status_code == 400, response.json()
     error = response.json()["error"]
     assert error["code"] == "voice_kind_unsupported"
-    assert "no reference clips on its load message" in error["message"]
+    assert "is not resident" in error["message"]
+    assert "params.reference" in error["message"]
+    assert error["details"]["resident"] is False
 
 
 def test_a_blank_chunk_is_refused_before_it_ends_the_batch(

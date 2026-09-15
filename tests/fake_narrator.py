@@ -113,6 +113,20 @@ must not be bent into passing test fixtures through it:
                                   failure. Its neighbours must still succeed: "a failed
                                   chunk is reported and the run continues" is a rule in
                                   every one of these contracts and it needs a test.
+    CRUCIBLE_FAKE_SAMPLING_LOG    a path this process appends one JSON line to per
+                                  item it is asked to render: `{"i", "sampling"}`,
+                                  the rung exactly as it arrived (null when the
+                                  item carried none). The ONLY way a test can see
+                                  what Crucible put on the wire, because narrator
+                                  does not echo sampling back and a fake that did
+                                  would be a fake asserting about itself.
+    CRUCIBLE_FAKE_SAMPLING_LEVERS a comma-separated subset of the four levers this
+                                  fake honours; anything else is
+                                  `sampling_not_supported` for that ROW. Default:
+                                  all four. It is narrator's own `levers` argument
+                                  (`engine/item_sampling.py:parse_item_sampling`),
+                                  which is how the MLX arm refuses a repetition
+                                  penalty it has no sampler for.
                                   The failure shape is `{i, message}` — narrator's own
                                   (`serve/worker.py`), where a row that failed is told
                                   apart from one that worked by having a `message` and
@@ -255,6 +269,95 @@ def _guard_for(row: int | None) -> dict[str, object]:
     return {"guard": verdicts[key]} if key in verdicts else {}
 
 
+#: narrator's per-item sampling vocabulary, verbatim from
+#: `engine/item_sampling.py:WIRE_KEYS`. The document's camelCase, deliberately:
+#: the per-load channel and the per-item channel are one set of levers and must
+#: not grow two spellings.
+_WIRE_KEYS = ("temperature", "topP", "topK", "repetitionPenalty")
+
+
+def _levers() -> set[str]:
+    raw = (os.environ.get("CRUCIBLE_FAKE_SAMPLING_LEVERS") or "").strip()
+    if not raw:
+        return set(_WIRE_KEYS)
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _record_sampling(row: int | None, sampling: object) -> None:
+    """Append what this item was asked to render under, for a test to read."""
+    path = (os.environ.get("CRUCIBLE_FAKE_SAMPLING_LOG") or "").strip()
+    if not path:
+        return
+    with _stdout_lock:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"i": row, "sampling": sampling}) + "\n")
+
+
+def _refuse_sampling_as_narrator_would(sampling: object, where: str) -> str | None:
+    """narrator's own per-item refusals, by name, for one item.
+
+    `engine/item_sampling.py` is the real one and this is its shape: a rung is
+    a non-empty object of known levers with positive numeric values (`topK` a
+    whole one), a key outside the vocabulary is `sampling_malformed`, and a
+    key this ENGINE has no lever for is `sampling_not_supported` — one is a
+    typo and the other is the wrong backend, and the difference matters to
+    whoever sent it. **None is not a refusal**: an item with no `sampling`
+    renders at the voice's loaded default, which is take 0.
+    """
+    if sampling is None:
+        return None
+    if not isinstance(sampling, dict) or not sampling:
+        return (
+            f"sampling_malformed: {where} carries sampling {sampling!r}; a rung "
+            f"is a non-empty object with any of {', '.join(sorted(_WIRE_KEYS))}."
+        )
+    unknown = sorted(set(sampling) - set(_WIRE_KEYS))
+    if unknown:
+        return (
+            f"sampling_malformed: {where} carries sampling key(s) {unknown}; the "
+            f"levers are {sorted(_WIRE_KEYS)}."
+        )
+    unsupported = sorted(set(sampling) - _levers())
+    if unsupported:
+        return (
+            f"sampling_not_supported: {where} asks for sampling {unsupported}, "
+            "which this engine has no lever for; it honours "
+            f"{sorted(_levers())}."
+        )
+    for key, value in sampling.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            return (
+                f"sampling_malformed: {where} carries sampling {key}={value!r}, "
+                "which is not a positive number."
+            )
+        if key == "topK" and int(value) != value:
+            return (
+                f"sampling_malformed: {where} carries sampling topK={value!r}; "
+                "top_k is a whole number of candidates."
+            )
+    return None
+
+
+def _refused_this_row(item: dict) -> bool:
+    """Answer one item's rung the way `_resolve_row` does, per ROW.
+
+    A per-item refusal fails THE ONE ITEM and not the batch — narrator's own
+    rule, and the reason `_resolve_row` exists at all ("one stray voice used to
+    fail all 16 sentences"). It reaches the client as a `batch_item` carrying
+    `message` and no `data`, which is how every per-row failure travels.
+    """
+    row = item.get("i")
+    sampling = item.get("sampling")
+    _record_sampling(row, sampling)
+    refusal = _refuse_sampling_as_narrator_would(
+        sampling, f"generate_batch row i={row!r}"
+    )
+    if refusal is None:
+        return False
+    send("batch_item", i=row, message=refusal)
+    return True
+
+
 def _told_to_fail(row: int | None) -> bool:
     """Answer `CRUCIBLE_FAKE_FAIL_ROW` for this row, and say whether it did."""
     fail_row = _env_int("CRUCIBLE_FAKE_FAIL_ROW")
@@ -378,6 +481,12 @@ def _run_batch(message: dict) -> None:
     # wrong the first time it meets a real one. For a streamed batch reversal
     # decides only which row wins a tie, because the rows are interleaved.
     ordered = list(reversed(items))
+    # THE RUNG IS ANSWERED FIRST, per item, before anything is rendered —
+    # `_resolve_row`'s position in the real worker, and for its reason: a rung
+    # this engine cannot honour must fail its own row while its neighbours are
+    # ordinary sentences. A refused row is already answered, so it never
+    # reaches the generators below.
+    ordered = [item for item in ordered if not _refused_this_row(item)]
     streamed = [item for item in ordered if item.get("stream")]
     whole = [item for item in ordered if not item.get("stream")]
 
@@ -452,6 +561,33 @@ def _refuse_load_as_narrator_would(message: dict) -> str | None:
             f"{path}: voice '{name}' is a fine-tune (kind 'checkpoint') and "
             "carries no 'maxChars'."
         )
+    # A CLIPS VOICE'S CLIPS ARE FILES ON THIS HOST, and narrator checks that
+    # they exist — `config.load_voices` calls `os.path.isfile` on every
+    # `clips[].path` and refuses a clip with no `path` or no `transcript`
+    # before any of them. So does this: a Crucible that wrote the document but
+    # not the wav, or wrote a clip with no transcript, fails in the suite
+    # rather than on somebody's book. (The transcript refusal is narrator's own
+    # law — a clone conditioned on an absent transcript is a whole book in a
+    # subtly wrong voice, reported as success.)
+    if entry.get("kind") == "clips" and not entry.get("clips"):
+        return (
+            f"{path}: voice '{name}' is a reference clone with no clips. A "
+            "zero-shot clone with no reference is the model's own voice, which "
+            "is a different thing."
+        )
+    for clip in entry.get("clips") or []:
+        for key in ("path", "transcript"):
+            if not (clip.get(key) or "").strip():
+                return (
+                    f"{path}: voice '{name}' has a clip with no '{key}'. The "
+                    "transcript is the book-exact text spoken in the clip - the "
+                    "corpus row or the narration copy, never a transcription."
+                )
+        if not os.path.isfile(clip["path"]):
+            return (
+                f"{path}: voice '{name}' names a clip that does not exist: "
+                f"{clip['path']}"
+            )
     return None
 
 
