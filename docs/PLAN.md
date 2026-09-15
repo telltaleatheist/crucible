@@ -404,8 +404,13 @@ So what is left is not code. It is **a card, and Owen's rulings on the five thin
    nothing is waiting on him.
 4. **Publish the promoted fine-tune merges.** The HF revisions are older merges than the
    arms the catalog measured; the caps survive that gap, the pace bands do not.
-5. **The take ladder.** Its steps are server config and its judgment is the client's — the
-   one place the division of knowledge had a genuinely arguable alternative.
+5. ~~**The take ladder.**~~ **RULED and BUILT, 2026-09-14** (PHASE3-TTS.md section 3). The
+   steps stay server config and the judgment stays the client's. Owen: *"i just know if a
+   sentence/chunk was problematic before, itll likely be problematic again with the same
+   settings used to originally generate it"* — so the requirement is that a retake must not
+   reuse the settings that produced the problem, and the spread IS the ladder. The five
+   fine-tunes declare rung 1 (`temperature = 0.7`, with its measurement), the rung reaches
+   narrator per item, and `sampling_not_wired` is deleted.
 6. **Does a resident model ever unload itself?** Proposed: no, and the Servers row shows
    what is resident and for how long (PHASE5-APPS.md section 7).
 

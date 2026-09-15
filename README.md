@@ -581,11 +581,21 @@ certificate per (voice, backend) — stays on the server. The wire carries a voi
 text, and a take number. Owen's ruling: the client knows what the operator ordered and
 which server to send it to; the server knows how to run it.
 
-Three things are refused by name rather than faked, because narrator cannot do them yet:
-a take-ladder deviation (`sampling_not_wired` — narrator's sampling door takes its older
-engine's vocabulary and raises on an unknown key), a zero-shot voice (`voice_kind_unsupported` —
-its `load` carries no reference clips), and a chunk over the voice's `max_chars`
-(`chunk_too_long`, never silently re-split).
+**The take ladder is the retake.** `[[voice.takes]]` per voice: take 0 is the boson
+default, take 1 the measured alternative, and a client asks for a NUMBER. Crucible resolves
+the rung and sends narrator the numbers on each item; a take past the end of the ladder is
+`unknown_take` and is never clamped, and `GET /v1/voices` carries `takes` so a client can ask
+how long the ladder is before it submits. Owen's ruling, 2026-09-14: a retake must not reuse
+the settings that produced the problem.
+
+**A zero-shot voice loads with its clip.** `load-voice` takes
+`params.reference {data, transcript, name?}` — a base64 WAV and the book-exact text spoken in
+it — required of a `kind = "zeroshot"` voice (`reference_required`), refused on any other
+(`reference_not_allowed`), and checked before the job is queued
+(`reference_malformed`). The weights are the server's and the clip is the client's; the row
+says `needs_reference` so a picker knows which is which.
+
+A chunk over the voice's `max_chars` is `chunk_too_long`, never silently re-split.
 
 FLACs are encoded through **ffmpeg**, which this server already requires for `asr`.
 `soundfile` would mean a compiled audio dependency in a process that deliberately imports

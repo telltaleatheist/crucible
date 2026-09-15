@@ -198,7 +198,8 @@ function — the same rule, and for the same reason, as `llm`'s models (PHASE2-L
   "estimate_basis": "declared",
   "max_chars": 800,
   "sample_rate": 24000,
-  "takes": 1,
+  "takes": 2,
+  "needs_reference": false,
   "pace": {
     "pace_chars_per_sec": 16.64,
     "max_chars_per_sec": 21.63,
@@ -213,6 +214,21 @@ function — the same rule, and for the same reason, as `llm`'s models (PHASE2-L
 `revision`, `fingerprint`, `memory_bytes_estimate`, `estimate_basis` and `max_chars` are
 `null` when `backend_supported` is false, because they live in the backend block this host
 does not have — and `0` would read as "needs nothing".
+
+**`takes` is how many rungs this voice's ladder has**, and it is on the row so a client can
+ask before it submits. A `take` past the end is `unknown_take` and is never clamped, and a
+client spreading N candidates across the ladder (BookForge's Correct Sentences does exactly
+that) has to know where the ladder ends. What each rung MEANS is deliberately not published,
+for the same reason `sampling` is not: the numbers are engine tuning and publishing them
+invites a client to send them back. It is never below 1 — take 0 exists whether or not the
+file declares it.
+
+**`needs_reference` says whether a `load-voice` for this row must carry a clip** — true for a
+`kind = "zeroshot"` voice and false for every other kind (section 5's amendment). On the row
+so a picker can show its clip field before the load is refused, and derived from `kind` by
+the server rather than left for a client to derive, because which kinds need one is the
+server's rule. It is a fact about the KIND and not about the backend block, so it stays true
+on a host this voice cannot be served on.
 
 `pace` is the whole block and not the one key the draft showed: a client that is going to
 pack has to see all of it, and the two shapes (a band, a target) are told apart by which keys
@@ -236,7 +252,7 @@ to (`pace`, `max_chars`) and the identity it must record (`fingerprint`).
 
 [[voice.takes]]
 temperature = 0.7
-reason = "measured 2026-09-11 over the same 88 chunks: 0.8 gave 4 guard fires / 3 holes / 0 drops, 0.7 gave 8 / 7 / 0. A second take at 0.7 is a different draw, not a better setting."
+reason = "measured 2026-09-11 over the same 88 chunks: 0.8 gave 4 guard fires / 3 holes / 0 drops, 0.7 gave 8 / 7 / 0. Not a better setting — a DIFFERENT one, which is what a retake of a chunk that failed at 0.8 needs (Owen's ruling 2026-09-14: a retake must not reuse the settings that produced the problem)."
 ```
 
 A `tts` job carries `take: N`, an index into that list, and nothing else about sampling. The
@@ -247,7 +263,59 @@ that stops climbing without telling anyone.
 
 This is the one place where the division of knowledge had a genuinely arguable alternative
 (move the whole ladder, judgment included). It is written here so that changing it later is
-a decision rather than a drift. **Owen has this open as a question.**
+a decision rather than a drift.
+
+### RULED, and BUILT, 2026-09-14
+
+Owen's question above is answered, and the answer keeps the ladder here. He was shown
+BookForge's Correct Sentences spreading temperatures of its own (`computeTakeTemperatures`,
+0.4 / 0.8 / 1.0 around an Orpheus-era 0.6) and ruled:
+
+> *"we dont have to use temperature as the lever to get sentences to sound different, but the
+> goal is to re-render sentences that dont sound quite right. prosody is bad, theres babbling
+> or truncation, some other issue. thats why the feature exists. i was using temperature as a
+> lever because it gives a different output. if we can get the same result without changing
+> temperature then thats fine. i just know if a sentence/chunk was problematic before, itll
+> likely be problematic again with the same settings used to originally generate it."*
+
+So the requirement is not *a temperature*; it is that **a retake must not reuse the settings
+that produced the problem**. Unseeded sampling alone gives a different output at the same
+settings, which is the weak form; a different RUNG is the strong form, and a problematic
+chunk needs the strong form at least once. **The spread IS the take ladder**, a temperature
+is never on the app's wire, and a client spreads its N candidates across the rungs rather
+than re-rolling take 0 N times.
+
+Three things this build changed.
+
+1. **The five fine-tunes declare rung 1** — `temperature = 0.7`, with the measurement above
+   as its written reason. `higgs-default` and `zeroshot` deliberately do not: that
+   measurement is 88 chunks of a fine-tune's output, a zero-shot voice's spread depends on a
+   clip nobody has measured against, and a rung that is not measured is a number somebody
+   will later mistake for one. They still have take 0, which every voice has whether or not
+   its file says so.
+2. **The rung reaches narrator PER ITEM.** `generate` and `generate_batch` items carry
+   `sampling: {temperature?, topP?, topK?, repetitionPenalty?}` since
+   `narrator/engine/item_sampling.py` — section 4 has the details. Crucible resolves
+   `take: N` against the voice's ladder and sends **only the keys the rung declares**: rung 1
+   is one line and means "take 0, but cooler", and each engine lays the item's keys over its
+   resolved sampling key by key. Take 0 sends **no `sampling` key at all**, because absent
+   means "the voice's loaded sampling", which is exactly what take 0 is — `{}` would be
+   asking for a rung with nothing in it, which narrator refuses as `sampling_malformed`,
+   correctly. It rides on each item and not on the request because that is where narrator's
+   channel is, and because the streaming door legitimately mixes rungs in one batch.
+3. **`sampling_not_wired` is DELETED from this contract and from the code.** It had exactly
+   one meaning — *there is no channel* — and there is a channel. It is not kept as a refusal
+   nothing can raise. (Its take-0 half had already gone when the voices document started
+   carrying sampling per load; the render door's went at the same time, and the streaming
+   door's second one — a voice whose take-0 sampling deviates — went with it.)
+
+**narrator's own refusals travel back per row, by name.** A rung that is not a sampling is
+`sampling_malformed`; one this engine has no lever for — the MLX arm has no repetition
+penalty — is `sampling_not_supported`. Both arrive as that row's `message` and Crucible
+carries them across as the row's error without interpreting them: one is a typo and the
+other is the wrong backend, and the difference matters to whoever sent it. A per-item
+refusal fails **its own row** and not the batch, which is narrator's rule and the reason
+`_resolve_row` exists at all.
 
 ## 4. Engines: narrator is the managed subprocess
 
@@ -429,7 +497,8 @@ it, and nothing it does not read:
 | key | from | note |
 |---|---|---|
 | `kind` | `[voice].kind` | `checkpoint` → `checkpoint`; `token` → **`default`**, narrator's name for the model's own voice |
-| `checkpointDir` | the pulled directory | checkpoint voices only. narrator checks the directory's required files itself at the load message (`checkpoint_serve_target`) |
+| `checkpointDir` | the pulled directory | a checkpoint's merged weights, or a **zeroshot voice's BASE weights** (2026-09-14 — narrator hands it to `ClipsVoice(checkpoint_dir=...)` and both arms load it, which is how a clone renders on the bytes the pin names instead of on whatever base snapshot the HF cache holds). narrator checks the directory's required files itself at the load message (`checkpoint_serve_target`) |
+| `clips` | the `load-voice`'s `reference`, placed on disk | zeroshot voices only, and required of them: `[{path, transcript, seconds}]`, narrator's own three keys. `seconds` is MEASURED by Crucible off the wav header, never taken from the client |
 | `maxChars` | `[voice.backends.<arm>].max_chars` | characters; the one key narrator refuses a checkpoint without |
 | `targetChars` | `[voice.pace].target_chars` | when declared |
 | `safeMinChars`, `safeMaxChars` | `[voice.pace].safe_*_chars` | when declared; the manifest loader has already refused a band above the cap |
@@ -449,11 +518,17 @@ now makes narrator's own refusals under `--engine higgs-v3` — `modelDir` by na
 variable, an absent voice — so a residency that stopped writing the document fails in the
 suite rather than on a book.
 
-**Two (voice, arm) pairs are refused by name before any engine starts**, in
-`narratorvoices.voice_entry`:
+**ONE (voice, arm) pair is refused by name before any engine starts**, in
+`narratorvoices.voice_entry` — it was two until 2026-09-14, when the zero-shot clip got a
+channel (section 5's amendment) and the first refusal stopped being true:
 
-- `kind = "zeroshot"`, either arm — the same refusal the render door makes as
-  `voice_kind_unsupported`, made at the load door too; section 6 says what narrator owes.
+- ~~`kind = "zeroshot"`, either arm.~~ **Lifted.** It was refused because "a Crucible
+  zeroshot voice's clips are either `from-request` or files in a refs repo nothing has laid
+  out, and an entry naming files Crucible has not checked is a load that dies inside
+  narrator". The load door now carries the clip, Crucible writes the wav itself beside the
+  document, and the entry names a path this process just wrote. What replaced it is a pair of
+  refusals about the CLIP rather than the kind: a zeroshot voice with none, and a clip on a
+  voice that is not one.
 - `kind = "token"` on `cuda-linux`. narrator's served arm exports `HIGGS_MODEL_DIR` only for a
   checkpoint voice and **unsets** it otherwise, and its launch script then serves "the base
   snapshot out of the HF cache" — not the directory Crucible pulled at the pin, so a server
@@ -463,7 +538,18 @@ suite rather than on a book.
   directory. **RULING OWED, narrator's side:** a way for the served arm to be told the base
   directory for a `default` voice. Until then `higgs-default` is a Mac-only smoke voice.
 
-### Sampling reaches narrator through the document — take 0 only
+  **A lead on that ruling, found while wiring zeroshot and deliberately NOT acted on.**
+  narrator's document reader passes `checkpointDir` into `DefaultVoice` exactly as it does
+  into `ClipsVoice`, and the served arm exports whatever `checkpoint_dir` the config ends up
+  with — so writing the pulled base directory as a `default` voice's `checkpointDir` would
+  very likely make the served arm start on the bytes Crucible pinned, which is the whole of
+  what this refusal is waiting for. That is the move this build now makes for `clips`. It is
+  not made for `token`, because the two differ in what has been tested and in whose decision
+  it is: a zero-shot load is a new door built to a written plan, and re-pointing
+  `higgs-default` is a behaviour change to a shipped smoke voice on an arm nobody has run it
+  on. Owen's ruling, with this lead in front of him.
+
+### Sampling reaches narrator: take 0 through the document, a rung per item
 
 **No `caps` are sent on the `load` message**, still. narrator's caps channel is
 `register_voice_caps`, whose key vocabulary is narrator's older engine's — `temperature`, `topP`, `minP`,
@@ -477,13 +563,28 @@ build states the boson default, so what the document asks for is what the engine
 rendered at — **except** on a merged checkpoint whose own `generation_config.json` says
 otherwise, where writing it is what makes take 0 the boson default rather than whatever the
 merge script left in the file. A voice that deviates with its written reason renders at what
-it declares; the take-0 half of `sampling_not_wired` is gone because it had become false.
+it declares; the take-0 half of the old `sampling_not_wired` refusal is gone because it had
+become false.
 
-What is still refused, and why: **a take above 0** on a voice that declares a ladder. A rung
-is per RENDER; the document is per LOAD; narrator's `generate_batch` takes no sampling. A
-reload per take is not a ladder. **Owed on narrator's side before the ladder can climb:** a
-sampling channel on `generate` / `generate_batch`. `unknown_take` already refuses a rung past
-the end, and no shipped manifest declares one.
+**And the other half went on 2026-09-14, when narrator grew the per-item channel.** A rung is
+per RENDER and the document is per LOAD, so until narrator's `generate` and `generate_batch`
+took sampling there was nowhere for take 1 to go and a reload per take is not a ladder. There
+is now: `narrator/engine/item_sampling.py`, one module, one spelling and one pair of refusal
+names.
+
+| | |
+|---|---|
+| the wire | an item may carry `sampling: {temperature?, topP?, topK?, repetitionPenalty?}` |
+| the spelling | **the voices document's**, deliberately — `engine/higgs/config.py`'s `_SAMPLING_KEYS`, so the per-load channel and the per-item channel are one vocabulary and not two names for one lever |
+| absent | the voice's loaded sampling, which IS take 0. Not a fallback: it is the documented meaning of "no rung" |
+| an overlay | the rung is applied OVER the engine's resolved sampling KEY BY KEY, so a one-line rung keeps take 0's `top_p` and `top_k`. This is measured rather than tidy: on SGLang-Omni an unset `top_k` is the untruncated 1026-way codebook tail, one chunk to the cap with 80 s of silence |
+| refused | `sampling_malformed` (not an object, empty, an unknown key, a value that is not a positive number — `topK` not a whole one) and `sampling_not_supported` (well formed, and this engine has no such lever, or has no per-item sampling at all). **Per row**, never per batch |
+
+Crucible's half is `narratorvoices.take_sampling(manifest, take)`: the rung's own keys,
+translated through the same `_SAMPLING_ON_THE_WIRE` map the document uses, and `None` at take
+0. Both doors send it on every item — the render door one take per job, the streaming door one
+per `say` — and both carry narrator's per-row refusal back to the client as that row's error,
+by name.
 
 ## 5. Residency holds one thing, whatever kind it is
 
@@ -522,7 +623,7 @@ New job types, mirroring the model pair exactly, and enabled by `[jobs] enable_t
 
 | Type | Refusals, all before queuing |
 |---|---|
-| `load-voice` | `unknown_voice`, `voice_not_installed`, `backend_unsupported`, `env_missing`, `accelerator_busy`, `insufficient_memory` |
+| `load-voice` | `unknown_voice`, `voice_not_installed`, `backend_unsupported`, `env_missing`, `accelerator_busy`, `insufficient_memory`, and the reference trio below |
 | `unload-voice` | `voice_not_resident` |
 
 One note on the first of those: an unknown id is refused as **`unknown_model`** rather than
@@ -531,6 +632,90 @@ model against what the job type advertises, for every job type, before `prefligh
 `unknown_voice` exists and is what `crucible/jobs/tts/` raises from its own lookup; it is
 simply not the code a client sees on this path. Changing that means changing `resolve_model`
 for every type, which is a decision about the whole API rather than about `tts`.
+
+### AMENDMENT, 2026-09-14: `load-voice` carries the zero-shot reference clip
+
+Owen, on what a zero-shot voice IS:
+
+> *"zero shot uses a voice reference and the base model i believe. it should effectively be
+> treated as a model, for all intents and purposes, except the route it takes to retrieve and
+> return the audio."*
+
+So it loads through this same door, with one extra field. The weights are the server's — the
+base model, pulled at `voices/zeroshot.toml`'s pin, like any other voice's — and **the clip
+is the client's**: BookForge keeps its four in `<userData>/runtime/higgs-models/refs/`, the
+browser extension keeps its own in the browser, and neither is published anywhere a server
+could pull from. A clip is a per-client CHOICE, like the voice pick itself, so it travels
+with the load, which is the one moment it is needed.
+
+```json
+{
+  "type": "load-voice",
+  "model": "zeroshot",
+  "params": {
+    "reference": {
+      "data": "<base64 of a RIFF/WAVE file, no data: prefix>",
+      "transcript": "He had been walking for some time.",
+      "name": "the stranger"
+    }
+  }
+}
+```
+
+**`model`, not `voice`, and `params`, not the top level.** `POST /v1/jobs` is
+`{type, model, params, inputs}` for every job type and the wire's word for the thing that
+produces the bytes is `model` (section 6); a second envelope for this one door would be a
+second shape to learn. The SDK's `loadVoice(voice, {reference})` spells it the readable way.
+
+**The field names are narrator's, translated once.** narrator reads reference clips out of
+the `NARRATOR_HIGGS_VOICES` document as `{path, transcript, seconds}` — where `path` is a
+file on the server's own disk, which it checks with `os.path.isfile`, base64s itself into
+vllm-omni's `references[].data` on the served arm, and hands to `encode_reference_audio` on
+the MLX one. A client across a network has no such path, so the wire carries the bytes and
+`crucible/voicereference.py` is the one place they become a file: written to
+`~/.crucible/narrator-reference.wav`, beside the document and in the same breath, because
+narrator checks the path the document names.
+
+Two deliberate differences from that shape, each with its reason:
+
+- **`seconds` is NOT on the wire.** narrator needs it — `reference_seconds` raises on a clip
+  that has none, because the 30-second budget is checked before the request is built — but
+  Crucible is holding the bytes and reads the duration out of the RIFF header. A duration the
+  client states is a second owner of a fact the server already has, and the day the two
+  disagree the refusal would name the honest one as the liar (`docs/ARCHITECTURE.md`, R1).
+- **`transcript` IS required**, and BookForge's `docs/EXTENSION-TO-CRUCIBLE-PLAN.md` §4b —
+  which sketched this field as `{data: <base64 wav>}` alone — is wrong about that. narrator
+  refuses a `ReferenceClip` with an empty transcript AT CONSTRUCTION and says why in as many
+  words: *"a zero-shot clone conditioned on a wrong or absent transcript is a whole book in a
+  subtly wrong voice, reported as success"*. It is the book-exact text the clip was cut from,
+  never an ASR guess — the same law the training corpora are held to. **The extension's clip
+  picker therefore needs a transcript field beside its file input.**
+
+`name` is optional and is a label for whoever reads the resident report; it is never derived
+from anything, because a made-up name is one a client would then look for.
+
+**The three refusals, all before the job is queued:**
+
+| code | what it means |
+|---|---|
+| `reference_required` | the voice's kind is `zeroshot` and the load carries no `params.reference`. The base weights with no reference are the model's OWN voice — a different speaker at 12 % of the narrator ceiling — and a book rendered in it under this id would be reported as success |
+| `reference_not_allowed` | a `checkpoint` or `token` voice carries one. A checkpoint's voice is in its weights and a token voice's is in the engine; narrator would clone from the clip and leave the weights this load names doing nothing, under their fingerprint |
+| `reference_malformed` | `data` is not base64 (validated strictly — a `data:` prefix or a pasted newline is a refusal, not a silent skip), the bytes are not a readable WAV, the transcript is missing or blank, or the clip is over **30.0 s** (`v3_served.MAX_REFERENCE_SECONDS`; vllm-omni answers HTTP 400 "Reference audio too long" above it) or over a 32 MiB decoded ceiling, checked against the encoded length first so a gigabyte is never decoded |
+
+**The resident report says which clip.** `zeroshot` is one voice id and any number of
+recordings, so the id alone is two clients each assuming the resident one is theirs.
+`GET /v1/activity`'s `resident` block gains `reference: {name, sha256, seconds}` — `null` for
+every other kind and for a model, always present, and the sha256 is over the DECODED audio so
+two clients sending the same wav agree and a client who re-encoded a different take does not.
+The `load-voice` job's own `done` carries the same object. A `/v1/voices` row does **not**:
+a row is a statement about the manifest and this host, not about the load, and it already
+says `resident` and `needs_reference`.
+
+**What this does NOT change.** The render door still refuses a zero-shot voice that is not
+already resident (`voice_kind_unsupported`, section 6) — a render job loads its own voice and
+has no `reference` field, and inventing a second clip channel there would be two doors owning
+one fact. The streaming door stopped refusing the kind entirely: it never loads, so a
+`zeroshot` session can only ever attach to a voice that was loaded with its clip.
 
 ## 6. The render door — job type `tts`
 
@@ -691,8 +876,8 @@ note), `invalid_params`, `ffmpeg_missing`, `backend_unsupported`, `env_missing`,
 
 | code | what it means |
 |---|---|
-| `voice_kind_unsupported` | the voice is `kind = "zeroshot"`, and narrator's `load` message carries `voice`, `modelDir`, `adapterDir`, `baseDir`, `caps` and `warm` — **and no reference clips**. There is no channel on this wire for the thing a zero-shot voice *is*, and rendering one would mean conditioning on nothing: a whole book in the base model's voice, reported as success. |
-| `sampling_not_wired` | the take is above 0. Take 0's sampling reaches narrator through the voices document (section 4), which is written per LOAD; a rung is per RENDER and narrator's `generate_batch` takes no sampling, so a ladder has no channel yet. A voice whose take-0 sampling deviates (with its written reason) is no longer refused — the document carries it. |
+| `voice_kind_unsupported` | the voice is `kind = "zeroshot"` **and is not already resident**. A render job loads its own voice (below), a zero-shot load needs the reference clip only `load-voice` carries (`params.reference`, section 5's amendment), and this job's params are `language`, `take` and `chunks` — a second clip channel here would be two doors owning one fact. Load it first, then render. *Narrowed 2026-09-14; it used to refuse the KIND outright, on the true-at-the-time grounds that narrator's `load` message carried no clips at all.* |
+| ~~`sampling_not_wired`~~ | **DELETED 2026-09-14.** It had one meaning — *there is no channel for a take above 0* — and narrator's per-item `sampling` is that channel (sections 3 and 4). Not kept as a refusal nothing can raise. |
 | `unknown_take` | a take past the end of the ladder. Never clamped. |
 | `chunk_too_long` | a chunk longer than the (voice, backend) `max_chars`. **Refused, not re-split**: chunking is the client's (section 1), and a server that quietly cut a chunk in half would return two files where one was asked for. |
 
@@ -881,9 +1066,11 @@ prevent.
 
 **DIFFERENCE 5 — `say` carries a required `take` and there is no default on the wire.** The
 SDK's `say(id, text, take?)` defaults it to 0 in the caller's own code, which is a client
-choosing; a default in the request body would be the server choosing, and the day a ladder is
-wired that becomes a render at a take nobody asked for. The refusals a `say` can make are the
-render door's, one row at a time: `unknown_take`, `sampling_not_wired`, `chunk_too_long`
+choosing; a default in the request body would be the server choosing, and now that the ladder
+is wired that would be a render at a take nobody asked for. **Rows in one session may be at
+different takes** — each `say` resolves its own rung and each item carries its own `sampling`
+— which is what spreading candidates across the ladder looks like on this door. The refusals a `say` can make are the
+render door's, one row at a time: `unknown_take`, `chunk_too_long`
 (refused, never re-split), a blank text, plus `duplicate_row_id` — an id is what every frame
 names its row by, so two rows sharing one would be two streams of audio under one name.
 
@@ -957,7 +1144,11 @@ one env row per narrator engine under `tts_envs`.
 
 ## 9. SDK additions (`@crucible/client`)
 
-- `voices()` → `VoiceInfo[]`, `loadVoice(id)` / `unloadVoice(id)` → job ids.
+- `voices()` → `VoiceInfo[]`, `loadVoice(id, {reference?})` / `unloadVoice(id)` → job ids.
+  The row carries `takes` (how many rungs, so a client can ask before it submits) and
+  `needsReference` (whether a load must carry a clip); `reference` is
+  `{data, transcript, name?}` and is validated client-side for the two required fields
+  before a round trip (section 5's amendment).
 - `render({voice, language, take, chunks, signal})` → **a job id**, not a handle; `chunk` is
   in the event vocabulary, and `writeArtifactsTo(jobId, dir)` is the batch writer of section
   6. See "What the render client deviated from, and why" below for the handle.
@@ -1255,7 +1446,12 @@ these routes.
 
 - **No assembly.** Crucible returns chunks; the m4b is BookForge's.
 - **No chunking and no text normalisation.** Section 1.
-- **No retake decision.** Section 3.
+- **No retake decision.** Section 3. The server owns what take N *means*; the client owns
+  *that* a row needs another take and *which* take it keeps.
+- **No voice creation from a clip.** A zero-shot load conditions the base weights on a
+  recording for as long as that voice is resident (section 5's amendment); it does not
+  publish, name, store or remember a clip. The next load overwrites the wav, exactly as it
+  overwrites the voices document, and for the same reason.
 - **No session.** Section 6.
 - **No voice creation.** Training a checkpoint and publishing it to HuggingFace is
   `orpheus-finetune`'s job and stays there. Crucible pulls a published voice at a pinned
