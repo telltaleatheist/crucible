@@ -502,7 +502,7 @@ it, and nothing it does not read:
 | key | from | note |
 |---|---|---|
 | `kind` | `[voice].kind` | `checkpoint` → `checkpoint`; `token` → **`default`**, narrator's name for the model's own voice |
-| `checkpointDir` | the pulled directory | a checkpoint's merged weights, or a **zeroshot voice's BASE weights** (2026-09-14 — narrator hands it to `ClipsVoice(checkpoint_dir=...)` and both arms load it, which is how a clone renders on the bytes the pin names instead of on whatever base snapshot the HF cache holds). narrator checks the directory's required files itself at the load message (`checkpoint_serve_target`) |
+| `checkpointDir` | the pulled directory | a checkpoint's merged weights, or a **zeroshot voice's BASE weights** (2026-09-14 — both arms load it, which is how a clone renders on the bytes the pin names instead of on whatever base snapshot the HF cache holds). **`kind` is what says which**, and the two are one statement: narrator reads a `clips` voice's directory into `ClipsVoice.base_dir` and every other kind's into `checkpoint_dir`, then checks the required files at the load message (`v3_served.voice_serve_target`) — a merge's `generation_config.json`, base weights' bytes and nothing else. See "What base weights are not" below |
 | `clips` | the `load-voice`'s `reference`, placed on disk | zeroshot voices only, and required of them: `[{path, transcript, seconds}]`, narrator's own three keys. `seconds` is MEASURED by Crucible off the wav header, never taken from the client |
 | `maxChars` | `[voice.backends.<arm>].max_chars` | characters; the one key narrator refuses a checkpoint without |
 | `targetChars` | `[voice.pace].target_chars` | when declared |
@@ -553,6 +553,50 @@ channel (section 5's amendment) and the first refusal stopped being true:
   it is: a zero-shot load is a new door built to a written plan, and re-pointing
   `higgs-default` is a behaviour change to a shipped smoke voice on an arm nobody has run it
   on. Owen's ruling, with this lead in front of him.
+
+### What base weights are not: the first zero-shot load, 2026-09-15
+
+The first zero-shot load ever made through Crucible on the PC was refused by name at
+00:11, before anything touched the card:
+
+```
+engine_failed: narrator (higgs-v3) refused the request: Higgs v3 voice 'zeroshot':
+the merged checkpoint /home/telltale/.crucible/voices/zeroshot/cuda-linux does not
+carry generation_config.json, which is a REQUIRED ...
+```
+
+**The pull was complete and the file does not exist.** `voices/zeroshot.toml` pins
+`bosonai/higgs-tts-3-4b` at `239f63fb7b02b1aa085f98d9efae5e35cc5523e8`; that tree lists
+thirteen files — `config.json`, `chat_template.jinja`, `model.safetensors` and its index,
+the tokenizer pair, `.gitattributes`, `README.md` / `AGENTS.md` / `PROMPTING.md` /
+`LICENSE`, one asset — and no `generation_config.json` under any name or subdirectory.
+Every one of them is in `~/.crucible/voices/zeroshot/cuda-linux`, with
+`crucible-pull.json` recording the same repo and revision, so `weights.pull` fetches the
+whole snapshot and omitted nothing. Nothing on Crucible's side was wrong.
+
+**The fault was a field with two meanings, and it is fixed in narrator.** `checkpointDir`
+meant "the merged fine-tune this voice IS", whose own `generation_config.json` is the
+sampling `vllm-omni serve` resolves from the model directory (`--generation-config auto`);
+narrator requires that file of a merge because an empty request against a directory without
+one gets a bare `SamplingParams()` — top_p 1.0, top_k DISABLED — which derails long chunks
+into babble. Base weights have never carried it, which is why narrator has sent
+`SERVER_DEFAULT_SAMPLING` explicitly for them since 2026-09-05. When this build started
+writing the pulled BASE directory into that same key so a clone would render on pinned
+bytes, the requirement came along with the name.
+
+So narrator reads the KIND beside the key: a `clips` voice's directory lands in
+`ClipsVoice.base_dir`, checked by `v3_served.require_base_weights_dir` (the bytes, no
+file), and every other kind's in `checkpoint_dir` as before. Naming both is refused —
+one server runs on one model. **Crucible's wire does not change**: it already writes
+`kind` and `checkpointDir` together, and `tests/test_narrator_voices.py` now asserts the
+pair rather than either half, because writing `checkpoint` there would resurrect the
+refusal with no other symptom.
+
+Two things that followed from the same conflation and are fixed with it: the config's
+`served_sampling` went EMPTY for any voice naming a directory, so a zero-shot render on
+base weights would have gone out with no sampling at all — the exact babble case — and
+the prep's safe-band check refused any voice naming a directory as "a fine-tune that
+declares no safe band", which a zero-shot voice is not and never declares.
 
 ### Sampling reaches narrator: take 0 through the document, a rung per item
 

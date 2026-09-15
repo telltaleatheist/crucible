@@ -229,11 +229,18 @@ def test_a_zeroshot_entry_is_narrators_clips_kind_with_the_placed_clip(
     """narrator's name for a reference clone is `clips`, and the clip row is
     its own `{path, transcript, seconds}` — the three keys
     `config.load_voices` reads, no more. `checkpointDir` is written too, and
-    it is the BASE weights Crucible pulled: narrator's reader hands it to
-    `ClipsVoice(checkpoint_dir=...)`, the served arm exports it as
-    HIGGS_MODEL_DIR and the MLX arm loads it, so a zero-shot render happens on
+    it is the BASE weights Crucible pulled, so a zero-shot render happens on
     the bytes this voice's revision names rather than on whatever base
-    snapshot the HuggingFace cache holds."""
+    snapshot the HuggingFace cache holds.
+
+    **`kind` AND `checkpointDir` ARE ONE STATEMENT, and the first is what says
+    what the second holds** (narrator, 2026-09-15). narrator reads a `clips`
+    voice's directory into `ClipsVoice.base_dir` and a `checkpoint` voice's
+    into `checkpoint_dir`, and only the second is asked for a
+    `generation_config.json` — the file a MERGE carries and the published base
+    (`bosonai/higgs-tts-3-4b` at 239f63fb: thirteen files) does not. Writing
+    this pair the other way round is the refusal that killed the first
+    zero-shot load ever made on the PC, so the pair is asserted together."""
     manifest = manifest_of(ZEROSHOT)
     weights = tmp_path / "voices" / "probe" / CUDA
     clip = a_clip(tmp_path)
@@ -247,6 +254,36 @@ def test_a_zeroshot_entry_is_narrators_clips_kind_with_the_placed_clip(
             "seconds": 8.4,
         }
     ]
+
+
+def test_a_zeroshot_entry_never_calls_its_base_weights_a_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """THE REGRESSION, from Crucible's side. 2026-09-15 00:11, the first
+    zero-shot load ever made on the PC:
+
+        engine_failed: narrator (higgs-v3) refused the request: Higgs v3 voice
+        'zeroshot': the merged checkpoint
+        /home/telltale/.crucible/voices/zeroshot/cuda-linux does not carry
+        generation_config.json, which is a REQUIRED ...
+
+    The pull was complete — `crucible-pull.json` records the manifest's repo
+    and revision and every one of the thirteen files in that tree is on disk —
+    and the published base simply has no `generation_config.json`. narrator now
+    tells a merge from base weights by the `kind` written beside the directory,
+    so a build that ever wrote `checkpoint` here would resurrect the refusal
+    with no other symptom. Nothing downstream can catch that: it looks like a
+    correct entry until a load fails.
+    """
+    manifest = manifest_of(ZEROSHOT)
+    entry = voice_entry(
+        manifest, manifest.spec(CUDA), tmp_path / "w", a_clip(tmp_path)
+    )
+    assert entry["kind"] == "clips" != "checkpoint"
+    assert "checkpointDir" in entry, (
+        "the directory is still named — it is the pinned base weights, and "
+        "omitting it is how a server comes up on an HF-cache snapshot"
+    )
 
 
 def test_a_zeroshot_voice_with_no_clip_is_refused_by_name(tmp_path: Path) -> None:

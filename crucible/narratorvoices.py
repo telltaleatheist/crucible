@@ -368,16 +368,24 @@ def voice_entry(
     entry: dict[str, Any] = {"kind": kind}
     if kind in ("checkpoint", "clips"):
         # `checkpointDir` FOR A CLIPS VOICE TOO, and it is not a stretch of the
-        # key: narrator's own reader builds `ClipsVoice(checkpoint_dir=...)`
-        # from it and both arms then load THAT directory —
-        # `HiggsV3Config.__post_init__` adopts the voice's checkpoint and the
-        # served arm exports it as `HIGGS_MODEL_DIR`; the MLX builder passes
-        # `checkpoint or model_dir_from_env()`. For a zero-shot voice the
-        # directory is the BASE weights Crucible pulled at the manifest's pin,
-        # which is exactly the thing the `token`-on-cuda-linux refusal below
-        # exists because it could not name. Written rather than omitted for
-        # that reason: omit it and the served arm serves "the base snapshot out
-        # of the HF cache", which is a fingerprint naming bytes nobody read.
+        # key: both arms load THAT directory, whichever kind named it. For a
+        # zero-shot voice the directory is the BASE weights Crucible pulled at
+        # the manifest's pin, which is exactly the thing the
+        # `token`-on-cuda-linux refusal below exists because it could not name.
+        # Written rather than omitted for that reason: omit it and the served
+        # arm serves "the base snapshot out of the HF cache", which is a
+        # fingerprint naming bytes nobody read.
+        #
+        # THE `kind` ABOVE IS WHAT SAYS WHICH, and the two travel as one
+        # statement (2026-09-15). narrator reads a `clips` voice's directory
+        # into `ClipsVoice.base_dir` and a `checkpoint` voice's into
+        # `checkpoint_dir`, and asks only the second for a
+        # `generation_config.json` — the file a MERGE carries and the published
+        # base does not (`bosonai/higgs-tts-3-4b` at 239f63fb: thirteen files,
+        # none of them it). Before narrator drew that line the first zero-shot
+        # load Crucible ever made was refused for that missing file, with a
+        # complete pull on disk. Writing `checkpoint` here would bring the
+        # refusal straight back, which is why the test asserts the pair.
         entry["checkpointDir"] = str(weights_dir)
     if clip is not None:
         # narrator's own clip row, verbatim. One clip and not a list of one by
