@@ -19,6 +19,15 @@ allowed to disagree about a character; they are not allowed to disagree about
 the dialect, and comparing the text would make a flaky test out of a real
 one.
 
+**`--load` OWNS THE RESIDENCY** (found by the first Windows run, 2026-09-14).
+Crucible never loads a model to answer a chat request — it refuses
+`model_not_resident` by name, on every backend — so a caller that wants a page
+read submits the `load-model` job itself, waits for its `done`, asks, and
+submits `unload-model` so the card is released. T6 pointed at the WSL server
+without `--load` and got that refusal; the server was right and this script
+was wrong. The unload runs in a `finally`, because a llama-server still
+holding 6 GB after a failed read is what breaks the NEXT stage.
+
 RASTERISING IS THE APP'S WORK (3.10: *"rasterising, parsing, EPUB assembly
 stay in the app"*), so a PNG is taken as it is and a PDF needs `pypdfium2` —
 which this script does not install and does not fall back from. Without it,
@@ -101,6 +110,34 @@ def post(url: str, token: str, body: dict, timeout: float) -> dict:
         raise SystemExit(f"{url} did not answer: {type(exc).__name__}: {exc}")
 
 
+def run_job(base: str, token: str, request: dict, timeout: float) -> dict:
+    """Submit one job and poll it to a terminal state. Never returns a failure.
+
+    Polled rather than streamed: this is a script, and a load that takes
+    minutes is a load whose only interesting fact is when it stopped.
+    """
+    job = post(f"{base}/v1/jobs", token, request, timeout)
+    job_id = job.get("job_id") or job.get("id")
+    if job_id is None:
+        raise SystemExit(f"{request['type']} was accepted without an id: {job}")
+    while True:
+        poll = urllib.request.Request(
+            f"{base}/v1/jobs/{job_id}",
+            headers={"Authorization": f"Bearer {token}", "X-Crucible-Api": "1"},
+        )
+        with urllib.request.urlopen(poll, timeout=60) as response:
+            status = json.loads(response.read().decode("utf-8"))
+        if status["status"] in ("done", "failed", "cancelled"):
+            break
+        time.sleep(2.0)
+    if status["status"] != "done":
+        raise SystemExit(
+            f"{request['type']} {request.get('model', '')} "
+            f"{status['status']}: {json.dumps(status)[:600]}"
+        )
+    return status
+
+
 def parse_blocks(text: str) -> list[dict]:
     """The dots dialect: a JSON array, sometimes fenced."""
     body = text.strip()
@@ -150,8 +187,12 @@ def main() -> int:
     parser.add_argument(
         "--load",
         action="store_true",
-        help="submit a load-model job first. The WSL server may already have "
-        "it resident; the staged Windows one never does.",
+        help="OWN THE RESIDENCY for this run: submit a load-model job first, "
+        "and an unload-model job at the end so the card is released whatever "
+        "happened in between. Crucible NEVER loads a model to answer a chat "
+        "request (it refuses `model_not_resident` by name), so every server "
+        "this script reads a page from needs this — the WSL one as much as "
+        "the staged Windows one.",
     )
     parser.add_argument("--timeout", type=float, default=900.0)
     args = parser.parse_args()
@@ -165,40 +206,48 @@ def main() -> int:
 
     if args.load:
         started = time.monotonic()
-        job = post(
-            f"{base}/v1/jobs",
+        print(f"load-model {pages.MODEL_ID}")
+        run_job(
+            base,
             args.token,
             {"type": "load-model", "model": pages.MODEL_ID},
             args.timeout,
         )
-        job_id = job.get("job_id") or job.get("id")
-        print(f"load-model {pages.MODEL_ID}: job {job_id}")
-        # Polled rather than streamed: this is a script, and a load that
-        # takes minutes is a load whose only interesting fact is when it
-        # stopped.
-        while True:
-            request = urllib.request.Request(
-                f"{base}/v1/jobs/{job_id}",
-                headers={
-                    "Authorization": f"Bearer {args.token}",
-                    "X-Crucible-Api": "1",
-                },
-            )
-            with urllib.request.urlopen(request, timeout=60) as response:
-                status = json.loads(response.read().decode("utf-8"))
-            if status["status"] in ("done", "failed", "cancelled"):
-                break
-            time.sleep(2.0)
-        if status["status"] != "done":
-            raise SystemExit(f"the load failed: {json.dumps(status)[:600]}")
         print(f"  loaded in {time.monotonic() - started:.1f}s")
 
-    body = pages.request_body(pages.data_uri(png))
-    started = time.monotonic()
-    answer = post(
-        f"{base}/v1/openai/chat/completions", args.token, body, args.timeout
-    )
-    seconds = time.monotonic() - started
+    reading: BaseException | None = None
+    try:
+        body = pages.request_body(pages.data_uri(png))
+        started = time.monotonic()
+        answer = post(
+            f"{base}/v1/openai/chat/completions", args.token, body, args.timeout
+        )
+        seconds = time.monotonic() - started
+    except BaseException as exc:
+        reading = exc
+        raise
+    finally:
+        if args.load:
+            # THE CARD IS RELEASED WHATEVER HAPPENED. A page that came back
+            # truncated, or in the wrong dialect, is a result to record; a
+            # llama-server still holding 6 GB afterwards is a test run that
+            # broke the next stage.
+            print(f"unload-model {pages.MODEL_ID}")
+            try:
+                run_job(
+                    base,
+                    args.token,
+                    {"type": "unload-model", "model": pages.MODEL_ID},
+                    args.timeout,
+                )
+            except SystemExit as exc:
+                # A failed unload must not OVERWRITE the failure that is
+                # already on its way out — the reason the page could not be
+                # read is the one a person needs. Both are said; the first one
+                # is the one that exits.
+                if reading is None:
+                    raise
+                print(f"AND THE UNLOAD FAILED TOO: {exc}", file=sys.stderr)
     (out / "answer.json").write_text(json.dumps(answer, indent=2), encoding="utf-8")
 
     choice = answer["choices"][0]

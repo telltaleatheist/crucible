@@ -343,7 +343,12 @@ it, and is skipped by name if it does not — rasterising is the APP's work
 (3.10) and Crucible ships no rasteriser."
   else
     note "THE CARD IS HELD FROM HERE UNTIL T7 ENDS."
-    run "python '${REPO}/scripts/read_one_page.py' --page '${page}' --out '${OUT}/t6' --server 'http://127.0.0.1:${ENGINE_PORT}' --token \"\$(wsl.exe -d ${WSL_DISTRO} --exec bash -lc \"grep -m1 '^token' ~/.crucible/config.toml | cut -d'\\\"' -f2\" | tr -d '\r')\"" \
+    # `--load`, like T7. Crucible NEVER loads a model to answer a chat request
+    # — it refuses `model_not_resident` by name, on every backend — so the
+    # CALLER loads it, reads the page, and unloads it. The first run of this
+    # script asked the WSL server to read a page with nothing resident and got
+    # that refusal; the server was right and this line was wrong.
+    run "python '${REPO}/scripts/read_one_page.py' --page '${page}' --out '${OUT}/t6' --load --server 'http://127.0.0.1:${ENGINE_PORT}' --token \"\$(wsl.exe -d ${WSL_DISTRO} --exec bash -lc \"grep -m1 '^token' ~/.crucible/config.toml | cut -d'\\\"' -f2\" | tr -d '\r')\"" \
       || fail "${LAST_OUTPUT}"
     pass "one page parsed under vLLM.
 \`\`\`
@@ -480,10 +485,15 @@ if wanted T10; then
       note "WOULD RUN: crucible serve with CRUCIBLE_HOST_DOOR set; POST /v1/tasks {engine,wsl}; read the events"
       pass "(dry run)"
     else
+      # Is anything listening on the host's door? A GET, never a POST: a POST
+      # to a LIVE door starts a real WSL install. Any HTTP code at all — 405
+      # included — means something answered; `000` means nothing did, which is
+      # what `-w '%{http_code}'` says and a bare exit status does not (curl
+      # exits 0 for a 404 as happily as for a 200).
+      door_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:7101/install" 2>/dev/null || printf '000')"
+      [ -n "${door_code}" ] || door_code="000"
       host_running=0
-      if curl -sS -o /dev/null --max-time 3 "http://127.0.0.1:7101/install" 2>/dev/null; then
-        host_running=1
-      fi
+      [ "${door_code}" = "000" ] || host_running=1
       log="${OUT}/t10-server.log"
       # 7102, not 7101: the host's DOOR is 7101 and the staged server's own
       # port was 7101 too, which is fine while nothing else runs — but T10 is
@@ -509,30 +519,59 @@ $(tail -40 "${log}")"; }
         || { stop_it; fail "${LAST_OUTPUT}"; }
       submitted="${LAST_OUTPUT}"
       printf '%s\n' "${submitted}" > "${OUT}/t10-submit.json"
-      stop_it
-      trap - EXIT
+      # 4.7, AND THE CORRECTION THE FIRST RUN FORCED. With CRUCIBLE_HOST_DOOR
+      # SET there is nothing to refuse at submit time: the server hands the
+      # move to the host and relays its events, so the POST is a 202 with a
+      # task id and EVERY failure of the door is named in the TASK. The first
+      # run of this stage read the POST body for a refusal, found a task id
+      # and called the server wrong. The server was right; this reads the task.
+      task_id="$(python "${REPO}/scripts/task_field.py" "${OUT}/t10-submit.json" task_id)"
       if [ "${host_running}" = "0" ]; then
-        case "${submitted}" in
-          *engine_move_needs_host*|*did\ not\ answer*)
-            pass "the host is NOT running, and the task said so by name rather
-than half-doing the move. That is the refusal 4.7 specifies for a server no
-host started, and on this machine it is the honest outcome: starting the tray
-and letting it import a distro is not something a test script does on its own.
-\`\`\`
+        [ -n "${task_id}" ] || { stop_it; fail "no host is running, and the POST
+answered without a task id at all, so there is no task to read the refusal from:
+${submitted}"; }
+        tries=0
+        state=""
+        while [ "${tries}" -lt 60 ]; do
+          curl -sS -H "Authorization: Bearer ${token}" -H 'X-Crucible-Api: 1' \
+            "http://127.0.0.1:7102/v1/tasks/${task_id}" > "${OUT}/t10-task.json" \
+            || { stop_it; fail "the task could not be read back"; }
+          state="$(python "${REPO}/scripts/task_field.py" "${OUT}/t10-task.json" state)"
+          case "${state}" in done|failed|cancelled) break ;; esac
+          tries=$(( tries + 1 ))
+          sleep 1
+        done
+        code="$(python "${REPO}/scripts/task_field.py" "${OUT}/t10-task.json" error.code)"
+        stop_it
+        trap - EXIT
+        if [ "${state}" = "failed" ] && [ "${code}" = "host_unreachable" ]; then
+          pass "the POST was ACCEPTED, which is what 4.7 asks for when
+\`CRUCIBLE_HOST_DOOR\` is set, and the task then failed BY NAME because the
+door at 7101 is not answering. \`host_unreachable\` and not
+\`engine_move_needs_host\`: the variable says a host started this server, so
+the answer is *start its door again*, not *start a host*.
+\`\`\`json
 ${submitted}
+
+$(cat "${OUT}/t10-task.json")
 \`\`\`"
-            ;;
-          *) fail "no host is running and the task did not refuse by name:
-${submitted}" ;;
-        esac
+        else
+          fail "nothing is listening on the host's door, and the task did not
+fail \`host_unreachable\`. state=${state:-<none>} code=${code:-<none>}
+$(cat "${OUT}/t10-task.json" 2>/dev/null)"
+        fi
       else
-        pass "the task was accepted and handed to the host's door.
+        stop_it
+        trap - EXIT
+        pass "something IS answering (HTTP ${door_code}) on 127.0.0.1:7101, so
+the task was accepted and handed to that door and a REAL move may be running
+now.
 \`\`\`
 ${submitted}
 \`\`\`
 Watch it finish on the page, or with
-\`curl .../v1/tasks/<id>/events\`. The move's own steps are the host's and its
-log is \`%LOCALAPPDATA%\\Crucible\\host.log\`."
+\`curl .../v1/tasks/${task_id}/events\`. The move's own steps are the host's
+and its log is \`%LOCALAPPDATA%\\Crucible\\host.log\`."
       fi
     fi
   fi
