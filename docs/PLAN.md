@@ -4,6 +4,13 @@ Rule for every phase: BookForge changes little or nothing until Crucible is read
 first BookForge consumer is `bookforge-cli` (it drives the compiled pipeline, so it proves
 the seam without touching the app UI).
 
+**Newest first, 2026-09-15: PHASE17 — orchestrator and engine.** Every Crucible process now
+has a `role` on `/v1/info`. `crucible host` was always an orchestrator and is now named one
+(`crucible orchestrator`, `host` kept as an alias); it CLAIMS the one engine it manages,
+restarts it by the owner-appropriate means, and still never carries a byte of data. Apps keep
+ONE address per machine and it is the engine's — `engineOf(info)` is the whole of the new
+client rule. Contract: `docs/PHASE17-ORCHESTRATOR.md`; the block is below, before Phase 1.
+
 **Where this stands, 2026-09-13.** Phases 1 through 4 are built and merged: every job type
 in DESIGN.md's table exists, is tested, is documented in its own contract file, and is
 reachable from `@crucible/client`. Two of them — `llm` and page reading — are verified on
