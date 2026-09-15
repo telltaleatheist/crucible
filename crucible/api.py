@@ -38,6 +38,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import (
+    API_HEADER,
     API_VERSION,
     VERSION,
     accelerator,
@@ -48,6 +49,7 @@ from . import (
     weights,
 )
 from . import capability as capability_classes
+from . import peer as peer_module
 from . import settings as settings_module
 from .backend import CUDA_LINUX, Backend
 from .config import Config, load_config
@@ -80,7 +82,6 @@ from .ttsstream import (
     require_streamable,
 )
 
-API_HEADER = "X-Crucible-Api"
 TERMINAL_EVENTS = frozenset({"done", "failed", "cancelled"})
 KEEPALIVE_SECONDS = 15.0
 UPLOAD_CHUNK = 1024 * 1024
@@ -193,6 +194,11 @@ class TaskCreate(BaseModel):
         "install": ("job_type", "narrator_engine"),
         "module": ("module",),
         "engine": ("target",),
+        # PHASE17-ORCHESTRATOR.md 4.2: NO fields, and that is the whole
+        # request. There is exactly one engine on a machine and the
+        # orchestrator knows which — a `target` here would be a client
+        # naming a thing it cannot see.
+        "engine-restart": (),
     }
     #: ...and which of those may not be omitted. `narrator_engine` is absent
     #: here because whether it is required depends on the job type, which is
@@ -202,6 +208,7 @@ class TaskCreate(BaseModel):
         "install": ("job_type",),
         "module": ("module",),
         "engine": ("target",),
+        "engine-restart": (),
     }
 
     @model_validator(mode="after")
@@ -415,6 +422,64 @@ def require_api_version(request: Request) -> None:
         )
 
 
+def require_peer_auth(request: Request) -> None:
+    """`require_auth`, refusing under the RELATION's name. PHASE17 2.1.
+
+    The same comparison against the same token, and a different code, because
+    the caller on this door is not an app: it is an orchestrator that has just
+    booted an engine and is telling it so. Told `unauthorized`, an
+    orchestrator cannot tell *"the token I copied out of the guest's pairing
+    file is stale"* — its own bug, and the thing its log must say — from
+    *"some app's token is wrong"*, which is not its business at all. One name
+    per relation, so a log line says which handshake failed.
+    """
+    config: Config = request.app.state.config
+    header = request.headers.get("authorization")
+    scheme, _, presented = (header or "").partition(" ")
+    if (
+        header is None
+        or scheme.lower() != "bearer"
+        or presented.strip() == ""
+        or not secrets.compare_digest(presented.strip(), config.token)
+    ):
+        raise ApiError(
+            401,
+            peer_module.PEER_TOKEN_MISMATCH,
+            "the peer door takes THIS engine's bearer token, which is the one "
+            "the orchestrator already holds: it reads it from the guest's "
+            "pairing line, or it is the token in the config it wrote itself. "
+            "There is no second credential for the relation "
+            "(PHASE17-ORCHESTRATOR.md 2.1)",
+        )
+
+
+def require_peer_api_version(request: Request) -> None:
+    """`require_api_version`, refusing `peer_version_incompatible`. PHASE17 2.1.
+
+    The API version travels in the header where every other call already
+    carries it, rather than in the claim body: a second copy in the body would
+    be a fact with two owners. What changes here is only the NAME of the
+    refusal, for `require_peer_auth`'s reason.
+    """
+    presented = request.headers.get(API_HEADER)
+    major: int | None = None
+    if presented is not None:
+        try:
+            major = int(presented.strip().split(".")[0])
+        except ValueError:
+            major = None
+    if major != API_VERSION:
+        raise ApiError(
+            426,
+            peer_module.PEER_VERSION_INCOMPATIBLE,
+            f"this engine speaks API version {API_VERSION} and the claim "
+            f"presented {presented!r}. An orchestrator and the engine it "
+            "manages are usually one install and one version; when they are "
+            "not, the relation is refused rather than half-spoken",
+            {"server_api_version": API_VERSION, "client_api_version": presented},
+        )
+
+
 def create_app(config: Config, backend: Backend) -> FastAPI:
     """Build the ASGI app for one server instance."""
     residency = Residency(config)
@@ -490,6 +555,13 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     # one catalog act nobody can undo, so it is the one that most needs to say
     # who asked.
     app.state.removals = catalog.Removals()
+    # WHO MANAGES THIS ENGINE (PHASE17-ORCHESTRATOR.md 2.3). In memory, and a
+    # restart forgets — that is the design and not a shortcut. A claim written
+    # to disk would outlive the orchestrator that made it: uninstall the tray,
+    # reboot, and the engine still names a door that will never answer again,
+    # which is `docs/ARCHITECTURE.md`'s one shape. The relation is
+    # RE-ASSERTED instead, on the orchestrator's next watch tick.
+    app.state.peer = peer_module.PeerState()
     # In memory, and a restart forgets: a lease protects a resident model, and a
     # restarted server holds none (crucible/leases.py).
     app.state.leases = Leases()
@@ -615,6 +687,13 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     openai = APIRouter(
         prefix="/openai/v1",
         dependencies=[Depends(require_auth), Depends(require_api_version)],
+    )
+    # THE RELATION'S OWN DOOR (PHASE17-ORCHESTRATOR.md section 2). Same token,
+    # same version header, two refusals with the relation's names on them —
+    # `require_peer_auth` says why that is not duplication.
+    peer_router = APIRouter(
+        prefix="/v1/peer",
+        dependencies=[Depends(require_peer_auth), Depends(require_peer_api_version)],
     )
 
     # ------------------------------------------------------------------ ping
@@ -862,12 +941,26 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             {"job_type": capability, "models": rows}
             for capability, rows in sorted(rows_for.items())
         ]
+        peer_state: peer_module.PeerState = request.app.state.peer
         return {
             "server": {
                 "name": config.name,
                 "version": VERSION,
                 "api_version": API_VERSION,
             },
+            # WHICH HALF OF THE RELATION THIS PROCESS IS
+            # (PHASE17-ORCHESTRATOR.md 3.1). A property of a PROCESS, never of
+            # an install: on a Windows machine with no WSL, one install runs
+            # an orchestrator and an engine as two processes, and only one of
+            # them answers this document.
+            #
+            # A client reads it all-or-nothing, exactly as it reads `route`
+            # (PHASE15 3.3): a document with NO `role` comes from a server
+            # that predates this phase, and such a server IS an engine with
+            # `managed_by: null` — a fact the document states by its vintage,
+            # not a default the client fills.
+            "role": peer_module.ROLE_ENGINE,
+            "managed_by": peer_state.managed_by(),
             "host": {
                 "platform": backend.platform,
                 "arch": backend.arch,
@@ -941,6 +1034,97 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 f"({found.bytes / 1e9:.2f} GB, {spec.hf_repo}@{spec.revision[:12]})"
             ),
         )
+
+    # ------------------------------------------------------------------ peer
+
+    @peer_router.get("")
+    async def read_peer(request: Request) -> dict[str, Any]:
+        """`GET /v1/peer` — who manages this engine, and how old this process is.
+
+        PHASE17 2.4: health flows ONE way. The orchestrator polls this and
+        `/v1/ping`; the engine calls nothing back. An engine that phoned home
+        would need to know its orchestrator's address, keep it fresh across
+        restarts, and behave when it is wrong — three facts to own for a push
+        a 15-second poll already delivers.
+        """
+        state: peer_module.PeerState = request.app.state.peer
+        return state.document(_uptime_s(request))
+
+    @peer_router.post("/claim")
+    async def claim_peer(request: Request) -> dict[str, Any]:
+        """`POST /v1/peer/claim` — an orchestrator says it manages this engine.
+
+        A STATEMENT OF FACT, not a grant of permission: nothing on this server
+        consults `managed_by` before doing anything, because there is nothing
+        an orchestrator asks an engine to do that an app may not also ask
+        (`crucible/peer.py`'s preamble). What it buys is that `/v1/info` can
+        answer "who manages this".
+        """
+        body = await _peer_body(request)
+        state: peer_module.PeerState = request.app.state.peer
+        orchestrator = peer_module.Orchestrator.from_body(body.get("orchestrator"))
+        force = body.get("force")
+        if force is not None and not isinstance(force, bool):
+            raise ApiError(
+                400,
+                "invalid_request",
+                "`force` is a boolean. It takes an engine away from another "
+                "orchestrator and is a person's act through the page, never "
+                "an orchestrator's own (PHASE17-ORCHESTRATOR.md 2.1)",
+            )
+        claim = state.claim(orchestrator, force=bool(force))
+        return {
+            "role": peer_module.ROLE_ENGINE,
+            "managed_by": claim.managed_by(),
+            "claimed": claim.claimed,
+        }
+
+    @peer_router.delete("/claim")
+    async def release_peer(request: Request) -> dict[str, Any]:
+        """`DELETE /v1/peer/claim` — the orchestrator's Quit (PHASE17 2.2).
+
+        Nothing claimed is NOT a refusal: "there is no claim" is the state the
+        caller asked for. Somebody else's claim is refused, because releasing
+        one by accident is how an engine ends up unmanaged with a tray still
+        watching it.
+        """
+        body = await _peer_body(request)
+        state: peer_module.PeerState = request.app.state.peer
+        raw = body.get("orchestrator")
+        who = None if raw is None else peer_module.Orchestrator.from_body(raw)
+        state.release(who, force=bool(body.get("force")))
+        return {"role": peer_module.ROLE_ENGINE, "managed_by": None}
+
+    async def _peer_body(request: Request) -> dict[str, Any]:
+        """The claim body, or `{}`. A DELETE with no body is the common one."""
+        raw = await request.body()
+        if not raw.strip():
+            return {}
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ApiError(
+                400, "invalid_request", f"the peer body is not JSON: {exc}"
+            ) from None
+        if not isinstance(parsed, dict):
+            raise ApiError(
+                400,
+                "invalid_request",
+                f"the peer body is an object; a bare {type(parsed).__name__} "
+                "says nothing about who is claiming",
+            )
+        return parsed
+
+    def _uptime_s(request: Request) -> float:
+        """MONOTONIC seconds since this process started serving.
+
+        It is what tells an orchestrator that an engine answering again is a
+        NEW process rather than the one it claimed — the signal that a
+        re-claim is owed. A wall clock would make that signal lie across an
+        NTP correction, which is the reason `started_at` is monotonic in the
+        first place.
+        """
+        return time.monotonic() - request.app.state.started_at
 
     @private.get("/health")
     async def health(request: Request) -> dict[str, Any]:
@@ -2226,6 +2410,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.include_router(public)
     app.include_router(private)
     app.include_router(openai)
+    app.include_router(peer_router)
 
     # ------------------------------------------------------- the static page
     #

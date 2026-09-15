@@ -79,7 +79,17 @@ TERMINAL_STATES = frozenset({DONE, FAILED, CANCELLED})
 #: 4.7's `engine`, which is the one this server does not RUN: it hands it to
 #: the host's loopback door and relays the host's events under its own id,
 #: because only the host can run `wsl.exe`, prompt UAC and survive the reboot.
-TASK_TYPES: tuple[str, ...] = ("pull", "install", "module", "engine")
+#:
+#: `engine-restart` (PHASE17-ORCHESTRATOR.md 4.2) is the second of the two that
+#: belong to the RELATION rather than to this server: the orchestrator restarts
+#: its engine by the owner-appropriate means, and this side relays.
+TASK_TYPES: tuple[str, ...] = (
+    "pull",
+    "install",
+    "module",
+    "engine",
+    "engine-restart",
+)
 
 #: The only place this build moves the engine TO. 4.7: the reverse (WSL2 back
 #: to Windows) is an explicit operator act written into section 6, and is
@@ -108,6 +118,19 @@ HOST_DOOR_ENV = "CRUCIBLE_HOST_DOOR"
 #: What the host's door answers on. The server POSTs `{"target": "wsl"}` here
 #: and reads newline-delimited JSON back.
 HOST_DOOR_PATH = "/install"
+
+#: The orchestrator's OTHER door route (PHASE17-ORCHESTRATOR.md 4.2). Same
+#: bearer, same ndjson, same relay — one implementation, two sequences.
+HOST_DOOR_RESTART_PATH = "/restart"
+
+#: The POST-time refusal when there is no orchestrator to hand a restart to.
+#:
+#: The same FACT `engine_move_needs_host` names — `$CRUCIBLE_HOST_DOOR` is not
+#: set — under a name that does not say "move". A server refusing a restart
+#: with a sentence about moving to WSL2 sends a person to the wrong page, and
+#: one code carrying two operator instructions is the defect T10 already found
+#: once on this very door.
+ENGINE_RESTART_NEEDS_ORCHESTRATOR = "engine_restart_needs_orchestrator"
 
 #: THREE ENDINGS OF ONE DOOR, THREE NAMES — and they are not this module's
 #: names, they are the door's (PHASE15-HOST.md 4.3 and 4.7).
@@ -426,6 +449,38 @@ def _validate_engine(backend: Backend, target: str) -> str:
             "the reboot the move may need — a server doing it itself would "
             "stop halfway through and take its own event stream with it. "
             "Start the host and press it again from the page",
+            {"env": HOST_DOOR_ENV},
+        )
+    return door.rstrip("/")
+
+
+def _validate_engine_restart() -> str:
+    """The restart's ONE refusal. PHASE17-ORCHESTRATOR.md 4.2.
+
+    Returns the orchestrator door's base URL. Unlike the MOVE, there is no
+    backend check: every engine an orchestrator started can be restarted by
+    it, whether it is the guest's unit on `cuda-linux` or a `llama-windows`
+    child on Windows. `engine_move_not_here` is a fact about a machine that
+    has a Windows engine to move FROM, and a restart moves nothing.
+
+    Whether the engine is one the orchestrator may TOUCH at all is not asked
+    here and cannot be: `owner` is PHASE15 4.1a's fact and the orchestrator is
+    the only process that holds it. A `found` engine is refused
+    `engine_not_ours` at the orchestrator's door, and that refusal arrives on
+    this task's own event stream.
+    """
+    door = os.environ.get(HOST_DOOR_ENV, "").strip()
+    if door == "":
+        raise ApiError(
+            409,
+            ENGINE_RESTART_NEEDS_ORCHESTRATOR,
+            "this server was not started by an orchestrator "
+            f"(${HOST_DOOR_ENV} is not set), so there is nothing here that "
+            "can restart it. Only the orchestrator can run wsl.exe, name the "
+            "guest's unit or respawn a child — a server restarting itself "
+            "would take its own event stream with it and leave nobody to say "
+            "whether it came back. Start `crucible orchestrator` and press it "
+            "again from the page",
             {"env": HOST_DOOR_ENV},
         )
     return door.rstrip("/")
@@ -807,6 +862,8 @@ class TaskStore:
             validate_module(self._config, self._backend, request["module"])
         elif task_type == "engine":
             _validate_engine(self._backend, request["target"])
+        elif task_type == "engine-restart":
+            _validate_engine_restart()
         else:  # unreachable: the request model closes the vocabulary
             raise ApiError(
                 400,
@@ -928,6 +985,8 @@ class TaskStore:
                 await self._run_install(task)
             elif task.type == "engine":
                 await self._run_engine(task)
+            elif task.type == "engine-restart":
+                await self._run_engine_restart(task)
             else:
                 await self._run_module(task)
         except (TaskCancelled, PullCancelled):
@@ -1085,7 +1144,9 @@ class TaskStore:
             "step",
             {"name": "hand the move to the host", "index": 1, "total": 1},
         )
-        terminal = await asyncio.to_thread(self._relay_blocking, task, door)
+        terminal = await asyncio.to_thread(
+            self._relay_blocking, task, door, HOST_DOOR_PATH, {"target": task.request["target"]}
+        )
         if terminal is None:
             raise ApiError(
                 502,
@@ -1103,18 +1164,27 @@ class TaskStore:
             # sentences about one failure in one place.
             raise TaskFailedByHost(task)
 
-    def _relay_blocking(self, task: Task, door: str) -> str | None:
+    def _relay_blocking(
+        self, task: Task, door: str, path: str, body_fields: dict[str, Any]
+    ) -> str | None:
         """**Worker thread.** POST, then one appended event per line read.
 
         Returns the name of the terminal event the host sent (`done` or
         `failed`), or None when the stream ended without one.
+
+        ONE RELAY, TWO SEQUENCES (PHASE17 4.2). `path` and `body_fields` are
+        the only things the move and the restart differ by; everything below —
+        the bearer, the line-by-line append, the unparseable-line rule, the
+        cancel check, the three endings — is the same contract for both. A
+        second copy of it would be a second owner of the ending names, which
+        is the defect T10 found the first time these names were written twice.
         """
         import urllib.error
         import urllib.request
 
-        body = json.dumps({"target": task.request["target"]}).encode("utf-8")
+        body = json.dumps(body_fields).encode("utf-8")
         request = urllib.request.Request(
-            f"{door}{HOST_DOOR_PATH}",
+            f"{door}{path}",
             data=body,
             method="POST",
             headers={
@@ -1168,7 +1238,7 @@ class TaskStore:
             raise ApiError(
                 502,
                 HOST_UNREACHABLE,
-                f"the host's door at {door}{HOST_DOOR_PATH} did not answer: "
+                f"the orchestrator's door at {door}{path} did not answer: "
                 f"{type(exc).__name__}: {exc}. A host started this server "
                 f"(${HOST_DOOR_ENV} is set) and its door is not answering "
                 "now. Start it from the Startup item, or run `crucible host` "
@@ -1176,6 +1246,48 @@ class TaskStore:
                 {"door": door},
             ) from None
         return terminal
+
+    # ------------------------------------------------------- engine-restart
+
+    async def _run_engine_restart(self, task: Task) -> None:
+        """Hand the restart to the orchestrator and RELAY. PHASE17 4.2.
+
+        **THE LAST EVENT MAY NEVER ARRIVE, AND THAT IS NOT A DEFECT.** The
+        relay runs in the process being restarted, so the stream this task is
+        writing to dies with it. PHASE15 4.7 set the precedent for the move —
+        *"the page, which lost its server for a few seconds at the
+        switch-over, re-reads `/v1/info`"* — and a restart is the same shape
+        in less time. The client believes `/v1/info`, not the stream.
+
+        A stream that ends with no terminal event is therefore reported with
+        4.7's `host_install_failed`. That name is slightly wrong for a
+        restart, and it is KEPT rather than forked: one relay with one set of
+        endings is worth more than a second table, and the alternative is the
+        thing ARCHITECTURE.md R1 forbids — one fact with two names depending
+        on which route read it.
+        """
+        door = _validate_engine_restart()
+        self.append_event(
+            task,
+            "step",
+            {"name": "hand the restart to the orchestrator", "index": 1, "total": 1},
+        )
+        terminal = await asyncio.to_thread(
+            self._relay_blocking, task, door, HOST_DOOR_RESTART_PATH, {}
+        )
+        if terminal is None:
+            raise ApiError(
+                502,
+                HOST_INSTALL_FAILED,
+                f"the orchestrator's door at {door}{HOST_DOOR_RESTART_PATH} "
+                "closed its stream without saying whether the engine came "
+                "back. That is the EXPECTED shape when the engine being "
+                "restarted is the one relaying: read `GET /v1/info` for the "
+                "answer, which is the only place it is reliably true",
+                {"door": door},
+            )
+        if terminal == "failed":
+            raise TaskFailedByHost(task)
 
     # --------------------------------------------------------------- install
 
@@ -1537,6 +1649,8 @@ __all__ = [
     "FAILED",
     "HISTORY",
     "RUNNING",
+    "ENGINE_RESTART_NEEDS_ORCHESTRATOR",
+    "HOST_DOOR_RESTART_PATH",
     "TASK_TYPES",
     "TERMINAL_STATES",
     "ModuleEntry",
