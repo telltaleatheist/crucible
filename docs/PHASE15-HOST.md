@@ -658,6 +658,90 @@ first rather than writing a `.lnk` of its own. The shortcut is written by
 dependency) and its target is `pythonw.exe -m crucible.cli host`, not the `.cmd` (4.4): a
 `.cmd` opens a console window, and a tray program has none.
 
+#### 4.1a Presence is a TRIPLE — added 2026-09-15, by the first real run
+
+`crucible host` ran on Owen's PC for the first time on 2026-09-15 and the pair was not
+enough to describe that machine. It has a Crucible engine inside **`Ubuntu`**, installed by
+hand long before any of this existed, so both halves of the pair are true at once and they
+contradict each other: `wsl -l -v` lists no distro NAMED `crucible`, so `distro` is honestly
+`absent`, and `GET /v1/ping` on 7100 honestly answers `200`. With only `(distro, engine)`
+the host reads the first fact as *"this machine runs the host-mode child"*, spawns the
+`llama-windows` server onto a port another Crucible already holds, pings, gets the OTHER
+server's answer and reports `running` about a child that lost the bind. **Section 0 is one
+server per machine and the host was the thing making it false.**
+
+So presence is `(distro, engine, owner)`, and `owner` has three values and an absence:
+
+| `owner` | means | what the host may do to it |
+|---|---|---|
+| `wsl-unit` | the guest's unit, in the distro Crucible owns | boot, restart, stop — all of 4.1 |
+| `host-child` | the `llama-windows` server this process spawned | start, respawn, stop; Quit takes it down |
+| `found` | an engine that was already answering when the host started | **watch it, and nothing else** |
+| `none` | there is no engine | start one, if this machine's answer says to |
+
+**A `found` engine is watched and never acted on.** `restart-engine` and `stop-engine` are
+disabled, `install-engine` is ABSENT even though the distro is (`install-engine` is offered
+when `distro` is absent or unknown — but importing a distro onto a machine that already has
+an engine is the one mistake here that pressing the button again cannot undo), a down-edge
+runs NO recovery recipe at all, and `quit`'s label is `Quit (the engine keeps running)`
+whatever the distro probe said. The refusal lives in the menu model AND at the click: a
+disabled item is a drawing, and the thing that must not happen is the act.
+
+**The ping comes FIRST on a machine with no Crucible distro.** The guard is a LOOK, not a
+refusal — a machine where nothing answers still gets the host-mode child. With the distro
+PRESENT the order is unchanged, because `boot()`'s `wsl --exec true` is a no-op on a distro
+that is already up.
+
+**The Windows pairing file is the guest's line COPIED, and 3.6 always said so** — *"the
+Windows file is the host's COPY of the guest's line"*. The code did not do it: it composed
+a line from the host's own `config.toml`, which on a machine whose engine is a guest's is a
+DIFFERENT token at the guest's address. 3.6 calls a file that exists and disagrees worse
+than none, and it is exactly that: every app that reads it gets 401. Where the line comes
+from is decided by the owner and there is no fallback between the two sources —
+`wsl-unit`/`found` read it out of the distro (`cat "${CRUCIBLE_HOME:-$HOME/.crucible}/pairing"`
+through `--exec`), `host-child` composes it from the host's own config, and when neither can
+answer **no file is written**. The distro a `found` engine is in is discovered by asking each
+**already-running** distro for its pairing line and keeping the first whose authority is
+`127.0.0.1:7100`; only running ones, because `wsl -d <name> --exec` BOOTS a stopped distro and
+the host boots no VM it does not own.
+
+**The host HOLDS the distro open** — 7b.4c's owed sentence, now written. A WSL distro
+terminates seconds after the last `wsl.exe` session ends, whatever its units say and whatever
+`loginctl enable-linger` says; `Restart=always` cannot keep a VM alive because the VM is not
+something the guest can hold. 4.1's boot (`wsl -d crucible --exec true`) therefore started the
+thing the host is watching and then let it go. The host now keeps one
+`wsl.exe -d <distro> --exec sleep infinity` child for as long as a WSL engine is the engine,
+takes it again on the watch tick after it dies, and releases it on Quit.
+
+**`user-bus-restart` is safe only in the distro Crucible OWNS, and that is now a rule.**
+`systemctl restart user@1000` kills every process uid 1000 owns in that distro. In the
+`crucible` rootfs that is Crucible's own processes and the cost is the restart. In a distro
+a person also uses it is everything they are running — on the night this was written, a
+five-thousand-step LoRA trainer. A `found` engine gets no recipes at all, and this is the
+second reason why.
+
+**What the user bus actually did, measured 2026-09-15 (read-only), correcting 7b.4c.**
+Linger is now ON (`Linger=yes`) and `/run/user/1000` EXISTS and holds `dbus-1/` and `pulse/`
+— and there is still **no `bus` socket in it**, so every door onto the user manager is shut:
+
+```
+wsl -d Ubuntu --exec systemctl --user is-active crucible.service
+  -> Failed to connect to bus: No such file or directory
+wsl -d Ubuntu --exec bash -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active …'
+  -> Failed to connect to bus: No such file or directory      (XDG_RUNTIME_DIR was ALREADY set)
+wsl -d Ubuntu -u root --exec systemctl --user -M telltale@ is-active crucible.service
+  -> Failed to retrieve unit state: Transport endpoint is not connected
+```
+
+So the root-side `-M <user>@` door — the one 4.1 was owed as a written recipe — **does not
+work here either**, and the reason is not the missing `XDG_RUNTIME_DIR` 7b.4c blamed: a
+`systemd --user` manager for uid 1000 IS running (pid 220) and simply never got a bus,
+because it was started before there was a logind session to give it one. The only thing that
+would repair it is `systemctl restart user@1000`, which is `user-bus-restart` — and on THIS
+distro that is the command the rule above forbids. `RECIPES` stands as 4.1 wrote it; what is
+added is that neither recipe can be reached from Windows on a distro in this state, and that
+the host must not try on one it does not own.
+
 ### 4.2 The menu
 
 `Crucible — running (WSL)` / `running (llama-windows)` / `stopped` / `installing…` as the title
@@ -2035,6 +2119,112 @@ injected, because a suite that skipped its subject on the machine it runs on wou
 nothing. All fifteen cells of 4.1's `(distro, engine)` table are walked, not sampled.
 
 ---
+
+### 7b.8 THE HOST IS INSTALLED AND RUNNING — the first real run, 2026-09-15
+
+Not a harness this time: the pack on disk under `%LOCALAPPDATA%`, the Startup item in the
+real Startup folder, the tray started the way the shortcut starts it, against the machine's
+own engine. Nothing went near the card; a mistborn LoRA trainer held the 3090 Ti throughout
+and was not disturbed.
+
+**What is installed, and where.**
+
+| | |
+|---|---|
+| host pack | `C:\Users\tellt\AppData\Local\Crucible\host\` — 186,333,005 B unpacked, `crucible.cmd --version` → `crucible 0.6.0` |
+| stamp | `…\host\.pack` — `sha256=dbad3ef8ca42a2e10eda557b2bdce5921f1858af8863f49236c58efa8876b296`, `release=0.6.0` |
+| Startup item | `…\Roaming\…\Startup\Crucible.lnk` — exactly one, target `…\Crucible\host\pythonw.exe`, args `-m crucible.cli host`, workdir `…\Crucible\host` |
+| tray | `pythonw.exe` pid 45504; `…\Crucible\host.pid` holds the same number |
+| log | `…\Crucible\host.log` |
+| pairing file | `…\Crucible\pairing` — 95 B, one line, ACL `OWENS-PC\telltale:(R,W)` and nothing else |
+| door | `127.0.0.1:7101`, listening |
+
+**`install.ps1` could NOT be used, and that is a release fact and not a defect of the
+script.** Its step 1 fetches `envpacks.json` from the release and dies `pack_manifest_unreadable`
+if it is not there. The latest release is **v0.5.0** and it publishes three assets — the
+wheel, the sdist and `crucible-client-0.5.0.tgz`. There is no `envpacks.json`, no rootfs and
+no host pack on ANY release, and `install.ps1`'s own default is `-Release 0.6.0`, a tag that
+does not exist yet. So the pack was BUILT here (`crucible envpack build host`, 54 s, CPU
+only) and `install.ps1`'s steps 5–7 were then performed verbatim against it: join the parts,
+verify the sha against the manifest the build wrote, unpack beside, prove `crucible.cmd`
+runs, move into place, stamp, `crucible host --install-startup`, `Start-Process -WindowStyle
+Hidden pythonw.exe -m crucible.cli host`. **7b.6's owed item is unchanged and is now the
+blocking one: a `windows-latest` run and a published asset.**
+
+**The branch it took, and the log it wrote.**
+
+```
+crucible host 0.6.0 starting; CRUCIBLE_HOME=C:\Users\tellt\AppData\Local\Crucible
+startup: …\Startup\Crucible.lnk now starts `crucible host` at login, with no console window
+presence: wsl -l -v lists Ubuntu and no "crucible"
+find-engine: the engine on http://127.0.0.1:7100 is the "Ubuntu" distro's, and this host did not start it
+presence: absent/running/found — the engine on http://127.0.0.1:7100 is the "Ubuntu" distro's and this host did not start it
+hold: "Ubuntu" is held open by pid 41212 — a distro terminates seconds after the last wsl.exe session ends, whatever its units say (7b.4c)
+pairing: C:\Users\tellt\AppData\Local\Crucible\pairing
+door: listening on 127.0.0.1:7101
+```
+
+`absent/running/found` is 4.1a's whole point in one line. **Before this run that same machine
+would have read line 3 and started a second server.**
+
+**Nothing was disturbed, verified rather than assumed.** `crucible serve` pid **17517**
+before and after; `train_lora.py` pid **18112** before and after; `wsl -l -v` lists `Ubuntu
+Running 2` throughout; `GET /v1/ping` 200 throughout; six minutes of the 15 s watch produced
+no state-change line, which is the watch saying nothing happened. The only `wsl.exe` calls
+the host made are `-l -v`, `-l -v --running`, one `--exec cat` of the guest's pairing file,
+and the held `--exec sleep infinity` — all read-only or additive, and `--terminate` /
+`--shutdown` appear nowhere on any branch this machine can reach.
+
+**Both app-side readers were exercised against the live file, and neither was told a token.**
+
+```
+@crucible/client 0.6.0 (vendored in BookForge)
+  cruciblePairingPath()      -> C:\Users\tellt\AppData\Local\Crucible\pairing
+  readPairingFile()          -> name crucible@owens-pc-wsl, url http://127.0.0.1:7100, token len 43
+BookForge dist/electron/crucible/pairing-file.js
+  cruciblePairingFilePath(h) -> the same path
+  readCruciblePairingFile(h) -> the same three facts
+GET /v1/ping with that token -> 200 {"crucible":true,"name":"crucible@owens-pc-wsl","api_version":1}
+```
+
+The 95 bytes are byte-for-byte the guest's own line, which is the copy rule working: the
+host's `config.toml` does not exist on this machine at all, and under the old composer there
+would have been no file.
+
+**Three defects, all fixed with tests.**
+
+1. `c59dc9d` — 4.1a's whole subject: a second server onto an occupied port, a `running`
+   reported about a child that lost the bind, a pairing file composed with the wrong token,
+   and a distro nobody held open. Thirteen tests, written with the shape of THIS machine.
+2. `ddbac6f` — `crucible envpack build host` shipped a 46 MB pack **with no Crucible in it**
+   and called it a success. With `PYTHONPATH` at the source checkout the pack's pip found the
+   repo's `crucible.egg-info`, said "Requirement already satisfied", installed every
+   dependency and not the wheel; `write_cmd_shims` wrote twelve correct shims for other
+   people's commands and none for `crucible`; the smoke test then failed as
+   `FileNotFoundError: [WinError 2]`. Now refused at build time by name, with the cause
+   named, and the smoke test says "there is no crucible.cmd in it" instead of raising a
+   traceback about a path.
+3. A test-fixture fact worth keeping: `WINDOWS_ENV`'s fabricated `USERNAME` made the real
+   `icacls` answer `No mapping between account names and security IDs was done`. On this PC
+   the profile directory is `tellt` and the ACCOUNT is `telltale` — which is precisely why
+   `paths.py` and `pairing.py` READ `%USERNAME%` instead of assembling a name from a path.
+   The rule earning its keep on the first machine it met.
+
+**Tests.** `tests/test_host.py` **98 passed, 1 skipped** (was 85, 1) and `tests/test_envpack.py`
+green but for one pre-existing environmental failure, both on the WINDOWS interpreter
+(`scripts/testrun-phase15.sh`'s T2 could not run: its lock refuses while a trainer holds the
+VM, and that rule was respected). The one failure is
+`test_a_baked_in_shebang_is_rewritten_to_one_that_survives_a_move`, which asserts an
+executable bit on the POSIX relocation path — NTFS has no mode to report, the same family as
+the already-documented 0600 skip.
+
+**What is left for the morning.** A `windows-latest` CI run and a published host pack, so
+`install.ps1` works as written (7b.6). The tray ICON itself was not looked at — the process
+is up and its menu model is pinned by tests, but nobody has seen the notification area.
+Foundry's reader was not exercised (BookForge's and the SDK's were). And the engine this
+host found is still the hand-held `crucible serve` in `Ubuntu`, not a systemd unit the host
+can restart: the unit exists and is enabled, linger is on, and its user bus is unreachable
+until `user@1000` is restarted — which must not happen while the trainer is in that distro.
 
 ## 7c. What was built — the Mac
 
