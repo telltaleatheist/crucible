@@ -64,14 +64,34 @@ max_num_seqs_note = """16 is vllm-omni's OWN stage-0 value in higgs_multimodal_q
 # zero-shot voice IS the base model plus a reference, which is why the two share a
 # revision and differ only in what conditions them.
 #
-# NOTE, and it is a real limitation rather than a caveat: higgs-models.json's
-# `_stackNote` records that "a reference-clone voice cannot render on SGLang at
-# all", and SGLang-Omni is what `cuda-linux` runs. So this block is here because
-# the base weights and the cap are real facts about this backend, and the engine
-# that will actually serve a clone on it is an open question for whoever writes
-# crucible/engines/narrator.py. If the answer turns out to be "it cannot", the
-# honest fix is to delete this block — a voice with no block for a backend is
-# refused there by name — and not to let a load discover it.
+# THE OPEN QUESTION THIS BLOCK CARRIED IS ANSWERED, AND THE ANSWER IS YES.
+#
+# This paragraph used to cite higgs-models.json's `_stackNote` — "a
+# reference-clone voice cannot render on SGLang at all" — and to say that if that
+# held, the honest fix was to DELETE this block rather than let a load discover
+# it. On 2026-09-15 that was read as a standing instruction and nearly acted on.
+# It would have broken working zero-shot on the 3090 Ti.
+#
+# SGLang-Omni serves a reference clone, and has since 2026-09-06. The reference
+# rides in the request BODY as base64 — `CreateSpeechRequest.references[].data`,
+# beside `media_type` and `text` — and `speech_service.py._normalize_reference`
+# takes that branch FIRST, never touching the server's filesystem, so no
+# `--allowed-local-media-path` is needed and `serve_higgs_sgl.sh` still hands the
+# server no directory. The refusal before that date rested on the belief that
+# `audio_path` was the only way in; the `data` branch was read off sglang-omni
+# 0.1.4's own source. narrator's `engine/higgs/sgl_served.py` fact 4 is the long
+# form, and the `_stackNote` that said otherwise was corrected the same day.
+#
+# It fits the context, which is the part that could have made it untrue in
+# practice: a 30 s clip is ~760 of this stack's hard-coded 4,096 positions, so at
+# the zero-shot chunk length (600 chars, the measured wall) the frame cap still
+# has its full 2.0x ceiling.
+#
+# So the block STAYS, and the base weights and cap below are what they always
+# were. The lesson worth keeping is the shape of the near-miss: a note in one
+# repo went stale, a second repo quoted it as a premise, and the quote came with
+# a pre-authorised destructive remedy. Verify the premise in the code that runs
+# before acting on a remedy written for a fact that may have moved.
 hf_repo = "bosonai/higgs-tts-3-4b"
 revision = "239f63fb7b02b1aa085f98d9efae5e35cc5523e8"
 memory_bytes_estimate = 19_000_000_000
