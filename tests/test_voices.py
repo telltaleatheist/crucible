@@ -685,6 +685,42 @@ def test_no_shipped_voice_claims_a_measured_estimate(voice_id: str) -> None:
         assert spec.estimate_note
 
 
+@pytest.mark.parametrize("voice_id", sorted(SHIPPED))
+def test_the_five_fine_tunes_declare_a_second_rung_and_nothing_else_does(
+    voice_id: str,
+) -> None:
+    """The ladder as shipped on 2026-09-14, after Owen's ruling that a retake
+    must not reuse the settings that produced the problem.
+
+    Two rungs on every `checkpoint` voice — take 0 the boson default, take 1
+    the measured 0.7 — and ONE on the base-weights pair. `higgs-default` and
+    `zeroshot` are left alone deliberately: the 0.7 measurement is 88 chunks
+    of a fine-tune's output, a zero-shot voice's spread depends on a clip
+    nobody has measured against, and a rung that is not measured is a number
+    somebody will later mistake for one. They still have take 0, which every
+    voice has whether or not its file says so.
+    """
+    voice = load_voice(voice_id)
+    kind = SHIPPED[voice_id][0]
+    if kind != "checkpoint":
+        assert len(voice.takes) == 1
+        assert voice.take(0).overrides == {}
+        return
+    assert len(voice.takes) == 2
+    assert voice.take(0).overrides == {}
+    assert voice.take(0).reason is None
+    assert voice.take(1).overrides == {"temperature": 0.7}
+    # The rung owes the measurement that chose it, in writing, and the reason
+    # says what the measurement was rather than that 0.7 is better — it is
+    # not: it fired the guard twice as often. It is DIFFERENT, which is the
+    # whole property a retake needs.
+    reason = voice.take(1).reason
+    assert reason is not None
+    assert "measured 2026-09-11" in reason
+    assert "88 chunks" in reason
+    assert "a DIFFERENT one" in reason
+
+
 def test_the_zeroshot_voice_takes_its_clips_from_the_request() -> None:
     """Its reference wavs live in a userData directory nothing can pull from."""
     voice = load_voice("zeroshot")

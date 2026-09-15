@@ -75,3 +75,20 @@ what 'declared' means. It is also a figure taken at 900 characters while this \
 voice's cap is 1100, so it is the number most owed a real measurement of the five."""
 max_chars = 1100
 sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+# THE RETAKE LADDER (PHASE3-TTS.md section 3): the server's steps, the client's
+# judgment. A job carries `take: N` and nothing else about sampling — a
+# temperature never travels on the app's wire. Owen's ruling of 2026-09-14,
+# after Correct Sentences was found spreading temperatures of its own: *"i just
+# know if a sentence/chunk was problematic before, itll likely be problematic
+# again with the same settings used to originally generate it"* — so a retake
+# must not reuse the settings that produced the problem, and the spread IS this
+# ladder.
+[[voice.takes]]
+# take 0 — the boson default (0.8 / 0.95 / 50). No deviation, so no reason is
+# owed: it is the draw every render starts from and the baseline the rungs
+# above it climb from.
+
+[[voice.takes]]
+temperature = 0.7
+reason = "measured 2026-09-11 over the same 88 chunks: 0.8 gave 4 guard fires / 3 holes / 0 drops, 0.7 gave 8 / 7 / 0. Not a better setting — a DIFFERENT one, which is what a retake of a chunk that failed at 0.8 needs (Owen's ruling 2026-09-14: a retake must not reuse the settings that produced the problem)."
