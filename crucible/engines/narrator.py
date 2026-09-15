@@ -118,6 +118,36 @@ ENGINE_VARIABLE = "NARRATOR_ENGINE"
 #: override is named; an operator's path into somebody's checkout is exactly
 #: what that commit removed the need for.
 #:
+#: THE LAUNCHER'S OTHER SIX KNOBS ARE UNSET HERE, AND THAT IS INERT RATHER THAN
+#: LOST — but it is inert only because two files agree, and an agreement nothing
+#: compares is the shape `docs/ARCHITECTURE.md` was written about. So the
+#: comparison is written down. BookForge states each of these from its catalog
+#: (`electron/data/higgs-models.json`'s shared `serving` block, through
+#: `higgsSpawnEnv`); Crucible states none of them and takes the default in
+#: narrator's own `engine/higgs/launch/serve_higgs_v3.sh`. The two columns are
+#: the same numbers, and they are the same numbers ON PURPOSE: that script's
+#: defaults were set to the measured catalog values on 2026-09-13 precisely so
+#: a caller who has only read the file is correct.
+#:
+#:     variable                  launcher default         catalog value
+#:     HIGGS_HOST                127.0.0.1                127.0.0.1
+#:     HIGGS_PORT                8095                     8095
+#:     HIGGS_GPU_MEM_UTIL        0.35                     0.35
+#:     HIGGS_CODEC_GPU_MEM_UTIL  0.10                     0.1
+#:     HIGGS_MAX_MODEL_LEN       8192                     8192
+#:     HIGGS_DEPLOY_CONFIG       the packaged             higgs_default_
+#:                               higgs_default_           frames7500.yaml
+#:                               frames7500.yaml          (the same bytes)
+#:
+#: THE LAST ROW IS THE ONE THAT WOULD HAVE HURT. Unset meant "vllm-omni's own
+#: auto-discovered profile" until 2026-09-13, and that profile caps stage 0 at
+#: 2048 frames = 81.92 s — every long chunk cut mid-sentence, with the request
+#: reporting success. It is now `${VAR-<sibling>}` (the `-` form, not `:-`), so
+#: silence means the certified frames-7500 profile and the auto one stays
+#: reachable as the empty string. A reader who finds this table stale should
+#: fix the table, not add six variables: the launcher is the owner, and a
+#: second statement of a number is how the two come to disagree.
+#:
 #: NARRATOR_HIGGS_VOICES (and, on the MLX arm, NARRATOR_HIGGS3_MLX_MODEL) is
 #: the fourth thing a `higgs-v3` worker needs, ON BOTH ARMS, and it is not a
 #: constant here because it is not a value: it is the PATH of a document
@@ -217,6 +247,20 @@ HIGGS_V3 = "higgs-v3"
 #: on `auto`. An operator who needs a different one sets
 #: `NARRATOR_HIGGS3_MLX_BATCH` in the environment narrator inherits, which is
 #: the override BookForge honours too.
+#:
+#: THIS IS THE RENDER DOOR'S WIDTH, AND THE STREAMING DOOR IS NOT AN EXCEPTION
+#: TO IT — it just does not use it. BookForge runs TWO processes and gives them
+#: two values: the audiobook worker gets the tier's width, and the Listen
+#: server gets `orpheus-worker-pool.ts`'s `streamBatchCeiling()`, which for
+#: Higgs is `HIGGS_STREAM_BATCH_WIDTH = 1` — measured 2026-09-11, where a 4-row
+#: group was exactly as fast as four solo rows and cost the listener a hole
+#: after the first sentence. Crucible runs ONE resident engine for both doors,
+#: so it cannot hold two values, and it does not need to: the streaming door's
+#: width is the number of ROWS it hands `generate_batch`
+#: (`ttsstream.STREAM_BATCH_WIDTH`, which is that same measured 1), and
+#: narrator's read-ahead batches only over the rows it was given. A ceiling of
+#: 64 with one row in hand is one row. The two would part company only if that
+#: table were ever raised, and raising it is a measurement, not an edit.
 MLX_BATCH_VARIABLE = "NARRATOR_HIGGS3_MLX_BATCH"
 MLX_MEM_BUDGET_VARIABLE = "NARRATOR_HIGGS3_MLX_MEM_BUDGET_GB"
 MLX_CACHE_LIMIT_VARIABLE = "HIGGS_MLX_CACHE_LIMIT_GB"
