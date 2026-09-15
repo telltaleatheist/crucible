@@ -1788,3 +1788,437 @@ def test_the_windows_port_deletes_through_3_5as_route() -> None:
     assert seen["url"] == "http://127.0.0.1:7100/v1/catalog/voice/mistborn"
     assert seen["method"] == "DELETE"
     assert seen["auth"] == "Bearer tok"
+
+
+# ------------------------------------------------- PHASE17: the relation
+#
+# The ORCHESTRATOR's half. The engine's is `tests/test_peer.py`, and the
+# task seam between them is `tests/test_engine_restart.py`.
+
+
+class FakeEngine:
+    """An engine on loopback: `/v1/info`, `/v1/peer/claim`, and a memory.
+
+    A real socket on a port the OS picks, because what is being tested is a
+    HANDSHAKE — a bearer, a body and a document — and a stubbed function call
+    would pin none of those.
+    """
+
+    def __init__(self, token: str = "guest-token") -> None:
+        self.token = token
+        self.claims: list[dict] = []
+        self.releases: list[dict] = []
+        self.info_document: dict | None = {
+            "server": {"name": "crucible@owens-pc-wsl", "version": "0.6.0", "api_version": 1},
+            "host": {"platform": "linux", "arch": "x86_64", "backend": "cuda-linux",
+                     "gpu": {"vendor": "nvidia", "name": "3090 Ti", "vram_bytes": 1}},
+            "role": "engine",
+            "managed_by": None,
+            "job_types": ["llm"],
+            "capabilities": [{"job_type": "llm", "models": [{"id": "qwen3.5-9b"}]}],
+        }
+        self._server = None
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def __enter__(self) -> "FakeEngine":
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        engine = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args: object) -> None:
+                return
+
+            def _send(self, status: int, body: dict) -> None:
+                raw = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def _authorised(self) -> bool:
+                if self.headers.get("Authorization") != f"Bearer {engine.token}":
+                    self._send(401, {"error": {"code": "peer_token_mismatch", "message": "no"}})
+                    return False
+                return True
+
+            def _read(self) -> dict:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b"{}"
+                return json.loads(raw.decode() or "{}")
+
+            def do_GET(self) -> None:  # noqa: N802
+                if not self._authorised():
+                    return
+                if self.path == "/v1/info":
+                    if engine.info_document is None:
+                        self._send(503, {"error": {"code": "unavailable", "message": "no"}})
+                        return
+                    self._send(200, engine.info_document)
+                    return
+                self._send(404, {"error": {"code": "not_found", "message": "no"}})
+
+            def do_POST(self) -> None:  # noqa: N802
+                if not self._authorised():
+                    return
+                engine.claims.append(self._read())
+                self._send(200, {"role": "engine", "managed_by": {}, "claimed": "now"})
+
+            def do_DELETE(self) -> None:  # noqa: N802
+                if not self._authorised():
+                    return
+                engine.releases.append(self._read())
+                self._send(200, {"role": "engine", "managed_by": None})
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _orchestrator(
+    tmp_path: Path, runner: Scripted, owner: Owner, engine: FakeEngine, monkeypatch
+) -> app_module.Host:
+    """A Host in a known presence, pointed at a fake engine on a live port."""
+    context = _context(tmp_path, runner)
+    context.name = "crucible-orchestrator@test"
+    context.presence = presence.Presence(Distro.PRESENT, Engine.RUNNING, "up", owner)
+    monkeypatch.setattr(app_module, "engine_url", lambda path="": f"{engine.url}{path}")
+    monkeypatch.setattr(app_module, "engine_token", lambda _c: engine.token)
+    return app_module.Host(context)
+
+
+def test_an_orchestrator_claims_the_engine_it_started(tmp_path: Path, monkeypatch) -> None:
+    """PHASE17 2.1, for the two owners that are the orchestrator's own."""
+    for owner in (Owner.WSL_UNIT, Owner.HOST_CHILD):
+        with FakeEngine() as engine:
+            host = _orchestrator(tmp_path, Scripted(), owner, engine, monkeypatch)
+            assert host.claim() is True, owner
+            assert len(engine.claims) == 1
+            said = engine.claims[0]["orchestrator"]
+            assert said["name"] == "crucible-orchestrator@test"
+            assert said["url"] == paths.door_url("")
+            assert said["version"]
+            # 2.1: no orchestrator sends `force` on any code path, ever.
+            assert "force" not in engine.claims[0]
+
+
+def test_a_FOUND_engine_is_NEVER_claimed(tmp_path: Path, monkeypatch) -> None:
+    """4.1a: watched, and nothing else.
+
+    A claim would be a statement that is not true — `managed_by` would name a
+    door that refuses every verb the field implies.
+    """
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, Scripted(), Owner.FOUND, engine, monkeypatch)
+        assert host.claim() is False
+        assert engine.claims == []
+    log_text = (tmp_path / "host.log").read_text(encoding="utf-8")
+    assert "watched and not claimed" in log_text
+
+
+def test_an_engine_with_no_engine_is_not_claimed_either(
+    tmp_path: Path, monkeypatch
+) -> None:
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, Scripted(), Owner.NONE, engine, monkeypatch)
+        assert host.claim() is False
+        assert engine.claims == []
+
+
+def test_a_claim_that_fails_is_a_LOG_LINE_and_never_a_crash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An engine that will not be claimed is still an engine, and a tray that
+    died telling it so would take the watch with it."""
+    with FakeEngine(token="a-different-token") as engine:
+        host = _orchestrator(tmp_path, Scripted(), Owner.WSL_UNIT, engine, monkeypatch)
+        monkeypatch.setattr(app_module, "engine_token", lambda _c: "the-wrong-one")
+        assert host.claim() is False
+    assert "peer_token_mismatch" in (tmp_path / "host.log").read_text(encoding="utf-8")
+
+
+def test_quit_releases_the_claim_while_the_engine_is_still_answering(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """3.6's rule one layer up: a `managed_by` pointing at a door that no
+    longer answers is worse than none."""
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, Scripted(), Owner.WSL_UNIT, engine, monkeypatch)
+        host.claim()
+        host.quit()
+        assert len(engine.releases) == 1
+        assert engine.releases[0]["orchestrator"]["url"] == paths.door_url("")
+
+
+def test_nothing_claimed_means_nothing_released(tmp_path: Path, monkeypatch) -> None:
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, Scripted(), Owner.FOUND, engine, monkeypatch)
+        host.claim()
+        host.quit()
+        assert engine.releases == []
+
+
+# ------------------------------------------------ PHASE17 3.2: the document
+
+
+def test_the_orchestrators_info_says_its_role_its_backend_and_zero_job_types(
+    tmp_path: Path, monkeypatch
+) -> None:
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, Scripted(), Owner.WSL_UNIT, engine, monkeypatch)
+        document = host.info()
+    assert document["role"] == "orchestrator"
+    assert document["host"]["backend"] == "orchestrator"
+    assert document["host"]["gpu"] == {"vendor": "none", "name": "", "vram_bytes": 0}
+    assert document["job_types"] == [], "the DEFINITION of the role"
+    assert document["server"]["name"] == "crucible-orchestrator@test"
+
+
+def test_the_capability_block_is_the_ENGINES_read_through_and_never_cached(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A cached list is this system's one defect in a third place: the engine
+    pulls a model, the orchestrator answers yesterday's list, and a client
+    picks a model the engine has and is told it does not."""
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, Scripted(), Owner.WSL_UNIT, engine, monkeypatch)
+        first = host.info()
+        assert first["capabilities"] == engine.info_document["capabilities"]
+        assert first["engine"] == {
+            "name": "crucible@owens-pc-wsl",
+            "url": engine.url,
+            "backend": "cuda-linux",
+            "owner": "wsl-unit",
+        }
+        # The engine gains a model. The NEXT read says so, with nothing
+        # invalidated and nothing told to refresh.
+        engine.info_document["capabilities"] = [
+            {"job_type": "llm", "models": [{"id": "qwen3.5-9b"}, {"id": "dots-ocr"}]}
+        ]
+        assert host.info()["capabilities"] == engine.info_document["capabilities"]
+
+
+def test_an_engine_that_cannot_be_read_is_an_empty_list_and_a_NULL_name(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The orchestrator does not invent an answer for a server that did not
+    give one. `engine.url` stands, because that is a fact about this MACHINE
+    rather than about the engine's health."""
+    with FakeEngine() as engine:
+        engine.info_document = None
+        host = _orchestrator(tmp_path, Scripted(), Owner.WSL_UNIT, engine, monkeypatch)
+        document = host.info()
+    assert document["capabilities"] == []
+    assert document["engine"]["name"] is None
+    assert document["engine"]["backend"] is None
+    assert document["engine"]["url"] == engine.url
+    assert document["engine"]["owner"] == "wsl-unit"
+
+
+def test_a_machine_with_no_engine_says_engine_is_null(
+    tmp_path: Path, monkeypatch
+) -> None:
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, Scripted(), Owner.NONE, engine, monkeypatch)
+        assert host.info()["engine"] is None
+
+
+def test_the_owner_is_spelled_child_on_the_wire_and_not_host_child(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """On the wire the word "host" is the thing PHASE17 renames, and the
+    orchestrator is the only possible parent."""
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, Scripted(), Owner.HOST_CHILD, engine, monkeypatch)
+        assert host.info()["engine"]["owner"] == "child"
+
+
+# ------------------------------------------------ PHASE17 4.2: the restart
+
+
+def test_a_found_engine_is_refused_engine_not_ours_BEFORE_anything_happens(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The refusal lives at the door, not only in the menu: a disabled item
+    is a drawing, and the thing that must not happen is the ACT."""
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, Scripted(), Owner.FOUND, engine, monkeypatch)
+        with pytest.raises(HostError) as caught:
+            host.check_restartable()
+        assert caught.value.code == "engine_not_ours"
+        with pytest.raises(HostError):
+            host.restart_engine(lambda _event: None)
+
+
+def test_a_wsl_unit_restart_is_the_working_door_and_not_a_recovery(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`boot()` on a RUNNING engine pings, succeeds and changes nothing — a
+    button that did nothing precisely when it was most obviously pressed."""
+    runner = Scripted(pings=[200])
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, runner, Owner.WSL_UNIT, engine, monkeypatch)
+        seen: list[str] = []
+        host.restart_engine(lambda event: seen.append(event.event))
+    argvs = [" ".join(call) for call in runner.calls]
+    assert any("systemctl --user restart crucible" in argv for argv in argvs), argvs
+    assert seen[-1] == "done"
+
+
+def test_a_child_restart_stops_the_child_and_starts_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = Scripted(pings=[200])
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, runner, Owner.HOST_CHILD, engine, monkeypatch)
+        host._c.watcher.child = FakeChild()
+        seen: list[str] = []
+        host.restart_engine(lambda event: seen.append(event.event))
+    assert runner.spawned, "a child was started again"
+    assert seen[-1] == "done"
+
+
+def test_a_restart_that_does_not_come_back_FAILS_by_name(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = Scripted(pings=[])
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, runner, Owner.WSL_UNIT, engine, monkeypatch)
+        events: list[tuple[str, dict]] = []
+        host.restart_engine(lambda event: events.append((event.event, event.data)))
+    assert events[-1][0] == "failed"
+    assert events[-1][1]["code"] == "engine_did_not_return"
+    assert host._c.presence.engine is Engine.FAILED
+
+
+def test_a_restarted_engine_is_CLAIMED_AGAIN_because_it_forgot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """2.3: a claim is live state. This is why nothing is written to disk."""
+    with FakeEngine() as engine:
+        host = _orchestrator(
+            tmp_path, Scripted(pings=[200]), Owner.WSL_UNIT, engine, monkeypatch
+        )
+        host.claim()
+        assert len(engine.claims) == 1
+        host.restart_engine(lambda _event: None)
+        assert len(engine.claims) == 2, "the restarted engine was told again"
+
+
+def test_the_tray_and_the_page_reach_ONE_restart(tmp_path: Path, monkeypatch) -> None:
+    """A person clicking Restart and a page posting `engine-restart` must not
+    get two different restarts."""
+    runner = Scripted(pings=[200])
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, runner, Owner.WSL_UNIT, engine, monkeypatch)
+        host.on_click(menu.RESTART_ENGINE)
+    assert any(
+        "systemctl --user restart crucible" in " ".join(call) for call in runner.calls
+    )
+
+
+# --------------------------------------------------- PHASE17 3.2: the door
+
+
+def test_the_door_answers_ping_WITHOUT_a_bearer_and_info_WITH_one(
+    host_log: log.HostLog,
+) -> None:
+    """`/v1/ping` is what lets a client tell "wrong token" from "not a
+    Crucible"; `/v1/info` names the engine's address and is not a thing to
+    hand an anonymous caller."""
+    import urllib.error
+    import urllib.request
+
+    fake = FakeOrchestrator(document={"role": "orchestrator", "job_types": []})
+    door = a_door(host_log, token="tok", orchestrator=fake)
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/ping", timeout=10) as answer:
+            ping = json.loads(answer.read().decode())
+        assert ping == {
+            "crucible": True,
+            "name": fake.name,
+            "api_version": 1,
+            "role": "orchestrator",
+        }
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/info", timeout=10)
+        assert caught.value.code == 401
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/info", headers={"Authorization": "Bearer tok"}
+        )
+        with urllib.request.urlopen(request, timeout=10) as answer:
+            assert json.loads(answer.read().decode()) == fake.document
+    finally:
+        server.shutdown()
+
+
+def test_the_door_streams_a_restart_and_refuses_a_found_engine_with_a_STATUS(
+    host_log: log.HostLog,
+) -> None:
+    import urllib.error
+    import urllib.request
+
+    fake = FakeOrchestrator()
+    door = a_door(host_log, token="tok", orchestrator=fake)
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    url = f"http://127.0.0.1:{port}/restart"
+    headers = {"Authorization": "Bearer tok"}
+    try:
+        request = urllib.request.Request(url, data=b"{}", headers=headers, method="POST")
+        with urllib.request.urlopen(request, timeout=20) as answer:
+            assert answer.headers["Content-Type"] == "application/x-ndjson"
+            lines = [json.loads(l) for l in answer.read().decode().splitlines() if l]
+        assert fake.restarts == ["restarted"]
+        assert lines[-1]["event"] == "done"
+
+        # And a `found` engine: a STATUS CODE, not the last line of a body.
+        fake.not_ours = True
+        request = urllib.request.Request(url, data=b"{}", headers=headers, method="POST")
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request, timeout=20)
+        assert caught.value.code == 409
+        assert json.loads(caught.value.read().decode())["error"]["code"] == "engine_not_ours"
+        assert fake.restarts == ["restarted"], "nothing ran"
+    finally:
+        server.shutdown()
+
+
+def test_a_path_this_door_does_not_serve_says_what_it_DOES_serve(
+    host_log: log.HostLog,
+) -> None:
+    """An app that wants anything else reads `/v1/info`'s `engine.url`."""
+    import urllib.error
+    import urllib.request
+
+    door = a_door(host_log, token="tok")
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    try:
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/jobs", timeout=10)
+        assert caught.value.code == 404
+        message = json.loads(caught.value.read().decode())["error"]["message"]
+        for route in ("/install", "/restart", "/v1/info", "/v1/ping"):
+            assert route in message
+    finally:
+        server.shutdown()
+
+
+def test_the_wire_owner_words_are_the_only_three(tmp_path: Path) -> None:
+    """A word this build does not have is a word a client cannot be sent."""
+    from crucible import peer as peer_module
+
+    assert set(app_module.OWNER_ON_THE_WIRE.values()) == set(peer_module.OWNERS)
+    assert Owner.NONE not in app_module.OWNER_ON_THE_WIRE, "an absence is not an owner"
