@@ -9,7 +9,38 @@
 id = "qwen3.5-9b"
 family = "qwen3.5"
 params_b = 9
-context_default = 12288
+# THE ONE CONTEXT THIS MODEL SERVES, on every backend — 2026-09-15.
+#
+# It was 12288, and 12288 had NO source. Chased on 2026-09-15 it turned out to be
+# BookForge's `numCtxMaxForModel` 32B tier (`>15B or unrecognized`, commented
+# "tuned for 32B Q4_K_M") reaching a 9B. That function's own `<=15B` tier is
+# 16384 and this model's id matches it, so the number was the right function's
+# WRONG TIER, carried across without the tier.
+#
+# Four independent records say 16384 for these weights and none says 12288:
+#   * `numCtxMaxForModel`'s `<=15B` tier (bookforge `electron/ai-bridge.ts`).
+#   * `electron/scripts/vllm/serve_text_vllm.sh` — `VLLM_TEXT_MAX_MODEL_LEN
+#     :-16384` in its first commit and unchanged since. The server that ran.
+#   * `electron/text-server.ts`'s pinned `qwen35-9b-bf16` profile: the same
+#     checkpoint at the same revision, max-model-len 16384.
+#   * Foundry's `CTX_MAX = 16384` (`src/clean/runner.ts`) — the ceiling of
+#     clean-text, which is the act that actually runs through this model.
+#
+# Being BELOW that ceiling is the defect, not a slower answer: Foundry sizes a
+# request as `max_model_len - (ceil(chars/2.5) + 256)`, so 12288 spends a long
+# block's budget 4096 tokens short of what the client was built to ask for.
+#
+# WHY IT IS HERE AND NOT REPEATED PER BACKEND. `cuda-linux` and `mlx-darwin`
+# each carried their own 16384 override for a few hours on 2026-09-15, written
+# one at a time as each was disproved, which left 12288 standing at model level
+# as "`llama-windows`'s number alone". That last claim does not survive either:
+# the `<=15B` tier's stated premise is *"Q4_K_M weights are <= ~9.5 GiB, leaving
+# room for a taller KV cache"*, and the Q8_0 GGUF the llama-windows block names
+# is 9.53 GB — the tier's own premise, met almost exactly. With no claimant left,
+# 12288 must not stay as the inherited default: a backend added later would
+# inherit a number nothing argues for, which is how it reached two backends in
+# the first place.
+context_default = 16384
 # Text, and that is a fact about this server rather than about the weights.
 # Qwen3.5-9B has a vision tower; the cuda-linux block below starts vLLM with
 # `--skip-mm-profiling`, so nothing on the card is reserved for an image, and the
@@ -126,60 +157,6 @@ revision = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
 # below is now the one the working launcher served rather than the one Ollama
 # was capped at.
 memory_bytes_estimate = 20_950_548_480
-# THE CONTEXT THIS BACKEND SERVES, RECOVERED 2026-09-15 rather than re-chosen.
-#
-# This line used to be absent and the model's own 12288 stood in for it, on the
-# stated grounds that 12288 was "the cleanup context BookForge asks for".
-#
-# WHERE 12288 ACTUALLY CAME FROM, chased 2026-09-15 because the first answer
-# given here was wrong. It is NOT Foundry's: Foundry's Ollama context is
-# `DEFAULT_NUM_CTX = 8192` (`src/translate/ollama.ts`) and clean-text's ceiling
-# is `CTX_MAX = 16384` (`src/clean/runner.ts`) — neither is 12288. It is
-# BOOKFORGE'S OWN, from `electron/ai-bridge.ts`'s `numCtxMaxForModel`, the
-# pre-Crucible AI-cleanup door's Ollama ceiling, which is size-tiered:
-#
-#     <=15B            16384   "Q4_K_M weights are <= ~9.5 GiB, leaving room
-#                               for a taller KV cache"
-#     >15B or UNKNOWN  12288   "tuned for 32B Q4_K_M (~18.5 GiB weights +
-#                               ~3 GiB KV)"
-#
-# So 12288 is the 32B-class tier, and it reached a 9B. BookForge's own function
-# would have given this model 16384: its regex reads `9b` out of the id and 9 is
-# under 15. The number was not wrong where it was written — it was the right
-# function's WRONG TIER, carried across without the tier.
-#
-# THREE INDEPENDENT SOURCES SAY 16384 FOR THIS MODEL, and no source says 12288:
-#   * `electron/scripts/vllm/serve_text_vllm.sh` — `VLLM_TEXT_MAX_MODEL_LEN
-#     :-16384` in its FIRST commit (bookforge cd222229), unchanged through
-#     2212708d and e23aabcd. This is the server that actually ran.
-#   * `ai-bridge.ts`'s own <=15B tier, above.
-#   * Foundry's `CTX_MAX = 16384`, the ceiling of clean-text — which is the act
-#     that actually runs through this model.
-#
-# So 12288 here was BELOW the ceiling of the act being served, which is a 400
-# from the server on a long block rather than a slow answer.
-#
-# IT FITS, BY THE MEASUREMENT ALREADY IN THIS FILE. vLLM refuses to start when
-# the KV pool cannot hold one full-length sequence; the pool at util 0.84 was
-# measured at 27,443 tokens, which holds 16,384 with room over. The
-# `--language-model-only` line below frees 0.85 GiB of vision tower into that
-# same pool, so the margin is wider now than when the 27,443 was taken.
-#
-# `[model] context_default` stays 12288 and is NOT this number. CORRECTED
-# 2026-09-15: this used to say 12288 was "what the other two backends serve",
-# and that sentence was only ever true of ONE of them. It argued `llama-windows`
-# — the llama.cpp form of the quantized Ollama path `ai-bridge.ts` tuned that
-# tier for in the first place — and said nothing whatever about `mlx-darwin`,
-# which was inheriting 12288 by omission rather than by any reasoning about a
-# Mac. The mlx block now carries its own 16384 and says why; 12288 survives here
-# as `llama-windows`'s number alone, and that is now the only claim made for it.
-#
-# The one thing 16384 is not is HEADROOM over Foundry's cleanup ceiling, and
-# `docs/PHASE9-CAPABILITY.md` already records that as a live defect in its own
-# right: `foundry/src/clean/runner.ts` is `CTX_MAX = 16384` too, so the two are
-# exactly equal with nothing between them. That is Foundry's ceiling to move,
-# not this server's floor to guess at, and it is the same on every model.
-context_default = 16384
 # `--max-num-seqs 16`: the number of CUDA graphs vLLM captures follows it. At the
 # default the 9B captured 51 graphs; at 16 it captures 7 piecewise + 2 full, in
 # 5 s and 0.09 GiB. Sixteen concurrent requests is also more than this one-model
@@ -306,36 +283,13 @@ revision = "27cdb77d9381d508abfe5d4e06bcb95471e312ac"
 # load on the Mac should re-take the peak and replace this line with a
 # measurement, the way the 27B block says its own computed pair is a floor.
 memory_bytes_estimate = 20_515_916_006
-# THE CONTEXT THIS BACKEND SERVES, 2026-09-15. It used to be absent, and the
-# model's 12288 stood in — inherited by OMISSION, never chosen for a Mac. The
-# cuda-linux comment above that was read as justifying it argues `llama-windows`
-# and names no other backend.
-#
-# 12288 is BookForge's `numCtxMaxForModel` 32B tier (`>15B or unrecognized`,
-# "tuned for 32B Q4_K_M") reaching a 9B. Its own `<=15B` tier is 16384 and this
-# model's id matches it. Four independent records say 16384 for these exact
-# weights and none says 12288: that tier; `electron/scripts/vllm/
-# serve_text_vllm.sh`'s `VLLM_TEXT_MAX_MODEL_LEN:-16384`; `electron/
-# text-server.ts`'s pinned `qwen35-9b-bf16` profile, which serves
-# `Qwen/Qwen3.5-9B` @ `c2022362` at max-model-len 16384 (CLIENT-SURFACES.md
-# section on the text server); and Foundry's `CTX_MAX = 16384`, the ceiling of
-# clean-text, which is the act that actually runs through this model on the Mac.
-#
-# Being BELOW that ceiling is the defect: Foundry sizes a request as
-# `max_model_len - (ceil(chars/2.5) + 256)`, so a 12288 here spends a long
-# block's budget 4096 tokens short of what the client was built to ask for.
-# 16384 makes them equal. It is NOT headroom over the client's ceiling, and must
-# not be raised further to manufacture some — that is Foundry's ceiling to move,
-# and `docs/PHASE9-CAPABILITY.md` already records it as a defect in its own right.
-#
-# NOTE WHAT THIS FLAG DOES AND DOES NOT DO HERE. mlx-lm has no `--max-model-len`
-# and `Residency._engine_args` sends that flag to vLLM only, so this number
-# never reaches the engine: mlx-lm takes its context from the model's own config
-# (`max_position_embeddings` 262144). It is the number Crucible REPORTS as
-# `max_model_len`/`context_default` and that clients size against, and on 64 GB
-# the machine was never the constraint. So this line does not enable anything the
-# Mac could not already do — it stops the server under-reporting what it serves.
-context_default = 16384
+# NOTE WHAT `context_default` DOES AND DOES NOT DO ON THIS BACKEND. mlx-lm has no
+# `--max-model-len` and `Residency._engine_args` sends that flag to vLLM only, so
+# the model's 16384 never reaches the engine: mlx-lm takes its context from the
+# model's own config (`max_position_embeddings` 262144). It is the number Crucible
+# REPORTS as `max_model_len`/`context_default` and that clients size against, and
+# on 64 GB the machine was never the constraint. So it enables nothing the Mac
+# could not already do — it stops the server UNDER-REPORTING what it serves.
 engine_args = []
 
 # ---------------------------------------------------------------------------
@@ -358,7 +312,13 @@ engine_args = []
 # on any backend (the cuda-linux block says why).
 #
 # memory_bytes_estimate: the file plus 1.5 GB for KV at `context_default` and
-# llama.cpp's own buffers — Foundry's `OVERHEAD_GB`, the same number the
+# llama.cpp's own buffers. The 12288 -> 16384 move at model level (2026-09-15)
+# does not disturb it: this checkpoint's KV is 32_768 B/token (8 full-attention
+# layers x 2 x 4 kv heads x 256 head_dim x 2 B; the other 24 layers are
+# gated-delta-net, whose state is per-SEQUENCE and does not grow with length),
+# so the extra 4096 tokens cost 134_217_728 B — 0.13 GB inside a 1.5 GB
+# allowance. Same estimate, and now it is a checked one rather than an
+# unexamined one — Foundry's `OVERHEAD_GB`, the same number the
 # `[local]` table above declares, and DECLARED for the same reason: nothing
 # has watched this on a Windows card.
 [backends.llama-windows]
