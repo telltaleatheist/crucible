@@ -14,7 +14,7 @@
  * Zero runtime dependencies. Node 20+, bun, and the Electron main process.
  */
 
-export { CrucibleClient, readRenderResult } from './client.js';
+export { CrucibleClient, engineOf, readRenderResult } from './client.js';
 export type {
   CrucibleClientOptions,
   EventsOptions,
@@ -152,6 +152,11 @@ export type {
   Lease,
   LlmCapability,
   LoadVoiceOptions,
+  CrucibleRole,
+  EngineOwner,
+  EngineRef,
+  EngineRestartTaskRequest,
+  ManagedBy,
   ModelDescriptor,
   ModelInfo,
   ModuleTaskRequest,

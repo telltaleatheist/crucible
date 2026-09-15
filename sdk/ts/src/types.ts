@@ -117,6 +117,56 @@ export interface GpuInfo {
   readonly vramBytes: number;
 }
 
+/**
+ * Which half of the orchestrator/engine relation a process is.
+ * PHASE17-ORCHESTRATOR.md section 1.
+ *
+ * A property of a PROCESS, never of an install: on a Windows machine with no
+ * WSL, ONE install runs an orchestrator and an engine as two processes, and
+ * only one of them answers any given `/v1/info`.
+ */
+export type CrucibleRole = 'engine' | 'orchestrator';
+
+/**
+ * How an orchestrator HOLDS its engine, and therefore what it may do to it.
+ * PHASE15-HOST.md 4.1a, as PHASE17 3.2 spells it on the wire.
+ *
+ * A plain union rather than a closed check at the edge of the client: the set
+ * can grow, and a client that threw a protocol error on an owner word it had
+ * not heard of would break on the server that added one. `found` is the one
+ * that matters to a reader — an engine the orchestrator did not start, which
+ * it watches and never acts on.
+ */
+export type EngineOwner = 'wsl-unit' | 'child' | 'found';
+
+/**
+ * Who manages an engine, from {@link ServerInfo.managedBy}.
+ *
+ * The name and the url and no version: the orchestrator's own version is a
+ * fact about the orchestrator, which is what `info()` against ITS address
+ * answers. Two copies of a version string in two documents is two things to
+ * keep in step across an upgrade that changes exactly one of them.
+ */
+export interface ManagedBy {
+  readonly name: string;
+  readonly url: string;
+}
+
+/**
+ * The engine an orchestrator manages, from {@link ServerInfo.engine}.
+ *
+ * `name` and `backend` are `null` when the orchestrator could not read the
+ * engine just now. `url` is never null while there is an engine at all: it is
+ * a fact about the MACHINE rather than about the engine's health, and it is
+ * the address {@link engineOf} hands back.
+ */
+export interface EngineRef {
+  readonly name: string | null;
+  readonly url: string;
+  readonly backend: string | null;
+  readonly owner: EngineOwner;
+}
+
 /** `GET /v1/info`. */
 export interface ServerInfo {
   readonly server: {
@@ -148,6 +198,31 @@ export interface ServerInfo {
    * 2026-09-13, which is the thing PHASE2-LLM.md section 5 exists to forbid.
    */
   readonly capabilities: readonly Capability[];
+  /**
+   * Which half of the relation answered. PHASE17 3.1 and 3.2.
+   *
+   * **A server that predates Phase 17 reads as `'engine'`**, and that is a
+   * fact its document states by its vintage rather than a default this client
+   * fills — PHASE15 3.3's all-or-nothing reading rule, the same one `route`
+   * gets. API version stays 1; every field of this phase is additive.
+   */
+  readonly role: CrucibleRole;
+  /**
+   * On an ENGINE: which orchestrator claimed it, or `null`.
+   *
+   * `null` is a complete, correct answer and never a fault. An engine nobody
+   * claims is a whole Crucible — the Mac, a droplet, any `crucible serve` run
+   * by hand. Always `null` on an orchestrator, which claims and is not
+   * claimed.
+   */
+  readonly managedBy: ManagedBy | null;
+  /**
+   * On an ORCHESTRATOR: the one engine it manages, or `null` when the machine
+   * has none. Always `null` on an engine, which IS the engine.
+   *
+   * Read it with {@link engineOf}, which is the whole of the rule.
+   */
+  readonly engine: EngineRef | null;
 }
 
 /** `GET /v1/health`. */
@@ -1677,11 +1752,31 @@ export interface EngineTaskRequest {
   readonly target: 'wsl';
 }
 
+/**
+ * Restart this machine's engine, through its orchestrator.
+ * PHASE17-ORCHESTRATOR.md 4.2.
+ *
+ * NO fields: there is exactly one engine on a machine and the orchestrator
+ * knows which, so a `target` here would be a client naming a thing it cannot
+ * see. Refused `engine_restart_needs_orchestrator` on a server no
+ * orchestrator started, and `engine_not_ours` when the orchestrator merely
+ * FOUND its engine and so has no unit it may name and no child it may kill.
+ *
+ * **The task's last event may never arrive.** The relay runs in the process
+ * being restarted. Read `info()` for the answer, exactly as a page does
+ * across the engine move's switch-over; a stream that ends with no terminal
+ * event is the expected shape here, not a fault to report.
+ */
+export interface EngineRestartTaskRequest {
+  readonly type: 'engine-restart';
+}
+
 export type TaskRequest =
   | PullTaskRequest
   | InstallTaskRequest
   | ModuleTaskRequest
-  | EngineTaskRequest;
+  | EngineTaskRequest
+  | EngineRestartTaskRequest;
 
 /**
  * A task has no `queued`: it is admitted and running in the same act, because

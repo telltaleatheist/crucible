@@ -75,6 +75,8 @@ import {
   type ChatResponse,
   type ChunkData,
   type DoneData,
+  type EngineOwner,
+  type EngineRef,
   type EstimateBasis,
   type Health,
   type JobEvent,
@@ -94,6 +96,7 @@ import {
   type RenderOptions,
   type RenderResult,
   type RouteSetting,
+  type CrucibleRole,
   type ServerInfo,
   type ServerSetup,
   type SettingsDocument,
@@ -379,6 +382,7 @@ export class CrucibleClient {
       capabilities: capabilities.map((entry, index) =>
         readCapability(entry, index, statesNeedsReference),
       ),
+      ...readRole(body),
     };
   }
 
@@ -1982,6 +1986,98 @@ export class CrucibleClient {
 }
 
 // ------------------------------------------------------------------ readers
+
+/**
+ * `role`, `managed_by` and `engine` out of an `/v1/info` document.
+ * PHASE17-ORCHESTRATOR.md 3.3.
+ *
+ * ALL-OR-NOTHING BY VINTAGE, which is PHASE15 3.3's rule applied a second
+ * time and for the reason it was written the first time. A document with NO
+ * `role` comes from a server that predates Phase 17, and such a server IS an
+ * engine that nobody manages: a fact the document states by what it is, not a
+ * default this client invents. A document that HAS `role` and is then missing
+ * the field its role owes is a defect and is refused by name, because a
+ * half-new document is the one thing a vintage rule cannot read.
+ */
+function readRole(body: Json): Pick<ServerInfo, 'role' | 'managedBy' | 'engine'> {
+  if (!('role' in body)) {
+    return { role: 'engine', managedBy: null, engine: null };
+  }
+  const role: CrucibleRole = oneOf(
+    str(body, 'role', 'info'),
+    ['engine', 'orchestrator'] as const,
+    'info.role',
+  );
+  if (role === 'engine') {
+    const managed = nullableObject(body, 'managed_by', 'info');
+    return {
+      role,
+      managedBy:
+        managed === null
+          ? null
+          : {
+              name: str(managed, 'name', 'info.managed_by'),
+              url: str(managed, 'url', 'info.managed_by'),
+            },
+      engine: null,
+    };
+  }
+  const engine = nullableObject(body, 'engine', 'info');
+  return {
+    role,
+    managedBy: null,
+    engine:
+      engine === null
+        ? null
+        : {
+            name: nullableStr(engine, 'name', 'info.engine'),
+            url: str(engine, 'url', 'info.engine'),
+            backend: nullableStr(engine, 'backend', 'info.engine'),
+            // NOT `oneOf`. The owner set can grow, and a client that threw a
+            // protocol error on a word it had not heard of would break on the
+            // server that added one — `Health.residentKind`'s rule, for
+            // `Health.residentKind`'s reason.
+            owner: str(engine, 'owner', 'info.engine') as EngineOwner,
+          },
+  };
+}
+
+/**
+ * Where to send work, given an `info()`. PHASE17-ORCHESTRATOR.md section 6.
+ *
+ * Three answers and no fourth:
+ *
+ * * `null` — **this IS the engine; talk to the address you already have.**
+ *   The overwhelmingly common case, and every pre-Phase-17 server.
+ * * an {@link EngineRef} — this is an orchestrator; **follow `engine.url`
+ *   ONCE, with the SAME token**, and talk to the engine for everything after.
+ * * it throws `orchestrator_has_no_engine` — this machine's orchestrator
+ *   manages nothing, so there is nothing here to ask. That is a fact to show
+ *   a person, next to the button that installs one; it is not a fault.
+ *
+ * ONCE, AND NEVER A CHAIN. An app follows one hop and no more. An
+ * orchestrator whose `engine.url` named another orchestrator would be a
+ * misconfiguration, and a client that followed it would loop; the caller
+ * checks the second document's `role` and refuses anything but `engine`
+ * rather than following it again.
+ *
+ * @example
+ * const here = await client.info();
+ * const engine = engineOf(here);
+ * const work = engine === null ? client : new CrucibleClient({ url: engine.url, token });
+ */
+export function engineOf(info: ServerInfo): EngineRef | null {
+  if (info.role === 'engine') {
+    return null;
+  }
+  if (info.engine === null) {
+    throw new CrucibleProtocolError(
+      `orchestrator_has_no_engine: ${info.server.name} is an orchestrator and manages ` +
+        'no engine, so there is nothing here to send work to. Install one from its console.',
+    );
+  }
+  return info.engine;
+}
 
 /**
  * One capability from `info()`.
