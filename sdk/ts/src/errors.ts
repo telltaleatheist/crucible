@@ -614,6 +614,22 @@ export const CAPABILITY_ROUTE_MISSING = 'capability_route_missing';
 /** A `route` that is neither `local` nor `upstream`. */
 export const CAPABILITY_ROUTE_UNKNOWN = 'capability_route_unknown';
 
+// ------------------------------------ the voice document's needs_reference
+//
+// The SAME reading rule (PHASE15-HOST.md 3.3), applied to the field
+// PHASE3-TTS.md section 2 added: a document in which NO voice row carries
+// `needs_reference` comes from a server that predates the field, and a voice
+// on such a server IS a checkpoint whose voice is in its weights — so every
+// row reads `needsReference: false`, because that is the document's vintage
+// speaking and not a default this client fills in per row. The rule holds for
+// both documents voice rows arrive in: `/v1/voices` and the `tts` capability
+// of `/v1/info`.
+
+/** A document where some voice rows say `needs_reference` and one does not. Names the row. */
+export const VOICES_NEEDS_REFERENCE_MISSING = 'voices_needs_reference_missing';
+/** A `needs_reference` that is not a boolean. */
+export const VOICES_NEEDS_REFERENCE_UNKNOWN = 'voices_needs_reference_unknown';
+
 // ------------------------------------------- the catalog's removal refusals
 //
 // PHASE15-HOST.md 3.5a. Four names because they are four different things to

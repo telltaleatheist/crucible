@@ -1075,6 +1075,12 @@ export interface VoiceInfo {
    * for every other kind. Read it to decide whether to show a clip picker;
    * loading without one is refused `reference_required`, and loading a
    * checkpoint WITH one is refused `reference_not_allowed`.
+   *
+   * On a server built before the field existed no row carries it, and every
+   * voice in such a document reads `false` — PHASE15-HOST.md section 3.3's
+   * client reading rule, asked once of the whole document, all or nothing. A
+   * document that states it on some rows and not others is refused
+   * `voices_needs_reference_missing` rather than patched.
    */
   readonly needsReference: boolean;
   /** Never null: the whole block, because a client that packs needs all of it. */

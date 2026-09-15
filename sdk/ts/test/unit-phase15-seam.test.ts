@@ -16,6 +16,15 @@
  *    which on Windows is a directory nothing writes to; 3.6's table pins
  *    `%LOCALAPPDATA%\Crucible\pairing`, with `CRUCIBLE_HOME` overriding
  *    everywhere. Same rule as `crucible/config.py`'s `crucible_home()`.
+ * 8. **A voice row with no `needs_reference`** (section 8 below). Foundry read
+ *    a server one commit older than the field and BOTH `info()` and `voices()`
+ *    threw on its first call. Same rule as 1, same shape, applied to the voice
+ *    row wherever it arrives: no row states it → a pre-field server, every
+ *    voice a checkpoint; some do and one does not →
+ *    `voices_needs_reference_missing`; not a boolean →
+ *    `voices_needs_reference_unknown`.
+ *
+ * Sections 4-7 are the rest of PHASE15's seams, added as they were built.
  *
  * Run: `npm run test:unit`.
  */
@@ -39,8 +48,11 @@ import {
   SUBJECT_UNKNOWN,
   CrucibleProtocolError,
   PAIRING_FILE_MALFORMED,
+  VOICES_NEEDS_REFERENCE_MISSING,
+  VOICES_NEEDS_REFERENCE_UNKNOWN,
   WINDOWS_HOME_DIRNAME,
   cruciblePairingPath,
+  isTtsCapability,
   readPairingFile,
 } from '../src/index.js';
 
@@ -563,5 +575,166 @@ test('a task type this build does not have names the four that exist', async () 
   await assert.rejects(
     client().submitTask({ type: 'reboot' } as never),
     /'pull', 'install', 'module' or 'engine'/,
+  );
+});
+
+// ---------- 8. the voice document's needs_reference — the SAME rule, by 3.3
+
+/**
+ * The defect Foundry found against a live server on 2026-09-14: a Crucible
+ * built one commit before 743dc1a answers voice rows with no `needs_reference`
+ * on them, and this client threw
+ * `info.capabilities[6].models[0] has no field "needs_reference"` at its very
+ * first read — and the same from `voices()`. Section 3.3's reading rule is the
+ * fix, applied exactly as it is to `route`: the vintage is asked ONCE of the
+ * whole document, and a document nobody's row states it in is a PRE-FIELD
+ * server's, where every voice is a checkpoint.
+ */
+const PRE_FIELD_VOICE = {
+  id: 'deathstalker',
+  display: 'Deathstalker',
+  kind: 'checkpoint',
+  language: 'en',
+  narrator_engine: 'higgs-v3',
+  backend_supported: true,
+  installed: true,
+  resident: false,
+  loadable: true,
+  reason: null,
+  revision: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4',
+  fingerprint: 'deathstalker@a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4',
+  memory_bytes_estimate: 19 * GIB,
+  estimate_basis: 'declared',
+  max_chars: 800,
+  sample_rate: 24000,
+  takes: 2,
+  // NO `needs_reference`. That is the whole fixture.
+  pace: {
+    pace_chars_per_sec: 16.64,
+    max_chars_per_sec: 21.63,
+    min_chars_per_sec: 12.8,
+    target_chars: null,
+    safe_min_chars: 600,
+    safe_max_chars: 800,
+  },
+};
+
+function preFieldVoices(): Record<string, unknown>[] {
+  return [
+    { ...PRE_FIELD_VOICE },
+    { ...PRE_FIELD_VOICE, id: 'mistborn', display: 'Mistborn' },
+    { ...PRE_FIELD_VOICE, id: 'leah', display: 'Leah' },
+  ];
+}
+
+/** `GET /v1/info` from the same server: the voice rows sit under `tts`. */
+function preFieldInfo(rows: Record<string, unknown>[]): Record<string, unknown> {
+  return {
+    server: { name: 'crucible@wsl', version: '0.5.0', api_version: 1 },
+    host: {
+      platform: 'linux',
+      arch: 'x86_64',
+      backend: 'cuda-linux',
+      gpu: { vendor: 'nvidia', name: 'NVIDIA GeForce RTX 3090 Ti', vram_bytes: 24 * GIB },
+    },
+    job_types: ['tts', 'load-voice', 'unload-voice'],
+    capabilities: [
+      { job_type: 'echo', models: [] },
+      { job_type: 'tts', models: rows },
+    ],
+  };
+}
+
+test('a voices() document where NO row says needs_reference reads every voice as false', async () => {
+  answers(200, preFieldVoices());
+  const voices = await client().voices();
+  assert.equal(voices.length, 3);
+  for (const voice of voices) {
+    assert.equal(voice.needsReference, false, `${voice.id} should read as false`);
+  }
+});
+
+test("info()'s tts rows read the same way — the seam Foundry hit first", async () => {
+  answers(200, preFieldInfo(preFieldVoices()));
+  const info = await client().info();
+  const tts = info.capabilities.find(isTtsCapability);
+  assert.ok(tts, 'the tts capability should be read as voice rows');
+  assert.equal(tts.models.length, 3);
+  for (const voice of tts.models) {
+    assert.equal(voice.needsReference, false, `${voice.id} should read as false`);
+  }
+});
+
+test('reading a pre-field document is a STATEMENT, not a filled-in default', async () => {
+  // Same proof as the route rule's: the same document with ONE row stating the
+  // field is not "two defaults and one fact", it is a defect.
+  const rows = preFieldVoices();
+  rows[2]!['needs_reference'] = true;
+  answers(200, rows);
+  await assert.rejects(client().voices(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError);
+    assert.match(error.message, new RegExp(VOICES_NEEDS_REFERENCE_MISSING));
+    // It names the ROW — both by path and by the voice's own id.
+    assert.match(error.message, /voices\[0\]/);
+    assert.match(error.message, /deathstalker/);
+    return true;
+  });
+});
+
+test('a half-stated info document is refused the same way', async () => {
+  const rows = preFieldVoices();
+  rows[0]!['needs_reference'] = false;
+  answers(200, preFieldInfo(rows));
+  await assert.rejects(client().info(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError);
+    assert.match(error.message, new RegExp(VOICES_NEEDS_REFERENCE_MISSING));
+    assert.match(error.message, /capabilities\[1\]\.models\[1\]/);
+    return true;
+  });
+});
+
+test('a needs_reference that is not a boolean is voices_needs_reference_unknown', async () => {
+  const rows = preFieldVoices();
+  for (const row of rows) row['needs_reference'] = false;
+  rows[1]!['needs_reference'] = 'yes';
+  answers(200, rows);
+  await assert.rejects(client().voices(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError);
+    assert.match(error.message, new RegExp(VOICES_NEEDS_REFERENCE_UNKNOWN));
+    assert.match(error.message, /voices\[1\]\.needs_reference is "yes"/);
+    return true;
+  });
+});
+
+test('a null needs_reference is refused too — null is not false', async () => {
+  const rows = preFieldVoices();
+  for (const row of rows) row['needs_reference'] = true;
+  rows[0]!['needs_reference'] = null;
+  answers(200, rows);
+  await assert.rejects(client().voices(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError);
+    assert.match(error.message, new RegExp(VOICES_NEEDS_REFERENCE_UNKNOWN));
+    return true;
+  });
+});
+
+test('a current document is read exactly as before, on both routes', async () => {
+  const rows = preFieldVoices();
+  for (const row of rows) row['needs_reference'] = false;
+  rows[1]!['kind'] = 'zeroshot';
+  rows[1]!['needs_reference'] = true;
+  answers(200, rows);
+  const voices = await client().voices();
+  assert.deepEqual(
+    voices.map((voice) => [voice.id, voice.needsReference]),
+    [['deathstalker', false], ['mistborn', true], ['leah', false]],
+  );
+  answers(200, preFieldInfo(rows));
+  const info = await client().info();
+  const tts = info.capabilities.find(isTtsCapability);
+  assert.ok(tts);
+  assert.deepEqual(
+    tts.models.map((voice) => [voice.id, voice.needsReference]),
+    [['deathstalker', false], ['mistborn', true], ['leah', false]],
   );
 });

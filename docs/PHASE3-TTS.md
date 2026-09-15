@@ -228,7 +228,12 @@ file declares it.
 so a picker can show its clip field before the load is refused, and derived from `kind` by
 the server rather than left for a client to derive, because which kinds need one is the
 server's rule. It is a fact about the KIND and not about the backend block, so it stays true
-on a host this voice cannot be served on.
+on a host this voice cannot be served on. **A client reads it the way it reads `route`**
+(PHASE15-HOST.md section 3.3's client reading rule, asked once of the whole document): if no
+voice row in the document carries `needs_reference` the server predates the field and every
+voice is read as `false`, if some rows carry it and one does not the document is refused
+`voices_needs_reference_missing` naming that row, and a value that is not a boolean is
+refused `voices_needs_reference_unknown` — all or nothing, never a per-row default.
 
 `pace` is the whole block and not the one key the draft showed: a client that is going to
 pack has to see all of it, and the two shapes (a band, a target) are told apart by which keys

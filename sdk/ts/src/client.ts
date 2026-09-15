@@ -30,6 +30,8 @@ import {
   CrucibleUnreachable,
   CrucibleVersionError,
   UPSTREAM_TEST_REFUSALS,
+  VOICES_NEEDS_REFERENCE_MISSING,
+  VOICES_NEEDS_REFERENCE_UNKNOWN,
 } from './errors.js';
 import {
   asArray,
@@ -339,7 +341,21 @@ export class CrucibleClient {
     const server = objectField(body, 'server', 'info');
     const host = objectField(body, 'host', 'info');
     const gpu = objectField(host, 'gpu', 'info.host');
-    const capabilities = asArray(field(body, 'capabilities', 'info'), 'info.capabilities');
+    const capabilities = asArray(field(body, 'capabilities', 'info'), 'info.capabilities').map(
+      (entry, index) => asObject(entry, `info.capabilities[${index}]`),
+    );
+    // THE VINTAGE IS READ ONCE, FOR THE WHOLE DOCUMENT — PHASE15-HOST.md
+    // section 3.3's client reading rule, applied to `needs_reference` exactly
+    // as `capability()` applies it to `route`. The `tts` capability's rows ARE
+    // `/v1/voices`' rows, so the question is asked of every voice row this
+    // document carries, wherever it sits, and never of a row on its own. See
+    // {@link readVoiceInfo}.
+    const statesNeedsReference = capabilities.some(
+      (entry) =>
+        entry['job_type'] === 'tts' &&
+        Array.isArray(entry['models']) &&
+        anyRowStates(entry['models'], 'needs_reference'),
+    );
     return {
       server: {
         name: str(server, 'name', 'info.server'),
@@ -361,7 +377,7 @@ export class CrucibleClient {
       // that operate it.
       jobTypes: strArray(body, 'job_types', 'info'),
       capabilities: capabilities.map((entry, index) =>
-        readCapability(asObject(entry, `info.capabilities[${index}]`), index),
+        readCapability(entry, index, statesNeedsReference),
       ),
     };
   }
@@ -1122,12 +1138,22 @@ export class CrucibleClient {
    *
    * Refused with `job_type_disabled` on a server where `[jobs] enable_tts` is
    * false, the same way `/v1/models` is for `llm`.
+   *
+   * A document in which NO row carries `needs_reference` comes from a server
+   * that predates the field and every voice on it is read as
+   * `needsReference: false` — PHASE15-HOST.md section 3.3's client reading
+   * rule, all or nothing, exactly as {@link capability} reads `route`.
    */
   async voices(): Promise<VoiceInfo[]> {
     const body = await this.#jsonValue('/v1/voices', { method: 'GET' }, 'voices');
     const entries = asArray(body, 'voices');
+    const statesNeedsReference = anyRowStates(entries, 'needs_reference');
     return entries.map((entry, index) =>
-      readVoiceInfo(asObject(entry, `voices[${index}]`), `voices[${index}]`),
+      readVoiceInfo(
+        asObject(entry, `voices[${index}]`),
+        `voices[${index}]`,
+        statesNeedsReference,
+      ),
     );
   }
 
@@ -1966,8 +1992,16 @@ export class CrucibleClient {
  * section 5) and `tts`'s are `GET /v1/voices`' (PHASE3-TTS.md section 8). So
  * each is read with that route's reader. Every other capability keeps the
  * descriptor.
+ *
+ * `documentStatesNeedsReference` is the whole info document's vintage, asked
+ * once by {@link CrucibleClient.info} and passed down rather than re-derived
+ * per capability — see {@link readVoiceInfo}.
  */
-function readCapability(entry: Json, index: number): Capability {
+function readCapability(
+  entry: Json,
+  index: number,
+  documentStatesNeedsReference: boolean,
+): Capability {
   const where = `info.capabilities[${index}]`;
   const jobType = str(entry, 'job_type', where);
   const models = asArray(field(entry, 'models', where), `${where}.models`);
@@ -1983,7 +2017,11 @@ function readCapability(entry: Json, index: number): Capability {
     return {
       jobType,
       models: models.map((voice, at) =>
-        readVoiceInfo(asObject(voice, `${where}.models[${at}]`), `${where}.models[${at}]`),
+        readVoiceInfo(
+          asObject(voice, `${where}.models[${at}]`),
+          `${where}.models[${at}]`,
+          documentStatesNeedsReference,
+        ),
       ),
     };
   }
@@ -2487,6 +2525,24 @@ function readModelInfo(entry: Json, where: string): ModelInfo {
 }
 
 /**
+ * Does this document STATE a field, anywhere in it?
+ *
+ * The one question PHASE15-HOST.md section 3.3's reading rule asks, and it is
+ * asked of the DOCUMENT: an absent field is a statement about the server's
+ * vintage only when no row in the whole document carries it. Rows that are not
+ * objects are left to the reader that will refuse them by name.
+ */
+function anyRowStates(rows: readonly unknown[], key: string): boolean {
+  return rows.some(
+    (row) =>
+      typeof row === 'object' &&
+      row !== null &&
+      !Array.isArray(row) &&
+      (row as Json)[key] !== undefined,
+  );
+}
+
+/**
  * One `/v1/voices` row.
  *
  * The nullability differs from {@link readModelInfo} in exactly one place and it
@@ -2496,8 +2552,53 @@ function readModelInfo(entry: Json, where: string): ModelInfo {
  * loaded and does not say why is unusable, because the operator cannot tell
  * whether to pull weights, install an env, free the card, or go to the other
  * host.
+ *
+ * **`needs_reference` is read the way `route` is** — PHASE15-HOST.md section
+ * 3.3's client reading rule, and `documentStatesNeedsReference` is the answer
+ * the caller already got from the WHOLE document. A document in which no voice
+ * row carries the field comes from a server built before PHASE3-TTS.md section
+ * 2 added it (before commit 743dc1a), and on such a server every voice IS a
+ * checkpoint whose voice is in its weights: `needsReference` reads `false`
+ * because the document's vintage says so, not because this client picked a
+ * default. Some rows carrying it and one not is a defect
+ * (`voices_needs_reference_missing`), and so is a value that is not a boolean
+ * (`voices_needs_reference_unknown`).
+ *
+ * Not hypothetical: Foundry pointed 0.6.0 at a server one commit older and
+ * BOTH its first reads threw — `info.capabilities[6].models[0] has no field
+ * "needs_reference"` and the same from `voices()`. Measured 2026-09-14.
  */
-function readVoiceInfo(entry: Json, where: string): VoiceInfo {
+function readVoiceInfo(
+  entry: Json,
+  where: string,
+  documentStatesNeedsReference: boolean,
+): VoiceInfo {
+  const rawNeedsReference = entry['needs_reference'];
+  let needsReference: boolean;
+  if (rawNeedsReference === undefined) {
+    if (documentStatesNeedsReference) {
+      // Some rows say it and this one does not, so the document cannot say
+      // whether a load of THIS voice must carry a clip. Reading it as `false`
+      // would invent the answer to the one question the field exists for: a
+      // zero-shot voice loaded with no clip comes up in the model's own voice
+      // under this id.
+      throw new CrucibleProtocolError(
+        `${VOICES_NEEDS_REFERENCE_MISSING}: ${where} has no "needs_reference", but ` +
+          'other voice rows in the same document do. A document either predates ' +
+          'the field entirely (no row has it, and every voice is a checkpoint) or ' +
+          'states it on every row; a half-stated document says nothing trustworthy ' +
+          `about ${str(entry, 'id', where)}.`,
+      );
+    }
+    needsReference = false;
+  } else if (typeof rawNeedsReference !== 'boolean') {
+    throw new CrucibleProtocolError(
+      `${VOICES_NEEDS_REFERENCE_UNKNOWN}: ${where}.needs_reference is ` +
+        `${JSON.stringify(rawNeedsReference)}, which is not a boolean`,
+    );
+  } else {
+    needsReference = rawNeedsReference;
+  }
   const loadable = bool(entry, 'loadable', where);
   const reason = nullableStr(entry, 'reason', where);
   if (!loadable && reason === null) {
@@ -2532,7 +2633,7 @@ function readVoiceInfo(entry: Json, where: string): VoiceInfo {
     // and a client that packs cannot be handed half a pace block.
     sampleRate: num(entry, 'sample_rate', where),
     takes: num(entry, 'takes', where),
-    needsReference: bool(entry, 'needs_reference', where),
+    needsReference,
     pace: readVoicePace(objectField(entry, 'pace', where), `${where}.pace`),
   };
 }
