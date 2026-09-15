@@ -990,10 +990,12 @@ ARCHITECTURE.md exists to stop. Instead each job type declares what it does to t
 | `load-voice` | `tts` | no — a Higgs v3 voice change IS a worker restart | — |
 | `tts` | `tts` | **yes** — `render.py`'s `_make_resident` | — |
 | `align` | `align` | **yes** — `AlignJobType._session` | — |
+| `denoise` | `denoise` | **yes** — `DenoiseJobType._session` | — |
 | `unload-model` | — | — | `llm` |
 | `unload-voice` | — | — | `tts` |
 | `unload-aligner` | — | — | `align` |
-| `echo`, `asr`, `rvc`, `denoise` | — | — | — |
+| `unload-denoiser` | — | — | `denoise` |
+| `echo`, `asr`, `rvc` | — | — | — |
 
 and `Lease.evicted_by(type, model)` is the whole rule, in two sentences:
 
@@ -1007,9 +1009,15 @@ Read out, that gives:
 
 | lease on | refused | admitted |
 |---|---|---|
-| a **model** | `load-model`, `load-voice`, `unload-model`, `tts`, `align` | chats, `echo`, `asr`, `rvc`, `denoise`, `unload-voice`, `unload-aligner` |
-| a **voice** | `load-model`, `load-voice`, `unload-voice`, `align`, `tts` **of any other voice** | chats, `echo`, `asr`, `rvc`, `denoise`, `unload-model`, `unload-aligner`, **`tts` of the leased voice** |
-| an **aligner** | `load-model`, `load-voice`, `tts`, `unload-aligner`, `align` **of any other aligner** | chats, `echo`, `asr`, `rvc`, `denoise`, `unload-model`, `unload-voice`, **`align` on the leased aligner** |
+| a **model** | `load-model`, `load-voice`, `unload-model`, `tts`, `align`, `denoise` | chats, `echo`, `asr`, `rvc`, `unload-voice`, `unload-aligner`, `unload-denoiser` |
+| a **voice** | `load-model`, `load-voice`, `unload-voice`, `align`, `denoise`, `tts` **of any other voice** | chats, `echo`, `asr`, `rvc`, `unload-model`, `unload-aligner`, `unload-denoiser`, **`tts` of the leased voice** |
+| an **aligner** | `load-model`, `load-voice`, `tts`, `unload-aligner`, `denoise`, `align` **of any other aligner** | chats, `echo`, `asr`, `rvc`, `unload-model`, `unload-voice`, `unload-denoiser`, **`align` on the leased aligner** |
+| a **separator** | `load-model`, `load-voice`, `tts`, `align`, `unload-denoiser`, `denoise` **of any other separator** | chats, `echo`, `asr`, `rvc`, `unload-model`, `unload-voice`, `unload-aligner`, **`denoise` on the leased separator** |
+
+The separator row is the one a denoise pass lives in, and the bold admission is why the
+row exists: ~44 blocks against one resident separator, each its own job, none of them
+reloading the checkpoint (PHASE4-AUDIO.md section 4.2, Owen's ruling 2026-09-15).
+`denoise` moved OUT of every "admitted" column at the same time, because it now loads.
 
 The model row is exactly what it was before the extension — the derivation did not loosen
 the case that was already ruled — and the two bold admissions are the whole point: they are

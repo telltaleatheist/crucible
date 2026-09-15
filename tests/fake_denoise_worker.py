@@ -1,15 +1,22 @@
 """A stand-in for `crucible/jobs/denoise/worker.py`, faithful to its wire.
 
-`tests/fake_rvc_worker.py`'s idea again: a **real subprocess**, run exactly as
-the server runs the real one (`<python> <this file>`, one request on stdin,
+`tests/fake_align_worker.py`'s idea: a **real subprocess**, run exactly as the
+server runs the real one (`<python> <this file>`, requests on stdin until EOF,
 newline-delimited JSON on fd 1), steered entirely by environment variables.
+
+IT IS A SESSION, not a one-shot, because the real worker is one since the
+residency ruling of 2026-09-15: `{"op": "load"}` once, then `{"op": "separate"}`
+per block for as long as the server holds it. The TRANSCRIPT is what lets a test
+count the loads across a whole pass — which is the assertion that matters, since
+a pass that has lost the residency looks identical in every other way: every job
+succeeds and every log is clean.
 
 It does not run audio-separator, and it does not import soundfile either —
 neither is in the interpreter running this suite. What it does is everything
-around them that the server depends on: it reads the input's shape from a JSON
-sidecar the test wrote beside it, it WRITES a stem file per output into the
-directory it was told to, and it answers one result carrying every stem, in the
-shape the real worker answers with.
+around them that the server depends on: it reads the input's shape from an
+environment variable, it WRITES a stem file per output into the directory it was
+told to, and it answers one result carrying every stem, in the shape the real
+worker answers with.
 
     CRUCIBLE_FAKE_DENOISE_INPUT      JSON: {"sample_rate", "frames", "channels"}
                                      — what this worker "reads" off the input.
@@ -19,7 +26,7 @@ shape the real worker answers with.
                                      Defaults to one `(Dry)` stem matching the
                                      input exactly, which is the good case.
     CRUCIBLE_FAKE_DENOISE_EXIT_CODE  exit with this code before saying anything.
-    CRUCIBLE_FAKE_DENOISE_LOAD_FAIL  fail as the model load would.
+    CRUCIBLE_FAKE_DENOISE_LOAD_FAIL  fail as the model load would, on the load op.
     CRUCIBLE_FAKE_DENOISE_SILENT     say nothing and sit there, for the silence
                                      timeout. A test that sets this MUST let the
                                      server terminate it.
@@ -28,12 +35,14 @@ shape the real worker answers with.
                                      result — a library logging to stdout.
     CRUCIBLE_FAKE_DENOISE_SLOW_S     seconds to sleep before separating, so a
                                      cancel has something to interrupt.
-    CRUCIBLE_FAKE_DENOISE_TRANSCRIPT a path. The request line is appended to it,
-                                     followed by a JSON line holding the engine
-                                     environment variables this process actually
-                                     INHERITED — the only way to assert that the
-                                     OpenMP hardening reached the engine, since
-                                     it travels in the environment.
+    CRUCIBLE_FAKE_DENOISE_TRANSCRIPT a path. Every request line is appended to
+                                     it, each followed by a JSON line holding the
+                                     engine environment variables this process
+                                     actually INHERITED — the only way to assert
+                                     that the OpenMP hardening reached the
+                                     engine, since it travels in the
+                                     environment. Counting the `load` lines in it
+                                     is how a test pins the residency.
 """
 
 from __future__ import annotations
@@ -67,35 +76,46 @@ def _env_int(name: str) -> int | None:
     return None if raw is None or raw == "" else int(raw)
 
 
-def main() -> int:
-    results_fd = os.dup(1)
-    os.dup2(2, 1)
-    results = os.fdopen(results_fd, "w", encoding="utf-8", buffering=1)
-
-    exit_code = _env_int("CRUCIBLE_FAKE_DENOISE_EXIT_CODE")
-    if exit_code is not None:
-        sys.stderr.write("fake denoise worker: told to exit before saying anything\n")
-        return exit_code
-
-    line = sys.stdin.readline()
+def _record(line: str) -> None:
+    """Append one request line plus the engine environment this process got."""
     transcript = os.environ.get("CRUCIBLE_FAKE_DENOISE_TRANSCRIPT")
-    if transcript:
-        with open(transcript, "a", encoding="utf-8") as handle:
-            handle.write(line)
-            handle.write(
-                json.dumps({key: os.environ.get(key) for key in ENGINE_KEYS}) + "\n"
-            )
-    request = json.loads(line)
+    if not transcript:
+        return
+    with open(transcript, "a", encoding="utf-8") as handle:
+        handle.write(line if line.endswith("\n") else line + "\n")
+        handle.write(
+            json.dumps({key: os.environ.get(key) for key in ENGINE_KEYS}) + "\n"
+        )
 
-    if os.environ.get("CRUCIBLE_FAKE_DENOISE_SILENT") == "1":
-        while True:
-            time.sleep(0.05)
 
+def do_load(results, request: dict) -> int:
+    """The `load` op: `ready` with the load time, then `done`. NO results.
+
+    A load that answered with results would be a worker that had separated
+    something nobody asked it to, and the real `Residency.load_separator`
+    refuses exactly that.
+    """
+    if os.environ.get("CRUCIBLE_FAKE_DENOISE_LOAD_FAIL") == "1":
+        send(
+            results,
+            "failed",
+            message=(
+                f"audio-separator could not load {request['model_filename']} from "
+                f"{request['model_file_dir']}: RuntimeError: told to fail"
+            ),
+        )
+        return 1
+    send(results, "ready", seconds=1.5)
+    send(results, "done")
+    return 0
+
+
+def do_separate(results, request: dict) -> int:
+    """The `separate` op: one block in, its stems out."""
     source = _env_json("CRUCIBLE_FAKE_DENOISE_INPUT", DEFAULT_INPUT)
     send(
         results,
         "ready",
-        model=request["model_filename"],
         sample_rate=source["sample_rate"],
         frames=source["frames"],
         seconds=round(source["frames"] / source["sample_rate"], 3),
@@ -107,20 +127,8 @@ def main() -> int:
             results,
             "failed",
             message=(
-                f"this input is {source['sample_rate']} Hz and "
-                f"{request['model_filename']} is {request['sample_rate']} Hz "
-                "native. Nothing was resampled"
-            ),
-        )
-        return 1
-
-    if os.environ.get("CRUCIBLE_FAKE_DENOISE_LOAD_FAIL") == "1":
-        send(
-            results,
-            "failed",
-            message=(
-                f"audio-separator could not load {request['model_filename']} from "
-                f"{request['model_file_dir']}: RuntimeError: told to fail"
+                f"this input is {source['sample_rate']} Hz and the model is "
+                f"{request['sample_rate']} Hz native. Nothing was resampled"
             ),
         )
         return 1
@@ -160,11 +168,53 @@ def main() -> int:
         results.write(junk + "\n")
         results.flush()
 
-    send(results, "result", stems=stems, load_seconds=1.5, separate_seconds=8.25)
+    send(results, "result", stems=stems, separate_seconds=8.25)
 
     if os.environ.get("CRUCIBLE_FAKE_DENOISE_NO_DONE") == "1":
-        return 0
+        # EXIT, rather than looping back to stdin. A HELD worker that simply
+        # withheld `done` would be indistinguishable from one still working, and
+        # the server would rightly wait out its silence timeout — so the protocol
+        # violation this stands in for is a worker that ENDS without saying
+        # `done`, which is what the server can actually detect.
+        # `fake_align_worker.py:175` does the same, for the same reason.
+        raise SystemExit(0)
     send(results, "done")
+    return 0
+
+
+OPS = {"load": do_load, "separate": do_separate}
+
+
+def main() -> int:
+    results_fd = os.dup(1)
+    os.dup2(2, 1)
+    results = os.fdopen(results_fd, "w", encoding="utf-8", buffering=1)
+
+    exit_code = _env_int("CRUCIBLE_FAKE_DENOISE_EXIT_CODE")
+    if exit_code is not None:
+        sys.stderr.write("fake denoise worker: told to exit before saying anything\n")
+        return exit_code
+
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        _record(line)
+        if os.environ.get("CRUCIBLE_FAKE_DENOISE_SILENT") == "1":
+            while True:
+                time.sleep(0.05)
+        request = json.loads(line)
+        handler = OPS.get(request.get("op"))
+        if handler is None:
+            send(
+                results,
+                "failed",
+                message=f"the denoise request's op is {request.get('op')!r}",
+            )
+            return 1
+        code = handler(results, request)
+        if code != 0:
+            return code
+    # EOF on stdin: the session was stopped politely.
     return 0
 
 

@@ -28,7 +28,7 @@ from crucible.leases import (
     MIN_TTL_SECONDS,
     Leases,
 )
-from crucible.residency import KIND_ALIGN, KIND_LLM, KIND_TTS
+from crucible.residency import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_TTS
 
 from .conftest import parse_sse
 from .fake_engine import FakeEngine
@@ -557,7 +557,9 @@ def test_every_job_type_this_build_knows_is_ruled_on() -> None:
         # loads, so it cannot be true of a job that loads nothing.
         assert not (effect.reuses_what_it_names and effect.makes_resident is None)
         for kind in (effect.makes_resident, effect.takes_off):
-            assert kind in (None, KIND_LLM, KIND_TTS, KIND_ALIGN), job_type
+            assert kind in (
+                None, KIND_LLM, KIND_TTS, KIND_ALIGN, KIND_DENOISE
+            ), job_type
 
 
 def test_an_unruled_job_type_is_named_rather_than_guessed_at(
@@ -640,8 +642,11 @@ def test_a_lease_refuses_the_unloader_of_its_own_kind_and_no_other() -> None:
         for job_type, effect in CARD_EFFECTS.items()
         if effect.takes_off is not None
     }
-    assert len(unloaders) == 3, unloaders
-    for kind in (KIND_LLM, KIND_TTS, KIND_ALIGN):
+    # Four since 2026-09-15: `unload-denoiser` arrived with the resident
+    # separator, for `unload-aligner`'s reason — without it a separator could
+    # only be evicted by loading something else.
+    assert len(unloaders) == 4, unloaders
+    for kind in (KIND_LLM, KIND_TTS, KIND_ALIGN, KIND_DENOISE):
         blocked = {
             job_type
             for job_type in unloaders
@@ -691,8 +696,12 @@ def test_work_that_touches_nothing_is_admitted_under_every_kind() -> None:
         for job_type, effect in CARD_EFFECTS.items()
         if effect.makes_resident is None and effect.takes_off is None
     }
-    assert untouched == {"echo", "asr", "rvc", "denoise"}
-    for kind in (KIND_LLM, KIND_TTS, KIND_ALIGN):
+    # `denoise` LEFT this set on 2026-09-15. It used to touch nothing because it
+    # loaded, worked and exited per job; it now loads a resident separator and
+    # reuses one it finds, which is the whole of Owen's ruling — a book is ~44
+    # blocks and one load, not ~44 loads.
+    assert untouched == {"echo", "asr", "rvc"}
+    for kind in (KIND_LLM, KIND_TTS, KIND_ALIGN, KIND_DENOISE):
         for job_type in untouched:
             for model in (THE_LEASED_THING, SOMETHING_ELSE, None):
                 assert not refused(kind, job_type, model), (kind, job_type)
@@ -712,4 +721,10 @@ def test_a_model_lease_still_refuses_exactly_what_it_refused_before() -> None:
         # leased model's id, so `SOMETHING_ELSE` is the honest reading here.
         if refused(KIND_LLM, job_type, SOMETHING_ELSE)
     }
-    assert blocked == {"load-model", "unload-model", "load-voice", "tts", "align"}
+    # `denoise` joined the list on 2026-09-15 for the same reason `align` is on
+    # it: it now LOADS something, so under a model lease it would evict the
+    # leased model. That is a tightening, which is the safe direction — the
+    # ruling this test guards is that nothing LOOSENED.
+    assert blocked == {
+        "load-model", "unload-model", "load-voice", "tts", "align", "denoise",
+    }

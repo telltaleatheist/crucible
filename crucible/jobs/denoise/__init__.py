@@ -30,6 +30,29 @@ the client for `tts` (DESIGN.md section 3.1). BookForge concatenates a book's
 sentences into ~22-minute blocks, denoises each, and slices the stems back at
 recorded offsets; it keeps all of that. Crucible denoises one thing at a time.
 
+The separator is RESIDENT, and one block per job is still the wire
+------------------------------------------------------------------
+Those two sentences are not in tension, and telling them apart is the whole of
+Owen's ruling of 2026-09-15. The WIRE is one block per job, unchanged. What
+changed is that the CHECKPOINT now stays on the card between jobs
+(`residency.KIND_DENOISE`, the fourth resident kind, `_session` below).
+
+This file used to argue the opposite — that "a separator loads once per job
+either way", so nothing was lost. That is true of one job and false of a book:
+the client sends **~44 jobs for a 15-hour book**, so the load was paid ~44 times.
+BookForge had already measured it and already fixed it on its own side
+(`electron/scripts/separator_worker.py`, bookforge `019afa52`): the per-block
+spawn cost "10-25 s each for ~85 s of real work per block", which
+`electron/denoise-bridge.ts:27-32` records as *"roughly a third of the pass. One
+load now serves the whole book."* The warm figure from that commit is 7.4 s of an
+11.0 s one-shot. Crucible could not see any of that, because a job type reasons
+about one job and a pass is a property of the client.
+
+`done.extra.load_seconds` is what makes it visible: the load time on the block
+that loaded the separator, and `0.0` on every block after it. A pass whose blocks
+all report a load is a pass that has lost the residency — which is exactly how
+this hid the first time, with every job succeeding and every log clean.
+
 Three invariants, each one BookForge's and each one measured
 ------------------------------------------------------------
 - **The input must already be at the model's native rate.** 44.1 kHz for this
@@ -49,8 +72,9 @@ Three invariants, each one BookForge's and each one measured
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -69,11 +93,18 @@ from ...denoisemodels import installed as model_installed
 from ...denoisemodels import missing as missing_model_files
 from ...errors import ApiError, JobError
 from ...manifests import fingerprint
+from ...residency import (
+    DEFAULT_READY_TIMEOUT_SECONDS,
+    KIND_DENOISE,
+    Residency,
+    describe_resident,
+)
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 
 __all__ = [
     "DenoiseJobType",
     "DenoiseParams",
+    "UnloadDenoiserJobType",
     "denoise_models_dir",
     "denoise_models_dir_for",
 ]
@@ -273,18 +304,32 @@ class DenoiseJobType:
 
     name = JOB_TYPE
 
-    def __init__(
-        self,
-        config: Config,
-        backend: Any,
-        owned_pids: Callable[[], frozenset[int]],
-    ) -> None:
+    def __init__(self, config: Config, backend: Any, residency: Residency) -> None:
         self._config = config
         self._backend = backend
-        # The accelerator guard must not report Crucible's own resident engine
-        # as somebody else's process holding the card. A callable and not a set,
-        # because the answer changes every time something is loaded.
-        self._owned_pids = owned_pids
+        # THE HOLDER, not a bare `owned_pids` callable any more. This type now
+        # loads and reuses a resident separator, so it needs the same object
+        # `align` needs: the guard's owned pids come off it, and so does the
+        # session it sends each block down.
+        self._residency = residency
+        #: What the load cost, by the job id that paid for it, so `done.extra`
+        #: can report it once and then report `0.0` for every block that reused
+        #: the session. Keyed by job rather than kept as one number because two
+        #: jobs must never be able to claim one load.
+        self._loaded_seconds: dict[str, float] = {}
+
+    @property
+    def residency(self) -> Residency:
+        return self._residency
+
+    def _owned_pids(self) -> frozenset[int]:
+        """The pids Crucible's own resident thing holds.
+
+        Kept as a method so every `accelerator.guard` call below reads the same
+        way it did before the holder arrived — the guard must not report this
+        server's own engine as somebody else's process on the card.
+        """
+        return self._residency.owned_pids()
 
     # ----------------------------------------------------------- describing
 
@@ -319,10 +364,12 @@ class DenoiseJobType:
                     # there is, so the repo alone would identify none of them.
                     source=source,
                     installed=installed,
-                    # Nothing is ever resident for `denoise`: one job, one load,
-                    # one exit. Holding the separator across jobs would be a
-                    # third kind of resident thing and a ruling nobody has made.
-                    resident=False,
+                    # A REAL QUESTION since 2026-09-15. It used to read
+                    # `resident=False` with a note saying holding the separator
+                    # across jobs "would be a third kind of resident thing and a
+                    # ruling nobody has made". Owen made it: a book is ~44 blocks
+                    # and one load (see `_session`).
+                    resident=self._residency.is_resident(KIND_DENOISE, manifest.id),
                     vram_bytes=estimate,
                 )
             )
@@ -439,15 +486,33 @@ class DenoiseJobType:
             raise ApiError(400, "model_required", f"{self.name} needs a model")
         _params(params)
         _manifest, spec, _python, _root = self._require_runnable(model)
+        # A streaming session holds the resident engine without occupying the
+        # lane, so a free lane is not a free card. `align` has asked this here
+        # since it became a mutator of residency; `denoise` became the fourth on
+        # 2026-09-15 and inherits the question with the kind. Admission is the
+        # server's one scheduling answer (ARCHITECTURE.md section 3), so it is
+        # given here rather than becoming a `failed` a minute later.
+        self._residency.refuse_if_claimed(f"denoising with {model!r}")
+        if self._residency.is_resident(KIND_DENOISE, model):
+            # Already on the card and about to be reused — which is the normal
+            # case for every block of a book after the first. Running the guard
+            # would refuse the job for memory the resident separator is itself
+            # holding.
+            return
         accelerator.guard(
             self._config.backend_kind,
             model_id=model,
             need_bytes=spec.memory_bytes_estimate,
             owned_pids=self._owned_pids(),
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-            # Deliberately no `reclaimable_bytes`, for `rvc`'s reason: a denoise
-            # never unloads somebody's model to make room for itself, so the
-            # memory a resident engine holds is not memory this job can have.
+            # A denoise load may now unload the previous resident to make room
+            # for itself, exactly as an align load may — one card, one thing —
+            # so what that resident holds counts as free. This USED to carry a
+            # note saying the opposite ("a denoise never unloads somebody's
+            # model"); that stopped being true when the separator became a
+            # resident kind, and a guard that still believed it would refuse a
+            # book for memory nothing is going to be using.
+            reclaimable_bytes=self._residency.reclaimable_bytes(excluding=model),
         )
 
     # ------------------------------------------------------------------ run
@@ -460,32 +525,19 @@ class DenoiseJobType:
 
         try:
             manifest, spec, python, root = self._require_runnable(model)
-            # The card can change between the queue and the lane, so the guard
-            # runs again here against the same rules.
-            state = accelerator.guard(
-                self._config.backend_kind,
-                model_id=model,
-                need_bytes=spec.memory_bytes_estimate,
-                owned_pids=self._owned_pids(),
-                desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-            )
         except ApiError as exc:
             raise JobError(exc.code, exc.message) from None
-        ctx.warming(state.detail)
 
         source = self._input(ctx)
         output_dir = ctx.scratch / "stems"
+        session = self._session(ctx, manifest, spec, root, python, model)
+
         request = {
-            "model_file_dir": str(root),
-            "model_filename": manifest.model_filename,
+            "op": "separate",
             "input": str(source),
             "output_dir": str(output_dir),
             "output_format": OUTPUT_FORMAT,
             "sample_rate": manifest.sample_rate,
-            # CUDA-only by audio-separator's own documentation, and a property
-            # of the accelerator rather than of the model — so it is decided
-            # here off the backend and never read from a manifest or a request.
-            "use_autocast": self._backend.kind == CUDA_LINUX,
         }
 
         def on_ready(message: dict[str, Any]) -> None:
@@ -503,28 +555,34 @@ class DenoiseJobType:
             )
 
         try:
-            outcome = workers.run_worker(
-                python=python,
-                script=WORKER_SCRIPT,
-                request=request,
-                log_path=self._config.logs_dir / f"denoise-{job.id}.log",
+            outcome = session.send(
+                request,
                 ready_silence_timeout=READY_SILENCE_TIMEOUT_SECONDS,
                 on_ready=on_ready,
                 on_progress=on_progress,
                 cancelled=lambda: ctx.cancelled,
-                environment=dict(ENGINE_ENVIRONMENT),
             )
             # ONE result, because the unit of work is one input. The stems ride
             # inside it: a run that produced three stems has not done three
             # units of work, and results are matched to work by position.
             results = workers.require_positional_results(outcome, 1, "input")
         except workers.WorkerError as exc:
+            # The session is dead or the worker broke the protocol. Take the
+            # separator off the card: `Residency` must not go on advertising a
+            # resident thing whose process has gone.
+            self._forget(model)
             raise JobError("worker_failed", str(exc)) from None
 
         stems = results[0]["stems"]
         primary = self._check(manifest, outcome.ready, stems)
-        for stem in stems:
-            ctx.artifact(stem["name"], output_dir / stem["name"])
+        # ONLY THE PRIMARY STEM IS PUBLISHED, and it is the only one anybody has
+        # ever read. `denoise-bridge.ts` slices the `(dry)` stem and discards the
+        # rest; publishing all of them meant the client downloaded a second
+        # ~233 MB copy of each block's noise — about 10 GB across a 15-hour book
+        # — to delete it. The others are still MEASURED and still reported below,
+        # because "what the model produced" is a fact about the run; what changed
+        # is that Crucible no longer ships bytes nothing asked for.
+        ctx.artifact(primary["name"], output_dir / primary["name"])
         ctx.progress(
             1.0,
             f"{len(stems)} stem(s) from {source.name} through {manifest.display}",
@@ -532,24 +590,131 @@ class DenoiseJobType:
         )
         ctx.done_extra(
             primary_stem=primary["name"],
+            # Every stem the model wrote, named and measured. `artifacts` on the
+            # done frame is what was PUBLISHED and this is what was PRODUCED;
+            # they differ by design and a reader can see both.
             stems=[stem["name"] for stem in stems],
             sample_rate=primary["sample_rate"],
             frames=primary["frames"],
-            load_seconds=results[0]["load_seconds"],
             separate_seconds=results[0]["separate_seconds"],
+            # WHAT THE LOAD COST THIS JOB, and the number that makes the
+            # residency visible: it is the load time on the block that loaded the
+            # separator and `0.0` on every block after it. A pass whose blocks
+            # all report a load is a pass that lost the residency, which is
+            # exactly the regression this arrangement fixed and exactly the shape
+            # that hid before — every job succeeding, every log clean.
+            load_seconds=self._loaded_seconds.pop(job.id, 0.0),
+            resident=self._residency.resident_id,
         )
 
     # -------------------------------------------------------------- helpers
+
+    def _session(
+        self,
+        ctx: JobContext,
+        manifest: DenoiseManifest,
+        spec: DenoiseBackendSpec,
+        model_file_dir: Path,
+        python: Path,
+        model: str,
+    ) -> workers.WorkerSession:
+        """The resident separator's worker, loading it first if it is not there.
+
+        A load here rather than through a `load-denoiser` job, which is
+        `AlignJobType._session`'s argument unchanged: `llm` and `tts` are loaded
+        by an explicit job because a client chooses *when* to spend the warm-up
+        and against what else is queued. A separator load is seconds and is
+        always immediately followed by the block it was loaded for, so making a
+        client send two jobs to denoise one block would be ceremony. Taking it
+        OFF the card is still an explicit door (`unload-denoiser`), because that
+        is a decision about somebody else's next job rather than about this one.
+
+        THIS METHOD IS THE FIX. Every block of a book after the first takes the
+        first branch and sends its request down a session that already has the
+        checkpoint on the card.
+        """
+        session = self._residency.separator_session
+        if session is not None and self._residency.is_resident(KIND_DENOISE, model):
+            if session.alive:
+                return session
+            # The resident row outlived its process — the worker died between
+            # blocks. Say so rather than sending a request into a closed pipe.
+            ctx.warming(
+                f"the resident {model} worker is gone (its log is "
+                f"{session.log_path}); loading it again"
+            )
+            self._forget(model)
+
+        try:
+            state = accelerator.guard(
+                self._config.backend_kind,
+                model_id=model,
+                need_bytes=spec.memory_bytes_estimate,
+                owned_pids=self._owned_pids(),
+                desktop_allowance_bytes=self._config.desktop_allowance_bytes,
+                reclaimable_bytes=self._residency.reclaimable_bytes(excluding=model),
+            )
+        except ApiError as exc:
+            raise JobError(exc.code, exc.message) from None
+        ctx.warming(state.detail)
+
+        began = time.perf_counter()
+        try:
+            self._residency.load_separator(
+                manifest,
+                spec,
+                model_file_dir,
+                python,
+                WORKER_SCRIPT,
+                # CUDA-only by audio-separator's own documentation, and a
+                # property of the accelerator rather than of the model — so it is
+                # decided here off the backend and never read from a manifest or
+                # a request. It rides on the LOAD because it is what the model
+                # was loaded with, and `ResidentSeparator` records it.
+                use_autocast=self._backend.kind == CUDA_LINUX,
+                environment=dict(ENGINE_ENVIRONMENT),
+                timeout=DEFAULT_READY_TIMEOUT_SECONDS,
+                on_progress=ctx.warming,
+            )
+        except workers.WorkerError as exc:
+            raise JobError("worker_failed", str(exc)) from None
+        self._loaded_seconds[ctx.job.id] = round(time.perf_counter() - began, 2)
+        loaded = self._residency.separator_session
+        if loaded is None:  # pragma: no cover - load_separator publishes or raises
+            raise JobError(
+                "worker_failed",
+                f"{model} loaded but no session was published; this is a bug in "
+                "crucible/residency.py",
+            )
+        return loaded
+
+    def _forget(self, model: str) -> None:
+        """Take a dead separator off the card without letting the tidy-up win.
+
+        The failure being reported is the worker's, and a `stop()` that also
+        fails must not replace it — the caller is about to raise the one error
+        that explains what happened.
+        """
+        try:
+            self._residency.unload(model)
+        except (KeyError, workers.WorkerError):
+            pass
 
     @staticmethod
     def _input(ctx: JobContext) -> Path:
         """The one audio file this job denoises, or a refusal.
 
-        One, not many. `rvc` takes a directory of sentences because urvc's
-        `convert-dir` loads the model once for all of them; a separator loads
-        once per job either way, and the app's own batching is the ~22-minute
-        block it builds before it sends anything — which is the client's, and is
-        already one file by the time it gets here.
+        One, not many, and that did NOT change when the separator became
+        resident — it is the half of the arrangement that was always right.
+        Blocking stays in the client (PHASE4-AUDIO.md section 4.2): the app
+        concatenates a session's sentences into ~22-minute blocks, sends each as
+        its own job, and slices the stem back at recorded offsets. What was wrong
+        was never the wire; it was that each of those ~44 jobs also paid a model
+        load. `_session` is where that stopped.
+
+        (`rvc` takes a directory for a different reason and still does: urvc's
+        `convert-dir` is one process per 96 files by design, because the recycle
+        needs a process to die.)
         """
         inputs = ctx.inputs()
         if not inputs:
@@ -611,3 +776,127 @@ class DenoiseJobType:
                 "not",
             )
         return primary
+
+
+# --------------------------------------------------------------- unload job
+
+
+class UnloadDenoiserParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class UnloadDenoiserJobType:
+    """`POST /v1/jobs {"type": "unload-denoiser", "model": "<separator id>"}`.
+
+    The other half of the residency ruling, and the reason there is no
+    `load-denoiser` beside it is in `DenoiseJobType._session`. Without this door
+    a separator could only be taken off the card by loading something else,
+    which would make "one card, one thing" a rule you can only obey by breaking
+    it. `unload-aligner`'s argument, unchanged, for the same shape of resident.
+    """
+
+    name = "unload-denoiser"
+
+    def __init__(self, config: Config, backend: Any, residency: Residency) -> None:
+        self._config = config
+        self._backend = backend
+        self._residency = residency
+
+    @property
+    def residency(self) -> Residency:
+        return self._residency
+
+    def describe_models(self) -> list[ModelDescriptor]:
+        rows: list[ModelDescriptor] = []
+        for manifest in _manifests().values():
+            backend_kind = self._config.backend_kind
+            supported = manifest.supports(backend_kind)
+            spec = manifest.spec(backend_kind) if supported else None
+            rows.append(
+                ModelDescriptor(
+                    id=manifest.id,
+                    revision=spec.revision if spec else "",
+                    source=f"{spec.hf_repo}:{spec.model_path}" if spec else "",
+                    installed=(
+                        model_installed(self._config.home, manifest, spec) is not None
+                        if spec
+                        else False
+                    ),
+                    resident=self._residency.is_resident(KIND_DENOISE, manifest.id),
+                    vram_bytes=spec.memory_bytes_estimate if spec else 0,
+                )
+            )
+        return rows
+
+    def model_provenance(self, model: str | None) -> dict[str, Any] | None:
+        return _denoise_provenance(self._config.backend_kind, model)
+
+    def vram_estimate(self, model: str | None) -> int:
+        return 0
+
+    def check(self, backend: Any) -> JobTypeStatus:
+        separator = self._residency.resident_separator
+        return JobTypeStatus(
+            ready=True,
+            detail=(
+                f"resident: {separator.separator_id}"
+                if separator
+                else "no separator is resident"
+            ),
+        )
+
+    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
+        if model is None:  # unreachable: resolve_model requires one
+            raise ApiError(400, "model_required", f"{self.name} needs a separator")
+        try:
+            UnloadDenoiserParams.model_validate(params)
+        except ValidationError as exc:
+            raise ApiError(
+                400, "invalid_params", f"{self.name} takes no params: {exc}"
+            ) from None
+        if self._residency.being_cleared(model):
+            # The settlement clearing this very separator is not a second
+            # holder, it is this request already happening (`unload-aligner`'s
+            # exception, T6 2026-09-15).
+            return
+        # Taking anything off the card while somebody holds it ends their
+        # conversation mid-sentence, and `Residency.unload` refuses it anyway —
+        # from inside the job, where it is a `failed` rather than an answer.
+        self._residency.refuse_if_claimed(f"unloading {model!r}")
+        if not self._residency.is_resident(KIND_DENOISE, model):
+            raise ApiError(
+                409,
+                "separator_not_resident",
+                f"{model!r} is not resident on this server; "
+                + describe_resident(self._residency, KIND_DENOISE, "no separator is"),
+                {"requested": model, "resident": self._residency.resident_id},
+            )
+
+    def run(self, job: Job, ctx: JobContext) -> None:
+        UnloadDenoiserParams.model_validate(job.params)
+        model = job.model
+        if model is None:  # unreachable: resolve_model requires one
+            raise JobError("model_required", f"{self.name} needs a separator")
+        if self._residency.await_clearance(model):
+            # The settlement got there first, which is the card this job asked
+            # for. Same terminal shape as an unload this job did itself.
+            ctx.progress(0.0, f"unloading {model}")
+            ctx.progress(1.0, f"{model} is unloaded — the card was cleared of it")
+            ctx.done_extra(resident=self._residency.resident_id)
+            return
+        if not self._residency.is_resident(KIND_DENOISE, model):
+            # Checked before `unload()` rather than caught from it: the holder
+            # unloads by id alone, and a voice sharing a separator's id would be
+            # taken off the card by `unload-denoiser`.
+            raise JobError(
+                "separator_not_resident",
+                f"{model!r} is not resident on this server; "
+                + describe_resident(self._residency, KIND_DENOISE, "no separator is"),
+            )
+        ctx.progress(0.0, f"unloading {model}")
+        try:
+            self._residency.unload(model)
+        except workers.WorkerError as exc:
+            raise JobError("worker_failed", str(exc)) from None
+        ctx.progress(1.0, f"{model} is unloaded")
+        ctx.done_extra(resident=self._residency.resident_id)

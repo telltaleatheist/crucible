@@ -176,9 +176,10 @@ doing (section 4).
 **The lane is not the only way to be busy.** A streaming session holds the resident
 engine without occupying the lane, so the job types that would talk to it or move it —
 `load-model`, `unload-model`, `load-voice`, `unload-voice`, `tts`, `align`,
-`unload-aligner` — additionally refuse `409 engine_in_use`, naming the holder. `asr` and
-`rvc` do not: they never touch the resident engine, and what they contend for is memory,
-which `accelerator.guard` already refuses by name.
+`unload-aligner`, `denoise`, `unload-denoiser` — additionally refuse `409 engine_in_use`,
+naming the holder. `asr` and `rvc` do not: they never touch the resident engine, and what
+they contend for is memory, which `accelerator.guard` already refuses by name. (`denoise`
+joined that list on 2026-09-15, when the separator became the fourth resident kind.)
 
 `crucible/jobs/queue.py` keeps the lane, the deque, `position`, `queue_depth`, cancel,
 events and provenance. One policy decision changed, at admission; `queue_depth` is now

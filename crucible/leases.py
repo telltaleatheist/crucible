@@ -101,7 +101,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .errors import ApiError
-from .residency import KIND_ALIGN, KIND_LLM, KIND_NOUNS, KIND_TTS
+from .residency import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_NOUNS, KIND_TTS
 
 #: The sane range for a ttl, in seconds, and the one the refusal states.
 #:
@@ -164,18 +164,25 @@ CARD_EFFECTS: dict[str, CardEffect] = {
     # its own id (`AlignJobType._session`) — the reason the resident aligner
     # exists at all (PHASE4-AUDIO.md section 2).
     "align": CardEffect(makes_resident=KIND_ALIGN, reuses_what_it_names=True),
-    # The three unloaders, each of which can reach its own kind and no other.
+    # Loads a separator, the FOURTH resident kind (2026-09-15), and reuses one it
+    # finds under its own id (`DenoiseJobType._session`) — which is the whole
+    # reason the resident separator exists: a book is ~44 blocks and one load.
+    # It is `align`'s row for `align`'s reason and not a new idea.
+    "denoise": CardEffect(makes_resident=KIND_DENOISE, reuses_what_it_names=True),
+    # The four unloaders, each of which can reach its own kind and no other.
     "unload-model": CardEffect(takes_off=KIND_LLM),
     "unload-voice": CardEffect(takes_off=KIND_TTS),
     "unload-aligner": CardEffect(takes_off=KIND_ALIGN),
+    "unload-denoiser": CardEffect(takes_off=KIND_DENOISE),
     # `echo` never touches the accelerator at all.
     "echo": CardEffect(),
-    # `asr` / `rvc` / `denoise` run the accelerator guard with **no**
-    # `reclaimable_bytes`, which is their own deliberate note: they never unload
-    # somebody's resident engine to make room, they refuse instead.
+    # `asr` and `rvc` run the accelerator guard with **no** `reclaimable_bytes`,
+    # which is their own deliberate note: they never unload somebody's resident
+    # engine to make room, they refuse instead. `denoise` USED to be in this
+    # sentence and moved up with the residency ruling — it now loads over a
+    # previous resident exactly as `align` does.
     "asr": CardEffect(),
     "rvc": CardEffect(),
-    "denoise": CardEffect(),
 }
 
 

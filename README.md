@@ -761,6 +761,12 @@ and the checkpoint is 1.7 GB, so the worker is held open — `workers.WorkerSess
 loading an aligner unloads a voice and vice versa. The load happens inside the first `align`
 job; `{"type": "unload-aligner"}` takes it off.
 
+`denoise` is the second, on the same machinery and for the same reason (2026-09-15): a
+book is ~44 blocks, so the separator stays on the card across them and
+`{"type": "unload-denoiser"}` takes it off. **A lease is what keeps either of them there
+across a run** — this server clears the card the moment nothing holds it, and "one more
+block is coming" is a fact only the client has.
+
 **No retries and no second backend, ever.** A failed chunk is named in the artifact and the
 run continues; nothing else is tried. A chunk over **300 seconds** is refused rather than
 split, because splitting it would silently change the alignment.

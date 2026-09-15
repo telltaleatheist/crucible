@@ -37,6 +37,7 @@ from typing import Any, Callable, Iterator
 
 from .accelerator import probe_unified_memory
 from .alignmodels import AlignBackendSpec, AlignManifest
+from .denoisemodels import DenoiseBackendSpec, DenoiseManifest
 from .backend import MLX_DARWIN
 from .config import Config
 from .engines import (
@@ -75,9 +76,25 @@ from .workers import WorkerError, WorkerSession
 #: holder slot rather than being dressed up as an engine, because an aligner has
 #: no `base_url`, nothing to proxy to, and no readiness route; pretending
 #: otherwise would put three lies in a row on one row of `/v1/health`.
+#:
+#: `denoise` is the fourth, added 2026-09-15 on Owen's ruling, and it is the
+#: SAME shape as `align` rather than a fifth idea: a `workers.WorkerSession`
+#: held open across jobs. `crucible/jobs/denoise/__init__.py` used to say that
+#: holding the separator "would be a third kind of resident thing and a ruling
+#: nobody has made" — the ruling is now made, and what bought it is a
+#: measurement BookForge had already taken and Crucible had no way to see. Its
+#: resident separator (`electron/scripts/separator_worker.py`, bookforge
+#: `019afa52`) replaced a per-block spawn because *"a 15-hour book is ~44 of
+#: them — so that fixed cost was being paid 44 times (10-25 s each) for ~85 s of
+#: real work per block"*, which `electron/denoise-bridge.ts:27-32` puts at
+#: *"roughly a third of the pass. One load now serves the whole book."* The warm
+#: figure from that commit body is 7.4 s of an 11.0 s one-shot. One job per
+#: block is the right WIRE — blocking stays in the client, PHASE4-AUDIO.md
+#: section 4.2 — and it is only the LOAD that had to stop being per-job.
 KIND_LLM = "llm"
 KIND_TTS = "tts"
 KIND_ALIGN = "align"
+KIND_DENOISE = "denoise"
 
 #: How long a load waits for the engine to prove it is up. vLLM on a 19 GB model
 #: spends most of it reading weights and capturing CUDA graphs; narrator on
@@ -257,7 +274,58 @@ class ResidentAligner:
         }
 
 
-Resident = ResidentModel | ResidentVoice | ResidentAligner
+@dataclass(frozen=True)
+class ResidentSeparator:
+    """The audio separator Crucible currently has loaded.
+
+    `ResidentAligner`'s shape, for `ResidentAligner`'s reason: this is not a
+    server either. It is `crucible/jobs/denoise/worker.py` held open by a
+    `workers.WorkerSession`, and what makes it *resident* is that the checkpoint
+    stays on the card between jobs — a book is ~44 blocks and one load, which is
+    the whole point (PHASE4-AUDIO.md section 4.2, Owen's ruling 2026-09-15).
+
+    `use_autocast` is on the row because it is what the model was actually
+    loaded with rather than what a manifest prefers. It is CUDA-only by
+    audio-separator's own documentation, the server decides it from the backend,
+    and BookForge measured what it buys on 2026-08-29: 20.1x realtime without it
+    against 29.2x with, output delta peak -72.6 dB / RMS -91.5 dB relative —
+    below the 16-bit noise floor. A reader looking at a block's timings cannot
+    tell which arrangement produced them unless the row says.
+    """
+
+    kind = KIND_DENOISE
+
+    separator_id: str
+    backend: str
+    model_filename: str
+    revision: str
+    fingerprint: str
+    sample_rate: int
+    use_autocast: bool
+    memory_bytes_estimate: int
+    log_path: Path
+    loaded_at: str
+
+    @property
+    def id(self) -> str:
+        return self.separator_id
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "separator": self.separator_id,
+            "backend": self.backend,
+            "model_filename": self.model_filename,
+            "revision": self.revision,
+            "fingerprint": self.fingerprint,
+            "sample_rate": self.sample_rate,
+            "use_autocast": self.use_autocast,
+            "memory_bytes_estimate": self.memory_bytes_estimate,
+            "log_path": str(self.log_path),
+            "loaded_at": self.loaded_at,
+        }
+
+
+Resident = ResidentModel | ResidentVoice | ResidentAligner | ResidentSeparator
 
 
 def _now() -> str:
@@ -265,12 +333,13 @@ def _now() -> str:
 
 
 #: What to call each kind in a refusal. A mapping and not a two-way conditional,
-#: because there are three of them now and "the resident model is
+#: because there are four of them now and "the resident model is
 #: 'qwen3-aligner'" would be a sentence that sends its reader to `unload-model`.
 KIND_NOUNS: dict[str, str] = {
     KIND_LLM: "model",
     KIND_TTS: "voice",
     KIND_ALIGN: "aligner",
+    KIND_DENOISE: "separator",
 }
 
 
@@ -617,6 +686,23 @@ class Residency:
         return None if self.resident_aligner is None else self._session
 
     @property
+    def resident_separator(self) -> ResidentSeparator | None:
+        """The resident, if it is a separator. None otherwise."""
+        return (
+            self._resident if isinstance(self._resident, ResidentSeparator) else None
+        )
+
+    @property
+    def separator_session(self) -> "WorkerSession | None":
+        """The held worker behind the resident separator, or None.
+
+        `aligner_session`'s reason, exactly: this module owns the LIFETIME of the
+        process and the job type owns the VOCABULARY of a separate request. A
+        `Residency.denoise(...)` would be this module learning what a block is.
+        """
+        return None if self.resident_separator is None else self._session
+
+    @property
     def warming(self) -> str | None:
         """The id a load job is currently warming, or None."""
         return self._warming
@@ -960,6 +1046,102 @@ class Residency:
             device=device,
             dtype=dtype,
             max_audio_s=max_audio_s,
+            memory_bytes_estimate=spec.memory_bytes_estimate,
+            log_path=log_path,
+            loaded_at=_now(),
+        )
+        say(f"{manifest.id} is resident")
+        return self._resident
+
+    def load_separator(
+        self,
+        manifest: DenoiseManifest,
+        spec: DenoiseBackendSpec,
+        model_file_dir: Path,
+        python: Path,
+        script: Path,
+        *,
+        use_autocast: bool,
+        environment: dict[str, str],
+        timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> ResidentSeparator:
+        """Make this separator the resident thing, unloading whatever was there.
+
+        `load_aligner`'s shape and `load_aligner`'s bar: the load is the
+        session's FIRST exchange, a `{"op": "load"}` the worker answers with
+        `ready` once audio-separator has the checkpoint on the device. A process
+        that has started has proved only that python runs; a `ready` to a load
+        has proved the weights are where the next block expects them.
+
+        There is no `load-denoiser` job to call this — `DenoiseJobType._session`
+        gives the reason `align` gives: a client never wants a loaded separator
+        for its own sake, only immediately before the blocks it loaded it for.
+        Taking it OFF the card is an explicit door (`unload-denoiser`) because
+        that is a decision about somebody else's next job.
+        """
+        self._refuse_mutation_if_claimed(f"load {manifest.id}")
+
+        def say(message: str) -> None:
+            if on_progress is not None:
+                on_progress(message)
+
+        self._evict(say, manifest.id)
+
+        log_path = engine_log_path(self._config.home, manifest.id)
+        # THE ENGINE ENVIRONMENT TRAVELS WITH THE SESSION, not with a request.
+        # It is the OpenMP hardening the shared rvc env needs — that env bundles
+        # three libomp copies (torch, faiss-cpu, scikit-learn) and loading more
+        # than one aborts with OMP Error #15, while co-loaded duplicates SIGSEGV
+        # the moment a thread pool spins up. A one-shot worker got it per run;
+        # a HELD worker gets it once, here, or it never gets it at all.
+        session = WorkerSession(
+            python=python,
+            script=script,
+            log_path=log_path,
+            environment=dict(environment),
+        )
+
+        self.begin_warming(manifest.id)
+        say(
+            f"loading {manifest.id} ({manifest.model_filename}) with "
+            f"use_autocast={use_autocast}; log {log_path}"
+        )
+        try:
+            outcome = session.start(
+                {
+                    "op": "load",
+                    "model_file_dir": str(model_file_dir),
+                    "model_filename": manifest.model_filename,
+                    "use_autocast": use_autocast,
+                },
+                ready_silence_timeout=timeout,
+                on_ready=lambda message: say(
+                    f"{manifest.id} loaded in {message['seconds']:.1f}s"
+                ),
+                on_progress=lambda message: say(str(message["message"])),
+            )
+        finally:
+            self.end_warming()
+        if outcome.results:
+            # `start` stopped nothing — the worker is alive and holding the card
+            # — so this refuses loudly rather than letting a worker that answered
+            # a load with stems go on to answer a book.
+            session.stop()
+            raise WorkerError(
+                f"{script.name} answered a load request with "
+                f"{len(outcome.results)} result(s); a load produces none"
+            )
+
+        self._session = session
+        self._resident = ResidentSeparator(
+            separator_id=manifest.id,
+            backend=spec.backend,
+            model_filename=manifest.model_filename,
+            revision=spec.revision,
+            fingerprint=fingerprint(manifest.id, spec.revision),
+            sample_rate=manifest.sample_rate,
+            use_autocast=use_autocast,
             memory_bytes_estimate=spec.memory_bytes_estimate,
             log_path=log_path,
             loaded_at=_now(),

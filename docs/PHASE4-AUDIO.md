@@ -579,6 +579,46 @@ with something else.
 app concatenates a book's sentences into ~22-minute blocks, denoises each, and slices the
 stems back at recorded offsets. Crucible denoises one thing at a time.
 
+**And the separator is RESIDENT** (Owen's ruling, 2026-09-15). Those two sentences are not
+in tension: the WIRE is still one block per job and the blocking is still the client's;
+what changed is that the checkpoint stays on the card BETWEEN jobs, as `KIND_DENOISE` —
+the fourth resident kind, the same `workers.WorkerSession` shape as the aligner in
+section 2.
+
+This reverses a ruling in this document, and the reason is a measurement Crucible had no
+way to see. The job type argued that "a separator loads once per job either way", which is
+true of one job and false of a pass: the client sends **~44 jobs for a 15-hour book**, so
+the load was paid ~44 times. BookForge had already made the identical mistake on its own
+side and already fixed it — `electron/scripts/separator_worker.py` (bookforge `019afa52`)
+replaced a per-block spawn with a resident worker because the fixed cost was *"being paid
+44 times (10-25 s each) for ~85 s of real work per block"*, which
+`electron/denoise-bridge.ts:27-32` records as *"roughly a third of the pass. One load now
+serves the whole book."* The warm figure from that commit is 7.4 s of an 11.0 s one-shot.
+A job type reasons about one job; a pass is a property of the client, and nothing here
+could see it.
+
+What the ruling needed, beyond the kind itself:
+
+- `unload-denoiser`, for `unload-aligner`'s reason exactly — without it a separator could
+  only be evicted by loading something else. There is no `load-denoiser`, for
+  `load-aligner`'s reason: a load is seconds and is always immediately followed by the
+  block it was loaded for.
+- **A LEASE at the client's door**, and this half is not optional. `crucible/settle.py`
+  clears the card the moment the last holder lets go, so an unleased run of ~44 blocks
+  would reload per block *and be right to* — "one more block is coming" is the client's
+  fact and nothing here can see it. `electron/crucible/denoise.ts` takes one after the
+  first block (a lease names what is already resident) and releases it in `dispose()`.
+- `done.extra.load_seconds` is the load time on the block that paid for it and `0.0` on
+  every block after. A pass whose blocks all report a load is a pass that has lost the
+  residency — which is how this hid the first time, with every job succeeding and every
+  log clean.
+
+**Only the primary stem is published.** The client slices the `(dry)` stem and discards the
+rest, so shipping the others meant downloading a second ~233 MB copy of each block's noise
+— about 10 GB across a 15-hour book — in order to delete it. Every stem is still measured
+and still named in `done.extra.stems`; `done.artifacts` is what was published and
+`done.extra.stems` is what was produced, and they differ on purpose.
+
 ### Three invariants, each one BookForge's and each one measured
 
 - **The input must already be at 44.1 kHz.** The model is 44.1 kHz native and its librosa

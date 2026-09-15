@@ -25,7 +25,8 @@ from crucible.accelerator import GIB
 from crucible.denoisemodels import load_denoise_manifest, stamp_name
 from crucible.jobs import denoise as denoise_job
 
-from .conftest import FAKE_BACKEND, parse_sse
+from .conftest import FAKE_BACKEND, holding_the_card, parse_sse
+from crucible.residency import KIND_DENOISE
 
 MODEL = "denoise-roformer"
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_denoise_worker.py"
@@ -196,7 +197,8 @@ def test_info_advertises_denoise(
     assert rows[0]["source"] == f"{spec.hf_repo}:{spec.model_path}"
     assert rows[0]["revision"] == spec.revision
     assert rows[0]["installed"] is False
-    # Nothing is ever resident: one job, one load, one exit.
+    # Not resident YET. This is a real question since 2026-09-15 — the separator
+    # is held across jobs — and the answer before anything has run is False.
     assert rows[0]["resident"] is False
 
 
@@ -325,14 +327,23 @@ def test_a_run_publishes_every_stem_and_names_the_primary(
     assert terminal(events)["event"] == "done", terminal(events)
     data = terminal(events)["data"]
     assert data["primary_stem"].lower().count("(dry)") == 1
+    # PRODUCED is every stem; PUBLISHED is the primary alone. The two differ on
+    # purpose since 2026-09-15: `denoise-bridge.ts` slices the `(dry)` stem and
+    # discards the rest, so shipping the others meant the client downloaded a
+    # second ~233 MB copy of each block's noise — ~10 GB across a 15-hour book —
+    # in order to delete it. What the model produced is still a fact about the
+    # run and is still reported.
     assert len(data["stems"]) == 2
-    assert sorted(data["artifacts"]) == sorted(data["stems"])
+    assert data["artifacts"] == [data["primary_stem"]]
     assert data["sample_rate"] == 44100
     assert data["frames"] == 441000
     assert data["separate_seconds"] == 8.25
+    # The load is reported once, on the block that paid for it.
+    assert data["load_seconds"] > 0
+    assert data["resident"] == MODEL
 
     job_id = events[0]["job_id"]
-    for name in data["stems"]:
+    for name in data["artifacts"]:
         got = ready.get(f"/v1/jobs/{job_id}/artifacts/{name}", headers=auth)
         assert got.status_code == 200
         assert name.encode() in got.content
@@ -360,13 +371,20 @@ def test_the_worker_is_told_the_native_rate_and_the_backend_decides_autocast(
     events = run_job(ready, auth)
     assert terminal(events)["event"] == "done"
     lines = transcript.read_text(encoding="utf-8").splitlines()
-    request = json.loads(lines[0])
-    assert request["sample_rate"] == 44100
-    assert request["output_format"] == "WAV"
+    # A SESSION now: the load is the first exchange and the block is the second.
+    # `use_autocast` rides on the LOAD, because it is what the model was loaded
+    # with; the rate and the format ride on the BLOCK, because they are what
+    # this block is checked against and written as.
+    load = json.loads(lines[0])
+    assert load["op"] == "load"
     # cuda-linux, so autocast is on: CUDA-only by audio-separator's own docs,
     # and decided by the backend rather than by a manifest or a request.
-    assert request["use_autocast"] is True
-    assert request["model_filename"].endswith(".ckpt")
+    assert load["use_autocast"] is True
+    assert load["model_filename"].endswith(".ckpt")
+    request = json.loads(lines[2])
+    assert request["op"] == "separate"
+    assert request["sample_rate"] == 44100
+    assert request["output_format"] == "WAV"
     # The OpenMP hardening the shared rvc env needs reached the engine.
     environment = json.loads(lines[1])
     assert environment["KMP_DUPLICATE_LIB_OK"] == "TRUE"
@@ -425,6 +443,7 @@ def test_autocast_is_off_on_the_mac(
     with make_client(enable_denoise=True, backend=FAKE_MAC_BACKEND) as client:
         events = run_job(client, auth)
     assert terminal(events)["event"] == "done", terminal(events)
+    # On the LOAD, which is the session's first exchange.
     assert json.loads(transcript.read_text(encoding="utf-8").splitlines()[0])[
         "use_autocast"
     ] is False
@@ -602,3 +621,124 @@ def test_check_reports_what_is_missing_in_order(
     ready_status = plugin.check(FAKE_BACKEND)
     assert ready_status.ready is True
     assert MODEL in ready_status.detail
+
+
+# ------------------------------------------------- the residency, and its bill
+
+
+def test_a_book_denoised_block_by_block_pays_one_load(
+    ready: TestClient,
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """THE TEST THIS WHOLE CHANGE EXISTS FOR.
+
+    A book is ~44 blocks and it used to be ~44 model loads: this type spawned a
+    worker, loaded the checkpoint, separated one block and exited, on the
+    reasoning that "a separator loads once per job either way". True of one job,
+    false of a book — and invisible, because every job succeeded and every log
+    was clean. BookForge had already measured the same mistake on its own side
+    and fixed it (`electron/scripts/separator_worker.py`, bookforge `019afa52`):
+    10-25 s of load for ~85 s of work per block, *"roughly a third of the pass"*.
+
+    Three blocks, one `load`. The ops in the transcript are the whole assertion,
+    because a pass that has lost the residency is identical in every other
+    respect — same artifacts, same stems, same `done` per block.
+
+    A LEASE IS WHAT MAKES IT TRUE ACROSS JOBS, and that is not a detail of the
+    test: `crucible/settle.py` clears the card the moment the last holder lets
+    go, so an unleased run of blocks would reload per block *and be right to*.
+    The client states the intention; the server never guesses that one more
+    block is coming. There is no `load-denoiser` door, so the first job is what
+    makes it resident and the lease is taken on what that left.
+    """
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_TRANSCRIPT", str(transcript))
+    with holding_the_card(ready):
+        run_job(ready, auth)
+        opened = ready.post(
+            f"/v1/models/{MODEL}/lease",
+            headers=auth,
+            json={"act": "denoise", "ttl_seconds": 60},
+        )
+    assert opened.status_code == 201, opened.text
+    lease = opened.json()
+    assert lease["subject"] == MODEL
+    assert lease["kind"] == KIND_DENOISE
+
+    second = run_job(ready, auth)
+    third = run_job(ready, auth)
+    assert terminal(second)["event"] == "done", terminal(second)
+    assert terminal(third)["event"] == "done", terminal(third)
+    assert ready.get("/v1/health", headers=auth).json()["resident_kind"] == (
+        KIND_DENOISE
+    )
+
+    # THE BILL, block by block: the first paid for the load and the other two
+    # paid nothing. A `load_seconds` on every block is the regression coming
+    # back, and it is the one number that can say so.
+    assert terminal(second)["data"]["load_seconds"] == 0.0
+    assert terminal(third)["data"]["load_seconds"] == 0.0
+
+    assert ready.delete(
+        f"/v1/leases/{lease['lease_id']}", headers=auth
+    ).status_code == 204
+    assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
+
+    ops = [
+        json.loads(line)["op"]
+        for line in transcript.read_text(encoding="utf-8").splitlines()
+        if line.startswith("{") and '"op"' in line
+    ]
+    assert ops == ["load", "separate", "separate", "separate"]
+
+
+def test_a_denoise_lease_refuses_what_would_evict_it_and_admits_its_own_work(
+    ready: TestClient, auth: dict[str, str]
+) -> None:
+    """A `denoise` on the leased separator reuses it; anything else is refused."""
+    with holding_the_card(ready):
+        run_job(ready, auth)
+        opened = ready.post(
+            f"/v1/models/{MODEL}/lease",
+            headers=auth,
+            json={"act": "denoise", "ttl_seconds": 60},
+        )
+    assert opened.status_code == 201, opened.text
+
+    refused = submit(ready, auth, type="unload-denoiser", model=MODEL, params={})
+    assert refused.status_code == 409, refused.text
+    error = refused.json()["error"]
+    assert error["code"] == "leased"
+    assert error["details"]["kind"] == KIND_DENOISE
+    assert "the resident separator" in error["message"]
+
+    # And the work the lease was taken for is admitted, which is the point.
+    assert submit(ready, auth).status_code == 202
+
+
+def test_unload_denoiser_takes_it_off_the_card_and_refuses_when_nothing_is_there(
+    ready: TestClient, auth: dict[str, str]
+) -> None:
+    """The other half of the residency: an explicit door off the card.
+
+    Without it a separator could only be evicted by loading something else,
+    which would make "one card, one thing" a rule you can only obey by breaking
+    it (`unload-aligner`'s argument, same shape of resident).
+    """
+    # Nothing resident yet: the refusal names the kind rather than 500ing.
+    empty = submit(ready, auth, type="unload-denoiser", model=MODEL, params={})
+    assert empty.status_code == 409, empty.text
+    assert empty.json()["error"]["code"] == "separator_not_resident"
+    assert "no separator is" in empty.json()["error"]["message"]
+
+    with holding_the_card(ready):
+        run_job(ready, auth)
+        assert ready.get("/v1/health", headers=auth).json()["resident_kind"] == (
+            KIND_DENOISE
+        )
+        events = run_job(ready, auth, type="unload-denoiser", model=MODEL, params={})
+    assert terminal(events)["event"] == "done", terminal(events)
+    assert terminal(events)["data"]["resident"] is None
+    assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None

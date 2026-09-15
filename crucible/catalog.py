@@ -66,7 +66,7 @@ from .config import Config
 from .errors import ApiError, CrucibleError
 from .manifests import load_all_manifests
 from .jobs.base import utcnow
-from .residency import KIND_ALIGN, KIND_LLM, KIND_TTS, Residency
+from .residency import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_TTS, Residency
 from .rvcmodels import load_all_rvc_manifests
 from .voices import load_all_voices
 
@@ -88,16 +88,21 @@ KINDS: tuple[str, ...] = ("model", "voice", "rvc", "rvc-base", "denoise", "engin
 #: detail of which engine this build's `rvc` job runs.
 RVC_BASE_ID = "base"
 
-#: Which resident kind, if any, a subject of this job type could BE. `rvc` and
-#: `denoise` are absent on purpose: nothing of those kinds is ever resident
-#: (both run a process that loads, works and exits), so their rows report
-#: `resident: false` without asking. Reading them off a residency that can never
-#: name them would be a comparison whose answer is structurally fixed, which is
-#: how a field becomes wrong the day the structure changes.
+#: Which resident kind, if any, a subject of this job type could BE. `rvc` is
+#: absent on purpose: nothing of that kind is ever resident (it runs a process
+#: that loads, works and exits), so its rows report `resident: false` without
+#: asking. Reading it off a residency that can never name it would be a
+#: comparison whose answer is structurally fixed, which is how a field becomes
+#: wrong the day the structure changes.
+#:
+#: `denoise` WAS in that sentence and is not any more (2026-09-15): the separator
+#: is held across jobs now, so its row is a real question with a real answer and
+#: the day the structure changed is today.
 _RESIDENT_KIND_FOR_JOB_TYPE: dict[str, str] = {
     "llm": KIND_LLM,
     "align": KIND_ALIGN,
     "tts": KIND_TTS,
+    "denoise": KIND_DENOISE,
 }
 
 
