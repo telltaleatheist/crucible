@@ -653,8 +653,20 @@ def test_a_windows_driver_that_will_not_answer_is_unreadable_and_never_ram(
     assert called == []
 
 
-def test_a_busy_windows_card_is_still_accelerator_busy(monkeypatch) -> None:
-    """Windows being a backend does not soften section 4: nothing is evicted."""
+def test_a_full_windows_card_is_refused_for_the_room_and_not_for_the_company(
+    monkeypatch,
+) -> None:
+    """CORRECTED by T7's second run on the live card, 2026-09-14.
+
+    This test used to assert `accelerator_busy` here, and that was the defect:
+    a Windows DESKTOP always shares its card, nvidia-smi on Windows names the
+    compositor and the shell and the browser, and "a foreign compute app holds
+    the card" refused every load this backend could ever be asked for. The
+    guard asks whether there is ROOM on this backend. Somebody else's 20 GiB
+    still refuses the load — by the name for a shortfall, with the figures,
+    and with the process REPORTED in the details rather than blamed in the
+    reason.
+    """
     _fake_card(
         monkeypatch,
         free=2 * GIB,
@@ -665,8 +677,71 @@ def test_a_busy_windows_card_is_still_accelerator_busy(monkeypatch) -> None:
         accelerator.guard(
             LLAMA_WINDOWS, model_id="dots-ocr", need_bytes=6 * GIB
         )
+    assert caught.value.code == "insufficient_memory"
+    assert "needs 6.0 GiB" in caught.value.message
+    assert "2.0 GiB free of 24.0 GiB" in caught.value.message
+    assert caught.value.details["processes"][0]["pid"] == 4242
+    assert "4242" not in caught.value.message
+
+
+def test_a_windows_card_with_room_beside_the_desktop_loads(monkeypatch) -> None:
+    """The load T7 could not perform: 20 GiB free with the shell on the card."""
+    _fake_card(
+        monkeypatch,
+        free=20 * GIB,
+        total=24 * GIB,
+        apps=[
+            accelerator.ComputeApp(
+                pid=1460, name="[Insufficient Permissions]", used_bytes=None
+            ),
+            accelerator.ComputeApp(
+                pid=11208, name=r"C:\WINDOWS\explorer.exe", used_bytes=None
+            ),
+        ],
+    )
+    state = accelerator.guard(
+        LLAMA_WINDOWS,
+        model_id="dots-ocr",
+        need_bytes=6 * GIB,
+        desktop_allowance_bytes=3 * GIB,
+    )
+    assert len(state.compute_apps) == 2
+
+
+def test_a_llama_server_of_ours_that_outlived_its_run_is_accelerator_busy(
+    monkeypatch,
+) -> None:
+    """The one holder on this backend, and it is found by IMAGE NAME.
+
+    A `llama-server` Crucible did not start is a previous run's engine child
+    still on the card. There is room here (20 GiB against 6), so nothing but
+    the name catches it — which is the point: the pid of a crashed run is not
+    knowable.
+    """
+    _fake_card(
+        monkeypatch,
+        free=20 * GIB,
+        total=24 * GIB,
+        apps=[
+            accelerator.ComputeApp(
+                pid=11208, name=r"C:\WINDOWS\explorer.exe", used_bytes=None
+            ),
+            accelerator.ComputeApp(
+                pid=31337,
+                name=r"C:\Users\tellt\AppData\Local\Crucible\engine\llama-server.exe",
+                used_bytes=6 * GIB,
+            ),
+        ],
+    )
+    with pytest.raises(ApiError) as caught:
+        accelerator.guard(
+            LLAMA_WINDOWS, model_id="dots-ocr", need_bytes=6 * GIB
+        )
     assert caught.value.code == "accelerator_busy"
-    assert "4242" in caught.value.message
+    assert "pid 31337" in caught.value.message
+    assert "never evicts" in caught.value.message
+    # explorer.exe is not a holder even here.
+    assert [row["pid"] for row in caught.value.details["processes"]] == [31337]
 
 
 def test_a_load_preflight_passes_on_a_fake_llama_windows_accelerator(

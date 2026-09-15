@@ -8,14 +8,42 @@ than competing for it. There is no eviction of other people's processes, ever.
                  Then `nvidia-smi --query-gpu=memory.free` against the manifest's
                  estimate — short is `insufficient_memory`, naming both numbers.
     mlx-darwin   the same two questions asked of free unified memory.
-    llama-windows the same two questions asked of the Windows driver, or — on a
-                 machine with no NVIDIA driver at all — of system RAM, which is
-                 where a GGUF on the CPU allocates from (PHASE15-HOST.md 3.5:
-                 *"`/v1/accelerator` (nvidia-smi, or `cpu` with the machine's
-                 RAM as the figure)"*).
+    llama-windows the SECOND question only — is there ROOM — asked of the Windows
+                 driver, or, on a machine with no NVIDIA driver at all, of system
+                 RAM, which is where a GGUF on the CPU allocates from
+                 (PHASE15-HOST.md 3.5: *"`/v1/accelerator` (nvidia-smi, or `cpu`
+                 with the machine's RAM as the figure)"*). The first question is
+                 asked of ONE image name; see below.
 
 Every probe is a module-level function so a test can replace it and assert on the
 refusal instead of on the machine it happens to run on.
+
+On `llama-windows` the card is SHARED BY DESIGN
+-----------------------------------------------
+Measured by the Phase 15 button's T7 on the live card, 2026-09-14: the staged
+Windows server refused `load-model dots-ocr` with `accelerator_busy`, naming
+`dwm`, `explorer.exe`, `SearchHost.exe`, `StartMenuExperienceHost.exe`,
+`CrossDeviceResume.exe` and one row the driver would only call
+`[Insufficient Permissions]`. Every one of them is Windows drawing a desktop.
+
+A Windows DESKTOP always shares its GPU with the compositor, the shell, the
+browser and whatever else has a window open, and nvidia-smi on Windows NAMES
+those processes in `--query-compute-apps` (several with no memory figure at
+all). So the cuda-linux meaning of a foreign compute app — inside WSL2 a
+process on the card is a trainer or another engine, refuse — does not transfer:
+applying it here makes every load on this backend impossible.
+
+**The rule on this backend, therefore, is ROOM and not solitude.** The guard
+asks `free VRAM >= memory_bytes_estimate` and refuses the shortfall by the name
+it has always had, `insufficient_memory`, naming both figures. The foreign
+processes are REPORTED — `details.processes` on that refusal, and `/v1/accelerator`
+lists them all along — but they are never the reason.
+
+**The one exception is an engine of ours that outlived its run.** A
+`llama-server` this Crucible did not start is a previous run's orphan holding
+the card, and it IS `accelerator_busy`. It is found BY IMAGE NAME, never by
+"any pid that is not ours": the pid of a crashed run is not knowable, and the
+image is.
 
 A measured limitation, stated rather than papered over
 ------------------------------------------------------
@@ -54,6 +82,29 @@ GIB = 1024 ** 3
 #: A process holding less than this is not "using the card" for our purposes —
 #: a compositor or a video decoder, not somebody's job (PHASE2-LLM.md section 4).
 FOREIGN_PROCESS_FLOOR_BYTES = 1 * GIB
+
+#: The image `llama-windows` runs as its engine child, without extension or
+#: directory. On a shared Windows desktop this is the ONE name that makes a
+#: foreign compute app a holder rather than a neighbour (PHASE15-HOST.md 3.5).
+LLAMA_SERVER_IMAGE = "llama-server"
+
+
+def is_llama_server(process_name: str) -> bool:
+    """Is this compute app a llama.cpp server, judged by its IMAGE NAME?
+
+    nvidia-smi reports the full path of the executable
+    (`C:\\...\\llama-server.exe` on Windows, `/opt/.../llama-server` elsewhere),
+    so the comparison is on the basename with any `.exe` removed, case-folded
+    because Windows paths are.
+
+    The image and not the pid, deliberately: the holder this catches is an
+    engine child left behind by a run that crashed, and nothing in this process
+    knows what pid that run gave it. A name is the only handle there is.
+    """
+    stem = process_name.replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+    if stem.endswith(".exe"):
+        stem = stem[: -len(".exe")]
+    return stem == LLAMA_SERVER_IMAGE
 
 
 class ProbeError(CrucibleError):
@@ -412,24 +463,44 @@ def guard(
             f"cannot load {model_id!r}: {exc}",
         ) from None
 
-    foreign = [
-        app
-        for app in state.compute_apps
-        if app.pid not in owned_pids
-        and (app.used_bytes is None or app.used_bytes > FOREIGN_PROCESS_FLOOR_BYTES)
-    ]
-    if foreign:
+    not_ours = [app for app in state.compute_apps if app.pid not in owned_pids]
+
+    if backend_kind == LLAMA_WINDOWS:
+        # The card is SHARED BY DESIGN here (this module's docstring, T7 on the
+        # live card 2026-09-14, PHASE15-HOST.md 3.5). dwm, explorer, the shell
+        # and the browser are all on it and nvidia-smi names them, so "a
+        # process that is not ours" is the normal state of a Windows desktop
+        # and cannot be the question. The question is whether there is ROOM,
+        # which the free-memory check below asks. The one holder is an engine
+        # of ours that outlived its run, found by image name.
+        holders = [app for app in not_ours if is_llama_server(app.name)]
+        opening = (
+            f"cannot load {model_id!r}: a llama-server this Crucible did not "
+            "start is still on the accelerator — "
+        )
+        closing = (
+            ". It is an engine child left behind by an earlier run; stop it and "
+            "load again. Crucible never evicts another process."
+        )
+    else:
+        holders = [
+            app
+            for app in not_ours
+            if app.used_bytes is None or app.used_bytes > FOREIGN_PROCESS_FLOOR_BYTES
+        ]
+        opening = f"cannot load {model_id!r}: the accelerator is held by "
+        closing = ". Crucible never evicts another process."
+
+    if holders:
         raise ApiError(
             409,
             "accelerator_busy",
-            f"cannot load {model_id!r}: the accelerator is held by "
-            + "; ".join(app.describe() for app in foreign)
-            + ". Crucible never evicts another process.",
+            opening + "; ".join(app.describe() for app in holders) + closing,
             {
                 "model": model_id,
                 "processes": [
                     {"pid": app.pid, "name": app.name, "used_bytes": app.used_bytes}
-                    for app in foreign
+                    for app in holders
                 ],
             },
         )
@@ -446,8 +517,8 @@ def guard(
     # apps — while a Windows desktop always holds VRAM that belongs to no
     # compute app at all (the compositor, the browser, every window on screen).
     # Running it here would refuse every load on a machine that is simply
-    # displaying a desktop, so the compute-app list and the free figure are the
-    # whole check on this backend.
+    # displaying a desktop, so the llama-server check above and the free figure
+    # below are the whole check on this backend.
     stray = (
         unattributed_bytes(state, desktop_allowance_bytes, reclaimable_bytes)
         if backend_kind == CUDA_LINUX
@@ -490,6 +561,15 @@ def guard(
                 "free_bytes": state.free_bytes,
                 "reclaimable_bytes": reclaimable_bytes,
                 "total_bytes": state.total_bytes,
+                # Who else is on the card, REPORTED and never the reason. On
+                # `llama-windows` these are the desktop's own processes and the
+                # operator will want to know which of them to close; on the
+                # other backends anything listed here is under the floor, so
+                # this is the same courtesy rather than a second rule.
+                "processes": [
+                    {"pid": app.pid, "name": app.name, "used_bytes": app.used_bytes}
+                    for app in not_ours
+                ],
             },
         )
     return state

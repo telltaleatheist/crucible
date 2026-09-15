@@ -446,8 +446,8 @@ for being a 27B on a 24 GB card rather than for needing a 55 GB download first:
 | `insufficient_memory` (409) | the estimate exceeds the accelerator's **total** — never loadable here |
 | `env_missing` (409) | `~/.crucible/envs/llm` is not installed |
 | `model_not_installed` (409) | no weights at the manifest's pinned revision |
-| `accelerator_busy` (409) | a process that is not Crucible's holds more than 1 GiB — named, with its pid |
-| `insufficient_memory` (409) | not enough **free** memory right now — both numbers named |
+| `accelerator_busy` (409) | a process that is not Crucible's holds more than 1 GiB — named, with its pid. On `llama-windows` only a stray `llama-server` counts: a Windows desktop shares its card with the compositor and the shell by design, so there the guard asks for room and not for solitude |
+| `insufficient_memory` (409) | not enough **free** memory right now — both numbers named, with whoever else is on the card in `details.processes` |
 
 All of these happen **before the job is queued**, so a client is told by name instead of
 watching a job fail a minute later.

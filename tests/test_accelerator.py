@@ -38,6 +38,52 @@ def fake_mac(
     )
 
 
+def fake_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    apps: list[ComputeApp],
+    free_bytes: int,
+    total_bytes: int = CARD_TOTAL,
+) -> None:
+    """A Windows host WITH an NVIDIA driver: `read_windows_state` takes the card arm."""
+    monkeypatch.setattr(
+        accelerator, "nvidia_smi_path", lambda: "C:/Windows/System32/nvidia-smi.exe"
+    )
+    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: list(apps))
+    monkeypatch.setattr(accelerator, "probe_vram", lambda: (free_bytes, total_bytes))
+
+
+#: What the Phase 15 button's T7 actually read off Owen's desktop, 2026-09-14 —
+#: the compositor, the shell, a system app, and one row the driver would only
+#: call `[Insufficient Permissions]` with no memory figure at all.
+WINDOWS_DESKTOP = [
+    ComputeApp(pid=1460, name="[Insufficient Permissions]", used_bytes=None),
+    ComputeApp(
+        pid=6028,
+        name=(
+            "C:\\WINDOWS\\SystemApps\\MicrosoftWindows.Client.CBS_cw5n1h2txyewy"
+            "\\CrossDeviceResume.exe"
+        ),
+        used_bytes=None,
+    ),
+    ComputeApp(pid=11208, name="C:\\WINDOWS\\explorer.exe", used_bytes=None),
+    ComputeApp(
+        pid=2200,
+        name="C:\\WINDOWS\\System32\\dwm.exe",
+        used_bytes=1_800 * 1024 ** 2,
+    ),
+    ComputeApp(
+        pid=7744,
+        name="C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        used_bytes=2 * GIB,
+    ),
+]
+
+#: `dots-ocr`'s declared estimate on `llama-windows`: the GGUF pair plus
+#: Foundry's overhead, ~5.9 GB (PHASE15-HOST.md 3.10 fact 2).
+DOTS_NEEDS = 5_900_000_000
+
+
 # --------------------------------------------------------------- it proceeds
 
 
@@ -314,6 +360,182 @@ def test_the_cuda_reserve_is_flat_and_the_mac_reserve_scales() -> None:
     small = default_desktop_allowance_bytes("mlx-darwin", 16 * GIB)
     large = default_desktop_allowance_bytes("mlx-darwin", 192 * GIB)
     assert large == 12 * small
+
+
+# ------------------------- `llama-windows`: the card is SHARED by design
+
+
+def test_a_windows_desktop_is_not_a_holder_and_the_load_proceeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The T7 failure, 2026-09-14, and the rule that replaces it.
+
+    The staged Windows server refused `load-model dots-ocr` with
+    `accelerator_busy` naming dwm, explorer, SearchHost, CrossDeviceResume and
+    an `[Insufficient Permissions]` row. Every one of those is Windows drawing
+    a desktop. On this backend the card is shared by design, so the guard asks
+    whether there is ROOM, not whether the card is untouched.
+    """
+    fake_windows(monkeypatch, apps=WINDOWS_DESKTOP, free_bytes=20 * GIB)
+    state = guard(
+        "llama-windows",
+        model_id="dots-ocr",
+        need_bytes=DOTS_NEEDS,
+        desktop_allowance_bytes=3 * GIB,
+    )
+    assert state.backend == "llama-windows"
+    assert state.free_bytes == 20 * GIB
+    # And the neighbours are still SEEN — reported, never the reason.
+    assert [app.pid for app in state.compute_apps] == [1460, 6028, 11208, 2200, 7744]
+
+
+def test_no_room_on_windows_is_refused_by_name_with_both_figures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shortfall keeps the name it has always had: `insufficient_memory`.
+
+    `capability.py` already points at this module for "is there room right
+    now" and names that refusal; a second spelling of one refusal would be a
+    fact with two owners.
+    """
+    fake_windows(monkeypatch, apps=WINDOWS_DESKTOP, free_bytes=3 * GIB)
+    with pytest.raises(ApiError) as caught:
+        guard(
+            "llama-windows",
+            model_id="dots-ocr",
+            need_bytes=DOTS_NEEDS,
+            desktop_allowance_bytes=3 * GIB,
+        )
+    error = caught.value
+    assert error.status_code == 409
+    assert error.code == "insufficient_memory"
+    assert "needs 5.5 GiB" in error.message
+    assert "3.0 GiB free of 24.0 GiB" in error.message
+    assert error.details["needed_bytes"] == DOTS_NEEDS
+    assert error.details["free_bytes"] == 3 * GIB
+    # The desktop is REPORTED in the details...
+    assert [entry["pid"] for entry in error.details["processes"]] == [
+        1460,
+        6028,
+        11208,
+        2200,
+        7744,
+    ]
+    # ...and is nowhere in the reason.
+    assert "explorer" not in error.message
+    assert "Insufficient Permissions" not in error.message
+    assert "held by" not in error.message
+
+
+def test_a_stray_llama_server_on_windows_is_accelerator_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One image name still holds the card: our own engine, outliving its run.
+
+    There is room (20 GiB free against 5.9 GB needed), so this cannot be the
+    memory check catching it — it is the image, and only the image.
+    """
+    orphan = ComputeApp(
+        pid=31337,
+        name="C:\\Users\\tellt\\AppData\\Local\\Crucible\\engine\\llama-server.exe",
+        used_bytes=6 * GIB,
+    )
+    fake_windows(monkeypatch, apps=[*WINDOWS_DESKTOP, orphan], free_bytes=20 * GIB)
+    with pytest.raises(ApiError) as caught:
+        guard(
+            "llama-windows",
+            model_id="dots-ocr",
+            need_bytes=DOTS_NEEDS,
+            desktop_allowance_bytes=3 * GIB,
+        )
+    error = caught.value
+    assert error.status_code == 409
+    assert error.code == "accelerator_busy"
+    assert "pid 31337" in error.message
+    assert "llama-server" in error.message
+    assert "left behind by an earlier run" in error.message
+    assert "never evicts" in error.message
+    # ONLY the llama-server. The desktop is not a holder even in this refusal.
+    assert [entry["pid"] for entry in error.details["processes"]] == [31337]
+
+
+def test_crucibles_own_llama_server_child_is_not_a_stray(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`owned_pids` still comes first: a resident engine of ours is ours."""
+    mine = ComputeApp(
+        pid=4242,
+        name="C:\\Users\\tellt\\AppData\\Local\\Crucible\\engine\\llama-server.exe",
+        used_bytes=9 * GIB,
+    )
+    fake_windows(monkeypatch, apps=[*WINDOWS_DESKTOP, mine], free_bytes=3 * GIB)
+    guard(
+        "llama-windows",
+        model_id="dots-ocr",
+        need_bytes=DOTS_NEEDS,
+        owned_pids=frozenset({4242}),
+        desktop_allowance_bytes=3 * GIB,
+        # Unloading our 9 GiB resident to make room for this one.
+        reclaimable_bytes=9 * GIB,
+    )
+
+
+def test_the_same_desktop_under_cuda_linux_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other two backends' guards are untouched, and this is the pin.
+
+    Inside WSL2 a foreign compute app on the card is a trainer or another
+    engine, and `accelerator_busy` is the right answer. The `llama-windows`
+    rule is a rule about a Windows DESKTOP, not a softening of the guard.
+    """
+    fake_cuda(monkeypatch, apps=WINDOWS_DESKTOP, free_bytes=20 * GIB)
+    with pytest.raises(ApiError) as caught:
+        guard(
+            "cuda-linux",
+            model_id="dots-ocr",
+            need_bytes=DOTS_NEEDS,
+            desktop_allowance_bytes=3 * GIB,
+        )
+    assert caught.value.code == "accelerator_busy"
+    assert "pid 1460" in caught.value.message
+
+
+def test_a_llama_server_is_found_by_image_name_never_by_pid() -> None:
+    """The pid of a crashed run is not knowable; the image is."""
+    assert accelerator.is_llama_server(
+        "C:\\Users\\tellt\\AppData\\Local\\Crucible\\engine\\llama-server.exe"
+    )
+    assert accelerator.is_llama_server("C:\\Engine\\LLAMA-SERVER.EXE")
+    assert accelerator.is_llama_server("/opt/llama.cpp/build/bin/llama-server")
+    assert accelerator.is_llama_server("llama-server")
+    assert not accelerator.is_llama_server("C:\\WINDOWS\\System32\\dwm.exe")
+    assert not accelerator.is_llama_server("[Insufficient Permissions]")
+    # Not a prefix match: a different binary is a different binary.
+    assert not accelerator.is_llama_server("C:\\Engine\\llama-server-bench.exe")
+    assert not accelerator.is_llama_server("C:\\Engine\\llama-cli.exe")
+
+
+def test_read_windows_state_survives_rows_the_driver_will_not_fill_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exactly the CSV the Windows driver printed under T7, parsed end to end."""
+    rows = [
+        "1460, [Insufficient Permissions], [N/A]",
+        "6028, C:\\WINDOWS\\SystemApps\\MicrosoftWindows.Client.CBS_cw5n1h2txyewy"
+        "\\CrossDeviceResume.exe, [N/A]",
+        "11208, C:\\WINDOWS\\explorer.exe, [N/A]",
+    ]
+    monkeypatch.setattr(
+        accelerator, "nvidia_smi_path", lambda: "C:/Windows/System32/nvidia-smi.exe"
+    )
+    monkeypatch.setattr(accelerator, "_nvidia_smi", lambda query, what: rows)
+    monkeypatch.setattr(accelerator, "probe_vram", lambda: (20 * GIB, CARD_TOTAL))
+    state = accelerator.read_windows_state(3 * GIB)
+    assert state.backend == "llama-windows"
+    assert [app.used_bytes for app in state.compute_apps] == [None, None, None]
+    assert state.compute_apps[1].name.endswith("CrossDeviceResume.exe")
+    assert "3 compute app(s)" in state.detail
 
 
 def test_the_mac_reserve_selects_the_4bit_27b_owen_already_runs() -> None:
