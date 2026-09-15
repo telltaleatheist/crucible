@@ -708,6 +708,34 @@ refusal — a machine where nothing answers still gets the host-mode child. With
 PRESENT the order is unchanged, because `boot()`'s `wsl --exec true` is a no-op on a distro
 that is already up.
 
+**A `found` engine can be RAISED to `wsl-unit` by CONSENT, and only by that —
+added 2026-09-15, PHASE17 2.5.** The rule above is right about a distro nobody
+has spoken about and useless about the one this machine's engine actually lives
+in: `Ubuntu` is `found` for the single reason that Crucible did not import it,
+which is all the orchestrator knows about a stranger's distro too. So a person
+may name one, once, in the orchestrator's own config:
+
+```toml
+# %LOCALAPPDATA%\Crucible\config.toml
+[orchestrator]
+distro = "Ubuntu"
+```
+
+With it, `probe_distro()` looks for THAT name (so it reads `present`), and a
+running engine there becomes `wsl-unit` **if `systemctl --user is-enabled
+crucible.service` answers inside it** — the claim then lands and `engine-restart`
+goes through the unit. If the unit cannot be read the owner stays `found` and the
+log says what systemctl said, because consent is permission and not evidence.
+Without the setting nothing changes: `found`, watched, never claimed.
+
+**What consent does NOT widen is `user-bus-restart`, and that is not a matter of
+permission.** `systemctl restart user@1000` kills every process uid 1000 owns in
+that distro — the paragraph below this one is the reason, and it is about what is
+RUNNING in somebody's Linux, not about who may manage it. It stays refused by
+name (`orchestrator_recipe_not_ours`) in any distro Crucible did not import,
+consented or not, at the point the recipe would have run. The predicate is the
+rootfs, never the flag.
+
 **The Windows pairing file is the guest's line COPIED, and 3.6 always said so** — *"the
 Windows file is the host's COPY of the guest's line"*. The code did not do it: it composed
 a line from the host's own `config.toml`, which on a machine whose engine is a guest's is a

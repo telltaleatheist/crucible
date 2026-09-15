@@ -164,6 +164,74 @@ def read_token(home: Path) -> str | None:
     return token if isinstance(token, str) and token else None
 
 
+#: PHASE17 2.5 — the table and key a person writes to CONSENT to this
+#: orchestrator managing a distro Crucible did not import. `[orchestrator]`
+#: because that is what the process reading it IS, and `distro` because the
+#: value is a distro's name: the setting is read by the orchestrator, about
+#: the orchestrator's own reach, and it belongs to no server.
+CONSENT_TABLE = "orchestrator"
+CONSENT_KEY = "distro"
+
+
+def consented_distro(home: Path) -> str | None:
+    """The distro this orchestrator was GIVEN permission to manage, or None.
+
+    PHASE17 2.5. Without it the orchestrator manages only the distro Crucible
+    imported (`crucible`), and every other engine on the machine is `found` —
+    watched, never claimed, never acted on (PHASE15 4.1a). That rule is right
+    for a machine nobody has spoken about and wrong for Owen's PC, where the
+    engine has lived in `Ubuntu` since before any of this existed: the
+    orchestrator can see it, can read its pairing line, could restart its unit
+    — and refuses, because it cannot tell that distro apart from a stranger's.
+    Consent is how a person tells it apart, by name, once, in the one file on
+    the Windows side that is already the orchestrator's own.
+
+    Read with `tomllib` and not a regex, for `read_token`'s reason: this is
+    the same document `crucible/config.py` reads, and two parsers for one file
+    are two opinions about escaping.
+
+    **A value that is present and unusable is REFUSED, never ignored.** A
+    person who wrote `distro = 4` is a person who meant to grant something,
+    and an orchestrator that shrugged at it would silently be the unconsented
+    one while its config said otherwise — a fact with two owners and nothing
+    comparing them (`docs/ARCHITECTURE.md`). Absent is the only quiet answer.
+    """
+    import tomllib
+
+    path = Path(home) / "config.toml"
+    if not path.is_file():
+        return None
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise HostError(
+            "orchestrator_distro_invalid",
+            f"{path} could not be read as TOML ({exc}), so whether this "
+            "orchestrator was given a distro to manage cannot be known. It "
+            "manages none until the file parses.",
+        ) from exc
+    table = document.get(CONSENT_TABLE)
+    if table is None:
+        return None
+    if not isinstance(table, dict):
+        raise HostError(
+            "orchestrator_distro_invalid",
+            f"[{CONSENT_TABLE}] in {path} is a {type(table).__name__} and not "
+            "a table.",
+        )
+    if CONSENT_KEY not in table:
+        return None
+    name = table[CONSENT_KEY]
+    if not isinstance(name, str) or name.strip() == "":
+        raise HostError(
+            "orchestrator_distro_invalid",
+            f"{CONSENT_TABLE}.{CONSENT_KEY} in {path} is "
+            f"{name!r}; it names a WSL distribution, as `wsl -l -v` spells it "
+            '(e.g. distro = "Ubuntu").',
+        )
+    return name.strip()
+
+
 def acquire(home: Path) -> Path:
     """One host per machine. Refuses `host_already_running`, naming the pid."""
     home.mkdir(parents=True, exist_ok=True)
@@ -768,7 +836,25 @@ def run(argv: list[str] | None = None) -> int:
     except HostError as exc:
         log.write(f"startup: NOT written — {exc.code}: {exc.message}")
 
-    watcher = PresenceWatcher(runner, log)
+    # PHASE17 2.5, BEFORE the watcher, because consent decides which distro
+    # the watcher is about. A malformed setting is named and then not used:
+    # the tray still runs, unconsented, which is the behaviour of every
+    # machine that never wrote one.
+    consented: str | None = None
+    try:
+        consented = consented_distro(home)
+    except HostError as exc:
+        log.write(f"consent: NOT used — {exc.code}: {exc.message}")
+    if consented is None:
+        watcher = PresenceWatcher(runner, log)
+    else:
+        log.write(
+            f'consent: config.toml names "{consented}" as the distro this '
+            "orchestrator may manage (PHASE17 2.5); its engine is claimed and "
+            "its unit restarted if there is one, and the recipes that would "
+            "restart everything uid 1000 owns in it stay refused"
+        )
+        watcher = PresenceWatcher(runner, log, distro=consented, consented=True)
     context = HostContext(
         runner=runner,
         log=log,

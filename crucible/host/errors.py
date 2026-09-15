@@ -51,6 +51,17 @@ HOST_ERROR_CODES: dict[str, str] = {
         "the pairing file's ACL could not be set to this user only. The file is "
         "DELETED rather than left readable by everybody with a token in it."
     ),
+    "orchestrator_distro_invalid": (
+        "`[orchestrator] distro` in the Windows config names something that is "
+        "not a distribution name. A person who wrote it meant to grant "
+        "something, so it is refused rather than ignored (PHASE17 2.5)."
+    ),
+    "orchestrator_recipe_not_ours": (
+        "a recovery recipe that restarts everything uid 1000 owns was asked "
+        "for in a distribution Crucible did not import. CONSENT widens "
+        "watching, claiming and the unit restart; it never widens this "
+        "(PHASE15-HOST.md 4.1a, PHASE17 2.5)."
+    ),
     "wsl_state_unknown": (
         "the 4c table answered a code this build has no predicate for, which "
         "means the generated table and the predicates have drifted."

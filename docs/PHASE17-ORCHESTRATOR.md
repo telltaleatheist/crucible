@@ -43,7 +43,7 @@ process which is NOT that thing has a role of its own, with a door of its own, o
 | **orchestrator** | a Crucible process with backend kind `orchestrator`, **zero job types**, which manages **exactly one** engine. Today that is `crucible orchestrator` (the Windows tray, formerly and still `crucible host`), answering its loopback door on `:7101`. |
 | **claim** | the act by which an orchestrator tells an engine it manages it. `POST /v1/peer/claim`. |
 | **`managed_by`** | on an ENGINE: which orchestrator claimed it, or `null`. |
-| **owner** | PHASE15 4.1a's word for *how* the orchestrator holds its engine: `wsl-unit`, `child`, `found`. It decides what the orchestrator may DO to it. |
+| **owner** | PHASE15 4.1a's word for *how* the orchestrator holds its engine: `wsl-unit`, `child`, `found`. It decides what the orchestrator may DO to it. A distro Crucible did not import can reach `wsl-unit` only by CONSENT (2.5) plus a unit that answers. |
 
 **`orchestrator` is a backend kind on the wire and nowhere else.** `detect_backend()` never
 returns it, `crucible init --backend` never accepts it, and it is absent from
@@ -158,6 +158,100 @@ home would need to know its orchestrator's address, keep it fresh across restart
 when it is wrong — three facts to own for a push that a 15-second poll already delivers. An
 engine's only knowledge of its orchestrator is the two strings it was handed.
 
+### 2.5 An orchestrator may be GIVEN a distro — CONSENT (ruled 2026-09-15)
+
+> **Owen, 2026-09-15 morning:** *"THE CLAIM MUST LAND ON THIS MACHINE, by
+> CONSENT rather than by distro name."*
+
+4.1a's `found` rule is right, and on the machine it was written for it is also
+useless. Owen's PC runs its engine inside **`Ubuntu`**, installed by hand years
+before Crucible existed. The orchestrator can see that engine, read its pairing
+line, and name the unit that would restart it — and refuses all three, because
+the only thing it knows about `Ubuntu` is that Crucible did not import it, which
+is exactly what it knows about a stranger's distro. A rule that cannot tell
+*"the distro this machine's owner keeps his engine in"* from *"a distro nobody
+has spoken about"* is a rule missing an input, and the missing input is a
+**person saying so**.
+
+**The setting.** In the Windows home's own config, `%LOCALAPPDATA%\Crucible\config.toml`:
+
+```toml
+[orchestrator]
+distro = "Ubuntu"
+```
+
+`[orchestrator]` because that is what the process reading it IS, and `distro`
+because the value is a distro's name as `wsl -l -v` spells it. It is read by
+`crucible/host/app.py`'s `consented_distro()` with `tomllib`, from the same
+document `read_token()` reads, at startup and before the watcher is built —
+because consent decides which distro the watcher is *about*.
+
+**What consent does, and it is three things:**
+
+| | with no setting | with `distro = "Ubuntu"` |
+|---|---|---|
+| `probe_distro()` | `absent` — no distro is NAMED `crucible` | `present` — the named one is looked for instead |
+| owner of a running engine there | `found` | `wsl-unit`, **if the unit probe answers** |
+| the claim (2.1) | never made | made, and true |
+| `engine-restart` (4.2) | `engine_not_ours` | `user-unit-restart`, then 4.1's recipes |
+| `user-bus-restart` | n/a | **still refused** |
+
+**The unit is PROBED, never assumed.** `systemctl --user is-enabled crucible.service`
+inside the named distro. A unit that answers makes the owner `wsl-unit`: the
+claim is then a statement that is true, and `engine-restart` has a door. A unit
+that cannot be read leaves the owner `found`, with the reason in the log, and
+the machine behaves exactly as it did before anybody wrote the setting.
+**Consent is permission, not evidence** — an orchestrator that read the
+permission as the fact would claim an engine it has no way to restart, which is
+2.1's `managed_by` naming a door that refuses every verb the field implies.
+
+Two details the probe earns its keep on. **The exit code is not the answer:**
+`is-enabled` exits non-zero for a unit that is merely `disabled`, and a disabled
+unit is still a unit `systemctl --user restart` starts, so what it PRINTED is
+read against `UNIT_STATES` and `not-found` is the one answer that means there is
+nothing to manage. And **there is one probe, not two** — 7b.8 measured the root
+door onto the same manager (`systemctl --user -M <user>@`) failing on the same
+machine, in the same minute, for the same cause (a `systemd --user` that never
+got a bus), so a second call that cannot succeed when the first failed is a
+round trip for nothing. What the first one *said* goes in the log instead,
+because `Failed to connect to bus: No such file or directory` is the sentence
+that tells a person what to repair.
+
+**CONSENT NEVER WIDENS DESTRUCTION, and that is the half of this ruling that
+matters most.** `user-bus-restart` (`systemctl restart user@1000` as root) stays
+refused in any distro Crucible did not import, consented or not, by name —
+`orchestrator_recipe_not_ours`, written into the log at the point the recipe
+would have run rather than drawn as a disabled menu item. 4.1a's reason is
+unchanged and is not a matter of permission: that command kills every process
+uid 1000 owns in the distro, and on the night the rule was found that was a
+five-thousand-step LoRA trainer. A person granting consent is naming a distro;
+they are not enumerating what is running inside it at the moment a recovery
+fires, and no wording of a setting could make them. So the predicate for a
+destructive recipe is the ROOTFS (`distro == "crucible"`), never the flag.
+
+There is nothing else on that list, and it was checked rather than assumed when
+consent was built: `--terminate` and `--unregister` appear on no branch the
+orchestrator can reach with a distro name it was *given* — the one
+`wsl --terminate` in the generated `wsl_states.py` is 4c's `distro_not_systemd`
+row and is hardcoded to `crucible`, `foreign_distro_not_systemd` is `instruct`
+with no argv at all, and `crucible/uninstall.py` refuses `--unregister` by
+ruling. `install-engine` needs no guard either: a consented distro reads
+`present`, and 4.2 offers that item only when the distro is absent or unknown.
+
+**A setting that is present and unusable is REFUSED, not ignored**
+(`orchestrator_distro_invalid`). A person who wrote `distro = 4` meant to grant
+something; an orchestrator that shrugged at it would quietly be the unconsented
+one while its config said otherwise — `docs/ARCHITECTURE.md`'s one shape, a fact
+with two owners and nothing comparing them. Absent is the only quiet answer. The
+refusal is a log line and the tray still runs, unconsented, because a
+malformed setting is a reason to manage nothing, not a reason to have no tray.
+
+**What consent is NOT.** It is not a second address, not a second engine, and
+not an install: the 4.3 sequence still imports and configures `crucible` and
+nothing else, and a consented distro is never written to. It is one sentence
+from the person who owns the machine, about which of the Linuxes on it this
+orchestrator is allowed to treat as its own.
+
 ## 3. `/v1/info` gains the role
 
 ### 3.1 On an engine
@@ -246,7 +340,7 @@ The orchestrator restarts **by the owner-appropriate means**, and the owner is 4
 |---|---|
 | `wsl-unit` | `user-unit-restart` — `systemctl --user restart crucible` in the distro, then wait for `/v1/ping`; on failure, PHASE15 4.1's two recovery recipes in 4.1's order (`user-unit-start`, then `user-bus-restart`). **`user-unit-restart` is NOT in `RECIPES`**: those are recoveries for an engine that should be up, and a restart built out of `boot()` would ping a running engine, succeed and change nothing — a button that did nothing precisely when it was most obviously pressed |
 | `child` | terminate the child and spawn `crucible serve` again (`host-mode-respawn`) |
-| `found` | **refused `engine_not_ours`** |
+| `found` | **refused `engine_not_ours`**. A machine whose engine is in a distro Crucible did not import reaches `wsl-unit` — and therefore this restart — by CONSENT (2.5), never by the orchestrator deciding on its own |
 
 **`engine_not_ours` (409) is 4.1a's rule with a wire name.** *"A `found` engine is watched
 and never acted on."* The orchestrator did not start it, has no unit it may name and no child
@@ -285,6 +379,35 @@ uninstall is one sentence: **the orchestrator's claim is not consulted and not r
 "whatever this orchestrator claimed" — and narrower is what an irreversible verb wants. An
 engine the orchestrator merely `found` is never uninstalled by it, from the same rule as
 4.2's.
+
+### 4.4 OWED: the orchestrator can only be stopped by its own menu
+
+Found 2026-09-15, upgrading the installed tray to this phase's pack. **There is
+no way to stop a running orchestrator except clicking Quit in the notification
+area.** `quit()` — which releases the claim (2.2), lets the held distro go
+(PHASE15 7b.4c) and takes the host-mode child down with it — is reachable from
+`menu.py`'s `quit` item and from nowhere else. The door serves `/install`,
+`/restart`, `/v1/ping` and `/v1/info`; no signal handler is installed; `run()`
+ends when `icon.run()` returns.
+
+So every non-interactive stop is `taskkill`, which runs none of that: the claim
+is left standing on an engine whose orchestrator is gone, the `wsl.exe
+--exec sleep infinity` hold is orphaned as a session nothing owns, and
+`host.pid` is stale (harmless — `acquire()` checks liveness). A tray installed
+by a script, upgraded by a script and started by a script should be stoppable by
+one.
+
+**Owed, and deliberately not built tonight:** a `POST /quit` on the loopback
+door with the same bearer as everything else on it — it is the transport this
+process already has, it authenticates the way 4.7 already decided, and it can
+run the whole of `quit()` before the process ends. A `SIGTERM`/`CTRL_CLOSE`
+handler is the alternative and is worse here: Windows gives a console-less
+`pythonw` no reliable console-control event, and `taskkill /F` delivers nothing
+at all, so the handler would cover the case that already works and miss the one
+that does not. The last event of a `POST /quit` never arrives, for 4.3's reason
+— a door served BY the orchestrator cannot survive stopping the orchestrator —
+and unlike a restart there is nothing left afterwards to re-read, which is why
+this is a verb with an empty answer rather than a task.
 
 ## 5. The shapes a machine can be
 
@@ -351,5 +474,8 @@ an engine. `tests/test_engine_restart.py` — `engine-restart` per owner, `engin
 `found`, `engine_restart_needs_orchestrator` with no door. `tests/test_host.py` — the
 orchestrator's `/v1/info`, read-through capability including the unreadable-engine case, the
 claim performed at presence-detection for `wsl-unit` and `child`, **and never for `found`**,
-and the release on Quit. `sdk/ts/test/unit-phase17-orchestrator.test.ts` — the three fields,
+and the release on Quit. And 2.5's consent: absent means unchanged, a named distro
+with a readable unit means `wsl-unit` and a claim, a named distro whose unit cannot be read
+means `found` with the reason, and `user-bus-restart` refused in a distro Crucible did not
+import whatever the setting says. `sdk/ts/test/unit-phase17-orchestrator.test.ts` — the three fields,
 the vintage rule, and `engineOf`'s three answers.

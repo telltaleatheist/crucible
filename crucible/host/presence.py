@@ -60,6 +60,9 @@ RECIPE_USER_UNIT_START = "user-unit-start"
 RECIPE_USER_BUS_RESTART = "user-bus-restart"
 RECIPE_HOST_MODE_RESPAWN = "host-mode-respawn"
 
+#: The guest unit every recipe and the restart name. Spelled once.
+UNIT_NAME = "crucible.service"
+
 #: PHASE17 4.2's `wsl-unit` restart, and it is NOT in `RECIPES`.
 #:
 #: The two in `RECIPES` are RECOVERIES — things to try when an engine that
@@ -171,6 +174,92 @@ def recipe_argv(name: str, distro: str = CRUCIBLE_DISTRO) -> list[str]:
 
 RECIPES: tuple[str, ...] = (RECIPE_USER_UNIT_START, RECIPE_USER_BUS_RESTART)
 
+#: Recipes that may run ONLY in the distro Crucible IMPORTED — PHASE15 4.1a's
+#: rule, and CONSENT (PHASE17 2.5) does not widen it.
+#:
+#: `systemctl restart user@1000` kills every process uid 1000 owns in that
+#: distro. In the `crucible` rootfs that is Crucible's own processes and the
+#: cost is the restart. In a distro a person also uses it is everything they
+#: are running — on the night this rule was written, a five-thousand-step LoRA
+#: trainer. Consent says "you may watch, claim and restart the UNIT in this
+#: distro"; it does not and cannot say "you may restart everything I am
+#: running in it", because the person granting it is naming a distro, not
+#: enumerating what is inside it at the moment the recipe fires.
+#:
+#: There is nothing else to list. `--terminate` and `--unregister` appear on no
+#: branch the orchestrator can reach with a distro name it was GIVEN: the one
+#: `wsl --terminate` in `wsl_states.py` is the 4c `distro_not_systemd` row and
+#: it is hardcoded to `crucible`, `foreign_distro_not_systemd` is `instruct`
+#: with no argv at all, and `crucible/uninstall.py` refuses `--unregister` by
+#: ruling. Checked 2026-09-15, when consent was built.
+DESTRUCTIVE_RECIPES: frozenset[str] = frozenset({RECIPE_USER_BUS_RESTART})
+
+
+def recipe_permitted(name: str, distro: str) -> bool:
+    """May this recipe run in this distro? `False` is refused, never skipped.
+
+    The predicate is the distro's NAME and not the consent flag, deliberately:
+    the question a destructive recipe asks is *"did Crucible create this
+    rootfs"*, which consent never changes. A caller that gets `False` refuses
+    by name (`orchestrator_recipe_not_ours`) and says so in the log — a recipe
+    that was quietly not run is a recovery a person believes happened.
+    """
+    return distro == CRUCIBLE_DISTRO or name not in DESTRUCTIVE_RECIPES
+
+
+def unit_enabled_argv(distro: str) -> list[str]:
+    """`systemctl --user is-enabled crucible.service`, inside a distro.
+
+    PHASE17 2.5's probe: consent names a distro, and this is what turns that
+    name into the fact the owner needs — *is there a unit here this
+    orchestrator can restart*. It is asked as the ORDINARY user and not
+    through `-u root`, because the thing that makes it fail on a distro in the
+    state 7b.8 measured is a missing user D-Bus, and the root door onto the
+    same manager (`systemctl --user -M <user>@`) was measured failing for the
+    same cause on the same machine the same night. A second probe that cannot
+    succeed when the first failed is a second round trip for nothing; what the
+    first one SAID is carried into the log instead, because "Failed to connect
+    to bus" is the sentence that tells a person what to repair.
+    """
+    return [
+        "wsl.exe", "-d", distro, "--exec",
+        "systemctl", "--user", "is-enabled", UNIT_NAME,
+    ]
+
+
+#: What `is-enabled` prints when the unit EXISTS. `disabled` is in here and
+#: that is the point of reading stdout rather than the exit code: a disabled
+#: unit exits non-zero and is still a unit `systemctl --user restart` starts.
+#: `not-found` is the one answer that means there is nothing to manage.
+UNIT_STATES: frozenset[str] = frozenset(
+    {
+        "enabled",
+        "enabled-runtime",
+        "disabled",
+        "static",
+        "indirect",
+        "generated",
+        "transient",
+        "linked",
+        "linked-runtime",
+        "masked",
+        "masked-runtime",
+        "alias",
+    }
+)
+
+
+@dataclass(frozen=True)
+class UnitProbe:
+    """What {@link PresenceWatcher.probe_unit} found. PHASE17 2.5."""
+
+    #: Is there a unit here this orchestrator could restart?
+    readable: bool
+    #: The state `is-enabled` printed, when it printed one.
+    state: str
+    #: The sentence for the log — what systemctl said, when it said no.
+    detail: str
+
 
 def parse_wsl_list(text: str) -> list[str]:
     """The distro names out of `wsl -l -v`.
@@ -234,6 +323,7 @@ class PresenceWatcher:
         log: HostLog,
         *,
         distro: str = CRUCIBLE_DISTRO,
+        consented: bool = False,
         boot_wait_s: float = BOOT_WAIT_SECONDS,
         watch_s: float = WATCH_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
@@ -242,6 +332,13 @@ class PresenceWatcher:
         self._runner = runner
         self._log = log
         self._distro = distro
+        #: PHASE17 2.5: was this distro NAMED by a person in the config, as one
+        #: this orchestrator may manage? It changes two things and no others --
+        #: the owner a running engine here gets (after the unit probe), and the
+        #: sentences the log writes about why. It never widens
+        #: `DESTRUCTIVE_RECIPES`, which ask about the rootfs and not about
+        #: permission.
+        self.consented = consented
         self._boot_wait_s = boot_wait_s
         self.watch_s = watch_s
         self._monotonic = monotonic
@@ -332,6 +429,65 @@ class PresenceWatcher:
                 return FoundEngine(distro=name, line=line)
         return None
 
+    def probe_unit(self) -> UnitProbe:
+        """Is there a `crucible.service` in this distro that could be restarted?
+
+        PHASE17 2.5's gate. Consent names a distro; this is the fact that turns
+        that name into an OWNER, and it is asked rather than assumed because
+        the two things consent promises — a claim that is true and an
+        `engine-restart` that works — both rest on a unit existing. A distro
+        whose user bus is unreachable (7b.8 measured exactly that) answers
+        nothing here, and the orchestrator then keeps `found` and says why.
+
+        The exit code is NOT the answer: `is-enabled` exits non-zero for a
+        unit that is merely `disabled`, and a disabled unit is still a unit
+        `systemctl --user restart` starts. What it PRINTED is the answer.
+        """
+        result = self._runner.run(
+            unit_enabled_argv(self._distro), timeout_s=RECIPE_TIMEOUT_SECONDS
+        )
+        state = result.stdout.strip().splitlines()[0].strip() if result.stdout.strip() else ""
+        if state in UNIT_STATES:
+            return UnitProbe(True, state, f"{UNIT_NAME} is {state}")
+        return UnitProbe(False, state, result.said())
+
+    def running_owner(self, distro: Distro, detail: str) -> Presence:
+        """The owner a RUNNING WSL engine gets — PHASE15 4.1a with PHASE17 2.5.
+
+        Without consent this is `wsl-unit` and always was: the distro is the
+        one Crucible imported, and the orchestrator booted the unit in it.
+
+        With consent the distro is somebody else's and the name alone is not
+        enough, so the unit is PROBED. A unit that answers makes the owner
+        `wsl-unit` — the claim is then a true statement and `engine-restart`
+        has a door. A unit that cannot be read leaves the owner `found`, which
+        is what the machine was before consent was written, with the reason in
+        the log: consent is permission, not a fact about the guest, and an
+        orchestrator that took the permission as the fact would claim an
+        engine it cannot restart.
+        """
+        if not self.consented:
+            return Presence(distro, Engine.RUNNING, detail, Owner.WSL_UNIT)
+        probe = self.probe_unit()
+        if probe.readable:
+            self._log.write(
+                f'consent: "{self._distro}" is named in config.toml and its '
+                f"{probe.detail} — owner=wsl-unit (PHASE17 2.5)"
+            )
+            return Presence(
+                distro,
+                Engine.RUNNING,
+                f'{detail}; "{self._distro}" is consented and its {probe.detail}',
+                Owner.WSL_UNIT,
+            )
+        self._log.write(
+            f'consent: "{self._distro}" is named in config.toml, but '
+            f"{UNIT_NAME} could not be read there ({probe.detail}), so the "
+            "engine stays owner=found — consent is permission to manage a "
+            "unit, not evidence that there is one (PHASE17 2.5)"
+        )
+        return self.adopt(distro)
+
     def adopt(self, distro: Distro) -> Presence:
         """An engine was already answering. Watch it; never replace it.
 
@@ -375,21 +531,14 @@ class PresenceWatcher:
             self._log.write(f"boot: wsl --exec true failed: {started.said()}")
         if self._wait_for_ping(self._boot_wait_s):
             self._recovery_spent = False
-            return Presence(
-                distro, Engine.RUNNING, "the engine answered /v1/ping", Owner.WSL_UNIT
-            )
+            return self.running_owner(distro, "the engine answered /v1/ping")
         self._log.write(
             f"boot: nothing on {engine_url('/v1/ping')} after {self._boot_wait_s:.0f}s; "
             "running the recovery recipes"
         )
         if self.recover(all_recipes=True):
             self._recovery_spent = False
-            return Presence(
-                distro,
-                Engine.RUNNING,
-                "a recovery recipe brought it up",
-                Owner.WSL_UNIT,
-            )
+            return self.running_owner(distro, "a recovery recipe brought it up")
         return Presence(
             distro,
             Engine.FAILED,
@@ -416,6 +565,18 @@ class PresenceWatcher:
         hides that it is not working.
         """
         for name in RECIPES:
+            if not recipe_permitted(name, self._distro):
+                # BY NAME, and in the log, because a recipe silently not run
+                # is a recovery a person believes happened. PHASE15 4.1a's
+                # rule survives consent unchanged (PHASE17 2.5).
+                self._log.write(
+                    f"recovery {name}: REFUSED orchestrator_recipe_not_ours — "
+                    f'it restarts every process uid 1000 owns in "{self._distro}", '
+                    f'and Crucible imported "{CRUCIBLE_DISTRO}", not that one. '
+                    "Consent widens watching, claiming and the unit restart; it "
+                    "does not widen this."
+                )
+                continue
             argv = recipe_argv(name, self._distro)
             result = self._runner.run(argv, timeout_s=RECIPE_TIMEOUT_SECONDS)
             self._log.write(

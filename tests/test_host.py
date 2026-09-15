@@ -2222,3 +2222,270 @@ def test_the_wire_owner_words_are_the_only_three(tmp_path: Path) -> None:
 
     assert set(app_module.OWNER_ON_THE_WIRE.values()) == set(peer_module.OWNERS)
     assert Owner.NONE not in app_module.OWNER_ON_THE_WIRE, "an absence is not an owner"
+
+
+# ------------------------------------- PHASE17 2.5: CONSENT, by name in the config
+#
+# Owen's PC, ruled 2026-09-15: the engine has lived in `Ubuntu` since before
+# any of this existed, and 4.1a's `found` rule — right for a stranger's distro
+# — makes the orchestrator refuse to claim or restart the one engine it
+# actually has. Consent is how a person tells the two apart, by name, once.
+# What it widens: watching, the claim, `engine-restart` through the unit. What
+# it never widens: a recipe that restarts everything uid 1000 owns.
+
+
+UBUNTU_CONSENT = '[orchestrator]\ndistro = "Ubuntu"\n'
+
+
+def _consented_watcher(
+    runner: Scripted, host_log: log.HostLog
+) -> presence.PresenceWatcher:
+    return presence.PresenceWatcher(
+        runner,
+        host_log,
+        distro="Ubuntu",
+        consented=True,
+        monotonic=ticking(),
+        sleep=lambda _s: None,
+    )
+
+
+def test_no_setting_means_the_machine_behaves_exactly_as_it_did(
+    tmp_path: Path,
+) -> None:
+    """Absent is the only quiet answer, and it is the one every machine gives."""
+    assert app_module.consented_distro(tmp_path) is None
+    (tmp_path / "config.toml").write_text('[auth]\ntoken = "t"\n', encoding="utf-8")
+    assert app_module.consented_distro(tmp_path) is None
+    (tmp_path / "config.toml").write_text("[orchestrator]\n", encoding="utf-8")
+    assert app_module.consented_distro(tmp_path) is None
+
+
+def test_the_setting_is_read_from_the_table_PHASE17_names(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text(UBUNTU_CONSENT, encoding="utf-8")
+    assert app_module.consented_distro(tmp_path) == "Ubuntu"
+    assert app_module.CONSENT_TABLE == "orchestrator"
+    assert app_module.CONSENT_KEY == "distro"
+
+
+def test_the_setting_does_not_disturb_the_token_beside_it(tmp_path: Path) -> None:
+    """One document, two readers, and neither may eat the other's key."""
+    (tmp_path / "config.toml").write_text(
+        '[auth]\ntoken = "the-token"\n\n[orchestrator]\ndistro = "Ubuntu"\n',
+        encoding="utf-8",
+    )
+    assert app_module.consented_distro(tmp_path) == "Ubuntu"
+    assert app_module.read_token(tmp_path) == "the-token"
+
+
+def test_a_setting_that_is_present_and_unusable_is_REFUSED_not_ignored(
+    tmp_path: Path,
+) -> None:
+    """A person who wrote it meant to grant something. An orchestrator that
+    shrugged would be the unconsented one while its config said otherwise."""
+    for value in ("distro = 4", "distro = true", 'distro = ""', "distro = []"):
+        (tmp_path / "config.toml").write_text(
+            f"[orchestrator]\n{value}\n", encoding="utf-8"
+        )
+        with pytest.raises(HostError) as caught:
+            app_module.consented_distro(tmp_path)
+        assert caught.value.code == "orchestrator_distro_invalid"
+        assert caught.value.code in HOST_ERROR_CODES
+    (tmp_path / "config.toml").write_text(
+        "[orchestrator]\nnot toml at all\n", encoding="utf-8"
+    )
+    with pytest.raises(HostError) as caught:
+        app_module.consented_distro(tmp_path)
+    assert caught.value.code == "orchestrator_distro_invalid"
+
+
+def test_without_consent_a_found_engine_is_still_found_and_still_unclaimed(
+    host_log: log.HostLog,
+) -> None:
+    """The rule this setting widens is unchanged where nobody wrote one."""
+    runner = Scripted(
+        answers={
+            "-l -v --running": ok(OWENS_PC_LIST),
+            "-l -v": ok(OWENS_PC_LIST),
+            "cat ": ok(GUEST_LINE),
+        },
+        pings=[200],
+    )
+    watcher = presence.PresenceWatcher(
+        runner, host_log, monotonic=ticking(), sleep=lambda _s: None
+    )
+    assert watcher.consented is False
+    distro, _detail = watcher.probe_distro()
+    assert distro is Distro.ABSENT, 'there is no distro NAMED "crucible"'
+    assert watcher.adopt(distro).owner is Owner.FOUND
+    # The unit was never even asked about: no consent, no probe.
+    assert not any("is-enabled" in " ".join(call) for call in runner.calls)
+
+
+def test_consent_makes_the_named_distro_PRESENT(host_log: log.HostLog) -> None:
+    """`probe_distro` is the one place "which distro is mine" is decided, and
+    consent answers it with the name a person wrote."""
+    runner = Scripted(answers={"-l -v": ok(OWENS_PC_LIST)})
+    watcher = _consented_watcher(runner, host_log)
+    distro, detail = watcher.probe_distro()
+    assert distro is Distro.PRESENT
+    assert "Ubuntu" in detail
+
+
+def test_consent_plus_a_readable_unit_is_owner_wsl_unit(
+    host_log: log.HostLog,
+) -> None:
+    """The claim lands, and it is a TRUE statement: there is a unit behind it."""
+    runner = Scripted(
+        answers={"-l -v": ok(OWENS_PC_LIST), "is-enabled": ok("enabled\n")},
+        pings=[200],
+    )
+    watcher = _consented_watcher(runner, host_log)
+    result = watcher.boot()
+    assert result.engine is Engine.RUNNING
+    assert result.owner is Owner.WSL_UNIT
+    assert presence.unit_enabled_argv("Ubuntu") in runner.calls
+    assert "owner=wsl-unit" in host_log.path.read_text(encoding="utf-8")
+
+
+def test_a_unit_that_merely_exists_counts_and_the_exit_code_does_not(
+    host_log: log.HostLog,
+) -> None:
+    """`is-enabled` exits non-zero for `disabled`, and a disabled unit is
+    still a unit `systemctl --user restart` starts."""
+    for state in ("enabled", "disabled", "static", "linked", "masked"):
+        runner = Scripted(
+            answers={
+                "-l -v": ok(OWENS_PC_LIST),
+                "is-enabled": RunResult(
+                    code=1, stdout=f"{state}\n", stderr="", failure=None
+                ),
+            },
+            pings=[200],
+        )
+        watcher = _consented_watcher(runner, host_log)
+        assert watcher.probe_unit().readable is True, state
+        assert watcher.boot().owner is Owner.WSL_UNIT, state
+
+
+def test_consent_with_an_unreadable_unit_stays_found_and_says_why(
+    tmp_path: Path,
+) -> None:
+    """7b.8's machine exactly: a `systemd --user` that never got a bus.
+
+    Consent is permission, not evidence. An orchestrator that read the
+    permission as the fact would claim an engine it cannot restart."""
+    host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
+    runner = Scripted(
+        answers={
+            "-l -v --running": ok(OWENS_PC_LIST),
+            "-l -v": ok(OWENS_PC_LIST),
+            "cat ": ok(GUEST_LINE),
+            "is-enabled": bad("Failed to connect to bus: No such file or directory"),
+        },
+        pings=[200],
+    )
+    watcher = _consented_watcher(runner, host_log)
+    result = watcher.boot()
+    assert result.engine is Engine.RUNNING
+    assert result.owner is Owner.FOUND
+    written = (tmp_path / "host.log").read_text(encoding="utf-8")
+    assert "Failed to connect to bus" in written
+    assert "stays owner=found" in written
+
+
+def test_a_unit_that_is_not_there_at_all_stays_found(tmp_path: Path) -> None:
+    host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
+    runner = Scripted(
+        answers={
+            "-l -v --running": ok(OWENS_PC_LIST),
+            "-l -v": ok(OWENS_PC_LIST),
+            "cat ": ok(GUEST_LINE),
+            "is-enabled": RunResult(
+                code=1, stdout="not-found\n", stderr="", failure=None
+            ),
+        },
+        pings=[200],
+    )
+    watcher = _consented_watcher(runner, host_log)
+    assert watcher.probe_unit().readable is False
+    assert watcher.boot().owner is Owner.FOUND
+
+
+def test_the_destructive_recipe_is_refused_in_a_distro_crucible_did_not_import(
+    tmp_path: Path,
+) -> None:
+    """4.1a's rule SURVIVES consent, and the refusal is the ACT and not a menu.
+
+    `systemctl restart user@1000` kills every process uid 1000 owns. On the
+    machine this rule was found on that was a five-thousand-step LoRA trainer.
+    """
+    assert presence.recipe_permitted("user-bus-restart", "crucible") is True
+    assert presence.recipe_permitted("user-bus-restart", "Ubuntu") is False
+    assert presence.recipe_permitted("user-unit-start", "Ubuntu") is True
+    assert presence.DESTRUCTIVE_RECIPES == frozenset(
+        {presence.RECIPE_USER_BUS_RESTART}
+    )
+
+    host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
+    runner = Scripted(answers={"-l -v": ok(OWENS_PC_LIST)}, pings=[])
+    watcher = _consented_watcher(runner, host_log)
+    assert watcher.recover(all_recipes=True) is False
+    ran = [" ".join(call) for call in runner.calls]
+    assert any("systemctl --user start crucible" in line for line in ran)
+    assert not any("user@1000" in line for line in ran), "the act, not a drawing"
+    written = (tmp_path / "host.log").read_text(encoding="utf-8")
+    assert "orchestrator_recipe_not_ours" in written
+
+
+def test_the_imported_distro_still_gets_both_recipes(tmp_path: Path) -> None:
+    """Consent narrows nothing: `crucible` is Crucible's own rootfs and the
+    cost of restarting its user manager is the restart."""
+    host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
+    runner = Scripted(pings=[])
+    watcher = presence.PresenceWatcher(
+        runner, host_log, monotonic=ticking(), sleep=lambda _s: None
+    )
+    assert watcher.recover(all_recipes=True) is False
+    ran = [" ".join(call) for call in runner.calls]
+    assert any("systemctl --user start crucible" in line for line in ran)
+    assert any("user@1000" in line for line in ran)
+
+
+def test_a_consented_engine_restart_goes_through_the_unit(tmp_path: Path) -> None:
+    """PHASE17 4.2 for the owner consent produces: the working door first, and
+    the escalation still refuses the one recipe that is not ours to run."""
+    host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
+    runner = Scripted(answers={"-l -v": ok(OWENS_PC_LIST)}, pings=[200])
+    watcher = _consented_watcher(runner, host_log)
+    assert watcher.restart_wsl_unit() is True
+    assert presence.recipe_argv("user-unit-restart", "Ubuntu") in runner.calls
+    assert not any("user@1000" in " ".join(call) for call in runner.calls)
+
+
+def test_a_consented_machine_is_not_refused_engine_not_ours(tmp_path: Path) -> None:
+    """The door's refusal is by OWNER, so consent lifting the owner lifts it —
+    and nothing else about `check_restartable` changes."""
+    runner = Scripted()
+    context = _context(tmp_path, runner)
+    host = app_module.Host(context)
+    context.presence = presence.Presence(
+        Distro.PRESENT, Engine.RUNNING, "up", Owner.FOUND
+    )
+    with pytest.raises(HostError) as caught:
+        host.check_restartable()
+    assert caught.value.code == "engine_not_ours"
+    context.presence = presence.Presence(
+        Distro.PRESENT, Engine.RUNNING, "up", Owner.WSL_UNIT
+    )
+    host.check_restartable()
+
+
+def test_consent_claims_the_engine_it_was_given(tmp_path: Path, monkeypatch) -> None:
+    """The whole point: on Owen's PC the claim now lands, by consent rather
+    than by a distro's name."""
+    with FakeEngine() as engine:
+        host = _orchestrator(tmp_path, Scripted(), Owner.WSL_UNIT, engine, monkeypatch)
+        assert host.claim() is True
+        assert len(engine.claims) == 1
+        assert "force" not in engine.claims[0]
