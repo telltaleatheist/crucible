@@ -26,8 +26,20 @@
 import { CURL_ARGS, DOWNLOADS_SUBDIR, guestProbeScript, PARTIAL_SUFFIX, SERVER_SUBDIR, STAMP_NAME, TAR_ARGS } from './pack.js';
 import { ENVPACKS_ASSET, RELEASE_REPO } from './envpacks.js';
 
-/** A word in a step's argv: a literal, or one of the values the install carries. */
-export type Word = string | { ref: RefName };
+/**
+ * A word in a step's argv: a literal, one of the values the install carries,
+ * or — for the generated script only — a raw shell fragment.
+ *
+ * `{ sh }` exists because the HAND install has two things an app-driven one
+ * does not: flags a person typed (`--host 0.0.0.0` on a droplet) and a job
+ * type read out of `$1`. Both are shell words that cannot be a literal or a
+ * ref, and spelling the command a second time in the generator to hold them
+ * would be the second copy this module exists to prevent. `renderArgv`
+ * REFUSES one by name: there is no shell on the TypeScript side to expand it,
+ * and a `$BIND` reaching `spawn()` as a literal argument would be an argument
+ * called `$BIND`.
+ */
+export type Word = string | { ref: RefName } | { sh: string };
 
 /**
  * The values a step's argv can refer to. `install()` substitutes what it
@@ -67,8 +79,16 @@ export interface StepPlan {
   enableFlags: readonly string[];
   /** `crucible install <type> …` argv, one per installable type. */
   installs: readonly { type: string; argv: readonly string[] }[];
-  /** `--host`/`--port` for `crucible init`, already spelled. */
-  bind: readonly string[];
+  /**
+   * `--host`/`--port` for `crucible init`, already spelled.
+   *
+   * `Word[]` and not `string[]` since the droplet route (PHASE15's
+   * `docs/INSTALL-UNINSTALL.md`): a rented Linux box is reached over the
+   * network, so `install.sh` takes `--host 0.0.0.0` from the operator and
+   * passes it through as `{ sh: '$BIND' }`. `install()` still pushes plain
+   * strings, which is what an app has.
+   */
+  bind: readonly Word[];
   /** Whether the linger step is part of this install (systemd hosts only). */
   linger: boolean;
 }
@@ -85,13 +105,25 @@ function q(value: string): string {
 
 /** A step's words as one shell line. Refs become `"$VAR"`; literals are quoted. */
 export function renderSh(words: readonly Word[]): string {
-  return words.map((word) => (typeof word === 'string' ? q(word) : v(word.ref))).join(' ');
+  return words
+    .map((word) => {
+      if (typeof word === 'string') return q(word);
+      if ('sh' in word) return word.sh;
+      return v(word.ref);
+    })
+    .join(' ');
 }
 
 /** A step's words as an argv, with this install's measured values. */
 export function renderArgv(words: readonly Word[], values: Readonly<Partial<Record<RefName, string>>>): string[] {
   return words.map((word) => {
     if (typeof word === 'string') return word;
+    if ('sh' in word) {
+      throw new Error(
+        `renderArgv: {sh: ${JSON.stringify(word.sh)}} is a shell fragment and there is no shell here. `
+        + 'It belongs to the generated installer, whose flags a person typed; an app states its values as refs.',
+      );
+    }
     const value = values[word.ref];
     if (value === undefined) throw new Error(`renderArgv: nothing measured for {ref: "${word.ref}"}`);
     return value;
@@ -189,6 +221,87 @@ export function lingerSh(): string {
     + `fi\n`;
 }
 
+/**
+ * `crucible install <type>` over a shell variable — the hand install's
+ * `--install <type>` loop.
+ *
+ * The COMMAND comes from `renderSh` and is therefore the same one
+ * `installSteps` gives `install()`; only the iteration is spelled twice,
+ * which is this module's standing rule for its programs. `tts` carries its
+ * narrator engine as `tts=<engine>`, because cuda-linux names one venv per
+ * engine and `crucible install tts` refuses without it — the same refusal an
+ * app gets from `planJobTypes`.
+ */
+export function installJobTypesSh(): string {
+  const crucible: Word = { ref: 'crucible' };
+  const plain = renderSh([crucible, 'install', { sh: '"$type"' }]);
+  const engined = renderSh([
+    crucible,
+    'install',
+    { sh: '"$type"' },
+    '--narrator-engine',
+    { sh: '"$engine"' },
+  ]);
+  return `if [ -n "$JOB_TYPES" ]; then\n`
+    + `  for entry in $JOB_TYPES; do\n`
+    + `    case "$entry" in\n`
+    + `      *=*) type="\${entry%%=*}"; engine="\${entry#*=}" ;;\n`
+    + `      *)   type="$entry"; engine="" ;;\n`
+    + `    esac\n`
+    + `    say "install-$type"\n`
+    + `    if [ -n "$engine" ]; then\n`
+    + `      ${engined} || die "step_failed: install-$type"\n`
+    + `    else\n`
+    + `      ${plain} || die "step_failed: install-$type"\n`
+    + `    fi\n`
+    + `  done\n`
+    + `fi\n`;
+}
+
+/**
+ * `install.sh --uninstall`, whole: the CLI verb, and then the pack.
+ *
+ * TWO HALVES, AND THE SPLIT IS NOT ARBITRARY. `crucible uninstall`
+ * (`crucible/uninstall.py`) stops the server, removes the service and takes
+ * `CRUCIBLE_HOME` apart step by named step — everything except the
+ * relocatable interpreter it is itself running from, which it cannot unlink
+ * without pulling `site-packages` out from under a live process. THIS script
+ * unpacked that interpreter, so this script removes it, after the verb has
+ * returned. One owner per artefact, and the order is the only one that works.
+ *
+ * `--dry-run` is passed through and the pack removal becomes a sentence, so
+ * the wrapper's dry run is as complete a description as the verb's.
+ */
+export function uninstallSh(): string {
+  const crucible: Word = { ref: 'crucible' };
+  const verb = renderSh([crucible, 'uninstall', { sh: '$UNINSTALL_FLAGS' }]);
+  return `CRUCIBLE_HOME="\${CRUCIBLE_HOME:-$HOME/.crucible}"\n`
+    + `CRUCIBLE="$CRUCIBLE_HOME/${SERVER_SUBDIR}/bin/crucible"\n`
+    + `if [ ! -x "$CRUCIBLE" ]; then\n`
+    + `  die "not_installed: there is no $CRUCIBLE on this machine, so there is no Crucible here for this script to remove. \\$CRUCIBLE_HOME names where one would be"\n`
+    + `fi\n`
+    + `UNINSTALL_FLAGS=""\n`
+    + `if [ "$PURGE_WEIGHTS" = 1 ]; then UNINSTALL_FLAGS="$UNINSTALL_FLAGS --purge-weights"; fi\n`
+    + `if [ "$DRY_RUN" = 1 ]; then UNINSTALL_FLAGS="$UNINSTALL_FLAGS --dry-run"; fi\n`
+    + `${verb} || die "step_failed: uninstall"\n`
+    + `# The pack, which the verb deliberately leaves: it is the interpreter\n`
+    + `# that just ran, and this script is what unpacked it.\n`
+    + `say "server-pack"\n`
+    + `if [ "$DRY_RUN" = 1 ]; then\n`
+    + `  say "server-pack: would remove $CRUCIBLE_HOME/${SERVER_SUBDIR} and $CRUCIBLE_HOME/${DOWNLOADS_SUBDIR}"\n`
+    + `  say "home: would remove $CRUCIBLE_HOME if it were then empty"\n`
+    + `else\n`
+    + `  rm -rf "$CRUCIBLE_HOME/${SERVER_SUBDIR}" "$CRUCIBLE_HOME/${SERVER_SUBDIR}${PARTIAL_SUFFIX}" "$CRUCIBLE_HOME/${DOWNLOADS_SUBDIR}"\n`
+    + `  say "server-pack: removed $CRUCIBLE_HOME/${SERVER_SUBDIR}"\n`
+    + `  if rmdir "$CRUCIBLE_HOME" 2>/dev/null; then\n`
+    + `    say "home: removed $CRUCIBLE_HOME"\n`
+    + `  else\n`
+    + `    say "home: KEPT $CRUCIBLE_HOME — it still holds $(ls -A "$CRUCIBLE_HOME" | tr '\\n' ' ')"\n`
+    + `    say "home: weights are kept unless --purge-weights; nothing else here was Crucible's to delete"\n`
+    + `  fi\n`
+    + `fi\n`;
+}
+
 // ------------------------------------------------------------- the sequence
 
 /**
@@ -225,10 +338,18 @@ export function installSteps(plan: StepPlan): StepDef[] {
       name: 'init',
       what: 'write config.toml with a token this side minted',
       words: [crucible, 'init', '--token', { ref: 'token' }, ...plan.bind, ...plan.enableFlags],
+      // The token is minted HERE unless the caller brought one. `--token` on
+      // the command line is the droplet's case: an operator who is about to
+      // paste a connect code into two apps on two machines would rather state
+      // the secret than read it back out of a terminal. An empty `$TOKEN` is
+      // the ordinary path and mints, which is what every install before the
+      // flag existed did.
       sh: `if [ -f "$CRUCIBLE_HOME/config.toml" ]; then\n`
         + `  say "init: $CRUCIBLE_HOME/config.toml exists; its token is kept"\n`
         + `else\n`
-        + `  TOKEN="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"\n`
+        + `  if [ -z "\${TOKEN:-}" ]; then\n`
+        + `    TOKEN="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"\n`
+        + `  fi\n`
         + `  ${renderSh([crucible, 'init', '--token', { ref: 'token' }, ...plan.bind, ...plan.enableFlags])} || die "step_failed: init"\n`
         + `fi\n`,
       skip: 'config-exists',

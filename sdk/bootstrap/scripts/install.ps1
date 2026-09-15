@@ -1,4 +1,4 @@
-# GENERATED FILE — do not edit.
+# GENERATED FILE  -  do not edit.
 # Written by sdk/bootstrap/scripts/gen-install-scripts.ts from src/steps.ts
 # and src/wsl-states.ts, so a hand install and an app-driven install cannot
 # differ (PHASE14-ENVPACKS.md 4a). Regenerate: npm run gen:install
@@ -9,7 +9,7 @@
 # then run install.sh inside an imported distribution. It no longer does,
 # and that is the point of the phase: `crucible host` owns that sequence
 # (4.3), it can carry a reboot across because it starts at login, and the
-# page drives it as a task (4.7) — an app that asks for an install talks
+# page drives it as a task (4.7)  -  an app that asks for an install talks
 # to the SAME implementation through the host loopback door. Two walks of
 # one table was the thing being removed.
 #
@@ -19,13 +19,27 @@
 #
 #   irm https://github.com/telltaleatheist/crucible/releases/latest/download/install.ps1 | iex
 #
+# And to take it off again, keeping the weights (the -Uninstall branch
+# below): download it to a file first, because `irm | iex` has no way to
+# pass a switch.
+#
+#   irm https://github.com/telltaleatheist/crucible/releases/latest/download/install.ps1 -OutFile install.ps1
+#   .\install.ps1 -Uninstall            # weights kept
+#   .\install.ps1 -Uninstall -WslToo    # and the guest engine with it
+#
 # No admin. Everything here is per-user and idempotent: run it again after
 # a failure and it resumes from whatever is already on disk.
 
 [CmdletBinding()]
 param(
   [string]$Release = '0.6.0',
-  [string]$Root = "$env:LOCALAPPDATA\Crucible"
+  [string]$Root = "$env:LOCALAPPDATA\Crucible",
+  # The inverse. `crucible uninstall` does the work inside the home; this
+  # script removes the host pack, because this script is what unpacked it.
+  [switch]$Uninstall,
+  [switch]$PurgeWeights,
+  [switch]$DryRun,
+  [switch]$WslToo
 )
 
 # Continue, not Stop: every call below is a native program whose exit code
@@ -51,8 +65,53 @@ if (-not $env:LOCALAPPDATA) {
   Die "host_no_localappdata: LOCALAPPDATA is not set, so there is no per-user place to install into."
 }
 
+# --- the inverse, which exits ---------------------------------------------
+# `crucible uninstall` stops the tray, removes the Startup item and takes
+# %LOCALAPPDATA%\Crucible apart step by named step  -  everything except the
+# interpreter it is itself running from. THIS script unpacked that, so this
+# script removes it, after the verb has returned. Weights are kept unless
+# -PurgeWeights; -WslToo runs the guest's own uninstall first.
+if ($Uninstall) {
+  if (-not (Test-Path $Cmd)) {
+    Die "not_installed: there is no $Cmd on this machine, so there is no Crucible host here to remove."
+  }
+  $verb = @("uninstall")
+  if ($DryRun) { $verb += "--dry-run" }
+  if ($PurgeWeights) { $verb += "--purge-weights" }
+  if ($WslToo) { $verb += "--wsl-too" }
+  Say "uninstall: $Cmd $($verb -join ' ')"
+  & $Cmd @verb
+  if ($LASTEXITCODE -ne 0) { Die "step_failed: uninstall (crucible uninstall exited $LASTEXITCODE; nothing of the pack has been removed)" }
+  if ($DryRun) {
+    Say "host-pack: would remove $HostDir and $DownloadDir"
+    Say "home: would remove $Root if it were then empty"
+    exit 0
+  }
+  Say "host-pack"
+  foreach ($gone in @($Partial, $DownloadDir, $HostDir)) {
+    if (Test-Path $gone) {
+      try {
+        Remove-Item $gone -Recurse -Force -ErrorAction Stop
+      } catch {
+        Die "host_pack_locked: $gone could not be removed ($($_.Exception.Message)). Something still holds a file in it  -  the tray was just ended, so log out and back in, then run this again. It is idempotent."
+      }
+    }
+  }
+  Say "host-pack: removed $HostDir"
+  $left = @(Get-ChildItem -Force -Path $Root -ErrorAction SilentlyContinue)
+  if ($left.Count -eq 0) {
+    Remove-Item $Root -Force -Recurse
+    Say "home: removed $Root"
+  } else {
+    Say "home: KEPT $Root  -  it still holds $($left.Name -join ', ')"
+    Say "home: weights are kept unless -PurgeWeights; nothing else there was Crucible's to delete"
+  }
+  Say "uninstalled."
+  exit 0
+}
+
 # A pack is a zstd tarball. Windows 10 1803+ and Windows 11 ship bsdtar
-# linked with libzstd, so no zstd.exe is needed — MEASURED on 2026-09-14:
+# linked with libzstd, so no zstd.exe is needed  -  MEASURED on 2026-09-14:
 # bsdtar 3.8.1 / libarchive 3.8.1 / libzstd 1.5.5. A machine whose tar has
 # no zstd would half-unpack in silence, so it is CHECKED, not assumed.
 $tarVersion = ""

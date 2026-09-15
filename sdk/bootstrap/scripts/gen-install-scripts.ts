@@ -31,9 +31,9 @@ import { fileURLToPath } from 'node:url';
 
 import { CRUCIBLE_DISTRO, WSL_CONF_MARKER, WSL_CONF_TEXT } from '../src/distro.js';
 import { ENVPACKS_ASSET, HOST_BACKEND, HOST_PACK, RELEASE_REPO } from '../src/envpacks.js';
-import { CURL_ARGS, DOWNLOADS_SUBDIR, HOST_SUBDIR, PARTIAL_SUFFIX, STAMP_NAME, TAR_ARGS } from '../src/pack.js';
+import { CURL_ARGS, DOWNLOADS_SUBDIR, HOST_SUBDIR, PARTIAL_SUFFIX, SERVER_SUBDIR, STAMP_NAME, TAR_ARGS } from '../src/pack.js';
 import type { RunResult } from '../src/runner.js';
-import { installSteps } from '../src/steps.js';
+import { installJobTypesSh, installSteps, uninstallSh, type StepPlan } from '../src/steps.js';
 import { BOOTSTRAP_VERSION } from '../src/version.js';
 import { probeArgv, wslStates, type ProbeKey, type WslStateDef } from '../src/wsl-states.js';
 
@@ -43,14 +43,244 @@ const SCRIPTS = join(HERE, '..', '..', 'scripts');
 /** build/scripts → sdk/bootstrap → sdk → the repo root, where `crucible/` is. */
 const REPO = join(HERE, '..', '..', '..', '..');
 
+/**
+ * The typographic characters Crucible's prose uses, and their ASCII.
+ *
+ * **`install.ps1` MUST BE ASCII, and this is the whole of why.** Windows
+ * PowerShell 5.1 reads a `.ps1` with no byte-order mark as the system ANSI
+ * code page, not as UTF-8 — and the generator writes UTF-8 with no BOM,
+ * because a BOM breaks `irm … | iex` in other ways and because every other
+ * file in this repo is BOM-less. So an em dash arrives at the 5.1 parser as
+ * three cp1252 characters, one of which is a curly double quote, and MEASURED
+ * on 2026-09-15: `[Parser]::ParseFile` on the generated script reported *"The
+ * string is missing the terminator"* inside a `Die "…"` message that contained
+ * one. Comments got away with it for a phase; a string does not.
+ *
+ * `irm | iex` is not the route that suffers — `Invoke-RestMethod` decodes the
+ * HTTP body's declared UTF-8 — but `.\install.ps1 -Uninstall` IS, and that is
+ * the documented way to pass a switch, because a piped script cannot take one.
+ *
+ * So the prose is transliterated rather than being written twice, and
+ * `asciiOnly` REFUSES anything not in this table: a new character silently
+ * degrading to `?` is exactly the failure this exists to stop.
+ */
+const ASCII_FOR: Readonly<Record<string, string>> = {
+  '—': ' - ',   // em dash
+  '–': '-',     // en dash
+  '‘': "'",     // left single quote
+  '’': "'",     // right single quote
+  '“': '"',     // left double quote
+  '”': '"',     // right double quote
+  '…': '...',   // ellipsis
+  ' ': ' ',     // non-breaking space
+  '×': 'x',     // multiplication sign
+  '→': '->',    // rightwards arrow
+  '·': '-',     // middle dot
+};
+
+/** The text with {@link ASCII_FOR} applied, refusing any other non-ASCII. */
+export function asciiOnly(text: string, what: string): string {
+  const out = text.replace(/[^\x00-\x7f]/g, (character) => {
+    const replacement = ASCII_FOR[character];
+    if (replacement === undefined) {
+      throw new Error(
+        `gen-install-scripts: ${what} contains U+${character.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')} `
+        + `(${JSON.stringify(character)}), which has no ASCII spelling in ASCII_FOR. Windows PowerShell 5.1 reads a `
+        + 'BOM-less .ps1 as the ANSI code page, so a character outside ASCII does not arrive as itself - add it to the '
+        + 'table with the spelling you mean, or write the sentence in ASCII.',
+      );
+    }
+    return replacement;
+  });
+  // Belt and braces: the transliteration itself must not smuggle one through.
+  const left = out.match(/[^\x00-\x7f]/);
+  if (left !== null) throw new Error(`gen-install-scripts: ${what} is still not ASCII after transliteration: ${JSON.stringify(left[0])}`);
+  return out;
+}
+
+/** Every non-empty line two spaces in. For a block that lands inside an `if`. */
+function indent(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => (line === '' ? '' : `  ${line}`))
+    .join('\n');
+}
+
 const BANNER = (comment: string): string =>
   `${comment} GENERATED FILE — do not edit.\n`
   + `${comment} Written by sdk/bootstrap/scripts/gen-install-scripts.ts from src/steps.ts\n`
   + `${comment} and src/wsl-states.ts, so a hand install and an app-driven install cannot\n`
   + `${comment} differ (PHASE14-ENVPACKS.md 4a). Regenerate: npm run gen:install\n`;
 
-/** The standalone installer's plan: no job types, no weights (4a). */
-const STANDALONE = { enableFlags: [], installs: [], bind: [], linger: true } as const;
+/**
+ * The standalone installer's plan.
+ *
+ * Still no job types and no weights BY DEFAULT (4a: a bare Crucible that
+ * serves nothing until an app or the operator page asks). What changed with
+ * the droplet route is that a person at a terminal can now say otherwise, and
+ * the two ways they say it are shell variables the generated script fills
+ * from its own flags: `$BIND` for `--host`/`--port`, and `$JOB_TYPES` for
+ * `--install <type>`. Both are EMPTY on a bare run, so the script a
+ * `curl … | sh` produces is byte for byte the same install it was.
+ */
+const STANDALONE: StepPlan = {
+  enableFlags: [],
+  installs: [],
+  bind: [{ sh: '$BIND' }],
+  linger: true,
+};
+
+/**
+ * The flags a hand install takes, and the refusal for a flag it does not.
+ *
+ * Nothing here has a default that does something: every variable starts empty
+ * or `0`, and an empty one means the behaviour the script had before the flag
+ * existed. An unknown flag is refused by name rather than ignored — a typo in
+ * `--purge-weights` on a machine holding 57 GB of voices must not quietly run
+ * the version that keeps them and then be believed to have run the other.
+ */
+function argumentsSh(): string {
+  return [
+    'usage() {',
+    "  cat <<'USAGE'",
+    'crucible install.sh — install or remove a Crucible on this machine.',
+    '',
+    'Install:',
+    '  --token <t>          use this bearer token instead of minting one',
+    '  --host <addr>        bind address for the server (default 127.0.0.1;',
+    '                       a rented box is reached over the network, so it',
+    '                       wants 0.0.0.0 — the bearer token is the lock)',
+    '  --port <n>           bind port (default 7100)',
+    '  --install <type>     also install this job type from its pack. Repeatable.',
+    '                       tts names its engine: --install tts=higgs-v3',
+    '  --from-source <ref>  build the server from a git ref instead of the',
+    '                       published pack (a branch, a tag or a sha)',
+    '  --release <version>  install this release rather than the built-in one',
+    '  --min-free-gib <n>   refuse unless this much disk is free for the weights',
+    '',
+    'Remove:',
+    '  --uninstall          undo the install, in the inverse order',
+    '  --purge-weights      with --uninstall: delete the weights too',
+    '  --dry-run            with --uninstall: print every step and touch nothing',
+    '',
+    'USAGE',
+    '}',
+    '',
+    'UNINSTALL=0',
+    'PURGE_WEIGHTS=0',
+    'DRY_RUN=0',
+    'TOKEN=""',
+    'BIND=""',
+    'JOB_TYPES=""',
+    'FROM_SOURCE=""',
+    'MIN_FREE_GIB=""',
+    'need() { [ "$1" -ge 2 ] || die "flag_needs_value: $2 takes a value"; }',
+    'while [ $# -gt 0 ]; do',
+    '  case "$1" in',
+    '    --uninstall) UNINSTALL=1 ;;',
+    '    --purge-weights) PURGE_WEIGHTS=1 ;;',
+    '    --dry-run) DRY_RUN=1 ;;',
+    '    --token) need $# "--token"; shift; TOKEN="$1" ;;',
+    '    --host) need $# "--host"; shift; BIND="$BIND --host $1" ;;',
+    '    --port) need $# "--port"; shift; BIND="$BIND --port $1" ;;',
+    '    --install) need $# "--install"; shift; JOB_TYPES="$JOB_TYPES $1" ;;',
+    '    --from-source) need $# "--from-source"; shift; FROM_SOURCE="$1" ;;',
+    '    --release) need $# "--release"; shift; RELEASE="$1" ;;',
+    '    --min-free-gib) need $# "--min-free-gib"; shift; MIN_FREE_GIB="$1" ;;',
+    '    -h|--help) usage; exit 0 ;;',
+    '    *) die "unknown_flag: $1 is not a flag this installer takes; run with --help" ;;',
+    '  esac',
+    '  shift',
+    'done',
+    'if [ "$UNINSTALL" = 0 ] && [ "$PURGE_WEIGHTS" = 1 ]; then',
+    '  die "flag_needs_uninstall: --purge-weights deletes weights and only means something with --uninstall"',
+    'fi',
+  ].join('\n');
+}
+
+/**
+ * The prerequisites, checked BY NAME on the backend that has them.
+ *
+ * `cuda-linux` is the droplet's backend and the one with hardware to refuse
+ * over. Each check names the thing it could not find and stops; none of them
+ * guesses around a missing answer, because every way this can fail produces a
+ * server that installs perfectly and then refuses its first job — which is
+ * the failure mode `crucible doctor` exists for and which an installer should
+ * not be adding to.
+ *
+ * `ffmpeg` is the one check that is CONDITIONAL, and deliberately: a bare llm
+ * droplet does not need it, and refusing one that asked for nothing else
+ * would be an installer inventing a requirement. It is required when a job
+ * type that decodes audio was asked for, and REPORTED otherwise.
+ *
+ * Disk is the other conditional. The server pack states its own size and the
+ * pack step already refuses `pack_disk` against it; WEIGHTS do not have a
+ * size until somebody names a model, so the only honest disk rule here is the
+ * one the operator states — `--min-free-gib` — plus the free figure, printed.
+ */
+function prerequisitesSh(): string {
+  return [
+    'if [ "$BACKEND" = cuda-linux ]; then',
+    '  command -v nvidia-smi >/dev/null 2>&1 || die "no_nvidia_smi: there is no nvidia-smi on PATH. cuda-linux runs vLLM, SGLang and torch on an NVIDIA card; a box without the driver is not this backend"',
+    '  driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 | tr -d \'[:space:]\')"',
+    '  [ -n "$driver" ] || die "no_nvidia_driver: nvidia-smi is on PATH and named no driver. On a rented GPU box that usually means the image has the CUDA userland and not the kernel module"',
+    '  cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d \'[:space:].\')"',
+    '  [ -n "$cap" ] || die "no_cuda_arch: this driver would not report a compute capability, so nothing here can say whether the engines will build for this card"',
+    '  [ "$cap" -ge 70 ] || die "cuda_arch_too_old: this card reports compute capability $cap (7.0 is the floor: vLLM and SGLang ship no kernels below it, and torch\'s wheels drop it too). Rent a card at 7.0 or newer"',
+    '  card="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"',
+    '  say "prerequisites: $card, driver $driver, compute capability $cap"',
+    'fi',
+    'case " $JOB_TYPES " in',
+    '  *" tts"*|*" asr"*|*" rvc"*|*" align"*|*" denoise"*)',
+    '    command -v ffmpeg >/dev/null 2>&1 || die "no_ffmpeg: --install named a job type that decodes audio and there is no ffmpeg on PATH. Install it first; crucible would otherwise install cleanly and refuse its first job" ;;',
+    '  *)',
+    '    if command -v ffmpeg >/dev/null 2>&1; then',
+    '      say "prerequisites: ffmpeg present"',
+    '    else',
+    '      say "prerequisites: NO ffmpeg on PATH. Nothing asked for today needs it; tts, asr, align, rvc and denoise will refuse until it is there"',
+    '    fi ;;',
+    'esac',
+    'if [ -n "$MIN_FREE_GIB" ]; then',
+    '  have_gib=$(( free_kib / 1048576 ))',
+    '  [ "$have_gib" -ge "$MIN_FREE_GIB" ] || die "disk_too_small: $CRUCIBLE_HOME has ${have_gib} GiB free and --min-free-gib asked for $MIN_FREE_GIB"',
+    'fi',
+    'say "prerequisites: $(( free_kib / 1048576 )) GiB free at $CRUCIBLE_HOME. Weights are pulled later and priced then — a 9B model is ~18 GiB, a Higgs voice ~8.5 GiB"',
+  ].join('\n');
+}
+
+/**
+ * `--from-source <ref>`: the server built from a checkout, not from a pack.
+ *
+ * For the night a branch is what exists — tonight's `feat/phase6-remote-render`
+ * is exactly that case — and for a droplet, where there is no app to ask for
+ * a release. It is a SEPARATE path and never a fallback: a pack that failed to
+ * download is `pack_download_failed` and stays that, because "the release is
+ * broken" and "I want this branch" are different sentences and only one of
+ * them is an argument.
+ *
+ * It needs a `python3` on the machine, and says so by name, because this is
+ * the one route where the interpreter does not arrive with the code.
+ */
+function fromSourceSh(): string {
+  return [
+    `say "server-pack: --from-source $FROM_SOURCE, building instead of downloading"`,
+    'command -v git >/dev/null 2>&1 || die "guest_missing_tool: --from-source needs git"',
+    'command -v python3 >/dev/null 2>&1 || die "guest_missing_tool: --from-source needs a python3 on this machine to build the venv with. The published pack brings its own interpreter; a source build cannot"',
+    `dest="$CRUCIBLE_HOME/${SERVER_SUBDIR}"`,
+    'src="$CRUCIBLE_HOME/src"',
+    'rm -rf "$src"',
+    `git clone --filter=blob:none "https://github.com/${RELEASE_REPO}" "$src" || die "from_source_clone_failed: https://github.com/${RELEASE_REPO}"`,
+    'git -C "$src" checkout --detach "$FROM_SOURCE" || die "from_source_ref_unknown: the checkout has no ref called $FROM_SOURCE"',
+    'rm -rf "$dest"',
+    'python3 -m venv "$dest" || die "from_source_venv_failed: python3 -m venv would not make $dest"',
+    '"$dest/bin/python" -m pip install --upgrade pip setuptools wheel || die "from_source_install_failed: pip would not update itself in $dest"',
+    '"$dest/bin/python" -m pip install "$src" || die "from_source_install_failed: pip would not install $src into $dest"',
+    '"$dest/bin/crucible" --version >/dev/null || die "from_source_install_failed: $dest/bin/crucible would not run"',
+    `printf 'sha256=%s\\nrelease=%s\\n' "from-source" "$(git -C "$src" rev-parse HEAD)" > "$dest/${STAMP_NAME}"`,
+    'CRUCIBLE="$dest/bin/crucible"',
+    'say "server-pack: built $("$CRUCIBLE" --version) from $(git -C "$src" rev-parse --short HEAD)"',
+  ].join('\n');
+}
 
 export function generateInstallSh(): string {
   const steps = installSteps(STANDALONE);
@@ -64,6 +294,16 @@ export function generateInstallSh(): string {
     '#',
     '#   curl -fsSL https://github.com/' + RELEASE_REPO + '/releases/latest/download/install.sh | sh',
     '#',
+    '# On a rented Linux box with a GPU, where the server is reached over the',
+    '# network and the bearer token is the lock:',
+    '#',
+    '#   curl -fsSL https://github.com/' + RELEASE_REPO + '/releases/latest/download/install.sh \\',
+    '#     | sh -s -- --token "$CRUCIBLE_TOKEN" --host 0.0.0.0 --install llm',
+    '#',
+    '# And to take it off again, keeping the weights:',
+    '#',
+    '#   curl -fsSL https://github.com/' + RELEASE_REPO + '/releases/latest/download/install.sh | sh -s -- --uninstall',
+    '#',
     '# CRUCIBLE_RELEASE=<version> picks a release other than the one this script',
     '# was cut with. Everything here is idempotent: run it again after a failure.',
     '',
@@ -73,6 +313,11 @@ export function generateInstallSh(): string {
     '',
     "say() { printf 'crucible: %s\\n' \"$*\"; }",
     "die() { printf 'crucible: %s\\n' \"$*\" >&2; exit 1; }",
+    '',
+    '# --- arguments -----------------------------------------------------------',
+    '# The flags a person types. An app never reaches this file: it calls',
+    '# `install()`, which walks the SAME step list (PHASE14 4a).',
+    argumentsSh(),
     '',
     '# --- backend -------------------------------------------------------------',
     '# Two backends and no third. Windows is never one: on Windows this script',
@@ -85,13 +330,53 @@ export function generateInstallSh(): string {
     'esac',
     'say "release $RELEASE, backend $BACKEND"',
     '',
+    '# --- uninstall -----------------------------------------------------------',
+    '# The inverse, and then this script exits: `crucible uninstall` does the',
+    '# nine steps inside CRUCIBLE_HOME and this removes the pack it unpacked.',
+    'if [ "$UNINSTALL" = 1 ]; then',
+    '  say "uninstall"',
+    indent(uninstallSh().trimEnd()),
+    '  say "uninstalled."',
+    '  exit 0',
+    'fi',
+    '',
   ];
   for (const step of steps) {
     lines.push(`# --- ${step.name} ${'-'.repeat(Math.max(0, 68 - step.name.length))}`);
     lines.push(`# ${step.what}`);
     lines.push(`say "${step.name}"`);
-    lines.push(step.sh.trimEnd());
+    if (step.name === 'server-pack') {
+      // The pack and the source build are two routes to one artefact, and the
+      // `if` is the whole of their relationship: neither is the other's
+      // fallback. `serverPackSh()` stays the one owner of the pack route.
+      lines.push('if [ -n "$FROM_SOURCE" ]; then');
+      lines.push(indent(fromSourceSh()));
+      lines.push('else');
+      lines.push(indent(step.sh.trimEnd()));
+      lines.push('fi');
+    } else {
+      lines.push(step.sh.trimEnd());
+    }
     lines.push('');
+    if (step.name === 'host-facts') {
+      // AFTER the probe, because it prices the disk the probe measured, and
+      // BEFORE anything is downloaded, because a refusal that arrives after
+      // eight gigabytes is a refusal that cost something.
+      lines.push('# --- prerequisites -------------------------------------------------------');
+      lines.push('# Named, and never guessed around. A missing one is a refusal here rather');
+      lines.push('# than a job type that refuses its first request a week later.');
+      lines.push('say "prerequisites"');
+      lines.push(prerequisitesSh());
+      lines.push('');
+    }
+    if (step.name === 'init') {
+      // Exactly where `installSteps` puts `install-<type>` for an app.
+      lines.push('# --- install-job-types ---------------------------------------------------');
+      lines.push('# `--install <type>`, from the published packs. Empty on a bare run, which');
+      lines.push('# is 4a: a Crucible that serves nothing until somebody asks.');
+      lines.push(installJobTypesSh().trimEnd());
+      lines.push('');
+    }
   }
   lines.push('# --- done ----------------------------------------------------------------');
   lines.push('say "installed. Pair an app with the line below."');
@@ -149,13 +434,27 @@ export function generateInstallPs1(): string {
     '#',
     '#   irm https://github.com/' + RELEASE_REPO + '/releases/latest/download/install.ps1 | iex',
     '#',
+    '# And to take it off again, keeping the weights (the -Uninstall branch',
+    '# below): download it to a file first, because `irm | iex` has no way to',
+    '# pass a switch.',
+    '#',
+    '#   irm https://github.com/' + RELEASE_REPO + '/releases/latest/download/install.ps1 -OutFile install.ps1',
+    '#   .\\install.ps1 -Uninstall            # weights kept',
+    '#   .\\install.ps1 -Uninstall -WslToo    # and the guest engine with it',
+    '#',
     '# No admin. Everything here is per-user and idempotent: run it again after',
     '# a failure and it resumes from whatever is already on disk.',
     '',
     '[CmdletBinding()]',
     'param(',
     `  [string]$Release = ${psQuote(BOOTSTRAP_VERSION)},`,
-    '  [string]$Root = "$env:LOCALAPPDATA\\Crucible"',
+    '  [string]$Root = "$env:LOCALAPPDATA\\Crucible",',
+    '  # The inverse. `crucible uninstall` does the work inside the home; this',
+    '  # script removes the host pack, because this script is what unpacked it.',
+    '  [switch]$Uninstall,',
+    '  [switch]$PurgeWeights,',
+    '  [switch]$DryRun,',
+    '  [switch]$WslToo',
     ')',
     '',
     '# Continue, not Stop: every call below is a native program whose exit code',
@@ -180,6 +479,51 @@ export function generateInstallPs1(): string {
     '}',
     'if (-not $env:LOCALAPPDATA) {',
     '  Die "host_no_localappdata: LOCALAPPDATA is not set, so there is no per-user place to install into."',
+    '}',
+    '',
+    '# --- the inverse, which exits ---------------------------------------------',
+    '# `crucible uninstall` stops the tray, removes the Startup item and takes',
+    '# %LOCALAPPDATA%\\Crucible apart step by named step — everything except the',
+    '# interpreter it is itself running from. THIS script unpacked that, so this',
+    '# script removes it, after the verb has returned. Weights are kept unless',
+    '# -PurgeWeights; -WslToo runs the guest\'s own uninstall first.',
+    'if ($Uninstall) {',
+    '  if (-not (Test-Path $Cmd)) {',
+    '    Die "not_installed: there is no $Cmd on this machine, so there is no Crucible host here to remove."',
+    '  }',
+    '  $verb = @("uninstall")',
+    '  if ($DryRun) { $verb += "--dry-run" }',
+    '  if ($PurgeWeights) { $verb += "--purge-weights" }',
+    '  if ($WslToo) { $verb += "--wsl-too" }',
+    '  Say "uninstall: $Cmd $($verb -join \' \')"',
+    '  & $Cmd @verb',
+    '  if ($LASTEXITCODE -ne 0) { Die "step_failed: uninstall (crucible uninstall exited $LASTEXITCODE; nothing of the pack has been removed)" }',
+    '  if ($DryRun) {',
+    '    Say "host-pack: would remove $HostDir and $DownloadDir"',
+    '    Say "home: would remove $Root if it were then empty"',
+    '    exit 0',
+    '  }',
+    '  Say "host-pack"',
+    '  foreach ($gone in @($Partial, $DownloadDir, $HostDir)) {',
+    '    if (Test-Path $gone) {',
+    '      try {',
+    '        Remove-Item $gone -Recurse -Force -ErrorAction Stop',
+    '      } catch {',
+    '        Die "host_pack_locked: $gone could not be removed ($($_.Exception.Message)). Something still holds a file in it — the tray was just ended, so log out and back in, then run this again. It is idempotent."',
+    '      }',
+    '    }',
+    '  }',
+    '  Say "host-pack: removed $HostDir"',
+    '  $left = @(Get-ChildItem -Force -Path $Root -ErrorAction SilentlyContinue)',
+    '  if ($left.Count -eq 0) {',
+    '    Remove-Item $Root -Force -Recurse',
+    '    Say "home: removed $Root"',
+    '  } else {',
+    '    Say "home: KEPT $Root — it still holds $($left.Name -join \', \')"',
+    '    Say "home: weights are kept unless -PurgeWeights; nothing else there was Crucible\'s to delete"',
+    '  }',
+    '  Say "uninstalled."',
+    '  exit 0',
     '}',
     '',
     '# A pack is a zstd tarball. Windows 10 1803+ and Windows 11 ship bsdtar',
@@ -276,7 +620,9 @@ export function generateInstallPs1(): string {
     'Say "Crucible is in your notification area. Open its menu to install the WSL2 engine."',
     '',
   ];
-  return lines.join('\n');
+  // ASCII, because Windows PowerShell 5.1 reads a BOM-less .ps1 as the ANSI
+  // code page. See `asciiOnly`, and the parse error that measured it.
+  return asciiOnly(lines.join('\n'), 'install.ps1');
 }
 
 // ------------------------------------------------- the table, as Python data
