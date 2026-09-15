@@ -1033,6 +1033,7 @@ class FakeOrchestrator:
     document: dict = field(default_factory=lambda: {"role": "orchestrator"})
     not_ours: bool = False
     restarts: list[str] = field(default_factory=list)
+    quits: list[str] = field(default_factory=list)
 
     def info(self) -> dict:
         return self.document
@@ -1044,6 +1045,9 @@ class FakeOrchestrator:
     def restart_engine(self, emit) -> None:
         self.restarts.append("restarted")
         emit(installer.Event("done", {"engine": "http://127.0.0.1:7100"}))
+
+    def quit(self) -> None:
+        self.quits.append("quit")
 
 
 def a_door(
@@ -1187,6 +1191,123 @@ def test_the_extra_fields_bootstrap_sends_are_accepted_and_not_refused(
     finally:
         server.shutdown()
     assert seen == ["ran"]
+
+
+# ------------------------------------------ PHASE17 4.4: `POST /quit`
+#
+# Measured 2026-09-15: `taskkill /PID 45504` with no `/F` reported "sent
+# termination signal", the tray was still alive 25 s later, and it had written
+# NOTHING to its log — a console-less `pythonw` never sees the WM_CLOSE. `/F`
+# ended it and ran none of `quit()`. So this route is not a convenience; it is
+# the only orderly stop the process has.
+
+
+def _post(port: int, path: str, *, bearer: str | None) -> tuple[int, dict]:
+    """POST with no body, returning (status, parsed body). Refusals included."""
+    import urllib.error
+    import urllib.request
+
+    headers = {} if bearer is None else {"Authorization": f"Bearer {bearer}"}
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", data=b"", headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.status, json.loads(response.read().decode())
+    except urllib.error.HTTPError as refused:
+        return refused.code, json.loads(refused.read().decode())
+
+
+def test_quit_takes_THE_SAME_bearer_as_every_other_route_on_this_door(
+    host_log: log.HostLog,
+) -> None:
+    """The ENGINE's token, and a wrong one is refused BY NAME.
+
+    A stop is the most destructive verb this door has, and it is the one an
+    unauthenticated caller must not be able to reach: anything that can open a
+    loopback socket could otherwise take the machine's orchestrator down.
+    """
+    orchestrator = FakeOrchestrator()
+    door = a_door(host_log, token="tok", orchestrator=orchestrator)
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    try:
+        for bearer in (None, "wrong"):
+            status, body = _post(port, door_module.QUIT_PATH, bearer=bearer)
+            assert status == 401, bearer
+            assert body["error"]["code"] == "host_unauthorized"
+        assert orchestrator.quits == [], "a refused quit stopped nothing"
+    finally:
+        server.shutdown()
+
+
+def test_a_quit_before_this_machine_has_a_token_is_host_no_token(
+    host_log: log.HostLog,
+) -> None:
+    """Not an authorisation failure, and named as the state it is — the same
+    distinction `authorised()` already makes for every other route."""
+    orchestrator = FakeOrchestrator()
+    door = a_door(host_log, token=lambda: None, orchestrator=orchestrator)
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    try:
+        status, body = _post(port, door_module.QUIT_PATH, bearer="anything")
+        assert status == 503
+        assert body["error"]["code"] == "host_no_token"
+        assert orchestrator.quits == []
+    finally:
+        server.shutdown()
+
+
+def test_the_quit_ANSWER_precedes_the_stop_and_is_the_last_event(
+    host_log: log.HostLog,
+) -> None:
+    """4.4: a verb with an empty answer, never a task.
+
+    Deterministic rather than timed. The fake's `quit()` BLOCKS until the
+    client says it holds the whole body, so an implementation that stopped
+    first would record `quit-before-the-answer` here instead of waiting for a
+    reader that could no longer arrive.
+    """
+    answered = threading.Event()
+    stopped = threading.Event()
+
+    class BlocksUntilAnswered(FakeOrchestrator):
+        def quit(self) -> None:
+            self.quits.append(
+                "quit" if answered.wait(20) else "quit-before-the-answer"
+            )
+            stopped.set()
+
+    orchestrator = BlocksUntilAnswered()
+    door = a_door(host_log, token="tok", orchestrator=orchestrator)
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    try:
+        status, body = _post(port, door_module.QUIT_PATH, bearer="tok")
+        answered.set()
+        assert status == 200
+        assert body == {"quit": True, "name": "crucible-orchestrator@test"}
+        # The stop ran, and it ran AFTER the answer was on the wire.
+        assert stopped.wait(20), "the door never reached the stop"
+        assert orchestrator.quits == ["quit"]
+    finally:
+        server.shutdown()
+
+
+def test_the_404_body_names_quit_among_the_routes_this_door_serves(
+    host_log: log.HostLog,
+) -> None:
+    door = a_door(host_log, token="tok")
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    try:
+        status, body = _post(port, "/stop", bearer="tok")
+        assert status == 404
+        assert body["error"]["code"] == "not_found"
+        assert door_module.QUIT_PATH in body["error"]["message"]
+    finally:
+        server.shutdown()
 
 
 # ------------------------------------------------------------- 3.6 pairing
@@ -1970,6 +2091,123 @@ def test_nothing_claimed_means_nothing_released(tmp_path: Path, monkeypatch) -> 
         host.claim()
         host.quit()
         assert engine.releases == []
+
+
+# ------------------------------------ PHASE17 4.4: ONE quit, two callers
+
+
+class FakeIcon:
+    """pystray's one verb, recorded. `icon.run()` returning IS the exit."""
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def _quit_trace(host: app_module.Host, engine: FakeEngine, runner: Scripted) -> dict:
+    """Everything a quit is observable by. Assert on the CALLS, not on a death."""
+    return {
+        "releases": len(engine.releases),
+        "hold_released": host._c.watcher.held is None,
+        "child_stopped": host._c.watcher.child is None,
+        "exited": host._icon.stopped,
+        "systemctl": [c for c in runner.calls if "systemctl" in " ".join(c)],
+    }
+
+
+def _a_quitting_host(
+    tmp_path: Path, owner: Owner, engine: FakeEngine, monkeypatch
+) -> tuple[app_module.Host, Scripted]:
+    """A claimed, held, child-owning orchestrator, ready to be stopped.
+
+    `tray.update` is stubbed for this module's stated reason: `tray.py` is
+    pystray and has no decision in it, and pystray is not installed where this
+    suite runs. The menu's Quit goes through `_refresh()` on its way out; the
+    door's does not, and that difference is a drawing rather than a step.
+    """
+    from crucible.host import tray as tray_module
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(tray_module, "update", lambda *_args: None)
+    runner = Scripted()
+    host = _orchestrator(tmp_path, runner, owner, engine, monkeypatch)
+    host._icon = FakeIcon()
+    host.claim()
+    host._c.watcher.hold("Ubuntu")
+    host._c.watcher.child = FakeChild()
+    runner.calls.clear()
+    return host, runner
+
+
+@pytest.mark.parametrize("owner", [Owner.WSL_UNIT, Owner.HOST_CHILD, Owner.FOUND])
+def test_the_doors_quit_is_THE_MENUS_quit_and_never_a_second_copy(
+    tmp_path: Path, monkeypatch, owner: Owner
+) -> None:
+    """4.4's rule, for every owner: one implementation, two callers.
+
+    A person clicking Quit and a script posting `/quit` must not get two
+    different shutdowns — the half that drifted would be the script's, which
+    is the half nobody is watching. So both are driven here and the traces are
+    compared, rather than each being asserted against its own expectations.
+    """
+    with FakeEngine() as engine:
+        clicked, clicked_runner = _a_quitting_host(
+            tmp_path / "menu", owner, engine, monkeypatch
+        )
+        clicked.on_click(menu.QUIT)
+        by_menu = _quit_trace(clicked, engine, clicked_runner)
+
+    with FakeEngine() as engine:
+        posted, posted_runner = _a_quitting_host(
+            tmp_path / "door", owner, engine, monkeypatch
+        )
+        door_module.OrchestratorDoor(
+            posted._c.log,
+            lambda _emit: None,
+            token=lambda: "tok",
+            orchestrator=posted,
+        ).quit()
+        by_door = _quit_trace(posted, engine, posted_runner)
+
+    assert by_menu == by_door, owner
+    assert by_door["exited"] is True, "every owner still ends the process"
+    assert by_door["hold_released"] is True, "the wsl.exe session is this process's"
+
+
+def test_a_quit_that_holds_a_claim_RELEASES_it(tmp_path: Path, monkeypatch) -> None:
+    with FakeEngine() as engine:
+        host, _runner = _a_quitting_host(tmp_path, Owner.WSL_UNIT, engine, monkeypatch)
+        assert host._claimed is True
+        door_module.OrchestratorDoor(
+            host._c.log, lambda _emit: None, token=lambda: "tok", orchestrator=host
+        ).quit()
+        assert len(engine.releases) == 1
+        assert engine.releases[0]["orchestrator"]["url"] == paths.door_url("")
+        assert host._icon.stopped is True
+
+
+def test_a_FOUND_engines_orchestrator_releases_NOTHING_and_still_stops(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """4.1a all the way to the exit: it never claimed it, so there is nothing
+    to release, and it is not this process's child, so it is not taken down —
+    but the hold IS let go and the orchestrator DOES end, because both of
+    those are this process's own and belong to nobody else."""
+    with FakeEngine() as engine:
+        host, runner = _a_quitting_host(tmp_path, Owner.FOUND, engine, monkeypatch)
+        child = host._c.watcher.child
+        assert host._claimed is False, "a found engine is never claimed"
+        door_module.OrchestratorDoor(
+            host._c.log, lambda _emit: None, token=lambda: "tok", orchestrator=host
+        ).quit()
+        assert engine.releases == []
+        assert child.terminated is False, "an engine it did not start is not stopped"
+        assert not any("systemctl" in " ".join(c) for c in runner.calls)
+        assert host._c.watcher.held is None
+        assert host._icon.stopped is True
+    assert "owner=found" in (tmp_path / "host.log").read_text(encoding="utf-8")
 
 
 # ------------------------------------------------ PHASE17 3.2: the document

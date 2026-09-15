@@ -1,9 +1,10 @@
 """The orchestrator's door on 127.0.0.1:7101. PHASE15-HOST.md 4.3, PHASE17 3.2/4.2.
 
-FOUR ROUTES, AND THEY ARE THE WHOLE OF WHAT AN ORCHESTRATOR SERVES
+FIVE ROUTES, AND THEY ARE THE WHOLE OF WHAT AN ORCHESTRATOR SERVES
 -------------------------------------------------------------------
     POST /install    the engine move (PHASE15 4.7)              — unchanged
     POST /restart    restart this orchestrator's engine (4.2)   — new
+    POST /quit       stop THIS orchestrator (4.4)               — new
     GET  /v1/info    who this process is, and its engine (3.2)  — new
     GET  /v1/ping    "is this a Crucible"                       — new
 
@@ -58,6 +59,7 @@ from .paths import DOOR_HOST, DOOR_PORT
 #: guessed a path is told what the door is rather than nothing.
 INSTALL_PATH = "/install"
 RESTART_PATH = "/restart"
+QUIT_PATH = "/quit"
 INFO_PATH = "/v1/info"
 PING_PATH = "/v1/ping"
 
@@ -88,6 +90,15 @@ class OrchestratorPort(Protocol):
 
     def restart_engine(self, emit: Callable[[Event], None]) -> None:
         """PHASE17 4.2's sequence, by the owner-appropriate means."""
+
+    def quit(self) -> None:
+        """PHASE17 4.4's stop — THE SAME ONE the tray menu's Quit runs.
+
+        Release the claim (2.2), let the held distro go (PHASE15 7b.4c), take
+        a child engine down when this process is the one that started it
+        (`owner == child`), and end the process. `app.Host.quit` is the one
+        implementation; the menu item and this door are its two callers.
+        """
 
 #: What the body may contain. 4.7: the reverse move is not in this phase.
 TARGETS = (ENGINE_TARGET_WSL,)
@@ -165,6 +176,10 @@ class OrchestratorDoor:
     def check_restartable(self) -> None:
         self._orchestrator.check_restartable()
 
+    def quit(self) -> None:
+        """PHASE17 4.4 — the menu's Quit, reached by the transport instead."""
+        self._orchestrator.quit()
+
     def info(self) -> dict[str, Any]:
         return self._orchestrator.info()
 
@@ -228,7 +243,7 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
         def _what_this_door_is(self) -> str:
             return (
                 f"this orchestrator serves {INSTALL_PATH}, {RESTART_PATH}, "
-                f"{INFO_PATH} and {PING_PATH}, and nothing else "
+                f"{QUIT_PATH}, {INFO_PATH} and {PING_PATH}, and nothing else "
                 f"(PHASE17-ORCHESTRATOR.md 3.2); {self.path} is not a door. An "
                 f"app wanting anything else reads {INFO_PATH}'s `engine.url` "
                 "and goes there."
@@ -256,6 +271,9 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
             path = self.path.split("?", 1)[0].rstrip("/")
             if path == RESTART_PATH:
                 self._restart()
+                return
+            if path == QUIT_PATH:
+                self._quit()
                 return
             if path != INSTALL_PATH:
                 self._refuse(404, "not_found", self._what_this_door_is())
@@ -345,6 +363,42 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
                 )
                 return
             self._stream(door.restart)
+
+        def _quit(self) -> None:
+            """`POST /quit` — PHASE17 4.4. The only non-interactive stop.
+
+            **IT ANSWERS BEFORE IT STOPS, AND THE ANSWER IS THE LAST EVENT.**
+            4.3's rule holds — a door served BY the orchestrator cannot
+            survive the act of stopping the orchestrator — so this is not a
+            task and there is no stream: the 200 and its body are written and
+            flushed onto the socket FIRST, and only then does the shutdown
+            run. A caller gets a response, never a dropped connection, and
+            there is nothing left afterwards for it to re-read.
+
+            **NOT REFUSABLE WHILE AN INSTALL IS RUNNING**, unlike `/restart`.
+            The measurement in 4.4 is that `taskkill` without `/F` is a no-op
+            against a console-less `pythonw` and `/F` runs none of `quit()`,
+            so this route is the ONLY orderly stop this process has. A stop
+            that a wedged sequence could refuse would send the operator
+            straight back to `/F`, which is the thing 4.4 exists to remove.
+
+            The bearer is the one every other route on this door takes — the
+            ENGINE's token — and the refusals are `host_unauthorized` (401)
+            and `host_no_token` (503), by the same `_authorised()`.
+            """
+            if not self._authorised():
+                return
+            door._log.write(f"door: POST {QUIT_PATH} — running the menu's Quit")
+            self._answer({"quit": True, "name": door.name})
+            try:
+                self.wfile.flush()
+            except OSError as exc:
+                # The caller hung up between the request and the answer. The
+                # stop still runs: it was asked for, and an orchestrator that
+                # stayed up because nobody was listening to its goodbye would
+                # be the no-op 4.4 was written about.
+                door._log.write(f"door: the quit answer did not land ({exc}); stopping anyway")
+            door.quit()
 
         def _stream(self, sequence: Callable[[Callable[[Event], None]], None]) -> None:
             """The ndjson. Flushed per line: a progress bar that arrives at the

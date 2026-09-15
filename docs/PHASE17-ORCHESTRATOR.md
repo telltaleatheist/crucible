@@ -341,9 +341,11 @@ bearer as everything else on that door — the engine's token.
   `{"crucible": true, "name": …, "api_version": 1, "role": "orchestrator"}`, so the
   "is this a Crucible" probe works on either address.
 
-Nothing else is on the orchestrator's door. It is not a second API surface: it has `/install`
-and `/restart` (section 4), `/v1/ping` and `/v1/info`, and an app that wants anything at all
-follows `engine.url`.
+Nothing else is on the orchestrator's door. It is not a second API surface: it has `/install`,
+`/restart` and `/quit` (section 4), `/v1/ping` and `/v1/info`, and an app that wants anything
+at all follows `engine.url`. All three verbs act on the ORCHESTRATOR or on the engine it
+manages — none of them carries anybody's data, which is section 0's line and the reason a
+fifth route is still not a second API.
 
 ### 3.3 How a client reads `role` — all-or-nothing, like `route`
 
@@ -422,42 +424,78 @@ uninstall is one sentence: **the orchestrator's claim is not consulted and not r
 engine the orchestrator merely `found` is never uninstalled by it, from the same rule as
 4.2's.
 
-### 4.4 OWED: the orchestrator can only be stopped by its own menu
+### 4.4 `POST /quit` — the orderly stop, and the only one
 
-Found 2026-09-15, upgrading the installed tray to this phase's pack. **There is
+```
+POST /quit                   (on the ORCHESTRATOR, 127.0.0.1:7101)
+Authorization: Bearer <the engine's token>
+
+200 {"quit": true, "name": "crucible-orchestrator@owens-pc"}
+```
+
+**Why it exists, measured 2026-09-15, 08:05–08:25.** Until this route there was
 no way to stop a running orchestrator except clicking Quit in the notification
-area.** `quit()` — which releases the claim (2.2), lets the held distro go
-(PHASE15 7b.4c) and takes the host-mode child down with it — is reachable from
-`menu.py`'s `quit` item and from nowhere else. The door serves `/install`,
-`/restart`, `/v1/ping` and `/v1/info`; no signal handler is installed; `run()`
-ends when `icon.run()` returns.
+area. Stopping the installed tray (pid 45504) with `taskkill /PID` and no `/F`
+reported *"sent termination signal"*, left it **alive 25 s later**, and wrote
+**no line to its log**: nothing handles the WM_CLOSE a console-less `pythonw`
+never sees, so the polite stop is not merely unclean — it is a no-op that looks
+like a hang. `/F` was needed, and `/F` runs **none** of `quit()`: the claim is
+left standing on an engine whose orchestrator is gone (2.2), the `wsl.exe
+--exec sleep infinity` hold is orphaned as a session nothing owns (PHASE15
+7b.4c), a host-mode child engine survives its parent, and `host.pid` is stale
+(harmless — `acquire()` checks liveness). A tray installed by a script,
+upgraded by a script and started by a script must be stoppable by one.
 
-So every non-interactive stop is `taskkill`, which runs none of that: the claim
-is left standing on an engine whose orchestrator is gone, the `wsl.exe
---exec sleep infinity` hold is orphaned as a session nothing owns, and
-`host.pid` is stale (harmless — `acquire()` checks liveness). A tray installed
-by a script, upgraded by a script and started by a script should be stoppable by
-one.
+**It is the SAME shutdown the menu runs, not a second copy.** `app.Host.quit()`
+is the one implementation and has exactly two callers: `menu.py`'s `quit` item
+and this route, through `OrchestratorDoor.quit()` — the rule 4.2 already
+applies to restart, for the same reason. In order: release the claim **while
+the engine is still answering**, let the held distro go, stop a child engine
+**only when `owner == child`**, then end the process. Per owner:
 
-**Owed, and deliberately not built tonight:** a `POST /quit` on the loopback
-door with the same bearer as everything else on it — it is the transport this
-process already has, it authenticates the way 4.7 already decided, and it can
-run the whole of `quit()` before the process ends. A `SIGTERM`/`CTRL_CLOSE`
-handler is the alternative and is worse here: Windows gives a console-less
-`pythonw` no reliable console-control event, and `taskkill /F` delivers nothing
-at all, so the handler would cover the case that already works and miss the one
-that does not. The last event of a `POST /quit` never arrives, for 4.3's reason
-— a door served BY the orchestrator cannot survive stopping the orchestrator —
-and unlike a restart there is nothing left afterwards to re-read, which is why
-this is a verb with an empty answer rather than a task.
+| `owner` | claim | distro hold | engine | process |
+|---|---|---|---|---|
+| `wsl-unit` | released (`DELETE /v1/peer/claim`) | let go | **keeps running** — it is the guest's unit | ends |
+| `child` | released | nothing held | **stopped** — it is this process's child | ends |
+| `found` | **nothing to release** — it was never claimed (4.1a) | let go | **keeps running** — never started by this process, never stopped by it | ends |
 
-**The owed item now has a witness — measured 2026-09-15, 08:05–08:25.** Stopping
-the installed tray (pid 45504) with `taskkill /PID` and no `/F` **did nothing in
-25 s**, and wrote **no line to the log**: nothing handles the WM_CLOSE a
-console-less `pythonw` never sees, so the polite stop is not merely unclean, it
-is a no-op that looks like a hang. `/F` was needed, and `/F` runs none of
-`quit()`. That is the paragraph above, measured rather than reasoned, and it
-raises `POST /quit` from tidy to the only stop this process has.
+The hold is let go for `found` too, and that is not an inconsistency: the
+`wsl.exe` session is **this process's own** whoever started the engine inside
+it, and the distro stays up as long as the engine's own session does.
+
+**It answers BEFORE it stops, and the answer is the last event of a quit.**
+4.3's rule holds — a door served BY the orchestrator cannot survive the act of
+stopping the orchestrator — so this is a **verb with an empty answer, not a
+task**: the `200` and its body are written and flushed onto the socket first,
+and only then does the shutdown run. The caller gets a response rather than a
+dropped connection, there is no stream, and unlike a restart there is nothing
+left afterwards to re-read. The process ends by the one mechanism it has —
+pystray's `stop()` returns `icon.run()` in the main thread and `run()` returns
+0 — and never by `os._exit`, which would skip every `finally` between there and
+`main`.
+
+**Authorised by the same bearer as every other route on this door: the
+ENGINE's token.** A wrong or absent one is `401 host_unauthorized`; a machine
+with no config yet is `503 host_no_token`, which is a state and not an
+authorisation failure. A stop is the most destructive verb this door has and is
+precisely the one an unauthenticated caller must not reach.
+
+**NOT refusable while an install is running**, unlike `/restart`. The
+measurement above is that `taskkill` without `/F` is a no-op and `/F` runs none
+of the shutdown, so this route is the only orderly stop the process has — and a
+stop that a wedged sequence could refuse would send the operator straight back
+to `/F`, which is the thing this section exists to remove.
+
+**Still no SIGTERM handler, and that argument is unchanged.** Windows gives a
+console-less `pythonw` no reliable console-control event and `taskkill /F`
+delivers nothing at all, so a handler would cover the case that already works
+and miss the one that does not.
+
+Tests: `tests/test_host.py` — the bearer and both refusals by name, the answer
+preceding the stop (the fake's `quit()` blocks until the client holds the whole
+body, so a door that stopped first records it), `/quit` named in the 404 body,
+and the menu's quit and the door's quit compared trace-for-trace across all
+three owners.
 
 ## 5. The shapes a machine can be
 
@@ -573,4 +611,8 @@ longer this PC**: with consent it is the first — orchestrator plus `cuda-linux
   and migrate-weights have still run against fakes only (PHASE15 7b.4b).
 - **The Windows child-engine shape** (5's second row, `owner: child`). It needs a machine
   with no WSL, and this one has WSL.
-- **`POST /quit`.** Not built; §4.4 now has the measurement that says why it must be.
+- **`POST /quit`.** Built the same day, off the back of that measurement (§4.4), and
+  covered by `tests/test_host.py` — but **never posted to the live tray**, because the
+  only tray on this machine is the one Owen is running. The first real `POST /quit` is
+  owed, and the thing to watch for is the line `quit:` in `host.log`: the whole point of
+  the route is that a stop now says so, where `taskkill /F` said nothing.

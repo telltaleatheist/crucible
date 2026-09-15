@@ -811,22 +811,60 @@ class Host:
                 self._refresh()
 
     def quit(self) -> None:
+        """THE stop. PHASE17 4.4 — one implementation, two callers.
+
+        `menu.QUIT` and the door's `POST /quit` both arrive here, for 4.2's
+        reason one verb over: a person and a script must not get two different
+        shutdowns. A second copy of these four steps living behind the door
+        would be the two-owners shape that the whole of PHASE17 is about, and
+        the half that drifted would be the half nobody watches — the script's.
+
+        It LOGS, and that is not decoration. 4.4's measurement is a tray that
+        was sent `taskkill /PID`, stayed up for 25 s and wrote **nothing**, so
+        "did the stop run at all" was unanswerable from the one artefact a
+        console-less `pythonw` leaves. Now every stop says so before it acts.
+        """
+        owner = self._c.presence.owner
+        claim = "released" if self._claimed else "not held, so nothing to release"
+        engine = (
+            "stopped with it, being this process's child"
+            if owner is Owner.HOST_CHILD
+            else "left running"
+        )
+        self._c.log.write(
+            f"quit: stopping this orchestrator (owner={owner.value}); the "
+            f"claim is {claim} and the engine is {engine}"
+        )
         self._stop.set()
         # BEFORE the hold and before the child: while the engine is still
         # answering. A release sent to a server this process is about to stop
         # would be a release nobody hears.
         self.release_claim()
         # The hold goes first: it is this process's session, and a wsl.exe
-        # left running after the tray is gone is a VM nothing owns.
+        # left running after the tray is gone is a VM nothing owns. Taken for
+        # a `found` engine's distro too (`_hold`), so it is let go for one too
+        # — the hold is THIS process's session whoever started the engine in
+        # it, and the distro stays up as long as the engine's own session does.
         self._c.watcher.release()
-        if self._c.presence.owner is Owner.HOST_CHILD:
+        if owner is Owner.HOST_CHILD:
             # In host mode the server is this process's child and 4.2's Quit
             # label already said it goes too. An engine the host FOUND is not
             # its child even though the distro probe said `absent`, which is
             # why this asks the owner and not the distro.
             self._c.watcher.stop_child()
-        if self._icon is not None:
-            self._icon.stop()  # type: ignore[attr-defined]
+        # AND THEN THE PROCESS ENDS, by the one mechanism it has: pystray's
+        # `stop()` returns `icon.run()` in the main thread, `run()` below
+        # returns 0, and the interpreter exits — which is why `POST /quit`
+        # needs no `os._exit` and gets none (it would skip this function's own
+        # callers and every `finally` between here and `main`). A host with no
+        # icon is a host with no loop to end: that is a test, and it says so.
+        if self._icon is None:
+            self._c.log.write(
+                "quit: there is no tray icon in this process, so there is no "
+                "loop to end; the shutdown ran and nothing exits"
+            )
+            return
+        self._icon.stop()  # type: ignore[attr-defined]
 
 
 def run(argv: list[str] | None = None) -> int:
