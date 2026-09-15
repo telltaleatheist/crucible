@@ -458,6 +458,34 @@ as their own rows and their own problems rather than folded into the env row —
 pins all match is otherwise reported ready, and a reader has no way to tell that from an env
 that will render every chunk with 240 ms of garbage on the end.
 
+**"Must be re-applied" named nobody until 2026-09-15, and the sentence was load-bearing.**
+pip does not merely fail to express a patch to somebody else's package — it UNDOES one, by
+writing the distribution's own file over the edit. MEASURED on owens-pc: `crucible install
+tts --narrator-engine higgs-v3 --build --force` at 07:34 restored both files pristine, and
+from 07:46 every Higgs load failed at narrator's sentinel proof —
+`.log.sentinel.jsonl holds no records`, the report 0 bytes, because the code that writes a
+record per invocation had just been uninstalled. Renders at 07:23 worked on the same pins,
+the same recipe and the same narrator sha, and both logs read `vLLM server version 0.28.0`:
+the pins were never the question. `crucible doctor` said `missing` for both the whole time,
+from a command nobody runs after an install.
+
+So `jobenv.install_env` now RUNS the two appliers after pip and before it stamps the env,
+and `narratorpatches.apply` re-runs the checker over the result and refuses the install when
+it disagrees — a script's exit code is its own idea of success, and the thing that has to be
+true is the marker `crucible doctor` greps for tomorrow. An env that is stamped installed is
+an env whose patches are in. Only for `tts`: the `llm` recipe pins `vllm` too, and the
+recipe's own pins then select a second time, so `mlx-darwin` (neither distribution) runs
+neither script and is not called broken for it.
+
+The appliers themselves live in `crucible/envs/tts/patches/`, byte-identical copies of
+BookForge's `electron/scripts/higgs/`, vendored for the same reason the marker table below
+is a copy: narrator's wheel does not carry them (it ships `engine/higgs/launch/` and nothing
+else). **The owed move is narrator shipping its own patches** — the engine that requires a
+patched server is the honest owner of the patch — on the same ruling as extracting narrator
+into its own repo. Until then `tests/test_narrator_patches.py` reads `REL`/`MARKER`/
+`ABSENT_MARKER` out of each script and asserts they are the table's, so the two halves
+cannot drift apart in silence.
+
 **One of the two names in this document was stale, and building the checker found it.** The
 second patch is `patch_sentinel_filter.py`, not `work/patch_tail_trim.py`; narrator's own
 `pyproject.toml` still says the old name too. The difference is not cosmetic. The retired
