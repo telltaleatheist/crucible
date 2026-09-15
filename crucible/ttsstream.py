@@ -507,18 +507,23 @@ class StreamSession:
         # render door 2026-09-15 (two takes, byte-identical audio); this door
         # sends the rung through the very same `generate_batch` items, so it had
         # the very same hole. Refused per ROW, which is this door's grain, and
-        # only above take 0 — take 0 sends no key and every narrator renders
-        # that correctly.
-        if sampling is not None and not self._engine.announced_item_sampling():
+        # only above take 0 — take 0 sends the lane every narrator draws in and
+        # no `sampling` key, and every narrator renders that correctly.
+        #
+        # ON THE TAKE, NOT ON THE SAMPLING — the render door's own correction
+        # of 2026-09-15: a rung may move the seed and declare no numbers at
+        # all, and such a rung would sail past a sampling-shaped gate.
+        if take > 0 and not self._engine.announces_item_take():
             raise ApiError(
                 409,
                 "sampling_not_wired",
                 f"take {take} resolves to sampling {sampling}, and the narrator "
-                f"serving session {self.id} did not announce `itemSampling` on "
-                f"its ready line — it has no per-item sampling channel, so this "
-                f"row would be rendered at take 0 and reported as take {take}. "
-                f"Re-resolve the tts env's narrator pin to a bookforge commit "
-                f"carrying narrator/engine/item_sampling.py. Take 0 says fine.",
+                f"serving session {self.id} did not announce `itemTake` on "
+                f"its ready line — it has no per-item rung channel, so this "
+                f"row would be rendered at take 0, in take 0's seed lane, and "
+                f"reported as take {take}. Re-resolve the tts env's narrator "
+                f"pin to a bookforge commit carrying "
+                f"narrator/engine/item_sampling.py. Take 0 says fine.",
                 {"session_id": self.id, "id": row_id, "take": take},
             )
         with self._state:
@@ -698,14 +703,21 @@ class StreamSession:
         **A batch here may MIX rungs**, unlike the render door's, where one
         `take` governs the whole job: rows arrive one `say` at a time and each
         carries its own. narrator's per-item channel is per item precisely for
-        this; the MLX arm splits its slab by sampling group rather than
-        rendering anyone at another row's numbers.
+        this; the MLX arm splits its slab by sampling group — and, since the
+        seed lane landed, by TAKE as well, because one `mx.random.seed` serves
+        a whole slab — rather than rendering anyone at another row's numbers or
+        in another row's lane.
+
+        `take` rides on every item including 0, and `sampling` only when the
+        rung declares numbers; the render door's own item comment says why the
+        two are spelled differently.
         """
         request = {
             "action": "generate_batch",
             "language": self.language,
             "items": [
-                {"i": row.slot, "text": row.text, "stream": True}
+                {"i": row.slot, "text": row.text, "stream": True,
+                 "take": row.take}
                 | ({} if row.sampling is None else {"sampling": row.sampling})
                 for row in batch
             ],

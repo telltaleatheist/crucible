@@ -298,21 +298,70 @@ Three things this build changed.
    clip nobody has measured against, and a rung that is not measured is a number somebody
    will later mistake for one. They still have take 0, which every voice has whether or not
    its file says so.
-2. **The rung reaches narrator PER ITEM.** `generate` and `generate_batch` items carry
+2. **The rung reaches narrator PER ITEM, and A RUNG IS TWO FACTS: `(sampling deltas, seed
+   offset)`.** `generate` and `generate_batch` items carry
    `sampling: {temperature?, topP?, topK?, repetitionPenalty?}` since
-   `narrator/engine/item_sampling.py` — section 4 has the details. Crucible resolves
-   `take: N` against the voice's ladder and sends **only the keys the rung declares**: rung 1
-   is one line and means "take 0, but cooler", and each engine lays the item's keys over its
-   resolved sampling key by key. Take 0 sends **no `sampling` key at all**, because absent
-   means "the voice's loaded sampling", which is exactly what take 0 is — `{}` would be
-   asking for a rung with nothing in it, which narrator refuses as `sampling_malformed`,
-   correctly. It rides on each item and not on the request because that is where narrator's
-   channel is, and because the streaming door legitimately mixes rungs in one batch.
-3. **`sampling_not_wired` is DELETED from this contract and from the code.** It had exactly
-   one meaning — *there is no channel* — and there is a channel. It is not kept as a refusal
-   nothing can raise. (Its take-0 half had already gone when the voices document started
-   carrying sampling per load; the render door's went at the same time, and the streaming
-   door's second one — a voice whose take-0 sampling deviates — went with it.)
+   `narrator/engine/item_sampling.py` and `take: N` since 2026-09-15 — section 4 has the
+   details. Crucible resolves `take: N` against the voice's ladder and sends **only the keys
+   the rung declares**: rung 1 is one line and means "take 0, but cooler", and each engine
+   lays the item's keys over its resolved sampling key by key. Take 0 sends **no `sampling`
+   key at all**, because absent means "the voice's loaded sampling", which is exactly what
+   take 0 is — `{}` would be asking for a rung with nothing in it, which narrator refuses as
+   `sampling_malformed`, correctly. The rung rides on each item and not on the request
+   because that is where narrator's channel is, and because the streaming door legitimately
+   mixes rungs in one batch.
+
+   **`take` rides on EVERY item, 0 included**, and the asymmetry with `sampling` is
+   deliberate: `{}` is not a sampling, but 0 *is* a take — narrator reads an absent key and
+   an explicit 0 as the same number — so sending it makes the wire say which take produced
+   each artifact.
+
+   **THE SEED HALF, 2026-09-15.** Point 1 above was only half honoured for a day. narrator
+   seeds chunk i at `config.seed + i` on both Higgs arms and the ladder never varied it, so
+   two renders of one chunk at the same sampling were byte-identical however they were
+   labelled: take 0 and take N whenever their numbers matched, and every pair of take-0
+   re-rolls, always. Owen's requirement is *a retake must not reuse the settings that
+   produced the problem*, and **a seed is a setting**. So a rung now also names a SEED
+   OFFSET: narrator renders take N in that take's own lane,
+   `seed + index + TAKE_SEED_STRIDE * take` (`engine/higgs/truncation.py`), and the stride
+   is a whole number of the guard's re-roll lanes so no take's draw is any other take's or
+   any re-roll's. **Two renders of the same chunk at the same take are byte-identical by
+   design — that is what reproducibility means here — and a different take is a different
+   draw even when its sampling equals take 0's.**
+
+   The two halves are independent on narrator's wire: `take: 3` with no `sampling` is a
+   legal item. Crucible's own `[[voice.takes]]` still refuses a rung above 0 that declares
+   no numbers (`voices.py:_check_takes`: *"a rung that is the same sampling as the one below
+   it is a different DRAW, which is what a re-roll is for"*) — a rule written when a
+   different draw was the one thing a rung could not ask for. The seed lane makes such a
+   rung expressible; **whether to allow one is an open ruling**, and nothing in this build
+   depends on the answer.
+3. **`sampling_not_wired` was DELETED on 2026-09-14 and CAME BACK on 2026-09-15 with a
+   different subject.** Its original meaning — *this contract has no channel for a take
+   above 0* — stopped being true and was not kept as a refusal nothing can raise. (Its
+   take-0 half had already gone when the voices document started carrying sampling per load;
+   the render door's went at the same time, and the streaming door's second one — a voice
+   whose take-0 sampling deviates — went with it.) It now means **the narrator ON THIS WIRE
+   has no rung channel**, which is a statement about a PROCESS and can never stop being
+   possible: the tts env pins narrator by commit, and a pin is allowed to be old. It was.
+   See the handshake below.
+
+**THE HANDSHAKE: `itemTake` on `ready`.** narrator says `itemTake: true` before any engine
+loads, and both doors refuse a take above 0 by name when it is absent rather than sending a
+rung into silence. This is not hypothetical — on 2026-09-15 two render jobs on voice `owen`,
+one 150-char sentence at take 0 and take 1, returned **byte-identical 264,174-byte
+artifacts**, because the env's pinned narrator (bookforge `0eeb0267`) read `item['voice']`
+and dropped the rest without a word. Crucible built the item correctly and reported a take
+that never happened; the recipe's pin and this contract's belief about it were one fact with
+two owners (`docs/ARCHITECTURE.md`), and the handshake is the comparison.
+
+**The gate asks about the TAKE, not about the sampling.** What the caller asked for is take
+N; what the handshake answers is "do you read a rung". `sampling is not None` stood in for
+both and was equal to neither — it was held up only by the `_check_takes` rule above, in a
+different file. (The key was `itemSampling` for one day, 2026-09-14 to 2026-09-15; it was
+renamed rather than joined by a second key when the seed half landed, because a build has
+both halves or neither. Nothing had shipped under the old name.) Engine-level support is a
+separate and later fact and stays per row: `sampling_not_supported`, `take_not_supported`.
 
 **narrator's own refusals travel back per row, by name.** A rung that is not a sampling is
 `sampling_malformed`; one this engine has no lever for — the MLX arm has no repetition
@@ -618,8 +667,11 @@ become false.
 **And the other half went on 2026-09-14, when narrator grew the per-item channel.** A rung is
 per RENDER and the document is per LOAD, so until narrator's `generate` and `generate_batch`
 took sampling there was nowhere for take 1 to go and a reload per take is not a ladder. There
-is now: `narrator/engine/item_sampling.py`, one module, one spelling and one pair of refusal
-names.
+is now: `narrator/engine/item_sampling.py`, one module, one spelling and one set of refusal
+names — `sampling_malformed` / `sampling_not_supported` for the numbers, and, since
+2026-09-15, `take_malformed` / `take_not_supported` for the item's `take`, which is the seed
+offset half of the same rung (section 3, point 2). A build that has the module has both
+halves and says so once, as `itemTake` on `ready`.
 
 | | |
 |---|---|
@@ -926,7 +978,7 @@ note), `invalid_params`, `ffmpeg_missing`, `backend_unsupported`, `env_missing`,
 | code | what it means |
 |---|---|
 | `voice_kind_unsupported` | the voice is `kind = "zeroshot"` **and is not already resident**. A render job loads its own voice (below), a zero-shot load needs the reference clip only `load-voice` carries (`params.reference`, section 5's amendment), and this job's params are `language`, `take` and `chunks` — a second clip channel here would be two doors owning one fact. Load it first, then render. *Narrowed 2026-09-14; it used to refuse the KIND outright, on the true-at-the-time grounds that narrator's `load` message carried no clips at all.* |
-| ~~`sampling_not_wired`~~ | **DELETED 2026-09-14.** It had one meaning — *there is no channel for a take above 0* — and narrator's per-item `sampling` is that channel (sections 3 and 4). Not kept as a refusal nothing can raise. |
+| `sampling_not_wired` | the narrator ON THIS WIRE did not announce `itemTake` on its `ready` line, so it has no per-item rung channel and a take above 0 would come back as take 0 under take N's name. Asked of the live process, because the tts env pins narrator by commit and a pin may be older than the channel — on 2026-09-15 it was, and two takes of one sentence returned byte-identical audio. **Only above take 0**: take 0 asks for the numbers and the seed lane every narrator ever built already uses. *Its ORIGINAL meaning — "this contract has no channel" — was deleted on 2026-09-14 when `narrator/engine/item_sampling.py` made it false; the code and the name came back a day later with the subject above (sections 3 and 4).* |
 | `unknown_take` | a take past the end of the ladder. Never clamped. |
 | `chunk_too_long` | a chunk longer than the (voice, backend) `max_chars`. **Refused, not re-split**: chunking is the client's (section 1), and a server that quietly cut a chunk in half would return two files where one was asked for. |
 

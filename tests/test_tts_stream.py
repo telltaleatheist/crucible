@@ -539,6 +539,11 @@ def test_a_row_at_take_one_carries_that_rungs_numbers_and_take_zero_carries_none
     assert {row["i"]: row["sampling"] for row in rows} == {
         0: None, 1: {"temperature": 0.7},
     }
+    # AND EACH ROW'S TAKE, which is the rung's other half: it puts that row in
+    # its own seed lane, so a mixed batch is a mixed set of DRAWS and not only
+    # a mixed set of numbers. On the MLX arm it is also what splits the slab,
+    # because one `mx.random.seed` serves a whole batch there.
+    assert {row["i"]: row["take"] for row in rows} == {0: 0, 1: 1}
 
 
 def test_a_rung_narrator_cannot_honour_fails_that_row_by_name(
@@ -572,11 +577,16 @@ def test_a_narrator_without_the_channel_refuses_a_rung_and_still_says_take_zero(
     way, one row at a time.
 
     `say` asks the live engine now. Refused per ROW and only above take 0: take
-    0 sends no `sampling` key, which every narrator ever built renders
-    correctly, so the session stays usable for the takes it can serve.
+    0 asks for the numbers and the seed lane every narrator ever built already
+    uses, so the session stays usable for the takes it can serve.
+
+    THE GATE IS ON THE TAKE, NOT ON THE SAMPLING (2026-09-15). What the caller
+    asked for is take N and what the handshake answers is "do you read a rung";
+    `sampling is not None` stood in for both and was equal to neither, held up
+    only by a rule in `voices.py` that refuses a rung declaring no numbers.
     """
     log = tmp_path / "sampling.jsonl"
-    with streaming_server(sampling_log=str(log), no_item_sampling=1) as base:
+    with streaming_server(sampling_log=str(log), no_item_take=1) as base:
         session = opened(base, auth)
         with listen(base, auth, session["session_id"]) as stream:
             stream.wait_for(lambda s: s.of("ready"), "the ready frame")
@@ -588,7 +598,7 @@ def test_a_narrator_without_the_channel_refuses_a_rung_and_still_says_take_zero(
             assert refused.status_code == 409, refused.text
             error = refused.json()["error"]
             assert error["code"] == "sampling_not_wired"
-            assert "did not announce `itemSampling`" in error["message"]
+            assert "did not announce `itemTake`" in error["message"]
 
             accepted = post_op(
                 base, auth, session["session_id"], op="say", id="r0",
@@ -601,8 +611,10 @@ def test_a_narrator_without_the_channel_refuses_a_rung_and_still_says_take_zero(
         json.loads(line)
         for line in log.read_text(encoding="utf-8").splitlines() if line
     ]
-    # Only the take-0 row ever reached the wire, and it carried no rung.
+    # Only the take-0 row ever reached the wire, and it carried no numbers and
+    # the bottom rung.
     assert [row["sampling"] for row in rows] == [None]
+    assert [row["take"] for row in rows] == [0]
 
 
 def test_say_has_no_default_take_on_the_wire(

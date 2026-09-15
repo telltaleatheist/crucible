@@ -544,14 +544,25 @@ class NarratorEngine(SubprocessEngine):
             f"(backend {message.get('backend')})"
         )
 
-    def announced_item_sampling(self) -> bool:
+    def announces_item_take(self) -> bool:
         """Did the narrator on the other end of this wire say it parses a rung?
 
-        `itemSampling: true` on the `ready` line means this narrator BUILD reads
-        `sampling` off a `generate_batch` item — the channel a take ladder needs
+        `itemTake: true` on the `ready` line means this narrator BUILD reads a
+        per-item rung off a `generate_batch` item — BOTH halves, `sampling` and
+        `take` — which is the channel a take ladder needs
         (`narrator/engine/item_sampling.py`). A narrator without the key has no
         such channel: its `_resolve_row` reads `item['voice']` and nothing else,
         so a rung is DROPPED IN SILENCE and take N renders at take 0.
+
+        ONE KEY FOR THE TWO FACTS, and the key was `itemSampling` for exactly
+        one day. A rung is (sampling deltas, SEED OFFSET): narrator seeded
+        chunk i at `config.seed + i` whatever the take until 2026-09-15, so a
+        rung that declared no sampling override — which `[[voice.takes]]`
+        permits — rendered take 0 byte for byte, and two take-0 re-rolls always
+        did. Both halves land in one narrator module, are refused under this one
+        code, and a build has both or neither; two capability keys would be two
+        owners of one answer (docs/ARCHITECTURE.md). Nothing had shipped under
+        the old name — the tts recipes pin a narrator older than either half.
 
         Measured 2026-09-15, which is why this exists. Two `tts` render jobs on
         voice `owen` — one 150-char sentence, take 0 and take 1, whose rung is
@@ -567,13 +578,14 @@ class NarratorEngine(SubprocessEngine):
         build: callers ask it AFTER `ready`, with the engine in hand.
 
         It answers only "is there a channel". Whether the LOADED ENGINE has a
-        particular lever is narrator's own answer, per row, and already has a
-        name — `sampling_not_supported`.
+        particular lever, or a seed lane at all, is narrator's own answer, per
+        row, and already has two names — `sampling_not_supported` and
+        `take_not_supported`.
         """
         message = self._ready_message
         if message is None:
             return False
-        return message.get("itemSampling") is True
+        return message.get("itemTake") is True
 
     def readiness_description(self) -> str:
         return "print a ready line on stdout"

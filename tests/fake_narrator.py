@@ -114,21 +114,23 @@ must not be bent into passing test fixtures through it:
                                   chunk is reported and the run continues" is a rule in
                                   every one of these contracts and it needs a test.
     CRUCIBLE_FAKE_SAMPLING_LOG    a path this process appends one JSON line to per
-                                  item it is asked to render: `{"i", "sampling"}`,
-                                  the rung exactly as it arrived (null when the
+                                  item it is asked to render:
+                                  `{"i", "sampling", "take"}` — the rung exactly as
+                                  it arrived, BOTH halves (null / absent when the
                                   item carried none). The ONLY way a test can see
                                   what Crucible put on the wire, because narrator
-                                  does not echo sampling back and a fake that did
+                                  does not echo a rung back and a fake that did
                                   would be a fake asserting about itself.
-    CRUCIBLE_FAKE_NO_ITEM_SAMPLING
-                                  omit `itemSampling` from the `ready` line, which is
+    CRUCIBLE_FAKE_NO_ITEM_TAKE    omit `itemTake` from the `ready` line, which is
                                   what a narrator built before
                                   `engine/item_sampling.py` looks like: it has no
-                                  per-item sampling channel and DROPS a rung without
-                                  a word. That is not hypothetical — the tts env was
-                                  pinned to one on 2026-09-15 and two takes of one
-                                  sentence came back byte-identical. Default: the
-                                  key is sent, because this fake parses a rung.
+                                  per-item rung channel at all — neither the
+                                  numbers nor the seed lane — and DROPS both keys
+                                  without a word. That is not hypothetical — the
+                                  tts env was pinned to one on 2026-09-15 and two
+                                  takes of one sentence came back byte-identical.
+                                  Default: the key is sent, because this fake
+                                  parses a rung.
     CRUCIBLE_FAKE_SAMPLING_LEVERS a comma-separated subset of the four levers this
                                   fake honours; anything else is
                                   `sampling_not_supported` for that ROW. Default:
@@ -292,14 +294,61 @@ def _levers() -> set[str]:
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
-def _record_sampling(row: int | None, sampling: object) -> None:
-    """Append what this item was asked to render under, for a test to read."""
+#: The highest take narrator accepts (`engine/item_sampling.py:MAX_TAKE`).
+_MAX_TAKE = 999
+
+
+def _record_sampling(row: int | None, sampling: object, take: object = None) -> None:
+    """Append what this item was asked to render under, for a test to read.
+
+    BOTH HALVES OF THE RUNG. narrator's wire takes a `take` with no `sampling`
+    beside it, and two takes whose numbers match are still two draws, so a log
+    that recorded only `sampling` could not tell take 1 from take 0 — which is
+    the exact defect the seed lane was added to fix on 2026-09-15.
+    """
     path = (os.environ.get("CRUCIBLE_FAKE_SAMPLING_LOG") or "").strip()
     if not path:
         return
     with _stdout_lock:
         with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"i": row, "sampling": sampling}) + "\n")
+            handle.write(
+                json.dumps({"i": row, "sampling": sampling, "take": take}) + "\n"
+            )
+
+
+def _refuse_take_as_narrator_would(take: object, where: str) -> str | None:
+    """narrator's own `take_malformed`, by name, for one item.
+
+    `engine/item_sampling.py:parse_item_take` is the real one and this is its
+    shape: a whole number >= 0 within `MAX_TAKE`. A bool is NOT a take
+    (`isinstance(True, int)` is True in Python, and `take: true` from a client
+    that meant `stream: true` would otherwise render take 1); a float is not,
+    `2.0` included, because a take indexes a rung and rounding one would render
+    the rung next door and report the one asked for.
+
+    **None is not a refusal**: an item with no `take` renders at take 0, which
+    is the seed rule narrator has always had. This fake has every lane, so
+    `take_not_supported` is Orpheus's answer and never reachable here.
+    """
+    if take is None:
+        return None
+    if isinstance(take, bool) or not isinstance(take, int):
+        return (
+            f"take_malformed: {where} carries take {take!r} "
+            f"({type(take).__name__}); a take is a whole number >= 0 naming a "
+            "rung of the voice's ladder, and 0 (or no key at all) is take 0."
+        )
+    if take < 0:
+        return (
+            f"take_malformed: {where} carries take {take!r}. A take names a rung "
+            "of the ladder and counts up from 0; there is no rung below take 0."
+        )
+    if take > _MAX_TAKE:
+        return (
+            f"take_malformed: {where} carries take {take!r}, above MAX_TAKE "
+            f"({_MAX_TAKE})."
+        )
+    return None
 
 
 def _refuse_sampling_as_narrator_would(sampling: object, where: str) -> str | None:
@@ -357,10 +406,11 @@ def _refused_this_row(item: dict) -> bool:
     """
     row = item.get("i")
     sampling = item.get("sampling")
-    _record_sampling(row, sampling)
-    refusal = _refuse_sampling_as_narrator_would(
-        sampling, f"generate_batch row i={row!r}"
-    )
+    take = item.get("take")
+    _record_sampling(row, sampling, take)
+    where = f"generate_batch row i={row!r}"
+    refusal = (_refuse_sampling_as_narrator_would(sampling, where)
+               or _refuse_take_as_narrator_would(take, where))
     if refusal is None:
         return False
     send("batch_item", i=row, message=refusal)
@@ -702,15 +752,17 @@ def main() -> int:
         while True:
             time.sleep(0.1)
 
-    # `itemSampling` by default, because this fake DOES parse a rung
-    # (`_refuse_sampling_as_narrator_would`) and a handshake that hid that would
-    # be a fake lying about itself. Withheld on demand, which is the only way to
-    # test the narrator that caused this: one pinned a day before
+    # `itemTake` by default, because this fake DOES parse a rung — both halves,
+    # `_refuse_sampling_as_narrator_would` and `_refuse_take_as_narrator_would` —
+    # and a handshake that hid that would be a fake lying about itself. ONE key
+    # for the two facts, which is narrator's own shape since 2026-09-15: a build
+    # has both or neither. Withheld on demand, which is the only way to test the
+    # narrator that caused this: one pinned a day before
     # `engine/item_sampling.py`, which dropped every rung in silence.
-    if os.environ.get("CRUCIBLE_FAKE_NO_ITEM_SAMPLING") == "1":
+    if os.environ.get("CRUCIBLE_FAKE_NO_ITEM_TAKE") == "1":
         send("ready", device="fake", backend="fake")
     else:
-        send("ready", device="fake", backend="fake", itemSampling=True)
+        send("ready", device="fake", backend="fake", itemTake=True)
 
     for line in sys.stdin:
         line = line.strip()

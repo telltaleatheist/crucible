@@ -317,11 +317,15 @@ def _require_renderable(
     # a `sampling_not_wired` refusal; it was unreachable with the shipped
     # manifests and, once the document existed, false.)
 
-    # AND A TAKE ABOVE 0 NOW REACHES IT TOO, per item. narrator's
-    # `generate_batch` items carry `sampling` since 2026-09-14
+    # AND A TAKE ABOVE 0 NOW REACHES IT TOO, per item, as BOTH HALVES OF A
+    # RUNG. narrator's `generate_batch` items carry `sampling` since 2026-09-14
     # (`narrator/engine/item_sampling.py`), which the engine lays over the
-    # voice's loaded numbers key by key — so the rung is resolved here, on the
-    # server, and sent as numbers.
+    # voice's loaded numbers key by key, and `take` since 2026-09-15, which
+    # moves that row's SEED into the take's own lane
+    # (`engine/higgs/truncation.py:in_take_lane`). Both are needed and neither
+    # implies the other: a rung that declares no sampling override is still a
+    # different draw because the lane moved, and until the seed half landed
+    # such a rung rendered take 0 byte for byte.
     #
     # `sampling_not_wired` SURVIVES, with a different subject. It used to mean
     # "the contract has no channel", and that is what stopped being true. It now
@@ -759,20 +763,33 @@ class TtsJobType:
         # not happened. A wrong take delivered as a success is the failure this
         # job type exists to make impossible, so it refuses instead.
         #
-        # Only above take 0. Take 0 sends no `sampling` key at all, which every
-        # narrator ever built renders correctly — it is the loaded voice's own
-        # sampling — so an old narrator keeps serving the takes it can serve.
-        if sampling is not None and not engine.announced_item_sampling():
+        # THE TEST IS THE TAKE, NOT THE SAMPLING (corrected 2026-09-15 when the
+        # seed half landed). It used to be `sampling is not None`, and that
+        # asked the wrong question about the right thing. What the client asked
+        # for is take N; what the handshake answers is "do you read a rung";
+        # `sampling is not None` stood in for both and was equal to neither.
+        # It happened to be equivalent only because `voices.py:_check_takes`
+        # refuses a rung above 0 that declares no numbers — a rule in a
+        # different file, written when a different DRAW was the one thing a
+        # rung could not ask for, and now the only thing holding the old gate
+        # up. That is a fact with two owners (docs/ARCHITECTURE.md); asking
+        # about the take directly has one.
+        #
+        # Only above take 0. Take 0 sends the numbers nobody (no `sampling`
+        # key) and the lane every narrator ever built already draws in, so an
+        # old narrator keeps serving the takes it can serve.
+        if params.take > 0 and not engine.announces_item_take():
             raise JobError(
                 "sampling_not_wired",
                 f"take {params.take} resolves to sampling {sampling}, and the "
-                f"narrator serving this voice did not announce `itemSampling` "
-                f"on its ready line — it has no per-item sampling channel, so "
-                f"it would render take 0 and this job would report take "
-                f"{params.take}. Re-resolve the tts env's narrator pin "
-                f"(envs/tts/*.txt) to a bookforge commit that carries "
-                f"narrator/engine/item_sampling.py, reinstall the env, and "
-                f"reload the voice. Take 0 renders on this narrator as it is.",
+                f"narrator serving this voice did not announce `itemTake` "
+                f"on its ready line — it has no per-item rung channel, so it "
+                f"would render take 0, in take 0's seed lane, and this job "
+                f"would report take {params.take}. Re-resolve the tts env's "
+                f"narrator pin (envs/tts/*.txt) to a bookforge commit that "
+                f"carries narrator/engine/item_sampling.py, reinstall the env, "
+                f"and reload the voice. Take 0 renders on this narrator as it "
+                f"is.",
             )
 
         by_index = {chunk.index: chunk for chunk in params.chunks}
@@ -799,8 +816,17 @@ class TtsJobType:
             # Correct Sentences will do when it spreads N candidates across the
             # ladder. At take 0 the key is ABSENT, not `{}`: absent means "the
             # voice's loaded sampling", which is what take 0 is.
+            #
+            # `take` RIDES ON EVERY ITEM INCLUDING TAKE 0, and the asymmetry
+            # with `sampling` is deliberate. `{}` is not a sampling — narrator
+            # refuses it as `sampling_malformed`, correctly — so absence is the
+            # only way to say "no override". But 0 IS a take: it is the
+            # documented bottom rung and narrator's `parse_item_take` reads an
+            # absent key and an explicit 0 as the same number. Sending it makes
+            # the wire say which take produced each artifact, which is the one
+            # fact the 2026-09-15 incident had nowhere to write down.
             "items": [
-                {"i": chunk.index, "text": chunk.text}
+                {"i": chunk.index, "text": chunk.text, "take": params.take}
                 | ({} if sampling is None else {"sampling": sampling})
                 for chunk in params.chunks
             ],

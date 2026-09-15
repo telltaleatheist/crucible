@@ -460,12 +460,17 @@ def test_take_zero_sends_no_sampling_key_at_all(
 ) -> None:
     """Absent means "the voice's loaded sampling", which IS take 0. Sending
     `{}` would be asking for a rung with nothing in it, which narrator refuses
-    as `sampling_malformed` — correctly."""
+    as `sampling_malformed` — correctly.
+
+    `take` is the other way round and deliberately so: 0 IS a take, narrator
+    reads an absent key and an explicit 0 as the same number, and sending it
+    makes the wire say which take produced the artifact."""
     events = rendered(take=0)
     assert terminal(events)["data"]["rendered"] == len(CHUNKS)
     rows = sampling_log()
     assert sorted(row["i"] for row in rows) == [41, 42, 43]
     assert all(row["sampling"] is None for row in rows), rows
+    assert all(row["take"] == 0 for row in rows), rows
 
 
 def test_take_one_sends_that_rungs_numbers_on_every_item(
@@ -482,6 +487,12 @@ def test_take_one_sends_that_rungs_numbers_on_every_item(
     rows = sampling_log()
     assert sorted(row["i"] for row in rows) == [41, 42, 43]
     assert all(row["sampling"] == {"temperature": 0.7} for row in rows), rows
+    # BOTH HALVES OF THE RUNG. The numbers say what to sample with; the take
+    # says which seed lane to draw in, and narrator seeds `seed + index +
+    # TAKE_SEED_STRIDE * take`. Without it, a rung whose numbers happened to
+    # match take 0's would be take 0's render under another name — which is
+    # what every rung with no sampling override was until 2026-09-15.
+    assert all(row["take"] == 1 for row in rows), rows
     # And the measurement still says which take it was.
     assert {row["take"] for row in events_of(events, "chunk")} == {1}
 
@@ -527,18 +538,18 @@ def test_a_narrator_without_the_channel_refuses_the_rung_instead_of_rendering_ta
     log said `Applied extra_params: {'temperature': 0.8, ...}`, which is take
     0's. Crucible reported a successful take 1 that never happened.
 
-    So the handshake carries the fact now (`itemSampling` on `ready`) and this
+    So the handshake carries the fact now (`itemTake` on `ready`) and this
     job asks before it sends. A wrong take delivered as a success is the one
     outcome this job type may not produce.
     """
-    fake_narrator_engine.steer(monkeypatch, no_item_sampling=1)
+    fake_narrator_engine.steer(monkeypatch, no_item_take=1)
     events = rendered(take=1)
 
     assert terminal(events)["event"] == "failed"
     error = terminal(events)["data"]["error"]
     assert error["code"] == "sampling_not_wired"
     assert "{'temperature': 0.7}" in error["message"]
-    assert "did not announce `itemSampling`" in error["message"]
+    assert "did not announce `itemTake`" in error["message"]
     # And it refused BEFORE the wire, so no row was rendered at the wrong rung.
     assert sampling_log() == []
 
@@ -552,10 +563,12 @@ def test_take_zero_still_renders_on_a_narrator_without_the_channel(
 
     Take 0 sends no `sampling` key at all, and "no key" is what every narrator
     ever built already does correctly — it renders at the loaded voice's own
-    sampling, which IS take 0. Refusing take 0 too would strand every render on
-    an old pin to protect a ladder it was not climbing.
+    sampling, in the seed lane it has always used, which IS take 0. Refusing
+    take 0 too would strand every render on an old pin to protect a ladder it
+    was not climbing. (The `take: 0` the item now carries is read by a new
+    narrator and ignored by an old one, and both are correct about it.)
     """
-    fake_narrator_engine.steer(monkeypatch, no_item_sampling=1)
+    fake_narrator_engine.steer(monkeypatch, no_item_take=1)
     events = rendered(take=0)
 
     assert terminal(events)["data"]["rendered"] == len(CHUNKS)
