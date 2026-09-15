@@ -315,6 +315,35 @@ Now:
     for WSL2's blind compute-app list, while a Windows desktop always holds VRAM that
     belongs to no compute app, so running it would refuse every load on a machine that is
     merely displaying a desktop.
+  - **AND THE GUARD ASKS FOR ROOM, NOT FOR SOLITUDE (T7, the SECOND Windows run,
+    2026-09-14, on the live card).** Reading the card the Windows way was half the job;
+    the other half is that the card's *meaning* is different here, and the first fix
+    kept the cuda-linux one. The staged server refused `load-model dots-ocr` with
+    `409 accelerator_busy: the accelerator is held by pid 1460 ([Insufficient
+    Permissions], memory not reported); pid 6028 (…CrossDeviceResume.exe); pid 11208
+    (C:\WINDOWS\explorer.exe); pid 12852 (…SearchHost.exe); pid 12880
+    (…StartMenuExperienceHost.exe)` — the compositor and the shell, i.e. Windows
+    drawing a desktop. **On `llama-windows` the card is SHARED BY DESIGN**: nvidia-smi
+    on Windows names every windowed process on the GPU, several with `[Insufficient
+    Permissions]` and no memory figure at all, so "a foreign compute app is on the
+    card" is the normal state of the machine and, taken as a refusal, makes every load
+    on this backend impossible. The cuda-linux meaning (a foreign GPU process inside
+    WSL2 is a trainer or another engine — refuse) does not transfer.
+    - **The rule.** The guard asks whether there is **ROOM**: `free VRAM >=
+      memory_bytes_estimate`, from nvidia-smi `memory.free`. A shortfall is refused by
+      the name that shortfall has always had, **`insufficient_memory`** (the name
+      `capability.py` already points at this module for; a second spelling of one
+      refusal would be a fact with two owners), naming both figures. The foreign
+      processes are **REPORTED** — `details.processes` on that refusal, and
+      `/v1/accelerator` lists them regardless — and are **never the reason**.
+    - **The one holder is an engine of ours that outlived its run.** A `llama-server`
+      Crucible did not start is a previous run's child still on the card and is
+      `accelerator_busy`, named. It is found **by image name** (`llama-server`, with
+      any directory and any `.exe` stripped, case-folded), never by "any pid that is
+      not ours": the pid of a crashed run is not knowable and the image is.
+    - **`cuda-linux` and `mlx-darwin` are untouched.** This is a rule about a Windows
+      desktop, not a softening of section 4; `tests/test_accelerator.py` pins the same
+      process list still refusing `accelerator_busy` on `cuda-linux`.
 - `crucible doctor` in host mode prints `backend: llama-windows on windows/x86_64 — llama.cpp
   <tag> (cuda-12.4 | cpu)`, then the engine line, then the upstream lines.
 - Nothing in host mode is a stopgap for WSL, and WSL is the better engine (section 0's block:
@@ -531,6 +560,16 @@ go.
    parser's dialect exactly (the MLX and vLLM builds do); seconds per page on CPU and on a
    small card. Both recorded in section 7 by whoever runs it first; the doc says
    "unmeasured" until then, never a guessed number.
+9. **CHANGED — the load guard asks for ROOM, not for solitude** (found by T7 on the live
+   card, 2026-09-14; the full record and the refusal names are in 3.5). Foundry never
+   asked the question at all — it started a server on port 8000 beside whatever else was
+   on the card, because a Windows desktop always shares its GPU. Crucible does ask, and
+   on this backend the question is `free VRAM >= memory_bytes_estimate`, refused
+   `insufficient_memory` with both figures; the compositor, the shell, the browser and
+   the `[Insufficient Permissions]` rows are reported in `details.processes` and are
+   never the reason. The single exception is a `llama-server` this Crucible did not
+   start — an engine child left behind by a crashed run — which is `accelerator_busy`,
+   matched **by image name** because the pid of that run is not knowable.
 
 **Exit for Foundry's package L:** `pages` answers `enabled: true` from a `llama-windows` server
 on a clean no-WSL Windows box and a real page comes back parsed; for text, `clean` answers the
@@ -1163,6 +1202,25 @@ a 24 GB card with a 3 GiB allowance, nothing configured):
   build, on CPU or CUDA. So: seconds per page under the Q8 GGUF, whether the Q8 answers
   in `parseDotsPage`'s dialect exactly, and seconds per page under vLLM on the 4090 are
   all **unmeasured — tested once the GPU is free** (3.10's fact 8 stands unchanged).
+- **T6's first run on a live card, 2026-09-15 00:01, run `20260914-235923`** — one figure
+  measured and the rest destroyed by a defect, which is why they are listed as such
+  rather than quietly left blank:
+
+  | figure | T6 |
+  |---|---|
+  | `load-model dots-ocr`, `cuda-linux` / vLLM in WSL | **99.3 s** |
+  | seconds/page | **not recorded** — under 5 s by the server journal (the load job's last `done` poll at 00:01:03, `POST /v1/openai/chat/completions 200 OK` at 00:01:08), which is a bound read off timestamps and NOT a measurement |
+  | blocks parsed | **not recorded** |
+  | dialect | **not recorded** |
+
+  The page WAS read — the journal has the `200 OK` — but `scripts/read_one_page.py`
+  unloaded in a `finally`, the server refused that unload `409 engine_in_use` because
+  its own settlement had already begun clearing the card, and the refusal replaced the
+  result before `answer.json` had been written. Both halves are fixed:
+  `crucible/settle.py` (a clearance of the same model is the same intent, answered, not
+  a conflict — `tests/test_llm_api.py`, `tests/test_tts_api.py`) and the stage, which
+  now records and prints what it measured before it tidies up. **Re-run T6 to fill the
+  three blank rows**; the load figure above stands.
 - **The three `llama-windows` `memory_bytes_estimate` figures are DECLARED**, not
   measured: the GGUF's own size plus 1.5 GB, which is Foundry's `OVERHEAD_GB` and the
   same number every `[local] needs_bytes` in `models/` declares.
@@ -1343,6 +1401,43 @@ Two things the first real Windows run found, which is what running it is for:
 `crucible doctor` asked `jobenv` for an `llm` env on a backend that has none
 and crashed, and the `config_permissions` check called every healthy Windows
 server unhealthy. Both fixed above.
+
+#### What T7 found on the live card, 2026-09-14 (second defect)
+
+The first press of the button with the card released got two stages into
+`llama-windows` and stopped at the same place twice, for two different
+reasons. The first was `read_state`'s hand-written backend list (3.5, first
+sub-bullet). The second is this one, and it is the more interesting of the
+two because the code was *correct on the backend it was written for*:
+
+> `409 accelerator_busy: cannot load 'dots-ocr': the accelerator is held by
+> pid 1460 ([Insufficient Permissions], memory not reported); pid 6028
+> (…CrossDeviceResume.exe); pid 11208 (C:\WINDOWS\explorer.exe); pid 12852
+> (…SearchHost.exe); pid 12880 (…StartMenuExperienceHost.exe)`
+
+Every named process is Windows drawing a desktop. The guard's rule — a
+foreign compute app on the card means somebody's job is on it, refuse — is
+the right rule inside WSL2 and the wrong one on a desktop, where the card is
+shared by design and nvidia-smi names every window on it. Carried across
+unexamined, it made every load on this backend impossible.
+
+**Fixed in `crucible/accelerator.py`**: on `llama-windows` the guard asks for
+ROOM (`free >= memory_bytes_estimate`, refused `insufficient_memory` with both
+figures, the neighbours reported in `details.processes` and never the reason);
+the one holder is a `llama-server` this Crucible did not start, matched by
+IMAGE NAME and refused `accelerator_busy`. `cuda-linux` and `mlx-darwin` are
+untouched, and a test pins that same process list still refusing
+`accelerator_busy` on `cuda-linux`. 3.5 and 3.10 fact 9 carry the rule; no new
+refusal name was minted.
+
+`read_windows_state()`'s handling of `[Insufficient Permissions]` rows was
+re-checked against the exact CSV the driver printed here and kept — those rows
+parse to `used_bytes: None`, which is not zero and is not treated as zero.
+
+New tests: `test_accelerator.py` +8 (24 in the file), `test_llama_engine.py`
++2 with one CORRECTED — `test_a_busy_windows_card_is_still_accelerator_busy`
+asserted the defect and is now
+`test_a_full_windows_card_is_refused_for_the_room_and_not_for_the_company`.
 
 #### STILL UNMEASURED — tested once the GPU is free
 
