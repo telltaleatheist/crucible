@@ -21,11 +21,17 @@
 # runner does. One job with four Windows-shaped steps is honest; a matrix with
 # `if: runner.os` on half its steps is a matrix pretending to be one job.
 #
-# THE MANIFEST IS UPLOADED LAST, by a job that waits for every build. That is
-# the whole invariant of this file: a release whose `envpacks.json` exists has
-# every pack that manifest names. A build that fails leaves its pack out of the
-# manifest, and `crucible install` refuses it by name (`pack_not_published`)
-# rather than being handed half a pack.
+# THE MANIFEST IS UPLOADED LAST, by a job that waits for every build, AND ONLY
+# WHEN IT IS COMPLETE. The invariant of this file used to be the weaker half of
+# that — a release whose `envpacks.json` exists has every pack that manifest
+# NAMES — which v0.6.0 satisfied perfectly while being broken: the host pack's
+# upload failed, the manifest was published with twelve honest rows and no
+# thirteenth, and `install.ps1` refused `pack_not_published` on a release that
+# looked finished. The invariant is now both halves: a release's
+# `envpacks.json` names every pack the TAG DECLARES (`envpack.every_pack()`)
+# and every pack it names is on the release. A run that cannot say that keeps
+# its merged manifest as a workflow artifact, uploads nothing, and fails
+# naming the missing packs.
 #
 # ------------------------------------------------------------------ the disk
 #
@@ -70,9 +76,11 @@
 # The four ESTIMATES are labelled as estimates on purpose and none of them has
 # been built on a runner. If one does not fit, its job fails with the sentence
 # the summary repeats — build it on Owen's machine with
-# `crucible envpack build <name>` and `gh release upload` it by hand — and the
-# release still ships every pack that DID fit, because the manifest is merged
-# from the fragments that exist.
+# `crucible envpack build <name>` and `gh release upload` it by hand. Every
+# pack that DID fit is on the release regardless, because each job uploads its
+# own parts; what waits is the MANIFEST, which is withheld until the hand-built
+# pack's row exists. That is the repair, and it is one upload, not a re-run of
+# the matrix.
 
 name: envpacks
 
@@ -197,15 +205,44 @@ jobs:
         # `--clobber` because a re-run of one job must replace that pack's
         # parts rather than fail on a name that exists. It replaces only this
         # pack's assets; nothing else on the release is touched.
+        #
+        # The glob here is a REAL shell glob and does what it reads like — the
+        # Windows job's `-Filter` did not, which is the 2026-09-15 defect. What
+        # this shares with it is the failure SHAPE: an unmatched glob inside
+        # `$(...)` is a status the shell discards even under `set -e`, so `gh`
+        # would again be handed the tag alone. The count is checked by name.
         run: |
           set -euo pipefail
-          gh release upload "$TAG" --clobber \
-            $(ls packs/*.part[0-9][0-9])
+          parts=(packs/*.part[0-9][0-9])
+          if [ ! -e "${parts[0]}" ]; then
+            echo "::error title=pack_parts_missing::${{ matrix.name }}/${{ matrix.backend }} built, but nothing in packs/ is named *.partNN, so there is nothing to upload. The split step and this step disagree about the part name."
+            exit 1
+          fi
+          printf 'parts to upload: %s\n' "${#parts[@]}"
+          printf '  %s\n' "${parts[@]}"
+          gh release upload "$TAG" --clobber "${parts[@]}"
 
+      # AFTER the upload, deliberately: a fragment is what puts a row in
+      # `envpacks.json`, and a row whose parts are not on the release is the
+      # same lie from the other side. The evidence copy is the step below.
       - name: keep this pack's manifest fragment
         uses: actions/upload-artifact@v4
         with:
           name: envpack-fragment-${{ matrix.name }}-${{ matrix.backend }}
+          path: packs/envpacks.json
+          if-no-files-found: error
+
+      # Kept under a name `envpack-fragment-*` does NOT match, so a fragment
+      # whose parts never reached the release is evidence for a person and
+      # never an input to the merge.
+      - name: keep the fragment as evidence when the upload failed
+        # `hashFiles` so this fires only when the fragment EXISTS: a job that
+        # failed before the build has nothing to keep, and should not add a
+        # second error saying so.
+        if: ${{ failure() && hashFiles('packs/envpacks.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-pack-${{ matrix.name }}-${{ matrix.backend }}
           path: packs/envpacks.json
           if-no-files-found: error
 
@@ -330,10 +367,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
         shell: pwsh
+        # `-Filter` IS NOT A GLOB. PowerShell hands that string straight to the
+        # Win32 file-matching API, whose entire metacharacter vocabulary is `*`
+        # and `?`; a character class is read as the literal characters `[`,
+        # `0`, `-`, `9`, `]`. So `-Filter "*.part[0-9][0-9]"` matched NOTHING
+        # on 2026-09-15 — the pack had already been built and split — and the
+        # empty `$parts` left `gh` holding one argument, which is why the run
+        # died `requires at least 2 arg(s), only received 1` and v0.6.0 shipped
+        # without its host pack.
+        #
+        # The match is on the NAME with a .NET regex and not on `-Filter`,
+        # because `-Filter "*.part??"` would work for the API but `?` there is
+        # ANY character, so `.partxy` would pass; `\.part\d\d$` says two
+        # DIGITS, at the end, in a language whose rules are written down.
+        #
+        # And the emptiness is checked BY NAME rather than left to `gh`'s
+        # argument count, because a silently empty list is the whole defect.
         run: |
-          $parts = Get-ChildItem packs -Filter "*.part[0-9][0-9]" | ForEach-Object { $_.FullName }
+          $parts = @(
+            Get-ChildItem packs -File |
+              Where-Object { $_.Name -match '\.part\d\d$' } |
+              ForEach-Object { $_.FullName }
+          )
+          Write-Host ('parts to upload: {0}' -f $parts.Count)
+          $parts | ForEach-Object { Write-Host ('  {0}' -f $_) }
+          if ($parts.Count -eq 0) {
+            Write-Host '::error title=pack_parts_missing::the host pack built, but nothing in packs/ is named *.partNN, so there is nothing to upload. The split step and this step disagree about the part name.'
+            exit 1
+          }
           gh release upload "$env:TAG" --clobber $parts
 
+      # AFTER the upload, deliberately: a fragment is what puts a row in
+      # `envpacks.json`, and a row whose parts are not on the release is the
+      # same lie from the other side. The evidence copy is the step below.
       - name: keep this pack's manifest fragment
         uses: actions/upload-artifact@v4
         with:
@@ -341,20 +407,49 @@ jobs:
           path: packs/envpacks.json
           if-no-files-found: error
 
+      # The fragment the manifest may NOT have. On 2026-09-15 the upload above
+      # failed and this pack's fragment — its sha256, its byte count, its part
+      # names, all of it already measured — was thrown away with the runner,
+      # because the step that keeps it runs after the step that failed. It is
+      # kept under a name `envpack-fragment-*` does NOT match, so it is
+      # evidence for a person and never an input to the merge.
+      - name: keep the fragment as evidence when the upload failed
+        # `hashFiles` so this fires only when the fragment EXISTS: a job that
+        # failed before the build has nothing to keep, and should not add a
+        # second error saying so.
+        if: ${{ failure() && hashFiles('packs/envpacks.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-pack-host-llama-windows
+          path: packs/envpacks.json
+          if-no-files-found: error
+
   manifest:
     name: merge and upload envpacks.json
     runs-on: ubuntu-latest
-    # `always()` so the manifest is still written when one pack failed: the
-    # release then carries every pack that built, and `crucible install`
-    # refuses the missing one by name. A manifest written only on a clean run
-    # would make one failed job cost every pack in the matrix.
+    # This job RUNS when a pack failed, and on 2026-09-15 that is exactly what
+    # it did: `host (llama-windows)` died at its upload, and the comment that
+    # used to sit here — "a manifest published WITHOUT the host pack's row is
+    # one where `install.ps1` refuses `pack_not_published` on a release that
+    # otherwise looks complete" — described, correctly and uselessly, the
+    # manifest this job then published to v0.6.0. Naming a hazard is not
+    # refusing it.
     #
-    # `host` is in `needs` for a sharper reason than the matrix is: a manifest
-    # published WITHOUT the host pack's row is one where `install.ps1` — the
-    # first thing anybody runs on Windows — refuses `pack_not_published` on a
-    # release that otherwise looks complete.
+    # So the gate MOVED rather than went away. The job still runs on a partial
+    # set, because a merged manifest is the diagnosis — it says which rows the
+    # tag declares and which fragments arrived — and throwing it away would
+    # make one failed job cost every pack in the matrix. What it no longer
+    # does is PUBLISH that manifest as the release's own. Incomplete, it is
+    # uploaded as a workflow artifact and the job FAILS naming the missing
+    # packs; the built packs' parts are already on the release (each job
+    # uploads its own), so the repair is to build the one pack by hand from
+    # the tag and upload its parts and a regenerated `envpacks.json` — not to
+    # re-run the matrix.
+    #
+    # `!cancelled()` and not `always()`: a run somebody cancelled has nothing
+    # to say about what the tag carries, and must not touch the release.
     needs: [pack, host]
-    if: always()
+    if: ${{ !cancelled() }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -373,11 +468,19 @@ jobs:
           path: fragments
 
       - name: merge
+        id: merge
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
         # The merge REFUSES a fragment from another version and refuses two
         # fragments carrying one pack (crucible/envpack.py), so a manifest that
         # is written is a manifest whose rows all came from this tag's build.
+        #
+        # What it CANNOT see is a row that is not there. `envpack.every_pack()`
+        # is the tag's own declaration of what it carries — the same list the
+        # summary below already prints as "not published by this run" — so it
+        # is what the merged rows are compared against, and the answer is
+        # carried out of this step as `missing` for the two steps that act on
+        # it. One list, asked once.
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -394,9 +497,31 @@ jobs:
           pathlib.Path("envpacks.json").write_text(merged.dumps(), encoding="utf-8")
           for entry in merged.packs:
               print(f"{entry.name}/{entry.backend}  {entry.bytes/1e9:.2f} GB  {len(entry.parts)} part(s)")
+          declared = envpack.every_pack()
+          published = {(entry.name, entry.backend) for entry in merged.packs}
+          missing = [f"{name}/{backend}" for name, backend in declared if (name, backend) not in published]
+          print(f"{tag} declares {len(declared)} packs, this manifest has {len(merged.packs)}")
+          print("missing: " + (" ".join(missing) if missing else "none"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"missing={' '.join(missing)}\n")
           PY
 
+      # Whether or not it is fit to publish. An incomplete manifest is the
+      # diagnosis of the run that produced it and must not vanish with the
+      # runner; it just does not become the release's index.
+      - name: keep the merged manifest as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: envpacks-json
+          path: envpacks.json
+          if-no-files-found: error
+
       - name: upload envpacks.json LAST
+        # ONLY when every declared pack has a row. This condition is the fix
+        # for v0.6.0: the release's `envpacks.json` is its promise that each
+        # pack it names is downloadable, and a promise short one row is what
+        # `install.ps1` reads as a complete release and then refuses.
+        if: steps.merge.outputs.missing == ''
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
@@ -434,3 +559,16 @@ jobs:
                   print(f"- `{name}` / {backend}")
           PY
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # LAST, so the artifact is kept and the summary is written before the
+      # run goes red. A missing row must never exit 0: the summary above said
+      # `host` / llama-windows was absent from v0.6.0's manifest and the run
+      # finished green anyway, which is how a broken release looked finished.
+      - name: refuse an incomplete manifest
+        if: steps.merge.outputs.missing != ''
+        env:
+          MISSING: ${{ steps.merge.outputs.missing }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          echo "::error title=manifest_incomplete::$TAG declares packs this run did not publish, so its envpacks.json was NOT uploaded to the release: $MISSING. The packs that did build are on the release already. Build each missing one from $TAG's commit with \`crucible envpack build <name>\`, \`gh release upload $TAG --clobber\` its parts, then regenerate and upload envpacks.json."
+          exit 1
