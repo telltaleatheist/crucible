@@ -64,7 +64,7 @@
 # off `itemSampling` on narrator's ready line) makes a stale pin loud rather
 # than wrong -- but loud still means the ladder does not run, so re-resolve
 # this to a bookforge commit at or after fbc235bf when bumping the env.
-narrator[narrator-mlx] @ git+https://github.com/telltaleatheist/bookforge@5ddead9b86a069112fa642fbb03034b514b09ca8#subdirectory=python
+narrator[narrator-mlx] @ git+https://github.com/telltaleatheist/bookforge@68dc0666068eb0ea00560e08b187ab887495e3f6#subdirectory=python
 
 # --- the two exact pins from narrator's `narrator-mlx` extra ---
 mlx-lm==0.31.3
