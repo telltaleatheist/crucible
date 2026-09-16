@@ -27,6 +27,7 @@ from .base import (
     validate_member_name,
 )
 from .align import AlignJobType, UnloadAlignerJobType
+from .alignlongform.jobtype import AlignLongformJobType
 from .asr import AsrJobType
 from .denoise import DenoiseJobType, UnloadDenoiserJobType
 from .echo import EchoJobType
@@ -39,6 +40,11 @@ from .tts import LoadVoiceJobType, TtsJobType, UnloadVoiceJobType, voice_rows
 ALL_JOB_TYPES: dict[str, str] = {
     AlignJobType.name: "align",
     UnloadAlignerJobType.name: "align",
+    # SHARES `align`'s FLAG and needs `asr`'s env too. Its own `check()` reports
+    # which half is missing rather than claiming ready on the aligner alone — a
+    # job type that says ready and fails in its first stage is the shape this
+    # server spends its refusals avoiding.
+    AlignLongformJobType.name: "align",
     AsrJobType.name: "asr",
     DenoiseJobType.name: "denoise",
     UnloadDenoiserJobType.name: "denoise",
@@ -89,6 +95,13 @@ def build_registry(
         registry[UnloadAlignerJobType.name] = UnloadAlignerJobType(
             config, backend, holder
         )
+        # NO HOLDER. align-longform drives the asr and align WORKERS directly
+        # (`alignlongform/stages.py`): nested jobs would deadlock, because a
+        # Crucible takes one job at a time and a job waiting on a job waits on a
+        # lane it is holding itself. It starts and stops its own aligner session
+        # rather than borrowing the resident one, so it never evicts what a
+        # client has loaded.
+        registry[AlignLongformJobType.name] = AlignLongformJobType(config, backend)
     if config.enable_rvc:
         # Only the owned-pid set, like `asr`: nothing is ever resident for
         # `rvc`, whose whole design is a process that exits every 96 files.

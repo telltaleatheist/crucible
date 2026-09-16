@@ -153,23 +153,41 @@ def test_an_unknown_field_is_refused_rather_than_silently_dropped() -> None:
 # ── The door is shut until there is something behind it ─────────────────────
 
 
-def test_the_type_is_not_registered_so_nothing_can_queue_it_yet() -> None:
-    """The contract exists; the worker does not. Until it does, the type must
-    not appear anywhere a client could select it — a job that can be queued and
-    cannot complete is worse than one that is absent."""
+def test_the_type_IS_registered_now_that_the_worker_exists() -> None:
+    """The inverse of what this asserted while the orchestrator was unbuilt.
+
+    It used to pin the ABSENCE — a job a client can queue and cannot finish is
+    worse than one that is missing — and it was written to fail the day
+    registration arrived without a worker. The worker arrived (jobtype.py), so
+    the assertion turns over rather than being deleted: what it guards now is
+    that the type is reachable at all.
+    """
     from crucible.jobs import ALL_JOB_TYPES
 
-    # Asserted against the REAL registry by its real name, and the sanity check
-    # below is why: this test first read a `JOB_TYPE_FLAGS` that does not exist,
-    # so it passed against an empty dict and proved nothing. A test that cannot
-    # fail is worse than no test.
     assert "align" in ALL_JOB_TYPES, (
-        "ALL_JOB_TYPES no longer looks like the registry this test reads; it "
-        "should contain the shipped types. Re-read jobs/__init__.py before "
-        "trusting the assertion below."
+        "ALL_JOB_TYPES no longer looks like the registry this test reads. Re-read "
+        "jobs/__init__.py before trusting the assertion below."
     )
-    assert alf.JOB_TYPE_NAME not in ALL_JOB_TYPES, (
-        "align-longform is registered but its worker is not built. Either the "
-        "worker landed and this assertion should go, or the registration is "
-        "premature and a client can now queue a job that cannot finish."
+    assert ALL_JOB_TYPES.get(alf.JOB_TYPE_NAME) == "align", (
+        "align-longform must share the `align` flag: it drives that job type's "
+        "worker, and a host with the aligner off cannot run it."
+    )
+
+
+def test_it_needs_BOTH_envs_and_says_which_is_missing() -> None:
+    """`check()` must not report ready on the aligner alone.
+
+    The rough pass runs in the `asr` env, so a host with `align` installed and
+    `asr` absent can queue this job and fail in its first stage — the exact shape
+    the contract's refusals exist to prevent, arriving through the health probe
+    instead of the door.
+    """
+    import inspect
+
+    from crucible.jobs.alignlongform import jobtype
+
+    source = inspect.getsource(jobtype.AlignLongformJobType.check)
+    assert '"asr"' in source and '"align"' in source, (
+        "check() no longer asks about both envs, so this job type can report ready "
+        "on a host where its first stage cannot run."
     )
