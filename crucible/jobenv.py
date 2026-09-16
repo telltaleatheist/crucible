@@ -285,6 +285,16 @@ class EnvStatus:
     #: The sha256 of the recipe this env was installed from, as recorded at
     #: install time. `doctor` compares it against the recipe on disk NOW.
     recipe_sha256: str | None = None
+    #: The recipe's TEXT as installed, line-ending-normalised. None for an env
+    #: stamped before this was recorded.
+    #:
+    #: A hash says THAT a recipe moved and can never say WHAT moved, and those
+    #: are different questions with different remedies: a changed comment costs
+    #: nothing, a re-pinned package is already checked package-by-package by
+    #: `env_status`, and a changed `--index-url` silently swaps the wheel a pin
+    #: resolves to. Keeping the bytes is what lets `install_env` tell the three
+    #: apart instead of sending every one of them to a multi-GB rebuild.
+    recipe_text: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -295,6 +305,10 @@ class EnvStatus:
             "packages": dict(self.packages),
             "pack_sha256": self.pack_sha256,
             "recipe_sha256": self.recipe_sha256,
+            # The text itself is deliberately NOT in `to_dict`: this feeds
+            # `crucible doctor --json`, and several KB of recipe per env would
+            # bury the report it is part of. What the text is FOR is the
+            # comparison in `install_env`, which reads the stamp directly.
         }
 
 
@@ -512,6 +526,10 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
     # exactly what `doctor` prints — not a default standing in for a fact.
     pack_sha256 = record.get("pack_sha256")
     recipe_sha256 = record.get("recipe_sha256")
+    # Absent for every env stamped before the text was recorded, and that
+    # absence is load-bearing rather than tidy-uppable: it is exactly the case
+    # `install_env` cannot prove anything about and refuses by name.
+    recipe_text = record.get("recipe_text")
     if record["backend"] != backend_kind:
         return EnvStatus(
             installed=False,
@@ -524,6 +542,7 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
             packages={},
             pack_sha256=pack_sha256,
             recipe_sha256=recipe_sha256,
+            recipe_text=recipe_text,
         )
 
     present = installed_packages(home, spec)
@@ -554,6 +573,7 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
             packages=present,
             pack_sha256=pack_sha256,
             recipe_sha256=recipe_sha256,
+            recipe_text=recipe_text,
         )
     return EnvStatus(
         installed=True,
@@ -566,6 +586,7 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
         packages=present,
         pack_sha256=pack_sha256,
         recipe_sha256=recipe_sha256,
+        recipe_text=recipe_text,
     )
 
 
@@ -640,6 +661,22 @@ def install_env(
     if directory.exists() and not force:
         existing = env_status(home, spec, backend_kind)
         if existing.installed:
+            # THE ENV HOLDS WHAT THE RECIPE ASKS. What may still be wrong is
+            # the STAMP: it records which recipe bytes built this env, and an
+            # edit to the recipe since then leaves it naming bytes that no
+            # longer exist. `crucible doctor` calls that `pack_recipe_drift`
+            # and has always told the operator to "re-run `crucible install`"
+            # — which arrived HERE, returned this line, and did nothing. The
+            # advice was unfollowable and the only remedy that worked was
+            # `--force`, which deletes several GB of working env to correct a
+            # line of JSON.
+            here = recipe_sha256(recipe)
+            if existing.recipe_sha256 is not None and existing.recipe_sha256 != here:
+                _restamp(
+                    home, spec, backend_kind,
+                    existing=existing, recipe=recipe, here=here, on_line=on_line,
+                )
+                return env_status(home, spec, backend_kind)
             return existing
         if stamp.is_file():
             raise EnvError(
@@ -734,26 +771,14 @@ def install_env(
         timeout=60,
     ).stdout.strip()
     elapsed = time.monotonic() - started
-    stamp.write_text(
-        json.dumps(
-            {
-                "backend": backend_kind,
-                "recipe": recipe.name,
-                # Recorded even on the `--build` path, so `doctor` can say a
-                # locally built env no longer matches the recipe bytes it was
-                # built from — the same question a pack answers with
-                # `pack_recipe_drift`, asked of an env nobody downloaded.
-                "recipe_sha256": recipe_sha256(recipe),
-                "python_version": version,
-                # A venv-built env has NO pack sha, and the key is written as
-                # null rather than left out: "built here" is an answer.
-                "pack_sha256": None,
-                "seconds": round(elapsed, 1),
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+    _write_stamp(
+        home, spec, backend_kind,
+        recipe=recipe,
+        python_version=version,
+        # A venv-built env has NO pack sha, and the key is written as null
+        # rather than left out: "built here" is an answer.
+        pack_sha256=None,
+        seconds=round(elapsed, 1),
     )
     return env_status(home, spec, backend_kind)
 
@@ -802,6 +827,224 @@ def recipe_sha256(path: Path) -> str:
     boundary to get the same answer.
     """
     return hashlib.sha256(path.read_bytes().replace(_CRLF, _LF)).hexdigest()
+
+
+def _write_stamp(
+    home: Path,
+    spec: EnvSpec,
+    backend_kind: str,
+    *,
+    recipe: Path,
+    python_version: str | None,
+    pack_sha256: str | None,
+    seconds: float | None,
+) -> None:
+    """Write `crucible-env.json`. THE one place that does.
+
+    Both the install and the re-stamp come here so the file has one shape. The
+    two used to be one path because only one of them existed; the moment a
+    second writer appeared, a key it forgot would be a key `env_status` reads
+    as "recorded before this was a thing" rather than as a bug.
+    """
+    stamp_path(home, spec).write_text(
+        json.dumps(
+            {
+                "backend": backend_kind,
+                "recipe": recipe.name,
+                # Recorded even on the `--build` path, so `doctor` can say a
+                # locally built env no longer matches the recipe bytes it was
+                # built from - the same question a pack answers with
+                # `pack_recipe_drift`, asked of an env nobody downloaded.
+                "recipe_sha256": recipe_sha256(recipe),
+                # And the bytes themselves, so the NEXT drift can be TOLD APART
+                # from a rebuild-worthy one instead of only detected.
+                "recipe_text": recipe_text(recipe),
+                "python_version": python_version,
+                "pack_sha256": pack_sha256,
+                "seconds": seconds,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _restamp(
+    home: Path,
+    spec: EnvSpec,
+    backend_kind: str,
+    *,
+    existing: EnvStatus,
+    recipe: Path,
+    here: str,
+    on_line: Any = None,
+) -> None:
+    """Correct a stamp whose recipe moved, or refuse and say what a rebuild is for.
+
+    Only ever reached for an env `env_status` has just called INSTALLED, which
+    is a stronger statement than it sounds: every `name==version` in the recipe
+    is present at that version and every `name @ url` was installed from that
+    exact commit. This function decides the one question that check leaves
+    open — whether the recipe moved in some way that check cannot see.
+    """
+    before = existing.recipe_text
+    if before is None:
+        # An env stamped before the text was recorded. The bytes behind the
+        # recorded hash are GONE, so nothing here can distinguish a moved
+        # comment from a moved `--index-url`, and guessing which it was is
+        # precisely the band-aid this refusal exists to avoid.
+        raise EnvError(
+            f"{existing.path} holds everything {recipe.name} pins, but its stamp "
+            f"records recipe {existing.recipe_sha256[:12]} where this build has "
+            f"{here[:12]}, and that stamp predates recording the recipe's text. "
+            "Without those bytes there is no telling whether the edit was a "
+            "comment or an `--index-url` that silently changes which wheel a pin "
+            "resolves to, so this refuses rather than stamping a claim it cannot "
+            f"support. `crucible install {spec.job_type} --force` rebuilds it, and "
+            "is the only answer that is certainly true."
+        )
+
+    after = recipe_text(recipe)
+    problems = unverifiable_recipe_changes(before, after, recipe.name)
+    if problems:
+        raise EnvError(
+            f"{existing.path} cannot be re-stamped for {recipe.name}: "
+            + "; ".join(problems)
+            + ". These are changes no package check can see — `env_status` asks "
+            "whether the env holds what the recipe names, and neither an index "
+            "URL nor a requirement that was deleted shows up in that answer. "
+            f"`crucible install {spec.job_type} --force` rebuilds it."
+        )
+
+    moved = sorted(
+        name for name in _names_in(after)
+        if _pin_of(before, name) != _pin_of(after, name)
+    )
+    if on_line is not None:
+        on_line(
+            f"{recipe.name} moved {existing.recipe_sha256[:12]} -> {here[:12]} "
+            "with no change to where packages come from"
+        )
+        for name in moved:
+            on_line(f"  {name}: {_pin_of(before, name)} -> {_pin_of(after, name)}")
+        on_line(
+            "  every one of those is already verified against the installed "
+            "package, so the env is what this recipe asks for; correcting the "
+            "stamp rather than rebuilding"
+        )
+    _write_stamp(
+        home, spec, backend_kind,
+        recipe=recipe,
+        python_version=existing.python_version,
+        pack_sha256=existing.pack_sha256,
+        seconds=None,
+    )
+
+
+def _pin_of(text: str, name: str) -> str | None:
+    """What a recipe's text pins `name` at — a version, or a commit."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+            continue
+        match = _DIRECT_REFERENCE.match(stripped)
+        raw = match.group("name") if match else stripped.partition("==")[0]
+        if raw.strip().lower().replace("_", "-") != name:
+            continue
+        if match is None:
+            return stripped.partition("==")[2].strip()
+        commit = _VCS_COMMIT.search(match.group("url"))
+        return commit.group("sha") if commit else stripped
+    return None
+
+
+def recipe_text(path: Path) -> str:
+    """The recipe's text, normalised the same way `recipe_sha256` hashes it.
+
+    ONE normalisation, shared, for the same reason the digest has one
+    implementation: a stamp whose text says CRLF and whose hash was taken over
+    LF is a stamp that disagrees with itself.
+    """
+    return path.read_bytes().replace(_CRLF, _LF).decode("utf-8")
+
+
+def _option_lines(text: str) -> list[str]:
+    """The `-`-prefixed lines of a recipe, in order.
+
+    These choose WHERE a pin resolves — `--index-url`,
+    `--extra-index-url`, `-f` — and `env_status` never looks at them, because
+    `_requirement_lines` skips them. That blind spot is the whole reason this
+    function exists: `torch==2.5.1` from PyPI and `torch==2.5.1` from
+    `download.pytorch.org/whl/cu121` are the same version string and different
+    binaries, one of them without CUDA at all, and `pip list` cannot tell them
+    apart afterwards.
+    """
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip().startswith("-")
+    ]
+
+
+def unverifiable_recipe_changes(before: str, after: str, recipe_name: str) -> list[str]:
+    """What moved between two recipes that `env_status` would NOT have caught.
+
+    Empty means: an env that satisfies `env_status` against `after` genuinely
+    satisfies `after`, so its stamp can be corrected without rebuilding it.
+    Non-empty means the difference is one no amount of package-checking can
+    see, and the env has to be built again to be what the recipe now says.
+
+    THE THREE KINDS OF CHANGE, AND WHY ONLY ONE OF THEM IS FATAL:
+
+      * A COMMENT or a blank line is not installed. Most recipe edits are
+        these — this file's own drift was two prose paragraphs and one pin —
+        and sending them to a multi-GB rebuild is what made the drift warning
+        something to ignore rather than act on.
+
+      * A PIN or a DIRECT REFERENCE that moved is already checked, exactly,
+        package by package: `env_status` compares every `name==version` against
+        `pip list` and every `name @ url` against the commit in PEP 610's
+        `direct_url.json`. Re-checking it here would be a second opinion about
+        a question that already has an owner.
+
+      * An OPTION line, or a requirement that VANISHED, is neither. The option
+        line case is above. A vanished requirement is fatal for the opposite
+        reason to the usual one: `env_status` asks whether everything the
+        recipe names is PRESENT, never whether anything else is, so a package
+        dropped from the recipe stays in the env and passes every check, and a
+        rebuild from this recipe would not have it.
+    """
+    problems: list[str] = []
+
+    was, now = _option_lines(before), _option_lines(after)
+    if was != now:
+        for line in [x for x in was if x not in now]:
+            problems.append(f"{recipe_name} no longer says {line!r}")
+        for line in [x for x in now if x not in was]:
+            problems.append(f"{recipe_name} now says {line!r}, and it did not")
+
+    # Parsed, not diffed: a requirement that merely MOVED in the file is not a
+    # change to what is installed, and a textual diff would call it one.
+    gone = sorted(_names_in(before) - _names_in(after))
+    for name in gone:
+        problems.append(
+            f"{recipe_name} no longer requires {name!r}, which is still installed"
+        )
+    return problems
+
+
+def _names_in(text: str) -> set[str]:
+    """Every requirement's name in a recipe's text, pins and references alike."""
+    found: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+            continue
+        match = _DIRECT_REFERENCE.match(stripped)
+        raw = match.group("name") if match else stripped.partition("==")[0]
+        found.add(raw.strip().lower().replace("_", "-"))
+    return found
 
 
 def _run(command: list[str], failure: str, on_line: Any) -> None:

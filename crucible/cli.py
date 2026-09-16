@@ -1918,7 +1918,10 @@ def _provenance(
         report["problems"].append(
             f"{label}: pack_recipe_drift — this env was installed from a "
             f"{recipe.name} hashing {status.recipe_sha256[:12]} and the one in "
-            f"this build hashes {here[:12]}. Re-run its `crucible install`"
+            f"this build hashes {here[:12]}. Re-run its `crucible install`, "
+            "which now either corrects the stamp (when the edit was to "
+            "comments or to pins it can re-verify package by package) or "
+            "names the change that needs `--force`, and why"
         )
     return entry
 
