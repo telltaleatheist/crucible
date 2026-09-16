@@ -145,8 +145,67 @@ def user_home() -> Path:
     return Path.home()
 
 
-def unit_path(home: Path) -> Path:
-    """`~/.config/systemd/user/crucible.service`."""
+#: The two systemd scopes this server can be installed into.
+USER_SCOPE = "user"
+SYSTEM_SCOPE = "system"
+
+#: Where a SYSTEM unit lives. Not under `home`: a system unit is the machine's,
+#: not a user's, and that is the whole point of using one.
+SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
+
+#: The kernel's own answer to "is this WSL". A module constant so a test can
+#: point it somewhere instead of monkeypatching `Path.read_text` globally.
+OSRELEASE = Path("/proc/sys/kernel/osrelease")
+
+
+def in_wsl() -> bool:
+    """True inside WSL, read from the KERNEL and not from the environment.
+
+    `WSL_DISTRO_NAME` and `WSL_INTEROP` are set for a login shell and are
+    ABSENT from a unit's environment — measured 2026-09-16 — so a service that
+    asked them would decide it was not in WSL precisely when it is running as
+    the service. `/proc/sys/kernel/osrelease` is the kernel's own answer
+    (`6.6.87.1-microsoft-standard-WSL2`) and is there for every process.
+    """
+    try:
+        release = OSRELEASE.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "microsoft" in release.lower()
+
+
+def systemd_scope() -> str:
+    """SYSTEM inside WSL, USER everywhere else.
+
+    WSLg mounts its own tmpfs over `/run/user/<uid>`, which HIDES the D-Bus
+    socket systemd's user manager is listening on. `systemctl --user` then
+    fails "Failed to connect to bus" for every caller, the Windows
+    orchestrator's unit probe fails with it, and the engine silently drops to
+    `owner=found` — at which point Windows can no longer restart or upgrade the
+    engine it exists to manage. WSLg is ON BY DEFAULT, so this is the ordinary
+    state of a stock WSL2, not a local misconfiguration.
+
+    The system manager has no such problem: `/run/dbus/system_bus_socket` is
+    not overmounted (measured — `findmnt /run/dbus` returns nothing), and the
+    Windows side reaches it through `wsl.exe -u root`, which needs no password.
+
+    Outside WSL this changes nothing: a user unit needs no privileges and
+    works, and asking a Linux operator for root to install their own server
+    would be a cost paid for somebody else's bug.
+    """
+    return SYSTEM_SCOPE if in_wsl() else USER_SCOPE
+
+
+def systemctl_argv(scope: str, *verbs: str) -> list[str]:
+    """`systemctl [--user] <verbs…>` for this scope. One place decides."""
+    prefix = ("--user",) if scope == USER_SCOPE else ()
+    return ["systemctl", *prefix, *verbs]
+
+
+def unit_path(home: Path, scope: str | None = None) -> Path:
+    """`~/.config/systemd/user/crucible.service`, or the system unit in WSL."""
+    if (scope if scope is not None else systemd_scope()) == SYSTEM_SCOPE:
+        return SYSTEM_UNIT_DIR / UNIT_NAME
     return home / ".config" / "systemd" / "user" / UNIT_NAME
 
 
@@ -168,7 +227,7 @@ def serve_log_path(crucible_home: Path) -> Path:
 def definition_path(mechanism: str, home: Path) -> Path:
     """The unit or the plist, whichever this host uses."""
     if mechanism == SYSTEMD:
-        return unit_path(home)
+        return unit_path(home)  # scope-aware: the system unit inside WSL
     if mechanism == LAUNCHD:
         return plist_path(home)
     raise ServiceError(f"there is no service mechanism called {mechanism!r}")
@@ -333,6 +392,7 @@ def systemd_unit_text(
     host: str,
     port: int,
     path_value: str,
+    run_as: str | None = None,
 ) -> str:
     """`~/.config/systemd/user/crucible.service`, exactly.
 
@@ -423,9 +483,17 @@ def systemd_unit_text(
         + environment("PATH", "PATH", path_value)
         + "Restart=always\n"
         f"RestartSec={RESTART_SECONDS}\n"
-        "\n"
-        "[Install]\n"
-        "WantedBy=default.target\n"
+        # A SYSTEM unit runs as root unless told whose server this is, and
+        # this one owns a home, a token and a pairing file under ONE user.
+        # The user scope needs no such line: it is already that user's manager.
+        + (f"User={_one_line('run_as', run_as)}\n" if run_as else "")
+        + "\n"
+        + "[Install]\n"
+        # `default.target` is the USER manager's "logged in". The system
+        # manager's equivalent is `multi-user.target`, and a system unit
+        # wanted by the former is enabled into a target that never runs.
+        + ("WantedBy=multi-user.target\n" if run_as
+           else "WantedBy=default.target\n")
     )
 
 
@@ -654,17 +722,17 @@ def status(
     definition = definition_path(mechanism, home)
     installed = definition.is_file()
     if mechanism == SYSTEMD:
+        scope = systemd_scope()
         ran = runner(
-            [
-                "systemctl",
-                "--user",
+            systemctl_argv(
+                scope,
                 "show",
                 UNIT_NAME,
                 "--property=ActiveState",
                 "--property=SubState",
                 "--property=MainPID",
                 "--property=UnitFileState",
-            ]
+            )
         )
         linger = read_linger(runner, user if user is not None else getpass.getuser())
         if not ran.ok:
@@ -814,8 +882,9 @@ def install(
     lines: list[str] = []
 
     if mechanism == SYSTEMD:
+        scope = systemd_scope()
         path, changed = write_definition(
-            unit_path(home),
+            unit_path(home, scope),
             systemd_unit_text(
                 server_name=server_name,
                 program=program,
@@ -823,17 +892,22 @@ def install(
                 host=host,
                 port=port,
                 path_value=recorded,
+                # A system unit must be told whose server it is; a user unit
+                # already is. `user` is what the caller states, falling back
+                # to the account doing the installing.
+                run_as=((user if user is not None else getpass.getuser())
+                        if scope == SYSTEM_SCOPE else None),
             ),
         )
         lines.append(f"wrote {path}")
         _require(
             runner,
-            ["systemctl", "--user", "daemon-reload"],
+            systemctl_argv(scope, "daemon-reload"),
             "systemd would not reload its user units",
         )
         _require(
             runner,
-            ["systemctl", "--user", "enable", "--now", UNIT_NAME],
+            systemctl_argv(scope, "enable", "--now", UNIT_NAME),
             f"systemd would not enable and start {UNIT_NAME}",
         )
         lines.append(f"enabled and started {UNIT_NAME}")
@@ -845,7 +919,7 @@ def install(
             # nothing at all.
             _require(
                 runner,
-                ["systemctl", "--user", "restart", UNIT_NAME],
+                systemctl_argv(scope, "restart", UNIT_NAME),
                 f"systemd would not restart {UNIT_NAME} onto its new definition",
             )
             lines.append(f"restarted {UNIT_NAME} onto its new definition")
@@ -925,12 +999,13 @@ def uninstall(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
     """Stop the service, forget it, and remove its definition. Idempotent."""
     lines: list[str] = []
     if mechanism == SYSTEMD:
-        path = unit_path(home)
+        scope = systemd_scope()
+        path = unit_path(home, scope)
         if not path.is_file():
             return [f"nothing to remove: there is no unit at {path}"]
         _require(
             runner,
-            ["systemctl", "--user", "disable", "--now", UNIT_NAME],
+            systemctl_argv(scope, "disable", "--now", UNIT_NAME),
             f"systemd would not stop and disable {UNIT_NAME}",
         )
         lines.append(f"stopped and disabled {UNIT_NAME}")
@@ -938,7 +1013,7 @@ def uninstall(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
         lines.append(f"removed {path}")
         _require(
             runner,
-            ["systemctl", "--user", "daemon-reload"],
+            systemctl_argv(scope, "daemon-reload"),
             "systemd would not reload its user units",
         )
         return lines
@@ -972,9 +1047,10 @@ def start(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
             "defined is not something this can guess at"
         )
     if mechanism == SYSTEMD:
+        scope = systemd_scope()
         _require(
             runner,
-            ["systemctl", "--user", "start", UNIT_NAME],
+            systemctl_argv(scope, "start", UNIT_NAME),
             f"systemd would not start {UNIT_NAME}",
         )
         return [f"started {UNIT_NAME}"]
@@ -1009,9 +1085,10 @@ def stop(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
     `crucible service start` brings it back now.
     """
     if mechanism == SYSTEMD:
+        scope = systemd_scope()
         _require(
             runner,
-            ["systemctl", "--user", "stop", UNIT_NAME],
+            systemctl_argv(scope, "stop", UNIT_NAME),
             f"systemd would not stop {UNIT_NAME}",
         )
         return [f"stopped {UNIT_NAME}"]

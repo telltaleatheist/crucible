@@ -23,6 +23,20 @@ from crucible.config import load_config
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 
+
+@pytest.fixture(autouse=True)
+def _user_scope_unless_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests are about the USER scope, so say so rather than inherit it.
+
+    `service.systemd_scope()` reads the kernel and answers SYSTEM inside WSL,
+    which is right for the product and wrong for a suite that asserts
+    `systemctl --user` argv: run on a developer's WSL box the same tests would
+    fail, having measured the machine instead of the code. A test that passes
+    or fails depending on where it runs is not testing anything. The
+    system-scope tests below opt in explicitly.
+    """
+    monkeypatch.setattr(service, "in_wsl", lambda: False)
+
 PATH_VALUE = "/usr/local/bin:/usr/bin:/bin"
 
 
@@ -967,3 +981,89 @@ def test_an_unquoted_unit_from_an_older_build_still_reads_back(
         "[Service]\nEnvironment=PATH=/usr/local/bin:/usr/bin\n", encoding="utf-8"
     )
     assert service.read_recorded_path("systemd", user_home) == "/usr/local/bin:/usr/bin"
+
+
+# ------------------------------------------------- the system scope, in WSL
+
+
+def test_in_wsl_reads_the_kernel_and_not_the_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A unit has no WSL_DISTRO_NAME, so asking the environment asks wrong.
+
+    Measured 2026-09-16: `WSL_DISTRO_NAME` and `WSL_INTEROP` are set for a login
+    shell and ABSENT from a service's environment, so a server that consulted
+    them would decide it was not in WSL exactly when it is running AS the
+    service. `/proc/sys/kernel/osrelease` is the kernel's own answer and is
+    there for every process.
+    """
+    monkeypatch.undo()  # this test is about the real detector, not the fixture
+    release = tmp_path / "osrelease"
+    monkeypatch.setattr(service, "OSRELEASE", release)
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.delenv("WSL_INTEROP", raising=False)
+
+    release.write_text("6.6.87.1-microsoft-standard-WSL2\n", encoding="utf-8")
+    assert service.in_wsl() is True
+    assert service.systemd_scope() == service.SYSTEM_SCOPE
+
+    release.write_text("6.8.0-generic\n", encoding="utf-8")
+    assert service.in_wsl() is False
+    assert service.systemd_scope() == service.USER_SCOPE
+
+
+def test_a_kernel_that_cannot_be_read_is_not_wsl(monkeypatch: pytest.MonkeyPatch,
+                                                 tmp_path: Path) -> None:
+    """Absent is not WSL: guessing SYSTEM would ask a Linux operator for root."""
+    monkeypatch.undo()
+    monkeypatch.setattr(service, "OSRELEASE", tmp_path / "does-not-exist")
+    assert service.in_wsl() is False
+
+
+def test_in_wsl_the_unit_is_the_machines_and_systemctl_drops_user(
+    monkeypatch: pytest.MonkeyPatch, user_home: Path
+) -> None:
+    """WSLg hides the user bus, so the guest's server belongs to the system.
+
+    WSLg mounts its own tmpfs over /run/user/<uid> and hides the D-Bus socket
+    systemd's user manager listens on, so `systemctl --user` fails for every
+    caller and the Windows orchestrator's probe drops the engine to
+    `owner=found`. WSLg is on by DEFAULT, so this is a stock WSL2, not a broken
+    one. `/run/dbus/system_bus_socket` is not overmounted.
+    """
+    monkeypatch.setattr(service, "in_wsl", lambda: True)
+    # The real /etc is not this test's to write; what is under test is WHERE the
+    # unit goes and WHAT argv reaches systemctl, not the ability to be root.
+    system_dir = user_home / "etc-systemd-system"
+    monkeypatch.setattr(service, "SYSTEM_UNIT_DIR", system_dir)
+    runner = Runner(LINGER_ON)
+    install_systemd(user_home, runner)
+
+    assert service.unit_path(user_home) == system_dir / "crucible.service"
+    assert (system_dir / "crucible.service").is_file()
+    assert runner.calls[0] == ("systemctl", "daemon-reload")
+    assert runner.calls[1] == ("systemctl", "enable", "--now", "crucible.service")
+    assert not any("--user" in call for call in runner.calls), (
+        "the whole point is that the guest's server is not a user unit"
+    )
+
+
+def test_a_system_unit_says_whose_server_it_is(
+    monkeypatch: pytest.MonkeyPatch, user_home: Path
+) -> None:
+    """A system unit runs as root unless told otherwise; this server is a user's."""
+    monkeypatch.setattr(service, "in_wsl", lambda: True)
+    text = service.systemd_unit_text(
+        server_name="crucible@owens-pc",
+        program=str(env_bin(user_home) / "crucible"),
+        crucible_home=user_home / ".crucible",
+        host="127.0.0.1",
+        port=7100,
+        path_value=PATH_VALUE,
+        run_as="telltale",
+    )
+    assert "User=telltale" in text
+    # `default.target` is the user manager's "logged in"; a system unit wanted by
+    # it would be enabled into a target that never activates.
+    assert "WantedBy=multi-user.target" in text
+    assert "WantedBy=default.target" not in text
