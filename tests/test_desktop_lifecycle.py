@@ -115,7 +115,7 @@ def test_start_does_not_spawn_over_http_error(monkeypatch, tmp_path, existing_pa
         local.act("start", tmp_path)
 
 
-@pytest.mark.parametrize("owner", ["child", "wsl-unit"])
+@pytest.mark.parametrize("owner", ["child", "wsl-unit", "found"])
 @pytest.mark.parametrize("release,contract", [("0.6.0", None), ("0.6.99", 1), ("0.6.99", 2)])
 def test_upgrade_uses_authenticated_supported_contract(monkeypatch, tmp_path, owner, release, contract):
     from crucible.host import app
@@ -137,7 +137,7 @@ def test_upgrade_uses_authenticated_supported_contract(monkeypatch, tmp_path, ow
             stopped.append(True)
             return {"quit": True}
         if stopped:
-            if ":7100/" in url and owner == "wsl-unit":
+            if ":7100/" in url and owner in ("wsl-unit", "found"):
                 pytest.fail("host replacement must not touch the guest engine")
             raise URLError(ConnectionRefusedError())
         return {"crucible": True, "role": "orchestrator"}
@@ -244,3 +244,85 @@ def test_sharing_menu_error_survives_health_refresh(monkeypatch, tmp_path):
             assert self.title == "Crucible — running"
     monkeypatch.setitem(sys.modules, "pystray", SimpleNamespace(Icon=Icon, Menu=lambda *a: a, MenuItem=Item))
     desktop._run_tray(tmp_path)
+
+
+def test_a_controller_without_quit_still_shuts_down(monkeypatch, tmp_path):
+    """0.6.0 was assumed to serve /quit. The one on owens-pc answered 404.
+
+    Measured 2026-09-16: the legacy path POSTs /quit on the strength of a
+    comment saying that release has it, and the installed 0.6.0 did not — which
+    is what stopped the upgrade, with an unhandled HTTP error naming nothing.
+    close_tray has already asked the process to go; whether it went is decided
+    by the wait, not by an assumption about an old version.
+    """
+    from urllib.error import HTTPError
+
+    from crucible.host import app
+
+    monkeypatch.setattr(local.sys, "platform", "win32")
+    monkeypatch.setattr(local, "crucible_home", lambda: tmp_path)
+    monkeypatch.setattr(desktop, "close_tray", lambda: None)
+    monkeypatch.setattr(local, "connection", lambda home: ("http://127.0.0.1:7100", "test", "secret"))
+    (tmp_path / "host.pid").write_text("12345")
+    gone = []
+
+    def request(url, **kw):
+        if url.endswith("/v1/info"):
+            return {"role": "orchestrator", "server": {"version": "0.6.0", "api_version": 1},
+                    "engine": {"owner": "wsl-unit"}, "local_lifecycle_version": None}
+        if url.endswith("/quit"):
+            gone.append(True)   # the tray signal is what actually stops it
+            raise HTTPError(url, 404, "Not Found", {}, None)
+        if gone:
+            raise URLError(ConnectionRefusedError())
+        return {"crucible": True, "role": "orchestrator"}
+
+    monkeypatch.setattr(local, "request", request)
+    monkeypatch.setattr(app, "_alive", lambda pid: not gone)
+    monkeypatch.setattr(local, "act", lambda action: None)
+
+    local.shutdown()          # a 404 must not be the end of the upgrade
+    assert gone == [True]
+
+
+@pytest.mark.parametrize("backend,raises", [
+    ("cuda-linux", False),      # a guest unit: outliving its controller is normal
+    ("mlx-darwin", False),
+    ("llama-windows", True),    # the controller's OWN child, still answering
+    (None, True),               # could not be asked: keep the refusal
+])
+def test_an_engine_outliving_its_controller_is_only_a_fault_when_native(
+    monkeypatch, tmp_path, backend, raises
+):
+    """A WSL unit is MEANT to survive the Windows swap; a native child is not.
+
+    Measured 2026-09-16: this refusal stopped an upgrade on a machine whose
+    engine was a healthy WSL guest, because the check asked whether an engine
+    was answering and not whether it was one this controller should have
+    stopped.
+    """
+    from crucible.host import app
+
+    monkeypatch.setattr(local.sys, "platform", "win32")
+    monkeypatch.setattr(local, "crucible_home", lambda: tmp_path)
+    monkeypatch.setattr(desktop, "close_tray", lambda: None)
+    monkeypatch.setattr(local, "connection", lambda home: ("http://127.0.0.1:7100", "test", "secret"))
+    monkeypatch.setattr(app, "_alive", lambda pid: False)
+
+    def request(url, **kw):
+        if ":7101/" in url:
+            raise URLError(ConnectionRefusedError())   # no controller at all
+        if url.endswith("/v1/ping"):
+            return {"crucible": True}
+        if url.endswith("/v1/info"):
+            if backend is None:
+                raise URLError(ConnectionRefusedError())
+            return {"host": {"backend": backend}}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(local, "request", request)
+    if raises:
+        with pytest.raises(local.LocalError, match="engine_unmanaged"):
+            local.shutdown()
+    else:
+        local.shutdown()

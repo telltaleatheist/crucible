@@ -287,7 +287,29 @@ def shutdown() -> None:
                 if refused(engine_exc):
                     return
                 raise LocalError(f"engine_shutdown_unknown: {engine_exc}") from engine_exc
-            raise LocalError("engine_unmanaged: an engine is answering without its controller; it was not stopped")
+            # AN ENGINE OUTLIVING ITS CONTROLLER IS NORMAL FOR A GUEST. A WSL
+            # unit runs under the distro's own init and is meant to survive the
+            # Windows swap — the loop further down leaves one running for that
+            # exact reason. What would genuinely be unmanaged is a NATIVE engine,
+            # the controller's own child, still answering after its parent went.
+            # So the engine is asked which it is rather than assumed to be the
+            # bad case. Measured 2026-09-16: this refusal stopped an upgrade on a
+            # machine whose engine was a perfectly healthy WSL guest.
+            try:
+                _, _, engine_token = connection(home)
+                backend = (request("http://127.0.0.1:7100/v1/info", token=engine_token)
+                           .get("host", {}).get("backend"))
+            except (LocalError, urllib.error.URLError, ConnectionError, ValueError, OSError):
+                backend = None
+            if backend is not None and backend != "llama-windows":
+                return
+            raise LocalError(
+                "engine_unmanaged: a native engine is answering without its "
+                "controller; it was not stopped"
+                if backend == "llama-windows" else
+                "engine_unmanaged: an engine is answering without its controller "
+                "and could not be asked what it is; it was not stopped"
+            )
         if ping.get("crucible") is not True or ping.get("role") != "orchestrator":
             raise LocalError("wrong_controller: port 7101 is occupied by another service")
         _, _, token = connection(home)
@@ -304,7 +326,16 @@ def shutdown() -> None:
                              f"for {release!r} (lifecycle {lifecycle!r})")
         engine = info.get("engine")
         owner = engine.get("owner") if isinstance(engine, dict) else None
-        if owner not in (None, "child", "wsl-unit"):
+        # `found` SITS WITH `wsl-unit`, NOT AGAINST IT. Both name an engine this
+        # controller did not start, and the loop below already leaves a
+        # `wsl-unit` engine running for exactly that reason — PHASE17 is explicit
+        # that an orchestrator must not stop what it does not own. Refusing the
+        # upgrade over it was the stricter reading of the same fact, and it made
+        # the DEFAULT state of a stock WSL2 unupgradable: WSLg hides the user bus
+        # (see crucible/service.py `systemd_scope`), the probe fails, and the
+        # owner is `found` on a machine where nothing is wrong with the engine.
+        # Measured 2026-09-16 on the 0.6.0 -> 0.6.3 upgrade of owens-pc.
+        if owner not in (None, "child", "wsl-unit", "found"):
             raise LocalError("controller_upgrade_unsupported: the controller does not own the answering engine")
         from .host.app import _alive
         pid_file = home / "host.pid"
@@ -317,7 +348,20 @@ def shutdown() -> None:
         # A guest unit uses a different runtime and survives the Windows swap.
         if supported:
             act("stop")
-        request("http://127.0.0.1:7101/quit", token=token, method="POST")
+        try:
+            request("http://127.0.0.1:7101/quit", token=token, method="POST")
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise
+            # THE COMMENT ABOVE WAS WRONG ABOUT 0.6.0. It says that release has
+            # `/quit`; the 0.6.0 installed on owens-pc answered 404 to it
+            # (measured 2026-09-16, and it is what stopped the upgrade). An
+            # assumption about what an OLD version serves cannot be checked by
+            # reading this file, so it is asked instead. `close_tray` above has
+            # already signalled the process to go; the wait below is what
+            # decides whether it did, and says `controller_shutdown_failed` by
+            # name if not — which beats an unhandled HTTP 404 either way.
+            pass
         deadline = time.monotonic() + 15
         while True:
             closed = False
@@ -329,7 +373,7 @@ def shutdown() -> None:
                 else:
                     raise LocalError(f"controller_shutdown_unknown: {exc}") from exc
             if closed and not _alive(controller_pid):
-                if owner != "wsl-unit":
+                if owner not in ("wsl-unit", "found"):
                     try:
                         request("http://127.0.0.1:7100/v1/ping")
                     except (urllib.error.URLError, ConnectionError) as exc:
