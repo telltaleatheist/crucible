@@ -33,6 +33,16 @@ real NVIDIA acceptance host, so CPU-only pack builders explicitly report that it
 was not exercised. Release 0.6.1's public notes now warn about both defects; its
 assets and source tag remain unchanged.
 
+The fix is committed in `db9b2b7d961c253212b8e2f24cb93f505940eaf8`.
+[Artifact-only run 35061594490](https://github.com/telltaleatheist/crucible/actions/runs/35061594490)
+rebuilt both POSIX core packs from that exact commit and passed. The relocated
+Mac pack explicitly reported `fresh-home init with real mlx-darwin detection ok`;
+the Linux runner explicitly reported that NVIDIA initialization was not exercised.
+These are private build artifacts, not replacements for published 0.6.1 assets.
+Focused regression results: 273 bootstrap tests passed with zero skips, including
+the real-shell manifest cases; 86 Python packaging tests passed with 14 existing
+platform/archive-tool skips.
+
 ## Measured release inputs
 
 Read the public 0.6.0 release asset list and `envpacks.json`, then compared every
