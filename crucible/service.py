@@ -21,10 +21,16 @@ agent**. A backend this module has no mechanism for is refused by name rather
 than served with a guess — DESIGN.md section 2's list of backends is short and
 explicit, and so is this one.
 
-They are user-level in both cases, deliberately. A system unit would need root to
-install, would run as a user with no HuggingFace cache and no conda env, and
-would put a server that holds one operator's models outside that operator's
-control. The cost is stated below, in `linger`.
+They are user-level by default, deliberately: a user unit needs no privileges,
+and a system unit would run as a user with no HuggingFace cache and no conda env
+unless told whose server it is. The cost is stated below, in `linger`.
+
+**WSL is the one exception, and it is not a preference.** WSLg overmounts
+`/run/user/<uid>` and hides the user manager's D-Bus socket, so a user unit
+there is one an orchestrator cannot reach (`systemd_scope`). In WSL the unit is
+therefore a SYSTEM unit with `User=` naming the installing account — same
+account, same caches, same conda env, a manager that answers. It needs root to
+install, and `root_prefix` is the one place that says how root is reached.
 
 THE PATH IS RECORDED, AND THIS IS THE BUG THAT MADE IT NECESSARY
 ----------------------------------------------------------------
@@ -89,9 +95,10 @@ import getpass
 import os
 import plistlib
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from xml.sax.saxutils import escape as xml_escape
 
 from . import hosttools
@@ -200,6 +207,57 @@ def systemctl_argv(scope: str, *verbs: str) -> list[str]:
     """`systemctl [--user] <verbs…>` for this scope. One place decides."""
     prefix = ("--user",) if scope == USER_SCOPE else ()
     return ["systemctl", *prefix, *verbs]
+
+
+#: What WSL calls the distro this process is inside. Set for a login shell and
+#: for `install.sh`; ABSENT from a unit's environment, which costs nothing —
+#: a running unit installs nothing.
+WSL_DISTRO_ENV = "WSL_DISTRO_NAME"
+
+
+def root_prefix(environ: Mapping[str, str] | None = None) -> list[str]:
+    """The argv prefix that runs a command as root, or `[]` when already root.
+
+    A SYSTEM unit needs root to install, and inside WSL there is no password to
+    give: `sudo -n true` on a stock Ubuntu answers "a password is required"
+    (measured 2026-09-16), and an install driven by the Windows orchestrator has
+    no terminal to type one into. The door that needs no password is the
+    WINDOWS one — `wsl.exe -u root` grants root to any distro without asking —
+    and interop makes it reachable from INSIDE the distro too.
+
+    So this is the same door `crucible/host/presence.py` opens to restart the
+    unit, approached from the other side, and the system has one answer to "how
+    does Crucible get root in WSL" instead of two.
+
+    Outside WSL nothing calls this: `systemd_scope` returns the user scope,
+    which needs no privileges at all.
+    """
+    if not hasattr(os, "geteuid"):
+        raise ServiceError(
+            "a system unit is a POSIX thing and this platform has no euid; "
+            "nothing here should have asked for one"
+        )
+    if os.geteuid() == 0:
+        return []
+    distro = (os.environ if environ is None else environ).get(WSL_DISTRO_ENV)
+    if not distro:
+        raise ServiceError(
+            f"the system unit needs root and ${WSL_DISTRO_ENV} is unset, so the "
+            "`wsl.exe -u root` door cannot be named. Install from a WSL shell, "
+            "or run this as root"
+        )
+    return ["wsl.exe", "-d", distro, "-u", "root", "--exec"]
+
+
+def writing_door(scope: str) -> list[str]:
+    """The prefix a systemd verb that CHANGES something needs in this scope.
+
+    Reading is free: `systemctl show` against the system manager answers any
+    user, and elevating it would buy a `wsl.exe` round trip per status poll for
+    nothing. Starting, stopping, enabling and writing the unit file are the
+    verbs that need root, and they all come through here.
+    """
+    return root_prefix() if scope == SYSTEM_SCOPE else []
 
 
 def unit_path(home: Path, scope: str | None = None) -> Path:
@@ -822,8 +880,21 @@ def _agent_is_loaded(runner: Runner) -> bool:
 # ------------------------------------------------------------------- writing
 
 
-def write_definition(path: Path, text: str) -> tuple[Path, bool]:
+def write_definition(
+    path: Path,
+    text: str,
+    *,
+    elevate: Sequence[str] = (),
+    runner: Runner | None = None,
+) -> tuple[Path, bool]:
     """Write the unit or the plist. Returns the path and whether it CHANGED.
+
+    `elevate` is `root_prefix`'s answer: empty when this process can write the
+    path itself, and the `wsl.exe -u root` door when it cannot. The text is
+    staged beside the temp directory and moved into place by `install(1)`
+    rather than piped, because the runner speaks argv and not stdin — and the
+    unit carries no secret (the token lives in `config.toml`), so a staged copy
+    exposes nothing.
 
     The second half is not bookkeeping. `systemctl enable --now` starts a unit
     that is STOPPED and does nothing at all to one already running, which is
@@ -834,14 +905,77 @@ def write_definition(path: Path, text: str) -> tuple[Path, bool]:
     conda path, and nothing in the install said so. The caller restarts when
     this says True.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     before = path.read_text(encoding="utf-8") if path.is_file() else None
-    path.write_text(text, encoding="utf-8")
+    if elevate:
+        if runner is None:
+            raise ServiceError(
+                "an elevated write needs a runner to elevate through; this is a "
+                "caller bug, not a host problem"
+            )
+        # A UNIQUE name: `/tmp` is shared and sticky, so a fixed one could
+        # collide with another account's file and be unwritable.
+        handle, staged_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".staged")
+        os.close(handle)
+        staged = Path(staged_name)
+        staged.write_text(text, encoding="utf-8")
+        try:
+            _require(
+                runner,
+                [*elevate, "install", "-D", "-m", "0644", str(staged), str(path)],
+                f"{path} could not be written as root",
+            )
+        finally:
+            staged.unlink(missing_ok=True)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
     # REPLACED, not merely "differs". On a first install `before` is None and
     # the unit is about to be started by `enable --now` with nothing stale
     # behind it, so a restart there would be an outage bought for nothing.
     # What matters is a definition that MOVED under a running process.
     return path, before is not None and before != text
+
+
+def retire_user_unit(home: Path, runner: Runner, elevate: Sequence[str]) -> list[str]:
+    """Take down a pre-7b.9 USER unit before a SYSTEM unit takes its port.
+
+    A guest installed before the scope moved has `crucible.service` under
+    `~/.config/systemd/user`, enabled, running, and holding 7100. The new
+    system unit's `enable --now` would then fail to bind, and the failure would
+    read as a port conflict rather than as the upgrade it is.
+
+    It cannot be retired through its own manager. The reason the scope moved at
+    all is that WSLg overmounts `/run/user/<uid>` and HIDES that manager's bus
+    socket (`systemd_scope`), so `systemctl --user` there fails for root and
+    user alike — setting `XDG_RUNTIME_DIR` does not help, because the socket is
+    not missing, it is covered.
+
+    What always answers is the SYSTEM manager, which owns `user@<uid>.service`.
+    Stopping that stops every unit the user manager was running, this one
+    included. The file is removed FIRST, so a manager that comes back — linger
+    brings it back on demand — comes back without it. One mechanism, no
+    second-guessing about which door happens to be open.
+
+    The cost is honest: any other service that user was running in this distro
+    restarts. A WSL distro that exists to hold an inference server is the case
+    this is for, and a Linux host never reaches here at all.
+    """
+    stale = unit_path(home, USER_SCOPE)
+    if not stale.is_file():
+        return []
+    # STOP FIRST, then remove. A stop that fails must leave the file where it
+    # is: the next install then sees a stale unit and retires it again, instead
+    # of finding nothing to retire and meeting the old server at the port.
+    _require(
+        runner,
+        [*elevate, "systemctl", "stop", f"user@{os.getuid()}.service"],
+        "the old user manager would not stop, so its Crucible still holds the port",
+    )
+    stale.unlink()
+    return [
+        f"retired the user unit at {stale} and stopped the user manager that "
+        "was running it"
+    ]
 
 
 def install(
@@ -883,6 +1017,14 @@ def install(
 
     if mechanism == SYSTEMD:
         scope = systemd_scope()
+        who = user if user is not None else getpass.getuser()
+        # A system unit lives in `/etc` and is driven through the system
+        # manager, both of which need root. `root_prefix` is the ONE place that
+        # says how root is reached, and it answers `[]` for the user scope and
+        # for a process that already is root.
+        elevate = writing_door(scope)
+        if scope == SYSTEM_SCOPE:
+            lines.extend(retire_user_unit(home, runner, elevate))
         path, changed = write_definition(
             unit_path(home, scope),
             systemd_unit_text(
@@ -895,19 +1037,20 @@ def install(
                 # A system unit must be told whose server it is; a user unit
                 # already is. `user` is what the caller states, falling back
                 # to the account doing the installing.
-                run_as=((user if user is not None else getpass.getuser())
-                        if scope == SYSTEM_SCOPE else None),
+                run_as=(who if scope == SYSTEM_SCOPE else None),
             ),
+            elevate=elevate,
+            runner=runner,
         )
         lines.append(f"wrote {path}")
         _require(
             runner,
-            systemctl_argv(scope, "daemon-reload"),
-            "systemd would not reload its user units",
+            [*elevate, *systemctl_argv(scope, "daemon-reload")],
+            "systemd would not reload its units",
         )
         _require(
             runner,
-            systemctl_argv(scope, "enable", "--now", UNIT_NAME),
+            [*elevate, *systemctl_argv(scope, "enable", "--now", UNIT_NAME)],
             f"systemd would not enable and start {UNIT_NAME}",
         )
         lines.append(f"enabled and started {UNIT_NAME}")
@@ -919,14 +1062,24 @@ def install(
             # nothing at all.
             _require(
                 runner,
-                systemctl_argv(scope, "restart", UNIT_NAME),
+                [*elevate, *systemctl_argv(scope, "restart", UNIT_NAME)],
                 f"systemd would not restart {UNIT_NAME} onto its new definition",
             )
             lines.append(f"restarted {UNIT_NAME} onto its new definition")
         lines.append(f"runs: {program} serve")
         lines.append(f"PATH recorded: {recorded}")
-        linger = read_linger(runner, user if user is not None else getpass.getuser())
-        who = user if user is not None else getpass.getuser()
+        if scope == SYSTEM_SCOPE:
+            # LINGER IS A USER-MANAGER FACT and says nothing about a system
+            # unit. Printing "this will die with your shell" over a unit
+            # `multi-user.target` starts at boot would be a true sentence about
+            # the wrong thing — the shape docs/ARCHITECTURE.md R1 is about.
+            lines.append(
+                f"scope: system unit, running as {who} — it starts with the "
+                "distro and needs no linger"
+            )
+            return lines
+
+        linger = read_linger(runner, who)
         if linger is True:
             lines.append(
                 f"linger: on for {who} — this server survives a logout and starts "
@@ -1003,18 +1156,23 @@ def uninstall(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
         path = unit_path(home, scope)
         if not path.is_file():
             return [f"nothing to remove: there is no unit at {path}"]
+        elevate = writing_door(scope)
         _require(
             runner,
-            systemctl_argv(scope, "disable", "--now", UNIT_NAME),
+            [*elevate, *systemctl_argv(scope, "disable", "--now", UNIT_NAME)],
             f"systemd would not stop and disable {UNIT_NAME}",
         )
         lines.append(f"stopped and disabled {UNIT_NAME}")
-        path.unlink()
+        if elevate:
+            # `/etc/systemd/system` is root's, so the unlink is too.
+            _require(runner, [*elevate, "rm", "-f", str(path)], f"{path} could not be removed as root")
+        else:
+            path.unlink()
         lines.append(f"removed {path}")
         _require(
             runner,
-            systemctl_argv(scope, "daemon-reload"),
-            "systemd would not reload its user units",
+            [*elevate, *systemctl_argv(scope, "daemon-reload")],
+            "systemd would not reload its units",
         )
         return lines
 
@@ -1050,7 +1208,7 @@ def start(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
         scope = systemd_scope()
         _require(
             runner,
-            systemctl_argv(scope, "start", UNIT_NAME),
+            [*writing_door(scope), *systemctl_argv(scope, "start", UNIT_NAME)],
             f"systemd would not start {UNIT_NAME}",
         )
         return [f"started {UNIT_NAME}"]
@@ -1088,7 +1246,7 @@ def stop(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
         scope = systemd_scope()
         _require(
             runner,
-            systemctl_argv(scope, "stop", UNIT_NAME),
+            [*writing_door(scope), *systemctl_argv(scope, "stop", UNIT_NAME)],
             f"systemd would not stop {UNIT_NAME}",
         )
         return [f"stopped {UNIT_NAME}"]

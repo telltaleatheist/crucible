@@ -294,6 +294,41 @@ nothing else, and a consented distro is never written to. It is one sentence
 from the person who owns the machine, about which of the Linuxes on it this
 orchestrator is allowed to treat as its own.
 
+### 2.6 The guest's unit is a SYSTEM unit, and root has one door (2026-09-16)
+
+**The user manager is not merely hard to reach in WSL; it is unreachable by
+design.** WSLg stacks a second tmpfs over `/run/user/<uid>` — `findmnt` shows
+two rows, `ss` sees the bus and `ls` cannot — so `$XDG_RUNTIME_DIR/bus` is not
+missing, it is *covered*. 2.5's `XDG_RUNTIME_DIR` fix answers the case where the
+variable was absent; it cannot answer an overmount, and neither can root, whose
+mount namespace is the same one. `wsl --shutdown` does not clear it. WSLg is ON
+BY DEFAULT, so this is a stock WSL2 and not a machine anybody broke.
+
+So inside WSL the engine is installed as a **system unit** — `/etc/systemd/system/crucible.service`,
+`User=<the installing account>`, `WantedBy=multi-user.target` — and the
+orchestrator's probe asks the system manager first (`system_systemctl_argv`).
+The system bus is not overmounted: `findmnt /run/dbus` returns nothing. Outside
+WSL nothing changes; a user unit needs no privileges and works.
+
+**A system unit needs root, and there is exactly one door.** A stock Ubuntu WSL
+has no passwordless sudo — measured: `sudo -n true` answers *"a password is
+required"* — and an install driven by the tray has no terminal to type into.
+What needs no password is `wsl.exe -u root`, and interop makes it reachable from
+INSIDE the distro as well as from Windows. `crucible/service.py:root_prefix` is
+its one owner, so the answer to "how does Crucible get root in WSL" is a single
+sentence rather than one per caller. Reading is never elevated: `systemctl show`
+answers any user, and a door per status poll would buy a `wsl.exe` round trip
+for nothing.
+
+**The upgrade retires the old unit through the system manager.** A guest
+installed before this has a USER unit, enabled, running, and holding 7100 — and
+it cannot be stopped through its own manager, for the reason above. What always
+answers is `user@<uid>.service`, which the SYSTEM manager owns: the unit file is
+removed first, then that manager is stopped, and every unit it was running goes
+with it. One mechanism, no guessing about which door happens to be open. The
+cost is stated plainly — any other service that user was running in the distro
+restarts — and a Linux host never reaches this path at all.
+
 ## 3. `/v1/info` gains the role
 
 ### 3.1 On an engine

@@ -1020,17 +1020,18 @@ def test_in_wsl_the_unit_is_the_machines_and_systemctl_drops_user(
     one. `/run/dbus/system_bus_socket` is not overmounted.
     """
     monkeypatch.setattr(service, "in_wsl", lambda: True)
-    # The real /etc is not this test's to write; what is under test is WHERE the
-    # unit goes and WHAT argv reaches systemctl, not the ability to be root.
+    monkeypatch.setattr(service.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setenv(service.WSL_DISTRO_ENV, "Ubuntu")
     system_dir = user_home / "etc-systemd-system"
     monkeypatch.setattr(service, "SYSTEM_UNIT_DIR", system_dir)
-    runner = Runner(LINGER_ON)
+    runner = CopyingRunner(LINGER_ON)
     install_systemd(user_home, runner)
 
     assert service.unit_path(user_home) == system_dir / "crucible.service"
     assert (system_dir / "crucible.service").is_file()
-    assert runner.calls[0] == ("systemctl", "daemon-reload")
-    assert runner.calls[1] == ("systemctl", "enable", "--now", "crucible.service")
+    verbs = [call for call in runner.calls if "systemctl" in call]
+    assert verbs[0][-1:] == ("daemon-reload",)
+    assert verbs[1][-4:] == ("systemctl", "enable", "--now", "crucible.service")
     assert not any("--user" in call for call in runner.calls), (
         "the whole point is that the guest's server is not a user unit"
     )
@@ -1055,3 +1056,175 @@ def test_a_system_unit_says_whose_server_it_is(
     # it would be enabled into a target that never activates.
     assert "WantedBy=multi-user.target" in text
     assert "WantedBy=default.target" not in text
+
+
+# ------------------------------------------------ the WSL system unit (7b.9)
+#
+# WSLg hides the user manager's bus, so in WSL the unit is a SYSTEM unit
+# (`systemd_scope`). A system unit needs root, and a stock Ubuntu WSL has no
+# passwordless sudo — measured 2026-09-16, `sudo -n true` says "a password is
+# required". These pin the door that DOES open without one.
+
+
+class CopyingRunner(Runner):
+    """A `Runner` that actually performs `install -D -m … src dst`.
+
+    The elevated write is a command, not a `Path.write_text`, so a runner that
+    only records it would leave every later assertion reading a file that was
+    never written — and `write_definition`'s "did it CHANGE" answer would be
+    permanently False.
+    """
+
+    def __call__(self, argv: Sequence[str]) -> service.Ran:
+        words = list(argv)
+        if "install" in words and "-D" in words:
+            source, target = words[-2], words[-1]
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+            Path(target).write_text(Path(source).read_text(encoding="utf-8"), encoding="utf-8")
+        return super().__call__(argv)
+
+
+@pytest.fixture
+def wsl_guest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A non-root process inside WSL, which is how `install.sh` runs."""
+    monkeypatch.setattr(service, "in_wsl", lambda: True)
+    monkeypatch.setattr(service.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setenv(service.WSL_DISTRO_ENV, "Ubuntu")
+    etc = tmp_path / "etc-systemd-system"
+    monkeypatch.setattr(service, "SYSTEM_UNIT_DIR", etc)
+    return etc
+
+
+ROOT_DOOR = ("wsl.exe", "-d", "Ubuntu", "-u", "root", "--exec")
+
+
+def test_root_prefix_is_empty_for_a_process_that_is_already_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service.os, "geteuid", lambda: 0, raising=False)
+    assert service.root_prefix({"WSL_DISTRO_NAME": "Ubuntu"}) == []
+
+
+def test_root_prefix_refuses_when_the_distro_cannot_be_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service.os, "geteuid", lambda: 1000, raising=False)
+    with pytest.raises(service.ServiceError) as caught:
+        service.root_prefix({})
+    assert "WSL_DISTRO_NAME" in str(caught.value)
+
+
+def test_in_wsl_the_unit_is_written_to_etc_through_the_root_door(
+    user_home: Path, wsl_guest: Path
+) -> None:
+    runner = CopyingRunner()
+    install_systemd(user_home, runner)
+    unit = wsl_guest / "crucible.service"
+    assert unit.is_file(), "the system unit was never written"
+    written = [call for call in runner.calls if "install" in call]
+    assert len(written) == 1
+    assert written[0][: len(ROOT_DOOR)] == ROOT_DOOR
+    assert written[0][-1] == str(unit)
+
+
+def test_the_system_managers_verbs_go_through_root_and_never_say_user(
+    user_home: Path, wsl_guest: Path
+) -> None:
+    runner = CopyingRunner()
+    install_systemd(user_home, runner)
+    verbs = [call for call in runner.calls if "systemctl" in call]
+    assert verbs, "nothing drove systemd"
+    for call in verbs:
+        assert call[: len(ROOT_DOOR)] == ROOT_DOOR, call
+        assert "--user" not in call, call
+
+
+def test_the_system_unit_names_the_installing_user_and_multi_user_target(
+    user_home: Path, wsl_guest: Path
+) -> None:
+    install_systemd(user_home, CopyingRunner(), user="telltale")
+    text = (wsl_guest / "crucible.service").read_text(encoding="utf-8")
+    assert "User=telltale\n" in text
+    assert "WantedBy=multi-user.target\n" in text
+    assert "WantedBy=default.target" not in text
+
+
+def test_a_system_install_says_nothing_about_linger(
+    user_home: Path, wsl_guest: Path
+) -> None:
+    """Linger is a user-manager fact; over a system unit it is a true sentence
+    about the wrong thing."""
+    lines = install_systemd(user_home, CopyingRunner(LINGER_OFF))
+    said = "\n".join(lines)
+    assert "loginctl enable-linger" not in said, said
+    assert "die with your shell" not in said, said
+    assert "system unit, running as telltale" in said, said
+
+
+def test_a_second_system_install_changes_nothing_and_restarts_nothing(
+    user_home: Path, wsl_guest: Path
+) -> None:
+    install_systemd(user_home, CopyingRunner())
+    second = CopyingRunner()
+    install_systemd(user_home, second)
+    assert not any("restart" in call for call in second.calls), second.calls
+
+
+def test_stopping_a_system_unit_goes_through_root(
+    user_home: Path, wsl_guest: Path
+) -> None:
+    runner = CopyingRunner()
+    install_systemd(user_home, runner)
+    stopper = CopyingRunner()
+    service.stop(service.SYSTEMD, home=user_home, runner=stopper)
+    assert stopper.calls[0][: len(ROOT_DOOR)] == ROOT_DOOR
+    assert "--user" not in stopper.calls[0]
+
+
+def test_removing_a_system_unit_removes_the_file_as_root(
+    user_home: Path, wsl_guest: Path
+) -> None:
+    install_systemd(user_home, CopyingRunner())
+    remover = CopyingRunner()
+    service.uninstall(service.SYSTEMD, home=user_home, runner=remover)
+    removals = [call for call in remover.calls if "rm" in call]
+    assert len(removals) == 1, remover.calls
+    assert removals[0] == (*ROOT_DOOR, "rm", "-f", str(wsl_guest / "crucible.service"))
+
+
+def test_reading_the_status_of_a_system_unit_needs_no_root(
+    user_home: Path, wsl_guest: Path
+) -> None:
+    """`systemctl show` answers any user; a door per status poll buys nothing."""
+    install_systemd(user_home, CopyingRunner())
+    reader = CopyingRunner()
+    service.status(service.SYSTEMD, user_home, runner=reader, user="telltale")
+    shows = [call for call in reader.calls if "show" in call]
+    assert shows, reader.calls
+    assert all("wsl.exe" not in call for call in shows), shows
+
+
+def test_a_system_install_retires_the_user_unit_that_holds_the_port(
+    user_home: Path, wsl_guest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The upgrade case: a guest installed before the scope moved."""
+    monkeypatch.setattr(service.os, "getuid", lambda: 1000, raising=False)
+    stale = service.unit_path(user_home, service.USER_SCOPE)
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("[Unit]\n# the 0.6.3 user unit\n", encoding="utf-8")
+
+    runner = CopyingRunner()
+    lines = install_systemd(user_home, runner)
+
+    assert not stale.exists(), "the user unit was left to hold 7100"
+    assert (*ROOT_DOOR, "systemctl", "stop", "user@1000.service") in runner.calls
+    assert any("retired the user unit" in line for line in lines), lines
+
+
+def test_a_fresh_system_install_stops_nobodys_user_manager(
+    user_home: Path, wsl_guest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service.os, "getuid", lambda: 1000, raising=False)
+    runner = CopyingRunner()
+    install_systemd(user_home, runner)
+    assert not any("user@1000.service" in call for call in runner.calls), runner.calls
