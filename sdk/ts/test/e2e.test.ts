@@ -71,7 +71,7 @@ test('info reports a real backend and offers echo', async () => {
   const info = await crucible.info();
   assert.equal(info.server.apiVersion, 1);
   assert.ok(
-    ['cuda-linux', 'mlx-darwin'].includes(info.host.backend),
+    ['cuda-linux', 'mlx-darwin', 'llama-windows'].includes(info.host.backend),
     `unexpected backend ${info.host.backend}`,
   );
   assert.ok(info.host.gpu.name.length > 0, 'the backend must name its gpu');
@@ -107,7 +107,7 @@ test('the accelerator probe answers a state, or refuses by name — never zeroes
     assert.equal(error.code, 'accelerator_unreadable');
     return;
   }
-  assert.ok(['cuda-linux', 'mlx-darwin'].includes(state.backend));
+  assert.ok(['cuda-linux', 'mlx-darwin', 'llama-windows'].includes(state.backend));
   assert.ok(state.gpu.totalBytes > 0, 'a readable probe names a real card');
   assert.ok(state.freeBytes >= 0);
   // Never negative and never a substitute for one: the server clamps at zero.
@@ -205,7 +205,7 @@ test('an inline echo job runs end to end, in order, with identical bytes', async
   assert.equal(provenance.model, null);
   assert.ok(provenance.server.name.length > 0);
   assert.ok(provenance.server.version.length > 0);
-  assert.ok(['cuda-linux', 'mlx-darwin'].includes(provenance.backend));
+  assert.ok(['cuda-linux', 'mlx-darwin', 'llama-windows'].includes(provenance.backend));
   assert.deepEqual(provenance.params, { delay_ms: 40 });
   assert.ok(provenance.started !== null, 'provenance records when the job started');
   assert.ok(provenance.finished.length > 0, 'provenance records when the job finished');
