@@ -1,0 +1,90 @@
+name: release-preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Exact source commit to build (no release is changed)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  tts:
+    name: ${{ matrix.pack }} (${{ matrix.backend }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pack: tts-higgs-v3, backend: cuda-linux, runner: ubuntu-latest, needs_gb: 40 }
+          - { pack: tts, backend: mlx-darwin, runner: macos-14, needs_gb: 25 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: prepare build tools and disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(uname -s)" = Darwin ]; then
+            brew install zstd
+          else
+            sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          fi
+          df -h .
+          free_gb=$(df -Pk . | awk 'NR==2 {print int($4/1024/1024)}')
+          test "$free_gb" -ge '${{ matrix.needs_gb }}'
+          python -m pip install --upgrade pip build
+          python -m pip install -e .
+      - name: build and relocation smoke test
+        shell: bash
+        env:
+          EXPECTED_BACKEND: ${{ matrix.backend }}
+          PACK: ${{ matrix.pack }}
+        run: |
+          set -euo pipefail
+          here=$(python -c 'from crucible import envpack; print(envpack.build_backend_kind())')
+          test "$here" = "$EXPECTED_BACKEND"
+          python -m crucible.cli envpack build "$PACK" --out packs
+          git rev-parse HEAD > packs/source-commit.txt
+          df -h .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preflight-${{ matrix.pack }}-${{ matrix.backend }}
+          path: |
+            packs/*.part*
+            packs/envpacks.json
+            packs/source-commit.txt
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+
+  rootfs:
+    name: WSL rootfs (artifact only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+      - name: build and verify rootfs
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^VERSION = "\([^"]*\)".*/\1/p' crucible/__init__.py)
+          test -n "$version"
+          bash sdk/bootstrap/scripts/build-rootfs.sh "$version" rootfs
+          git rev-parse HEAD > rootfs/source-commit.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preflight-rootfs
+          path: rootfs/*
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
