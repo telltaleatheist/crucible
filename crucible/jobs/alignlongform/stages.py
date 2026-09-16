@@ -49,10 +49,16 @@ from typing import Any, Callable
 
 from ... import workerenv, workers
 
-#: The `asr` worker's window, verbatim from that job type so the two cannot
-#: disagree about what a window is.
-WINDOW_SECONDS = 600.0
-OVERLAP_SECONDS = 5.0
+#: The `asr` worker's window, IMPORTED from that job type rather than copied.
+#:
+#: This file first carried 600.0/5.0, invented here. The real values are 900/15
+#: and they are INTS — the worker refuses a float by name ("the asr request's
+#: 'window_s' must be int, got float"), which is how the wrong numbers were
+#: caught on the first real run. Importing is what stops the pair drifting: a
+#: copy agrees on the day it is written and silently stops agreeing later, and
+#: two different ideas of how long a window is would put every word in the
+#: second window at the wrong second.
+from ..asr import OVERLAP_SECONDS, WINDOW_SECONDS  # noqa: E402
 
 #: What the rough pass runs at. `float16` on the card, and the device is the
 #: card: this stage is the long one and running it on CPU would dominate the job.
