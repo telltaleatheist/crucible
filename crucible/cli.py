@@ -2516,7 +2516,9 @@ def _pairing_permission(path: Path) -> str:
     return f"mode {config_mode(path)}"
 
 
-def _pairing_lines(name: str, host: str, port: int, token: str) -> list[str] | str:
+def _pairing_lines(
+    name: str, host: str, port: int, token: str, advertise: tuple[str, ...] = ()
+) -> list[str] | str:
     """The lines, or the sentence saying why there are none.
 
     PHASE13-OPERATOR.md section 3.1. A refusal is returned rather than raised
@@ -2535,7 +2537,7 @@ def _pairing_lines(name: str, host: str, port: int, token: str) -> list[str] | s
     """
     loopback = pairing.pairing_line(name, f"http://{DEFAULT_HOST}:{port}", token)
     try:
-        urls = pairing.reachable_urls(host, port)
+        urls = pairing.reachable_urls(host, port, advertise)
     except InterfaceError as exc:
         return (
             f"this host will not list its own interfaces, so there is no "
@@ -2553,14 +2555,16 @@ def _pairing_lines(name: str, host: str, port: int, token: str) -> list[str] | s
     return lines
 
 
-def _print_pairing(name: str, host: str, port: int, token: str) -> None:
+def _print_pairing(
+    name: str, host: str, port: int, token: str, advertise: tuple[str, ...] = ()
+) -> None:
     """The one block `init`, `service install` and `token --url` all print.
 
     Owen, 2026-09-14: nobody types a token twice. The line carries the name,
     the address and the secret, so the person setting up BookForge pastes one
     string into one field instead of reading three values off a terminal.
     """
-    result = _pairing_lines(name, host, port, token)
+    result = _pairing_lines(name, host, port, token, advertise)
     if isinstance(result, str):
         print(f"pairing: {result}", file=sys.stderr)
         return
@@ -2588,7 +2592,9 @@ def cmd_token(args: argparse.Namespace) -> int:
     if args.show:
         print(config.token)
     if args.url:
-        result = _pairing_lines(config.name, config.host, config.port, config.token)
+        result = _pairing_lines(
+            config.name, config.host, config.port, config.token, config.advertise
+        )
         if isinstance(result, str):
             return _fail(result)
         for line in result:

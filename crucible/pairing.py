@@ -31,6 +31,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
+from collections.abc import Sequence
 from urllib.parse import quote, unquote, urlsplit
 
 from .errors import CrucibleError
@@ -49,7 +50,9 @@ def _authority(host: str, port: int) -> str:
     return f"{host}:{port}"
 
 
-def reachable_urls(host: str, port: int) -> list[str]:
+def reachable_urls(
+    host: str, port: int, advertise: Sequence[str] = ()
+) -> list[str]:
     """The bind address, made into addresses something else can dial.
 
     A **wildcard** bind (`0.0.0.0`, `::`, or an empty host) is not an address,
@@ -60,10 +63,58 @@ def reachable_urls(host: str, port: int) -> list[str]:
     `127.0.0.1`: the operator stated it, it is where the server really is, and
     an app on the same machine reaches it there. Substituting a LAN address for
     a loopback bind would hand out a URL nothing answers on.
+
+    AND THEN THE DECLARED ONES, APPENDED - `[server] advertise`.
+
+    Everything above answers "where am I" by looking at this machine, and that
+    is complete only while the server's reachability is its own. It is not, when
+    something outside creates it: the engine in WSL binds 127.0.0.1, correctly
+    reports 127.0.0.1, and is reachable from another machine anyway because
+    `tailscale serve` on the Windows side forwards into the guest. From inside
+    there is nothing to see - no interface, no socket, no route - so no amount
+    of looking finds it and it has to be said.
+
+    APPENDED, NEVER SUBSTITUTED, and the order matters. The derived line comes
+    first because an app on THIS machine should take it: loopback needs no
+    network and cannot be intercepted. The declared line is for the app that is
+    somewhere else. Both are true at once, and a console offering only one is
+    wrong for exactly one of its two readers - which is the state this field was
+    added to end, where the PC's console handed out `127.0.0.1` and a Mac could
+    do nothing with it.
+
+    Deduplicated, preserving that order: an operator who advertises an address
+    the server already derives has stated something true, and the answer to that
+    is one line rather than a refusal.
     """
     if host in ("0.0.0.0", "::", ""):
-        return [f"http://{_authority(address, port)}" for address in ipv4_addresses()]
-    return [f"http://{_authority(host, port)}"]
+        derived = [f"http://{_authority(address, port)}" for address in ipv4_addresses()]
+    else:
+        derived = [f"http://{_authority(host, port)}"]
+    for authority in advertise:
+        # A bare host takes the server's own port: a forward that keeps the
+        # number is the overwhelmingly common one, and `_authority` decides how
+        # a bracketed IPv6 literal is spelled.
+        url = (
+            f"http://{authority}"
+            if _has_port(authority)
+            else f"http://{_authority(authority, port)}"
+        )
+        if url not in derived:
+            derived.append(url)
+    return derived
+
+
+def _has_port(authority: str) -> bool:
+    """Does this authority already name a port?
+
+    A bracketed IPv6 literal carries colons that are not a port separator, so
+    the question is only ever about what follows the closing bracket.
+    """
+    tail = authority.rsplit("]", 1)[-1] if authority.startswith("[") else authority
+    head, separator, port = tail.rpartition(":")
+    if separator != ":" or not port.isdigit():
+        return False
+    return head != "" or authority.startswith("[")
 
 
 def pairing_line(name: str, url: str, token: str) -> str:

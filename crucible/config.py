@@ -213,6 +213,25 @@ class Config:
     name: str
     host: str
     port: int
+    #: ADDRESSES SOMETHING ELSE FORWARDS TO THIS SERVER FROM, stated because
+    #: they cannot be derived.
+    #:
+    #: `reachable_urls` answers "where am I" by looking at the bind and, for a
+    #: wildcard, at this machine's own interfaces. That is right and it is
+    #: complete for a server whose reachability is its own. It is NOT complete
+    #: when something outside the server's world creates the reachability: the
+    #: engine in WSL binds 127.0.0.1, correctly says so, and is reachable from
+    #: another machine anyway because `tailscale serve` on the Windows side
+    #: forwards into the guest. The guest cannot see that and never will.
+    #:
+    #: So the fact is DECLARED, once, here — and it is added to what the server
+    #: derives, never substituted for it. The loopback line is what an app on
+    #: this machine needs; this is what an app on another machine needs; both
+    #: are true at the same time and the console offers both.
+    #:
+    #: Empty is the normal case: a server whose bind is already reachable
+    #: (0.0.0.0 on a Mac) enumerates its interfaces and needs no help.
+    advertise: tuple[str, ...]
     token: str
     backend_kind: str
     enable_echo: bool
@@ -339,6 +358,55 @@ class Config:
     @property
     def models_dir(self) -> Path:
         return self.home / "models"
+
+
+def _advertised(table: dict[str, Any]) -> tuple[str, ...]:
+    """`[server] advertise` — authorities something forwards to this server on.
+
+    ABSENT IS THE NORMAL CASE and means "nothing does", which is why this is
+    not `_require`: almost every server's reachability is its own, and only one
+    whose address is manufactured outside itself has anything to declare.
+
+    Each entry is an AUTHORITY — `host` or `host:port` — not a URL. The scheme
+    is this server's own and a path would have nowhere to go, which is the same
+    reasoning `pairing_line` gives for using only a URL's authority. A bare host
+    takes the server's port, because the overwhelmingly common case is a
+    forward that keeps the number.
+    """
+    server = table.get("server")
+    if not isinstance(server, dict) or "advertise" not in server:
+        return ()
+    raw = server["advertise"]
+    if not isinstance(raw, list) or not all(isinstance(entry, str) for entry in raw):
+        raise ConfigError(
+            "config [server] advertise: must be a list of strings, each an "
+            "address something forwards to this server on "
+            '(e.g. advertise = ["owens-pc.owenmorgan.com:7100"])'
+        )
+    cleaned: list[str] = []
+    for entry in raw:
+        authority = entry.strip()
+        if authority == "":
+            raise ConfigError(
+                "config [server] advertise: an empty entry names no address"
+            )
+        # REFUSED, NOT TRIMMED. A scheme here means somebody believes this
+        # field takes URLs, and quietly dropping it would leave them believing
+        # it — including the day they write `https://`, which this would
+        # silently serve over http.
+        if "://" in authority:
+            raise ConfigError(
+                f"config [server] advertise: {entry!r} carries a scheme; entries "
+                "are authorities like `host` or `host:port`, and the scheme is "
+                "the server's own"
+            )
+        if "/" in authority:
+            raise ConfigError(
+                f"config [server] advertise: {entry!r} carries a path; an address "
+                "an app dials has nowhere to put one"
+            )
+        cleaned.append(authority)
+    return tuple(cleaned)
 
 
 def _require(table: dict[str, Any], section: str, key: str, kind: type) -> Any:
@@ -637,6 +705,7 @@ def load_config(home: Path | None = None) -> Config:
         name=_require(table, "server", "name", str),
         host=_require(table, "server", "host", str),
         port=_require(table, "server", "port", int),
+        advertise=_advertised(table),
         token=_require(table, "auth", "token", str),
         backend_kind=_require(table, "backend", "kind", str),
         enable_echo=_capability_flag(table, "enable_echo"),
