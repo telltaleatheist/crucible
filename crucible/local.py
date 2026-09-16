@@ -18,6 +18,7 @@ import webbrowser
 from urllib.parse import quote
 
 from . import VERSION
+from . import VERSION
 from .config import crucible_home, load_config
 from .pairing import parse_pairing_line
 from .errors import CrucibleError
@@ -143,7 +144,12 @@ def status(home: Path | None = None) -> dict:
     server = info.get("server")
     if not isinstance(server, dict) or server.get("name") != name or server.get("api_version") != 1:
         return dict(result, state="wrong_service", detail="The engine returned incompatible or unexpected identity information")
-    return dict(result, state="running", detail="The paired engine is answering")
+    # The engine's own version travels with the observation. It is reported
+    # rather than judged here, because `status` answers for a running server
+    # generally and two versions coexisting is not by itself a fault. The
+    # START path below is where a mismatch IS one.
+    return dict(result, state="running", version=server.get("version"),
+                detail="The paired engine is answering")
 
 
 def _spawn_controller(home: Path) -> None:
@@ -219,6 +225,26 @@ def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
         observed = status(home)
         if observed["state"] == ("running" if action == "start" else "stopped"):
             if action == "start":
+                # THE ENGINE ANSWERING MUST BE THE ONE THIS RELEASE INSTALLED.
+                # `systemctl enable --now` does nothing to an already-running
+                # unit, so an upgrade that rewrote ExecStart can leave the OLD
+                # executable serving while every line of the install says it
+                # succeeded (measured 2026-09-16: a guest reported 0.6.0 from
+                # the previous release's path after installing 0.6.3).
+                # `service.install` now restarts a definition that moved; this
+                # is the check that would have caught it either way, and it
+                # catches any other route to the same stale process.
+                #
+                # ABSENT is not MISMATCHED: an engine too old to report its
+                # version is not evidence of staleness, and refusing it would
+                # be inventing a fault out of a missing key.
+                running_version = observed.get("version")
+                if isinstance(running_version, str) and running_version != VERSION:
+                    raise LocalError(
+                        f"engine_version_stale: the engine answering is "
+                        f"{running_version}, but this installation is {VERSION}. "
+                        "Its service was not restarted onto the new definition"
+                    )
                 from .sharing import reconcile
                 try:
                     observed["sharing"] = reconcile(home)

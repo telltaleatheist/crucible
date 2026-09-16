@@ -223,3 +223,82 @@ def test_controller_failure_always_has_one_terminal_event(tmp_path, already_emit
     finally:
         server.shutdown()
         server.server_close()
+
+
+def _engine_serving(monkeypatch, tmp_path, version):
+    """A fake paired engine that reports `version` from /v1/info."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.endswith("ping"):
+                body = {"crucible": True, "name": "expected"}
+            else:
+                server_block = {"name": "expected", "api_version": 1}
+                if version is not None:
+                    server_block["version"] = version
+                body = {"server": server_block}
+            raw = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        def log_message(self, *args): pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(
+        local, "connection",
+        lambda _: (f"http://127.0.0.1:{server.server_port}", "expected", "test-token"),
+    )
+    return server, thread
+
+
+def test_the_observation_carries_the_engines_own_version(monkeypatch, tmp_path):
+    server, thread = _engine_serving(monkeypatch, tmp_path, local.VERSION)
+    try:
+        observed = local.status(tmp_path)
+        assert observed["state"] == "running"
+        assert observed["version"] == local.VERSION
+    finally:
+        server.shutdown(); server.server_close(); thread.join()
+
+
+def test_an_engine_of_another_version_is_not_a_successful_start(monkeypatch, tmp_path):
+    """The stale-process defect, measured 2026-09-16.
+
+    `systemctl enable --now` does nothing to an already-running unit, so an
+    upgrade that rewrote ExecStart left the OLD executable serving while the
+    install reported success end to end. Whatever the route to it, an engine
+    answering with a version this installation did not install is not a start
+    that worked.
+    """
+    from types import SimpleNamespace
+    from crucible import service as service_module
+
+    server, thread = _engine_serving(monkeypatch, tmp_path, "0.0.1-previous")
+    # HERMETIC ON PURPOSE. `act` defaults `home` to the real `crucible_home()`
+    # and then drives systemctl for real; an earlier draft of this test did
+    # exactly that and passed by touching the live engine. The service call is
+    # stubbed and `home` is the tmp dir, so what is under test is the version
+    # check and nothing else.
+    monkeypatch.setattr(local, "load_config",
+                        lambda _h: SimpleNamespace(backend_kind="cuda-linux"))
+    monkeypatch.setattr(service_module, "start", lambda *a, **k: None)
+    try:
+        with pytest.raises(local.LocalError) as caught:
+            local.act("start", tmp_path)
+        assert "engine_version_stale" in str(caught.value)
+        assert "0.0.1-previous" in str(caught.value)
+        assert local.VERSION in str(caught.value)
+    finally:
+        server.shutdown(); server.server_close(); thread.join()
+
+
+def test_an_engine_too_old_to_report_a_version_is_not_called_stale(monkeypatch, tmp_path):
+    """Absent is not mismatched; refusing it would invent a fault from a missing key."""
+    server, thread = _engine_serving(monkeypatch, tmp_path, None)
+    try:
+        observed = local.status(tmp_path)
+        assert observed["state"] == "running"
+        assert observed["version"] is None
+    finally:
+        server.shutdown(); server.server_close(); thread.join()

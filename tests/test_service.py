@@ -405,6 +405,34 @@ def test_linger_that_cannot_be_asked_is_unknown_and_never_read_as_off(
     assert any("linger: UNKNOWN" in line for line in lines)
 
 
+def test_a_changed_definition_is_restarted_onto(user_home: Path) -> None:
+    """`enable --now` does nothing to a running unit, so an upgrade must restart.
+
+    MEASURED 2026-09-16, and it is the failure that says nothing: a guest
+    upgraded to 0.6.3 kept answering /v1/info with 0.6.0 out of the previous
+    release's path, because its unit was already active and `enable --now`
+    started nothing. Every line the installer printed claimed success.
+    """
+    runner = Runner(LINGER_ON)
+    install_systemd(user_home, runner)
+    assert not any("restart" in " ".join(call) for call in runner.calls), (
+        "a first install writes the unit and starts it; there is nothing stale "
+        "to restart, and a needless restart is a needless outage"
+    )
+
+    # The SAME inputs again: the definition does not move, so neither does the
+    # running process.
+    again = Runner(LINGER_ON)
+    install_systemd(user_home, again)
+    assert not any("restart" in " ".join(call) for call in again.calls)
+
+    # A definition that MOVES — which is what an upgrade does to ExecStart.
+    moved = Runner(LINGER_ON)
+    lines = install_systemd(user_home, moved, port=7101)
+    assert ("systemctl", "--user", "restart", "crucible.service") in moved.calls
+    assert any("restarted crucible.service" in line for line in lines)
+
+
 def test_install_is_idempotent(user_home: Path) -> None:
     runner = Runner(LINGER_ON)
     install_systemd(user_home, runner)

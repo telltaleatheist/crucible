@@ -754,11 +754,26 @@ def _agent_is_loaded(runner: Runner) -> bool:
 # ------------------------------------------------------------------- writing
 
 
-def write_definition(path: Path, text: str) -> Path:
-    """Write the unit or the plist, creating its directory. Returns the path."""
+def write_definition(path: Path, text: str) -> tuple[Path, bool]:
+    """Write the unit or the plist. Returns the path and whether it CHANGED.
+
+    The second half is not bookkeeping. `systemctl enable --now` starts a unit
+    that is STOPPED and does nothing at all to one already running, which is
+    exactly the state an upgrade finds. So rewriting ExecStart and calling it
+    leaves the OLD executable serving while every line this function prints
+    says the new one was installed. Measured 2026-09-16: a guest upgraded to
+    0.6.3 went on answering /v1/info with 0.6.0 out of the previous release's
+    conda path, and nothing in the install said so. The caller restarts when
+    this says True.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    before = path.read_text(encoding="utf-8") if path.is_file() else None
     path.write_text(text, encoding="utf-8")
-    return path
+    # REPLACED, not merely "differs". On a first install `before` is None and
+    # the unit is about to be started by `enable --now` with nothing stale
+    # behind it, so a restart there would be an outage bought for nothing.
+    # What matters is a definition that MOVED under a running process.
+    return path, before is not None and before != text
 
 
 def install(
@@ -799,7 +814,7 @@ def install(
     lines: list[str] = []
 
     if mechanism == SYSTEMD:
-        path = write_definition(
+        path, changed = write_definition(
             unit_path(home),
             systemd_unit_text(
                 server_name=server_name,
@@ -822,6 +837,18 @@ def install(
             f"systemd would not enable and start {UNIT_NAME}",
         )
         lines.append(f"enabled and started {UNIT_NAME}")
+        if changed:
+            # THE DEFINITION MOVED, SO THE RUNNING PROCESS IS STALE. The
+            # `enable --now` above does nothing to a unit that is already
+            # active. Without this the old executable keeps serving and the
+            # install still reports success — the one failure here that says
+            # nothing at all.
+            _require(
+                runner,
+                ["systemctl", "--user", "restart", UNIT_NAME],
+                f"systemd would not restart {UNIT_NAME} onto its new definition",
+            )
+            lines.append(f"restarted {UNIT_NAME} onto its new definition")
         lines.append(f"runs: {program} serve")
         lines.append(f"PATH recorded: {recorded}")
         linger = read_linger(runner, user if user is not None else getpass.getuser())
@@ -851,7 +878,7 @@ def install(
         # launchd refuses to load an agent whose StandardOutPath directory does
         # not exist, and the failure it gives says nothing about the directory.
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        path = write_definition(
+        path, _changed = write_definition(
             plist_path(home),
             launchd_plist_text(
                 program=program,
