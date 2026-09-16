@@ -1,5 +1,9 @@
 # Patch release readiness — 2026-09-16
 
+The corrected 0.6.2 candidate is now published separately; see
+[its artifact verification record](RELEASE-0.6.2-VERIFICATION.md).
+The 0.6.1 history below is retained as evidence of the failed acceptance checks.
+
 The lifecycle changes are not in the published 0.6.0 runtime packs. Source,
 client, bootstrap, generated installers, module manifests and both app vendor
 dependencies identify this candidate as 0.6.1. Its complete binary prerelease is
