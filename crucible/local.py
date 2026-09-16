@@ -268,10 +268,30 @@ def shutdown() -> None:
     home = crucible_home()
     if sys.platform == "win32":
         def refused(exc: BaseException) -> bool:
+            """Did the endpoint GO AWAY? A refusal and a reset both say yes.
+
+            A server that is asked to quit and does so can end the conversation
+            two ways: the port stops accepting (ECONNREFUSED / WinError 10061)
+            or the socket it was already holding is torn down as the process
+            exits (ECONNRESET / WinError 10054). Only the first was recognised,
+            so an orchestrator that quit PROPERLY — 0.6.3 does have `/quit`, and
+            used it — was reported as `controller_shutdown_unknown: [WinError
+            10054] An existing connection was forcibly closed by the remote
+            host` and the upgrade stopped. Measured 2026-09-16 on the
+            0.6.3 -> 0.6.5 upgrade of owens-pc, and it is the eighth distinct
+            way this path refused a machine with nothing wrong with it.
+
+            The caller pairs this with `_alive(controller_pid)` before treating
+            the controller as gone, so a reset from something still running
+            cannot be mistaken for an exit.
+            """
             import errno
             reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-            return isinstance(reason, ConnectionRefusedError) or (
-                isinstance(reason, OSError) and (reason.errno == errno.ECONNREFUSED or getattr(reason, "winerror", None) == 10061))
+            if isinstance(reason, (ConnectionRefusedError, ConnectionResetError)):
+                return True
+            return isinstance(reason, OSError) and (
+                reason.errno in (errno.ECONNREFUSED, errno.ECONNRESET)
+                or getattr(reason, "winerror", None) in (10061, 10054))
         try:
             ping = request("http://127.0.0.1:7101/v1/ping")
         except (urllib.error.URLError, ConnectionError) as exc:

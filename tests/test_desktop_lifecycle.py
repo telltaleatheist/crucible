@@ -326,3 +326,46 @@ def test_an_engine_outliving_its_controller_is_only_a_fault_when_native(
             local.shutdown()
     else:
         local.shutdown()
+
+
+@pytest.mark.parametrize("gone_as", [
+    ConnectionRefusedError(),                 # the port stopped accepting
+    ConnectionResetError(),                   # the held socket was torn down
+])
+def test_a_controller_that_quit_is_gone_however_the_socket_ended(
+    monkeypatch, tmp_path, gone_as
+):
+    """A refusal and a reset both mean the controller went. Only one was read.
+
+    Measured 2026-09-16 on the 0.6.3 -> 0.6.5 upgrade: the orchestrator was
+    asked to quit, DID quit, and tore down the socket it was holding as it
+    exited. That is WinError 10054, which was not in the list, so a clean
+    shutdown was reported as `controller_shutdown_unknown` and the upgrade
+    stopped on a machine with nothing wrong with it.
+    """
+    from crucible.host import app
+
+    monkeypatch.setattr(local.sys, "platform", "win32")
+    monkeypatch.setattr(local, "crucible_home", lambda: tmp_path)
+    monkeypatch.setattr(desktop, "close_tray", lambda: None)
+    monkeypatch.setattr(local, "connection", lambda home: ("http://127.0.0.1:7100", "test", "secret"))
+    (tmp_path / "host.pid").write_text("12345")
+    stopped = []
+
+    def request(url, **kw):
+        if url.endswith("/v1/info"):
+            return {"role": "orchestrator", "server": {"version": "0.6.99", "api_version": 1},
+                    "engine": {"owner": "wsl-unit"}, "local_lifecycle_version": 1}
+        if url.endswith("/quit"):
+            stopped.append(True)
+            return {"quit": True}
+        if stopped:
+            raise URLError(gone_as)
+        return {"crucible": True, "role": "orchestrator"}
+
+    monkeypatch.setattr(local, "request", request)
+    monkeypatch.setattr(app, "_alive", lambda pid: not stopped)
+    monkeypatch.setattr(local, "act", lambda action: None)
+
+    local.shutdown()
+    assert stopped == [True]
