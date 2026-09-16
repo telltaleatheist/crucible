@@ -96,6 +96,19 @@ def wheel_names(built_wheel: Path) -> list[str]:
         return bundle.namelist()
 
 
+def test_core_wheel_installs_mlx_for_apple_silicon_backend_detection(built_wheel: Path) -> None:
+    from email import message_from_bytes
+    from packaging.requirements import Requirement
+    with zipfile.ZipFile(built_wheel) as bundle:
+        metadata = next(name for name in bundle.namelist() if name.endswith(".dist-info/METADATA"))
+        requirements = [Requirement(value) for value in message_from_bytes(bundle.read(metadata)).get_all("Requires-Dist", [])]
+    mlx = next(requirement for requirement in requirements if requirement.name == "mlx")
+    assert mlx.marker is not None
+    assert mlx.marker.evaluate({"sys_platform": "darwin", "platform_machine": "arm64"})
+    for platform, machine in [("win32", "AMD64"), ("linux", "x86_64"), ("darwin", "x86_64")]:
+        assert not mlx.marker.evaluate({"sys_platform": platform, "platform_machine": machine})
+
+
 def test_every_directory_the_server_reads_is_inside_the_wheel(
     wheel_names: list[str],
 ) -> None:

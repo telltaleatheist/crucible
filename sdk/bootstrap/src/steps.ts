@@ -165,13 +165,15 @@ export function serverPackSh(): string {
     + `manifest="$(curl -fsSL --retry 3 "$manifest_url")" || die "pack_manifest_unreadable: could not fetch $manifest_url"\n`
     // One pack per awk record (no value in the manifest contains a brace), then
     // flattened to one line so the field reads work whether the JSON is
-    // pretty-printed or not. No jq, no python: a fresh machine has neither.
-    + `pack="$(printf '%s' "$manifest" | awk -v RS='}' -v b="$BACKEND" '$0 ~ /"name"[[:space:]]*:[[:space:]]*"server"/ && $0 ~ ("\\"backend\\"[[:space:]]*:[[:space:]]*\\"" b "\\"")' | tr -d '\\n')"\n`
+    // pretty-printed or not. JSON whitespace includes CRLF: stripping LF alone
+    // leaves CR around the part names and constructs an invalid download URL.
+    // No jq, no python: a fresh machine has neither.
+    + `pack="$(printf '%s' "$manifest" | awk -v RS='}' -v b="$BACKEND" '$0 ~ /"name"[[:space:]]*:[[:space:]]*"server"/ && $0 ~ ("\\"backend\\"[[:space:]]*:[[:space:]]*\\"" b "\\"")' | tr -d '\\r\\n')"\n`
     + `[ -n "$pack" ] || die "pack_not_published: the $RELEASE release publishes no server pack for $BACKEND"\n`
     + `want_sha="$(printf '%s' "$pack" | sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\\([0-9a-f]*\\)".*/\\1/p')"\n`
     + `unpacked="$(printf '%s' "$pack" | sed -n 's/.*"unpacked_bytes"[[:space:]]*:[[:space:]]*\\([0-9]*\\).*/\\1/p')"\n`
     + `archive_bytes="$(printf '%s' "$pack" | sed -n 's/.*"bytes"[[:space:]]*:[[:space:]]*\\([0-9]*\\).*/\\1/p')"\n`
-    + `parts="$(printf '%s' "$pack" | sed -n 's/.*"parts"[[:space:]]*:[[:space:]]*\\[\\([^]]*\\)\\].*/\\1/p' | tr -d ' "' | tr ',' ' ')"\n`
+    + `parts="$(printf '%s' "$pack" | sed -n 's/.*"parts"[[:space:]]*:[[:space:]]*\\[\\([^]]*\\)\\].*/\\1/p' | tr -d '[:space:]"' | tr ',' ' ')"\n`
     + `[ -n "$want_sha" ] && [ -n "$parts" ] && [ -n "$unpacked" ] && [ -n "$archive_bytes" ] || die "pack_manifest_unreadable: $manifest_url does not describe the server pack"\n`
     + `if [ "$stamp_sha" = "$want_sha" ] && [ -x "$dest/bin/crucible" ]; then\n`
     + `  say "server-pack: already installed ($want_sha)"\n`

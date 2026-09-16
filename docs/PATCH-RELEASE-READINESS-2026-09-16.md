@@ -7,6 +7,32 @@ now published from source commit `407886bace61fa66bf273c306b8f67f6f5e3f343`.
 It remains separate from the recommended latest release pending fresh installation
 validation. Development checkout tests alone do not prove that release path.
 
+**Installation validation found a blocker: do not promote 0.6.1.** The Mac's actual
+fresh installation read the valid CRLF-formatted manifest through a shell parser
+that removed LF but retained CR. The resulting part URL contained carriage returns
+before and after its filename, so curl refused it. The acceptance procedure restored
+the previous Mac service. Published binaries/installers and the tag remain unchanged;
+the corrected installer must ship in the next coordinated patch release.
+
+The source fix normalizes CR and LF before extracting fields and removes JSON
+whitespace from the parts list. A fixture copied from the actual published 13-pack
+manifest reproduces the exact malformed URL before the fix. Real shell tests cover
+Mac/Linux pack selection and LF/CRLF input; Git Bash awk uses binary input mode in
+the test because its default Windows text translation otherwise hides this POSIX
+failure. All 273 bootstrap tests pass after the fix. Artifact checksum/relocation
+checks had passed for 0.6.1; they do not replace a real fresh-install acceptance test.
+
+**A second blocker appeared after testing the corrected parser:** the published
+Mac core pack does not contain MLX, but `crucible init` imports `mlx.core` in the
+core interpreter before any worker environment exists. The Mac's previous service
+was again restored. The core wheel now declares MLX on Darwin arm64, fixing both
+pack and pip installs. Relocated Mac and Windows core smoke tests now run actual
+`init --backend` in an isolated fresh home and require the config to be written;
+they do not start services or fetch models. CUDA initialization still requires a
+real NVIDIA acceptance host, so CPU-only pack builders explicitly report that it
+was not exercised. Release 0.6.1's public notes now warn about both defects; its
+assets and source tag remain unchanged.
+
 ## Measured release inputs
 
 Read the public 0.6.0 release asset list and `envpacks.json`, then compared every

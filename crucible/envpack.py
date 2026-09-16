@@ -1968,6 +1968,26 @@ def smoke_test(
                     raise PackError("pack_smoke_failed", f"{archive.name} lacks the lifecycle entrypoint "
                                     f"{' '.join(args[1:])}: {detail}")
             say("smoke: local lifecycle entrypoints ok")
+            if target.backend_kind in (MLX_DARWIN, LLAMA_WINDOWS):
+                # Version/help cannot reveal a missing runtime probe dependency.
+                # Exercise the fresh-install path with real host detection, in a
+                # new home, without starting a service or downloading any models.
+                home = Path(temporary) / "fresh-home"
+                environment = os.environ.copy()
+                environment["CRUCIBLE_HOME"] = str(home)
+                environment.pop("PYTHONPATH", None)
+                environment.pop("PYTHONHOME", None)
+                args = [command[0], "init", "--backend", target.backend_kind]
+                checked = subprocess.run(args, capture_output=True, text=True, timeout=120,
+                                         cwd=temporary, env=environment)
+                if checked.returncode != 0 or not (home / "config.toml").is_file():
+                    detail = (checked.stderr or checked.stdout).strip()
+                    raise PackError("pack_smoke_failed", f"{archive.name} failed fresh-home init: {detail}")
+                say(f"smoke: fresh-home init with real {target.backend_kind} detection ok")
+            else:
+                # CUDA builds run on CPU-only hosted runners. Hardware acceptance
+                # is separate; claiming to have probed NVIDIA here would be false.
+                say("smoke: fresh-home CUDA init requires an NVIDIA acceptance host; not run here")
 
 
 def write_manifest_entry(out: Path, version: str, entry: PackEntry) -> None:
