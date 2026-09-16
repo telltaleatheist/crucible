@@ -2,6 +2,11 @@
 
 An inference server for Owen's apps. One server binary per backend, one API, any client.
 
+Start with [the intent of Crucible](docs/INTENT.md) for the product contract:
+app-managed setup, independent Windows operation, optional WSL, shared model
+ownership and external providers. It takes precedence over older phase plans on
+product direction; release validation records what is actually verified.
+
 BookForge, Foundry, Content Studio and Briefcase all need the same class of hardware: a
 GPU with a language model, a vision-language model, a TTS model, an aligner or a voice
 converter resident on it. Crucible is the thing that gets hot. It runs the models. It
@@ -10,8 +15,9 @@ never knows what an audiobook or a cleanup pass is.
 **Two roles, and the word for each.** A Crucible process is an **engine** — it serves job
 types on a backend (`cuda-linux`, `mlx-darwin`, `llama-windows`) — or an **orchestrator**:
 a hollow thing that keeps time and plays nothing, managing exactly one engine and carrying
-no data at all. On Windows the tray (`crucible orchestrator`, formerly `crucible host`) is
-the orchestrator and the WSL2 guest is the engine; a Mac or a rented box is an engine with
+no model data itself. On Windows the controller (`crucible orchestrator`, formerly
+`crucible host`) manages the native engine or the optional WSL2 guest; the tray is its
+independent desktop control. A Mac or a rented box is an engine with
 no orchestrator. Apps always hold ONE address per machine and it is the engine's. See
 `docs/PHASE17-ORCHESTRATOR.md`.
 
