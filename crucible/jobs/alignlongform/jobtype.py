@@ -286,8 +286,15 @@ class AlignLongformJobType:
                     "is not a transcript.",
                 )
             vtt = cues.write_vtt(written)
-            (ctx.scratch / "alignment.vtt").write_text(vtt, encoding="utf-8")
-            stages.write_report(ctx.scratch / "align-report.json", {
+            # WRITTEN AND THEN REGISTERED. `ctx.scratch` is a working directory,
+            # not the artifact store — a file left there is a job that reported
+            # `done` with `artifacts: []`, which is success delivering nothing.
+            # Measured on the first green run, 2026-09-15.
+            vtt_path = ctx.scratch / "alignment.vtt"
+            vtt_path.write_text(vtt, encoding="utf-8")
+            ctx.artifact("alignment.vtt", vtt_path)
+            report_path = ctx.scratch / "align-report.json"
+            stages.write_report(report_path, {
                 "sentences": len(params.sentences),
                 "placed": len(written),
                 "dropped": rough_times.dropped,
@@ -298,6 +305,7 @@ class AlignLongformJobType:
                 "rough_model": params.rough_model,
                 "aligner": f"{aligner.id}@{aligner_spec.revision}",
             })
+            ctx.artifact("align-report.json", report_path)
             ctx.progress(1.0, f"placed {len(written)} of {len(params.sentences)} sentence(s)",
                          stage=STAGES[3])
         except stages.StageFailed as exc:
