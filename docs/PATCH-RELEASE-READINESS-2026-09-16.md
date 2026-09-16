@@ -2,9 +2,10 @@
 
 The lifecycle changes are not in the published 0.6.0 runtime packs. Source,
 client, bootstrap, generated installers, module manifests and both app vendor
-dependencies now identify this candidate as 0.6.1. Fresh installs request 0.6.1
-and fail explicitly until its runtime packs are published. No binary release
-has been deployed. Development checkout tests do not prove that release path.
+dependencies identify this candidate as 0.6.1. Its complete binary prerelease is
+now published from source commit `407886bace61fa66bf273c306b8f67f6f5e3f343`.
+It remains separate from the recommended latest release pending fresh installation
+validation. Development checkout tests alone do not prove that release path.
 
 ## Measured release inputs
 
@@ -127,6 +128,34 @@ the final release commit. Inference recipes did not change during that work.
 
 Artifacts and build logs are staged under
 `C:\Users\tellt\Projects\crucible-release-staging\0.6.1`. No local service,
-GPU workload, model, or WSL instance was changed. Final core builds, candidate
-publication, fresh release-based installation tests, and promotion remain separate
-release gates.
+GPU workload, model, or WSL instance was changed during these builds.
+
+## Complete published candidate
+
+The final Windows host, Linux server, and Mac server packs were rebuilt from frozen
+commit `407886bace61fa66bf273c306b8f67f6f5e3f343`. Both POSIX packs passed the
+artifact-only [core run 35059968205](https://github.com/telltaleatheist/crucible/actions/runs/35059968205).
+Windows built locally in an isolated source archive and passed relocated CLI smoke
+checks; all 148 wheel package files matched the frozen source and installed host
+archive byte-for-byte. No live controller was started for this packaging proof.
+
+The Python wheel/sdist and both SDKs were built from that source. The client archive
+used by the apps was compared with the isolated rebuild: seven source files differed
+only in CRLF/LF line endings. The exact app-consumer archive was published. Generated
+installer drift checks passed.
+
+[v0.6.1](https://github.com/telltaleatheist/crucible/releases/tag/v0.6.1) now carries
+29 assets: all 13 packs in 18 parts, Python/SDK/install/rootfs artifacts, complete
+manifest, provenance, and checksum inventory. The 18 archive parts total
+17,298,249,463 bytes. Every pre-manifest asset's GitHub-reported SHA256 and size
+matched the local verified input before `envpacks.json` was uploaded last. The
+read-only promotion validator passed the complete published manifest/source check.
+
+The automatic tag build queued despite a brief workflow pause around tag creation.
+Only that redundant exact-tag run was cancelled. Its two completed asset uploads
+were restored from the verified staging files before the digest checks; the ordinary
+pack workflow is enabled. No unrelated workflow run was cancelled.
+
+The release is public, marked prerelease, and not latest. Fresh installation
+acceptance and promotion are still separate gates. The published tag points to the
+frozen core commit; later workflow/documentation commits do not change its runtime.

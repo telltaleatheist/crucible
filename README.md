@@ -43,11 +43,12 @@ all of it.
 |---|---|---|
 | `cuda-linux` | Linux with an NVIDIA card | `nvidia-smi` (PATH, then `/usr/lib/wsl/lib/nvidia-smi`) |
 | `mlx-darwin` | Apple Silicon macOS | `arm64` + `import mlx.core` |
+| `llama-windows` | Native Windows | NVIDIA when available; otherwise the CPU build of llama.cpp |
 
-**Windows is not a backend.** On Windows, Crucible runs inside WSL2; the `crucible`
-command refuses to do anything on win32 and says so. Anything else — Linux without a
-working `nvidia-smi`, an Intel Mac, any other platform — is refused by name, with no
-CPU fallback.
+Windows installation starts a native engine immediately. WSL2 is an optional guided
+upgrade for Linux engines such as SGLang; it is not required for local Windows use.
+Linux without a working `nvidia-smi`, Intel Macs, and unsupported platforms are
+refused by name. Native Windows explicitly supports its CPU backend.
 
 ## Install
 
@@ -68,13 +69,17 @@ curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/
 ```
 
 ```powershell
-# Windows: the ORCHESTRATOR, which then installs the WSL2 engine from its own menu
+# Windows: native engine, desktop controls, and optional guided WSL upgrade
 irm https://github.com/telltaleatheist/crucible/releases/latest/download/install.ps1 | iex
 
 # and off again, the Windows half and the guest with it
 irm https://github.com/telltaleatheist/crucible/releases/latest/download/install.ps1 -OutFile install.ps1
 .\install.ps1 -Uninstall -WslToo
 ```
+
+The `latest` URLs select the promoted stable release. To validate a prerelease, use
+its explicit `releases/download/v<version>/install.sh` or `install.ps1` URL. A
+candidate is not promoted until its complete assets and installation checks pass.
 
 `crucible uninstall --dry-run` prints every step and touches nothing; `--json` is the same
 plan for an app. Weights are KEPT unless `--purge-weights`, and the bearer token is not —
@@ -84,7 +89,8 @@ plan for an app. Weights are KEPT unless `--purge-weights`, and the bearer token
 
 `crucible install <type>` **downloads** a pre-built environment pack from this version's
 GitHub release and unpacks it (`docs/PHASE14-ENVPACKS.md`). A pack is a relocatable
-CPython 3.11 with that job type's recipe installed into it, split into parts under
+CPython with that job type's recipe installed into it (3.11 for most packs; 3.12
+for CUDA SGLang Higgs), split into parts under
 1900 MiB, with the sha256 of the reassembled whole in `envpacks.json`:
 
 ```bash
@@ -870,7 +876,8 @@ builds, `.d.ts` for both, and **no runtime dependencies** — Node 20+, bun and 
 Electron main process all have `fetch`, `ReadableStream`, `FormData` and `Blob`.
 
 ```bash
-npm install https://github.com/telltaleatheist/crucible/releases/download/v0.1.0/crucible-client-0.1.0.tgz
+npm install https://github.com/telltaleatheist/crucible/releases/download/v0.6.1/crucible-client-0.6.1.tgz
+npm install https://github.com/telltaleatheist/crucible/releases/download/v0.6.1/crucible-bootstrap-0.6.1.tgz
 ```
 
 ```ts
@@ -884,19 +891,23 @@ registry publish: the tarball on the release is the distribution.
 
 ## Releases
 
-One version, one tag, one release. `v<ver>` carries all three artefacts —
-`crucible-<ver>.tar.gz`, `crucible-<ver>-py3-none-any.whl` and
-`crucible-client-<ver>.tgz` — because the server and the client that speaks to it share
-a version, so a client can never be paired with a server nobody tested it against.
+One version, one tag, one release. `v<ver>` carries the Python source archive
+`crucible-<ver>.tar.gz`, the wheel `crucible-<ver>-py3-none-any.whl`, and both SDK
+packages, `crucible-client-<ver>.tgz` and `crucible-bootstrap-<ver>.tgz`,
+alongside the generated installers, complete environment packs and manifest, and WSL
+rootfs. Core runtimes are built from that release's exact source commit. Unchanged
+inference archives may be reused only after recipe, interpreter and archive digest
+verification; their manifest names the actual uploaded parts.
 
 ```bash
 ./scripts/release.sh --dry-run   # build and check, create nothing
-./scripts/release.sh             # cut v<ver> from main
+./scripts/release.sh             # cut a prerelease candidate from main, not latest
 ```
 
-The version is read from `crucible/__init__.py`, `sdk/ts/package.json` and
-`sdk/ts/src/version.ts`; a disagreement between any two of them is a refusal. So is a
-dirty tree, an unpushed HEAD, and a tag that already exists.
+Server, client and bootstrap version declarations and the bootstrap client peer pin
+must agree. A dirty tree, an unpushed HEAD, and an existing tag are refused.
+`scripts/promote_release.py` checks the complete published candidate before promotion;
+publication requires an explicit attestation that fresh installation tests passed.
 
 ## Tests
 
