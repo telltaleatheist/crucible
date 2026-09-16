@@ -33,10 +33,20 @@ proposed change against these.
   declares what it needs; Crucible obtains, stores, serves and removes it.
 - **A local server is FOUND, not configured.** An app looks at the standard port,
   sees a Crucible answering and connects — no token typed and no file hunted, the
-  way any program finds Ollama. This is about LOCAL instances. A server reachable
-  across a network still requires authorization: loopback on your own machine and
-  an address a stranger can reach are not the same claim, and "Ollama needs no
-  token" is a statement about the former.
+  way any program finds Ollama.
+- **Another machine reaches it the way it reaches Ollama.** Ollama binds loopback
+  by default and the operator widens it (`OLLAMA_HOST=0.0.0.0:11434`); what then
+  protects the open port is the NETWORK — a firewall, a VPN, a tailnet — and not a
+  credential every caller must carry. Crucible follows that. The Mac using the
+  PC's engine is a first-class case, not an advanced one, and the bind address
+  plus the operator's own network controls are what decide who may reach it. The
+  `host`/`advertise` split Crucible already has is the mechanism; what changes is
+  that reaching it stops being gated on a token.
+
+  Stated plainly because it is the trade being made: an engine bound to `0.0.0.0`
+  on an untrusted network is usable by anyone who can route to it. That is
+  precisely Ollama's posture, and precisely why its own documentation tells
+  people to put it behind something. The default stays loopback for that reason.
 - **If it is missing, the app installs it.** BookForge or Foundry finding no local
   Crucible installs one rather than sending the user elsewhere to get it.
 - **The tray icon and the installer are the whole of the user's direct contact.**
