@@ -9,4 +9,4 @@
  * `crucible/__init__.py` — a bootstrapper is never paired with a server nobody
  * tested it against (PHASE5-APPS.md section 6.0).
  */
-export const BOOTSTRAP_VERSION = '0.6.2';
+export const BOOTSTRAP_VERSION = '0.6.3';
