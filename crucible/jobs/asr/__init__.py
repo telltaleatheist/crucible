@@ -669,6 +669,16 @@ class AsrJobType:
                     WORKER_SCRIPT_FOR_ENGINE, engine, "worker script"
                 ),
                 request=request,
+                # The CUDA libraries pip put inside this env, on the loader
+                # path. ctranslate2 resolves cuBLAS at the first matrix
+                # multiply rather than at load, so without this the model
+                # constructs fine and the first window fails with
+                # "Library libcublas.so.12 is not found or cannot be loaded"
+                # — measured on owens-pc against a doctor reporting ready.
+                # See `workerenv.worker_environment`.
+                environment=workerenv.worker_environment(
+                    workerenv.worker_env_dir(self._config.home, JOB_TYPE)
+                ),
                 log_path=self._config.logs_dir / f"asr-{job.id}.log",
                 ready_silence_timeout=READY_SILENCE_TIMEOUT_SECONDS,
                 on_ready=on_ready,

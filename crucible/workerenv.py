@@ -563,3 +563,84 @@ def _run(command: list[str], failure: str, on_line: Callable[[str], None] | None
         raise WorkerEnvError(
             f"{failure}: `{' '.join(command)}` exited {code}\n" + "\n".join(tail)
         )
+
+
+# ---------------------------------------------------------------------------
+# THE LIBRARIES A WORKER FINDS AT COMPUTE TIME, WHICH ARE NOT THE ONES IT
+# FINDS AT IMPORT TIME
+# ---------------------------------------------------------------------------
+#
+# MEASURED 2026-09-15 on owens-pc, against a `crucible doctor` that reported
+# `asr` as `ready: True` with the weights installed and 0 problems. The first
+# real transcribe answered:
+#
+#     asr_window_failed — window 0 (0s):
+#     RuntimeError: Library libcublas.so.12 is not found or cannot be loaded
+#
+# The library was never missing. `nvidia-cublas-cu12` ships it inside the env at
+# `site-packages/nvidia/cublas/lib/libcublas.so.12`, and it was there the whole
+# time. What was missing is the loader path: pip puts CUDA libraries in
+# per-package directories that the dynamic linker has no reason to search, and
+# ctranslate2 links them with no RPATH pointing at that layout.
+#
+# WHY IT LOOKS LIKE HEALTH, and why the doctor could not have caught it. The
+# model LOADS without these — `WhisperModel(..., device="cuda")` constructs
+# fine, which is what any readiness probe would check. ctranslate2 resolves
+# cuBLAS LAZILY, at the first matrix multiply, so the failure is not at import,
+# not at load, and not at the first request either: it is at the first COMPUTE.
+# Every check short of actually transcribing a second of audio passes.
+#
+# It cost a wrong diagnosis on the way in, which is worth recording: the first
+# A/B ran `WhisperModel(...)` with and without the path, both succeeded, and the
+# hypothesis was discarded as disproved. The experiment was measuring the wrong
+# moment. Reproducing the real failure — transcribe, not load — showed the
+# control failing with the job's exact message and the treatment returning three
+# segments.
+#
+# DERIVED FROM THE ENV, never hardcoded: whatever `nvidia/*/lib` directories that
+# env actually contains, plus the package's own bundled `.libs`. A list written
+# here would go stale the day a recipe pins a different CUDA package set, and the
+# staleness would look exactly like this defect does.
+
+
+def cuda_library_path(env_dir: Path) -> str | None:
+    """`LD_LIBRARY_PATH` additions for an env whose CUDA libs came from pip.
+
+    `None` when there is nothing to add, so a caller can tell "no CUDA packages
+    here" (a CPU env, a Mac) from "an empty path", and pass nothing rather than
+    an empty variable that would shadow the inherited one.
+    """
+    site = sorted(env_dir.glob("lib/python*/site-packages"))
+    if not site:
+        return None
+    packages = site[0]
+    directories: list[str] = []
+    # Every `nvidia/<package>/lib` this env actually has.
+    nvidia = packages / "nvidia"
+    if nvidia.is_dir():
+        for child in sorted(nvidia.iterdir()):
+            lib = child / "lib"
+            if lib.is_dir():
+                directories.append(str(lib))
+    # auditwheel-style bundled libraries (`ctranslate2.libs`, and friends).
+    for bundled in sorted(packages.glob("*.libs")):
+        if bundled.is_dir():
+            directories.append(str(bundled))
+    return os.pathsep.join(directories) if directories else None
+
+
+def worker_environment(env_dir: Path, inherited: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment a worker in `env_dir` needs, over what it inherits.
+
+    PREPENDED rather than replacing: an operator who has set `LD_LIBRARY_PATH`
+    for their own reasons keeps it, and the env's own libraries win only over
+    the search order, never over the variable.
+    """
+    base = dict(os.environ if inherited is None else inherited)
+    addition = cuda_library_path(env_dir)
+    if addition is None:
+        return {}
+    existing = base.get("LD_LIBRARY_PATH", "")
+    return {
+        "LD_LIBRARY_PATH": addition + (os.pathsep + existing if existing else "")
+    }
