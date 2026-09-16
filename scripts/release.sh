@@ -98,18 +98,21 @@ python -c 'import crucible.envpack' 2>/dev/null \
 #
 # THE PACKS ARE PUBLISHED BY AN EXPLICIT DISPATCH, not by this tag.
 # `.github/workflows/envpacks.yml` takes the tag as a `workflow_dispatch`
-# input and nothing else triggers it — deliberately, as 0.6.2 recorded: "tag
+# input and NO trigger of its own — deliberately, as 0.6.2 recorded: "tag
 # creation cannot launch another builder that overwrites verified candidate
-# assets." A patch release rebuilds only the CORE runtime packs (they carry
-# this code) and REUSES the unchanged inference archives under their original
-# filenames, which is what `scripts/release_packs.py` plans and stages.
+# assets." The dispatch is this script's, after the release exists, so there
+# is exactly one caller. A patch release rebuilds only the CORE runtime packs
+# (they carry this code) and REUSES the unchanged inference archives under
+# their original filenames, which `scripts/release_packs.py` plans and stages.
 #
 # Since 0.6.0 `crucible install <type>` DOWNLOADS a pack by default and
 # refuses `pack_not_published` when the release has none, so a release whose
-# packs were never dispatched is one where every fresh machine's first
-# install fails by name — the worst kind of working release. What is checked
-# here is only that the workflow EXISTS to be dispatched; dispatching it is a
-# step the releaser still has to take.
+# packs were never built is one where every fresh machine's first install
+# fails by name — the worst kind of working release. THIS SCRIPT DISPATCHES
+# THEM: `gh workflow run envpacks.yml -f tag=$TAG` runs once the release
+# exists, at the bottom of this file. The check here is the earlier half —
+# that the workflow is in the tree at all — so a cut refuses up front rather
+# than creating a release and then failing to dispatch anything.
 ENVPACKS_WORKFLOW=".github/workflows/envpacks.yml"
 [ -f "$ENVPACKS_WORKFLOW" ] \
   || fail "$ENVPACKS_WORKFLOW is not in this tree, so the tag would build no environment packs and \`crucible install\` would refuse every job type \`pack_not_published\` (PHASE14-ENVPACKS.md section 3.3)"
