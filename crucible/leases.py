@@ -183,6 +183,22 @@ CARD_EFFECTS: dict[str, CardEffect] = {
     # previous resident exactly as `align` does.
     "asr": CardEffect(),
     "rvc": CardEffect(),
+    # `align-longform` LOADS AN ALIGNER AND STILL LEAVES NOTHING RESIDENT, which
+    # is the one row here that needs its reasoning written down because the
+    # obvious ruling is wrong.
+    #
+    # It runs the same Qwen3 weights as `align` and it is not
+    # `makes_resident=KIND_ALIGN`: it starts and stops its OWN `WorkerSession`
+    # (`jobs/alignlongform/stages.py`) rather than putting one in the holder, and
+    # the `stop` is in a `finally`, so the card is back before the job answers.
+    # Nothing is left for a later job to reuse, and — the half that matters for
+    # leases — nothing of somebody else's is evicted to make room for it.
+    #
+    # Deliberate rather than incidental. A long-form align is ONE pass over one
+    # book, so the weights are read once either way; borrowing the resident
+    # holder would buy nothing and would evict whatever a client had loaded,
+    # which is exactly what a lease exists to prevent.
+    "align-longform": CardEffect(),
 }
 
 

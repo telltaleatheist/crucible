@@ -700,7 +700,14 @@ def test_work_that_touches_nothing_is_admitted_under_every_kind() -> None:
     # loaded, worked and exited per job; it now loads a resident separator and
     # reuses one it finds, which is the whole of Owen's ruling — a book is ~44
     # blocks and one load, not ~44 loads.
-    assert untouched == {"echo", "asr", "rvc"}
+    # `align-longform` JOINED on 2026-09-15, and it is the member that looks
+    # wrong. It loads the same Qwen3 weights `align` does — but into its OWN
+    # session, stopped in a `finally`, never into the holder. So it leaves
+    # nothing resident for a later job to reuse AND evicts nothing of
+    # somebody else's to make room, which is the property this set is about.
+    # Like `asr` and `rvc` it runs the guard with no `reclaimable_bytes`: on a
+    # full card it refuses rather than taking a lease-holder's engine off.
+    assert untouched == {"echo", "asr", "rvc", "align-longform"}
     for kind in (KIND_LLM, KIND_TTS, KIND_ALIGN, KIND_DENOISE):
         for job_type in untouched:
             for model in (THE_LEASED_THING, SOMETHING_ELSE, None):
