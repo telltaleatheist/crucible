@@ -20,6 +20,8 @@ from dataclasses import dataclass
 
 #: The distro Crucible owns. One name, and its owner is sdk/bootstrap/src/distro.ts.
 CRUCIBLE_DISTRO = "crucible"
+ROOTFS_ASSET_TEMPLATE = "crucible-rootfs-{version}.tar.zst"
+RELEASE_REPOSITORY = "telltaleatheist/crucible"
 
 #: The line /etc/wsl.conf carries in the Crucible rootfs and nowhere else.
 WSL_CONF_MARKER = "# crucible-rootfs"

@@ -863,7 +863,7 @@ class PresenceWatcher:
         self.held = None
         self.held_distro = None
 
-    def stop_child(self, timeout_s: float = 20.0) -> RunResult | None:
+    def stop_child(self, timeout_s: float = 60.0) -> RunResult | None:
         """Stop the host-mode child, if there is one. Used by Quit and by 4.3."""
         if self.child is None:
             return None

@@ -1183,7 +1183,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # `live.advertise` is the operator's statement that something
             # forwards here from elsewhere. The bind is what this host can see;
             # that is what it cannot.
-            urls = pairing.reachable_urls(host, port, live.advertise)
+            urls = pairing.reachable_urls(host, port, live.advertise + live.tailscale_advertise)
         except InterfaceError as exc:
             # 503 and not an empty `urls`: an empty list reads as "reachable
             # from nowhere", which is a claim about this host rather than a

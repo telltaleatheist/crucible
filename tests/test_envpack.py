@@ -968,7 +968,8 @@ def test_a_baked_in_shebang_is_rewritten_to_one_that_survives_a_move(
     assert str(root) not in text
     assert text.startswith(envpack.RELOCATABLE_SHEBANG)
     assert text.endswith("import sys\nprint('ok')\n")
-    assert script.stat().st_mode & 0o111, "it must still be executable"
+    if os.name != "nt":
+        assert script.stat().st_mode & 0o111, "it must still be executable"
 
 
 def test_the_rewritten_header_is_valid_python(tmp_path: Path) -> None:

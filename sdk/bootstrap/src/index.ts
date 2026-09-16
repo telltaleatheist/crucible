@@ -137,3 +137,5 @@ export { parseToml, TomlError } from './toml.js';
 export type { TomlTable, TomlValue } from './toml.js';
 
 export { BOOTSTRAP_VERSION } from './version.js';
+export { readLocalInstallation, localStatus, startLocal, stopLocal, localUninstallCommand, LocalInstallationError } from './local.js';
+export type { LocalInstallation, LocalStatus, LocalOptions, LocalCommand, LocalUninstallFlags } from './local.js';

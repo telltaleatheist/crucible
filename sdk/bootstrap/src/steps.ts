@@ -23,7 +23,7 @@
  * same constants. Their iteration is spelled twice because two languages; the
  * facts they iterate over are spelled once.
  */
-import { CURL_ARGS, DOWNLOADS_SUBDIR, guestProbeScript, PARTIAL_SUFFIX, SERVER_SUBDIR, STAMP_NAME, TAR_ARGS } from './pack.js';
+import { activatePackSh, CURL_ARGS, DOWNLOADS_SUBDIR, guestProbeScript, PARTIAL_SUFFIX, SERVER_SUBDIR, STAMP_NAME, TAR_ARGS } from './pack.js';
 import { ENVPACKS_ASSET, RELEASE_REPO } from './envpacks.js';
 
 /**
@@ -193,7 +193,7 @@ export function serverPackSh(): string {
     + `  rm -rf "$partial" && mkdir -p "$partial"\n`
     + `  tar ${TAR_ARGS.join(' ')} "$archive" -C "$partial" || die "pack_unpack_failed: tar would not open $archive"\n`
     + `  "$partial/bin/crucible" --version >/dev/null || die "pack_unpack_failed: $partial/bin/crucible would not run"\n`
-    + `  rm -rf "$dest" && mv "$partial" "$dest"\n`
+    + `  ${activatePackSh('"$dest"', '"$partial"')} || die "pack_activation_failed: the previous runtime was preserved"\n`
     + `  printf 'sha256=%s\\nrelease=%s\\n' "$want_sha" "$RELEASE" > "$dest/${STAMP_NAME}"\n`
     + `  rm -f "$archive"\n`
     + `fi\n`
@@ -376,6 +376,14 @@ export function installSteps(plan: StepPlan): StepDef[] {
     skip: null,
     timeout: 'quickMs',
   });
+  for (const action of ['register', 'install-cli', 'install-desktop']) {
+    const words: Word[] = [crucible, 'local', action];
+    steps.push({
+      name: `local-${action}`, what: `publish and configure the local Crucible ${action}`,
+      words, sh: `${renderSh(words)} || die "step_failed: local-${action}"\n`,
+      skip: null, timeout: 'quickMs',
+    });
+  }
   if (plan.linger) {
     steps.push({
       name: 'linger',

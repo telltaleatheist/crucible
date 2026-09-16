@@ -10,8 +10,10 @@
  *   CRUCIBLE_LLM_MODEL  the model id to exercise, e.g. qwen3.5-9b
  *
  * The tests run in file order and depend on each other: the model is loaded
- * once at the top and unloaded at the bottom, because loading it is the
- * expensive part and because phase 2 keeps exactly one model resident.
+ * once at the top and leased for the chat series. The server settles an
+ * unleased model after each chat; a sequence of chats must explicitly retain
+ * residency. The lease is heartbeated and released before testing unload,
+ * with an after hook cleaning up even when an earlier assertion fails.
  *
  * It touches the GPU. Before running it, `nvidia-smi` must show only the
  * desktop: Crucible never evicts anyone else's work, so a busy card makes the
@@ -20,7 +22,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 
 import {
   CrucibleClient,
@@ -50,6 +52,55 @@ const crucible = new CrucibleClient({
   url: URL_,
   token: TOKEN,
   clientName: 'crucible-e2e-llm',
+});
+
+let loadedBySuite = false;
+let leaseId: string | null = null;
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let heartbeatInFlight: Promise<void> | null = null;
+let heartbeatFailure: unknown = null;
+
+async function retainModel(): Promise<void> {
+  // Lease acts are capability names; the test client's identity is User-Agent.
+  leaseId = (await crucible.lease(MODEL, { act: 'clean', ttlSeconds: 120 })).leaseId;
+  heartbeatTimer = setInterval(() => {
+    if (heartbeatInFlight !== null || leaseId === null) return;
+    heartbeatInFlight = crucible.heartbeat(leaseId)
+      .then(() => undefined)
+      .catch((error: unknown) => { heartbeatFailure = error; })
+      .finally(() => { heartbeatInFlight = null; });
+  }, 30_000);
+  heartbeatTimer.unref();
+}
+
+function assertRetained(): void {
+  assert.notEqual(leaseId, null, 'the chat series must hold a model lease');
+  assert.equal(heartbeatFailure, null, `the model lease heartbeat failed: ${String(heartbeatFailure)}`);
+}
+
+async function releaseModel(): Promise<void> {
+  if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+  // Do not release while a previous heartbeat is still using the receipt.
+  await heartbeatInFlight;
+  const id = leaseId;
+  leaseId = null;
+  if (id !== null) await crucible.release(id);
+}
+
+after(async () => {
+  const failures: unknown[] = [];
+  try { await releaseModel(); } catch (error) { failures.push(error); }
+  try {
+    // Only unload the model this suite loaded, never another client's model.
+    // Lease release may already have settled it; then there is nothing to do.
+    if (loadedBySuite && (await row()).resident) {
+      const events = await collect(await crucible.unloadModel(MODEL));
+      assert.equal(events.at(-1)?.event, 'done', `cleanup unload failed: ${JSON.stringify(events.at(-1))}`);
+    }
+  } catch (error) { failures.push(error); }
+  if (heartbeatFailure !== null) failures.push(heartbeatFailure);
+  if (failures.length > 0) throw new AggregateError(failures, 'LLM e2e cleanup or lease renewal failed');
 });
 
 /** The row for the model under test, or a failure naming what the server does offer. */
@@ -115,6 +166,7 @@ test('the server offers the llm capability and lists the model', async () => {
 
 test('load-model warms the engine and finishes naming the resident model', async () => {
   const jobId = await crucible.loadModel(MODEL);
+  loadedBySuite = true;
   const events = await collect(jobId);
 
   const names = events.map((event) => event.event);
@@ -134,6 +186,7 @@ test('load-model warms the engine and finishes naming the resident model', async
   const done = events.at(-1)!;
   assert.equal(done.event, 'done');
   assert.equal(done.event === 'done' ? done.data.resident : null, MODEL);
+  await retainModel();
 
   const health = await crucible.health();
   assert.deepEqual(health.residentModels, [MODEL]);
@@ -145,6 +198,7 @@ test('load-model warms the engine and finishes naming the resident model', async
 // --------------------------------------------------------------------- chat
 
 test('chat returns a non-empty completion from the resident engine', async () => {
+  assertRetained();
   // `thinking: false` is what makes a 64-token ceiling honest against a
   // reasoning model: without it Qwen3.5 spends the whole budget in `reasoning`
   // and the message comes back with no `content` at all.
@@ -175,6 +229,7 @@ test('chat returns a non-empty completion from the resident engine', async () =>
 });
 
 test('chatStream yields deltas that concatenate to the answer', async () => {
+  assertRetained();
   const deltas: string[] = [];
   for await (const delta of crucible.chatStream({
     model: MODEL,
@@ -195,6 +250,7 @@ test('chatStream yields deltas that concatenate to the answer', async () => {
 });
 
 test('chat on a model that is not resident is refused by name, never loaded implicitly', async () => {
+  assertRetained();
   const wrong = `${MODEL}-not-a-real-model`;
   await assert.rejects(
     crucible.chat({ model: wrong, messages: [{ role: 'user', content: 'hello' }] }),
@@ -218,6 +274,11 @@ test('chat on a model that is not resident is refused by name, never loaded impl
 // ------------------------------------------------------------------- unload
 
 test('unload-model frees the card and the model stops reading as resident', async () => {
+  assertRetained();
+  // A lease deliberately refuses unload-model. Releasing it also asks the
+  // settlement layer to clear the model; the explicit unload remains valid
+  // when that clearance has already completed or is still finishing.
+  await releaseModel();
   const jobId = await crucible.unloadModel(MODEL);
   const events = await collect(jobId);
   const done = events.at(-1)!;
@@ -232,6 +293,7 @@ test('unload-model frees the card and the model stops reading as resident', asyn
 
   const model = await row();
   assert.equal(model.resident, false, `${MODEL} unloaded but still reads as resident`);
+  loadedBySuite = false;
   assert.deepEqual((await crucible.health()).residentModels, []);
 
   await assert.rejects(

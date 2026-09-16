@@ -139,6 +139,12 @@ def engine_token(context: "HostContext") -> str | None:
             return None
     if owner is Owner.HOST_CHILD:
         return read_token(context.home)
+    if owner is Owner.NONE and (context.home / "engine.stopped").exists():
+        # A deliberately stopped engine must remain controllable after login.
+        try:
+            return parse_pairing_line((context.home / "pairing").read_text(encoding="utf-8").strip()).token
+        except (OSError, ValueError) as exc:
+            context.log.write(f"stopped engine pairing is invalid: {exc}")
     return None
 
 
@@ -234,19 +240,20 @@ def consented_distro(home: Path) -> str | None:
 
 
 def acquire(home: Path) -> Path:
-    """One host per machine. Refuses `host_already_running`, naming the pid."""
+    """One controller per installation; PID reuse cannot block the kernel lock."""
     home.mkdir(parents=True, exist_ok=True)
     lock = home / LOCK_NAME
-    if lock.is_file():
-        previous = lock.read_text(encoding="utf-8").strip()
-        if previous.isdigit() and _alive(int(previous)):
-            raise HostError(
-                "host_already_running",
-                f"another `crucible host` is running on this machine (pid {previous}). "
-                "Two trays would boot the same distro twice and watch each other's "
-                "recoveries. Quit that one from its menu, or end that process.",
-            )
-    lock.write_text(str(os.getpid()), encoding="utf-8")
+    from ..processlock import ProcessLock
+    import atexit
+    guard = ProcessLock(home / "host.lock")
+    if not guard.acquire():
+        raise HostError("host_already_running", "Another Crucible controller is starting or running")
+    try:
+        lock.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        guard.close()
+        raise
+    atexit.register(guard.close)
     return lock
 
 
@@ -254,27 +261,30 @@ def _alive(pid: int) -> bool:
     """Is this pid a live process? A stale lock must not wedge the tray."""
     if sys.platform == "win32":
         import ctypes
-
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # type: ignore[attr-defined]
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)
         if not handle:
-            return False
-        ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+            # Access denied is not proof the process has exited.
+            return ctypes.get_last_error() == 5
+        kernel.CloseHandle(handle)
         return True
     try:
         os.kill(pid, 0)
+    except PermissionError:
+        return True
     except (OSError, ProcessLookupError):
         return False
     return True
 
 
 def server_argv(env: "os._Environ[str] | dict[str, str]") -> list[str]:
-    """`crucible serve` as the host's CHILD — the `llama-windows` server.
+    """Launch the owned engine directly, with a private graceful-stop pipe."""
+    return [str(host_pack_dir(env) / "python.exe"), "-m", "crucible.cli", "serve", "--controller-stdin"]
 
-    Through the pack's own `crucible.cmd`, which is the relocatable entry point
-    (4.4): `Scripts\\crucible.exe` bakes the build tree's interpreter path into
-    the binary and does not survive the move to `%LOCALAPPDATA%`.
-    """
-    return [str(console_cmd_path(env)), "serve"]
 
 
 def server_environment(
@@ -364,7 +374,10 @@ class Host:
         self._c = context
         self._icon: object | None = None
         self._stop = threading.Event()
+        self._shutdown_complete = threading.Event()
         self._door_server: object | None = None
+        self._operation = threading.RLock()
+        self._paused = (context.home / "engine.stopped").exists()
         #: Whether THIS process holds a claim on this machine's engine
         #: (PHASE17 2.1). Not "whether the engine is claimed" — that is the
         #: engine's fact and it is read from `/v1/info`, never mirrored here.
@@ -399,6 +412,80 @@ class Host:
         )
         self._hold()
         return self._c.presence
+
+    def local_status(self) -> dict[str, object]:
+        return {"state": "stopped" if self._paused else self._c.presence.engine.value,
+                "intentional": self._paused,
+                "detail": self._c.presence.detail}
+
+    def local_start(self) -> dict[str, object]:
+        with self._operation:
+            self.check_restartable()
+            self._c.home.joinpath("engine.stopped").unlink(missing_ok=True)
+            self._paused = False
+            if not self._c.watcher.ping():
+                self.start()
+                _write_pairing(self._c)
+                self._claimed = False
+                self.claim()
+            self._refresh()
+            return self.local_status()
+
+    def local_stop(self) -> dict[str, object]:
+        with self._operation:
+            self.check_restartable()
+            self._stop_engine()
+            return self.local_status()
+
+    def stop_windows_for_move(self) -> None:
+        """Called only after the guest has the config and installed subjects."""
+        if self._c.presence.owner is Owner.HOST_CHILD:
+            self.release_claim()
+            self._c.watcher.stop_child()
+        elif self._c.presence.owner not in (Owner.NONE, Owner.WSL_UNIT):
+            raise HostError("engine_not_ours", "Cannot replace an unmanaged engine")
+
+    def finish_wsl_move(self) -> None:
+        """Publish the guest only after Windows can authenticate to that guest."""
+        from ..local import request
+        self._c.watcher.release()
+        watcher = PresenceWatcher(self._c.runner, self._c.log, distro=CRUCIBLE_DISTRO)
+        presence = watcher.boot()
+        if presence.engine is not Engine.RUNNING:
+            raise HostError("engine_move_failed", presence.detail)
+        line = watcher.read_guest_pairing(CRUCIBLE_DISTRO)
+        if line is None:
+            raise HostError("engine_move_failed", "The guest did not publish its pairing")
+        pair = parse_pairing_line(line)
+        ping = request(engine_url("/v1/ping"))
+        if ping.get("crucible") is not True or ping.get("name") != pair.name:
+            raise HostError("engine_move_failed", "Windows is not reaching the installed guest engine")
+        info = request(engine_url("/v1/info"), token=pair.token)
+        server, machine = info.get("server"), info.get("host")
+        if (not isinstance(server, dict) or server.get("name") != pair.name
+                or server.get("api_version") != 1 or not isinstance(machine, dict)
+                or machine.get("backend") != "cuda-linux"):
+            raise HostError("engine_move_failed", "Windows is not reaching the authenticated WSL engine with the expected API")
+        self._c.watcher = watcher
+        self._c.presence = presence
+        _write_pairing(self._c)
+        if (self._c.home / "pairing").read_text(encoding="utf-8").strip() != line.strip():
+            raise HostError("engine_move_failed", "Windows pairing was not updated")
+        self._paused = False
+        self._c.home.joinpath("engine.stopped").unlink(missing_ok=True)
+        self._hold()
+        self._claimed = False
+        if not self.claim():
+            raise HostError("engine_move_failed", "The guest could not be claimed by its Windows controller")
+        self._refresh()
+        from ..sharing import SharingError, reconcile
+        try:
+            reconcile(self._c.home, self._c.runner)
+        except SharingError as exc:
+            raise HostError(
+                "sharing_reconcile_failed",
+                f"The WSL engine is running, but its saved network sharing could not be restored: {exc}",
+            ) from exc
 
     def _hold(self) -> None:
         """7b.4c: hold the distro the engine is in, or it goes away by itself."""
@@ -598,6 +685,7 @@ class Host:
                 "gpu": dict(ORCHESTRATOR_GPU),
             },
             "role": peer_module.ROLE_ORCHESTRATOR,
+            "local_lifecycle_version": 1,
             # ZERO, and that is the DEFINITION of the role rather than a
             # property of this machine. An orchestrator serves none.
             "job_types": [],
@@ -627,6 +715,8 @@ class Host:
         cannot get two different restarts.
         """
         self.check_restartable()
+        self._c.home.joinpath("engine.stopped").unlink(missing_ok=True)
+        self._paused = False
         owner = self._c.presence.owner
         if owner is Owner.WSL_UNIT:
             emit(_step("restart the guest's unit", 1))
@@ -716,7 +806,7 @@ class Host:
         elif item_id == menu.STOP_ENGINE:
             if self._refuse_acting_on_a_found_engine("stop"):
                 return
-            self._stop_engine()
+            self.local_stop()
         elif item_id == menu.OPEN_LOG:
             open_log(self._c.log)
         elif item_id == menu.QUIT:
@@ -758,7 +848,7 @@ class Host:
                     "XDG_RUNTIME_DIR=/run/user/<uid> and the uid could not "
                     "be read; the engine is untouched"
                 )
-                return
+                raise HostError("engine_stop_failed", "The guest uid could not be read; engine was not stopped")
             result = self._c.runner.run(
                 presence_module.user_systemctl_argv(
                     self._c.watcher._distro,  # noqa: SLF001
@@ -768,8 +858,13 @@ class Host:
                 timeout_s=60.0,
             )
             self._c.log.write(f"stop: {'ok' if result.ok else result.said()}")
+            if not result.ok:
+                raise HostError("engine_stop_failed", result.said())
         else:
             self._c.watcher.stop_child()
+        self._c.home.mkdir(parents=True, exist_ok=True)
+        self._c.home.joinpath("engine.stopped").write_text("Stopped by the operator\n", encoding="utf-8")
+        self._paused = True
         self._c.presence = Presence(
             self._c.presence.distro,
             Engine.STOPPED,
@@ -789,26 +884,29 @@ class Host:
     def watch(self) -> None:
         """4.1's watch. One recovery per down-edge, then a state with a name."""
         while not self._stop.wait(self._c.watcher.watch_s):
-            before = self._c.presence.engine
-            self._c.presence = self._c.watcher.poll(
-                self._c.presence.distro, self._c.presence.owner
-            )
-            # 7b.4c: the hold is what keeps the VM there at all, so it is
-            # taken again the tick after it dies rather than at the next login.
-            self._c.watcher.rehold()
-            if self._c.presence.engine is not before:
-                self._c.log.write(
-                    f"watch: {before.value} -> {self._c.presence.engine.value} — "
-                    f"{self._c.presence.detail}"
+            with self._operation:
+                if self._paused:
+                    continue
+                before = self._c.presence.engine
+                self._c.presence = self._c.watcher.poll(
+                    self._c.presence.distro, self._c.presence.owner
                 )
-                # PHASE17 2.3: a claim is LIVE state and an engine that
-                # restarted has forgotten. Every down-to-up edge re-asserts
-                # it, which is why nothing has to be remembered on disk — the
-                # relation is re-stated within one 15-second tick instead.
-                if self._c.presence.engine is Engine.RUNNING:
-                    self._claimed = False
-                    self.claim()
-                self._refresh()
+                # 7b.4c: the hold is what keeps the VM there at all, so it is
+                # taken again the tick after it dies rather than at the next login.
+                self._c.watcher.rehold()
+                if self._c.presence.engine is not before:
+                    self._c.log.write(
+                        f"watch: {before.value} -> {self._c.presence.engine.value} — "
+                        f"{self._c.presence.detail}"
+                    )
+                    # PHASE17 2.3: a claim is LIVE state and an engine that
+                    # restarted has forgotten. Every down-to-up edge re-asserts
+                    # it, which is why nothing has to be remembered on disk — the
+                    # relation is re-stated within one 15-second tick instead.
+                    if self._c.presence.engine is Engine.RUNNING:
+                        self._claimed = False
+                        self.claim()
+                    self._refresh()
 
     def quit(self) -> None:
         """THE stop. PHASE17 4.4 — one implementation, two callers.
@@ -852,25 +950,20 @@ class Host:
             # its child even though the distro probe said `absent`, which is
             # why this asks the owner and not the distro.
             self._c.watcher.stop_child()
-        # AND THEN THE PROCESS ENDS, by the one mechanism it has: pystray's
-        # `stop()` returns `icon.run()` in the main thread, `run()` below
-        # returns 0, and the interpreter exits — which is why `POST /quit`
-        # needs no `os._exit` and gets none (it would skip this function's own
-        # callers and every `finally` between here and `main`). A host with no
-        # icon is a host with no loop to end: that is a test, and it says so.
+        # Stop recovery immediately, but do not let the main thread exit until
+        # cleanup finishes: HTTP request threads are daemon threads.
+        self._shutdown_complete.set()
         if self._icon is None:
-            self._c.log.write(
-                "quit: there is no tray icon in this process, so there is no "
-                "loop to end; the shutdown ran and nothing exits"
-            )
+            self._c.log.write("quit: shutdown complete; controller loop signalled")
             return
         self._icon.stop()  # type: ignore[attr-defined]
 
 
-def run(argv: list[str] | None = None) -> int:
+def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
     """`crucible host`. Returns an exit code; never raises past here."""
     env = os.environ
-    home = Path(str(crucible_root(env)))
+    from ..config import crucible_home
+    home = crucible_home()
     log = HostLog(Path(str(log_path(env))), Path(str(previous_log_path(env))))
     runner = ProcessRunner(sys.platform, env)
     log.write(f"crucible host {VERSION} starting; CRUCIBLE_HOME={home}")
@@ -914,7 +1007,10 @@ def run(argv: list[str] | None = None) -> int:
     )
     log.write(f"role: orchestrator, as {context.name} (PHASE17-ORCHESTRATOR.md)")
     host = Host(context)
-    host.start()
+    if host._paused:
+        context.presence = Presence(Distro.UNKNOWN, Engine.STOPPED, "Stopped by the operator", Owner.NONE)
+    else:
+        host.start()
     _write_pairing(context)
     # AFTER the presence and AFTER the pairing file, because the claim needs
     # both: the owner decides whether a claim is made at all (a `found` engine
@@ -925,17 +1021,28 @@ def run(argv: list[str] | None = None) -> int:
 
     door = OrchestratorDoor(
         log,
-        _sequence(context),
+        _sequence(context, host),
         token=lambda: engine_token(context),
         orchestrator=host,
     )
     try:
-        serve(door)
+        host._door_server = serve(door)
         log.write("door: listening on 127.0.0.1:7101")
     except OSError as exc:
-        log.write(f"door: NOT listening ({exc}); the page's engine switch will refuse")
+        log.write(f"door: NOT listening ({exc}); shutting down this controller's owned child")
+        host.quit()
+        raise HostError("host_door_unavailable", f"The local controller port is unavailable: {exc}") from exc
 
     threading.Thread(target=host.watch, name="crucible-watch", daemon=True).start()
+
+    from ..local import publish_installation
+    publish_installation(home)
+    if headless:
+        host._shutdown_complete.wait()
+        if host._door_server is not None:
+            host._door_server.shutdown()
+            host._door_server.server_close()
+        return 0
 
     from . import tray
 
@@ -945,7 +1052,7 @@ def run(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _sequence(context: HostContext) -> Callable[[Callable[[installer.Event], None]], None]:
+def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer.Event], None]], None]:
     """Bind the install sequence to THIS host's two servers.
 
     The catalogs are built per RUN and not once at startup, because the token
@@ -958,7 +1065,7 @@ def _sequence(context: HostContext) -> Callable[[Callable[[installer.Event], Non
     Windows config has no Windows engine, so there is no catalog to move from
     and `migrate-weights` says exactly that.
     """
-    def run_sequence(emit: Callable[[installer.Event], None]) -> None:
+    def install_sequence(emit: Callable[[installer.Event], None]) -> None:
         token = read_token(context.home)
         windows: CatalogPort | None = None
         guest: CatalogPort | None = None
@@ -981,7 +1088,15 @@ def _sequence(context: HostContext) -> Callable[[Callable[[installer.Event], Non
             install_sh_url=INSTALL_SH_URL.format(release=context.release),
             windows_catalog=windows,
             guest_catalog=guest,
+            stop_windows_server=host.stop_windows_for_move,
+            switch_pairing=host.finish_wsl_move,
         ).run()
+
+    def run_sequence(emit: Callable[[installer.Event], None]) -> None:
+        # A watch recovery during migration could start a second engine.
+        with host._operation:
+            host.check_restartable()
+            install_sequence(emit)
 
     return run_sequence
 

@@ -159,7 +159,11 @@ def cmd_orchestrator(args: argparse.Namespace) -> int:
     from .host.app import run as run_host
 
     try:
-        return run_host()
+        if not args.headless:
+            from .desktop import tray
+            tray()
+            return EXIT_OK
+        return run_host(headless=args.headless)
     except HostError as exc:
         return _fail(f"{exc.code}: {exc.message}")
 
@@ -418,7 +422,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     import uvicorn
 
-    uvicorn.run(app, host=host, port=port, log_level=args.log_level)
+    if getattr(args, "controller_stdin", False):
+        from .host.child_lifecycle import run_owned_server
+        run_owned_server(app, host=host, port=port, log_level=args.log_level)
+    else:
+        uvicorn.run(app, host=host, port=port, log_level=args.log_level)
     return EXIT_OK
 
 
@@ -498,6 +506,8 @@ def cmd_service_install(args: argparse.Namespace) -> int:
     )
     print(f"pairing:  {paired} ({_pairing_permission(paired)})")
     _print_pairing(config.name, config.host, config.port, config.token)
+    from .local import publish_installation
+    publish_installation(config.home)
     return EXIT_OK
 
 
@@ -660,6 +670,8 @@ def _write_capability(
         ),
         routes=config.routes,
         upstreams=config.upstreams,
+        advertise=config.advertise,
+        tailscale_advertise=config.tailscale_advertise,
         **values,
     )
 
@@ -2593,7 +2605,8 @@ def cmd_token(args: argparse.Namespace) -> int:
         print(config.token)
     if args.url:
         result = _pairing_lines(
-            config.name, config.host, config.port, config.token, config.advertise
+            config.name, config.host, config.port, config.token,
+            config.advertise + config.tailscale_advertise
         )
         if isinstance(result, str):
             return _fail(result)
@@ -2616,6 +2629,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"crucible {VERSION}")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    from .local import add_parser as add_local_parser
+    add_local_parser(subparsers)
 
     init = subparsers.add_parser(
         "init", help="detect the backend, mint a token, write config.toml"
@@ -2965,11 +2980,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="delete the Startup shortcut and exit",
     )
     host_parser.set_defaults(func=cmd_orchestrator)
+    host_parser.add_argument("--headless", action="store_true", help="Run the controller independently of the tray")
 
     serve = subparsers.add_parser("serve", help="run the API in the foreground")
     serve.add_argument("--host", default=None, help="bind host (default from config)")
     serve.add_argument("--port", type=int, default=None, help="bind port (default from config)")
     serve.add_argument("--log-level", default="info", help="uvicorn log level")
+    serve.add_argument("--controller-stdin", action="store_true", help=argparse.SUPPRESS)
     serve.set_defaults(func=cmd_serve)
 
     service_parser = subparsers.add_parser(
@@ -3083,6 +3100,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     token.set_defaults(func=cmd_token)
 
+    from .sharing import add_parser as add_sharing_parser
+    add_sharing_parser(subparsers)
     return parser
 
 

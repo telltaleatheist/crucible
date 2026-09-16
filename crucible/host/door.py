@@ -91,6 +91,15 @@ class OrchestratorPort(Protocol):
     def restart_engine(self, emit: Callable[[Event], None]) -> None:
         """PHASE17 4.2's sequence, by the owner-appropriate means."""
 
+    def local_status(self) -> dict[str, object]:
+        """Report controller-observed engine state and explicit stop intent."""
+
+    def local_start(self) -> dict[str, object]:
+        """Start the managed engine and clear explicit stop intent."""
+
+    def local_stop(self) -> dict[str, object]:
+        """Stop the managed engine and preserve that intent across login."""
+
     def quit(self) -> None:
         """PHASE17 4.4's stop — THE SAME ONE the tray menu's Quit runs.
 
@@ -223,6 +232,10 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
             through, and neither is a thing to hand an anonymous caller.
             """
             path = self.path.split("?", 1)[0].rstrip("/") or "/"
+            if path == "/local/status":
+                if self._authorised():
+                    self._answer(door._orchestrator.local_status())
+                return
             if path == PING_PATH:
                 self._answer(
                     {
@@ -269,6 +282,20 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:  # noqa: N802
             path = self.path.split("?", 1)[0].rstrip("/")
+            if path in ("/local/start", "/local/stop"):
+                if not self._authorised():
+                    return
+                if not door.claim():
+                    self._refuse(409, "host_install_running", "An engine operation is already running")
+                    return
+                try:
+                    operation = door._orchestrator.local_start if path.endswith("/start") else door._orchestrator.local_stop
+                    self._answer(operation())
+                except HostError as exc:
+                    self._refuse(409, exc.code, exc.message)
+                finally:
+                    door.release()
+                return
             if path == RESTART_PATH:
                 self._restart()
                 return
@@ -408,10 +435,12 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             index = 0
+            terminal = False
 
             def emit(event: Event) -> None:
-                nonlocal index
+                nonlocal index, terminal
                 index += 1
+                terminal = terminal or event.event in ("done", "failed")
                 line = json.dumps(
                     {"id": index, "event": event.event, "data": event.data}
                 )
@@ -426,6 +455,11 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
                 # could. A stream that stops without a terminal event is what
                 # the client reports as truncated, so one is always sent.
                 door._log.write(f"door: install failed: {exc.code}: {exc.message}")
+                if not terminal:
+                    try:
+                        emit(Event("failed", {"code": exc.code, "message": exc.message}))
+                    except OSError:
+                        pass
             except Exception as exc:  # noqa: BLE001 - the stream must terminate
                 door._log.write(f"door: install crashed: {type(exc).__name__}: {exc}")
                 try:

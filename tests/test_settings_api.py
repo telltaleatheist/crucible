@@ -49,6 +49,38 @@ def put(client: TestClient, auth: dict[str, str], patch: dict[str, Any]):
     return client.put("/v1/settings", headers=auth, json=patch)
 
 
+def test_managed_sharing_survives_settings_writes_and_does_not_change_bind(settings_client, auth):
+    client = settings_client
+    before = client.get("/v1/setup", headers=auth).json()
+    response = put(client, auth, {"tailscale_advertise": ["pc.tail.ts.net:7100"]})
+    assert response.status_code == 200
+    assert response.json()["tailscale_advertise"] == ["pc.tail.ts.net:7100"]
+    assert put(client, auth, {"desktop_allowance_bytes": 1}).status_code == 200
+    after = client.get("/v1/setup", headers=auth).json()
+    assert after["urls"] == before["urls"] + ["http://pc.tail.ts.net:7100"]
+    assert load_config(client.app.state.config.home).tailscale_advertise == ("pc.tail.ts.net:7100",)
+    assert put(client, auth, {"tailscale_advertise": []}).status_code == 200
+    assert client.get("/v1/setup", headers=auth).json()["urls"] == before["urls"]
+
+
+def test_operator_addresses_survive_settings_write(settings_client, auth):
+    client = settings_client
+    path = client.app.state.config.path
+    text = path.read_text(encoding="utf-8").replace("[server]", '[server]\nadvertise = ["manual.example:7100"]')
+    path.write_text(text, encoding="utf-8")
+    client.app.state.config.adopt(load_config(client.app.state.config.home))
+    assert put(client, auth, {"tailscale_advertise": ["pc.tail.ts.net:7100"]}).status_code == 200
+    assert put(client, auth, {"tailscale_advertise": []}).status_code == 200
+    assert load_config(client.app.state.config.home).advertise == ("manual.example:7100",)
+
+
+@pytest.mark.parametrize("address", ["https://pc.test", "0.0.0.0", "pc.test:99999", "x@y", "pc#token", "bad name"])
+def test_managed_sharing_rejects_non_dialable_authorities(settings_client, auth, address):
+    response = put(settings_client, auth, {"tailscale_advertise": [address]})
+    assert response.status_code == 400
+    assert response.json()["error"]["details"]["field"] == "tailscale_advertise"
+
+
 # --------------------------------------------------------------------- GET
 
 

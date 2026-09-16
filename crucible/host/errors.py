@@ -14,6 +14,7 @@ from ..errors import CrucibleError
 #: carries one of these or one of the 4c state codes (`crucible/host/wsl_states.py`),
 #: and `sdk/bootstrap/src/hostdoor.ts` is the client that reads them.
 HOST_ERROR_CODES: dict[str, str] = {
+    "host_door_unavailable": "The local controller could not bind its control port; its owned child was stopped.",
     "host_windows_only": (
         "`crucible host` is a Windows verb. On Linux and macOS the server runs "
         "on the machine and its service manager already supervises it (4.4: "

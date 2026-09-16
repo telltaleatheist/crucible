@@ -16,7 +16,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { BootstrapStepFailed, install, planJobTypes, type InstallStep, type OutputStream } from '../src/index.js';
+import { BOOTSTRAP_VERSION, BootstrapStepFailed, install as installCurrent, planJobTypes, type InstallStep, type OutputStream } from '../src/index.js';
 import { envpacksUrl } from '../src/envpacks.js';
 import { guestProbeScript } from '../src/pack.js';
 import {
@@ -42,6 +42,16 @@ import {
   type Expectation,
 } from './fake.js';
 
+// These fixtures model a specific published release, including archive/stamp
+// names. Keep that release explicit when the SDK's default version advances.
+const install: typeof installCurrent = (options, runner) =>
+  installCurrent({ release: '0.6.0', ...options }, runner);
+
+test('the default install command requests this SDK release, not the fixture release', async () => {
+  const result = await refusal(installCurrent({ jobTypes: ['llm'], onLine: () => {} }, winRunner({})));
+  assert.equal(result.command, `irm https://github.com/telltaleatheist/crucible/releases/download/v${BOOTSTRAP_VERSION}/install.ps1 | iex`);
+});
+
 /** On linux the command runs as it is: no transport, no wrapping. */
 const N = (...argv: string[]): string[] => [...argv];
 /** The script a `bash -c` call carries, wherever it is in the argv. */
@@ -64,7 +74,7 @@ const PACK_FETCH: Expectation[] = [
   { argv: N('sha256sum', ARCHIVE), stdout: `${PACK_SHA}  ${ARCHIVE}\n` },
   { argv: (argv) => script(argv).startsWith(`rm -rf '${DEST}.partial'`) && script(argv).includes('tar --zstd -xf') },
   { argv: (argv) => script(argv).includes(`'${DEST}.partial/bin/crucible' --version`) },
-  { argv: (argv) => script(argv).startsWith(`rm -rf '${DEST}' && mv '${DEST}.partial' '${DEST}'`) && script(argv).includes('sha256=%s') },
+  { argv: (argv) => script(argv).includes('activate_crucible_pack') && script(argv).includes(`_crucible_dest='${DEST}'`) && script(argv).includes('sha256=%s') },
 ];
 
 function collector(): { lines: string[]; steps: string[]; onLine: (line: string, stream: OutputStream, step: string) => void; onStep: (step: InstallStep) => void } {
@@ -128,6 +138,9 @@ test('linux: the whole PHASE14 sequence, each step by name, the token redacted e
     { argv: N(CRUCIBLE_BIN, 'install', 'llm', '--verbose'), lines: [['  downloading llm pack', 'stdout'], ['installed in 400s', 'stdout']] },
     { argv: N(CRUCIBLE_BIN, 'install', 'tts', '--narrator-engine', 'higgs-v3', '--verbose'), lines: [['installed in 300s', 'stdout']] },
     { argv: N(CRUCIBLE_BIN, 'service', 'install'), lines: [['enabled and started crucible.service', 'stdout']] },
+    { argv: N(CRUCIBLE_BIN, 'local', 'register') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'install-desktop') },
     { argv: N(CRUCIBLE_BIN, 'capability', '--write'), lines: [['recorded in /home/owen/.crucible/config.toml', 'stdout']] },
   ];
   const runner = linuxRunner(expectations);
@@ -146,7 +159,7 @@ test('linux: the whole PHASE14 sequence, each step by name, the token redacted e
   runner.assertDrained();
 
   assert.deepEqual(result.steps.map((s) => `${s.name}:${s.status}`), [
-    'host-facts:ok', 'server-pack:ok', 'init:ok', 'install-llm:ok', 'install-tts:ok', 'service-install:ok', 'capability-write:ok',
+    'host-facts:ok', 'server-pack:ok', 'init:ok', 'install-llm:ok', 'install-tts:ok', 'service-install:ok', 'local-register:ok', 'local-install-cli:ok', 'local-install-desktop:ok', 'capability-write:ok',
   ]);
   assert.deepEqual(result.server, { name: 'crucible@owens-pc-wsl', url: 'http://127.0.0.1:7100', configPath: CONFIG_PATH });
   assert.equal(result.release, '0.6.0');
@@ -178,6 +191,9 @@ test('the pack download happens with the machine\'s own tools: curl, sha256sum, 
     MANIFEST,
     ...PACK_FETCH,
     { argv: N(CRUCIBLE_BIN, 'service', 'install') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'register') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'install-desktop') },
     { argv: N(CRUCIBLE_BIN, 'capability', '--write') },
   ], HAS_CONFIG);
   await install({ jobTypes: ['echo'], onLine: c.onLine }, runner);
@@ -193,7 +209,7 @@ test('the pack download happens with the machine\'s own tools: curl, sha256sum, 
   }
   assert.ok(commands.includes(`sha256sum ${ARCHIVE}`), 'the digest is computed beside the archive');
   assert.ok(commands.some((line) => line.includes(`tar --zstd -xf '${ARCHIVE}' -C '${DEST}.partial'`)));
-  assert.ok(commands.some((line) => line.includes(`mv '${DEST}.partial' '${DEST}'`)), 'the unpack is renamed into place, never unpacked over');
+  assert.ok(commands.some((line) => line.includes(`_crucible_dest='${DEST}'`) && line.includes('mv "$_crucible_partial" "$_crucible_dest"')), 'the unpack is renamed into place, never unpacked over');
 });
 
 test('a pack whose stamp already matches the manifest is skipped, and nothing is downloaded', async () => {
@@ -202,6 +218,9 @@ test('a pack whose stamp already matches the manifest is skipped, and nothing is
     { argv: PROBE(), stdout: GUEST_INSTALLED },
     MANIFEST,
     { argv: N(CRUCIBLE_BIN, 'service', 'install') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'register') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'install-desktop') },
     { argv: N(CRUCIBLE_BIN, 'capability', '--write') },
   ], HAS_CONFIG);
   const result = await install({ jobTypes: ['echo'], onLine: c.onLine }, runner);
@@ -271,6 +290,9 @@ test('init is skipped when a config already exists, and its token is kept', asyn
     MANIFEST,
     { argv: N(CRUCIBLE_BIN, 'install', 'asr', '--verbose') },
     { argv: N(CRUCIBLE_BIN, 'service', 'install') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'register') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'install-desktop') },
     { argv: N(CRUCIBLE_BIN, 'capability', '--write') },
   ], HAS_CONFIG);
   const result = await install({ jobTypes: ['asr', 'echo'], onLine: c.onLine }, runner);
@@ -334,6 +356,9 @@ test('{home} travels as CRUCIBLE_HOME into every crucible verb, and {bind} into 
     MANIFEST,
     { argv: (argv) => argv.slice(0, 2).join(' ') === `${CRUCIBLE} init` && argv[2] === '--token' && argv.slice(4).join(' ') === '--host 0.0.0.0 --port 7200 --enable-echo', env: ENV },
     { argv: N(CRUCIBLE, 'service', 'install'), env: ENV },
+    { argv: N(CRUCIBLE, 'local', 'register'), env: ENV },
+    { argv: N(CRUCIBLE, 'local', 'install-cli'), env: ENV },
+    { argv: N(CRUCIBLE, 'local', 'install-desktop'), env: ENV },
     { argv: N(CRUCIBLE, 'capability', '--write'), env: ENV },
   ]);
   let written = false;
@@ -367,6 +392,9 @@ test('darwin: the same steps run natively, shasum instead of sha256sum, no linge
     { argv: (argv) => argv[1] === 'init' },
     { argv: ['/Users/owen/.crucible/server/bin/crucible', 'install', 'llm', '--verbose'] },
     { argv: ['/Users/owen/.crucible/server/bin/crucible', 'service', 'install'] },
+    { argv: ['/Users/owen/.crucible/server/bin/crucible', 'local', 'register'] },
+    { argv: ['/Users/owen/.crucible/server/bin/crucible', 'local', 'install-cli'] },
+    { argv: ['/Users/owen/.crucible/server/bin/crucible', 'local', 'install-desktop'] },
     { argv: ['/Users/owen/.crucible/server/bin/crucible', 'capability', '--write'] },
   ]);
   // The config read on darwin is a file read, not a call: absent before init, present after.

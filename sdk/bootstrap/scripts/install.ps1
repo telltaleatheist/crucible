@@ -32,7 +32,7 @@
 
 [CmdletBinding()]
 param(
-  [string]$Release = '0.6.0',
+  [string]$Release = '0.6.1',
   [string]$Root = "$env:LOCALAPPDATA\Crucible",
   # The inverse. `crucible uninstall` does the work inside the home; this
   # script removes the host pack, because this script is what unpacked it.
@@ -45,6 +45,8 @@ param(
 # Continue, not Stop: every call below is a native program whose exit code
 # is checked explicitly, and Windows PowerShell 5.1 turns a native command writing to stderr into a terminating error under Stop.
 $ErrorActionPreference = "Continue"
+$Root = [System.IO.Path]::GetFullPath($Root)
+$env:CRUCIBLE_HOME = $Root
 $HostDir = Join-Path $Root 'host'
 $DownloadDir = Join-Path $Root 'downloads'
 $Partial = "$HostDir.partial"
@@ -54,6 +56,11 @@ $Pythonw = Join-Path $HostDir "pythonw.exe"
 
 function Say($m) { Write-Host "crucible: $m" }
 function Die($m) { Write-Host "crucible: $m" -ForegroundColor Red; exit 1 }
+$Previous = "$HostDir.previous"
+foreach ($target in @($HostDir, $Partial, $Previous, $DownloadDir)) {
+  $absolute = [System.IO.Path]::GetFullPath($target)
+  if (-not $absolute.StartsWith($Root.TrimEnd("\") + "\", [System.StringComparison]::OrdinalIgnoreCase)) { Die "unsafe_install_path: $absolute is outside $Root" }
+}
 
 # --- 0. this machine can hold the host -----------------------------------
 # 64-bit x86 only: the pinned interpreter is
@@ -183,8 +190,24 @@ if ($have -eq $pack.sha256 -and (Test-Path $Cmd)) {
   # (PHASE15-HOST.md 4.4, and PHASE14 7.2a for the POSIX half of it).
   & (Join-Path $Partial "crucible.cmd") --version | Out-Null
   if ($LASTEXITCODE -ne 0) { Die "pack_unpack_failed: crucible.cmd in $Partial would not run" }
-  if (Test-Path $HostDir) { Remove-Item $HostDir -Recurse -Force }
-  Move-Item $Partial $HostDir
+  # Stop with the new staged control code before touching the installed runtime.
+  # A shutdown failure leaves both the old runtime and verified staging intact.
+  if (Test-Path -LiteralPath $Previous) { Die "upgrade_recovery_required: $Previous exists from an interrupted upgrade; restore or inspect it before retrying" }
+  if (Test-Path -LiteralPath $HostDir) {
+    & (Join-Path $Partial "crucible.cmd") local shutdown
+    if ($LASTEXITCODE -ne 0) { Die "upgrade_stop_failed: the old runtime was kept because Crucible did not stop cleanly" }
+    Move-Item -LiteralPath $HostDir -Destination $Previous -ErrorAction Stop
+  }
+  try {
+    Move-Item $Partial $HostDir -ErrorAction Stop
+    & $Cmd --version | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "the installed runtime failed its startup check" }
+  } catch {
+    if ((Test-Path -LiteralPath $Previous) -and (Test-Path -LiteralPath $HostDir) -and -not (Test-Path -LiteralPath $Partial)) { Move-Item -LiteralPath $HostDir -Destination $Partial -ErrorAction Stop }
+    if ((Test-Path -LiteralPath $Previous) -and -not (Test-Path -LiteralPath $HostDir)) { Move-Item -LiteralPath $Previous -Destination $HostDir }
+    Die "upgrade_swap_failed: $_. The previous runtime is retained at $Previous when present."
+  }
+  if (Test-Path -LiteralPath $Previous) { Remove-Item -LiteralPath $Previous -Recurse -Force }
   Set-Content -Path $Stamp -Encoding ascii -Value @("sha256=$($pack.sha256)", "release=$Release")
   Remove-Item $archive -Force
   Say "host-pack: unpacked $($pack.parts.Count) part(s) into $HostDir (Python $($pack.python))"
@@ -194,11 +217,15 @@ if ($have -eq $pack.sha256 -and (Test-Path $Cmd)) {
 # The host OWNS that shortcut (4.1). This script asks for it by verb rather
 # than writing a .lnk of its own, so there is one spelling of what it points
 # at and one place that changes when it moves.
-& $Cmd host --install-startup
-if ($LASTEXITCODE -ne 0) { Die "the Startup item could not be written (crucible host --install-startup exited $LASTEXITCODE)" }
+foreach ($action in @("register", "install-cli", "install-desktop")) {
+  & $Cmd local $action
+  if ($LASTEXITCODE -ne 0) { Die "local setup failed: $action (exit $LASTEXITCODE)" }
+}
 
 # --- 7. start the host, and stop ------------------------------------------
 # pythonw, not the .cmd: a tray program has no console window (4.1).
 Say "starting the tray"
 Start-Process -WindowStyle Hidden -FilePath $Pythonw -ArgumentList "-m","crucible.cli","host"
-Say "Crucible is in your notification area. Open its menu to install the WSL2 engine."
+& $Cmd local start
+if ($LASTEXITCODE -ne 0) { Die "Crucible installed but did not become ready. Run crucible local status for the named failure." }
+Say "Crucible is ready in your notification area. The Windows engine works now; the optional Linux engine is available from its console."

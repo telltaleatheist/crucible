@@ -40,6 +40,8 @@ reads the two catalogs every time rather than carrying a list across.
 from __future__ import annotations
 
 import base64
+import re
+import shlex
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -202,6 +204,8 @@ class EngineInstall:
         elevate: bool = True,
         windows_catalog: CatalogPort | None = None,
         guest_catalog: CatalogPort | None = None,
+        stop_windows_server: Callable[[], None] | None = None,
+        switch_pairing: Callable[[], None] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -220,6 +224,8 @@ class EngineInstall:
         #: is nothing on this machine to move.
         self._windows = windows_catalog
         self._guest = guest_catalog
+        self._stop_windows_callback = stop_windows_server
+        self._switch_pairing_callback = switch_pairing
         self._monotonic = monotonic
         self._sleep = sleep
         self._index = 0
@@ -390,25 +396,55 @@ class EngineInstall:
         listed = self._runner.run(["wsl.exe", "-l", "-v"], timeout_s=QUICK_TIMEOUT_SECONDS)
         from .presence import parse_wsl_list
 
-        if listed.ok and self._distro in parse_wsl_list(listed.stdout):
+        if not listed.ok:
+            raise self._fail("wsl_read_failed", listed.said())
+        if self._distro in parse_wsl_list(listed.stdout):
+            marked = self._runner.run(
+                ["wsl.exe", "-d", self._distro, "--exec", "cat", "/etc/wsl.conf"],
+                timeout_s=QUICK_TIMEOUT_SECONDS,
+            )
+            if not marked.ok or "# crucible-rootfs" not in marked.stdout:
+                raise self._fail("distro_unmarked", f'The existing "{self._distro}" distro is not marked as a Crucible image; it was left untouched')
             self._line(f'"{self._distro}" is already imported')
             self._finish("import-distro", f'"{self._distro}" was already there')
             return
-        raise self._fail(
-            "no_crucible_distro",
-            f'the "{self._distro}" distro is not on this machine and importing it '
-            "needs the rootfs asset this release does not publish yet "
-            "(crucible-rootfs-<version>.tar.zst, PHASE14 4b). "
-            "`sdk/bootstrap/scripts/build-rootfs.sh` is what CI runs to make it; "
-            "until a release carries it there is nothing to import, and this step "
-            "refuses rather than importing somebody else's image.",
-        )
+        from .wsl_states import ROOTFS_ASSET_TEMPLATE, RELEASE_REPOSITORY, WSL_CONF_MARKER
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?", self._release):
+            raise self._fail("invalid_release", "The rootfs release must be a version")
+        asset = ROOTFS_ASSET_TEMPLATE.replace("{version}", self._release)
+        base = f"https://github.com/{RELEASE_REPOSITORY}/releases/download/v{self._release}"
+        downloads, destination = self._home / "downloads", self._home / "wsl"
+        downloads.mkdir(parents=True, exist_ok=True)
+        destination.mkdir(parents=True, exist_ok=True)
+        if any(destination.iterdir()):
+            raise self._fail("distro_import_incomplete", f"{destination} is not empty but no distro is registered. Its files were kept for recovery")
+        archive = downloads / asset
+        self._line(f"Downloading the verified Crucible Linux image for {self._release}")
+        fetched = self._runner.run(["curl.exe", "-fL", "--retry", "3", "-o", str(archive), f"{base}/{asset}"], timeout_s=3600)
+        digest = self._runner.run(["curl.exe", "-fsSL", "--retry", "3", f"{base}/{asset}.sha256"], timeout_s=300) if fetched.ok else fetched
+        if not fetched.ok or not digest.ok:
+            raise self._fail("rootfs_download_failed", f"The release's rootfs or checksum could not be downloaded: {digest.said()}")
+        want = digest.stdout.split()[0].lower() if digest.stdout.split() else ""
+        hashed = self._runner.run(["certutil", "-hashfile", str(archive), "SHA256"], timeout_s=300)
+        candidates = [line.replace(" ", "").strip().lower() for line in hashed.stdout.splitlines()]
+        if not re.fullmatch(r"[0-9a-f]{64}", want) or not hashed.ok or want not in candidates:
+            raise self._fail("pack_sha_mismatch", "The downloaded rootfs does not match the release checksum; no distro was imported")
+        imported = self._runner.run(["wsl.exe", "--import", self._distro, str(destination), str(archive), "--version", "2"], timeout_s=IMPORT_TIMEOUT_SECONDS)
+        if not imported.ok:
+            raise self._fail("distro_import_failed", imported.said())
+        marked = self._runner.run(["wsl.exe", "-d", self._distro, "--exec", "cat", "/etc/wsl.conf"], timeout_s=300)
+        if not marked.ok or WSL_CONF_MARKER not in marked.stdout:
+            raise self._fail("distro_import_invalid", "The imported image did not contain its ownership marker; it was preserved for inspection")
+        self._finish("import-distro", f'Imported the verified {asset} as "{self._distro}"')
 
     def _guest_install(self) -> None:
         """`install.sh`, inside the distro. The guest half has ONE owner."""
         self._step("guest-install")
         script = (
-            f"CRUCIBLE_RELEASE={self._release} curl -fsSL {self._install_sh_url} | sh"
+            'export XDG_RUNTIME_DIR="/run/user/$(id -u)"; '
+            'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"; '
+            f"curl -fsSL {shlex.quote(self._install_sh_url)} -o /tmp/crucible-install.sh "
+            f"&& sh /tmp/crucible-install.sh --release {shlex.quote(self._release)}"
         )
         result = self._stream_guest(["bash", "-c", script], GUEST_INSTALL_TIMEOUT_SECONDS)
         if not result.ok:
@@ -475,6 +511,26 @@ class EngineInstall:
                 f"(`crucible init --config-from` exited {result.code}): {result.said()}. "
                 "Every app that paired with this machine would have to pair again.",
             )
+        restarted = self._stream_guest([
+            "bash", "-c", 'export XDG_RUNTIME_DIR="/run/user/$(id -u)"; '
+            'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"; '
+            '"$HOME/.crucible/server/bin/crucible" capability --write && '
+            '"$HOME/.crucible/server/bin/crucible" service stop && '
+            '"$HOME/.crucible/server/bin/crucible" service start',
+        ], QUICK_TIMEOUT_SECONDS)
+        if not restarted.ok:
+            raise self._fail("guest_restart_failed", restarted.said())
+        if self._guest is not None:
+            # A guest catalog request proves the migrated token is actually live.
+            deadline = self._monotonic() + 30
+            while True:
+                try:
+                    self._guest.installed_subjects()
+                    break
+                except HostError:
+                    if self._monotonic() >= deadline:
+                        raise self._fail("guest_authentication_failed", "The restarted guest did not accept the migrated token")
+                    self._sleep(0.5)
         self._finish("migrate-config", "the Windows token, routes and upstreams are the guest's now")
 
     def _install_job_types(self) -> None:
@@ -616,53 +672,33 @@ class EngineInstall:
                 )
 
     def _lan_door(self) -> None:
-        """4.1: the Windows-side forward that makes the LAN pairing lines true."""
+        """Installing an engine is not consent to expose it on every interface."""
         self._step("lan-door")
-        door = landoor.detect(self._runner)
-        self._line(f"lan door ({door.mechanism}): {door.detail}")
-        if door.open:
-            self._finish("lan-door", door.detail)
-            return
-        if not self._elevate:
-            self._line(
-                "elevation is off for this run, so the LAN forward was not added: "
-                + " ".join(landoor.add_argv()),
-                "stderr",
-            )
-            self._finish("lan-door", door.detail)
-            return
-        self._line(landoor.ELEVATION_SENTENCE)
-        result = self._runner.run(
-            elevated(landoor.add_argv()), timeout_s=QUICK_TIMEOUT_SECONDS
+        self._finish(
+            "lan-door",
+            "Local engine access is ready. Network sharing is optional and must be "
+            "enabled explicitly; installation changes no port forwards or firewall rules.",
         )
-        if not result.ok:
-            # NOT a failure of the move. The engine works; other devices cannot
-            # reach it yet, which is a sentence rather than a rollback.
-            self._line(
-                "the LAN forward was not added "
-                f"({result.said()}); the engine works and only this computer can "
-                "reach it. The tray can try again.",
-                "stderr",
-            )
-        self._finish("lan-door", door.detail, argv=list(landoor.add_argv()))
 
     def _stop_windows_server(self) -> None:
         """4.7: the Windows engine stops only after the guest is serving."""
         self._step("stop-windows-server")
+        if self._stop_windows_callback is None:
+            raise self._fail("host_switch_unavailable", "The host did not provide its native-engine shutdown operation")
+        self._stop_windows_callback()
         self._line(
-            "the Windows server is the host's child and `app.py` stops it once "
-            "this sequence returns — the door reports the step so the page can "
-            "expect its server to go away for a few seconds"
+            "The host stopped its native engine; activating the Linux engine."
         )
         self._finish("stop-windows-server", "the host stops its child when this returns")
 
     def _switch_pairing(self) -> None:
         """3.6: the Windows-side pairing file now names the guest's server."""
         self._step("switch-pairing")
+        if self._switch_pairing_callback is None:
+            raise self._fail("host_switch_unavailable", "The host did not provide its guest activation operation")
+        self._switch_pairing_callback()
         self._line(
-            "the pairing file keeps the same line — same token, same host, same "
-            "port (4.3) — because the token was carried over; it is rewritten by "
-            "the host when the guest answers"
+            "The host activated the guest and refreshed local pairing with the carried token."
         )
         self._finish("switch-pairing", "the same line, same token, same host, same port")
 
@@ -677,7 +713,7 @@ class EngineInstall:
         full = ["wsl.exe", "-d", self._distro, "--exec", *argv]
         result = self._runner.run(full, timeout_s=timeout_s)
         for line in result.stdout.splitlines():
-            self._line(line)
+            self._line(re.sub(r"crucible://\S+", "<pairing code redacted>", line))
         for line in result.stderr.splitlines():
             self._line(line, "stderr")
         return result

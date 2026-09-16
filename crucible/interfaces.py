@@ -21,8 +21,8 @@ four ways to produce such a list and three of them produce something else
 
 So this asks **`getifaddrs(3)`** through `ctypes`, which is stdlib, is present
 on `cuda-linux` (glibc) and `mlx-darwin` (libSystem), and is the same call
-`psutil` would have made. Windows is not a backend (`crucible/backend.py`), so
-there is no third implementation to keep in step.
+`psutil` would have made. Windows uses Get-NetIPAddress's structured result;
+it has no getifaddrs C ABI.
 
 WHAT IS EXCLUDED, AND WHY EACH EXCLUSION IS A FACT RATHER THAN A TASTE
 ----------------------------------------------------------------------
@@ -139,6 +139,8 @@ def ipv4_addresses() -> list[str]:
     can present one address twice, and two identical URLs in `/v1/setup` would
     be two identical pairing lines for a person to choose between.
     """
+    if sys.platform == "win32":
+        return _windows_ipv4_addresses()
     libc = _libc()
     head = ctypes.POINTER(_IfAddrs)()
     if libc.getifaddrs(ctypes.byref(head)) != 0:
@@ -169,6 +171,41 @@ def ipv4_addresses() -> list[str]:
     finally:
         libc.freeifaddrs(head)
     return found
+
+
+def _windows_ipv4_addresses() -> list[str]:
+    import ipaddress
+    import json
+    import subprocess
+    script = (
+        "$ErrorActionPreference='Stop'; "
+        "@(Get-NetIPAddress -AddressFamily IPv4 -AddressState Preferred "
+        "| Select-Object -ExpandProperty IPAddress) | ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode:
+            raise InterfaceError(f"Get-NetIPAddress failed: {result.stderr.strip()}")
+        # PowerShell serializes a single item as a scalar, no items as empty.
+        data = json.loads(result.stdout) if result.stdout.strip() else []
+        if isinstance(data, str):
+            data = [data]
+        if not isinstance(data, list):
+            raise ValueError("expected an address list")
+        found = []
+        for value in data:
+            address = ipaddress.IPv4Address(value)
+            if address.is_loopback or address.is_link_local or address.is_unspecified:
+                continue
+            if str(address) not in found:
+                found.append(str(address))
+        return found
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise InterfaceError(f"Windows network interfaces could not be read: {exc}") from exc
 
 
 __all__ = ["InterfaceError", "ipv4_addresses"]

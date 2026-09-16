@@ -48,8 +48,9 @@ from .config import (
     RouteRecord,
     load_config,
     write_config,
+    _advertised,
 )
-from .errors import ApiError
+from .errors import ApiError, ConfigError
 from .jobs.base import utcnow
 from .upstreams import UPSTREAM_NAMES, UpstreamRecord
 
@@ -64,7 +65,7 @@ HISTORY_LIMIT = 20
 #: naming it, rather than ignored: a caller that sent `desktopAllowanceBytes`
 #: believes it changed something.
 PATCH_KEYS: frozenset[str] = frozenset(
-    {"routes", "upstreams", "desktop_allowance_bytes"}
+    {"routes", "upstreams", "desktop_allowance_bytes", "tailscale_advertise"}
 )
 
 
@@ -149,6 +150,7 @@ def document(config: Config) -> dict[str, Any]:
         "upstreams": upstreams,
         "desktop_allowance_bytes": config.desktop_allowance_bytes,
         "backend_kind": config.backend_kind,
+        "tailscale_advertise": list(config.tailscale_advertise),
     }
 
 
@@ -168,6 +170,7 @@ class Resolved:
             entry.capability: entry.model for entry in config.routes
         }
         self.desktop_allowance_bytes = config.desktop_allowance_bytes
+        self.tailscale_advertise = config.tailscale_advertise
         self.removed: set[str] = set()
         self.changed: list[str] = []
         self.touched_routes = False
@@ -319,6 +322,13 @@ def resolve(config: Config, patch: Any) -> Resolved:
             resolved.desktop_allowance_bytes = value
             resolved.changed.append(f"desktop_allowance_bytes = {value}")
 
+    if "tailscale_advertise" in patch:
+        try:
+            resolved.tailscale_advertise = _advertised({"server": {"advertise": patch["tailscale_advertise"]}})
+        except ConfigError as exc:
+            raise ApiError(400, "invalid_request", str(exc), {"field": "tailscale_advertise"}) from exc
+        if resolved.tailscale_advertise != config.tailscale_advertise:
+            resolved.changed.append("tailscale_advertise")
     _validate(resolved)
     return resolved
 
@@ -460,6 +470,8 @@ def apply(config: Config, resolved: Resolved, *, gpu_vendor: str) -> None:
         capability=recomputed_capability(config, resolved, gpu_vendor=gpu_vendor),
         routes=routes,
         upstreams=upstreams,
+        advertise=config.advertise,
+        tailscale_advertise=resolved.tailscale_advertise,
     )
     config.adopt(load_config(config.home))
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,8 @@ def test_init_writes_a_0600_config_with_a_token(
     assert cli.main(["init", "--enable-echo"]) == 0
     path = config_path(home)
     assert path.exists()
-    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":
+        assert oct(path.stat().st_mode & 0o777) == "0o600"
 
     config = load_config(home)
     assert config.backend_kind == "cuda-linux"
@@ -83,7 +85,8 @@ def test_doctor_json_is_healthy_after_init(
     assert report["healthy"] is True
     assert report["problems"] == []
     assert report["backend"]["kind"] == "cuda-linux"
-    assert report["config"]["mode"] == "0o600"
+    if os.name != "nt":
+        assert report["config"]["mode"] == "0o600"
     echo = [entry for entry in report["job_types"] if entry["name"] == "echo"][0]
     assert echo == {
         "name": "echo",
@@ -245,7 +248,7 @@ def test_doctor_reports_one_tts_env_per_narrator_engine(
     assert sorted(report["tts_envs"]) == ["higgs-v3"]
     for engine, entry in report["tts_envs"].items():
         assert entry["installed"] is False
-        assert f"envs/tts-{engine}" in entry["detail"]
+        assert f"envs/tts-{engine}" in entry["detail"].replace("\\", "/")
         assert "crucible install tts" in entry["detail"]
     assert any("tts_env[higgs-v3]" in problem for problem in report["problems"])
 

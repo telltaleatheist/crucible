@@ -96,6 +96,28 @@ class Child(Protocol):
     def wait(self, timeout_s: float) -> int | None: ...
 
 
+class ControlledChild:
+    """An owned engine exits through its lifespan, never TerminateProcess."""
+
+    def __init__(self, process: subprocess.Popen) -> None:
+        self._process = process
+
+    @property
+    def pid(self) -> int:
+        return self._process.pid
+
+    def poll(self) -> int | None:
+        return self._process.poll()
+
+    def terminate(self) -> None:
+        # Idempotent; closing the writer also handles an engine already exiting.
+        if self._process.stdin is not None:
+            self._process.stdin.close()
+
+    def wait(self, timeout_s: float) -> int:
+        return self._process.wait(timeout=timeout_s)
+
+
 class ProcessRunner:
     """The real one. `subprocess` plus `urllib`, and nothing else."""
 
@@ -171,14 +193,17 @@ class ProcessRunner:
         *,
         env: Mapping[str, str] | None = None,
     ) -> Child:
-        return subprocess.Popen(  # type: ignore[return-value]
+        controlled = list(argv)[1:] == ["-m", "crucible.cli", "serve", "--controller-stdin"]
+        child = subprocess.Popen(
             list(argv),
             env=self._child_env(env),
             creationflags=_no_window_flag(self._platform),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if controlled else subprocess.DEVNULL,
         )
+        return ControlledChild(child) if controlled else child  # type: ignore[return-value]
+
 
 
 def _no_window_flag(platform: str) -> int:

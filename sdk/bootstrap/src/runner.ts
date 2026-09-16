@@ -40,6 +40,8 @@ export interface RunResult {
 }
 
 export interface RunOptions {
+  /** Published working directory of an installed control command. */
+  cwd?: string;
   /** Required. There is no call here that may block forever. */
   timeoutMs: number;
   /** Extra environment for the child, merged over the process's own. */
@@ -234,6 +236,7 @@ function launch(
   let child: ChildProcess;
   try {
     child = spawn(program, argv.slice(1), {
+      cwd: options.cwd,
       windowsHide: true,
       env: options.env === undefined ? process.env : { ...process.env, ...options.env },
     });

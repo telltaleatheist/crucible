@@ -1,6 +1,6 @@
 {
   "name": "foundry",
-  "version": "0.6.0+66fd04e88639",
+  "version": "0.6.1+66fd04e88639",
   "job_types": [
     {
       "type": "llm"

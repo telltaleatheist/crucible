@@ -74,6 +74,12 @@ def local_app_data(env: Mapping[str, str]) -> PureWindowsPath:
 
 def crucible_root(env: Mapping[str, str]) -> PureWindowsPath:
     """`%LOCALAPPDATA%\\Crucible` — and the host's `CRUCIBLE_HOME`."""
+    override = env.get("CRUCIBLE_HOME")
+    if override:
+        root = PureWindowsPath(override)
+        if not root.is_absolute():
+            raise HostError("host_invalid_home", "CRUCIBLE_HOME must be an absolute Windows path")
+        return root
     return local_app_data(env) / APPDATA_DIRNAME
 
 

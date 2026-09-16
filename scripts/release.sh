@@ -271,11 +271,13 @@ gh release create "$TAG" \
   --repo "$REPO_SLUG" \
   --target "$HEAD_SHA" \
   --title "$TAG" \
+  --prerelease --latest=false \
   --generate-notes \
   --notes "$NOTES_HEADER" \
   "$SDIST" "$WHEEL" "$TGZ" "$BOOT" \
   "$INSTALL_SH" "$INSTALL_PS1"
 
-echo "release: $TAG created"
+echo "release: $TAG candidate created (prerelease, not latest)"
+echo "release: wait for every pack and rootfs, test fresh native installs, then run python scripts/promote_release.py --tag $TAG --publish --confirmed-install-smoke"
 gh release view "$TAG" --repo "$REPO_SLUG" --json tagName,url,assets \
   --jq '.tagName + "  " + .url, (.assets[] | "  asset: " + .name + " (" + (.size|tostring) + " bytes)")'

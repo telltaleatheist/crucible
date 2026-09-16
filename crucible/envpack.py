@@ -111,11 +111,11 @@ OWN_CONSOLE_SCRIPT = "crucible"
 #: The tray's two packages, installed into the `host` pack AFTER the wheel and
 #: declared HERE rather than in `pyproject.toml`'s dependencies.
 #:
-#: They are Windows-tray-only — `pystray` draws the icon and menu (4.1/4.2) and
+#: They are desktop-only — `pystray` draws the icon and menu (4.1/4.2) and
 #: `pillow` is what it renders the icon image with — and `pyproject.toml` is
 #: what EVERY pack's server half is built from, so putting them there would
-#: make every Linux and Mac server download and carry a GUI toolkit it can
-#: never open a window with. One list, one place, one reason.
+#: make every headless Linux server carry a GUI toolkit. The Windows host
+#: and macOS server packs include them; Linux packs do not.
 HOST_EXTRA_PACKAGES = ("pystray", "pillow")
 
 #: Split here. GitHub Releases refuses an asset over 2 GiB; 1900 MiB leaves room
@@ -214,7 +214,7 @@ class StandalonePython:
 #: "-shared" so the doc's original spelling cannot creep back.
 #:
 #: 3.11 and not 3.12+, because `requires-python = ">=3.11"` is the floor the
-#: server declares and every recipe in `envs/` was resolved by pip against 3.11
+#: server declares and the original recipes were resolved by pip against 3.11
 #: (`envs/asr/cuda-linux.txt` records one pin that moved for exactly that
 #: reason). Building a pack on 3.12 would resolve a different set than the file
 #: `crucible doctor` checks the env against.
@@ -238,6 +238,18 @@ STANDALONE_PYTHON: dict[str, StandalonePython] = {
         release="20260901",
         asset="cpython-3.11.16+20260901-x86_64-pc-windows-msvc-install_only.tar.gz",
         sha256="6be524fa6752af802146a4adc7d098565425b0b1c166e19a5a7a4c8cccb86bf6",
+    ),
+}
+
+# Recipe-specific interpreters. The CUDA Higgs SGLang recipe declares 3.12
+# through jobenv.EnvSpec; changing the server's interpreter would break other
+# recipes. Digest read from the upstream 20260901 SHA256SUMS on 2026-09-16.
+RECIPE_STANDALONE_PYTHON: dict[tuple[str, str], StandalonePython] = {
+    (CUDA_LINUX, "3.12"): StandalonePython(
+        python_version="3.12.14",
+        release="20260901",
+        asset="cpython-3.12.14+20260901-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        sha256="936c246dfdbbfa7cb22dd01814a21f582a892689fae96b06071a5e433baffa22",
     ),
 }
 
@@ -518,6 +530,27 @@ def pack_target(name: str, backend_kind: str) -> PackTarget:
             f"publishes {sorted(targets)}",
         )
     return found
+
+
+def python_for_target(target: PackTarget) -> StandalonePython:
+    """Select the recipe's interpreter before downloading or resolving packages."""
+    default = STANDALONE_PYTHON[target.backend_kind]
+    required = None
+    if target.job_type == "tts":
+        assert target.narrator_engine is not None
+        required = jobenv.tts_env(target.narrator_engine, target.backend_kind).python_version
+    elif target.job_type == "llm":
+        required = jobenv.llm_env(target.backend_kind).python_version
+    if required is None or default.python_version.startswith(required + "."):
+        return default
+    pin = RECIPE_STANDALONE_PYTHON.get((target.backend_kind, required))
+    if pin is None:
+        raise PackError(
+            "pack_python_unavailable",
+            f"{target.name}/{target.backend_kind} requires Python {required}, "
+            "but no verified standalone interpreter is pinned for that recipe",
+        )
+    return pin
 
 
 def target_for_env_key(key: str, backend_kind: str) -> PackTarget:
@@ -1357,9 +1390,11 @@ def fetch_standalone_python(
     *,
     on_line: Callable[[str], None] | None = None,
     on_progress: ProgressHook | None = None,
+    pin: StandalonePython | None = None,
 ) -> Path:
     """The pinned interpreter archive, verified. Cached so a rebuild is free."""
-    pin = STANDALONE_PYTHON[backend_kind]
+    if pin is None:
+        pin = STANDALONE_PYTHON[backend_kind]
     cache.mkdir(parents=True, exist_ok=True)
     archive = cache / pin.asset
     if archive.is_file() and sha256_of(archive) == pin.sha256:
@@ -1677,7 +1712,7 @@ def build_pack(
     """
     say = on_line if on_line is not None else (lambda line: None)
     require_zstd_tar()
-    pin = STANDALONE_PYTHON[target.backend_kind]
+    pin = python_for_target(target)
     out.mkdir(parents=True, exist_ok=True)
     cache = out / ".cache"
     workspace = out / ".build" / target.name
@@ -1686,7 +1721,7 @@ def build_pack(
     workspace.mkdir(parents=True)
 
     started = time.monotonic()
-    interpreter = fetch_standalone_python(target.backend_kind, cache, on_line=say)
+    interpreter = fetch_standalone_python(target.backend_kind, cache, on_line=say, pin=pin)
     say(f"unpacking {pin.asset}")
     _run(
         [_tool("tar"), "-xzf", str(interpreter), "-C", str(workspace)],
@@ -1721,7 +1756,7 @@ def build_pack(
             f"could not install {wheel} into {root}",
             say,
         )
-        if target.name == HOST_PACK:
+        if target.name == HOST_PACK or (target.name == SERVER_PACK and target.backend_kind == "mlx-darwin"):
             # AFTER the wheel, so a resolver conflict between the tray and the
             # server's own pins fails while the server is already the thing
             # installed — and so the log reads in the order the pack was
@@ -1921,6 +1956,18 @@ def smoke_test(
                 + ". A pack that does not pass is not an asset",
             )
         say(f"smoke: {what} ok ({completed.stdout.strip() or 'no output'})")
+        if target.name in (SERVER_PACK, HOST_PACK):
+            # Installers consume these entrypoints. A version-only probe can
+            # mistakenly bless an older core missing the lifecycle contract.
+            # --help proves parser availability without installing or starting.
+            for action in (None, "register", "install-cli", "install-desktop", "shutdown"):
+                args = [command[0], "local"] + ([] if action is None else [action]) + ["--help"]
+                checked = subprocess.run(args, capture_output=True, text=True, timeout=60, cwd=temporary)
+                if checked.returncode != 0:
+                    detail = (checked.stderr or checked.stdout).strip()
+                    raise PackError("pack_smoke_failed", f"{archive.name} lacks the lifecycle entrypoint "
+                                    f"{' '.join(args[1:])}: {detail}")
+            say("smoke: local lifecycle entrypoints ok")
 
 
 def write_manifest_entry(out: Path, version: str, entry: PackEntry) -> None:

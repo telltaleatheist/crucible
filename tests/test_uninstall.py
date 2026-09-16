@@ -238,8 +238,8 @@ def test_a_real_run_removes_the_state_and_keeps_the_weights(
     assert not (installed_home / "pairing").exists()
     assert not (installed_home / "envs").exists()
     assert not (installed_home / "logs").exists()
-    assert not (installed_home / "jobs").exists()
-    assert not (installed_home / "uploads").exists()
+    assert (installed_home / "jobs" / "j1").exists()
+    assert (installed_home / "uploads").exists()
     for dirname in uninstall.SUBJECT_DIRS.values():
         assert (installed_home / dirname).is_dir(), f"{dirname} is KEPT by default"
     assert plan.kept()["weights_bytes"] == 6000, "six subject dirs, 1000 bytes each"
@@ -386,7 +386,7 @@ def test_a_launchd_uninstall_boots_the_agent_out_and_deletes_the_plist(
     assert not plist.exists()
 
 
-def test_a_service_that_will_not_stop_is_fatal_and_the_rest_still_runs(
+def test_a_service_that_will_not_stop_preserves_its_runtime_and_config(
     installed_home: Path, unit_home: Path
 ) -> None:
     """R6: partial work survives failure, and the exit code carries the failure."""
@@ -395,7 +395,8 @@ def test_a_service_that_will_not_stop_is_fatal_and_the_rest_still_runs(
     )
     plan = uninstall.run(make(installed_home, user_home=unit_home, runner=runner))
     assert [s.name for s in plan.fatal] == ["stop-engine"]
-    assert not (installed_home / "config.toml").exists(), "the rest of the work happened"
+    assert (installed_home / "config.toml").exists(), "a live service must retain its config"
+    assert (installed_home / "envs").exists(), "a live service must retain its runtime"
     assert plan.to_dict()["ok"] is False
 
 

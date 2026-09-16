@@ -13,12 +13,12 @@ reboot, and this is that something.
 THE TARGET IS `pythonw.exe`, NOT `crucible.cmd`
 ------------------------------------------------
 A `.cmd` opens a console window. A login item that flashes a black box on every
-boot is a login item people disable. `pythonw.exe -m crucible.cli host` runs
-the same verb with no console — and `-m crucible.cli` rather than the console
-script for the reason `crucible/service.py`'s `console_script` writes down at
-length, one directory over: the pack's own `Lib\\site-packages` is on the path
-of its own interpreter, and there is no cwd shadowing hazard here because
-`WorkingDirectory` is the pack.
+boot is a login item people disable. The shortcut runs the installed pythonw
+with a small Python entry point that binds CRUCIBLE_HOME before dispatching
+`crucible local tray`. This preserves a custom install location after login,
+when Explorer does not inherit the installer's environment. The pack's own
+`Lib\\site-packages` is on its interpreter's path and WorkingDirectory is the
+pack, so the caller's directory cannot shadow the installed module.
 
 WHY POWERSHELL AND NOT pywin32
 -------------------------------
@@ -34,10 +34,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import PureWindowsPath
+import subprocess
 from typing import Mapping
 
 from .errors import HostError
-from .paths import host_pack_dir, pythonw_path
+from .paths import crucible_root, host_pack_dir, pythonw_path
 from .runner import Runner
 
 #: The file, exactly. One name, so the install verb, the remove verb and the
@@ -51,9 +52,18 @@ STARTUP_SEGMENTS = ("Microsoft", "Windows", "Start Menu", "Programs", "Startup")
 
 SHORTCUT_TIMEOUT_SECONDS = 60.0
 
-#: What the shortcut runs. `crucible host` with no console (see the header).
-SHORTCUT_ARGUMENTS = "-m crucible.cli host"
+#: Description of the separately owned desktop presence.
 SHORTCUT_DESCRIPTION = "Crucible — the engine's presence on this machine"
+
+
+def startup_python(env: Mapping[str, str]) -> str:
+    """Bind login to the installed home, independent of Explorer's environment."""
+    return (
+        "import os,runpy,sys;"
+        f"os.environ['CRUCIBLE_HOME']={str(crucible_root(env))!r};"
+        "sys.argv=['crucible','local','tray'];"
+        "runpy.run_module('crucible.cli',run_name='__main__')"
+    )
 
 
 @dataclass(frozen=True)
@@ -122,7 +132,8 @@ def install_argv(env: Mapping[str, str]) -> list[str]:
     lnk = shortcut_path(env)
     script = (
         f"New-Item -ItemType Directory -Force -Path {_ps_quote(str(lnk.parent))} | Out-Null; "
-        + write_script(str(pythonw_path(env)), SHORTCUT_ARGUMENTS, str(pack), str(lnk))
+        + write_script(str(pythonw_path(env)), subprocess.list2cmdline(["-c", startup_python(env)]),
+                       str(pack), str(lnk))
     )
     return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script]
 
@@ -157,7 +168,7 @@ def install(runner: Runner) -> StartupOutcome:
     return StartupOutcome(
         path=str(lnk),
         changed=True,
-        detail=f"{lnk} now starts `crucible host` at login, with no console window",
+        detail=f"{lnk} now starts Crucible's tray at login, with no console window",
     )
 
 

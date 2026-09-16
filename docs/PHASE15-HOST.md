@@ -16,6 +16,17 @@ that owner is this file). Four builds read it: the server (section 3), the Windo
 (section 4), BookForge (section 5) and Foundry (section 5). A build that needs a name this file
 does not have adds it HERE first, in its own commit, and says so.
 
+**2026-09-16 lifecycle/network amendment:** native Windows remains the default;
+WSL and network sharing are optional. Installation never opens a wildcard LAN
+forward. `GET/PUT /v1/settings` gains `tailscale_advertise: string[]`, a managed
+host projection of dialable HTTP authorities, separate from operator-authored
+`server.advertise`. `/v1/setup` combines both; neither changes the listener bind
+or promises remote reachability. The host owns its Tailscale forward and
+`sharing.json`; publication uses the authenticated settings API even for a WSL
+engine. See `INSTALL-NETWORK-AUDIT-2026-09-16.md` for ownership, recovery, and
+remaining release validation. Uninstall retains jobs/uploads and stops if service
+shutdown/deregistration fails.
+
 ## 0. What is decided, and what it corrects
 
 > **SUPERSEDED IN PART, 2026-09-15 — `docs/PHASE17-ORCHESTRATOR.md`.** Section 4's host

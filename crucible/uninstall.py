@@ -140,14 +140,16 @@ SUBJECT_DIRS: dict[str, str] = {
 }
 
 #: Directories under `CRUCIBLE_HOME` that hold this server's working state.
-#: Removed on every run: a reinstall regenerates all of them, and `jobs/` and
-#: `uploads/` after an uninstall are scratch for a server that is gone.
-STATE_DIRS: tuple[str, ...] = ("logs", "jobs", "uploads", "downloads")
+#: Removed on every run: a reinstall regenerates them. Jobs and uploads are
+#: user data and remain, including partial output from interrupted jobs.
+STATE_DIRS: tuple[str, ...] = ("logs", "downloads")
+USER_DATA_DIRS: tuple[str, ...] = ("jobs", "uploads")
 
 #: Loose files under `CRUCIBLE_HOME` this package writes and can regenerate.
 #: `host.pid` is the tray's lock (`crucible/host/app.py`), the other two are
 #: documents the narrator engine rebuilds on demand.
 STATE_FILES: tuple[str, ...] = (
+    "installation.json",
     "host.pid",
     "narrator-higgs-voices.json",
     "narrator-reference.wav",
@@ -507,8 +509,10 @@ def known_entries() -> set[str]:
         CONFIG_NAME,
         PAIRING_NAME,
         ENVS_DIR,
+        "launcher.json", "sharing.json", "bin",
         *PACK_DIRS,
         *STATE_DIRS,
+        *USER_DATA_DIRS,
         *STATE_FILES,
         *SUBJECT_DIRS.values(),
     }
@@ -548,6 +552,17 @@ def plan(
     running_from = Path(executable if executable is not None else sys.executable)
     steps: list[Step] = []
 
+    # Sharing's engine projection must be withdrawn while the engine is up.
+    # Failed cleanup retains its ownership record and aborts destructive steps.
+    if (home / "sharing.json").is_file():
+        from . import sharing
+        from .host.runner import ProcessRunner
+        steps.append(Step(
+            name="remove-sharing", what="withdraw the owned Tailscale address and forward",
+            action=REMOVE, target=str(home / "sharing.json"),
+            act=lambda: [str(sharing.disable(home, ProcessRunner(platform, env), sharing.Engine(home)))],
+        ))
+
     # 1. STOP. Before anything is deleted: a unit whose ExecStart has gone is a
     #    unit systemd restarts every two seconds (`service.py`'s Restart=always).
     steps.append(_stop_step(mechanism, home, operator_home, runner))
@@ -561,6 +576,22 @@ def plan(
 
     # 3. THE SERVICE ITSELF.
     steps.append(_service_step(mechanism, home, operator_home, env, runner))
+    if platform in ("win32", "darwin") and (home / "installation.json").is_file():
+        steps.append(Step(
+            name="remove-desktop", what="remove Crucible's registered desktop presence",
+            action=REMOVE, target="Crucible desktop registration",
+            act=lambda: _run_or_raise(
+                runner, [str(running_from), "-m", "crucible.cli", "local", "remove-desktop"],
+                "desktop_remove_failed", "the desktop registration could not be removed",
+            ),
+        ))
+    if (home / "launcher.json").is_file():
+        from . import launcher
+        steps.append(Step(
+            name="remove-cli", what="remove the owned CLI launcher and user PATH entry",
+            action=REMOVE, target=str(home / "launcher.json"),
+            act=lambda: launcher.remove(home),
+        ))
 
     # 4. THE ENVS. `crucible install <type>` rebuilds any of them from a pack.
     steps.append(
@@ -619,6 +650,13 @@ def plan(
         )
 
     # 8. THE WEIGHTS — kept unless asked, and the size is said either way.
+    for name in USER_DATA_DIRS:
+        path = home / name
+        if path.exists():
+            steps.append(Step(
+                name=f"keep-data:{name}", what="user inputs and partial job output survive uninstall",
+                action=KEEP, target=str(path), bytes=path_bytes(path),
+            ))
     for kind in catalog.KINDS:
         steps.append(
             _weights_step(home, kind, SUBJECT_DIRS[kind], purge_weights=purge_weights)
@@ -1061,11 +1099,9 @@ def _run_or_raise(
 def run(plan_: Plan) -> Plan:
     """Perform the plan. The same object comes back, with the outcomes filled in.
 
-    A step that raises does not stop the run. R6 — partial work survives
-    failure — is the whole point here: a machine whose systemd unit would not
-    go must still get its config, its envs and its pairing file removed, and
-    the operator must be told which single thing is left. The exit code carries
-    the failure; the other nine steps carry the work.
+    Cleanup continues after independent file failures. Sharing withdrawal and
+    stopping/removing the service are prerequisites: failure there stops the
+    run before it can delete files a live engine is still using.
     """
     plan_.dry_run = False
     for step in plan_.steps:
@@ -1084,6 +1120,10 @@ def run(plan_: Plan) -> Plan:
                 message=message or str(exc),
                 fatal=True,
             )
+            if step.name in ("remove-sharing", "stop-engine", "remove-service"):
+                # A live supervisor may still execute these files. Deleting
+                # them is neither a safe uninstall nor preserving partial work.
+                break
     return plan_
 
 

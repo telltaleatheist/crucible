@@ -37,7 +37,7 @@ function installHalf(sh: string): string {
 test('install.sh walks the same step list, in the same order, with the same names', () => {
   const sh = installHalf(generateInstallSh());
   const names = installSteps(STANDALONE).map((step) => step.name);
-  assert.deepEqual(names, ['host-facts', 'server-pack', 'init', 'service-install', 'linger', 'capability-write']);
+  assert.deepEqual(names, ['host-facts', 'server-pack', 'init', 'service-install', 'local-register', 'local-install-cli', 'local-install-desktop', 'linger', 'capability-write']);
   let at = -1;
   for (const name of names) {
     const found = sh.indexOf(`say "${name}"`);
@@ -165,7 +165,8 @@ test('install.sh uses the same probe script, curl flags and tar flags the TypeSc
   assert.ok(sh.includes(guestProbeScript(undefined)), 'the host probe is ONE script, not two');
   assert.ok(sh.includes(`curl ${CURL_ARGS.join(' ')} -o "$downloads/$part"`));
   assert.ok(sh.includes(`tar ${TAR_ARGS.join(' ')} "$archive" -C "$partial"`));
-  assert.ok(sh.includes('rm -rf "$dest" && mv "$partial" "$dest"'), 'the same rename-into-place');
+  assert.ok(sh.includes('activate_crucible_pack'), 'the shared verified activation transaction');
+  assert.ok(sh.includes('local shutdown || return 1'), 'the runtime is stopped before replacement');
   assert.ok(sh.includes('printf \'sha256=%s\\nrelease=%s\\n\''), 'the same stamp');
 });
 
@@ -214,7 +215,7 @@ test('install.ps1 installs the HOST and stops — it no longer walks 4c itself (
   // app's install() and a hand install alike. A .ps1 that still did it would
   // be the second walk this phase exists to delete.
   const ps1 = generateInstallPs1();
-  const order = ['tar.exe --version', 'pack_not_published', 'pack_disk', 'Get-FileHash', 'Move-Item $Partial $HostDir', 'host --install-startup', 'Start-Process -WindowStyle Hidden'];
+  const order = ['tar.exe --version', 'pack_not_published', 'pack_disk', 'Get-FileHash', 'Move-Item $Partial $HostDir', '& $Cmd local $action', 'Start-Process -WindowStyle Hidden'];
   let at = -1;
   for (const marker of order) {
     const found = ps1.indexOf(marker);
@@ -236,7 +237,7 @@ test('install.ps1 needs no admin, and starts the tray with pythonw rather than t
   assert.match(ps1, /\$Pythonw = Join-Path \$HostDir "pythonw\.exe"/);
   assert.match(ps1, /Start-Process -WindowStyle Hidden -FilePath \$Pythonw -ArgumentList "-m","crucible\.cli","host"/);
   // The Startup item has ONE owner and this script asks for it by verb.
-  assert.match(ps1, /& \$Cmd host --install-startup/);
+  assert.match(ps1, /& \$Cmd local \$action/);
   assert.equal(/New-Object -ComObject WScript\.Shell/.test(ps1), false, 'it does not write a .lnk of its own');
 });
 

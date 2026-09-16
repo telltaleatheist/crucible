@@ -37,6 +37,7 @@ from typing import Any, Protocol
 
 from .errors import HostError
 from .runner import Runner
+from .. import API_VERSION
 
 #: A catalog read is cheap, and a server that will not answer one is a server
 #: this step cannot reason about — so the timeout is short and the failure is
@@ -176,7 +177,7 @@ class HttpCatalog:
         self, method: str, path: str, body: dict[str, Any] | None, timeout_s: float
     ) -> bytes:
         data = None if body is None else json.dumps(body).encode("utf-8")
-        headers = {"Authorization": f"Bearer {self._token}"}
+        headers = {"Authorization": f"Bearer {self._token}", "X-Crucible-Api": str(API_VERSION)}
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
@@ -258,6 +259,8 @@ class GuestCatalog:
             method,
             "-H",
             f"Authorization: Bearer {self._token}",
+            "-H",
+            f"X-Crucible-Api: {API_VERSION}",
             "-w",
             f"{self.STATUS_MARK}%{{http_code}}",
         ]

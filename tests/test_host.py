@@ -656,7 +656,8 @@ def test_the_shortcut_points_at_pythonw_and_never_at_the_cmd() -> None:
     script = argv[-1]
     assert r"\host\pythonw.exe" in script
     assert "crucible.cmd" not in script
-    assert "-m crucible.cli host" in script
+    assert "runpy.run_module" in script
+    assert "local" in script and "tray" in script
     assert argv[0] == "powershell.exe"
     assert "WScript.Shell" in script
 
@@ -667,6 +668,23 @@ def test_install_startup_is_idempotent_because_CreateShortcut_rewrites() -> None
     second = startup.install(runner)
     assert first.path == second.path
     assert runner.calls[0] == runner.calls[1]
+
+
+def test_login_preserves_custom_home_without_inherited_environment(monkeypatch) -> None:
+    import os
+    import runpy
+    import sys
+    home = r"E:\Crucible installs\Owen's engine"
+    env = dict(WINDOWS_ENV, CRUCIBLE_HOME=home)
+    monkeypatch.delenv("CRUCIBLE_HOME", raising=False)
+    monkeypatch.setattr(sys, "argv", [])
+    calls = []
+    monkeypatch.setattr(runpy, "run_module", lambda module, **kwargs:
+                        calls.append((module, kwargs, os.environ["CRUCIBLE_HOME"], list(sys.argv))))
+    # Execute the shortcut's Python source without launching a real engine.
+    exec(startup.startup_python(env), {})
+    assert calls == [("crucible.cli", {"run_name": "__main__"}, home, ["crucible", "local", "tray"])]
+    monkeypatch.delenv("CRUCIBLE_HOME")
 
 
 def test_the_remove_script_is_powershell_that_parses(monkeypatch) -> None:
@@ -828,7 +846,7 @@ def test_mirrored_networking_needs_no_forward_and_says_so() -> None:
     runner = Scripted(answers={"type": ok("[wsl2]\nnetworkingMode=mirrored\n")})
     door = landoor.detect(runner)
     assert door.mechanism == landoor.MIRRORED
-    assert door.open is True
+    assert door.open is False
     assert not any("netsh" in " ".join(call) for call in runner.calls)
 
 
@@ -968,7 +986,7 @@ def test_a_missing_rootfs_refuses_rather_than_importing_somebody_elses_image(
     )
     with pytest.raises(HostError) as caught:
         walk.run()
-    assert caught.value.code == "no_crucible_distro"
+    assert caught.value.code == "pack_sha_mismatch"
     assert "rootfs" in caught.value.message
 
 
@@ -2963,6 +2981,7 @@ def test_a_stop_with_no_uid_touches_nothing(tmp_path: Path) -> None:
     context.presence = presence.Presence(
         Distro.PRESENT, Engine.RUNNING, "up", Owner.WSL_UNIT
     )
-    app_module.Host(context)._stop_engine()
+    with pytest.raises(HostError, match="engine_stop_failed"):
+        app_module.Host(context)._stop_engine()
     assert not any("systemctl" in " ".join(call) for call in runner.calls)
     assert "stop: NOT RUN" in (tmp_path / "host.log").read_text(encoding="utf-8")

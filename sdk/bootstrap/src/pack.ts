@@ -45,6 +45,27 @@ export const HOST_SUBDIR = 'host';
 export const DOWNLOADS_SUBDIR = 'downloads';
 /** The half-unpacked tree's suffix. Renamed onto the real path only when tar exits 0. */
 export const PARTIAL_SUFFIX = '.partial';
+
+/** Shared activation transaction used by app installs and generated install.sh.
+ * Arguments are shell expressions (already quoted), never untrusted raw paths.
+ */
+export function activatePackSh(dest: string, partial: string): string {
+  return `activate_crucible_pack() {\n`
+    + `  _crucible_dest=${dest}; _crucible_partial=${partial}; _crucible_previous="$_crucible_dest.previous"\n`
+    + `  if [ -e "$_crucible_previous" ]; then echo "upgrade_recovery_required: $_crucible_previous was preserved from an interrupted upgrade" >&2; return 1; fi\n`
+    + `  if [ -e "$_crucible_dest" ]; then\n`
+    + `    "$_crucible_partial/bin/crucible" local shutdown || return 1\n`
+    + `    mv "$_crucible_dest" "$_crucible_previous" || return 1\n`
+    + `  fi\n`
+    + `  if mv "$_crucible_partial" "$_crucible_dest" && "$_crucible_dest/bin/crucible" --version; then\n`
+    + `    rm -rf "$_crucible_previous" || return 1\n`
+    + `  else\n`
+    + `    if [ -e "$_crucible_dest" ] && [ ! -e "$_crucible_partial" ]; then mv "$_crucible_dest" "$_crucible_partial" || return 1; fi\n`
+    + `    if [ -e "$_crucible_previous" ]; then mv "$_crucible_previous" "$_crucible_dest" || return 1; fi\n`
+    + `    echo "upgrade_activation_failed: the previous runtime was preserved" >&2; return 1\n`
+    + `  fi\n`
+    + `}\nactivate_crucible_pack`;
+}
 /** `<CRUCIBLE_HOME>/server/.pack` — `sha256=` and `release=`, the two facts that say what this tree is. */
 export const STAMP_NAME = '.pack';
 
@@ -355,7 +376,7 @@ export async function installPack(
 
   await run(
     'install',
-    `rm -rf ${shellQuote(paths.dest)} && mv ${shellQuote(paths.partial)} ${shellQuote(paths.dest)}`
+    activatePackSh(shellQuote(paths.dest), shellQuote(paths.partial))
       + ` && printf 'sha256=%s\\nrelease=%s\\n' ${shellQuote(entry.sha256)} ${shellQuote(options.release)} > ${shellQuote(paths.stamp)}`
       + ` && rm -f ${shellQuote(paths.archive)}`,
     'pack_unpack_failed',

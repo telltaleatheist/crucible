@@ -25,7 +25,7 @@
 
 set -eu
 
-RELEASE="${CRUCIBLE_RELEASE:-0.6.0}"
+RELEASE="${CRUCIBLE_RELEASE:-0.6.1}"
 
 say() { printf 'crucible: %s\n' "$*"; }
 die() { printf 'crucible: %s\n' "$*" >&2; exit 1; }
@@ -188,11 +188,30 @@ if [ -n "$FROM_SOURCE" ]; then
   rm -rf "$src"
   git clone --filter=blob:none "https://github.com/telltaleatheist/crucible" "$src" || die "from_source_clone_failed: https://github.com/telltaleatheist/crucible"
   git -C "$src" checkout --detach "$FROM_SOURCE" || die "from_source_ref_unknown: the checkout has no ref called $FROM_SOURCE"
-  rm -rf "$dest"
-  python3 -m venv "$dest" || die "from_source_venv_failed: python3 -m venv would not make $dest"
-  "$dest/bin/python" -m pip install --upgrade pip setuptools wheel || die "from_source_install_failed: pip would not update itself in $dest"
-  "$dest/bin/python" -m pip install "$src" || die "from_source_install_failed: pip would not install $src into $dest"
-  "$dest/bin/crucible" --version >/dev/null || die "from_source_install_failed: $dest/bin/crucible would not run"
+  partial="$dest.partial"
+  rm -rf "$partial"
+  python3 -m venv "$partial" || die "from_source_venv_failed: python3 -m venv would not make $partial"
+  "$partial/bin/python" -m pip install --upgrade pip setuptools wheel || die "from_source_install_failed: pip would not update itself in $partial"
+  "$partial/bin/python" -m pip install "$src" || die "from_source_install_failed: pip would not install $src into $partial"
+  if [ "$(uname -s)" = Darwin ]; then "$partial/bin/python" -m pip install pystray pillow || die "from_source_install_failed: desktop packages could not be installed"; fi
+  "$partial/bin/python" -c 'from pathlib import Path; import sys; from crucible.envpack import relocate_console_scripts; relocate_console_scripts(Path(sys.argv[1]))' "$partial" || die "from_source_install_failed: console scripts could not be relocated"
+  "$partial/bin/crucible" --version >/dev/null || die "from_source_install_failed: $partial/bin/crucible would not run"
+  activate_crucible_pack() {
+    _crucible_dest="$dest"; _crucible_partial="$partial"; _crucible_previous="$_crucible_dest.previous"
+    if [ -e "$_crucible_previous" ]; then echo "upgrade_recovery_required: $_crucible_previous was preserved from an interrupted upgrade" >&2; return 1; fi
+    if [ -e "$_crucible_dest" ]; then
+      "$_crucible_partial/bin/crucible" local shutdown || return 1
+      mv "$_crucible_dest" "$_crucible_previous" || return 1
+    fi
+    if mv "$_crucible_partial" "$_crucible_dest" && "$_crucible_dest/bin/crucible" --version; then
+      rm -rf "$_crucible_previous" || return 1
+    else
+      if [ -e "$_crucible_dest" ] && [ ! -e "$_crucible_partial" ]; then mv "$_crucible_dest" "$_crucible_partial" || return 1; fi
+      if [ -e "$_crucible_previous" ]; then mv "$_crucible_previous" "$_crucible_dest" || return 1; fi
+      echo "upgrade_activation_failed: the previous runtime was preserved" >&2; return 1
+    fi
+  }
+  activate_crucible_pack || die "from_source_install_failed: runtime activation failed; previous runtime preserved"
   printf 'sha256=%s\nrelease=%s\n' "from-source" "$(git -C "$src" rev-parse HEAD)" > "$dest/.pack"
   CRUCIBLE="$dest/bin/crucible"
   say "server-pack: built $("$CRUCIBLE" --version) from $(git -C "$src" rev-parse --short HEAD)"
@@ -227,7 +246,22 @@ else
     rm -rf "$partial" && mkdir -p "$partial"
     tar --zstd -xf "$archive" -C "$partial" || die "pack_unpack_failed: tar would not open $archive"
     "$partial/bin/crucible" --version >/dev/null || die "pack_unpack_failed: $partial/bin/crucible would not run"
-    rm -rf "$dest" && mv "$partial" "$dest"
+    activate_crucible_pack() {
+    _crucible_dest="$dest"; _crucible_partial="$partial"; _crucible_previous="$_crucible_dest.previous"
+    if [ -e "$_crucible_previous" ]; then echo "upgrade_recovery_required: $_crucible_previous was preserved from an interrupted upgrade" >&2; return 1; fi
+    if [ -e "$_crucible_dest" ]; then
+      "$_crucible_partial/bin/crucible" local shutdown || return 1
+      mv "$_crucible_dest" "$_crucible_previous" || return 1
+    fi
+    if mv "$_crucible_partial" "$_crucible_dest" && "$_crucible_dest/bin/crucible" --version; then
+      rm -rf "$_crucible_previous" || return 1
+    else
+      if [ -e "$_crucible_dest" ] && [ ! -e "$_crucible_partial" ]; then mv "$_crucible_dest" "$_crucible_partial" || return 1; fi
+      if [ -e "$_crucible_previous" ]; then mv "$_crucible_previous" "$_crucible_dest" || return 1; fi
+      echo "upgrade_activation_failed: the previous runtime was preserved" >&2; return 1
+    fi
+  }
+  activate_crucible_pack || die "pack_activation_failed: the previous runtime was preserved"
     printf 'sha256=%s\nrelease=%s\n' "$want_sha" "$RELEASE" > "$dest/.pack"
     rm -f "$archive"
   fi
@@ -268,6 +302,21 @@ fi
 # write the systemd unit (or the launchd plist) and start it
 say "service-install"
 "$CRUCIBLE" 'service' 'install' || die "step_failed: service-install"
+
+# --- local-register ------------------------------------------------------
+# publish and configure the local Crucible register
+say "local-register"
+"$CRUCIBLE" 'local' 'register' || die "step_failed: local-register"
+
+# --- local-install-cli ---------------------------------------------------
+# publish and configure the local Crucible install-cli
+say "local-install-cli"
+"$CRUCIBLE" 'local' 'install-cli' || die "step_failed: local-install-cli"
+
+# --- local-install-desktop -----------------------------------------------
+# publish and configure the local Crucible install-desktop
+say "local-install-desktop"
+"$CRUCIBLE" 'local' 'install-desktop' || die "step_failed: local-install-desktop"
 
 # --- linger --------------------------------------------------------------
 # make the service survive a logout

@@ -257,6 +257,8 @@ class Config:
     #: positional argument` in four llama-engine tests. `()` is the honest
     #: default anyway: nothing forwards here unless somebody says so.
     advertise: tuple[str, ...] = ()
+    # A host-owned projection, kept separate from operator-authored addresses.
+    tailscale_advertise: tuple[str, ...] = ()
     flags_absent: tuple[str, ...] = ()
     #: What `crucible capability` decided on this host, or None when nothing has
     #: decided anything here yet — a config written by `crucible init` alone, or
@@ -412,7 +414,19 @@ def _advertised(table: dict[str, Any]) -> tuple[str, ...]:
                 f"config [server] advertise: {entry!r} carries a path; an address "
                 "an app dials has nowhere to put one"
             )
-        cleaned.append(authority)
+        from urllib.parse import urlsplit
+        try:
+            parsed = urlsplit("http://" + authority)
+            port = parsed.port
+            if (not parsed.hostname or parsed.username is not None or parsed.password is not None
+                    or parsed.query or parsed.fragment or any(c.isspace() for c in authority)
+                    or "\\" in authority or parsed.hostname in ("0.0.0.0", "::")
+                    or (port is not None and not 1 <= port <= 65535)):
+                raise ValueError("not a dialable authority")
+        except ValueError as exc:
+            raise ConfigError(f"config [server] advertise: invalid authority {entry!r}: {exc}") from exc
+        if authority not in cleaned:
+            cleaned.append(authority)
     return tuple(cleaned)
 
 
@@ -713,6 +727,7 @@ def load_config(home: Path | None = None) -> Config:
         host=_require(table, "server", "host", str),
         port=_require(table, "server", "port", int),
         advertise=_advertised(table),
+        tailscale_advertise=_advertised({"server": {"advertise": table.get("server", {}).get("tailscale_advertise", [])}}),
         token=_require(table, "auth", "token", str),
         backend_kind=_require(table, "backend", "kind", str),
         enable_echo=_capability_flag(table, "enable_echo"),
@@ -765,6 +780,8 @@ def write_config(
     #: test pins it.
     routes: tuple[RouteRecord, ...] = (),
     upstreams: tuple[UpstreamRecord, ...] = (),
+    advertise: tuple[str, ...] = (),
+    tailscale_advertise: tuple[str, ...] = (),
     #: Whole top-level tables to copy in VERBATIM, or None.
     #:
     #: `crucible init --config-from` (PHASE15-HOST.md 4.3) is the one caller:
@@ -811,6 +828,10 @@ def write_config(
     }
     if capability is not None:
         document["capability"] = capability.to_dict()
+    if advertise:
+        document["server"]["advertise"] = list(advertise)
+    if tailscale_advertise:
+        document["server"]["tailscale_advertise"] = list(tailscale_advertise)
     if routes:
         # Only when there is one. An empty `[routes]` table and no table at all
         # read the same, and writing the empty one would put a section in every
@@ -837,11 +858,21 @@ def write_config(
                 "else."
             )
         document[table_name] = table
-    # Create with 0600 from the outset so the token is never briefly world-readable.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(tomli_w.dumps(document).encode("utf-8"))
-    os.chmod(path, 0o600)
+    # Serialize before touching the installed file, then replace atomically.
+    # A failed write/reinstall must not truncate the token and provider keys.
+    import tempfile
+    data = tomli_w.dumps(document).encode("utf-8")
+    fd, temporary = tempfile.mkstemp(prefix="config-", suffix=".tmp", dir=home)
+    staged = Path(temporary)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(staged, 0o600)
+        os.replace(staged, path)
+    finally:
+        staged.unlink(missing_ok=True)
     return path
 
 

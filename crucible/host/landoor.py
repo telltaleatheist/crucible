@@ -127,7 +127,8 @@ def has_forward(show_output: str, port: int = ENGINE_PORT) -> bool:
             continue
         if not parts[1].isdigit():
             continue
-        if int(parts[1]) == port and parts[3].isdigit() and int(parts[3]) == port:
+        if (parts[0] == "0.0.0.0" and parts[2] == "127.0.0.1"
+                and int(parts[1]) == port and parts[3].isdigit() and int(parts[3]) == port):
             return True
     return False
 
@@ -148,10 +149,11 @@ def detect(runner: Runner, port: int = ENGINE_PORT) -> LanDoor:
     if mode == MIRRORED:
         return LanDoor(
             mechanism=MIRRORED,
-            open=True,
+            open=False,
             detail=(
-                f"{path} sets networkingMode=mirrored, so the guest is already on "
-                "this machine's interfaces and there is nothing to forward"
+                f"{path} requests mirrored networking. This does not prove the "
+                "active WSL network mode, a non-loopback listener, or firewall access; "
+                "remote reachability has not been tested"
             ),
         )
     shown = runner.run(show_argv(), timeout_s=WSLCONFIG_TIMEOUT_SECONDS)
