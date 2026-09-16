@@ -213,25 +213,6 @@ class Config:
     name: str
     host: str
     port: int
-    #: ADDRESSES SOMETHING ELSE FORWARDS TO THIS SERVER FROM, stated because
-    #: they cannot be derived.
-    #:
-    #: `reachable_urls` answers "where am I" by looking at the bind and, for a
-    #: wildcard, at this machine's own interfaces. That is right and it is
-    #: complete for a server whose reachability is its own. It is NOT complete
-    #: when something outside the server's world creates the reachability: the
-    #: engine in WSL binds 127.0.0.1, correctly says so, and is reachable from
-    #: another machine anyway because `tailscale serve` on the Windows side
-    #: forwards into the guest. The guest cannot see that and never will.
-    #:
-    #: So the fact is DECLARED, once, here — and it is added to what the server
-    #: derives, never substituted for it. The loopback line is what an app on
-    #: this machine needs; this is what an app on another machine needs; both
-    #: are true at the same time and the console offers both.
-    #:
-    #: Empty is the normal case: a server whose bind is already reachable
-    #: (0.0.0.0 on a Mac) enumerates its interfaces and needs no help.
-    advertise: tuple[str, ...]
     token: str
     backend_kind: str
     enable_echo: bool
@@ -250,6 +231,32 @@ class Config:
     #: Empty for a config written by this build. `crucible doctor` prints it, so
     #: "the type is not enabled" and "the config predates the type" are told
     #: apart by a reader rather than guessed at.
+    #: ADDRESSES SOMETHING ELSE FORWARDS TO THIS SERVER FROM, stated because
+    #: they cannot be derived.
+    #:
+    #: `reachable_urls` answers "where am I" by looking at the bind and, for a
+    #: wildcard, at this machine's own interfaces. That is right and it is
+    #: complete for a server whose reachability is its own. It is NOT complete
+    #: when something outside the server's world creates the reachability: the
+    #: engine in WSL binds 127.0.0.1, correctly says so, and is reachable from
+    #: another machine anyway because `tailscale serve` on the Windows side
+    #: forwards into the guest. The guest cannot see that and never will.
+    #:
+    #: So the fact is DECLARED, once, here — and it is added to what the server
+    #: derives, never substituted for it. The loopback line is what an app on
+    #: this machine needs; this is what an app on another machine needs; both
+    #: are true at the same time and the console offers both.
+    #:
+    #: Empty is the normal case: a server whose bind is already reachable
+    #: (0.0.0.0 on a Mac) enumerates its interfaces and needs no help.
+    #:
+    #: DEFAULTED, and placed here with the other defaulted fields for the
+    #: reason dataclasses require: a field with a default cannot precede one
+    #: without. It was briefly required, which broke every construction of a
+    #: Config that is not the parser -- `Config.__init__() missing 1 required
+    #: positional argument` in four llama-engine tests. `()` is the honest
+    #: default anyway: nothing forwards here unless somebody says so.
+    advertise: tuple[str, ...] = ()
     flags_absent: tuple[str, ...] = ()
     #: What `crucible capability` decided on this host, or None when nothing has
     #: decided anything here yet — a config written by `crucible init` alone, or
