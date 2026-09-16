@@ -2744,6 +2744,9 @@ def test_consent_plus_a_readable_unit_is_owner_wsl_unit(
         answers={
             "-l -v": ok(OWENS_PC_LIST),
             "id -u": ok("1000\n"),
+            # No SYSTEM unit in this guest, so the probe falls through to the user
+            # manager — which is the guest shape these tests are about.
+            "-u root --exec systemctl is-enabled": bad("Failed to connect to bus"),
             "is-enabled": ok("enabled\n"),
         },
         pings=[200],
@@ -2766,6 +2769,9 @@ def test_a_unit_that_merely_exists_counts_and_the_exit_code_does_not(
             answers={
                 "-l -v": ok(OWENS_PC_LIST),
                 "id -u": ok("1000\n"),
+                # No SYSTEM unit in this guest, so the probe falls through to the user
+                # manager — which is the guest shape these tests are about.
+                "-u root --exec systemctl is-enabled": bad("Failed to connect to bus"),
                 "is-enabled": RunResult(
                     code=1, stdout=f"{state}\n", stderr="", failure=None
                 ),
@@ -2791,6 +2797,9 @@ def test_consent_with_an_unreadable_unit_stays_found_and_says_why(
             "-l -v": ok(OWENS_PC_LIST),
             "cat ": ok(GUEST_LINE),
             "id -u": ok("1000\n"),
+            # No SYSTEM unit in this guest, so the probe falls through to the user
+            # manager — which is the guest shape these tests are about.
+            "-u root --exec systemctl is-enabled": bad("Failed to connect to bus"),
             "is-enabled": bad("Failed to connect to bus: No such file or directory"),
         },
         pings=[200],
@@ -2812,6 +2821,9 @@ def test_a_unit_that_is_not_there_at_all_stays_found(tmp_path: Path) -> None:
             "-l -v": ok(OWENS_PC_LIST),
             "cat ": ok(GUEST_LINE),
             "id -u": ok("1000\n"),
+            # No SYSTEM unit in this guest, so the probe falls through to the user
+            # manager — which is the guest shape these tests are about.
+            "-u root --exec systemctl is-enabled": bad("Failed to connect to bus"),
             "is-enabled": RunResult(
                 code=1, stdout="not-found\n", stderr="", failure=None
             ),
@@ -3004,6 +3016,9 @@ def test_the_probe_asks_with_the_runtime_directory_and_answers(
         answers={
             "-l -v": ok(OWENS_PC_LIST),
             "id -u": ok("1000\n"),
+            # No SYSTEM unit in this guest, so the probe falls through to the user
+            # manager — which is the guest shape these tests are about.
+            "-u root --exec systemctl is-enabled": bad("Failed to connect to bus"),
             "is-enabled": ok("enabled\n"),
         },
         pings=[200],
@@ -3036,6 +3051,9 @@ def test_a_socket_that_is_truly_absent_is_still_found_with_the_reason(
             "-l -v": ok(OWENS_PC_LIST),
             "cat ": ok(GUEST_LINE),
             "id -u": ok("1000\n"),
+            # No SYSTEM unit in this guest, so the probe falls through to the user
+            # manager — which is the guest shape these tests are about.
+            "-u root --exec systemctl is-enabled": bad("Failed to connect to bus"),
             "is-enabled": bad("Failed to connect to bus: No such file or directory"),
         },
         pings=[200],
@@ -3079,7 +3097,14 @@ def test_an_unreadable_uid_leaves_the_owner_found_and_runs_no_recipe(
     assert probe.readable is False
     assert "could not be read" in probe.detail
     assert watcher.boot().owner is Owner.FOUND
-    assert not any("systemctl" in " ".join(call) for call in runner.calls)
+    # The system probe is a READ — `systemctl is-enabled`, which changes nothing
+    # — and runs before the uid is needed at all. What an unreadable uid must
+    # still prevent is anything that ACTS, which is what "no recipe" means here.
+    assert not any(
+        verb in " ".join(call)
+        for call in runner.calls
+        for verb in ("restart", " start ", "user@1000")
+    )
 
 
 def test_a_recovery_that_needs_a_uid_is_SKIPPED_and_never_guessed(
@@ -3128,3 +3153,68 @@ def test_a_stop_with_no_uid_touches_nothing(tmp_path: Path) -> None:
         app_module.Host(context)._stop_engine()
     assert not any("systemctl" in " ".join(call) for call in runner.calls)
     assert "stop: NOT RUN" in (tmp_path / "host.log").read_text(encoding="utf-8")
+
+
+def test_a_system_unit_guest_is_owned_and_restarted_as_root(
+    host_log: log.HostLog,
+) -> None:
+    """The guest a stock WSL2 gets since 0.6.4, and the door it is reached by.
+
+    WSLg mounts its own tmpfs over /run/user/<uid>, hiding the socket the user
+    manager listens on, so `systemctl --user` cannot be reached at all on an
+    ordinary guest — measured 2026-09-16. The install writes a SYSTEM unit
+    there instead, and this is the probe finding it: no uid to read, no
+    XDG_RUNTIME_DIR to set, and the restart goes through the same door.
+    """
+    runner = Scripted(
+        answers={
+            "-l -v": ok(OWENS_PC_LIST),
+            "-u root --exec systemctl is-enabled": ok("enabled" + chr(10)),
+            # If anything reached for the USER manager it would find this, and
+            # the assertions below would catch it.
+            "--user": bad("Failed to connect to bus"),
+            "id -u": bad("should not be needed"),
+        },
+        pings=[200],
+    )
+    watcher = presence.PresenceWatcher(
+        runner,
+        host_log,
+        distro="Ubuntu",
+        consented=True,
+        monotonic=ticking(),
+        sleep=lambda _s: None,
+    )
+    probe = watcher.probe_unit()
+    assert probe.readable is True
+    assert probe.scope == presence.SCOPE_SYSTEM
+    assert watcher.boot().owner is Owner.WSL_UNIT
+    assert presence.system_systemctl_argv("Ubuntu", "is-enabled") in runner.calls
+    assert not any("--user" in " ".join(call) for call in runner.calls), (
+        "a system-unit guest must never be asked through the user manager: that",
+        "is the bus WSLg hides",
+    )
+
+
+def test_the_restart_of_a_system_unit_guest_goes_through_root(
+    host_log: log.HostLog,
+) -> None:
+    """One door for finding the unit and for restarting it."""
+    runner = Scripted(
+        answers={
+            "-l -v": ok(OWENS_PC_LIST),
+            "-u root --exec systemctl is-enabled": ok("enabled" + chr(10)),
+            "-u root --exec systemctl restart": ok(""),
+        },
+        pings=[200],
+    )
+    watcher = presence.PresenceWatcher(
+        runner,
+        host_log,
+        distro="Ubuntu",
+        consented=True,
+        monotonic=ticking(),
+        sleep=lambda _s: None,
+    )
+    assert watcher.restart_wsl_unit() is True
+    assert presence.system_systemctl_argv("Ubuntu", "restart") in runner.calls

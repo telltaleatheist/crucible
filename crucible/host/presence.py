@@ -73,6 +73,15 @@ UNIT_NAME = "crucible.service"
 #: escalation from here IS `RECIPES`, in order, exactly as `boot()` escalates.
 RECIPE_USER_UNIT_RESTART = "user-unit-restart"
 
+#: The same act on a guest whose server is a SYSTEM unit. Since 0.6.4 that is
+#: what a WSL install writes, because WSLg hides the user bus; a guest
+#: installed before it still has a user unit, so both doors stay.
+RECIPE_SYSTEM_UNIT_RESTART = "system-unit-restart"
+
+#: The two systemd scopes a guest engine can be installed into.
+SCOPE_SYSTEM = "system"
+SCOPE_USER = "user"
+
 
 def wsl_boot_argv(distro: str = CRUCIBLE_DISTRO) -> list[str]:
     """`wsl -d crucible --exec true` — 4.1's boot.
@@ -302,6 +311,36 @@ def unit_enabled_argv(distro: str, uid: str) -> list[str]:
     return user_systemctl_argv(distro, uid, "is-enabled")
 
 
+def _printed_state(result: RunResult) -> str:
+    """The first line systemctl PRINTED, which is the answer — not its code.
+
+    `is-enabled` exits non-zero for a unit that is merely `disabled`, and a
+    disabled unit is still a unit that can be restarted.
+    """
+    text = result.stdout.strip()
+    return text.splitlines()[0].strip() if text else ""
+
+
+def system_systemctl_argv(distro: str, verb: str) -> list[str]:
+    """One `systemctl <verb> crucible.service` against the guest's SYSTEM manager.
+
+    No `--user`, no `XDG_RUNTIME_DIR`, no uid to read first — and that is the
+    point. WSLg mounts its own tmpfs over `/run/user/<uid>`, which HIDES the
+    socket the user manager is listening on, so the careful prefix above stops
+    working on a stock WSL2 and says `Failed to connect to bus` while the bus
+    is in fact fine (measured 2026-09-16 with /proc/self/mountinfo: two mounts
+    on one path, `ss` sees the socket, `ls` cannot). `/run/dbus` is not
+    overmounted, so the system manager is reachable.
+
+    `-u root` because a system unit is the machine's. It needs no password:
+    wsl.exe grants root from the Windows side, which is where this runs.
+    """
+    return [
+        "wsl.exe", "-d", distro, "-u", "root", "--exec",
+        "systemctl", verb, UNIT_NAME,
+    ]
+
+
 #: What `is-enabled` prints when the unit EXISTS. `disabled` is in here and
 #: that is the point of reading stdout rather than the exit code: a disabled
 #: unit exits non-zero and is still a unit `systemctl --user restart` starts.
@@ -334,6 +373,9 @@ class UnitProbe:
     state: str
     #: The sentence for the log — what systemctl said, when it said no.
     detail: str
+    #: WHICH manager answered, so the restart uses the same door it found the
+    #: unit behind. Empty when nothing answered.
+    scope: str = ""
 
 
 def parse_wsl_list(text: str) -> list[str]:
@@ -557,20 +599,37 @@ class PresenceWatcher:
         unit that is merely `disabled`, and a disabled unit is still a unit
         `systemctl --user restart` starts. What it PRINTED is the answer.
         """
+        # THE SYSTEM MANAGER FIRST. Since 0.6.4 a WSL install writes a system
+        # unit, because WSLg hides the user bus and `systemctl --user` then
+        # fails for every caller on a stock guest. Asking it first costs one
+        # call and needs no uid.
+        system = self._runner.run(
+            system_systemctl_argv(self._distro, "is-enabled"),
+            timeout_s=RECIPE_TIMEOUT_SECONDS,
+        )
+        state = _printed_state(system)
+        if state in UNIT_STATES:
+            return UnitProbe(True, state, f"{UNIT_NAME} is {state}", SCOPE_SYSTEM)
+
+        # THEN THE USER MANAGER, for a guest installed before that change. Its
+        # unit is still there and still restartable when the bus is reachable,
+        # and silently calling such a machine ownerless would take away the
+        # restart it has always had.
         uid = self.guest_uid()
         if uid is None:
             return UnitProbe(
                 False,
                 "",
-                f'the user id in "{self._distro}" could not be read, so '
-                f"{UNIT_NAME} could not be asked about",
+                f'no system {UNIT_NAME} in "{self._distro}" ({system.said()}), '
+                f'and the user id there could not be read, so a user unit '
+                f"could not be asked about either",
             )
         result = self._runner.run(
             unit_enabled_argv(self._distro, uid), timeout_s=RECIPE_TIMEOUT_SECONDS
         )
-        state = result.stdout.strip().splitlines()[0].strip() if result.stdout.strip() else ""
+        state = _printed_state(result)
         if state in UNIT_STATES:
-            return UnitProbe(True, state, f"{UNIT_NAME} is {state}")
+            return UnitProbe(True, state, f"{UNIT_NAME} is {state}", SCOPE_USER)
         return UnitProbe(False, state, result.said())
 
     def running_owner(self, distro: Distro, detail: str) -> Presence:
@@ -736,6 +795,30 @@ class PresenceWatcher:
         rather than pretending. That distro's engine is a `found` one anyway,
         and a `found` engine never reaches this method.
         """
+        # RESTART THROUGH THE DOOR THE UNIT WAS FOUND BEHIND. A guest installed
+        # since 0.6.4 has a system unit (WSLg hides the user bus, so a user one
+        # cannot be reached on a stock WSL2); one installed before it still has
+        # a user unit. Asking the probe is what keeps those two from needing two
+        # code paths here.
+        probe = self.probe_unit()
+        if probe.scope == SCOPE_SYSTEM:
+            result = self._runner.run(
+                system_systemctl_argv(self._distro, "restart"),
+                timeout_s=RECIPE_TIMEOUT_SECONDS,
+            )
+            self._log.write(
+                f"restart {RECIPE_SYSTEM_UNIT_RESTART}: "
+                f"{'ok' if result.ok else result.said()}"
+            )
+            if self._wait_for_ping(self._boot_wait_s):
+                self._recovery_spent = False
+                return True
+            self._log.write(
+                f"restart: nothing on {engine_url('/v1/ping')} after the system "
+                f"unit was restarted"
+            )
+            return False
+
         uid = self.guest_uid()
         if uid is None:
             # The working door cannot be built at all. `RECIPES` is still
