@@ -235,8 +235,8 @@ def test_sharing_menu_error_survives_health_refresh(monkeypatch, tmp_path):
         def update_menu(self): pass
         def stop(self): pass
         def run(self):
-            self.menu[4].action()
-            assert self.menu[4].text == "Use existing Tailscale sharing"
+            next(item for item in self.menu if item.text == "Enable Tailscale sharing").action()
+            assert any(item.text == "Use existing Tailscale sharing" for item in self.menu)
             message = self.menu[0].text
             assert "matching Tailscale forward" in message
             watchers[0]()

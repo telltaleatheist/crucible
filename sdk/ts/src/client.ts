@@ -8,6 +8,7 @@
  */
 
 import { encodeBase64 } from './base64.js';
+import type { PendingPairing } from './connect.js';
 import {
   ACCELERATOR_UNREADABLE,
   CAPABILITY_ROUTE_MISSING,
@@ -427,6 +428,32 @@ export class CrucibleClient {
   async settings(): Promise<SettingsDocument> {
     const body = await this.#json('/v1/settings', { method: 'GET' }, 'settings');
     return readSettings(body);
+  }
+
+  /** Pending connection approvals, visible only to an already trusted app. */
+  async listPairingRequests(): Promise<PendingPairing[]> {
+    const body = await this.#json('/v1/pairing/requests', { method: 'GET' }, 'listPairingRequests');
+    return asArray(field(body, 'requests', 'pairing'), 'pairing.requests').map((value, index) => {
+      const where = `pairing.requests[${index}]`;
+      const row = asObject(value, where);
+      return {
+        id: str(row, 'id', where),
+        userCode: str(row, 'user_code', where),
+        clientName: str(row, 'client_name', where),
+        address: str(row, 'address', where),
+        expiresIn: num(row, 'expires_in', where),
+      };
+    });
+  }
+
+  /** Approve or deny the request whose displayed code the user has checked. */
+  async decidePairing(id: string, userCode: string, allow: boolean): Promise<{ status: 'approved' | 'denied' }> {
+    const body = await this.#json('/v1/pairing/decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, user_code: userCode, allow }),
+    }, 'decidePairing');
+    return { status: oneOf(str(body, 'status', 'pairing'), ['approved', 'denied'] as const, 'pairing.status') };
   }
 
   /**

@@ -183,8 +183,9 @@ def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
                 raise LocalError("controller_start_failed: native engine did not initialize; inspect host.log")
             time.sleep(0.25)
     url, name, token = connection(home)
-    if action == "open-console":
-        webbrowser.open(url + "/#token=" + quote(token, safe=""))
+    if action in ("open-console", "connect"):
+        section = "?section=connect" if action == "connect" else ""
+        webbrowser.open(url + "/" + section + "#token=" + quote(token, safe=""))
         return {"schema_version": 1, "state": "opened", "name": name, "url": url,
                 "detail": "Opened Crucible's console"}
     if sys.platform == "win32":
@@ -353,6 +354,6 @@ def command(args: argparse.Namespace) -> int:
 def add_parser(subparsers) -> None:
     parser = subparsers.add_parser("local", help="Local installation and service lifecycle")
     parser.add_argument("local_action", choices=["register", "status", "start", "stop",
-                                                "open-console", "tray", "install-cli", "install-desktop", "remove-desktop", "close-tray", "shutdown"])
+                                                "open-console", "connect", "tray", "install-cli", "install-desktop", "remove-desktop", "close-tray", "shutdown"])
     parser.add_argument("--json", action="store_true", help="Structured output (always enabled)")
     parser.set_defaults(func=command)

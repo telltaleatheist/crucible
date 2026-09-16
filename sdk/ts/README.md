@@ -13,10 +13,35 @@ process. ESM and CommonJS builds ship side by side, with `.d.ts` for both.
 From the GitHub Release (there is no npm registry publish):
 
 ```bash
-npm install https://github.com/telltaleatheist/crucible/releases/download/v0.1.0/crucible-client-0.1.0.tgz
+npm install https://github.com/telltaleatheist/crucible/releases/download/v0.6.1/crucible-client-0.6.1.tgz
 ```
 
 Pin the URL in `package.json` so the version is a fact, not a resolution.
+
+## App-owned setup and connection
+
+Use `readPairingFile()` for an existing same-user local installation and
+`@crucible/bootstrap` for local installation/lifecycle. Ordinary users should not
+need to find a token or open Crucible's console. Configure a connected local or
+remote server using authenticated `settings()`, `putSettings()`, capability,
+model, module, and task APIs from your app's own settings UI.
+
+For a new remote connection, `startPairing(address, clientName)` accepts a bare
+IP/hostname on standard port 7100, or an explicit URL/custom port. It verifies
+Crucible identity and returns a short `userCode`, request metadata, and a private
+`deviceCode`. Keep the latter in the app's trusted main process; display only the
+short code. Poll with `pollPairing(request)` no faster than `request.interval`
+seconds and stop on expiry, denial, cancellation, or approval. A previously
+trusted app lists requests with `client.listPairingRequests()` and approves a
+matching code with `client.decidePairing(id, userCode, true)`. Only after approval
+does the requester receive the pairing credential to persist in trusted storage.
+The optional Crucible console supports the same approval API.
+
+This uses a canonical port, not arbitrary port scanning or multicast discovery.
+Network sharing must already make the remote endpoint reachable. Knowing its IP
+does not authorize a connection. Old servers without approval support require an
+update or their existing connection line. Pairing grants the existing service
+credential; per-client scopes and revocation are not implemented.
 
 ## Example
 

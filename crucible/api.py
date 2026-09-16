@@ -1,8 +1,9 @@
 """API v1 — exactly the surface in DESIGN.md section 4.
 
-Base path is `/v1`. Every route except `GET /v1/ping` needs
-`Authorization: Bearer <token>` and `X-Crucible-Api: 1`. The checks run in that
-order, so a request with a bad token and a missing version header is answered 401.
+Base path is `/v1`. Protected routes need `Authorization: Bearer <token>` and
+`X-Crucible-Api: 1`, checked in that order. Public discovery (`GET /v1/ping`)
+and the limited pairing start/poll exchange do not require an existing token.
+Pairing approval always requires authentication; start/poll require the version header.
 Errors are always `{"error": {"code", "message", "details"?}}`.
 """
 
@@ -53,6 +54,7 @@ from . import peer as peer_module
 from . import settings as settings_module
 from .backend import CUDA_LINUX, Backend
 from .config import Config, load_config
+from .connect import PairingRequests, StartPairing, PollPairing, DecidePairing
 from .errors import ApiError, CrucibleError
 from .interfaces import InterfaceError
 from .jobs import (
@@ -562,6 +564,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     # which is `docs/ARCHITECTURE.md`'s one shape. The relation is
     # RE-ASSERTED instead, on the orchestrator's next watch tick.
     app.state.peer = peer_module.PeerState()
+    app.state.pairing_requests = PairingRequests()
     # In memory, and a restart forgets: a lease protects a resident model, and a
     # restarted server holds none (crucible/leases.py).
     app.state.leases = Leases()
@@ -701,7 +704,33 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     @public.get("/ping")
     async def ping() -> dict[str, Any]:
         """Unauthenticated. Lets a client tell "wrong token" from "not a Crucible"."""
-        return {"crucible": True, "name": config.name, "api_version": API_VERSION}
+        return {"crucible": True, "name": config.name, "api_version": API_VERSION,
+                "pairing_version": 1}
+
+    @public.post("/pairing/start", dependencies=[Depends(require_api_version)])
+    async def start_pairing(body: StartPairing, request: Request, response: Response) -> dict:
+        response.headers["Cache-Control"] = "no-store"
+        address = request.client.host if request.client is not None else "unknown"
+        return {"name": config.name, **app.state.pairing_requests.start(body.client_name, address)}
+
+    @public.post("/pairing/poll", dependencies=[Depends(require_api_version)])
+    async def poll_pairing(body: PollPairing, response: Response) -> dict:
+        response.headers["Cache-Control"] = "no-store"
+        status = app.state.pairing_requests.poll(body.id, body.device_code)
+        result = {"status": status}
+        if status == "approved":
+            result.update(name=config.name, token=config.token)
+        return result
+
+    @private.get("/pairing/requests")
+    async def pairing_requests(response: Response) -> dict:
+        response.headers["Cache-Control"] = "no-store"
+        return {"requests": app.state.pairing_requests.pending()}
+
+    @private.post("/pairing/decision")
+    async def decide_pairing(body: DecidePairing, response: Response) -> dict:
+        response.headers["Cache-Control"] = "no-store"
+        return app.state.pairing_requests.decide(body.id, body.user_code, body.allow)
 
     # ------------------------------------------------------------ capability
 

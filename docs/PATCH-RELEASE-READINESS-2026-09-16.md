@@ -100,7 +100,33 @@ the helper is not a substitute for that release review.
    with release installation still pending. Never replace 0.6.0 assets with new
    source carrying the old version.
 
-The version bump and small SDK/wheel artifacts are prepared. No release, tag,
-service restart, GPU job, WSL change, or multi-GB pack download was performed.
-Actual runtime/TTS pack builds, fresh release-based installation, publication and
-promotion remain outstanding.
+## Actual artifact preflight, 2026-09-16
+
+The artifact-only `release-preflight.yml` workflow was added and run against exact
+commit `a8ccb077e2cbf3e69965cc8466e41ad0401220fa`. Its token has `contents: read`;
+it cannot upload release assets or promote a release. All three jobs in
+[run 35058903633](https://github.com/telltaleatheist/crucible/actions/runs/35058903633)
+passed:
+
+| Artifact | Measured result |
+|---|---|
+| SGLang Higgs / CUDA Linux | Python 3.12.14; 5,336,358,502 compressed bytes in three parts; 13,324,566,947 unpacked bytes; build and relocated narrator import passed in 404 seconds. SHA256 `daeba1022c2a4eef004cfb5621b01812980db21b3fe8b92da36806902b1ca1f9`. |
+| Mac TTS | 164,290,057 compressed bytes; build and relocated narrator import passed in 80 seconds. Downloaded archive and recipe reverified locally. SHA256 `b4b5534ab0771ca46b91e2b2ccbf99592bd14f2189a4523d86fea3bb54042aec`. |
+| WSL rootfs | 30,689,880 bytes; archive/ownership-marker checks passed; downloaded checksum verified. SHA256 `f3aafba32e9eb7238c10bd4e902b773be02b9efa7044d091cbbfc301d9d30856`. |
+
+All eight eligible 0.6.0 inference archives were downloaded and their complete
+concatenated sizes and SHA256 digests verified before writing 0.6.1 staging
+fragments. These remain a repair option if the final full build needs one;
+they are not uploaded to a release by the staging helper.
+
+An isolated Windows source archive of the same commit built a 46,420,828-byte
+host pack in 71 seconds. Its relocated CLI version and lifecycle parser smoke
+checks passed. This is packaging preflight, not the final core: connection and
+pairing changes made afterward require all final runtime packs to be built from
+the final release commit. Inference recipes did not change during that work.
+
+Artifacts and build logs are staged under
+`C:\Users\tellt\Projects\crucible-release-staging\0.6.1`. No local service,
+GPU workload, model, or WSL instance was changed. Final core builds, candidate
+publication, fresh release-based installation tests, and promotion remain separate
+release gates.

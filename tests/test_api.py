@@ -15,7 +15,7 @@ def test_ping_needs_no_auth_and_no_version_header(client: TestClient) -> None:
     response = client.get("/v1/ping")
     assert response.status_code == 200
     body = response.json()
-    assert body == {"crucible": True, "name": "crucible@test", "api_version": API_VERSION}
+    assert body == {"crucible": True, "name": "crucible@test", "api_version": API_VERSION, "pairing_version": 1}
 
 
 def test_missing_authorization_is_401(client: TestClient) -> None:

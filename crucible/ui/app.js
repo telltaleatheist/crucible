@@ -60,6 +60,7 @@
     capability: null,
     catalog: null,
     tasks: [],
+    pairingRequests: [],
     refusals: {},
     running: null,
     live: null,
@@ -441,6 +442,28 @@
       state.setup = null;
       setRefusal('setup', refusal);
     }
+  }
+
+  async function loadPairingRequests() {
+    try {
+      state.pairingRequests = (await call('/v1/pairing/requests')).requests;
+      setRefusal('pairing', null);
+    } catch (refusal) {
+      state.pairingRequests = [];
+      setRefusal('pairing', refusal);
+    }
+  }
+
+  async function decidePairing(request, allow) {
+    try {
+      await call('/v1/pairing/decision', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: request.id, user_code: request.user_code, allow: allow }) });
+      await loadPairingRequests();
+    } catch (refusal) {
+      setRefusal('pairing', refusal);
+    }
+    renderConnect();
   }
 
   async function loadInfo() {
@@ -2023,9 +2046,27 @@
     }
     var setup = state.setup;
 
+    body.appendChild(el('p', { class: 'lead', text:
+      'Apps on this computer connect automatically. On another computer, enter this computer’s IP or hostname in BookForge or Foundry, then approve its matching code here.' }));
+    var pairingRefusal = refusalBox(state.refusals.pairing);
+    if (pairingRefusal) body.appendChild(pairingRefusal);
+    state.pairingRequests.forEach(function (request) {
+      var card = el('div', { class: 'line-item' }, [
+        el('div', { class: 'line-text' }, [
+          el('strong', { text: request.client_name + ' — ' + request.user_code }),
+          el('p', { text: 'From ' + request.address + '. Approve only if this code matches the app you are connecting. This grants access to this Crucible.' })
+        ]),
+        el('div', { class: 'line-actions' }, [
+          el('button', { class: 'button', type: 'button', text: 'Approve', onclick: function () { decidePairing(request, true); } }),
+          el('button', { class: 'button quiet', type: 'button', text: 'Deny', onclick: function () { decidePairing(request, false); } })
+        ])
+      ]);
+      body.appendChild(card);
+    });
+
     body.appendChild(
       el('p', { class: 'lead' }, [
-        'Paste a line below into BookForge or Foundry → Settings → Crucible ' +
+        'You can also paste a connection line below into BookForge or Foundry → Settings → Crucible ' +
           'Servers → Add. It carries the name, the address and the token, so ' +
           'nobody types a secret twice.'
       ])
@@ -2345,7 +2386,8 @@
       loadActivity(),
       loadCapability(),
       loadSettings(),
-      loadCatalog()
+      loadCatalog(),
+      loadPairingRequests()
     ]);
     await loadTasks();
     state.lastStatusAt = Date.now();
@@ -2360,13 +2402,16 @@
     }
     storeToken(token);
     showConsole();
+    if (new URLSearchParams(window.location.search).get('section') === 'connect') {
+      document.getElementById('panel-connect').scrollIntoView();
+    }
     if (state.timer === null) {
       state.timer = window.setInterval(function () {
         if (state.token === null) {
           return;
         }
         state.lastStatusAt = Date.now();
-        loadActivity().then(render);
+        Promise.all([loadActivity(), loadPairingRequests()]).then(render);
       }, ACTIVITY_MS);
     }
   }

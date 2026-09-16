@@ -165,6 +165,7 @@ def _run_tray(home: Path) -> None:
         icon.menu = pystray.Menu(
             pystray.MenuItem(notice["message"] or state["detail"], None, enabled=False),
             pystray.MenuItem("Open Crucible", lambda *_: action("open-console")),
+            pystray.MenuItem("Connect an app…", lambda *_: action("connect")),
             pystray.MenuItem("Start Crucible", lambda *_: action("start"), enabled=state["state"] != "running"),
             pystray.MenuItem("Stop Crucible", lambda *_: action("stop"), enabled=state["state"] == "running"),
             pystray.MenuItem(sharing_label, lambda *_: action("sharing")),

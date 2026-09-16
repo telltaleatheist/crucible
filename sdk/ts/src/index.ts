@@ -202,3 +202,5 @@ export type {
 } from './types.js';
 
 export { SDK_VERSION } from './version.js';
+export { startPairing, pollPairing, crucibleAddress, DEFAULT_CRUCIBLE_PORT, CrucibleConnectionError } from './connect.js';
+export type { PairingRequest, PairingResult, PairingOptions, PendingPairing } from './connect.js';
