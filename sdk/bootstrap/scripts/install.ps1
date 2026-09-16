@@ -32,7 +32,7 @@
 
 [CmdletBinding()]
 param(
-  [string]$Release = '0.6.4',
+  [string]$Release = '0.6.5',
   [string]$Root = "$env:LOCALAPPDATA\Crucible",
   # The inverse. `crucible uninstall` does the work inside the home; this
   # script removes the host pack, because this script is what unpacked it.

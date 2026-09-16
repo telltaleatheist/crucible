@@ -25,7 +25,7 @@
 
 set -eu
 
-RELEASE="${CRUCIBLE_RELEASE:-0.6.4}"
+RELEASE="${CRUCIBLE_RELEASE:-0.6.5}"
 
 say() { printf 'crucible: %s\n' "$*"; }
 die() { printf 'crucible: %s\n' "$*" >&2; exit 1; }
