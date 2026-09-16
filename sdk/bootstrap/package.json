@@ -1,6 +1,6 @@
 {
   "name": "@crucible/bootstrap",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "The app-side installer and ensurer for a local Crucible: detect the host, install the server, make sure its service is running, report health. Zero runtime dependencies beyond @crucible/client.",
   "type": "module",
   "license": "MIT",
@@ -45,7 +45,7 @@
     "gen:install": "npm run build:test && node build/scripts/gen-install-scripts.js"
   },
   "peerDependencies": {
-    "@crucible/client": "0.6.3"
+    "@crucible/client": "0.6.4"
   },
   "devDependencies": {
     "@crucible/client": "file:../ts",
