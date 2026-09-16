@@ -59,6 +59,7 @@ def _decide(
     total: int,
     reserve: int,
     vendor: str = "nvidia",
+    chosen: str | None = None,
 ) -> Any:
     """One class, decided. `vendor` defaults to the card these tests are about.
 
@@ -73,6 +74,7 @@ def _decide(
         total_bytes=total,
         desktop_allowance_bytes=reserve,
         gpu_vendor=vendor,
+        chosen=chosen,
     )
 
 
@@ -164,6 +166,7 @@ def test_higgs_is_binary_and_a_six_gig_card_loses_tts_entirely() -> None:
         total_bytes=SIX_GIG,
         desktop_allowance_bytes=CUDA_RESERVE,
         gpu_vendor="nvidia",
+        chosen={},
     )) is False
 
 
@@ -187,6 +190,7 @@ def test_a_six_gig_card_keeps_llm_only_if_something_behind_it_fits() -> None:
         total_bytes=SIX_GIG,
         desktop_allowance_bytes=CUDA_RESERVE,
         gpu_vendor="nvidia",
+        chosen={},
     )
     by_name = {d.capability: d for d in decisions}
     assert by_name["clean"].enabled is False
@@ -207,6 +211,7 @@ def test_llm_survives_when_one_of_its_three_classes_survives() -> None:
         total_bytes=24 * GIB,
         desktop_allowance_bytes=8 * GIB,
         gpu_vendor="nvidia",
+        chosen={},
     )
     by_name = {d.capability: d for d in decisions}
     assert by_name["pages"].enabled is True
@@ -328,6 +333,7 @@ def test_the_capability_record_round_trips_through_config_toml(home: Path) -> No
         total_bytes=THREE_NINETY,
         desktop_allowance_bytes=CUDA_RESERVE,
         gpu_vendor="nvidia",
+        chosen={},
     )
     written = capability.record(
         "cuda-linux",
@@ -468,6 +474,7 @@ def test_the_llm_refusal_reads_every_class_behind_the_flag(home: Path) -> None:
         total_bytes=SIX_GIG,
         desktop_allowance_bytes=CUDA_RESERVE,
         gpu_vendor="nvidia",
+        chosen={},
     )
     rows = tuple(d.row() for d in decisions if d.job_type == "llm")
     config = _config_with(home, rows)
@@ -665,6 +672,7 @@ def test_the_capability_route_answers_every_class_and_its_reason(
             total_bytes=total,
             desktop_allowance_bytes=allowance,
             gpu_vendor="nvidia",
+            chosen={},
         ),
         routes={},
     )
@@ -716,6 +724,7 @@ def test_the_route_says_which_job_type_each_class_feeds_and_what_builds_it(
             total_bytes=total,
             desktop_allowance_bytes=allowance,
             gpu_vendor="nvidia",
+            chosen={},
         ),
         routes={},
     )

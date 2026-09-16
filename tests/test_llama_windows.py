@@ -41,13 +41,14 @@ WINDOWS_RESERVE = 3 * GIB
 LAPTOP_RAM = 32 * GIB
 
 
-def _decide(name: str, total: int, reserve: int, vendor: str):
+def _decide(name: str, total: int, reserve: int, vendor: str, chosen: str | None = None):
     return decide(
         BY_NAME[name],
         LLAMA_WINDOWS,
         total_bytes=total,
         desktop_allowance_bytes=reserve,
         gpu_vendor=vendor,
+        chosen=chosen,
     )
 
 
@@ -343,6 +344,7 @@ def test_the_whole_record_reads_as_three_kinds_of_answer() -> None:
         total_bytes=WINDOWS_CARD,
         desktop_allowance_bytes=WINDOWS_RESERVE,
         gpu_vendor="nvidia",
+        chosen={},
     )
     by_name = {d.capability: d for d in decisions}
     assert by_name["echo"].enabled is True

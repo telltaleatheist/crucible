@@ -2287,7 +2287,36 @@ function readSettings(body: Json): SettingsDocument {
     if ('url' in entry) setting.url = nullableStr(entry, 'url', at);
     upstreams[name] = setting;
   }
+  /*
+   * Both keys are absent on an engine older than this SDK, and absent is not
+   * the same claim as "this engine has no local models": the key is left off
+   * the document entirely so a reader can tell an engine that does not answer
+   * the question from one that answers it with nothing. `NonNullable` keeps
+   * the optionality in ONE place — the declaration in `SettingsDocument` —
+   * rather than restating the shape of a choice row here.
+   */
+  const local: {
+    localModels?: NonNullable<SettingsDocument['localModels']>;
+    localModelChoices?: NonNullable<SettingsDocument['localModelChoices']>;
+  } = {};
+  if ('local_models' in body) {
+    const rows = objectField(body, 'local_models', where);
+    local.localModels = Object.fromEntries(Object.keys(rows).map(name =>
+      [name, nullableStr(rows, name, `${where}.local_models`)]));
+  }
+  if ('local_model_choices' in body) {
+    const rows = objectField(body, 'local_model_choices', where);
+    local.localModelChoices = Object.fromEntries(Object.keys(rows).map(name => [name,
+      asArray(field(rows, name, `${where}.local_model_choices`), `${where}.local_model_choices.${name}`).map((raw, index) => {
+        const at = `${where}.local_model_choices.${name}[${index}]`;
+        const choice = asObject(raw, at);
+        return { id: str(choice, 'id', at), memoryBytesEstimate: num(choice, 'memory_bytes_estimate', at),
+          fits: bool(choice, 'fits', at), installed: bool(choice, 'installed', at) };
+      }),
+    ]));
+  }
   return {
+    ...local,
     routes,
     upstreams,
     desktopAllowanceBytes: num(body, 'desktop_allowance_bytes', where),
@@ -2304,6 +2333,7 @@ function readSettings(body: Json): SettingsDocument {
  */
 function settingsPayload(patch: SettingsPatch): Json {
   const body: Json = {};
+  if (patch.localModels !== undefined) body.local_models = { ...patch.localModels };
   if (patch.routes !== undefined) body.routes = { ...patch.routes };
   if (patch.upstreams !== undefined) body.upstreams = { ...patch.upstreams };
   if (patch.desktopAllowanceBytes !== undefined) {

@@ -173,6 +173,7 @@ export type {
   RouteSetting,
   ServerInfo,
   ServerSetup,
+  LocalModelChoice,
   SettingsDocument,
   SettingsPatch,
   SubjectKind,

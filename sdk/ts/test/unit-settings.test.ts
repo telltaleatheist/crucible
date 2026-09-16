@@ -416,3 +416,25 @@ test('the refusal names this package exports are the contract spelling', () => {
   assert.equal(ROUTE_NOT_ROUTABLE, 'route_not_routable');
   assert.equal(UPSTREAM_IN_USE, 'upstream_in_use');
 });
+
+
+test('local model choices and nullable automatic preferences cross the settings wire', async () => {
+  answer(200, {...DOCUMENT, local_models:{translate:'qwen3.8-27b-4bit',clean:null},
+    local_model_choices:{translate:[{id:'qwen3.8-27b-4bit',memory_bytes_estimate:16e9,fits:true,installed:true},
+      {id:'qwen3.8-27b',memory_bytes_estimate:55e9,fits:false,installed:false}]}});
+  const doc=await client().settings();
+  assert.deepEqual(doc.localModels,{translate:'qwen3.8-27b-4bit',clean:null});
+  assert.deepEqual(doc.localModelChoices?.translate?.[0],{id:'qwen3.8-27b-4bit',memoryBytesEstimate:16e9,fits:true,installed:true});
+  await client().putSettings({localModels:{translate:null}});
+  assert.deepEqual(JSON.parse(lastBody),{local_models:{translate:null}});
+});
+
+test('old engines omit local selection support and malformed new choices fail by name', async () => {
+  answer(200,DOCUMENT);
+  const old=await client().settings();
+  assert.equal(old.localModels,undefined);assert.equal(old.localModelChoices,undefined);
+  answer(200,{...DOCUMENT,local_models:{translate:123}});
+  await assert.rejects(client().settings(),CrucibleProtocolError);
+  answer(200,{...DOCUMENT,local_model_choices:{translate:[{id:'model',memory_bytes_estimate:1,fits:true}]}});
+  await assert.rejects(client().settings(),CrucibleProtocolError);
+});

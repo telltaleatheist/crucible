@@ -80,7 +80,7 @@ instead of an answer. The phase doc's tables are in GB; the bytes are identical.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from .alignmodels import load_all_align_manifests
 from .asrmodels import load_all_asr_manifests
@@ -379,6 +379,16 @@ ROUTABLE_CLASSES: tuple[str, ...] = tuple(
     entry.name for entry in CLASSES if entry.routable
 )
 
+#: The classes an APP may choose a local model for, in report order: every one
+#: with candidates to choose between. Read off the same table as
+#: `ROUTABLE_CLASSES` and for the same reason — `[local_models]`,
+#: `PUT /v1/settings` and the settings document must ask ONE thing which
+#: classes those are (ARCHITECTURE.md R1). `echo` is absent because it has no
+#: candidates, not because it was left out by hand.
+SELECTABLE_CLASSES: tuple[str, ...] = tuple(
+    entry.name for entry in CLASSES if entry.candidates is not None
+)
+
 
 def classes_for_job_type(job_type: str) -> tuple[CapabilityClass, ...]:
     """Every class whose verdict feeds one `enable_*` flag."""
@@ -502,6 +512,7 @@ def decide(
     total_bytes: int,
     desktop_allowance_bytes: int,
     gpu_vendor: str,
+    chosen: str | None,
 ) -> Decision:
     """Walk one class's candidates best-first and take the first that fits.
 
@@ -575,6 +586,72 @@ def decide(
         else ""
     )
     fitting = [c for c in found if c.memory_bytes_estimate <= budget]
+
+    if chosen is not None:
+        # AN APP'S OWN CHOICE, and the reason the best-first walk below is not
+        # the only way a class gets its model. INTENT.md gives the app the
+        # choice of its models; what stays HERE is the arithmetic, because
+        # whether a model fits is a fact about this card and no app can know it
+        # from where it sits. A choice is honoured or it is refused with the
+        # numbers — it is never quietly replaced by a different model, which
+        # would make the settings document a suggestion.
+        picked = next((c for c in found if c.id == chosen), None)
+        if picked is None:
+            return Decision(
+                capability=entry.name,
+                job_type=entry.job_type,
+                enabled=False,
+                selected="",
+                reason=(
+                    f"disabled: {chosen} was chosen for {entry.name}, and it is "
+                    f"not among the {len(found)} {entry.noun} this build ships "
+                    f"with a {backend_kind} block"
+                ),
+                shortfall_bytes=0,
+                available_bytes=budget,
+                candidates=found,
+                fit_count=len(fitting),
+            )
+        if picked.memory_bytes_estimate > budget:
+            # The settings door refuses a choice that does not fit, so reaching
+            # here means the MACHINE changed under a choice that did fit when it
+            # was made — a config carried to a smaller card, or a desktop
+            # allowance raised since. Say that, rather than silently demoting to
+            # something that fits and leaving an app to wonder why its model
+            # never runs.
+            shortfall = picked.memory_bytes_estimate - budget
+            return Decision(
+                capability=entry.name,
+                job_type=entry.job_type,
+                enabled=False,
+                selected="",
+                reason=(
+                    f"disabled: {picked.id} was chosen for {entry.name} and needs "
+                    f"{_gib(picked.memory_bytes_estimate)}, and there is only "
+                    f"{arithmetic} — short by {_gib(shortfall)}. This choice fit "
+                    f"the machine it was made on{cpu_note}"
+                ),
+                shortfall_bytes=shortfall,
+                available_bytes=budget,
+                candidates=found,
+                fit_count=len(fitting),
+            )
+        return Decision(
+            capability=entry.name,
+            job_type=entry.job_type,
+            enabled=True,
+            selected=picked.id,
+            reason=(
+                f"{picked.id} was chosen for {entry.name}: it needs "
+                f"{_gib(picked.memory_bytes_estimate)} and there is {arithmetic}; "
+                f"{len(fitting)} of {len(found)} {entry.noun} fit{cpu_note}"
+            ),
+            shortfall_bytes=0,
+            available_bytes=budget,
+            candidates=found,
+            fit_count=len(fitting),
+        )
+
     if fitting:
         best = fitting[0]
         return Decision(
@@ -619,8 +696,16 @@ def decide_all(
     total_bytes: int,
     desktop_allowance_bytes: int,
     gpu_vendor: str,
+    chosen: Mapping[str, str],
 ) -> tuple[Decision, ...]:
-    """Every class, decided on one host. The order of `CLASSES`."""
+    """Every class, decided on one host. The order of `CLASSES`.
+
+    `chosen` is the app selections — class name to model id — and a class
+    absent from it is decided best-first. It is REQUIRED and has no default
+    for the reason `gpu_vendor` is: a caller that forgot it would silently
+    un-choose every model an app had picked, while the config went on saying
+    otherwise, and the two would disagree with nothing comparing them.
+    """
     return tuple(
         decide(
             entry,
@@ -628,6 +713,7 @@ def decide_all(
             total_bytes=total_bytes,
             desktop_allowance_bytes=desktop_allowance_bytes,
             gpu_vendor=gpu_vendor,
+            chosen=chosen.get(entry.name),
         )
         for entry in CLASSES
     )
@@ -717,6 +803,7 @@ __all__ = [
     "WSL_ONLY_JOB_TYPES",
     "pool_name",
     "ROUTABLE_CLASSES",
+    "SELECTABLE_CLASSES",
     "routed_row",
     "Candidate",
     "CapabilityClass",

@@ -38,13 +38,14 @@ routed to — a different mistake, correctly named.
 from __future__ import annotations
 
 import threading
-from typing import Any
+from typing import Any, Mapping
 
 from . import capability as capability_classes
 from . import upstreams as upstream_module
 from .config import (
     CapabilityRecord,
     Config,
+    LocalModelRecord,
     RouteRecord,
     load_config,
     write_config,
@@ -65,7 +66,13 @@ HISTORY_LIMIT = 20
 #: naming it, rather than ignored: a caller that sent `desktopAllowanceBytes`
 #: believes it changed something.
 PATCH_KEYS: frozenset[str] = frozenset(
-    {"routes", "upstreams", "desktop_allowance_bytes", "tailscale_advertise"}
+    {
+        "routes",
+        "upstreams",
+        "local_models",
+        "desktop_allowance_bytes",
+        "tailscale_advertise",
+    }
 )
 
 
@@ -123,7 +130,59 @@ def local_selection(config: Config, name: str) -> str | None:
     return row.selected
 
 
-def document(config: Config) -> dict[str, Any]:
+def _choices(
+    config: Config, installed: Mapping[str, bool]
+) -> dict[str, list[dict[str, Any]]]:
+    """What an app may choose from, per class, best-first.
+
+    Computed rather than recorded. `fits` is arithmetic against THIS card and
+    `installed` is a fact about THIS disk, and a stored answer to either would
+    be wrong the first time the config moved or a download finished.
+
+    `{}` when nothing has decided this host's capability yet, which is the
+    true answer then: without a probe there is no backend to list candidates
+    for and no budget to measure them against. An app that needs to know WHY
+    it is empty reads `/v1/capability`, which says `capability_undecided` by
+    name — the same division `local_selection` above explains for its None.
+    """
+    record = config.capability
+    if record is None:
+        return {}
+    budget = capability_classes.available_bytes(
+        record.total_bytes, config.desktop_allowance_bytes
+    )
+    found: dict[str, list[dict[str, Any]]] = {}
+    for name in capability_classes.SELECTABLE_CLASSES:
+        entry = capability_classes.BY_NAME[name]
+        assert entry.candidates is not None  # SELECTABLE_CLASSES is this
+        rows: list[dict[str, Any]] = []
+        for candidate in entry.candidates(record.backend_kind):
+            if candidate.id not in installed:
+                # The catalog and the class table read the SAME manifests, so
+                # this cannot happen without one of them being wrong. Saying so
+                # beats drawing a chooser with a silent `installed: false` on a
+                # model that is sitting on the disk.
+                raise ApiError(
+                    500,
+                    "catalog_incomplete",
+                    f"the catalog has no row for {candidate.id!r}, which "
+                    f"{name} offers as a candidate; these two read the same "
+                    "manifests and must agree",
+                    {"capability": name, "model": candidate.id},
+                )
+            rows.append(
+                {
+                    "id": candidate.id,
+                    "memory_bytes_estimate": candidate.memory_bytes_estimate,
+                    "fits": candidate.memory_bytes_estimate <= budget,
+                    "installed": installed[candidate.id],
+                }
+            )
+        found[name] = rows
+    return found
+
+
+def document(config: Config, *, installed: Mapping[str, bool]) -> dict[str, Any]:
     """`GET /v1/settings`, and the body every `PUT` answers with.
 
     The PUT returns this AFTER the write, so a window never has to guess what
@@ -146,6 +205,14 @@ def document(config: Config) -> dict[str, Any]:
             else upstream_module.settings_entry(record)
         )
     return {
+        # EVERY selectable class, with null where nobody has chosen. Listing
+        # only the chosen ones would make "this class takes the automatic
+        # decision" and "this build does not know this class" the same reading.
+        "local_models": {
+            name: config.local_model(name)
+            for name in capability_classes.SELECTABLE_CLASSES
+        },
+        "local_model_choices": _choices(config, installed),
         "routes": routes,
         "upstreams": upstreams,
         "desktop_allowance_bytes": config.desktop_allowance_bytes,
@@ -169,14 +236,23 @@ class Resolved:
         self.routes: dict[str, str] = {
             entry.capability: entry.model for entry in config.routes
         }
+        self.local_models: dict[str, str] = {
+            entry.capability: entry.model for entry in config.local_models
+        }
         self.desktop_allowance_bytes = config.desktop_allowance_bytes
         self.tailscale_advertise = config.tailscale_advertise
         self.removed: set[str] = set()
         self.changed: list[str] = []
         self.touched_routes = False
 
-    def as_records(self) -> tuple[tuple[RouteRecord, ...], tuple[UpstreamRecord, ...]]:
-        """The two tables in `config.toml`'s order: class order, then name order.
+    def as_records(
+        self,
+    ) -> tuple[
+        tuple[RouteRecord, ...],
+        tuple[UpstreamRecord, ...],
+        tuple[LocalModelRecord, ...],
+    ]:
+        """The three tables in `config.toml`'s order: class order, then name order.
 
         A stable order and not insertion order, so a config rewritten twice with
         the same content is byte-identical and a diff of the file says what
@@ -190,7 +266,12 @@ class Resolved:
         upstreams = tuple(
             self.upstreams[name] for name in UPSTREAM_NAMES if name in self.upstreams
         )
-        return routes, upstreams
+        local_models = tuple(
+            LocalModelRecord(capability=name, model=self.local_models[name])
+            for name in capability_classes.SELECTABLE_CLASSES
+            if name in self.local_models
+        )
+        return routes, upstreams, local_models
 
 
 #: The dotted path of the document itself, for a refusal about the WHOLE body.
@@ -322,6 +403,112 @@ def resolve(config: Config, patch: Any) -> Resolved:
             resolved.desktop_allowance_bytes = value
             resolved.changed.append(f"desktop_allowance_bytes = {value}")
 
+    if "local_models" in body:
+        # AFTER the allowance, deliberately. Whether a chosen model fits is
+        # arithmetic against a budget THIS SAME PATCH may be changing, and
+        # checking the choice first would measure it against a reserve that is
+        # about to be gone — the same ordering rule the upstreams/routes pair
+        # follows at the top of this function.
+        table = _require_object(body["local_models"], "local_models")
+        record = config.capability
+        for name in sorted(table):
+            field = f"local_models.{name}"
+            if name not in capability_classes.SELECTABLE_CLASSES:
+                raise ApiError(
+                    400,
+                    "local_model_not_selectable",
+                    f"{name!r} has no local models to choose between. The classes "
+                    f"that do are "
+                    f"{list(capability_classes.SELECTABLE_CLASSES)}",
+                    {
+                        "field": field,
+                        "capability": name,
+                        "selectable": list(capability_classes.SELECTABLE_CLASSES),
+                    },
+                )
+            value = table[name]
+            if value is None:
+                # NULL RESTORES THE AUTOMATIC DECISION. It is not "no model" —
+                # that is not a thing an app can ask for — it is the removal of
+                # a preference, after which `decide()` walks best-first again.
+                if resolved.local_models.pop(name, None) is not None:
+                    resolved.changed.append(f"local_models.{name} = automatic")
+                continue
+            if not isinstance(value, str) or value == "":
+                raise ApiError(
+                    400,
+                    "invalid_request",
+                    f"{field} must be a model id, or null for automatic, got "
+                    f"{type(value).__name__}",
+                    {"field": field},
+                )
+            if record is None:
+                # Nothing has probed this card, so there is no backend to look
+                # the id up on and no budget to measure it against. Saying so
+                # is the honest answer; accepting the choice unchecked would
+                # store a preference this server may never be able to keep.
+                raise ApiError(
+                    503,
+                    "capability_undecided",
+                    "This server has not decided its capability yet, so a local "
+                    "model cannot be chosen on it. Run `crucible capability "
+                    "--write` on the host first",
+                    {"field": field, "capability": name},
+                )
+            entry = capability_classes.BY_NAME[name]
+            assert entry.candidates is not None  # SELECTABLE_CLASSES is this
+            offered = entry.candidates(record.backend_kind)
+            picked = next((c for c in offered if c.id == value), None)
+            if picked is None:
+                raise ApiError(
+                    400,
+                    "local_model_unknown",
+                    f"{value!r} is not among the {len(offered)} {entry.noun} "
+                    f"this build ships for {name} on {record.backend_kind}",
+                    {
+                        "field": field,
+                        "capability": name,
+                        "model": value,
+                        "choices": [c.id for c in offered],
+                    },
+                )
+            budget = capability_classes.available_bytes(
+                record.total_bytes, resolved.desktop_allowance_bytes
+            )
+            if picked.memory_bytes_estimate > budget:
+                # REFUSED WITH THE ARITHMETIC, and nothing is applied. The
+                # alternative — storing it and disabling the class — would let
+                # an app believe it had configured something that this machine
+                # can never run, and the refusal is the only place the numbers
+                # can be put in front of whoever chose.
+                shortfall = picked.memory_bytes_estimate - budget
+                raise ApiError(
+                    409,
+                    "local_model_does_not_fit",
+                    f"{value} needs "
+                    f"{picked.memory_bytes_estimate / 2**30:.1f} GiB and there "
+                    f"is {budget / 2**30:.1f} GiB available "
+                    f"({record.total_bytes / 2**30:.1f} GiB less a "
+                    f"{resolved.desktop_allowance_bytes / 2**30:.1f} GiB desktop "
+                    f"allowance) — short by {shortfall / 2**30:.1f} GiB",
+                    {
+                        "field": field,
+                        "capability": name,
+                        "model": value,
+                        "memory_bytes_estimate": picked.memory_bytes_estimate,
+                        "available_bytes": budget,
+                        "shortfall_bytes": shortfall,
+                    },
+                )
+            # NOT INSTALLED IS NOT A REFUSAL (Owen, 2026-09-16). A choice is a
+            # statement of what this app wants to run; preparation is what
+            # fetches the weights, and INTENT.md gives the app the choice and
+            # Crucible the downloading. Refusing here would force an app to
+            # install a model before it was allowed to say it wanted it.
+            if resolved.local_models.get(name) != value:
+                resolved.local_models[name] = value
+                resolved.changed.append(f"local_models.{name} = {value}")
+
     if "tailscale_advertise" in patch:
         try:
             resolved.tailscale_advertise = _advertised({"server": {"advertise": patch["tailscale_advertise"]}})
@@ -426,6 +613,10 @@ def recomputed_capability(
         # when the detected backend and the recorded one disagree, so the two
         # cannot drift apart under a running server.
         gpu_vendor=gpu_vendor,
+        # The selections as this patch leaves them, not as the config had
+        # them: a write that changes a choice must be decided on the NEW one,
+        # or the record would describe the model the app just replaced.
+        chosen=resolved.local_models,
     )
     return capability_classes.record(
         record.backend_kind,
@@ -451,7 +642,7 @@ def apply(config: Config, resolved: Resolved, *, gpu_vendor: str) -> None:
     `crucible install` uses and for the reason its docstring gives: an in-place
     TOML edit is one more thing that can lose a token.
     """
-    routes, upstreams = resolved.as_records()
+    routes, upstreams, local_models = resolved.as_records()
     write_config(
         config.home,
         name=config.name,
@@ -470,6 +661,7 @@ def apply(config: Config, resolved: Resolved, *, gpu_vendor: str) -> None:
         capability=recomputed_capability(config, resolved, gpu_vendor=gpu_vendor),
         routes=routes,
         upstreams=upstreams,
+        local_models=local_models,
         advertise=config.advertise,
         tailscale_advertise=resolved.tailscale_advertise,
     )

@@ -627,6 +627,10 @@ def _decide_here(config: Config, backend: Backend) -> tuple[capability.Decision,
         # another, and the row's words differ (`crucible/capability.py`'s
         # `pool_name` and the cpu-build sentence).
         gpu_vendor=backend.gpu.vendor,
+        # The app selections this config carries. A probe that ignored them
+        # would write a record naming a different model than the settings
+        # document reports, and nothing would be comparing the two.
+        chosen={entry.capability: entry.model for entry in config.local_models},
     )
 
 

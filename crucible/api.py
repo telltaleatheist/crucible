@@ -810,6 +810,18 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
 
     # -------------------------------------------------------------- settings
 
+    def _installed_subjects(live: Config) -> dict[str, bool]:
+        """Which subjects are on this disk, by id, straight from the catalog.
+
+        The settings document needs `installed` for every model an app may
+        choose, and `GET /v1/catalog` is ALREADY the one owner of that fact.
+        Asking it here rather than re-deriving is what keeps the chooser and
+        the catalog from disagreeing about what is on the disk
+        (ARCHITECTURE.md R1) — every kind, not only `model`, because a voice
+        and an aligner are chosen the same way.
+        """
+        return {row["id"]: row["installed"] for row in catalog.rows(live, backend, residency)}
+
     @private.get("/settings")
     async def get_settings(request: Request) -> dict[str, Any]:
         """Where each class's work runs, and which upstreams are configured.
@@ -824,7 +836,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         no route on this server that returns one.
         """
         live: Config = request.app.state.config
-        return settings_module.document(live)
+        return settings_module.document(live, installed=_installed_subjects(live))
 
     @private.put("/settings")
     async def put_settings(request: Request) -> dict[str, Any]:
@@ -868,7 +880,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 client=_client_agent(request),
                 changed=resolved.changed,
             )
-        return settings_module.document(live)
+        return settings_module.document(live, installed=_installed_subjects(live))
 
     @private.post("/settings/upstreams/{name}/test")
     async def test_upstream(request: Request, name: str) -> dict[str, Any]:

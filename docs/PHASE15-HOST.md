@@ -157,6 +157,13 @@ url = "http://192.168.68.20:11434"   # no key; ollama is reached by address
     "openai":    {"configured": false, "key_hint": null},
     "ollama":    {"configured": true,  "url": "http://192.168.68.20:11434"}
   },
+  "local_models": {"translate": "qwen3.8-27b-4bit", "tts": null},
+  "local_model_choices": {
+    "translate": [
+      {"id": "qwen3.8-27b",      "memory_bytes_estimate": 56371445760, "fits": false, "installed": false},
+      {"id": "qwen3.8-27b-4bit", "memory_bytes_estimate": 21580613632, "fits": true,  "installed": true}
+    ]
+  },
   "desktop_allowance_bytes": 3221225472,
   "backend_kind": "cuda-linux"
 }
@@ -169,6 +176,20 @@ url = "http://192.168.68.20:11434"   # no key; ollama is reached by address
   that is not the same statement wearing one spelling: this document must be readable before
   anything has probed the card, because writing the key is what an app does FIRST. A window
   that needs the two apart reads capability, which says which it is by name.
+- `local_models.<class>` is the model an APP chose for that class, or `null` where nobody
+  chose and the engine decides best-first. INTENT.md gives the app the choice of its own
+  models — BookForge its voices, Foundry its reading and language models — and Crucible the
+  running of them; this is where that choice lives. EVERY selectable class appears, because
+  listing only the chosen ones would make "nobody chose" and "this build does not know that
+  class" the same reading. `echo` is absent: it has nothing to choose between.
+- `local_model_choices.<class>` is what may be chosen, best-first, each row carrying
+  `memory_bytes_estimate`, `fits` (against this card less the desktop allowance) and
+  `installed` (a fact about this disk, read from the same catalog `GET /v1/catalog`
+  serves). Both are COMPUTED per read, never stored: a recorded `fits` would be wrong the
+  first time the config moved to another machine, and a recorded `installed` the first
+  time a download finished. `local_model_choices` is `{}` when nothing has decided this
+  host's capability yet — without a probe there is no backend to list candidates for and
+  no budget to measure them against.
 - A key is **write-only**. `key_hint` is the last four characters, enough to recognise which
   key is there and nothing else. There is no route that returns a key.
 
@@ -179,6 +200,7 @@ Body is any subset of:
 ```json
 {
   "routes":   {"translate": "anthropic/claude-sonnet-5", "simplify": "local"},
+  "local_models": {"tts": "mistborn", "translate": null},
   "upstreams": {"anthropic": {"key": "sk-ant-…"}, "ollama": {"url": "http://…"}, "openai": null},
   "desktop_allowance_bytes": 3221225472
 }
@@ -189,6 +211,23 @@ Body is any subset of:
   an upstream name that is not one of the three), `route_upstream_unconfigured` (the named
   upstream has no key/url — configure it in the SAME request or before; the server never
   stores a route it cannot serve).
+- `local_models.<class>` is a model id, or `null` to restore the automatic best-first
+  decision. `null` is not "no model" — that is not a thing an app can ask for — it is the
+  removal of a preference. A choice is HONOURED or REFUSED, never quietly replaced by a
+  model that happens to fit, which would make this document a suggestion. Refusals, each
+  with `details.field`: `local_model_not_selectable` (400 — a class with no candidates,
+  such as `echo`), `local_model_unknown` (400 — not among that class's candidates on this
+  backend; `details.choices` lists what there was), `local_model_does_not_fit` (409 —
+  carrying `memory_bytes_estimate`, `available_bytes` and `shortfall_bytes`, with the
+  arithmetic in the sentence), and `capability_undecided` (503 — nothing has probed this
+  card, so there is no budget to measure a choice against).
+- **A model that is not installed may still be chosen** (Owen, 2026-09-16). The choice is
+  the app's statement of what it wants to run, and preparation is what fetches the weights:
+  the recomputed capability row names the chosen model, and the module task pulls whatever
+  that row selected. Refusing an uninstalled model here would force an app to install one
+  before it was allowed to say it wanted it.
+- Order inside one request: the allowance is applied BEFORE `local_models`, because whether
+  a choice fits is arithmetic against a budget the same patch may be changing.
 - `upstreams.<name>: null` removes that upstream. Removing one that a route names is refused
   `upstream_in_use` with the classes that name it — the caller re-routes first, in the same
   request if it likes. Order inside one request: upstreams are applied, then routes, then the

@@ -34,6 +34,7 @@ def decided(total: int = 26 * 1024 ** 3, allowance: int = 3 * 1024 ** 3) -> Any:
             total_bytes=total,
             desktop_allowance_bytes=allowance,
             gpu_vendor="nvidia",
+            chosen={},
         ),
         routes={},
     )
@@ -470,6 +471,7 @@ def test_the_operators_routes_survive_a_capability_rewrite(
         total_bytes=FAKE_BACKEND.gpu.vram_bytes,
         desktop_allowance_bytes=config.desktop_allowance_bytes,
         gpu_vendor=FAKE_BACKEND.gpu.vendor,
+        chosen={},
     )
     _write_capability(config, FAKE_BACKEND, decisions, {"enable_tts": True})
     after = load_config(home)

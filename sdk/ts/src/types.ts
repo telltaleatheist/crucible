@@ -1922,8 +1922,19 @@ export interface UpstreamSetting {
   readonly url?: string | null;
 }
 
+/** An eligible local model, computed by the engine for a capability class. */
+export interface LocalModelChoice {
+  readonly id: string;
+  readonly memoryBytesEstimate: number;
+  readonly fits: boolean;
+  readonly installed: boolean;
+}
+
 /** `GET /v1/settings` — the whole of what an app's settings window draws. */
 export interface SettingsDocument {
+  /** Absent on older engines. Null requests automatic selection, never a fallback. */
+  readonly localModels?: Readonly<Record<string, string | null>>;
+  readonly localModelChoices?: Readonly<Record<string, readonly LocalModelChoice[]>>;
   /** One entry per routable class: `clean`, `translate`, `simplify`, `analysis`. */
   readonly routes: Readonly<Record<string, RouteSetting>>;
   readonly upstreams: Readonly<Record<UpstreamName, UpstreamSetting>>;
@@ -1941,6 +1952,8 @@ export interface SettingsDocument {
  * it. A refusal applies nothing.
  */
 export interface SettingsPatch {
+  /** Explicit local selection; null restores the engine's automatic decision. */
+  readonly localModels?: Readonly<Record<string, string | null>>;
   /** Class → `'local'` or an upstream model id. */
   readonly routes?: Readonly<Record<string, string>>;
   /** Name → its one field, or `null` to remove the upstream. */

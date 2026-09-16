@@ -144,6 +144,26 @@ class RouteRecord:
 
 
 @dataclass(frozen=True)
+class LocalModelRecord:
+    """One `[local_models]` entry: a class, and the local model an APP chose.
+
+    The mirror of `RouteRecord` above, with the same absence rule: no record
+    means the class takes whatever `capability` decides best-first, and
+    "automatic" is never written as a value, so "did anyone choose" is one
+    question with one answer rather than a value spelled two ways.
+
+    INTENT.md gives the APP the choice of its own models — BookForge its
+    voices, Foundry its reading and language models — and Crucible the running
+    of them. This table is where that choice is kept so it survives a restart.
+    Whether the choice still FITS is not recorded here: that is a fact about a
+    card, `capability` owns it, and a stored answer would go stale the first
+    time the config moved to another machine.
+    """
+
+    capability: str
+    model: str
+
+@dataclass(frozen=True)
 class CapabilityRow:
     """One capability class's verdict, as `crucible capability` decided it.
 
@@ -274,10 +294,27 @@ class Config:
     #: operator's account. PRESENT MEANS CONFIGURED: `load_config` refuses an
     #: entry missing its one field, so nothing downstream has to ask twice.
     upstreams: tuple[UpstreamRecord, ...] = ()
+    #: `[local_models]` — the local model an app CHOSE for a class, where it
+    #: chose one. Empty means every class is decided automatically, which is
+    #: what every config written before this field says, so an old one needs
+    #: no migration.
+    local_models: tuple[LocalModelRecord, ...] = ()
 
     def route_model(self, capability: str) -> str | None:
         """The upstream model this class runs on, or None because it runs local."""
         for entry in self.routes:
+            if entry.capability == capability:
+                return entry.model
+        return None
+
+    def local_model(self, capability: str) -> str | None:
+        """The local model an app chose for this class, or None for automatic.
+
+        None is not "nothing fits" — that is `capability`'s answer and it says
+        so with an arithmetic reason. None here is the narrower fact that
+        nobody has stated a preference, which is the common case.
+        """
+        for entry in self.local_models:
             if entry.capability == capability:
                 return entry.model
         return None
@@ -705,6 +742,50 @@ def _route_records(
     return tuple(found)
 
 
+def _local_model_records(table: dict[str, Any]) -> tuple[LocalModelRecord, ...]:
+    """`[local_models]`, validated as classes that can have a selection.
+
+    A hand-edited config is refused HERE for the reason `[routes]` is: a server
+    that started holding a selection for a class which cannot have one would
+    answer every settings read with a fact nothing can act on.
+
+    What is NOT asked here is whether the model exists on this backend or fits
+    this card. Both are questions about a machine this process has not probed
+    yet, `capability` is their one owner, and answering them twice is how two
+    doors come to disagree (ARCHITECTURE.md R1). A selection naming a model
+    this backend cannot run is reported BY `capability`, with its own reason.
+    """
+    from .capability import BY_NAME, CLASSES
+
+    section = table.get("local_models")
+    if section is None:
+        return ()
+    if not isinstance(section, dict):
+        raise ConfigError("config key local_models must be a table")
+    selectable = [entry.name for entry in CLASSES if entry.candidates is not None]
+    found: list[LocalModelRecord] = []
+    for name in sorted(section):
+        entry = BY_NAME.get(name)
+        if entry is None or entry.candidates is None:
+            raise ConfigError(
+                f"config [local_models]: local_model_not_selectable {name!r}; "
+                f"only {selectable} choose a local model"
+            )
+        model = section[name]
+        if not isinstance(model, str):
+            raise ConfigError(
+                f"config key local_models.{name} must be a string, got "
+                f"{type(model).__name__}"
+            )
+        if model == "":
+            raise ConfigError(
+                f"config [local_models]: local_models.{name} is empty, which is "
+                "the absence of a selection and is never written; remove the key"
+            )
+        found.append(LocalModelRecord(capability=name, model=model))
+    return tuple(found)
+
+
 def load_config(home: Path | None = None) -> Config:
     """Read config.toml. Raises ConfigError naming the missing piece."""
     root = home if home is not None else crucible_home()
@@ -745,6 +826,7 @@ def load_config(home: Path | None = None) -> Config:
         ),
         capability=_capability_record(table),
         routes=_route_records(table, upstreams),
+        local_models=_local_model_records(table),
         upstreams=upstreams,
     )
 
@@ -779,6 +861,9 @@ def write_config(
     #: rewrite silently unroutes a server — `cli._write_capability` does, and a
     #: test pins it.
     routes: tuple[RouteRecord, ...] = (),
+    #: `[local_models]`, on the same terms as `routes` above: defaulted to
+    #: empty, and written only when there is one.
+    local_models: tuple[LocalModelRecord, ...] = (),
     upstreams: tuple[UpstreamRecord, ...] = (),
     advertise: tuple[str, ...] = (),
     tailscale_advertise: tuple[str, ...] = (),
@@ -837,6 +922,11 @@ def write_config(
         # read the same, and writing the empty one would put a section in every
         # config on earth to say nothing.
         document["routes"] = {entry.capability: entry.model for entry in routes}
+    if local_models:
+        # Only when there is one, for the reason `routes` gives just above.
+        document["local_models"] = {
+            entry.capability: entry.model for entry in local_models
+        }
     if upstreams:
         document["upstreams"] = {
             entry.name: (
