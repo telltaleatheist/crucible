@@ -64,7 +64,7 @@ from .asrmodels import load_all_asr_manifests
 from .backend import Backend
 from .config import Config
 from .errors import ApiError, CrucibleError
-from .manifests import load_all_manifests
+from .manifests import BACKEND_ENGINES, load_all_manifests
 from .jobs.base import utcnow
 from .residency import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_TTS, Residency
 from .rvcmodels import load_all_rvc_manifests
@@ -389,6 +389,56 @@ def declared_ids() -> dict[str, list[str]]:
         # on a PC). Whether THIS backend has the row is `subjects()`' answer.
         llamacpp.ENGINE_KIND: [llamacpp.LLAMA_CPP_ID],
     }
+
+
+def backends_declaring(kind: str, subject_id: str) -> list[str]:
+    """Which backend kinds this build declares a subject for. Sorted.
+
+    `declared_ids()` with the union NOT taken — the question it deliberately
+    flattens, asked again because one caller needs it back.
+
+    WHY IT IS NEEDED. A module file is written once and posted to a Mac and a
+    PC alike, and `modules.py` says so: "must name the same subjects on both".
+    That holds for every subject in this build except the transcribers, and for
+    a reason that will not go away — `crucible/asr/mlx-whisper-large-v3.toml`
+    states it: CTranslate2 has no Metal backend, "so there is no
+    `[backends.mlx-darwin]` on any `asr/faster-whisper-*.toml` and there never
+    will be". BookForge names `faster-whisper-large-v3`, the Mac has never
+    heard of it, and the whole module is refused `invalid_module` (measured
+    2026-09-15, on Owen's Mac).
+
+    A CLASS CANNOT FIX THIS ONE, which is how the same shape was fixed last
+    time (`dots-ocr`, found by Foundry against the Mac): `[[needs]]` resolves
+    model classes only, and choosing WHICH whisper is an app choosing a
+    transcriber's accuracy — the generator picking for it is precisely what
+    this module file exists not to do. So the choice stays the app's, and the
+    generator records which backends each named choice is real on.
+
+    Absent from every backend is NOT answered here as an empty list meaning
+    "everywhere": that is the caller's existence check to make, and it already
+    does.
+    """
+    loaders: dict[str, Any] = {
+        "model": (
+            load_all_manifests,
+            load_all_asr_manifests,
+            load_all_align_manifests,
+        ),
+        "voice": (load_all_voices,),
+        "rvc": (load_all_rvc_manifests,),
+        "denoise": (denoisemodels.load_all_denoise_manifests,),
+    }
+    found: set[str] = set()
+    for load in loaders.get(kind, ()):
+        manifest = load().get(subject_id)
+        if manifest is not None:
+            found.update(manifest.backends)
+    if kind not in loaders:
+        # `rvc-base` and the llama.cpp engine row are declared on every
+        # machine by `declared_ids` itself and have no manifest to ask, so
+        # they are every backend by construction. Said rather than defaulted.
+        return sorted(BACKEND_ENGINES)
+    return sorted(found)
 
 
 def find(

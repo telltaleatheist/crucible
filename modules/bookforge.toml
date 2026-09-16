@@ -62,9 +62,31 @@ class = "clean"
 
 # The transcriber. large-v3 rather than distil: BookForge's transcripts are
 # used for alignment, where a dropped word is a cue in the wrong place.
+#
+# TWO ENTRIES FOR ONE CHOICE, because this is the one subject in the build whose
+# ID DEPENDS ON THE BACKEND. CTranslate2 has no Metal backend, so a
+# `faster-whisper-*` will never have an `[backends.mlx-darwin]` block and an
+# `mlx-whisper-*` will never have a cuda-linux one — that is stated in
+# `crucible/asr/mlx-whisper-large-v3.toml` and is not going to change.
+#
+# Naming only the first is what BookForge shipped, and the Mac refused the whole
+# module: `invalid_module ... this server has no model called
+# 'faster-whisper-large-v3' for mlx-darwin` (measured on Owen's Mac,
+# 2026-09-15). The generator scopes each of these to the backends that declare
+# it, so an app sends each machine the one it can actually hold.
+#
+# The CHOICE is still stated here and still BookForge's — large-v3 on both — for
+# the reason the section header gives: a generator picking among six whisper
+# models would be choosing a transcriber's accuracy.
 [[subjects]]
 kind = "model"
 id = "faster-whisper-large-v3"
+
+# The same choice on Apple silicon. `-turbo` is faster and less accurate; these
+# transcripts are aligned against, so accuracy wins on both backends.
+[[subjects]]
+kind = "model"
+id = "mlx-whisper-large-v3"
 
 # The forced aligner — one candidate, but named rather than classed because
 # `align`'s candidates are not models' namespace.

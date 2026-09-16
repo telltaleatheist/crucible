@@ -240,15 +240,41 @@ def build(declaration: dict[str, Any], where: str) -> dict[str, Any]:
         job_types.append(entry)
 
     declared = catalog.declared_ids()
-    subjects: list[dict[str, str]] = []
+    subjects: list[dict[str, Any]] = []
 
     def add(kind: str, subject_id: str) -> None:
         # Deduplicated, in first-declared order. Two classes can floor on one
         # model — `translate` and `simplify` both floor on the 4-bit 27B — and
         # a module that named it twice would make the server run two steps
         # where the second is always skipped.
-        if {"kind": kind, "id": subject_id} not in subjects:
-            subjects.append({"kind": kind, "id": subject_id})
+        #
+        # `backends` ON EVERY ENTRY, not only the narrowing ones.
+        #
+        # The assumption this replaces is a few lines up — "a module is posted
+        # to a Mac and a PC alike and must name the same subjects on both" —
+        # and it stops being true at the transcribers: CTranslate2 has no Metal
+        # backend, so `faster-whisper-*` is cuda-linux and `mlx-whisper-*` is
+        # mlx-darwin, permanently, and a module naming only the first is one
+        # the Mac refuses WHOLE (`invalid_module`, measured 2026-09-15).
+        #
+        # Written uniformly because the alternative is a rule about when it
+        # appears, and every such rule needs a judgment about which backends
+        # "count" — `llama-windows` declares `rvc-base` and can serve none of
+        # the job types in this file, so "is it on all three?" answers the
+        # wrong question. A derived field on every row needs no such judgment
+        # and is read by a machine, which does not mind the repetition.
+        #
+        # THE KEY NEVER REACHES A SERVER. `tasks.validate_module` refuses a
+        # subject carrying an unknown key, so an app filters on this and strips
+        # it before posting — which is also what keeps every Crucible already
+        # installed able to read the files this generator writes today.
+        entry: dict[str, Any] = {
+            "kind": kind,
+            "id": subject_id,
+            "backends": catalog.backends_declaring(kind, subject_id),
+        }
+        if entry not in subjects:
+            subjects.append(entry)
 
     # NEEDS TRAVEL AS CLASSES, UNRESOLVED (PHASE15-HOST.md 5.3a, found
     # 2026-09-14 by Foundry against the Mac). This generator used to resolve a

@@ -1,6 +1,6 @@
 {
   "name": "bookforge",
-  "version": "0.6.0+8b7dd947029d",
+  "version": "0.6.0+321f2d7cf907",
   "job_types": [
     {
       "type": "llm"
@@ -27,23 +27,50 @@
   "subjects": [
     {
       "kind": "model",
-      "id": "faster-whisper-large-v3"
+      "id": "faster-whisper-large-v3",
+      "backends": [
+        "cuda-linux"
+      ]
     },
     {
       "kind": "model",
-      "id": "qwen3-aligner"
+      "id": "mlx-whisper-large-v3",
+      "backends": [
+        "mlx-darwin"
+      ]
+    },
+    {
+      "kind": "model",
+      "id": "qwen3-aligner",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
     },
     {
       "kind": "voice",
-      "id": "higgs-default"
+      "id": "higgs-default",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
     },
     {
       "kind": "rvc-base",
-      "id": "base"
+      "id": "base",
+      "backends": [
+        "cuda-linux",
+        "llama-windows",
+        "mlx-darwin"
+      ]
     },
     {
       "kind": "denoise",
-      "id": "denoise-roformer"
+      "id": "denoise-roformer",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
     }
   ]
 }
