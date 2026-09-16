@@ -207,7 +207,7 @@ echo "release: building the bootstrap"
 # rather than shipping beside a bootstrapper it disagrees with.
 echo "release: the generated installers match bootstrap's step list"
 ( cd sdk/bootstrap && npm run gen:install -- --check >/dev/null ) \
-  || fail "sdk/bootstrap/scripts/install.sh|.ps1 are stale; run `npm run gen:install` in sdk/bootstrap and commit them"
+  || fail "sdk/bootstrap/scripts/install.sh|.ps1 are stale; run 'npm run gen:install' in sdk/bootstrap and commit them"
 INSTALL_SH="$REPO/sdk/bootstrap/scripts/install.sh"
 INSTALL_PS1="$REPO/sdk/bootstrap/scripts/install.ps1"
 for asset in "$INSTALL_SH" "$INSTALL_PS1"; do
