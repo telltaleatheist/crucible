@@ -5,8 +5,9 @@ PHASE15-HOST.md 3.5 (the weights rule) and 3.5a (`DELETE /v1/catalog/{kind}/{id}
 THE HOST NEVER TOUCHES A WEIGHTS FILE. 3.5a exists precisely so that it does
 not: `crucible/weights.py` owns where a subject's bytes live, and a host that
 deleted a directory it had composed itself would be a second owner of that
-layout — the shape ARCHITECTURE.md R1 is about. So every read and every
-removal here is an HTTP call to a server that owns its own disk.
+layout. Preparation reads the two live APIs. After activation, retirement calls
+the stopped native catalog's existing owner functions; port 7100 then belongs
+to the guest and must never receive a deletion meant for the Windows copy.
 
 TWO PORTS, BECAUSE THE TWO SERVERS ARE REACHED DIFFERENTLY
 -----------------------------------------------------------
@@ -98,6 +99,10 @@ def parse_catalog(document: Any, where: str) -> list[Subject]:
                     f"{where}: a subject row has no {field!r}; its fields were "
                     f"{sorted(row)}",
                 )
+        if (not isinstance(row["kind"], str) or not row["kind"]
+                or not isinstance(row["id"], str) or not row["id"]
+                or type(row["installed"]) is not bool):
+            raise HostError("catalog_unreadable", f"{where}: kind/id must be non-empty strings and installed must be a boolean")
         subjects.append(
             Subject(
                 kind=str(row["kind"]),
@@ -184,7 +189,8 @@ class HttpCatalog:
             f"{self._base}{path}", data=data, method=method, headers=headers
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(request, timeout=timeout_s) as response:
                 return response.read()
         except urllib.error.HTTPError as exc:
             raise refusal_from(exc.read(), exc.code, self._where, f"{method} {path}") from None
@@ -214,6 +220,62 @@ class HttpCatalog:
             None,
             CATALOG_TIMEOUT_SECONDS,
         )
+
+
+class StoppedWindowsCatalog:
+    """Retire weights through their catalog owner after the native process exits.
+
+    Port 7100 belongs to the guest after activation; using the old HTTP client
+    there would delete the destination. The controller must establish ownership
+    and shutdown before constructing this adapter. Runtime binaries stay local.
+    """
+
+    def __init__(self, config, backend, pending: set[tuple[str, str]]) -> None:
+        from ..backend import LLAMA_WINDOWS
+        if config.backend_kind != LLAMA_WINDOWS or backend.kind != LLAMA_WINDOWS:
+            raise HostError("migration_source_invalid", "Cleanup requires the native Windows catalog")
+        self._config = config
+        self._backend = backend
+        self._pending = set(pending)
+
+    @property
+    def where(self) -> str:
+        return "the stopped Windows engine"
+
+    def _subjects(self):
+        from ..catalog import subjects
+        return [row for row in subjects(self._config, self._backend) if row.kind != "engine"]
+
+    def installed_subjects(self) -> list[Subject]:
+        rows = self._subjects()
+        unknown = self._pending - {(row.kind, row.id) for row in rows}
+        if unknown:
+            raise HostError("migration_cleanup_subject_unknown", f"The native catalog cannot retire these recorded subjects: {sorted(unknown)}")
+        # A deletion interrupted after removing its stamp must still be resumed.
+        return [Subject(row.kind, row.id, row.name or row.id, True)
+                for row in rows if row.installed() is not None or (row.kind, row.id) in self._pending]
+
+    def pull(self, subject: Subject) -> None:
+        raise HostError("migration_source_readonly", "The stopped Windows engine cannot download models")
+
+    def remove(self, subject: Subject) -> None:
+        from ..errors import CrucibleError
+        from .installer import cleanup_subjects, record_cleanup
+        for row in self._subjects():
+            if (row.kind, row.id) == subject.key:
+                try:
+                    # Downloads completed during preparation can add a subject.
+                    # Record it before deletion, so interruption after its stamp
+                    # disappears still has a named catalog operation to resume.
+                    saved = cleanup_subjects(self._config.home)
+                    if subject.key not in saved:
+                        record_cleanup(self._config.home, saved | {subject.key})
+                    row.remove()
+                    self._pending.discard(subject.key)
+                except (OSError, CrucibleError) as exc:
+                    raise CatalogRefusal("subject_remove_failed", str(exc)) from exc
+                return
+        raise CatalogRefusal("subject_unknown", f"The native catalog no longer declares {subject}")
 
 
 class GuestCatalog:

@@ -895,10 +895,11 @@ def test_the_sequence_is_4_7s_steps_in_4_7s_order() -> None:
         "guest-install",
         "migrate-config",
         "install-job-types",
-        "migrate-weights",
+        "prepare-weights",
         "lan-door",
         "stop-windows-server",
         "switch-pairing",
+        "migrate-weights",
     )
 
 
@@ -1726,6 +1727,148 @@ def test_a_subject_the_guest_ALREADY_has_is_not_pulled_again(tmp_path: Path) -> 
     assert windows.subjects == []
 
 
+def test_preparation_never_deletes_a_source_when_a_later_pull_fails(tmp_path: Path) -> None:
+    class RefusesSecond(FakeCatalog):
+        def pull(self, subject: Subject) -> None:
+            if subject.id == "b":
+                raise CatalogRefusal("download_failed", "fixture failure")
+            super().pull(subject)
+    windows = FakeCatalog("windows", [("model", "a"), ("model", "b"), ("engine", "llama.cpp")])
+    guest = RefusesSecond("guest")
+    with pytest.raises(CatalogRefusal):
+        migration(windows, guest, [], tmp_path)._prepare_weights()
+    assert len(windows.subjects) == 3
+    assert not any(call.startswith("remove") for call in windows.calls)
+    assert not any("engine" in call for call in guest.calls)
+
+
+def test_activation_precedes_retirement_and_native_binary_is_not_migrated(tmp_path: Path) -> None:
+    windows = FakeCatalog("windows", [("model", "a"), ("engine", "llama.cpp")])
+    guest = FakeCatalog("guest")
+    walk = migration(windows, guest, [], tmp_path)
+    for method in ("_wsl_state", "_import_distro", "_guest_install", "_migrate_config", "_install_job_types", "_lan_door"):
+        setattr(walk, method, lambda: None)
+    order = []
+    def stopped():
+        assert ("model", "a") in {row.key for row in windows.subjects}
+        assert ("model", "a") in {row.key for row in guest.subjects}
+        order.append("stopped")
+    def switched():
+        assert order == ["stopped"]
+        assert (tmp_path / installer.CLEANUP_RECORD).is_file()
+        order.append("switched")
+    def cleanup_catalog():
+        assert order == ["stopped", "switched"]
+        return windows
+    walk._stop_windows_callback = stopped
+    walk._switch_pairing_callback = switched
+    walk._windows_after_switch = cleanup_catalog
+    walk._guest_facts = lambda: ("/guest", "/guest/server/bin/crucible", "guest")
+    walk.run()
+    assert {row.key for row in windows.subjects} == {("engine", "llama.cpp")}
+    assert {row.key for row in guest.subjects} == {("model", "a")}
+    assert not any(call.startswith("remove") for call in guest.calls)
+    assert not (tmp_path / installer.CLEANUP_RECORD).exists()
+
+
+def test_failed_activation_keeps_all_windows_models_and_resume_record(tmp_path: Path) -> None:
+    windows = FakeCatalog("windows", [("model", "a")])
+    guest = FakeCatalog("guest")
+    walk = migration(windows, guest, [], tmp_path)
+    for method in ("_wsl_state", "_import_distro", "_guest_install", "_migrate_config", "_install_job_types", "_lan_door"):
+        setattr(walk, method, lambda: None)
+    walk._stop_windows_callback = lambda: None
+    def failed_switch():
+        raise HostError("engine_move_failed", "fixture cannot reach guest through Windows")
+    walk._switch_pairing_callback = failed_switch
+    walk._windows_after_switch = lambda: windows
+    with pytest.raises(HostError, match="fixture"):
+        walk.run()
+    assert {row.key for row in windows.subjects} == {("model", "a")}
+    assert (tmp_path / installer.CLEANUP_RECORD).is_file()
+
+
+def test_malformed_installed_flag_cannot_authorize_source_deletion() -> None:
+    with pytest.raises(HostError):
+        catalog_module.parse_catalog({"subjects": [{"kind": "model", "id": "a", "installed": "false"}]}, "guest")
+
+
+def test_stopped_catalog_resumes_partial_deletion_through_the_weights_owner(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from crucible import catalog
+    residue = tmp_path / "fixture-remaining-weight"
+    residue.write_bytes(b"weight")
+    calls = []
+    def remove():
+        calls.append("owner remove")
+        residue.unlink(missing_ok=True)
+    row = SimpleNamespace(kind="model", id="fixture", name="Fixture", installed=lambda: None, remove=remove)
+    monkeypatch.setattr(catalog, "subjects", lambda config, backend: [row])
+    installer.record_cleanup(tmp_path, {("model", "fixture")})
+    config = SimpleNamespace(backend_kind="llama-windows", home=tmp_path)
+    backend = SimpleNamespace(kind="llama-windows")
+    stopped = catalog_module.StoppedWindowsCatalog(config, backend, installer.cleanup_subjects(tmp_path))
+    pending = stopped.installed_subjects()
+    assert len(pending) == 1, "a removed stamp cannot hide a partially deleted model"
+    stopped.remove(pending[0])
+    assert calls == ["owner remove"] and not residue.exists()
+    assert stopped.installed_subjects() == []
+
+
+def test_controller_resumes_cleanup_and_keeps_journal_on_failure(tmp_path, monkeypatch):
+    context = _context(tmp_path, Scripted())
+    host = app_module.Host(context)
+    windows = FakeCatalog("stopped Windows", [("model", "a")])
+    guest = FakeCatalog("active guest", [("model", "a")])
+    installer.record_cleanup(tmp_path, {("model", "a")})
+    monkeypatch.setattr(host, "stopped_windows_catalog", lambda: windows)
+    monkeypatch.setattr(app_module, "engine_token", lambda _: "fixture-token")
+    monkeypatch.setattr(app_module, "HttpCatalog", lambda *a, **kw: guest)
+    host._cleanup_running = True
+    guest.unreachable = True
+    host._resume_model_cleanup()
+    assert (tmp_path / installer.CLEANUP_RECORD).exists()
+    assert windows.subjects and not host._cleanup_running
+    guest.unreachable = False
+    host._resume_model_cleanup()
+    assert not (tmp_path / installer.CLEANUP_RECORD).exists()
+    assert windows.subjects == [] and guest.subjects
+
+
+def test_cleanup_refuses_an_engine_still_owned_by_windows(tmp_path):
+    host = app_module.Host(_context(tmp_path, Scripted()))
+    host._c.presence = presence.Presence(Distro.ABSENT, Engine.RUNNING, "native", Owner.HOST_CHILD)
+    with pytest.raises(HostError, match="Windows models are kept"):
+        host.stopped_windows_catalog()
+
+
+def test_background_cleanup_never_downloads_or_deletes_if_destination_missing(tmp_path):
+    windows = FakeCatalog("stopped Windows", [("model", "a"), ("model", "b")])
+    guest = FakeCatalog("active guest", [("model", "a")])
+    with pytest.raises(HostError, match="Windows models are kept"):
+        migration(windows, guest, [], tmp_path)._migrate_weights(allow_pull=False)
+    assert not any(call.startswith("pull") for call in guest.calls)
+    assert not any(call.startswith("remove") for call in windows.calls)
+
+
+def test_retry_after_guest_activation_never_rebuilds_native_http_source(tmp_path, monkeypatch):
+    context = _context(tmp_path, Scripted())
+    context.presence = presence.Presence(Distro.PRESENT, Engine.RUNNING, "guest", Owner.WSL_UNIT)
+    host = app_module.Host(context)
+    installer.record_cleanup(tmp_path, {("model", "a")})
+    calls = []
+    def resumed(*, raise_errors):
+        assert raise_errors is True
+        calls.append("resume native cleanup")
+    monkeypatch.setattr(host, "_resume_model_cleanup", resumed)
+    monkeypatch.setattr(installer.EngineInstall, "_complete", lambda self: calls.append("complete"))
+    def wrong_source(*args, **kwargs):
+        raise AssertionError("The active guest cannot be constructed as a native source")
+    monkeypatch.setattr(app_module, "HttpCatalog", wrong_source)
+    app_module._sequence(context, host)(lambda event: None)
+    assert calls == ["resume native cleanup", "complete"]
+
+
 def test_an_interrupted_move_resumes_from_the_two_catalogs(tmp_path: Path) -> None:
     """The half-done state — one moved, one not — is just a different diff."""
     windows = FakeCatalog("windows", [("model", "a"), ("voice", "b")])
@@ -1906,7 +2049,7 @@ def test_a_guest_that_will_not_answer_refuses_rather_than_reporting_nothing() ->
     assert caught.value.code == "catalog_unreachable"
 
 
-def test_the_windows_port_deletes_through_3_5as_route() -> None:
+def test_the_windows_port_deletes_through_3_5as_route(monkeypatch) -> None:
     port = catalog_module.HttpCatalog("http://127.0.0.1:7100", "tok", where="the Windows engine")
     seen: dict[str, object] = {}
 
@@ -1923,12 +2066,12 @@ def test_the_windows_port_deletes_through_3_5as_route() -> None:
 
     import urllib.request as urllib_request
 
-    original = urllib_request.urlopen
-    urllib_request.urlopen = fake_urlopen  # type: ignore[assignment]
-    try:
-        port.remove(Subject("voice", "mistborn", "mistborn", True))
-    finally:
-        urllib_request.urlopen = original  # type: ignore[assignment]
+    from types import SimpleNamespace
+    def opener(handler):
+        assert handler.proxies == {}, "local migration credentials must not use ambient HTTP proxies"
+        return SimpleNamespace(open=fake_urlopen)
+    monkeypatch.setattr(urllib_request, "build_opener", opener)
+    port.remove(Subject("voice", "mistborn", "mistborn", True))
     assert seen["url"] == "http://127.0.0.1:7100/v1/catalog/voice/mistborn"
     assert seen["method"] == "DELETE"
     assert seen["auth"] == "Bearer tok"

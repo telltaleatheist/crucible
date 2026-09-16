@@ -28,18 +28,21 @@ runs `crucible init --force --config-from <file>`, which takes exactly
 and then deletes. Two inits and one token, rather than one init and an app
 that silently stops being paired.
 
-NOTHING IS DELETED BEFORE THE GUEST HAS IT
+MODEL RETIREMENT FOLLOWS VERIFIED ACTIVATION
 -------------------------------------------
-3.5's weights rule, and `migrate-weights` below is shaped by it: pull the
-guest's form of every subject the Windows engine has, and only then delete the
-Windows copy. An interrupted move leaves both copies of the unfinished subject
-and resumes from the catalog diff on the next attempt, which is why the step
-reads the two catalogs every time rather than carrying a list across.
+Prepare every guest model while retaining every native original, then stop the
+native process and verify guest ownership/pairing. Retire native model files
+through their catalog owner functions only afterward. A persistent subject-key
+record resumes interrupted cleanup, even if a partial deletion removed its
+installation stamp. The Windows executable is retained; it is not a model or
+a portable Linux engine. Temporary copies during migration preserve recovery;
+successful cleanup leaves only the active backend's model files.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import re
 import shlex
 import time
@@ -57,6 +60,29 @@ from .wsl_states import CRUCIBLE_DISTRO
 #: The only target this door accepts. 4.7: the reverse move is not in this
 #: phase, and a target nobody implemented is refused rather than ignored.
 ENGINE_TARGET_WSL = "wsl"
+CLEANUP_RECORD = "migration-cleanup.json"
+
+
+def cleanup_subjects(home: Path) -> set[tuple[str, str]]:
+    """Read only named catalog subjects; never accept filesystem paths."""
+    value = json.loads((home / CLEANUP_RECORD).read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or value.get("schema_version") != 1 or not isinstance(value.get("subjects"), list):
+        raise HostError("migration_cleanup_record_invalid", "The migration cleanup record is incompatible")
+    result = set()
+    for row in value["subjects"]:
+        if (not isinstance(row, list) or len(row) != 2
+                or not all(isinstance(part, str) and part for part in row) or row[0] == "engine"):
+            raise HostError("migration_cleanup_record_invalid", "The migration cleanup record contains an invalid model subject")
+        result.add(tuple(row))
+    return result
+
+
+def record_cleanup(home: Path, subjects: set[tuple[str, str]]) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    record = home / CLEANUP_RECORD
+    staged = record.with_suffix(".tmp")
+    staged.write_text(json.dumps({"schema_version": 1, "subjects": [list(row) for row in sorted(subjects)]}) + "\n", encoding="utf-8")
+    staged.replace(record)
 
 #: 4.7's step names, in 4.7's order. The page draws these, the log carries
 #: them, and `tests/test_host_installer.py` asserts the order — a sequence
@@ -67,10 +93,11 @@ STEPS: tuple[str, ...] = (
     "guest-install",
     "migrate-config",
     "install-job-types",
-    "migrate-weights",
+    "prepare-weights",
     "lan-door",
     "stop-windows-server",
     "switch-pairing",
+    "migrate-weights",
 )
 
 #: Long enough for a `wsl --import` of a multi-gigabyte ext4 file, and for a
@@ -206,6 +233,7 @@ class EngineInstall:
         guest_catalog: CatalogPort | None = None,
         stop_windows_server: Callable[[], None] | None = None,
         switch_pairing: Callable[[], None] | None = None,
+        windows_after_switch: Callable[[], CatalogPort] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -226,6 +254,7 @@ class EngineInstall:
         self._guest = guest_catalog
         self._stop_windows_callback = stop_windows_server
         self._switch_pairing_callback = switch_pairing
+        self._windows_after_switch = windows_after_switch
         self._monotonic = monotonic
         self._sleep = sleep
         self._index = 0
@@ -320,16 +349,27 @@ class EngineInstall:
     # ------------------------------------------------------------- the walk
 
     def run(self) -> InstallOutcome:
-        """Walk 4.7's steps. A failure leaves the Windows engine untouched."""
+        """Prepare, activate, then retire; failed preparation preserves native models."""
         self._wsl_state()
         self._import_distro()
         self._guest_install()
         self._migrate_config()
         self._install_job_types()
-        self._migrate_weights()
+        prepared = self._prepare_weights()
         self._lan_door()
+        if self._windows is not None:
+            if self._windows_after_switch is None:
+                raise self._fail("migration_cleanup_unavailable", "The controller did not provide stopped-engine cleanup; Windows models are unchanged")
+            record_cleanup(self._home, {row.key for row in prepared})
         self._stop_windows_server()
         self._switch_pairing()
+        if self._windows is not None:
+            self._windows = self._windows_after_switch()
+        self._migrate_weights()
+        self._home.joinpath(CLEANUP_RECORD).unlink(missing_ok=True)
+        return self._complete()
+
+    def _complete(self) -> InstallOutcome:
         guest_home, crucible, name = self._guest_facts()
         outcome = InstallOutcome(
             steps=list(self._records),
@@ -551,20 +591,39 @@ class EngineInstall:
         )
         self._finish("install-job-types", "none: the coordinate records are the server's")
 
-    def _migrate_weights(self) -> None:
-        """3.5 and 3.5a: pull in the guest, then delete on Windows. Never the reverse.
+    def _prepare_weights(self) -> list[Subject]:
+        """Prepare every destination before stopping or deleting any source."""
+        self._step("prepare-weights")
+        if self._windows is None or self._guest is None:
+            self._finish("prepare-weights", "No Windows model catalog to move")
+            return []
+        source = [row for row in self._windows.installed_subjects() if row.kind != "engine"]
+        target = {row.key for row in self._guest.installed_subjects()}
+        for subject in source:
+            if subject.key not in target:
+                self._pull_into_guest(subject)
+        installed = {row.key for row in self._guest.installed_subjects()}
+        missing = [str(row) for row in source if row.key not in installed]
+        if missing:
+            raise self._fail("migration_destination_incomplete", "Windows models are unchanged; the guest is missing " + ", ".join(missing))
+        self._finish("prepare-weights", f"Verified {len(source)} subject(s) in the guest; all Windows originals are still present")
+        return source
+
+    def _migrate_weights(self, *, allow_pull: bool = True) -> None:
+        """Retire native models after the guest owns the endpoint.
 
         THE ORDER IS THE WHOLE RULE. For each subject the Windows catalog
         reports installed: submit the guest's pull, WAIT until the guest's own
         catalog says it is installed there, and only then
-        `DELETE /v1/catalog/{kind}/{id}` on the Windows server. A machine
+        the stopped native catalog's removal operation. A machine
         unplugged at any instant has the subject on one side or on both, never
         on neither.
 
-        IDEMPOTENT BY RE-DIFFING, not by a journal. Every round re-reads BOTH
-        catalogs and acts on the difference, so a resume after a crash, a
-        reboot or a `Ctrl-C` needs no state that survived the crash — which is
-        the only kind of resume that is true after a power cut.
+        Every round re-reads both catalogs. The persistent cleanup record also
+        names incomplete deletions whose installation stamp disappeared. That
+        lets the stopped native adapter finish removing their remaining files.
+        Background retries refuse missing destinations promptly; only an
+        explicit guided migration may download another destination subject.
 
         `subject_in_use` (3.5a) is WAITED OUT, never skipped. Something holds
         the subject — a lease, a resident model, a running task — and 3.5 says
@@ -573,8 +632,9 @@ class EngineInstall:
         then the step fails BY THAT NAME. The two honest ends are "removed"
         and "still held, and here is who".
 
-        The host never touches a file: every read, pull and delete is a
-        request to the server that owns that disk (3.5a's reason for existing).
+        The native adapter calls the same catalog/weights owner functions as
+        the API. It never sends a native deletion to port 7100 after that port
+        has become the guest's endpoint.
         """
         self._step("migrate-weights")
         if self._windows is None or self._guest is None:
@@ -589,7 +649,7 @@ class EngineInstall:
         moved: list[str] = []
         held: dict[tuple[str, str], str] = {}
         for round_number in range(1, MIGRATE_IN_USE_ROUNDS + 1):
-            source = {row.key: row for row in self._windows.installed_subjects()}
+            source = {row.key: row for row in self._windows.installed_subjects() if row.kind != "engine"}
             if not source:
                 detail = (
                     f"moved {len(moved)} subject(s): {', '.join(moved)}"
@@ -600,6 +660,10 @@ class EngineInstall:
                 self._finish("migrate-weights", detail)
                 return
             target = {row.key for row in self._guest.installed_subjects()}
+            missing = [str(row) for key, row in source.items() if key not in target]
+            if missing and not allow_pull:
+                raise self._fail("migration_cleanup_destination_missing",
+                                 "Windows models are kept; the active guest must restore these subjects before cleanup: " + ", ".join(missing))
             held = {}
             for key in sorted(source):
                 subject = source[key]

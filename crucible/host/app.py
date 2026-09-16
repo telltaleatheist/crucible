@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +35,7 @@ from .. import API_VERSION, VERSION
 from .. import peer as peer_module
 from ..pairing import parse_pairing_line
 from . import installer, menu, startup
-from .catalog import CatalogPort, GuestCatalog, HttpCatalog
+from .catalog import CatalogPort, GuestCatalog, HttpCatalog, StoppedWindowsCatalog
 from .door import OrchestratorDoor, serve
 from .errors import HostError
 from .log import HostLog
@@ -378,6 +379,8 @@ class Host:
         self._door_server: object | None = None
         self._operation = threading.RLock()
         self._paused = (context.home / "engine.stopped").exists()
+        self._cleanup_running = False
+        self._cleanup_retry_at = 0.0
         #: Whether THIS process holds a claim on this machine's engine
         #: (PHASE17 2.1). Not "whether the engine is claimed" — that is the
         #: engine's fact and it is read from `/v1/info`, never mirrored here.
@@ -486,6 +489,53 @@ class Host:
                 "sharing_reconcile_failed",
                 f"The WSL engine is running, but its saved network sharing could not be restored: {exc}",
             ) from exc
+
+    def stopped_windows_catalog(self) -> CatalogPort:
+        """Deletion is allowed only after ownership and authenticated guest proof."""
+        from ..backend import detect_backend
+        from ..config import load_config
+        self._verify_active_guest()
+        return StoppedWindowsCatalog(load_config(self._c.home), detect_backend(), installer.cleanup_subjects(self._c.home))
+
+    def _verify_active_guest(self) -> None:
+        from ..local import request
+        if self._c.presence.owner is not Owner.WSL_UNIT or self._c.presence.engine is not Engine.RUNNING:
+            raise HostError("migration_cleanup_not_ready", "The WSL engine has not taken ownership; Windows models are kept")
+        token = engine_token(self._c)
+        if token is None:
+            raise HostError("migration_cleanup_not_ready", "The WSL engine has no pairing; Windows models are kept")
+        info = request(engine_url("/v1/info"), token=token)
+        if info.get("host", {}).get("backend") != "cuda-linux":
+            raise HostError("migration_cleanup_not_ready", "The authenticated endpoint is not the WSL engine; Windows models are kept")
+
+    def _resume_model_cleanup(self, *, raise_errors: bool = False) -> None:
+        """Resume an interrupted retirement using the retained native catalog."""
+        try:
+            with self._operation:
+                record = self._c.home / installer.CLEANUP_RECORD
+                if not record.exists():
+                    return
+                windows = self.stopped_windows_catalog()
+                token = engine_token(self._c)
+                if token is None:
+                    raise HostError("migration_cleanup_not_ready", "The active guest has no credential")
+                guest = HttpCatalog(engine_url(), token, where="the active WSL engine")
+                walk = installer.EngineInstall(
+                    self._c.runner, lambda event: self._c.log.write(f"model cleanup: {event.event}: {event.data}"),
+                    release=self._c.release, home=self._c.home,
+                    install_sh_url=INSTALL_SH_URL.format(release=self._c.release),
+                    windows_catalog=windows, guest_catalog=guest,
+                )
+                walk._migrate_weights(allow_pull=False)
+                record.unlink()
+                self._c.log.write("model cleanup: completed; native runtime kept, migrated Windows model files removed")
+        except Exception as exc:
+            self._c.log.write(f"model cleanup pending: {exc}")
+            if raise_errors:
+                raise
+        finally:
+            self._cleanup_retry_at = time.monotonic() + 300
+            self._cleanup_running = False
 
     def _hold(self) -> None:
         """7b.4c: hold the distro the engine is in, or it goes away by itself."""
@@ -894,6 +944,12 @@ class Host:
                 # 7b.4c: the hold is what keeps the VM there at all, so it is
                 # taken again the tick after it dies rather than at the next login.
                 self._c.watcher.rehold()
+                if (self._c.presence.owner is Owner.WSL_UNIT
+                        and self._c.presence.engine is Engine.RUNNING
+                        and (self._c.home / installer.CLEANUP_RECORD).exists()
+                        and not self._cleanup_running and time.monotonic() >= self._cleanup_retry_at):
+                    self._cleanup_running = True
+                    threading.Thread(target=self._resume_model_cleanup, name="crucible-model-cleanup", daemon=True).start()
                 if self._c.presence.engine is not before:
                     self._c.log.write(
                         f"watch: {before.value} -> {self._c.presence.engine.value} — "
@@ -1066,6 +1122,18 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
     and `migrate-weights` says exactly that.
     """
     def install_sequence(emit: Callable[[installer.Event], None]) -> None:
+        if context.presence.owner is Owner.WSL_UNIT:
+            # Port 7100 now belongs to the destination. It must never be read
+            # as the Windows source on a retry after an interrupted cleanup.
+            if (context.home / installer.CLEANUP_RECORD).exists():
+                host._resume_model_cleanup(raise_errors=True)
+            else:
+                host._verify_active_guest()
+            walk = installer.EngineInstall(context.runner, emit, release=context.release,
+                                           home=context.home,
+                                           install_sh_url=INSTALL_SH_URL.format(release=context.release))
+            walk._complete()
+            return
         token = read_token(context.home)
         windows: CatalogPort | None = None
         guest: CatalogPort | None = None
@@ -1090,6 +1158,7 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
             guest_catalog=guest,
             stop_windows_server=host.stop_windows_for_move,
             switch_pairing=host.finish_wsl_move,
+            windows_after_switch=host.stopped_windows_catalog,
         ).run()
 
     def run_sequence(emit: Callable[[installer.Event], None]) -> None:

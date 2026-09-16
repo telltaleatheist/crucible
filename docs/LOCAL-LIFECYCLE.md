@@ -46,6 +46,18 @@ switch before emitting completion. The controller suppresses recovery during the
 move, authenticates to the guest through Windows after the switch, takes the WSL
 hold, and claims the guest. Logged intentions are not completed steps.
 
+All destination model formats are prepared before any native original is removed.
+Native weights are retired only after the authenticated WSL engine takes ownership,
+using the native catalog's own removal functions after the native process exits.
+The old HTTP endpoint must never be used for this deletion: it now belongs to WSL.
+The native llama.cpp executable stays installed; it is not a Linux model to migrate.
+`migration-cleanup.json` records subject keys so a restart can finish cleanup,
+including a deletion interrupted after removing an installation stamp. Background
+cleanup never downloads missing destinations or holds lifecycle controls through
+a model download; missing destinations retain the native originals and the record.
+An interrupted migration can temporarily retain both formats. Completed cleanup
+keeps one active model store, without deleting models still needed for recovery.
+
 Validation: lifecycle regression tests exercise identity validation against a real
 local HTTP server, bad credentials/transport distinctions, persistent stop intent,
 and failure to stop. Bootstrap tests exercise record discovery, malformed records,

@@ -149,6 +149,7 @@ USER_DATA_DIRS: tuple[str, ...] = ("jobs", "uploads")
 #: `host.pid` is the tray's lock (`crucible/host/app.py`), the other two are
 #: documents the narrator engine rebuilds on demand.
 STATE_FILES: tuple[str, ...] = (
+    "migration-cleanup.json",
     "installation.json",
     "host.pid",
     "narrator-higgs-voices.json",
