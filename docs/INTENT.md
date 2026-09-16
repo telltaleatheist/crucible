@@ -20,6 +20,34 @@ progress. Crucible performs the work through its API. The same controls should
 work when Crucible is on another computer. Its own UI and tray remain useful for
 maintenance, diagnostics, service control and optional connection approval.
 
+### The Ollama standard (Owen, 2026-09-16)
+
+Crucible should feel like Ollama: installed once, then set and forget. Judge any
+proposed change against these.
+
+- **Configuration happens in BookForge and Foundry.** Their own settings and
+  setup pages pass configuration through to Crucible programmatically. A user
+  may open Crucible's own UI occasionally for a minor adjustment; needing it to
+  complete a normal workflow is a defect, not a documentation problem.
+- **Crucible manages the models on the user's behalf**, as Ollama does. The app
+  declares what it needs; Crucible obtains, stores, serves and removes it.
+- **A local server is FOUND, not configured.** An app looks at the standard port,
+  sees a Crucible answering and connects — no token typed and no file hunted, the
+  way any program finds Ollama. This is about LOCAL instances. A server reachable
+  across a network still requires authorization: loopback on your own machine and
+  an address a stranger can reach are not the same claim, and "Ollama needs no
+  token" is a statement about the former.
+- **If it is missing, the app installs it.** BookForge or Foundry finding no local
+  Crucible installs one rather than sending the user elsewhere to get it.
+- **The tray icon and the installer are the whole of the user's direct contact.**
+  Open it, close it, install it, remove it, at will.
+- **Windows alone runs everything the apps need.** Installing into WSL unlocks
+  SGLang/vLLM and the Python job types, so there is an incentive to but never a
+  requirement; the Windows service is then the pass-through to that guest.
+
+Idiot-proof is the acceptance bar. A step that a non-technical person would not
+think to take is a step that does not exist.
+
 ## Who owns what
 
 | Concern | Owner |
