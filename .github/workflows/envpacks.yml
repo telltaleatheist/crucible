@@ -1,7 +1,9 @@
-# Build the environment packs a tag carries, on the backends they target.
+# Explicit full-release pack builder. Never triggered by tag creation: an
+# artifact-based patch release already has one publisher, and a second builder
+# would race it and overwrite verified assets through --clobber.
 #
 # PHASE14-ENVPACKS.md section 3.3. `scripts/release.sh` cuts the tag and uploads
-# the four existing assets; this runs ON THE TAG and adds the packs.
+# the four existing assets and explicitly dispatches this for that tag.
 #
 # ONE PACK PER JOB, and the shape of the matrix is not a style choice: a hosted
 # runner has a finite disk and a pack's high-water mark is its unpacked tree
@@ -85,8 +87,6 @@
 name: envpacks
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -97,7 +97,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: envpacks-${{ github.ref }}
+  group: envpacks-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:

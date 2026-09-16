@@ -257,7 +257,8 @@ NOTES_HEADER="$NOTES_HEADER
 ### Environment packs
 
 \`crucible install <type>\` downloads a pack from this release and unpacks it; it
-builds nothing. \`.github/workflows/envpacks.yml\` runs on this tag and attempts:
+builds nothing. This release script explicitly dispatches
+\`.github/workflows/envpacks.yml\` for this tag and attempts:
 
 $PACK_LIST
 
@@ -278,6 +279,7 @@ gh release create "$TAG" \
   "$INSTALL_SH" "$INSTALL_PS1"
 
 echo "release: $TAG candidate created (prerelease, not latest)"
+gh workflow run envpacks.yml --repo "$REPO_SLUG" -f tag="$TAG"
 echo "release: wait for every pack and rootfs, test fresh native installs, then run python scripts/promote_release.py --tag $TAG --publish --confirmed-install-smoke"
 gh release view "$TAG" --repo "$REPO_SLUG" --json tagName,url,assets \
   --jq '.tagName + "  " + .url, (.assets[] | "  asset: " + .name + " (" + (.size|tostring) + " bytes)")'
