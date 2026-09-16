@@ -137,6 +137,13 @@ Crucible's maintenance UI available as another approval surface. A server must n
 publish its bearer token merely because a stranger knows its IP address. After
 pairing, routine authenticated configuration and model management happen in the app.
 
+Local use works without configuring network interfaces. Enabling access from other
+devices is an app-level choice that Crucible applies consistently to its bind,
+advertised address and owned networking configuration. The address offered to a
+remote app must actually reach the active engine; neither a loopback address nor
+an internal WSL address is a usable remote connection merely because it works on
+the server itself. Report connection failures in the app with an actionable cause.
+
 ## Acceptance scenarios
 
 The following are the practical definition of done. Record the platform, release,
