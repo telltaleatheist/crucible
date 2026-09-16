@@ -170,6 +170,14 @@ VERSION="$PY_VERSION"
 TAG="v$VERSION"
 echo "release: $TAG from $BRANCH ($(git rev-parse --short HEAD))"
 
+# THE APP MODULES carry this version too — `modules/<app>.module.json` names it
+# as `<version>+<content hash>`, and apps vendor those bytes verbatim. They are
+# GENERATED, so a bump that does not regenerate them ships a release whose
+# module files name the release before it. That is exactly what v0.6.3 shipped:
+# the seven version places above all agreed and nothing looked at `modules/`.
+echo "release: the generated app modules match the manifests"
+python scripts/gen-modules.py --check >/dev/null   || fail "modules/*.module.json are stale; run 'python scripts/gen-modules.py' and commit them (this is what shipped stale in v0.6.3)"
+
 # ------------------------------------------------------------- refuse a re-cut
 
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
