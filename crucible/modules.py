@@ -63,7 +63,8 @@ from pathlib import Path
 from typing import Any
 
 from . import VERSION, catalog, lineup
-from .capability import BY_NAME, CLASSES, CatalogCandidates
+from .capability import BY_NAME, CLASSES, WSL_ONLY_JOB_TYPES, CatalogCandidates
+from .backend import LLAMA_WINDOWS
 from .errors import ApiError, CrucibleError
 from .manifests import BACKEND_ENGINES, load_all_manifests
 from .tasks import require_installable, require_narrator_engine
@@ -237,6 +238,13 @@ def build(declaration: dict[str, Any], where: str) -> dict[str, Any]:
         entry: dict[str, Any] = {"type": job_type}
         if engine is not None:
             entry["narrator_engine"] = engine
+        # The same core capability policy that reports native Windows support
+        # scopes app installation plans. Clients strip this generated metadata
+        # before POST, just as they strip subjects[].backends.
+        entry["backends"] = sorted(
+            backend for backend in BACKEND_ENGINES
+            if backend != LLAMA_WINDOWS or job_type not in WSL_ONLY_JOB_TYPES
+        )
         job_types.append(entry)
 
     declared = catalog.declared_ids()

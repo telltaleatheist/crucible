@@ -1,9 +1,14 @@
 {
   "name": "foundry",
-  "version": "0.6.1+66fd04e88639",
+  "version": "0.6.1+92b04d4bd398",
   "job_types": [
     {
-      "type": "llm"
+      "type": "llm",
+      "backends": [
+        "cuda-linux",
+        "llama-windows",
+        "mlx-darwin"
+      ]
     }
   ],
   "needs": [

@@ -102,6 +102,23 @@ def test_bookforge_asks_for_what_its_install_door_used_to_print() -> None:
     assert tts["narrator_engine"] == "higgs-v3"
 
 
+def test_generated_job_types_follow_the_core_backend_support_policy() -> None:
+    from crucible.backend import LLAMA_WINDOWS
+    from crucible.capability import WSL_ONLY_JOB_TYPES
+    from crucible.manifests import BACKEND_ENGINES
+
+    document = modules.build(modules.read_declaration(MODULES_DIR / "bookforge.toml"), "bookforge")
+    for job in document["job_types"]:
+        assert job["backends"] == sorted(
+            backend for backend in BACKEND_ENGINES
+            if backend != LLAMA_WINDOWS or job["type"] not in WSL_ONLY_JOB_TYPES
+        )
+    native = [job["type"] for job in document["job_types"] if LLAMA_WINDOWS in job["backends"]]
+    assert "llm" in native
+    assert "tts" not in native
+    assert "align" not in native
+
+
 def test_foundry_asks_for_the_classes_owens_ruling_names() -> None:
     """FIVE CLASSES AND NO IDS AT ALL, since PHASE15-HOST.md 5.3a.
 
