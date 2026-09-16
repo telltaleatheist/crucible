@@ -35,7 +35,9 @@ maintenance, diagnostics, service control and optional connection approval.
 | Provider connections and inference routes | Configured through the app; executed and managed by Crucible |
 
 BookForge chooses its voice models and other required capabilities. Foundry
-chooses its document-reading, cleanup, translation and analysis models. A bare
+chooses its input-processing and language models: currently document reading/OCR,
+cleanup, translation and analysis. Transcription, wherever an app offers it,
+follows the same ownership rule. This contract does not itself add a new app workflow. A bare
 Crucible installation does not choose an app's model collection or download those
 weights. The distinction between installing a runtime and downloading a model
 must remain explicit in code and progress reporting.
