@@ -65,6 +65,7 @@ from .config import Config
 from .errors import ApiError, CrucibleError
 from .hosttools import searched_note, which
 from .jobs.base import utcnow
+from .jobs.llm import llm_engine_status
 from .settle import Held
 from .voices import NARRATOR_ENGINE_SAMPLING
 from .weights import PullCancelled, WeightsError
@@ -359,13 +360,13 @@ def env_installed(config: Config, backend: Backend, job_type: str, engine: str |
     builds, so the env is what decides whether there is anything to do.
     """
     try:
+        if job_type == "llm":
+            # Native Windows owns a llama.cpp executable, not a Python venv.
+            # Use the same installed predicate as model loading and /v1/models.
+            return llm_engine_status(config, backend).installed
         if job_type in workerenv.WORKER_JOB_TYPES:
             return workerenv.env_status(config.home, job_type, backend.kind).installed
-        spec = (
-            jobenv.llm_env(backend.kind)
-            if job_type == "llm"
-            else jobenv.tts_env(engine or "", backend.kind)
-        )
+        spec = jobenv.tts_env(engine or "", backend.kind)
         return jobenv.env_status(config.home, spec, backend.kind).installed
     except (jobenv.EnvError, workerenv.WorkerEnvError):
         # An env whose recipe or directory cannot be read is not an env that is

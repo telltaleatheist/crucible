@@ -242,6 +242,32 @@ def test_env_installed_reads_the_env_and_not_the_flag(
     assert tasks.env_installed(config, FAKE_BACKEND, "tts", "higgs-v3") is False
 
 
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_native_windows_install_checks_the_llama_binary_not_a_nonexistent_venv(
+    home: Path, make_client: Callable[..., TestClient], monkeypatch: pytest.MonkeyPatch,
+    installed: bool,
+) -> None:
+    from types import SimpleNamespace
+    from crucible import llamacpp
+    from crucible.backend import Backend, Gpu, LLAMA_WINDOWS
+
+    with make_client() as client:
+        config = client.app.state.config
+    backend = Backend(LLAMA_WINDOWS, "windows", "x86_64",
+                      Gpu("nvidia", "fixture", 24 * 1024**3), "fixture")
+    calls: list[str] = []
+    def engine_installation(config: Any, build: str) -> Any:
+        calls.append(build)
+        return SimpleNamespace(path=home / "engine", bytes=1) if installed else None
+    monkeypatch.setattr(llamacpp, "installed", engine_installation)
+    def unexpected_recipe(*args: Any) -> Any:
+        raise AssertionError("Native Windows must not look for a Python llm recipe")
+    monkeypatch.setattr(jobenv, "llm_env", unexpected_recipe)
+    assert tasks.env_installed(config, backend, "llm", None) is installed
+    assert calls == [llamacpp.CUDA_BUILD]
+
+
 def test_adopt_refuses_a_config_from_another_home(
     home: Path, tmp_path: Path, make_client: Callable[..., TestClient]
 ) -> None:
