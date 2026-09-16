@@ -339,6 +339,11 @@ fi
 say "capability-write"
 "$CRUCIBLE" 'capability' '--write' || die "step_failed: capability-write"
 
+# --- local-start ---------------------------------------------------------
+# wait for the paired engine to answer with authenticated identity
+say "local-start"
+"$CRUCIBLE" 'local' 'start' '--json' || die "step_failed: local-start"
+
 # --- done ----------------------------------------------------------------
 say "installed. Pair an app with the line below."
 "$CRUCIBLE" token --url

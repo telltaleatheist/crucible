@@ -142,6 +142,7 @@ test('linux: the whole PHASE14 sequence, each step by name, the token redacted e
     { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
     { argv: N(CRUCIBLE_BIN, 'local', 'install-desktop') },
     { argv: N(CRUCIBLE_BIN, 'capability', '--write'), lines: [['recorded in /home/owen/.crucible/config.toml', 'stdout']] },
+    { argv: N(CRUCIBLE_BIN, 'local', 'start', '--json') },
   ];
   const runner = linuxRunner(expectations);
   // The config is absent before init and present after: `init` is the step that writes it.
@@ -159,7 +160,7 @@ test('linux: the whole PHASE14 sequence, each step by name, the token redacted e
   runner.assertDrained();
 
   assert.deepEqual(result.steps.map((s) => `${s.name}:${s.status}`), [
-    'host-facts:ok', 'server-pack:ok', 'init:ok', 'install-llm:ok', 'install-tts:ok', 'service-install:ok', 'local-register:ok', 'local-install-cli:ok', 'local-install-desktop:ok', 'capability-write:ok',
+    'host-facts:ok', 'server-pack:ok', 'init:ok', 'install-llm:ok', 'install-tts:ok', 'service-install:ok', 'local-register:ok', 'local-install-cli:ok', 'local-install-desktop:ok', 'capability-write:ok', 'local-start:ok',
   ]);
   assert.deepEqual(result.server, { name: 'crucible@owens-pc-wsl', url: 'http://127.0.0.1:7100', configPath: CONFIG_PATH });
   assert.equal(result.release, '0.6.0');
@@ -195,6 +196,7 @@ test('the pack download happens with the machine\'s own tools: curl, sha256sum, 
     { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
     { argv: N(CRUCIBLE_BIN, 'local', 'install-desktop') },
     { argv: N(CRUCIBLE_BIN, 'capability', '--write') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'start', '--json') },
   ], HAS_CONFIG);
   await install({ jobTypes: ['echo'], onLine: c.onLine }, runner);
   runner.assertDrained();
@@ -222,6 +224,7 @@ test('a pack whose stamp already matches the manifest is skipped, and nothing is
     { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
     { argv: N(CRUCIBLE_BIN, 'local', 'install-desktop') },
     { argv: N(CRUCIBLE_BIN, 'capability', '--write') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'start', '--json') },
   ], HAS_CONFIG);
   const result = await install({ jobTypes: ['echo'], onLine: c.onLine }, runner);
   runner.assertDrained();
@@ -294,6 +297,7 @@ test('init is skipped when a config already exists, and its token is kept', asyn
     { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
     { argv: N(CRUCIBLE_BIN, 'local', 'install-desktop') },
     { argv: N(CRUCIBLE_BIN, 'capability', '--write') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'start', '--json') },
   ], HAS_CONFIG);
   const result = await install({ jobTypes: ['asr', 'echo'], onLine: c.onLine }, runner);
   runner.assertDrained();
@@ -320,6 +324,62 @@ test('a failing step stops the sequence with its name, exit code, tail and the s
   assert.deepEqual(failed.stepsDone, ['host-facts']);
   assert.deepEqual(failed.tail, ['recipe: llm/cuda-linux', '! ERROR: pack_not_published']);
   assert.match(failed.message, /install step "install-llm" exited 1 inside this machine/);
+});
+
+for (const detail of ['local_start_failed: engine did not answer', 'unauthorized: engine info returned HTTP 401']) {
+  test(`install refuses readiness failure after service installation: ${detail}`, async () => {
+    const runner = linuxRunner([
+      { argv: PROBE(), stdout: GUEST_INSTALLED }, MANIFEST,
+      { argv: N(CRUCIBLE_BIN, 'service', 'install') },
+      { argv: N(CRUCIBLE_BIN, 'local', 'register') },
+      { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
+      { argv: N(CRUCIBLE_BIN, 'local', 'install-desktop') },
+      { argv: N(CRUCIBLE_BIN, 'capability', '--write') },
+      { argv: N(CRUCIBLE_BIN, 'local', 'start', '--json'), code: 1, lines: [[detail, 'stderr']] },
+    ], HAS_CONFIG);
+    const result = await refusal(install({ jobTypes: ['echo'], onLine: () => {} }, runner));
+    runner.assertDrained();
+    const error = result.error as BootstrapStepFailed;
+    assert.equal(error.step, 'local-start');
+    assert.ok(error.tail.some(line => line.includes(detail)));
+    assert.equal(error.stepsDone.at(-1), 'capability-write');
+  });
+}
+
+test('install does not return while local authenticated readiness is pending', async () => {
+  const runner = linuxRunner([
+    { argv: PROBE(), stdout: GUEST_INSTALLED }, MANIFEST,
+    { argv: N(CRUCIBLE_BIN, 'service', 'install') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'register') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'install-desktop') },
+    { argv: N(CRUCIBLE_BIN, 'capability', '--write') },
+    { argv: N(CRUCIBLE_BIN, 'local', 'start', '--json') },
+  ], HAS_CONFIG);
+  let enter!: () => void;
+  let ready!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const pending = new Promise<void>(resolve => { ready = resolve; });
+  const stream = runner.stream.bind(runner);
+  runner.stream = async (argv, options) => {
+    if (argv.slice(1).join(' ') === 'local start --json') {
+      enter();
+      await pending;
+    }
+    return stream(argv, options);
+  };
+  let completed = false;
+  const installing = install({ jobTypes: ['echo'], onLine: () => {} }, runner).then(result => {
+    completed = true;
+    return result;
+  });
+  await entered;
+  assert.equal(completed, false);
+  ready();
+  const result = await installing;
+  assert.equal(result.steps.at(-1)?.name, 'local-start');
+  assert.equal(result.steps.at(-1)?.status, 'ok');
+  runner.assertDrained();
 });
 
 test('a step that never returns is a failure naming the timeout, not a hang', async () => {
@@ -360,6 +420,7 @@ test('{home} travels as CRUCIBLE_HOME into every crucible verb, and {bind} into 
     { argv: N(CRUCIBLE, 'local', 'install-cli'), env: ENV },
     { argv: N(CRUCIBLE, 'local', 'install-desktop'), env: ENV },
     { argv: N(CRUCIBLE, 'capability', '--write'), env: ENV },
+    { argv: N(CRUCIBLE, 'local', 'start', '--json'), env: ENV },
   ]);
   let written = false;
   runner.fileExists = (path: string): boolean => (path === '/srv/crucible/config.toml' ? written : false);
@@ -396,6 +457,7 @@ test('darwin: the same steps run natively, shasum instead of sha256sum, no linge
     { argv: ['/Users/owen/.crucible/server/bin/crucible', 'local', 'install-cli'] },
     { argv: ['/Users/owen/.crucible/server/bin/crucible', 'local', 'install-desktop'] },
     { argv: ['/Users/owen/.crucible/server/bin/crucible', 'capability', '--write'] },
+    { argv: ['/Users/owen/.crucible/server/bin/crucible', 'local', 'start', '--json'] },
   ]);
   // The config read on darwin is a file read, not a call: absent before init, present after.
   let written = false;

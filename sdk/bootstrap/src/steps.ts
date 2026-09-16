@@ -405,5 +405,18 @@ export function installSteps(plan: StepPlan): StepDef[] {
     skip: null,
     timeout: 'quickMs',
   });
+  // launchd/systemd accepting a start request does not prove the API is ready.
+  // The local lifecycle owner waits for the paired identity and authenticated
+  // info response, with a bounded timeout and explicit failures. Both callers
+  // of this shared sequence must finish that check before reporting success.
+  const readyWords: Word[] = [crucible, 'local', 'start', '--json'];
+  steps.push({
+    name: 'local-start',
+    what: 'wait for the paired engine to answer with authenticated identity',
+    words: readyWords,
+    sh: `${renderSh(readyWords)} || die "step_failed: local-start"\n`,
+    skip: null,
+    timeout: 'quickMs',
+  });
   return steps;
 }
