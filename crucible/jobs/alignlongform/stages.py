@@ -146,7 +146,6 @@ def transcribe(
         raise StageFailed("transcribe_failed", str(exc)) from None
 
     words: list[tuple[str, float]] = []
-    offset = 0.0
     for index, result in enumerate(outcome.results):
         if result.get("error"):
             # A HOLE IS NOT A TRANSCRIPT. The coarse stage would read a wordless
@@ -159,10 +158,20 @@ def transcribe(
                 "reads as text the narrator never spoke, and those sentences would be "
                 "dropped from the VTT rather than placed.",
             )
+        # WINDOW-RELATIVE IN, BOOK-ABSOLUTE OUT, and the expression is the
+        # `asr` job type's own (`jobs/asr/__init__.py`: `offset = index *
+        # float(WINDOW_SECONDS)`) rather than a second derivation of it. Results
+        # carry no index — position in the stream IS the window, which is that
+        # worker's rule — so `enumerate` is the whole of the bookkeeping.
+        #
+        # Written as a carried variable at first, which computed the same numbers
+        # and hid that it did. Only ever exercised on a ONE-WINDOW clip until
+        # `test_align_longform_stages.py`, because a 15-second probe has no
+        # second window to get wrong.
+        offset = index * float(WINDOW_SECONDS)
         for segment in result.get("segments") or []:
             for word in segment.get("words") or []:
                 words.append((str(word["word"]), float(word["start"]) + offset))
-        offset = (index + 1) * WINDOW_SECONDS
     return words
 
 
