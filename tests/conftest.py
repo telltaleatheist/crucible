@@ -334,3 +334,21 @@ __all__ = [
     "wav_base64",
     "wav_bytes",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _state_the_systemd_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the suite to the USER scope; the system-scope tests opt in.
+
+    `service.systemd_scope()` reads the kernel and answers SYSTEM inside WSL,
+    which is right for the product and wrong for a suite that asserts
+    `systemctl --user` argv and writes units under a temp home. Left to
+    inherit it, these tests measure the MACHINE: run on a developer's WSL box
+    they reached for the real /etc/systemd/system and failed there, and on a
+    hosted Linux runner they passed — the same code, two answers, neither of
+    them about the code. A test whose result depends on where it runs is not
+    testing anything.
+    """
+    from crucible import service
+
+    monkeypatch.setattr(service, "in_wsl", lambda: False)

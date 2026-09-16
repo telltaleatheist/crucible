@@ -24,18 +24,6 @@ from crucible.config import load_config
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 
 
-@pytest.fixture(autouse=True)
-def _user_scope_unless_asked(monkeypatch: pytest.MonkeyPatch) -> None:
-    """These tests are about the USER scope, so say so rather than inherit it.
-
-    `service.systemd_scope()` reads the kernel and answers SYSTEM inside WSL,
-    which is right for the product and wrong for a suite that asserts
-    `systemctl --user` argv: run on a developer's WSL box the same tests would
-    fail, having measured the machine instead of the code. A test that passes
-    or fails depending on where it runs is not testing anything. The
-    system-scope tests below opt in explicitly.
-    """
-    monkeypatch.setattr(service, "in_wsl", lambda: False)
 
 PATH_VALUE = "/usr/local/bin:/usr/bin:/bin"
 
