@@ -469,17 +469,47 @@ class Host:
                 or server.get("api_version") != 1 or not isinstance(machine, dict)
                 or machine.get("backend") != "cuda-linux"):
             raise HostError("engine_move_failed", "Windows is not reaching the authenticated WSL engine with the expected API")
+        # THE COMMIT. Everything above is a read that can fail while changing
+        # nothing. Everything from here changes this host's idea of who owns
+        # the engine, and four of these steps can still fail. A HALF-APPLIED
+        # move is the dangerous outcome: a guest watcher in place while
+        # presence still says HOST_CHILD would leave Windows believing WSL
+        # owns an engine it never took, and `_verify_active_guest` gates model
+        # DELETION on exactly that pair. So the commit is undone as a whole —
+        # the discipline settings.py states for its own door: validated as a
+        # whole, and only then written.
+        #
+        # The region ends at `claim()`, because that is the step that makes
+        # the move TRUE. A failure after it is a live WSL engine with
+        # something else wrong, and rolling back there would be the lie.
+        was = (self._c.watcher, self._c.presence, self._paused)
+        was_pairing = (self._c.home / "pairing").read_text(encoding="utf-8")
+        was_stopped = self._c.home.joinpath("engine.stopped").exists()
         self._c.watcher = watcher
         self._c.presence = presence
-        _write_pairing(self._c)
-        if (self._c.home / "pairing").read_text(encoding="utf-8").strip() != line.strip():
-            raise HostError("engine_move_failed", "Windows pairing was not updated")
-        self._paused = False
-        self._c.home.joinpath("engine.stopped").unlink(missing_ok=True)
-        self._hold()
-        self._claimed = False
-        if not self.claim():
-            raise HostError("engine_move_failed", "The guest could not be claimed by its Windows controller")
+        try:
+            _write_pairing(self._c)
+            if (self._c.home / "pairing").read_text(encoding="utf-8").strip() != line.strip():
+                raise HostError("engine_move_failed", "Windows pairing was not updated")
+            self._paused = False
+            self._c.home.joinpath("engine.stopped").unlink(missing_ok=True)
+            self._hold()
+            self._claimed = False
+            if not self.claim():
+                raise HostError("engine_move_failed", "The guest could not be claimed by its Windows controller")
+        except Exception:
+            # STATE FIRST, then the release. The guest may well be up; this
+            # host simply is not adopting it, and releasing the watcher we
+            # booted is part of not adopting it — but a release that threw
+            # would abandon the undo half-done and lose the original failure
+            # with it, which is the very outcome this block exists to prevent.
+            self._c.watcher, self._c.presence, self._paused = was
+            self._c.home.joinpath("pairing").write_text(was_pairing, encoding="utf-8")
+            if was_stopped:
+                self._c.home.joinpath("engine.stopped").touch()
+            self._claimed = False
+            watcher.release()
+            raise
         self._refresh()
         from ..sharing import SharingError, reconcile
         try:
