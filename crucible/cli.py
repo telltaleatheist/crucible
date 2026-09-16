@@ -986,6 +986,26 @@ def _install_from_pack(
         existing = _env_status_for(config, backend, args.job_type, args.narrator_engine)
         if existing is not None and existing.installed:
             print(f"already installed: {existing.detail}")
+            # AND THE STAMP, WHICH IS THE OTHER HALF OF "INSTALLED". The env
+            # holding what the recipe pins says nothing about whether the stamp
+            # still names the recipe bytes in this build; when it does not,
+            # `crucible doctor` reports `pack_recipe_drift` and sends the
+            # operator here. THIS is the line that has to answer, because this
+            # is the path `crucible install` actually takes - `install_env` is
+            # only reached under `--build`, so a drift branch there alone is one
+            # the operator never runs.
+            if args.job_type not in workerenv.WORKER_JOB_TYPES:
+                try:
+                    spec = _env_spec(
+                        args.job_type, args.narrator_engine, backend.kind
+                    )
+                    if jobenv.reconcile_stamp(
+                        config.home, spec, backend.kind,
+                        on_line=lambda line: print(f"  {line}"),
+                    ):
+                        print("stamp corrected: no rebuild needed")
+                except jobenv.EnvError as exc:
+                    return _fail(str(exc))
             return _capability_step(config, backend, *_types_served(args.job_type))
 
     print(f"backend: {backend.kind}")

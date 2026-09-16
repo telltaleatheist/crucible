@@ -670,12 +670,7 @@ def install_env(
             # advice was unfollowable and the only remedy that worked was
             # `--force`, which deletes several GB of working env to correct a
             # line of JSON.
-            here = recipe_sha256(recipe)
-            if existing.recipe_sha256 is not None and existing.recipe_sha256 != here:
-                _restamp(
-                    home, spec, backend_kind,
-                    existing=existing, recipe=recipe, here=here, on_line=on_line,
-                )
+            if reconcile_stamp(home, spec, backend_kind, on_line=on_line):
                 return env_status(home, spec, backend_kind)
             return existing
         if stamp.is_file():
@@ -868,6 +863,37 @@ def _write_stamp(
         + "\n",
         encoding="utf-8",
     )
+
+
+def reconcile_stamp(
+    home: Path,
+    spec: EnvSpec,
+    backend_kind: str,
+    *,
+    on_line: Any = None,
+) -> bool:
+    """Correct this env's stamp if its recipe moved. True when it was rewritten.
+
+    THE ENTRY POINT BOTH INSTALL PATHS SHARE. `crucible install` defaults to
+    downloading a pack and only reaches `install_env` under `--build`, so a
+    drift branch on the build path alone would be one the operator never runs -
+    which is exactly how the unfollowable advice got there in the first place.
+
+    Raises `EnvError` when the recipe moved in a way that cannot be reconciled
+    without rebuilding, naming the line.
+    """
+    status = env_status(home, spec, backend_kind)
+    if not status.installed or status.recipe_sha256 is None:
+        return False
+    recipe = recipe_for(spec)
+    here = recipe_sha256(recipe)
+    if status.recipe_sha256 == here:
+        return False
+    _restamp(
+        home, spec, backend_kind,
+        existing=status, recipe=recipe, here=here, on_line=on_line,
+    )
+    return True
 
 
 def _restamp(
