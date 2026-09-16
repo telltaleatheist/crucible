@@ -30,8 +30,9 @@
 # which is why the manifest job waits for it.
 #
 # The ENVIRONMENT PACKS are not built here. `.github/workflows/envpacks.yml`
-# runs on the tag this creates and uploads them beside the four, because a pack
-# is built on the backend it targets and this script runs on one machine
+# is dispatched with this tag afterwards and uploads them beside the four,
+# because a pack is built on the backend it targets and this script runs on
+# one machine
 # (PHASE14-ENVPACKS.md section 3.3). What this script does about them is refuse
 # to cut a tag when that workflow is absent, and name the packs the tag will
 # attempt in the notes.
@@ -95,12 +96,20 @@ python -c 'import crucible.envpack' 2>/dev/null \
 
 # -------------------------------------------------- the packs have a builder
 #
-# A TAG IS WHAT BUILDS THE PACKS (.github/workflows/envpacks.yml runs on
-# `v*`), and since 0.6.0 `crucible install <type>` DOWNLOADS a pack by default
-# and refuses `pack_not_published` when the release has none. So a tag cut
-# without that workflow present is a release on which every fresh machine's
-# first install fails by name — the worst kind of working release. Refused
-# here rather than discovered by the first person to install it.
+# THE PACKS ARE PUBLISHED BY AN EXPLICIT DISPATCH, not by this tag.
+# `.github/workflows/envpacks.yml` takes the tag as a `workflow_dispatch`
+# input and nothing else triggers it — deliberately, as 0.6.2 recorded: "tag
+# creation cannot launch another builder that overwrites verified candidate
+# assets." A patch release rebuilds only the CORE runtime packs (they carry
+# this code) and REUSES the unchanged inference archives under their original
+# filenames, which is what `scripts/release_packs.py` plans and stages.
+#
+# Since 0.6.0 `crucible install <type>` DOWNLOADS a pack by default and
+# refuses `pack_not_published` when the release has none, so a release whose
+# packs were never dispatched is one where every fresh machine's first
+# install fails by name — the worst kind of working release. What is checked
+# here is only that the workflow EXISTS to be dispatched; dispatching it is a
+# step the releaser still has to take.
 ENVPACKS_WORKFLOW=".github/workflows/envpacks.yml"
 [ -f "$ENVPACKS_WORKFLOW" ] \
   || fail "$ENVPACKS_WORKFLOW is not in this tree, so the tag would build no environment packs and \`crucible install\` would refuse every job type \`pack_not_published\` (PHASE14-ENVPACKS.md section 3.3)"
