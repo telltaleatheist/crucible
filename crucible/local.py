@@ -18,7 +18,6 @@ import webbrowser
 from urllib.parse import quote
 
 from . import VERSION
-from . import VERSION
 from .config import crucible_home, load_config
 from .pairing import parse_pairing_line
 from .errors import CrucibleError
@@ -148,7 +147,9 @@ def status(home: Path | None = None) -> dict:
     # rather than judged here, because `status` answers for a running server
     # generally and two versions coexisting is not by itself a fault. The
     # START path below is where a mismatch IS one.
+    machine = info.get("host")
     return dict(result, state="running", version=server.get("version"),
+                backend=(machine.get("backend") if isinstance(machine, dict) else None),
                 detail="The paired engine is answering")
 
 
@@ -238,8 +239,24 @@ def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
                 # ABSENT is not MISMATCHED: an engine too old to report its
                 # version is not evidence of staleness, and refusing it would
                 # be inventing a fault out of a missing key.
+                #
+                # AND ONLY FOR AN ENGINE THIS INSTALLATION OWNS. A Windows host
+                # managing a WSL guest is TWO installations that upgrade
+                # separately, and the guest is reached through the same door —
+                # so comparing its version to this one compares two different
+                # products. The first draft of this guard did exactly that and
+                # refused the 0.6.5 Windows install because the guest it had
+                # just started was still 0.6.3 (measured 2026-09-16): a
+                # chicken-and-egg where neither side could go first. Same
+                # distinction as `owner=found` above — an engine this
+                # installation did not install is not its to judge.
                 running_version = observed.get("version")
-                if isinstance(running_version, str) and running_version != VERSION:
+                try:
+                    own_backend = load_config(home).backend_kind
+                except (ValueError, OSError, CrucibleError):
+                    own_backend = None
+                ours = own_backend is None or observed.get("backend") in (None, own_backend)
+                if ours and isinstance(running_version, str) and running_version != VERSION:
                     raise LocalError(
                         f"engine_version_stale: the engine answering is "
                         f"{running_version}, but this installation is {VERSION}. "

@@ -369,3 +369,40 @@ def test_a_controller_that_quit_is_gone_however_the_socket_ended(
 
     local.shutdown()
     assert stopped == [True]
+
+
+def test_a_guest_of_another_version_does_not_fail_this_installations_start(
+    monkeypatch, tmp_path
+):
+    """A Windows host and its WSL guest are TWO installations, upgraded apart.
+
+    Measured 2026-09-16: the first draft of the stale-engine guard compared the
+    guest's version to the Windows host's and refused the 0.6.5 install because
+    the guest it had just started was still 0.6.3 — a chicken-and-egg in which
+    neither side could go first. An engine this installation did not install is
+    not its to judge, the same distinction `owner=found` draws.
+    """
+    monkeypatch.setattr(local.sys, "platform", "linux")
+    monkeypatch.setattr(local, "crucible_home", lambda: tmp_path)
+    monkeypatch.setattr(local, "connection", lambda home: ("http://127.0.0.1:7100", "test", "secret"))
+
+    class Config:
+        backend_kind = "llama-windows"      # what THIS installation serves
+
+    monkeypatch.setattr(local, "load_config", lambda home: Config())
+    monkeypatch.setattr(local, "status", lambda home=None: {
+        "state": "running", "version": "0.6.3", "backend": "cuda-linux",
+        "detail": "the guest", "name": "x", "url": "u", "schema_version": 1,
+    })
+    monkeypatch.setattr(local, "act", local.act)
+    from crucible import service
+    monkeypatch.setattr(service, "start", lambda *a, **k: None)
+    monkeypatch.setattr(service, "mechanism_for", lambda kind: "systemd")
+    monkeypatch.setattr(local, "reconcile", lambda home: {"state": "disabled"}, raising=False)
+
+    from crucible import sharing
+    monkeypatch.setattr(sharing, "reconcile", lambda home: {"state": "disabled"})
+
+    observed = local.act("start", tmp_path)
+    assert observed["state"] == "running"
+    assert observed["version"] == "0.6.3", "a guest of another version is not this start's problem"
