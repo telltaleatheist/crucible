@@ -49,9 +49,29 @@ def install(home: Path, executable: str, cwd: str, *, platform: str | None = Non
     path = directory / ("crucible.cmd" if platform == "win32" else "crucible")
     metadata = home / RECORD
     old = json.loads(metadata.read_text(encoding="utf-8")) if metadata.exists() else None
+    adopted = False
     if path.exists() and (old is None or old.get("path") != str(path)
                          or old.get("sha256") != _digest(path.read_text(encoding="utf-8"))):
-        raise CrucibleError(f"cli_launcher_conflict: {path} was not installed by this Crucible; nothing changed")
+        # NOT OURS BY THE RECORD — but there are two very different files that
+        # can be. One is a launcher for THIS Crucible written by something other
+        # than this installer: a previous release, or the hand-written shim that
+        # was on both of Owen's machines (its own comments say it exists because
+        # `Scripts\crucible.exe --version` exited 1). Replacing that is what an
+        # upgrade IS, and refusing it stopped the 0.6.3 upgrade twice on
+        # 2026-09-16, once per machine, with "nothing changed" and no remedy.
+        #
+        # The other is a `crucible` of somebody else's that happens to sit on
+        # the same path, and that one must still be left alone. The two are told
+        # apart by what the file DOES: ours runs `crucible.cli` out of this home.
+        existing = path.read_text(encoding="utf-8", errors="replace")
+        if "crucible.cli" in existing and str(home) in existing:
+            adopted = True
+        else:
+            raise CrucibleError(
+                f"cli_launcher_conflict: {path} was not installed by this "
+                f"Crucible and does not launch it either; nothing changed. "
+                f"Move it aside and run the install again if it is not wanted"
+            )
     if any(c in value for value in (str(home), executable, cwd) for c in ('\n', '\r', '"')):
         raise CrucibleError("cli_launcher_invalid_path: a path contains quotes or newlines")
     if platform == "win32":
@@ -70,7 +90,8 @@ def install(home: Path, executable: str, cwd: str, *, platform: str | None = Non
         if str(directory).casefold() not in [part.casefold() for part in current.split(";")]:
             path_store(current + (";" if current else "") + str(directory))
             added = True
-    record = {"path": str(path), "sha256": _digest(body), "platform": platform, "path_added": added}
+    record = {"path": str(path), "sha256": _digest(body), "platform": platform,
+              "path_added": added, "adopted": adopted}
     home.mkdir(parents=True, exist_ok=True)
     metadata.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return record

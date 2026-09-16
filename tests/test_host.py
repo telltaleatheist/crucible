@@ -3218,3 +3218,39 @@ def test_the_restart_of_a_system_unit_guest_goes_through_root(
     )
     assert watcher.restart_wsl_unit() is True
     assert presence.system_systemctl_argv("Ubuntu", "restart") in runner.calls
+
+
+def test_children_start_in_crucible_home_not_in_the_installation(monkeypatch) -> None:
+    """A wsl.exe that inherits the installation directory blocks the next upgrade.
+
+    MEASURED 2026-09-16. The orchestrator's own working directory is inside its
+    installation — installation.json records `...\Crucible\host\Lib\
+    site-packages`, deliberately, so `-m crucible.cli` imports. Children inherit
+    it, so `wsl.exe` held a handle on `Crucible\host` and KEPT holding it after
+    the orchestrator exited. The installer then failed with "the process cannot
+    access the file because it is being used by another process" and named
+    nothing; Sysinternals handle64 found two orphaned wsl.exe and a wslhost.exe.
+
+    CRUCIBLE_HOME is the server's own state directory, which is what the systemd
+    unit uses as WorkingDirectory for the same reason, and which the installer
+    never moves. Not the user's home: `console_script` records the ImportError
+    that follows from a working directory landing on sys.path.
+    """
+    import subprocess as sp
+    from crucible.host.runner import ProcessRunner
+
+    seen: dict[str, object] = {}
+
+    class Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        seen["cwd"] = kwargs.get("cwd")
+        return Done()
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    runner = ProcessRunner("win32", {}, cwd="C:/Users/x/AppData/Local/Crucible")
+    runner.run(["wsl.exe", "-l", "-v"], timeout_s=5)
+    assert seen["cwd"] == "C:/Users/x/AppData/Local/Crucible"

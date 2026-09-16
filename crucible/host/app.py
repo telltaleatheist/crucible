@@ -1051,7 +1051,10 @@ def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
     from ..config import crucible_home
     home = crucible_home()
     log = HostLog(Path(str(log_path(env))), Path(str(previous_log_path(env))))
-    runner = ProcessRunner(sys.platform, env)
+    # Children start in CRUCIBLE_HOME, not in this process's own directory
+    # inside the installation — see ProcessRunner. A wsl.exe that inherits the
+    # latter holds a handle on `Crucible\host` and blocks the next upgrade.
+    runner = ProcessRunner(sys.platform, env, cwd=str(home))
     log.write(f"crucible host {VERSION} starting; CRUCIBLE_HOME={home}")
     acquire(home)
 

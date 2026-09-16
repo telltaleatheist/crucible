@@ -121,9 +121,28 @@ class ControlledChild:
 class ProcessRunner:
     """The real one. `subprocess` plus `urllib`, and nothing else."""
 
-    def __init__(self, platform: str, env: Mapping[str, str]) -> None:
+    def __init__(
+        self, platform: str, env: Mapping[str, str], cwd: str | None = None
+    ) -> None:
         self._platform = platform
         self._env = dict(env)
+        #: WHERE CHILDREN START, and it is not cosmetic. A child inherits this
+        #: process's working directory, and the orchestrator's is inside its own
+        #: installation (installation.json records
+        #: `...\Crucible\host\Lib\site-packages`, deliberately, so that
+        #: `-m crucible.cli` imports). A `wsl.exe` child therefore holds a handle
+        #: on `Crucible\host` — and keeps holding it after the orchestrator
+        #: exits, which is what stopped an upgrade on 2026-09-16 with
+        #: "Move-Item: the process cannot access the file because it is being
+        #: used by another process", naming nothing. Sysinternals `handle64`
+        #: found two orphaned wsl.exe and a wslhost.exe on that directory.
+        #:
+        #: The caller passes CRUCIBLE_HOME: the server's own state directory,
+        #: which is what the systemd unit uses as WorkingDirectory for the same
+        #: reason, and which the installer never moves. NOT the user's home —
+        #: `console_script` records the ImportError that follows from a working
+        #: directory landing on sys.path.
+        self._cwd = cwd
 
     @property
     def platform(self) -> str:
@@ -153,6 +172,7 @@ class ProcessRunner:
                 capture_output=True,
                 timeout=timeout_s,
                 env=self._child_env(env),
+                cwd=self._cwd,
                 # A tray program has no console; a child that opens one is a
                 # window flashing on somebody's desktop every fifteen seconds.
                 creationflags=_no_window_flag(self._platform),
@@ -197,6 +217,7 @@ class ProcessRunner:
         child = subprocess.Popen(
             list(argv),
             env=self._child_env(env),
+            cwd=self._cwd,
             creationflags=_no_window_flag(self._platform),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

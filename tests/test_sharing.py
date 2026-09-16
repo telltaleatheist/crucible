@@ -134,6 +134,47 @@ def test_cli_launcher_refuses_unowned_or_modified_files(tmp_path):
         launcher.install(home, "/usr/bin/python", "/runtime", platform="linux", user_home=user)
 
 
+def test_a_launcher_that_already_runs_this_crucible_is_adopted(tmp_path):
+    """An upgrade replacing a shim written by something else is not a conflict.
+
+    Measured 2026-09-16: BOTH of Owen's machines carried a hand-written shim —
+    its own comments say it existed because `Scripts\crucible.exe --version`
+    exited 1 — and the 0.6.3 install refused each one with "nothing changed"
+    and no remedy. Replacing a launcher that already launches THIS Crucible is
+    what an upgrade is.
+    """
+    home = tmp_path / "crucible"
+    user = tmp_path / "user"
+    record = launcher.install(home, "/usr/bin/python", "/runtime",
+                              platform="linux", user_home=user)
+    assert record["adopted"] is False
+
+    # A launcher for this home, written by something that is not this installer.
+    Path(record["path"]).write_text(
+        "#!/bin/sh" + chr(10) +
+        "export CRUCIBLE_HOME=" + str(home) + chr(10) +
+        "exec /some/other/python -m crucible.cli \"$@\"" + chr(10)
+    )
+    again = launcher.install(home, "/usr/bin/python", "/runtime",
+                             platform="linux", user_home=user)
+    assert again["adopted"] is True
+    assert "-m crucible.cli" in Path(again["path"]).read_text()
+
+
+def test_a_stranger_named_crucible_is_still_refused_and_told_what_to_do(tmp_path):
+    """The refusal protects somebody else's file, and must stay — with a remedy."""
+    home = tmp_path / "crucible"
+    user = tmp_path / "user"
+    record = launcher.install(home, "/usr/bin/python", "/runtime",
+                              platform="linux", user_home=user)
+    Path(record["path"]).write_text("#!/bin/sh" + chr(10) + "echo not ours" + chr(10))
+    with pytest.raises(CrucibleError, match="cli_launcher_conflict") as caught:
+        launcher.install(home, "/usr/bin/python", "/runtime",
+                         platform="linux", user_home=user)
+    assert "Move it aside" in str(caught.value), "a refusal with no remedy is a dead end"
+    assert Path(record["path"]).read_text().endswith("not ours" + chr(10))
+
+
 def test_windows_interfaces_read_structured_addresses_and_filter(monkeypatch):
     import subprocess
     from crucible import interfaces
