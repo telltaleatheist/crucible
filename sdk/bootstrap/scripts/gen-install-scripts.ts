@@ -678,7 +678,6 @@ const FREE_KIB_SENTINEL = '999999999';
 const SUBSTITUTIONS: { from: string; to: string; required: boolean }[] = [
   { from: SAID, to: '{said}', required: false },
   { from: APP_DISTRO, to: '{app_distro}', required: false },
-  { from: GUEST_USER, to: '{guest_user}', required: false },
   { from: RELEASE_MARK, to: '{release}', required: false },
   { from: '424242.0 GiB', to: '{required}', required: false },
   { from: '953.7 GiB', to: '{free}', required: false },
@@ -722,7 +721,6 @@ export function generateWslStatesPy(): string {
   const inputs = {
     release: RELEASE_MARK,
     appDistro: APP_DISTRO,
-    guestUser: GUEST_USER,
     requiredBytes: REQUIRED_SENTINEL,
     checkNetwork: true,
   };
@@ -759,7 +757,7 @@ export function generateWslStatesPy(): string {
 
   // Every placeholder the table CAN produce must actually have been produced,
   // or the Python side would show a sentence with a hole nobody fills.
-  for (const wanted of ['{said}', '{app_distro}', '{guest_user}', '{release}', '{required}', '{free}']) {
+  for (const wanted of ['{said}', '{app_distro}', '{release}', '{required}', '{free}']) {
     if (!fired.has(wanted)) {
       throw new Error(
         `gen-install-scripts: nothing in the WSL table produces ${wanted} any more. `
@@ -777,7 +775,7 @@ export function generateWslStatesPy(): string {
     '# is not installed".',
     '#',
     '# `sentence`, `action_text`, `action_url` and `probe_argv` carry `{said}` /',
-    '# `{app_distro}` / `{guest_user}` / `{release}` / `{required}` / `{free}`',
+    '# `{app_distro}` / `{release}` / `{required}` / `{free}`',
     '# where the TypeScript interpolated something the caller measures. The',
     '# PREDICATES are not here: they are code, and they live in',
     '# `crucible/host/wslstate.py`, one per code, tied to this file by a test.',

@@ -62,6 +62,12 @@ from .wsl_states import CRUCIBLE_DISTRO
 ENGINE_TARGET_WSL = "wsl"
 CLEANUP_RECORD = "migration-cleanup.json"
 
+#: Written when the walk stops for the reboot `wsl --install` needs, removed as
+#: soon as a later walk gets past `wsl-state`. It exists so that "continue where
+#: it stopped" is a fact something can READ rather than a sentence this module
+#: asserts — see `_wsl_state`'s reboot branch for what used to be promised.
+REBOOT_PENDING = "wsl-reboot-pending"
+
 
 def cleanup_subjects(home: Path) -> set[tuple[str, str]]:
     """Read only named catalog subjects; never accept filesystem paths."""
@@ -90,6 +96,10 @@ def record_cleanup(home: Path, subjects: set[tuple[str, str]]) -> None:
 STEPS: tuple[str, ...] = (
     "wsl-state",
     "import-distro",
+    # 4c's guest rows, asked once there IS a guest for them to be about. See
+    # `_guest_ready`: the first walk stops before the distro exists, so without
+    # this one nothing ever asks the distro anything.
+    "guest-ready",
     "guest-install",
     "migrate-config",
     "install-job-types",
@@ -126,9 +136,10 @@ MIGRATE_IN_USE_ROUNDS = 60
 
 #: The sentence 4.7 requires for the reboot states, verbatim in one place.
 REBOOT_SENTENCE = (
-    "reboot, then Crucible continues — this machine has to restart before "
-    "Windows can start a Linux virtual machine. Crucible starts itself when "
-    "you log back in and picks this up where it stopped."
+    "reboot, then start this again — this machine has to restart before "
+    "Windows can start a Linux virtual machine. Crucible's icon comes back by "
+    "itself when you log in; the install does not, so press Install once more "
+    "and it will go on from here. Nothing downloaded so far is lost."
 )
 
 
@@ -352,6 +363,7 @@ class EngineInstall:
         """Prepare, activate, then retire; failed preparation preserves native models."""
         self._wsl_state()
         self._import_distro()
+        self._guest_ready()
         self._guest_install()
         self._migrate_config()
         self._install_job_types()
@@ -388,13 +400,86 @@ class EngineInstall:
 
     def _wsl_state(self) -> None:
         """4c, answered. The rows that need admin run through UAC BY NAME."""
-        self._step("wsl-state")
+        self._walk("wsl-state", stop=("wsl_ready", "no_crucible_distro"))
+
+    def _guest_ready(self) -> None:
+        """4c AGAIN, once there is a distro for its guest rows to be about.
+
+        `_wsl_state` runs before the import and stops the moment it can say
+        "WSL itself is fine", so every row whose probe runs INSIDE the distro —
+        `distro_not_systemd`, `guest_no_network`, `pack_disk`,
+        `guest_root_unreachable` — was skipped on the one path that creates the
+        distro. Measured 2026-09-16 on a fabricated fresh machine: the walk ran
+        `--status`, `-l -v`, `-l -v` and then downloaded the rootfs, and asked
+        the guest nothing.
+
+        `guest_root_unreachable` is the row that now matters most. Since the guest's
+        server became a SYSTEM unit (`crucible/service.py`), the install writes
+        `/etc/systemd/system` and drives the system manager, both through
+        `wsl.exe -u root` — so a distro that will not grant root cannot be
+        installed into at all, and finding that out here costs one `id -u`
+        instead of a failed install.
+
+        `check_network` is passed for the first time by anybody. This is the
+        caller `wsl-states.ts` describes: "the only caller that needs this row
+        is one that is about to download gigabytes." It costs one `curl` in the
+        guest and turns a VPN into a sentence instead of a failed download.
+
+        `required_bytes` is deliberately NOT passed, and `pack_disk` therefore
+        still never fires. THE GUEST ALREADY ASKS IT, BETTER: `install.sh`
+        reads `envpacks.json` for the pack it is about to fetch and refuses
+        `pack_disk: the server pack needs N GiB free and there is M GiB` before
+        a byte moves (`sdk/bootstrap/src/steps.ts`, the same sum as
+        `pack.ts:requiredBytes` — unpacked + archive + one part). Pricing it
+        here would mean this side fetching the same manifest to compute the
+        same number a step later, which is ARCHITECTURE.md R1's two owners of
+        one fact — and it would put a network call inside a walk that is
+        otherwise entirely `wsl.exe`. The row stays in the table for a caller
+        that knows a bigger number, such as one about to pull weights.
+        """
+        self._walk(
+            "guest-ready",
+            stop=("wsl_ready",),
+            # `_import_distro` has just run and said it succeeded. If the table
+            # still cannot see the distro, importing it AGAIN is not a repair —
+            # it is this step doing the previous step's job on a machine where
+            # that job did not take. Two owners of one import, and the second
+            # one loops.
+            never_repair=("no_crucible_distro",),
+            check_network=True,
+        )
+
+    def _walk(
+        self,
+        step: str,
+        *,
+        stop: tuple[str, ...],
+        never_repair: tuple[str, ...] = (),
+        **inputs: object,
+    ) -> None:
+        """Detect, repair, detect again — until a state nothing can improve.
+
+        **A REPAIR THAT DID NOT CHANGE THE ANSWER ENDS THE WALK.** Without this
+        the loop runs the same action forever: `distro_not_systemd` answers
+        again, `wsl --terminate crucible` exits 0 again, nothing is different
+        and nothing says so. Measured 2026-09-16 — `pytest tests/test_host.py`
+        sat for forty minutes on exactly that, printing nothing, and a stranger
+        whose distro will not take systemd would have watched an installer hang
+        with no message at all. An action is allowed one attempt: a code that
+        comes back after its own repair ran is a machine this cannot fix, and
+        saying so is the whole point of the table.
+        """
+        self._step(step)
+        repaired: set[str] = set()
         while True:
-            state = wslstate.detect(self._runner, release=self._release)
+            state = wslstate.detect(self._runner, release=self._release, **inputs)  # type: ignore[arg-type]
             self._state(state)
-            if state.code in ("wsl_ready", "no_crucible_distro"):
-                # Both mean "WSL itself is fine". The distro is the next step's.
-                self._finish("wsl-state", state.sentence)
+            if state.code in stop:
+                # Past the reboot, whether or not this run is the one that
+                # caused it. A marker left behind would have an app offering to
+                # continue something already continued.
+                self._home.joinpath(REBOOT_PENDING).unlink(missing_ok=True)
+                self._finish(step, state.sentence)
                 return
             if state.action_kind == "instruct" or state.action_kind == "link":
                 # Nothing software can do: firmware, a VPN, a disk, a hardened
@@ -420,9 +505,31 @@ class EngineInstall:
                     )
                 # Enabling WSL always needs a restart, and there is no probe
                 # that says so — `wsl --status` answers the same before and
-                # after. 4.7: the task ends here and the Startup item is what
-                # makes "Crucible continues" true.
+                # after. 4.7: the task ends here, and the tray's Startup item
+                # brings the tray back. It does NOT bring the INSTALL back:
+                # `app.py`'s INSTALL_ENGINE opens the console and the page posts
+                # the task, so nothing on this machine resumes by itself. The
+                # sentence used to say it did. Now a file says where we got to,
+                # and the app that asked for the install is the one that offers
+                # to go on — which is also where Owen's Ollama ruling puts it.
+                self._home.joinpath(REBOOT_PENDING).write_text(
+                    self._release, encoding="utf-8"
+                )
                 raise self._fail("wsl_reboot_required", REBOOT_SENTENCE)
+            if state.code in never_repair:
+                raise self._fail(
+                    state.code,
+                    f"{state.sentence} This step does not repair that — the step "
+                    "before it owns it, and it reported success.",
+                )
+            if state.code in repaired:
+                raise self._fail(
+                    state.code,
+                    f"{state.sentence} `{' '.join(state.action_argv)}` ran and "
+                    "the machine still answers the same way, so this is not "
+                    "something Crucible can repair here.",
+                )
+            repaired.add(state.code)
             result = self._runner.run(list(state.action_argv), timeout_s=QUICK_TIMEOUT_SECONDS)
             self._line(f"{' '.join(state.action_argv)}: {'ok' if result.ok else result.said()}")
             if not result.ok:

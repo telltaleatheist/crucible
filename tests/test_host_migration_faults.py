@@ -130,7 +130,7 @@ def test_native_stop_timeout_keeps_owned_child_and_prevents_switch(tmp_path, mon
     windows = FakeCatalog('native', [('model', 'a'), ('model', 'b')])
     guest = FakeCatalog('guest', [('model', 'a'), ('model', 'b')])
     walk = migration(windows, guest, [], tmp_path)
-    for method in ('_wsl_state', '_import_distro', '_guest_install', '_migrate_config', '_install_job_types', '_lan_door'):
+    for method in ('_wsl_state', '_import_distro', '_guest_ready', '_guest_install', '_migrate_config', '_install_job_types', '_lan_door'):
         monkeypatch.setattr(walk, method, lambda: None)
     walk._stop_windows_callback = host.stop_windows_for_move
     walk._switch_pairing_callback = lambda: pytest.fail('A live native child prohibits the switch')

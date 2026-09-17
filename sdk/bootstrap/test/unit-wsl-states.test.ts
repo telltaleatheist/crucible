@@ -14,7 +14,7 @@ const MARKED = '# crucible-rootfs\n[boot]\nsystemd=true\n';
 const P = (key: Parameters<typeof probeArgv>[0], inputs = INPUTS): string[] => probeArgv(key, inputs);
 
 test('the table is total, ordered deepest-cause-first, and every row carries a sentence and an action', () => {
-  const rows = wslStates({ release: '0.6.0', appDistro: 'Ubuntu', requiredBytes: 1, checkNetwork: true, guestUser: 'crucible' });
+  const rows = wslStates({ release: '0.6.0', appDistro: 'Ubuntu', requiredBytes: 1, checkNetwork: true });
   assert.deepEqual(rows.map((row) => row.code), [
     'virtualization_disabled',
     'wsl_missing',
@@ -24,7 +24,7 @@ test('the table is total, ordered deepest-cause-first, and every row carries a s
     'foreign_distro_not_systemd',
     'guest_no_network',
     'pack_disk',
-    'linger_unreadable',
+    'guest_root_unreachable',
     'wsl_ready',
   ]);
   const empty = { code: 0, stdout: '', stderr: '', failure: null };
@@ -151,8 +151,8 @@ test('the disk row is the numbers, and only when a number was given', async () =
   assert.match(state.sentence, /Nothing has been downloaded/);
 });
 
-test('a distro that will not give root is the one hand-over, with the exact loginctl line', async () => {
-  const inputs = { release: '0.6.0', guestUser: 'crucible' };
+test('a distro that will not give root is the one hand-over, and it is about INSTALLING', async () => {
+  const inputs = { release: '0.6.0' };
   const runner = new FakeRunner({ platform: 'win32' }, [
     { argv: P('wsl-status', inputs), stdout: STATUS_OK },
     { argv: P('wsl-list', inputs), stdout: WSL_LIST_WITH_CRUCIBLE },
@@ -160,8 +160,11 @@ test('a distro that will not give root is the one hand-over, with the exact logi
     { argv: P('guest-root', inputs), code: 1, stderr: 'wsl: root is not available in this distribution' },
   ]);
   const state = await detectWslState(inputs, runner);
-  assert.equal(state.code, 'linger_unreadable');
-  assert.match((state.action as { text: string }).text, /sudo loginctl enable-linger crucible/);
+  assert.equal(state.code, 'guest_root_unreachable');
+  // Not linger: the guest's server is a system unit, so root is what lets it
+  // be installed at all. The remedy names the two doors a person actually has.
+  assert.match(state.sentence, /system service, which needs root to write/);
+  assert.match((state.action as { text: string }).text, /import its own distribution/);
 });
 
 test('a machine with nothing wrong answers wsl_ready rather than nothing', async () => {

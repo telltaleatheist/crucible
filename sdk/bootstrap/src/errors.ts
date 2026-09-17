@@ -92,6 +92,14 @@ export type BootstrapRefusalCode =
    * server that dies with the next logout, so neither is guessed.
    */
   | 'linger_unreadable'
+  /**
+   * win32 only, and a WSL STATE rather than a linger answer. The distribution
+   * would not let Crucible in as root through `wsl.exe -u root` (WSL1, or a
+   * distro whose root account is disabled). Since 2026-09-16 the guest's server
+   * is a SYSTEM unit, so root is what lets it be installed at all — not merely
+   * what makes it survive a logout, which is what `linger_unreadable` is about.
+   */
+  | 'guest_root_unreachable'
   /** win32 only. `loginctl enable-linger` ran as root and failed. */
   | 'linger_failed'
   /**

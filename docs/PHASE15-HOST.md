@@ -884,7 +884,8 @@ implementation of the sequence, the host's; the bootstrap is its client.
 The host's install: the state table's answer for the machine, each state's sentence shown in a
 window (not a console), the ones that need admin (`wsl --install`, the feature enable) run
 through a UAC prompt by name with the sentence that explains why, the reboot states say
-"reboot, then Crucible continues" and the Startup item makes that true; import the distro;
+"reboot, then start this again" (see the correction below: the Startup item does NOT make
+"Crucible continues" true, and the sentence no longer says it does); import the distro;
 fetch the server pack in the guest; **move the host-mode config into the guest** (token,
 routes, upstreams — `crucible init` in the guest with `--config-from` a file the host wrote,
 0600) so the token survives; install the module's job types; service install; linger;
@@ -927,9 +928,23 @@ and `cli.INSTALLABLE_JOB_TYPES` already use.
 operator PAGE. Because `llama-windows` runs on any Windows machine, the host starts the
 Windows server within seconds of install and opens the page; the WSL install is then the
 page's engine switch (4.7), shown as a task in the page's Tasks panel like a pull. The
-states that need a reboot are answered by the task saying "reboot, then Crucible continues"
-and the Startup item resuming the task and reopening the page. There is no tkinter, no
-second progress UI, no second owner of the sequence.
+states that need a reboot are answered by the task saying so, and the Startup item brings
+the TRAY back. There is no tkinter, no second progress UI, no second owner of the sequence.
+
+**CORRECTION, 2026-09-16: the Startup item does not resume the task, and this paragraph
+used to say it did.** `app.py`'s `INSTALL_ENGINE` opens the console and the PAGE posts the
+task (4.7, deliberately — one door, one sequence, one place a person watches), so nothing
+on this machine re-posts it after a reboot. The task's sentence promised "Crucible starts
+itself when you log back in and picks this up where it stopped"; the first half is the
+Startup item and is true, the second half was never built. The sentence now says what
+happens, and `installer.py` writes `wsl-reboot-pending` into the host home so that
+"we stopped for a reboot" is a fact something can READ instead of one this module asserts.
+
+**The fork this leaves, and it is Owen's.** Resuming could mean the tray re-posting the
+task and reopening Crucible's own page, which is what this section originally designed —
+or the APP that asked for the install noticing the marker on its next launch and offering
+to go on, which is where Owen's Ollama ruling of 2026-09-16 puts every other piece of
+configuration (`docs/INTENT.md`). The marker serves either; nothing consumes it yet.
 
 **The migrate step, named.** `crucible init --config-from <file>` is the flag 4.3 asks for:
 the file is a TOML document the host wrote at 0600 and deletes afterwards, and `init` takes

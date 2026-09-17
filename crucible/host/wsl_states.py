@@ -9,7 +9,7 @@
 # is not installed".
 #
 # `sentence`, `action_text`, `action_url` and `probe_argv` carry `{said}` /
-# `{app_distro}` / `{guest_user}` / `{release}` / `{required}` / `{free}`
+# `{app_distro}` / `{release}` / `{required}` / `{free}`
 # where the TypeScript interpolated something the caller measures. The
 # PREDICATES are not here: they are code, and they live in
 # `crucible/host/wslstate.py`, one per code, tied to this file by a test.
@@ -135,13 +135,13 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         optional=True,
     ),
     WslStateDef(
-        code="linger_unreadable",
+        code="guest_root_unreachable",
         probe="guest-root",
         probe_argv=("wsl.exe", "-d", "crucible", "-u", "root", "--exec", "id", "-u", ),
-        sentence="The \"crucible\" distribution will not let Crucible in as root ({said}), so it cannot make the server survive a logout.",
+        sentence="The \"crucible\" distribution will not let Crucible in as root ({said}). The server is installed as a system service, which needs root to write, so there is nothing to install until it does.",
         action_kind="instruct",
         action_argv=(),
-        action_text="Run this yourself inside the distribution: sudo loginctl enable-linger {guest_user}",
+        action_text="Enable the root account in \"crucible\", or let Crucible import its own distribution, which grants root through wsl.exe with no password.",
         action_url="",
         optional=False,
     ),

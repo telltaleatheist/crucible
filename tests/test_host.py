@@ -892,6 +892,7 @@ def test_the_sequence_is_4_7s_steps_in_4_7s_order() -> None:
     assert installer.STEPS == (
         "wsl-state",
         "import-distro",
+        "guest-ready",
         "guest-install",
         "migrate-config",
         "install-job-types",
@@ -941,7 +942,14 @@ def test_a_reboot_state_ends_the_task_with_the_sentence_4_7_requires(
     with pytest.raises(HostError) as caught:
         walk.run()
     assert caught.value.code == "wsl_reboot_required"
-    assert "reboot, then Crucible continues" in caught.value.message
+    # NOT "Crucible continues": the Startup item brings the tray back and the
+    # tray does not re-post the task (app.py's INSTALL_ENGINE opens the console
+    # and the PAGE posts it). The sentence says what actually happens.
+    assert "reboot, then start this again" in caught.value.message
+    assert "picks this up where it stopped" not in caught.value.message
+    assert (tmp_path / installer.REBOOT_PENDING).is_file(), (
+        "nothing recorded that this machine stopped for a reboot"
+    )
     kinds = [event.event for event in events]
     assert kinds[0] == "step", "a line must never precede a step"
     assert kinds[-1] == "failed"
@@ -1746,7 +1754,7 @@ def test_activation_precedes_retirement_and_native_binary_is_not_migrated(tmp_pa
     windows = FakeCatalog("windows", [("model", "a"), ("engine", "llama.cpp")])
     guest = FakeCatalog("guest")
     walk = migration(windows, guest, [], tmp_path)
-    for method in ("_wsl_state", "_import_distro", "_guest_install", "_migrate_config", "_install_job_types", "_lan_door"):
+    for method in ("_wsl_state", "_import_distro", "_guest_ready", "_guest_install", "_migrate_config", "_install_job_types", "_lan_door"):
         setattr(walk, method, lambda: None)
     order = []
     def stopped():
@@ -1775,7 +1783,7 @@ def test_failed_activation_keeps_all_windows_models_and_resume_record(tmp_path: 
     windows = FakeCatalog("windows", [("model", "a")])
     guest = FakeCatalog("guest")
     walk = migration(windows, guest, [], tmp_path)
-    for method in ("_wsl_state", "_import_distro", "_guest_install", "_migrate_config", "_install_job_types", "_lan_door"):
+    for method in ("_wsl_state", "_import_distro", "_guest_ready", "_guest_install", "_migrate_config", "_install_job_types", "_lan_door"):
         setattr(walk, method, lambda: None)
     walk._stop_windows_callback = lambda: None
     def failed_switch():
@@ -3254,3 +3262,101 @@ def test_children_start_in_crucible_home_not_in_the_installation(monkeypatch) ->
     runner = ProcessRunner("win32", {}, cwd="C:/Users/x/AppData/Local/Crucible")
     runner.run(["wsl.exe", "-l", "-v"], timeout_s=5)
     assert seen["cwd"] == "C:/Users/x/AppData/Local/Crucible"
+
+
+# ------------------------------------------------ the from-scratch WSL walk
+#
+# Owen, 2026-09-16: "ideally id like to get it to the point where it can
+# install on wsl basically on its own, with an idiot driving the system.
+# whether wsl already exists or it needs to be installed from scratch".
+# These drive the walk on the two machines a stranger actually has.
+
+
+def a_fresh_wsl2_machine(**extra: RunResult) -> Scripted:
+    """WSL2 is installed and working; Crucible has never been here.
+
+    The rootfs download is what stops the walk, and that is fine: everything
+    under test happens before it.
+    """
+    answers = {
+        "--status": ok("Default Version: 2"),
+        "-l -v": ok("  Ubuntu  Running  2\n"),
+    }
+    answers.update(extra)
+    return Scripted(answers=answers)
+
+
+def probes_run(runner: Scripted) -> list[str]:
+    return [" ".join(call) for call in runner.calls]
+
+
+def test_the_root_door_is_probed_before_the_guest_install_needs_it(
+    tmp_path: Path,
+) -> None:
+    """`crucible service install` in the guest writes /etc/systemd/system and
+    drives the system manager, both through `wsl.exe -u root`. A distro that
+    will not grant root cannot be installed into at all — so the row that asks
+    has to be asked, and `_wsl_state` returns at `no_crucible_distro` long
+    before the distro it would ask about exists.
+    """
+    # The distro is ALREADY there, so `import-distro` is a no-op and the walk
+    # reaches the rows that are about the guest. (A machine that has yet to
+    # import one cannot be asked about it — that is the whole reason the first
+    # walk stops early, and the whole reason this second one exists.)
+    runner = a_fresh_wsl2_machine(**{
+        "-l -v": ok("  crucible  Running  2\n"),
+        "cat /etc/wsl.conf": ok("# crucible-rootfs\n[boot]\nsystemd=true\n"),
+        # Root IS reachable here, so the FIRST walk gets past that row and
+        # the second one is what the network probe below can only have
+        # come from.
+        "--exec id -u": ok("0\n"),
+    })
+    walk = installer.EngineInstall(
+        runner,
+        lambda event: None,
+        release="0.6.0",
+        home=tmp_path,
+        install_sh_url="https://example.invalid/install.sh",
+    )
+    with pytest.raises(HostError):
+        walk.run()
+    asked = probes_run(runner)
+    assert any(
+        "-d crucible -u root --exec id -u" in call for call in asked
+    ), f"nothing asked whether root is reachable in the guest: {asked}"
+    # And the row that turns a VPN into a sentence instead of a failed download.
+    assert any("envpacks.json" in call for call in asked), (
+        f"nothing asked whether the guest can reach the release: {asked}"
+    )
+
+
+def test_a_repair_that_changes_nothing_ends_the_walk_instead_of_looping(
+    tmp_path: Path,
+) -> None:
+    """The hang, pinned. `distro_not_systemd` is repairable by terminating the
+    distro — and when the terminate exits 0 and the distro still answers the
+    same way, the old loop ran it again, forever, printing nothing.
+    """
+    runner = Scripted(
+        answers={
+            "--status": ok("Default Version: 2"),
+            "-l -v": ok("  crucible  Running  2\n"),
+            # /etc/wsl.conf without `systemd=true`, every time it is read.
+            "cat /etc/wsl.conf": ok("[user]\ndefault=crucible\n"),
+        }
+    )
+    walk = installer.EngineInstall(
+        runner,
+        lambda event: None,
+        release="0.6.0",
+        home=tmp_path,
+        install_sh_url="https://example.invalid/install.sh",
+    )
+    with pytest.raises(HostError) as caught:
+        walk.run()
+    assert caught.value.code == "distro_not_systemd"
+    assert "still answers the same way" in caught.value.message
+    terminates = [
+        call for call in runner.calls if "--terminate" in " ".join(call)
+    ]
+    assert len(terminates) == 1, f"the repair ran {len(terminates)} times: {terminates}"

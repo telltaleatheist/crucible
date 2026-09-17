@@ -49,7 +49,6 @@ class Evidence:
     #: What the caller measured, for the rows that are about numbers.
     required_bytes: int = 0
     app_distro: str | None = None
-    guest_user: str | None = None
     release: str = ""
 
 
@@ -104,7 +103,7 @@ MEANS: dict[str, Predicate] = {
     "pack_disk": lambda result, seen: (
         _free_bytes(result) is not None and _free_bytes(result) < seen.required_bytes  # type: ignore[operator]
     ),
-    "linger_unreadable": lambda result, _: not result.ok or result.stdout.strip() != "0",
+    "guest_root_unreachable": lambda result, _: not result.ok or result.stdout.strip() != "0",
     # THE LAST ROW IS TOTAL. `detect()` returning None would make "nothing is
     # wrong" a null every caller has to interpret; it is a state with a name.
     "wsl_ready": lambda _result, _seen: True,
@@ -135,7 +134,6 @@ def render(text: str, result: RunResult, seen: Evidence) -> str:
     replacements: Mapping[str, str] = {
         "{said}": _said(result),
         "{app_distro}": seen.app_distro or "",
-        "{guest_user}": seen.guest_user or "",
         "{release}": seen.release,
         "{required}": gib(seen.required_bytes),
         "{free}": "an unreadable amount" if free is None else gib(free),
@@ -159,7 +157,6 @@ def detect(
     release: str,
     required_bytes: int = 0,
     app_distro: str | None = None,
-    guest_user: str | None = None,
     check_network: bool = False,
     timeout_s: float = PROBE_TIMEOUT_SECONDS,
 ) -> WslState:
@@ -178,14 +175,12 @@ def detect(
         distros=[],
         required_bytes=required_bytes,
         app_distro=app_distro,
-        guest_user=guest_user,
         release=release,
     )
 
     def substitute(word: str) -> str:
         return (
             word.replace("{app_distro}", app_distro or "")
-            .replace("{guest_user}", guest_user or "")
             .replace("{release}", release)
         )
 

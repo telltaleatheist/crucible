@@ -135,7 +135,6 @@ export async function detectHost(options: DetectOptions = {}, runner: Runner = p
       {
         release: options.release ?? BOOTSTRAP_VERSION,
         ...(options.distro === undefined ? {} : { appDistro: options.distro }),
-        ...(guest === null ? {} : { guestUser: guest.user }),
       },
       runner,
       PROBE_TIMEOUT_MS,

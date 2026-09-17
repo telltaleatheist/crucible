@@ -79,8 +79,6 @@ export interface WslStateInputs {
    * that needs this row is one that is about to download gigabytes.
    */
   checkNetwork?: boolean;
-  /** The guest user the linger row is about. */
-  guestUser?: string;
 }
 
 /** `wsl.exe --status` / `-l -v` / a command inside a distro — the table's four probes. */
@@ -214,16 +212,25 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
       action: () => ({ kind: 'instruct', text: 'Free some space on the drive WSL keeps its disk on, then try again.' }),
     },
     {
-      // The one hand-over that remains (linger.ts): a distro whose root account
-      // is disabled. Everything else above we can do; this one we cannot.
-      code: 'linger_unreadable',
+      // The one hand-over that remains: a distro whose root account is disabled
+      // (or WSL1, which has no `-u root` at all). Everything else above we can
+      // do; this one we cannot.
+      //
+      // IT USED TO BE CALLED `linger_unreadable` AND USED TO BE ABOUT LINGER.
+      // Two things changed on 2026-09-16. The guest's server became a SYSTEM
+      // unit, so root is no longer what makes it survive a logout — it is what
+      // lets it be INSTALLED: /etc/systemd/system is root's and so is the
+      // system manager. And `linger_unreadable` is already a real refusal from
+      // linger.ts about actual linger, so the old name was one code meaning two
+      // different machine states.
+      code: 'guest_root_unreachable',
       probe: 'guest-root',
       means: (result) => result.failure !== null || result.code !== 0 || result.stdout.trim() !== '0',
-      sentence: (result) => `The "${CRUCIBLE_DISTRO}" distribution will not let Crucible in as root (${said(result)}), `
-        + 'so it cannot make the server survive a logout.',
+      sentence: (result) => `The "${CRUCIBLE_DISTRO}" distribution will not let Crucible in as root (${said(result)}). `
+        + 'The server is installed as a system service, which needs root to write, so there is nothing to install until it does.',
       action: () => ({
         kind: 'instruct',
-        text: `Run this yourself inside the distribution: sudo loginctl enable-linger ${inputs.guestUser ?? '$USER'}`,
+        text: `Enable the root account in "${CRUCIBLE_DISTRO}", or let Crucible import its own distribution, which grants root through wsl.exe with no password.`,
       }),
     },
     {
