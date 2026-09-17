@@ -78,6 +78,12 @@ RECIPE_USER_UNIT_RESTART = "user-unit-restart"
 #: installed before it still has a user unit, so both doors stay.
 RECIPE_SYSTEM_UNIT_RESTART = "system-unit-restart"
 
+#: The recovery recipe for a guest whose unit is the machine's. Needs no
+#: uid and no user bus, touches nothing but Crucible's own unit, and so is
+#: permitted in ANY distro - unlike `user-bus-restart`, which restarts
+#: every process uid 1000 owns and is refused outside our own rootfs.
+RECIPE_SYSTEM_UNIT_START = "system-unit-start"
+
 #: The two systemd scopes a guest engine can be installed into.
 SCOPE_SYSTEM = "system"
 SCOPE_USER = "user"
@@ -745,6 +751,27 @@ class PresenceWatcher:
         attempt, because the unit restarts itself and a tray that keeps trying
         hides that it is not working.
         """
+        # THE SYSTEM UNIT FIRST, and for such a guest it is the only recipe
+        # there is. RECIPES speaks to the USER manager, which a guest
+        # installed since 0.6.4 does not use, and the escalation behind it
+        # (`user-bus-restart`) is destructive and refused outside the distro
+        # Crucible imported. So a stock Ubuntu guest with a system unit had
+        # NOTHING recovery could run, and said `both recipes were spent`
+        # while the one command that would have worked needs no uid, no bus
+        # and no permission it does not have. `restart` has branched on the
+        # scope since 0.6.4; this never did. Measured 2026-09-17 by asking
+        # the tray to Start a stopped engine and watching it stay down.
+        if self.probe_unit().scope == SCOPE_SYSTEM:
+            result = self._runner.run(
+                system_systemctl_argv(self._distro, "start"),
+                timeout_s=RECIPE_TIMEOUT_SECONDS,
+            )
+            self._log.write(
+                f"recovery {RECIPE_SYSTEM_UNIT_START}: "
+                f"{'ok' if result.ok else result.said()}"
+            )
+            return self._wait_for_ping(10.0)
+
         for name in RECIPES:
             if not recipe_permitted(name, self._distro):
                 # BY NAME, and in the log, because a recipe silently not run

@@ -3148,6 +3148,43 @@ def test_the_menus_stop_carries_the_runtime_directory_too(tmp_path: Path) -> Non
     assert presence.user_systemctl_argv("Ubuntu", "1000", "stop") in runner.calls
 
 
+def test_a_system_unit_guest_is_brought_up_by_its_own_manager(
+    host_log: log.HostLog,
+) -> None:
+    """`recover` had no recipe that could start a system unit at all.
+
+    RECIPES is `user-unit-start` then `user-bus-restart`. The first speaks to a
+    manager a system-unit guest does not use; the second is DESTRUCTIVE and
+    `recipe_permitted` refuses it outside the distro Crucible imported. So on a
+    stock Ubuntu guest with the system unit 0.6.9 gives it, recovery had
+    nothing to run and said "both recipes were spent" - measured 2026-09-17 by
+    asking the tray to Start the engine and watching it stay down.
+
+    `restart` learned this in 0.6.4 and `recover` never did.
+    """
+    runner = Scripted(
+        answers={
+            "-u root --exec systemctl is-enabled": ok("enabled" + chr(10)),
+            "--user": bad("Failed to connect to bus"),
+            "id -u": bad("should not be needed"),
+        },
+        pings=[None, 200, 200],
+    )
+    watcher = presence.PresenceWatcher(
+        runner,
+        host_log,
+        distro="Ubuntu",
+        consented=True,
+        monotonic=ticking(),
+        sleep=lambda _s: None,
+    )
+    assert watcher.recover(all_recipes=True) is True
+    assert presence.system_systemctl_argv("Ubuntu", "start") in runner.calls
+    assert not any("--user" in " ".join(call) for call in runner.calls), (
+        "a system-unit guest must not be recovered through the user manager"
+    )
+
+
 def test_the_stop_of_a_system_unit_guest_goes_through_root(tmp_path: Path) -> None:
     """The stop had not learned what the restart already knows.
 
