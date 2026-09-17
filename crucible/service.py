@@ -696,7 +696,11 @@ class Status:
     #: there" is only useful next to where it would have been.
     definition: Path
     installed: bool
-    running: bool
+    #: `True`/`False` when a manager ANSWERED; `None` when none could be asked.
+    #: Tri-state for exactly the reason `linger` is: "it is not running" and
+    #: "nothing here could tell" are different facts, and a caller that waits
+    #: for a service to STOP acts on the first and must not act on the second.
+    running: bool | None
     pid: int | None
     detail: str
     #: systemd only. `True`/`False` when `loginctl` answered, `None` when it
@@ -823,6 +827,26 @@ def read_linger(runner: Runner, user: str) -> bool | None:
     return value.lower() == "yes"
 
 
+def user_manager_active(runner: Runner, manager: str) -> bool | None:
+    """Is the manager that HOLDS this user's units running? None if unaskable.
+
+    `user@<uid>.service` is a SYSTEM unit, so this reaches it through the
+    system manager, whose bus WSLg does not overmount — the same asymmetry
+    `stop_user_manager` relies on, asked instead of acted on.
+
+    NO ROOT. `writing_door` already rules that reading is free, and it has to
+    be free here: `status` runs inside the unit's own environment, where
+    `WSL_DISTRO_NAME` is absent and `root_prefix()` therefore RAISES (see
+    `in_wsl`). A status that elevated would refuse to answer precisely when it
+    is the service asking about itself.
+    """
+    ran = runner(["systemctl", "show", manager, "--property=ActiveState"])
+    if not ran.ok:
+        return None
+    state = parse_systemctl_show(ran.stdout).get("ActiveState")
+    return None if state is None else state == "active"
+
+
 def status(
     mechanism: str, home: Path, *, runner: Runner, user: str | None = None
 ) -> Status:
@@ -845,16 +869,37 @@ def status(
         )
         linger = read_linger(runner, user if user is not None else getpass.getuser())
         if not ran.ok:
+            # THE STOP DESTROYS THE EVIDENCE THAT IT WORKED. `stop_user_manager`
+            # takes down `user@<uid>.service`, which is the only thing that was
+            # answering for the user bus, so the wait that confirms the stop
+            # then cannot reach a manager at all. Measured 2026-09-17 on
+            # owens-pc: 0.6.8 stopped the guest correctly and the install failed
+            # anyway with `local_stop_failed: Engine did not answer`.
+            #
+            # A unit whose manager is not running is not running. That is
+            # systemd's own model, not an inference about this machine, and the
+            # system manager answers it without a session bus.
+            unreachable = (
+                f"systemctl could not be asked: `{' '.join(ran.argv)}` exited "
+                f"{ran.returncode}: {ran.text()}"
+            )
+            running: bool | None = None
+            detail = unreachable
+            if scope == USER_SCOPE:
+                manager = f"user@{os.getuid()}.service"
+                if user_manager_active(runner, manager) is False:
+                    running = False
+                    detail = (
+                        f"inactive: {manager} is not running, so nothing it "
+                        f"holds is either. {unreachable}"
+                    )
             return Status(
                 mechanism=mechanism,
                 definition=definition,
                 installed=installed,
-                running=False,
+                running=running,
                 pid=None,
-                detail=(
-                    f"systemctl could not be asked: `{' '.join(ran.argv)}` exited "
-                    f"{ran.returncode}: {ran.text()}"
-                ),
+                detail=detail,
                 linger=linger,
             )
         properties = parse_systemctl_show(ran.stdout)
@@ -882,7 +927,7 @@ def status(
                 mechanism=mechanism,
                 definition=definition,
                 installed=installed,
-                running=False,
+                running=None,
                 pid=None,
                 detail=(
                     f"launchctl could not be asked: `{' '.join(ran.argv)}` exited "

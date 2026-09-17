@@ -579,13 +579,21 @@ def cmd_service_status(args: argparse.Namespace) -> int:
         return _fail(str(exc))
     if args.json:
         print(json.dumps(state.to_dict(), indent=2))
-        return EXIT_OK if state.running else EXIT_REFUSED
+        return EXIT_OK if state.running is True else EXIT_REFUSED
     print(f"mechanism:  {state.mechanism}")
     print(
         f"definition: {state.definition} "
         f"({'present' if state.installed else 'NOT THERE'})"
     )
-    print(f"running:    {'yes' if state.running else 'NO'}")
+    # Three answers, because there are three. `None` is "no manager could be
+    # asked", and reporting that as NO would be this command inventing a fact.
+    if state.running is True:
+        runs = "yes"
+    elif state.running is False:
+        runs = "NO"
+    else:
+        runs = "UNKNOWN - no manager could be asked"
+    print(f"running:    {runs}")
     print(f"pid:        {state.pid if state.pid is not None else '-'}")
     print(f"detail:     {state.detail}")
     if state.mechanism == service.SYSTEMD:
@@ -601,7 +609,7 @@ def cmd_service_status(args: argparse.Namespace) -> int:
         else:
             linger = "UNKNOWN — loginctl could not be asked"
         print(f"linger:     {linger}")
-    return EXIT_OK if state.running else EXIT_REFUSED
+    return EXIT_OK if state.running is True else EXIT_REFUSED
 
 
 # -------------------------------------------------------------- capability

@@ -239,3 +239,62 @@ def test_ship_does_not_gate_on_a_dry_run_it_has_made_impossible():
             continue
         assert 'release.sh --dry-run' not in stripped, (
             f'ship.sh runs a gate that a bumped tree can never pass: {stripped}')
+
+INSTALL_PS1 = REPO / 'sdk/bootstrap/scripts/install.ps1'
+INSTALL_SH = REPO / 'sdk/bootstrap/scripts/install.sh'
+
+
+def test_windows_unpacks_with_the_same_tar_it_checked():
+    """One tool, named once. Checking one tar and unpacking with another is how
+    a check passes and the unpack still half-works.
+
+    `tar` resolved through PATH found Git Bash's GNU tar 1.32 (no zstd) on a
+    Windows 11 machine whose System32 bsdtar has read zstd all along, and the
+    0.6.8 deploy refused it (measured 2026-09-17).
+    """
+    text = INSTALL_PS1.read_text(encoding='utf-8')
+    body = '{}'.format(chr(10)).join(
+        line for line in text.splitlines() if not line.lstrip().startswith('#')
+    )
+    assert 'Join-Path $env:SystemRoot "System32' in body, (
+        'the Windows installer must name the tar Windows guarantees'
+    )
+    assert '& tar.exe' not in body, (
+        'a PATH-resolved tar.exe is back; it is the caller shell that decides '
+        'which one that is'
+    )
+    assert body.count('& $Tar') >= 2, (
+        'both the capability check and the unpack have to use the named tar'
+    )
+
+
+def test_the_mac_install_runs_under_the_accounts_own_login_shell():
+    """Asked, not named.
+
+    A bare `ssh host cmd` gets PATH=/usr/bin:/bin:/usr/sbin:/sbin on macOS, and
+    the installer then probes for curl/tar/zstd in an environment its owner
+    never uses. `bash -lc` does not fix it either: this account is zsh and its
+    Homebrew line is in ~/.zprofile, which bash does not read.
+    """
+    text = DEPLOY.read_text(encoding='utf-8')
+    start = text.index('install_mac()')
+    body = text[start:text.index('install_windows()')]
+    code = '{}'.format(chr(10)).join(
+        line for line in body.splitlines() if not line.lstrip().startswith('#')
+    )
+    assert '$SHELL' in code, (
+        'the mac install must ask the account which shell it uses'
+    )
+    assert '-lc' in code, 'and run it as a LOGIN shell, or the profile is not read'
+    assert 'bash -lc' not in code, (
+        'naming bash guesses at a shell this account does not use'
+    )
+
+
+def test_every_installer_probes_for_the_tools_it_actually_runs():
+    """The probe list and the tools the script runs must not drift apart."""
+    text = INSTALL_SH.read_text(encoding='utf-8')
+    assert 'for t in curl tar zstd' in text, (
+        'the POSIX installer probes curl, tar and zstd by name; if that list '
+        'moved, this test is the place to say what it moved to'
+    )

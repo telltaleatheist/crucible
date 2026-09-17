@@ -138,8 +138,18 @@ install_wsl() {
 }
 
 install_mac() {
+  # THE ACCOUNT'S OWN LOGIN SHELL, asked rather than named. A bare
+  # `ssh host cmd` runs a NON-login shell, and macOS hands that
+  # PATH=/usr/bin:/bin:/usr/sbin:/sbin - four directories, no Homebrew.
+  # The 0.6.8 deploy refused the Mac for a missing zstd on 2026-09-17
+  # while the machine had one at /opt/homebrew/bin/zstd the whole time.
+  #
+  # `bash -lc` does NOT fix it and was the first thing tried: bash reads
+  # ~/.bash_profile, this account is zsh, and its Homebrew line lives in
+  # ~/.zprofile. Naming a shell here guesses at something the machine
+  # already knows, so $SHELL is expanded REMOTELY and answers for itself.
   ssh -n -o ConnectTimeout=15 mac \
-    "set -e; curl -fsSL '$(install_sh_url "$1")' | sh -s -- --release '$1'"
+    "\"\$SHELL\" -lc \"set -e; curl -fsSL '$(install_sh_url "$1")' | sh -s -- --release '$1'\""
 }
 
 install_windows() {

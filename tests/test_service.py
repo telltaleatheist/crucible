@@ -1351,3 +1351,119 @@ def test_the_retire_path_and_the_stop_path_use_one_door(
     runner = Runner()
     service.stop_user_manager(runner, "why", elevate=["sudo"])
     assert runner.calls == [("sudo", "systemctl", "stop", "user@1000.service")]
+
+
+# ------------------- a stop that destroys the evidence it worked (DEFECT 17)
+
+
+def test_a_user_unit_whose_manager_is_gone_is_stopped_not_unknown(
+    user_home: Path, wsl_guest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The success of `stop_user_manager` is what makes the user bus unaskable.
+
+    Measured 2026-09-17 on owens-pc: 0.6.8's stop worked — `user@1000.service`
+    really was inactive — and the install failed anyway, because the wait that
+    confirms the stop asks the manager the stop had just taken down.
+    """
+    monkeypatch.setattr(service.os, "getuid", lambda: 1000, raising=False)
+    (user_home / ".config/systemd/user").mkdir(parents=True, exist_ok=True)
+    (user_home / ".config/systemd/user/crucible.service").write_text("[Unit]\n")
+    runner = Runner(
+        {
+            ("systemctl", "--user", "show"): answer(
+                code=1, err="Failed to connect to bus: No such file or directory\n"
+            ),
+            ("systemctl", "show", "user@1000.service"): answer(
+                out="ActiveState=inactive\n"
+            ),
+            ("loginctl",): answer(out="Linger=yes\n"),
+        }
+    )
+    state = service.status(
+        service.SYSTEMD, user_home, runner=runner, user="telltale"
+    )
+    assert state.running is False, (
+        "a unit whose manager is not running cannot be running; systemd's own "
+        "model says so and the system manager is what answers for it"
+    )
+    assert "user@1000.service" in state.detail, (
+        "the detail has to name WHY it is known to be stopped"
+    )
+
+
+def test_a_covered_bus_with_a_live_user_manager_is_unknown_not_stopped(
+    user_home: Path, wsl_guest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`running=False` must mean ASKED AND ANSWERED, never `could not tell`."""
+    monkeypatch.setattr(service.os, "getuid", lambda: 1000, raising=False)
+    (user_home / ".config/systemd/user").mkdir(parents=True, exist_ok=True)
+    (user_home / ".config/systemd/user/crucible.service").write_text("[Unit]\n")
+    runner = Runner(
+        {
+            ("systemctl", "--user", "show"): answer(
+                code=1, err="Failed to connect to bus: No such file or directory\n"
+            ),
+            ("systemctl", "show", "user@1000.service"): answer(
+                out="ActiveState=active\n"
+            ),
+            ("loginctl",): answer(out="Linger=yes\n"),
+        }
+    )
+    state = service.status(
+        service.SYSTEMD, user_home, runner=runner, user="telltale"
+    )
+    assert state.running is None, (
+        "the manager is up and its bus is covered, so nothing here knows "
+        "whether the unit is running. None is how that is said"
+    )
+
+
+def test_when_neither_manager_answers_the_unit_state_is_unknown(
+    user_home: Path, wsl_guest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service.os, "getuid", lambda: 1000, raising=False)
+    (user_home / ".config/systemd/user").mkdir(parents=True, exist_ok=True)
+    (user_home / ".config/systemd/user/crucible.service").write_text("[Unit]\n")
+    runner = Runner(
+        {
+            ("systemctl",): answer(code=1, err="Failed to connect to bus\n"),
+            ("loginctl",): answer(out="Linger=yes\n"),
+        }
+    )
+    state = service.status(
+        service.SYSTEMD, user_home, runner=runner, user="telltale"
+    )
+    assert state.running is None
+
+
+def test_asking_the_system_manager_about_a_user_manager_needs_no_root(
+    user_home: Path, wsl_guest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading is free, and `status` runs where the root door cannot be named.
+
+    A unit's own environment has no `WSL_DISTRO_NAME` (`in_wsl` documents why),
+    so `root_prefix()` RAISES there. A status that elevated would refuse to
+    answer precisely when it is the service asking about itself.
+    """
+    monkeypatch.setattr(service.os, "getuid", lambda: 1000, raising=False)
+    monkeypatch.delenv(service.WSL_DISTRO_ENV, raising=False)
+    (user_home / ".config/systemd/user").mkdir(parents=True, exist_ok=True)
+    (user_home / ".config/systemd/user/crucible.service").write_text("[Unit]\n")
+    runner = Runner(
+        {
+            ("systemctl", "--user", "show"): answer(
+                code=1, err="Failed to connect to bus: No such file or directory\n"
+            ),
+            ("systemctl", "show", "user@1000.service"): answer(
+                out="ActiveState=inactive\n"
+            ),
+            ("loginctl",): answer(out="Linger=yes\n"),
+        }
+    )
+    state = service.status(
+        service.SYSTEMD, user_home, runner=runner, user="telltale"
+    )
+    assert state.running is False
+    assert not any("wsl.exe" in call[0] for call in runner.calls), (
+        "reading a unit's state must not open the root door"
+    )

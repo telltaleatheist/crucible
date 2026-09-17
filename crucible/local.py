@@ -125,8 +125,14 @@ def status(home: Path | None = None) -> dict:
                                       service.user_home(), runner=service.subprocess_runner)
             if not observed.installed:
                 result.update(state="broken", detail="The service definition is missing")
-            elif not observed.running and (observed.detail.startswith("inactive/") or
-                                           "not loaded" in observed.detail):
+            elif observed.running is False:
+                # ASKED AND ANSWERED, not matched out of prose. This used to
+                # read `not observed.running` next to two string tests on
+                # `detail`, because `running` was False both when systemd said
+                # "inactive" and when systemd could not be reached at all, and
+                # the strings were what told those apart. `Status.running` is
+                # tri-state now and says it itself: False is a manager's
+                # answer, None is nobody's.
                 result.update(state="stopped", detail=observed.detail)
         return result
     except (ValueError, LocalError) as exc:
