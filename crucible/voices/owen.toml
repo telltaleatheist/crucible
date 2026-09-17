@@ -2,13 +2,32 @@
 # BookForge's electron/data/higgs-models.json (`owen`); the shared reasoning is in
 # voices/deathstalker.toml.
 #
-# THE PIN AND THE ARMS HAVE DRIFTED APART, though less far than mistborn's. The
-# catalog's arms point at `ow_v7_prod` (ckpt-966), promoted 2026-09-10 after the
-# `--tail-s 0.25` re-slice fixed the v6 EOS failure; the HuggingFace repo was last
-# written on 2026-09-07, on the previous promotion. The pace below was measured on
-# 2026-09-07 against `owen_gp2w_prod` — so it belongs to the era of the pin rather
-# than to today's arms, which is the one thing that makes this manifest's pace
-# more trustworthy than mistborn's and still not proof. Re-measure before a book.
+# THE PIN AND THE ARMS AGREE AS OF 2026-09-16. Both now name `ow_v7_prod`
+# (ckpt-966), promoted 2026-09-10 after the `--tail-s 0.25` re-slice fixed the v6
+# EOS failure. The repo had held the 2026-09-07 `owen_gp2w_prod` upload until
+# tonight, because HuggingFace was full and the upload had no green light.
+#
+# WHAT THAT TRADE COST, stated plainly: the pace and band below were measured on
+# `owen_gp2w_prod`, the PREDECESSOR of the weights now pinned. Until tonight they
+# described the pinned bytes exactly and the drift was in the weights; now the
+# weights are right and the drift is in the numbers. This manifest is a MIRROR of
+# BookForge's catalog, which carries exactly the same gap for exactly the same
+# reason — its `owen` pace cites `owen_gp2w_prod` while both its arms serve
+# ow_v7_prod — so Crucible is not inventing a discrepancy here, it is reflecting
+# one, and fixing it in one place without the other would be worse.
+#
+# WHY THAT IS TOLERABLE AND STILL OWED: pace has twice measured as a property of
+# the CORPUS rather than the checkpoint (deathstalker 15.91 vs its runner-up's
+# 15.85; mistborn 13.33 vs its predecessor's 13.29). That is the argument for
+# carrying 16.32 across a checkpoint change — but ow_v7 was trained from the
+# cod-full-rebuild corpus and owen_gp2w from God's People plus Was Hitler an
+# Atheist, so the corpus is NOT held constant here and the argument does not
+# actually reach. n is also 23, the thinnest clean sample of the five. A ladder
+# on these weights settles it; until one is run, treat the numbers as inherited.
+#
+# A SECOND REASON TO EXPECT THIS TO MOVE: which Owen checkpoint should ship is
+# itself unsettled. Owen heard ow_v8_rvcbed1 on 2026-09-15 and said the deployed
+# v7 might be the better of the two, and no ladder has compared them.
 
 [voice]
 id = "owen"
@@ -18,7 +37,8 @@ narrator_engine = "higgs-v3"
 language = "en"
 sample_rate = 24000
 
-# MEASURED 2026-09-07 on the served arm at temperature 0.8 on owen_gp2w_prod:
+# MEASURED 2026-09-07 on the served arm at temperature 0.8 on owen_gp2w_prod —
+# the PREDECESSOR of the weights this manifest now pins; see the header:
 # night3/gp/para, the Fuhrer-49 bank, 50 renders, 23 clean by the pace rule.
 # median 16.32, p05 14.62, p95 16.84, p99 17.76. The thinnest clean sample of the
 # five (n 23 against deathstalker's 40 and sigma's 422). Edges = median x 1.3 and
@@ -30,11 +50,16 @@ sample_rate = 24000
 pace_chars_per_sec = 16.32
 max_chars_per_sec = 21.22
 min_chars_per_sec = 12.55
-# SAFE BAND = the training corpus's INTERQUARTILE RANGE, measured 2026-09-09
-# (field notes 4n.37.20). owen_gp2w: p25 555, p75 1082, so the floor is 600. The
-# method was validated on thirdreich, whose IQR 532-985 predicted its measured
-# best band 600-1000. The ceiling is held at Owen's 800 ruling rather than at the
-# measured 1000; the measurement supports raising it and nobody has.
+# SAFE BAND = owen_gp2w's training-corpus INTERQUARTILE RANGE, measured
+# 2026-09-09 (field notes 4n.37.20): p25 555, p75 1082, so the floor is 600. The
+# ceiling is held at Owen's 800 ruling rather than at the measured 1000.
+#
+# TWO CAVEATS, both pointing the same way. It is the PREDECESSOR's corpus, as the
+# header says. And the corpus-IQR method itself has since been retired for the
+# other voices: it was wrong in production within a day, and deathstalker and
+# mistborn now take their bands off each checkpoint's own 512-render ladder
+# instead. This band survives here only because no ladder has been run on ow_v7 —
+# it is the last corpus-IQR band in the set, not a defended one.
 safe_min_chars = 600
 safe_max_chars = 800
 # WHAT THE SERVER narrator STARTS IS SIZED BY, and the one number it refuses to
@@ -52,9 +77,9 @@ max_num_seqs_note = """16 is vllm-omni's OWN stage-0 value in higgs_multimodal_q
 
 [voice.backends.cuda-linux]
 hf_repo = "owenmorgan/owen-morgan-higgs-v3"
-# Read from the HF API 2026-09-13 with Owen's token (private repo): the
-# 2026-09-07 upload. See the header — the arms have moved on to ow_v7_prod.
-revision = "f566ab43db20cc064096d2557af9271ab7dd3a90"
+# The repo's head after the upload of 2026-09-16, verified against the HF API:
+# ow_v7 checkpoint 966, the same merge both arms serve. See the header.
+revision = "8be4fd07ed3e02135fe9b51d4faf4cc490307835"
 memory_bytes_estimate = 19_000_000_000
 estimate_basis = "declared"
 estimate_note = """SGLang-Omni's configured reservation on this arm, not a watched \
@@ -71,7 +96,7 @@ sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
 
 [voice.backends.mlx-darwin]
 hf_repo = "owenmorgan/owen-morgan-higgs-v3"
-revision = "f566ab43db20cc064096d2557af9271ab7dd3a90"
+revision = "8be4fd07ed3e02135fe9b51d4faf4cc490307835"
 memory_bytes_estimate = 12_133_000_000
 estimate_basis = "declared"
 estimate_note = """The one recorded MLX figure for a Higgs v3 merged checkpoint — \
