@@ -435,8 +435,23 @@ if it is then empty) and answers `204`. Refusals by name: `subject_unknown` (404
 or named by a running task), `subject_remove_failed` (500, with the path). Same auth as every
 private route; recorded in `/v1/activity` with the act. `crucible remove <kind> <id>` is the
 CLI spelling, refusing identically. The page's Catalog panel gains a Remove on installed rows.
-An app never calls it on a user's behalf without saying so on screen (BookForge and Foundry:
-not in this phase — the host is the only caller for now).
+An app never calls it on a user's behalf without saying so on screen.
+
+> **SUPERSEDED IN PART, 2026-09-16.** The parenthetical here used to read
+> *"(BookForge and Foundry: not in this phase — the host is the only caller for
+> now)"*. Owen withdrew that: *"they sohuld have a way to delete models from
+> crucible, too. probably through bookforge/foundry settings"*
+> (docs/MODEL-CHOICE.md section 7). Both apps call this route now, from a
+> settings page, behind a confirm that names the SIZE — deciding about 17.3 GB
+> is a different decision from deciding about "a file" — with keep as the
+> default and the four refusals printed as the server wrote them.
+>
+> **The sentence above it is NOT superseded** and is the reason this is a
+> partial supersession rather than a deletion: saying so on screen was always
+> the rule, and it is the half that survives a change in who calls. Foundry
+> built its delete control on exactly that reading (foundry 2a789da) while this
+> paragraph still said the opposite, which is how the mistake would have been
+> made in the other direction — a later reader concluding the button was wrong.
 
 ### 3.6 The pairing file
 

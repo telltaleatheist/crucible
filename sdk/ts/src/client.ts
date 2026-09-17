@@ -1850,8 +1850,21 @@ export class CrucibleClient {
    * layout to do it. Answers nothing on success (204).
    *
    * **An app does not call this on a user's behalf without saying so on
-   * screen.** 3.5a is explicit that neither BookForge nor Foundry calls it in
-   * this phase; the host does, and an operator does from the page.
+   * screen.** That condition is the durable half and is unchanged.
+   *
+   * WHAT CHANGED, 2026-09-16: this comment used to go on to say that 3.5a is
+   * explicit that NEITHER BookForge NOR Foundry calls it in this phase — the
+   * host does, and an operator does from the page. Owen withdrew that:
+   * *"they sohuld have a way to delete models from crucible, too. probably
+   * through bookforge/foundry settings"* (docs/MODEL-CHOICE.md section 7). So
+   * an app calls it now, from a settings page, behind a confirm that names the
+   * SIZE — deciding about 17.3 GB is a different decision from deciding about
+   * "a file" — with keep as the default.
+   *
+   * The sentence above survives the reversal intact, which is why it is stated
+   * separately from the division it used to be attached to. A reader who found
+   * the old division still written here would conclude the app's own delete
+   * button was a mistake.
    *
    * Refused by name, and each name is a different thing to do about it:
    * `subject_unknown` (404), `subject_not_installed` (409),
