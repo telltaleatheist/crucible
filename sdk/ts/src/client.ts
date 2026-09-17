@@ -2214,19 +2214,36 @@ function readCapabilityRow(
   const raw = entry['route'];
   let route: 'local' | 'upstream';
   if (raw === undefined) {
-    if (documentHasRoutes) {
-      // Some rows have it and this one does not, so the document cannot say
-      // where this class runs. Reading it as `local` would be inventing the
-      // one thing a routed server is about.
-      throw new CrucibleProtocolError(
-        `${CAPABILITY_ROUTE_MISSING}: ${where} has no "route", but other rows ` +
-          'in the same capability document do. A document either predates ' +
-          'phase 15 entirely (no row has it, and every class is local) or ' +
-          'states it on every row; a half-routed document says nothing ' +
-          `trustworthy about ${str(entry, 'capability', where)}.`,
-      );
-    }
-    route = 'local';
+    /*
+     * A MISSING `route` IS A REFUSAL NOW, WHOLE DOCUMENT OR HALF.
+     *
+     * The half-routed case always refused: some rows have it and this one does
+     * not, so the document cannot say where this class runs, and reading it as
+     * `local` would invent the one thing a routed server is about.
+     *
+     * The WHOLE-document case used to answer `local` instead, on the reading
+     * that no row carrying it means a server predating phase 15, where every
+     * class really was local. That was Crucible-version tolerance, and Owen
+     * ended the population it served on 2026-09-16: nothing is released, so
+     * there is no pre-phase-15 server for anyone but us to point at. It was a
+     * SHIM by the test Foundry proposed the same evening — it made a wrong
+     * version work and said nothing — and the rule is that shims go while named
+     * refusals stay.
+     *
+     * So the one sentence covers both, and neither invents a route. What made
+     * the old arm dangerous is worth keeping in view: `local` and `upstream`
+     * decide whether a run costs GPU-minutes or money, and that is not a fact
+     * a client may fill in.
+     */
+    throw new CrucibleProtocolError(
+      `${CAPABILITY_ROUTE_MISSING}: ${where} has no "route"` +
+        (documentHasRoutes
+          ? ', but other rows in the same capability document do'
+          : ', and neither does any other row in the document') +
+        '. Every server states it on every row; where a class runs decides ' +
+        'whether its work costs GPU-minutes or money, so this is not something ' +
+        `a client may fill in for ${str(entry, 'capability', where)}.`,
+    );
   } else if (typeof raw !== 'string' || !ROUTES.includes(raw as 'local')) {
     throw new CrucibleProtocolError(
       `${CAPABILITY_ROUTE_UNKNOWN}: ${where}.route is ${JSON.stringify(raw)}, ` +

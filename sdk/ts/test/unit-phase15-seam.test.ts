@@ -110,8 +110,15 @@ after(async () => {
 const GIB = 1024 ** 3;
 
 /**
- * The shape of the answer Owen's live WSL server gives today: eleven classes,
- * no `route` on any of them, because it was initialised before phase 15.
+ * Eleven classes with NO `route` on any of them — the shape a server
+ * initialised before phase 15 sent.
+ *
+ * It was read as "every class is local" until 2026-09-16. Owen ruled that
+ * population out of existence (nothing is released, so no such server exists
+ * for anyone but us), and inventing a route is inventing the one fact that
+ * decides whether a run costs GPU-minutes or money — so it is a REFUSAL now,
+ * whole document or half. The fixture stays, because what it produces is worth
+ * asserting; only the answer changed.
  */
 function preRouteRecord(): Record<string, unknown> {
   const classes = [
@@ -143,14 +150,22 @@ function preRouteRecord(): Record<string, unknown> {
 
 // ------------------------------- 1. the capability document's route, by 3.3
 
-test('a document where NO row says route is read as every class local', async () => {
+test('a document where NO row says route is REFUSED, not read as every class local', async () => {
   answers(200, preRouteRecord());
-  const record = await client().capability();
-  assert.equal(record.classes.length, 11);
-  for (const row of record.classes) {
-    assert.equal(row.route, 'local', `${row.capability} should read as local`);
-  }
+  await assert.rejects(client().capability(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError);
+    assert.match(error.message, new RegExp(CAPABILITY_ROUTE_MISSING));
+    assert.match(error.message, /neither does any other row/);
+    return true;
+  });
 });
+
+/** The same eleven classes, each stating where it runs. What a server sends. */
+function routedRecord(): Record<string, unknown> {
+  const document = preRouteRecord();
+  for (const row of document['classes'] as Record<string, unknown>[]) row['route'] = 'local';
+  return document;
+}
 
 test('reading a pre-phase-15 document is a STATEMENT, not a filled-in default', async () => {
   // The difference shows in the other direction: the same document with ONE
@@ -212,7 +227,7 @@ test('a phase-15 document is read exactly as before', async () => {
 // ------------------------------------------- 2. a clock on the three probes
 
 test('capability() takes a timeoutMs and abandons a server that is asleep', async () => {
-  answers(200, preRouteRecord());
+  answers(200, routedRecord());
   stall = 5000;
   const started = Date.now();
   await assert.rejects(client().capability({ timeoutMs: 120 }), (error: unknown) => {
@@ -240,7 +255,7 @@ test('ping() and info() take the same clock', async () => {
 });
 
 test("a caller's own signal still aborts, and says so with its own name", async () => {
-  answers(200, preRouteRecord());
+  answers(200, routedRecord());
   stall = 5000;
   const control = new AbortController();
   const pending = client().capability({ signal: control.signal, timeoutMs: 5000 });
@@ -253,13 +268,13 @@ test("a caller's own signal still aborts, and says so with its own name", async 
 });
 
 test('no clock means no clock — a probe with neither option still answers', async () => {
-  answers(200, preRouteRecord());
+  answers(200, routedRecord());
   const record = await client().capability();
   assert.equal(record.classes.length, 11);
 });
 
 test('a timeoutMs that is not a positive number is refused, not rounded', async () => {
-  answers(200, preRouteRecord());
+  answers(200, routedRecord());
   for (const bad of [0, -1, Number.NaN]) {
     await assert.rejects(client().capability({ timeoutMs: bad }), /timeoutMs/);
   }
@@ -391,7 +406,7 @@ test('CRLF is one line, because a Windows editor is not a second server', async 
 // ---------------------------- 4. a clock at CONSTRUCTION, on every call
 
 test('timeoutMs on the constructor puts a deadline on every call', async () => {
-  answers(200, preRouteRecord());
+  answers(200, routedRecord());
   stall = 5000;
   const impatient = new CrucibleClient({
     url: base,
@@ -418,7 +433,7 @@ test("a per-call signal REPLACES the constructor's clock rather than racing it",
   // Two different statements: the constructor's is this app's patience, the
   // call's is "this caller owns this request". A second deadline quietly
   // ANDed onto a caller's cancel would end a stream they were still reading.
-  answers(200, preRouteRecord());
+  answers(200, routedRecord());
   stall = 400;
   const impatient = new CrucibleClient({
     url: base,
@@ -433,7 +448,7 @@ test("a per-call signal REPLACES the constructor's clock rather than racing it",
 });
 
 test('no timeoutMs means no clock, and a bad one is refused at construction', async () => {
-  answers(200, preRouteRecord());
+  answers(200, routedRecord());
   stall = 200;
   const unhurried = new CrucibleClient({
     url: base,

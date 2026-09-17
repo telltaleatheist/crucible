@@ -249,6 +249,48 @@ def root_prefix(environ: Mapping[str, str] | None = None) -> list[str]:
     return ["wsl.exe", "-d", distro, "-u", "root", "--exec"]
 
 
+def installed_scope(home: Path) -> str | None:
+    """Which scope this machine's unit is ACTUALLY in, or None for neither.
+
+    `systemd_scope()` answers a different question: where an install would PUT
+    a unit on this host. During an UPGRADE those two disagree, and acting on the
+    wrong one is how 0.6.6's own install failed on the first machine it ran on:
+
+        systemd would not stop crucible.service:
+        `wsl.exe -d Ubuntu -u root --exec systemctl stop crucible.service`
+        exited 5: Failed to stop crucible.service: Unit crucible.service not
+        loaded.
+
+    The guest was a USER unit being upgraded onto a SYSTEM one, the runtime swap
+    stops the service first, and it asked the system manager about a unit the
+    user manager was holding. Every verb that acts on a unit ALREADY THERE —
+    stop, start, status, uninstall — has to ask where it is rather than where it
+    would go. `install` is the one that legitimately uses `systemd_scope()`,
+    because it is the thing deciding.
+
+    Read from the FILESYSTEM and not from either manager: a unit file is there
+    or it is not, and that answer needs no bus, no root and no session — the
+    same property that makes `id -u` the right first question of a distro.
+    """
+    if unit_path(home, SYSTEM_SCOPE).is_file():
+        return SYSTEM_SCOPE
+    if unit_path(home, USER_SCOPE).is_file():
+        return USER_SCOPE
+    return None
+
+
+def acting_scope(home: Path, verb: str) -> str:
+    """`installed_scope`, refused by name when there is no unit to act on."""
+    scope = installed_scope(home)
+    if scope is None:
+        raise ServiceError(
+            f"there is no {UNIT_NAME} on this machine to {verb}: neither "
+            f"{unit_path(home, SYSTEM_SCOPE)} nor {unit_path(home, USER_SCOPE)} "
+            "exists. Run `crucible service install` first"
+        )
+    return scope
+
+
 def writing_door(scope: str) -> list[str]:
     """The prefix a systemd verb that CHANGES something needs in this scope.
 
@@ -283,9 +325,17 @@ def serve_log_path(crucible_home: Path) -> Path:
 
 
 def definition_path(mechanism: str, home: Path) -> Path:
-    """The unit or the plist, whichever this host uses."""
+    """The unit or the plist THIS MACHINE HAS, or where one would go.
+
+    `installed_scope` first, because during an upgrade the unit that exists and
+    the scope an install would choose are different answers, and every caller of
+    this asks "is there one, and where". `systemd_scope()` only when there is no
+    unit at all — which is not a fallback for a missing value but the honest
+    answer to "where would it be", the question a caller with nothing installed
+    is really asking.
+    """
     if mechanism == SYSTEMD:
-        return unit_path(home)  # scope-aware: the system unit inside WSL
+        return unit_path(home, installed_scope(home) or systemd_scope())
     if mechanism == LAUNCHD:
         return plist_path(home)
     raise ServiceError(f"there is no service mechanism called {mechanism!r}")
@@ -780,7 +830,8 @@ def status(
     definition = definition_path(mechanism, home)
     installed = definition.is_file()
     if mechanism == SYSTEMD:
-        scope = systemd_scope()
+        # The scope `definition` was just resolved in, by the same rule.
+        scope = installed_scope(home) or systemd_scope()
         ran = runner(
             systemctl_argv(
                 scope,
@@ -1152,10 +1203,14 @@ def uninstall(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
     """Stop the service, forget it, and remove its definition. Idempotent."""
     lines: list[str] = []
     if mechanism == SYSTEMD:
-        scope = systemd_scope()
+        # Idempotent, so "nothing installed" is an ANSWER here and not a
+        # refusal: `crucible service uninstall` twice must be quiet the second
+        # time. `installed_scope` is None exactly then, and the sentence names
+        # where a unit would have been.
+        scope = installed_scope(home)
+        if scope is None:
+            return [f"nothing to remove: there is no unit at {unit_path(home, systemd_scope())}"]
         path = unit_path(home, scope)
-        if not path.is_file():
-            return [f"nothing to remove: there is no unit at {path}"]
         elevate = writing_door(scope)
         _require(
             runner,
@@ -1205,7 +1260,7 @@ def start(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
             "defined is not something this can guess at"
         )
     if mechanism == SYSTEMD:
-        scope = systemd_scope()
+        scope = acting_scope(home, "start")
         _require(
             runner,
             [*writing_door(scope), *systemctl_argv(scope, "start", UNIT_NAME)],
@@ -1243,7 +1298,11 @@ def stop(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
     `crucible service start` brings it back now.
     """
     if mechanism == SYSTEMD:
-        scope = systemd_scope()
+        # Also idempotent. Stopping a machine that has no unit is not an
+        # error, it is a machine that is already stopped.
+        scope = installed_scope(home)
+        if scope is None:
+            return [f"nothing to stop: there is no {UNIT_NAME} on this machine"]
         _require(
             runner,
             [*writing_door(scope), *systemctl_argv(scope, "stop", UNIT_NAME)],

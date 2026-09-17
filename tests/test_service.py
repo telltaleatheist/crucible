@@ -562,9 +562,21 @@ def test_start_starts(user_home: Path) -> None:
 
 
 def test_stop_stops(user_home: Path) -> None:
+    """It acts on the unit THIS MACHINE HAS, so there has to be one."""
+    install_systemd(user_home, Runner(LINGER_ON))
     runner = Runner()
     service.stop(service.SYSTEMD, home=user_home, runner=runner)
     assert runner.calls == [("systemctl", "--user", "stop", "crucible.service")]
+
+
+def test_stopping_a_machine_with_no_unit_is_quiet_and_runs_nothing(
+    user_home: Path,
+) -> None:
+    """A machine with no unit is already stopped, not an error."""
+    runner = Runner()
+    lines = service.stop(service.SYSTEMD, home=user_home, runner=runner)
+    assert runner.calls == []
+    assert "nothing to stop" in lines[0]
 
 
 def test_launchd_stop_is_a_bootout_because_keepalive_would_restart_a_kill(
@@ -1228,3 +1240,41 @@ def test_a_fresh_system_install_stops_nobodys_user_manager(
     runner = CopyingRunner()
     install_systemd(user_home, runner)
     assert not any("user@1000.service" in call for call in runner.calls), runner.calls
+
+
+def test_stopping_a_user_unit_mid_upgrade_asks_the_manager_that_holds_it(
+    user_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """DEFECT 16, measured on the first machine 0.6.6 ran on.
+
+    The guest was a USER unit being upgraded onto a SYSTEM one. The runtime swap
+    stops the service first, `systemd_scope()` answered SYSTEM because that is
+    where an install would now put it, and the system manager was asked about a
+    unit the user manager was holding:
+
+        systemd would not stop crucible.service: `wsl.exe -d Ubuntu -u root
+        --exec systemctl stop crucible.service` exited 5: Failed to stop
+        crucible.service: Unit crucible.service not loaded.
+
+    The whole activation failed and preserved the previous runtime, which is the
+    right way to fail and no way to upgrade. Where a unit IS and where one would
+    GO are different questions, and only `install` asks the second.
+    """
+    # Install as a user unit FIRST, the way every pre-7b.9 guest is...
+    install_systemd(user_home, Runner(LINGER_ON))
+    assert service.unit_path(user_home, service.USER_SCOPE).is_file()
+
+    # ...then become the machine an install would put a system unit on.
+    monkeypatch.setattr(service, "in_wsl", lambda: True)
+    monkeypatch.setattr(service.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setenv(service.WSL_DISTRO_ENV, "Ubuntu")
+    monkeypatch.setattr(service, "SYSTEM_UNIT_DIR", tmp_path / "etc-systemd-system")
+    assert service.systemd_scope() == service.SYSTEM_SCOPE
+    assert service.installed_scope(user_home) == service.USER_SCOPE
+
+    runner = Runner()
+    service.stop(service.SYSTEMD, home=user_home, runner=runner)
+    assert runner.calls == [("systemctl", "--user", "stop", "crucible.service")], (
+        "the stop went to the manager an INSTALL would use, not the one holding "
+        f"the unit: {runner.calls}"
+    )
