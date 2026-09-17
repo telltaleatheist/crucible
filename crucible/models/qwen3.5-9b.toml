@@ -113,12 +113,28 @@ thinking = false
 #                   llm-catalog.ts): KV at an ordinary context plus the runner's
 #                   buffers, chosen to err small. Nothing here was watched on a
 #                   card, and `needs_basis` says so all the way to the screen.
+#   minimum_for     THE FLOOR FOR TRANSLATE AND SIMPLIFY, moved here from
+#                   models/qwen3.8-27b-4bit.toml on 2026-09-16. Owen's tile rule
+#                   is unchanged in shape — *"translation and simplify tiles do
+#                   not light unless the machine can run"* the floor model — and
+#                   what changed is WHICH model that is: *"they cant pick smaller
+#                   than 9b… i think 9b could do an ok job at translation."*
+#
+#                   THE LIST IS CARRIED ACROSS UNCHANGED, not widened. `analysis`
+#                   is still absent because the reason it was absent has not
+#                   moved: Owen named translate and simplify, and Foundry's own
+#                   stopgap gave analysis no floor either. Adding it here would
+#                   put a GATE on a tile that has never had one, which is a
+#                   change to what Foundry draws and not a consequence of this
+#                   ruling. `clean` is absent for the same reason — it is the act
+#                   this model was always for, and it has never been gated.
 [local]
 kind = "ollama"
 tag = "qwen3.5:9b-bf16"
 download_bytes = 19_321_189_044
 needs_bytes = 20_821_189_044
 needs_basis = "declared"
+minimum_for = ["translate", "simplify"]
 
 [backends.cuda-linux]
 engine = "vllm"

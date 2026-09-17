@@ -1,9 +1,9 @@
 {
-  "generated_from": "60f57c68a06d32e880d9f96042967499f64a54f5",
+  "generated_from": "b6e47e78b6c0cd1022735d1669759527cc9b1811",
   "schema": 2,
   "floors": {
-    "simplify": "qwen3.8-27b-4bit",
-    "translate": "qwen3.8-27b-4bit"
+    "simplify": "qwen3.5-9b",
+    "translate": "qwen3.5-9b"
   },
   "models": [
     {
@@ -31,7 +31,10 @@
     {
       "id": "qwen3.5-9b",
       "classes": [
-        "clean"
+        "clean",
+        "translate",
+        "simplify",
+        "analysis"
       ],
       "label": "Qwen 3.5 · 9B",
       "description": "The cleanup model, in bf16. Cleanup and the other 9B-class text work; wants a 24 GB card at this precision.",
@@ -44,8 +47,11 @@
           "basis": "declared"
         }
       },
-      "minimum": false,
-      "minimumFor": []
+      "minimum": true,
+      "minimumFor": [
+        "translate",
+        "simplify"
+      ]
     },
     {
       "id": "qwen3.8-27b-4bit",
@@ -65,11 +71,8 @@
           "basis": "declared"
         }
       },
-      "minimum": true,
-      "minimumFor": [
-        "translate",
-        "simplify"
-      ]
+      "minimum": false,
+      "minimumFor": []
     }
   ]
 }

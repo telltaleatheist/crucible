@@ -36,7 +36,9 @@ WITHOUT_LOCAL = ["qwen3.8-27b"]
 #: table that moves a model is a change this file notices.
 CLASSES = {
     "dots-ocr": ["pages"],
-    "qwen3.5-9b": ["clean"],
+    # All four since 2026-09-16: Owen dropped the translate/simplify/analysis
+    # floor from the 27B to the 9B (docs/MODEL-CHOICE.md section 1).
+    "qwen3.5-9b": ["clean", "translate", "simplify", "analysis"],
     "qwen3.8-27b-4bit": ["translate", "simplify", "analysis"],
 }
 
@@ -184,18 +186,37 @@ def test_the_cleanup_model_is_the_bf16_ollama_tag() -> None:
         "downloadGB": 19.32,
         "needsGB": {"value": 20.82, "basis": "declared"},
     }
-    assert row["minimum"] is False and row["minimumFor"] == []
+    # THE FLOOR SINCE 2026-09-16, moved here from the 27B. Owen's tile rule is
+    # unchanged in shape — translate and simplify do not light below the floor
+    # model — and what changed is which model that is.
+    assert row["minimum"] is True
+    assert row["minimumFor"] == ["translate", "simplify"]
+    assert set(row["minimumFor"]) <= set(row["classes"])
 
 
-def test_the_27b_is_the_floor_for_the_three_classes_it_serves() -> None:
-    """Owen's tile rule: translate and simplify do not light below it; analysis has no floor."""
+def test_the_27b_no_longer_floors_anything() -> None:
+    """The reversal, seen from the row that used to carry it.
+
+    `qwen3.8-27b-4bit.toml` had asked for this ruling in writing since
+    2026-09-14 — *"whether the 9B may be a local translate floor is his call"* —
+    and he called it. The 27B is still what a card that can hold it should
+    PREFER, and the capability walk still picks it first by size; it is simply no
+    longer the smallest thing that lights a translate tile.
+    """
     row = next(r for r in _checked_in()["models"] if r["id"] == "qwen3.8-27b-4bit")
     assert row["local"]["kind"] == "ollama"
     assert row["local"]["tag"] == "qwen3.8:27b"
     assert row["local"]["downloadGB"] == 17.74
-    assert row["minimum"] is True
-    assert row["minimumFor"] == ["translate", "simplify"]
-    assert set(row["minimumFor"]) <= set(row["classes"])
+    assert row["minimum"] is False
+    assert row["minimumFor"] == []
+
+
+def test_a_class_has_exactly_one_floor_and_it_is_the_9b() -> None:
+    """Derived from the rows, never declared — so this is what MOVED."""
+    assert _checked_in()["floors"] == {
+        "simplify": "qwen3.5-9b",
+        "translate": "qwen3.5-9b",
+    }
 
 
 def test_gigabytes_are_decimal_at_two_places() -> None:
@@ -280,14 +301,18 @@ def test_a_floor_for_a_class_the_model_does_not_serve_is_refused(
         tmp_path,
         id="demo-1b",
         family="qwen3.5",
-        extra='minimum_for = ["translate"]\n',
+        # `pages` and not `translate`: since 2026-09-16 a qwen3.5 model DOES
+        # serve translate, so the old fixture stopped being a model that
+        # cannot serve what it claims to floor. `pages` is the VLM door and
+        # no text family reaches it, which is what this test needs.
+        extra='minimum_for = ["pages"]\n',
     )
     with pytest.raises(LineupError) as caught:
         lineup.build()
-    assert "minimum_for names ['translate'], which this model does not serve" in (
+    assert "minimum_for names ['pages'], which this model does not serve" in (
         str(caught.value)
     )
-    assert "its classes are ['clean']" in str(caught.value)
+    assert "clean" in str(caught.value)
 
 
 def test_a_fixture_catalog_builds_the_same_shape(
@@ -299,7 +324,7 @@ def test_a_fixture_catalog_builds_the_same_shape(
     assert rows == [
         {
             "id": "demo-1b",
-            "classes": ["clean"],
+            "classes": ["clean", "translate", "simplify", "analysis"],
             "label": "Demo",
             "description": "A fixture.",
             "local": {
@@ -360,12 +385,19 @@ def test_floors_names_one_model_per_class_and_only_where_a_manifest_says_so() ->
     file AND keeps its own additions, and its reader took the SMALLEST declared
     floor across both — so a local row naming a 9B the translate floor silently
     overruled this catalog on every machine that fits a 9B and not a 27B,
-    against Owen's ruling that translate and simplify take a 27B-class model, a
-    Crucible, or a cloud provider, never a 9B locally.
+    against the ruling of the day.
+
+    **That overruling now reaches the RIGHT answer, and the defect is unchanged.**
+    Owen ruled on 2026-09-16 that the 9B may indeed floor translation, so
+    Foundry's stopgap would today arrive at the correct model by a mechanism that
+    is still wrong: it lets a vendored file be overruled without saying so. A
+    second owner that happens to agree has not stopped being a second owner — the
+    day the ruling moves again it disagrees silently, exactly as it did before.
+    What this test holds is "one owner", not "the 27B".
     """
     rows, _ = lineup.build()
     table = lineup.floors(rows)
-    assert table == {"simplify": "qwen3.8-27b-4bit", "translate": "qwen3.8-27b-4bit"}
+    assert table == {"simplify": "qwen3.5-9b", "translate": "qwen3.5-9b"}
     # Derived from the rows, never declared beside them.
     for name, model in table.items():
         row = next(r for r in rows if r["id"] == model)

@@ -166,23 +166,26 @@ description = "The 27B standard for translation, simplification and analysis, qu
 #                   `ollama show` says Q4_K_M, 27.3B.
 #   needs_bytes     19_241_872_172 — download + 1_500_000_000, DECLARED, for the
 #                   9B's reason: Foundry's `OVERHEAD_GB`. Not watched on a card.
-#   minimum_for     Owen's tile rule, in his words: "translation and simplify tiles
-#                   do not light unless the machine can run" the floor model. He
-#                   named those two and not analysis; Foundry's own stopgap gave
-#                   analysis no floor either, so analysis is NOT listed here
-#                   (2026-09-14, on Foundry-pc-1's reading, taken as Owen's
-#                   default). This is the smallest 27B the catalog names, so
-#                   below it translate and simplify do not light at all.
-#                   RULING OWED: his words said "at least the 9B", while this
+#   minimum_for     GONE FROM THIS FILE as of 2026-09-16, and the ruling this
+#                   block had been owed since 2026-09-14 is the reason. It read:
+#                   *"RULING OWED: his words said 'at least the 9B', while this
 #                   catalog serves translate/simplify only from the 27B family —
-#                   whether the 9B may be a local translate floor is his call.
+#                   whether the 9B may be a local translate floor is his call."*
+#                   He called it: *"the user can pick a model to use for
+#                   translate/simplify/etc, but they cant pick smaller than 9b.
+#                   this is a reversal from what it was previously - before, it
+#                   was never smaller than 27b. i think 9b could do an ok job at
+#                   translation."* So the floor moved to models/qwen3.5-9b.toml
+#                   and this row is no longer the smallest thing that lights a
+#                   translate tile. Nothing else about this model changed — it is
+#                   still what a card that can hold it should PREFER, and the
+#                   capability walk still picks it first by size.
 [local]
 kind = "ollama"
 tag = "qwen3.8:27b"
 download_bytes = 17_741_872_172
 needs_bytes = 19_241_872_172
 needs_basis = "declared"
-minimum_for = ["translate", "simplify"]
 
 [backends.cuda-linux]
 engine = "vllm"
