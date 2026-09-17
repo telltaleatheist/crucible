@@ -345,6 +345,10 @@ def one_entry(**overrides: Any) -> dict[str, Any]:
         "parts": ["crucible-env-asr-cuda-linux-9.9.9.tar.zst.part00"],
         "recipe_sha256": "b" * 64,
         "unpacked_bytes": 4321,
+        # Required from schema 2. `one_document()` still defaults to schema 1,
+        # where an extra field is ignored, so this is harmless there and
+        # necessary the moment a case asks for 2.
+        "release": VERSION,
     }
     entry.update(overrides)
     return entry
@@ -371,7 +375,11 @@ def test_a_manifest_round_trips() -> None:
         ("not json at all", "is not JSON"),
         ("[]", "is a list, not an object"),
         (json.dumps({"version": VERSION, "packs": []}), "says schema None"),
-        (json.dumps(one_document(schema=2)), "says schema 2"),
+        # SCHEMA 2 IS READ NOW, so the unreadable one is the next number up.
+        # This row said `schema=2` until 2026-09-17, when rows gained `release`
+        # and the manifest went to 2 — see PACK_SCHEMAS_READ. A version-gate
+        # test has to move with the gate or it pins the build it was written on.
+        (json.dumps(one_document(schema=3)), "says schema 3"),
         (json.dumps(one_document(version=7)), "has no version string"),
         (json.dumps({"schema": 1, "version": VERSION}), "has no `packs` array"),
         (json.dumps(one_document(packs=["x"])), "packs[0] is a str"),
@@ -508,6 +516,7 @@ def test_pack_disk_names_the_three_numbers(tmp_path: Path) -> None:
         sha256="a" * 64,
         parts=("a.part00", "a.part01"),
         recipe_sha256="b" * 64,
+        release=VERSION,
         unpacked_bytes=900_000_000_000_000,
     )
     with pytest.raises(PackError) as caught:
@@ -529,6 +538,7 @@ def test_a_pack_built_from_another_recipe_is_pack_recipe_drift() -> None:
         sha256="a" * 64,
         parts=("a.part00",),
         recipe_sha256="c" * 64,
+        release=VERSION,
         unpacked_bytes=20,
     )
     with pytest.raises(PackError) as caught:
@@ -548,6 +558,7 @@ def test_a_pack_built_from_this_recipe_passes() -> None:
         sha256="a" * 64,
         parts=("a.part00",),
         recipe_sha256=jobenv.recipe_sha256(target.recipe),
+        release=VERSION,
         unpacked_bytes=20,
     )
     envpack.check_recipe(entry, target)  # no refusal
@@ -667,6 +678,7 @@ def build_fake_pack(
             if recipe_sha256 is not None
             else jobenv.recipe_sha256(target.recipe)
         ),
+        release=VERSION,
         unpacked_bytes=unpacked_bytes,
     )
     envpack.write_manifest_entry(out, VERSION, entry)
@@ -889,7 +901,8 @@ def test_something_that_is_not_a_pack_is_refused_after_it_unpacks(
             sha256=digest,
             parts=tuple(part.name for part in parts),
             recipe_sha256=jobenv.recipe_sha256(target.recipe),
-            unpacked_bytes=envpack.directory_bytes(root),
+            release=VERSION,
+        unpacked_bytes=envpack.directory_bytes(root),
         ),
     )
     home = tmp_path / "home"
@@ -1465,3 +1478,69 @@ def test_a_type_with_no_recipe_gets_the_MOST_SPECIFIC_refusal_it_has_earned(
     # Neither of the two less useful truths reaches the operator.
     assert "pack_unknown" not in error
     assert "recipe" not in error
+
+
+
+# ---------------------------------------- a pack that was not rebuilt this time
+#
+# Owen, 2026-09-17: *"We don't need to rebuild the env every time we change
+# something."* MEASURED on v0.6.6 -> 0.6.7: of thirteen packs, ten had an
+# unchanged recipe and were rebuilt anyway; one of them ran for over forty
+# minutes. A pack is a function of its RECIPE, so those ten were byte-identical
+# to what already existed.
+#
+# They are carried by REFERENCE rather than copied: the release's assets come to
+# 16 GB, and copying the unchanged ones forward would store the same bytes again
+# under every tag, forever. So a row names the release its bytes are in.
+
+
+def test_a_carried_row_is_fetched_from_the_release_that_built_it() -> None:
+    """The whole mechanism, in one assertion."""
+    entry = PackEntry(
+        name="llm", backend="cuda-linux", python="3.11.16", bytes=10,
+        sha256="a" * 64, parts=("crucible-env-llm-cuda-linux-0.6.6.tar.zst.part00",),
+        recipe_sha256="b" * 64, unpacked_bytes=20, release="0.6.6",
+    )
+    where = f"{envpack.RELEASE_DOWNLOAD_BASE}/v0.6.8/{envpack.MANIFEST_NAME}"
+    url = envpack.part_url(where, entry, entry.parts[0], "0.6.8")
+    assert "/v0.6.6/" in url, url
+    assert "/v0.6.8/" not in url, "a carried pack must not be looked for where it was never uploaded"
+
+
+def test_a_row_built_here_is_fetched_beside_its_manifest() -> None:
+    """The ordinary case still resolves relatively, so a moved release works."""
+    entry = PackEntry(
+        name="server", backend="cuda-linux", python="3.11.16", bytes=10,
+        sha256="a" * 64, parts=("crucible-env-server-cuda-linux-0.6.8.tar.zst.part00",),
+        recipe_sha256="b" * 64, unpacked_bytes=20, release="0.6.8",
+    )
+    where = f"{envpack.RELEASE_DOWNLOAD_BASE}/v0.6.8/{envpack.MANIFEST_NAME}"
+    assert envpack.part_url(where, entry, entry.parts[0], "0.6.8") == (
+        f"{envpack.RELEASE_DOWNLOAD_BASE}/v0.6.8/{entry.parts[0]}"
+    )
+
+
+def test_a_mirror_holds_every_part_it_names() -> None:
+    """A MIRROR IS NOT A REDIRECTOR, and this is deliberate.
+
+    `--manifest-url file:///tmp/packs/envpacks.json` means "these bytes, here".
+    A mirror that reached back to github.com for the parts of a carried row
+    would not be a mirror -- it would be a mirror of the index only, and the
+    machine that has no route to github (which is usually why a mirror exists)
+    would fail on the second file instead of the first.
+    """
+    entry = PackEntry(
+        name="llm", backend="cuda-linux", python="3.11.16", bytes=10,
+        sha256="a" * 64, parts=("crucible-env-llm-cuda-linux-0.6.6.tar.zst.part00",),
+        recipe_sha256="b" * 64, unpacked_bytes=20, release="0.6.6",
+    )
+    url = envpack.part_url("file:///srv/mirror/envpacks.json", entry, entry.parts[0], "0.6.8")
+    assert url == f"file:///srv/mirror/{entry.parts[0]}"
+
+
+def test_schema_one_rows_recover_their_release_rather_than_defaulting() -> None:
+    """Schema 1 stated it structurally: every pack was on its own release."""
+    document = json.dumps({"schema": 1, "version": "0.6.5", "packs": [
+        {k: v for k, v in one_entry().items() if k != "release"}]})
+    manifest = envpack.parse_manifest(document, source="envpacks.json")
+    assert manifest.packs[0].release == "0.6.5"

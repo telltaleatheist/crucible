@@ -258,6 +258,8 @@ else
   unpacked="$(printf '%s' "$pack" | sed -n 's/.*"unpacked_bytes"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')"
   archive_bytes="$(printf '%s' "$pack" | sed -n 's/.*"bytes"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')"
   parts="$(printf '%s' "$pack" | sed -n 's/.*"parts"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' | tr -d '[:space:]"' | tr ',' ' ')"
+  pack_release="$(printf '%s' "$pack" | sed -n 's/.*"release"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  [ -n "$pack_release" ] || pack_release="$RELEASE"
   [ -n "$want_sha" ] && [ -n "$parts" ] && [ -n "$unpacked" ] && [ -n "$archive_bytes" ] || die "pack_manifest_unreadable: $manifest_url does not describe the server pack"
   if [ "$stamp_sha" = "$want_sha" ] && [ -x "$dest/bin/crucible" ]; then
     say "server-pack: already installed ($want_sha)"
@@ -269,7 +271,7 @@ else
     rm -f "$archive"; mkdir -p "$downloads"
     for part in $parts; do
       say "server-pack: $part"
-      curl -fL --retry 3 --retry-delay 2 --continue-at - --create-dirs -o "$downloads/$part" "https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/$part" || die "pack_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/$part"
+      curl -fL --retry 3 --retry-delay 2 --continue-at - --create-dirs -o "$downloads/$part" "https://github.com/telltaleatheist/crucible/releases/download/v$pack_release/$part" || die "pack_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$pack_release/$part"
       cat "$downloads/$part" >> "$archive" && rm -f "$downloads/$part"
     done
     got_sha="$($SHA_TOOL "$archive" | awk '{print $1}')"

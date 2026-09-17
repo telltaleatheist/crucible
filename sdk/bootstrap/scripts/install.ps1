@@ -143,7 +143,7 @@ $manifestUrl = "https://github.com/telltaleatheist/crucible/releases/download/v$
 $manifestRaw = & curl.exe -fsSL --retry 3 "$manifestUrl"
 if ($LASTEXITCODE -ne 0) { Die "pack_manifest_unreadable: could not fetch $manifestUrl" }
 try { $manifest = $manifestRaw | Out-String | ConvertFrom-Json } catch { Die "pack_manifest_unreadable: $manifestUrl is not JSON" }
-if ($manifest.schema -ne 1) { Die "pack_manifest_unreadable: $manifestUrl declares schema $($manifest.schema), this installer reads 1" }
+if ($manifest.schema -ne 1 -and $manifest.schema -ne 2) { Die "pack_manifest_unreadable: $manifestUrl declares schema $($manifest.schema), this installer reads 1 or 2" }
 $pack = $null
 foreach ($entry in $manifest.packs) { if ($entry.name -eq 'host' -and $entry.backend -eq 'llama-windows') { $pack = $entry } }
 if ($null -eq $pack) { Die "pack_not_published: the $Release release publishes no host pack for llama-windows" }
@@ -171,12 +171,14 @@ if ($have -eq $pack.sha256 -and (Test-Path $Cmd)) {
   New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null
   $archiveName = $pack.parts[0] -replace "\.part[0-9]+$", ""
   $archive = Join-Path $DownloadDir $archiveName
+  $packRelease = if ($pack.PSObject.Properties.Name -contains "release") { $pack.release } else { $Release }
+  $packBase = "https://github.com/telltaleatheist/crucible/releases/download/v$packRelease"
   if (Test-Path $archive) { Remove-Item $archive -Force }
   foreach ($part in $pack.parts) {
     Say "host-pack: $part"
     $partPath = Join-Path $DownloadDir $part
-    & curl.exe -fL --retry 3 --retry-delay 2 --continue-at - --create-dirs -o $partPath "https://github.com/telltaleatheist/crucible/releases/download/v$Release/$part"
-    if ($LASTEXITCODE -ne 0) { Die "pack_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$Release/$part" }
+    & curl.exe -fL --retry 3 --retry-delay 2 --continue-at - --create-dirs -o $partPath "$packBase/$part"
+    if ($LASTEXITCODE -ne 0) { Die "pack_download_failed: $packBase/$part" }
     # Byte-for-byte append, then delete: peak extra disk is ONE part and
     # not the whole set. Add-Content would re-encode the bytes as text.
     $in = [System.IO.File]::OpenRead($partPath)

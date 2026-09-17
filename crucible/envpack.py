@@ -128,7 +128,22 @@ MANIFEST_NAME = "envpacks.json"
 
 #: The manifest's schema. A document that does not say `1` is refused rather
 #: than read optimistically: a future field is fine, a future MEANING is not.
-PACK_SCHEMA = 1
+PACK_SCHEMA = 2
+
+#: Schemas this build can READ. Two, and the older one is not a legacy shim.
+#:
+#: Schema 1 has no `release` on a row because it did not need one: every pack it
+#: named was an asset of the manifest's own release, by construction. So reading
+#: a schema-1 row as `release = <that manifest's version>` is EXACT — it
+#: recovers a fact the document states structurally rather than guessing one it
+#: omits. Nothing is invented and nothing is defaulted.
+#:
+#: It has to be readable for one concrete reason: planning a release means
+#: reading the PREVIOUS release's manifest, and at the moment this field
+#: arrives the previous release is always a schema-1 one. A build that could not
+#: read it would rebuild all thirteen packs on the very release that introduces
+#: not rebuilding them.
+PACK_SCHEMAS_READ = (1, 2)
 
 #: Where a download's parts and the reassembled archive live while `install` runs.
 DOWNLOADS_DIRNAME = "downloads"
@@ -591,6 +606,26 @@ class PackEntry:
     #: from. See that function for the measurement.
     recipe_sha256: str
     unpacked_bytes: int
+    #: THE RELEASE WHOSE ASSETS HOLD THESE BYTES, which is not always the
+    #: release whose manifest this row is in.
+    #:
+    #: An environment pack is a function of its RECIPE, not of the version
+    #: beside it: when a recipe has not changed, the pack built from it last
+    #: time is byte-for-byte the pack this release would build, and rebuilding
+    #: it costs seven minutes of CI to arrive back where we started. So an
+    #: unchanged pack is not rebuilt and NOT COPIED either — 16 GB of assets per
+    #: release is what copying would mean, stored again for every tag — the row
+    #: is carried over and keeps naming the release that already has the bytes.
+    #:
+    #: Owen, 2026-09-17: *"We don't need to rebuild the env every time we change
+    #: something."*
+    #:
+    #: The invariant this changes, stated honestly: a release's `envpacks.json`
+    #: used to promise every pack it names is an asset OF THAT RELEASE. It now
+    #: promises every pack it names RESOLVES, and each row says where. The
+    #: manifest job verifies every referenced asset exists before publishing, so
+    #: it is still checked rather than hoped.
+    release: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -602,6 +637,7 @@ class PackEntry:
             "parts": list(self.parts),
             "recipe_sha256": self.recipe_sha256,
             "unpacked_bytes": self.unpacked_bytes,
+            "release": self.release,
         }
 
 
@@ -615,6 +651,11 @@ _ENTRY_FIELDS = (
     ("recipe_sha256", str),
     ("unpacked_bytes", int),
 )
+
+#: Fields schema 2 adds. Required there, absent in schema 1, and never
+#: defaulted: `parse_manifest` fills `release` from the manifest's own version
+#: for a schema-1 row because that is what schema 1 MEANT.
+_ENTRY_FIELDS_V2 = (("release", str),)
 
 
 @dataclass(frozen=True)
@@ -675,9 +716,10 @@ def parse_manifest(text: str, *, source: str = "<memory>") -> PackManifest:
     if not isinstance(document, dict):
         raise refuse(f"is a {type(document).__name__}, not an object")
     schema = document.get("schema")
-    if schema != PACK_SCHEMA:
+    if schema not in PACK_SCHEMAS_READ:
         raise refuse(
-            f"says schema {schema!r}; this build reads schema {PACK_SCHEMA}"
+            f"says schema {schema!r}; this build reads "
+            f"{' or '.join(str(s) for s in PACK_SCHEMAS_READ)}"
         )
     version = document.get("version")
     if not isinstance(version, str) or version.strip() == "":
@@ -691,7 +733,8 @@ def parse_manifest(text: str, *, source: str = "<memory>") -> PackManifest:
         where = f"packs[{index}]"
         if not isinstance(row, dict):
             raise refuse(f"{where} is a {type(row).__name__}, not an object")
-        for field, kind in _ENTRY_FIELDS:
+        required = _ENTRY_FIELDS + (_ENTRY_FIELDS_V2 if schema >= 2 else ())
+        for field, kind in required:
             if field not in row:
                 raise refuse(f"{where} has no {field!r}")
             # bool is an int in Python and `bytes: true` must not read as 1.
@@ -719,6 +762,10 @@ def parse_manifest(text: str, *, source: str = "<memory>") -> PackManifest:
                 parts=tuple(parts),
                 recipe_sha256=row["recipe_sha256"].lower(),
                 unpacked_bytes=row["unpacked_bytes"],
+                # Schema 1 said it by construction rather than in a field: every
+                # pack it named was an asset of its own release. See
+                # PACK_SCHEMAS_READ — this recovers a stated fact, not a default.
+                release=row["release"] if schema >= 2 else version,
             )
         )
     duplicates = _duplicates((entry.name, entry.backend) for entry in entries)
@@ -785,15 +832,36 @@ def manifest_url(version: str) -> str:
 
 
 def asset_url(manifest_location: str, filename: str) -> str:
-    """A part's URL: beside the manifest, always.
+    """A part's URL, beside the manifest.
 
-    The manifest and its parts are assets of one release, so the parts are
-    resolved RELATIVE to wherever the manifest was read from. That is what makes
-    `--manifest-url file:///tmp/packs/envpacks.json` work without a second flag,
-    and what makes a mirror one URL rather than two.
+    Relative to wherever the manifest was read from, which is what makes
+    `--manifest-url file:///tmp/packs/envpacks.json` work without a second flag
+    and a mirror one URL rather than two.
+
+    For a pack row use `part_url`, which knows that an unchanged pack is not
+    rebuilt and still lives in the release that built it.
     """
     base = manifest_location.rsplit("/", 1)[0]
     return f"{base}/{filename}"
+
+
+def part_url(manifest_location: str, entry: PackEntry, filename: str, version: str) -> str:
+    """Where one part of `entry` actually is.
+
+    Beside the manifest when the row was built for this release, and in the
+    release the row NAMES when it was carried forward unchanged — see
+    `PackEntry.release`.
+
+    A MIRROR STILL RESOLVES RELATIVE, and that is deliberate rather than an
+    oversight. `--manifest-url file:///tmp/packs/envpacks.json` means "these
+    bytes, here", and a mirror that reached back to github.com for half its
+    parts would not be a mirror. So a mirror holds every part it names, exactly
+    as before; only a github release resolves a carried row elsewhere.
+    """
+    base = manifest_location.rsplit("/", 1)[0]
+    if entry.release == version or not base.startswith(RELEASE_DOWNLOAD_BASE):
+        return f"{base}/{filename}"
+    return f"{RELEASE_DOWNLOAD_BASE}/v{entry.release}/{filename}"
 
 
 def read_manifest(location: str, *, timeout: int = 60) -> PackManifest:
@@ -1290,10 +1358,15 @@ def install_pack(
     check_disk(home, entry)
 
     downloads = home / DOWNLOADS_DIRNAME
+    # THE ROW'S RELEASE, NOT THE MANIFEST'S. A carried-forward pack's parts are
+    # still named for the release that built them, and this path is what those
+    # parts are concatenated into — naming it after a version that appears in no
+    # part filename would leave a scratch file whose name contradicts its
+    # contents, which is the sort of thing somebody debugs at 3am.
     archive = downloads / pack_filename(
-        target.name, target.backend_kind, manifest.version
+        target.name, target.backend_kind, entry.release
     )
-    urls = [asset_url(where, part) for part in entry.parts]
+    urls = [part_url(where, entry, part, manifest.version) for part in entry.parts]
     started = time.monotonic()
     if on_line is not None:
         on_line(
@@ -1820,6 +1893,8 @@ def build_pack(
         parts=tuple(part.name for part in parts),
         recipe_sha256=recipe_digest(target.recipe),
         unpacked_bytes=unpacked_bytes,
+        # Built HERE, so this release is where the parts are uploaded.
+        release=version,
     )
     write_manifest_entry(out, version, entry)
     say(

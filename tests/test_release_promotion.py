@@ -24,7 +24,7 @@ def complete():
         part = envpack.part_filename(target.archive_name(version), 0)
         names.append(part)
         rows.append(envpack.PackEntry(name, backend, envpack.python_for_target(target).python_version,
-                    1, 'a' * 64, (part,), envpack.recipe_digest(target.recipe), 1))
+                    1, 'a' * 64, (part,), envpack.recipe_digest(target.recipe), 1, version))
     return envpack.PackManifest(version, tuple(rows)), [{'name': name, 'size': 1} for name in names]
 
 

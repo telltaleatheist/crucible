@@ -18,7 +18,7 @@ def manifest(tmp_path, *, name='llm', backend='mlx-darwin', payload=b'archive co
     (tmp_path / part).write_bytes(payload)
     entry = envpack.PackEntry(name, backend, envpack.STANDALONE_PYTHON[backend].python_version,
         len(payload), hashlib.sha256(payload).hexdigest(), (part,),
-        envpack.recipe_digest(target.recipe), 1000)
+        envpack.recipe_digest(target.recipe), 1000, '0.6.0')
     return envpack.PackManifest('0.6.0', (entry,), (tmp_path / 'envpacks.json').as_uri())
 
 

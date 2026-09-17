@@ -157,7 +157,16 @@ export function hostFactsSh(): string {
  */
 export function serverPackSh(): string {
   const manifest = `https://github.com/${RELEASE_REPO}/releases/download/v$RELEASE/${ENVPACKS_ASSET}`;
-  const base = `https://github.com/${RELEASE_REPO}/releases/download/v$RELEASE`;
+  // NOT a fixed base. A pack row NAMES the release its bytes are in, because an
+  // unchanged pack is carried by reference rather than rebuilt (PackEntry.release),
+  // and the shell reads that field exactly like it reads the other four.
+  //
+  // Today the SERVER pack always rebuilds -- it embeds the Crucible source, so
+  // `release_packs.plan()` never marks it reusable -- and a fixed base would
+  // work. It reads the field anyway, because a silent dependence on one pack's
+  // build policy is the kind of coupling that is correct right up until somebody
+  // changes the policy and nothing here says why it broke.
+  const base = `https://github.com/${RELEASE_REPO}/releases/download/v$pack_release`;
   return `dest="$CRUCIBLE_HOME/${SERVER_SUBDIR}"\n`
     + `partial="$dest${PARTIAL_SUFFIX}"\n`
     + `downloads="$CRUCIBLE_HOME/${DOWNLOADS_SUBDIR}"\n`
@@ -174,6 +183,11 @@ export function serverPackSh(): string {
     + `unpacked="$(printf '%s' "$pack" | sed -n 's/.*"unpacked_bytes"[[:space:]]*:[[:space:]]*\\([0-9]*\\).*/\\1/p')"\n`
     + `archive_bytes="$(printf '%s' "$pack" | sed -n 's/.*"bytes"[[:space:]]*:[[:space:]]*\\([0-9]*\\).*/\\1/p')"\n`
     + `parts="$(printf '%s' "$pack" | sed -n 's/.*"parts"[[:space:]]*:[[:space:]]*\\[\\([^]]*\\)\\].*/\\1/p' | tr -d '[:space:]"' | tr ',' ' ')"\n`
+    // Schema 2 states it; schema 1 did not need to, having placed every pack
+    // on its own release. An absent field therefore RECOVERS `$RELEASE` -- the
+    // fact that schema stated structurally -- rather than defaulting to it.
+    + `pack_release="$(printf '%s' "$pack" | sed -n 's/.*"release"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')"\n`
+    + `[ -n "$pack_release" ] || pack_release="$RELEASE"\n`
     + `[ -n "$want_sha" ] && [ -n "$parts" ] && [ -n "$unpacked" ] && [ -n "$archive_bytes" ] || die "pack_manifest_unreadable: $manifest_url does not describe the server pack"\n`
     + `if [ "$stamp_sha" = "$want_sha" ] && [ -x "$dest/bin/crucible" ]; then\n`
     + `  say "server-pack: already installed ($want_sha)"\n`

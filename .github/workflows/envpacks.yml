@@ -101,28 +101,95 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ---------------------------------------------------------------- the plan
+  #
+  # WHICH PACKS THIS RELEASE ACTUALLY HAS TO BUILD, which is usually not many.
+  #
+  # An environment pack is a function of its RECIPE, not of the version beside
+  # it, so when a recipe and its standalone-Python pin are unchanged the pack the
+  # previous release built IS the pack this one would build. Measured on
+  # v0.6.6 -> 0.6.7: thirteen packs, three genuinely changed, ten rebuilt for
+  # nothing — and one of those ten ran for over forty minutes while the three
+  # that mattered took 0, 0 and 1. Owen, 2026-09-17: *"We don't need to rebuild
+  # the env every time we change something."*
+  #
+  # An unchanged pack is carried by REFERENCE, not copied. A release's assets
+  # come to 16 GB; copying the unchanged ones into every new tag would store the
+  # same bytes again forever. The carried row keeps naming the release that
+  # already holds them (`PackEntry.release`), and the manifest job verifies every
+  # referenced asset exists before publishing — so the invariant weakens from
+  # "every pack is an asset OF THIS RELEASE" to "every pack RESOLVES, and the row
+  # says where", and it is still checked rather than hoped.
+  #
+  # A previous release that cannot be read means BUILD EVERYTHING. A slow release
+  # is a fine answer to a missing manifest; guessing is not.
+  plan:
+    name: what has to be built
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      carry: ${{ steps.decide.outputs.carry }}
+      any_to_build: ${{ steps.decide.outputs.any_to_build }}
+      build_host: ${{ steps.decide.outputs.build_host }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install crucible
+        run: python -m pip install --upgrade pip && python -m pip install -e .
+      - name: the newest published release before this one
+        id: previous
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        # The newest release that is NOT this tag and that published a manifest.
+        # `--exclude-drafts` only; a prerelease is a perfectly good source of
+        # packs, and every release here is cut as one.
+        run: |
+          set -euo pipefail
+          previous=""
+          for candidate in $(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 30 --json tagName --jq '.[].tagName'); do
+            [ "$candidate" = "$TAG" ] && continue
+            if gh release view "$candidate" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qx envpacks.json; then
+              previous="$candidate"; break
+            fi
+          done
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+          echo "comparing against ${previous:-nothing}"
+      - name: decide
+        id: decide
+        env:
+          PREVIOUS: ${{ steps.previous.outputs.previous }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PREVIOUS" ]; then
+            url="https://github.com/$GITHUB_REPOSITORY/releases/download/$PREVIOUS/envpacks.json"
+            python scripts/plan_packs.py --previous "$url" --github-output
+          else
+            python scripts/plan_packs.py --github-output
+          fi
+
   pack:
     name: ${{ matrix.name }} (${{ matrix.backend }})
     runs-on: ${{ matrix.runner }}
+    needs: plan
+    if: ${{ needs.plan.outputs.any_to_build == 'true' }}
     strategy:
       # NEVER fail-fast. Each pack is independent and a pack that builds is
       # worth uploading even when another does not; the manifest merge is what
       # makes a partial set honest rather than broken.
       fail-fast: false
+      # COMPUTED, not written here. `scripts/plan_packs.py` decides which packs
+      # this release must build and emits exactly the rows this matrix used to
+      # hold — name, backend, runner and needs_gb — for those and no others. The
+      # runner/disk table moved into that script with the decision, because a
+      # list that says WHAT RUNS belongs beside the code that decides WHETHER it
+      # runs; two copies is how one of them goes stale.
       matrix:
-        include:
-          - { name: server,       backend: cuda-linux,  runner: ubuntu-latest, needs_gb: 2 }
-          - { name: asr,          backend: cuda-linux,  runner: ubuntu-latest, needs_gb: 6 }
-          - { name: align,        backend: cuda-linux,  runner: ubuntu-latest, needs_gb: 20 }
-          - { name: rvc,          backend: cuda-linux,  runner: ubuntu-latest, needs_gb: 24 }
-          - { name: llm,          backend: cuda-linux,  runner: ubuntu-latest, needs_gb: 30 }
-          - { name: tts-higgs-v3, backend: cuda-linux,  runner: ubuntu-latest, needs_gb: 30 }
-          - { name: server,       backend: mlx-darwin,  runner: macos-14,      needs_gb: 2 }
-          - { name: rvc,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 20 }
-          - { name: align,        backend: mlx-darwin,  runner: macos-14,      needs_gb: 12 }
-          - { name: asr,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 12 }
-          - { name: llm,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 10 }
-          - { name: tts,          backend: mlx-darwin,  runner: macos-14,      needs_gb: 25 }
+        include: ${{ fromJSON(needs.plan.outputs.build) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -313,6 +380,11 @@ jobs:
     # `envpack.build_backend_kind()` refuses anything else by name.
     name: host (llama-windows)
     runs-on: windows-latest
+    # Planned like every other pack, and skipped on the same rule. It is not in
+    # the matrix because its steps are Windows-shaped, not because it is exempt
+    # from being unchanged.
+    needs: plan
+    if: ${{ needs.plan.outputs.build_host == 'true' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -448,7 +520,7 @@ jobs:
     #
     # `!cancelled()` and not `always()`: a run somebody cancelled has nothing
     # to say about what the tag carries, and must not touch the release.
-    needs: [pack, host]
+    needs: [plan, pack, host]
     if: ${{ !cancelled() }}
     steps:
       - uses: actions/checkout@v4
@@ -466,6 +538,61 @@ jobs:
         with:
           pattern: envpack-fragment-*
           path: fragments
+
+      # THE PACKS NOBODY REBUILT, as one more fragment.
+      #
+      # A carried row is a complete, valid row that happens to name an older
+      # release for its bytes, so it merges exactly like a built one — there is
+      # no second code path and no "carried" special case downstream. The
+      # document is written at THIS version because that is the release whose
+      # index it is; the per-row `release` is what says where the bytes live.
+      #
+      # AND EVERY REFERENCED ASSET IS CHECKED TO EXIST. The invariant this
+      # feature weakens is "every pack is an asset of this release"; what
+      # replaces it is "every pack resolves". That is only worth having if
+      # somebody actually asks, so this asks, by HEAD, before the manifest is
+      # allowed to become the release's own.
+      - name: carry the packs whose recipe did not change
+        env:
+          CARRY: ${{ needs.plan.outputs.carry }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, pathlib, urllib.request
+          from crucible import VERSION, envpack
+          rows = json.loads(os.environ["CARRY"])
+          if not rows:
+              print("nothing carried; every pack was built by this run")
+              raise SystemExit(0)
+          repo = os.environ["GITHUB_REPOSITORY"]
+          missing = []
+          for row in rows:
+              for part in row["parts"]:
+                  url = f"https://github.com/{repo}/releases/download/v{row['release']}/{part}"
+                  request = urllib.request.Request(url, method="HEAD")
+                  try:
+                      with urllib.request.urlopen(request, timeout=60) as answer:
+                          if answer.status >= 400:
+                              missing.append(url)
+                  except Exception as exc:  # noqa: BLE001 - the URL is the diagnosis
+                      missing.append(f"{url} ({exc})")
+              print(f"carried {row['name']}/{row['backend']} from v{row['release']}")
+          if missing:
+              for gone in missing:
+                  print("NOT PUBLISHED: " + gone)
+              raise SystemExit(
+                  f"{len(missing)} carried part(s) are not published; "
+                  "a carried row must name bytes that exist"
+              )
+          out = pathlib.Path("fragments/carried")
+          out.mkdir(parents=True, exist_ok=True)
+          (out / "envpacks.json").write_text(
+              json.dumps({"schema": envpack.PACK_SCHEMA, "version": VERSION, "packs": rows}, indent=2),
+              encoding="utf-8",
+          )
+          print(f"{len(rows)} carried row(s) written as a fragment")
+          PY
 
       - name: merge
         id: merge

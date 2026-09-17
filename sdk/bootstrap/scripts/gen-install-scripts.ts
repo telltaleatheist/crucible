@@ -597,7 +597,7 @@ export function generateInstallPs1(): string {
     '$manifestRaw = & curl.exe -fsSL --retry 3 "$manifestUrl"',
     'if ($LASTEXITCODE -ne 0) { Die "pack_manifest_unreadable: could not fetch $manifestUrl" }',
     'try { $manifest = $manifestRaw | Out-String | ConvertFrom-Json } catch { Die "pack_manifest_unreadable: $manifestUrl is not JSON" }',
-    'if ($manifest.schema -ne 1) { Die "pack_manifest_unreadable: $manifestUrl declares schema $($manifest.schema), this installer reads 1" }',
+    'if ($manifest.schema -ne 1 -and $manifest.schema -ne 2) { Die "pack_manifest_unreadable: $manifestUrl declares schema $($manifest.schema), this installer reads 1 or 2" }',
     '$pack = $null',
     `foreach ($entry in $manifest.packs) { if ($entry.name -eq ${psQuote(HOST_PACK)} -and $entry.backend -eq ${psQuote(HOST_BACKEND)}) { $pack = $entry } }`,
     `if ($null -eq $pack) { Die "pack_not_published: the $Release release publishes no ${HOST_PACK} pack for ${HOST_BACKEND}" }`,
@@ -625,12 +625,19 @@ export function generateInstallPs1(): string {
     '  New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null',
     '  $archiveName = $pack.parts[0] -replace "\\.part[0-9]+$", ""',
     '  $archive = Join-Path $DownloadDir $archiveName',
+    // THE ROW'S RELEASE. An unchanged pack is carried by reference rather
+    // than rebuilt or copied, so its parts stay in the release that built them
+    // and the row says which that is. Schema 1 has no such field and needs
+    // none: it placed every pack on its own release, so `$Release` IS the
+    // answer there — recovered, not defaulted.
+    '  $packRelease = if ($pack.PSObject.Properties.Name -contains "release") { $pack.release } else { $Release }',
+    `  $packBase = "https://github.com/${RELEASE_REPO}/releases/download/v$packRelease"`,
     '  if (Test-Path $archive) { Remove-Item $archive -Force }',
     '  foreach ($part in $pack.parts) {',
     '    Say "host-pack: $part"',
     '    $partPath = Join-Path $DownloadDir $part',
-    `    & curl.exe ${CURL_ARGS.join(' ')} -o $partPath "${base}/$part"`,
-    `    if ($LASTEXITCODE -ne 0) { Die "pack_download_failed: ${base}/$part" }`,
+    '    & curl.exe ' + CURL_ARGS.join(' ') + ' -o $partPath "$packBase/$part"',
+    '    if ($LASTEXITCODE -ne 0) { Die "pack_download_failed: $packBase/$part" }',
     '    # Byte-for-byte append, then delete: peak extra disk is ONE part and',
     '    # not the whole set. Add-Content would re-encode the bytes as text.',
     '    $in = [System.IO.File]::OpenRead($partPath)',

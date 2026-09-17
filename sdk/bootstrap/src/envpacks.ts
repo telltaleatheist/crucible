@@ -55,10 +55,25 @@ export interface PackEntry {
   recipeSha256: string | null;
   /** What the unpacked tree costs on disk — what the pre-flight checks. */
   unpackedBytes: number;
+  /**
+   * The release whose assets hold these bytes, which is not always the release
+   * whose manifest carries the row.
+   *
+   * A pack is a function of its RECIPE, so when a recipe has not changed the
+   * pack the previous release built IS the pack this one would build. Rebuilding
+   * it wastes CI minutes and copying it forward would store the same 17 GB under
+   * every tag, so an unchanged pack is carried by reference and the row keeps
+   * naming the release that already has it.
+   *
+   * Schema 1 had no such field because it did not need one: every pack it named
+   * was an asset of its own release. Reading those rows as the manifest's own
+   * version is therefore exact, not a default.
+   */
+  release: string;
 }
 
 export interface EnvPacks {
-  schema: 1;
+  schema: 1 | 2;
   version: string;
   packs: PackEntry[];
   /** Where this manifest was read from, for every message about it. */
@@ -136,7 +151,10 @@ export function parseEnvpacks(text: string, url: string, release: string): EnvPa
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw bad(url, 'the top level is not an object');
   const table = parsed as Record<string, unknown>;
-  if (table['schema'] !== 1) throw bad(url, `schema must be 1, got ${JSON.stringify(table['schema'])}`);
+  const schema = table['schema'];
+  if (schema !== 1 && schema !== 2) {
+    throw bad(url, `schema must be 1 or 2, got ${JSON.stringify(schema)}`);
+  }
   const version = requireString(table, 'version', url, 'the manifest');
   if (version !== release) {
     throw bad(url, `it says version ${JSON.stringify(version)} and this is the ${release} release's manifest URL`);
@@ -175,9 +193,13 @@ export function parseEnvpacks(text: string, url: string, release: string): EnvPa
       parts,
       recipeSha256: typeof recipe === 'string' ? recipe : null,
       unpackedBytes: requireInt(raw, 'unpacked_bytes', url, where),
+      // Required from schema 2. On a schema-1 row this is not a default: that
+      // schema placed every pack on its own release by construction, so the
+      // manifest's version IS the row's release, stated structurally.
+      release: schema >= 2 ? requireString(raw, 'release', url, where) : version,
     };
   });
-  return { schema: 1, version, packs, url };
+  return { schema, version, packs, url };
 }
 
 /** The pack for a (name, backend), or `pack_not_published` naming what the manifest does have. */

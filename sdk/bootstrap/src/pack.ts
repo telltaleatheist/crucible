@@ -220,7 +220,11 @@ export function packPaths(home: string, entry: PackEntry, release: string): Pack
     dest,
     partial: `${dest}${PARTIAL_SUFFIX}`,
     downloads: `${home}/${DOWNLOADS_SUBDIR}`,
-    archive: `${home}/${DOWNLOADS_SUBDIR}/${packAssetName(entry.name, entry.backend, release)}`,
+    // THE ROW'S release again: this path is what the parts are concatenated
+    // into, and a carried pack's parts are still named for the release that
+    // built them. Naming the joined file after a version that appears in none
+    // of its parts leaves a scratch file whose name contradicts its contents.
+    archive: `${home}/${DOWNLOADS_SUBDIR}/${packAssetName(entry.name, entry.backend, entry.release)}`,
     stamp: `${dest}/${STAMP_NAME}`,
     crucible: `${dest}/bin/crucible`,
   };
@@ -330,7 +334,10 @@ export async function installPack(
   await run('start', `rm -f ${shellQuote(paths.archive)} && mkdir -p ${shellQuote(paths.downloads)}`, 'pack_download_failed', 'clear the download directory');
 
   for (const part of entry.parts) {
-    const url = releaseAssetUrl(options.release, part);
+    // THE ROW'S RELEASE, NOT THE ONE BEING INSTALLED. An unchanged pack is
+    // carried by reference rather than rebuilt or copied, so its parts stay in
+    // the release that built them — see PackEntry.release.
+    const url = releaseAssetUrl(entry.release, part);
     const file = `${paths.downloads}/${part}`;
     const script = `curl ${CURL_ARGS.join(' ')} -o ${shellQuote(file)} ${shellQuote(url)}`
       + ` && cat ${shellQuote(file)} >> ${shellQuote(paths.archive)}`
