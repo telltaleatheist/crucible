@@ -110,7 +110,12 @@ def test_the_mac_selects_the_4bit_27b_and_refuses_the_bf16() -> None:
     assert verdict.selected == "qwen3.8-27b-4bit"
     ids = [c.id for c in verdict.candidates]
     assert ids[0] == "qwen3.8-27b", "the walk must SEE the bf16 and refuse it"
-    assert verdict.fit_count == 1
+    # TWO SINCE 2026-09-16, not one: Owen dropped the translate floor to the 9B,
+    # so the 9B is now a translate candidate and a 64 GB Mac fits it as well as
+    # the 4-bit 27B. What this test is ABOUT is unchanged and still asserted
+    # above — the walk sees the bf16 at 55.5 GB, refuses it against a 25%
+    # reserve, and takes the 4-bit. The count is the incidental half.
+    assert verdict.fit_count == 2
 
 
 # -------------------------------------------------------------- the ordering
@@ -128,7 +133,11 @@ def test_best_precision_first_not_smallest_that_fits() -> None:
     assert verdict.selected == "qwen3.8-27b", (
         "with room for both, the rule must take the better one, not the smaller"
     )
-    assert verdict.fit_count == 2
+    # THREE SINCE 2026-09-16: the 9B joined translate's candidates. The claim
+    # being made here is best-first, and it is sharper now than it was — with
+    # three models fitting, a walk that took the smallest would land on the 9B
+    # rather than merely on the 4-bit.
+    assert verdict.fit_count == 3
 
 
 def test_the_selected_id_does_not_depend_on_catalog_order() -> None:
