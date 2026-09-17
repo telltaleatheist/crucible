@@ -27,7 +27,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ... import accelerator, jobenv, llamacpp, weights
 from ...backend import LLAMA_WINDOWS
-from ...capability import available_bytes
+from ...capability import available_bytes
+from ... import ollamastore
 from ...config import Config
 from ...engines import EngineError
 from ...errors import ApiError, JobError
@@ -200,6 +201,41 @@ def _descriptors(
     return rows
 
 
+def _in_the_ollama_store(manifest: Any, backend_kind: str) -> dict[str, Any] | None:
+    """The copy of this model Ollama already holds, or None.
+
+    None for six different reasons and that is deliberate here, unlike in
+    `ollamastore.resident` which raises and names each one: this runs on a
+    listing route for every model on every read, and a store that is absent or a
+    tag that was never pulled is the ORDINARY case, not an error. A caller that
+    wants the reason asks `ollamastore` directly.
+    """
+    if backend_kind != LLAMA_WINDOWS:
+        return None
+    local = manifest.local
+    if local is None or getattr(local, "tag", None) is None:
+        return None
+    root = ollamastore.store_root()
+    try:
+        found = ollamastore.resident(
+            root, local.tag, wants_projector="image" in manifest.modalities
+        )
+    except ollamastore.OllamaStoreError:
+        return None
+    return {
+        "tag": found.tag,
+        "bytes": found.bytes,
+        "provenance": found.provenance,
+        "path": str(found.model.path),
+        # SAY THAT IT IS NOT THE SAME FILE, on the row itself, because the id
+        # beside it is the same id. Ollama's `qwen3.5:9b-bf16` and this block's
+        # `unsloth/Qwen3.5-9B-GGUF` `Q8_0` are two quantizations of one model by
+        # two different people, and a reader who assumes otherwise builds a cache
+        # key that answers for weights that never ran.
+        "same_file_as_the_pin": False,
+    }
+
+
 def model_rows(
     config: Config, backend: Any, residency: Residency
 ) -> list[dict[str, Any]]:
@@ -230,6 +266,7 @@ def model_rows(
         max_model_len: int | None = None
         terms: Any = None
         ceiling: dict[str, Any] | None = None
+        already_here: dict[str, Any] | None = None
         is_installed = False
         reason: str | None = None
         if not supported:
@@ -295,6 +332,7 @@ def model_rows(
                 else manifest.context_for(backend_kind)
             )
             is_installed = weights.installed(config, manifest, spec) is not None
+            already_here = _in_the_ollama_store(manifest, backend_kind)
             if estimate > backend.gpu.vram_bytes:
                 # Not loadable here at all, so say so instead of asking for a
                 # 55 GB download first.
@@ -342,6 +380,28 @@ def model_rows(
             "modalities": list(manifest.modalities),
             "backend_supported": supported,
             "installed": is_installed,
+            # ----------------------------------- a copy this machine already has
+            #
+            # Owen, 2026-09-16: *"if its possible to use the ollama copies that
+            # already exist on disk then we should do that. i dont want to have
+            # 16 copies of giant models sitting around."* A settings page cannot
+            # act on that unless it can SEE the copy, and offering a 19 GB
+            # download beside a file the machine already holds is the whole of
+            # the complaint.
+            #
+            # `llama-windows` ONLY, and the null on every other backend is a fact
+            # rather than an omission: Ollama stores GGUF (measured — the largest
+            # blob in Owen's 64 GB store begins with the bytes `GGUF`), llama.cpp
+            # reads GGUF, and vLLM and mlx-lm want safetensors. A cuda-linux host
+            # saves nothing by having Ollama installed and must not be shown a
+            # row suggesting otherwise.
+            #
+            # NOTHING LOADS FROM HERE YET. This says the bytes exist and what
+            # they would be called in a record; the load path is a separate
+            # change, because serving them means serving a DIFFERENT
+            # quantization from the one this block pins and that has to travel
+            # into provenance rather than be swapped in quietly.
+            "ollama_copy": already_here,
             "resident": residency.is_resident(KIND_LLM, manifest.id),
             "loadable": reason is None,
             "memory_bytes_estimate": estimate,
