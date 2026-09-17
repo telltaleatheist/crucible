@@ -460,8 +460,35 @@ def command(args: argparse.Namespace) -> int:
         print(json.dumps(result))
         return 0
     except (OSError, ValueError, RuntimeError, CrucibleError, subprocess.SubprocessError) as exc:
-        print(json.dumps({"error": {"code": "local_failed", "message": str(exc)}}), file=sys.stderr)
+        print(json.dumps({"error": {"code": "local_failed", "message": said(exc)}}), file=sys.stderr)
         return 1
+
+
+def said(exc: BaseException) -> str:
+    """What the failure SAID, including a refusal's own body.
+
+    `str(HTTPError)` is "HTTP Error 409: Conflict" and nothing else, while the
+    door on the other end had just written
+    `{"error": {"code": "engine_stop_failed", "message": "..."}}` into the
+    response. Every refusal this project makes names itself, and throwing the
+    name away at the last step turned a diagnosable stop failure into a status
+    line: on 2026-09-17 an upgrade printed `HTTP Error 409: Conflict` and the
+    reason - that the guest had become a system unit and was being stopped
+    through the user manager - had to be found by reading source instead.
+    """
+    if not isinstance(exc, urllib.error.HTTPError):
+        return str(exc)
+    try:
+        body = json.loads(exc.read().decode("utf-8", "replace"))
+    except (ValueError, OSError):
+        return str(exc)
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return str(exc)
+    code, message = error.get("code"), error.get("message")
+    if not isinstance(code, str) or not isinstance(message, str):
+        return str(exc)
+    return f"{exc} - {code}: {message}"
 
 
 def add_parser(subparsers) -> None:

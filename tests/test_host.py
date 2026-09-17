@@ -3148,6 +3148,43 @@ def test_the_menus_stop_carries_the_runtime_directory_too(tmp_path: Path) -> Non
     assert presence.user_systemctl_argv("Ubuntu", "1000", "stop") in runner.calls
 
 
+def test_the_stop_of_a_system_unit_guest_goes_through_root(tmp_path: Path) -> None:
+    """The stop had not learned what the restart already knows.
+
+    `recover` and `probe_unit` have branched on the unit's scope since 0.6.4,
+    but `_stop_engine` went on saying `systemctl --user stop` to every guest.
+    The moment 0.6.9 retired owens-pc's user unit and gave it the system unit
+    it was supposed to have, Windows could no longer stop its own engine:
+    `HTTP Error 409` out of the door, `upgrade_stop_failed` on the console,
+    and the Windows host stranded on 0.6.5 (measured 2026-09-17).
+
+    A stop that cannot be made is an upgrade that cannot run, so this is the
+    same shape as the guest-side bug it was created by.
+    """
+    runner = Scripted(
+        answers={
+            "-u root --exec systemctl is-enabled": ok("enabled" + chr(10)),
+            # Reaching for the user manager would find these, and the
+            # assertions below would catch it.
+            "--user": bad("Failed to connect to bus"),
+            "id -u": bad("should not be needed"),
+        },
+    )
+    context = _context(tmp_path, runner)
+    context.watcher = presence.PresenceWatcher(
+        runner, context.log, distro="Ubuntu", consented=True, sleep=lambda _s: None
+    )
+    context.presence = presence.Presence(
+        Distro.PRESENT, Engine.RUNNING, "up", Owner.WSL_UNIT
+    )
+    app_module.Host(context)._stop_engine()
+    assert presence.system_systemctl_argv("Ubuntu", "stop") in runner.calls
+    assert not any("--user" in " ".join(call) for call in runner.calls), (
+        "a system-unit guest must never be stopped through the user manager: "
+        "that is the bus WSLg hides"
+    )
+
+
 def test_a_stop_with_no_uid_touches_nothing(tmp_path: Path) -> None:
     runner = Scripted(answers={"id -u": bad("nothing")})
     context = _context(tmp_path, runner)
@@ -3159,7 +3196,14 @@ def test_a_stop_with_no_uid_touches_nothing(tmp_path: Path) -> None:
     )
     with pytest.raises(HostError, match="engine_stop_failed"):
         app_module.Host(context)._stop_engine()
-    assert not any("systemctl" in " ".join(call) for call in runner.calls)
+    # NOT STOPPED, which is what this is about. The scope probe that runs
+    # first is a READ (`systemctl is-enabled`), and reading is not touching
+    # - the assertion used to be `no systemctl at all` and that stopped
+    # being the same statement once the stop learned to ask where the unit
+    # is before reaching for it.
+    assert not any("stop" in call for call in runner.calls), (
+        "the engine must be untouched when the uid cannot be read"
+    )
     assert "stop: NOT RUN" in (tmp_path / "host.log").read_text(encoding="utf-8")
 
 

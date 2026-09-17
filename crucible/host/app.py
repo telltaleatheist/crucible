@@ -912,6 +912,32 @@ class Host:
 
     def _stop_engine(self) -> None:
         if self._c.presence.distro is Distro.PRESENT:
+            # STOP THROUGH THE DOOR THE UNIT WAS FOUND BEHIND. `probe_unit`
+            # and `recover` have branched on the guest's scope since 0.6.4;
+            # this went on saying `systemctl --user stop` to every guest. The
+            # moment 0.6.9 retired owens-pc's legacy user unit and gave it the
+            # system unit a stock WSL2 is supposed to have, Windows could no
+            # longer stop its own engine: `HTTP Error 409` out of the door,
+            # `upgrade_stop_failed` on the console, and the host stranded on
+            # 0.6.5 while the guest and the Mac both reached 0.6.9. Measured
+            # 2026-09-17, and it is the same shape as the guest-side bug that
+            # created it - a stop that cannot be made is an upgrade that can
+            # never run.
+            probe = self._c.watcher.probe_unit()
+            if probe.scope == presence_module.SCOPE_SYSTEM:
+                result = self._c.runner.run(
+                    presence_module.system_systemctl_argv(
+                        self._c.watcher._distro,  # noqa: SLF001
+                        "stop",
+                    ),
+                    timeout_s=60.0,
+                )
+                self._c.log.write(f"stop: {'ok' if result.ok else result.said()}")
+                if not result.ok:
+                    raise HostError("engine_stop_failed", result.said())
+                self._mark_stopped()
+                return
+
             # `systemctl --user stop`, which `Restart=always` respects: the
             # unit is STOPPED, not exited (the ruling in crucible/service.py).
             #
@@ -942,6 +968,10 @@ class Host:
                 raise HostError("engine_stop_failed", result.said())
         else:
             self._c.watcher.stop_child()
+        self._mark_stopped()
+
+    def _mark_stopped(self) -> None:
+        """What every stop records, wherever the stop itself was made."""
         self._c.home.mkdir(parents=True, exist_ok=True)
         self._c.home.joinpath("engine.stopped").write_text("Stopped by the operator\n", encoding="utf-8")
         self._paused = True

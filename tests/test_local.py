@@ -61,7 +61,7 @@ def test_timeout_is_not_reported_as_stopped(monkeypatch, tmp_path):
 def test_windows_stopped_intent_survives_controller_restart(tmp_path, monkeypatch):
     from crucible.host.app import Host, HostContext, engine_token
     from crucible.host.log import HostLog
-    from crucible.host.presence import Presence
+    from crucible.host.presence import Presence, UnitProbe, SCOPE_USER
     from crucible.host.menu import Distro, Engine, Owner
     from types import SimpleNamespace
     (tmp_path / "engine.stopped").write_text("stopped")
@@ -83,14 +83,19 @@ def test_windows_stopped_intent_survives_controller_restart(tmp_path, monkeypatc
 def test_windows_failed_stop_does_not_publish_stopped(tmp_path):
     from crucible.host.app import Host, HostContext
     from crucible.host.log import HostLog
-    from crucible.host.presence import Presence
+    from crucible.host.presence import Presence, UnitProbe, SCOPE_USER
     from crucible.host.menu import Distro, Engine, Owner
     from crucible.host.runner import RunResult
     from crucible.host.errors import HostError
     from types import SimpleNamespace
     runner = SimpleNamespace(run=lambda *args, **kwargs: RunResult(code=1, stdout="", stderr="denied", failure=None))
     context = HostContext(runner=runner, log=HostLog(tmp_path / "log", tmp_path / "old"), home=tmp_path,
-        watcher=SimpleNamespace(guest_uid=lambda: "1000", _distro="crucible"),
+        # A guest whose unit is a USER one, which is the path this test is
+        # about: `probe_unit` is what the stop now asks FIRST to decide
+        # which manager to speak to.
+        watcher=SimpleNamespace(guest_uid=lambda: "1000", _distro="crucible",
+            probe_unit=lambda: UnitProbe(True, "enabled", "user unit",
+                SCOPE_USER)),
         presence=Presence(Distro.PRESENT, Engine.RUNNING, "running", Owner.WSL_UNIT), release="test")
     host = Host(context)
     with pytest.raises(HostError, match="denied"):
@@ -102,7 +107,7 @@ def test_windows_failed_stop_does_not_publish_stopped(tmp_path):
 def test_controller_exit_waits_for_child_shutdown(tmp_path):
     from crucible.host.app import Host, HostContext
     from crucible.host.log import HostLog
-    from crucible.host.presence import Presence
+    from crucible.host.presence import Presence, UnitProbe, SCOPE_USER
     from crucible.host.menu import Distro, Engine, Owner
     from types import SimpleNamespace
     entered, finish = threading.Event(), threading.Event()
@@ -155,7 +160,7 @@ def test_wsl_move_publishes_only_the_authenticated_guest(tmp_path, monkeypatch, 
     from types import SimpleNamespace
     from crucible.host import app
     from crucible.host.log import HostLog
-    from crucible.host.presence import Presence
+    from crucible.host.presence import Presence, UnitProbe, SCOPE_USER
     from crucible.host.menu import Distro, Engine, Owner
     from crucible.host.errors import HostError
     line = "crucible://guest@127.0.0.1:7100/#guest-token"
@@ -302,3 +307,38 @@ def test_an_engine_too_old_to_report_a_version_is_not_called_stale(monkeypatch, 
         assert observed["version"] is None
     finally:
         server.shutdown(); server.server_close(); thread.join()
+
+def test_a_refusal_behind_an_http_error_still_names_itself():
+    """`HTTP Error 409: Conflict` is not a diagnosis; the body was.
+
+    Measured 2026-09-17: an upgrade refused with exactly that line, and the
+    reason the door had written into the response - which stop had failed and
+    why - was thrown away by the last `str(exc)` on the path.
+    """
+    import io
+    import urllib.error
+
+    body = json.dumps(
+        {"error": {"code": "engine_stop_failed", "message": "Unit not loaded"}}
+    ).encode("utf-8")
+    exc = urllib.error.HTTPError(
+        "http://127.0.0.1:7101/local/stop", 409, "Conflict", {}, io.BytesIO(body)
+    )
+    said = local.said(exc)
+    assert "engine_stop_failed" in said
+    assert "Unit not loaded" in said
+    assert "409" in said, "the status code is still worth keeping"
+
+
+def test_a_failure_with_no_structured_body_is_reported_as_it_came():
+    """No invention. A refusal that said nothing parseable says what it said."""
+    import io
+    import urllib.error
+
+    exc = urllib.error.HTTPError(
+        "http://127.0.0.1:7101/local/stop", 502, "Bad Gateway", {},
+        io.BytesIO(b"<html>nginx</html>"),
+    )
+    assert local.said(exc) == str(exc)
+    assert local.said(ValueError("plain")) == "plain"
+
