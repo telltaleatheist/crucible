@@ -122,14 +122,14 @@ if ($Uninstall) {
 # bsdtar 3.8.1 / libarchive 3.8.1 / libzstd 1.5.5. A machine whose tar has
 # no zstd would half-unpack in silence, so it is CHECKED, not assumed.
 #
-# NAMED, NOT LOOKED UP. `tar` used to be resolved through PATH, and PATH is
-# the CALLER'S: launched from a Git Bash shell this found
-# C:\Program Files\Git\usr\bin\tar.exe  -  GNU tar 1.32, no zstd at all  -
-# and refused a Windows 11 box that has had a working bsdtar the whole time.
-# Measured 2026-09-17 deploying 0.6.8 through scripts/deploy.sh. The tar
-# Windows GUARANTEES is now the one this checks AND the one it unpacks with:
-# checking one tool and using another is how a check passes and the unpack
-# still half-works.
+# NAMED, NOT LOOKED UP. `tar` used to be resolved through PATH, and PATH
+# is the CALLERS: launched from a Git Bash shell this found
+# C:\Program Files\Git\usr\bin\tar.exe - GNU tar 1.32, no zstd at all -
+# and refused a Windows 11 box whose System32 bsdtar has read zstd the
+# whole time. Measured 2026-09-17 deploying 0.6.8 via scripts/deploy.sh.
+# The tar Windows GUARANTEES is now the one this checks AND the one it
+# unpacks with: checking one tool and using another is how a check
+# passes and the unpack still half-works.
 $Tar = Join-Path $env:SystemRoot "System32\tar.exe"
 if (-not (Test-Path $Tar)) {
   Die "guest_missing_tool: there is no $Tar on this machine. Windows 10 1803+ and Windows 11 ship a bsdtar there that reads zstd, and a pack cannot be unpacked without one."
