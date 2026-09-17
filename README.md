@@ -897,32 +897,66 @@ registry publish: the tarball on the release is the distribution.
 
 ## Releases
 
-One version, one tag, one release. `v<ver>` carries the Python source archive
-`crucible-<ver>.tar.gz`, the wheel `crucible-<ver>-py3-none-any.whl`, and both SDK
-packages, `crucible-client-<ver>.tgz` and `crucible-bootstrap-<ver>.tgz`,
-alongside the generated installers, complete environment packs and manifest, and WSL
-rootfs. Core runtimes are built from that release's exact source commit. Unchanged
-inference archives may be reused only after recipe, interpreter and archive digest
-verification; their manifest names the actual uploaded parts.
-
 ```bash
-./scripts/release.sh --dry-run   # build and check, create nothing
-./scripts/release.sh             # cut a prerelease candidate from main, not latest
+./scripts/ship.sh patch              # bump, test, cut, and watch the packs build
+./scripts/ship.sh patch --dry-run    # everything up to creating anything
+./scripts/ship.sh patch --deploy     # and install it on every machine afterwards
 ```
+
+`ship.sh` is the one door, and the steps below are what it runs in order. Each is
+also usable alone, which is what to reach for when one of them is what went wrong.
+
+| | | |
+|---|---|---|
+| 1 | `scripts/bump.py patch` | writes the version to all seven places and regenerates the modules and the API reference |
+| 2 | `scripts/tests.sh --changed` | runs the tests the diff since the last tag can reach; `--all` for the suite |
+| 3 | `scripts/release.sh` | builds the six assets, cuts `v<ver>` as a prerelease, dispatches the pack build |
+| 4 | `scripts/deploy.sh --release <ver>` | installs it on every machine and proves each one took it |
+| 5 | `scripts/promote_release.py` | validates the candidate, and on `--publish` makes it `latest` |
+
+One version, one tag, one release. `v<ver>` carries the Python source archive
+`crucible-<ver>.tar.gz`, the wheel `crucible-<ver>-py3-none-any.whl`, both SDK
+packages, `crucible-client-<ver>.tgz` and `crucible-bootstrap-<ver>.tgz`, the two
+generated installers, the WSL rootfs, and `envpacks.json`.
+
+**A release does not carry every pack, and its manifest does not name only its own
+assets.** An environment pack is a function of its recipe, so when a recipe and its
+standalone-Python pin are unchanged the pack is not rebuilt and not re-uploaded:
+the row is carried by reference and keeps naming the release that already holds the
+bytes. Measured across v0.6.6 to v0.6.7, three of thirteen packs had genuinely
+changed. What is guaranteed is that every row RESOLVES — the manifest job HEADs
+every carried part before publishing, and `promote_release.py` checks each pack
+against the release its own row names. Core runtimes embed Crucible's source and
+are therefore never carried; that is checked by name, not by convention.
 
 Server, client and bootstrap version declarations and the bootstrap client peer pin
 must agree. A dirty tree, an unpushed HEAD, and an existing tag are refused.
-`scripts/promote_release.py` checks the complete published candidate before promotion;
-publication requires an explicit attestation that fresh installation tests passed.
+
+**Cutting and promoting are two jobs.** Every release is created
+`--prerelease --latest=false` on purpose: it is a candidate until somebody has
+installed it. `promote_release.py --publish` requires `--confirmed-install-smoke`,
+which attests that a fresh install passed — metadata cannot prove that, so no
+script here passes the flag on its own. Between 0.6.1 and 0.6.6 the second job was
+simply forgotten six times, and `releases/latest/download/install.sh` went on
+serving the 0.6.0 script. Installers no longer bake a version (they ask GitHub for
+the newest release at run time), and `deploy.sh` installs from the tag rather than
+from `latest`, so a missed promotion no longer silently installs an old release —
+but it still leaves `latest` pointing at the wrong one.
 
 ## Tests
 
 ```bash
 pip install -e '.[test]'
 pytest                       # in-process, FastAPI TestClient, temp CRUCIBLE_HOME
+./scripts/tests.sh --changed # only the tests the diff since the last tag reaches
 ./scripts/keeper-live.sh     # a real server on a free port, driven with curl
 ./scripts/keeper-llm-live.sh # a real server, a real engine, a real model
 ```
+
+`tests.sh --changed` maps each changed file to the test files that name it, and
+widens to the whole suite for anything it does not understand — an unrecognised
+file is a reason to run MORE, never fewer. `--list` shows what it would run and
+why, without running it.
 
 Both exit non-zero on any failure — trust the exit code, not the log. The pytest suite
 never touches a real `~/.crucible`: every test gets a `CRUCIBLE_HOME` under pytest's

@@ -133,9 +133,9 @@ def main() -> int:
 
     plan = decide(args.previous, args.version)
     for row in plan["build"]:
-        print(f"BUILD  {row['name']}/{row['backend']}  — {row['reason']}")
+        print(f"BUILD  {row['name']}/{row['backend']}  -- {row['reason']}")
     for row in plan["carry"]:
-        print(f"CARRY  {row['name']}/{row['backend']}  — already in v{row['release']}")
+        print(f"CARRY  {row['name']}/{row['backend']}  -- already in v{row['release']}")
     print(f"{len(plan['build'])} to build, {len(plan['carry'])} carried")
 
     if args.github_output:

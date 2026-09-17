@@ -18,8 +18,28 @@ from crucible import VERSION, envpack  # noqa: E402
 REPO = 'telltaleatheist/crucible'
 
 
-def validate_assets(manifest: envpack.PackManifest, assets: list[dict], version: str) -> None:
-    """The manifest is complete, matches this source, and every named byte exists."""
+def assets_of_release(release: str) -> list[dict]:
+    """Every published asset of `v<release>`, asked of GitHub."""
+    return json.loads(subprocess.check_output([
+        'gh', 'release', 'view', f'v{release}', '--repo', REPO, '--json', 'assets',
+    ], text=True))['assets']
+
+
+def validate_assets(manifest: envpack.PackManifest, assets: list[dict], version: str,
+                    assets_for_release=assets_of_release) -> None:
+    """The manifest is complete, matches this source, and every named byte exists.
+
+    A CARRIED pack's bytes are not assets of this release. Since
+    `scripts/plan_packs.py`, a release builds only the packs whose recipe
+    changed and carries the rest by reference, so `entry.release` names where
+    each pack actually lives and that is the release whose assets must hold it.
+    Checking a carried part against this release's asset list is checking a
+    list it was never going to be in.
+
+    `assets_for_release` is how another release's assets are read; passing None
+    means there is no way to read them, which is a REFUSAL for any carried row
+    rather than a reason to let it through unchecked.
+    """
     if manifest.version != version:
         raise ValueError(f'manifest is {manifest.version}, expected {version}')
     by_name = {asset['name']: asset for asset in assets}
@@ -38,6 +58,21 @@ def validate_assets(manifest: envpack.PackManifest, assets: list[dict], version:
     actual = {(p.name, p.backend) for p in manifest.packs}
     if declared != actual:
         raise ValueError(f'pack set mismatch; missing={declared-actual}, extra={actual-declared}')
+    elsewhere: dict[str, dict[str, dict]] = {}
+
+    def published_where_it_lives(entry) -> dict[str, dict]:
+        """The assets of the release this entry names, read at most once each."""
+        if entry.release == version:
+            return by_name
+        if assets_for_release is None:
+            raise ValueError(
+                f'{entry.name}/{entry.backend} is carried from v{entry.release} and this '
+                'check cannot verify it: no way to read that release')
+        if entry.release not in elsewhere:
+            found = assets_for_release(entry.release)
+            elsewhere[entry.release] = {asset['name']: asset for asset in found}
+        return elsewhere[entry.release]
+
     for entry in manifest.packs:
         target = envpack.pack_target(entry.name, entry.backend)
         if entry.recipe_sha256 != envpack.recipe_digest(target.recipe):
@@ -47,15 +82,24 @@ def validate_assets(manifest: envpack.PackManifest, assets: list[dict], version:
         if not re.fullmatch(r'[a-f0-9]{64}', entry.sha256):
             raise ValueError(f'{entry.name}/{entry.backend}: invalid archive digest')
         if target.job_type is None:
+            # A runtime pack EMBEDS Crucible's own source, so it is never the
+            # same pack across two versions and may never be carried. Both
+            # halves are checked: the release it names, and the names of its
+            # parts -- a row can be wrong in either without being wrong in both.
+            if entry.release != version:
+                raise ValueError(f'{entry.name}/{entry.backend}: runtime must be rebuilt for '
+                                 f'{version}, not carried from v{entry.release}')
             expected = tuple(envpack.part_filename(target.archive_name(version), i)
                              for i in range(len(entry.parts)))
             if entry.parts != expected:
                 raise ValueError(f'{entry.name}/{entry.backend}: runtime must be rebuilt for {version}')
+        available = published_where_it_lives(entry)
+        where = 'this release' if entry.release == version else f'v{entry.release}'
         total = 0
         for part in entry.parts:
-            if '/' in part or '\\' in part or part not in by_name or by_name[part]['size'] <= 0:
-                raise ValueError(f'missing/invalid pack part: {part}')
-            total += by_name[part]['size']
+            if '/' in part or '\\' in part or part not in available or available[part]['size'] <= 0:
+                raise ValueError(f'missing/invalid pack part in {where}: {part}')
+            total += available[part]['size']
         if total != entry.bytes:
             raise ValueError(f'{entry.name}/{entry.backend}: published part sizes differ from manifest')
 
