@@ -111,7 +111,137 @@ VRAM held by something that is not us. `CapabilityRecord` stores only
 a desktop swing flips a load. Decide against measured-free, keep the allowance as
 a FLOOR, and record both numbers so a stale decision is visible.
 
-## 6. Order of work
+## 6. The ceiling, and how Ollama gets it wrong
+
+Owen, 2026-09-16: *"there are some situations in which foundry and bookforge
+could conceivably change the chunk size for things like translate. if thats the
+case, crucible should have the upper limit for each crucible server. if bookforge
+tries to send an entire book through on one translate call, that would work on
+the mac but not on the PC. maybe kv cache should be a configurable number with a
+maximum set. how does ollama handle this?"*
+
+### 6.1 What Ollama actually does — MEASURED, Owen's PC, 2026-09-16
+
+Not "it OOMs". Ollama never errors on context at all. It answers 200 and lies.
+
+**Ask for a context bigger than the weights were trained for.** `num_ctx:
+1_000_000` to `qwen3.5:9b-q8_0`:
+
+    HTTP 200 in 49.4 s, response "ok"
+    /api/ps: context_length=262144, size 14.71 GB, size_vram 14.71 GB (all GPU)
+
+It clamped a million to 262144 — the checkpoint's `max_position_embeddings` —
+and said nothing. The client asked for one thing, got another, and has no field
+on the response that tells it so.
+
+**Send a prompt longer than the context.** ~5,600 tokens of text whose FIRST line
+is `REMEMBER THIS WORD: pomegranate.` and whose last line asks for that word
+back, at `num_ctx: 512`:
+
+    HTTP 200 in 8.6 s
+    prompt_eval_count: 1026        (of ~5628 sent)
+    response: "RE"
+
+It threw away the front of the prompt — the instruction included — evaluated
+about a fifth of what was sent, and answered anyway. No error, no warning, no
+flag. A wrong answer that looks exactly like a right one.
+
+There is a third silent shape not measured here: a `num_ctx` that fits the
+trained maximum but not the card makes Ollama offload layers to system RAM and
+run an order of magnitude slower, again with a 200 and no field saying so.
+
+So Ollama's answer to "let the user set it to anything" is: accept anything,
+clamp or truncate whatever does not fit, and never tell the caller. **This is the
+model to not copy.** An OOM would be more honest than what it actually does.
+
+### 6.2 The number is already on the wire; two things behind it are not
+
+`/v1/info`'s `llm` rows already carry the ceiling per server per model, and they
+already carry it twice for two different reasons (`crucible/jobs/llm/__init__.py`):
+
+* `context_default` — the context THIS host intends to serve for this model,
+  from the backend block or the model.
+* `max_model_len` — what the resident engine is serving RIGHT NOW. A client
+  sizes a request against this one; Foundry's `capFor` is
+  `max_model_len − (⌈chars/2.5⌉ + 256)` with **no clamp** when the field is
+  absent, which is how an unclamped request becomes a 400.
+
+Measured on the PC today: `qwen3.5-9b` 16384, `qwen3.8-27b-4bit` 16384,
+`qwen3.8-27b` 12288, `dots-ocr` 32768. So an app never has to guess a chunk
+size — it reads the ceiling off the server it is about to talk to. Owen's
+Mac-vs-PC example is already visible in that field.
+
+Two things behind it are missing.
+
+**(a) The Mac's number is a claim, not a limit.** `models/qwen3.5-9b.toml`'s
+`mlx-darwin` block says so in its own comment: mlx-lm has no `--max-model-len`
+and `Residency._engine_args` sends that flag to vLLM only, so the Mac takes its
+context from the checkpoint's `max_position_embeddings` (262144) and the reported
+number enables nothing — it only stops the server under-reporting. The
+consequence is that the two backends do not merely have different ceilings, they
+have different KINDS of ceiling: on the PC vLLM rejects an over-long prompt with
+a 400; on the Mac nothing rejects anything and the machine runs until it cannot.
+One field, two meanings. That is the asymmetry, and it is worse than Owen's
+version of it.
+
+**(b) Crucible does not adjudicate; it forwards the engine's verdict.** Today an
+over-long request reaches vLLM and comes back wearing vLLM's sentence — and on
+mlx-darwin there is no sentence at all. Crucible should count the prompt and
+refuse by name before the engine sees it, the same refusal on every backend:
+
+    context_exceeded: this request is 41,208 tokens and this server serves
+    qwen3.5-9b at 16,384. Send it in blocks, or load the model with a taller
+    context — this card affords up to 49,152 at concurrency 16.
+
+Both numbers in the sentence, and the third one — what the card *could* afford —
+is the fits arithmetic talking.
+
+### 6.3 The ceiling should be derived, not typed
+
+Every `context_default` in the tree today is a hand-written number with a comment
+arguing for it. `qwen3.5-9b`'s own comment is forty lines of archaeology about a
+12288 that turned out to be BookForge's 32B tier reaching a 9B. That is the cost
+of a typed ceiling: it has no source, so it takes a day to disprove.
+
+The same terms that answer *does it fit* answer *how tall can it be*. Section 1's
+identity, solved for context instead of for total:
+
+    max_context = (available − weights − overhead) / (kv_bytes_per_token × concurrency)
+
+Every term on the right already exists — stated as prose in the 27B manifest
+(weights 17.68 GiB, non-KV demand 19.12 GiB, KV 86,251 B/token MEASURED), and
+obtainable on any card by section 4's two-point calibration without knowing a
+single architectural fact. So the server can say *"on this card, at this
+concurrency, this model tops out at N"* rather than reciting a table, and the
+Mac/PC difference stops being two opinions and becomes two cards.
+
+### 6.4 Yes to a configurable KV with a maximum — and where the knob lives
+
+Owen's instinct is right, with one correction about what the knob IS.
+
+On vLLM the context is **fixed when the engine starts**, not negotiated per
+request: `--max-model-len` sizes the KV pool at load. So "BookForge changes the
+chunk size for translate" can only ever move WITHIN the started ceiling; going
+above it is a reload, not a bigger request. That is good news rather than a
+limitation — there is exactly one number per resident engine, the app reads it
+and chunks to it, and no per-request negotiation is needed.
+
+So the configurable number is the context the model is LOADED with, it belongs in
+settings (which the apps own, per the Ollama standard — Crucible is set and
+forget), and Crucible computes the maximum from 6.3 and **refuses a value above
+it by name, before the engine starts.** That refusal already exists in a worse
+form: the 9B block records that `--gpu-memory-utilization 0.79` on the 3090 Ti
+produces a −0.07 GiB pool and vLLM dies with `No available memory for the cache
+blocks`. Same fact, discovered by the engine after a minute of loading instead of
+stated by Crucible in a millisecond.
+
+And per section 3 this knob barely matters for the work Owen actually runs.
+Translate and simplify send ~4k batched blocks that never approach any of these
+ceilings; raising the context buys DEPTH — more requests in flight against a
+bigger pool — not reach. It is `pages` at 32k that has to fit, and `pages`
+already declares it.
+
+## 7. Order of work
 
 1. Split the manifest number into its terms. Pure promotion of existing prose;
    no GPU.
