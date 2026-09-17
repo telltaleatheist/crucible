@@ -885,10 +885,101 @@ def test_wslconfig_networking_mode_ignores_a_comment_and_reports_absence_as_None
     assert landoor.networking_mode("networkingMode = Mirrored") == "mirrored"
 
 
+FORWARD_ROW = (
+    "Listen on ipv4:             Connect to ipv4:\n\n"
+    "Address         Port        Address         Port\n"
+    "--------------- ----------  --------------- ----------\n"
+    "0.0.0.0         7100        127.0.0.1       7100\n"
+)
+
+
+def _door(*, forward: bool, firewall: bool, category: str = "Private") -> landoor.LanDoor:
+    """`detect` against a machine described by three facts."""
+    runner = Scripted(
+        answers={
+            "type": ok("[wsl2]\nmemory=13GB\n"),
+            "portproxy show": ok(FORWARD_ROW if forward else ""),
+            "advfirewall firewall show": (
+                ok("Rule Name: Crucible engine (LAN)\n") if firewall
+                else RunResult(code=1, stdout="No rules match.", stderr="", failure=None)
+            ),
+            "Get-NetConnectionProfile": ok(
+                '[{"InterfaceAlias":"Ethernet 2","NetworkCategory":"' + category + '"}]'
+            ),
+        }
+    )
+    return landoor.detect(runner)
+
+
+def test_a_forward_with_no_firewall_rule_is_a_door_that_looks_open_and_is_shut() -> None:
+    """The half-open state: Windows drops it before the forward ever sees it."""
+    door = _door(forward=True, firewall=False)
+    assert door.forward is True and door.firewall is False
+    assert door.open is False
+    assert "drops the connection" in door.detail
+
+
+def test_both_rows_on_a_private_network_is_the_only_open_door() -> None:
+    door = _door(forward=True, firewall=True)
+    assert door.open is True
+    assert door.private_network is True
+
+
+def test_both_rows_on_a_public_only_network_is_not_called_open() -> None:
+    """A Private-scoped rule admits nothing on a Public network. Said, not hidden."""
+    door = _door(forward=True, firewall=True, category="Public")
+    assert door.forward is True and door.firewall is True
+    assert door.open is False
+    assert "admits nothing here" in door.detail
+
+
+def test_the_firewall_argv_names_the_rule_it_can_later_delete_by() -> None:
+    added = landoor.firewall_add_argv()
+    assert added[:5] == ["netsh", "advfirewall", "firewall", "add", "rule"]
+    assert f"name={landoor.RULE_NAME}" in added
+    assert "dir=in" in added and "protocol=TCP" in added
+    assert f"profile={landoor.RULE_PROFILE}" in added
+    # The delete must be addressable by the SAME name, or it removes nothing.
+    assert f"name={landoor.RULE_NAME}" in landoor.firewall_remove_argv()
+    assert landoor.firewall_remove_argv()[3] == "delete"
+
+
+def test_the_consent_sentence_names_BOTH_things_it_will_add() -> None:
+    sentence = landoor.ELEVATION_SENTENCE
+    assert "administrator" in sentence
+    assert "7100" in sentence
+    assert "port forward" in sentence
+    assert landoor.RULE_NAME in sentence, "a consent that hides half of itself"
+    assert "crucible lan disable" in sentence, "it says how to undo it"
+
+
+def test_the_network_category_is_read_as_a_name_and_an_enum_is_not_guessed() -> None:
+    """Measured: PowerShell serialises NetworkCategory as its INTEGER value.
+
+    The probe forces `[string]`. If that is ever dropped this reports None
+    (unreadable) rather than quietly deciding the network is not Private, which
+    is what it did on Owen's PC before the cast was measured and added.
+    """
+    assert "[string]" in " ".join(landoor.connection_profile_argv())
+    assert landoor.has_private_network('[{"NetworkCategory":"Private"}]') is True
+    assert landoor.has_private_network('[{"NetworkCategory":"Public"}]') is False
+    assert landoor.has_private_network('[{"NetworkCategory":1}]') is None
+    assert landoor.has_private_network("") is None
+    assert landoor.has_private_network("not json") is None
+    # One profile serialises as a scalar, not a list.
+    assert landoor.has_private_network('{"NetworkCategory":"Private"}') is True
+
+
 # ------------------------------------------------------------ 4.3 installer
 
 
 def test_the_sequence_is_4_7s_steps_in_4_7s_order() -> None:
+    # `lan-door` MOVED after `switch-pairing` on 2026-09-17. It was a no-op
+    # message when it sat before the switch-over, and the position did not
+    # matter; now that it opens a real door it has to run where there is a guest
+    # engine to publish `lan_advertise` INTO, which is only after the switch.
+    # Still before `migrate-weights`, which can run for hours: a consent prompt
+    # raised at the far end of that is a prompt nobody is sitting in front of.
     assert installer.STEPS == (
         "wsl-state",
         "import-distro",
@@ -897,9 +988,9 @@ def test_the_sequence_is_4_7s_steps_in_4_7s_order() -> None:
         "migrate-config",
         "install-job-types",
         "prepare-weights",
-        "lan-door",
         "stop-windows-server",
         "switch-pairing",
+        "lan-door",
         "migrate-weights",
     )
 

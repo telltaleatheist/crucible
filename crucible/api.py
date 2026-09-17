@@ -564,7 +564,10 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     # which is `docs/ARCHITECTURE.md`'s one shape. The relation is
     # RE-ASSERTED instead, on the orchestrator's next watch tick.
     app.state.peer = peer_module.PeerState()
-    app.state.pairing_requests = PairingRequests()
+    # The POLICY comes from the config, not from this module's idea of a default:
+    # an operator who wrote `open_pairing = false` must not have it re-opened by
+    # the construction site.
+    app.state.pairing_requests = PairingRequests(open_pairing=config.open_pairing)
     # In memory, and a restart forgets: a lease protects a resident model, and a
     # restarted server holds none (crucible/leases.py).
     app.state.leases = Leases()
@@ -1224,7 +1227,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # `live.advertise` is the operator's statement that something
             # forwards here from elsewhere. The bind is what this host can see;
             # that is what it cannot.
-            urls = pairing.reachable_urls(host, port, live.advertise + live.tailscale_advertise)
+            urls = pairing.reachable_urls(
+                host, port, live.advertise + live.tailscale_advertise + live.lan_advertise
+            )
         except InterfaceError as exc:
             # 503 and not an empty `urls`: an empty list reads as "reachable
             # from nowhere", which is a claim about this host rather than a

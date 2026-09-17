@@ -23,7 +23,7 @@ from crucible import API_VERSION, accelerator, jobenv
 from crucible.accelerator import GIB
 from crucible.api import create_app
 from crucible.backend import Backend, Gpu
-from crucible.config import load_config, mint_token, write_config
+from crucible.config import DEFAULT_OPEN_PAIRING, load_config, mint_token, write_config
 from crucible import residency as residency_module
 from crucible.manifests import load_manifest
 
@@ -82,6 +82,10 @@ def make_app(home: Path) -> Callable[..., FastAPI]:
         # for a fixture: a config written before anything probed the card. Pass a
         # record to test a server that has decided.
         capability: Any = None,
+        # Taken from the ONE owner of the default rather than restated, so that a
+        # test asserting the open behaviour actually fails if the product's
+        # default changes. A test about the approval step passes False here.
+        open_pairing: bool = DEFAULT_OPEN_PAIRING,
     ) -> FastAPI:
         write_config(
             home,
@@ -99,6 +103,7 @@ def make_app(home: Path) -> Callable[..., FastAPI]:
             enable_denoise=enable_denoise,
             desktop_allowance_bytes=desktop_allowance_bytes,
             capability=capability,
+            open_pairing=open_pairing,
         )
         return create_app(load_config(home), backend)
 

@@ -684,6 +684,7 @@ def _write_capability(
         upstreams=config.upstreams,
         advertise=config.advertise,
         tailscale_advertise=config.tailscale_advertise,
+        lan_advertise=config.lan_advertise,
         **values,
     )
 
@@ -2618,7 +2619,7 @@ def cmd_token(args: argparse.Namespace) -> int:
     if args.url:
         result = _pairing_lines(
             config.name, config.host, config.port, config.token,
-            config.advertise + config.tailscale_advertise
+            config.advertise + config.tailscale_advertise + config.lan_advertise
         )
         if isinstance(result, str):
             return _fail(result)
@@ -3114,6 +3115,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     from .sharing import add_parser as add_sharing_parser
     add_sharing_parser(subparsers)
+    from .lan import add_parser as add_lan_parser
+    add_lan_parser(subparsers)
     return parser
 
 

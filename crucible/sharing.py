@@ -85,16 +85,25 @@ def read(home: Path) -> dict[str, Any] | None:
 
 
 class Engine:
-    def __init__(self, home: Path):
+    """The local engine's door, shared by `crucible sharing` and `crucible lan`.
+
+    `label` prefixes every refusal this class raises. It is REQUIRED and not
+    defaulted to "sharing": a `crucible lan` failure reporting itself as
+    `sharing_engine_unreachable` sends a person to read about Tailscale when
+    the thing that broke was a port forward.
+    """
+
+    def __init__(self, home: Path, label: str):
+        self.label = label
         line = read_pairing_file(home)
         if line is None:
-            raise SharingError("sharing_no_pairing: register/start Crucible before sharing it")
+            raise SharingError(f"{label}_no_pairing: register/start Crucible before sharing it")
         self.pairing = parse_pairing_line(line)
         parts = urlsplit(self.pairing.url)
         if parts.hostname not in ("127.0.0.1", "localhost", "::1"):
-            raise SharingError("sharing_not_local: the local pairing file must name loopback")
+            raise SharingError(f"{label}_not_local: the local pairing file must name loopback")
         if parts.port is None:
-            raise SharingError("sharing_missing_port: local pairing must state the engine port")
+            raise SharingError(f"{label}_missing_port: local pairing must state the engine port")
         self.target = f"127.0.0.1:{parts.port}"
 
     def request(self, method: str, path: str, body: Any = None) -> dict[str, Any]:
@@ -113,18 +122,21 @@ class Engine:
                 raise ValueError("expected an object")
             return result
         except (OSError, ValueError) as exc:
-            raise SharingError(f"sharing_engine_unreachable: {method} /v1/{path}: {exc}") from exc
+            raise SharingError(f"{self.label}_engine_unreachable: {method} /v1/{path}: {exc}") from exc
 
     def verify(self) -> None:
         ping = self.request("GET", "ping")
         if ping.get("crucible") is not True or ping.get("name") != self.pairing.name:
-            raise SharingError("sharing_wrong_engine: local port is not the paired Crucible")
+            raise SharingError(f"{self.label}_wrong_engine: local port is not the paired Crucible")
         self.request("GET", "settings")  # proves the token, not just the name
 
-    def advertise(self, authorities: list[str]) -> None:
-        result = self.request("PUT", "settings", {"tailscale_advertise": authorities})
-        if result.get("tailscale_advertise") != authorities:
-            raise SharingError("sharing_publish_failed: engine did not confirm the advertised address")
+    def advertise(self, field: str, authorities: list[str]) -> None:
+        """Publish this owner's addresses into ITS field, never another's."""
+        result = self.request("PUT", "settings", {field: authorities})
+        if result.get(field) != authorities:
+            raise SharingError(
+                f"{self.label}_publish_failed: engine did not confirm {field}"
+            )
 
 
 def enable(home: Path, runner: Runner, engine: Engine, *, port: int = 7100,
@@ -156,7 +168,7 @@ def enable(home: Path, runner: Runner, engine: Engine, *, port: int = 7100,
         _run(runner, ["tailscale", "serve", "--bg", f"--tcp={port}", "tcp://" + engine.target])
     if not _matches(_entry(runner, port), engine.target):
         raise SharingError("sharing_verification_failed: Serve did not retain the requested forward")
-    engine.advertise([authority])
+    engine.advertise("tailscale_advertise", [authority])
     record["state"] = "configured"
     _write(home, record)
     return {**record, "url": "http://" + authority, "remote_reachability": "not_tested"}
@@ -168,7 +180,7 @@ def disable(home: Path, runner: Runner, engine: Engine) -> dict[str, Any]:
         return {"state": "disabled"}
     # Withdraw the projection first. If the engine cannot be reached, retain
     # the record and forward so a retry never loses what it needs to clean up.
-    engine.advertise([])
+    engine.advertise("tailscale_advertise", [])
     existing = _entry(runner, record["port"])
     if existing is not None:
         if not _matches(existing, record["target"]):
@@ -202,14 +214,14 @@ def reconcile(home: Path, runner: Runner | None = None) -> dict[str, Any]:
     if record is None:
         return {"state": "disabled"}
     runner = ProcessRunner(sys.platform, os.environ) if runner is None else runner
-    return enable(home, runner, Engine(home), port=record["port"])
+    return enable(home, runner, Engine(home, "sharing"), port=record["port"])
 
 
 def command(args: argparse.Namespace) -> int:
     home = crucible_home()
     runner = ProcessRunner(sys.platform, os.environ)
     try:
-        engine = Engine(home)
+        engine = Engine(home, "sharing")
         if args.sharing_action == "enable":
             result = enable(home, runner, engine, port=args.port, adopt=args.adopt)
         elif args.sharing_action == "reconcile":

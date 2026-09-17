@@ -53,7 +53,8 @@ from typing import Callable, Sequence
 from . import landoor, wslstate
 from .catalog import CatalogPort, CatalogRefusal, Subject
 from .errors import HostError
-from .paths import engine_url
+from ..errors import CrucibleError
+from .paths import ENGINE_PORT, engine_url
 from .runner import RunResult, Runner
 from .wsl_states import CRUCIBLE_DISTRO
 
@@ -104,9 +105,9 @@ STEPS: tuple[str, ...] = (
     "migrate-config",
     "install-job-types",
     "prepare-weights",
-    "lan-door",
     "stop-windows-server",
     "switch-pairing",
+    "lan-door",
     "migrate-weights",
 )
 
@@ -240,6 +241,7 @@ class EngineInstall:
         install_sh_url: str,
         distro: str = CRUCIBLE_DISTRO,
         elevate: bool = True,
+        share_lan: bool | None = None,
         windows_catalog: CatalogPort | None = None,
         guest_catalog: CatalogPort | None = None,
         stop_windows_server: Callable[[], None] | None = None,
@@ -257,6 +259,19 @@ class EngineInstall:
         #: `False` in a test and in `--install --no-elevate`: the argv is still
         #: reported, and nothing raises a consent dialog.
         self._elevate = elevate
+        #: Whether this install should open the LAN door (`crucible lan`).
+        #:
+        #: THREE STATES, and `None` is the useful one. `True`/`False` is an
+        #: operator saying so for this install. `None` means *follow what this
+        #: machine already decided* — the `landoor.json` record — so a machine
+        #: whose door was opened once keeps it open across every later
+        #: reinstall and upgrade, and a machine that never opened one is never
+        #: silently exposed by an upgrade.
+        #:
+        #: The RECORD is the preference. A second setting saying the same thing
+        #: is a second thing to disagree with it, which is the shape of defect
+        #: `docs/ARCHITECTURE.md` was written about.
+        self._share_lan = share_lan
         #: The two servers the weights migration talks to (3.5, 3.5a). Both
         #: `None` on a machine that has no Windows server yet — the very first
         #: install — and that is a FACT the step states, not a fallback: there
@@ -368,7 +383,6 @@ class EngineInstall:
         self._migrate_config()
         self._install_job_types()
         prepared = self._prepare_weights()
-        self._lan_door()
         if self._windows is not None:
             if self._windows_after_switch is None:
                 raise self._fail("migration_cleanup_unavailable", "The controller did not provide stopped-engine cleanup; Windows models are unchanged")
@@ -377,6 +391,12 @@ class EngineInstall:
         self._switch_pairing()
         if self._windows is not None:
             self._windows = self._windows_after_switch()
+        # AFTER the switch: the door publishes this machine's addresses into
+        # the guest engine, which only answers once `_switch_pairing` has
+        # pointed this machine at it. Before `_migrate_weights`, because that
+        # step can run for hours and a consent prompt raised at its far end is
+        # a prompt nobody is sitting in front of.
+        self._lan_door()
         self._migrate_weights()
         self._home.joinpath(CLEANUP_RECORD).unlink(missing_ok=True)
         return self._complete()
@@ -843,13 +863,83 @@ class EngineInstall:
                 )
 
     def _lan_door(self) -> None:
-        """Installing an engine is not consent to expose it on every interface."""
+        """Installing an engine is not consent to expose it on every interface.
+
+        Unless the operator said so, which `share_lan` is. The work itself is
+        `crucible/lan.py`'s and is not restated here: an install that opened the
+        door by its own second copy of the mechanism would be a door
+        `crucible lan status` did not know about and `crucible lan disable`
+        could not shut.
+        """
         self._step("lan-door")
-        self._finish(
-            "lan-door",
-            "Local engine access is ready. Network sharing is optional and must be "
-            "enabled explicitly; installation changes no port forwards or firewall rules.",
-        )
+        from .. import lan as lan_door
+
+        try:
+            wanted = (
+                lan_door.read(self._home) is not None
+                if self._share_lan is None else self._share_lan
+            )
+        except CrucibleError as exc:
+            # A record too broken to read is not a licence to guess which way
+            # the operator wanted this. It names the file and stops.
+            raise self._fail(
+                "lan_door_failed",
+                f"this machine's LAN sharing record cannot be read ({exc}), so this "
+                "install will not guess whether to open the network door. Fix or delete "
+                "the file and run the install again.",
+            )
+        if not wanted:
+            self._finish(
+                "lan-door",
+                "Local engine access is ready. Network sharing is optional and must be "
+                "enabled explicitly; installation changes no port forwards or firewall rules.",
+            )
+            return
+        # Imported inside the method rather than at module scope: `crucible.lan`
+        # reaches back into `crucible.host` for the mechanism, and the host
+        # package is what this file belongs to. A deferred import is how
+        # `cli.py` keeps the same two-way relation from becoming a cycle.
+        from ..sharing import Engine
+
+        door = landoor.detect(self._runner, ENGINE_PORT)
+        missing = [
+            command
+            for present, command in (
+                (door.forward, landoor.add_argv(ENGINE_PORT)),
+                (door.firewall, landoor.firewall_add_argv(ENGINE_PORT)),
+            )
+            if not present
+        ]
+        if missing and not self._elevate:
+            # `--no-elevate` REPORTS the argv and changes nothing. Saying "done"
+            # here would be the one lie this whole step exists to avoid.
+            self._finish(
+                "lan-door",
+                "network sharing was requested, but this install may not elevate; "
+                "nothing was changed. Run `crucible lan enable` to open it.",
+                argv=lan_door.elevated_argv(missing),
+            )
+            return
+        if missing:
+            self._line(landoor.ELEVATION_SENTENCE)
+        try:
+            # `adopt=True`: a forward this machine already had is not a reason to
+            # stop an install the operator asked for. It is still VERIFIED and
+            # still recorded, so `lan disable` remains able to shut what it opened.
+            result = lan_door.enable(
+                self._home, self._runner, Engine(self._home, "lan"),
+                port=ENGINE_PORT, adopt=True,
+            )
+        except CrucibleError as exc:
+            raise self._fail(
+                "lan_door_failed",
+                "the engine is installed and working on this machine, but network "
+                f"sharing could not be turned on: {exc}. Run `crucible lan enable` "
+                "to retry; nothing else about this install is affected.",
+            )
+        for url in result["urls"]:
+            self._line(f"other devices on this network can reach the engine at {url}")
+        self._finish("lan-door", result["detail"])
 
     def _stop_windows_server(self) -> None:
         """4.7: the Windows engine stops only after the guest is serving."""

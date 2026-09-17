@@ -39,7 +39,8 @@ class Engine:
     def verify(self):
         pass
 
-    def advertise(self, addresses):
+    def advertise(self, field, addresses):
+        assert field == "tailscale_advertise", field
         if self.fail_publish:
             raise sharing.SharingError("publish interrupted")
         self.addresses = addresses

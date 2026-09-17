@@ -72,6 +72,7 @@ PATCH_KEYS: frozenset[str] = frozenset(
         "local_models",
         "desktop_allowance_bytes",
         "tailscale_advertise",
+        "lan_advertise",
     }
 )
 
@@ -218,6 +219,7 @@ def document(config: Config, *, installed: Mapping[str, bool]) -> dict[str, Any]
         "desktop_allowance_bytes": config.desktop_allowance_bytes,
         "backend_kind": config.backend_kind,
         "tailscale_advertise": list(config.tailscale_advertise),
+        "lan_advertise": list(config.lan_advertise),
     }
 
 
@@ -241,6 +243,7 @@ class Resolved:
         }
         self.desktop_allowance_bytes = config.desktop_allowance_bytes
         self.tailscale_advertise = config.tailscale_advertise
+        self.lan_advertise = config.lan_advertise
         self.removed: set[str] = set()
         self.changed: list[str] = []
         self.touched_routes = False
@@ -516,6 +519,13 @@ def resolve(config: Config, patch: Any) -> Resolved:
             raise ApiError(400, "invalid_request", str(exc), {"field": "tailscale_advertise"}) from exc
         if resolved.tailscale_advertise != config.tailscale_advertise:
             resolved.changed.append("tailscale_advertise")
+    if "lan_advertise" in patch:
+        try:
+            resolved.lan_advertise = _advertised({"server": {"advertise": patch["lan_advertise"]}})
+        except ConfigError as exc:
+            raise ApiError(400, "invalid_request", str(exc), {"field": "lan_advertise"}) from exc
+        if resolved.lan_advertise != config.lan_advertise:
+            resolved.changed.append("lan_advertise")
     _validate(resolved)
     return resolved
 
@@ -664,6 +674,7 @@ def apply(config: Config, resolved: Resolved, *, gpu_vendor: str) -> None:
         local_models=local_models,
         advertise=config.advertise,
         tailscale_advertise=resolved.tailscale_advertise,
+        lan_advertise=resolved.lan_advertise,
     )
     config.adopt(load_config(config.home))
 

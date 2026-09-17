@@ -687,12 +687,30 @@ the notification area. It is the front door Owen asked for. It owns exactly four
   user bus is absent, `systemctl restart user@1000` as root (`wsl -d crucible -u root`). If
   neither brings it up the tray shows "engine did not start — open the log", never a spinner.
 - **The LAN door.** The WSL server binds loopback and reaches the LAN only through a
-  Windows-side forward, so the host owns it: when the WSL engine is active the host keeps a
-  `netsh interface portproxy` (or WSL mirrored networking where present — the host detects
-  which, by name) from the machine's LAN addresses on `7100` to the guest, and removes it when
-  the engine stops. This is what makes `/v1/setup`'s LAN pairing lines true on Windows without
-  the user touching netsh; it needs admin once, prompted by name with the sentence that says
-  why.
+  Windows-side forward, so the host owns it: `netsh interface portproxy` from the machine's
+  addresses on `7100` to `127.0.0.1:7100` — which WSL already carries into the guest, so the
+  row survives the guest's address changing — **plus an inbound firewall rule**, because the
+  forward's listener belongs to a Windows service and no program-scoped rule covers it. One
+  without the other is a door that looks open from Windows and is shut from the network.
+  (Mirrored networking where present is detected by name and needs neither.) It needs admin
+  once, prompted by name with the sentence that says why, and both rows go up under a single
+  prompt. This is what makes `/v1/setup`'s LAN pairing lines true on Windows without the user
+  touching netsh.
+
+  **AMENDED 2026-09-17, twice.** The original text said the host "removes it when the engine
+  stops". It does not: that cost a UAC prompt on every start and stop and bought nothing, since
+  a forward to a port with no listener refuses a connection exactly as no forward does. The rows
+  persist until `crucible lan disable`. And the original named only the portproxy; the firewall
+  rule was missing, which is the difference between this feature working and not — measured on
+  Owen's PC, where the only inbound rule naming 7100 was Zoom's, scoped to Zoom's own binary.
+
+  The verb is `crucible lan {enable,disable,status,reconcile,explain}` (`crucible/lan.py`),
+  shaped exactly like `crucible sharing`: an ownership record (`landoor.json`), `lan_advertise`
+  in the engine as its projection, `--adopt` for a forward somebody else made, and `reconcile`
+  to republish when a DHCP lease moves the address. An install follows the RECORD when nothing
+  says otherwise (`EngineInstall(share_lan=None)`), so a machine that opened the door once keeps
+  it across every later upgrade and a machine that never did is never silently exposed by one.
+
 - **Watch.** `GET /v1/ping` every 15 s. Down → the same recipe once, then the tray state
   "engine stopped" with a Start item. It never loops on restart; the systemd unit's own
   `Restart=` handles crashes. (RULING RECORDED HERE: `service.py` moves to `Restart=always`
@@ -1184,7 +1202,7 @@ update to download the necessary models and wheels."*
   install the job types the apps' modules asked for (the coordinate records the server keeps
   from every connected app say which; nothing is guessed) → pull each installed subject's
   guest form → delete the Windows copies (3.5) → service install, linger, capability → stop
-  the Windows server → the guest answers `:7100` with the same token → `done`. The page,
+  the Windows server → the guest answers `:7100` with the same token → **the LAN door, when this machine already has one** (4.1; `share_lan=None` follows `landoor.json`, so a machine that opened it keeps it and one that never did is not exposed by an upgrade) → `done`. The page,
   which lost its server for a few seconds at the switch-over, re-reads `/v1/info` and shows
   **Engine: WSL2**.
 - A failed step fails the task by name with the state table's sentence and leaves the Windows
@@ -2037,7 +2055,8 @@ contains no `if`.
 | `presence.py` | the boot, the two recovery recipes, the 15 s watch. 4.1. |
 | `wsl_states.py` | **GENERATED** from `sdk/bootstrap/src/wsl-states.ts`. |
 | `wslstate.py` | the predicates for that table, and the walk. |
-| `landoor.py` | 4.1's LAN forward: which mechanism, and whether it is already open. |
+| `landoor.py` | 4.1's LAN door MECHANISM: which mechanism, and whether the forward AND the inbound rule are already there. Reads only. |
+| `../lan.py` | 4.1's LAN door VERB: `crucible lan enable/disable/status/reconcile`. Owns `landoor.json` and publishes `lan_advertise`. The only thing that runs `netsh`. |
 | `catalog.py` | the two catalog ports the weights migration reads, and 3.5a's delete. |
 | `installer.py` | 4.7's sequence, including the weights migration. |
 | `door.py` | `POST /install` on 127.0.0.1:7101. |
@@ -2763,3 +2782,74 @@ and `envs/asr/mlx-darwin.md` still say what those comparisons are.
 "served today" row is unchanged: `tts`, `llm`, `rvc`, `denoise`. The upgrade
 off conda (4.6's checklist, the audit's §3) is untouched by all of this and
 still has to be done in that order.
+
+## The LAN door, OPENED and measured — 2026-09-17
+
+The 2026-09-14 entry above recorded this machine as `portproxy / not open` with **no netsh
+run**. Owen asked for it to be opened and for future installs to do the same
+(*"like ollama, it should be able to be connected to by other computers on the same
+network"*). It is now open, and this is the evidence.
+
+**The starting state was not what the question assumed.** The Mac was ALREADY serving the
+whole LAN — `host = "0.0.0.0"`, `lsof` showing `*:7100`, and Windows reaching
+`192.168.68.79:7100` over plain LAN with `remote_ip` the LAN address, not a tailnet one.
+Only the WSL engine was loopback-only. So "Crucible cannot leave the tailnet" was true of
+one machine of two.
+
+**Binding was never the problem, and widening the bind would not have helped.** `--host`
+already exists on `serve`, on `init` and in `install.sh`, whose help already says a box
+reached over the network wants `0.0.0.0`. The default is `127.0.0.1`, which is also
+Ollama's default. On WSL, though, the guest is NAT'd: `eth0` 192.168.227.162/20 against a
+LAN of 192.168.68.0/24, with Windows holding 192.168.224.1. A guest bound to `0.0.0.0` is
+still invisible to the LAN, so binding wider would have widened exposure without buying
+reachability. The crossing is a Windows-side fact.
+
+**What was added**, under one UAC prompt, by `crucible lan enable`:
+
+```
+netsh interface portproxy add v4tov4 listenport=7100 listenaddress=0.0.0.0 \
+      connectport=7100 connectaddress=127.0.0.1
+netsh advfirewall firewall add rule name="Crucible engine (LAN)" dir=in action=allow \
+      protocol=TCP localport=7100 profile=private
+```
+
+`connectaddress=127.0.0.1`, not the guest's address: WSL's own localhost forwarding carries
+loopback into the guest, so the row does not need re-pointing when `eth0` changes on boot.
+
+**The measurement that matters.** From the Mac, over plain LAN, no tailnet:
+
+```
+$ curl http://192.168.68.100:7100/v1/ping
+{"crucible":true,"name":"crucible@owens-pc-wsl","api_version":1,"pairing_version":1}
+HTTP 200 via 192.168.68.100
+```
+
+**Three things this found that were not in the design.**
+
+1. *The firewall rule was missing from the spec.* A portproxy's listener belongs to a Windows
+   service, not to a Crucible binary, so no program-scoped rule admits it. The only inbound
+   rule on this machine naming 7100 was Zoom's, scoped to Zoom's own executable. The forward
+   alone is a dead door.
+2. *`NetworkCategory` serialises as an integer enum.* The probe read it as a string and
+   reported "unreadable" on a machine whose network is Private. Fixed at the source by making
+   PowerShell emit the name (`[string]`), rather than by carrying a 0/1/2 table here that
+   would have been a guess. Pinned by a test that fails if the cast is dropped.
+3. *`profile=private` can be a silent no-op.* A Private-scoped rule on a machine whose only
+   network is Public admits nothing. `detect()` reports it and `status` calls it `degraded`
+   rather than `configured`.
+
+**One thing is NOT finished.** `enable` opened both rows, verified them, and then failed
+publishing `lan_advertise` — the engine running here is 0.6.12 and `PUT /v1/settings` refused
+the unknown field with a 400, correctly. The ownership record is therefore `pending`, which is
+the durable-intent design working as intended: the door is open and proven, and
+`crucible lan reconcile` completes the publish once an engine carrying `lan_advertise` is
+deployed. Until then `/v1/setup` will not list the LAN URL even though it answers.
+
+**A known gap, deliberately not closed here.** Nothing reconciles the LAN door automatically
+when this machine's address changes. `crucible sharing` is reconciled from `finish_wsl_move`
+in `host/app.py`, and the symmetrical hook was considered and REJECTED for now: a reconcile
+that raises there blocks engine activation, and a host newer than its engine (exactly today's
+state, where 0.6.12 refuses `lan_advertise`) would then fail to activate over an optional
+convenience. Until that is sequenced properly, a DHCP move is repaired by
+`crucible lan reconcile`, and `crucible lan status` reports `degraded` with
+`addresses_match: false` when it has happened rather than quietly serving a dead URL.

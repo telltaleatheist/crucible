@@ -29,6 +29,19 @@ from .upstreams import UPSTREAM_FIELD, UPSTREAM_NAMES, UpstreamRecord
 
 CRUCIBLE_HOME_ENV = "CRUCIBLE_HOME"
 DEFAULT_HOST = "127.0.0.1"
+
+#: Whether reaching an engine is the whole of the authorisation.
+#:
+#: THE ONE OWNER OF THIS FACT. `_open_pairing` returns it for an absent key,
+#: `write_config` writes it for a config that states nothing, and the test
+#: fixture builds servers with it. Flipping this line flips the product, which
+#: is the property a default is supposed to have and did not when three files
+#: each said `True` on their own account.
+#:
+#: TRUE by ruling (Owen, 2026-09-17): *"ollama allows anybody to connect if they
+#: can reach it. make that the case with crucible servers as well"*. See
+#: `crucible/connect.py` for what that does and does not expose.
+DEFAULT_OPEN_PAIRING = True
 DEFAULT_PORT = 7100
 TOKEN_BYTES = 32
 
@@ -279,6 +292,19 @@ class Config:
     advertise: tuple[str, ...] = ()
     # A host-owned projection, kept separate from operator-authored addresses.
     tailscale_advertise: tuple[str, ...] = ()
+    #: The SAME shape for the LAN door (`crucible lan`), and separate from
+    #: `tailscale_advertise` for the same reason that one is separate from
+    #: `advertise`: each is owned by a different thing, and one list holding
+    #: two owners' entries cannot be withdrawn by either without guessing
+    #: which rows were whose. Disabling the LAN door must not silently drop
+    #: a tailnet address.
+    lan_advertise: tuple[str, ...] = ()
+    #: `[auth] open_pairing` — whether reaching this engine is the whole of the
+    #: authorisation (Owen, 2026-09-17; see `crucible/connect.py`). TRUE is the
+    #: ruled default and what an absent key means, so every config written before
+    #: this field reads as open, which is the behaviour that was asked for. Set it
+    #: false to put the approval step back.
+    open_pairing: bool = True
     flags_absent: tuple[str, ...] = ()
     #: What `crucible capability` decided on this host, or None when nothing has
     #: decided anything here yet — a config written by `crucible init` alone, or
@@ -404,6 +430,31 @@ class Config:
     @property
     def models_dir(self) -> Path:
         return self.home / "models"
+
+
+def _open_pairing(table: dict[str, Any]) -> bool:
+    """`[auth] open_pairing`, defaulting to TRUE when the key is absent.
+
+    Absent means open, and that is not a fallback hiding a missing value: it is
+    the ruled default stated once. A config written before this field existed
+    describes a server whose behaviour is now open, and reading it as closed
+    would make every existing machine disagree with the ruling.
+
+    A non-boolean is REFUSED rather than coerced. `open_pairing = "false"` is a
+    string, is truthy, and would silently open a door its operator just tried to
+    shut — which is the one mistake this field must never make quietly.
+    """
+    auth = table.get("auth")
+    if not isinstance(auth, dict) or "open_pairing" not in auth:
+        return DEFAULT_OPEN_PAIRING
+    value = auth["open_pairing"]
+    if not isinstance(value, bool):
+        raise ConfigError(
+            "config [auth] open_pairing: must be true or false, not "
+            f"{value!r}. A quoted string here would read as true and open a "
+            "door you meant to close"
+        )
+    return value
 
 
 def _advertised(table: dict[str, Any]) -> tuple[str, ...]:
@@ -809,7 +860,9 @@ def load_config(home: Path | None = None) -> Config:
         port=_require(table, "server", "port", int),
         advertise=_advertised(table),
         tailscale_advertise=_advertised({"server": {"advertise": table.get("server", {}).get("tailscale_advertise", [])}}),
+        lan_advertise=_advertised({"server": {"advertise": table.get("server", {}).get("lan_advertise", [])}}),
         token=_require(table, "auth", "token", str),
+        open_pairing=_open_pairing(table),
         backend_kind=_require(table, "backend", "kind", str),
         enable_echo=_capability_flag(table, "enable_echo"),
         enable_llm=_capability_flag(table, "enable_llm"),
@@ -867,6 +920,8 @@ def write_config(
     upstreams: tuple[UpstreamRecord, ...] = (),
     advertise: tuple[str, ...] = (),
     tailscale_advertise: tuple[str, ...] = (),
+    lan_advertise: tuple[str, ...] = (),
+    open_pairing: bool = DEFAULT_OPEN_PAIRING,
     #: Whole top-level tables to copy in VERBATIM, or None.
     #:
     #: `crucible init --config-from` (PHASE15-HOST.md 4.3) is the one caller:
@@ -898,7 +953,7 @@ def write_config(
     path = config_path(home)
     document: dict[str, Any] = {
         "server": {"name": name, "host": host, "port": port},
-        "auth": {"token": token},
+        "auth": {"token": token, "open_pairing": open_pairing},
         "backend": {"kind": backend_kind},
         "jobs": {
             "enable_echo": enable_echo,
@@ -917,6 +972,8 @@ def write_config(
         document["server"]["advertise"] = list(advertise)
     if tailscale_advertise:
         document["server"]["tailscale_advertise"] = list(tailscale_advertise)
+    if lan_advertise:
+        document["server"]["lan_advertise"] = list(lan_advertise)
     if routes:
         # Only when there is one. An empty `[routes]` table and no table at all
         # read the same, and writing the empty one would put a section in every

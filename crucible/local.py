@@ -85,6 +85,11 @@ def connection(home: Path) -> tuple[str, str, str]:
 
 def request(url: str, *, token: str | None = None, method: str = "GET",
             timeout: float = 3) -> dict:
+    """One local HTTP call. `timeout` is THREE seconds because most of these
+    are liveness probes, and a tray that blocks is a tray with no menu.
+
+    Callers that ask a heavier question pass their own -- see `INFO_TIMEOUT`.
+    """
     headers = {} if token is None else {"Authorization": f"Bearer {token}", "X-Crucible-Api": "1"}
     req = urllib.request.Request(url, headers=headers, method=method,
                                  data=b"{}" if method == "POST" else None)
@@ -95,6 +100,16 @@ def request(url: str, *, token: str | None = None, method: str = "GET",
     if not isinstance(value, dict):
         raise LocalError(f"local_protocol_invalid: {url} did not return an object")
     return value
+
+
+#: `/v1/info` is not a liveness probe. It composes a document by enumerating
+#: every model and every voice the engine knows, so on a machine with a full
+#: catalogue it legitimately takes longer than the three seconds a ping gets.
+#: Measured consequence of not having this: a HEALTHY engine reported
+#: `unhealthy`, and the reason shown to a person was the two words "timed
+#: out" (reported by the Foundry session, 2026-09-17). The timeout was the
+#: cause; the unwrapped message below was why it was unreadable.
+INFO_TIMEOUT = 15.0
 
 
 def status(home: Path | None = None) -> dict:
@@ -140,12 +155,17 @@ def status(home: Path | None = None) -> dict:
     if ping.get("crucible") is not True or ping.get("name") != name:
         return dict(result, state="wrong_service", detail="The endpoint is not the paired Crucible engine")
     try:
-        info = request(url + "/v1/info", token=token)
+        info = request(url + "/v1/info", token=token, timeout=INFO_TIMEOUT)
     except urllib.error.HTTPError as exc:
         return dict(result, state="unauthorized" if exc.code in (401, 403) else "unhealthy",
                     detail=f"Engine info returned HTTP {exc.code}")
     except (OSError, ValueError, LocalError) as exc:
-        return dict(result, state="unhealthy", detail=str(exc))
+        # WRAPPED, like the ping branch twenty lines up. `str(TimeoutError())`
+        # is the two words "timed out" -- no subject, no endpoint, nothing a
+        # person can act on -- and this string is shown to one. An exception
+        # message is evidence, never a sentence.
+        return dict(result, state="unhealthy",
+                    detail=f"The engine answered ping but not /v1/info: {exc}")
     server = info.get("server")
     if not isinstance(server, dict) or server.get("name") != name or server.get("api_version") != 1:
         return dict(result, state="wrong_service", detail="The engine returned incompatible or unexpected identity information")
