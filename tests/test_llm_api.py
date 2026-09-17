@@ -519,6 +519,9 @@ id = "shifty"
 family = "demo"
 params_b = 1
 context_default = {context}
+# The weights' own wall, well clear of either context this test writes, so
+# the two it is actually about are the only ones that move.
+trained_context = 262144
 modalities = ["text"]
 
 [backends.cuda-linux]

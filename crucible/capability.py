@@ -139,6 +139,23 @@ CPU_BUILD_REASON = (
 #: back loses nothing and a reader can see what this host would do on its own.
 LOCAL_ANSWER_PREFIX = "the local answer would be: "
 
+#: Said at the end of a REFUSAL for a class that could have been routed
+#: (docs/MODEL-CHOICE.md section 5). Owen, 2026-09-16: *"if nothing fits their
+#: card, it should give them the option of using api keys for claude or
+#: openai."*
+#:
+#: It goes on the refusal rather than in an app's own copy for the reason every
+#: other number in these sentences is here: the server is the thing that knows
+#: this class CAN be routed, and an app that hard-coded the offer would show it
+#: beside `pages` — which is deliberately not routable, because sending page
+#: images to Anthropic is a different feature with a different body that nobody
+#: has asked for. A class that grew or lost `routable` would then be wrong in
+#: two repos at once.
+UPSTREAM_OFFER = (
+    " This class can run somewhere else instead: add an API key for Anthropic or "
+    "OpenAI in settings and this host will route it rather than refuse it."
+)
+
 
 @dataclass(frozen=True)
 class WorkingContext:
@@ -224,10 +241,17 @@ class Candidate:
 class CatalogCandidates:
     """One catalog, read into candidates for a backend, best-first.
 
-    `family` filters `models/` down to one model family — the `[model] family` key
-    that is already in the manifests (`qwen3.5`, `qwen3.8`, `dots`), so the class
-    table below names a fact the repo already states rather than listing model ids
-    that would go stale the day a variant is added.
+    `families` filters `models/` down to the model families a class may run —
+    the `[model] family` key already in the manifests (`qwen3.5`, `qwen3.8`,
+    `dots`), so the class table below names a fact the repo already states rather
+    than listing model ids that would go stale the day a variant is added.
+
+    SEVERAL rather than one since 2026-09-16 (docs/MODEL-CHOICE.md). Translate
+    used to read `qwen3.8` alone, which made the 27B a floor — Owen's ruling of
+    2026-09-13, *"if 27b doesnt fit on the card then it cant translate"* —
+    and he has withdrawn it: *"they cant pick smaller than 9b… i think 9b could
+    do an ok job at translation."* A class's floor is now the smallest family it
+    lists, and nothing but this tuple has to change to move it.
 
     A class with fields rather than a closure, because `classes_for_model` below
     has to ask a class WHICH catalog it reads — the lineup Foundry vendors lists
@@ -236,12 +260,12 @@ class CatalogCandidates:
     """
 
     load: Callable[[], dict[str, Any]]
-    family: str | None = None
+    families: tuple[str, ...] | None = None
 
     def __call__(self, backend_kind: str) -> tuple[Candidate, ...]:
         found: list[Candidate] = []
         for manifest in self.load().values():
-            if self.family is not None and manifest.family != self.family:
+            if self.families is not None and manifest.family not in self.families:
                 continue
             if not manifest.supports(backend_kind):
                 continue
@@ -274,9 +298,9 @@ class CatalogCandidates:
 
 
 def _from_catalog(
-    load: Callable[[], dict[str, Any]], family: str | None = None
+    load: Callable[[], dict[str, Any]], *families: str
 ) -> CatalogCandidates:
-    return CatalogCandidates(load, family)
+    return CatalogCandidates(load, families or None)
 
 
 @dataclass(frozen=True)
@@ -355,7 +379,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
         ),
         purpose="cleanup and the other 9B-class text work",
         noun="qwen3.5 variants",
-        candidates=_from_catalog(load_all_manifests, family="qwen3.5"),
+        candidates=_from_catalog(load_all_manifests, "qwen3.5"),
         binary_note=(
             "This build ships no 4-bit 9B, so there is nothing smaller to fall "
             "back to (PHASE9-CAPABILITY.md section 1.1)."
@@ -383,11 +407,12 @@ CLASSES: tuple[CapabilityClass, ...] = (
             ),
         ),
         purpose="translation, which needs a 27B-class model",
-        noun="qwen3.8 variants",
-        candidates=_from_catalog(load_all_manifests, family="qwen3.8"),
+        noun="qwen3.8 and qwen3.5 variants",
+        candidates=_from_catalog(load_all_manifests, "qwen3.8", "qwen3.5"),
         binary_note=(
-            "Translation is binary per server: it needs a 27B and the smallest "
-            "this build ships is already 4-bit, so this host cannot translate."
+            "The floor for translation is the 9B, not the 27B — so a host that "
+            "cannot translate cannot hold a 9B either, and nothing smaller is "
+            "coming (docs/MODEL-CHOICE.md section 1)."
         ),
     ),
     # THREE ACTS, ONE MODEL, THREE CLASSES. `simplify` and `analysis` select the
@@ -431,11 +456,11 @@ CLASSES: tuple[CapabilityClass, ...] = (
             ),
         ),
         purpose="simplification, which runs on the same 27B translation needs",
-        noun="qwen3.8 variants",
-        candidates=_from_catalog(load_all_manifests, family="qwen3.8"),
+        noun="qwen3.8 and qwen3.5 variants",
+        candidates=_from_catalog(load_all_manifests, "qwen3.8", "qwen3.5"),
         binary_note=(
-            "Simplification is binary per server for translation's reason: it "
-            "needs a 27B and the smallest this build ships is already 4-bit."
+            "The floor for simplification is the 9B, for translation's reason: "
+            "a host that cannot hold a 9B cannot do this work at all."
         ),
     ),
     CapabilityClass(
@@ -457,11 +482,11 @@ CLASSES: tuple[CapabilityClass, ...] = (
             ),
         ),
         purpose="structured analysis answers, on the same 27B",
-        noun="qwen3.8 variants",
-        candidates=_from_catalog(load_all_manifests, family="qwen3.8"),
+        noun="qwen3.8 and qwen3.5 variants",
+        candidates=_from_catalog(load_all_manifests, "qwen3.8", "qwen3.5"),
         binary_note=(
-            "Analysis is binary per server for translation's reason: it needs a "
-            "27B and the smallest this build ships is already 4-bit."
+            "The floor for analysis is the 9B, for translation's reason: a host "
+            "that cannot hold a 9B cannot do this work at all."
         ),
     ),
     CapabilityClass(
@@ -485,7 +510,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
         ),
         purpose="reading page images (the VLM door)",
         noun="page readers",
-        candidates=_from_catalog(load_all_manifests, family="dots"),
+        candidates=_from_catalog(load_all_manifests, "dots"),
     ),
     CapabilityClass(
         name="tts",
@@ -822,7 +847,8 @@ def decide(
                     f"disabled: {picked.id} was chosen for {entry.name} and needs "
                     f"{spell_out(picked, entry.work)}, and there is only "
                     f"{arithmetic} — short by {_gib(shortfall)}. This choice fit "
-                    f"the machine it was made on{cpu_note}"
+                    f"the machine it was made on{cpu_note}."
+                    + (UPSTREAM_OFFER if entry.routable else "")
                 ),
                 shortfall_bytes=shortfall,
                 available_bytes=budget,
@@ -875,6 +901,7 @@ def decide(
             f"disabled: the smallest of {len(found)} {entry.noun} is {smallest.id} "
             f"at {spell_out(smallest, entry.work)} and there is only "
             f"{arithmetic} — short by {_gib(shortfall)}.{note}"
+            + (UPSTREAM_OFFER if entry.routable else "")
         ),
         shortfall_bytes=shortfall,
         available_bytes=budget,
@@ -992,6 +1019,7 @@ __all__ = [
     "CPU_POOL_NAME",
     "CPU_VENDOR",
     "LOCAL_ANSWER_PREFIX",
+    "UPSTREAM_OFFER",
     "NEEDS_WSL_REASON",
     "WSL_ONLY_JOB_TYPES",
     "pool_name",
