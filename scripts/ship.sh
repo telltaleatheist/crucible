@@ -20,12 +20,21 @@
 #   1. the tree is clean and pushed          (a release must be reproducible)
 #   2. bump.py writes the seven and regenerates      (scripts/bump.py)
 #   3. the tests that can say no             (scripts/tests.sh --changed)
-#   4. release.sh --dry-run                  (the cut's own gate, before the tag)
-#   5. commit and push
-#   6. release.sh                            (tag, six assets, dispatch envpacks)
-#   7. watch the pack build                  (gh run watch)
-#   8. deploy.sh                             (optional; three machines)
-#   9. the promote command, printed          (see below — it is not run here)
+#   4. commit and push
+#   5. release.sh                            (tag, six assets, dispatch envpacks)
+#   6. watch the pack build                  (gh run watch)
+#   7. deploy.sh                             (optional; three machines)
+#   8. the promote command, printed          (see below — it is not run here)
+#
+# THERE IS NO SEPARATE DRY-RUN GATE BEFORE THE COMMIT, and there cannot be:
+# `release.sh --dry-run` refuses a dirty tree and an unpushed HEAD, which is
+# exactly what a just-bumped working tree is. The first version of this ran it
+# at step 4 and it refused every time. It is not needed either — release.sh
+# checks the tree, the branch, the remote, all seven versions, the generated
+# files and the absence of the tag, and BUILDS all six assets, before it creates
+# anything. Nothing is published by a run that fails; the cost of a failure
+# after step 4 is a bump commit on main with no release beside it, which
+# `./scripts/ship.sh --no-bump` picks straight back up.
 #
 # PROMOTION IS NOT AUTOMATED AND MUST NOT BE. `promote_release.py --publish`
 # requires `--confirmed-install-smoke`, which is an ATTESTATION that a person
@@ -98,23 +107,16 @@ case "$test_mode" in
   *) ./scripts/tests.sh "$test_mode" || fail "the tests said no; nothing has been pushed or tagged" ;;
 esac
 
-# ------------------------------------------------- 4. the cut's own gate, early
-#
-# `release.sh --dry-run` builds every asset and runs every refusal the real cut
-# runs, and creates nothing. Running it BEFORE the commit means a bump that
-# cannot be released is a bump that is still only in the working tree.
-
-step "the release gate (dry run)"
-./scripts/release.sh --dry-run || fail "release.sh refused this tree; nothing has been committed"
-
 if [ "$dry_run" = "1" ]; then
   echo
   echo "ship: --dry-run, so v$version was not committed, pushed or tagged."
-  echo "ship: the bump is in the working tree. 'git checkout .' undoes it."
+  echo "ship: the bump is in the working tree; 'git checkout .' undoes it, and"
+  echo "ship: './scripts/ship.sh --no-bump' carries on from here."
+  git --no-pager diff --stat
   exit 0
 fi
 
-# ------------------------------------------------------- 5. commit and push
+# ------------------------------------------------------- 4. commit and push
 
 if [ -n "$(git status --porcelain)" ]; then
   step "committing $version"
@@ -123,7 +125,7 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 git push origin main
 
-# --------------------------------------------------------------- 6. the cut
+# --------------------------------------------------------------- 5. the cut
 
 step "cutting v$version"
 # The newest envpacks run BEFORE the dispatch. Step 7 waits for one that is not
@@ -134,7 +136,7 @@ previous_run="$(gh run list --workflow envpacks.yml --limit 1 --json databaseId 
                   --jq '.[0].databaseId' 2>/dev/null || true)"
 ./scripts/release.sh
 
-# ---------------------------------------------------------- 7. the pack build
+# ---------------------------------------------------------- 6. the pack build
 #
 # `release.sh` dispatches `envpacks.yml` and returns. The run takes a moment to
 # appear, so this waits for one dispatched AT OR AFTER the cut rather than
@@ -162,14 +164,14 @@ else
   gh run watch "$run_id" --exit-status || fail "the pack build failed. The tag and its six assets exist; re-dispatch with: gh workflow run envpacks.yml -f tag=v$version"
 fi
 
-# ------------------------------------------------------------- 8. the machines
+# ------------------------------------------------------------- 7. the machines
 
 if [ "$do_deploy" = "1" ]; then
   step "the machines"
   ./scripts/deploy.sh --release "$version"
 fi
 
-# ------------------------------------------------------------- 9. what is left
+# ------------------------------------------------------------- 8. what is left
 
 echo
 echo "ship: v$version is cut, built and downloadable."

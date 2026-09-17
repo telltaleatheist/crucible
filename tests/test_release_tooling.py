@@ -222,3 +222,20 @@ def test_deploy_waits_for_the_record_rather_than_reading_it_once():
     text = DEPLOY.read_text(encoding='utf-8')
     assert 'await_release()' in text, 'the bounded wait for the record is gone'
     assert 'after="$(await_release' in text, 'the after-check reads the record directly again'
+
+
+def test_ship_does_not_gate_on_a_dry_run_it_has_made_impossible():
+    """`release.sh --dry-run` refuses a dirty tree and an unpushed HEAD.
+
+    A just-bumped working tree is both, so calling it between the bump and the
+    commit refuses every single time — which is what the first version of
+    ship.sh did, and what its first rehearsal caught. The cut's own run is the
+    gate: it checks everything and builds every asset before creating anything.
+    """
+    text = SHIP.read_text(encoding='utf-8')
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('#') or stripped.startswith('echo '):
+            continue
+        assert 'release.sh --dry-run' not in stripped, (
+            f'ship.sh runs a gate that a bumped tree can never pass: {stripped}')
