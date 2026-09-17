@@ -7,4 +7,4 @@
  * and `scripts/release.sh` refuses to cut a release if either drifts from
  * `crucible/__init__.py`.
  */
-export const SDK_VERSION = '0.6.7';
+export const SDK_VERSION = '0.6.8';
