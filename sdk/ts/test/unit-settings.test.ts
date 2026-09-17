@@ -102,6 +102,14 @@ const DOCUMENT = {
   },
   desktop_allowance_bytes: 3221225472,
   backend_kind: 'cuda-linux',
+  // REQUIRED since 2026-09-16, so the shared fixture carries them: a document
+  // without these is one no engine sends, and a fixture that omitted them
+  // would be testing a server that does not exist.
+  local_models: { clean: 'qwen3.5-9b', translate: null, simplify: null, analysis: null },
+  local_model_choices: {
+    clean: [{ id: 'qwen3.5-9b', memory_bytes_estimate: 20950548480, fits: true, installed: true }],
+    translate: [], simplify: [], analysis: [],
+  },
 };
 
 // ------------------------------------------------------------------ settings
@@ -424,15 +432,24 @@ test('local model choices and nullable automatic preferences cross the settings 
       {id:'qwen3.8-27b',memory_bytes_estimate:55e9,fits:false,installed:false}]}});
   const doc=await client().settings();
   assert.deepEqual(doc.localModels,{translate:'qwen3.8-27b-4bit',clean:null});
-  assert.deepEqual(doc.localModelChoices?.translate?.[0],{id:'qwen3.8-27b-4bit',memoryBytesEstimate:16e9,fits:true,installed:true});
+  assert.deepEqual(doc.localModelChoices.translate?.[0],{id:'qwen3.8-27b-4bit',memoryBytesEstimate:16e9,fits:true,installed:true});
   await client().putSettings({localModels:{translate:null}});
   assert.deepEqual(JSON.parse(lastBody),{local_models:{translate:null}});
 });
 
-test('old engines omit local selection support and malformed new choices fail by name', async () => {
-  answer(200,DOCUMENT);
-  const old=await client().settings();
-  assert.equal(old.localModels,undefined);assert.equal(old.localModelChoices,undefined);
+test('a document missing either local-model field fails by name, and so does a malformed one', async () => {
+  // IT USED TO READ AN OMISSION AS AN OLD ENGINE. Owen, 2026-09-16: nothing is
+  // released, so nothing is legacy, and there is no older engine for anyone but
+  // us to point at. Absent is now a protocol error like any other missing
+  // field — named, with the field in the sentence — rather than a vintage every
+  // caller downstream had to branch on.
+  const { local_models: _m, ...noModels } = DOCUMENT;
+  answer(200, noModels);
+  await assert.rejects(client().settings(), CrucibleProtocolError);
+  const { local_model_choices: _c, ...noChoices } = DOCUMENT;
+  answer(200, noChoices);
+  await assert.rejects(client().settings(), CrucibleProtocolError);
+
   answer(200,{...DOCUMENT,local_models:{translate:123}});
   await assert.rejects(client().settings(),CrucibleProtocolError);
   answer(200,{...DOCUMENT,local_model_choices:{translate:[{id:'model',memory_bytes_estimate:1,fits:true}]}});

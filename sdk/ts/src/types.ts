@@ -1583,7 +1583,17 @@ export interface ServerSetup {
   readonly configPath: string;
 }
 
-/** The five things a subject can be. PHASE13-OPERATOR.md section 2. */
+/**
+ * The SIX things a subject can be. PHASE13-OPERATOR.md section 2 named five;
+ * `engine` was added for PHASE15-HOST.md 3.10 and this sentence did not move
+ * with it.
+ *
+ * It said "five" until 2026-09-16, when Foundry read the sentence instead of
+ * the union, wrote a five-word mirror of it, and was saved by its compiler. A
+ * mirror built by hand from the prose would have shipped a Windows-native
+ * engine that could not fetch its own llama.cpp. COUNT THE UNION, and when a
+ * member is added, the count above it is part of the change.
+ */
 export type SubjectKind =
   | 'model'
   | 'voice'
@@ -1932,9 +1942,18 @@ export interface LocalModelChoice {
 
 /** `GET /v1/settings` — the whole of what an app's settings window draws. */
 export interface SettingsDocument {
-  /** Absent on older engines. Null requests automatic selection, never a fallback. */
-  readonly localModels?: Readonly<Record<string, string | null>>;
-  readonly localModelChoices?: Readonly<Record<string, readonly LocalModelChoice[]>>;
+  /**
+   * Which local model serves each capability class. Null requests the engine's
+   * automatic selection, and is a DECISION rather than an absence.
+   *
+   * REQUIRED since 2026-09-16. Both keys were optional so this SDK could read
+   * an engine older than them; Owen ruled that population out of existence —
+   * nothing is released, so nothing is legacy — and an optional field kept for
+   * readers who do not exist is a branch every caller pays for.
+   */
+  readonly localModels: Readonly<Record<string, string | null>>;
+  /** Empty when the engine has not measured its card yet; never absent. */
+  readonly localModelChoices: Readonly<Record<string, readonly LocalModelChoice[]>>;
   /** One entry per routable class: `clean`, `translate`, `simplify`, `analysis`. */
   readonly routes: Readonly<Record<string, RouteSetting>>;
   readonly upstreams: Readonly<Record<UpstreamName, UpstreamSetting>>;
