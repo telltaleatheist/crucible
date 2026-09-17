@@ -310,6 +310,7 @@ id = "mac-only"
 family = "demo"
 params_b = 1
 context_default = 4096
+trained_context = 262144
 modalities = ["text"]
 
 [backends.mlx-darwin]
@@ -379,6 +380,7 @@ id = "mac-only"
 family = "demo"
 params_b = 1
 context_default = 4096
+trained_context = 262144
 modalities = ["text"]
 
 [backends.mlx-darwin]
@@ -588,6 +590,7 @@ id = "mac-only"
 family = "demo"
 params_b = 1
 context_default = 4096
+trained_context = 262144
 modalities = ["text"]
 
 [backends.mlx-darwin]

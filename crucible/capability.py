@@ -87,7 +87,7 @@ from .asrmodels import load_all_asr_manifests
 from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
 from .config import CapabilityRecord, CapabilityRow
 from .denoisemodels import load_all_denoise_manifests
-from .manifests import BACKEND_ENGINES, load_all_manifests
+from .manifests import BACKEND_ENGINES, MemoryTerms, load_all_manifests
 from .rvcmodels import load_all_rvc_manifests
 from .voices import load_all_voices
 
@@ -141,14 +141,83 @@ LOCAL_ANSWER_PREFIX = "the local answer would be: "
 
 
 @dataclass(frozen=True)
+class WorkingContext:
+    """How much context a CLASS actually uses, and how much of it at once.
+
+    docs/FITS-AND-THE-CARD.md section 3. The free variable in
+
+        engine_total = weights + overhead + kv_bytes_per_token x context x concurrency
+
+    is the WORK, and the work belongs to the class rather than to the model. A
+    model's `context_default` is what the weights are FOR; it is not what
+    translate sends, and using it to decide whether translate can run is how a
+    27B gets refused on a 24 GB card for a 98304-token KV cache that a
+    paragraph-at-a-time act was never going to fill.
+
+    `source` is required and is prose: a context declared here with no stated
+    origin is the 12288 that turned out to be BookForge's 32B tier reaching a 9B
+    and took a day to disprove.
+    """
+
+    tokens: int
+    concurrency: int
+    source: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tokens": self.tokens,
+            "concurrency": self.concurrency,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
 class Candidate:
     """One concrete thing that could satisfy a class on one backend."""
 
     id: str
     memory_bytes_estimate: int
+    #: This candidate's estimate taken apart, where its backend block has been
+    #: taken apart. None means the collapsed number is all there is, and
+    #: `need_bytes` below then answers with it whatever the class asks — which
+    #: is the behaviour every class had before the split, kept exactly, so a
+    #: block without terms decides today what it decided yesterday.
+    memory: "MemoryTerms | None" = None
+
+    def need_bytes(self, work: "WorkingContext | None") -> int:
+        """What this candidate costs doing THAT work.
+
+        The one place the reframe is spent. Everything else — the walk, the
+        refusals, the ordering — asks this and does not know whether the answer
+        came from arithmetic or from a stored number.
+        """
+        if work is None or self.memory is None:
+            return self.memory_bytes_estimate
+        return self.memory.bytes_for(
+            context=work.tokens, concurrency=work.concurrency
+        )
+
+    def max_context(self, available_bytes: int, work: "WorkingContext | None") -> int | None:
+        """The tallest context this candidate affords here, or None if unknown.
+
+        None rather than a guess: a block with no terms cannot say what it would
+        cost at another length, and answering with `context_default` would be
+        this server stating a ceiling it has no arithmetic for — the thing
+        section 6.2 refuses Ollama for doing.
+        """
+        if self.memory is None:
+            return None
+        concurrency = 1 if work is None else work.concurrency
+        return self.memory.max_context(
+            available_bytes=available_bytes, concurrency=concurrency
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "memory_bytes_estimate": self.memory_bytes_estimate}
+        return {
+            "id": self.id,
+            "memory_bytes_estimate": self.memory_bytes_estimate,
+            "memory": None if self.memory is None else self.memory.to_dict(),
+        }
 
 
 @dataclass(frozen=True)
@@ -182,6 +251,17 @@ class CatalogCandidates:
                     memory_bytes_estimate=manifest.spec(
                         backend_kind
                     ).memory_bytes_estimate,
+                    # ONLY THE MODEL CATALOG HAS TERMS, and that is not a gap to
+                    # be filled later: this same class reads the voice, RVC,
+                    # aligner, ASR and denoise catalogs, whose specs have no KV
+                    # term because their work is not measured in tokens. A voice
+                    # is one engine holding one reservation whatever the
+                    # sentence is. `getattr` here is asking WHICH CATALOG this
+                    # is, not papering over a missing attribute — the classes
+                    # that read those catalogs declare no `work` either, so
+                    # `need_bytes` answers with the collapsed estimate and the
+                    # two facts agree.
+                    memory=getattr(manifest.spec(backend_kind), "memory", None),
                 )
             )
         # Descending by size, then by id. The id is not decoration: every voice in
@@ -229,6 +309,11 @@ class CapabilityClass:
     #: derivation would have made the two indistinguishable and routed the VLM
     #: the first time somebody typed the wrong class name.
     routable: bool = False
+    #: The context this class's work actually uses, and how much of it at once.
+    #: None for a class whose candidates are not context-shaped at all — a voice,
+    #: an aligner, an RVC model — where there is no KV term to scale and the
+    #: collapsed estimate IS the answer.
+    work: "WorkingContext | None" = None
 
 
 #: Every capability class this build knows, in report order.
@@ -250,6 +335,24 @@ CLASSES: tuple[CapabilityClass, ...] = (
         name="clean",
         job_type="llm",
         routable=True,
+        # A LONGER RUN OF TEXT THAN TRANSLATE, AND STILL NOT A BOOK. Cleanup
+        # reads a passage and rewrites it, so it needs enough context to keep a
+        # paragraph's neighbours in view, and the two apps that run it already
+        # size their requests: Foundry's `CTX_MAX` is 16384 and it sends
+        # `max_model_len - (ceil(chars/2.5) + 256)`, so a full-width request is
+        # the whole of the context. 8192 with two in flight is that budget spent
+        # the way the lane actually spends it — Foundry keeps twelve requests
+        # moving but the cleanup pass is the narrow one — and it comes to the
+        # same bytes as one 16384 request, which is what this block was sized
+        # against before any of this arithmetic existed.
+        work=WorkingContext(
+            tokens=8192,
+            concurrency=2,
+            source=(
+                "Foundry clean/runner.ts CTX_MAX 16384 spent as two in flight; "
+                "PLACEHOLDER until a cleanup run is watched"
+            ),
+        ),
         purpose="cleanup and the other 9B-class text work",
         noun="qwen3.5 variants",
         candidates=_from_catalog(load_all_manifests, family="qwen3.5"),
@@ -262,6 +365,23 @@ CLASSES: tuple[CapabilityClass, ...] = (
         name="translate",
         job_type="llm",
         routable=True,
+        # THE RULING THIS WHOLE SPLIT CAME OUT OF. A paragraph at a time, batched,
+        # each block independent of the last — so the KV this act needs is
+        # thousands of tokens, not the model's 98304. Four in flight because the
+        # blocks are independent, which is the property that makes batching safe
+        # here and does not hold for cleanup.
+        work=WorkingContext(
+            tokens=4096,
+            concurrency=4,
+            source=(
+                "Owen 2026-09-16: \"translate/simplify/etc dont actually need "
+                "that much kv cache because it's batched with small blocks. it "
+                "isnt sending in the entire book to be translated, its only "
+                "sending it in one block (roughly a paragraph) at a time. and "
+                "its batched, so each block doesnt depend on the context of the "
+                "one that came before it\""
+            ),
+        ),
         purpose="translation, which needs a 27B-class model",
         noun="qwen3.8 variants",
         candidates=_from_catalog(load_all_manifests, family="qwen3.8"),
@@ -296,6 +416,20 @@ CLASSES: tuple[CapabilityClass, ...] = (
         name="simplify",
         job_type="llm",
         routable=True,
+        # Translate's ruling names this act in the same breath, so it carries the
+        # same working context rather than one reasoned separately.
+        work=WorkingContext(
+            tokens=4096,
+            concurrency=4,
+            source=(
+                "Owen 2026-09-16: \"translate/simplify/etc dont actually need "
+                "that much kv cache because it's batched with small blocks. it "
+                "isnt sending in the entire book to be translated, its only "
+                "sending it in one block (roughly a paragraph) at a time. and "
+                "its batched, so each block doesnt depend on the context of the "
+                "one that came before it\""
+            ),
+        ),
         purpose="simplification, which runs on the same 27B translation needs",
         noun="qwen3.8 variants",
         candidates=_from_catalog(load_all_manifests, family="qwen3.8"),
@@ -308,6 +442,20 @@ CLASSES: tuple[CapabilityClass, ...] = (
         name="analysis",
         job_type="llm",
         routable=True,
+        # Translate's ruling ends "/etc", and analysis is one of the acts it
+        # covers: a structured answer about a passage, not about a book.
+        work=WorkingContext(
+            tokens=4096,
+            concurrency=4,
+            source=(
+                "Owen 2026-09-16: \"translate/simplify/etc dont actually need "
+                "that much kv cache because it's batched with small blocks. it "
+                "isnt sending in the entire book to be translated, its only "
+                "sending it in one block (roughly a paragraph) at a time. and "
+                "its batched, so each block doesnt depend on the context of the "
+                "one that came before it\""
+            ),
+        ),
         purpose="structured analysis answers, on the same 27B",
         noun="qwen3.8 variants",
         candidates=_from_catalog(load_all_manifests, family="qwen3.8"),
@@ -319,6 +467,22 @@ CLASSES: tuple[CapabilityClass, ...] = (
     CapabilityClass(
         name="pages",
         job_type="llm",
+        # THE ONE CLASS THAT REALLY WANTS THE HEIGHT, and the reason a flat
+        # per-model context was never going to serve all five. A page at the
+        # app's 200 dpi is about 3_450 image tokens plus the prompt plus up to
+        # 8192 of answer (`models/dots-ocr.toml`), and `dots-ocr` declares 32768
+        # on cuda-linux for it. One at a time: `--parallel 1` in that manifest's
+        # llama-windows block, and "one page at a time is what the guard and the
+        # lease already assume".
+        work=WorkingContext(
+            tokens=32768,
+            concurrency=1,
+            source=(
+                "models/dots-ocr.toml: context_default 32768 on cuda-linux, and "
+                "its own note that one page is ~3450 image tokens plus up to "
+                "8192 of answer, one page at a time"
+            ),
+        ),
         purpose="reading page images (the VLM door)",
         noun="page readers",
         candidates=_from_catalog(load_all_manifests, family="dots"),
@@ -505,6 +669,31 @@ def pool_name(backend_kind: str, gpu_vendor: str) -> str:
     return pool
 
 
+def spell_out(candidate: Candidate, work: "WorkingContext | None") -> str:
+    """A candidate's need, with the terms it is made of, in one clause.
+
+    docs/FITS-AND-THE-CARD.md section 3: `fits` stops being a stored boolean and
+    becomes arithmetic that can STATE ITSELF. A refusal that says only "it needs
+    19.4 GiB" leaves the reader to guess which of the four terms is the one they
+    could do something about; this one names all four, and the two that belong to
+    the WORK are the two an app can change.
+
+    Falls back to the bare figure where the backend block has not been taken
+    apart — the sentence every class had before, unchanged, rather than a
+    breakdown invented to fill the shape.
+    """
+    need = candidate.need_bytes(work)
+    if work is None or candidate.memory is None:
+        return _gib(need)
+    terms = candidate.memory
+    kv = terms.kv_bytes_per_token * work.tokens * work.concurrency
+    return (
+        f"{_gib(need)} — {_gib(terms.weights_bytes)} weights + "
+        f"{_gib(terms.overhead_bytes)} overhead + {_gib(kv)} KV for "
+        f"{work.tokens} tokens x {work.concurrency} in flight"
+    )
+
+
 def decide(
     entry: CapabilityClass,
     backend_kind: str,
@@ -585,7 +774,11 @@ def decide(
         if backend_kind == LLAMA_WINDOWS and gpu_vendor == CPU_VENDOR
         else ""
     )
-    fitting = [c for c in found if c.memory_bytes_estimate <= budget]
+    # THE ONE LINE THE REFRAME CHANGES. `need_bytes` answers the question this
+    # class is actually asking — its own working context, its own concurrency —
+    # instead of the question the model's `context_default` asks. On a block with
+    # no terms it answers with the collapsed estimate, so nothing moves.
+    fitting = [c for c in found if c.need_bytes(entry.work) <= budget]
 
     if chosen is not None:
         # AN APP'S OWN CHOICE, and the reason the best-first walk below is not
@@ -612,14 +805,14 @@ def decide(
                 candidates=found,
                 fit_count=len(fitting),
             )
-        if picked.memory_bytes_estimate > budget:
+        if picked.need_bytes(entry.work) > budget:
             # The settings door refuses a choice that does not fit, so reaching
             # here means the MACHINE changed under a choice that did fit when it
             # was made — a config carried to a smaller card, or a desktop
             # allowance raised since. Say that, rather than silently demoting to
             # something that fits and leaving an app to wonder why its model
             # never runs.
-            shortfall = picked.memory_bytes_estimate - budget
+            shortfall = picked.need_bytes(entry.work) - budget
             return Decision(
                 capability=entry.name,
                 job_type=entry.job_type,
@@ -627,7 +820,7 @@ def decide(
                 selected="",
                 reason=(
                     f"disabled: {picked.id} was chosen for {entry.name} and needs "
-                    f"{_gib(picked.memory_bytes_estimate)}, and there is only "
+                    f"{spell_out(picked, entry.work)}, and there is only "
                     f"{arithmetic} — short by {_gib(shortfall)}. This choice fit "
                     f"the machine it was made on{cpu_note}"
                 ),
@@ -643,7 +836,7 @@ def decide(
             selected=picked.id,
             reason=(
                 f"{picked.id} was chosen for {entry.name}: it needs "
-                f"{_gib(picked.memory_bytes_estimate)} and there is {arithmetic}; "
+                f"{spell_out(picked, entry.work)} and there is {arithmetic}; "
                 f"{len(fitting)} of {len(found)} {entry.noun} fit{cpu_note}"
             ),
             shortfall_bytes=0,
@@ -660,7 +853,7 @@ def decide(
             enabled=True,
             selected=best.id,
             reason=(
-                f"{best.id} fits: it needs {_gib(best.memory_bytes_estimate)} and "
+                f"{best.id} fits: it needs {spell_out(best, entry.work)} and "
                 f"there is {arithmetic}; {len(fitting)} of {len(found)} "
                 f"{entry.noun} fit{cpu_note}"
             ),
@@ -671,7 +864,7 @@ def decide(
         )
 
     smallest = found[-1]
-    shortfall = smallest.memory_bytes_estimate - budget
+    shortfall = smallest.need_bytes(entry.work) - budget
     note = f" {entry.binary_note}" if entry.binary_note else ""
     return Decision(
         capability=entry.name,
@@ -680,7 +873,7 @@ def decide(
         selected="",
         reason=(
             f"disabled: the smallest of {len(found)} {entry.noun} is {smallest.id} "
-            f"at {_gib(smallest.memory_bytes_estimate)} and there is only "
+            f"at {spell_out(smallest, entry.work)} and there is only "
             f"{arithmetic} — short by {_gib(shortfall)}.{note}"
         ),
         shortfall_bytes=shortfall,

@@ -233,6 +233,7 @@ id = "{id}"
 family = "{family}"
 params_b = 1
 context_default = 4096
+trained_context = 262144
 modalities = ["text"]
 display = "Demo"
 description = "A fixture."

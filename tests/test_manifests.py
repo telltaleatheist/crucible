@@ -30,6 +30,7 @@ id = "demo-1b"
 family = "demo"
 params_b = 1
 context_default = 4096
+trained_context = 262144
 modalities = ["text"]
 
 [backends.cuda-linux]

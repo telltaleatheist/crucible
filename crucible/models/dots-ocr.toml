@@ -53,6 +53,15 @@ id = "dots-ocr"
 family = "dots"
 params_b = 3
 context_default = 32768
+
+# What the WEIGHTS support, read from the hub on 2026-09-16:
+#   rednote-hilab/dots.ocr @ main
+#   config.json `max_position_embeddings` = 131072
+# It is the wall behind context_default above and behind any backend
+# block's override; both are checked against it at load. It is also what
+# stops the card-derived ceiling running away — see
+# docs/FITS-AND-THE-CARD.md section 6.3.
+trained_context = 131072
 # The point of the file. `image` here is what makes the loader refuse
 # `--skip-mm-profiling` in the block below — the flag the two text manifests
 # carry, worth a measured 1.90 GiB on the 9B, and the one thing that must NOT be
@@ -282,6 +291,25 @@ engine_args = [
     "--max-num-seqs", "16",
 ]
 
+# ---------------------------------------- NO [memory] TABLE HERE, DELIBERATELY
+#
+# `memory_bytes_estimate` above is not a sum of terms at all -- it is the BUDGET,
+# 0.5 x 24_564 MiB, and the comment says so: "the engine's share is the budget,
+# whatever the model is". Taking a budget apart into weights, overhead and a
+# slope would produce three numbers that add to the right total and describe
+# nothing, which is worse than no table.
+#
+# What the comment DOES give -- 6_078_431_736 B of weights and 28_672 B/token
+# COMPUTED -- leaves about 5.4 GiB unaccounted, and that residual is explicitly
+# two different things at once: the vision tower's activation peak and the CUDA
+# graphs, which are fixed, AND "the KV of more than one page at a time", which is
+# the concurrency term. Putting the whole of it in `overhead_bytes` would count
+# the second part again the moment anything asked what four pages cost.
+#
+# The measurement this wants is already written down two screens up ("WHAT MUST
+# BE MEASURED, AND WHEN: the first time a card is free"), and calibration at two
+# contexts answers it in the same run.
+
 # ###########################################################################
 # STILL NO `[backends.mlx-darwin]` — AND SINCE 2026-09-14 THE REASON IS A
 # MEASUREMENT RATHER THAN AN ABSENCE OF ONE.
@@ -395,3 +423,13 @@ mmproj = "mmproj-dots.ocr-Q8_0.gguf"
 memory_bytes_estimate = 4_738_598_784
 context_default = 16384
 engine_args = ["--parallel", "1"]
+
+# ---------------------------------------- NO [memory] TABLE HERE, DELIBERATELY
+#
+# The estimate is 3.24 GB of weights plus Foundry's flat 1.5 GB, and splitting
+# that 1.5 GB the way the two text manifests split theirs needs this model's KV
+# rate per token. The 9B and the 27B both state theirs, computed from
+# config.json, in the blocks that use them; dots.ocr's is stated nowhere in this
+# file, and a rate worked out here would be the one number in this table nothing
+# cites. The first Windows load -- which section 3.10 fact 8 already owes -- is
+# where it comes from.

@@ -140,6 +140,7 @@ id = "faster-whisper-base"
 family = "qwen3.5"
 params_b = 9
 context_default = 4096
+trained_context = 262144
 modalities = ["text"]
 
 [backends.cuda-linux]

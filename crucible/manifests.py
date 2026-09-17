@@ -207,6 +207,22 @@ _MODEL_REQUIRED: dict[str, type] = {
     "family": str,
     "params_b": int,
     "context_default": int,
+    # WHAT THE WEIGHTS SUPPORT, which is a different fact from either of the
+    # other two contexts in this file and is the only one that belongs to the
+    # checkpoint rather than to a machine. `context_default` is what a host
+    # CHOOSES to serve; a backend block's override is what an accelerator has
+    # ROOM for; this is the wall behind both, `max_position_embeddings` from the
+    # repo's own config.json at the pinned revision.
+    #
+    # Required, and required for a reason that showed up the hour it was missing:
+    # the ceiling Crucible derives from the card (`max_context_affordable`) is
+    # unbounded above without it, and the Mac's 64 GB of unified memory afforded
+    # 1_389_135 tokens of the 9B — five times what the weights can do. Publishing
+    # that would be handing out a number nothing behind it can honour, which is
+    # exactly what this design refuses Ollama for (docs/FITS-AND-THE-CARD.md
+    # section 6.1). A model with no stated wall must not silently get an
+    # infinite one.
+    "trained_context": int,
     # Required, not defaulted to `["text"]`, for the reason every other key in
     # this table is required: a manifest that forgets it must not quietly load as
     # text-only and have a page reader refused at request time with an error
@@ -249,7 +265,67 @@ _BACKEND_OPTIONAL: dict[str, type] = {
     # once the weights are down. Absent means "the model's number"; it is never
     # a silent default.
     "context_default": int,
+    # THE SAME NUMBER AS `memory_bytes_estimate`, TAKEN APART — see
+    # docs/FITS-AND-THE-CARD.md. The collapsed estimate answers one question
+    # ("does this model fit at the context this block serves") and the class that
+    # is about to run is not always asking it: translate sends a paragraph at a
+    # time, batched and independent, and gets refused for a KV cache it will
+    # never fill. Optional, because a block that has not been taken apart is
+    # honest as it stands; where it IS present the two must agree, and the parser
+    # below checks that rather than trusting it.
+    "memory": dict,
 }
+
+#: What `[backends.<kind>.memory]` must state. Every term is a count of bytes
+#: except `basis` and the context the estimate was taken at, and nothing is
+#: optional: a term left out would be a term some later reader supplies from
+#: somewhere else.
+_MEMORY_REQUIRED: dict[str, type] = {
+    #: What the weights themselves occupy ON THE CARD, which is not the size of
+    #: the files: vLLM's own "Model loading took" is larger than the safetensors
+    #: sum, and an MLX load is smaller because it maps rather than reads.
+    "weights_bytes": int,
+    #: Everything the engine holds that is neither weights nor KV — activation
+    #: peak, CUDA graphs, the allocator's own slack. It is a real term and it is
+    #: the one nobody remembers: on the 27B-4bit it is 1.44 GiB, larger than the
+    #: whole KV pool that block runs with.
+    "overhead_bytes": int,
+    #: The slope. MEASURED where a card has answered, COMPUTED from config.json
+    #: where none has — and the difference is not academic: the 27B-4bit's
+    #: computed 65_536 was 24% under its measured 86_251, because vLLM pads the
+    #: attention page up to the linear layers' recurrent state. A computed rate
+    #: is a FLOOR.
+    "kv_bytes_per_token": int,
+    #: `measured` or `computed`, and it travels to the screen for the reason
+    #: `[local] needs_basis` does: a picker is entitled to know which of the two
+    #: kinds of number it is about to refuse somebody with.
+    "basis": str,
+    #: The context the numbers above were taken at. Present so the consistency
+    #: check below has something to check AGAINST, and because an estimate is
+    #: only true at the context it was measured at — the defect that put a Mac
+    #: context of 98304 on a Windows block with a 1.5 GB KV allowance
+    #: (docs/FITS-AND-THE-CARD.md section 0b).
+    "measured_at_context": int,
+}
+
+#: Where the terms came from, weakest last. `measured` is watched on a card;
+#: `computed` is derived from the checkpoint's own config.json — and is a FLOOR,
+#: because the 27B-4bit's computed 65_536 B/token turned out to be 24% under the
+#: 86_251 its card actually spent. `declared` is neither: it is a stated
+#: allowance nobody has watched or worked out, which is what every
+#: `llama-windows` block has today (Foundry's 1.5 GB `OVERHEAD_GB`), and it
+#: travels to the screen for the reason `[local] needs_basis` does — a picker is
+#: entitled to know which of the three it is about to refuse somebody with.
+MEMORY_BASES: frozenset[str] = frozenset({"measured", "computed", "declared"})
+
+#: How far the terms may sit from the collapsed estimate before the manifest is
+#: refused. They are measurements of PARTS against a measurement of the WHOLE at
+#: a peak, so bit-exact agreement would be a lie rather than a standard; 5% is
+#: wide enough for that and narrow enough to catch the mistakes that actually
+#: happen — a term typed in GB where the estimate is GiB (7.4% adrift), or a KV
+#: rate computed from config.json where the card says otherwise (24% on the
+#: 27B-4bit).
+MEMORY_TERMS_TOLERANCE = 0.05
 
 #: The two shapes a model takes on a machine with no Crucible. `ollama` is a
 #: tag in Ollama's library; `gguf` is a file (and, for a model that reads
@@ -325,6 +401,66 @@ class ManifestError(CrucibleError):
 
 
 @dataclass(frozen=True)
+class MemoryTerms:
+    """`memory_bytes_estimate`, taken apart into the terms it is made of.
+
+        engine_total = weights + overhead + kv_bytes_per_token x context x concurrency
+
+    The first two belong to the model and the engine; the last two belong to the
+    WORK, and that is the whole point of the split (docs/FITS-AND-THE-CARD.md
+    section 1). Collapsed into one number keyed to one context, a 27B is refused
+    on a 24 GB card for a 98304-token working context that translate — which
+    sends a paragraph at a time, batched, each block independent of the last —
+    is never going to ask for.
+    """
+
+    weights_bytes: int
+    overhead_bytes: int
+    kv_bytes_per_token: int
+    basis: str
+    measured_at_context: int
+
+    @property
+    def fixed_bytes(self) -> int:
+        """What is on the card before a single token of KV: the intercept."""
+        return self.weights_bytes + self.overhead_bytes
+
+    def bytes_for(self, *, context: int, concurrency: int) -> int:
+        """What the engine holds serving `concurrency` requests of `context`."""
+        if context <= 0:
+            raise ValueError(f"context must be positive, got {context}")
+        if concurrency <= 0:
+            raise ValueError(f"concurrency must be positive, got {concurrency}")
+        return self.fixed_bytes + self.kv_bytes_per_token * context * concurrency
+
+    def max_context(self, *, available_bytes: int, concurrency: int) -> int:
+        """The tallest context this many bytes affords, at this concurrency.
+
+        THE ANSWER TO "how much can I send", and it is derived rather than typed
+        — the number a client should read instead of guessing a chunk size and
+        discovering the ceiling as a 400 (docs/FITS-AND-THE-CARD.md section 6.3).
+        Zero means the weights and overhead alone do not fit, which is a
+        different refusal from "your request is too long" and must not be
+        rounded into one.
+        """
+        if concurrency <= 0:
+            raise ValueError(f"concurrency must be positive, got {concurrency}")
+        room = available_bytes - self.fixed_bytes
+        if room <= 0:
+            return 0
+        return room // (self.kv_bytes_per_token * concurrency)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "weights_bytes": self.weights_bytes,
+            "overhead_bytes": self.overhead_bytes,
+            "kv_bytes_per_token": self.kv_bytes_per_token,
+            "basis": self.basis,
+            "measured_at_context": self.measured_at_context,
+        }
+
+
+@dataclass(frozen=True)
 class BackendSpec:
     """One `[backends.<kind>]` block."""
 
@@ -336,6 +472,11 @@ class BackendSpec:
     engine_args: tuple[str, ...]
     #: This backend's own context, or None to use the model's.
     context_default: int | None
+    #: This block's estimate taken apart, or None where nobody has taken it
+    #: apart yet. `memory_bytes_estimate` above stays the answer at this block's
+    #: own context either way; these terms are what lets a CLASS ask a different
+    #: question (docs/FITS-AND-THE-CARD.md).
+    memory: "MemoryTerms | None" = None
     #: `llama-windows`: the one GGUF in `hf_repo` this row IS, and the vision
     #: projector beside it. None on every other backend, where the whole repo
     #: is the weights and there is no file to choose.
@@ -363,6 +504,7 @@ class BackendSpec:
             "memory_bytes_estimate": self.memory_bytes_estimate,
             "engine_args": list(self.engine_args),
             "context_default": self.context_default,
+            "memory": None if self.memory is None else self.memory.to_dict(),
             "file": self.file,
             "mmproj": self.mmproj,
         }
@@ -483,6 +625,9 @@ class ModelManifest:
     family: str
     params_b: int
     context_default: int
+    #: What `max_position_embeddings` says at the pinned revision — the wall
+    #: behind every host's choice.
+    trained_context: int
     #: In the order the manifest wrote them, so a row reads the way the file does.
     modalities: tuple[str, ...]
     backends: dict[str, BackendSpec]
@@ -547,6 +692,7 @@ class ModelManifest:
             "family": self.family,
             "params_b": self.params_b,
             "context_default": self.context_default,
+            "trained_context": self.trained_context,
             "modalities": list(self.modalities),
             # Always present, null when unstated, for the reason `defaults` is:
             # a row whose keys come and go cannot tell "no display name" from
@@ -907,6 +1053,17 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
         raise ManifestError(
             f"{path.name}: model.params_b must be positive, got {model['params_b']}"
         )
+    if model["trained_context"] <= 0:
+        raise ManifestError(
+            f"{path.name}: model.trained_context must be positive, got "
+            f"{model['trained_context']}"
+        )
+    if model["context_default"] > model["trained_context"]:
+        raise ManifestError(
+            f"{path.name}: model.context_default is {model['context_default']} "
+            f"and the weights are trained at {model['trained_context']}. A host "
+            f"may serve less than the checkpoint supports; it cannot serve more"
+        )
     if model["context_default"] <= 0:
         raise ManifestError(
             f"{path.name}: model.context_default must be positive, got "
@@ -1079,6 +1236,85 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             raise ManifestError(
                 f"{where}: context_default must be positive, got {backend_context}"
             )
+        if backend_context is not None and backend_context > model["trained_context"]:
+            raise ManifestError(
+                f"{where}: context_default is {backend_context} and the weights "
+                f"are trained at {model['trained_context']}. An accelerator with "
+                f"room to spare does not give a checkpoint a longer memory"
+            )
+        # ------------------------------------------------- the terms, if stated
+        terms: MemoryTerms | None = None
+        memory_table = block.get("memory")
+        if memory_table is not None:
+            memory_where = f"{where}.memory"
+            if not isinstance(memory_table, dict):
+                raise ManifestError(f"{memory_where}: must be a table")
+            check_table(memory_where, memory_table, _MEMORY_REQUIRED, {})
+            for key in ("weights_bytes", "kv_bytes_per_token"):
+                if memory_table[key] <= 0:
+                    raise ManifestError(
+                        f"{memory_where}: {key} must be positive, got "
+                        f"{memory_table[key]}"
+                    )
+            # OVERHEAD MAY BE ZERO, and zero is a statement rather than a gap:
+            # it says this estimate never accounted for the engine holding
+            # anything but weights and KV. Both `qwen3.8-27b` blocks are exactly
+            # that, and their own header says so — "weights at bfloat16 as they
+            # sit on disk plus the KV cache at context_default" — and warns that
+            # the same arithmetic ran 6% under on the 9B where a card could
+            # check it. Refusing zero here would force somebody to invent a
+            # number to get past the parser, which is the opposite of the point.
+            if memory_table["overhead_bytes"] < 0:
+                raise ManifestError(
+                    f"{memory_where}: overhead_bytes cannot be negative, got "
+                    f"{memory_table['overhead_bytes']}"
+                )
+            if memory_table["basis"] not in MEMORY_BASES:
+                raise ManifestError(
+                    f"{memory_where}: basis {memory_table['basis']!r} is not one "
+                    f"of {sorted(MEMORY_BASES)}"
+                )
+            if memory_table["measured_at_context"] <= 0:
+                raise ManifestError(
+                    f"{memory_where}: measured_at_context must be positive, got "
+                    f"{memory_table['measured_at_context']}"
+                )
+            terms = MemoryTerms(
+                weights_bytes=memory_table["weights_bytes"],
+                overhead_bytes=memory_table["overhead_bytes"],
+                kv_bytes_per_token=memory_table["kv_bytes_per_token"],
+                basis=memory_table["basis"],
+                measured_at_context=memory_table["measured_at_context"],
+            )
+            # THE TWO OWNERS ARE COMPARED, which is the only reason it is safe to
+            # have two (ARCHITECTURE.md R1: the chaos is always a fact with two
+            # owners and nothing checking them against each other). The terms and
+            # the collapsed estimate are two readings of one thing — parts and
+            # whole — so they are allowed to differ by a measurement's worth and
+            # not by a mistake's worth.
+            served = backend_context or model["context_default"]
+            if terms.measured_at_context != served:
+                raise ManifestError(
+                    f"{memory_where}: measured_at_context is "
+                    f"{terms.measured_at_context} and this block serves "
+                    f"{served}. An estimate is only true at the context it was "
+                    f"taken at; state the terms at the context this block runs, "
+                    f"or move the block's context_default to match what was "
+                    f"measured (docs/FITS-AND-THE-CARD.md section 0b)"
+                )
+            from_terms = terms.bytes_for(context=served, concurrency=1)
+            stated = block["memory_bytes_estimate"]
+            drift = abs(from_terms - stated) / stated
+            if drift > MEMORY_TERMS_TOLERANCE:
+                raise ManifestError(
+                    f"{memory_where}: the terms come to {from_terms} bytes at "
+                    f"{served} tokens and memory_bytes_estimate says {stated} — "
+                    f"{drift:.1%} apart, past the {MEMORY_TERMS_TOLERANCE:.0%} a "
+                    f"parts-against-whole reading is allowed. One of the two is "
+                    f"wrong and the manifest does not say which; check for GB "
+                    f"where GiB was meant, and for a kv_bytes_per_token computed "
+                    f"from config.json on a backend whose card says otherwise"
+                )
         backends[kind] = BackendSpec(
             backend=kind,
             engine=engine,
@@ -1087,6 +1323,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             memory_bytes_estimate=block["memory_bytes_estimate"],
             engine_args=tuple(engine_args),
             context_default=backend_context,
+            memory=terms,
             file=block.get("file"),
             mmproj=block.get("mmproj"),
         )
@@ -1096,6 +1333,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
         family=model["family"],
         params_b=model["params_b"],
         context_default=model["context_default"],
+        trained_context=model["trained_context"],
         modalities=tuple(modalities),
         backends=backends,
         path=path,

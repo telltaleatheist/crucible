@@ -36,6 +36,15 @@ id = "qwen3.8-27b"
 family = "qwen3.8"
 params_b = 27
 context_default = 12288
+
+# What the WEIGHTS support, read from the hub on 2026-09-16:
+#   Qwen/Qwen3.8-27B @ 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+#   config.json `text_config.max_position_embeddings` = 262144
+# It is the wall behind context_default above and behind any backend
+# block's override; both are checked against it at load. It is also what
+# stops the card-derived ceiling running away — see
+# docs/FITS-AND-THE-CARD.md section 6.3.
+trained_context = 262144
 # Text, for the reason models/qwen3.5-9b.toml gives at length: the checkpoint has
 # a vision tower and this server does not offer it. This block carries no
 # `--skip-mm-profiling`, so nothing stops it being offered for images one day —
@@ -80,9 +89,38 @@ engine_args = [
     "--max-num-seqs", "16",
 ]
 
+# ------------------------------------------------- the same number, taken apart
+#
+# `overhead_bytes = 0` IS THE STATEMENT, not a gap. This file's header says what
+# its estimates are made of -- "weights at bfloat16 as they sit on disk plus the
+# KV cache at context_default" -- and nothing else. There is no overhead term
+# because nobody has ever measured one here: no machine Owen owns can hold 51.7
+# GiB of weights. The header already draws the conclusion ("treat these two as a
+# floor, not a ceiling"); writing the zero makes the floor arithmetic rather than
+# advice, and stops a reader assuming an allowance is hiding inside the number.
+[backends.cuda-linux.memory]
+weights_bytes = 55_563_006_776
+overhead_bytes = 0
+kv_bytes_per_token = 65_536
+basis = "computed"
+measured_at_context = 12288
+
 [backends.mlx-darwin]
 engine = "mlx-lm"
 hf_repo = "mlx-community/Qwen3.8-27B-bf16"
 revision = "6f265714824f3c38d4452baa1628aef3d9b9aae9"
 memory_bytes_estimate = 55_518_912_853
 engine_args = []
+
+# ------------------------------------------------- the same number, taken apart
+#
+# The same shape as the cuda-linux block above, off the same header: the mlx
+# repo's safetensors sum plus KV at 12288, and no overhead term because none was
+# measured. On the 9B, where a Mac COULD be measured, the residual came to 2.07
+# GB -- so this row is under by at least that, and says so by carrying a zero.
+[backends.mlx-darwin.memory]
+weights_bytes = 54_713_606_485
+overhead_bytes = 0
+kv_bytes_per_token = 65_536
+basis = "computed"
+measured_at_context = 12288

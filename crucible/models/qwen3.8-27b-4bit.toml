@@ -119,6 +119,15 @@ id = "qwen3.8-27b-4bit"
 family = "qwen3.8"
 params_b = 27
 context_default = 98304
+
+# What the WEIGHTS support, read from the hub on 2026-09-16:
+#   avyukth/Qwen3.8-27B-AWQ-INT4 @ 5a2ee524cbc9f3ac5df12729ecf0c4b57f311192
+#   config.json `text_config.max_position_embeddings` = 262144
+# It is the wall behind context_default above and behind any backend
+# block's override; both are checked against it at load. It is also what
+# stops the card-derived ceiling running away — see
+# docs/FITS-AND-THE-CARD.md section 6.3.
+trained_context = 262144
 # Text, for the same reason as the bf16 manifest and the 9B's: a vision tower the
 # server does not offer, and on cuda-linux a `--skip-mm-profiling` that leaves
 # nothing reserved for a page. models/qwen3.5-9b.toml carries the long version.
@@ -232,6 +241,26 @@ engine_args = [
     "--language-model-only",
 ]
 
+# ------------------------------------------------- the same number, taken apart
+#
+# THE ONE FULLY MEASURED ROW IN THIS CATALOG, and the one that proves why the
+# split is worth having. All three terms are read straight off the 2026-09-12 run
+# above: 17.68 GiB of weights on the card, 19.12 GiB of non-KV demand (so 1.44
+# GiB is neither weights nor KV -- larger than the whole 1.51 GiB KV pool this
+# block runs with, and the term nobody remembers), and 86_251 B per token of KV
+# rather than the 65_536 the architecture says.
+#
+# The terms add to 21_942_765_977 at 16384 and `memory_bytes_estimate` says
+# 21_633_171_456 -- 1.4% apart, which is parts against a whole measured at a peak
+# during a 15,380-token completion rather than a full 16,384. The terms are the
+# conservative side of that, which is the side a guard should err on.
+[backends.cuda-linux.memory]
+weights_bytes = 18_983_441_367
+overhead_bytes = 1_546_188_226
+kv_bytes_per_token = 86_251
+basis = "measured"
+measured_at_context = 16384
+
 [backends.mlx-darwin]
 engine = "mlx-lm"
 hf_repo = "mlx-community/Qwen3.8-27B-4bit"
@@ -261,6 +290,23 @@ revision = "3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
 # it is 2.2x low. That script now reports the unified-memory delta instead.)
 memory_bytes_estimate = 33_873_484_870
 engine_args = []
+
+# ---------------------------------------- NO [memory] TABLE HERE, DELIBERATELY
+#
+# docs/FITS-AND-THE-CARD.md section 2 splits an estimate into a fixed part and a
+# per-token slope. This block cannot be split that way and the comment above is
+# why: the 34% the computed figure fell short by is not weights and is not KV, it
+# is what mlx-lm's prefill holds at once -- 2048-token steps, logits over the
+# whole step, a 248320-token vocab, so 2.03 GB per step before any temporary. At
+# 98304 tokens that residual is the largest term after the weights, and NOTHING
+# MEASURED SAYS WHETHER IT IS FLAT OR RISING. One measurement cannot tell an
+# intercept from a slope; writing either would be inventing the shape of a curve
+# from a single point, and the comment above already says in as many words: "Do
+# not compute this number for a long-context model."
+#
+# Two-point calibration (section 4) is exactly the answer, and it is cheap here:
+# two loads on a machine with 64 GB. Until then this block keeps the collapsed
+# estimate, which is a true number about one context and admits to nothing else.
 
 # ---------------------------------------------------------------------------
 # PHASE15-HOST.md sections 0 and 3.10: the 27B that translate, simplify and
@@ -333,3 +379,16 @@ memory_bytes_estimate = 17_964_440_224
 # discover.
 context_default = 16384
 engine_args = ["--parallel", "1"]
+
+# ------------------------------------------------- the same number, taken apart
+#
+# `declared`, exactly as the 9B's llama-windows block: the GGUF's own size, the
+# 65_536 B/token this model's config.json gives, and whatever is left of
+# Foundry's 1.5 GB allowance once that KV is removed at 16384. Nothing here has
+# been watched on a card.
+[backends.llama-windows.memory]
+weights_bytes = 16_464_440_224
+overhead_bytes = 426_258_176
+kv_bytes_per_token = 65_536
+basis = "declared"
+measured_at_context = 16384

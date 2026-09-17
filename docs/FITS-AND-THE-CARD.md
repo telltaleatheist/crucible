@@ -5,7 +5,34 @@ adjudicate on its own. to decide how much it can fit… we need to come up with 
 creative way of measuring the user's card and determining what would fit, and if
 kv cache+overhead+model weights will fit on their card."*
 
-NOT BUILT. This is the design, written while it was sharp.
+**STATUS 2026-09-16: steps 1, 2, 3 and the published ceiling are BUILT.** What
+is left is step 4 (two-point calibration, which wants the card), step 5
+(`context_exceeded` refused before the engine) and step 6 (the loaded context as
+a settings knob). The sections below are the design as written; where the build
+went further than the design said, the section says so.
+
+What landed:
+
+* `[backends.<kind>.memory]` in the manifests — `weights_bytes`,
+  `overhead_bytes`, `kv_bytes_per_token`, `basis`, `measured_at_context` — on
+  seven of eleven blocks, every number quoted from prose already in the file.
+  The parser refuses terms that do not add back up to `memory_bytes_estimate`
+  within 5%, and refuses terms taken at a context the block does not serve.
+* `[model] trained_context` — what the WEIGHTS support, read from each pinned
+  checkpoint's config.json. Required, and it bounds both the model's own
+  `context_default` and any backend override.
+* `CapabilityClass.work` — five classes now state the context and concurrency
+  they actually use, each with a `source`.
+* `decide()` asks `candidate.need_bytes(entry.work)` instead of reading a stored
+  estimate, and every refusal names all four terms.
+* `max_context` on the `llm` rows: `{tokens, card_affords, weights_allow,
+  limited_by, concurrency, basis}`.
+
+The four blocks WITHOUT terms are not an oversight and each says why in place:
+`dots-ocr`'s cuda-linux estimate is a budget rather than a sum, its
+llama-windows block has no cited KV rate, and the 27B-4bit on MLX has a residual
+nothing measured says is flat or rising. A candidate with no terms answers every
+question with its collapsed estimate, exactly as before.
 
 ## 0. The correction this starts from
 

@@ -41,6 +41,15 @@ params_b = 9
 # inherit a number nothing argues for, which is how it reached two backends in
 # the first place.
 context_default = 16384
+
+# What the WEIGHTS support, read from the hub on 2026-09-16:
+#   Qwen/Qwen3.5-9B @ c202236235762e1c871ad0ccb60c8ee5ba337b9a
+#   config.json `text_config.max_position_embeddings` = 262144
+# It is the wall behind context_default above and behind any backend
+# block's override; both are checked against it at load. It is also what
+# stops the card-derived ceiling running away — see
+# docs/FITS-AND-THE-CARD.md section 6.3.
+trained_context = 262144
 # Text, and that is a fact about this server rather than about the weights.
 # Qwen3.5-9B has a vision tower; the cuda-linux block below starts vLLM with
 # `--skip-mm-profiling`, so nothing on the card is reserved for an image, and the
@@ -239,6 +248,36 @@ engine_args = [
     "--language-model-only",
 ]
 
+# ------------------------------------------------- the same number, taken apart
+#
+# docs/FITS-AND-THE-CARD.md section 2. `memory_bytes_estimate` above answers ONE
+# question -- does this model fit at 16384 -- and the class about to run is not
+# always asking it. Every term here is quoted from the measurement above, and the
+# parser checks that they add back up to it.
+#
+#   weights_bytes       17.66 GiB, "weights on the card", MEASURED
+#   overhead_bytes      19.02 - 17.66 GiB, the non-KV demand less the weights:
+#                       vLLM's non-torch allocation, the profiled activation
+#                       peak and 0.09 GiB of CUDA graphs. MEASURED.
+#   kv_bytes_per_token  32_768, COMPUTED from config.json the way the
+#                       llama-windows block below sets out: 8 full-attention
+#                       layers x 2 x 4 kv heads x 256 head_dim x 2 B. The other
+#                       24 layers are gated-delta-net, per-SEQUENCE, and do not
+#                       grow with length.
+#
+# `basis` is the WEAKEST term's, not the strongest: two of these were watched on
+# a card and the slope was not, and the slope is the term the 27B-4bit block
+# proves an architecture cannot be trusted for -- its computed 65_536 was 24%
+# under the 86_251 vLLM actually spent, because the attention page is padded up
+# to the linear layers' recurrent state. Two-point calibration on this card
+# (docs/FITS-AND-THE-CARD.md section 4) is what turns this row `measured`.
+[backends.cuda-linux.memory]
+weights_bytes = 18_962_006_507
+overhead_bytes = 1_460_288_880
+kv_bytes_per_token = 32_768
+basis = "computed"
+measured_at_context = 16384
+
 [backends.mlx-darwin]
 engine = "mlx-lm"
 hf_repo = "mlx-community/Qwen3.5-9B-bf16"
@@ -292,6 +331,27 @@ memory_bytes_estimate = 20_515_916_006
 # could not already do — it stops the server UNDER-REPORTING what it serves.
 engine_args = []
 
+# ------------------------------------------------- the same number, taken apart
+#
+# The terms the comment above already computes, written down. `weights_bytes` is
+# mlx's own "after load active 17.91 GB"; `overhead_bytes` is the rest of the
+# measured 20_378_749_158 peak once the KV of the 12198 tokens it was taken at is
+# removed -- the activations and allocator slack that comment calls "the 1.16 GB
+# by which the peak exceeded computed weights+KV".
+#
+# THE ASSUMPTION IS THE BLOCK'S OWN, NOT A NEW ONE: that the residual does not
+# grow with context, because mlx-lm prefills in fixed-size chunks. The comment
+# above states it, states that it was reasoned rather than re-read from mlx-lm's
+# source, and gives the honest upper bound if it is wrong (21.23 GB). Writing it
+# as a constant intercept here changes nothing about that, except that it is now
+# somewhere a calibration run can overwrite.
+[backends.mlx-darwin.memory]
+weights_bytes = 17_910_000_000
+overhead_bytes = 2_069_045_094
+kv_bytes_per_token = 32_768
+basis = "computed"
+measured_at_context = 16384
+
 # ---------------------------------------------------------------------------
 # PHASE15-HOST.md sections 0 and 3.10: the same weights the cuda-linux block
 # names (`Qwen/Qwen3.5-9B`), quantized to Q8_0 by unsloth, run by llama.cpp on
@@ -328,3 +388,19 @@ revision = "3885219b6810b007914f3a7950a8d1b469d598a5"
 file = "Qwen3.5-9B-Q8_0.gguf"
 memory_bytes_estimate = 11_027_502_048
 engine_args = ["--parallel", "1"]
+
+# ------------------------------------------------- the same number, taken apart
+#
+# `declared`, and that is the honest word for it: nobody has watched this on a
+# Windows card and nobody worked the overhead out. `weights_bytes` is the GGUF's
+# own size from the tree API; `kv_bytes_per_token` is the 32_768 the comment
+# above computes from config.json; `overhead_bytes` is what is LEFT of Foundry's
+# 1.5 GB `OVERHEAD_GB` once that KV is taken out of it at this context -- so the
+# three terms come back to exactly the estimate above rather than approximately.
+# The first load on a Windows card replaces all of this.
+[backends.llama-windows.memory]
+weights_bytes = 9_527_502_048
+overhead_bytes = 963_129_088
+kv_bytes_per_token = 32_768
+basis = "declared"
+measured_at_context = 16384

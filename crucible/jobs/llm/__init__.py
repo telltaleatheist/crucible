@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ... import accelerator, jobenv, llamacpp, weights
 from ...backend import LLAMA_WINDOWS
+from ...capability import available_bytes
 from ...config import Config
 from ...engines import EngineError
 from ...errors import ApiError, JobError
@@ -227,6 +228,8 @@ def model_rows(
         estimate: int | None = None
         revision: str | None = None
         max_model_len: int | None = None
+        terms: Any = None
+        ceiling: dict[str, Any] | None = None
         is_installed = False
         reason: str | None = None
         if not supported:
@@ -238,6 +241,48 @@ def model_rows(
             spec = manifest.spec(backend_kind)
             estimate = spec.memory_bytes_estimate
             revision = spec.revision
+            terms = spec.memory
+            if terms is not None:
+                # THE CEILING, run backwards out of the same terms that decide
+                # whether the model fits at all (docs/FITS-AND-THE-CARD.md
+                # section 6.3). At one request in flight, because that is the
+                # number a client sizing ONE request needs; a client batching
+                # four divides by four, and the class about to run already
+                # declares its own concurrency.
+                #
+                # Against the card's FREE budget, not its total: vLLM's
+                # `--gpu-memory-utilization` is a fraction of the total and the
+                # Windows desktop is spent on top of it, which is the measured
+                # defect this whole design started from (section 0a).
+                afforded = terms.max_context(
+                    available_bytes=available_bytes(
+                        backend.gpu.vram_bytes, config.desktop_allowance_bytes
+                    ),
+                    concurrency=1,
+                )
+                # BOTH WALLS, AND THE LOWER OF THEM, rather than one number with
+                # the reasoning swallowed. The card and the weights each impose a
+                # limit and they are limits of different kinds: more VRAM raises
+                # the first and nothing raises the second. A client reads
+                # `tokens`; a person reading a refusal wants to know WHICH wall
+                # they hit, because one of them is worth buying a bigger card for
+                # and the other is not.
+                #
+                # This is also the field that caught itself: before
+                # `trained_context` existed, a 64 GB Mac afforded 1_389_135
+                # tokens of a checkpoint trained at 262_144, and publishing that
+                # would have been Crucible doing precisely what section 6.1
+                # refuses Ollama for.
+                ceiling = {
+                    "tokens": min(afforded, manifest.trained_context),
+                    "card_affords": afforded,
+                    "weights_allow": manifest.trained_context,
+                    "limited_by": (
+                        "card" if afforded <= manifest.trained_context else "weights"
+                    ),
+                    "concurrency": 1,
+                    "basis": terms.basis,
+                }
             # For the model that is up, the number the engine was actually
             # started with, read off the engine's own record; for everything else
             # the number this host would start it with. A manifest edited under a
@@ -316,6 +361,33 @@ def model_rows(
             # `revision` and `memory_bytes_estimate` are: the number lives in a
             # backend block this manifest does not have.
             "max_model_len": max_model_len,
+            # What the WEIGHTS support, which is neither of the two contexts
+            # above: `context_default` is what this host chose and
+            # `max_model_len` is what the engine was started with, and both are
+            # decisions. This one is a property of the checkpoint and is the same
+            # on every machine, which is why it is not null for an unsupported
+            # backend the way `revision` is.
+            "trained_context": manifest.trained_context,
+            # --------------------------------------------------- the ceiling
+            #
+            # HOW FAR THE WALL COULD MOVE, as against `max_model_len`, which is
+            # where the wall IS. A request longer than `max_model_len` is refused
+            # right now; a request longer than `max_context.tokens` cannot be
+            # served by this machine at all, whatever it is restarted with. The
+            # gap between the two is exactly what a settings door may offer.
+            #
+            # Owen's Mac-versus-PC case is this field: same model, same act, two
+            # numbers, and an app that reads it never has to discover the
+            # difference as a 400. Null where this backend block has not been
+            # taken apart into terms — null rather than a guess, because a
+            # ceiling stated without arithmetic behind it is the thing Ollama
+            # does (section 6.1: it clamps a million to 262144 and tells nobody).
+            "max_context": ceiling,
+            # The terms the ceiling came out of, so a client can show the working
+            # rather than take a figure on trust — and so the `basis` travels:
+            # `measured` was watched on a card, `computed` came from config.json
+            # and is a FLOOR, `declared` is an allowance nobody has checked.
+            "memory_terms": None if terms is None else terms.to_dict(),
             # What a chat request that states nothing will be answered with
             # (PHASE2-LLM.md section 9). For the resident model this is the
             # record the proxy is ACTUALLY applying, read off the engine's own
