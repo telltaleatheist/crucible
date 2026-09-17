@@ -953,10 +953,10 @@ def test_a_render_writes_the_voices_document_narrator_reads(
     assert entry["checkpointDir"] == str(home / "voices" / VOICE / "cuda-linux")
     # deathstalker.toml's own numbers, on the wire narrator reads.
     assert entry["maxChars"] == 800
-    assert entry["safeMinChars"] == 600
+    assert entry["safeMinChars"] == 500
     assert entry["safeMaxChars"] == 800
     assert entry["sampling"] == {"temperature": 0.8, "topP": 0.95, "topK": 50}
-    assert entry["paceCharsPerSec"] == 16.64
+    assert entry["paceCharsPerSec"] == 15.91
     assert narrator[0].environment()["NARRATOR_HIGGS_VOICES"] == str(document)
 
 

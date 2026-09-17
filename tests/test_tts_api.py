@@ -179,8 +179,8 @@ def test_a_voice_with_everything_in_place_is_loadable(
     assert row["needs_reference"] is False
     assert row["estimate_basis"] == "declared"
     assert row["fingerprint"] == f"{VOICE}@{row['revision']}"
-    assert row["pace"]["pace_chars_per_sec"] == 16.64
-    assert row["pace"]["safe_min_chars"] == 600
+    assert row["pace"]["pace_chars_per_sec"] == 15.91
+    assert row["pace"]["safe_min_chars"] == 500
 
 
 def test_a_row_never_carries_the_sampling(

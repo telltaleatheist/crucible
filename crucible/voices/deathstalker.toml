@@ -25,10 +25,18 @@ sample_rate = 24000
 # (Owen, 2026-09-06: "it can be the same setting for both mac and windows since
 # theyre the same voice and theyre pretty close").
 #
-# MEASURED 2026-09-07 on the served arm at temperature 0.8 on ds_v5_prod: the
-# Fuhrer-49 bank, 50 renders, 40 clean by the ladder's rule (coverage >= 0.95, no
-# early stop, no babble, 0.8 <= audio ratio <= 1.25, chars >= 150). median 16.64,
-# mean 16.78, p05 15.73, p95 18.02, p99 18.26, n 40.
+# MEASURED 2026-09-14 ON THE WEIGHTS THIS MANIFEST NOW PINS — ds_v8_rvcbed1
+# checkpoint 3658 — from that checkpoint's own length ladder (rungs 100-1600, 8
+# prompts x 4 seeds = 512 renders), 222 of them clean at coverage >= 0.99 with no
+# defects. median 15.91, mean 15.79, p05 13.88, p95 17.45, p99 18.14, n 222.
+# Evidence: _campaigns/2026-09-12-deathstalker-rvc-corpus/screen_ds_v8_rvcbed1/
+# ladder/ds_v8_rvcbed1_3658.
+#
+# The runner-up checkpoint 3540 measured 15.85 and the superseded ds_v5_prod
+# measured 16.64, which is the evidence that pace belongs to the CORPUS rather
+# than to the checkpoint — and equally why a predecessor's figure is not safe to
+# inherit: 16.64 stood in this file until 2026-09-16, 4.6% off the weights that
+# now ship, which mis-sizes narrator's duration guard from a book's first chunk.
 #
 # THE TWO EDGES ARE DERIVED FROM THE MEDIAN, by BookForge's `higgsLengthBand()`:
 # max = median x PACE_GUARD_SHORT_FACTOR (1.3), min = median / PACE_GUARD_LONG_FACTOR
@@ -44,16 +52,22 @@ sample_rate = 24000
 # 1.3 on the Shift measurements (the fixed long edge at 11.97 fired on 340 healthy
 # chunks at take 0). The CODE is what runs, so 1.3 is what is written here.
 [voice.pace]
-pace_chars_per_sec = 16.64
-max_chars_per_sec = 21.63
-min_chars_per_sec = 12.80
-# THE SAFE BAND = the training corpus's INTERQUARTILE RANGE, measured 2026-09-09
-# (orpheus-finetune field notes 4n.37.20). ds_v5: p25 598, p75 1094, so the floor
-# is 600. safeMaxChars is held at Owen's 800 ruling rather than the measured 1000.
+pace_chars_per_sec = 15.91
+max_chars_per_sec = 20.68
+min_chars_per_sec = 12.24
+# THE SAFE BAND, ruled 2026-09-14 FROM THE LADDER'S FAILURE CURVE, not from the
+# training corpus. The corpus-IQR rule that set the old 600 floor was wrong in
+# production within a day (orpheus-finetune field notes 4n.37.20), so the band is
+# now read off the same 512-render ladder the pace comes from: renders are pooled
+# by ACTUAL character count in 100-character bins — a rung is target +/-12% and
+# smears across bin boundaries, so the rung label cannot be the pool — and each
+# bin is ranked by the Wilson 95% upper bound on its failure rate, ties to the
+# wider band. 500-800 wins for ckpt-3658 at 2.50% against 3540's 4.17%.
+#
 # The floor is the half that did not exist until 2026-09-09: before it, floor and
 # cap were one number, so two 400-char paragraphs could not merge and a 400-char
 # chunk shipped — which is how Owen's Mac render truncated at 323, 502 and 634.
-safe_min_chars = 600
+safe_min_chars = 500
 safe_max_chars = 800
 
 # WHAT THE SERVER narrator STARTS IS SIZED BY, and the one number it refuses to
@@ -74,20 +88,19 @@ max_num_seqs_note = """16 is vllm-omni's OWN stage-0 value in higgs_multimodal_q
 
 [voice.backends.cuda-linux]
 hf_repo = "owenmorgan/deathstalker-higgs-v3"
-# The repo's current head, read from the HF API 2026-09-13 with Owen's token
-# (the repo is private). It is the 2026-09-06 upload, ds_ad4lm_prod_ckpt1080.
+# The repo's head after the upload of 2026-09-16, verified against the HF API.
 #
-# THIS IS NOT THE MERGE THE PC IS SERVING TODAY. The catalog's WSL arm points at
-# /home/telltale/higgs_v3_merged/ds_v7_930_prod, promoted 2026-09-11 by temper's
-# pause screen, and its `_promotionNote` says "HuggingFace NOT updated - Owen has
-# not given a green light". Crucible pulls a PUBLISHED voice at a pinned revision
-# (PHASE3-TTS.md section 11) and has no access to a directory inside the guest, so
-# this pin is the honest one: it names the bytes a `crucible voices pull` will
-# actually fetch. The cap below survives the difference because it is a RULING
-# over every fine-tune rather than a certificate bound to one directory — see
-# max_chars. The pace band does not have that property, and re-measuring it
-# against these weights is owed the first time this voice renders a book here.
-revision = "d732c38e9a500d5ba0de06b69252833e9d5ee9b8"
+# THIS PIN AND THE ARMS ARE THE SAME WEIGHTS AGAIN, for the first time since
+# 2026-09-06. It is ds_v8_rvcbed1 checkpoint 3658 — the merge BookForge's catalog
+# points both arms at (/home/telltale/higgs_v3_merged/ds_v8_rvcbed1_3658_prod on
+# the PC, runtime/higgs-models/ds_v8_rvcbed1_3658_prod on the Mac), promoted
+# 2026-09-14 by temper's pause screen. Two generations of drift closed at once:
+# the repo had held ds_ad4lm_prod_ckpt1080 while the arms moved to ds_v7_930_prod
+# and then here, because HuggingFace was full and the uploads were never given a
+# green light. Crucible pulls a PUBLISHED voice at a pinned revision (PHASE3-TTS.md
+# section 11) and cannot see a directory inside the guest, so this pin naming the
+# same bytes the arms serve is what makes the pace and band below true of it.
+revision = "d9877691c46f0e41eb1a5381f0435dac449fa0b3"
 # DECLARED, not measured — neither of Owen's cards was free the night this was
 # written, and PHASE3-TTS.md section 10 leaves the measurement owed.
 memory_bytes_estimate = 19_000_000_000
@@ -117,14 +130,16 @@ sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
 
 [voice.backends.mlx-darwin]
 hf_repo = "owenmorgan/deathstalker-higgs-v3"
-revision = "d732c38e9a500d5ba0de06b69252833e9d5ee9b8"
+revision = "d9877691c46f0e41eb1a5381f0435dac449fa0b3"
 memory_bytes_estimate = 12_133_000_000
 estimate_basis = "declared"
 estimate_note = """The one recorded MLX figure for a Higgs v3 merged checkpoint: \
 "peak memory 11.3 GiB at 900" characters, from this voice's own MLX cap \
 certificate (mlx-audio 0.4.8 / mlx 0.32.0 on owens-mac-studio, 2026-09-05, \
-docs/certificates/max_chars_certificate_mlx_ckpt1080.json), against the same \
-ckpt-1080 weights this revision holds. 11.3 GiB = 12_133_000_000 bytes. Recorded \
+docs/certificates/max_chars_certificate_mlx_ckpt1080.json), measured against \
+ds_ad4lm_prod_ckpt1080 — a PREDECESSOR of the weights this revision now holds, \
+not the same bytes, though every v3 fine-tune is the same 4B merge and so has \
+the same footprint. 11.3 GiB = 12_133_000_000 bytes. Recorded \
 rather than watched here, and it was measured at a 900-character chunk while the \
 cap below is 800, so it is a ceiling for this voice rather than a reading. Owed: \
 watch the Mac's allocator on a real render."""
