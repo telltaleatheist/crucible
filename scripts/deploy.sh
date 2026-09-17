@@ -53,12 +53,20 @@ fail() { echo "deploy: $*" >&2; exit 1; }
 release=""
 only=""
 assume_yes=0
+# A machine whose record already NAMES the release is skipped, because the
+# record is the whole point of reading it. But a record is written partway
+# through an install, so a run that DIED after writing it leaves a machine
+# that claims the version and never finished: on 2026-09-17 a truncated
+# `curl | sh` stopped after local-register, and the retry then skipped the
+# machine as already done. --force installs anyway.
+force=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --release) [ $# -ge 2 ] || fail "--release needs a version"; release="$2"; shift 2 ;;
     --only)    [ $# -ge 2 ] || fail "--only needs a comma-separated list"; only="$2"; shift 2 ;;
     --yes|-y)  assume_yes=1; shift ;;
+    --force)   force=1; shift ;;
     -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown argument $1" ;;
   esac
@@ -130,11 +138,44 @@ read_mac() {
 install_sh_url() { echo "https://github.com/$REPO_SLUG/releases/download/v$1/install.sh"; }
 install_ps1_url() { echo "https://github.com/$REPO_SLUG/releases/download/v$1/install.ps1"; }
 
+# FETCH TO A FILE, THEN RUN IT - never `curl | sh`.
+#
+# A pipe throws curl's exit status away: the remote `sh` reads whatever
+# arrived and its own status is all `set -e` can see, so a transfer cut in
+# half is an installer that runs half. Measured 2026-09-17 installing 0.6.11
+# into WSL: `sh: 352: Syntax error: Unterminated quoted string`, from a
+# published install.sh that is byte-identical to the repo's and passes
+# `sh -n`. It had already written installation.json with the new version, so
+# the machine then LOOKED upgraded while linger, capability-write and
+# local-start had never run.
+#
+# Written to a file, curl's failure is the command's failure. `sh -n` after
+# it is the second half: a truncation that still parses would otherwise run.
+# install_windows has fetched to a file all along, for its own reason.
+# The format string is SINGLE-quoted so `$(mktemp)` and `$f` reach the far
+# machine as text. Double-quoted, bash ran mktemp HERE and expanded $f to
+# nothing, and the payload came out as `curl -o ""` - caught by printing it
+# before trusting it, which is the only reason this note is not a defect.
+# ONE MORE SHELL PARSE ON THE MAC THAN IN WSL. `wsl.exe --exec bash -lc
+# <payload>` hands the payload over as an argv element and nothing re-reads
+# it; `ssh mac '"$SHELL" -lc <payload>'` is a STRING the remote shell parses
+# before $SHELL ever sees it, so a payload containing double quotes (and the
+# one below must, for $f) ends that string early. Measured while building
+# this: WSL took it and the Mac answered `no such file or directory`.
+shquote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+remote_install_payload() {
+  printf 'set -e; f=$(mktemp); curl -fsSL --retry 3 -o "$f" %s; sh -n "$f"; sh "$f" --release %s; rm -f "$f"' \
+    "'$1'" "'$2'"
+}
+
 install_wsl() {
   # --exec, so wsl.exe hands the string to bash instead of letting the Windows
   # side pre-expand a `$` in it first.
   wsl.exe -d Ubuntu --exec bash -lc \
-    "set -e; curl -fsSL '$(install_sh_url "$1")' | sh -s -- --release '$1'"
+    "$(remote_install_payload "$(install_sh_url "$1")" "$1")"
 }
 
 install_mac() {
@@ -149,7 +190,7 @@ install_mac() {
   # ~/.zprofile. Naming a shell here guesses at something the machine
   # already knows, so $SHELL is expanded REMOTELY and answers for itself.
   ssh -n -o ConnectTimeout=15 mac \
-    "\"\$SHELL\" -lc \"set -e; curl -fsSL '$(install_sh_url "$1")' | sh -s -- --release '$1'\""
+    "\"\$SHELL\" -lc $(shquote "$(remote_install_payload "$(install_sh_url "$1")" "$1")")"
 }
 
 install_windows() {
@@ -191,7 +232,8 @@ for machine in $FLEET; do
   note=""
   if [ -n "$release" ]; then
     case "${BEFORE[$machine]}" in
-      "$release")   note="  (already $release)" ;;
+      "$release")   if [ "$force" = "1" ]; then note="  (already $release, reinstalling anyway)"; any_behind=1
+                    else note="  (already $release)"; fi ;;
       unreachable)  note="  (CANNOT BE ASKED — will not be touched)" ;;
       *)            note="  -> $release"; any_behind=1 ;;
     esac
@@ -226,7 +268,7 @@ failed=""
 for machine in $FLEET; do
   selected "$machine" || continue
   case "${BEFORE[$machine]}" in
-    "$release") continue ;;
+    "$release") [ "$force" = "1" ] || continue ;;
     unreachable)
       # NOT a skip. A machine that could not be asked is a machine whose state
       # is unknown, and the summary must say so rather than imply it is fine.

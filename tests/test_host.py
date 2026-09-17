@@ -3185,6 +3185,112 @@ def test_a_system_unit_guest_is_brought_up_by_its_own_manager(
     )
 
 
+def test_an_ownerless_host_does_not_blame_its_config(host_log: log.HostLog) -> None:
+    """A refusal that names the WRONG cause costs more than one that names none.
+
+    Every empty token got the same sentence - "this host has no config yet" -
+    and on 2026-09-17 a host whose config was perfectly good, but which owned
+    no engine, refused every door with it. The reader goes and looks at a file
+    that was never the problem.
+    """
+    from types import SimpleNamespace
+    from crucible.host.app import engine_token_detail
+
+    context = SimpleNamespace(
+        presence=presence.Presence(Distro.PRESENT, Engine.RUNNING, "up", Owner.NONE),
+        home=Path("C:/nowhere"),
+    )
+    said = engine_token_detail(context)
+    assert "owner=none" in said
+    assert "config is not the problem" in said
+
+    context.presence = presence.Presence(
+        Distro.ABSENT, Engine.RUNNING, "up", Owner.HOST_CHILD
+    )
+    assert "no token in its config" in engine_token_detail(context)
+
+    context.presence = presence.Presence(
+        Distro.PRESENT, Engine.RUNNING, "up", Owner.WSL_UNIT
+    )
+    assert "pairing line" in engine_token_detail(context)
+
+
+def test_the_door_reports_the_hosts_own_reason_for_having_no_token(
+    host_log: log.HostLog,
+) -> None:
+    from types import SimpleNamespace
+
+    door = door_module.OrchestratorDoor(
+        host_log,
+        lambda _emit: None,
+        token=lambda: None,
+        token_detail=lambda: "this orchestrator owns no engine (owner=none)",
+        orchestrator=SimpleNamespace(name="test"),
+    )
+    with pytest.raises(HostError) as caught:
+        door.authorised("Bearer anything")
+    assert caught.value.code == "host_no_token"
+    assert "owns no engine" in caught.value.message
+
+
+def test_an_engine_that_comes_back_to_nobody_is_given_an_owner(
+    host_log: log.HostLog,
+) -> None:
+    """`poll` carried the owner through verbatim, so NONE was PERMANENT.
+
+    `boot` DECIDES the owner (`running_owner`); the watch tick never did - it
+    passed whatever it was handed straight back into the new Presence. So any
+    transient that once landed on Owner.NONE - and `boot`'s own "both recipes
+    were spent" branch returns exactly that - left the orchestrator ownerless
+    for the rest of its life, even with the engine answering every 15 seconds.
+
+    That is not a cosmetic field. `engine_token` returns None for an ownerless
+    host, and then EVERY authenticated door answers 503 host_no_token,
+    `/quit` included, so the tray cannot even be asked to stop. Measured
+    2026-09-17: only killing the process and relaunching it cleared this.
+    """
+    runner = Scripted(pings=[200])
+    watcher = presence.PresenceWatcher(
+        runner, host_log, distro="Ubuntu", sleep=lambda _s: None
+    )
+    seen = watcher.poll(Distro.PRESENT, Owner.NONE)
+    assert seen.engine is Engine.RUNNING
+    assert seen.owner is Owner.WSL_UNIT, (
+        "an engine that is answering has an owner; refusing to name one is how "
+        "the host locks itself out of its own doors"
+    )
+
+
+def test_a_tick_does_not_re_decide_an_owner_it_already_has(
+    host_log: log.HostLog,
+) -> None:
+    """Only the ownerless case asks. A probe every tick is a wsl.exe round
+    trip every 15 seconds to re-learn something already known."""
+    runner = Scripted(pings=[200, 200])
+    watcher = presence.PresenceWatcher(
+        runner, host_log, distro="Ubuntu", consented=True, sleep=lambda _s: None
+    )
+    seen = watcher.poll(Distro.PRESENT, Owner.WSL_UNIT)
+    assert seen.owner is Owner.WSL_UNIT
+    assert not any("is-enabled" in " ".join(call) for call in runner.calls), (
+        "the owner was already decided; nothing needed asking"
+    )
+
+
+def test_an_ownerless_engine_on_a_machine_with_no_distro_is_adopted(
+    host_log: log.HostLog,
+) -> None:
+    """Same rule, the other shape: something answers, this host did not start
+    it, and `found` is the honest name for that."""
+    runner = Scripted(pings=[200, 200])
+    watcher = presence.PresenceWatcher(
+        runner, host_log, distro="Ubuntu", sleep=lambda _s: None
+    )
+    seen = watcher.poll(Distro.ABSENT, Owner.NONE)
+    assert seen.engine is Engine.RUNNING
+    assert seen.owner is Owner.FOUND
+
+
 def test_the_stop_of_a_system_unit_guest_goes_through_root(tmp_path: Path) -> None:
     """The stop had not learned what the restart already knows.
 

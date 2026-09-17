@@ -137,6 +137,7 @@ class OrchestratorDoor:
         *,
         token: Callable[[], str | None],
         orchestrator: OrchestratorPort,
+        token_detail: Callable[[], str] | None = None,
     ) -> None:
         self._log = log
         self._run_sequence = run_sequence
@@ -146,6 +147,11 @@ class OrchestratorDoor:
         # 3.5), and a door holding a copy would start refusing its own caller
         # halfway through.
         self._token = token
+        #: Why the token is missing, asked of the host rather than guessed
+        #: at here. There is more than one way to have no bearer and the
+        #: door cannot tell them apart; naming the wrong one sent a reader
+        #: to the wrong file (2026-09-17).
+        self._token_detail = token_detail
         self._lock = threading.Lock()
         self._running = False
 
@@ -153,6 +159,8 @@ class OrchestratorDoor:
         """Constant-time, and `host_no_token` is NOT an authorisation failure."""
         expected = self._token()
         if expected is None:
+            if self._token_detail is not None:
+                raise HostError("host_no_token", self._token_detail())
             raise HostError(
                 "host_no_token",
                 "this host has no config yet, so the install door has no token to "

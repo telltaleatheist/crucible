@@ -892,6 +892,28 @@ class PresenceWatcher:
         """One watch tick. 4.1: ping; down → one recovery; then `stopped`."""
         if self.ping():
             self._recovery_spent = False
+            if owner is Owner.NONE:
+                # AN ENGINE THAT IS ANSWERING HAS AN OWNER. This used to
+                # hand `owner` straight back, so NONE was permanent: `boot`
+                # DECIDES an owner (`running_owner`) and the watch tick
+                # never did, while `boot`'s own `both recipes were spent`
+                # branch returns exactly Owner.NONE.
+                #
+                # It is not a cosmetic field. `engine_token` reads None for
+                # an ownerless host and every authenticated door then
+                # answers 503 host_no_token - `/quit` included, so the tray
+                # could not even be asked to stop and had to be killed.
+                # Measured 2026-09-17, after a guest was reinstalled under a
+                # running host.
+                #
+                # ONLY when nobody owns it: re-deciding an owner already
+                # settled would buy a wsl.exe round trip every 15 seconds to
+                # re-learn what is known.
+                if distro is Distro.PRESENT:
+                    return self.running_owner(distro, "the engine answered /v1/ping")
+                # No distro to have started it in, and it is answering: it
+                # is somebody else's, which is what `found` means.
+                return self.adopt(distro)
             return Presence(
                 distro, Engine.RUNNING, "the engine answered /v1/ping", owner
             )

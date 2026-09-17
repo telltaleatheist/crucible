@@ -298,3 +298,54 @@ def test_every_installer_probes_for_the_tools_it_actually_runs():
         'the POSIX installer probes curl, tar and zstd by name; if that list '
         'moved, this test is the place to say what it moved to'
     )
+
+def test_no_installer_is_piped_straight_into_a_shell():
+    """`curl | sh` throws curl's exit status away.
+
+    The remote shell runs whatever arrived and its own status is all `set -e`
+    can see, so a transfer cut in half is an installer that runs half. Measured
+    2026-09-17 installing 0.6.11 into WSL: `sh: 352: Syntax error: Unterminated
+    quoted string` from a published install.sh that is byte-identical to the
+    repo's and passes `sh -n`.
+    """
+    text = DEPLOY.read_text(encoding='utf-8')
+    code = '{}'.format(chr(10)).join(
+        line for line in text.splitlines() if not line.lstrip().startswith('#')
+    )
+    assert '| sh -s' not in code and '| sh ' not in code, (
+        'an installer piped into a shell cannot report a truncated download'
+    )
+    # NOT `'sh -n' in code`: that matches `ssh -n`, which has been in this
+    # file all along, so the assertion passed against the very version it
+    # was written to catch.
+    assert 'sh -n \"$f\"' in code, (
+        'the fetched script is parsed before it is run'
+    )
+
+
+def test_the_mac_payload_is_quoted_for_its_extra_shell():
+    """`ssh host '"$SHELL" -lc <payload>'` is parsed once BEFORE $SHELL sees it.
+
+    WSL's `--exec bash -lc <payload>` passes an argv element and nothing
+    re-reads it. The Mac has one more parse, so a payload containing double
+    quotes ends the string early - measured while building this: WSL took the
+    same payload and the Mac answered `no such file or directory`.
+    """
+    text = DEPLOY.read_text(encoding='utf-8')
+    assert 'shquote()' in text, 'the extra parse needs a quoter'
+    start = text.index('install_mac()')
+    body = text[start:text.index('install_windows()')]
+    assert 'shquote' in body, 'the mac payload must go through it'
+
+
+def test_deploy_can_reinstall_a_machine_that_already_names_the_release():
+    """A record is written PARTWAY through an install.
+
+    So a run that died after `local-register` leaves a machine claiming the
+    version with its later steps never run - and the retry then skipped it as
+    already done (measured 2026-09-17). --force is the way to say otherwise.
+    """
+    text = DEPLOY.read_text(encoding='utf-8')
+    assert '--force' in text
+    assert 'force=0' in text, 'and it must default to off'
+

@@ -149,6 +149,38 @@ def engine_token(context: "HostContext") -> str | None:
     return None
 
 
+def engine_token_detail(context: "HostContext") -> str:
+    """WHY `engine_token` came back empty, in the words of this machine.
+
+    The door used to answer every empty token with one sentence -
+    *"this host has no config yet"* - which is true for exactly one of the
+    ways this can happen and was measured being wrong about another: on
+    2026-09-17 a host whose config was perfectly good owned no engine, and
+    every authenticated door refused with a message pointing at a file that
+    was not the problem. A refusal that names the wrong cause costs more
+    than one that names none.
+    """
+    owner = context.presence.owner
+    if owner in (Owner.WSL_UNIT, Owner.FOUND):
+        return (
+            f"the engine here is owner={owner.value} and its bearer comes from the "
+            "guest's pairing line, which could not be read or would not parse. "
+            "The host log says which."
+        )
+    if owner is Owner.HOST_CHILD:
+        return (
+            "this host runs its own engine and there is no token in its config "
+            f"yet ({context.home}). It gets one the first time the Windows server "
+            "is initialised, which is seconds after the host first starts."
+        )
+    return (
+        "this orchestrator owns no engine (owner=none), so there is no bearer "
+        "for it to check against. Its config is not the problem. An engine that "
+        "is answering is adopted on the next watch tick; one that is not needs "
+        "Restart engine, or `crucible local start`."
+    )
+
+
 def read_token(home: Path) -> str | None:
     """The engine token out of the host's own config, or None before there is one.
 
@@ -1142,6 +1174,7 @@ def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
         log,
         _sequence(context, host),
         token=lambda: engine_token(context),
+        token_detail=lambda: engine_token_detail(context),
         orchestrator=host,
     )
     try:
