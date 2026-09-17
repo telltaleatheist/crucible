@@ -1155,7 +1155,17 @@ def add_parser(subparsers: Any) -> None:
     job_verbs = job.add_subparsers(dest="job_command", required=True)
 
     submit = job_verbs.add_parser("submit", help="POST /v1/jobs")
-    submit.add_argument("--type", required=True, help="llm, tts, asr, align, align-longform, rvc, denoise, echo, load-model, …")
+    submit.add_argument(
+        "--type", required=True,
+        # NOT `llm` — there is no such job type, and writing one here would send
+        # somebody looking for it. LLM work is the chat proxy; the llm-class job
+        # types are the two that move a model on and off the card. `api info`'s
+        # `job_types` is the list to ASK rather than the one to remember, which
+        # is why this help says so instead of pretending to be complete.
+        help="tts, asr, align, align-longform, rvc, denoise, echo, load-model, "
+             "unload-model, load-voice, unload-voice, unload-aligner, "
+             "unload-denoiser — `crucible api info` says which this server offers",
+    )
     submit.add_argument("--model", default=None, help="the model, voice or aligner id this type serves")
     submit.add_argument("--params", default=None, help="the type's params object, as JSON or @file")
     submit.add_argument(
