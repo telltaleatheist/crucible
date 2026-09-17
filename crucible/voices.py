@@ -447,8 +447,49 @@ class VoiceManifest:
 # ------------------------------------------------------------------ locating
 
 
+def home_voices_dir() -> Path:
+    """`<CRUCIBLE_HOME>/voices` — this machine's own voices. May not exist."""
+    from .config import crucible_home
+
+    return crucible_home() / "voices"
+
+
+def voice_dirs() -> tuple[Path, ...]:
+    """Every directory voices are read from, LOWEST precedence first.
+
+    TWO DIRECTORIES, AND THE SECOND IS WHY THIS FUNCTION EXISTS.
+
+    Voice manifests began as package data, which made *deploying a voice* mean
+    *cutting a release*: a new fine-tune could not be served until a version was
+    tagged, its packs rebuilt on CI and the result installed on every machine.
+    Owen, 2026-09-16: *"we dont have to cut a new release every time we deploy a
+    model do we? ... i train models all the time. nearly every night."* No.
+
+    So `<CRUCIBLE_HOME>/voices/*.toml` is read after the packaged set and WINS on
+    a shared id. Drop a file in, restart the engine, and it serves — no release,
+    no pack, no version. Delete the file and the packaged voice is back, which
+    is what makes overriding a shipped voice safe to try.
+
+    `CRUCIBLE_VOICES_DIR` still REPLACES both, unchanged. That is the right
+    shape for "run this exact set and nothing else" and the wrong shape for
+    "add one", which is the mistake this overlay corrects: with only the
+    override, adding a single voice meant copying all seven shipped manifests
+    into a directory and maintaining the set by hand forever.
+    """
+    override = os.environ.get(VOICES_DIR_ENV)
+    if override is not None and override != "":
+        return (voices_dir(),)
+    home = home_voices_dir()
+    packaged = voices_dir()
+    return (packaged, home) if home.is_dir() and home != packaged else (packaged,)
+
+
 def voices_dir() -> Path:
-    """Where `voices/*.toml` live on this host. Refuses by name if absent."""
+    """The PACKAGED voices, the set every install ships. Refuses if absent.
+
+    `CRUCIBLE_VOICES_DIR` replaces it wholesale. For the ordinary read — shipped
+    plus this machine's own — callers want `voice_dirs()`.
+    """
     override = os.environ.get(VOICES_DIR_ENV)
     if override is not None and override != "":
         path = Path(override).expanduser()
@@ -944,13 +985,22 @@ def parse_voice(text: str, path: Path, expected_id: str) -> VoiceManifest:
 
 
 def load_voice(voice_id: str, directory: Path | None = None) -> VoiceManifest:
-    """Load `voices/<voice_id>.toml`. Raises VoiceError if it is not there."""
-    root = directory if directory is not None else voices_dir()
-    path = root / f"{voice_id}.toml"
-    if not path.is_file():
-        known = sorted(p.stem for p in root.glob("*.toml"))
+    """Load `<voice_id>.toml`. Raises VoiceError if no directory holds it.
+
+    Searched HIGHEST precedence first, so `<CRUCIBLE_HOME>/voices` answers
+    before the packaged set — the same order `load_all_voices` merges in, read
+    from the other end.
+    """
+    roots = (directory,) if directory is not None else tuple(reversed(voice_dirs()))
+    for root in roots:
+        path = root / f"{voice_id}.toml"
+        if path.is_file():
+            break
+    else:
+        known = sorted({p.stem for root in roots for p in root.glob("*.toml")})
+        where = ", ".join(str(r) for r in roots)
         raise VoiceError(
-            f"no manifest for voice {voice_id!r} at {path}; this build ships {known}"
+            f"no manifest for voice {voice_id!r} in {where}; this host serves {known}"
         )
     try:
         text = path.read_text(encoding="utf-8")
@@ -960,8 +1010,24 @@ def load_voice(voice_id: str, directory: Path | None = None) -> VoiceManifest:
 
 
 def load_all_voices(directory: Path | None = None) -> dict[str, VoiceManifest]:
-    """Every voice manifest this build ships, by id, in id order."""
-    root = directory if directory is not None else voices_dir()
+    """Every voice this host serves, by id, in id order.
+
+    Packaged first, then `<CRUCIBLE_HOME>/voices`, so a home manifest sharing an
+    id REPLACES the shipped one — see `voice_dirs()`. Passing `directory`
+    reads exactly that one, which is what the tests and `--voices-dir` want.
+    """
+    roots = (directory,) if directory is not None else voice_dirs()
+    voices: dict[str, VoiceManifest] = {}
+    for root in roots:
+        voices.update(_voices_in(root))
+    # Re-sorted because the merge is by directory and the ORDER is by id: a home
+    # voice inserted in the middle of the shipped set must list in the middle,
+    # not at the end. `/v1/voices` lists in this order and it is documented.
+    return {vid: voices[vid] for vid in sorted(voices)}
+
+
+def _voices_in(root: Path) -> dict[str, VoiceManifest]:
+    """The manifests in one directory, by id."""
     voices: dict[str, VoiceManifest] = {}
     # By id — `path.stem` — and not by path, for the reason `load_all_manifests`
     # gives: the two orders differ whenever one id is a prefix of another, because

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from crucible.voices import (
+    VOICES_DIR_ENV,
     CLIPS_FROM_REQUEST,
     NARRATOR_ENGINE_SAMPLING,
     VoiceError,
@@ -730,3 +731,81 @@ def test_the_zeroshot_voice_takes_its_clips_from_the_request() -> None:
 
 def test_the_shipped_manifests_are_the_directory_beside_the_package() -> None:
     assert voices_dir() == Path(__file__).resolve().parent.parent / "crucible" / "voices"
+
+
+# ------------------------------------------- deploying a voice without a release
+#
+# Owen, 2026-09-16: *"we dont have to cut a new release every time we deploy a
+# model do we? if thats the case, we should simplify it so it just reads the
+# model manifest and i can upload new models at will. i train models all the
+# time. nearly every night."*
+#
+# Before this, voice manifests were package data and the answer was yes: a voice
+# could not be served until a version was tagged, its packs rebuilt on CI and the
+# result installed on three machines. These four tests are the answer being no.
+
+
+def a_voice_file(into: Path, voice_id: str, display: str | None = None) -> Path:
+    """A real manifest, copied from a shipped one and re-identified."""
+    import re
+
+    into.mkdir(parents=True, exist_ok=True)
+    raw = (voices_dir() / "mistborn.toml").read_text(encoding="utf-8")
+    raw = raw.replace('id = "mistborn"', f'id = "{voice_id}"', 1)
+    if display is not None:
+        raw = re.sub(r'display\s*=\s*"[^"]*"', f'display = "{display}"', raw, count=1)
+    path = into / f"{voice_id}.toml"
+    path.write_text(raw, encoding="utf-8")
+    return path
+
+
+def test_a_voice_dropped_into_the_home_is_served(tmp_path, monkeypatch) -> None:
+    """THE WHOLE POINT: a file appears, the voice exists, nothing was released."""
+    monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
+    monkeypatch.delenv(VOICES_DIR_ENV, raising=False)
+    a_voice_file(tmp_path / "voices", "tonights-finetune")
+    assert "tonights-finetune" in load_all_voices()
+    assert load_voice("tonights-finetune").id == "tonights-finetune"
+
+
+def test_the_shipped_voices_are_still_there_beside_it(tmp_path, monkeypatch) -> None:
+    """AN OVERLAY, NOT A REPLACEMENT — the distinction the old env var got wrong.
+
+    `CRUCIBLE_VOICES_DIR` replaces the set, so adding one voice through it meant
+    copying all seven shipped manifests somewhere and maintaining them by hand
+    forever. Adding must not cost that.
+    """
+    monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
+    monkeypatch.delenv(VOICES_DIR_ENV, raising=False)
+    a_voice_file(tmp_path / "voices", "tonights-finetune")
+    served = load_all_voices()
+    for shipped in ("deathstalker", "mistborn", "owen", "zeroshot"):
+        assert shipped in served, f"the overlay hid the packaged {shipped}"
+    # And the order is by ID, not by directory: a home voice belongs where its
+    # name puts it, because this dict's order is what `/v1/voices` lists in.
+    assert list(served) == sorted(served)
+
+
+def test_a_home_manifest_overrides_a_shipped_id(tmp_path, monkeypatch) -> None:
+    """Retuning a shipped voice is the same gesture, and is REVERSIBLE.
+
+    Deleting the file restores the packaged manifest, which is what makes
+    trying a new pace on deathstalker a safe thing to do on a Tuesday.
+    """
+    monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
+    monkeypatch.delenv(VOICES_DIR_ENV, raising=False)
+    path = a_voice_file(tmp_path / "voices", "mistborn", display="Mistborn (tonight)")
+    assert load_all_voices()["mistborn"].display == "Mistborn (tonight)"
+    assert load_voice("mistborn").display == "Mistborn (tonight)"
+    path.unlink()
+    assert load_all_voices()["mistborn"].display != "Mistborn (tonight)"
+
+
+def test_the_full_override_still_replaces_everything(tmp_path, monkeypatch) -> None:
+    """The escape hatch keeps its meaning: run THIS set and nothing else."""
+    monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path / "home"))
+    only = tmp_path / "only"
+    a_voice_file(only, "just-this-one")
+    a_voice_file(tmp_path / "home" / "voices", "ignored-because-overridden")
+    monkeypatch.setenv(VOICES_DIR_ENV, str(only))
+    assert sorted(load_all_voices()) == ["just-this-one"]
