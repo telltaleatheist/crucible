@@ -1259,6 +1259,19 @@ def test_stopping_a_user_unit_mid_upgrade_asks_the_manager_that_holds_it(
     The whole activation failed and preserved the previous runtime, which is the
     right way to fail and no way to upgrade. Where a unit IS and where one would
     GO are different questions, and only `install` asks the second.
+
+    THIS TEST ONCE ASSERTED `systemctl --user stop crucible.service`, and that
+    was half the answer. Asking the manager that holds the unit is right; that
+    manager being REACHABLE is a separate fact, and in a WSL guest it is not —
+    WSLg covers its bus socket. So 0.6.7 shipped this fix and the upgrade still
+    failed, with a different message, on the same machine:
+
+        Failed to connect to bus: No such file or directory
+
+    What is asserted now is the door that exists: the SYSTEM manager owns
+    `user@<uid>.service`, and stopping that stops the unit it holds. The subject
+    of this test is unchanged — the stop must not go to the system manager
+    asking about `crucible.service`, which is the scope confusion DEFECT 16 was.
     """
     # Install as a user unit FIRST, the way every pre-7b.9 guest is...
     install_systemd(user_home, Runner(LINGER_ON))
@@ -1272,9 +1285,69 @@ def test_stopping_a_user_unit_mid_upgrade_asks_the_manager_that_holds_it(
     assert service.systemd_scope() == service.SYSTEM_SCOPE
     assert service.installed_scope(user_home) == service.USER_SCOPE
 
+    monkeypatch.setattr(service.os, "getuid", lambda: 1000, raising=False)
     runner = Runner()
     service.stop(service.SYSTEMD, home=user_home, runner=runner)
-    assert runner.calls == [("systemctl", "--user", "stop", "crucible.service")], (
+    assert (*ROOT_DOOR, "systemctl", "stop", "crucible.service") not in runner.calls, (
         "the stop went to the manager an INSTALL would use, not the one holding "
         f"the unit: {runner.calls}"
     )
+    assert runner.calls == [(*ROOT_DOOR, "systemctl", "stop", "user@1000.service")], (
+        f"the unit's holder was asked through a door that cannot open: {runner.calls}"
+    )
+
+
+# ---------------------------------------------- a legacy user unit in a guest
+#
+# The state every machine installed before the scope moved is in: a USER unit
+# under `~/.config/systemd/user`, running, and a WSLg overmount covering the
+# manager's bus socket. Nothing can `systemctl --user` there, so an upgrade —
+# which stops the server before swapping the runtime — could never quiesce it.
+# Measured 2026-09-17 on owens-pc: 0.6.3 while releases had reached 0.6.8.
+
+
+def test_stopping_a_legacy_user_unit_in_a_guest_goes_through_the_user_manager(
+    user_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`systemctl --user` cannot be reached in WSL, so it must not be asked."""
+    install_systemd(user_home, Runner(LINGER_ON))       # writes the USER unit
+    monkeypatch.setattr(service, "in_wsl", lambda: True)
+    monkeypatch.setattr(service.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(service.os, "getuid", lambda: 1000, raising=False)
+    monkeypatch.setenv(service.WSL_DISTRO_ENV, "Ubuntu")
+
+    stopper = CopyingRunner()
+    lines = service.stop(service.SYSTEMD, home=user_home, runner=stopper)
+
+    assert len(stopper.calls) == 1, stopper.calls
+    call = stopper.calls[0]
+    assert "--user" not in call, (
+        "the unit's own manager was asked, and in a WSL guest it cannot answer")
+    assert call == (*ROOT_DOOR, "systemctl", "stop", "user@1000.service")
+    assert "user manager" in lines[0]
+
+
+def test_a_user_unit_outside_wsl_is_still_stopped_by_its_own_manager(
+    user_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guest is the exception. A Linux host's user bus works fine."""
+    install_systemd(user_home, Runner(LINGER_ON))
+    monkeypatch.setattr(service, "in_wsl", lambda: False)
+    runner = Runner()
+    service.stop(service.SYSTEMD, home=user_home, runner=runner)
+    assert runner.calls == [("systemctl", "--user", "stop", "crucible.service")]
+
+
+def test_the_retire_path_and_the_stop_path_use_one_door(
+    user_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two callers, one answer to "how is a user unit stopped in a guest".
+
+    `retire_user_unit` had this right and `stop` did not, which is the whole
+    defect: the technique existed in the file that needed it, ten lines from
+    the code that failed for want of it.
+    """
+    monkeypatch.setattr(service.os, "getuid", lambda: 1000, raising=False)
+    runner = Runner()
+    service.stop_user_manager(runner, "why", elevate=["sudo"])
+    assert runner.calls == [("sudo", "systemctl", "stop", "user@1000.service")]

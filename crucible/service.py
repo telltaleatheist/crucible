@@ -987,6 +987,42 @@ def write_definition(
     return path, before is not None and before != text
 
 
+def stop_user_manager(runner: Runner, why: str, *, elevate: Sequence[str] | None = None) -> None:
+    """Stop a USER unit in a WSL guest the only way that works: its manager, as root.
+
+    WSLg overmounts `/run/user/<uid>` and COVERS the user manager's bus socket
+    (`systemd_scope`), so `systemctl --user` fails for root and user alike, and
+    setting `XDG_RUNTIME_DIR` does not help — the socket is not missing, it is
+    covered. What always answers is the SYSTEM manager, which owns
+    `user@<uid>.service`. Stopping that stops every unit the user manager was
+    running, this one included.
+
+    THIS IS WHY AN UPGRADE COULD NOT LAND ON A GUEST INSTALLED BEFORE THE SCOPE
+    MOVED. `install.sh` swaps the runtime by calling `crucible local shutdown`
+    first, that reaches `stop()`, and `stop()` asked the unit's own manager.
+    Measured 2026-09-17 on owens-pc, which sat on 0.6.3 while releases reached
+    0.6.8 — and note that the two failures READ completely differently:
+
+        0.6.6: `systemctl stop crucible.service` (as root, system manager)
+               -> Failed to stop: Unit crucible.service not loaded
+        0.6.7: `systemctl --user stop crucible.service`
+               -> Failed to connect to bus: No such file or directory
+
+    0.6.7 fixed the SCOPE (`installed_scope`, a4841d8) and so began asking the
+    right manager — which is unreachable. One bug behind two messages.
+
+    The cost is honest: any other service that user was running in this distro
+    restarts. A WSL distro that exists to hold an inference server is the case
+    this is for, and a Linux host never reaches here at all.
+    """
+    _require(
+        runner,
+        [*(root_prefix() if elevate is None else elevate),
+         "systemctl", "stop", f"user@{os.getuid()}.service"],
+        why,
+    )
+
+
 def retire_user_unit(home: Path, runner: Runner, elevate: Sequence[str]) -> list[str]:
     """Take down a pre-7b.9 USER unit before a SYSTEM unit takes its port.
 
@@ -1017,10 +1053,10 @@ def retire_user_unit(home: Path, runner: Runner, elevate: Sequence[str]) -> list
     # STOP FIRST, then remove. A stop that fails must leave the file where it
     # is: the next install then sees a stale unit and retires it again, instead
     # of finding nothing to retire and meeting the old server at the port.
-    _require(
+    stop_user_manager(
         runner,
-        [*elevate, "systemctl", "stop", f"user@{os.getuid()}.service"],
         "the old user manager would not stop, so its Crucible still holds the port",
+        elevate=elevate,
     )
     stale.unlink()
     return [
@@ -1303,6 +1339,13 @@ def stop(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
         scope = installed_scope(home)
         if scope is None:
             return [f"nothing to stop: there is no {UNIT_NAME} on this machine"]
+        if scope == USER_SCOPE and in_wsl():
+            # A user unit in a WSL guest is a pre-scope-move installation, and
+            # its own manager cannot be reached to stop it. See
+            # `stop_user_manager` for the measurement; without this an upgrade
+            # can never quiesce the server it is replacing.
+            stop_user_manager(runner, f"systemd would not stop {UNIT_NAME}")
+            return [f"stopped {UNIT_NAME} by stopping the user manager running it"]
         _require(
             runner,
             [*writing_door(scope), *systemctl_argv(scope, "stop", UNIT_NAME)],
