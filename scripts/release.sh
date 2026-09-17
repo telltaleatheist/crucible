@@ -178,6 +178,13 @@ echo "release: $TAG from $BRANCH ($(git rev-parse --short HEAD))"
 echo "release: the generated app modules match the manifests"
 python scripts/gen-modules.py --check >/dev/null   || fail "modules/*.module.json are stale; run 'python scripts/gen-modules.py' and commit them (this is what shipped stale in v0.6.3)"
 
+# THE API REFERENCE IS GENERATED TOO, from the FastAPI app this release ships.
+# A field added to a request model and not regenerated ships a reference that
+# does not mention it, which is the same failure as a stale module manifest and
+# harder to notice, because nothing downstream breaks — a reader is just wrong.
+echo "release: the API reference matches the app"
+python scripts/gen-api-docs.py --check >/dev/null   || fail "docs/API.md is stale; run 'python scripts/gen-api-docs.py' and commit it"
+
 # ------------------------------------------------------------- refuse a re-cut
 
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
