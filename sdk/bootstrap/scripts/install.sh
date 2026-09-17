@@ -20,12 +20,25 @@
 #
 #   curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh | sh -s -- --uninstall
 #
-# CRUCIBLE_RELEASE=<version> picks a release other than the one this script
-# was cut with. Everything here is idempotent: run it again after a failure.
+# CRUCIBLE_RELEASE=<version> or --release <version> installs a NAMED release.
+# Given neither, this asks GitHub which release is newest and installs that.
+# Everything here is idempotent: run it again after a failure.
+#
+# THERE IS NO BAKED DEFAULT, and that is the point. This file used to carry
+# the version it was GENERATED at, which is wrong in the one situation that
+# matters: the documented way to get this script is
+# `releases/latest/download/install.sh`, so the copy you run is whichever one
+# GitHub calls latest. Every release is cut `--prerelease --latest=false` and
+# becomes latest only when promote_release.py says so, so on 2026-09-16 that
+# URL served the v0.6.0 script, which then installed 0.6.0 and its packs --
+# six versions behind, silently, with nothing in the output looking wrong.
+# Asking at RUN time cannot drift that way, and a baked value that is only
+# right on the day it was written is exactly the kind of default this repo
+# does not keep.
 
 set -eu
 
-RELEASE="${CRUCIBLE_RELEASE:-0.6.6}"
+RELEASE="${CRUCIBLE_RELEASE:-}"
 
 say() { printf 'crucible: %s\n' "$*"; }
 die() { printf 'crucible: %s\n' "$*" >&2; exit 1; }
@@ -96,7 +109,25 @@ case "$(uname -s)/$(uname -m)" in
   Darwin/arm64)  BACKEND=mlx-darwin; SHA_TOOL="shasum -a 256"; MECHANISM=launchd ;;
   *) die "unsupported_platform: $(uname -s)/$(uname -m) is not a Crucible backend (cuda-linux on Linux x86_64, mlx-darwin on Apple Silicon)" ;;
 esac
-say "release $RELEASE, backend $BACKEND"
+# --- which release -------------------------------------------------------
+# Asked only when nobody named one, and NOT asked at all for --uninstall,
+# which removes what is on this disk and must work with no network.
+# The failure is loud: no fallback to a version this script was built beside,
+# because installing a silently-wrong release is the defect being fixed.
+newest_release() {
+  curl -fsSL --retry 3 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/telltaleatheist/crucible/releases?per_page=1" |
+    grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4
+}
+if [ "$UNINSTALL" = 1 ]; then
+  say "backend $BACKEND, uninstalling"
+else
+  if [ -z "$RELEASE" ]; then
+    tag="$(newest_release)" || tag=""
+    RELEASE="${tag#v}"
+  fi
+  [ -n "$RELEASE" ] || die "release_lookup_failed: could not learn the newest release from https://api.github.com/repos/telltaleatheist/crucible/releases -- name one with --release <version> or CRUCIBLE_RELEASE=<version>"
+  say "release $RELEASE, backend $BACKEND"
+fi
 
 # --- uninstall -----------------------------------------------------------
 # The inverse, and then this script exits: `crucible uninstall` does the

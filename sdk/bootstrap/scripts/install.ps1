@@ -32,7 +32,7 @@
 
 [CmdletBinding()]
 param(
-  [string]$Release = '0.6.6',
+  [string]$Release = '',
   [string]$Root = "$env:LOCALAPPDATA\Crucible",
   # The inverse. `crucible uninstall` does the work inside the home; this
   # script removes the host pack, because this script is what unpacked it.
@@ -128,6 +128,16 @@ if ($tarVersion -notmatch "zstd") {
 }
 
 # --- 1. which pack -------------------------------------------------------
+# Asked only when nobody named one. -Uninstall returned long before here,
+# so taking Crucible off a machine still needs no network.
+if (-not $Release) {
+  $feed = "https://api.github.com/repos/telltaleatheist/crucible/releases?per_page=1"
+  $feedRaw = & curl.exe -fsSL --retry 3 -H "Accept: application/vnd.github+json" "$feed"
+  if ($LASTEXITCODE -ne 0) { Die "release_lookup_failed: could not read $feed -- name one with -Release <version>" }
+  try { $feedJson = $feedRaw | Out-String | ConvertFrom-Json } catch { Die "release_lookup_failed: $feed is not JSON" }
+  $Release = ($feedJson[0].tag_name) -replace '^v',''
+  if (-not $Release) { Die "release_lookup_failed: $feed named no release" }
+}
 Say "release $Release"
 $manifestUrl = "https://github.com/telltaleatheist/crucible/releases/download/v$Release/envpacks.json"
 $manifestRaw = & curl.exe -fsSL --retry 3 "$manifestUrl"
