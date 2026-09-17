@@ -47,8 +47,21 @@ def test_the_document_offers_every_selectable_class_and_null_for_automatic(setti
     assert "echo" not in body["local_model_choices"]
 
     offered = body["local_model_choices"]["translate"]
-    assert [row["id"] for row in offered] == ["qwen3.8-27b", "qwen3.8-27b-4bit"]
-    assert [row["fits"] for row in offered] == [False, True]
+    # THE 9B IS IN THIS LIST SINCE 2026-09-16, and this row is where Owen's
+    # ruling becomes a thing a person can click: *"bookforge/foundry should give
+    # the user the option of using 3.5:9b or 3.8:27b IF their system can manage
+    # it."* Foundry's settings card renders exactly this list, so its picker
+    # gains the option with no app change.
+    #
+    # Ordered best-first by declared size, which is why the 9B is LAST: the
+    # default is still the largest thing that fits, and preferring a 9B at bf16
+    # over a 27B at 4-bit for speed is a trade no arithmetic here can rank.
+    assert [row["id"] for row in offered] == [
+        "qwen3.8-27b",
+        "qwen3.8-27b-4bit",
+        "qwen3.5-9b",
+    ]
+    assert [row["fits"] for row in offered] == [False, True, True]
     assert offered[0]["memory_bytes_estimate"] > offered[1]["memory_bytes_estimate"]
     # `installed` is a fact about this disk and every row carries it, so a
     # chooser never has to infer "probably not" from a missing key.
@@ -156,7 +169,11 @@ def test_an_unknown_model_is_refused_and_names_what_there_was(settings_client, a
     assert response.status_code == 400
     error = response.json()["error"]
     assert error["code"] == "local_model_unknown"
-    assert error["details"]["choices"] == ["qwen3.8-27b", "qwen3.8-27b-4bit"]
+    assert error["details"]["choices"] == [
+        "qwen3.8-27b",
+        "qwen3.8-27b-4bit",
+        "qwen3.5-9b",
+    ]
     assert error["details"]["field"] == "local_models.translate"
 
 

@@ -814,18 +814,34 @@ def test_the_cleanup_model_is_the_bf16_tag_the_clean_text_ruling_names() -> None
     assert isinstance(local, OllamaLocal)
     assert local.tag == "qwen3.5:9b-bf16"
     assert local.download_bytes == 19_321_189_044
-    assert local.minimum_for == ()
+    # THE FLOOR SINCE 2026-09-16, moved here from the 27B. Owen reversed his own
+    # ruling of 2026-09-13: "they cant pick smaller than 9b… i think 9b could do
+    # an ok job at translation." `qwen3.8-27b-4bit.toml` had carried a written
+    # RULING OWED asking for exactly this call since 2026-09-14.
+    assert local.minimum_for == ("translate", "simplify")
 
 
-def test_the_27b_is_the_floor_for_translate_and_simplify_not_analysis() -> None:
+def test_the_27b_no_longer_floors_anything() -> None:
+    """The reversal, seen from the row that used to carry the floor.
+
+    It is still the model a card that can hold it should PREFER — the capability
+    walk picks it first by declared size — and it is no longer the smallest thing
+    that lights a translate tile.
+    """
     local = load_manifest("qwen3.8-27b-4bit").local
     assert isinstance(local, OllamaLocal)
     # The PUBLISHED parent, not Owen's local `-24g` Modelfile over it (2026-09-14):
     # a tag that pulls on one machine is not what a setup wizard offers.
+    #
+    # MEASURED 2026-09-16, and it settled a wrong claim of mine: `-24g` and this
+    # published tag share their model, projector and licence digests exactly
+    # (f5f1dd8920d417a / ac3714bfdddeca3 / 4c6a8e842ef0d85). The only difference
+    # was an 18-byte params layer carrying Owen's `num_ctx: 98304`. So a 404 on a
+    # tag NAME is not evidence about the bytes, and this pin was always the right
+    # one to publish.
     assert local.tag == "qwen3.8:27b"
     assert local.download_bytes == 17_741_872_172
-    # Owen named translate and simplify; analysis has no floor (2026-09-14).
-    assert local.minimum_for == ("translate", "simplify")
+    assert local.minimum_for == ()
 
 
 def test_the_page_reader_is_a_gguf_pair_at_a_pinned_sha() -> None:

@@ -202,8 +202,23 @@ def test_a_class_with_several_candidates_and_no_floor_is_refused() -> None:
 
 def test_a_named_model_is_checked_against_the_class_it_was_named_for() -> None:
     assert modules.resolve_class("analysis", "qwen3.8-27b-4bit") == "qwen3.8-27b-4bit"
+    # THE 9B SERVES ANALYSIS NOW, so the model that must be refused here had to
+    # change with Owen's 2026-09-16 reversal. `dots-ocr` is the page reader and
+    # no text class reaches it, which is what this test needs: a model that
+    # genuinely does not serve the class it was named for.
     with pytest.raises(ModuleError, match="does not serve"):
-        modules.resolve_class("analysis", "qwen3.5-9b")
+        modules.resolve_class("analysis", "dots-ocr")
+
+
+def test_the_9b_now_serves_the_three_acts_it_used_to_be_refused_for() -> None:
+    """The reversal, at the door a module declaration comes through.
+
+    An app naming the 9B for translation used to be refused by name. Owen:
+    *"they cant pick smaller than 9b… i think 9b could do an ok job at
+    translation."*
+    """
+    for name in ("translate", "simplify", "analysis"):
+        assert modules.resolve_class(name, "qwen3.5-9b") == "qwen3.5-9b"
 
 
 def test_a_class_that_does_not_select_a_model_says_to_name_the_subject() -> None:
