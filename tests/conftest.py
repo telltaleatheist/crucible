@@ -337,7 +337,9 @@ __all__ = [
 
 
 @pytest.fixture(autouse=True)
-def _state_the_systemd_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+def _state_the_systemd_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Pin the suite to the USER scope; the system-scope tests opt in.
 
     `service.systemd_scope()` reads the kernel and answers SYSTEM inside WSL,
@@ -352,3 +354,13 @@ def _state_the_systemd_scope(monkeypatch: pytest.MonkeyPatch) -> None:
     from crucible import service
 
     monkeypatch.setattr(service, "in_wsl", lambda: False)
+    # AND THE SAME FOR WHERE A SYSTEM UNIT WOULD BE. Pinning `in_wsl`
+    # settles `systemd_scope()` - where an install would PUT a unit - and
+    # leaves `installed_scope()` alone, which reads SYSTEM_UNIT_DIR
+    # straight off the filesystem and so was still asking the real
+    # /etc/systemd/system. That answered `no` on every machine anyone had
+    # run this on, so the gap held until 2026-09-17, when a deploy finally
+    # installed a system unit on this developer's WSL box and 17 tests
+    # that had never been touched began to fail. Same defect the docstring
+    # above describes; it was only half fixed.
+    monkeypatch.setattr(service, "SYSTEM_UNIT_DIR", tmp_path / "etc-systemd-system")
