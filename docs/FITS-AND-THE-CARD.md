@@ -249,6 +249,13 @@ already declares it.
    wrong refusals.
 3. `fits` as arithmetic that names its terms.
 4. Calibration (section 4). Wants the card.
+5. `context_exceeded` as Crucible's own refusal, counted before the engine sees
+   the request, identical on every backend (section 6.2b). This is what closes
+   the mlx-darwin hole, where today nothing refuses at all.
+6. The loaded context as a settings knob with a DERIVED maximum (section 6.4),
+   refused above the ceiling before the engine starts rather than after.
 
 1–3 are a day and need no GPU. 4 is what makes Crucible adjudicate rather than
-recite a table.
+recite a table. 5 needs no GPU and is worth doing early — it is the difference
+between Crucible's verdict and vLLM's. 6 waits on 4, because its maximum is 4's
+output.
