@@ -5,11 +5,42 @@ adjudicate on its own. to decide how much it can fit… we need to come up with 
 creative way of measuring the user's card and determining what would fit, and if
 kv cache+overhead+model weights will fit on their card."*
 
-**STATUS 2026-09-16: steps 1, 2, 3 and the published ceiling are BUILT.** What
-is left is step 4 (two-point calibration, which wants the card), step 5
-(`context_exceeded` refused before the engine) and step 6 (the loaded context as
-a settings knob). The sections below are the design as written; where the build
-went further than the design said, the section says so.
+**STATUS 2026-09-18: steps 1, 2, 3, 4 and the published ceiling are BUILT.**
+What is left is step 5 (`context_exceeded` refused before the engine) and step 6
+(the loaded context as a settings knob). The sections below are the design as
+written; where the build went further than the design said, the section says so.
+
+**Step 4 ran on the card on 2026-09-18** and the results are in
+`docs/MEASUREMENTS.md`. Three things came out of it that this document did not
+predict, and section 4 below is written as though they were unknown:
+
+* **The slope was 23% light on the 9B**, the same error and nearly the same size
+  as the 27B's 24%. Two models checked, two computed slopes light. Section 4's
+  argument was right and is now evidence rather than reasoning.
+* **Two points at the same context and different UTILISATIONS are cleaner than
+  two contexts.** vLLM reports the pool it allocated and the token count that
+  pool bought, so bytes-per-token is a division; varying the utilisation moves
+  the pool and holds everything else. Stating the pool in bytes pins it exactly.
+* **Section 0a's diagnosis was incomplete and section 5's remedy was not the
+  whole fix.** The desktop's SIZE is not what flips a load — the same argv
+  failed and succeeded with the desktop the same size. What moves is
+  `total_consumed`, a whole-card delta across the profiling window, so a slow
+  cold-compile load is charged more of somebody else's allocation than a fast
+  warm one. And inside WSL2 the guest's CUDA `mem_get_info` is BLIND to the
+  Windows desktop, so vLLM cannot discover any of this for itself.
+
+  The remedy is therefore not a better fraction: `--kv-cache-memory-bytes`
+  states the pool in bytes, ignores the utilisation and skips the profiling run
+  altogether, which removes the mechanism instead of tuning it.
+  `crucible/vram.py` is where that lives.
+
+**And one correction to section 5 as written below.** "Decide against measured
+free" is right for the ENGINE and wrong for CAPABILITY, and `capability.py`'s
+ruling 2 already said so: *"The bar is TOTAL memory, not free memory. A
+capability is a fact about the host; free VRAM is a fact about this second."* A
+browser open during `crucible install` must not permanently disable TTS. So
+`decide()` stays on total and does not import `vram`; the free-based arithmetic
+belongs to the load, which is a different question asked at a different time.
 
 What landed:
 

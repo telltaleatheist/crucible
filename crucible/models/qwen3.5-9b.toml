@@ -281,17 +281,53 @@ engine_args = [
 #                       24 layers are gated-delta-net, per-SEQUENCE, and do not
 #                       grow with length.
 #
-# `basis` is the WEAKEST term's, not the strongest: two of these were watched on
-# a card and the slope was not, and the slope is the term the 27B-4bit block
-# proves an architecture cannot be trusted for -- its computed 65_536 was 24%
-# under the 86_251 vLLM actually spent, because the attention page is padded up
-# to the linear layers' recurrent state. Two-point calibration on this card
-# (docs/FITS-AND-THE-CARD.md section 4) is what turns this row `measured`.
+# CALIBRATED ON THE CARD, 2026-09-18 (docs/MEASUREMENTS.md, and section 4 of
+# docs/FITS-AND-THE-CARD.md is the method). Every term below was read off this
+# 3090 Ti; none of it is computed any more, and both of the numbers that changed
+# had been wrong in a way nothing here could have noticed.
+#
+# THE SLOPE WAS 23% LIGHT, exactly as this comment used to predict it might be.
+# Two loads at the same context and different utilisations give it with no
+# architectural knowledge at all -- vLLM reports the pool it allocated AND the
+# token count that pool bought, so bytes-per-token is a division:
+#
+#   util 0.84 -> 1.94 GiB of KV = 51,738 tokens        40_259 B/token
+#   util 0.90 -> 3.37 GiB of KV = 89,680 tokens        40_346 B/token
+#   the slope between them, (3.37-1.94)/(89,680-51,738) 40_470 B/token
+#   and pinned exactly by stating the pool in bytes:
+#   --kv-cache-memory-bytes 2_800_000_000 -> 69,416 tokens  40_337 B/token
+#
+# The last line is the figure below, because it is the only one of the four
+# whose numerator is exact rather than a 2-decimal GiB. The four agree to 0.5%.
+# The computed 32_768 -- 8 full-attention layers x 2 x 4 kv heads x 256 head_dim
+# x 2 B -- is 23.1% under it, which is the same error, in the same direction and
+# within a point of the same size as the 24% the 27B-4bit block measured on
+# 2026-09-12. Two models checked, two computed slopes light. Do not compute this.
+#
+# THE INTERCEPT FELL BY EXACTLY THE VISION TOWER. It was 19.02 GiB here (17.66
+# weights + 1.36 overhead) and measures 18.17 GiB now -- a difference of
+# 0.845 GiB where the cuda-linux comment above measures the tower at 0.85 GiB.
+# `--language-model-only` landed on 2026-09-15 and these terms were never
+# re-taken, so they have been overstating this model by a whole vision tower
+# ever since. Measured as `Total non KV cache memory` across the two loads:
+# 18.21 and 18.14 GiB, so 18.175 +/- 0.035 GiB, stable to 0.4% run-to-run.
+#
+# WHY THE TERMS NO LONGER ADD UP TO `memory_bytes_estimate` (they come to 3.7%
+# under it, inside the parser's 5%): the estimate was measured on 2026-09-12
+# with the tower resident and it has deliberately NOT been re-taken here. It
+# feeds the accelerator guard's "does this model fit", where being 0.7 GiB
+# conservative is the safe direction, and lowering a guard is not something to
+# do in the same change that lands a calibration. The next load that watches the
+# whole card end to end is what should replace it.
+#
+# `basis` is now `measured` for all three terms, which is what section 4 says
+# this calibration is for: it turns the row measured for real rather than by
+# declaration.
 [backends.cuda-linux.memory]
-weights_bytes = 18_962_006_507
-overhead_bytes = 1_460_288_880
-kv_bytes_per_token = 32_768
-basis = "computed"
+weights_bytes = 18_038_862_643
+overhead_bytes = 1_476_395_008
+kv_bytes_per_token = 40_337
+basis = "measured"
 measured_at_context = 16384
 
 [backends.mlx-darwin]

@@ -63,6 +63,7 @@ from .manifests import (
 from .narratorvoices import DOCUMENT_READERS, write_document
 from .voicereference import VoiceReference
 from .voices import VoiceBackendSpec, VoiceManifest
+from .vram import KvPlan
 from .workers import WorkerError, WorkerSession
 
 #: The kinds of thing that can hold the card, and what `/v1/health` reports as
@@ -783,10 +784,18 @@ class Residency:
         weights_dir: Path,
         python: Path,
         *,
+        plan: "KvPlan | None",
         timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
         on_progress: Callable[[str], None] | None = None,
     ) -> ResidentModel:
-        """Make this model the resident one, unloading whatever was there."""
+        """Make this model the resident one, unloading whatever was there.
+
+        `plan` has NO default, deliberately. It is the KV pool sized against the
+        card a moment ago, and the one thing a caller must not be able to do by
+        omission is start an engine with an unsized pool on a shared card — that
+        is the 2026-09-17 failure. A caller with nothing to size (a block with no
+        memory terms, an engine that is not vLLM) passes None and says so.
+        """
         self._refuse_mutation_if_claimed(f"load {manifest.id}")
 
         def say(message: str) -> None:
@@ -818,7 +827,7 @@ class Residency:
                 weights_dir,
                 served,
                 port,
-                self._engine_args(manifest, spec, weights_dir),
+                self._engine_args(manifest, spec, weights_dir, plan),
                 say,
                 timeout,
             )
@@ -1230,9 +1239,19 @@ class Residency:
 
     @staticmethod
     def _engine_args(
-        manifest: ModelManifest, spec: BackendSpec, weights_dir: Path
+        manifest: ModelManifest,
+        spec: BackendSpec,
+        weights_dir: Path,
+        plan: "KvPlan | None",
     ) -> list[str]:
         """The manifest's args plus what Crucible always sets.
+
+        `plan` is the KV pool sized against the card THIS SECOND (crucible/
+        vram.py), and it goes on last so its `--gpu-memory-utilization`
+        overrides the manifest's constant — argparse takes the last spelling of
+        a flag. `None` means nothing was sized: a block with no `[memory]`
+        terms, or an engine that is not vLLM, keeps exactly the args its
+        manifest states.
 
         `--max-model-len` only goes to vLLM; mlx-lm takes the context from the
         model's own config and has no such flag (see engines/mlx_lm.py).
@@ -1259,6 +1278,8 @@ class Residency:
             if spec.mmproj is not None:
                 args += ["--mmproj", str(weights_dir / spec.mmproj)]
             args += ["-c", str(manifest.context_for(spec.backend))]
+        if plan is not None:
+            args += plan.flags()
         return args
 
     def unload(self, subject_id: str) -> Resident:

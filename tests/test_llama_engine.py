@@ -472,7 +472,9 @@ def test_the_spawn_line_is_facts_3_and_the_alias_decision(tmp_path: Path) -> Non
     manifest = load_manifest("dots-ocr")
     spec = manifest.spec(LLAMA_WINDOWS)
     weights_dir = tmp_path / "dots"
-    args = Residency._engine_args(manifest, spec, weights_dir)
+    # `None`: llama-server is not vLLM and has no KV pool to size
+    # (crucible/vram.py returns None for every engine but vllm).
+    args = Residency._engine_args(manifest, spec, weights_dir, None)
     assert args[:2] == ["-m", str(weights_dir / "dots.ocr-Q8_0.gguf")]
     assert "--mmproj" in args
     assert args[args.index("--mmproj") + 1] == str(
@@ -496,7 +498,7 @@ def test_the_spawn_line_is_facts_3_and_the_alias_decision(tmp_path: Path) -> Non
 def test_a_text_model_gets_no_mmproj(tmp_path: Path) -> None:
     manifest = load_manifest("qwen3.5-9b")
     spec = manifest.spec(LLAMA_WINDOWS)
-    args = Residency._engine_args(manifest, spec, tmp_path)
+    args = Residency._engine_args(manifest, spec, tmp_path, None)
     assert "--mmproj" not in args
     assert args[args.index("-c") + 1] == str(manifest.context_for(LLAMA_WINDOWS))
 

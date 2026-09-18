@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 from crucible import accelerator
 from crucible import accelerator, jobenv
 from crucible.accelerator import GIB, ComputeApp
+from crucible.config import DEFAULT_DESKTOP_ALLOWANCE_BYTES
 from crucible import residency as residency_module
 from crucible.manifests import load_manifest
 from crucible.settle import SETTLEMENT_HOLDER
@@ -487,8 +488,11 @@ def test_the_openai_listing_reports_the_context_the_engine_was_started_with(
     entry = llm_client.get("/v1/openai/models", headers=auth).json()["data"][0]
     assert entry["id"] == MODEL
     assert entry["max_model_len"] == 16384
-    # The same number vLLM was handed as --max-model-len.
-    assert engines[0].args[-2:] == ["--max-model-len", "16384"]
+    # The same number vLLM was handed as --max-model-len. Asked for by NAME and
+    # not by position: since crucible/vram.py the KV pool's own flags go on
+    # after this one, and where it sits on the line was never the point.
+    args = engines[0].args
+    assert args[args.index("--max-model-len") + 1] == "16384"
 
 
 def test_max_model_len_follows_the_engine_and_context_default_follows_the_manifest(
@@ -814,13 +818,36 @@ def test_the_4bit_27b_actually_loads_on_a_free_24_gib_card(
     # across on 2026-09-15: this checkpoint is multimodal, the `llm` lane sends it
     # nothing but text, and without the flag vLLM reads 921_460_192 B of vision
     # tower onto the card and holds it for the life of the engine.
+    #
+    # AND THE KV POOL IS SIZED AGAINST THE CARD, which is what this test is now
+    # also the record of (crucible/vram.py, docs/MEASUREMENTS.md). The card here
+    # is entirely free, so the budget is `total - desktop_allowance` and the pool
+    # is whatever the weights and overhead leave of it. Derived rather than
+    # typed: a literal would have to be recomputed by hand the next time this
+    # model is calibrated, and the arithmetic is the thing being asserted.
+    #
+    # `--gpu-memory-utilization` appears TWICE and that is deliberate. The
+    # manifest's own 0.86 stays on the line and the derived value overrides it,
+    # because argparse takes the last spelling of a flag — an engine line that
+    # silently dropped the manifest's value would hide which number came from
+    # where.
+    terms = load_manifest(SMALL_BIG_MODEL).spec(FAKE_BACKEND.kind).memory
+    assert terms is not None
+    total = FAKE_BACKEND.gpu.vram_bytes
+    budget = total - DEFAULT_DESKTOP_ALLOWANCE_BYTES
+    pool = min(budget - terms.fixed_bytes, terms.kv_bytes_per_token * 16384 * 16)
     assert engines[0].args == [
         "--gpu-memory-utilization", "0.86",
         "--max-num-seqs", "16",
         "--skip-mm-profiling",
         "--language-model-only",
         "--max-model-len", "16384",
+        "--kv-cache-memory-bytes", str(pool),
+        "--gpu-memory-utilization", f"{budget / total:.4f}",
     ]
+    # It is a real pool, not a rounding artefact: more than one full-context
+    # request, which is the floor vLLM refuses below.
+    assert pool > terms.kv_bytes_per_token * 16384
 
 
 def test_unknown_params_are_refused(

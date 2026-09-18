@@ -25,7 +25,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ... import accelerator, jobenv, llamacpp, weights
+from ... import accelerator, jobenv, llamacpp, vram, weights
 from ...backend import LLAMA_WINDOWS
 from ...capability import available_bytes
 from ... import ollamastore
@@ -628,7 +628,7 @@ class LoadModelJobType:
         # (PHASE3-TTS.md section 7).
         self._residency.refuse_if_claimed(f"loading {model!r}")
         manifest, spec, _ = _require_loadable(self._config, self._backend, model)
-        accelerator.guard(
+        state = accelerator.guard(
             self._config.backend_kind,
             model_id=model,
             need_bytes=spec.memory_bytes_estimate,
@@ -636,6 +636,22 @@ class LoadModelJobType:
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
             reclaimable_bytes=self._residency.reclaimable_bytes(excluding=model),
         )
+        # AND THEN THE SECOND QUESTION, which the guard above does not ask.
+        # The guard asks whether the model FITS — estimate against free. This
+        # asks whether what is left after the weights can hold a single request
+        # at the context this server serves, which is a different number and the
+        # one that actually refused on 2026-09-17 (crucible/vram.py). Asked here
+        # as well as in the lane so a client is refused at submit rather than
+        # watching a job fail two minutes into a load.
+        plan = vram.plan_vllm_memory(
+            model_id=model,
+            spec=spec,
+            context=manifest.context_for(spec.backend),
+            card=state,
+            desktop_allowance_bytes=self._config.desktop_allowance_bytes,
+        )
+        if plan is not None and not plan.fits:
+            raise ApiError(409, "insufficient_kv_cache", plan.sentence())
 
     def run(self, job: Job, ctx: JobContext) -> None:
         params = LoadParams.model_validate(job.params)
@@ -675,6 +691,21 @@ class LoadModelJobType:
             raise JobError(exc.code, exc.message) from None
         ctx.warming(state.detail)
 
+        # The card moved between the queue and the lane for the guard above, and
+        # it moved for the KV pool too. Sized here from the state just read, so
+        # the bytes handed to the engine are the bytes the card had a moment ago.
+        plan = vram.plan_vllm_memory(
+            model_id=model,
+            spec=spec,
+            context=manifest.context_for(spec.backend),
+            card=state,
+            desktop_allowance_bytes=self._config.desktop_allowance_bytes,
+        )
+        if plan is not None:
+            if not plan.fits:
+                raise JobError("insufficient_kv_cache", plan.sentence())
+            ctx.warming(plan.detail())
+
         ctx.progress(0.0, f"loading {model}")
         try:
             resident = self._residency.load(
@@ -682,6 +713,7 @@ class LoadModelJobType:
                 spec,
                 installed.path,
                 python,
+                plan=plan,
                 timeout=params.timeout_s,
                 on_progress=ctx.warming,
             )
