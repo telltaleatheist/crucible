@@ -160,6 +160,8 @@ export type {
   ModelDescriptor,
   ModelInfo,
   ModuleTaskRequest,
+  PageRequest,
+  PagesEngine,
   Ping,
   PullTaskRequest,
   ProgressData,

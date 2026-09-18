@@ -278,6 +278,56 @@ test('a pace block missing a rate is a protocol error, not a voice packed to a g
   });
 });
 
+// ── a voice nobody measured ──────────────────────────────────────────────────
+//
+// The three rates became optional AS A GROUP on 2026-09-18. `higgs-default` and
+// `zeroshot` are the base weights and no length ladder has ever been run on
+// either, so both manifests had been satisfying a required triple by copying
+// narrator's own Higgs v3 constants back to it — a pace of 15.0 that is the
+// DIVISOR `cap_frames()` sizes against and was never measured as a speaking
+// rate, inside a band written around a real book pace nearer 17.2. narrator
+// re-centres a band's RATIOS on the running median, so that combination judged
+// healthy chunks run-ons and sent them to MAX_DEPTH.
+//
+// So a manifest states what was measured or states nothing, `to_dict()` sends
+// all three as `null`, and the derivation of a centre keeps its one owner —
+// narrator's. This client derives none either.
+
+test('a voice with no measured pace parses, and states three nulls rather than a guess', async () => {
+  answers(200, [{
+    ...VOICE_ROW,
+    id: 'higgs-default',
+    pace: {
+      pace_chars_per_sec: null,
+      max_chars_per_sec: null,
+      min_chars_per_sec: null,
+      target_chars: null,
+      safe_min_chars: null,
+      safe_max_chars: null,
+    },
+  }]);
+  const [voice] = await client().voices();
+  assert.equal(voice!.pace.paceCharsPerSec, null);
+  assert.equal(voice!.pace.maxCharsPerSec, null);
+  assert.equal(voice!.pace.minCharsPerSec, null);
+});
+
+test('a HALF-stated band is refused by name: all three or none, on both sides', async () => {
+  // The manifest loader refuses a partial triple (`_PACE_RATES`), so a document
+  // carrying one is a server disagreeing with itself — and a client that read
+  // two of three would pack to an edge with no centre, which is the shape that
+  // caused the run-on cascade in the first place.
+  answers(200, [{
+    ...VOICE_ROW,
+    pace: { ...VOICE_ROW.pace, pace_chars_per_sec: null },
+  }]);
+  await assert.rejects(client().voices(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+    assert.match(error.message, /voices\[0\]\.pace states 2 of its 3 rates/);
+    return true;
+  });
+});
+
 test('a voice row without a sample_rate is a protocol error, not 24000', async () => {
   // 24000 everywhere in today's catalog is the coincidence this field exists to
   // stop becoming a constant.

@@ -59,7 +59,11 @@ test('a (name, backend) the release does not publish is pack_not_published, list
 for (const [label, text, pattern] of [
   ['not JSON', '<html>404</html>', /it is not JSON/],
   ['an array', '[]', /the top level is not an object/],
-  ['another schema', '{"schema": 2, "version": "0.6.0", "packs": []}', /schema must be 1/],
+  // A schema this build does not read — THREE, not two. `f1e8b38` ("Build only
+  // the packs that changed; carry the rest by reference") added schema 2 and
+  // its per-pack `release`, so the parser reads 1 or 2 and this row went on
+  // asserting that 2 was refused. It had been red ever since.
+  ['another schema', '{"schema": 3, "version": "0.6.0", "packs": []}', /schema must be 1 or 2/],
   ['another version', '{"schema": 1, "version": "0.5.0", "packs": []}', /it says version "0\.5\.0"/],
   ['no packs array', '{"schema": 1, "version": "0.6.0"}', /packs must be an array/],
   ['a pack with no parts', '{"schema":1,"version":"0.6.0","packs":[{"name":"server","backend":"cuda-linux","python":"3.11.13","bytes":1,"sha256":"'

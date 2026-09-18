@@ -89,6 +89,7 @@ import {
   type LoadVoiceOptions,
   type ModelDescriptor,
   type ModelInfo,
+  type PagesEngine,
   type Ping,
   type ProgressData,
   type Provenance,
@@ -384,6 +385,7 @@ export class CrucibleClient {
         readCapability(entry, index, statesNeedsReference),
       ),
       ...readRole(body),
+      pagesEngine: readPagesEngine(body),
     };
   }
 
@@ -2083,6 +2085,55 @@ function readRole(body: Json): Pick<ServerInfo, 'role' | 'managedBy' | 'engine'>
 }
 
 /**
+ * `pages_engine` out of an `/v1/info` document. PHASE15-HOST.md 3.10 fact 7.
+ *
+ * VINTAGE FIRST, EVERYTHING AFTER IT STRICT — `readRole`'s rule, for
+ * `readRole`'s reason. A document with NO `pages_engine` comes from a server
+ * that predates the block, and `null` is that fact; a document that HAS the
+ * block and is then missing a field of it is a defect and is refused by name,
+ * because a half-new document is the one thing a vintage rule cannot read.
+ *
+ * NOTHING INSIDE IS FILLED IN. The prompt, the dpi, the pixel budget and the
+ * ceiling are facts about the weights and this client owns none of them: the
+ * reason the block is on the wire is that clients were pinning their own
+ * copies, and an SDK that substituted one when the server went quiet would be
+ * the third owner all over again.
+ *
+ * The field names are the Python's, verbatim — `crucible/pages.py`'s
+ * `request_shape()` and `engine_block()`, and `tests/test_pages_request.py` is what
+ * holds the two spellings to each other.
+ */
+function readPagesEngine(body: Json): PagesEngine | null {
+  if (!('pages_engine' in body)) {
+    return null;
+  }
+  const block = objectField(body, 'pages_engine', 'info');
+  const request = objectField(block, 'request', 'info.pages_engine');
+  return {
+    // NOT `oneOf`. The engine set grows — `vllm`, `llama-server`, `mlx-vlm`
+    // and whatever reads a page next — and this field is for an operator to
+    // look at, never for a client to branch on.
+    engine: nullableStr(block, 'engine', 'info.pages_engine'),
+    installed: bool(block, 'installed', 'info.pages_engine'),
+    detail: str(block, 'detail', 'info.pages_engine'),
+    request: {
+      model: str(request, 'model', 'info.pages_engine.request'),
+      dpi: num(request, 'dpi', 'info.pages_engine.request'),
+      maxPixels: num(request, 'max_pixels', 'info.pages_engine.request'),
+      maxTokens: num(request, 'max_tokens', 'info.pages_engine.request'),
+      temperature: num(request, 'temperature', 'info.pages_engine.request'),
+      prompt: str(request, 'prompt', 'info.pages_engine.request'),
+      dialect: str(request, 'dialect', 'info.pages_engine.request'),
+      truncatedFinishReason: str(
+        request,
+        'truncated_finish_reason',
+        'info.pages_engine.request',
+      ),
+    },
+  };
+}
+
+/**
  * Where to send work, given an `info()`. PHASE17-ORCHESTRATOR.md section 6.
  *
  * Three answers and no fourth:
@@ -2823,20 +2874,45 @@ function readVoiceInfo(
 }
 
 /**
- * A voice's pace block. The three rates are required; the three that describe
- * the packing shape are nullable, and *which* of them are null is how a client
- * tells a band from a target from neither.
+ * A voice's pace block. The three rates are ALL THREE OR NONE — a voice with no
+ * measured pace states none, and narrator derives the centre. The three that
+ * describe the packing shape are nullable each on their own, and *which* of
+ * them are null is how a client tells a band from a target from neither.
  *
- * The manifest's own invariants — `min < pace < max`, and never both a band and
- * a target — are the loader's to enforce and are not re-checked here. This
- * client reads the wire; it does not keep a second copy of the server's schema
- * rules to disagree with it.
+ * They were required until 2026-09-18, and what that cost is why the group rule
+ * is worth a paragraph: `higgs-default` and `zeroshot` are the base weights and
+ * no ladder has been run on either, so both manifests satisfied the requirement
+ * by copying narrator's own Higgs v3 constants back to it — a pace of 15.0 that
+ * is the frame cap's divisor rather than a measured speaking rate, inside edges
+ * written around a real book pace nearer 17.2. narrator re-centres a band's
+ * RATIOS on the running median, so healthy chunks fell under the short edge and
+ * went to the bottom of the retake ladder. A manifest now states what was
+ * measured or states nothing, and NOTHING HERE FILLS IN THE NOTHING.
+ *
+ * A HALF-STATED TRIPLE IS REFUSED, which is the one invariant this reader does
+ * check — because it is not the manifest's schema, it is the wire disagreeing
+ * with itself. `min < pace < max` and "never both a band and a target" stay the
+ * loader's to enforce: this client reads the wire and does not keep a second
+ * copy of the server's rules to disagree with it.
  */
 function readVoicePace(entry: Json, where: string): VoicePace {
+  const paceCharsPerSec = nullableNum(entry, 'pace_chars_per_sec', where);
+  const maxCharsPerSec = nullableNum(entry, 'max_chars_per_sec', where);
+  const minCharsPerSec = nullableNum(entry, 'min_chars_per_sec', where);
+  const stated = [paceCharsPerSec, maxCharsPerSec, minCharsPerSec]
+    .filter((rate) => rate !== null).length;
+  if (stated !== 0 && stated !== 3) {
+    throw new CrucibleProtocolError(
+      `${where} states ${stated} of its 3 rates. A band is a measured pace and the two ` +
+        'edges derived from it, so a subset is a band nobody finished writing — and a ' +
+        'client packing to an edge with no centre is the shape the group rule exists to ' +
+        'prevent.',
+    );
+  }
   return {
-    paceCharsPerSec: num(entry, 'pace_chars_per_sec', where),
-    maxCharsPerSec: num(entry, 'max_chars_per_sec', where),
-    minCharsPerSec: num(entry, 'min_chars_per_sec', where),
+    paceCharsPerSec,
+    maxCharsPerSec,
+    minCharsPerSec,
     targetChars: nullableNum(entry, 'target_chars', where),
     safeMinChars: nullableNum(entry, 'safe_min_chars', where),
     safeMaxChars: nullableNum(entry, 'safe_max_chars', where),
