@@ -38,8 +38,10 @@ control and, until the work below, did not consult.
 * `scripts/measure-llm-memory.sh <model>` — the engine's **share** of the
   accelerator, at rest and under a request that fills `context_default`. Works on
   both backends. This is where `memory_bytes_estimate` comes from.
-* Two-point calibration (`FITS-AND-THE-CARD.md` section 4) — slope and intercept
-  per model per host. Harness and results in the 2026-09-18 section below.
+* `scripts/calibrate-kv.sh <model> <util> [context]` — two-point calibration
+  (`FITS-AND-THE-CARD.md` section 4): the KV slope and the intercept, per model
+  per host, read off vLLM's own DEBUG memory profiler. cuda-linux only, because
+  the whole arithmetic it measures is vLLM's. Results in the 2026-09-18 section.
 
 Both want an idle machine. On the PC, check `pgrep -af train_lora.py` first and
 refuse if training is up — WSL pytest and training share 13 GB.
@@ -181,7 +183,7 @@ hypothesis until measured, and measuring it is the 2026-09-18 section.
 *Owen authorised the card: "both cards are free", then "go ahead and do the test
 and fix this the right way".*
 
-**Harness.** `/tmp/crucible-calib/calibrate.sh <model> <util> [context]` — runs
+**Harness.** `scripts/calibrate-kv.sh <model> <util> [context]` — runs
 the engine's real argv with `VLLM_LOGGING_LEVEL=DEBUG`, which makes
 `MemoryProfilingResult.__repr__` print every term of the arithmetic above, and
 samples `nvidia-smi` at 1 Hz throughout so the desktop's own movement during the
@@ -320,6 +322,11 @@ The two halves were built for each other.
 what its documentation says, and it is the only one of the four derivations
 whose numerator is exact rather than a two-decimal GiB, so **40,337 B/token is
 what went into the manifest**.
+
+A fourth point, taken later the same night when the harness was re-run from its
+repo home to prove that copy works: `--kv-cache-memory-bytes 2_500_000_000` ->
+62,086 tokens = **40,266 B/token**. Four derivations now span 40,259 to 40,470,
+and the manifest carries 40,337.
 
 ### What these runs changed
 
