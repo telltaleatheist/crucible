@@ -211,6 +211,73 @@ def test_a_pace_outside_its_own_edges_is_refused() -> None:
     assert "the band is min < pace < max" in message
 
 
+#: THE TRIPLE THAT CAUSED THE RULING — narrator's Higgs v3 defaults spliced
+#: together, `HiggsDefaults.CHARS_PER_SEC` 15.0 between `HiggsV3Defaults`'
+#: 20.0/14.5 edges. It satisfies `min < pace < max` and is still wrong: the two
+#: halves were written around different centres, so the band is 1.333 long and
+#: 1.034 short, and narrator — which keeps only the RATIOS — judged healthy
+#: chunks run-ons and re-rolled them to MAX_DEPTH.
+SPLICED = swap(
+    "pace_chars_per_sec = 16.0\nmax_chars_per_sec = 20.8\nmin_chars_per_sec = 12.3",
+    "pace_chars_per_sec = 15.0\nmax_chars_per_sec = 20.0\nmin_chars_per_sec = 14.5",
+)
+
+
+def test_a_lopsided_triple_is_refused_naming_both_ratios() -> None:
+    """A BAND IS SYMMETRIC UNLESS IT SAYS OTHERWISE (ruled 2026-09-18).
+
+    `min < pace < max` passes this triple, which is how it shipped. The defect
+    is one level up: the edges were not derived from the pace at all.
+    """
+    message = refused(SPLICED)
+    assert "1.333" in message
+    assert "1.034" in message
+    assert "edges" in message
+
+
+def test_a_percentile_band_may_be_lopsided() -> None:
+    """The escape hatch, and it is a STATEMENT rather than a tolerance.
+
+    A band read off a distribution's percentiles is lopsided because the
+    distribution is, and there is nothing to refuse. Saying so in the manifest
+    is what separates that voice from one whose edges were spliced.
+    """
+    voice = parse(
+        SPLICED.replace(
+            "min_chars_per_sec = 14.5",
+            'min_chars_per_sec = 14.5\nedges = "percentile"',
+        )
+    )
+    assert voice.pace.pace_chars_per_sec == 15.0
+    assert voice.pace.max_chars_per_sec == 20.0
+    assert voice.pace.min_chars_per_sec == 14.5
+
+
+def test_an_unknown_edges_word_is_refused() -> None:
+    """A typo in the escape hatch must not read as "not percentile, so check"."""
+    message = refused(
+        SPLICED.replace(
+            "min_chars_per_sec = 14.5",
+            'min_chars_per_sec = 14.5\nedges = "percentiles"',
+        )
+    )
+    assert "edges" in message
+    assert "'percentiles'" in message
+
+
+def test_edges_without_a_band_is_refused() -> None:
+    """A key that describes edges the manifest does not state is a leftover."""
+    message = refused(
+        swap(
+            "pace_chars_per_sec = 16.0\nmax_chars_per_sec = 20.8\n"
+            "min_chars_per_sec = 12.3\n",
+            'edges = "percentile"\n',
+        )
+    )
+    assert "edges" in message
+    assert "states no rate band" in message
+
+
 def test_a_negative_rate_is_refused() -> None:
     assert "min_chars_per_sec must be positive" in refused(
         swap("min_chars_per_sec = 12.3", "min_chars_per_sec = -1.0")
@@ -709,6 +776,23 @@ def test_a_manifest_states_the_pace_it_measured_and_no_other(voice_id: str) -> N
         return
     assert all(rate is not None for rate in rates), voice_id
     assert pace.min_chars_per_sec < pace.pace_chars_per_sec < pace.max_chars_per_sec
+
+
+@pytest.mark.parametrize("voice_id", sorted(set(SHIPPED) - set(UNMEASURED_PACE)))
+def test_every_measured_band_in_this_catalog_is_symmetric(voice_id: str) -> None:
+    """EVERY LADDER IN THIS BUILD WROTE max = pace x 1.3 AND min = pace / 1.3.
+
+    Not a rule the loader imposes — `edges = "percentile"` exists for a band
+    read off a distribution instead — but a fact about the five manifests that
+    are here, and the reason the symmetry check can be the default. A sixth
+    voice arriving with genuinely lopsided edges must say so in its manifest,
+    and this test is where that shows up.
+    """
+    pace = load_voice(voice_id).pace
+    long_side = pace.max_chars_per_sec / pace.pace_chars_per_sec
+    short_side = pace.pace_chars_per_sec / pace.min_chars_per_sec
+    assert round(long_side, 2) == 1.3, voice_id
+    assert round(short_side, 2) == 1.3, voice_id
 
 
 @pytest.mark.parametrize("voice_id", sorted(SHIPPED))

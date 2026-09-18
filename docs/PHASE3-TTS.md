@@ -54,7 +54,8 @@ sample_rate = 24000
 [voice.pace]
 pace_chars_per_sec = 16.64      # the measured triple: all three, or none at all
 max_chars_per_sec = 21.63       # (a voice nobody measured writes none of them)
-min_chars_per_sec = 12.80       # min < pace < max
+min_chars_per_sec = 12.80       # min < pace < max, and symmetric in ratio
+# edges = "percentile"          # ...unless the edges came off a distribution
 safe_min_chars = 600            # this voice's packing shape: a band...
 safe_max_chars = 800
 # target_chars = 600            # ...or a single target. Never both; neither is
@@ -125,6 +126,24 @@ corpus's interquartile range, measured 2026-09-09) OR a single `target_chars` (w
 zero-shot voices declare), never both, and a voice declaring neither packs to the backend's
 `max_chars`, which is what BookForge does today. The loader refuses a band whose ceiling
 exceeds the arm's `max_chars`, the same rule BookForge and narrator both refuse on.
+
+**The stated triple must also be SYMMETRIC IN RATIO, and `edges` is how a manifest says it
+is not** (ruled 2026-09-18). Every length ladder run in this build wrote `max = pace × 1.3`
+and `min = pace ÷ 1.3`, and all five measured manifests here still round to 1.30 on both
+sides, so `max / pace` and `pace / min` are one number twice. The spliced 15.0 / 20.0 / 14.5
+above satisfied `min < pace < max` and was still 1.333 long against 1.034 short — two halves
+written around different centres — which is exactly what `min < pace < max` cannot see. The
+loader therefore refuses a triple whose two ratios disagree, naming both, with a tolerance
+that is the manifest's own rounding and nothing wider: these rates are written to two
+decimals, so each stands for a real number within 0.005, and that uncertainty is propagated
+through the two divisions rather than replaced by a round number chosen to make the catalog
+pass. The one escape is the optional `edges = "percentile"` under `[voice.pace]`: a band read
+off a distribution's percentiles is lopsided because the distribution is, and there is
+nothing to refuse. It is a statement to the loader and **does not reach the wire** — nothing
+downstream branches on how the edges were got, since narrator keeps only the ratios — so
+`/v1/voices` carries the same six pace fields it always did. The word is a closed set, so a
+typo is refused rather than read as "not percentile, therefore check the symmetry", and
+`edges` stated with no rate band to describe is refused as the leftover it is.
 
 **DIFFERENCE 3 — `sample_rate` is required in `[voice]`.** The `/v1/voices` row carries it
 and a client writing FLACs cannot be handed a null. It is 24000 for every voice in the

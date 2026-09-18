@@ -186,6 +186,31 @@ _PACE_OPTIONAL: dict[str, type] = {
     "safe_min_chars": int,
     "safe_max_chars": int,
 }
+#: HOW THE TWO EDGES WERE GOT, stated only when it is not the usual way.
+#:
+#: Every ladder run in this build wrote `max = pace x 1.3` and `min = pace /
+#: 1.3`, so a triple whose two ratios disagree is edges that were not derived
+#: from that pace — the defect of 2026-09-18, where narrator's `CHARS_PER_SEC`
+#: 15.0 sat between `HiggsV3Defaults`' 20.0/14.5 and gave 1.333 long against
+#: 1.034 short. `_check_pace` therefore refuses a lopsided triple by default,
+#: and this key is the manifest saying the lopsidedness is real: a band read
+#: off a distribution's percentiles is lopsided because the distribution is.
+#:
+#: It does NOT reach the wire. Nothing downstream branches on how the edges
+#: were got — narrator keeps the RATIOS whatever produced them — so this is a
+#: statement to this loader and stays here, rather than a seventh `Pace` field
+#: every client must learn to ignore.
+_PACE_EDGES = "edges"
+#: The one word `edges` takes. A closed set, so a typo is refused rather than
+#: read as "not percentile, therefore check the symmetry".
+_PACE_EDGES_WORDS = ("percentile",)
+#: HALF THE LAST PLACE OF A MANIFEST NUMBER. Every rate in this catalog is
+#: written to two decimals (`deathstalker.toml` 15.91 / 20.68 / 12.24), so a
+#: stated rate stands for a real one up to 0.005 either side, and the two
+#: ratios computed from three such numbers cannot be compared for exact
+#: equality. The tolerance in `_check_pace` is this propagated through the two
+#: divisions rather than a round number chosen to make the catalog pass.
+_PACE_HALF_ULP = 0.005
 
 #: `[voice.serving]` — WHAT THE SERVER narrator STARTS IS CONFIGURED WITH.
 #:
@@ -549,8 +574,20 @@ def _number(where: str, key: str, value: Any) -> float:
 
 def _check_pace(where: str, table: dict[str, Any]) -> Pace:
     check_table(
-        where, table, {}, {**_PACE_RATES, **_PACE_OPTIONAL}, error=VoiceError
+        where,
+        table,
+        {},
+        {**_PACE_RATES, **_PACE_OPTIONAL, _PACE_EDGES: str},
+        error=VoiceError,
     )
+    edges = table.get(_PACE_EDGES)
+    if edges is not None and edges not in _PACE_EDGES_WORDS:
+        raise VoiceError(
+            f"{where}: {_PACE_EDGES} {edges!r} is not one of "
+            f"{sorted(_PACE_EDGES_WORDS)}; the key says how the two edges were "
+            "got, and a word this loader does not know would silently read as "
+            "'derived from the pace'"
+        )
     # ALL THREE OR NONE, refused by name on the subset — narrator's `_length_band`
     # refuses the same subset with the same sentence, and a manifest that got past
     # this door would only be refused later, at the engine, on somebody's book.
@@ -584,6 +621,47 @@ def _check_pace(where: str, table: dict[str, Any]) -> Pace:
                 f"max_chars_per_sec {rates['max_chars_per_sec']} are out of order; "
                 "the band is min < pace < max"
             )
+
+        # THE TWO EDGES ARE DERIVED FROM THE PACE, so the band is symmetric in
+        # ratio — every ladder run in this build wrote `max = pace x 1.3` and
+        # `min = pace / 1.3`, and the five fine-tunes here all measure 1.30 on
+        # both sides. A triple whose ratios disagree is edges that came from
+        # somewhere else: the 15.0 / 20.0 / 14.5 that shipped until 2026-09-18
+        # passed `min < pace < max` and was still a splice of two different
+        # centres, 1.333 long against 1.034 short. narrator keeps only the
+        # RATIOS (`engine/higgs/truncation.PaceTracker`), so a lopsided pair
+        # re-centred on the book's running median judged healthy chunks run-ons
+        # and re-rolled them to MAX_DEPTH — a band nobody can read as a band.
+        #
+        # The tolerance is the rounding, not a fudge: each rate is written to
+        # two decimals, so it stands for a real number within `_PACE_HALF_ULP`,
+        # and that uncertainty propagates through each division as
+        # `half_ulp x (1 + ratio) / divisor` — the divisor's own rounding
+        # scaled by the ratio, plus the numerator's. Nothing wider.
+        long_side = rates["max_chars_per_sec"] / rates["pace_chars_per_sec"]
+        short_side = rates["pace_chars_per_sec"] / rates["min_chars_per_sec"]
+        rounding = _PACE_HALF_ULP * (1 + long_side) / rates[
+            "pace_chars_per_sec"
+        ] + _PACE_HALF_ULP * (1 + short_side) / rates["min_chars_per_sec"]
+        if edges is None and abs(long_side - short_side) > rounding:
+            raise VoiceError(
+                f"{where}: the band is not symmetric — max_chars_per_sec is "
+                f"{long_side:.3f} x pace_chars_per_sec but pace_chars_per_sec "
+                f"is only {short_side:.3f} x min_chars_per_sec, further apart "
+                f"than two-decimal rounding allows ({rounding:.4f}). The two "
+                "edges are derived from the measured pace, so both ratios are "
+                "the same number; a band whose edges came off a distribution "
+                f'instead says so with {_PACE_EDGES} = "percentile"'
+            )
+    elif edges is not None:
+        # An `edges` with no edges to describe. It is the leftover of a triple
+        # somebody deleted, and left alone it reads as a band this loader
+        # checked and passed.
+        raise VoiceError(
+            f"{where}: states {_PACE_EDGES} = {edges!r} but states no rate "
+            "band for it to describe; the key says how max_chars_per_sec and "
+            "min_chars_per_sec were got, and there are none"
+        )
 
     target = table.get("target_chars")
     floor = table.get("safe_min_chars")
