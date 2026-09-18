@@ -52,9 +52,9 @@ sample_rate = 24000
 # client does the packing, the server states the shape. These are the numbers that
 # live in BookForge's higgs-models.json voice document today.
 [voice.pace]
-pace_chars_per_sec = 16.64      # required
-max_chars_per_sec = 21.63       # required
-min_chars_per_sec = 12.80       # required; min < pace < max
+pace_chars_per_sec = 16.64      # the measured triple: all three, or none at all
+max_chars_per_sec = 21.63       # (a voice nobody measured writes none of them)
+min_chars_per_sec = 12.80       # min < pace < max
 safe_min_chars = 600            # this voice's packing shape: a band...
 safe_max_chars = 800
 # target_chars = 600            # ...or a single target. Never both; neither is
@@ -105,15 +105,21 @@ manifest carries the catalog's name and the catalog's meaning; the token budget 
 it is computed. **Nothing in `tts` carries a token cap on the wire**, and the `chunk` event's
 `capped` (section 6) is therefore about the frame cap narrator computed, not about this.
 
-**DIFFERENCE 2 — the pace block is three required rates plus an OPTIONAL packing shape.**
+**DIFFERENCE 2 — the pace block is a measured rate triple plus an OPTIONAL packing shape.**
 As drafted it required all seven numbers, and no voice in the catalog declares all seven.
-The three rates (`pace_chars_per_sec`, `max_chars_per_sec`, `min_chars_per_sec`) are
-required of every voice and must satisfy `min < pace < max`, which is narrator's own rule in
+The three rates (`pace_chars_per_sec`, `max_chars_per_sec`, `min_chars_per_sec`) are ALL
+THREE OR NONE and must satisfy `min < pace < max`, which is narrator's own rule in
 `engine/higgs/config.py`'s `_length_band` — the band is the measured pace and the two edges
 derived from it, and narrator keeps only the RATIOS and re-centres them on the book's own
-running median. A voice with no measurement of its own carries the narrator engine's default
-band, which is still a recorded number (Higgs v3: 15.0 / 20.0 / 14.5, read off
-`HiggsDefaults` and `HiggsV3Defaults`). What the client packs to is then EITHER a
+running median. **A voice with no measurement of its own states none of the three** (ruled
+2026-09-18): the base-weights pair used to restate narrator's Higgs v3 defaults instead —
+15.0 / 20.0 / 14.5 — and the 15.0 in that triple is `HiggsDefaults.CHARS_PER_SEC`, the
+divisor `cap_frames()` sizes the frame cap with, not a rate anything was measured speaking
+at. Against edges written around a book pace nearer 17.2 it gave narrator 1.034 tolerance on
+the long side and re-rolled healthy chunks to MAX_DEPTH. With the keys absent the voices
+document carries none of them, narrator uses its engine's own default band, and it derives
+the centre as the geometric mean of the edges (`truncation.tracker_for`) — one owner for
+that derivation, and Crucible is not it. What the client packs to is then EITHER a
 `safe_min_chars`/`safe_max_chars` band (what the five fine-tunes declare — their training
 corpus's interquartile range, measured 2026-09-09) OR a single `target_chars` (what the
 zero-shot voices declare), never both, and a voice declaring neither packs to the backend's

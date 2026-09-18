@@ -402,9 +402,25 @@ def voice_entry(
     if pace.safe_max_chars is not None:
         entry["safeMaxChars"] = pace.safe_max_chars
     entry["sampling"] = _sampling_entry(manifest, spec)
-    entry["paceCharsPerSec"] = pace.pace_chars_per_sec
-    entry["maxCharsPerSec"] = pace.max_chars_per_sec
-    entry["minCharsPerSec"] = pace.min_chars_per_sec
+    # THE RATE BAND ONLY WHEN THE MANIFEST MEASURED ONE, and all three keys
+    # together: narrator's `_length_band` (`engine/higgs/config.py`) takes all
+    # three or none and refuses a subset by name. Testing one of the three is
+    # enough because `_check_pace` refuses a partial triple at the manifest.
+    #
+    # WHAT ABSENCE BUYS. A voice nobody ran a ladder on has no pace, and the
+    # three numbers `higgs-default` and `zeroshot` used to send were narrator's
+    # own Higgs v3 defaults read back to it — a pace of 15.0 that is the frame
+    # cap's DIVISOR rather than a narration rate, between edges written around
+    # a book pace nearer 17.2. narrator keeps a band's RATIOS, so that triple
+    # gave it 1.034 tolerance on the long side and it re-rolled healthy chunks
+    # to MAX_DEPTH. Sending nothing puts it on the path it already has for an
+    # unmeasured voice: its engine's default band, centred on the geometric
+    # mean of the edges (`truncation.tracker_for`). Crucible does not derive a
+    # centre of its own — that fact has one owner and it is narrator.
+    if pace.pace_chars_per_sec is not None:
+        entry["paceCharsPerSec"] = pace.pace_chars_per_sec
+        entry["maxCharsPerSec"] = pace.max_chars_per_sec
+        entry["minCharsPerSec"] = pace.min_chars_per_sec
     return entry
 
 

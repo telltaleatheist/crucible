@@ -176,9 +176,33 @@ def test_a_voice_with_no_pace_is_refused() -> None:
 
 def test_half_a_band_is_refused() -> None:
     """narrator's rule: the band is a triple, write all three or none."""
-    assert "missing required key(s) ['min_chars_per_sec']" in refused(
-        swap("min_chars_per_sec = 12.3\n", "")
+    message = refused(swap("min_chars_per_sec = 12.3\n", ""))
+    assert "declares only part of its rate band" in message
+    assert "['min_chars_per_sec']" in message
+
+
+def test_a_voice_may_state_no_rates_at_all() -> None:
+    """THE OTHER HALF OF "all three or none": none is a legal statement.
+
+    A voice nobody ran a ladder on has no pace to state, and narrator already
+    knows what to do with one — given no band it uses its engine's own default
+    and derives the centre as the geometric mean of the two edges
+    (`engine/higgs/truncation.tracker_for`). The alternative, which the loader
+    obliged until 2026-09-18, is a manifest made to invent three numbers.
+    """
+    voice = parse(
+        swap(
+            "pace_chars_per_sec = 16.0\nmax_chars_per_sec = 20.8\n"
+            "min_chars_per_sec = 12.3\n",
+            "",
+        )
     )
+    assert voice.pace.pace_chars_per_sec is None
+    assert voice.pace.max_chars_per_sec is None
+    assert voice.pace.min_chars_per_sec is None
+    # The packing shape is a different fact in the same table and is untouched.
+    assert voice.pace.safe_min_chars == 600
+    assert voice.pace.safe_max_chars == 800
 
 
 def test_a_pace_outside_its_own_edges_is_refused() -> None:
@@ -643,8 +667,48 @@ SHIPPED = {
 }
 
 
+#: The two voices in this build that are the BASE WEIGHTS rather than a
+#: fine-tune, and therefore the two nobody has run a length ladder on. They are
+#: named here because "which voices have no measured pace" is a fact about the
+#: catalog, and a third one appearing must be a deliberate edit to this line
+#: rather than a manifest quietly shipping without a band.
+UNMEASURED_PACE = ("higgs-default", "zeroshot")
+
+
 def test_this_build_ships_the_voices_it_says_it_does() -> None:
     assert sorted(load_all_voices()) == sorted(SHIPPED)
+
+
+@pytest.mark.parametrize("voice_id", sorted(SHIPPED))
+def test_a_manifest_states_the_pace_it_measured_and_no_other(voice_id: str) -> None:
+    """A MANIFEST STATES WHAT WAS MEASURED (ruling of 2026-09-18).
+
+    `higgs-default` and `zeroshot` are the base weights, no ladder has been run
+    on either, and until 2026-09-18 both satisfied a required-triple rule by
+    copying narrator's Higgs v3 defaults out of its source — `CHARS_PER_SEC`
+    15.0, which is the DIVISOR `cap_frames()` sizes the frame cap against and
+    not a rate anything was measured speaking at, between edges written around
+    a book pace nearer 17.2. narrator keeps a band's RATIOS, and those ratios
+    are 1.333 short against 1.034 long, so it judged healthy chunks run-ons and
+    re-rolled them to MAX_DEPTH. Stating nothing puts the derivation back where
+    it has one owner: narrator centres its own default band on the geometric
+    mean of the edges.
+
+    The five fine-tunes DO state all three, each from its own ladder, and this
+    test is the pair of those two statements.
+    """
+    pace = load_voice(voice_id).pace
+    rates = (pace.pace_chars_per_sec, pace.max_chars_per_sec, pace.min_chars_per_sec)
+    if voice_id in UNMEASURED_PACE:
+        assert rates == (None, None, None)
+        # Dropping the rates did not take the packing shape with them: they are
+        # two different facts in one table, and zeroshot still packs to the
+        # catalog's single 600-character target.
+        if voice_id == "zeroshot":
+            assert pace.target_chars == 600
+        return
+    assert all(rate is not None for rate in rates), voice_id
+    assert pace.min_chars_per_sec < pace.pace_chars_per_sec < pace.max_chars_per_sec
 
 
 @pytest.mark.parametrize("voice_id", sorted(SHIPPED))

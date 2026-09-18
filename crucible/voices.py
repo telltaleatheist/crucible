@@ -139,15 +139,36 @@ _VOICE_REQUIRED: dict[str, type] = {
     "sample_rate": int,
 }
 
-#: The three rates are a property of the VOICE and are required of every one:
-#: BookForge measures them per voice from clean renders, and a voice with no
-#: measurement of its own carries the narrator engine's default band, which is
-#: still a real recorded number rather than a guess.
+#: The three rates are a property of the VOICE, measured per voice by BookForge
+#: from clean renders, and they travel as ONE statement: all three or none.
+#: That is narrator's own rule in `engine/higgs/config.py`'s `_length_band`,
+#: which refuses a partial triple by name, and this is the same rule rather
+#: than a second copy of it — the band is a measured pace and the two edges
+#: derived from it, so a subset is a band nobody finished writing.
+#:
+#: OPTIONAL AS A GROUP SINCE 2026-09-18, and the reason is the point of the
+#: block. They were required, and the two voices in this build that are the
+#: BASE WEIGHTS rather than a fine-tune — `higgs-default` and `zeroshot`, which
+#: no ladder has ever been run on — met the requirement by copying narrator's
+#: Higgs v3 defaults out of its source: `HiggsDefaults.CHARS_PER_SEC` 15.0 as
+#: the pace, with `HiggsV3Defaults.MAX_CHARS_PER_SEC` 20.0 and
+#: `MIN_CHARS_PER_SEC` 14.5 as the edges. That is not one fact: 15.0 is the
+#: DIVISOR `cap_frames()` sizes the frame cap against and nothing was ever
+#: measured speaking at it, while the edges were written around a real book
+#: pace nearer 17.2. narrator keeps a band's RATIOS and re-centres them on the
+#: book's running median, and those ratios are 1.333 on the short side against
+#: 1.034 on the long — so after warm-up healthy chunks fell under
+#: `median x 0.967`, were judged run-ons, and went re-roll -> split -> re-roll
+#: to MAX_DEPTH. A manifest states what was measured; with nothing stated
+#: narrator uses its own default band and derives the centre as the geometric
+#: mean of the edges (`truncation.tracker_for`), and that derivation keeps its
+#: one owner. Crucible does not compute a centre.
+#:
 #: `object` rather than `float` because TOML's 16 is an int and its 16.0 is a
 #: float, and a pace that happens to land on a whole number is still a pace.
 #: `_number()` does the real check and refuses a bool, which `isinstance` would
 #: not.
-_PACE_REQUIRED: dict[str, type] = {
+_PACE_RATES: dict[str, type] = {
     "pace_chars_per_sec": object,
     "max_chars_per_sec": object,
     "min_chars_per_sec": object,
@@ -258,11 +279,17 @@ class Pace:
     The server states the shape; the client does the packing. At most one of
     `target_chars` and the `safe_*` pair is set; with neither, the client packs
     to the backend's `max_chars` — see `_PACE_OPTIONAL`.
+
+    THE THREE RATES ARE ALL THREE OR ALL NONE (`_PACE_RATES`). `None` is a
+    voice nobody measured, and it means exactly that rather than a default
+    standing in for one: a client reading it derives nothing here, and narrator
+    reaches for its engine's own band. A caller may test any one of the three
+    to know which it has.
     """
 
-    pace_chars_per_sec: float
-    max_chars_per_sec: float
-    min_chars_per_sec: float
+    pace_chars_per_sec: float | None
+    max_chars_per_sec: float | None
+    min_chars_per_sec: float | None
     target_chars: int | None
     safe_min_chars: int | None
     safe_max_chars: int | None
@@ -521,30 +548,42 @@ def _number(where: str, key: str, value: Any) -> float:
 
 
 def _check_pace(where: str, table: dict[str, Any]) -> Pace:
-    check_table(where, table, _PACE_REQUIRED, _PACE_OPTIONAL, error=VoiceError)
-    rates = {
-        key: _number(where, key, table[key]) for key in _PACE_REQUIRED
-    }
-    for key, value in rates.items():
-        if value <= 0:
-            raise VoiceError(f"{where}: {key} must be positive, got {value}")
-    # min < pace < max, narrator's own rule (`engine/higgs/config.py`
-    # `_length_band`): the band is the measured pace and the two edges DERIVED
-    # from it, so a pace outside its own edges is a band nobody finished writing.
-    # narrator keeps only the band's RATIOS and re-centres them on the running
-    # median of the book's own shipped takes, which it cannot do without knowing
-    # what the edges were centred on.
-    if not (
-        rates["min_chars_per_sec"]
-        < rates["pace_chars_per_sec"]
-        < rates["max_chars_per_sec"]
-    ):
+    check_table(
+        where, table, {}, {**_PACE_RATES, **_PACE_OPTIONAL}, error=VoiceError
+    )
+    # ALL THREE OR NONE, refused by name on the subset — narrator's `_length_band`
+    # refuses the same subset with the same sentence, and a manifest that got past
+    # this door would only be refused later, at the engine, on somebody's book.
+    stated = set(_PACE_RATES) & set(table)
+    if stated and stated != set(_PACE_RATES):
         raise VoiceError(
-            f"{where}: min_chars_per_sec {rates['min_chars_per_sec']}, "
-            f"pace_chars_per_sec {rates['pace_chars_per_sec']}, max_chars_per_sec "
-            f"{rates['max_chars_per_sec']} are out of order; the band is "
-            "min < pace < max"
+            f"{where}: declares only part of its rate band, missing "
+            f"{sorted(set(_PACE_RATES) - stated)}. The band is a measured pace "
+            "and the two edges derived from it; write all three or none"
         )
+    rates: dict[str, float | None] = dict.fromkeys(_PACE_RATES)
+    if stated:
+        rates = {key: _number(where, key, table[key]) for key in _PACE_RATES}
+        for key, value in rates.items():
+            if value <= 0:
+                raise VoiceError(f"{where}: {key} must be positive, got {value}")
+        # min < pace < max, narrator's own rule (`engine/higgs/config.py`
+        # `_length_band`): the band is the measured pace and the two edges DERIVED
+        # from it, so a pace outside its own edges is a band nobody finished
+        # writing. narrator keeps only the band's RATIOS and re-centres them on the
+        # running median of the book's own shipped takes, which it cannot do
+        # without knowing what the edges were centred on.
+        if not (
+            rates["min_chars_per_sec"]
+            < rates["pace_chars_per_sec"]
+            < rates["max_chars_per_sec"]
+        ):
+            raise VoiceError(
+                f"{where}: min_chars_per_sec {rates['min_chars_per_sec']}, "
+                f"pace_chars_per_sec {rates['pace_chars_per_sec']}, "
+                f"max_chars_per_sec {rates['max_chars_per_sec']} are out of order; "
+                "the band is min < pace < max"
+            )
 
     target = table.get("target_chars")
     floor = table.get("safe_min_chars")
