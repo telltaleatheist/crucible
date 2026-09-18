@@ -234,6 +234,11 @@ class LoadVoiceJobType:
             raise JobError(exc.code, exc.message) from None
         ctx.warming(state.detail)
 
+        # Read on both sides of the load, for `jobs/llm/__init__.py`'s reason:
+        # narrator's start is not interruptible, so the only two moments a
+        # cancel can be honoured are before the worker is spawned and after it
+        # answers. This side refuses to start a voice nobody wants any more.
+        ctx.raise_if_cancelled()
         ctx.progress(0.0, f"loading {model}")
         try:
             resident = self._residency.load_voice(
@@ -247,6 +252,12 @@ class LoadVoiceJobType:
             )
         except EngineError as exc:
             raise JobError("engine_failed", str(exc)) from None
+        # And on the far side, with no teardown of its own: the settlement
+        # takes the voice off the card because a load that ended `cancelled` is
+        # no longer exempt from it (crucible/settle.py). A stranded VOICE is
+        # the same 21 GB as a stranded model, and the streaming door's safety
+        # rests on `load-voice` behaving (that module docstring's RULING OWED).
+        ctx.raise_if_cancelled()
         ctx.progress(1.0, f"{model} is resident")
         # `reference` on `done` for the same reason it is on the residency
         # report: two clients loading `zeroshot` see one voice id, and the

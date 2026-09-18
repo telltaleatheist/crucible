@@ -492,12 +492,12 @@ class JobStore:
             # submission that would otherwise race the unload; a job admitted
             # here waits behind this one instead of failing against a dying
             # engine.
-            await self._settle(job)
+            await self._settle(job, status)
         finally:
             self._finish(job, status, error)
             self._running_id = None
 
-    async def _settle(self, job: Job) -> None:
+    async def _settle(self, job: Job, outcome: str) -> None:
         """Clear the card if this job was the last thing holding it.
 
         A CLEANUP FAILURE IS NOT AN OPERATION FAILURE. An engine that will not
@@ -505,11 +505,19 @@ class JobStore:
         does not rewrite the outcome of the render that finished: a book that
         rendered is a book that rendered, whatever happened to the card
         afterwards.
+
+        `outcome` is carried in rather than read off the job because this runs
+        BEFORE `_finish` — which is the whole point of where it sits — so
+        `job.status` is still `running`. A load is exempt from settling only
+        when it ended `done` (`crucible/settle.py`), and that is the one fact
+        the settlement cannot get from the document in front of it.
         """
         if self._settlement is None:
             return
         try:
-            settled = await asyncio.to_thread(self._settlement.settle_for_job, job)
+            settled = await asyncio.to_thread(
+                self._settlement.settle_for_job, job, outcome
+            )
         except Exception as exc:
             line = (
                 f"could not clear the card after job {job.id} ({job.type}): "

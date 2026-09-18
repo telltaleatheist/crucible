@@ -16,6 +16,7 @@ replaces: every assertion below is about a state, not about a duration.
 from __future__ import annotations
 
 import base64
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -298,6 +299,72 @@ def test_a_load_is_not_a_holder_letting_go(
     # Loaded twice on purpose: the second load evicts the first, which is the
     # residency's own rule and not a settlement.
     assert len(engines) == 2
+
+
+def test_a_cancelled_load_is_settled_like_any_other_job_and_leaves_no_card(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    fake_env: Path,
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engine_factory: Callable[..., list[FakeEngine]],
+) -> None:
+    """The BOUNDARY of the test above, and the bug it was hiding.
+
+    `LEAVES_IT_RESIDENT` is a statement about a load that SUCCEEDED — its whole
+    content was *"be resident"*, so it is resident and the operator has
+    `unload-model`. A load that ends `cancelled` made no such statement: the
+    client asked for it to stop, was told `cancelled`, and will never send an
+    unload for something it believes never landed. Exempting it BY TYPE left the
+    model on the card with all four facts false and nobody who knew it was
+    there.
+
+    So the loader reads `ctx.cancelled` on the far side of a load it could not
+    interrupt (`WorkerSession.start` has no cancel hook, deliberately), and the
+    settlement clears the card through the ONE door — there is no second
+    teardown path for a cancel, exactly as PHASE7-LANES.md says of a render.
+    """
+    hold = threading.Event()
+    engines = engine_factory(hold=hold)
+    fake_weights(MODEL)
+    with make_client(enable_llm=True) as client:
+        response = client.post(
+            "/v1/jobs", headers=auth, json={"type": "load-model", "model": MODEL}
+        )
+        assert response.status_code == 202, response.text
+        job_id = response.json()["job_id"]
+        try:
+            # Held inside `ready()` so the cancel lands with the load genuinely
+            # in flight, rather than racing a sleep: a cancel that arrived while
+            # the job was still QUEUED never reaches the plugin at all.
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                if engines and engines[0].warming_started.wait(timeout=0.1):
+                    break
+                time.sleep(0.05)
+            assert engines and engines[0].warming_started.is_set(), (
+                "the lane never reached the engine"
+            )
+            cancelling = client.delete(f"/v1/jobs/{job_id}", headers=auth)
+            assert cancelling.status_code == 200, cancelling.text
+            assert cancelling.json()["status"] == "cancelling"
+        finally:
+            hold.set()
+
+        events = finish(client, auth, job_id)
+        assert events[-1]["event"] == "cancelled", events[-1]
+        assert not is_resident(client, auth)
+        # The process too, and not merely the row: the settlement's unload is
+        # what stops it, so a card reported clear is a card that is clear.
+        assert engines[0].stopped is True
+        notes = [row for row in events if row["event"] == "note"]
+        assert [note["data"]["unloaded"] for note in notes] == [MODEL], events
+
+        # And the ruling above is untouched: the exemption is for a load that
+        # SUCCEEDED, and this one does.
+        run_load(client, auth)
+        assert is_resident(client, auth)
+        assert engines[1].stopped is False
 
 
 def test_every_exempt_name_is_a_job_type_this_build_knows() -> None:

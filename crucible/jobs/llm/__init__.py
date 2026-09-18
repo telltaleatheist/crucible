@@ -706,6 +706,14 @@ class LoadModelJobType:
                 raise JobError("insufficient_kv_cache", plan.sentence())
             ctx.warming(plan.detail())
 
+        # THE CANCEL IS READ ON BOTH SIDES OF THE LOAD, and it has to be, because
+        # the load itself cannot be interrupted: `WorkerSession.start` and an
+        # engine's `ready()` have no cancel hook on purpose (crucible/workers.py
+        # says why — a half-loaded model is a process holding VRAM that nothing
+        # is tracking). This side refuses to start an engine nobody wants any
+        # more; the far side is where a DELETE that landed during the two
+        # minutes of a 21 GB load arrives.
+        ctx.raise_if_cancelled()
         ctx.progress(0.0, f"loading {model}")
         try:
             resident = self._residency.load(
@@ -719,6 +727,11 @@ class LoadModelJobType:
             )
         except EngineError as exc:
             raise JobError("engine_failed", str(exc)) from None
+        # NO TEARDOWN OF ITS OWN. The card is left to the settlement, which
+        # since 2026-09-18 exempts a load only when it ended `done`
+        # (crucible/settle.py): a client told `cancelled` never sends an
+        # unload, so a job that does not settle strands what it just loaded.
+        ctx.raise_if_cancelled()
         ctx.progress(1.0, f"{model} is resident")
         ctx.done_extra(resident=resident.model_id)
 

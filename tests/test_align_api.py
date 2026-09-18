@@ -23,12 +23,12 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, workerenv
+from crucible import accelerator, workerenv, workers
 from crucible.accelerator import GIB, ComputeApp
 from crucible.alignmodels import load_align_manifest
 from crucible.errors import JobError
 from crucible.jobs import align as align_job
-from crucible.residency import KIND_ALIGN
+from crucible.residency import KIND_ALIGN, Residency
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, holding_the_card, parse_sse
 
@@ -848,6 +848,45 @@ def test_a_worker_that_dies_fails_the_job_with_its_log(
     assert error["code"] == "worker_failed"
     # PHASE4-AUDIO.md section 6: the error carries the log, not a pointer to it.
     assert "told to exit before saying anything" in error["message"]
+
+
+def test_a_tidy_up_unload_that_also_fails_is_said_and_does_not_win(
+    ready: TestClient,
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A CLEANUP FAILURE IS NOT AN OPERATION FAILURE — but it is not silent.
+
+    `_forget` swallows the unload's error on purpose: the caller is about to
+    raise the one error that explains what happened, and a `stop()` that also
+    failed must not replace it. That reason says nothing about saying so. A
+    `WorkerError` out of `unload` is a worker that did not go on SIGTERM, so its
+    memory is still on the card with no resident row left pointing at it, and
+    the only reader who can act on that is the one watching this server.
+    """
+
+    def would_not_stop(self: Residency, subject_id: str) -> None:
+        raise workers.WorkerError(f"{subject_id} did not exit after SIGTERM")
+
+    monkeypatch.setattr(Residency, "unload", would_not_stop)
+    monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_DIE_AFTER", "1")
+    capfd.readouterr()
+    events = run_job(ready, auth)
+
+    # The worker's failure is still the one the client is told about.
+    assert terminal(events)["event"] == "failed"
+    assert terminal(events)["data"]["error"]["code"] == "worker_failed"
+
+    said = f"could not take {MODEL} off the card"
+    assert said in capfd.readouterr().err
+    notes = [row["data"]["message"] for row in events if row["event"] == "note"]
+    assert [note for note in notes if said in note and "WorkerError" in note], events
+
+    # The refusal to stop was this job's tidy-up, not the server's shutdown:
+    # left patched, the lifespan's own `residency.shutdown()` would raise it
+    # again and fail the teardown rather than the thing under test.
+    monkeypatch.undo()
 
 
 def test_a_short_stream_fails_the_job(

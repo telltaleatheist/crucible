@@ -66,6 +66,24 @@ request, and neither the chat door nor the streaming door ever loads
 bring it back. A server whose `load-model` is a no-op is not a stricter server,
 it is a broken one.
 
+AND ONLY A LOAD THAT GOT THERE (2026-09-18). The sentence above is about a load
+that SUCCEEDED, and the code read it as a sentence about a load's TYPE.
+`DELETE /v1/jobs/{id}` sets `cancel_requested`; neither loader read it, so
+the engine came up anyway, the lane stamped the job `cancelled` because the flag
+was set, and the exemption then let that job off settling BY NAME. The client
+had been told `cancelled`, so it would never send an unload; the lane was empty,
+no lease, no claim, no chat. A 21 GB model sat on the card with all four facts
+false and nobody left who knew it was there — which is the exact overnight card
+this ruling exists to prevent, arrived at through the ruling's own exemption.
+
+So the exemption now reads type AND outcome (`Settlement.settle_for_job`), and
+the loaders read `ctx.cancelled` on both sides of the load: before, to refuse to
+start one nobody wants any more, and after, because `WorkerSession.start` has no
+cancel hook and a DELETE has the whole of a load to land inside. A
+cancelled load gets NO teardown of its own — it raises `JobCancelled` and the
+settlement takes the card off it through the one unload door, exactly as
+PHASE7-LANES.md says of a cancelled render.
+
 That is not an exception to the rule — it is the rule read correctly. A load is
 the *start* of a resident thing's life. What ends it is the last holder letting
 go, and the doors below are the ones that have to say so:
@@ -161,6 +179,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
 from .errors import JobError
+from .jobs.base import DONE
 from .jobs.queue import busy_details
 
 if TYPE_CHECKING:  # pragma: no cover - imports for annotations only
@@ -177,6 +196,12 @@ SETTLEMENT_HOLDER = "the settlement clearing the card"
 #: The job types whose completion is NOT a moment to clear the card, because
 #: making something resident is the whole of what they do. See the module
 #: docstring's RULING OWED block — this is a statement about what a load MEANS.
+#:
+#: **A NAME HERE IS HALF THE EXEMPTION; the other half is `done`.** The
+#: exemption says a load's whole content was *"be resident"*, and that is only
+#: true of a load that got there. `Settlement.settle_for_job` therefore asks for
+#: the type AND the outcome, and a `load-...` that ended `cancelled` or `failed`
+#: settles like every other job.
 #:
 #: **`tts` and `align` are deliberately NOT here**, although both make something
 #: resident: making it resident is not the whole of what they do, and a render
@@ -445,13 +470,22 @@ class Settlement:
             )
             return None
 
-    def settle_for_job(self, job: Any) -> Settled | None:
+    def settle_for_job(self, job: Any, outcome: str) -> Settled | None:
         """The lane's trigger. **Never the event loop.**
 
-        A load is not a holder letting go (module docstring), so it is the one
-        job whose end asks nothing.
+        A load that SUCCEEDED is not a holder letting go (module docstring), so
+        it is the one job whose end asks nothing. A load that ended any other
+        way asks like everything else, because what it left on the card is a
+        thing nobody is coming back for.
+
+        `outcome` is the status the lane is ABOUT to stamp, handed over rather
+        than read off `job.status` — which at this moment is still `running`.
+        The lane settles BEFORE `_finish` on purpose, so that the note lands on
+        a stream the client is still reading (`jobs/queue.py:_execute`), and a
+        `job.status` read here would be a fact that has not been written yet:
+        every load would find itself un-exempt and clear its own card.
         """
-        if job.type in LEAVES_IT_RESIDENT:
+        if job.type in LEAVES_IT_RESIDENT and outcome == DONE:
             return None
         return self.settle(
             f"job {job.id} ({job.type}) finished", excluding_job=job.id
