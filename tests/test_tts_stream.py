@@ -369,6 +369,51 @@ def test_a_second_session_is_refused_by_name(
         assert first["session_id"] in error["message"]
 
 
+def test_a_session_that_cannot_be_built_does_not_keep_the_card(
+    streaming_server: Callable[..., Any],
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ledger C4: the claim was taken before the thing that releases it existed.
+
+    `StreamManager.open` claimed the card and then CONSTRUCTED the session, and
+    the only thing that ever releases a claim is the worker thread `start()`
+    would have begun. So any refusal between those two lines held the card for
+    the life of the process: no expiry, no watchdog, and every later load,
+    unload and render answered `engine_in_use` naming a session that was never
+    opened.
+
+    The refusal used here is the one the constructor actually has —
+    `batch_width_for`, which has deliberately NO default, because a guessed
+    streaming batch width is wrong in both directions. Emptying the table is
+    how a build reaches that state today: every voice in the catalog is
+    `higgs-v3`, so the live case is the day a second narrator engine ships
+    without a measured width.
+    """
+    with streaming_server() as base:
+        measured = dict(ttsstream.STREAM_BATCH_WIDTH)
+        monkeypatch.setattr(ttsstream, "STREAM_BATCH_WIDTH", {})
+        refused = open_session(base, auth)
+        assert refused.status_code == 500, refused.text
+        error = refused.json()["error"]
+        assert error["code"] == "unknown_narrator_engine"
+        assert "higgs-v3" in error["message"]
+
+        # THE CARD IS FREE. `/v1/activity` is where the claim is reported, and
+        # `claim` there is null exactly when `Residency.claimed_by` is None and
+        # `{"held_by": ...}` otherwise (crucible/api.py) — so this is the same
+        # read the bench tests at the bottom of this file make, asserted for
+        # the opposite answer.
+        activity = httpx.get(f"{base}/v1/activity", headers=auth, timeout=30.0)
+        assert activity.json()["claim"] is None, activity.text
+
+        # And free in the way that matters: with the widths back, the next
+        # client gets a session rather than an `engine_in_use` naming a holder
+        # that never existed.
+        monkeypatch.setattr(ttsstream, "STREAM_BATCH_WIDTH", measured)
+        assert opened(base, auth)["voice"] == VOICE
+
+
 def test_an_unknown_session_is_a_named_404(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:

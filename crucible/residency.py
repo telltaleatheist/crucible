@@ -329,6 +329,48 @@ class ResidentSeparator:
 Resident = ResidentModel | ResidentVoice | ResidentAligner | ResidentSeparator
 
 
+@dataclass(frozen=True)
+class DyingResident:
+    """Something Crucible asked to stop and has not been told is gone.
+
+    A THIRD SLOT BESIDE THE TWO HOLDERS, and the reason is that "what may be
+    used" and "what is on the card" are two facts rather than one. `unload`
+    unpublishes before it signals, deliberately — nothing new must be proxied to
+    a dying engine — and until this record existed that same line also forgot
+    the process: `owned_pids()` reads the holder slots, so the instant they were
+    nulled the accelerator guard stopped counting Crucible's own child as
+    Crucible's. A stop that then failed left a live CUDA process the guard
+    reported as a FOREIGN one and `_evict` had nothing to evict, so the next
+    load started a second engine onto an occupied card.
+
+    That is not a rare shape. `engines/base.py` gives a stop
+    `STOP_TIMEOUT_SECONDS` and **never SIGKILLs** — a killed CUDA process wedges
+    WSL2 until Windows reboots — so "asked to stop, still running" is the
+    documented outcome of a wedge rather than an accident, and children are
+    spawned `start_new_session=True`, so nothing at shutdown reaches a process
+    this module has forgotten.
+
+    `pids` is a SNAPSHOT taken before the stop, not read back off the handle,
+    because the two handles report differently once a stop has failed:
+    `SubprocessEngine` keeps its `_process` and would still answer, while
+    `WorkerSession.stop()` discards its conversation in a `finally` and answers
+    `frozenset()` whether the worker died or not. A record that asked the handle
+    would therefore forget exactly the worker that would not go.
+    """
+
+    subject_id: str
+    kind: str
+    #: Whichever of the two holder slots was occupied. Both are kept so
+    #: `shutdown` can ask again, and neither is dressed up as the other: an
+    #: engine raises `EngineError`, a session raises `WorkerError`.
+    engine: SubprocessEngine | None
+    session: WorkerSession | None
+    pids: frozenset[int]
+    #: When the stop was asked for, in `Resident.loaded_at`'s format, so a
+    #: refusal can say how long this has been going on.
+    since: str
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -375,6 +417,10 @@ class Residency:
         # engine is stopped through `EngineError`, a session through
         # `WorkerError`, and each caller catches the one its own door raises.
         self._session: WorkerSession | None = None
+        #: What `unload` took out of those two slots and has not been told is
+        #: gone. See `DyingResident`: the holders say what may be USED, this
+        #: says what is still ON THE CARD.
+        self._dying: DyingResident | None = None
         self._warming: str | None = None
         self._claim: str | None = None
         #: The thread a mutating claimant took the card on, or None when the
@@ -619,6 +665,37 @@ class Residency:
                 "mid-sentence",
             )
 
+    def _refuse_if_stopping(self, what: str) -> None:
+        """Refuse while a process Crucible asked to stop has not confirmed it.
+
+        THE ANSWER IS A REFUSAL BY NAME, never an eviction and never a wait.
+        Not an eviction, because there is nothing left to evict — `unload`
+        already sent the SIGTERM and the process ignored it, so `_evict` would
+        be a no-op onto an occupied card and the load behind it would be a
+        second engine sharing the first one's VRAM. Not a wait, because
+        `engines/base.py` has already waited `STOP_TIMEOUT_SECONDS` and will
+        never SIGKILL: a killed CUDA process wedges WSL2 until Windows reboots,
+        so this state ends when a human ends it.
+
+        A different code from `engine_in_use` because it is a different fact.
+        `engine_in_use` means somebody is USING the card and would be cut off;
+        this means nobody is using it and nobody can, because a process that was
+        told to leave is still on it.
+        """
+        dying = self._dying
+        if dying is None:
+            return
+        raise JobError(
+            "engine_still_stopping",
+            f"cannot {what}: {dying.subject_id} (the {KIND_NOUNS[dying.kind]} "
+            f"that was resident) was asked to stop at {dying.since} and has not "
+            f"confirmed it. Its pid(s) {sorted(dying.pids)} still hold the card, "
+            "and Crucible does not SIGKILL a process holding CUDA — that wedges "
+            "WSL2 until Windows reboots. Loading now would put a second engine "
+            "on a card that is already full. Stop that process by hand, then "
+            "restart Crucible",
+        )
+
     # -------------------------------------------------------------- reading
 
     @property
@@ -736,20 +813,38 @@ class Residency:
     def end_warming(self) -> None:
         self._warming = None
 
+    @property
+    def stopping(self) -> DyingResident | None:
+        """What Crucible asked to stop and has not been told is gone, or None.
+
+        Read by `_refuse_if_stopping` and by anything that wants to say why a
+        load is being refused. It is never a resident: `resident` is what may be
+        used, and this is a process that may only be waited for.
+        """
+        return self._dying
+
     def owned_pids(self) -> frozenset[int]:
         """Every pid Crucible itself has on the card.
 
-        Both slots, unioned, so the accelerator guard never reports Crucible's own
-        resident aligner as somebody else's process holding the card. Only one of
-        them is ever non-empty — one card holds one thing — but reading only the
-        engine slot was the bug waiting to happen the moment a second shape of
-        resident thing existed.
+        All three slots, unioned, so the accelerator guard never reports
+        Crucible's own resident aligner as somebody else's process holding the
+        card. Only one of them is ever non-empty — one card holds one thing —
+        but reading only the engine slot was the bug waiting to happen the
+        moment a second shape of resident thing existed.
+
+        THE DYING SLOT COUNTS, and it is the whole of why it exists. A process
+        is Crucible's until its stop is CONFIRMED, not until it has been asked:
+        `unload` unpublishes the holders before it signals, and a guard reading
+        only the holders called Crucible's own unstoppable child a foreign
+        process the instant the SIGTERM was sent.
         """
         pids: frozenset[int] = frozenset()
         if self._engine is not None:
             pids |= self._engine.pids
         if self._session is not None:
             pids |= self._session.pids
+        if self._dying is not None:
+            pids |= self._dying.pids
         return pids
 
     def reclaimable_bytes(self, excluding: str | None = None) -> int:
@@ -797,6 +892,7 @@ class Residency:
         memory terms, an engine that is not vLLM) passes None and says so.
         """
         self._refuse_mutation_if_claimed(f"load {manifest.id}")
+        self._refuse_if_stopping(f"load {manifest.id}")
 
         def say(message: str) -> None:
             if on_progress is not None:
@@ -875,6 +971,7 @@ class Residency:
         door's own `reference_required` is the same rule made earlier.
         """
         self._refuse_mutation_if_claimed(f"load {manifest.id}")
+        self._refuse_if_stopping(f"load {manifest.id}")
 
         def say(message: str) -> None:
             if on_progress is not None:
@@ -1004,6 +1101,7 @@ class Residency:
         it.
         """
         self._refuse_mutation_if_claimed(f"load {manifest.id}")
+        self._refuse_if_stopping(f"load {manifest.id}")
 
         def say(message: str) -> None:
             if on_progress is not None:
@@ -1090,6 +1188,7 @@ class Residency:
         that is a decision about somebody else's next job.
         """
         self._refuse_mutation_if_claimed(f"load {manifest.id}")
+        self._refuse_if_stopping(f"load {manifest.id}")
 
         def say(message: str) -> None:
             if on_progress is not None:
@@ -1291,6 +1390,12 @@ class Residency:
         `session.stop()` raises `WorkerError` — and both are let out, because a
         thing that would not stop is the one fact a caller must not be told a
         soothing version of.
+
+        It is let out ON TOP OF a record, not instead of one. The handle moves
+        into the dying slot before it is signalled and stays there until the
+        stop returns, so a caller that sees the raise and a guard that reads
+        `owned_pids()` are told the same thing: this process is still Crucible's
+        and still on the card.
         """
         self._refuse_mutation_if_claimed(f"unload {subject_id}")
         resident = self._resident
@@ -1302,6 +1407,26 @@ class Residency:
         self._resident = None
         self._engine = None
         self._session = None
+        # Unpublished is NOT gone, and the dying slot is the difference. Nulling
+        # the two holders above used to be the only record, so the instant the
+        # SIGTERM was sent `owned_pids()` stopped naming Crucible's own child:
+        # the accelerator guard called it a foreign process holding the card,
+        # `_evict` had nothing left to evict, and the next load put a second
+        # engine onto VRAM the first one had not given back. The pids are
+        # snapshotted HERE, before the signal, because a failed stop leaves the
+        # two handles answering differently — `WorkerSession.stop()` discards
+        # its conversation in a `finally` and reports `frozenset()` whether the
+        # worker died or not, so asking afterwards would forget exactly the
+        # worker that would not go.
+        self._dying = DyingResident(
+            subject_id=resident.id,
+            kind=resident.kind,
+            engine=engine,
+            session=session,
+            pids=(frozenset() if engine is None else engine.pids)
+            | (frozenset() if session is None else session.pids),
+            since=_now(),
+        )
         with self._claim_lock:
             # WHY the card is now empty, recorded here because this is the one
             # door everything comes off it through. A clearance leaves the
@@ -1309,13 +1434,50 @@ class Residency:
             # late is answered as the same intent (`being_cleared`); any other
             # unload wipes it, because the emptiness now has a different cause.
             self._cleared = subject_id if self._claim_clears else None
-        if engine is not None:
-            engine.stop()
-        if session is not None:
-            session.stop()
+        self._stop_the_dying()
         return resident
 
+    def _stop_the_dying(self) -> None:
+        """Signal what is in the dying slot, and clear it only once it has gone.
+
+        ONE PLACE, because "asked to stop" and "confirmed stopped" are two facts
+        and the whole defect was them being recorded as one. `unload` calls this
+        first, `shutdown` calls it again; only the line after a stop that
+        RETURNED empties the slot, so a stop that raised leaves the record —
+        and with it the pids and the refusal the next load reads — exactly where
+        it was.
+
+        The error is let out rather than logged and swallowed: a thing that
+        would not stop is the one fact a caller must not be told a soothing
+        version of, and it is also the loud part of this record being left
+        behind.
+        """
+        dying = self._dying
+        if dying is None:
+            return
+        if dying.engine is not None:
+            dying.engine.stop()
+        if dying.session is not None:
+            dying.session.stop()
+        self._dying = None
+
     def shutdown(self) -> None:
-        """Stop whatever is resident. Called when the server exits."""
+        """Stop whatever is resident, and ask again after a stop that failed.
+
+        The dying slot is retried here because NOTHING ELSE EVER WILL. Children
+        are spawned `start_new_session=True` (`engines/base.py`, `workers.py`),
+        so they are not in this process's group and the server exiting does not
+        reach one an earlier `unload` could not stop. A second SIGTERM after the
+        first was ignored for `STOP_TIMEOUT_SECONDS` is the last cheap thing
+        Crucible can do, and it still never escalates: a killed CUDA process
+        wedges WSL2 until Windows reboots.
+
+        Both slots are asked, in this order, though only one of them can be
+        occupied — `_refuse_if_stopping` guards every load, so nothing can
+        become resident while something is stopping. It is written as two
+        statements rather than an `elif` because the invariant is enforced
+        there, not here.
+        """
+        self._stop_the_dying()
         if self._resident is not None:
             self.unload(self._resident.id)
