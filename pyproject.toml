@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crucible"
-version = "1.0.1"
+version = "1.0.2"
 description = "One inference server, many client apps."
 readme = "README.md"
 requires-python = ">=3.11"
