@@ -396,6 +396,30 @@ Every voice this build has a manifest for, and where it stands here.
 
 *Answers:* `200`
 
+### `PUT /v1/voices/{voice_id}`
+
+Add or replace a voice this machine owns. Returns its `/v1/voices` row. `revision` MAY BE OMITTED per backend, and that is the whole reason a person can paste a repo id: a manifest needs a full commit sha so a pull is reproducible, and resolving one is the engine's job because the engine is what fetches and what holds the HuggingFace credential. REPLACING A PACKAGED VOICE IS ALLOWED and is not an accident: the overlay is documented to win on a shared id, and deleting the overlay brings the packaged voice back, which is what makes trying an override safe. A door that refused would make the safe thing impossible and the unsafe thing (editing the install) the only way.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `voice_id` | path | yes | string |  |
+
+*Answers:* `200`, `422`
+
+### `DELETE /v1/voices/{voice_id}`
+
+Delete this machine's own manifest for a voice. The packaged set stands. A voice that only ever existed in the overlay goes entirely; one that was SHADOWING a packaged voice reverts to the packaged manifest, which is the undo for an override that did not work out. This deletes the MANIFEST, never the weights. They are a subject like any other and `DELETE /v1/catalog/voice/{id}` is what removes them — two doors because they are two decisions, and somebody re-describing a voice they have just downloaded 8 GB of should not lose the download.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `voice_id` | path | yes | string |  |
+
+*Answers:* `204`, `422`
+
 ## Streaming narration
 
 A long-lived session that takes text and gives audio back over SSE, instead of one render per request (PHASE3-TTS.md section 7).

@@ -12,7 +12,7 @@ uvicorn or httpx in behind it. One spelling, in the one module both sides can
 import for free.
 """
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 API_VERSION = 1
 API_HEADER = "X-Crucible-Api"
 
