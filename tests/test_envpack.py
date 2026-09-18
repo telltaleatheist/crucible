@@ -516,7 +516,7 @@ def test_pack_disk_names_the_three_numbers(tmp_path: Path) -> None:
         sha256="a" * 64,
         parts=("a.part00", "a.part01"),
         recipe_sha256="b" * 64,
-        release=VERSION,
+        release=VERSION,
         unpacked_bytes=900_000_000_000_000,
     )
     with pytest.raises(PackError) as caught:
@@ -538,7 +538,7 @@ def test_a_pack_built_from_another_recipe_is_pack_recipe_drift() -> None:
         sha256="a" * 64,
         parts=("a.part00",),
         recipe_sha256="c" * 64,
-        release=VERSION,
+        release=VERSION,
         unpacked_bytes=20,
     )
     with pytest.raises(PackError) as caught:
@@ -558,7 +558,7 @@ def test_a_pack_built_from_this_recipe_passes() -> None:
         sha256="a" * 64,
         parts=("a.part00",),
         recipe_sha256=jobenv.recipe_sha256(target.recipe),
-        release=VERSION,
+        release=VERSION,
         unpacked_bytes=20,
     )
     envpack.check_recipe(entry, target)  # no refusal
@@ -678,7 +678,7 @@ def build_fake_pack(
             if recipe_sha256 is not None
             else jobenv.recipe_sha256(target.recipe)
         ),
-        release=VERSION,
+        release=VERSION,
         unpacked_bytes=unpacked_bytes,
     )
     envpack.write_manifest_entry(out, VERSION, entry)
@@ -901,7 +901,7 @@ def test_something_that_is_not_a_pack_is_refused_after_it_unpacks(
             sha256=digest,
             parts=tuple(part.name for part in parts),
             recipe_sha256=jobenv.recipe_sha256(target.recipe),
-            release=VERSION,
+            release=VERSION,
         unpacked_bytes=envpack.directory_bytes(root),
         ),
     )
@@ -1478,7 +1478,7 @@ def test_a_type_with_no_recipe_gets_the_MOST_SPECIFIC_refusal_it_has_earned(
     # Neither of the two less useful truths reaches the operator.
     assert "pack_unknown" not in error
     assert "recipe" not in error
-
+
 
 
 # ---------------------------------------- a pack that was not rebuilt this time

@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ... import accelerator, jobenv, llamacpp, weights
 from ...backend import LLAMA_WINDOWS
-from ...capability import available_bytes
+from ...capability import available_bytes
 from ... import ollamastore
 from ...config import Config
 from ...engines import EngineError
