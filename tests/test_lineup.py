@@ -29,7 +29,7 @@ CHECKED_IN = REPO_ROOT / lineup.FILE_NAME
 
 #: The three models Foundry runs locally today, and the one it cannot.
 WITH_LOCAL = ["dots-ocr", "qwen3.5-9b", "qwen3.8-27b-4bit"]
-WITHOUT_LOCAL = ["qwen3.8-27b"]
+WITHOUT_LOCAL = ["qwen3.8-27b-8bit"]
 
 #: Which classes each local model lights, read off `capability.CLASSES` through
 #: the same door the generator uses. Written out here so a change to the class
@@ -119,7 +119,7 @@ def test_the_generator_writes_a_file_its_own_check_accepts(tmp_path: Path) -> No
     target = tmp_path / "out" / lineup.FILE_NAME
     wrote = _run("--verbose", "--output", str(target))
     assert wrote.returncode == 0, wrote.stderr
-    assert "omitted qwen3.8-27b: no [local] table" in wrote.stdout
+    assert "omitted qwen3.8-27b-8bit: no [local] table" in wrote.stdout
     assert "3 model(s) with a local form, 1 omitted" in wrote.stdout
     assert lineup.content(json.loads(target.read_text(encoding="utf-8"))) == (
         lineup.content(_checked_in())
@@ -237,7 +237,7 @@ def test_classes_come_from_the_capability_table(model_id: str) -> None:
 def test_a_model_with_no_local_form_still_has_classes() -> None:
     """Omitted from the lineup is not the same as serving nothing: the bf16 27B
     is a translate candidate on a 64 GB Mac; it just has no Ollama form."""
-    assert classes_for_model("qwen3.8-27b") == ("translate", "simplify", "analysis")
+    assert classes_for_model("qwen3.8-27b-8bit") == ("translate", "simplify", "analysis")
 
 
 def test_an_unknown_model_id_is_refused_not_answered_with_no_classes() -> None:

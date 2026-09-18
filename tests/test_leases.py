@@ -34,7 +34,7 @@ from .conftest import parse_sse
 from .fake_engine import FakeEngine
 
 MODEL = "qwen3.5-9b"
-OTHER_MODEL = "qwen3.8-27b"
+OTHER_MODEL = "qwen3.8-27b-8bit"
 TTL = 60
 
 

@@ -39,7 +39,7 @@ from .fake_engine import ANSWER, DELTAS, TOOL_CALL, FakeEngine
 MODEL = "qwen3.5-9b"
 #: The page reader, which sorts first by id and so leads every listing.
 PAGE_MODEL = "dots-ocr"
-BIG_MODEL = "qwen3.8-27b"
+BIG_MODEL = "qwen3.8-27b-8bit"
 #: The same 27B at 4 bits: the one that does fit Owen's card.
 SMALL_BIG_MODEL = "qwen3.8-27b-4bit"
 
@@ -187,8 +187,11 @@ def test_models_lists_every_manifest_with_its_standing(
     response = llm_client.get("/v1/models", headers=auth)
     assert response.status_code == 200
     rows = {row["id"]: row for row in response.json()}
+    # ORDERED BY ID, so the 4-bit precedes the 8-bit ('4' < '8'). It read
+    # BIG then SMALL_BIG while BIG was the bare `qwen3.8-27b`, which sorted
+    # before both; the 2026-09-17 rename moved it to the end of the family.
     assert [row["id"] for row in response.json()] == [
-        PAGE_MODEL, MODEL, BIG_MODEL, SMALL_BIG_MODEL,
+        PAGE_MODEL, MODEL, SMALL_BIG_MODEL, BIG_MODEL,
     ]
     row = rows[MODEL]
     assert row["family"] == "qwen3.5"
@@ -236,7 +239,7 @@ def test_info_gains_an_llm_capability(
     by_type = {entry["job_type"]: entry for entry in capabilities}
     assert "llm" in by_type
     assert [row["id"] for row in by_type["llm"]["models"]] == [
-        PAGE_MODEL, MODEL, BIG_MODEL, SMALL_BIG_MODEL,
+        PAGE_MODEL, MODEL, SMALL_BIG_MODEL, BIG_MODEL,
     ]
     # The two things you can actually POST are in `job_types`, NOT in
     # `capabilities`. They were capabilities of their own until 2026-09-13, and
@@ -697,14 +700,14 @@ def test_the_27b_on_this_card_is_insufficient_memory(
     assert response.status_code == 409
     error = response.json()["error"]
     assert error["code"] == "insufficient_memory"
-    assert error["details"]["needed_bytes"] == 56_368_313_144
+    assert error["details"]["needed_bytes"] == 48_685_810_449
     assert error["details"]["total_bytes"] == FAKE_BACKEND.gpu.vram_bytes
 
 
 def test_a_model_too_big_for_the_card_is_refused_before_the_download(
     llm_client: TestClient, auth: dict[str, str], idle_card: None
 ) -> None:
-    """52.5 GiB on a 24 GiB card is not a "pull 55 GB first" problem.
+    """45.3 GiB on a 24 GiB card is not a "pull 29 GB first" problem.
 
     The weights are deliberately NOT stamped here: a refusal that says
     `model_not_installed` would send somebody off to download 55 GB for a model
@@ -715,7 +718,7 @@ def test_a_model_too_big_for_the_card_is_refused_before_the_download(
     error = response.json()["error"]
     assert error["code"] == "insufficient_memory"
     assert "ever" in error["message"]
-    assert "52.5 GiB" in error["message"]
+    assert "45.3 GiB" in error["message"]
     assert "24.0 GiB in total" in error["message"]
     assert "NVIDIA GeForce RTX 3090 Ti" in error["message"]
 
@@ -725,7 +728,7 @@ def test_models_says_why_the_27b_is_not_loadable_here(
 ) -> None:
     rows = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
     assert rows[BIG_MODEL]["loadable"] is False
-    assert "52.5 GiB" in rows[BIG_MODEL]["reason"]
+    assert "45.3 GiB" in rows[BIG_MODEL]["reason"]
     assert "24.0 GiB in total" in rows[BIG_MODEL]["reason"]
 
 
@@ -768,7 +771,7 @@ def test_the_4bit_27b_is_loadable_on_this_card_where_the_bf16_27b_is_not(
     )
 
     assert rows[BIG_MODEL]["loadable"] is False
-    assert "52.5 GiB" in rows[BIG_MODEL]["reason"]
+    assert "45.3 GiB" in rows[BIG_MODEL]["reason"]
 
     # And the refusal the listing predicts is the refusal the load makes.
     response = submit(llm_client, auth, type="load-model", model=BIG_MODEL)

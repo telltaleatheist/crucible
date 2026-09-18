@@ -128,7 +128,7 @@ def test_foundry_asks_for_the_classes_owens_ruling_names() -> None:
     because the generator runs on a PC. Posted to the Mac, `validate_module`
     refused the whole module `unknown_subject` (dots-ocr has no mlx-darwin
     block), and `qwen3.8-27b-4bit` is not what that machine's capability
-    selected anyway (`qwen3.8-27b`).
+    selected anyway (`qwen3.8-27b-8bit`).
 
     Deduplication moved with the resolution: three classes resolving to one
     model on one card is the SERVER's `skipped`, and here they are three

@@ -193,7 +193,7 @@ def resident_page_model(
 def test_the_page_model_is_the_only_one_offered_for_images() -> None:
     """The fact a client picks a page reader by, instead of knowing a name."""
     assert "image" in load_manifest(PAGE_MODEL).modalities
-    for text_only in ("qwen3.5-9b", "qwen3.8-27b", "qwen3.8-27b-4bit"):
+    for text_only in ("qwen3.5-9b", "qwen3.8-27b-8bit", "qwen3.8-27b-4bit"):
         assert load_manifest(text_only).modalities == ("text",)
 
 
@@ -327,7 +327,7 @@ def test_the_text_models_do_not_load_a_vision_tower_they_never_use() -> None:
     921_460_192 B on the 4-bit 27B — on a card whose whole usable utilisation
     window is 0.80 to 0.88.
 
-    `qwen3.8-27b` in bf16 is deliberately absent from this list; its own block
+    `qwen3.8-27b-8bit` in bf16 is deliberately absent from this list; its own block
     records why, and nothing Owen owns can load it.
     """
     for text_only in ("qwen3.5-9b", "qwen3.8-27b-4bit"):

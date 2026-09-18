@@ -370,6 +370,55 @@ def hf_token(config: Config) -> str | None:
     return None
 
 
+def resolve_revision(config: Config, hf_repo: str) -> str:
+    """The repo's current head sha, so a caller can pin what it just looked at.
+
+    ── Why the ENGINE resolves this and not the app ───────────────────────────
+
+    A voice manifest requires a full 40-character commit sha, never a branch
+    name, so that a pull is reproducible (`crucible/voices.py`). That makes
+    "add the voice at this repo" impossible to ask for without first turning a
+    repo id into a sha — and the thing that should do the turning is the thing
+    that will do the fetching. This process already holds the HuggingFace
+    credential (`hf_token`) and already talks to the Hub; an app resolving the
+    sha would need its own copy of the token to read a private repo, which is
+    the credential sprawl PHASE15 section 0 exists to prevent.
+
+    ── It pins the head, and that is a MOMENT rather than a promise ───────────
+
+    Between this call and the pull the repo may move. That is not a race worth
+    locking: the point of the pin is that whatever is fetched is *recorded*, so
+    two machines asked for the same voice get the same bytes. A caller that
+    wants a specific older revision passes one and never reaches here.
+
+    Refuses by name. `revision_unresolved` carries the Hub's own words, because
+    "no such repo", "you are not authorised" and "the Hub is down" are three
+    different things to do about it and only the Hub can tell them apart.
+    """
+    try:
+        from huggingface_hub import HfApi
+    except Exception as exc:  # pragma: no cover - import guard
+        raise WeightsError(
+            f"huggingface_hub is not importable: {exc}"
+        ) from exc
+    try:
+        info = HfApi(token=hf_token(config)).model_info(hf_repo)
+    except Exception as exc:
+        raise WeightsError(
+            f"could not read {hf_repo!r} on HuggingFace: {exc}. A voice pins a "
+            "full commit sha, so the repo has to be readable from this machine "
+            "before it can be added — check the id, and check [hf] token in "
+            "config.toml if the repo is private"
+        ) from exc
+    sha = getattr(info, "sha", None)
+    if not isinstance(sha, str) or len(sha) != 40:
+        raise WeightsError(
+            f"HuggingFace answered for {hf_repo!r} without a commit sha "
+            f"({sha!r}), so there is nothing to pin"
+        )
+    return sha
+
+
 def reporting_tqdm(on_progress: ProgressHook) -> Any:
     """A `tqdm_class` for `huggingface_hub` that reports bytes to `on_progress`.
 

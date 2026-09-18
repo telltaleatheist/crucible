@@ -194,7 +194,7 @@ already carry it twice for two different reasons (`crucible/jobs/llm/__init__.py
   absent, which is how an unclamped request becomes a 400.
 
 Measured on the PC today: `qwen3.5-9b` 16384, `qwen3.8-27b-4bit` 16384,
-`qwen3.8-27b` 12288, `dots-ocr` 32768. So an app never has to guess a chunk
+`qwen3.8-27b-8bit` 12288, `dots-ocr` 32768. So an app never has to guess a chunk
 size — it reads the ceiling off the server it is about to talk to. Owen's
 Mac-vs-PC example is already visible in that field.
 

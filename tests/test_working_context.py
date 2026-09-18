@@ -288,7 +288,7 @@ def test_a_model_the_card_cannot_hold_affords_no_context_at_all(pc: Backend) -> 
     about the MODEL; rounding it into a context refusal would send somebody off
     to shorten a paragraph that was never the problem.
     """
-    ceiling = rows_for(pc)["qwen3.8-27b"]["max_context"]
+    ceiling = rows_for(pc)["qwen3.8-27b-8bit"]["max_context"]
     assert ceiling["tokens"] == 0
     assert ceiling["card_affords"] == 0
 

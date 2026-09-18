@@ -6,7 +6,7 @@ carried `qwen3.8-27b-4bit` and `dots-ocr` as RESOLVED ids, because
 cuda-linux answer, because the generator runs on a PC. Posted to the Mac,
 `validate_module` refused the WHOLE module `unknown_subject` (dots-ocr has no
 mlx-darwin block), and `qwen3.8-27b-4bit` is not what that machine's
-capability selected anyway (`qwen3.8-27b`). The generator was a second owner
+capability selected anyway (`qwen3.8-27b-8bit`). The generator was a second owner
 of a decision that is the server's: PHASE9 says the capability record is the
 one place a class is resolved, and the record is per machine.
 

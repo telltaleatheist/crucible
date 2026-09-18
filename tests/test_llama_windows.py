@@ -148,7 +148,7 @@ def test_a_windows_session_with_no_localappdata_is_refused_not_guessed(
 def test_the_three_published_ggufs_are_named_and_the_fourth_is_absent() -> None:
     """Section 3.10: *"a model whose GGUF is not published is simply absent."*
 
-    `qwen3.8-27b` (bf16) has no llama-windows block, because a 55 GB GGUF on a
+    `qwen3.8-27b-8bit` has no llama-windows block, because a 29 GB GGUF on a
     24 GB card is not a thing a Windows box runs and a row with nothing
     truthful in it is worse than no row.
     """

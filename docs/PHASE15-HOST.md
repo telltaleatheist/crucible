@@ -160,7 +160,7 @@ url = "http://192.168.68.20:11434"   # no key; ollama is reached by address
   "local_models": {"translate": "qwen3.8-27b-4bit", "tts": null},
   "local_model_choices": {
     "translate": [
-      {"id": "qwen3.8-27b",      "memory_bytes_estimate": 56371445760, "fits": false, "installed": false},
+      {"id": "qwen3.8-27b-8bit",      "memory_bytes_estimate": 56371445760, "fits": false, "installed": false},
       {"id": "qwen3.8-27b-4bit", "memory_bytes_estimate": 21580613632, "fits": true,  "installed": true}
     ]
   },
@@ -577,7 +577,7 @@ WSL). The spec is Foundry's working launcher, handed over at
 
 **The catalog for `llama-windows`** (its own block per manifest, like `mlx-darwin`'s): `dots-ocr`
 → the GGUF pair in fact 2; `qwen3.5-9b` → a Q8_0 GGUF of the same weights the `cuda-linux`
-row names; `qwen3.8-27b` → a Q4_K_M GGUF (the 27B on a 24 GB card only fits at 4-bit, which is
+row names; `qwen3.8-27b-8bit` → a Q4_K_M GGUF (the 27B on a 24 GB card only fits at 4-bit, which is
 the same binary-per-server sentence `translate` already carries). Each row records the HF repo,
 revision, file name(s), bytes and the floor, read from the repo once and recorded — the agent
 that lands this picks the repos, states them in section 7, and the manifests are the one
@@ -1274,7 +1274,7 @@ Measured by Foundry against the Mac: foundry.module.json carries `qwen3.8-27b-4b
 `dots-ocr` as resolved ids because gen-modules.py resolves a `[[needs]] class` to ONE id at
 generation time — the cuda-linux answer. Posted to the Mac, validate_module refuses the whole
 module `unknown_subject` (dots-ocr has no mlx-darwin block) and `qwen3.8-27b-4bit` is not what
-the Mac's capability selected (`qwen3.8-27b`). The generator was a second owner of a decision
+the Mac's capability selected (`qwen3.8-27b-8bit`). The generator was a second owner of a decision
 that is the server's (PHASE9: the capability record is the one place a class is resolved).
 
 Ruling: the module carries `needs` as CLASSES on the wire, unresolved:

@@ -67,6 +67,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import tomli_w
+
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
 from .manifests import check_table
@@ -1024,6 +1026,118 @@ def load_all_voices(directory: Path | None = None) -> dict[str, VoiceManifest]:
     # voice inserted in the middle of the shipped set must list in the middle,
     # not at the end. `/v1/voices` lists in this order and it is documented.
     return {vid: voices[vid] for vid in sorted(voices)}
+
+
+#: The id a caller may write. Same shape a file stem has to have, checked here
+#: because a request is not a filename until this says so: an id with a slash or
+#: a `..` in it is a path, and a path is how a write to `voices/` becomes a write
+#: to anywhere.
+_VOICE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+def home_voice_path(voice_id: str) -> Path:
+    """Where a voice this machine owns is written. NOT where one is read from.
+
+    Reading searches both directories (`voice_dirs`); writing has exactly one
+    destination, because "which of the two did that land in" is not a question
+    anybody should have to ask about their own machine.
+    """
+    if not _VOICE_ID.match(voice_id):
+        raise VoiceError(
+            f"voice id {voice_id!r} is not usable as a manifest name: lower-case "
+            "letters, digits, dot, dash and underscore, starting with a letter or "
+            "digit, at most 64 characters. The id becomes a FILENAME, so anything "
+            "else is a path rather than a name"
+        )
+    return home_voices_dir() / f"{voice_id}.toml"
+
+
+def write_home_voice(voice_id: str, document: dict[str, Any]) -> VoiceManifest:
+    """Validate a voice document and store it in this machine's own overlay.
+
+    ── Why this is here and not in the API layer ───────────────────────────────
+
+    `voices/*.toml` has one owner, and it is this module: `_parse` decides what a
+    manifest means and refuses by name, and now `tomli_w` writes back the same
+    shape. An HTTP handler building TOML with an f-string would be a second
+    author of the format, and the two would disagree the first time a field grew
+    a type — silently, because the file would still parse.
+
+    ── VALIDATED BEFORE IT IS WRITTEN, AND VALIDATED AS A FILE ────────────────
+
+    The document is parsed by the SAME `_parse` every packaged manifest goes
+    through, at the path it is about to occupy, so a caller is refused by the
+    reader's own sentence rather than by a second opinion invented for the wire.
+    Then it is round-tripped: serialise, re-parse, and compare what comes back.
+    That catches the one class of bug a pre-write check cannot — a value this
+    validator accepts and `tomli_w` cannot represent — and it catches it before
+    anything reaches the disk rather than at the next render.
+
+    ── AND WRITTEN ATOMICALLY ────────────────────────────────────────────────
+
+    To a temporary file in the same directory, then replaced. A half-written
+    manifest is not a broken voice; it is a broken SERVER, because
+    `load_all_voices` reads the whole directory and one unparseable file raises
+    for every caller of it.
+
+    Returns the manifest as it will be read back.
+    """
+    path = home_voice_path(voice_id)
+    manifest = _parse(document, path, voice_id)
+
+    try:
+        text = tomli_w.dumps(document)
+    except (TypeError, ValueError) as exc:
+        raise VoiceError(
+            f"{path.name}: this manifest cannot be written as TOML ({exc}). "
+            "Every value must be a string, number, boolean, array or table"
+        ) from exc
+    # The round trip, for the reason above: what a reader will see, compared with
+    # what this call meant.
+    written = parse_voice(text, path, voice_id)
+    if written != manifest:
+        raise VoiceError(
+            f"{path.name}: writing this manifest and reading it back did not give "
+            "the same voice, so it was not written. This is a defect in Crucible "
+            "rather than in the request; please report it"
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.writing")
+    try:
+        temporary.write_text(text, encoding="utf-8")
+        temporary.replace(path)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        raise VoiceError(f"could not write {path}: {exc}") from exc
+    return written
+
+
+def remove_home_voice(voice_id: str) -> bool:
+    """Delete this machine's own manifest for `voice_id`. True if one went.
+
+    A PACKAGED voice is untouched and unreachable from here — the packaged set
+    is the install, and deleting out of it would make the next upgrade the thing
+    that "restored" a voice somebody meant to be rid of. Removing an overlay that
+    SHADOWED a packaged voice brings the packaged one back, which is exactly what
+    makes overriding a shipped voice safe to try.
+    """
+    path = home_voice_path(voice_id)
+    if not path.is_file():
+        return False
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise VoiceError(f"could not remove {path}: {exc}") from exc
+    return True
+
+
+def is_home_voice(voice_id: str) -> bool:
+    """Does this machine's own overlay hold a manifest for this id?"""
+    try:
+        return home_voice_path(voice_id).is_file()
+    except VoiceError:
+        return False
 
 
 def _voices_in(root: Path) -> dict[str, VoiceManifest]:

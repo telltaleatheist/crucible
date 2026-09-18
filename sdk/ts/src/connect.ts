@@ -15,6 +15,34 @@ export interface PairingRequest {
   userCode: string;
   expiresIn: number;
   interval: number;
+  /**
+   * Does anybody have to APPROVE this before it becomes a pairing?
+   *
+   * `false` on an engine with open pairing — the default since 1.0.0 — where
+   * the request is already approved and the first poll returns a token. `true`
+   * where `[auth] open_pairing = false` restores the approval step, and the
+   * user code has to be read out to somebody at the other machine.
+   *
+   * NOT OPTIONAL, AND ABSENCE IS RESOLVED BY THE PARSER rather than handed on
+   * as `undefined`. An engine that does not send the field predates it, and
+   * every one of those engines required approval — so absence is a FACT about
+   * that engine, not a gap. Resolving it here means no caller writes
+   * `?? true`, which is the fallback that would otherwise appear at every call
+   * site and be got wrong at one of them.
+   *
+   * `!== false` RATHER THAN `=== true`, so the reading fails in the safe
+   * direction: a null, a string, a number and a missing key all land on
+   * `true`. A malformed answer asks for approval rather than skipping it.
+   *
+   * The field was on the wire from 1.0.0 and dropped here until 2026-09-18:
+   * `startPairing` builds its result explicitly, so a field nobody added to
+   * this shape is a field the server sends and no client can read. Found by
+   * the Foundry session, which correctly refused to work around it by posting
+   * a second `/v1/pairing/start` and parsing the raw body — that would mint a
+   * second request to learn about the first, and put two readers on one
+   * document.
+   */
+  approvalRequired: boolean;
 }
 export interface PendingPairing {
   id: string;
@@ -93,7 +121,9 @@ export async function startPairing(address: string, clientName: string, options:
     throw new CrucibleConnectionError('invalid_response', 'Crucible returned an incompatible pairing request');
   }
   return { url, name: value['name'] as string, id: value['id'], deviceCode: value['device_code'],
-    userCode: value['user_code'], expiresIn: value['expires_in'], interval: value['interval'] };
+    userCode: value['user_code'], expiresIn: value['expires_in'], interval: value['interval'],
+    // Absent means an engine older than the field, and those always asked.
+    approvalRequired: value['approval_required'] !== false };
 }
 
 export async function pollPairing(request: PairingRequest, options: PairingOptions = {}): Promise<PairingResult> {

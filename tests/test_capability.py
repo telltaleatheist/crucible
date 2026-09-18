@@ -96,33 +96,48 @@ def test_the_3090ti_translates_which_is_what_owen_already_does() -> None:
     assert verdict.shortfall_bytes == 0
 
 
-def test_the_mac_selects_the_4bit_27b_and_refuses_the_bf16() -> None:
-    """Owen translates on a 4-bit 27B on the 64 GB Studio, and has for months.
+def test_the_mac_selects_the_8bit_27b_over_the_4bit() -> None:
+    """The 64 GB Studio translates on the 8-bit, and that is the point of it.
 
-    A flat 3 GiB reserve would let a best-first walk take the **bf16** 27B at
-    55.5 GB and leave macOS 8.5 GB out of the one pool everything allocates from.
-    `default_desktop_allowance_bytes` reserves 25% there instead, and this asserts
-    the consequence rather than the constant: the walk sees 48 GiB, bf16 does not
-    fit, and the 4-bit does.
+    ── What changed on 2026-09-17, and why this test reads the other way now ──
+
+    It was `test_the_mac_selects_the_4bit_27b_and_refuses_the_bf16`, and the
+    thing it asserted was a REFUSAL: the walk saw the bf16 27B at 55.5 GB,
+    refused it against the 25% reserve, and fell to the 4-bit. Owen removed the
+    bf16 — *"I don't think the Mac can fit 27b 16 bit. It fits 8 bit at most.
+    We should remove 16 bit and put 8 bit on the Mac. 4 bit for pc"* — and
+    `qwen3.8-27b-8bit` took its place at 47_320_162_000.
+
+    That number is the whole difference: 44.07 GiB against the 48.0 GiB this
+    reserve leaves, so the largest candidate now FITS and best-first takes it.
+    The Mac stops running a 4-bit translation it never had to.
+
+    ── What is still being asserted ──────────────────────────────────────────
+
+    The same rule, reaching a different answer because the catalog changed
+    rather than because the rule did: a 25% share of a 64 GiB machine, a
+    best-first walk over `memory_bytes_estimate`, and the consequence rather
+    than the constant. The 4-bit is still a candidate and still fits; it is
+    simply no longer the best one that does.
     """
     verdict = _decide("translate", "mlx-darwin", STUDIO, MAC_RESERVE)
     assert verdict.enabled is True
-    assert verdict.selected == "qwen3.8-27b-4bit"
+    assert verdict.selected == "qwen3.8-27b-8bit", (
+        "the Mac must take the 8-bit: it is the best candidate that fits, and "
+        "fitting it is the reason the bf16 was replaced rather than dropped"
+    )
     ids = [c.id for c in verdict.candidates]
-    assert ids[0] == "qwen3.8-27b", "the walk must SEE the bf16 and refuse it"
-    # TWO SINCE 2026-09-16, not one: Owen dropped the translate floor to the 9B,
-    # so the 9B is now a translate candidate and a 64 GB Mac fits it as well as
-    # the 4-bit 27B. What this test is ABOUT is unchanged and still asserted
-    # above — the walk sees the bf16 at 55.5 GB, refuses it against a 25%
-    # reserve, and takes the 4-bit. The count is the incidental half.
-    assert verdict.fit_count == 2
+    assert ids[0] == "qwen3.8-27b-8bit", "best-first must still walk largest first"
+    # THREE, and the count is the incidental half: the 8-bit, the 4-bit and the
+    # 9B all fit this machine. It was two while the largest candidate could not.
+    assert verdict.fit_count == 3
 
 
 # -------------------------------------------------------------- the ordering
 
 
 def test_best_precision_first_not_smallest_that_fits() -> None:
-    """A 4-bit translation is a worse translation. Given room, take the bf16.
+    """A 4-bit translation is a worse translation. Given room, take the 8-bit.
 
     The order is read off `memory_bytes_estimate` descending rather than off a
     `precision` field, because the manifests already declare the size and a second
@@ -130,7 +145,7 @@ def test_best_precision_first_not_smallest_that_fits() -> None:
     (ARCHITECTURE.md R1).
     """
     verdict = _decide("translate", "cuda-linux", 200 * GIB, CUDA_RESERVE)
-    assert verdict.selected == "qwen3.8-27b", (
+    assert verdict.selected == "qwen3.8-27b-8bit", (
         "with room for both, the rule must take the better one, not the smaller"
     )
     # THREE SINCE 2026-09-16: the 9B joined translate's candidates. The claim

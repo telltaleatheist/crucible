@@ -1,0 +1,157 @@
+# Qwen 3.8 27B at 8 bits — the best translation a 64 GB Mac can actually hold.
+#
+# WHY THIS MANIFEST EXISTS, AND WHAT IT REPLACED
+# ----------------------------------------------
+# It replaces `qwen3.8-27b`, the bf16, which was deleted on 2026-09-17. Owen:
+# *"I don't think the Mac can fit 27b 16 bit. It fits 8 bit at most. We should
+# remove 16 bit and put 8 bit on the Mac. 4 bit for pc."*
+#
+# He is right, and the old manifest's own numbers say so. bf16 estimated
+# 55_518_912_853 against a 64 GiB Studio whose 25% desktop reserve leaves
+# 51_539_607_552 — so it was a candidate that could never win on either of the
+# two machines this catalog is measured on, and `tests/test_capability.py`
+# existed partly to assert that it *loses*. A row whose only job is to be
+# refused is a row that costs a person a scroll and a decision every time they
+# open a model picker.
+#
+# TWO ARMS, AND THE SPLIT OWEN ASKED FOR IS WHAT THE NUMBERS DO, NOT WHAT THIS
+# FILE DECIDES
+# ---------------------------------------------------------------------------
+# *"put 8 bit on the Mac. 4 bit for pc."* This manifest does not encode that by
+# withholding a block — it declares both arms honestly and lets each machine's
+# capability walk reach his answer on its own:
+#
+#   Mac Studio, 64 GiB, 25% desktop reserve -> 48.0 GiB to give.
+#     this row estimates 44.07 GiB  -> FITS, and beats the 4-bit on quality.
+#   PC, RTX 3090 Ti, 24 GiB.
+#     the FP8 weights ALONE are 28.75 GiB -> cannot fit, and the walk falls to
+#     `qwen3.8-27b-4bit` at 20.15 GiB.
+#
+# That is the difference between a catalog that describes the world and one
+# that has had a person's conclusion baked into it. If Owen puts a 48 GB card
+# in the PC, the second line changes by itself.
+#
+# The FP8 arm is Qwen's OWN quantization and vLLM reads it natively; the MLX
+# arm is the community 8-bit build, which is a different file format for the
+# same precision. A `cuda-linux` block pointing at the MLX repo would be a
+# block vLLM cannot load.
+
+[model]
+id = "qwen3.8-27b-8bit"
+family = "qwen3.8"
+params_b = 27
+context_default = 12288
+
+# What the WEIGHTS support — the same ceiling the bf16 row carried, read from
+# the hub on 2026-09-16 from the ORIGINAL checkpoint
+# (`Qwen/Qwen3.8-27B` @ 1d4bf0f2, `text_config.max_position_embeddings`).
+# Quantizing changes the numbers in the tensors, not the position embeddings,
+# so this is the same wall.
+trained_context = 262144
+# Text, for the reason the 9B's manifest gives at length: the checkpoint has a
+# vision tower and this server does not offer it. A modality is advertised on
+# what was measured, not on what is architecturally possible.
+modalities = ["text"]
+
+# THE PRECISION IS IN THE NAME, on both members of the pair. Owen, 2026-09-17,
+# reading two 27B rows side by side: *"qwen3.8-27b / qwen3.8-27b-4bit — how are
+# these different? it should be explicit. is the first one 8 bit?"* It was not;
+# it was bf16, and only one of the two names said a precision, which is what
+# invited the question.
+display = "Qwen 3.8 · 27B (8-bit)"
+description = "The 27B at 8 bits — the best translation a 64 GB Mac can hold. A 24 GB card cannot: its weights alone are 28.75 GiB, and such a machine falls to the 4-bit."
+
+[backends.cuda-linux]
+engine = "vllm"
+# QWEN'S OWN FP8, not a community requantization: `Qwen/Qwen3.8-27B-FP8` is
+# published by the same org as the original checkpoint and vLLM reads FP8
+# natively. FP8 is eight bits, which is why it belongs in this manifest and not
+# in one of its own — the pair this catalog offers is 8-bit and 4-bit, and which
+# FILE FORMAT carries the eight bits is a per-backend fact like every other
+# `hf_repo` here.
+hf_repo = "Qwen/Qwen3.8-27B-FP8"
+# The repo's head on 2026-09-17, read from the HuggingFace API rather than typed.
+revision = "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
+#
+# 48_685_810_449 = 30_866_866_928 (weights) + 17_818_943_521 (everything else).
+#
+# THE WEIGHTS HALF IS MEASURED the same way the mlx arm's is: the sum of the
+# repo's 66 safetensors blobs as the hub reports them, at the revision pinned
+# above.
+#
+# THE OTHER HALF IS THE MLX SIBLING'S MEASURED NON-WEIGHT TERM, carried across,
+# and on THIS arm that is a rougher claim than it is over there: vLLM's KV and
+# CUDA-graph footprint are not mlx-lm's prefill footprint, and nobody has run
+# this file on the 3090 Ti. It is a ceiling with a real basis rather than a
+# measurement, and the number it produces is far past the card either way — the
+# weights alone are larger than the whole 24 GiB — so no decision on this
+# machine turns on its precision.
+#
+# OWED: if a card that could hold this ever arrives, measure it before anybody
+# relies on the figure.
+memory_bytes_estimate = 48_685_810_449
+engine_args = []
+
+# The same number, taken apart. `basis` is "computed" and not "measured" for the
+# reason above: the weights term is read, the rest is inherited.
+[backends.cuda-linux.memory]
+weights_bytes = 30_866_866_928
+overhead_bytes = 17_818_943_521
+kv_bytes_per_token = 65_536
+basis = "computed"
+measured_at_context = 12288
+
+[backends.mlx-darwin]
+engine = "mlx-lm"
+hf_repo = "mlx-community/Qwen3.8-27B-8bit"
+# The repo's head on 2026-09-17, read from the HuggingFace API rather than typed:
+#   GET /api/models/mlx-community/Qwen3.8-27B-8bit -> sha
+revision = "815b83c0df8ffd1d1b5244cf75fd6ef14fca9ef9"
+#
+# 47_320_162_000 = 29_501_218_479 (weights) + 17_818_943_521 (everything else).
+#
+# THE WEIGHTS HALF IS MEASURED, and not by loading anything: it is the sum of
+# the repo's six safetensors blobs as the hub itself reports their sizes
+# (`?blobs=true`), at the revision pinned above. That is the same method the
+# 4-bit and bf16 rows use for their weight terms.
+#
+# THE OTHER HALF IS INHERITED FROM THE 4-BIT'S MEASUREMENT ON THIS MACHINE, and
+# that is the part that is owed. `qwen3.8-27b-4bit`'s mlx block was measured on
+# Owen's Studio (M1 Ultra, 64 GB, mlx-lm 0.31.3 / mlx 0.32.2, 2026-09-12) at a
+# peak of 33_873_484_870 against computed weights of 16_054_541_349 — leaving
+# 17_818_943_521 that is NOT weights: KV at full context plus what mlx-lm's
+# prefill holds at once, which on this model is dominated by one 2048-token
+# step's logits over a 248320 vocabulary.
+#
+# Carrying that term across to the 8-bit is a claim that the non-weight cost
+# does not depend on the quantization. That is true of the KV and the logits —
+# both are shaped by context, vocab and dtype rather than by the weights' width
+# — and it is the honest way to size a model nobody has loaded yet. It is NOT a
+# measurement of this model.
+#
+# It is also the CONSERVATIVE direction: the 4-bit's figure was taken under a
+# 98220-token completion, and `context_default` above is 12288. A real run at
+# the default context will hold less than this says.
+#
+# OWED: load this on the Studio, run a full-context completion, and write what
+# mlx's allocator reports. Then the memory table's `basis` below becomes
+# "measured" — and note it is THERE and not here: a model's backend block takes
+# no `estimate_basis` (that is a voice manifest's field), which the validator
+# said by name the first time this file was written with one.
+memory_bytes_estimate = 47_320_162_000
+engine_args = []
+
+# ------------------------------------------------- the same number, taken apart
+#
+# `weights_bytes` is the hub's own blob sum, so it is the one term here nobody
+# has to trust. `overhead_bytes` carries the inherited non-weight term rather
+# than a zero, because a zero would be a claim that this row is complete and the
+# bf16 row's comment is explicit that its own zero meant "none was measured".
+# Here something WAS measured — on the sibling — and pretending otherwise would
+# lose the only evidence this estimate has.
+[backends.mlx-darwin.memory]
+weights_bytes = 29_501_218_479
+overhead_bytes = 17_818_943_521
+kv_bytes_per_token = 65_536
+basis = "computed"
+measured_at_context = 12288

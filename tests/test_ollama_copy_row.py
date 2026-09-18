@@ -151,6 +151,6 @@ def test_no_ollama_at_all_is_quiet(tmp_path: Path) -> None:
 
 
 def test_a_model_with_no_local_table_claims_nothing(store: Path) -> None:
-    """`qwen3.8-27b` has no `[local]` table at all — there is no Ollama form of
+    """`qwen3.8-27b-8bit` has no `[local]` table at all — there is no Ollama form of
     a 52 GiB bf16 27B — so there is nothing to look up."""
-    assert rows("llama-windows", store)["qwen3.8-27b"]["ollama_copy"] is None
+    assert rows("llama-windows", store)["qwen3.8-27b-8bit"]["ollama_copy"] is None

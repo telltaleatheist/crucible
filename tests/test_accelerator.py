@@ -382,17 +382,17 @@ def test_the_27b_on_a_24_gib_card_is_insufficient_memory(
     with pytest.raises(ApiError) as caught:
         guard(
             "cuda-linux",
-            model_id="qwen3.8-27b",
-            need_bytes=56_368_313_144,
+            model_id="qwen3.8-27b-8bit",
+            need_bytes=48_685_810_449,
             desktop_allowance_bytes=3 * GIB,
         )
     error = caught.value
     assert error.status_code == 409
     assert error.code == "insufficient_memory"
     # It names both numbers, as section 4 requires.
-    assert "needs 52.5 GiB" in error.message
+    assert "needs 45.3 GiB" in error.message
     assert "22.0 GiB free" in error.message
-    assert error.details["needed_bytes"] == 56_368_313_144
+    assert error.details["needed_bytes"] == 48_685_810_449
     assert error.details["free_bytes"] == 22 * GIB
 
 
@@ -402,7 +402,7 @@ def test_unified_memory_is_checked_the_same_way(
     fake_mac(monkeypatch, available=30 * GIB)
     guard("mlx-darwin", model_id="qwen3.5-9b", need_bytes=19 * GIB)
     with pytest.raises(ApiError) as caught:
-        guard("mlx-darwin", model_id="qwen3.8-27b", need_bytes=55_518_912_853)
+        guard("mlx-darwin", model_id="qwen3.8-27b-8bit", need_bytes=47_320_162_000)
     assert caught.value.code == "insufficient_memory"
     assert "30.0 GiB free" in caught.value.message
 
@@ -694,20 +694,40 @@ def test_read_windows_state_survives_rows_the_driver_will_not_fill_in(
     assert "3 compute app(s)" in state.detail
 
 
-def test_the_mac_reserve_selects_the_4bit_27b_owen_already_runs() -> None:
-    """The rule is checked against a known-good answer, not just written.
+def test_the_mac_reserve_is_a_share_and_leaves_macos_a_quarter() -> None:
+    """The rule is checked against real numbers, not just written.
 
-    Owen has translated with a 4-bit 27B on the 64 GB Studio for months. Under a
-    flat 3 GiB reserve a best-first walk selects the **bf16** 27B instead and
-    leaves macOS 8.5 GB — PHASE9-CAPABILITY.md section 1.1 is the record of that
-    disagreement, and of the finding that the rule was wrong rather than the
-    operator. This is the test that keeps it that way.
+    ── What this test USED to be about, and why it changed ────────────────────
+
+    It was `test_the_mac_reserve_selects_the_4bit_27b_owen_already_runs`, and
+    its discriminator was the **bf16** 27B: under a flat 3 GiB reserve a
+    best-first walk took it and left macOS 8.5 GB, which is the disagreement
+    PHASE9-CAPABILITY.md section 1.1 records. The bf16 left the catalog on
+    2026-09-17 — Owen: *"I don't think the Mac can fit 27b 16 bit. It fits 8
+    bit at most"* — so there is no longer anything in the catalog that a flat
+    reserve would wrongly admit, and a test asserting a fictional model does
+    not fit is a test asserting nothing.
+
+    ── What is still true, and worth keeping ─────────────────────────────────
+
+    The reserve is a SHARE rather than a constant, and the margin it leaves is
+    now the thing that decides the Mac's best model. The numbers below are the
+    shipped manifests' own, so this fails if either the rule or an estimate
+    moves — which is the whole job it had before.
     """
     from crucible.config import default_desktop_allowance_bytes
 
-    total = 64 * 1000 ** 3  # 64 GB as Apple counts it
-    available = total - default_desktop_allowance_bytes("mlx-darwin", total)
-    bf16_27b = 55.5 * 1000 ** 3
-    fourbit_27b = 33.9 * 1000 ** 3
-    assert bf16_27b > available, "bf16 must NOT fit — it leaves macOS nothing"
-    assert fourbit_27b < available, "the 4-bit must fit — it is what he runs"
+    total = 64 * 1000 ** 3  # 64 GB as Apple counts it, and the conservative read
+    reserve = default_desktop_allowance_bytes("mlx-darwin", total)
+    available = total - reserve
+    assert reserve == total // 4, "the reserve stopped being a quarter"
+
+    eightbit_27b = 47_320_162_000   # qwen3.8-27b-8bit, mlx arm
+    fourbit_27b = 33_873_484_870    # qwen3.8-27b-4bit, mlx arm, MEASURED
+    assert eightbit_27b < available, (
+        "the 8-bit must fit — it is what the Mac is meant to translate on, and "
+        "the reason the bf16 was dropped rather than kept as an option"
+    )
+    assert fourbit_27b < available, "the 4-bit must still fit — it is the fallback"
+    # And the 8-bit is the one a best-first walk takes, because it is bigger.
+    assert eightbit_27b > fourbit_27b

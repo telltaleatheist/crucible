@@ -250,7 +250,10 @@ def test_an_unknown_model_id_names_what_is_shipped(tmp_path: Path) -> None:
 #: Every manifest this build ships, in the order `load_all_manifests` returns
 #: them — which is id order, and the order `/v1/models` lists them in. The 4-bit
 #: 27B sorts after the bf16 one because its id extends it.
-SHIPPED = ["dots-ocr", "qwen3.5-9b", "qwen3.8-27b", "qwen3.8-27b-4bit"]
+# SORTED, because the assertion is against `sorted(manifests)`. The 2026-09-17
+# rename put `-8bit` where the bare `qwen3.8-27b` sat, which is BEFORE `-4bit`
+# in the old ordering and after it in the real one ('4' < '8').
+SHIPPED = ["dots-ocr", "qwen3.5-9b", "qwen3.8-27b-4bit", "qwen3.8-27b-8bit"]
 
 #: Each model's `context_default`. The two bf16 manifests carry Owen's pinned
 #: cleanup context; the 4-bit 27B carries the 98304 of his `qwen3.8:27b-24g`
@@ -267,7 +270,7 @@ CONTEXTS = {
     # GGUF that block names is 9.53 GB. So the number moved to [model] and both
     # overrides were deleted — see BACKEND_CONTEXTS, which no longer names it.
     "qwen3.5-9b": 16384,
-    "qwen3.8-27b": 12288,
+    "qwen3.8-27b-8bit": 12288,
     "qwen3.8-27b-4bit": 98304,
 }
 
@@ -278,12 +281,12 @@ CONTEXTS = {
 #: works (PHASE3-VLM.md section 4).
 BACKENDS = {
     # `llama-windows` (PHASE15-HOST.md 3.10) on the three whose GGUF is
-    # published. `qwen3.8-27b` has none and gets no row: a 55 GB GGUF on a
-    # 24 GB card is not a thing a Windows box runs, and a row with nothing
-    # truthful in it is worse than no row.
+    # published. `qwen3.8-27b-8bit` has none and gets no row: its FP8 weights
+    # are 28.75 GiB before any cache, which is not a thing a 24 GB Windows box
+    # runs, and a row with nothing truthful in it is worse than no row.
     "dots-ocr": ["cuda-linux", "llama-windows"],
     "qwen3.5-9b": ["cuda-linux", "llama-windows", "mlx-darwin"],
-    "qwen3.8-27b": ["cuda-linux", "mlx-darwin"],
+    "qwen3.8-27b-8bit": ["cuda-linux", "mlx-darwin"],
     "qwen3.8-27b-4bit": ["cuda-linux", "llama-windows", "mlx-darwin"],
 }
 
@@ -313,7 +316,7 @@ def test_this_build_ships_the_manifests_the_contracts_name() -> None:
 
 
 def test_the_ids_sort_the_way_the_listing_shows_them() -> None:
-    """`qwen3.8-27b-4bit` sits after `qwen3.8-27b`, not before it."""
+    """`qwen3.8-27b-4bit` sits after `qwen3.8-27b-8bit`, not before it."""
     assert sorted(SHIPPED) == SHIPPED
     assert list(load_all_manifests()) == SHIPPED
 
@@ -406,7 +409,7 @@ def test_a_page_engine_named_by_a_text_model_is_refused_too() -> None:
 
 def test_the_27b_does_not_fit_a_24_gib_card() -> None:
     """The refusal the PC must make is arithmetic in the manifest, not a mood."""
-    spec = load_manifest("qwen3.8-27b").spec("cuda-linux")
+    spec = load_manifest("qwen3.8-27b-8bit").spec("cuda-linux")
     assert spec.memory_bytes_estimate > 24 * 1024 ** 3
 
 
@@ -415,7 +418,7 @@ def test_the_9b_does_fit_a_24_gib_card() -> None:
     assert spec.memory_bytes_estimate < 24 * 1024 ** 3
 
 
-def test_the_4bit_27b_fits_a_24_gib_card_and_the_bf16_one_does_not() -> None:
+def test_the_4bit_27b_fits_a_24_gib_card_and_the_8bit_one_does_not() -> None:
     """The whole reason the 4-bit manifest exists, as arithmetic.
 
     Same model, same family, same params_b; the only difference is the weights
@@ -423,7 +426,7 @@ def test_the_4bit_27b_fits_a_24_gib_card_and_the_bf16_one_does_not() -> None:
     other is not.
     """
     small = load_manifest("qwen3.8-27b-4bit")
-    big = load_manifest("qwen3.8-27b")
+    big = load_manifest("qwen3.8-27b-8bit")
     assert small.family == big.family == "qwen3.8"
     assert small.params_b == big.params_b == 27
     assert small.spec("cuda-linux").memory_bytes_estimate < 24 * 1024 ** 3
@@ -466,7 +469,7 @@ def test_the_text_models_are_served_language_model_only() -> None:
     """A lane that sends only text does not pay for a vision tower.
 
     Pinned per model rather than looped over every manifest, because the third
-    27B — `qwen3.8-27b` in bf16 — deliberately does NOT carry these flags, and a
+    27B — `qwen3.8-27b-8bit` in bf16 — deliberately does NOT carry these flags, and a
     loop would either fail on it or need an exception list that hides it. Its own
     block records the choice: nothing there has been measured with an image
     profiled in, and it cannot load on either of Owen's machines, so it is left
@@ -793,7 +796,7 @@ def test_the_three_local_models_are_the_ones_foundry_runs() -> None:
     manifests = load_all_manifests()
     shipped = {k: v.local.kind for k, v in manifests.items() if v.local is not None}
     assert shipped == LOCAL_KINDS_SHIPPED
-    assert manifests["qwen3.8-27b"].local is None
+    assert manifests["qwen3.8-27b-8bit"].local is None
 
 
 @pytest.mark.parametrize("model_id", sorted(LOCAL_KINDS_SHIPPED))

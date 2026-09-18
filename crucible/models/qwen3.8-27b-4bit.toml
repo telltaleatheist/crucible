@@ -134,6 +134,8 @@ trained_context = 262144
 modalities = ["text"]
 # The two display facts (PHASE9-CAPABILITY.md, "The local form"), required by
 # the [local] table below.
+# Its pair is "Qwen 3.8 · 27B (16-bit)" — both say a precision, because either
+# saying it alone reads as the other having none. See that file's note.
 display = "Qwen 3.8 · 27B (4-bit)"
 description = "The 27B standard for translation, simplification and analysis, quantized to fit a 24 GB card. The smallest model those three may run on."
 
