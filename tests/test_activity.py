@@ -20,6 +20,9 @@ from fastapi.testclient import TestClient
 
 from crucible import API_VERSION, VERSION
 
+from .test_residency import STUBBORN_PID, a_process_that_will_not_stop
+from .test_tts_api import VOICE
+
 
 #: `echo` refuses `no_inputs`, so every submission here carries one. It is not
 #: what any of these tests are about — they are about what the bench sees — but
@@ -253,3 +256,47 @@ def test_it_never_publishes_a_jobs_params(
         assert "delay_ms" not in repr(body["running"][0])
     finally:
         client.delete(f"/v1/jobs/{job_id}", headers=auth)
+
+
+# ------------------------------------------ what was told to go and has not
+
+
+def test_a_stubborn_engine_shows_on_the_bench_read(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    """Ledger R13. `resident` goes null the moment the stop is asked for, so a
+    bench that read only that drew an idle machine which refuses everything —
+    and nothing in Crucible ever clears the state, because a killed CUDA
+    process wedges WSL2 until Windows reboots. The pids are published because
+    ending it is a thing a human does with them."""
+    assert activity(client, auth)["stopping"] is None
+
+    with a_process_that_will_not_stop(client.app.state.residency):
+        body = activity(client, auth)
+        assert body["resident"] is None
+        assert body["stopping"] == {
+            "kind": "tts",
+            "id": VOICE,
+            "since": body["stopping"]["since"],
+            "pids": [STUBBORN_PID],
+        }
+        assert body["stopping"]["since"].startswith("20")
+        # The lane is genuinely free and still says so. `accepts_work` was
+        # never the question this field answers.
+        assert body["slots"]["accelerated"]["accepts_work"] is True
+
+
+def test_health_says_it_too_and_the_two_reads_cannot_differ(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    """One object (`DyingResident.to_dict`) behind both routes."""
+    health = client.get("/v1/health", headers=auth).json()
+    assert health["stopping"] is None
+
+    with a_process_that_will_not_stop(client.app.state.residency):
+        health = client.get("/v1/health", headers=auth).json()
+        assert health["stopping"] == activity(client, auth)["stopping"]
+        assert health["stopping"]["pids"] == [STUBBORN_PID]
+        # `status` reports the LANE and is untouched: `ok` there has always
+        # meant "no job is running", never "the card is free".
+        assert health["status"] == "ok"

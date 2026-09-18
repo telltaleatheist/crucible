@@ -1140,6 +1140,18 @@ class StreamManager:
                     "whole attention. Close it first",
                     {"session_id": existing.id, "voice": existing.voice},
                 )
+            # ASKED BEFORE `voice_not_resident`, AND THAT ORDER IS THE POINT
+            # (ledger R14). `unload` unpublishes the voice before it signals
+            # the process, so a narrator that would not stop leaves
+            # `resident_voice` None — and the check below would send this
+            # client away with "post a load-voice job first", which is a job
+            # that is itself refused `engine_still_stopping`. Two round trips
+            # to reach a refusal this door already had in hand. The named
+            # reason wins over the incidental one.
+            try:
+                residency.refuse_if_stopping(f"stream {voice!r}")
+            except JobError as exc:
+                raise ApiError(409, exc.code, exc.message) from None
             resident = residency.resident_voice
             if resident is None or resident.voice_id != voice:
                 # The streaming door never loads, exactly as chat never loads:

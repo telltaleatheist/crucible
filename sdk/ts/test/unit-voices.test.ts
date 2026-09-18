@@ -425,12 +425,14 @@ test('health() reads resident_kind beside the ids', async () => {
     queue_depth: 0,
     resident_models: ['deathstalker'],
     resident_kind: 'tts',
+    stopping: null,
   });
   const health = await client().health();
   assert.deepEqual(health, {
     status: 'ok',
     queueDepth: 0,
     residentModels: ['deathstalker'],
+    stopping: null,
     // One id is one id whatever kind of thing it names; this is which door to
     // knock on, and `chat()` here would be model_not_resident.
     residentKind: 'tts',
@@ -445,6 +447,7 @@ test('health() reports a kind this client has never heard of rather than refusin
     queue_depth: 2,
     resident_models: ['qwen3-forced-aligner'],
     resident_kind: 'align',
+    stopping: null,
   });
   const health = await client().health();
   assert.equal(health.residentKind, 'align');

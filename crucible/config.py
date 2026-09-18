@@ -42,6 +42,21 @@ DEFAULT_HOST = "127.0.0.1"
 #: can reach it. make that the case with crucible servers as well"*. See
 #: `crucible/connect.py` for what that does and does not expose.
 DEFAULT_OPEN_PAIRING = True
+
+#: `[jobs] retention_days` — how long a FINISHED job's directory survives.
+#:
+#: THE ONE OWNER OF THIS FACT, on `DEFAULT_OPEN_PAIRING`'s terms: `_retention_days`
+#: returns it for an absent key, `write_config` writes it for a config that
+#: states nothing, and `JobStore.reap` reads it off the loaded Config.
+#:
+#: SEVEN by ruling (Owen, 2026-09-18), and it is a backstop rather than the
+#: normal path: a job whose artifacts the client has fetched is reaped as soon
+#: as the fetch is complete, and this is what catches the job nobody came back
+#: for. Measured the day it was ruled: 9.3 GB in 88 job directories on the PC
+#: since 09-12, 60 of them with an empty `artifacts/`, and nothing in Crucible
+#: had ever deleted one.
+DEFAULT_RETENTION_DAYS = 7
+
 DEFAULT_PORT = 7100
 TOKEN_BYTES = 32
 
@@ -305,6 +320,12 @@ class Config:
     #: this field reads as open, which is the behaviour that was asked for. Set it
     #: false to put the approval step back.
     open_pairing: bool = True
+    #: `[jobs] retention_days` — how many days a FINISHED job's directory and
+    #: its record survive when nothing fetched its artifacts. See
+    #: `DEFAULT_RETENTION_DAYS` for the ruling and `JobStore.reap` for what
+    #: reads it. Defaulted for `_capability_flag`'s reason: every config in
+    #: existence was written before this key, and absent means the ruled seven.
+    retention_days: int = DEFAULT_RETENTION_DAYS
     flags_absent: tuple[str, ...] = ()
     #: What `crucible capability` decided on this host, or None when nothing has
     #: decided anything here yet — a config written by `crucible init` alone, or
@@ -453,6 +474,34 @@ def _open_pairing(table: dict[str, Any]) -> bool:
             "config [auth] open_pairing: must be true or false, not "
             f"{value!r}. A quoted string here would read as true and open a "
             "door you meant to close"
+        )
+    return value
+
+
+def _retention_days(table: dict[str, Any]) -> int:
+    """`[jobs] retention_days`, defaulting to the ruled seven when absent.
+
+    Absent means seven on `_open_pairing`'s terms rather than as a fallback
+    hiding a missing value: every config on every machine was written before
+    this key existed, and demanding it would make an upgrade unable to read its
+    own file — the failure `_capability_flag` above was written for.
+
+    ZERO AND NEGATIVE ARE REFUSED, not read as "never reap". Retention is how
+    long a finished job survives, and a server that kept nothing would delete a
+    job's artifacts before the client that submitted it could fetch them.
+    Turning reaping off is not a setting; a long window is how you ask for one.
+    """
+    section = table.get("jobs")
+    if section is None:
+        raise ConfigError("config is missing the [jobs] section")
+    if "retention_days" not in section:
+        return DEFAULT_RETENTION_DAYS
+    value = _require(table, "jobs", "retention_days", int)
+    if value < 1:
+        raise ConfigError(
+            f"config [jobs] retention_days: must be at least 1 day, got {value}. "
+            "A server that kept a finished job for no days would delete its "
+            "artifacts before the client that asked for them could fetch them"
         )
     return value
 
@@ -871,6 +920,7 @@ def load_config(home: Path | None = None) -> Config:
         enable_align=_capability_flag(table, "enable_align"),
         enable_rvc=_capability_flag(table, "enable_rvc"),
         enable_denoise=_capability_flag(table, "enable_denoise"),
+        retention_days=_retention_days(table),
         flags_absent=tuple(
             flag for flag in CAPABILITY_FLAGS if flag not in table.get("jobs", {})
         ),
@@ -906,6 +956,11 @@ def write_config(
     #: existed — a test, a script — for which `False` is the same answer
     #: `_capability_flag` gives an absent key, and the safe direction.
     enable_denoise: bool = False,
+    #: Defaulted for `enable_denoise`'s reason and with its hazard: a caller
+    #: that REWRITES an existing config must pass the loaded value, or the
+    #: rewrite silently puts an operator's retention window back to seven.
+    #: `cli._write_capability` and `settings.apply` both do.
+    retention_days: int = DEFAULT_RETENTION_DAYS,
     capability: CapabilityRecord | None = None,
     #: `[routes]` and `[upstreams.*]`. Defaulted to empty for the same reason
     #: `enable_denoise` is defaulted: a caller written before this phase states
@@ -963,6 +1018,11 @@ def write_config(
             "enable_align": enable_align,
             "enable_rvc": enable_rvc,
             "enable_denoise": enable_denoise,
+            # Written always, unlike `routes` and `local_models` below: this is
+            # not "there is one of these", it is a number every server has, and
+            # an operator changing how long his renders survive should find the
+            # key already in the file rather than have to know it exists.
+            "retention_days": retention_days,
         },
         "accelerator": {"desktop_allowance_bytes": desktop_allowance_bytes},
     }

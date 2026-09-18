@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import pages
+from crucible import capability, pages
 
 HANDOVER_PROMPT = Path(__file__).resolve().parent / "dots_prompt.txt"
 
@@ -190,3 +192,65 @@ def test_the_block_is_json_serialisable_and_carries_no_bytes(
     block = client.get("/v1/info", headers=auth).json()["pages_engine"]
     json.dumps(block)
     assert set(block) == {"engine", "installed", "detail", "request"}
+
+
+# ------------------------------------------------ the server owns the width
+
+
+def test_the_request_block_states_how_many_pages_may_be_in_flight(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    """Ledger N3. A client that picked its own number was the defect: both
+    apps sent twelve while `crucible/capability.py` sized the card's
+    arithmetic for one, so the guard that decides whether `dots-ocr` FITS was
+    reasoning about a twelfth of the work that arrives.
+
+    Twelve is the manifest's own measurement note — *"at the worst case 12
+    concurrent pages want about 4.1 GiB of KV"* — and it is the same number
+    on every backend, because a client must not be able to tell which engine
+    read its page.
+    """
+    block = client.get("/v1/info", headers=auth).json()["pages_engine"]
+    assert block["request"]["concurrency"] == 12
+    assert block["request"]["concurrency"] == pages.PAGE_CONCURRENCY
+
+
+def test_the_fits_arithmetic_asks_for_the_published_number(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    """One owner, read by both halves. `pages.py` publishes it to clients and
+    `capability.py`'s `WorkingContext` — the object `Candidate.need_bytes`
+    multiplies by — reads the same name, so there is no second literal that
+    could drift from the wire."""
+    work = capability.BY_NAME["pages"].work
+    assert work is not None
+    published = client.get("/v1/info", headers=auth).json()
+    assert work.concurrency == published["pages_engine"]["request"]["concurrency"]
+    # And the source says where the number came from, which is what stops the
+    # next reader inventing a different one.
+    assert "pages.py" in work.source
+
+
+def test_changing_the_published_number_moves_the_arithmetic() -> None:
+    """The one-owner claim, made falsifiable.
+
+    In a subprocess because `CAPABILITY_CLASSES` is built at import time: the
+    child imports `crucible.pages`, changes the number, and only THEN imports
+    `crucible.capability`, so what it prints is what the arithmetic would be
+    on a build whose published width were three. Reloading in-process would
+    hand every other module in this suite a stale `CLASSES` tuple.
+    """
+    source = (
+        "import crucible.pages as pages\n"
+        "pages.PAGE_CONCURRENCY = 3\n"
+        "import crucible.capability as capability\n"
+        "print(capability.BY_NAME['pages'].work.concurrency)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", source],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "3", result.stderr

@@ -102,6 +102,7 @@ import {
   type ServerSetup,
   type SettingsDocument,
   type SettingsPatch,
+  type Stopping,
   type SubjectKind,
   type TaskCancelResult,
   type TaskEvent,
@@ -547,6 +548,7 @@ export class CrucibleClient {
       // that threw a protocol error on a kind it had not heard of would be
       // broken by the server that added one.
       residentKind: nullableStr(body, 'resident_kind', 'health'),
+      stopping: readStopping(body, 'health'),
     };
   }
 
@@ -599,6 +601,7 @@ export class CrucibleClient {
                 'activity.resident',
               ),
             },
+      stopping: readStopping(body, 'activity'),
       warming: nullableStr(body, 'warming', 'activity'),
       claim: claim === null ? null : { heldBy: str(claim, 'held_by', 'activity.claim') },
       streaming: streaming === null ? null : readStreaming(streaming),
@@ -3470,6 +3473,34 @@ function leasedRefusal(
     if (cause instanceof CrucibleProtocolError) return cause;
     throw cause;
   }
+}
+
+/**
+ * `stopping`, wherever it appears — `/v1/health` and `/v1/activity` publish
+ * the server's ONE `DyingResident`, so there is one reader for it here.
+ *
+ * The key must be present; `null` is the statement "nothing is stopping", and
+ * a server that omitted it would be one whose answer about a wedged card is
+ * unknown rather than negative. See {@link Stopping}.
+ */
+function readStopping(body: Json, where: string): Stopping | null {
+  const data = nullableObject(body, 'stopping', where);
+  if (data === null) return null;
+  const at = `${where}.stopping`;
+  return {
+    kind: str(data, 'kind', at),
+    id: str(data, 'id', at),
+    since: str(data, 'since', at),
+    pids: asArray(field(data, 'pids', at), `${at}.pids`).map((entry, index) => {
+      if (typeof entry !== 'number' || !Number.isInteger(entry)) {
+        throw new CrucibleProtocolError(
+          `${at}.pids[${index}] is not an integer pid; it is what an operator ` +
+            'types into a kill command, so a rounded or absent one is unusable',
+        );
+      }
+      return entry;
+    }),
+  };
 }
 
 /** The six fields a lease carries wherever it appears. */

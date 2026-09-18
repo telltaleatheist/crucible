@@ -668,6 +668,11 @@ def _write_capability(
         token=config.token,
         backend_kind=config.backend_kind,
         desktop_allowance_bytes=config.desktop_allowance_bytes,
+        # THE OPERATOR'S RETENTION WINDOW SURVIVES A CAPABILITY WRITE, on the
+        # same terms as the routes below: `write_config` writes the whole
+        # document, so omitting it would quietly put a server back to the
+        # default seven days the next time `crucible install` ran.
+        retention_days=config.retention_days,
         capability=capability.record(
             backend.kind,
             total_bytes=backend.gpu.vram_bytes,

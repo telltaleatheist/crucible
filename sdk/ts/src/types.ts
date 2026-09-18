@@ -225,6 +225,31 @@ export interface ServerInfo {
   readonly engine: EngineRef | null;
 }
 
+/**
+ * What this server asked to stop and has not been told is gone.
+ *
+ * **Read it before you believe an idle server is free.** Crucible never
+ * SIGKILLs a process holding CUDA — that wedges WSL2 until Windows reboots —
+ * so when a `stop` goes unanswered the engine stays on the card and every
+ * load, every claim and the streaming door answer `engine_still_stopping`
+ * while `resident` reads `null` and the lane reads `ok`. Nothing in Crucible
+ * clears this: a human stops those pids, which is why {@link Stopping.pids}
+ * is here and not summarised.
+ *
+ * It is never both this and {@link Activity.resident}: `resident` is what may
+ * be USED, this is what may only be waited for.
+ */
+export interface Stopping {
+  /** `llm`, `tts`, … — what sort of thing was on the card. */
+  readonly kind: string;
+  /** The model or voice id that was resident. */
+  readonly id: string;
+  /** When the stop was asked for, in {@link ActivityJob.started}'s format. */
+  readonly since: string;
+  /** The pids still holding the card, ascending. Stop these by hand. */
+  readonly pids: readonly number[];
+}
+
 /** `GET /v1/health`. */
 export interface Health {
   readonly status: 'ok' | 'warming' | 'busy';
@@ -248,6 +273,15 @@ export interface Health {
    * error on a kind it has not heard of would break on the server that added it.
    */
   readonly residentKind: string | null;
+  /**
+   * What was told to go and has not, or `null`.
+   *
+   * On the smallest read this server has because it is the reason every load
+   * is being refused, and {@link Health.status} cannot say it: `status`
+   * reports the LANE, and `ok` there has always meant "no job is running",
+   * never "the card is free". See {@link Stopping}.
+   */
+  readonly stopping: Stopping | null;
 }
 
 /**
@@ -406,6 +440,14 @@ export interface Activity {
     readonly since: string;
     readonly memoryBytesEstimate: number | null;
   } | null;
+  /**
+   * What was told to go and has not, or `null`. See {@link Stopping}.
+   *
+   * The state {@link Activity.resident} cannot describe: `resident` is `null`
+   * the moment the stop is asked for, and a bench reading only that drew an
+   * idle machine that refuses everything.
+   */
+  readonly stopping: Stopping | null;
   /** The id of a model being loaded right now, or null. */
   readonly warming: string | null;
   /**

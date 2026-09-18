@@ -101,6 +101,14 @@ class Job:
     #: Extra keys a job type adds to its own `done` event. `load-model` puts
     #: `resident` here (PHASE2-LLM.md section 5); `artifacts` is always present.
     done_extra: dict[str, Any] = field(default_factory=dict)
+    #: Every member of `artifacts/` a client has asked for through
+    #: `GET /v1/jobs/{id}/artifacts/{name}`, sidecars included.
+    #:
+    #: WHAT THE REAPER READS (Owen's ruling, 2026-09-18): a job whose artifacts
+    #: have all been collected is a job whose directory is a second copy of
+    #: something the client now holds, and `JobStore.reap` deletes it. Nothing
+    #: else reads this — it is not on the wire and it is not provenance.
+    fetched: set[str] = field(default_factory=set)
 
     @property
     def inputs_dir(self) -> Path:
@@ -109,6 +117,32 @@ class Job:
     @property
     def artifacts_dir(self) -> Path:
         return self.dir / "artifacts"
+
+    @property
+    def collected(self) -> bool:
+        """Has the client taken every artifact of this job, sidecars included?
+
+        FALSE FOR A JOB THAT PUBLISHED NOTHING, and that is the whole of why
+        this is a method and not `set(artifacts) <= fetched`. `load-model`,
+        `unload-voice` and a job that failed before it wrote anything all have
+        an empty `artifacts` list, and an empty list is vacuously "all
+        fetched" — which would reap a job the instant it ended, out from under
+        the client still reading its event stream. A job with nothing to
+        collect is the retention window's business, never this rule's.
+
+        THE SIDECAR COUNTS. `SdkClient.#writeArtifact` fetches `<name>` and
+        `<name>.provenance.json` with one `Promise.all`, so the two requests
+        are in flight together; a rule that reaped on the artifact alone would
+        race the sidecar's own GET and answer it `job_reaped` about a job the
+        client was in the middle of collecting. DESIGN.md section 7 requires
+        the client to keep the sidecar, so waiting for it costs nothing real.
+        """
+        if not self.artifacts:
+            return False
+        return all(
+            name in self.fetched and f"{name}.provenance.json" in self.fetched
+            for name in self.artifacts
+        )
 
 
 @runtime_checkable

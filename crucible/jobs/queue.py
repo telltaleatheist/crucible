@@ -34,6 +34,8 @@ import shutil
 import sys
 import uuid
 from collections import deque
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +53,55 @@ from .base import (
     JobType,
     utcnow,
 )
+
+#: How often the lane looks for job directories to delete while it is idle.
+#:
+#: A MINUTE BECAUSE NOTHING HERE IS URGENT. The two reasons a job is reaped are
+#: "the client has it" and "it is a week old", and neither becomes wrong by
+#: being acted on a minute late. The cost of the tick is a `listdir` of the
+#: jobs directory, so a shorter one would buy nothing and spin a loop that is
+#: otherwise asleep on an event.
+REAP_INTERVAL_SECONDS = 60.0
+
+
+def _now() -> datetime:
+    """The reaper's clock, in one place so a test can move it.
+
+    Its own function for `crucible/residency.py`'s reason — a module that has
+    to reason about elapsed time needs one place the time comes from, or a
+    keeper about a seven-day window has to wait seven days.
+    """
+    return datetime.now(timezone.utc)
+
+
+@dataclass(frozen=True)
+class Reaped:
+    """The tombstone a reaped job leaves behind, so its id still answers.
+
+    A REAPED JOB IS NOT AN UNKNOWN ONE. `GET /v1/jobs/{id}` answering
+    `unknown_job` about a job this server ran an hour ago tells the client it
+    got the id wrong, which sends it looking in the wrong place; `job_reaped`
+    with the moment and the reason tells it what actually happened and what to
+    do differently (fetch sooner, or keep the bytes it was given).
+
+    THEY ARE NOT CAPPED, and the reason is arithmetic rather than principle:
+    `JobStore` has always held every job it has ever seen in this process, and
+    a tombstone is a few hundred bytes where the `Job` it replaces holds its
+    params, its artifact list and its whole event log. Reaping strictly
+    reduces what this process keeps; capping the tombstones would put the
+    `unknown_job` lie back for the oldest of them to save the smallest thing
+    here.
+    """
+
+    job_id: str
+    #: `fetched` or `aged`. Two words rather than prose because the message is
+    #: built from them and the pair is the whole vocabulary.
+    why: str
+    #: When the reaper took it, in `Job.finished`'s format.
+    when: str
+    #: The sentence `GET /v1/jobs/{id}` answers with, written once here so the
+    #: stderr line and the 404 cannot tell two stories about one deletion.
+    detail: str
 
 
 def busy_details(job: Job) -> dict[str, Any]:
@@ -96,6 +147,16 @@ class JobStore:
         self._backend = backend
         self._registry = registry
         self._jobs: dict[str, Job] = {}
+        #: Every job this store has reaped, by id. See `Reaped`: it is what
+        #: keeps `GET /v1/jobs/{id}` from calling a job it deleted an unknown
+        #: one, and it is never emptied.
+        self._reaped: dict[str, Reaped] = {}
+        #: Every upload blob a job has CONSUMED, by blob id, to the job that
+        #: took it. An upload is MOVED into the job that names it (Owen's
+        #: ruling, 2026-09-18), so there is exactly one copy of those bytes on
+        #: this disk and the second job to name the same blob has to be told
+        #: why the bytes are not there rather than that they never were.
+        self._consumed_blobs: dict[str, str] = {}
         self._pending: deque[str] = deque()
         self._wake = asyncio.Event()
         self._worker: asyncio.Task[None] | None = None
@@ -202,9 +263,21 @@ class JobStore:
 
     def get(self, job_id: str) -> Job:
         job = self._jobs.get(job_id)
-        if job is None:
-            raise ApiError(404, "unknown_job", f"no job {job_id} on this server")
-        return job
+        if job is not None:
+            return job
+        reaped = self._reaped.get(job_id)
+        if reaped is not None:
+            # NAMED, NEVER "UNKNOWN". A client told `unknown_job` about a job
+            # this server finished an hour ago concludes it has the wrong id or
+            # the wrong server, and goes looking for the bug somewhere it is
+            # not. See `Reaped`.
+            raise ApiError(
+                404,
+                "job_reaped",
+                reaped.detail,
+                {"job_id": job_id, "reaped_at": reaped.when, "why": reaped.why},
+            )
+        raise ApiError(404, "unknown_job", f"no job {job_id} on this server")
 
     def position(self, job: Job) -> int | None:
         """0 while running, 1-based place in line while queued, null once terminal.
@@ -339,6 +412,230 @@ class JobStore:
         self._jobs.pop(job.id, None)
         shutil.rmtree(job.dir, ignore_errors=True)
 
+    # ----------------------------------------------------------------- uploads
+
+    def refuse_if_blob_consumed(self, blob_id: str) -> None:
+        """Refuse, by name, an upload some job has already taken.
+
+        OWEN'S RULING, 2026-09-18: an upload is MOVED into the job that names
+        it, not copied — one copy of those bytes on this disk. The move is
+        `crucible/api.py`'s `_materialise_inputs`; what is here is the fact
+        that a blob is consumed ONCE. After the move there is nothing left in
+        `uploads/` for a second job to take, and the honest answer to that
+        second job is not `unknown_blob` — this server did hold those bytes,
+        and it can say where they went.
+
+        The record survives the job, including one discarded before it ran:
+        the bytes went with the job either way, and a client that gets this
+        refusal has to upload them again whichever it was.
+        """
+        taken = self._consumed_blobs.get(blob_id)
+        if taken is None:
+            return
+        raise ApiError(
+            409,
+            "blob_consumed",
+            f"blob {blob_id!r} was consumed by job {taken}. An upload is moved "
+            "into the job that names it, so this server holds one copy of "
+            "those bytes and that job has it. Upload them again for this job",
+            {"blob_id": blob_id, "job_id": taken},
+        )
+
+    def consume_blob(self, blob_id: str, job: Job) -> None:
+        """Record that `job` has taken this upload. Refuses a second taker.
+
+        The check is `refuse_if_blob_consumed` and is made again here rather
+        than trusted from the caller's earlier pass: this is the line that
+        writes the record, so this is where it has to be true.
+        """
+        self.refuse_if_blob_consumed(blob_id)
+        self._consumed_blobs[blob_id] = job.id
+
+    # ----------------------------------------------------------------- reaping
+
+    def mark_fetched(self, job: Job, name: str) -> None:
+        """Record that a client has asked for this member of `artifacts/`.
+
+        Called by the artifact route once the file is known to exist. It is
+        what turns `Job.collected` true, and `reap` deletes a collected job.
+        """
+        job.fetched.add(name)
+
+    def reap(self) -> list[Reaped]:
+        """Delete the job directories nothing needs any more. **Event loop only.**
+
+        OWEN'S RULING, 2026-09-18 (ledger C5), and the measurement behind it:
+        9.3 GB in 88 job directories on the PC since 09-12, 60 of them with an
+        empty `artifacts/`, plus 2.4 GB of uploads. `store.discard` deleted a
+        directory on the create-then-refused path and nothing else ever did:
+        `_jobs` never evicted, so every render this server has ever done was
+        still on the disk twice — once in the client's library and once here.
+
+        TWO REASONS, BOTH LOUD, NEITHER A GUESS:
+
+        - **fetched.** Every artifact and every sidecar has been GET. The
+          client holds the bytes; this directory is the second copy.
+        - **aged.** It finished more than `retention_days` ago
+          (`crucible/config.py`). This is the backstop for the job nobody came
+          back for, and for the one that published nothing to fetch.
+
+        A QUEUED OR RUNNING JOB IS NEVER TOUCHED, which is why the terminal
+        check comes first and is not an age comparison: a render that has been
+        going for eight days is not a week-old job, it is this afternoon's
+        work, and deleting its scratch would take the book with it.
+
+        THE DIRECTORIES OF DEAD PROCESSES ARE REAPED TOO, by age alone. `_jobs`
+        lives in this process, so every directory under `jobs/` that no live
+        job owns belongs to a server that has already exited — its record is
+        gone, nothing can ever fetch it, and it is the whole of the 9.3 GB. It
+        is reaped by AGE and never immediately, so a second Crucible sharing
+        this home (a different port on the same machine) cannot delete a
+        directory the first one is writing into.
+
+        Returns what it took, for the keepers and for a caller that wants to
+        say so. Never raises on a directory it cannot delete: see the per-job
+        `OSError` below.
+        """
+        now = _now()
+        horizon = float(self._config.retention_days) * 86_400.0
+        taken: list[Reaped] = []
+        for job in list(self._jobs.values()):
+            if job.status not in TERMINAL_STATES:
+                continue
+            if job.collected:
+                record = self._reap_one(
+                    job,
+                    "fetched",
+                    now,
+                    f"its {len(job.artifacts)} artifact(s) and their sidecars "
+                    "had all been fetched",
+                )
+            elif self._age_seconds(job, now) > horizon:
+                record = self._reap_one(
+                    job,
+                    "aged",
+                    now,
+                    f"it finished at {job.finished} and this server keeps a "
+                    f"finished job for {self._config.retention_days} day(s) "
+                    "([jobs] retention_days)",
+                )
+            else:
+                continue
+            if record is not None:
+                taken.append(record)
+        taken.extend(self._reap_orphan_directories(now, horizon))
+        return taken
+
+    def _age_seconds(self, job: Job, now: datetime) -> float:
+        """How long this terminal job has been finished, in seconds.
+
+        `finished` is set by `_finish` and by `_fail_out_of_band` before either
+        publishes a terminal status, so a terminal job without one is this
+        module's own bug and is raised rather than given a substitute age —
+        a missing timestamp read as "just now" would keep the directory for
+        ever and a missing one read as 1970 would delete it at once.
+        """
+        if job.finished is None:
+            raise RuntimeError(
+                f"job {job.id} is {job.status} with no `finished` stamp; the "
+                "reaper cannot say how old a job that never recorded an end is"
+            )
+        return (now - datetime.fromisoformat(job.finished)).total_seconds()
+
+    def _reap_one(
+        self, job: Job, why: str, now: datetime, because: str
+    ) -> Reaped | None:
+        """Delete one job's directory and replace its record with a tombstone.
+
+        Returns None when the directory would not go. A CLEANUP FAILURE IS NOT
+        AN OPERATION FAILURE: the job still ran and the client still has what
+        it fetched, so this says what happened and leaves the record alone —
+        the next tick tries again, and until it succeeds the id goes on
+        answering about a job rather than about a deletion that did not
+        happen. The one that really occurs is a Windows file still open in a
+        `FileResponse` that is being streamed.
+        """
+        when = now.isoformat()
+        detail = (
+            f"job {job.id} was reaped at {when} because {because}. Crucible "
+            "keeps a finished job's directory until its artifacts are fetched "
+            "or it ages out; it is not an unknown job and this server did run "
+            "it"
+        )
+        try:
+            shutil.rmtree(job.dir)
+        except OSError as exc:
+            print(
+                f"crucible: could not reap job {job.id} ({why}) at {job.dir}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+        del self._jobs[job.id]
+        record = Reaped(job_id=job.id, why=why, when=when, detail=detail)
+        self._reaped[job.id] = record
+        print(
+            f"crucible: reaped job {job.id} ({job.type}) — {because}",
+            file=sys.stderr,
+        )
+        return record
+
+    def _reap_orphan_directories(
+        self, now: datetime, horizon: float
+    ) -> list[Reaped]:
+        """Delete aged job directories no live job owns. See `reap`.
+
+        No tombstone is left, because there is no id to answer for: the record
+        these directories belonged to died with the process that made them, so
+        `GET /v1/jobs/{id}` was already answering `unknown_job` about every one
+        of them and will go on doing so.
+        """
+        root = Path(self._config.jobs_dir)
+        if not root.is_dir():
+            return []
+        taken: list[Reaped] = []
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir() or entry.name in self._jobs:
+                continue
+            try:
+                age = now.timestamp() - entry.stat().st_mtime
+            except OSError as exc:
+                print(
+                    f"crucible: could not read the age of {entry}: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+            if age <= horizon:
+                continue
+            when = now.isoformat()
+            because = (
+                f"it belongs to no job this process is running, and it was "
+                f"last written {age / 86_400.0:.1f} day(s) ago — past this "
+                f"server's {self._config.retention_days}-day window "
+                "([jobs] retention_days)"
+            )
+            try:
+                shutil.rmtree(entry)
+            except OSError as exc:
+                print(
+                    f"crucible: could not reap the orphan directory {entry}: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+            print(f"crucible: reaped {entry} — {because}", file=sys.stderr)
+            taken.append(
+                Reaped(
+                    job_id=entry.name,
+                    why="aged",
+                    when=when,
+                    detail=f"job {entry.name} was reaped at {when} because "
+                    f"{because}",
+                )
+            )
+        return taken
+
     # ------------------------------------------------------------------ events
 
     def append_event(self, job: Job, kind: str, data: dict[str, Any]) -> None:
@@ -429,7 +726,37 @@ class JobStore:
         while True:
             if not self._pending:
                 self._wake.clear()
-                await self._wake.wait()
+                # THE STORE TICK, and it is here rather than in a second task
+                # because there is exactly one thing in this server allowed to
+                # decide a job is finished with, and it is the thing that runs
+                # them. It happens with the lane IDLE — the first time on the
+                # way into the wait, which is the startup sweep, and again
+                # every time the wait times out — so a reaper never competes
+                # with a render for the disk.
+                try:
+                    self.reap()
+                except Exception as exc:
+                    # THE LANE OUTLIVES THE REAPER. A cleanup failure is not an
+                    # operation failure (`_settle` says the same about the
+                    # card), and letting one out here would kill the coroutine
+                    # that IS the lane: every later job would sit at `queued`
+                    # for ever while the server went on answering 202. Said
+                    # loudly, and the next tick tries again.
+                    print(
+                        f"crucible: the job reaper failed: "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+                try:
+                    await asyncio.wait_for(
+                        self._wake.wait(), timeout=REAP_INTERVAL_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    # Nothing arrived; go round and reap again. The wait is
+                    # still an event and not a poll — a submission wakes it in
+                    # microseconds, and the timeout only exists so that a
+                    # server nobody is using still cleans up after itself.
+                    pass
                 continue
             job_id = self._pending.popleft()
             job = self._jobs[job_id]

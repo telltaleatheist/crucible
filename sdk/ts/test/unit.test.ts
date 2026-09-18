@@ -229,7 +229,7 @@ test('a url that already carries /v1 is refused rather than doubled', () => {
 // ------------------------------------------------------------------ headers
 
 test('authed calls carry the token, the api header and the client name', async () => {
-  answer(200, { status: 'ok', queue_depth: 0, resident_models: [], resident_kind: null });
+  answer(200, { status: 'ok', queue_depth: 0, resident_models: [], resident_kind: null, stopping: null });
   await client().health();
   assert.equal(lastHeaders['authorization'], 'Bearer the-token');
   assert.equal(lastHeaders['x-crucible-api'], '1');
@@ -370,6 +370,8 @@ test('only refusals about a SERVER travel to the next one', () => {
 const ACTIVITY_WITH_SESSION = {
   server: { name: 'crucible@mac', version: '0.4.0', api_version: 1, backend: 'mlx-darwin', uptime_s: 12.5 },
   resident: { kind: 'tts', id: 'deathstalker', since: '2026-09-13T18:00:00Z', memory_bytes_estimate: 19000000000 },
+  // Nothing was told to go: present and null, like `claim` and `lease` below.
+  stopping: null,
   warming: null,
   claim: { held_by: 'tts stream 3f2a' },
   streaming: {
@@ -486,4 +488,75 @@ test('a chat in flight is named as the act it IS, and does not gate work', async
   // more. The lane is what `accepts_work` is about, and it is free.
   assert.equal(seen.slots.accelerated.acceptsWork, true);
   assert.equal(seen.slots.accelerated.busy, 0);
+});
+
+// ------------------------------------- what was told to go and has not gone
+
+/**
+ * `GET /v1/health` off a server whose narrator ignored its SIGTERM, captured
+ * from `crucible/api.py`'s route — the shape `DyingResident.to_dict` writes.
+ *
+ * The state matters because nothing in Crucible ends it: `engines/base.py`
+ * never SIGKILLs, since a killed CUDA process wedges WSL2 until Windows
+ * reboots. So `status` reads `ok`, `resident_models` is empty, and every load
+ * is nonetheless refused `engine_still_stopping` until somebody stops pid
+ * 41288 by hand — which is why the pids are on the wire.
+ */
+const HEALTH_WHILE_STOPPING = {
+  status: 'ok',
+  queue_depth: 0,
+  resident_models: [],
+  resident_kind: null,
+  stopping: {
+    kind: 'tts',
+    id: 'deathstalker',
+    since: '2026-09-18T04:12:07+00:00',
+    pids: [41288, 41301],
+  },
+};
+
+test('health reads what is stopping, pids and all', async () => {
+  answer(200, HEALTH_WHILE_STOPPING);
+  const seen = await client().health();
+  assert.equal(seen.status, 'ok');
+  assert.deepEqual(seen.residentModels, []);
+  assert.deepEqual(seen.stopping, {
+    kind: 'tts',
+    id: 'deathstalker',
+    since: '2026-09-18T04:12:07+00:00',
+    pids: [41288, 41301],
+  });
+});
+
+test('activity carries the same object, and an absent key is a protocol error', async () => {
+  answer(200, { ...ACTIVITY_WITH_SESSION, stopping: HEALTH_WHILE_STOPPING.stopping });
+  const seen = await client().activity();
+  assert.equal(seen.stopping?.id, 'deathstalker');
+  assert.deepEqual(seen.stopping?.pids, [41288, 41301]);
+
+  // An absent key is not the news "nothing is stopping": it is a build that
+  // does not speak the field, and a client that read it as a null would draw
+  // a free card on a server that refuses everything.
+  const { stopping: _gone, ...withoutStopping } = ACTIVITY_WITH_SESSION;
+  answer(200, withoutStopping);
+  await assert.rejects(client().activity(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+    assert.match(error.message, /stopping/);
+    return true;
+  });
+});
+
+test('a pid that is not an integer is refused rather than rounded', async () => {
+  // It is what an operator types into a kill command. A float or a string
+  // there is unusable, and quietly coercing one would hand him a number no
+  // process has.
+  answer(200, {
+    ...HEALTH_WHILE_STOPPING,
+    stopping: { ...HEALTH_WHILE_STOPPING.stopping, pids: ['41288'] },
+  });
+  await assert.rejects(client().health(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+    assert.match(error.message, /pids\[0\] is not an integer pid/);
+    return true;
+  });
 });

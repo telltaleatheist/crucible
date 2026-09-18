@@ -20,6 +20,8 @@ Crucible causing.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -115,6 +117,34 @@ def a_resident_voice_on(holder: Residency, engine: object) -> None:
     holder._engine = engine  # type: ignore[assignment]
 
 
+@contextmanager
+def a_process_that_will_not_stop(holder: Residency) -> Iterator[StubbornEngine]:
+    """Put a stubborn engine on `holder`'s card and fail to unload it.
+
+    The dying slot is reached through `unload` rather than written into,
+    because "asked to stop, still running" is a state `Residency` composes out
+    of two facts, and a test that assembled it by hand would pin the assembly
+    instead of the behaviour.
+
+    **THE SLOT IS EMPTIED ON THE WAY OUT**, which matters only to the callers
+    that hold a whole server (tests/test_activity.py, tests/test_tts_stream.py):
+    `Residency.shutdown` asks the dying slot a second time and lets the refusal
+    out — the right thing over a real CUDA process, and the reason a double
+    that can NEVER go would turn those tests' teardown into an error about the
+    double rather than a result about the server. Cleared rather than stopped,
+    because being unstoppable is this double's whole character. The tests that
+    drive a bare `Residency` do not need it and do not use it.
+    """
+    engine = StubbornEngine()
+    a_resident_voice_on(holder, engine)
+    with pytest.raises(EngineError):
+        holder.unload(VOICE)
+    try:
+        yield engine
+    finally:
+        holder._dying = None
+
+
 def test_a_stop_that_never_completes_leaves_the_pid_crucibles(
     holder: Residency,
 ) -> None:
@@ -178,7 +208,7 @@ def test_a_stop_that_completes_leaves_nothing_behind(holder: Residency) -> None:
 
     # And the card is loadable again: the very guard that refused in the test
     # above has nothing to refuse for, so it returns instead of raising.
-    holder._refuse_if_stopping(f"load {VOICE}")
+    holder.refuse_if_stopping(f"load {VOICE}")
 
 
 def test_shutdown_asks_the_dying_process_again(holder: Residency) -> None:
@@ -196,3 +226,34 @@ def test_shutdown_asks_the_dying_process_again(holder: Residency) -> None:
     # Still not confirmed, so still Crucible's. A shutdown that reported a clean
     # exit over a live CUDA process is the one lie that costs a reboot.
     assert holder.owned_pids() == frozenset({STUBBORN_PID})
+
+
+def test_the_claim_is_refused_behind_a_process_that_will_not_stop(
+    holder: Residency,
+) -> None:
+    """Ledger R14. The four `load*` doors have refused since the dying slot
+    existed and this one did not, so a render or a settlement could take the
+    card while a process Crucible had told to go was still on it — and then be
+    refused `engine_still_stopping` by the load it took the card in order to
+    make. It is also the ONLY place a claimant that loads nothing (a streaming
+    session) can be told at all."""
+    engine = StubbornEngine()
+    a_resident_voice_on(holder, engine)
+    with pytest.raises(EngineError):
+        holder.unload(VOICE)
+
+    with pytest.raises(JobError) as refusal:
+        holder.claim("tts render", may_mutate=True)
+    assert refusal.value.code == "engine_still_stopping"
+    assert str(STUBBORN_PID) in refusal.value.message
+    # Refused, not half-taken: the next claimant is told about the dying
+    # process rather than about a holder that never got the card.
+    assert holder.claimed_by is None
+    assert engine.stops == 1
+
+
+def test_a_card_with_nothing_dying_on_it_still_claims(holder: Residency) -> None:
+    """The clean path, pinned beside the refusal: the guard returns."""
+    holder.claim("tts render", may_mutate=True)
+    assert holder.claimed_by == "tts render"
+    holder.release("tts render")

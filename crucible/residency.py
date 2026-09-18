@@ -370,6 +370,33 @@ class DyingResident:
     #: refusal can say how long this has been going on.
     since: str
 
+    def to_dict(self) -> dict[str, Any]:
+        """What `/v1/activity` and `/v1/health` publish as `stopping`.
+
+        ON THE WIRE BECAUSE THE STATE ENDS WHEN A HUMAN ENDS IT (ledger R13).
+        Every load, the claim and the streaming door refuse
+        `engine_still_stopping` while this record stands, and nothing in
+        Crucible clears it: `engines/base.py` never SIGKILLs, because a killed
+        CUDA process wedges WSL2 until Windows reboots. A bench that could see
+        only `resident: null` therefore drew an idle machine that refuses
+        everything, and the operator's next move — stop those pids by hand —
+        needs the pid numbers, which is why they are here and not summarised.
+        `null` at the route means nothing is stopping; this object never
+        appears with the fields hollowed out.
+
+        The two handles are NOT published. They are process handles, they are
+        not JSON, and which of the two is set is this module's business.
+        """
+        return {
+            "kind": self.kind,
+            "id": self.subject_id,
+            "since": self.since,
+            # Sorted, because a frozenset has no order and a bench printing
+            # them would otherwise redraw the same pids in a new arrangement
+            # on every poll.
+            "pids": sorted(self.pids),
+        }
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -501,7 +528,16 @@ class Residency:
         An exemption is a thread identity rather than a name, because the thing
         being prevented is a *second conversation*, and the claimant's own thread
         is by definition not one.
+
+        **A DYING PROCESS REFUSES THIS DOOR TOO** (ledger R14). The four `load*`
+        doors have refused `engine_still_stopping` since the dying slot existed,
+        and this one did not — so a render or a settlement could take the card
+        while a process Crucible had told to go was still on it, and then get
+        `engine_still_stopping` from the load it was claiming in order to make.
+        The claim is where that is cheapest to say and the only place a
+        claimant that loads NOTHING (a streaming session) can be told at all.
         """
+        self.refuse_if_stopping(f"give the card to {holder!r}")
         with self._claim_lock:
             if self._claim is not None:
                 raise JobError(
@@ -665,7 +701,7 @@ class Residency:
                 "mid-sentence",
             )
 
-    def _refuse_if_stopping(self, what: str) -> None:
+    def refuse_if_stopping(self, what: str) -> None:
         """Refuse while a process Crucible asked to stop has not confirmed it.
 
         THE ANSWER IS A REFUSAL BY NAME, never an eviction and never a wait.
@@ -681,6 +717,13 @@ class Residency:
         `engine_in_use` means somebody is USING the card and would be cut off;
         this means nobody is using it and nobody can, because a process that was
         told to leave is still on it.
+
+        PUBLIC, because the streaming door asks it (ledger R14). `ttsstream.py`
+        has to say this BEFORE its own `voice_not_resident`, and a second
+        module cannot reach a `_name` without either reaching into this one or
+        writing the sentence again — and the sentence, with the pids and the
+        reason Crucible will not SIGKILL, is exactly the thing there must be
+        one of.
         """
         dying = self._dying
         if dying is None:
@@ -817,7 +860,7 @@ class Residency:
     def stopping(self) -> DyingResident | None:
         """What Crucible asked to stop and has not been told is gone, or None.
 
-        Read by `_refuse_if_stopping` and by anything that wants to say why a
+        Read by `refuse_if_stopping` and by anything that wants to say why a
         load is being refused. It is never a resident: `resident` is what may be
         used, and this is a process that may only be waited for.
         """
@@ -892,7 +935,7 @@ class Residency:
         memory terms, an engine that is not vLLM) passes None and says so.
         """
         self._refuse_mutation_if_claimed(f"load {manifest.id}")
-        self._refuse_if_stopping(f"load {manifest.id}")
+        self.refuse_if_stopping(f"load {manifest.id}")
 
         def say(message: str) -> None:
             if on_progress is not None:
@@ -971,7 +1014,7 @@ class Residency:
         door's own `reference_required` is the same rule made earlier.
         """
         self._refuse_mutation_if_claimed(f"load {manifest.id}")
-        self._refuse_if_stopping(f"load {manifest.id}")
+        self.refuse_if_stopping(f"load {manifest.id}")
 
         def say(message: str) -> None:
             if on_progress is not None:
@@ -1101,7 +1144,7 @@ class Residency:
         it.
         """
         self._refuse_mutation_if_claimed(f"load {manifest.id}")
-        self._refuse_if_stopping(f"load {manifest.id}")
+        self.refuse_if_stopping(f"load {manifest.id}")
 
         def say(message: str) -> None:
             if on_progress is not None:
@@ -1188,7 +1231,7 @@ class Residency:
         that is a decision about somebody else's next job.
         """
         self._refuse_mutation_if_claimed(f"load {manifest.id}")
-        self._refuse_if_stopping(f"load {manifest.id}")
+        self.refuse_if_stopping(f"load {manifest.id}")
 
         def say(message: str) -> None:
             if on_progress is not None:
@@ -1473,7 +1516,7 @@ class Residency:
         wedges WSL2 until Windows reboots.
 
         Both slots are asked, in this order, though only one of them can be
-        occupied — `_refuse_if_stopping` guards every load, so nothing can
+        occupied — `refuse_if_stopping` guards every load, so nothing can
         become resident while something is stopping. It is written as two
         statements rather than an `elif` because the invariant is enforced
         there, not here.

@@ -1166,6 +1166,10 @@ def test_health_says_warming_while_a_load_is_in_flight(
         "queue_depth": 0,
         "resident_models": [MODEL],
         "resident_kind": "llm",
+        # Nothing was asked to stop, and the key says so rather than being
+        # absent (ledger R13): `resident` and `stopping` are never both set,
+        # and a reader has to be able to see which of the two this is.
+        "stopping": None,
     }
 
 

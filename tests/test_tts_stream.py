@@ -40,6 +40,7 @@ from crucible import ttsstream
 
 from . import fake_narrator_engine
 from .live_server import run_job, serve
+from .test_residency import STUBBORN_PID, a_process_that_will_not_stop
 from .test_tts_api import (  # noqa: F401 — imported to be used as fixtures
     fake_env,
     fake_weights,
@@ -1283,3 +1284,36 @@ def test_the_bench_names_the_client_that_opened_the_session_or_says_it_did_not(
             headers=auth,
             timeout=30.0,
         )
+
+
+def test_the_door_names_the_dying_process_before_it_names_the_voice(
+    make_client: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    """Ledger R14, and the ORDER is the point.
+
+    `unload` unpublishes the voice before it signals the process, so a
+    narrator that will not stop leaves `resident_voice` None — and the
+    `voice_not_resident` check would send this client away with "post a
+    load-voice job first", which is a job that is itself refused
+    `engine_still_stopping`. Two round trips to reach a refusal this door
+    already had in hand.
+
+    Through `TestClient` rather than a live server, alone in this file: what
+    is under test is a refusal made before anything is claimed, spawned or
+    streamed, so none of the reasons in the module docstring apply.
+    """
+    with make_client(enable_tts=True, enable_echo=False) as client:
+        with a_process_that_will_not_stop(client.app.state.residency):
+            response = client.post(
+                "/v1/tts/stream",
+                json={"voice": VOICE, "language": "en"},
+                headers=auth,
+            )
+            assert response.status_code == 409, response.text
+            error = response.json()["error"]
+            assert error["code"] == "engine_still_stopping"
+            assert str(STUBBORN_PID) in error["message"]
+            # And no session was opened on the way to saying so.
+            assert (
+                client.get("/v1/activity", headers=auth).json()["streaming"] is None
+            )

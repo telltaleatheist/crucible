@@ -176,6 +176,7 @@ export type {
   LocalModelChoice,
   SettingsDocument,
   SettingsPatch,
+  Stopping,
   SubjectKind,
   TaskBytesProgress,
   TaskCancelResult,

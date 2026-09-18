@@ -88,6 +88,7 @@ from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
 from .config import CapabilityRecord, CapabilityRow
 from .denoisemodels import load_all_denoise_manifests
 from .manifests import BACKEND_ENGINES, MemoryTerms, load_all_manifests
+from .pages import PAGE_CONCURRENCY
 from .rvcmodels import load_all_rvc_manifests
 from .voices import load_all_voices
 
@@ -496,16 +497,25 @@ CLASSES: tuple[CapabilityClass, ...] = (
         # per-model context was never going to serve all five. A page at the
         # app's 200 dpi is about 3_450 image tokens plus the prompt plus up to
         # 8192 of answer (`models/dots-ocr.toml`), and `dots-ocr` declares 32768
-        # on cuda-linux for it. One at a time: `--parallel 1` in that manifest's
-        # llama-windows block, and "one page at a time is what the guard and the
-        # lease already assume".
+        # on cuda-linux for it.
+        #
+        # THE WIDTH IS NOT DECLARED HERE (ledger N3, Owen's ruling 2026-09-18).
+        # It used to be `concurrency=1`, on the strength of a comment saying
+        # "one page at a time is what the guard and the lease already assume" —
+        # and the comment was the stale copy: both apps send twelve, which is
+        # the number the manifest's own KV note is written against, so the
+        # arithmetic that decides whether `dots-ocr` FITS was sized for a
+        # twelfth of the work that arrives. `crucible/pages.py` publishes the
+        # number to clients as `pages_engine.request.concurrency`, so it is the
+        # owner and this reads it; there is no second literal to drift.
         work=WorkingContext(
             tokens=32768,
-            concurrency=1,
+            concurrency=PAGE_CONCURRENCY,
             source=(
                 "models/dots-ocr.toml: context_default 32768 on cuda-linux, and "
                 "its own note that one page is ~3450 image tokens plus up to "
-                "8192 of answer, one page at a time"
+                f"8192 of answer, at the {PAGE_CONCURRENCY} pages in flight "
+                "crucible/pages.py publishes to clients"
             ),
         ),
         purpose="reading page images (the VLM door)",
