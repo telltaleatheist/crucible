@@ -23,7 +23,8 @@
 #   4. the cut                               (scripts/release.sh)
 #   5. the machines, at the same time        (scripts/deploy.sh; --deploy only)
 #   6. the promote command, printed          (scripts/promote_release.py — not run)
-#   7. where it went                         (a row per step, and per machine)
+#   7. where it went                         (a row per step, and per machine —
+#      on a run that FAILED too, with the step it died in marked)
 #
 # THERE IS NO TEST STEP, and there is no flag that adds one back. Owen,
 # 2026-09-18 (PHASE20-CODE-NOT-ENVIRONMENTS.md 7): *"Normal deploy does not need
@@ -77,9 +78,14 @@ fail() { echo "ship: $*" >&2; exit 1; }
 #
 # `step` is the banner AND the clock. A phase is the gap between two banners, so
 # a step added later cannot be a step nobody timed — there is no second call to
-# forget. The rows are accumulated as `name|seconds` lines and rendered once at
-# the end; a run that dies partway prints no table, which is correct, because
-# the failure is the thing to read then.
+# forget. The rows are accumulated as `name|seconds` lines and rendered once, by
+# the EXIT trap armed at step 1 — on a failed run as much as a finished one.
+#
+# It used to print on success only, "because the failure is the thing to read
+# then". The first real `--deploy` (1.0.3, 2026-09-19) is what settled that:
+# step 5 refused, the script exited 1, and the run that had just cut a release
+# and upgraded the Mac left NO record of what had got as far as where. The
+# failure is the thing to read AND the table is how you read the rest of it.
 SHIP_STARTED="$(date +%s)"
 PHASE_ROWS=""
 phase_name=""
@@ -107,11 +113,24 @@ hms() {
   else printf '%ds' "$1"; fi
 }
 
-# WHERE THE RELEASE WENT. Printed last, from the rows every `step` left behind.
+# WHERE THE RELEASE WENT. Printed last, from the rows every `step` left behind,
+# and reached through the EXIT trap rather than by being called: an exit path
+# that has to remember to print the table is an exit path that will forget, and
+# `fail` — the one every refusal goes through — is exactly the one that did.
+#
+# THE OPEN PHASE IS THE ONE THAT DIED. A non-zero status means the script left
+# between two banners, so the step whose banner was last is where it went wrong
+# and the row says so; there is nothing else to consult and nothing to guess.
 where_it_went() {
+  local status="$1"
+  if [ "$status" -ne 0 ] && [ -n "$phase_name" ]; then
+    phase_name="$phase_name — FAILED"
+  fi
   phase_close
+  local what="v$version"
+  [ -n "$version" ] || what="this run"
   echo
-  echo "ship: where v$version went ($(hms $(( $(date +%s) - SHIP_STARTED ))))"
+  echo "ship: where $what went ($(hms $(( $(date +%s) - SHIP_STARTED ))))"
   printf '%s' "$PHASE_ROWS" | while IFS='|' read -r name seconds; do
     [ -n "$name" ] || continue
     printf '  %-38s %8s\n' "$name" "$(hms "$seconds")"
@@ -122,13 +141,16 @@ level=""
 dry_run=0
 no_bump=0
 do_deploy=0
+# Named before the trap can read it: the table prints on a run that died in
+# step 1, which is a run that never learned a version.
+version=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry_run=1; shift ;;
     --no-bump) no_bump=1; shift ;;
     --deploy)  do_deploy=1; shift ;;
-    -h|--help) sed -n '2,62p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,63p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) fail "unknown argument $1" ;;
     *) [ -z "$level" ] || fail "name one version bump, not two ($level and $1)"; level="$1"; shift ;;
   esac
@@ -141,6 +163,10 @@ else
 fi
 
 # ------------------------------------------------------------- 1. the tree
+
+# ARMED HERE and not at the top: everything above is argument parsing, and a
+# table for a run that was refused its arguments would be a table with no rows.
+trap 'where_it_went "$?"' EXIT
 
 step "the tree"
 [ -z "$(git status --porcelain)" ] \
@@ -170,7 +196,6 @@ if [ "$dry_run" = "1" ]; then
   echo "ship: the bump is in the working tree; 'git checkout .' undoes it, and"
   echo "ship: './scripts/ship.sh --no-bump' carries on from here."
   git --no-pager diff --stat
-  where_it_went
   exit 0
 fi
 
@@ -235,5 +260,3 @@ echo "ship: and the flag attests that you installed it, so only you can pass it:
 echo "  python scripts/promote_release.py --tag v$version --publish --confirmed-install-smoke"
 echo "ship: and repin the apps:"
 echo "  node tools/adopt-crucible-release.mjs $version     # in bookforge, and in foundry"
-
-where_it_went

@@ -206,3 +206,47 @@ def test_without_deploy_the_command_to_run_is_printed_instead(tmp_path: Path) ->
     assert not (tmp_path / "deploy-argv").exists() and not (work / "deploy-argv").exists()
     assert "./scripts/deploy.sh --release 1.0.3" in done.stdout, done.stdout
     assert "adopt-crucible-release.mjs 1.0.3" in done.stdout, done.stdout
+
+
+# ------------------------------------------------ the table on a run that died
+#
+# MEASURED on the first real `ship.sh patch --deploy` (1.0.3, 2026-09-19): the
+# cut worked, the Mac was serving 1.0.3 thirty-three seconds later, the PC's
+# `install.ps1` refused — and the script exited 1 having printed no table at
+# all, so "what got as far as where" had to be reconstructed from scrollback.
+# The failure is the thing to read AND the table is how the rest of it is read.
+
+
+def test_a_failed_step_still_prints_the_table_and_marks_the_step_it_died_in(
+    tmp_path: Path,
+) -> None:
+    work = fake_repo(tmp_path)
+    _shim(work / "scripts/deploy.sh", 'echo "deploy: the mac refused"\nexit 1\n')
+    git(work, "add", "-A")
+    git(work, "commit", "--quiet", "-m", "a deploy that refuses")
+    git(work, "push", "--quiet", "origin", "main")
+    git(work, "fetch", "--quiet", "origin", "main")
+
+    done = run_ship(work, "patch", "--deploy")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "ship: where v1.0.3 went" in done.stdout, done.stdout
+    # The step it died in, named as such, and the ones that DID finish beside it.
+    assert re.search(r"^  the machines — FAILED +\d+s$", done.stdout, re.MULTILINE), done.stdout
+    assert re.search(r"^  the tree +\d+s$", done.stdout, re.MULTILINE), done.stdout
+
+
+def test_a_run_that_dies_before_it_has_a_version_still_prints_its_table(
+    tmp_path: Path,
+) -> None:
+    """Step 1 refuses before step 2 reads a version, and the table is printed by
+    a trap that runs anyway — so the version it names has to be a value that
+    exists. `set -u` and an unset one would turn the table into a second
+    failure on top of the real one."""
+    work = fake_repo(tmp_path)
+    (work / "uncommitted").write_text("a dirty tree\n", encoding="utf-8")
+
+    done = run_ship(work, "patch")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "the working tree is dirty" in done.stderr, done.stderr
+    assert "ship: where this run went" in done.stdout, done.stdout
+    assert re.search(r"^  the tree — FAILED +\d+s$", done.stdout, re.MULTILINE), done.stdout

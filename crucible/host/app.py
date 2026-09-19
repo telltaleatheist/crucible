@@ -68,6 +68,20 @@ LOCK_NAME = "host.pid"
 #: answer rather than a guess at one.
 DEFAULT_RELEASE = VERSION
 
+#: How long the guest carry waits for the watch loop's FIRST settled
+#: measurement before saying, in the log, that it never came.
+#:
+#: Composed from the watch's own numbers rather than chosen, because the thing
+#: being waited for is one watch tick: the first one is `WATCH_SECONDS` away,
+#: and it may spend every recovery recipe (`RECIPE_TIMEOUT_SECONDS` each) and
+#: the wait for the engine to answer one (`BOOT_WAIT_SECONDS`) before it
+#: returns a presence. Past that the presence is not going to settle, and a
+#: thread that waited forever would be a carry nobody can tell from a carry
+#: that decided nothing.
+PRESENCE_SETTLE_CEILING_SECONDS = presence_module.WATCH_SECONDS + len(
+    presence_module.RECIPES
+) * (presence_module.RECIPE_TIMEOUT_SECONDS + presence_module.BOOT_WAIT_SECONDS)
+
 INSTALL_SH_URL = (
     "https://github.com/telltaleatheist/crucible/releases/download/"
     "v{release}/install.sh"
@@ -413,6 +427,13 @@ class Host:
         self._paused = (context.home / "engine.stopped").exists()
         self._cleanup_running = False
         self._cleanup_retry_at = 0.0
+        #: Set by `watch` after its first full pass, and read by the guest
+        #: carry. `start()` decides a presence but does not always DECIDE AN
+        #: OWNER — its `both recipes were spent` branch and its paused branch
+        #: both leave `Owner.NONE`, and `poll` is what turns that into the
+        #: owner an answering engine has. Anything gated on the owner has to
+        #: wait for the tick that settles it.
+        self._presence_settled = threading.Event()
         #: Whether THIS process holds a claim on this machine's engine
         #: (PHASE17 2.1). Not "whether the engine is claimed" — that is the
         #: engine's fact and it is read from `/v1/info`, never mirrored here.
@@ -552,7 +573,9 @@ class Host:
                 f"The WSL engine is running, but its saved network sharing could not be restored: {exc}",
             ) from exc
 
-    def carry_guest_to_this_release(self) -> None:
+    def carry_guest_to_this_release(
+        self, *, settle_ceiling_s: float = PRESENCE_SETTLE_CEILING_SECONDS
+    ) -> None:
         """ONE RELEASE PER MACHINE, and this host is what makes it true.
 
         Owen, 2026-09-18: *"windows is the driver; the thing moving wsl
@@ -567,13 +590,38 @@ class Host:
         claim there is no guest of OURS — `Owner.WSL_UNIT` is the single
         question, asked of the presence the watcher already measured.
 
+        AND IT WAITS FOR THAT MEASUREMENT, which is the whole of the first real
+        `ship.sh patch --deploy` (1.0.3, 2026-09-19). This runs on a thread
+        started at the end of `main`, and on Owen's PC the owner did not become
+        `wsl-unit` until the watch loop's first tick seven seconds later
+        (`consent: "Ubuntu" is named … owner=wsl-unit`, 02:04:59, against a tray
+        that started at 02:04:52). The question above was asked in that gap, got
+        the `Owner.NONE` `start()` leaves when it decides no owner, and returned
+        — silently, so the log did not even say a carry had happened. The guest
+        stayed on 1.0.2 and `install.ps1` then refused the whole install.
+        `_presence_settled` is the fact being waited for and the watch loop is
+        what sets it; a sleep loop on `presence.owner` would be this thread
+        deciding for itself when a measurement is finished.
+
         IT NEVER RAISES OUT OF THE THREAD. A guest that is ahead, unreadable or
         simply unreachable is a LINE IN THE LOG and a host that carries on
         supervising the engine it has; the alternative is a tray that dies on
         startup because a VM was busy. Everything it decided is named, so the
-        log says which of the three answers this machine got.
+        log says which of the four answers this machine got — the fourth being
+        "there was nothing here to carry", which used to be the silent one.
         """
+        if not self._presence_settled.wait(settle_ceiling_s):
+            self._c.log.write(
+                f"guest release: presence never settled within "
+                f"{settle_ceiling_s:.0f} s, so whether this machine's engine is "
+                "a guest of ours is unknown and nothing was carried"
+            )
+            return
         if self._c.presence.owner is not Owner.WSL_UNIT:
+            self._c.log.write(
+                f"guest release: no guest to carry "
+                f"(owner={self._c.presence.owner.value})"
+            )
             return
         walk = installer.EngineInstall(
             self._c.runner,
@@ -1071,34 +1119,41 @@ class Host:
         """4.1's watch. One recovery per down-edge, then a state with a name."""
         while not self._stop.wait(self._c.watcher.watch_s):
             with self._operation:
-                if self._paused:
-                    continue
-                before = self._c.presence.engine
-                self._c.presence = self._c.watcher.poll(
-                    self._c.presence.distro, self._c.presence.owner
-                )
-                # 7b.4c: the hold is what keeps the VM there at all, so it is
-                # taken again the tick after it dies rather than at the next login.
-                self._c.watcher.rehold()
-                if (self._c.presence.owner is Owner.WSL_UNIT
-                        and self._c.presence.engine is Engine.RUNNING
-                        and (self._c.home / installer.CLEANUP_RECORD).exists()
-                        and not self._cleanup_running and time.monotonic() >= self._cleanup_retry_at):
-                    self._cleanup_running = True
-                    threading.Thread(target=self._resume_model_cleanup, name="crucible-model-cleanup", daemon=True).start()
-                if self._c.presence.engine is not before:
-                    self._c.log.write(
-                        f"watch: {before.value} -> {self._c.presence.engine.value} — "
-                        f"{self._c.presence.detail}"
+                if not self._paused:
+                    before = self._c.presence.engine
+                    self._c.presence = self._c.watcher.poll(
+                        self._c.presence.distro, self._c.presence.owner
                     )
-                    # PHASE17 2.3: a claim is LIVE state and an engine that
-                    # restarted has forgotten. Every down-to-up edge re-asserts
-                    # it, which is why nothing has to be remembered on disk — the
-                    # relation is re-stated within one 15-second tick instead.
-                    if self._c.presence.engine is Engine.RUNNING:
-                        self._claimed = False
-                        self.claim()
-                    self._refresh()
+                    # 7b.4c: the hold is what keeps the VM there at all, so it is
+                    # taken again the tick after it dies rather than at the next login.
+                    self._c.watcher.rehold()
+                    if (self._c.presence.owner is Owner.WSL_UNIT
+                            and self._c.presence.engine is Engine.RUNNING
+                            and (self._c.home / installer.CLEANUP_RECORD).exists()
+                            and not self._cleanup_running and time.monotonic() >= self._cleanup_retry_at):
+                        self._cleanup_running = True
+                        threading.Thread(target=self._resume_model_cleanup, name="crucible-model-cleanup", daemon=True).start()
+                    if self._c.presence.engine is not before:
+                        self._c.log.write(
+                            f"watch: {before.value} -> {self._c.presence.engine.value} — "
+                            f"{self._c.presence.detail}"
+                        )
+                        # PHASE17 2.3: a claim is LIVE state and an engine that
+                        # restarted has forgotten. Every down-to-up edge re-asserts
+                        # it, which is why nothing has to be remembered on disk — the
+                        # relation is re-stated within one 15-second tick instead.
+                        if self._c.presence.engine is Engine.RUNNING:
+                            self._claimed = False
+                            self.claim()
+                        self._refresh()
+                # THE ONE PLACE THE PRESENCE BECOMES KNOWN, and the paused
+                # branch reaches it too: a host the operator stopped has a
+                # presence — stopped, owned by nobody — and a waiter told that
+                # can act on it. `start()` does not set this, deliberately; it
+                # is what leaves `Owner.NONE` behind for `poll` to resolve, so
+                # a waiter released by `start()` would be released into exactly
+                # the unmeasured owner this exists to prevent.
+                self._presence_settled.set()
 
     def quit(self) -> None:
         """THE stop. PHASE17 4.4 — one implementation, two callers.
@@ -1237,7 +1292,8 @@ def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
     # is only worth comparing against a host release something has published.
     # ON A THREAD, because carrying a guest is a pip run inside a VM and the
     # tray has to appear in the meantime — and a daemon one, so quitting the
-    # host does not wait for it.
+    # host does not wait for it. It is started after the watch thread and waits
+    # on it: the owner it asks about is the watch's to settle, not `start()`'s.
     threading.Thread(
         target=host.carry_guest_to_this_release,
         name="crucible-guest-release",

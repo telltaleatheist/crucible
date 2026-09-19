@@ -390,6 +390,14 @@ def test_a_guest_of_another_version_does_not_fail_this_installations_start(
         backend_kind = "llama-windows"      # what THIS installation serves
 
     monkeypatch.setattr(local, "load_config", lambda home: Config())
+    # THE SAME FACT IN THE FILE, because the guard reads the document rather
+    # than a Config: `own_engine_backend` answers "what does this installation
+    # serve" straight out of `config.toml`, so a stub alone would leave the
+    # question being asked of a file that is not there.
+    (tmp_path / "config.toml").write_text(
+        "[server]\nname = 'this-one'\n[backend]\nkind = 'llama-windows'\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(local, "status", lambda home=None: {
         "state": "running", "version": "0.6.3", "backend": "cuda-linux",
         "detail": "the guest", "name": "x", "url": "u", "schema_version": 1,
