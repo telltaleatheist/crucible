@@ -10,6 +10,17 @@ Rule for every phase: BookForge changes little or nothing until Crucible is read
 first BookForge consumer is `bookforge-cli` (it drives the compiled pipeline, so it proves
 the seam without touching the app UI).
 
+**PLANNED, 2026-09-18 (not built): PHASE19 — the Linux engine arrives by itself.** The
+topology stays PHASE17's (a router was considered and rejected: the native fallback is not
+capability-equivalent, so it would be a silent one). What changes is the DEFAULT: on every
+Windows machine that can host WSL2 the orchestrator runs the engine move automatically at
+install, resumes it itself after the reboot Windows demands, and records the outcome in one
+file; native Windows is the outcome only where the machine cannot. No app surface shows a
+command or a token, ever — the bearer is an identifier the open door hands out, and the
+firewall is the lock, as with Ollama. Both apps' setup pages collapse to three faces and lose
+every paste/key/manual row. Five rulings are listed for Owen; Opus subagents build it when he
+says go. Contract: `docs/PHASE19-AUTOMATIC-WSL.md`.
+
 **Newest first, 2026-09-18: PHASE18 — uncertified voices. THE SOURCE AXIS IS BUILT; THE
 REST IS A RULING.** A voice
 may name its weights by PATH as well as by HF pin (the deploy problem has been blocked since
