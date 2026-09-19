@@ -31,12 +31,17 @@
  * with that name rather than wrapping it in a generic one, because the app's
  * next move is chosen from the code.
  *
- * **Bootstrap never elevates and never installs the host.** `wsl-states.ts`
- * states the rule for `run-elevated`: "a UAC prompt raised by a library, from a
- * background probe, is a dialog nobody asked for". The same rule is why a
- * machine with no host runtime is a NAMED refusal carrying the `irm … | iex` line
- * rather than a library that downloads and runs an elevated installer of its
- * own accord.
+ * **Bootstrap never elevates.** `wsl-states.ts` states the rule for
+ * `run-elevated`: "a UAC prompt raised by a library, from a background probe,
+ * is a dialog nobody asked for". It used to also never INSTALL the host, and
+ * PHASE19 changed that half: `install.ps1` is per-user and raises no consent
+ * dialog, and the UAC prompt a WSL install needs is raised later by the tray,
+ * which is a process a person can see. What stays refused is elevation.
+ *
+ * **PHASE19 2.6 added two GETs.** The tray starts the move itself now, so the
+ * door has to be watchable and not only drivable: {@link installStatus} reads
+ * `GET /install` and {@link watchInstall} attaches to `GET /install/events`
+ * from the move's current step. Neither ever posts.
  */
 import { crucibleAppData } from './distro.js';
 import { backendFor, releaseAssetUrl } from './release.js';
@@ -57,8 +62,11 @@ export const HOST_DOOR_PORT = 7101;
  */
 export const HOST_DOOR_URL = `http://127.0.0.1:${HOST_DOOR_PORT}`;
 
-/** `POST` here to run the sequence. The only verb this client speaks. */
+/** `POST` here to run the sequence; `GET` it for the status (PHASE19 2.6). */
 export const HOST_INSTALL_PATH = '/install';
+
+/** `GET` here to ATTACH to a move in flight, from its current step (PHASE19 2.6). */
+export const HOST_INSTALL_EVENTS_PATH = '/install/events';
 
 /**
  * The Windows host's relocatable entry point (PHASE15 4.4). A `.cmd` and
@@ -285,14 +293,15 @@ export interface HostInstallRequestBody {
  */
 export type HostFetch = typeof globalThis.fetch;
 
-export interface HostInstallOptions {
-  /** Which release the host installs. Required here: `install()` has already resolved it. */
-  release: string;
-  jobTypes: readonly JobTypeRequest[];
-  /** `CRUCIBLE_HOME` inside the guest. Omit for the server's own default. */
-  home?: string;
-  /** What `crucible init` binds. Omit for the server's own defaults (127.0.0.1:7100). */
-  bind?: { host?: string; port?: number };
+/**
+ * The four callbacks a move's event stream feeds.
+ *
+ * Its own interface because BOTH readers take it — `requestHostInstall`, which
+ * started the move, and {@link watchInstall}, which did not. A watcher that had
+ * to name a release and a job list it is not asking for would be inventing two
+ * required values to satisfy a type.
+ */
+export interface HostEventSinks {
   /** Every event, verbatim, as it arrives — including `progress`, which is where the bytes are. */
   onEvent?: (event: HostEvent) => void;
   /** Every line a step printed. The same callback `install()` was given. */
@@ -301,6 +310,16 @@ export interface HostInstallOptions {
   onStep?: (step: InstallStep) => void;
   /** Each 4c state the host reported on its way through the table. */
   onState?: (state: HostStateData) => void;
+}
+
+export interface HostInstallOptions extends HostEventSinks {
+  /** Which release the host installs. Required here: `install()` has already resolved it. */
+  release: string;
+  jobTypes: readonly JobTypeRequest[];
+  /** `CRUCIBLE_HOME` inside the guest. Omit for the server's own default. */
+  home?: string;
+  /** What `crucible init` binds. Omit for the server's own defaults (127.0.0.1:7100). */
+  bind?: { host?: string; port?: number };
   /**
    * The `fetch` to use. Defaults to `globalThis.fetch`, which is the one
    * legitimate default in this file: it is the PLATFORM's own function on the
@@ -513,7 +532,7 @@ function parseEventLine(line: string, url: string, final: boolean): HostEvent {
 }
 
 /** Hand one event to the callbacks. Returns the result when it was the `done`. */
-function handleEvent(event: HostEvent, currentStep: string | null, url: string, options: HostInstallOptions): InstallResult | null {
+function handleEvent(event: HostEvent, currentStep: string | null, url: string, options: HostEventSinks): InstallResult | null {
   options.onEvent?.(event);
   switch (event.event) {
     case 'state':
@@ -583,7 +602,7 @@ function hostRefusal(data: HostFailedData, url: string): BootstrapRefusal {
 }
 
 /** The `done` event → an {@link InstallResult}. Every field is required; a missing one is named. */
-function doneResult(data: HostDoneData, url: string): InstallResult {
+export function doneResult(data: HostDoneData, url: string): InstallResult {
   const want = (value: unknown, field: string): string => {
     if (typeof value !== 'string' || value.trim() === '') {
       throw new BootstrapRefusal(
@@ -646,4 +665,322 @@ function doneStep(raw: unknown, index: number, url: string): InstallStep {
 /** A line, short enough to sit inside a message. */
 function clip(line: string): string {
   return line.length > 200 ? `${line.slice(0, 200)}…` : line;
+}
+
+// ------------------------------------------- PHASE19 2.6: watching the move
+
+/**
+ * The five endings of `wsl-outcome.json` (PHASE19 2.2), verbatim.
+ *
+ * `crucible/host/outcome.py` is the owner; this is the same five words on the
+ * wire, and an answer naming a sixth is refused rather than passed through as
+ * a string an app would then `switch` on and fall off the end of.
+ */
+export const WSL_OUTCOME_STATES = ['done', 'reboot-pending', 'cannot', 'failed', 'declined'] as const;
+export type WslOutcomeState = (typeof WSL_OUTCOME_STATES)[number];
+
+/**
+ * The endings after which the app stops waiting and coordinates (PHASE19 2.8).
+ *
+ * `done` and `cannot` are where the machine has landed — on the guest engine or
+ * on the native one — and `reboot-pending` is where it will stay until somebody
+ * presses Restart now. `failed` is NOT one: the tray retries it once, so an app
+ * that gave up on the first failure would give up before the retry.
+ * `declined` is terminal too: nothing further will happen on that machine.
+ */
+export const TERMINAL_OUTCOME_STATES: readonly WslOutcomeState[] = ['done', 'cannot', 'reboot-pending', 'declined'];
+
+/** `wsl-outcome.json`, as `GET /install` reports it. Snake_case-free: the file has none. */
+export interface WslOutcome {
+  state: WslOutcomeState;
+  /** A 4c state code or a task failure code. `null` for `done` and `declined`. */
+  code: string | null;
+  /** What a person reads. `null` for `done` and `declined`. */
+  sentence: string | null;
+  /** ISO-8601, UTC. */
+  at: string;
+  /** Which release the move was for. */
+  release: string;
+  /** How many consecutive tries this was. The tray retries a `failed` once. */
+  attempts: number;
+}
+
+/** The tray's presence, as `presence.Presence` holds it. */
+export interface HostPresenceData {
+  distro: string;
+  engine: string;
+  owner: string;
+  detail: string;
+}
+
+/** `GET /install`'s document. Three facts and no fourth. */
+export interface InstallStatus {
+  /** Is a move in flight right now? */
+  running: boolean;
+  /** How the last one ENDED, or null when none ever has. */
+  outcome: WslOutcome | null;
+  presence: HostPresenceData;
+}
+
+export interface InstallStatusOptions {
+  /** See {@link HostInstallOptions.fetchImpl}. */
+  fetchImpl?: HostFetch;
+}
+
+export interface WatchInstallOptions extends InstallStatusOptions, HostEventSinks {
+  /**
+   * How long to wait for the TRAY to make its own decision before deciding
+   * there is nothing to watch.
+   *
+   * PHASE19 2.3 moved the move's start into the tray, and the tray makes that
+   * decision only after its watch loop has settled a presence — so a caller
+   * that asked the instant the tray came up would see `running: false` and no
+   * outcome and be right for about a second. Absent, {@link DECISION_WAIT_MS}.
+   */
+  decisionWaitMs?: number;
+  /** Between two polls while waiting for that decision. Absent, {@link DECISION_POLL_MS}. */
+  pollMs?: number;
+}
+
+/**
+ * How long {@link watchInstall} waits for the tray to decide, in ms.
+ *
+ * CITED, not chosen: `crucible/host/app.py`'s
+ * `PRESENCE_SETTLE_CEILING_SECONDS` is the tray's OWN ceiling for that
+ * decision, composed there from `presence.WATCH_SECONDS`,
+ * `RECIPE_TIMEOUT_SECONDS` and `BOOT_WAIT_SECONDS` — and past it the tray
+ * writes "presence never settled" and carries nothing. Waiting longer than the
+ * thing being waited for is waiting for something that has already given up,
+ * so this is that ceiling as of 1.0.5, with that file's own numbers:
+ * `WATCH_SECONDS` 15 + 2 recipes x (`RECIPE_TIMEOUT_SECONDS` 60 +
+ * `BOOT_WAIT_SECONDS` 30) = 195 s.
+ */
+export const DECISION_WAIT_MS = 195_000;
+
+/** Between two `GET /install` polls while waiting. Four a second is a tray, not a load. */
+export const DECISION_POLL_MS = 250;
+
+/**
+ * `GET /install` — is a move running, how did the last one end, what is the
+ * tray's presence (PHASE19 2.6).
+ *
+ * The same named refusals as {@link requestHostInstall}: `host_unauthorized`,
+ * `host_unreachable`, and the door's own code for anything else.
+ */
+export async function installStatus(
+  options: InstallStatusOptions = {},
+  runner: Runner = processRunner(),
+): Promise<InstallStatus> {
+  const url = `${HOST_DOOR_URL}${HOST_INSTALL_PATH}`;
+  const response = await doorGet(url, options.fetchImpl, runner);
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch (err) {
+    throw new BootstrapRefusal(
+      'host_install_failed',
+      `${url} answered 200 with a body that is not JSON: ${(err as Error).message}`,
+      { cause: err },
+    );
+  }
+  return readStatus(raw, url);
+}
+
+/**
+ * Attach to this machine's move and follow it to its end (PHASE19 2.6).
+ *
+ * **IT NEVER STARTS ONE.** 2.3 put that in the tray, which is the process that
+ * is already there at login and the only one that can resume across the reboot
+ * `wsl --install` demands. This waits for the tray's decision, replays the ring
+ * so the caller sees the step it joined at, follows the stream, and returns the
+ * status once the move is over.
+ *
+ * Returns the status as it stands when there is nothing left to follow — which
+ * on a machine that declined, or that has already finished, is immediate.
+ */
+export async function watchInstall(
+  options: WatchInstallOptions = {},
+  runner: Runner = processRunner(),
+): Promise<InstallStatus> {
+  const waitMs = options.decisionWaitMs ?? DECISION_WAIT_MS;
+  const pollMs = options.pollMs ?? DECISION_POLL_MS;
+  const deadline = Date.now() + waitMs;
+  let status = await installStatus(options, runner);
+  // THE TRAY MAY NOT HAVE DECIDED YET. Its decision waits on a presence
+  // measurement, so "nothing running and nothing recorded" is a state a caller
+  // can legitimately see for a second after the tray starts.
+  while (!status.running && status.outcome === null && Date.now() < deadline) {
+    await sleep(pollMs);
+    status = await installStatus(options, runner);
+  }
+  for (;;) {
+    const attached = await attachInstall(options, runner);
+    if (!attached) break;
+    status = await installStatus(options, runner);
+    // A `failed` is retried by the tray ONCE (2.2), and that retry is a second
+    // move on the same machine. Following it is what makes "watch until the
+    // outcome is terminal" true rather than "watch the first attempt".
+    if (!status.running) break;
+  }
+  return await installStatus(options, runner);
+}
+
+/** Follow the event stream to its end. False when the door had nothing to show. */
+async function attachInstall(options: WatchInstallOptions, runner: Runner): Promise<boolean> {
+  const url = `${HOST_DOOR_URL}${HOST_INSTALL_EVENTS_PATH}`;
+  const response = await doorGet(url, options.fetchImpl, runner, { allow404: true });
+  if (response.status === 404) return false;
+  const stream = response.body;
+  if (stream === null) {
+    throw new BootstrapRefusal(
+      'host_install_failed',
+      `${url} answered ${response.status} with no body. The door streams newline-delimited JSON.`,
+    );
+  }
+  await readEventStream(stream, url, options);
+  return true;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** One authenticated GET on the door, with this file's named refusals. */
+async function doorGet(
+  url: string,
+  fetchImpl: HostFetch | undefined,
+  runner: Runner,
+  options: { allow404?: boolean } = {},
+): Promise<Awaited<ReturnType<HostFetch>>> {
+  const token = hostToken(runner);
+  const doFetch = fetchImpl ?? globalThis.fetch;
+  let response: Awaited<ReturnType<HostFetch>>;
+  try {
+    response = await doFetch(url, { method: 'GET', headers: { 'authorization': `Bearer ${token}` } });
+  } catch (err) {
+    throw new BootstrapRefusal(
+      'host_unreachable',
+      `the Crucible host is installed on this machine and ${url} did not answer (${(err as Error).message}). `
+        + 'Start it from the Startup item, or run `crucible host` from the host runtime.',
+      { command: `${hostRuntimeDir(runner)}\\${HOST_ENTRY_POINT} host`, cause: err },
+    );
+  }
+  if (response.status === 401) {
+    throw new BootstrapRefusal(
+      'host_unauthorized',
+      `the host refused the engine token read from ${hostConfigPath(runner)}.`,
+      { detail: await readBodyText(response) },
+    );
+  }
+  if (options.allow404 === true && response.status === 404) return response;
+  if (!response.ok) {
+    const body = await readBodyText(response);
+    throw new BootstrapRefusal(
+      'host_install_failed',
+      `${url} answered ${response.status}: ${body === '' ? '(no body)' : body}`,
+      { detail: body },
+    );
+  }
+  return response;
+}
+
+/** `GET /install`'s body, with every field required and a missing one named. */
+function readStatus(raw: unknown, url: string): InstallStatus {
+  const bad = (why: string): BootstrapRefusal =>
+    new BootstrapRefusal('host_install_failed', `${url} ${why}.`);
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw bad('did not answer an object');
+  const body = raw as Record<string, unknown>;
+  if (typeof body['running'] !== 'boolean') throw bad(`says running=${JSON.stringify(body['running'])}`);
+  const presence = body['presence'];
+  if (typeof presence !== 'object' || presence === null) throw bad('answered no presence');
+  const seen = presence as Record<string, unknown>;
+  for (const field of ['distro', 'engine', 'owner', 'detail']) {
+    if (typeof seen[field] !== 'string') throw bad(`presence.${field} is ${JSON.stringify(seen[field])}`);
+  }
+  const recorded = body['outcome'];
+  return {
+    running: body['running'],
+    outcome: recorded === null || recorded === undefined ? null : readOutcome(recorded, url),
+    presence: {
+      distro: seen['distro'] as string,
+      engine: seen['engine'] as string,
+      owner: seen['owner'] as string,
+      detail: seen['detail'] as string,
+    },
+  };
+}
+
+function readOutcome(raw: unknown, url: string): WslOutcome {
+  const bad = (why: string): BootstrapRefusal =>
+    new BootstrapRefusal('host_install_failed', `${url}: the outcome ${why}.`);
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw bad('is not an object');
+  const body = raw as Record<string, unknown>;
+  const state = body['state'];
+  if (typeof state !== 'string' || !(WSL_OUTCOME_STATES as readonly string[]).includes(state)) {
+    throw bad(`says state=${JSON.stringify(state)}; the states are ${WSL_OUTCOME_STATES.join(', ')}`);
+  }
+  const code = body['code'];
+  const sentence = body['sentence'];
+  const at = body['at'];
+  const release = body['release'];
+  const attempts = body['attempts'];
+  if (code !== null && typeof code !== 'string') throw bad(`says code=${JSON.stringify(code)}`);
+  if (sentence !== null && typeof sentence !== 'string') throw bad(`says sentence=${JSON.stringify(sentence)}`);
+  if (typeof at !== 'string' || at === '') throw bad('carries no `at`');
+  if (typeof release !== 'string' || release === '') throw bad('names no release');
+  if (typeof attempts !== 'number' || !Number.isInteger(attempts)) throw bad(`says attempts=${JSON.stringify(attempts)}`);
+  return { state: state as WslOutcomeState, code, sentence, at, release, attempts };
+}
+
+/**
+ * The ndjson, dispatched to the callbacks. The SAME parser the POST's stream
+ * uses — `parseEventLine` and `handleEvent` — so an attacher and the poster
+ * cannot read one stream two ways.
+ */
+async function readEventStream(
+  stream: ReadableStream<Uint8Array>,
+  url: string,
+  options: WatchInstallOptions,
+): Promise<void> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let pending = '';
+  let currentStep: string | null = null;
+  const relay: HostEventSinks = {
+    ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
+    ...(options.onLine === undefined ? {} : { onLine: options.onLine }),
+    ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
+    ...(options.onState === undefined ? {} : { onState: options.onState }),
+  };
+  const take = (line: string, final: boolean): void => {
+    if (line.trim() === '') return;
+    const event = parseEventLine(line, url, final);
+    if (event.event === 'step') currentStep = event.data.name;
+    // A WATCHER IS NOT THE CALLER OF THE MOVE. `failed` throws for the poster,
+    // because its `install()` must refuse by that code; here it is an EVENT
+    // about somebody else's move, and the outcome file is what says how it
+    // ended. So the throw is caught and the stream is read to its end.
+    try {
+      handleEvent(event, currentStep, url, relay);
+    } catch (err) {
+      if (!(err instanceof BootstrapRefusal)) throw err;
+    }
+  };
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      pending += decoder.decode(chunk.value, { stream: true });
+      for (;;) {
+        const newline = pending.indexOf('\n');
+        if (newline < 0) break;
+        take(pending.slice(0, newline), false);
+        pending = pending.slice(newline + 1);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  pending += decoder.decode();
+  take(pending, true);
 }

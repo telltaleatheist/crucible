@@ -76,32 +76,46 @@ export {
 export type { DistroChoiceOptions, DistroOutcome, EnsureDistroOptions } from './distro.js';
 
 export {
+  DECISION_POLL_MS,
+  DECISION_WAIT_MS,
   HOST_DOOR_PORT,
   HOST_DOOR_URL,
   HOST_ENTRY_POINT,
   HOST_EVENT_KINDS,
+  HOST_INSTALL_EVENTS_PATH,
   HOST_INSTALL_PATH,
   HOST_INSTALL_TARGET,
+  TERMINAL_OUTCOME_STATES,
+  WSL_OUTCOME_STATES,
   hostConfigPath,
   hostInstallCommand,
   hostInstalled,
   hostRuntimeDir,
   hostToken,
+  installStatus,
   requestHostInstall,
+  watchInstall,
 } from './hostdoor.js';
 export type {
   HostDoneData,
   HostDoneStep,
   HostEvent,
   HostEventKind,
+  HostEventSinks,
   HostFailedData,
   HostFetch,
   HostInstallOptions,
   HostInstallRequestBody,
   HostLineData,
+  HostPresenceData,
   HostProgressData,
   HostStateData,
   HostStepData,
+  InstallStatus,
+  InstallStatusOptions,
+  WatchInstallOptions,
+  WslOutcome,
+  WslOutcomeState,
 } from './hostdoor.js';
 
 export { detectWslState, elevatedArgv, probeArgv, wslStates } from './wsl-states.js';

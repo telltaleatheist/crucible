@@ -16,7 +16,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { BOOTSTRAP_VERSION, BootstrapStepFailed, install as installCurrent, planJobTypes, type InstallStep, type OutputStream } from '../src/index.js';
+import {
+  BOOTSTRAP_VERSION,
+  BootstrapStepFailed,
+  hostInstallCommand,
+  install as installCurrent,
+  planJobTypes,
+  type InstallStep,
+  type OutputStream,
+} from '../src/index.js';
 import { interpreterFor, interpreterUrl } from '../src/interpreter.js';
 import { wheelShaUrl, wheelUrl } from '../src/release.js';
 import { guestProbeScript } from '../src/runtime.js';
@@ -26,6 +34,7 @@ import {
   DEST,
   DOWNLOADS,
   fakeHostDoor,
+  fakeWatchDoor,
   FakeRunner,
   GUEST_BARE,
   GUEST_INSTALLED,
@@ -49,9 +58,14 @@ import {
 const install: typeof installCurrent = (options, runner) =>
   installCurrent({ release: '0.6.0', ...options }, runner);
 
-test('the default install command requests this SDK release, not the fixture release', async () => {
-  const result = await refusal(installCurrent({ jobTypes: ['llm'], onLine: () => {} }, winRunner({})));
-  assert.equal(result.command, `irm https://github.com/telltaleatheist/crucible/releases/download/v${BOOTSTRAP_VERSION}/install.ps1 | iex`);
+test('the default install command requests this SDK release, not the fixture release', () => {
+  // PHASE19: nobody is ever SHOWN this line — `install()` runs the script
+  // itself now. The function stays because the release it names is still the
+  // release a hand install must fetch, and that is worth pinning.
+  assert.equal(
+    hostInstallCommand(BOOTSTRAP_VERSION),
+    `irm https://github.com/telltaleatheist/crucible/releases/download/v${BOOTSTRAP_VERSION}/install.ps1 | iex`,
+  );
 });
 
 /** On linux the command runs as it is: no transport, no wrapping. */
@@ -475,9 +489,15 @@ function winRunner(files: Record<string, string> = { [HOST_CMD]: '@echo off', [H
   return new FakeRunner({ platform: 'win32', env: WIN_ENV, files }, []);
 }
 
-test('win32 + a host: install() asks the door and returns the HOST\'s result, spawning nothing itself', async () => {
+const DONE_OUTCOME = {
+  state: 'done', code: null, sentence: null,
+  at: '2026-09-19T00:00:00+00:00', release: '0.6.0', attempts: 1,
+};
+
+test('win32 + a host: install() WATCHES the move the tray started and never posts one', async () => {
   const c = collector();
-  const door = fakeHostDoor({
+  const door = fakeWatchDoor({
+    statuses: [{ running: true }, { running: false, outcome: DONE_OUTCOME }],
     events: [
       ['state', { code: 'no_crucible_distro', sentence: 'There is no Crucible distro on this machine yet.', action: 'run-elevated' }],
       ['step', { name: 'server', index: 2, total: 7 }],
@@ -494,65 +514,42 @@ test('win32 + a host: install() asks the door and returns the HOST\'s result, sp
     fetchImpl: door.fetchImpl,
   }, runner);
 
-  // The request, field for field.
-  assert.equal(door.requests.length, 1);
-  assert.equal(door.requests[0]?.url, 'http://127.0.0.1:7101/install');
-  assert.equal(door.requests[0]?.method, 'POST');
+  // PHASE19 2.6: the tray already started it, so nothing here posts.
+  assert.deepEqual(door.requests.map((r) => `${r.method} ${new URL(r.url).pathname}`), [
+    'GET /install',
+    'GET /install/events',
+    'GET /install',
+    'GET /install',
+  ]);
+  assert.equal(door.requests.every((r) => r.method === 'GET'), true, 'install() never POSTs the move');
   assert.equal(door.requests[0]?.authorization, 'Bearer host-token-not-a-secret');
-  assert.deepEqual(door.requests[0]?.body, {
-    target: 'wsl',
-    release: '0.6.0',
-    job_types: ['llm', { type: 'tts', narrator_engine: 'higgs-v3' }],
-  });
 
-  // The result is the host's, verbatim — including the linger step, which only
-  // the host can perform now because only the host has the guest.
+  // The result is still the host's `done`, verbatim: the outcome file says the
+  // move finished, the EVENT says what it finished into.
   assert.deepEqual(result.steps.map((s) => s.name), ['host-facts', 'server', 'init', 'service-install', 'linger', 'capability-write']);
   assert.deepEqual(result.server, {
     name: HOST_DONE_DATA.server.name,
     url: HOST_DONE_DATA.server.url,
     configPath: HOST_DONE_DATA.server.config_path,
   });
-  assert.equal(result.release, '0.6.0');
   assert.equal(result.backend, 'cuda-linux');
   assert.equal(result.crucible, '/home/crucible/.crucible/server/bin/crucible');
 
-  // Relayed through the callbacks install() already had.
   assert.deepEqual(c.steps, ['server:running']);
   assert.deepEqual(c.lines, [
     'state/stdout: There is no Crucible distro on this machine yet.',
     'server/stdout: server: cpython-3.11.16',
   ]);
-
-  // The whole point of 4.3: bootstrap does not ALSO walk the sequence. Nothing
-  // was spawned on this machine at all — no wsl.exe, no probe, no curl.
+  // Bootstrap does not ALSO walk the sequence: the host runtime was there, so
+  // nothing was spawned on this machine at all.
   assert.deepEqual(runner.calls, []);
-});
-
-test('win32 + a host: {home} and {bind} travel over the wire, not through a wsl.exe argv', async () => {
-  const c = collector();
-  const door = fakeHostDoor({ events: [HOST_DONE] });
-  await install({
-    jobTypes: ['echo'],
-    release: '0.6.0',
-    home: '/srv/crucible',
-    bind: { host: '0.0.0.0', port: 7200 },
-    onLine: c.onLine,
-    fetchImpl: door.fetchImpl,
-  }, winRunner());
-  assert.deepEqual(door.requests[0]?.body, {
-    target: 'wsl',
-    release: '0.6.0',
-    job_types: ['echo'],
-    home: '/srv/crucible',
-    bind: { host: '0.0.0.0', port: 7200 },
-  });
 });
 
 test('win32 + a host: onHostEvent sees every event verbatim, including the 4c states and the bytes', async () => {
   const c = collector();
   const seen: string[] = [];
-  const door = fakeHostDoor({
+  const door = fakeWatchDoor({
+    statuses: [{ running: true }, { running: false, outcome: DONE_OUTCOME }],
     events: [
       ['state', { code: 'wsl_ready', sentence: 'WSL2 is ready.', action: 'run' }],
       ['step', { name: 'server', index: 2, total: 7 }],
@@ -575,21 +572,66 @@ test('win32 + a host: onHostEvent sees every event verbatim, including the 4c st
   assert.deepEqual(seen, ['state:wsl_ready', 'step', 'progress:4194304/120000000', 'line', 'done']);
 });
 
-test('win32 with NO host: host_not_installed, carrying the exact irm line for the release asked for', async () => {
+test('win32 with NO host: install.ps1 is RUN, not printed for somebody to type', async () => {
+  // PHASE19: "Nobody is ever shown a command. A command a person could run is
+  // a step the app should be running." The script is per-user and elevates
+  // nothing, so the old `host_not_installed` refusal is now a download and a run.
   const c = collector();
-  const runner = winRunner({});
-  const r = await refusal(install({ jobTypes: ['llm'], release: '0.6.0', onLine: c.onLine }, runner));
-  assert.equal(r.code, 'host_not_installed');
-  assert.equal(r.command, 'irm https://github.com/telltaleatheist/crucible/releases/download/v0.6.0/install.ps1 | iex');
-  assert.match(r.message, new RegExp(HOST_DIR.replace(/\\/g, '\\\\')));
-  // Named, not performed: a library does not elevate.
-  assert.deepEqual(runner.calls, []);
+  const door = fakeWatchDoor({ statuses: [{ running: false, outcome: DONE_OUTCOME }], events: [HOST_DONE] });
+  const runner = new FakeRunner(
+    { platform: 'win32', env: WIN_ENV, files: {}, appearAfter: { [HOST_CMD]: '@echo off', [HOST_CONFIG_PATH]: HOST_CONFIG } },
+    [{ argv: (argv) => argv[0] === 'powershell.exe' }],
+  );
+  await install({ jobTypes: ['llm'], release: '0.6.0', onLine: c.onLine, fetchImpl: door.fetchImpl }, runner);
+  const argv: readonly string[] = runner.calls[0]?.argv ?? [];
+  assert.equal(argv[0], 'powershell.exe');
+  assert.deepEqual(argv.slice(1, 5), ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command']);
+  const script = argv[5] ?? '';
+  assert.match(script, /releases\/download\/v0\.6\.0\/install\.ps1/);
+  assert.match(script, /-Release '0\.6\.0'/, 'the release the caller asked for, not the channel latest');
+  assert.doesNotMatch(script, /RunAs/, 'bootstrap still never elevates');
 });
 
-test('win32 with NO host: the irm line names the release the caller asked for, not this package\'s', async () => {
+test('win32 with NO host: install.ps1 failing is host_not_installed, naming the directory', async () => {
   const c = collector();
-  const r = await refusal(install({ jobTypes: ['llm'], release: '9.9.9', onLine: c.onLine }, winRunner({})));
-  assert.equal(r.command, 'irm https://github.com/telltaleatheist/crucible/releases/download/v9.9.9/install.ps1 | iex');
+  const runner = new FakeRunner(
+    { platform: 'win32', env: WIN_ENV, files: {} },
+    [{ argv: (argv) => argv[0] === 'powershell.exe', code: 1, stderr: 'runtime_download_failed' }],
+  );
+  const r = await refusal(install({ jobTypes: ['llm'], release: '0.6.0', onLine: c.onLine }, runner));
+  assert.equal(r.code, 'host_not_installed');
+  assert.match(r.message, new RegExp(HOST_DIR.replace(/\\/g, '\\\\')));
+});
+
+test('win32: an outcome that is not `done` is install()\'s refusal, with the OUTCOME\'s 4c code', async () => {
+  const c = collector();
+  const door = fakeWatchDoor({
+    statuses: [{
+      running: false,
+      outcome: {
+        state: 'cannot',
+        code: 'virtualization_disabled',
+        sentence: "Virtualization is turned off in this machine's firmware.",
+        at: '2026-09-19T00:00:00+00:00',
+        release: '0.6.0',
+        attempts: 1,
+      },
+    }],
+  });
+  const r = await refusal(install({ jobTypes: ['echo'], release: '0.6.0', onLine: c.onLine, fetchImpl: door.fetchImpl }, winRunner()));
+  assert.equal(r.code, 'virtualization_disabled');
+  assert.match(r.message, /firmware/);
+});
+
+test('win32: `done` with no `done` event is refused rather than described from nothing', async () => {
+  // The tray restarted, so its 200-event ring no longer holds the move's
+  // `done` — and the server's name, url and config path are the GUEST's facts,
+  // which this side has no door onto. It says so instead of returning blanks.
+  const c = collector();
+  const door = fakeWatchDoor({ statuses: [{ running: false, outcome: DONE_OUTCOME }] });
+  const r = await refusal(install({ jobTypes: ['echo'], release: '0.6.0', onLine: c.onLine, fetchImpl: door.fetchImpl }, winRunner()));
+  assert.equal(r.code, 'host_install_unwitnessed');
+  assert.match(r.message, /readLocalConfig/);
 });
 
 test('win32: a malformed job list is bad_job_type here, without needing a host to say so', async () => {
@@ -599,18 +641,9 @@ test('win32: a malformed job list is bad_job_type here, without needing a host t
   assert.match(r.message, /tts must name its narrator engine/);
 });
 
-test('win32: a failed event from the host is install()\'s refusal, with the 4c code the host sent', async () => {
-  const c = collector();
-  const door = fakeHostDoor({
-    events: [['failed', { code: 'virtualization_disabled', message: 'Virtualization is turned off in this machine\'s firmware.' }]],
-  });
-  const r = await refusal(install({ jobTypes: ['echo'], release: '0.6.0', onLine: c.onLine, fetchImpl: door.fetchImpl }, winRunner()));
-  assert.equal(r.code, 'virtualization_disabled');
-});
-
 test('win32: a host whose config has no token refuses host_no_token before anything is sent', async () => {
   const c = collector();
-  const door = fakeHostDoor({ events: [HOST_DONE] });
+  const door = fakeWatchDoor({ statuses: [{ running: false, outcome: DONE_OUTCOME }] });
   const r = await refusal(install(
     { jobTypes: ['echo'], release: '0.6.0', onLine: c.onLine, fetchImpl: door.fetchImpl },
     winRunner({ [HOST_CMD]: '@echo off' }),
