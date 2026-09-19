@@ -1,5 +1,11 @@
 # crucible `asr` env — cuda-linux (faster-whisper on an NVIDIA card, Linux or WSL2).
 #
+# archive-bytes: 1300000000  PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's table, measured 2026-09-18
+#   What `crucible install asr` refuses on a disk with less (`env_disk`,
+#   PHASE19-AUTOMATIC-WSL.md 2.12 and ruling 6). An ARCHIVE size — what this
+#   recipe weighed while it was re-hosted as a pack — so the unpacked env is
+#   LARGER and this number is a floor, never an estimate.
+#
 # Installed by `crucible install asr` into ~/.crucible/envs/asr/ as a venv built
 # from the server's own interpreter. Everything here comes from PyPI; heavy
 # wheels are never hosted on GitHub Releases (DESIGN.md section 5).

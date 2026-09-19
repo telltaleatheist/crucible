@@ -183,3 +183,35 @@ def test_a_headline_that_is_not_installed_is_a_build_bug_said_out_loud(
     with pytest.raises(workerenv.WorkerEnvError) as caught:
         workerenv.env_status(home, "align", "cuda-linux")
     assert "the package the align env exists for" in str(caught.value)
+
+
+def test_a_worker_env_is_refused_the_same_way_when_the_disk_is_short(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PHASE19 2.12 — the shared guard, through this module's own error type.
+
+    `install_worker_env` is the second of the two install paths and it walks
+    the same `jobenv.plan_env` sequence, so it gets the same `env_disk` refusal
+    before `python -m venv` and long before pip dials a mirror. The exception
+    is this module's, because that is what its callers catch.
+    """
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        workerenv, "_run", lambda command, failure, on_line: ran.append(list(command))
+    )
+    monkeypatch.setattr(
+        workerenv.jobenv.shutil, "disk_usage", lambda _p: _Usage(1_000_000)
+    )
+    with pytest.raises(workerenv.WorkerEnvError) as caught:
+        workerenv.install_worker_env(home, "align", "cuda-linux")
+    assert "env_disk" in str(caught.value)
+    assert "'align'" in str(caught.value)
+    assert ran == [], "nothing was run"
+    assert not workerenv.worker_env_dir(home, "align").exists()
+
+
+class _Usage:
+    def __init__(self, free: int) -> None:
+        self.total = free * 2
+        self.used = free
+        self.free = free

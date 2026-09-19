@@ -725,3 +725,199 @@ class _Completed:
     def __init__(self, out: str) -> None:
         self.stdout = out
         self.returncode = 0
+
+
+# ------------------------------------------- what a recipe costs (PHASE19 2.12)
+#
+# PHASE20 moved the gigabytes off our releases and onto the mirrors, so a first
+# install now downloads 5.3 GB of `tts` over minutes and would find out about
+# the disk at the end of it. `pack_disk` cannot fire (`_guest_ready` passes no
+# `required_bytes`: the move itself is ~31 MB), so the disk question lives here
+# now, on the measured archive size each recipe states in its own header.
+
+ENVS_ROOT = Path(jobenv.__file__).resolve().parent / "envs"
+
+
+def every_recipe() -> list[Path]:
+    """Every recipe this build ships, found rather than typed out."""
+    found = sorted(ENVS_ROOT.glob("*/*.txt"))
+    assert len(found) >= 10, f"only {len(found)} recipes under {ENVS_ROOT}"
+    return found
+
+
+def test_every_recipe_in_the_tree_states_what_it_costs() -> None:
+    """A recipe with no size is one `crucible install` has to refuse, so no
+    recipe in the tree may be without one."""
+    for path in every_recipe():
+        assert jobenv.recipe_archive_bytes(path) > 0, path
+
+
+def test_the_sizes_are_the_ones_phase20_measured() -> None:
+    """The five cuda numbers, off `PHASE20-CODE-NOT-ENVIRONMENTS.md` section 0:
+    tts 5.3 GB, llm 3.3, rvc 3.3, align 2.9, asr 1.3. An uncited constant is
+    invented, so the test cites the same table the headers do."""
+    def size(*parts: str) -> int:
+        return jobenv.recipe_archive_bytes(ENVS_ROOT.joinpath(*parts))
+
+    assert size("tts", "higgs-v3-cuda-linux.txt") == 5_300_000_000
+    assert size("llm", "cuda-linux.txt") == 3_300_000_000
+    assert size("rvc", "cuda-linux.txt") == 3_300_000_000
+    assert size("align", "cuda-linux.txt") == 2_900_000_000
+    assert size("asr", "cuda-linux.txt") == 1_300_000_000
+    # The mlx table row prices the five together and never apart, so each mlx
+    # recipe carries the total: an overstatement, which is the only direction a
+    # floor may be wrong in.
+    for job_type in ("tts", "llm", "rvc", "align", "asr"):
+        assert size(job_type, "mlx-darwin.txt") == 900_000_000
+
+
+def test_a_recipe_with_no_size_line_is_refused_rather_than_guessed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _recipe(tmp_path, monkeypatch, "torch==2.13.0\n")
+    with pytest.raises(EnvError) as caught:
+        jobenv.recipe_archive_bytes(path)
+    assert "recipe_unsized" in str(caught.value)
+
+
+def test_a_size_with_nothing_to_cite_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where a number was measured is part of the number."""
+    path = _recipe(tmp_path, monkeypatch, "# archive-bytes: 900000000\ntorch==2.13.0\n")
+    with pytest.raises(EnvError) as caught:
+        jobenv.recipe_archive_bytes(path)
+    assert "recipe_size_invalid" in str(caught.value)
+    assert "names no source" in str(caught.value)
+
+
+def test_two_sizes_in_one_recipe_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _recipe(
+        tmp_path,
+        monkeypatch,
+        "# archive-bytes: 900000000  measured somewhere\n"
+        "# archive-bytes: 5300000000  measured somewhere else\n"
+        "torch==2.13.0\n",
+    )
+    with pytest.raises(EnvError) as caught:
+        jobenv.recipe_archive_bytes(path)
+    assert "recipe_size_invalid" in str(caught.value)
+    assert "One recipe, one size, one owner" in str(caught.value)
+
+
+def test_a_size_line_is_invisible_to_pip_and_to_the_pin_readers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It is a comment, so nothing that reads requirements trips over it."""
+    path = _recipe(
+        tmp_path,
+        monkeypatch,
+        "# archive-bytes: 900000000  PHASE20 section 0\ntorch==2.13.0\n",
+    )
+    assert recipe_pins(path) == {"torch": "2.13.0"}
+    assert jobenv.recipe_direct_references(path) == {}
+
+
+class _Usage:
+    """What `shutil.disk_usage` answers, with the free space a test chose."""
+
+    def __init__(self, free: int) -> None:
+        self.total = free * 2
+        self.used = free
+        self.free = free
+
+
+def _sized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, size: int) -> Path:
+    return _recipe(
+        tmp_path,
+        monkeypatch,
+        f"# archive-bytes: {size}  PHASE20 section 0, measured 2026-09-18\n"
+        "torch==2.13.0\n",
+    )
+
+
+def _with_free(monkeypatch: pytest.MonkeyPatch, free: int) -> None:
+    monkeypatch.setattr(jobenv.shutil, "disk_usage", lambda _path: _Usage(free))
+
+
+def test_less_free_than_the_recipe_states_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe = _sized(tmp_path, monkeypatch, 5_300_000_000)
+    _with_free(monkeypatch, 4_900_000_000)
+    with pytest.raises(EnvError) as caught:
+        jobenv.refuse_without_room(
+            job_type="tts", recipe=recipe, directory=tmp_path / "envs" / "tts"
+        )
+    said = str(caught.value)
+    assert "env_disk" in said
+    assert "'tts'" in said, "the refusal names the type"
+    assert "5300000000" in said and "4900000000" in said, "and both byte counts"
+    assert str(tmp_path) in said, "and the filesystem it measured"
+    assert "at least" in said, "an archive size is a floor: the env unpacks larger"
+
+
+def test_exactly_enough_is_enough(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe = _sized(tmp_path, monkeypatch, 5_300_000_000)
+    _with_free(monkeypatch, 5_300_000_000)
+    jobenv.refuse_without_room(
+        job_type="tts", recipe=recipe, directory=tmp_path / "envs" / "tts"
+    )
+
+
+def test_an_unsized_recipe_refuses_the_install_rather_than_letting_it_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No fallback: not knowing what it costs is not "probably fine"."""
+    path = _recipe(tmp_path, monkeypatch, "torch==2.13.0\n")
+    _with_free(monkeypatch, 500_000_000_000)
+    with pytest.raises(EnvError) as caught:
+        jobenv.refuse_without_room(
+            job_type="tts", recipe=path, directory=tmp_path / "envs" / "tts"
+        )
+    assert "recipe_unsized" in str(caught.value)
+
+
+def test_the_free_space_read_is_the_one_the_venv_would_land_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`~/.crucible/envs/<key>/` does not exist yet, so the nearest existing
+    parent is what can be measured — and it is on the same filesystem."""
+    asked: list[Path] = []
+
+    def usage(path):
+        asked.append(Path(path))
+        return _Usage(500_000_000_000)
+
+    recipe = _sized(tmp_path, monkeypatch, 1_000)
+    monkeypatch.setattr(jobenv.shutil, "disk_usage", usage)
+    jobenv.refuse_without_room(
+        job_type="tts", recipe=recipe, directory=tmp_path / "a" / "b" / "c"
+    )
+    assert asked == [tmp_path]
+
+
+def test_the_install_refuses_before_it_makes_a_venv_or_dials_a_mirror(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of the guard: pip is never started.
+
+    A fresh env is `PLAN_BUILD`, and the check sits ahead of `python -m venv`,
+    ahead of `interpreter_for` (which downloads a CPython) and therefore ahead
+    of every byte pip would fetch.
+    """
+    spec = llm_env("cuda-linux")
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        jobenv, "_run", lambda command, failure, on_line: ran.append(list(command))
+    )
+    _with_free(monkeypatch, 1_000_000)
+    with pytest.raises(EnvError) as caught:
+        jobenv.install_env(home, spec, "cuda-linux")
+    assert "env_disk" in str(caught.value)
+    assert ran == [], "nothing was run"
+    assert not env_dir(home, spec).exists(), "and nothing was made"

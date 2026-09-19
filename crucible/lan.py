@@ -38,7 +38,56 @@ The elevated child's exit code is not the authority on success — `netsh` repor
 the LAST command's status, and a person can dismiss UAC. `enable` and `disable`
 both re-READ the machine afterwards and refuse on what they find, which is the
 only check that cannot be fooled by either.
-"""
+
+AND IT IS REFUSED WHEN THE ENGINE IS THE NATIVE ONE
+----------------------------------------------------
+PHASE19-AUTOMATIC-WSL.md 2.9. Everything above assumes the thing answering
+`127.0.0.1:7100` lives inside WSL2, because that is the only shape where a
+portproxy is a CROSSING. On a machine whose engine is the native Windows one
+(`backend.LLAMA_WINDOWS`), the very same row forwards `0.0.0.0:7100` to
+`127.0.0.1:7100` — the listener and the target are one process, and every
+connection the forward accepts it makes again to itself. That is the self-loop
+measured on Owen's PC on 2026-09-17, which held 15.5k of the machine's 16.4k
+ephemeral ports and made localhost keepers fail at random. Under PHASE19 native
+Windows stops being a transient state and becomes the OUTCOME on every machine
+that cannot host WSL2, so `enable` refuses it by name.
+
+WHO IS ASKED, AND WHY IT IS THE ENGINE ITSELF
+----------------------------------------------
+`GET /v1/info`'s `host.backend`, from the engine this verb is already holding
+— not the orchestrator's `owner` on `:7101` and not `config.own_engine_backend`.
+
+- The orchestrator's `owner: child` is a MEASUREMENT of what the tray spawned,
+  and it is one observer away from the question: an engine it calls `found`
+  (PHASE15 4.1a) is just as native and just as much a self-loop, and a tray
+  that is not running has no answer at all while `:7100` still answers.
+- `config.own_engine_backend` is a DECLARATION about this installation, and on
+  the machine that matters it answers `None`: Owen's PC's Windows-side
+  `config.toml` is an orchestrator's, with no `[server]` section, because the
+  engine lives in the guest's installation.
+- The engine's own document is the fact itself. It is the process listening on
+  the port this row would forward to, and this module already dials it
+  (`Engine.verify`), so asking it adds a field to a request that is made
+  anyway rather than a second copy of "which engine answers 7100 here".
+
+THE FIREWALL ROW IS NOT ADDED ON THE NATIVE PATH EITHER
+--------------------------------------------------------
+A native engine bound to a LAN address DOES need the inbound allow, so the
+tempting answer is "refuse the forward, add the rule". This module does not,
+for two reasons and neither is thrift:
+
+- Nothing here knows whether that engine is bound to a LAN address. `[server]
+  host` is not on `/v1/info`, and an inbound allow in front of a loopback-only
+  listener admits nothing while reading, in `netsh` and in the firewall UI, as
+  though the machine were open. That is the same silent no-op `landoor.py`
+  refuses to ship for a Private rule on a Public-only machine.
+- This module owns Windows rows THROUGH `landoor.json`, and a refusal writes no
+  record. A row added beside a refusal is a row `disable` has never heard of —
+  the understating record this file's own comment at the end of `enable` was
+  written to prevent.
+
+So the refusal names the rule as the thing that is still needed, and leaves the
+machine exactly as it found it."""
 from __future__ import annotations
 
 import argparse
@@ -49,6 +98,7 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
+from .backend import LLAMA_WINDOWS
 from .config import crucible_home
 from .errors import CrucibleError
 from .host import landoor
@@ -130,6 +180,45 @@ def _require_windows(runner: Runner) -> None:
         )
 
 
+def _refuse_a_native_engine(engine: Engine, port: int) -> None:
+    """PHASE19 2.9 — a portproxy in front of a native engine is a self-loop.
+
+    Reads `host.backend` off the engine's own `/v1/info`. A document that does
+    not carry it is refused rather than assumed: "which engine answers this
+    port" is the whole basis of the row about to be added, and an engine too
+    old to say is an engine this verb cannot decide about.
+    """
+    info = engine.request("GET", "info")
+    host = info.get("host")
+    backend = host.get("backend") if isinstance(host, dict) else None
+    if not isinstance(backend, str) or backend == "":
+        raise LanError(
+            "lan_engine_backend_unknown: the engine on 127.0.0.1:"
+            f"{port} answered GET /v1/info without host.backend, so nothing "
+            "here can tell whether a port forward to it would cross into WSL2 "
+            "or loop back to Windows. Upgrade the engine before opening a LAN "
+            "door onto it"
+        )
+    if backend != LLAMA_WINDOWS:
+        return
+    raise LanError(
+        f"lan_native_engine: 127.0.0.1:{port} on this machine is answered by "
+        f"the native Windows engine (backend {LLAMA_WINDOWS}), not by a Linux "
+        "engine inside WSL2. This door's forward exists to cross from this "
+        "machine's LAN addresses into the guest's loopback; aimed at a native "
+        f"engine the same row forwards 0.0.0.0:{port} to 127.0.0.1:{port}, "
+        "which is a self-loop — one of those held 15.5k of this machine's "
+        "16.4k ephemeral ports on 2026-09-17 and made local connections fail "
+        "at random. A native engine reaches the LAN by binding it itself: set "
+        "`[server] host` in config.toml to the address it should listen on and "
+        "restart the engine. An inbound allow for TCP "
+        f"{port} is then the only thing Windows still needs, and this command "
+        "does not add it, because nothing here can see what the engine is "
+        "bound to and a rule in front of a loopback-only listener admits "
+        "nothing while looking as though the machine were open"
+    )
+
+
 def _authorities(port: int) -> list[str]:
     """Every address the forward listens on, as `host:port`.
 
@@ -163,6 +252,10 @@ def enable(home: Path, runner: Runner, engine: Engine, *, port: int = ENGINE_POR
             "changing its port"
         )
     engine.verify()
+    # BEFORE `detect`, and long before anything is written or elevated: on a
+    # native machine there is no door to open, so there is nothing to read the
+    # machine for either.
+    _refuse_a_native_engine(engine, port)
     door = landoor.detect(runner, port)
     if door.mechanism == landoor.MIRRORED:
         raise LanError(

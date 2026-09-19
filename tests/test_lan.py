@@ -86,13 +86,21 @@ class Runner:
 
 
 class Engine:
-    """The local engine door. Records which FIELD was published into."""
+    """The local engine door. Records which FIELD was published into.
+
+    `backend` is what its `GET /v1/info` says `host.backend` is — the fact
+    PHASE19 2.9's refusal turns on. `cuda-linux` by default because that is the
+    engine this whole door was built for: the Linux one inside WSL2. Pass
+    `backend=None` for an engine whose document predates the question.
+    """
 
     target = "127.0.0.1:7100"
 
-    def __init__(self) -> None:
+    def __init__(self, backend: str | None = "cuda-linux") -> None:
         self.published: dict[str, list[str]] = {}
         self.verified = 0
+        self.backend = backend
+        self.paths: list[str] = []
 
     def verify(self) -> None:
         self.verified += 1
@@ -100,7 +108,13 @@ class Engine:
     def advertise(self, field: str, authorities: list[str]) -> None:
         self.published[field] = authorities
 
-    def request(self, *args):
+    def request(self, method="GET", path="settings", body=None):
+        self.paths.append(path)
+        if path == "info":
+            host = {"platform": "linux", "arch": "x86_64"}
+            if self.backend is not None:
+                host["backend"] = self.backend
+            return {"role": "engine", "host": host}
         return {"lan_advertise": self.published.get("lan_advertise", [])}
 
 
@@ -183,6 +197,46 @@ def test_a_machine_with_no_address_publishes_nothing(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(lan, "ipv4_addresses", lambda: [])
     with pytest.raises(lan.LanError, match="lan_no_addresses"):
         lan.enable(tmp_path, Runner(), Engine())
+
+
+# --------------------------------------------- the native engine (PHASE19 2.9)
+#
+# The row this verb adds forwards `0.0.0.0:7100` to `127.0.0.1:7100`. In front
+# of the WSL engine that is a crossing; in front of the native Windows one it is
+# a self-loop, and one of those held 15.5k of Owen's PC's 16.4k ephemeral ports
+# on 2026-09-17. So the verb asks WHICH engine answers the port first.
+
+
+def test_a_native_windows_engine_is_refused_and_nothing_is_touched(tmp_path) -> None:
+    runner, engine = Runner(), Engine(backend="llama-windows")
+    with pytest.raises(lan.LanError, match="lan_native_engine"):
+        lan.enable(tmp_path, runner, engine)
+    assert not (tmp_path / lan.RECORD).exists(), "a refusal claims nothing"
+    assert runner.calls == [], "it did not even read a machine it cannot change"
+
+
+def test_the_native_refusal_says_what_opens_that_machine_instead(tmp_path) -> None:
+    with pytest.raises(lan.LanError) as raised:
+        lan.enable(tmp_path, Runner(), Engine(backend="llama-windows"))
+    said = str(raised.value)
+    # The two halves an operator needs: the engine binds the LAN itself, and
+    # the inbound rule is still wanted but is deliberately not added here.
+    assert "[server] host" in said
+    assert "inbound allow for TCP 7100" in said
+
+
+def test_the_wsl_engine_is_the_unchanged_path(tmp_path) -> None:
+    runner, engine = Runner(), Engine()
+    assert lan.enable(tmp_path, runner, engine)["state"] == "configured"
+    assert "info" in engine.paths, "it asked the engine which engine it is"
+    assert runner.elevations, "and then opened the door as it always did"
+
+
+def test_an_engine_that_will_not_say_its_backend_is_refused(tmp_path) -> None:
+    runner = Runner()
+    with pytest.raises(lan.LanError, match="lan_engine_backend_unknown"):
+        lan.enable(tmp_path, runner, Engine(backend=None))
+    assert runner.calls == [], "not knowing is not the same answer as wsl"
 
 
 # ------------------------------------------------------------- the happy path
