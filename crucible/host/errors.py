@@ -67,11 +67,31 @@ HOST_ERROR_CODES: dict[str, str] = {
         "not a distribution name. A person who wrote it meant to grant "
         "something, so it is refused rather than ignored (PHASE17 2.5)."
     ),
+    "orchestrator_wsl_invalid": (
+        "`[orchestrator] wsl` in the Windows config holds something other than "
+        '"never". It is the one way to keep a machine native on purpose '
+        "(PHASE19 1), so a value nobody defined is refused rather than ignored."
+    ),
     "orchestrator_recipe_not_ours": (
         "a recovery recipe that restarts everything uid 1000 owns was asked "
         "for in a distribution Crucible did not import. CONSENT widens "
         "watching, claiming and the unit restart; it never widens this "
         "(PHASE15-HOST.md 4.1a, PHASE17 2.5)."
+    ),
+    "wsl_reboot_required": (
+        "`wsl --install` ran and Windows needs a restart before it can start a "
+        "Linux virtual machine. The move stops here and the tray resumes it "
+        "after the restart (PHASE19 2.3); the outcome file records it."
+    ),
+    "wsl_reboot_again": (
+        "Windows asked for a restart a SECOND time, on a run that was already "
+        "the one after the first. Nothing here can repair that and asking again "
+        "would be a loop, so it is terminal for the tray (PHASE19 2.4)."
+    ),
+    "wsl_outcome_invalid": (
+        "`wsl-outcome.json` is present and is not the document PHASE19 2.2 "
+        "describes. It is what the tray decides from, so it is refused rather "
+        "than read as 'nothing has happened here yet'."
     ),
     "wsl_state_unknown": (
         "the 4c table answered a code this build has no predicate for, which "

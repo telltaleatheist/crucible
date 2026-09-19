@@ -151,6 +151,11 @@ USER_DATA_DIRS: tuple[str, ...] = ("jobs", "uploads")
 STATE_FILES: tuple[str, ...] = (
     "migration-cleanup.json",
     "installation.json",
+    # PHASE19 2.2's record of what happened to the WSL move. Removed with the
+    # rest: a machine that said `cannot` and was then uninstalled is a machine
+    # with no history, and a reinstall must be free to decide again from
+    # nothing rather than inheriting a verdict about a Crucible that is gone.
+    "wsl-outcome.json",
     "host.pid",
     "narrator-higgs-voices.json",
     "narrator-reference.wav",

@@ -26,10 +26,12 @@ from __future__ import annotations
 
 import codecs
 import subprocess
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Mapping, Protocol, Sequence
+from pathlib import Path
+from typing import Callable, Mapping, Protocol, Sequence
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,48 @@ class Runner(Protocol):
         env: Mapping[str, str] | None = None,
     ) -> RunResult:
         """Run and collect. Never raises for a non-zero exit or a timeout."""
+        ...
+
+    def stream(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout_s: float,
+        on_line: "Callable[[str, str], None]",
+        env: Mapping[str, str] | None = None,
+    ) -> RunResult:
+        """The same, with every line handed over AS IT ARRIVES.
+
+        PHASE19 2.12 is why this exists. `run` collects and returns, so a
+        `guest-install` step that pips gigabytes for twenty minutes reached the
+        event stream as one burst of lines at the end — `door.py`'s own rule,
+        "a progress bar that arrives at the end is not a progress bar", broken
+        one layer down. `on_line(text, stream)` where `stream` is `"stdout"` or
+        `"stderr"`.
+
+        The returned `RunResult` still carries the whole of both streams: a
+        caller that wants the tail for a refusal should not have to have kept
+        it itself.
+        """
+        ...
+
+    def download(
+        self,
+        url: str,
+        destination: "Path",
+        *,
+        timeout_s: float,
+        on_progress: "Callable[[int, int | None, str], None] | None" = None,
+        attempts: int = 1,
+    ) -> RunResult:
+        """Fetch one file, reporting bytes as they land.
+
+        PHASE19 2.12: the Ubuntu WSL image is 340 MB and used to be a blocking
+        `curl.exe -o` that reached the event stream as nothing at all. It is a
+        Runner method rather than a call to `urllib` inside `installer.py` for
+        this module's whole reason — a test supplies a scripted stand-in and
+        the host never touches the network on a machine that is not Windows.
+        """
         ...
 
     def get(self, url: str, *, timeout_s: float) -> int | None:
@@ -201,6 +245,96 @@ class ProcessRunner:
             stderr=_decode_pipe(completed.stderr),
             failure=None,
         )
+
+    def stream(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout_s: float,
+        on_line: Callable[[str, str], None],
+        env: Mapping[str, str] | None = None,
+    ) -> RunResult:
+        """`Popen` with both pipes read by a thread each, decoded per line.
+
+        ONE THREAD PER PIPE and not `communicate()`, because the point is that
+        a line arrives while the process is still running. The decoding is
+        `_decode_pipe`'s, applied per chunk: wsl.exe's own messages are
+        UTF-16LE and the guest's relayed output is UTF-8, and one command
+        produces both (see that function's measurement).
+        """
+        collected: dict[str, list[str]] = {"stdout": [], "stderr": []}
+        try:
+            child = subprocess.Popen(
+                list(argv),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=self._child_env(env),
+                cwd=self._cwd,
+                creationflags=_no_window_flag(self._platform),
+            )
+        except OSError as exc:
+            return RunResult(code=None, stdout="", stderr="", failure=str(exc))
+
+        def pump(pipe: object, name: str) -> None:
+            assert pipe is not None
+            for raw in pipe:  # type: ignore[attr-defined]
+                for line in _decode_pipe(raw).splitlines():
+                    collected[name].append(line)
+                    on_line(line, name)
+
+        threads = [
+            threading.Thread(target=pump, args=(child.stdout, "stdout"), daemon=True),
+            threading.Thread(target=pump, args=(child.stderr, "stderr"), daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        try:
+            code: int | None = child.wait(timeout=timeout_s)
+            failure = None
+        except subprocess.TimeoutExpired:
+            child.kill()
+            code, failure = None, f"timed out after {timeout_s:.0f}s"
+        for thread in threads:
+            # The pipes close when the child dies, so these end on their own;
+            # the join is bounded anyway, because a pump that cannot finish
+            # must not hold the step open for ever.
+            thread.join(timeout=30.0)
+        return RunResult(
+            code=code,
+            stdout="\n".join(collected["stdout"]),
+            stderr="\n".join(collected["stderr"]),
+            failure=failure,
+        )
+
+    def download(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        timeout_s: float,
+        on_progress: Callable[[int, int | None, str], None] | None = None,
+        attempts: int = 1,
+    ) -> RunResult:
+        """`crucible.interpreter.fetch`, which is the one byte loop there is.
+
+        NOT a second chunk-and-count written here, and not `curl.exe -o` with
+        its progress meter parsed: the meter is CR-separated, locale-shaped and
+        version-dependent, and the one thing this step needs is two integers.
+        """
+        from ..interpreter import InterpreterError, fetch
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fetch(
+                url,
+                destination,
+                on_progress=on_progress,
+                timeout=int(timeout_s),
+                attempts=attempts,
+            )
+        except InterpreterError as exc:
+            return RunResult(code=None, stdout="", stderr="", failure=exc.message)
+        return RunResult(code=0, stdout=str(destination), stderr="", failure=None)
 
     def get(self, url: str, *, timeout_s: float) -> int | None:
         try:

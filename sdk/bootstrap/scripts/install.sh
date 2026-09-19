@@ -259,7 +259,17 @@ if [ "$stamp_python_sha" = "$py_sha" ] && [ -x "$dest/bin/python3" ]; then
 else
   say "server: python $py_version from python-build-standalone"
   mkdir -p "$downloads"; rm -f "$downloads/$py_asset"
-  curl -fL --retry 3 --retry-delay 2 --create-dirs -o "$downloads/$py_asset" "$py_url" || die "runtime_download_failed: $py_url"
+  total="$(curl -fsSLI -m 20 "$py_url" | tr -d '\r' | awk 'tolower($1) == "content-length:" { print $2 }' | tail -n 1)"
+  case "$total" in ''|*[!0-9]*) total=null ;; esac
+  curl -fL --retry 3 --retry-delay 2 --create-dirs -o "$downloads/$py_asset" "$py_url" &
+  fetch_pid=$!
+  while kill -0 "$fetch_pid" 2>/dev/null; do
+    got=0
+    if [ -f "$downloads/$py_asset" ]; then got="$(wc -c < "$downloads/$py_asset" | tr -d ' ')"; fi
+    printf 'crucible-progress {"bytes_done": %s, "bytes_total": %s, "file": "%s"}\n' "$got" "$total" "$py_asset"
+    sleep 1
+  done
+  wait "$fetch_pid" || die "runtime_download_failed: $py_url"
   got_sha="$($SHA_TOOL "$downloads/$py_asset" | awk '{print $1}')"
   if [ "$got_sha" != "$py_sha" ]; then rm -f "$downloads/$py_asset"; die "runtime_sha_mismatch: $py_asset hashes $got_sha and this installer pins $py_sha. The download was deleted"; fi
   rm -rf "$partial" && mkdir -p "$partial"

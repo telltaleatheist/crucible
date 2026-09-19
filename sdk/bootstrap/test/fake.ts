@@ -41,6 +41,15 @@ export interface FakeHost {
   realpaths?: Record<string, string>;
   /** Files that exist but cannot be read. */
   unreadable?: readonly string[];
+  /**
+   * Files that appear once a command has RUN — an installer's own output.
+   *
+   * PHASE19 made `install()` run `install.ps1` on a machine with no host, and
+   * the thing it then asserts is that `crucible.cmd` is there afterwards. A
+   * fake whose files never change could only ever say "it was there all along"
+   * or "it never appeared", and neither is the sequence under test.
+   */
+  appearAfter?: Record<string, string>;
 }
 
 export class FakeRunner implements Runner {
@@ -49,6 +58,7 @@ export class FakeRunner implements Runner {
   readonly homedir: string;
   readonly calls: Call[] = [];
   private readonly files: Record<string, string>;
+  private readonly appearAfter: Record<string, string>;
   private readonly realpaths: Record<string, string>;
   private readonly unreadable: readonly string[];
   private readonly queue: Expectation[];
@@ -57,7 +67,8 @@ export class FakeRunner implements Runner {
     this.platform = host.platform ?? 'win32';
     this.env = host.env ?? {};
     this.homedir = host.homedir ?? (this.platform === 'win32' ? 'C:\\Users\\owen' : '/home/owen');
-    this.files = host.files ?? {};
+    this.files = { ...(host.files ?? {}) };
+    this.appearAfter = host.appearAfter ?? {};
     this.realpaths = host.realpaths ?? {};
     this.unreadable = host.unreadable ?? [];
     this.queue = [...expectations];
@@ -79,6 +90,9 @@ export class FakeRunner implements Runner {
     }
     if (expectation.env !== undefined) assert.deepEqual(options.env, expectation.env);
     this.calls.push({ argv, env: options.env, timeoutMs: options.timeoutMs, streamed });
+    if ((expectation.code ?? 0) === 0 && expectation.failure === undefined) {
+      Object.assign(this.files, this.appearAfter);
+    }
     return {
       expectation,
       result: {
@@ -272,6 +286,78 @@ export function fakeHostDoor(script: FakeDoorScript): { fetchImpl: HostFetch; re
       },
     });
     return new Response(stream, { status });
+  }) as HostFetch;
+  return { fetchImpl, requests };
+}
+
+/** PHASE19 2.6's status document, with the fields a test does not care about filled in. */
+export interface FakeStatus {
+  running?: boolean;
+  outcome?: unknown;
+  presence?: unknown;
+}
+
+export interface FakeWatchScript {
+  /**
+   * What `GET /install` answers, in order; the LAST one repeats. A test that
+   * wants "not decided yet, then running, then done" writes three.
+   */
+  statuses: readonly FakeStatus[];
+  /** The move's events, served once on `GET /install/events`. Absent means 404. */
+  events?: readonly (readonly [kind: string, data: unknown])[];
+}
+
+export const FAKE_PRESENCE = { distro: 'absent', engine: 'running', owner: 'child', detail: 'the Windows engine' };
+
+/**
+ * A `fetchImpl` for the PHASE19 2.6 door: three routes, answered by path.
+ *
+ * {@link fakeHostDoor} replays one script for one request, which was right
+ * while `install()` made exactly one. It now reads the status, attaches, and
+ * reads the status again, so the fake has to know which door it is answering.
+ */
+export function fakeWatchDoor(script: FakeWatchScript): { fetchImpl: HostFetch; requests: DoorRequest[] } {
+  const requests: DoorRequest[] = [];
+  let asked = 0;
+  let streamed = false;
+  const fetchImpl = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    const headers = new Headers(init?.headers ?? {});
+    requests.push({
+      url,
+      method: init?.method,
+      authorization: headers.get('authorization'),
+      contentType: headers.get('content-type'),
+      body: typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body,
+    });
+    if (url.endsWith('/install/events')) {
+      if (streamed || script.events === undefined) {
+        return new Response(JSON.stringify({ error: { code: 'no_install_running', message: 'nothing to watch' } }), { status: 404 });
+      }
+      streamed = true;
+      const encoder = new TextEncoder();
+      const lines = script.events.map(([kind, data], index) => doorLine(index + 1, kind, data));
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller): void {
+            for (const line of lines) controller.enqueue(encoder.encode(line));
+            controller.close();
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    const index = Math.min(asked, script.statuses.length - 1);
+    asked += 1;
+    const status = script.statuses[index] ?? {};
+    return new Response(
+      JSON.stringify({
+        running: status.running ?? false,
+        outcome: status.outcome ?? null,
+        presence: status.presence ?? FAKE_PRESENCE,
+      }),
+      { status: 200 },
+    );
   }) as HostFetch;
   return { fetchImpl, requests };
 }

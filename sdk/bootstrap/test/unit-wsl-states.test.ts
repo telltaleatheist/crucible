@@ -167,6 +167,38 @@ test('a distro that will not give root is the one hand-over, and it is about INS
   assert.match((state.action as { text: string }).text, /import its own distribution/);
 });
 
+test('every row says whether the tray can carry it, and only wsl_ready differs from its action', () => {
+  // PHASE19 2.1. The partition is DATA here so that `crucible host` reads a
+  // field instead of spelling the rule again in Python.
+  const rows = wslStates({ release: '0.6.0', appDistro: 'Ubuntu', requiredBytes: 1, checkNetwork: true });
+  const carried = new Set(['run', 'run-elevated']);
+  const evidence = { code: 0, stdout: '', stderr: '', failure: null };
+  const seen = { results: {}, distros: [] };
+  for (const row of rows) {
+    assert.equal(typeof row.automatic, 'boolean', `${row.code} has no partition`);
+    if (row.code === 'wsl_ready') {
+      assert.equal(row.automatic, true);
+      continue;
+    }
+    assert.equal(
+      row.automatic,
+      carried.has(row.action(evidence, seen).kind),
+      `${row.code} says automatic=${row.automatic} and its action disagrees`,
+    );
+  }
+  assert.ok(rows.some((row) => row.automatic));
+  assert.ok(rows.some((row) => !row.automatic));
+});
+
+test('a detected state carries the partition through, so a caller never re-derives it', async () => {
+  const runner = new FakeRunner({ platform: 'win32' }, [
+    { argv: P('wsl-status'), failure: 'ENOENT' },
+  ]);
+  const state = await detectWslState(INPUTS, runner);
+  assert.equal(state.code, 'wsl_missing');
+  assert.equal(state.automatic, true);
+});
+
 test('a machine with nothing wrong answers wsl_ready rather than nothing', async () => {
   const runner = new FakeRunner({ platform: 'win32' }, [
     { argv: P('wsl-status'), stdout: STATUS_OK },

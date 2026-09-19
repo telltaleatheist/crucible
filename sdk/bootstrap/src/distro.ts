@@ -93,6 +93,18 @@ export function rootfsSumsUrl(): string {
  * `distro_unmarked`), which is the §4c rule unchanged: we write it, then we
  * detect it.
  */
+/**
+ * `%LOCALAPPDATA%\Crucible\wsl-outcome.json` — what happened to the engine
+ * move on this machine (PHASE19-AUTOMATIC-WSL.md 2.2).
+ *
+ * Spelled HERE because three things read it and none of them can be the owner:
+ * `crucible/host/outcome.py` writes and parses it, `install.ps1` reads it for
+ * its closing sentence (2.7), and both of those are GENERATED from this file.
+ * A name written down in a shell script and again in Python is a file two
+ * programs can disagree about the location of.
+ */
+export const WSL_OUTCOME_NAME = 'wsl-outcome.json';
+
 export const WSL_CONF_MARKER = '# crucible-rootfs';
 
 /** `/etc/wsl.conf`, exactly as the rootfs ships it and as the repair writes it. */

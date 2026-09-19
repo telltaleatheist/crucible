@@ -258,7 +258,54 @@ def parse_progress_line(line: str) -> dict[str, Any] | None:
 # ------------------------------------------------------------ the download
 
 
-def _fetch(
+def fetch(
+    url: str,
+    destination: Path,
+    *,
+    on_progress: ProgressHook | None = None,
+    timeout: int = 120,
+    chunk: int = 1 << 20,
+    attempts: int = 1,
+) -> None:
+    """One archive, into `destination`, reporting bytes. No resume.
+
+    The pack downloader that used to live here resumed with a `Range` request
+    because a part was up to 1900 MiB. An interpreter is one small file whose
+    digest is checked the moment it lands, so a half-finished one is deleted
+    and fetched again rather than appended to — which is also the only way to
+    be sure a proxy that ignored the range did not build a corrupt archive.
+
+    PUBLIC SINCE PHASE19 2.12, and `attempts` came with it. The Windows host's
+    `_import_distro` downloads Canonical's 340 MB WSL image, which used to be a
+    blocking `curl.exe -fL --retry 3` that reached the event stream as nothing
+    at all — an hour-long step with no bytes behind it. It uses THIS loop now,
+    because a second chunk-and-count written in `crucible/host/` would be a
+    second owner of "download a file and say how far it has got".
+
+    `attempts` defaults to 1, which is what every existing caller had. The host
+    passes 3, from `CURL_ARGS` in `sdk/bootstrap/src/runtime.ts` — `--retry 3`,
+    the number that call has always used.
+    """
+    if attempts < 1:
+        raise InterpreterError(
+            "interpreter_download_failed",
+            f"attempts={attempts} is not a number of tries; a download that is "
+            "not attempted has not failed either.",
+        )
+    last: InterpreterError | None = None
+    for attempt in range(attempts):
+        try:
+            _fetch_once(url, destination, on_progress=on_progress, timeout=timeout, chunk=chunk)
+            return
+        except InterpreterError as exc:
+            last = exc
+            if attempt + 1 < attempts:
+                destination.unlink(missing_ok=True)
+    assert last is not None  # the loop runs at least once
+    raise last
+
+
+def _fetch_once(
     url: str,
     destination: Path,
     *,
@@ -266,14 +313,6 @@ def _fetch(
     timeout: int = 120,
     chunk: int = 1 << 20,
 ) -> None:
-    """One archive, into `destination`. No resume: it is 30 MB, not 8 GB.
-
-    The pack downloader that used to live here resumed with a `Range` request
-    because a part was up to 1900 MiB. An interpreter is one small file whose
-    digest is checked the moment it lands, so a half-finished one is deleted
-    and fetched again rather than appended to — which is also the only way to
-    be sure a proxy that ignored the range did not build a corrupt archive.
-    """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             total_header = response.headers.get("Content-Length")
@@ -323,7 +362,7 @@ def download_interpreter(
         archive = work / pin.asset
         if on_line is not None:
             on_line(f"fetching {pin.asset} from python-build-standalone")
-        _fetch(pin.url, archive, on_progress=on_progress)
+        fetch(pin.url, archive, on_progress=on_progress)
         digest = sha256_of(archive)
         if digest != pin.sha256:
             raise InterpreterError(

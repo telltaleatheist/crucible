@@ -30,6 +30,11 @@ UBUNTU_WSL_ROOTFS = "ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
 UBUNTU_WSL_ROOTFS_URL = "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
 UBUNTU_WSL_SUMS_URL = "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/SHA256SUMS"
 
+#: PHASE19 2.2's record of what happened to the engine move, in the host
+#: home. Read by `crucible/host/outcome.py`, which is its writer and parser,
+#: and by `install.ps1` for its closing sentence (2.7).
+WSL_OUTCOME_NAME = "wsl-outcome.json"
+
 #: The line /etc/wsl.conf carries in a Crucible distro and nowhere else.
 WSL_CONF_MARKER = "# crucible-rootfs"
 
@@ -54,6 +59,11 @@ class WslStateDef:
     action_argv: tuple[str, ...]
     action_text: str
     action_url: str
+    #: PHASE19 2.1: can the tray carry a machine past this state with
+    #: nobody in front of it? True for the rows whose action is something
+    #: we run, and for `wsl_ready`, which needs nothing run at all. False
+    #: is the tray writing `cannot` and stopping.
+    automatic: bool
     optional: bool
 
 
@@ -67,6 +77,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=(),
         action_text="Virtualization is turned off in this machine's firmware. Restart, open the BIOS/UEFI setup (usually Del or F2 during boot), and enable Intel VT-x (Intel) or SVM Mode (AMD). Then run Enable WSL again.",
         action_url="",
+        automatic=False,
         optional=False,
     ),
     WslStateDef(
@@ -78,6 +89,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=("wsl.exe", "--install", "--no-distribution", ),
         action_text="",
         action_url="",
+        automatic=True,
         optional=False,
     ),
     WslStateDef(
@@ -89,6 +101,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=("wsl.exe", "--set-default-version", "2", ),
         action_text="",
         action_url="",
+        automatic=True,
         optional=False,
     ),
     WslStateDef(
@@ -100,6 +113,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=("wsl.exe", "--import", "crucible", "<install dir>", "<rootfs>", "--version", "2", ),
         action_text="",
         action_url="",
+        automatic=True,
         optional=False,
     ),
     WslStateDef(
@@ -111,6 +125,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=("wsl.exe", "--terminate", "crucible", ),
         action_text="",
         action_url="",
+        automatic=True,
         optional=False,
     ),
     WslStateDef(
@@ -122,17 +137,19 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=(),
         action_text="Add [boot] systemd=true to /etc/wsl.conf in \"{app_distro}\" and run wsl --terminate {app_distro}, or let Crucible import its own distribution instead.",
         action_url="",
+        automatic=False,
         optional=True,
     ),
     WslStateDef(
         code="guest_no_network",
         probe="guest-network",
-        probe_argv=("wsl.exe", "-d", "crucible", "--exec", "curl", "-fsS", "-m", "20", "-o", "/dev/null", "https://github.com/telltaleatheist/crucible/releases/download/v{release}/crucible-{release}-py3-none-any.whl", ),
-        sentence="The \"crucible\" distribution cannot reach https://github.com/telltaleatheist/crucible/releases/download/v{release}/crucible-{release}-py3-none-any.whl ({said}). A VPN or a proxy on this machine usually explains it; there is nothing to install until it can.",
+        probe_argv=("wsl.exe", "-d", "crucible", "--exec", "bash", "-c", "set -e; for u in {indexes}; do curl -fsSL -I -m 20 -o /dev/null \"$u\" || { echo \"$u could not be reached\" >&2; exit 1; }; done", ),
+        sentence="The \"crucible\" distribution cannot reach one of the places this install downloads from: {said}. A VPN or a proxy on this machine usually explains it; there is nothing to install until it can.",
         action_kind="link",
         action_argv=(),
         action_text="",
         action_url="https://github.com/telltaleatheist/crucible/releases/download/v{release}/crucible-{release}-py3-none-any.whl",
+        automatic=False,
         optional=True,
     ),
     WslStateDef(
@@ -144,6 +161,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=(),
         action_text="Free some space on the drive WSL keeps its disk on, then try again.",
         action_url="",
+        automatic=False,
         optional=True,
     ),
     WslStateDef(
@@ -155,6 +173,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=(),
         action_text="Enable the root account in \"crucible\", or let Crucible import its own distribution, which grants root through wsl.exe with no password.",
         action_url="",
+        automatic=False,
         optional=False,
     ),
     WslStateDef(
@@ -166,6 +185,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=(),
         action_text="Nothing to do.",
         action_url="",
+        automatic=True,
         optional=False,
     ),
 )

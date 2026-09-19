@@ -27,7 +27,7 @@ import pytest
 from crucible.host import app as app_module
 from crucible.host import catalog as catalog_module
 from crucible.host import door as door_module
-from crucible.host import installer, landoor, log, menu, paths, presence, startup, wslstate
+from crucible.host import installer, landoor, log, menu, outcome, paths, presence, startup, wslstate
 from crucible.host.catalog import CatalogRefusal, Subject
 from crucible.host.errors import HOST_ERROR_CODES, HostError
 from crucible.host.menu import Distro, Engine, Owner
@@ -54,6 +54,7 @@ class Scripted:
     calls: list[list[str]] = field(default_factory=list)
     gets: list[str] = field(default_factory=list)
     spawned: list[list[str]] = field(default_factory=list)
+    downloads: list[tuple[str, str, int]] = field(default_factory=list)
     platform: str = "win32"
     env: Mapping[str, str] = field(default_factory=lambda: dict(WINDOWS_ENV))
     default: RunResult = RunResult(code=0, stdout="", stderr="", failure=None)
@@ -70,6 +71,50 @@ class Scripted:
             if needle in " ".join(argv):
                 return answer
         return self.default
+
+    def stream(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout_s: float,
+        on_line: Callable[[str, str], None],
+        env: Mapping[str, str] | None = None,
+    ) -> RunResult:
+        """`run`, then the lines — the SAME answers, so a scripted test is
+        unchanged by PHASE19 2.12's move to streaming.
+
+        It is not a second script: the point of the production change is WHEN a
+        line arrives, and a test that needs to pin that says so by supplying
+        its own `stream` (see the guest-install one).
+        """
+        result = self.run(argv, timeout_s=timeout_s, env=env)
+        for line in result.stdout.splitlines():
+            on_line(line, "stdout")
+        for line in result.stderr.splitlines():
+            on_line(line, "stderr")
+        return result
+
+    def download(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        timeout_s: float,
+        on_progress: Callable[[int, int | None, str], None] | None = None,
+        attempts: int = 1,
+    ) -> RunResult:
+        """It lands, empty, and the call is recorded.
+
+        The same answer the default `run` gave when this was `curl.exe -o`: the
+        bytes are then checked against a digest by the step itself, which is
+        what every one of these tests is really about.
+        """
+        self.downloads.append((url, str(destination), attempts))
+        Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        Path(destination).write_bytes(b"")
+        if on_progress is not None:
+            on_progress(0, None, Path(destination).name)
+        return RunResult(code=0, stdout=str(destination), stderr="", failure=None)
 
     def get(self, url: str, *, timeout_s: float) -> int | None:
         self.gets.append(url)
@@ -708,6 +753,30 @@ def test_the_install_script_is_powershell_that_parses() -> None:
     assert "}}" not in script and "{{" not in script
 
 
+def _install_ps1() -> str:
+    root = Path(__file__).resolve().parent.parent
+    return (root / "sdk" / "bootstrap" / "scripts" / "install.ps1").read_text(encoding="utf-8")
+
+
+def test_install_ps1_ends_by_READING_the_outcome_and_never_by_asserting_one() -> None:
+    """PHASE19 2.7. The script stopped being able to say what happens next the
+    moment the tray began starting the move itself (2.3), so it reads."""
+    script = _install_ps1()
+    # It names the SAME file `outcome.py` writes, because both spellings are
+    # generated from `sdk/bootstrap/src/distro.ts`.
+    assert f"Join-Path $Root '{outcome.OUTCOME_NAME}'" in script
+    assert "It is setting up its Linux engine now" in script
+    assert "Say $Verdict.sentence" in script, "a machine that cannot gets the outcome's OWN words"
+    # And the sentence the phase deletes is no longer SAID. It survives in the
+    # comment that records why, which is the one place a deleted sentence
+    # belongs.
+    assert 'Say "Crucible is ready in your notification area."' in script
+    assert "Say \"Crucible is ready in your notification area. The Windows engine works now" not in script
+    # No logic of its own: it decides nothing, it reads a field.
+    assert "wsl --install" not in script
+    assert script.count("{") == script.count("}")
+
+
 def test_remove_startup_says_whether_there_was_one() -> None:
     there = Scripted(default=ok("removed\n"))
     assert startup.remove(there).changed is True
@@ -732,6 +801,37 @@ def test_the_generated_table_kept_4cs_order_deepest_cause_first() -> None:
     codes = list(WSL_STATE_CODES)
     assert codes.index("virtualization_disabled") < codes.index("wsl_missing")
     assert codes[-1] == "wsl_ready", "the last row must be total"
+
+
+def test_every_row_says_whether_the_tray_can_carry_it_and_agrees_with_its_action() -> None:
+    """PHASE19 2.1: the can/cannot partition is DATA, and it is checked.
+
+    `automatic` is a field rather than a reading of `action_kind` because
+    `wsl_ready` instructs ("Nothing to do.") and is the most automatic state
+    there is. Every other row must still agree with its own action, or the
+    field has become a second opinion about what the row does.
+    """
+    carried = {"run", "run-elevated"}
+    for state in WSL_STATES:
+        assert isinstance(state.automatic, bool), f"{state.code} has no partition"
+        if state.code == "wsl_ready":
+            assert state.automatic is True
+            continue
+        assert state.automatic is (state.action_kind in carried), (
+            f"{state.code} says automatic={state.automatic} and its action is "
+            f"{state.action_kind!r}"
+        )
+    # The two halves are both non-empty, because a partition with one side
+    # empty is not a partition and would make `decide_engine` a single branch.
+    assert any(state.automatic for state in WSL_STATES)
+    assert any(not state.automatic for state in WSL_STATES)
+
+
+def test_a_detected_state_carries_the_partition_so_a_caller_never_re_derives_it() -> None:
+    runner = Scripted(answers={"--status": bad("not recognized", code=None)})
+    state = wslstate.detect(runner, release="1.0.5")
+    assert state.code == "wsl_missing"
+    assert state.automatic is True, "an elevated action is one the tray carries"
 
 
 def test_no_sentinel_survived_the_generation() -> None:
@@ -831,12 +931,304 @@ def test_a_generated_row_with_no_predicate_is_refused_by_name(monkeypatch) -> No
         action_argv=(),
         action_text="",
         action_url="",
+        automatic=False,
         optional=False,
     )
     monkeypatch.setattr(wslstate, "WSL_STATES", (extra,) + generated.WSL_STATES)
     with pytest.raises(HostError) as caught:
         wslstate.detect(Scripted(), release="0.6.0")
     assert caught.value.code == "wsl_state_unknown"
+
+
+# --------------------------------------- PHASE19 2.12 the two downloads emit bytes
+
+
+def test_the_ubuntu_image_download_emits_pulls_own_byte_shape(tmp_path: Path) -> None:
+    """2.12: the 340 MB image reached the event stream as nothing at all."""
+    events: list[installer.Event] = []
+
+    class Downloading(Scripted):
+        def download(self, url, destination, *, timeout_s, on_progress=None, attempts=1):  # type: ignore[no-untyped-def]
+            self.downloads.append((url, str(destination), attempts))
+            assert on_progress is not None, "the step asked for no bytes at all"
+            on_progress(1 << 20, 356515840, Path(destination).name)
+            on_progress(356515840, 356515840, Path(destination).name)
+            Path(destination).parent.mkdir(parents=True, exist_ok=True)
+            Path(destination).write_bytes(b"")
+            return RunResult(code=0, stdout=str(destination), stderr="", failure=None)
+
+    runner = Downloading(
+        answers={
+            "-l -v": ok("  NAME   STATE   VERSION\n"),
+            "SHA256SUMS": ok("deadbeef  ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz\n"),
+            "certutil": ok("nope\n"),
+        }
+    )
+    walk = installer.EngineInstall(
+        runner, events.append, release="1.0.5", home=tmp_path,
+        install_sh_url="https://example.invalid/install.sh",
+    )
+    with pytest.raises(HostError):
+        # The sha will not match the fabricated sums file; the import is
+        # refused AFTER the download, which is the part under test.
+        walk._import_distro()
+    url, _destination, attempts = runner.downloads[0]
+    assert url.endswith("ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz")
+    assert attempts == installer.IMAGE_DOWNLOAD_ATTEMPTS == 3, "curl's --retry 3, kept"
+    progress = [event for event in events if event.event == "progress"]
+    assert progress, "the image downloaded and nothing said how far it had got"
+    assert set(progress[0].data) == {"bytes_done", "bytes_total", "file"}, (
+        "the shape is `pull`'s, in crucible/tasks.py"
+    )
+    assert progress[-1].data["bytes_done"] == progress[-1].data["bytes_total"]
+
+
+def test_install_sh_emits_the_progress_wire_interpreter_py_parses() -> None:
+    """2.12, the guest half. The shell WRITES the line and Python PARSES it.
+
+    The wire has one owner — `crucible/interpreter.py` declares it, writes it
+    from Python and parses it — and `install.sh` is a second writer of the same
+    three fields. This is the test that ties them: a prefix or a field renamed
+    on either side fails here rather than at a person's first install.
+    """
+    from crucible.interpreter import PROGRESS_PREFIX, parse_progress_line
+
+    root = Path(__file__).resolve().parent.parent
+    script = (root / "sdk" / "bootstrap" / "scripts" / "install.sh").read_text(encoding="utf-8")
+    line = next(
+        (raw.strip() for raw in script.splitlines() if PROGRESS_PREFIX in raw),
+        None,
+    )
+    assert line is not None, "install.sh emits no progress line for the interpreter fetch"
+    # The printf format, with its three %s filled in the way the shell would.
+    emitted = (
+        line.split("'", 1)[1].rsplit("'", 1)[0]
+        .replace("\\n", "")
+        .replace("%s", "1", 1)
+        .replace("%s", "2", 1)
+        .replace("%s", "cpython.tar.gz", 1)
+    )
+    assert parse_progress_line(emitted) == {
+        "bytes_done": 1,
+        "bytes_total": 2,
+        "file": "cpython.tar.gz",
+    }
+
+
+def test_a_guest_progress_line_becomes_a_progress_EVENT_not_a_log_line(tmp_path: Path) -> None:
+    """A person watching an install must not be shown a JSON blob."""
+    from crucible.interpreter import progress_line
+
+    events: list[installer.Event] = []
+    walk = installer.EngineInstall(
+        Scripted(), events.append, release="1.0.5", home=tmp_path,
+        install_sh_url="https://example.invalid/install.sh",
+    )
+    walk._line(progress_line(17, 100, "cpython.tar.gz"))
+    walk._line("server: python 3.11.16 from python-build-standalone")
+    assert [event.event for event in events] == ["progress", "line"]
+    assert events[0].data == {"bytes_done": 17, "bytes_total": 100, "file": "cpython.tar.gz"}
+
+
+def test_the_guest_install_streams_its_lines_rather_than_collecting_them(
+    tmp_path: Path,
+) -> None:
+    """2.12: `guest-install` pips for twenty minutes, and every line of it used
+    to arrive in one burst at the end."""
+    events: list[installer.Event] = []
+    seen_before_exit: list[str] = []
+
+    class Streaming(Scripted):
+        def stream(self, argv, *, timeout_s, on_line, env=None):  # type: ignore[no-untyped-def]
+            self.calls.append(list(argv))
+            on_line("Collecting torch==2.13.0", "stdout")
+            seen_before_exit.append(
+                "progress" if any(e.event == "line" for e in events) else "nothing"
+            )
+            on_line("Successfully installed torch", "stdout")
+            return RunResult(code=0, stdout="", stderr="", failure=None)
+
+    walk = installer.EngineInstall(
+        Streaming(), events.append, release="1.0.5", home=tmp_path,
+        install_sh_url="https://example.invalid/install.sh",
+    )
+    walk._guest_install()
+    assert seen_before_exit == ["progress"], (
+        "the first line reached the stream before the process had exited"
+    )
+    assert [event.data["text"] for event in events if event.event == "line"] == [
+        "Collecting torch==2.13.0",
+        "Successfully installed torch",
+    ]
+
+
+# ----------------------------------- PHASE19 2.12 the probe proves EVERY route
+
+
+def test_the_network_probe_names_every_index_a_recipe_names() -> None:
+    """2.12: the probe proved one route and the install needs five.
+
+    Derived, not listed: the recipes under `crucible/envs/` are read, so a
+    recipe that gains an `--extra-index-url` gains a probe with it. A list
+    written into this test would be the same drift one level down, so the test
+    reads the recipes too — and asserts that the two agree.
+    """
+    import re as _re
+
+    from crucible import jobenv
+
+    urls = wslstate.install_index_urls("1.0.5")
+    assert urls[0] == "https://pypi.org/simple", "a recipe with no index still uses one"
+    # Every option line in every recipe, read here independently of the code
+    # under test, must be in the list.
+    named: set[str] = set()
+    for directory in jobenv.recipe_roots():
+        for recipe in directory.glob("*.txt"):
+            for line in recipe.read_text(encoding="utf-8").splitlines():
+                found = _re.match(
+                    r"^\s*(?:--index-url|--extra-index-url|-f|--find-links)[=\s]+(\S+)\s*$", line
+                )
+                if found is not None:
+                    named.add(found.group(1))
+    assert named, "no recipe in this build names an index; the probe would prove nothing"
+    assert named <= set(urls), f"not probed: {sorted(named - set(urls))}"
+    # And the three no recipe names.
+    assert any("huggingface" in url for url in urls), "the weights come from somewhere"
+    assert any("python-build-standalone" in url for url in urls), "so does the interpreter"
+    assert any(url.endswith("crucible-1.0.5-py3-none-any.whl") for url in urls)
+
+
+def test_the_probe_runs_one_HEAD_per_index_and_names_the_FIRST_it_cannot_reach() -> None:
+    runner = Scripted(
+        answers={
+            "--status": ok("WSL version: 2.3.26.0\nDefault Version: 2\n"),
+            "-l -v": ok("  NAME        STATE           VERSION\n* crucible    Running         2\n"),
+            "/etc/wsl.conf": ok("# crucible-rootfs\n[boot]\nsystemd=true\n"),
+            "for u in": bad("https://download.pytorch.org/whl/cu128 could not be reached"),
+        }
+    )
+    state = wslstate.detect(runner, release="1.0.5", check_network=True)
+    assert state.code == "guest_no_network"
+    assert "download.pytorch.org" in state.sentence, "the sentence names the one that failed"
+    probe = next(call for call in runner.calls if "for u in" in " ".join(call))
+    script = probe[-1]
+    assert "{indexes}" not in script, "the placeholder was filled from the recipes"
+    assert "curl -fsSL -I -m 20" in script, "one cheap HEAD each"
+    for url in wslstate.install_index_urls("1.0.5"):
+        assert url in script, f"{url} is not probed"
+
+
+def test_reading_a_machines_facts_still_costs_nothing_it_was_not_asked_for() -> None:
+    """The network row is OFF by default, and its index list is not even built."""
+    runner = Scripted(answers={"--status": bad("not recognized")})
+    state = wslstate.detect(runner, release="1.0.5")
+    assert state.code == "wsl_missing"
+    assert not any("for u in" in " ".join(call) for call in runner.calls)
+
+
+# ------------------------------------------------- PHASE19 2.2 the outcome
+
+
+def test_an_outcome_round_trips_every_field_2_2_names(tmp_path: Path) -> None:
+    written = outcome.write(
+        tmp_path,
+        state=outcome.CANNOT,
+        code="virtualization_disabled",
+        sentence="Windows cannot start a virtual machine: no",
+        release="1.0.5",
+        attempts=1,
+        now=lambda: "2026-09-19T00:00:00+00:00",
+    )
+    assert (tmp_path / "wsl-outcome.json").is_file()
+    read_back = outcome.read(tmp_path)
+    assert read_back == written
+    assert read_back is not None
+    assert read_back.to_dict() == {
+        "state": "cannot",
+        "code": "virtualization_disabled",
+        "sentence": "Windows cannot start a virtual machine: no",
+        "at": "2026-09-19T00:00:00+00:00",
+        "release": "1.0.5",
+        "attempts": 1,
+    }
+
+
+def test_a_machine_that_never_recorded_one_reads_None_and_never_a_blank(
+    tmp_path: Path,
+) -> None:
+    assert outcome.read(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "{not json",
+        '["a list"]',
+        '{"state": "sideways", "at": "x", "release": "1.0.5", "attempts": 0}',
+        '{"state": "done", "at": "x", "release": "1.0.5", "attempts": "two"}',
+        '{"state": "done", "at": "x", "release": "", "attempts": 0}',
+        '{"state": "done", "at": "", "release": "1.0.5", "attempts": 0}',
+        '{"state": "failed", "at": "x", "release": "1.0.5", "attempts": 1, "code": 7}',
+    ],
+)
+def test_a_present_outcome_that_cannot_be_read_is_REFUSED_and_never_treated_as_absent(
+    tmp_path: Path, document: str
+) -> None:
+    """2.3 branches opposite ways on None and on `cannot`.
+
+    So a file that is there and unreadable must not answer the question the
+    same way an absent one does: reading it as None would start a move on a
+    machine that had already said it cannot run one.
+    """
+    (tmp_path / "wsl-outcome.json").write_text(document, encoding="utf-8")
+    with pytest.raises(HostError) as caught:
+        outcome.read(tmp_path)
+    assert caught.value.code == "wsl_outcome_invalid"
+    assert caught.value.code in HOST_ERROR_CODES
+
+
+def test_a_state_nobody_defined_is_refused_at_the_WRITE(tmp_path: Path) -> None:
+    with pytest.raises(HostError) as caught:
+        outcome.write(tmp_path, state="nearly", release="1.0.5", attempts=0)
+    assert caught.value.code == "wsl_outcome_invalid"
+    assert not (tmp_path / "wsl-outcome.json").exists()
+
+
+def test_the_classifier_reads_the_TABLES_partition_and_keeps_no_list_of_its_own() -> None:
+    """2.2's three non-trivial endings, each derived rather than listed.
+
+    A refusal naming a row the tray cannot carry IS a `cannot`; one naming a row
+    it can carry is a `failed`, because the action ran and the machine still
+    answers the same way; the reboot is its own code.
+    """
+    for row in WSL_STATES:
+        expected = outcome.FAILED if row.automatic else outcome.CANNOT
+        assert outcome.classify(row.code) == expected, row.code
+    assert outcome.classify("wsl_reboot_required") == outcome.REBOOT_PENDING
+    assert outcome.classify("wsl_reboot_again") == outcome.CANNOT
+    # Not a state code at all: a download that died is retried, not refused.
+    assert outcome.classify("rootfs_download_failed") == outcome.FAILED
+    assert outcome.classify("step_failed") == outcome.FAILED
+
+
+def test_a_second_reboot_demand_is_terminal_and_says_twice(tmp_path: Path) -> None:
+    """2.4. The first demand is Windows being asked what it needs; the second,
+    on the run that already followed a restart, is a machine to look at."""
+    events: list[installer.Event] = []
+    runner = Scripted(answers={"--status": bad("not recognized")})
+    walk = installer.EngineInstall(
+        runner,
+        events.append,
+        release="1.0.5",
+        home=tmp_path,
+        install_sh_url="https://example.invalid/install.sh",
+        resuming=True,
+    )
+    with pytest.raises(HostError) as caught:
+        walk.run()
+    assert caught.value.code == "wsl_reboot_again"
+    assert "twice" in caught.value.message
+    assert outcome.classify(caught.value.code) == outcome.CANNOT
 
 
 # ------------------------------------------------------------ 4.1 LAN door
@@ -1033,14 +1425,17 @@ def test_a_reboot_state_ends_the_task_with_the_sentence_4_7_requires(
     with pytest.raises(HostError) as caught:
         walk.run()
     assert caught.value.code == "wsl_reboot_required"
-    # NOT "Crucible continues": the Startup item brings the tray back and the
-    # tray does not re-post the task (app.py's INSTALL_ENGINE opens the console
-    # and the PAGE posts it). The sentence says what actually happens.
-    assert "reboot, then start this again" in caught.value.message
-    assert "picks this up where it stopped" not in caught.value.message
-    assert (tmp_path / installer.REBOOT_PENDING).is_file(), (
-        "nothing recorded that this machine stopped for a reboot"
-    )
+    # PHASE19 2.3: the tray resumes, so the sentence no longer asks for a press
+    # that nothing is waiting for. It still says the machine has to restart and
+    # that nothing downloaded is lost.
+    assert "has to restart" in caught.value.message
+    assert "goes on from here" in caught.value.message
+    assert "press Install" not in caught.value.message
+    # The MARKER is gone with it (2.2): the file that records this is
+    # `wsl-outcome.json`, written by the one caller that knows a terminal point
+    # when it sees one — `app._sequence`, which is tested where it lives.
+    assert not (tmp_path / "wsl-reboot-pending").exists()
+    assert outcome.classify(caught.value.code) == outcome.REBOOT_PENDING
     kinds = [event.event for event in events]
     assert kinds[0] == "step", "a line must never precede a step"
     assert kinds[-1] == "failed"
@@ -1171,6 +1566,27 @@ class FakeOrchestrator:
 
     def quit(self) -> None:
         self.quits.append("quit")
+
+    #: PHASE19 2.6's two reads. `where` is a home the test writes an outcome
+    #: into, so the door's answer comes from the real reader.
+    where: Path | None = None
+    seen: dict = field(
+        default_factory=lambda: {
+            "distro": "absent",
+            "engine": "running",
+            "owner": "child",
+            "detail": "the Windows engine",
+        }
+    )
+
+    def presence(self) -> dict:
+        return dict(self.seen)
+
+    def install_outcome(self) -> dict | None:
+        if self.where is None:
+            return None
+        recorded = outcome.read(self.where)
+        return None if recorded is None else recorded.to_dict()
 
 
 def a_door(
@@ -4064,3 +4480,381 @@ def test_an_unconsented_host_still_carries_the_distro_crucible_imported(
     ]
     assert len(installs) == 1, installs
     assert installs[0][:3] == ["wsl.exe", "-d", CRUCIBLE_DISTRO], installs[0]
+
+
+
+# ------------------------------------------- PHASE19 2.3 the tray decides
+
+
+def _native(tmp_path: Path, runner: Scripted, *, owner: Owner = Owner.HOST_CHILD,
+            release: str = "1.0.5") -> app_module.HostContext:
+    """A machine whose engine is NOT a guest of ours â€” where 2.3 applies."""
+    context = _context(tmp_path, runner)
+    context.release = release
+    context.presence = presence.Presence(
+        Distro.ABSENT, Engine.RUNNING, "the Windows engine", owner
+    )
+    return context
+
+
+def _decider(
+    context: app_module.HostContext, sequence=None
+) -> tuple[app_module.Host, list[str]]:
+    """A host with a REAL door, so the move takes the real claim (2.3)."""
+    ran: list[str] = []
+
+    def default(emit: Callable[[installer.Event], None]) -> None:
+        ran.append("the move ran")
+        emit(installer.Event("step", {"name": "wsl-state", "index": 1, "total": 11}))
+        emit(installer.Event("done", {}))
+
+    host = app_module.Host(context)
+    host._install_door = door_module.OrchestratorDoor(
+        context.log,
+        sequence or default,
+        token=lambda: "t",
+        orchestrator=FakeOrchestrator(),
+    )
+    return host, ran
+
+
+def _recorded(tmp_path: Path, state: str, **fields) -> None:
+    outcome.write(
+        tmp_path,
+        state=state,
+        release=fields.pop("release", "1.0.5"),
+        attempts=fields.pop("attempts", 1),
+        **fields,
+    )
+
+
+def test_an_engine_this_orchestrator_did_not_start_is_NEVER_moved(tmp_path: Path) -> None:
+    """PHASE17 4.1a survives PHASE19 whole: `found` is watched, never acted on."""
+    context = _native(tmp_path, Scripted(), owner=Owner.FOUND)
+    host, ran = _decider(context)
+    assert host.decide_engine() == "found"
+    assert ran == []
+    assert outcome.read(tmp_path) is None, "nothing was recorded about somebody else's engine"
+
+
+def test_a_machine_that_declined_stays_native_and_says_so_once(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text(
+        '[orchestrator]\nwsl = "never"\n', encoding="utf-8"
+    )
+    context = _native(tmp_path, Scripted())
+    host, ran = _decider(context)
+    assert host.decide_engine() == "declined"
+    assert ran == []
+    recorded = outcome.read(tmp_path)
+    assert recorded is not None and recorded.state == "declined"
+    # And it is not rewritten on every start: the file is the record of a
+    # decision, and a new `at` every fifteen minutes is a file that looks like
+    # something keeps happening.
+    was = recorded.at
+    assert host.decide_engine() == "declined"
+    after = outcome.read(tmp_path)
+    assert after is not None and after.at == was
+
+
+def test_a_wsl_key_nobody_defined_is_refused_and_moves_nothing(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text(
+        '[orchestrator]\nwsl = "sometimes"\n', encoding="utf-8"
+    )
+    context = _native(tmp_path, Scripted())
+    host, ran = _decider(context)
+    assert host.decide_engine() == "unreadable"
+    assert ran == [], "a setting this build cannot carry out is not a licence to move"
+
+
+def test_cannot_is_TERMINAL_for_the_tray_and_is_never_retried(tmp_path: Path) -> None:
+    _recorded(tmp_path, "cannot", code="virtualization_disabled", sentence="VT-x is off")
+    context = _native(tmp_path, Scripted())
+    host, ran = _decider(context)
+    assert host.decide_engine() == "cannot"
+    assert ran == [], "a person changes the BIOS and presses Try again (2.5)"
+
+
+def test_a_failed_move_is_retried_ONCE_and_then_left_alone(tmp_path: Path) -> None:
+    """2.2: `failed` is retried at the next start, once."""
+    _recorded(tmp_path, "failed", code="rootfs_download_failed", sentence="the download died", attempts=1)
+    context = _native(tmp_path, Scripted())
+    host, ran = _decider(context)
+    assert host.decide_engine() == "done"
+    assert ran == ["the move ran"], "the first failure earns one retry"
+
+    _recorded(tmp_path, "failed", code="rootfs_download_failed", sentence="again", attempts=2)
+    context = _native(tmp_path, Scripted())
+    host, again = _decider(context)
+    assert host.decide_engine() == "failed"
+    assert again == [], "a second consecutive failure stays failed until Try again"
+
+
+def test_a_machine_with_no_outcome_at_all_is_MOVED_without_anybody_choosing(
+    tmp_path: Path,
+) -> None:
+    """The whole phase in one assertion: nothing was asked and it moved."""
+    context = _native(tmp_path, Scripted())
+    host, ran = _decider(context)
+    assert host.decide_engine() == "done"
+    assert ran == ["the move ran"]
+
+
+def test_an_unreadable_outcome_stops_the_decision_rather_than_starting_a_move(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "wsl-outcome.json").write_text("{not json", encoding="utf-8")
+    context = _native(tmp_path, Scripted())
+    host, ran = _decider(context)
+    assert host.decide_engine() == "unreadable"
+    assert ran == []
+
+
+def test_the_carry_thread_is_the_one_that_decides_and_it_waits_for_the_owner(
+    tmp_path: Path,
+) -> None:
+    """2.12: the decision lives in the carry thread, not in a second one.
+
+    A machine with no distro settles as `child`, and the SAME thread that would
+    have carried a guest is the one that asks whether to make one.
+    """
+    runner = Scripted(answers={"-l -v": bad("no distributions")})
+    context = _native(tmp_path, runner)
+    host = fast_watching_host(context)
+    decisions: list[str] = []
+    host.decide_engine = lambda: decisions.append("asked") or "found"  # type: ignore[assignment]
+    settle_presence(host)
+    host.carry_guest_to_this_release(settle_ceiling_s=10.0)
+    assert decisions == ["asked"]
+
+
+# ------------------------------- PHASE19 2.3/2.2 the move records its ending
+
+
+def _real_sequence_host(
+    tmp_path: Path, runner: Scripted
+) -> tuple[app_module.Host, app_module.HostContext]:
+    context = _native(tmp_path, runner)
+    host = app_module.Host(context)
+    host._install_door = door_module.OrchestratorDoor(
+        context.log,
+        app_module._sequence(context, host),
+        token=lambda: "t",
+        orchestrator=FakeOrchestrator(),
+    )
+    return host, context
+
+
+def test_a_machine_that_cannot_writes_cannot_with_the_tables_own_sentence(
+    tmp_path: Path,
+) -> None:
+    """2.3's `automatic == false` branch, reached the way the code reaches it.
+
+    The plan writes this as a probe the tray makes BEFORE starting the move;
+    the walk's first step is that same probe, so the probe is made once and the
+    refusal it raises is what becomes the outcome. What 2.3 requires is
+    observable either way: `cannot`, the code, the sentence, and no move.
+    """
+    runner = Scripted(
+        answers={"--status": bad("HCS_E_HYPERV_NOT_INSTALLED 0x80370102")}
+    )
+    host, _context = _real_sequence_host(tmp_path, runner)
+    assert host.decide_engine() == "cannot"
+    recorded = outcome.read(tmp_path)
+    assert recorded is not None
+    assert recorded.state == "cannot"
+    assert recorded.code == "virtualization_disabled"
+    assert recorded.sentence is not None and "virtual machine" in recorded.sentence
+    assert recorded.release == "1.0.5"
+    # Nothing was imported: the walk stopped at its first step.
+    assert not any("--import" in " ".join(call) for call in runner.calls)
+
+
+def test_a_reboot_writes_reboot_pending_and_the_NEXT_start_resumes(
+    tmp_path: Path,
+) -> None:
+    """2.3 and 2.4 together, on one machine, twice."""
+    runner = Scripted(answers={"--status": bad("not recognized")})
+    host, _context = _real_sequence_host(tmp_path, runner)
+    assert host.decide_engine() == "reboot-pending"
+    first = outcome.read(tmp_path)
+    assert first is not None and first.state == "reboot-pending"
+    assert first.code == "wsl_reboot_required"
+
+    # The machine restarts, the Startup item brings the tray back, and Windows
+    # asks for a restart AGAIN. That is 2.4's `cannot`, not a third restart.
+    again = Scripted(answers={"--status": bad("not recognized")})
+    host2, _c2 = _real_sequence_host(tmp_path, again)
+    assert host2.decide_engine() == "cannot"
+    second = outcome.read(tmp_path)
+    assert second is not None and second.state == "cannot"
+    assert second.code == "wsl_reboot_again"
+    assert second.sentence is not None and "twice" in second.sentence
+
+
+# ------------------------------------------- PHASE19 2.6 watching the door
+
+
+def _get(port: int, path: str, *, bearer: str | None = "tok") -> tuple[int, object]:
+    import urllib.error
+    import urllib.request
+
+    headers = {} if bearer is None else {"Authorization": f"Bearer {bearer}"}
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.status, json.loads(response.read().decode())
+    except urllib.error.HTTPError as refused:
+        return refused.code, json.loads(refused.read().decode())
+
+
+def test_get_install_answers_running_outcome_and_presence(
+    host_log: log.HostLog, tmp_path: Path
+) -> None:
+    outcome.write(
+        tmp_path, state="cannot", code="wsl1_only", sentence="WSL is version 1",
+        release="1.0.5", attempts=1,
+    )
+    fake = FakeOrchestrator(where=tmp_path)
+    door = a_door(host_log, token="tok", orchestrator=fake)
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    try:
+        status, body = _get(port, "/install")
+    finally:
+        server.shutdown()
+    assert status == 200
+    assert isinstance(body, dict)
+    assert body["running"] is False
+    assert body["outcome"]["state"] == "cannot"
+    assert body["outcome"]["code"] == "wsl1_only"
+    assert body["presence"]["owner"] == "child"
+
+
+def test_nothing_to_watch_is_a_404_by_name_and_not_an_empty_success(
+    host_log: log.HostLog, tmp_path: Path
+) -> None:
+    door = a_door(host_log, token="tok", orchestrator=FakeOrchestrator(where=tmp_path))
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    try:
+        status, body = _get(port, "/install/events")
+    finally:
+        server.shutdown()
+    assert status == 404
+    assert isinstance(body, dict)
+    assert body["error"]["code"] == "no_install_running"
+
+
+def test_a_late_attacher_sees_the_step_it_joined_at_and_then_follows(
+    host_log: log.HostLog, tmp_path: Path
+) -> None:
+    """2.6's ring. The attacher arrives after four events and must still be
+    told which step is running, or it draws a blank page for twenty minutes."""
+    import urllib.request
+
+    started = threading.Event()
+    go = threading.Event()
+
+    def sequence(emit: Callable[[installer.Event], None]) -> None:
+        emit(installer.Event("step", {"name": "wsl-state", "index": 1, "total": 11}))
+        emit(installer.Event("state", {"code": "wsl_ready", "sentence": "ready", "action": "instruct"}))
+        emit(installer.Event("step", {"name": "import-distro", "index": 2, "total": 11}))
+        emit(installer.Event("line", {"text": "Downloading Ubuntu's own WSL image", "stream": "stdout"}))
+        started.set()
+        assert go.wait(20.0)
+        emit(installer.Event("done", {"steps": []}))
+
+    door = a_door(host_log, sequence, token="tok", orchestrator=FakeOrchestrator(where=tmp_path))
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    mover = threading.Thread(target=_post_install, args=(port,), daemon=True)
+    try:
+        mover.start()
+        assert started.wait(20.0), "the move never began"
+        # It is running, and the status says so.
+        status, body = _get(port, "/install")
+        assert status == 200 and isinstance(body, dict) and body["running"] is True
+        # A SECOND POST is refused by name and told where to watch.
+        refused_status, refused = _post_install(port)
+        assert refused_status == 409
+        assert isinstance(refused, dict)
+        assert refused["error"]["code"] == "host_install_running"
+        assert "/install/events" in refused["error"]["message"]
+
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/install/events",
+            headers={"Authorization": "Bearer tok"},
+        )
+        response = urllib.request.urlopen(request, timeout=20)
+        go.set()
+        lines = [json.loads(line) for line in response.read().decode().splitlines() if line]
+    finally:
+        go.set()
+        mover.join(timeout=20.0)
+        server.shutdown()
+    # The four it missed, in order, and then the one it was there for.
+    assert [line["id"] for line in lines] == [1, 2, 3, 4, 5]
+    assert [line["event"] for line in lines] == ["step", "state", "step", "line", "done"]
+    assert lines[2]["data"]["name"] == "import-distro", "the step it joined at"
+
+
+def _post_install(port: int) -> tuple[int, object]:
+    """`POST /install` with the body the door takes, refusals included."""
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/install",
+        data=json.dumps({"target": "wsl"}).encode(),
+        headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.status, response.read().decode()
+    except urllib.error.HTTPError as refused:
+        return refused.code, json.loads(refused.read().decode())
+
+
+def test_the_ring_keeps_the_LAST_events_and_not_the_whole_transcript(
+    host_log: log.HostLog,
+) -> None:
+    """A guest install prints thousands of pip lines into a tray process."""
+    def sequence(emit: Callable[[installer.Event], None]) -> None:
+        emit(installer.Event("step", {"name": "guest-install", "index": 4, "total": 11}))
+        for index in range(door_module.MAX_RING_EVENTS + 50):
+            emit(installer.Event("line", {"text": f"pip line {index}", "stream": "stdout"}))
+        emit(installer.Event("done", {}))
+
+    door = a_door(host_log, sequence, token="tok")
+    assert door.claim()
+    try:
+        door.run_recorded()
+    finally:
+        door.release()
+    backlog, _watcher = door.attach()
+    assert len(backlog) == door_module.MAX_RING_EVENTS
+    assert backlog[-1]["event"] == "done"
+    assert backlog[-1]["id"] == door_module.MAX_RING_EVENTS + 52
+
+
+def test_a_move_that_throws_records_a_terminal_event_for_every_watcher(
+    host_log: log.HostLog,
+) -> None:
+    """A watcher whose stream merely stopped cannot tell a failure from a
+    socket that died, so `run_recorded` always records an ending."""
+    def sequence(emit: Callable[[installer.Event], None]) -> None:
+        emit(installer.Event("step", {"name": "wsl-state", "index": 1, "total": 11}))
+        raise HostError("rootfs_download_failed", "the image would not download")
+
+    door = a_door(host_log, sequence, token="tok")
+    assert door.claim()
+    with pytest.raises(HostError):
+        try:
+            door.run_recorded()
+        finally:
+            door.release()
+    backlog, watcher = door.attach()
+    assert [event["event"] for event in backlog] == ["step", "failed"]
+    assert backlog[-1]["data"]["code"] == "rootfs_download_failed"
+    assert watcher.get_nowait() is None, "a finished move closes the queue it hands out"

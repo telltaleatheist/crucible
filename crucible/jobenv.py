@@ -368,6 +368,75 @@ def recipes_dir(job_type: str) -> Path:
     return path
 
 
+#: Where a recipe that names no index resolves from: pip's own default
+#: `index-url`, which the pip documentation gives as `https://pypi.org/simple`.
+#: A recipe with no `--index-url` line is not a recipe that downloads nothing —
+#: it is one that downloads from here.
+DEFAULT_INDEX_URL = "https://pypi.org/simple"
+
+#: Hugging Face's, as `huggingface_hub` resolves it: `HF_ENDPOINT` when set,
+#: and `https://huggingface.co` otherwise. Read rather than hard-coded so a
+#: machine behind a mirror is probed at ITS mirror; the constant is that
+#: library's documented default and not a guess at one.
+HF_ENDPOINT_ENV = "HF_ENDPOINT"
+DEFAULT_HF_ENDPOINT = "https://huggingface.co"
+
+#: `--index-url https://…`, `--extra-index-url=https://…`, `-f https://…`.
+#: The three pip options that choose WHERE a pin resolves.
+_INDEX_OPTION = re.compile(
+    r"^(?:--index-url|--extra-index-url|-f|--find-links)[=\s]+(?P<url>\S+)$"
+)
+
+
+def recipe_roots() -> list[Path]:
+    """Every `envs/<job type>/` this build ships, in name order.
+
+    `recipes_dir` answers for ONE job type because every other caller knows
+    which one it wants. This caller does not: PHASE19 2.12's network probe is
+    about every index ANY recipe could send pip to, and a list of job types
+    written down here would be one more thing to forget when a sixth arrives.
+    """
+    override = os.environ.get(RECIPES_DIR_ENV)
+    if override is not None and override != "":
+        root = Path(override).expanduser()
+    else:
+        root = Path(__file__).resolve().parent / "envs"
+    if not root.is_dir():
+        raise EnvError(
+            f"no env recipes at {root}; they are package data and this install "
+            f"has lost them, or ${RECIPES_DIR_ENV} must point at them"
+        )
+    return sorted(path for path in root.iterdir() if path.is_dir())
+
+
+def recipe_index_urls() -> list[str]:
+    """Every place a `crucible install <type>` downloads from, in order.
+
+    PHASE19-AUTOMATIC-WSL.md 2.12: *"the network probe proves one route and the
+    install needs five"*. `guest_no_network` used to fetch the release wheel off
+    GitHub, and a VPN or a proxy that passes GitHub and blocks PyPI,
+    `download.pytorch.org`, the SGLang index or Hugging Face passed that probe
+    and failed minutes later inside pip.
+
+    READ FROM THE RECIPES, never listed. A list spelled here would drift the
+    first time a recipe gained an `--extra-index-url`, and the drift would be
+    invisible: the probe would go on passing and pip would go on failing. The
+    two that no recipe names are added by their own owners — pip's default
+    index, and the hub endpoint the weights come from.
+    """
+    urls = [DEFAULT_INDEX_URL]
+    for directory in recipe_roots():
+        for recipe in sorted(directory.glob("*.txt")):
+            for line in _option_lines(recipe_text(recipe)):
+                found = _INDEX_OPTION.match(line)
+                if found is not None and found.group("url") not in urls:
+                    urls.append(found.group("url"))
+    hub = os.environ.get(HF_ENDPOINT_ENV) or DEFAULT_HF_ENDPOINT
+    if hub not in urls:
+        urls.append(hub)
+    return urls
+
+
 def recipe_for(spec: EnvSpec) -> Path:
     """The recipe that builds this env, or a named refusal."""
     root = recipes_dir(spec.job_type)

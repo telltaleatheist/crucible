@@ -118,6 +118,12 @@ class WslState:
     action_argv: tuple[str, ...]
     action_text: str
     action_url: str
+    #: The generated row's own answer to "can the tray carry a machine past
+    #: this without a person" (PHASE19 2.1). Carried through rather than
+    #: re-derived from `action_kind`: `wsl_ready` instructs and is automatic,
+    #: and a second derivation here would be the second opinion the field
+    #: exists to remove.
+    automatic: bool
     evidence: str
 
 
@@ -140,6 +146,59 @@ def render(text: str, result: RunResult, seen: Evidence) -> str:
     for key, value in replacements.items():
         out = out.replace(key, value)
     return out
+
+
+def install_index_urls(release: str) -> list[str]:
+    """Every place a first install downloads from, in the order it needs them.
+
+    PHASE19-AUTOMATIC-WSL.md 2.12. THREE OWNERS, ASKED, and no fourth list:
+
+      * `crucible/jobenv.py` reads the RECIPES under `crucible/envs/` — pip's
+        default index, every `--index-url` / `--extra-index-url` /
+        `--find-links` any recipe names, and the Hugging Face endpoint the
+        weights come from.
+      * `crucible/interpreter.py` holds the python-build-standalone pin, and
+        its `url` is the exact file `install.sh` fetches.
+      * `crucible/host/wsl_states.py` holds the release wheel's URL, generated
+        from `release.ts`.
+
+    A list written down here instead would drift the first time a recipe gained
+    an index, and the drift would be INVISIBLE: the probe would go on passing
+    and pip would go on failing minutes later with pip's own message.
+    """
+    from ..interpreter import SERVER_PYTHON, pin_for
+    from ..jobenv import recipe_index_urls
+
+    urls: list[str] = []
+    for url in recipe_index_urls():
+        if url not in urls:
+            urls.append(url)
+    # The guest is Linux; `GUEST_BACKEND` in installer.py is the one place that
+    # word is decided, and this is the same backend's interpreter.
+    interpreter = pin_for("cuda-linux", SERVER_PYTHON).url
+    if interpreter not in urls:
+        urls.append(interpreter)
+    wheel = _WHEEL_URL_TEMPLATE.replace("{release}", release)
+    if wheel not in urls:
+        urls.append(wheel)
+    return urls
+
+
+#: The release wheel's URL, as the generated table already spells it in the
+#: `guest_no_network` row's `action_url`. Taken from there rather than composed
+#: again: `release.ts` owns that URL and the generator carries it across.
+def _wheel_url_template() -> str:
+    for state in WSL_STATES:
+        if state.code == "guest_no_network":
+            return state.action_url
+    raise HostError(
+        "wsl_state_unknown",
+        "the generated table has no `guest_no_network` row, so nothing here "
+        "knows which wheel a first install fetches.",
+    )
+
+
+_WHEEL_URL_TEMPLATE = _wheel_url_template()
 
 
 def parse_distro_names(text: str) -> list[str]:
@@ -176,10 +235,16 @@ def detect(
         release=release,
     )
 
+    #: Built ONCE, and only when the network row is actually going to be
+    #: probed: reading the recipes touches the disk, and `wsl-states.ts`'s rule
+    #: is that reading a machine's facts costs nothing it was not asked for.
+    indexes = " ".join(install_index_urls(release)) if check_network else ""
+
     def substitute(word: str) -> str:
         return (
             word.replace("{app_distro}", app_distro or "")
             .replace("{release}", release)
+            .replace("{indexes}", indexes)
         )
 
     def ask(state: WslStateDef) -> RunResult:
@@ -223,6 +288,7 @@ def detect(
             action_argv=tuple(substitute(word) for word in state.action_argv),
             action_text=render(state.action_text, result, seen),
             action_url=render(state.action_url, result, seen),
+            automatic=state.automatic,
             evidence=_said(result),
         )
     # Unreachable while `wsl_ready` matches everything. A table whose last row

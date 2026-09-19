@@ -161,7 +161,7 @@ def test_a_download_verifies_unpacks_and_stamps(
     blob = _install_only_tarball(source)
     pin = _pin(hashlib.sha256(blob).hexdigest())
     monkeypatch.setattr(
-        interpreter, "_fetch", lambda url, path, **kw: path.write_bytes(blob)
+        interpreter, "fetch", lambda url, path, **kw: path.write_bytes(blob)
     )
     home = tmp_path / "home"
     python = interpreter.ensure_interpreter(home, CUDA_LINUX, "3.12", pin=pin)
@@ -190,7 +190,7 @@ def test_a_second_call_with_a_matching_stamp_downloads_nothing(
         calls.append(url)
         path.write_bytes(blob)
 
-    monkeypatch.setattr(interpreter, "_fetch", fetch)
+    monkeypatch.setattr(interpreter, "fetch", fetch)
     home = tmp_path / "home"
     interpreter.ensure_interpreter(home, CUDA_LINUX, "3.12", pin=pin)
     interpreter.ensure_interpreter(home, CUDA_LINUX, "3.12", pin=pin)
@@ -204,7 +204,7 @@ def test_a_digest_that_does_not_match_is_refused_by_name_and_leaves_nothing(
     blob = _install_only_tarball(source)
     pin = _pin("0" * 64)
     monkeypatch.setattr(
-        interpreter, "_fetch", lambda url, path, **kw: path.write_bytes(blob)
+        interpreter, "fetch", lambda url, path, **kw: path.write_bytes(blob)
     )
     home = tmp_path / "home"
     with pytest.raises(InterpreterError) as caught:

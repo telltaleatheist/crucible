@@ -161,7 +161,20 @@ export type BootstrapRefusalCode =
    * door's own contract (a line that is not JSON, an event with no name, a
    * `done` missing a field). A truncated stream is not a success.
    */
-  | 'host_install_failed';
+  | 'host_install_failed'
+  /**
+   * win32 only, and PHASE19's. The machine IS on the Linux engine — its
+   * `wsl-outcome.json` says `done` — and this process never saw the move's
+   * `done` event, because the move finished before it attached and the tray's
+   * 200-event ring no longer holds it (a tray restart empties it).
+   *
+   * So there is no {@link InstallResult} to return and none is invented: the
+   * server's name, url, config path and console script are the GUEST's facts,
+   * and the `wsl.exe` door this package used to read them through is the one
+   * PHASE15 deleted. `readLocalConfig()` and the door's `/v1/info` are where
+   * they live now.
+   */
+  | 'host_install_unwitnessed';
 
 export interface BootstrapRefusalOptions {
   /** The exact command the host must run, when there is one. Never a guess. */

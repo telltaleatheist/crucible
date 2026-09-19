@@ -43,21 +43,43 @@
  * Windows-native tray process, walks the state table and the step list and
  * raises the UAC prompts a WSL install needs. (It has no window of its own —
  * 4.7: its UI is the tray menu and the operator page.) So on win32 this
- * function is two branches and nothing else —
+ * function is two steps and nothing else (PHASE19-AUTOMATIC-WSL.md 2.6) —
  *
- *   host installed?  ask it (`requestHostInstall`) and relay its events
- *                    through the SAME `onLine`/`onStep` this function was given
- *   host absent?     `host_not_installed`, carrying the `irm … | iex` line
+ *   host absent?   run `install.ps1`, which is per-user and elevates nothing
+ *   then           `watchInstall()`: attach to the move the TRAY started
  *
  * — and the walk below is reached only on linux and darwin, where the machine
  * IS the server and there is no host to ask.
+ *
+ * **IT NEVER POSTS THE MOVE.** PHASE19 2.3 put that decision in the tray, which
+ * takes it at every start from facts on disk: a fresh install, a tray coming
+ * back after the reboot `wsl --install` demanded, and an old native install
+ * being upgraded are the same decision seen three times, and only a process
+ * that is there at login can make all three. A `POST /install` from here would
+ * be a second caller racing the first for a claim it would lose.
+ *
+ * **AND NOBODY IS SHOWN A COMMAND.** This used to refuse `host_not_installed`
+ * with the `irm … | iex` line for a person to type. PHASE19: "a command a
+ * person could run is a step the app should be running."
  */
 import { randomBytes } from 'node:crypto';
 
 import { readLocalConfig, type LocalConfig } from './config.js';
 import { backendFor, type ServerBackend } from './release.js';
 import { BootstrapRefusal, BootstrapStepFailed } from './errors.js';
-import { hostInstallCommand, hostInstalled, hostRuntimeDir, requestHostInstall, type HostEvent, type HostFetch } from './hostdoor.js';
+import {
+  doneResult,
+  hostInstalled,
+  hostRuntimeDir,
+  watchInstall,
+  HOST_DOOR_URL,
+  HOST_ENTRY_POINT,
+  HOST_INSTALL_EVENTS_PATH,
+  type HostEvent,
+  type HostFetch,
+  type InstallStatus,
+} from './hostdoor.js';
+import { releaseAssetUrl } from './release.js';
 import { ensureLinger } from './linger.js';
 import { installRuntime, probeGuest, refuseMissingTools, SERVER_SUBDIR } from './runtime.js';
 import { processRunner, type OutputStream, type Runner } from './runner.js';
@@ -273,30 +295,125 @@ async function installThroughHost(options: InstallOptions, release: string, runn
   }
 
   if (!hostInstalled(runner)) {
-    throw new BootstrapRefusal(
-      'host_not_installed',
-      `there is no Crucible host at ${hostRuntimeDir(runner)} on this machine, and on Windows the host is what installs `
-        + 'a Crucible: it walks the WSL state table, raises the two UAC prompts a WSL install needs, and shows the '
-        + 'steps in its own window. Run the line below once, then call install() again. '
-        + 'It is not run from here on purpose — a library that downloads and elevates an installer from a background '
-        + 'call is a dialog nobody asked for.',
-      { command: hostInstallCommand(release) },
-    );
+    // PHASE19: NOBODY IS EVER SHOWN A COMMAND. This used to refuse with the
+    // `irm … | iex` line, on the grounds that a library must not download and
+    // elevate an installer from a background call. Half of that still holds
+    // and half never applied: `install.ps1` is per-user and elevates nothing
+    // (its own header: "No admin. Everything here is per-user and
+    // idempotent"), and the UAC prompt a WSL install needs is raised later, by
+    // the tray, which is a process a person can see. So the script is run, and
+    // the only thing still refused here is elevation.
+    await runInstallPs1(options, release, runner);
   }
 
-  return await requestHostInstall(
+  // NEVER A POST (PHASE19 2.6). The tray decides at every start whether this
+  // machine should be moving (2.3) and has already started if it should, so a
+  // POST from here would be a second caller racing the first for a claim it
+  // would lose. This attaches to what is already happening.
+  //
+  // The `done` event is kept as it goes past, because it is the one place the
+  // GUEST's facts — its server name, its url, its config path, its console
+  // script — cross to this side. The outcome file records that the move
+  // finished; it does not describe what it finished into.
+  let witnessed: InstallResult | null = null;
+  const status = await watchInstall(
     {
-      release,
-      jobTypes: options.jobTypes,
-      ...(options.home === undefined ? {} : { home: options.home }),
-      ...(options.bind === undefined ? {} : { bind: options.bind }),
-      ...(options.onHostEvent === undefined ? {} : { onEvent: options.onHostEvent }),
       ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
-      onLine: options.onLine,
       ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
+      onLine: options.onLine,
+      onEvent: (event) => {
+        if (event.event === 'done') witnessed = doneResult(event.data, `${HOST_DOOR_URL}${HOST_INSTALL_EVENTS_PATH}`);
+        options.onHostEvent?.(event);
+      },
     },
     runner,
   );
+  return installedResult(status, witnessed, runner);
+}
+
+/**
+ * `install.ps1`, run as this user, with no console for anybody to read.
+ *
+ * Downloaded to a file and run with `-Release` rather than piped through
+ * `iex`: a piped script cannot take a switch (the script says so itself), and
+ * the release this call was given is the release the host must be, not
+ * whatever the channel calls latest at this second.
+ */
+async function runInstallPs1(options: InstallOptions, release: string, runner: Runner): Promise<void> {
+  const url = releaseAssetUrl(release, 'install.ps1');
+  const quoted = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+  const script = `$ErrorActionPreference = 'Stop'; `
+    + `$p = Join-Path $env:TEMP 'crucible-install.ps1'; `
+    + `Invoke-RestMethod ${quoted(url)} -OutFile $p; `
+    + `& $p -Release ${quoted(release)}`;
+  const argv = ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script];
+  options.onStep?.({ name: 'host', argv, status: 'running', detail: `install.ps1 ${release}` });
+  const result = await runner.stream(argv, {
+    timeoutMs: { ...DEFAULT_INSTALL_TIMEOUTS, ...options.timeouts }.runtimeMs,
+    onLine: (line, stream) => options.onLine(line, stream, 'host'),
+  });
+  if (result.failure !== null || result.code !== 0) {
+    throw new BootstrapRefusal(
+      'host_not_installed',
+      `install.ps1 ${result.failure ?? `exited ${result.code}`} on this machine, so there is still no Crucible host at `
+        + `${hostRuntimeDir(runner)}. It is idempotent: the lines above say what it got to, and running install() again `
+        + 'resumes from whatever is on disk.',
+      { detail: result.stderr.trim() || result.stdout.trim() },
+    );
+  }
+  if (!hostInstalled(runner)) {
+    throw new BootstrapRefusal(
+      'host_not_installed',
+      `install.ps1 reported success and there is still no ${HOST_ENTRY_POINT} at ${hostRuntimeDir(runner)}. `
+        + 'Nothing here can say what it installed instead.',
+    );
+  }
+}
+
+/**
+ * The move's status → the {@link InstallResult} `install()` promises, or the
+ * named refusal that says why there is none.
+ *
+ * Every ending of PHASE19 2.2 has an answer and none of them is a shrug:
+ * `done` is the result, `cannot`, `failed`, `reboot-pending` and `declined`
+ * are refusals carrying the OUTCOME's own code and sentence — which is the 4c
+ * code an app switches on.
+ */
+function installedResult(
+  status: InstallStatus,
+  witnessed: InstallResult | null,
+  runner: Runner,
+): InstallResult {
+  const recorded = status.outcome;
+  if (recorded === null) {
+    throw new BootstrapRefusal(
+      'host_install_failed',
+      'the Crucible host on this machine recorded no outcome for its engine move, and none is running. '
+        + `Its own log (${hostRuntimeDir(runner)}) says what it decided; there is nothing here to report as an install.`,
+    );
+  }
+  if (recorded.state !== 'done') {
+    // THE OUTCOME'S OWN CODE AND SENTENCE, verbatim. The 4c codes cross the
+    // wire unwrapped for `hostRefusal`'s reason: the app's next move is chosen
+    // from the code, and `virtualization_disabled` wrapped in a generic name
+    // would delete the only thing the message was carrying.
+    throw new BootstrapRefusal(
+      (recorded.code ?? 'host_install_failed') as BootstrapRefusal['code'],
+      recorded.sentence ?? `the engine move on this machine ended as ${recorded.state}.`,
+      { detail: `${recorded.state} at ${recorded.at}, attempt ${recorded.attempts}, release ${recorded.release}` },
+    );
+  }
+  if (witnessed === null) {
+    throw new BootstrapRefusal(
+      'host_install_unwitnessed',
+      `this machine's engine move finished at ${recorded.at} (release ${recorded.release}) and this call did not see it: `
+        + 'the tray keeps the last 200 events of a move and its `done` is no longer among them, which is what a tray '
+        + 'restart leaves behind. The machine is on the Linux engine and there is nothing here to describe it with — '
+        + "the server's name, url and config path are the guest's, and `readLocalConfig()` is what reads them now.",
+      { detail: `${recorded.state} at ${recorded.at}, release ${recorded.release}` },
+    );
+  }
+  return witnessed;
 }
 
 export async function install(options: InstallOptions, runner: Runner = processRunner()): Promise<InstallResult> {

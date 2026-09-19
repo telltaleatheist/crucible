@@ -34,7 +34,8 @@ from typing import Any, Callable
 from .. import API_VERSION, VERSION
 from .. import peer as peer_module
 from ..pairing import parse_pairing_line
-from . import installer, menu, startup
+from . import door as door_module
+from . import installer, menu, outcome, startup
 from .catalog import CatalogPort, GuestCatalog, HttpCatalog, StoppedWindowsCatalog
 from .door import OrchestratorDoor, serve
 from .errors import HostError
@@ -225,6 +226,54 @@ def read_token(home: Path) -> str | None:
 #: the orchestrator's own reach, and it belongs to no server.
 CONSENT_TABLE = "orchestrator"
 CONSENT_KEY = "distro"
+
+#: PHASE19 1 — the ONE way to keep a machine native on purpose.
+#: `[orchestrator] wsl = "never"` in the Windows config. It is Crucible's
+#: setting and neither app offers it, because the apps' setup has no choice to
+#: make (section 3): every Windows machine that CAN host WSL2 is moved, and one
+#: that cannot is told so in a sentence.
+WSL_KEY = "wsl"
+WSL_NEVER = "never"
+
+
+def declined_wsl(home: Path) -> bool:
+    """Has somebody written `[orchestrator] wsl = "never"` on this machine?
+
+    Read with `tomllib` and refused when present and unusable, for
+    `consented_distro`'s two reasons: it is the same document
+    `crucible/config.py` reads, and a person who wrote something into this key
+    meant to decide something. A value that is neither absent nor `"never"` is
+    a decision this build cannot carry out, and an orchestrator that shrugged
+    and moved the machine anyway would be doing the opposite of what the file
+    says.
+    """
+    import tomllib
+
+    path = Path(home) / "config.toml"
+    if not path.is_file():
+        return False
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise HostError(
+            "orchestrator_wsl_invalid",
+            f"{path} could not be read as TOML ({exc}), so whether this machine "
+            "declined the Linux engine cannot be known. Nothing is moved until "
+            "the file parses.",
+        ) from exc
+    table = document.get(CONSENT_TABLE)
+    if table is None or not isinstance(table, dict) or WSL_KEY not in table:
+        return False
+    value = table[WSL_KEY]
+    if value != WSL_NEVER:
+        raise HostError(
+            "orchestrator_wsl_invalid",
+            f"{CONSENT_TABLE}.{WSL_KEY} in {path} is {value!r}. The one value "
+            f'this key takes is "{WSL_NEVER}", which keeps this machine on its '
+            "native Windows engine; remove the key to let Crucible install the "
+            "Linux one.",
+        )
+    return True
 
 
 def consented_distro(home: Path) -> str | None:
@@ -434,6 +483,14 @@ class Host:
         #: owner an answering engine has. Anything gated on the owner has to
         #: wait for the tick that settles it.
         self._presence_settled = threading.Event()
+        #: The door this orchestrator serves, once `run()` has built it.
+        #:
+        #: PHASE19 2.3 is why the tray holds it: the tray's own move must take
+        #: the SAME claim a `POST /install` takes, or the two callers would be
+        #: two owners of "one install on a machine" — a POST arriving during
+        #: the tray's run would claim successfully and then block on
+        #: `_operation`, which is a 409 the caller never receives.
+        self._install_door: "door_module.OrchestratorDoor | None" = None
         #: Whether THIS process holds a claim on this machine's engine
         #: (PHASE17 2.1). Not "whether the engine is claimed" — that is the
         #: engine's fact and it is read from `/v1/info`, never mirrored here.
@@ -468,6 +525,20 @@ class Host:
         )
         self._hold()
         return self._c.presence
+
+    def presence(self) -> dict[str, object]:
+        """`OrchestratorPort`. The measurement, as the watcher left it (PHASE19 2.6)."""
+        return {
+            "distro": self._c.presence.distro.value,
+            "engine": self._c.presence.engine.value,
+            "owner": self._c.presence.owner.value,
+            "detail": self._c.presence.detail,
+        }
+
+    def install_outcome(self) -> dict[str, object] | None:
+        """`OrchestratorPort`. `wsl-outcome.json`, or None (PHASE19 2.2/2.6)."""
+        recorded = outcome.read(self._c.home)
+        return None if recorded is None else recorded.to_dict()
 
     def local_status(self) -> dict[str, object]:
         return {"state": "stopped" if self._paused else self._c.presence.engine.value,
@@ -618,10 +689,15 @@ class Host:
             )
             return
         if self._c.presence.owner is not Owner.WSL_UNIT:
+            # PHASE19 2.3: ONE THREAD, ONE WAIT, TWO BRANCHES. The owner this
+            # thread already waited for is the same fact the engine decision
+            # needs, and a second thread asking it would be two owners of "what
+            # does this tray do at start" (2.12).
             self._c.log.write(
                 f"guest release: no guest to carry "
                 f"(owner={self._c.presence.owner.value})"
             )
+            self.decide_engine()
             return
         walk = installer.EngineInstall(
             self._c.runner,
@@ -652,6 +728,136 @@ class Host:
         else:
             self._c.log.write(f"guest release: carried the guest to {carried}")
             self._refresh()
+
+    # -------------------------------------------- PHASE19 2.3 the decision
+
+    def decide_engine(self) -> str:
+        """Should this machine be moving to the Linux engine, and is it?
+
+        PHASE19-AUTOMATIC-WSL.md 2.3. Called from the carry thread, AFTER
+        `_presence_settled`, on a machine whose engine is not a guest of ours.
+        Returns the decision it made, by name, so the log and a test say the
+        same word.
+
+        THE TABLE, IN ITS ORDER, AND NOTHING IS TRIED TWICE:
+
+            owner is found                      -> `found`, nothing. PHASE17
+                                                   4.1a: an engine this
+                                                   orchestrator did not start is
+                                                   watched and never acted on.
+            `[orchestrator] wsl = "never"`      -> `declined`, recorded once.
+            outcome is `cannot`                 -> `cannot`, nothing. A person
+                                                   changes the BIOS, the VPN or
+                                                   the distro and presses Try
+                                                   again (2.5).
+            outcome is `failed`, attempts >= 2  -> `failed`, nothing.
+            outcome is `reboot-pending`         -> the move, resumed (2.4).
+            otherwise                           -> probe the table; a row the
+                                                   tray cannot carry is written
+                                                   as `cannot` and stops, and a
+                                                   row it can is the move.
+
+        IT NEVER RAISES OUT OF THE THREAD, for `carry_guest_to_this_release`'s
+        reason: a tray that died at startup because a VM was busy is worse than
+        a machine that keeps its Windows engine and says why in the log.
+        """
+        owner = self._c.presence.owner
+        if owner is Owner.FOUND:
+            self._c.log.write(
+                "engine: this machine's engine is one this orchestrator did not "
+                "start (owner=found), so nothing is moved (PHASE17 4.1a)"
+            )
+            return "found"
+        try:
+            declined = declined_wsl(self._c.home)
+        except HostError as exc:
+            self._c.log.write(f"engine: {exc.code}: {exc.message}")
+            return "unreadable"
+        try:
+            previous = outcome.read(self._c.home)
+        except HostError as exc:
+            self._c.log.write(f"engine: {exc.code}: {exc.message}")
+            return "unreadable"
+        if declined:
+            if previous is None or previous.state != outcome.DECLINED:
+                outcome.write(
+                    self._c.home,
+                    state=outcome.DECLINED,
+                    release=self._c.release,
+                    attempts=0 if previous is None else previous.attempts,
+                )
+            self._c.log.write(
+                'engine: this machine declined the Linux engine '
+                f'([{CONSENT_TABLE}] {WSL_KEY} = "{WSL_NEVER}"); it stays native'
+            )
+            return outcome.DECLINED
+        if previous is not None and previous.state == outcome.CANNOT:
+            self._c.log.write(
+                f"engine: this machine cannot run the Linux engine "
+                f"({previous.code}), recorded {previous.at}. Nothing is retried "
+                "on its own; the apps offer Try again (2.5)"
+            )
+            return outcome.CANNOT
+        if (
+            previous is not None
+            and previous.state == outcome.FAILED
+            and previous.attempts >= outcome.FAILED_ATTEMPT_CEILING
+        ):
+            self._c.log.write(
+                f"engine: the move has failed {previous.attempts} times in a row "
+                f"({previous.code}); it stays failed until somebody presses Try "
+                "again (2.2)"
+            )
+            return outcome.FAILED
+        if previous is not None and previous.state == outcome.DONE:
+            # The presence says otherwise — this branch runs on a machine whose
+            # engine is NOT the guest's — so the record is history that has been
+            # overtaken. It is not a reason to refuse: the sequence is
+            # idempotent and the machine is the fact.
+            self._c.log.write(
+                f"engine: the last move finished at {previous.at} and this "
+                "machine's engine is not the guest's now; walking the sequence "
+                "again"
+            )
+        return self._move("resumed" if previous is not None and previous.state == outcome.REBOOT_PENDING else "started")
+
+    def _move(self, why: str) -> str:
+        """Run the move, under the SAME claim a `POST /install` takes.
+
+        2.3: "The move runs through the SAME `_sequence` the door's
+        `POST /install` runs, under the same `host._operation` lock, emitting
+        the same events; the tray is simply the first caller." The claim is the
+        door's, not a second one here, so a `POST /install` that arrives while
+        this is in flight gets the existing `host_install_running` 409 and
+        attaches (2.6) rather than queueing behind a lock it cannot see.
+        """
+        door = self._install_door
+        if door is None:
+            self._c.log.write(
+                "engine: NOT moved — this orchestrator has no door yet, and the "
+                "move runs under the door's claim so that a POST /install can "
+                "be refused and attached rather than queued"
+            )
+            return "no_door"
+        if not door.claim():
+            self._c.log.write(
+                "engine: a move is already running on this machine; this one is "
+                "not a second walk over the same distro"
+            )
+            return "already_running"
+        self._c.log.write(f"engine: the move is {why}")
+        try:
+            door.run_recorded()
+        except HostError as exc:
+            self._c.log.write(f"engine: {exc.code}: {exc.message}")
+            return outcome.classify(exc.code)
+        except Exception as exc:  # noqa: BLE001 - a thread that dies silently is worse
+            self._c.log.write(f"engine: the move crashed: {type(exc).__name__}: {exc}")
+            return outcome.FAILED
+        finally:
+            door.release()
+        self._refresh()
+        return outcome.DONE
 
     def stopped_windows_catalog(self) -> CatalogPort:
         """Deletion is allowed only after ownership and authenticated guest proof."""
@@ -1285,6 +1491,11 @@ def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
         token_detail=lambda: engine_token_detail(context),
         orchestrator=host,
     )
+    # BEFORE the socket and long before the carry thread: the tray's own move
+    # (PHASE19 2.3) runs under this door's claim, so that a `POST /install`
+    # arriving mid-move is refused 409 and attaches rather than queueing behind
+    # a lock it cannot see.
+    host._install_door = door
     try:
         host._door_server = serve(door)
         log.write("door: listening on 127.0.0.1:7101")
@@ -1336,7 +1547,7 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
     Windows config has no Windows engine, so there is no catalog to move from
     and `migrate-weights` says exactly that.
     """
-    def install_sequence(emit: Callable[[installer.Event], None]) -> None:
+    def install_sequence(emit: Callable[[installer.Event], None], *, resuming: bool) -> None:
         if context.presence.owner is Owner.WSL_UNIT:
             # Port 7100 now belongs to the destination. It must never be read
             # as the Windows source on a retry after an interrupted cleanup.
@@ -1369,6 +1580,7 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
             release=context.release,
             home=context.home,
             install_sh_url=INSTALL_SH_URL.format(release=context.release),
+            resuming=resuming,
             windows_catalog=windows,
             guest_catalog=guest,
             stop_windows_server=host.stop_windows_for_move,
@@ -1377,10 +1589,62 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
         ).run()
 
     def run_sequence(emit: Callable[[installer.Event], None]) -> None:
+        """The move, and the ONE place its ending is recorded (PHASE19 2.2).
+
+        Both callers reach it — the tray's start-time decision (2.3) and the
+        door's `POST /install` (2.5) — so `wsl-outcome.json` is written at every
+        terminal point of a move and at no terminal point of anything else. The
+        carry (`carry_guest_to_this_release`) deliberately does NOT come
+        through here: a guest that is ahead or unreadable is not a move that
+        failed, and recording it as one would make the tray refuse a machine
+        that is perfectly well.
+
+        WHETHER THIS IS A RESUME IS READ OFF THE FILE, not passed in. The
+        previous outcome is the one owner of "where did this machine get to",
+        and a parameter would let the two callers disagree about it — `Try
+        again` pressed after a reboot is as much a resume as the tray's own.
+        """
         # A watch recovery during migration could start a second engine.
         with host._operation:
             host.check_restartable()
-            install_sequence(emit)
+            previous = outcome.read(context.home)
+            resuming = previous is not None and previous.state == outcome.REBOOT_PENDING
+            # 2.2: a `failed` is retried ONCE. The count is of consecutive
+            # failures, so anything else resets it — a machine that failed,
+            # was fixed and then failed again gets its retry back.
+            attempt = (
+                previous.attempts + 1
+                if previous is not None and previous.state == outcome.FAILED
+                else 1
+            )
+            try:
+                install_sequence(emit, resuming=resuming)
+            except HostError as exc:
+                outcome.write(
+                    context.home,
+                    state=outcome.classify(exc.code),
+                    code=exc.code,
+                    sentence=exc.message,
+                    release=context.release,
+                    attempts=attempt,
+                )
+                raise
+            except Exception as exc:  # noqa: BLE001 - an ending is always recorded
+                outcome.write(
+                    context.home,
+                    state=outcome.FAILED,
+                    code="task_failed",
+                    sentence=f"{type(exc).__name__}: {exc}",
+                    release=context.release,
+                    attempts=attempt,
+                )
+                raise
+            outcome.write(
+                context.home,
+                state=outcome.DONE,
+                release=context.release,
+                attempts=attempt,
+            )
 
     return run_sequence
 
