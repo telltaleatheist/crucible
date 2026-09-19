@@ -255,6 +255,21 @@ def read_frontmatter(card: str) -> dict[str, str]:
 # ----------------------------------------------------------------- the export
 
 
+def _toml_number(value: float) -> str:
+    """A rate or a sampling value, written the way the catalog writes it.
+
+    A WHOLE NUMBER IS WRITTEN WHOLE. Every value that reaches here has been
+    through `crucible/voices.py`'s `_number()`, which returns a float, so
+    `top_k` 50 would otherwise be written `50.0` — read back identically by that
+    same `_number()`, and read by a PERSON as a different number from the 50 the
+    catalog states everywhere else. The loader takes either; this is about the
+    file being readable by whoever has to check it before it is pushed.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
 def _toml_string(value: str) -> str:
     """A TOML string — multi-line for prose, so a note stays readable."""
     if "\n" in value or len(value) > 90:
@@ -343,9 +358,16 @@ def export_manifest(
         lines += ["", "[voice.pace]"]
         if has_band:
             lines.append(f"basis              = {_toml_string(pace_basis)}")
-            lines.append(f"pace_chars_per_sec = {pace.pace_chars_per_sec}")
-            lines.append(f"max_chars_per_sec  = {pace.max_chars_per_sec}")
-            lines.append(f"min_chars_per_sec  = {pace.min_chars_per_sec}")
+            lines.append(
+                "pace_chars_per_sec = "
+                + _toml_number(pace.pace_chars_per_sec)
+            )
+            lines.append(
+                "max_chars_per_sec  = " + _toml_number(pace.max_chars_per_sec)
+            )
+            lines.append(
+                "min_chars_per_sec  = " + _toml_number(pace.min_chars_per_sec)
+            )
             if measured_from:
                 lines.append(f"measured_from      = {_toml_string(measured_from)}")
         for key in ("target_chars", "safe_min_chars", "safe_max_chars"):
@@ -373,7 +395,7 @@ def export_manifest(
         lines.append(f"max_chars       = {spec.max_chars}")
         lines.append(f"max_chars_basis = {_toml_string(max_chars_basis)}")
         sampling = ", ".join(
-            f"{key} = {value}" for key, value in spec.sampling.items()
+            f"{key} = {_toml_number(value)}" for key, value in spec.sampling.items()
         )
         lines.append(f"sampling        = {{ {sampling} }}")
         if spec.sampling_reason is not None:
@@ -389,7 +411,7 @@ def export_manifest(
                     f"[[voice.arms.{arm}.clips]]",
                     f"file       = {_toml_string(clip.file)}",
                     f"transcript = {_toml_string(clip.transcript)}",
-                    f"seconds    = {clip.seconds}",
+                    "seconds    = " + _toml_number(clip.seconds),
                 ]
         dropped.append(
             f"[voice.backends.{arm}] memory_bytes_estimate = "
@@ -446,7 +468,7 @@ def export_manifest(
     for take in manifest.takes:
         lines += ["", "[[voice.takes]]"]
         for key, value in sorted(take.overrides.items()):
-            lines.append(f"{key} = {value}")
+            lines.append(f"{key} = {_toml_number(value)}")
         if take.reason is not None:
             lines.append(f"reason = {_toml_string(take.reason)}")
     return "\n".join(lines) + "\n", dropped
