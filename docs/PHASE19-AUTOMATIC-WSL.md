@@ -8,7 +8,10 @@ automatically."* And: *"we removed tokens. this system is supposed to work like 
 doesn't require a token request/approval to connect. its protection is the system firewall."*
 
 This document is the CONTRACT for the phase (ARCHITECTURE.md R1). It is a PLAN: nothing in
-it is built. Three builds read it: the orchestrator (section 2), BookForge (section 4) and
+it is built. **Revised 2026-09-19 for PHASE20 (code, not environments)** — the draft of
+2026-09-18 was written against envpacks and a rootfs off our own releases, both of which
+PHASE20 deleted that night. Section 2.12 lists what moved; every section it touches is
+edited in place. Three builds read it: the orchestrator (section 2), BookForge (section 4) and
 Foundry (section 5). Owen executes it when he is ready, through one Opus subagent per repo,
 on a branch, and tests the result in-app himself before anything is merged.
 
@@ -59,7 +62,7 @@ sequence, and an app that merely reads the outcome cannot double-run it.
 
 | word | meaning |
 |---|---|
-| **the move** | PHASE15 4.7's engine task, unchanged: state table → `wsl --install` → import the `crucible` distro → server pack → migrate config → migrate weights → switch pairing. |
+| **the move** | PHASE15 4.7's engine task, unchanged in shape: state table → `wsl --install` → import Canonical's Ubuntu 24.04 WSL image as the `crucible` distro and finish it (user, sudo, marker, systemd) → `install.sh` in the guest (pinned CPython from python-build-standalone, the release wheel, PyPI deps) → migrate config → migrate weights → switch pairing. **Job envs are NOT part of the move** (2.12): the app's coordinate step installs them on first connect to the guest. |
 | **outcome** | a file in the host home, `wsl-outcome.json`, the ONE owner of "what happened to the move on this machine". Shape in 2.2. |
 | **can / cannot** | the state table's verdict, partitioned: a code whose `action` is `run`, `run-elevated` or `reboot` is *can* (the tray carries it); a code whose action is `instruct` or `link` is *cannot* (a person must change something first). `wsl_ready` is *can* and trivially so. The partition is DATA in `wsl-states.ts` (2.1), not a list spelled in Python. |
 | **declined** | `[orchestrator] wsl = "never"` in `%LOCALAPPDATA%\Crucible\config.toml`. The one way to keep a machine native on purpose. It is Crucible's setting, written by hand or by the page; neither app offers it, because the apps' setup has no choice to make. |
@@ -102,7 +105,10 @@ point and read by the tray at start and by the door on request:
 
 ### 2.3 The decision, at every tray start
 
-After `host.start()` and `_write_pairing`, before the door opens, `Host.decide_engine()`:
+In the thread `main` already starts at the end (`Host.carry_guest_to_this_release`), after
+`_presence_settled` — the owner is a MEASUREMENT the watch loop's first pass makes, and
+FIX-35 (1.0.3) is what happens to a decision taken before it. One thread, one wait, two
+branches: `wsl-unit` → the carry, as today; `child` → `Host.decide_engine()`:
 
 ```
 owner is wsl-unit or found          → nothing (already there, or not ours: PHASE17 stays)
@@ -127,8 +133,9 @@ it. The Startup item brings the tray back; 2.3 sees `reboot-pending` and resumes
 
 ### 2.4 Resume is idempotent because every step already is
 
-Import is "present is a no-op" (`installer.py:561`), the rootfs download is checksummed,
-the pack install in the guest is the existing `install.sh`, migrate-config refuses a file
+Import is "present is a no-op" (`_import_distro`), the Ubuntu image is checked against
+Canonical's own `SHA256SUMS` by filename, the guest install is the existing `install.sh`
+(interpreter + wheel, PHASE20 §3, ~30 MB + 1 MB + PyPI), migrate-config refuses a file
 without a token and is otherwise a re-write of the same three keys, migrate-weights pulls
 before it deletes. Resume therefore means: run the sequence from the top. The one thing
 resume adds is that `wsl --status` after the reboot must not report the same reboot state
@@ -156,8 +163,7 @@ itself, because the tray already has.
 
 ### 2.7 `install.ps1` ends differently
 
-Its last lines (`sdk/bootstrap/scripts/install.ps1:253-256`) start the tray, start the
-native engine and print *"The Windows engine works now; the optional Linux engine is
+Its section 7 starts the tray, starts the native engine and prints *"The Windows engine works now; the optional Linux engine is
 available from its console."* The tray's own 2.3 now starts the move, so the script's
 closing sentence becomes *"Crucible is installed. It is setting up its Linux engine now;
 the app you installed from will show its progress."* on a *can* machine and the `cannot`
@@ -169,12 +175,16 @@ says which. The script gains no logic of its own; it stays generated.
 Nothing here delays the first answer on `:7100`. The native engine is up within seconds of
 install as today, and the move runs behind it. Two consequences the apps must honour:
 
-- **The app's install is not finished until the outcome is terminal** (`done`, `cannot`,
-  `reboot-pending`). An app that connected to the native engine and immediately pulled 20
-  GB of weights onto Windows made migrate-weights expensive for nothing; so the app's setup
-  face stays on the install step until then, and the engine's coordinate-on-connect model
-  pulls are deferred by the APP until the outcome is terminal. The engine is not asked to
-  refuse pulls — the app asked for the install, the app waits.
+- **The app coordinates ONLY with the terminal engine.** Coordinate-on-connect (PHASE14
+  4a) is what installs job envs and pulls weights, and under PHASE20 those are gigabytes
+  from the mirrors and from Hugging Face. Run against the native engine on a machine
+  that is mid-move, they land on Windows and make migrate-weights expensive for nothing.
+  So the app's setup face stays on the install step until the outcome is terminal
+  (`done`, `cannot`, `reboot-pending`), and coordinate runs once, against whichever engine
+  is left standing: the guest on `done`, the native one on `cannot`. The engine is not
+  asked to refuse anything — the app asked for the install, the app waits. The coordinate
+  step's own `install` tasks (one per job type) are the LAST rows of the progress list
+  (3.1), not something that happens after the page says done.
 - **The engine switch mid-session stays invisible** as PHASE17 §6 promised: same port,
   same token, the SDK re-reads `/v1/info` after a refused connection.
 
@@ -189,8 +199,11 @@ firewall rule alone is what it adds. A test asserts the refusal.
 
 ### 2.10 Where the distro lives — RULING NEEDED
 
-`wsl --import` lands the vhdx under `%LOCALAPPDATA%\Crucible` on C:. On Owen's PC the
-fused-checkpoint fills traced to exactly this kind of vhdx growth. Options: (a) keep C: and
+`wsl --import` lands the vhdx under `%LOCALAPPDATA%\Crucible\wsl` on C:, and under
+PHASE20 that vhdx holds the Ubuntu image, the guest interpreter, EVERY job env (tts 5.3 GB
+as an archive, more unpacked; llm 3.3; rvc 3.3; align 2.9; asr 1.3, `INSTALL-UNINSTALL.md`)
+and the weights. On Owen's PC the fused-checkpoint fills traced to exactly this kind of
+vhdx growth. Options: (a) keep C: and
 let `pack_disk` refuse by name with the drive and the bytes — nothing to build; (b) let
 `CRUCIBLE_HOME` on another drive move it — already true, undocumented, no UI; (c) a drive
 picker in the app's install face. Recommendation: (a) for this phase, with the sentence
@@ -212,6 +225,49 @@ PC with nested virtualization enabled can host WSL2 — and a fresh `install.ps1
 end with `Engine: WSL2` after the one reboot, watched from BookForge's setup page. That run
 is the phase's gate and it is Owen's to schedule (GPU and machine use need his go).
 
+### 2.12 What PHASE20 changed under this plan (2026-09-19)
+
+PHASE20 (`docs/PHASE20-CODE-NOT-ENVIRONMENTS.md`, built and deployed as 1.0.3–1.0.5) made
+a release carry code only. Everything else is fetched from its publisher at install: CPython
+from python-build-standalone, the server wheel from our release, its deps from PyPI, the WSL
+image from Canonical, job envs by `pip install -r <recipe>` from PyPI and the PyTorch and
+SGLang indexes, weights from Hugging Face. What that changes here:
+
+- **The move is small; the job envs are not, and they are not in the move.**
+  `_install_job_types` installs nothing (the list is the coordinate records', which the
+  Windows server has no door onto), so a finished move is a guest with an interpreter, a
+  wheel and no job type. The gigabytes arrive when the app coordinates (2.8). Measured
+  2026-09-19: host install ~70 s, carry 19 s, the PC's tts env 217 s from the mirrors. A
+  fresh machine on a slow line is tens of minutes end to end, and the progress list (3.1)
+  says so rather than looking stuck.
+- **The decision lives in the carry thread** (2.3). PHASE20 gave the tray a start-time
+  thread that waits for presence and acts on the guest; a second thread asking the same
+  question is two owners of "what does this tray do at start".
+- **Two downloads emit no bytes today.** `_import_distro` runs `curl.exe -o` blocking for
+  up to an hour and the guest's interpreter fetch is inside `install.sh`; neither reaches
+  the event stream as `bytes_done`/`bytes_total`, which `pull` already emits
+  (`tasks.py`). The 340 MB image and the 30 MB interpreter get the pull shape. **pip has
+  no byte total** — an `install` task streams pip's own lines (`_run_install_process`),
+  and the app shows the line, honestly, not an invented bar.
+- **The network probe proves one route and the install needs five.** `guest_no_network`
+  fetches the release wheel off GitHub. A VPN or proxy that passes GitHub and blocks
+  PyPI, `download.pytorch.org`, the SGLang index or Hugging Face passes the probe and
+  fails minutes later inside pip. Either the probe touches each index a recipe names
+  (one `curl -I` each, cheap), or a pip failure is parsed for the index it could not reach
+  and named. Recommendation: the probe, because the sentence arrives before the download.
+- **`pack_disk` never fires** — `_guest_ready` deliberately passes no `required_bytes`
+  because the move itself is ~31 MB. The disk question moves to where the gigabytes are:
+  `crucible install <type>` and `pull`. pip cannot size a recipe ahead of time, but the
+  archive sizes PHASE20 MEASURED are cited numbers: `crucible install <type>` refuses
+  `env_disk` by name when the guest has less free than the recipe's measured archive size,
+  recorded in the recipe file's header (one owner, next to the pins). Ruling 6 in §7.
+- **Canonical's `current/` is a moving pointer.** The sums file is matched by filename and
+  a rename refuses; the bytes themselves change when Canonical republishes. That is
+  Canonical's reproducibility, not ours, and the finish script writes what we need
+  regardless. Recorded so nobody pins an image digest that will go stale in a month.
+- **The bootstrap SDK is already a release asset** (PHASE20 §1). Step 6.1 no longer cuts
+  anything for the apps; how the apps pin it is FIX-32 (PHASE20 §9), queued and separate.
+
 ## 3. What the apps share
 
 Both apps' Crucible setup becomes the same three faces, drawn from the same SDK calls:
@@ -219,10 +275,14 @@ Both apps' Crucible setup becomes the same three faces, drawn from the same SDK 
 1. **Local**: found on this machine (pairing file) → connected, nothing to do. Not found →
    one button, **Install Crucible**, which runs the whole of section 2 and shows it as one
    progress list: *Installing Crucible* → *Starting the Windows engine* → *Setting up the
-   Linux engine* (bytes while the rootfs and packs download) → one of: *Done — running on
-   the Linux engine* / *Restart Windows to finish* + **Restart now** / *Running on the
-   Windows engine. This computer can't run the Linux engine: <sentence>* + **Try again**.
-   No "Show what it does" with a command list; the steps ARE the progress list.
+   Linux engine* (bytes for the Ubuntu image and the interpreter, 2.12) → one of: *Restart
+   Windows to finish* + **Restart now** / *This computer can't run the Linux engine:
+   <sentence>* + **Try again** / on to → *Installing what BookForge needs* (one row per job
+   type the module asked for, pip's own lines underneath, no bar because pip has no total)
+   → *Downloading models* (bytes, as `pull` already reports) → *Done — running on the
+   Linux engine* (or *on the Windows engine* after a `cannot`). The list says at its top
+   that a first install downloads several gigabytes and can take a while; it never looks
+   stuck. No "Show what it does" with a command list; the steps ARE the progress list.
 2. **Another computer**: one field, the address; one button, **Connect**. The app calls
    `/v1/connect` and, because pairing is open, is connected in two seconds. When an operator
    has set `open_pairing = false` on that engine, the existing code prompt appears — that is
@@ -296,14 +356,25 @@ One Opus subagent per repo, each on a branch in a worktree, Crucible first becau
 apps' SDK calls (2.6) must exist before the apps can be built against them:
 
 1. **crucible** — `feat/phase19-automatic-wsl`: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.9,
-   2.11; SDK `installStatus`/`watchInstall`; a release tarball of `@crucible/bootstrap`
-   for the apps to pin. Gate: `pytest` (one suite at a time, the flock rule), `npm run
-   gen:install -- --check`, `npm test` in `sdk/bootstrap`.
+   2.11, and 2.12's four builds (bytes on the two downloads, the per-index probe,
+   `env_disk`, the decision in the carry thread); SDK `installStatus`/`watchInstall`.
+   Gate: `tests.sh --changed` (PHASE20 §7; one suite at a time, the flock rule), `npm run
+   gen:install -- --check`, `npm test` in `sdk/bootstrap`. Ship it as a patch through
+   `ship.sh`; nothing here is an environment.
 2. **bookforge** — `feat/phase19-setup-surface`: section 4, pin the new bootstrap. Gate:
    `npx tsc`, `ng build`, the keeper, `dist` fresh. No packaging.
 3. **foundry** — `feat/phase19-setup-surface`: section 5, same gate.
 4. **Owen**: the acceptance run of 2.11 on a machine without WSL, then his in-app pass in
    both apps, then merges. Reviews and further keepers come after his pass, not before.
+
+**Foundry lands in BookForge only by re-vendor.** `foundry-app/` is a mechanical copy
+(`foundry-app/VENDORED.md`), and it carries Foundry's `crucible-install.ts` with the
+`irm … | iex` constant. Step 3 therefore finishes before BookForge's keeper (section 4)
+can pass: Foundry's setup surface is fixed on Foundry's branch, re-vendored into BookForge
+at that sha, and only then does BookForge's renderer scan come up clean. Editing
+`foundry-app/` directly is the thing VENDORED.md forbids. The hosted install door is not
+reachable from BookForge anyway (the "Install Crucible from BookForge." guard), so the
+vendored strings are a keeper matter, not a user-facing one.
 
 Nothing in 1–3 touches the wire between apps and the ENGINE; `/v1/*` is unchanged. The only
 new surface is the orchestrator door's `GET /install` and `GET /install/events`.
@@ -318,6 +389,9 @@ new surface is the orchestrator door's `GET /install` and `GET /install/events`.
 4. **The acceptance machine** for a no-WSL run (2.11): a Hyper-V VM on the PC, or another
    box.
 5. **The first-run step stays skippable** in BookForge (4). Recommendation: yes.
+6. **`env_disk` floors from the measured archive sizes** written into each recipe's
+   header (2.12). Recommendation: yes; it is the one cited number there is, and a floor
+   that is too low still beats a pip that dies at 4.9 GB.
 
 Everything else in this document is taken as ruled by the 2026-09-18 conversation and
 needs no further word.

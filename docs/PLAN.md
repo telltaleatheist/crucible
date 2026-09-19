@@ -10,7 +10,17 @@ Rule for every phase: BookForge changes little or nothing until Crucible is read
 first BookForge consumer is `bookforge-cli` (it drives the compiled pipeline, so it proves
 the seam without touching the app UI).
 
-**PLANNED, 2026-09-18 (not built): PHASE19 — the Linux engine arrives by itself.** The
+**PLANNED 2026-09-19, BUILD STARTED: PHASE21 — a voice's facts travel with its weights; Crucible
+ships no voices.** `crucible-voice.toml` at the HF repo root in the same commit as the weights
+(voice facts only: pace with a `basis`, band, per-arm `max_chars` with a basis, sampling, takes;
+`[voice.pace]` omissible = uncertified, PHASE18 4.1 built here); the local side pins ONE thing
+(`pins.toml`, packaged + home); machine facts (`memory_bytes_estimate`, `max_num_seqs`) move to
+each server's `config.toml` under `[tts.<engine>]`; `PUT /v1/voices` becomes a repin or a local
+override; Crucible renders the card from the TOML and refuses retired keys by name; the two
+base-model rows stay packaged as the ENGINE's. Migration cannot switch the loader first: two shipped
+voices have no band on HF today. Contract: `docs/PHASE21-VOICES-FROM-HF.md`.
+
+**PLANNED, 2026-09-18, REVISED 2026-09-19 for PHASE20 (not built): PHASE19 — the Linux engine arrives by itself.** Under PHASE20 the move is ~31 MB plus Canonical's 340 MB image; the gigabytes are the job envs the app's coordinate step pips from the mirrors AFTER the move, so the app coordinates only with the terminal engine and the progress list carries those rows; the decision lives in the carry thread; two downloads gain bytes; the network probe touches every index; `env_disk` floors from the measured archive sizes (ruling 6). The
 topology stays PHASE17's (a router was considered and rejected: the native fallback is not
 capability-equivalent, so it would be a silent one). What changes is the DEFAULT: on every
 Windows machine that can host WSL2 the orchestrator runs the engine move automatically at
