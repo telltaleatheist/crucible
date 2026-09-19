@@ -38,7 +38,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: `asr_manifests_dir`, `recipes_dir`, and the operator page.
 REQUIRED_TREES: tuple[tuple[str, str], ...] = (
     ("crucible/models", "qwen3.5-9b.toml"),
-    ("crucible/voices", "higgs-default.toml"),
+    ("crucible/voices", "mistborn.toml"),
+    # THE ENGINE'S OWN BASE ROWS (PHASE21 section 2.6). `higgs-default` and
+    # `zeroshot` used to be `crucible/voices/*.toml` and stood for this row;
+    # they moved here when "Crucible ships no voices" became true of voices,
+    # and a wheel without this file is a server with no zero-shot and no token
+    # default — the same invisible failure this file exists for.
+    ("crucible/engines/higgs-v3", "base.toml"),
     ("crucible/denoise", "denoise-roformer.toml"),
     ("crucible/rvc", "sigma.toml"),
     ("crucible/rvcbase", "ultimate-rvc.toml"),

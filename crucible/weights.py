@@ -498,11 +498,24 @@ def remove_files(
 
 def hf_token(config: Config) -> str | None:
     """`$HF_TOKEN`, else `[hf] token` in config.toml, else None."""
+    return hf_token_at(config.path)
+
+
+def hf_token_at(config_path: Path) -> str | None:
+    """The same credential, asked of a PATH rather than of a loaded Config.
+
+    `crucible/voicerepo.py` fetches a voice's manifest out of a private repo
+    while merging the catalog, and it does that without a `Config` — the merge
+    happens inside `load_all_voices()`, which the CLI, the tests and three job
+    types call with no server around. One reader either way: `hf_token` is this
+    function with a Config's path, so there is no second answer to "which token
+    does this machine use".
+    """
     from_env = os.environ.get(HF_TOKEN_ENV)
     if from_env is not None and from_env.strip() != "":
         return from_env.strip()
     try:
-        with config.path.open("rb") as handle:
+        with config_path.open("rb") as handle:
             document = tomllib.load(handle)
     except OSError:
         return None
