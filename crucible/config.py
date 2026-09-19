@@ -886,8 +886,13 @@ def _local_model_records(table: dict[str, Any]) -> tuple[LocalModelRecord, ...]:
     return tuple(found)
 
 
-def load_config(home: Path | None = None) -> Config:
-    """Read config.toml. Raises ConfigError naming the missing piece."""
+def _read_document(home: Path | None) -> tuple[Path, Path, dict[str, Any]]:
+    """The home, the path and the parsed document — or a ConfigError saying why.
+
+    One reader, because `own_engine_backend` below asks a question about the
+    same document and a second `tomllib.load` beside this one would be two
+    opinions about what "unreadable" means for one file.
+    """
     root = home if home is not None else crucible_home()
     path = config_path(root)
     if not path.exists():
@@ -896,9 +901,35 @@ def load_config(home: Path | None = None) -> Config:
         )
     try:
         with path.open("rb") as handle:
-            table = tomllib.load(handle)
+            return root, path, tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"could not read {path}: {exc}") from exc
+
+
+def own_engine_backend(home: Path | None = None) -> str | None:
+    """The backend kind of the engine THIS installation runs, or None for none.
+
+    `[server]` IS THE QUESTION. An installation whose config has no `[server]`
+    section serves nothing — Owen's PC is the case: the Windows half's
+    `config.toml` is an orchestrator's, `[orchestrator] distro = "Ubuntu"` and
+    no server at all, because the engine on that machine lives in the guest and
+    belongs to the guest's installation. "No engine here" is a FACT about such a
+    config and this is where it is stated, so a caller asking whether an engine
+    is its own gets an answer rather than an exception it has to interpret.
+
+    Unreadable is still an error. A config that is absent, will not parse, or
+    names a `[server]` without a `[backend] kind` raises `ConfigError` exactly
+    as `load_config` does: not knowing is not the same answer as none.
+    """
+    _root, _path, table = _read_document(home)
+    if "server" not in table:
+        return None
+    return _require(table, "backend", "kind", str)
+
+
+def load_config(home: Path | None = None) -> Config:
+    """Read config.toml. Raises ConfigError naming the missing piece."""
+    root, path, table = _read_document(home)
 
     upstreams = _upstream_records(table)
     return Config(

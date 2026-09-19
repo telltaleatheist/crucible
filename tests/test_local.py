@@ -267,6 +267,29 @@ def test_the_observation_carries_the_engines_own_version(monkeypatch, tmp_path):
         server.shutdown(); server.server_close(); thread.join()
 
 
+def _config(home: Path, body: str) -> Path:
+    path = home / "config.toml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _stub_the_service_path(monkeypatch):
+    """HERMETIC ON PURPOSE, and only as far as the systemd call.
+
+    `act` defaults `home` to the real `crucible_home()` and then drives
+    systemctl for real; an earlier draft of these tests did exactly that and
+    passed by touching the live engine. What is stubbed is the service
+    mechanism lookup and the start itself — never the ownership question the
+    guard asks, which reads the config file each test writes.
+    """
+    from types import SimpleNamespace
+    from crucible import service as service_module
+
+    monkeypatch.setattr(local, "load_config",
+                        lambda _h: SimpleNamespace(backend_kind="cuda-linux"))
+    monkeypatch.setattr(service_module, "start", lambda *a, **k: None)
+
+
 def test_an_engine_of_another_version_is_not_a_successful_start(monkeypatch, tmp_path):
     """The stale-process defect, measured 2026-09-16.
 
@@ -276,24 +299,61 @@ def test_an_engine_of_another_version_is_not_a_successful_start(monkeypatch, tmp
     answering with a version this installation did not install is not a start
     that worked.
     """
-    from types import SimpleNamespace
-    from crucible import service as service_module
-
     server, thread = _engine_serving(monkeypatch, tmp_path, "0.0.1-previous")
-    # HERMETIC ON PURPOSE. `act` defaults `home` to the real `crucible_home()`
-    # and then drives systemctl for real; an earlier draft of this test did
-    # exactly that and passed by touching the live engine. The service call is
-    # stubbed and `home` is the tmp dir, so what is under test is the version
-    # check and nothing else.
-    monkeypatch.setattr(local, "load_config",
-                        lambda _h: SimpleNamespace(backend_kind="cuda-linux"))
-    monkeypatch.setattr(service_module, "start", lambda *a, **k: None)
+    # THE CONFIG IS A REAL FILE, because the guard reads one: `own_engine_backend`
+    # answers "does this installation run an engine at all" out of the document,
+    # and a stub in its place would pin the answer instead of the reading.
+    _config(tmp_path, "[server]\nname = 'expected'\n[backend]\nkind = 'cuda-linux'\n")
+    _stub_the_service_path(monkeypatch)
     try:
         with pytest.raises(local.LocalError) as caught:
             local.act("start", tmp_path)
         assert "engine_version_stale" in str(caught.value)
         assert "0.0.1-previous" in str(caught.value)
         assert local.VERSION in str(caught.value)
+    finally:
+        server.shutdown(); server.server_close(); thread.join()
+
+
+def test_an_orchestrator_only_installation_judges_nobodys_engine(monkeypatch, tmp_path):
+    """Owen's PC, exactly, on the first real `ship.sh patch --deploy` (1.0.3).
+
+    The Windows half's `config.toml` is an ORCHESTRATOR's — `[orchestrator]
+    distro = "Ubuntu"` and no `[server]` — because the engine on that machine
+    lives in the guest and belongs to the guest's installation. `load_config`
+    raised on it, the draft read the raise as "own backend unknown" and treated
+    unknown as OURS, so the 1.0.3 host compared the guest's 1.0.2 against
+    itself and refused the whole install: the chicken-and-egg the guard's own
+    comment records fixing, back through another door. An installation with no
+    `[server]` section runs no engine, so there is nothing here for it to judge.
+    """
+    server, thread = _engine_serving(monkeypatch, tmp_path, "0.0.1-previous")
+    _config(tmp_path, '[orchestrator]\ndistro = "Ubuntu"\n')
+    _stub_the_service_path(monkeypatch)
+    try:
+        observed = local.act("start", tmp_path)
+        assert observed["state"] == "running"
+        assert observed["version"] == "0.0.1-previous"
+    finally:
+        server.shutdown(); server.server_close(); thread.join()
+
+
+def test_a_config_that_cannot_be_read_is_refused_by_name_and_never_read_as_ours(
+    monkeypatch, tmp_path
+):
+    """An unreadable config is not a verdict about whose engine is answering.
+
+    "We do not know" and "it is not ours" are different sentences, and only the
+    second one is a judgement this installation is entitled to make.
+    """
+    server, thread = _engine_serving(monkeypatch, tmp_path, "0.0.1-previous")
+    _config(tmp_path, "[server\nname = 'unterminated'\n")
+    _stub_the_service_path(monkeypatch)
+    try:
+        with pytest.raises(local.LocalError) as caught:
+            local.act("start", tmp_path)
+        assert "local_config_unreadable" in str(caught.value)
+        assert "engine_version_stale" not in str(caught.value)
     finally:
         server.shutdown(); server.server_close(); thread.join()
 

@@ -3748,3 +3748,119 @@ def test_the_guest_sequence_the_host_runs_is_the_phase20_one(tmp_path: Path) -> 
     assert "py3-none-any.whl" in generated
     assert "pip install --upgrade --no-input" in generated
     assert 'say "install-$type"' in generated
+
+
+# ------------------------- …AND ONLY ONCE THE WATCHER HAS SAID WHOSE ENGINE IT IS
+#
+# MEASURED on the first real `ship.sh patch --deploy` (1.0.3, 2026-09-19): the
+# tray started at 02:04:52 and the owner became `wsl-unit` at 02:04:59, when the
+# watch loop's first tick ran `running_owner`. The carry thread `main()` starts
+# a few lines after the watch thread asked its `Owner.WSL_UNIT` question inside
+# that seven-second gap, got the `Owner.NONE` that `start()` leaves when it
+# decides no owner, and returned with NO LINE IN THE LOG. The guest stayed on
+# 1.0.2 and `install.ps1` refused the whole install over it.
+
+
+def fast_watching_host(context: app_module.HostContext) -> app_module.Host:
+    """A host whose watch ticks fast enough for a test to wait on one."""
+    host = app_module.Host(context)
+    context.watcher.watch_s = 0.01
+    return host
+
+
+def settle_presence(host: app_module.Host) -> None:
+    """Run the REAL watch loop until it has settled a presence, then stop it.
+
+    The event is the seam under test, so a test that set it by hand would pin
+    nothing about who sets it in production — `watch` is the one writer, and
+    this is how a keeper gets to say so.
+    """
+    thread = threading.Thread(target=host.watch, name="keeper-watch", daemon=True)
+    thread.start()
+    assert host._presence_settled.wait(10.0), "the watch loop settled no presence"
+    host._stop.set()
+    thread.join(timeout=10.0)
+    assert not thread.is_alive()
+
+
+def test_the_guest_carry_waits_for_the_owner_the_watcher_has_not_measured_yet(
+    tmp_path: Path,
+) -> None:
+    """The carry thread starts BEFORE the owner is known, and still carries.
+
+    This is the 1.0.3 run exactly: presence is `starting`/`none` when the
+    thread begins, and only the watch tick turns it into `wsl-unit`.
+    """
+    runner = Scripted(
+        answers={
+            "installation.json": ok(guest_record("0.6.9")),
+            "printf %s": ok("/home/crucible/.crucible"),
+        },
+        pings=[200] * 50,
+    )
+    context = _context(tmp_path, runner)
+    context.release = "0.7.0"
+    context.presence = presence.Presence(
+        Distro.PRESENT, Engine.STARTING, "starting", Owner.NONE
+    )
+    host = fast_watching_host(context)
+
+    carry = threading.Thread(
+        target=host.carry_guest_to_this_release,
+        kwargs={"settle_ceiling_s": 10.0},
+        name="keeper-carry",
+        daemon=True,
+    )
+    carry.start()
+    # Nothing may have been installed against an owner nobody has measured.
+    assert not [a for a in runner.calls if "crucible-install.sh" in " ".join(a)]
+
+    settle_presence(host)
+    carry.join(timeout=10.0)
+    assert not carry.is_alive(), "the carry never finished"
+
+    assert context.presence.owner is Owner.WSL_UNIT
+    installs = [
+        " ".join(argv) for argv in runner.calls if "crucible-install.sh" in " ".join(argv)
+    ]
+    assert len(installs) == 1, installs
+    assert "--release 0.7.0" in installs[0]
+
+
+def test_a_machine_with_no_guest_says_so_rather_than_returning_silently(
+    tmp_path: Path,
+) -> None:
+    """The fourth answer. `owner=found` is a real verdict about this machine and
+    the log is where a person reads it; the silent `return` made a carry that
+    decided nothing indistinguishable from one that never ran."""
+    runner = Scripted(pings=[200] * 50)
+    context = _context(tmp_path, runner)
+    context.presence = presence.Presence(
+        Distro.ABSENT, Engine.RUNNING, "somebody else's", Owner.FOUND
+    )
+    host = fast_watching_host(context)
+    settle_presence(host)
+    host.carry_guest_to_this_release(settle_ceiling_s=10.0)
+
+    written = (tmp_path / "host.log").read_text(encoding="utf-8")
+    assert "guest release: no guest to carry (owner=found)" in written, written
+    assert not [a for a in runner.calls if "crucible-install.sh" in " ".join(a)]
+
+
+def test_a_presence_that_never_settles_is_a_line_and_not_a_thread_that_waits_forever(
+    tmp_path: Path,
+) -> None:
+    """No watch loop runs here, so the event is never set: the ceiling is what
+    ends the wait, and it says so by name instead of leaving a daemon thread
+    parked on a fact that is not coming."""
+    runner = Scripted()
+    context = _context(tmp_path, runner)
+    host = app_module.Host(context)
+    host.carry_guest_to_this_release(settle_ceiling_s=1.0)
+
+    written = (tmp_path / "host.log").read_text(encoding="utf-8")
+    assert "guest release: presence never settled within 1 s" in written, written
+    assert not [a for a in runner.calls if "crucible-install.sh" in " ".join(a)]
+    # The shipped ceiling outlasts the first tick it is waiting for, which is
+    # the only property a number composed from the watch's own constants has.
+    assert app_module.PRESENCE_SETTLE_CEILING_SECONDS > presence.WATCH_SECONDS

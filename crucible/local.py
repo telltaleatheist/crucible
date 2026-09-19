@@ -18,9 +18,9 @@ import webbrowser
 from urllib.parse import quote
 
 from . import VERSION
-from .config import crucible_home, load_config
+from .config import crucible_home, load_config, own_engine_backend
 from .pairing import parse_pairing_line
-from .errors import CrucibleError
+from .errors import ConfigError, CrucibleError
 
 RECORD = "installation.json"
 
@@ -311,18 +311,49 @@ def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
                 # chicken-and-egg where neither side could go first. Same
                 # distinction as `owner=found` above — an engine this
                 # installation did not install is not its to judge.
+                #
+                # "OURS" IS A FACT, and an unknown own-backend is not a licence
+                # to judge. The draft below read every failure of `load_config`
+                # as `own_backend = None` and then treated None as ours, which
+                # on Owen's PC is the chicken-and-egg this paragraph records
+                # fixing, back again by another door: that machine's Windows
+                # config is an ORCHESTRATOR's — `[orchestrator] distro =
+                # "Ubuntu"`, no `[server]` — so `load_config` raised, `ours`
+                # became True, and the 1.0.3 host compared the guest's 1.0.2
+                # against itself and refused the install (measured on the first
+                # real `ship.sh patch --deploy`, 2026-09-19). An installation
+                # with no `[server]` section runs no engine, so the engine
+                # answering is by definition somebody else's; and a config that
+                # cannot be READ is a refusal by name rather than a verdict,
+                # because "we do not know whose engine that is" and "it is not
+                # ours" are different sentences.
+                #
+                # THE MISMATCH IS ASKED ABOUT FIRST, and the ownership question
+                # only about a mismatch: an engine reporting this release, or
+                # reporting none, is not a verdict waiting to be made, so there
+                # is nothing there for a config to decide and a config that
+                # cannot be read is not yet anybody's problem.
                 running_version = observed.get("version")
-                try:
-                    own_backend = load_config(home).backend_kind
-                except (ValueError, OSError, CrucibleError):
-                    own_backend = None
-                ours = own_backend is None or observed.get("backend") in (None, own_backend)
-                if ours and isinstance(running_version, str) and running_version != VERSION:
-                    raise LocalError(
-                        f"engine_version_stale: the engine answering is "
-                        f"{running_version}, but this installation is {VERSION}. "
-                        "Its service was not restarted onto the new definition"
+                if isinstance(running_version, str) and running_version != VERSION:
+                    try:
+                        own_backend = own_engine_backend(home)
+                    except (ConfigError, OSError) as exc:
+                        raise LocalError(
+                            "local_config_unreadable: this installation's config "
+                            f"could not be read ({exc}), so whether the engine "
+                            f"answering ({running_version}) is its own cannot be "
+                            "known"
+                        ) from exc
+                    ours = own_backend is not None and observed.get("backend") in (
+                        None,
+                        own_backend,
                     )
+                    if ours:
+                        raise LocalError(
+                            f"engine_version_stale: the engine answering is "
+                            f"{running_version}, but this installation is {VERSION}. "
+                            "Its service was not restarted onto the new definition"
+                        )
                 from .sharing import reconcile
                 try:
                     observed["sharing"] = reconcile(home)
