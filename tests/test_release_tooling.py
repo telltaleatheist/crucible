@@ -55,10 +55,17 @@ def test_ship_only_names_scripts_that_exist():
 
 
 def test_ship_runs_the_steps_in_the_order_it_documents():
-    """The header lists the steps; the body must call them in that order."""
+    """The header lists the steps; the body must call them in that order.
+
+    READ OUT OF THE HEADER, not typed here. The list used to be a literal, and
+    when PHASE20 took the test step off the deploy path this test failed on a
+    name that was correctly gone — a second copy of the step list, kept in the
+    place that is supposed to be checking the first one.
+    """
     text = SHIP.read_text(encoding='utf-8')
-    order = ['scripts/bump.py', 'scripts/tests.sh', 'scripts/release.sh', 'scripts/deploy.sh',
-             'scripts/promote_release.py']
+    header = text[:text.index('set -euo pipefail')]
+    order = re.findall(r'^#\s+\d+\.\s.*?\((scripts/[A-Za-z0-9_.-]+)', header, re.MULTILINE)
+    assert order, 'the header no longer numbers its steps with the script each runs'
     positions = []
     for name in order:
         # The LAST mention, so a header that lists them all does not decide this.
@@ -102,37 +109,21 @@ def test_deploy_never_reports_an_unreachable_machine_as_current():
         'deploy.sh notices an unreachable machine but does not carry it into the result')
 
 
-def test_the_selector_widens_when_it_does_not_understand_a_file():
-    """The safe direction is MORE tests; a silent skip is the failure mode."""
-    text = TESTS.read_text(encoding='utf-8')
-    assert 'no test names it' in text
-    assert re.search(r'everything="\$everything .*no test names it', text), (
-        'tests.sh no longer routes an unrecognised file to the whole suite')
+def test_the_selector_says_which_files_no_test_names():
+    """It used to answer those with the whole suite.
 
-
-def test_the_selector_treats_its_own_widening_list_as_wide():
-    """conftest, the fakes and the workflows must each still select everything."""
-    text = TESTS.read_text(encoding='utf-8')
-    wide = text.split('is_wide()', 1)[1].split('}', 1)[0]
-    for needed in ['conftest.py', 'fake_*.py', '.github/*', 'crucible/app.py']:
-        assert needed in wide, f'{needed} is no longer a whole-suite trigger'
-
-
-def test_the_two_files_every_release_touches_are_not_unconditionally_wide():
-    """`crucible/__init__.py` and `pyproject.toml` both carry the version.
-
-    If either is wide, every release runs the whole suite no matter what the
-    release contains — the selector switches itself off exactly when it is being
-    asked to work. They are allowed through only when the diff is the version
-    line alone, and that condition must still be attached to both of them.
+    PHASE20-CODE-NOT-ENVIRONMENTS.md 7 removed the reason: `ship.sh` runs no
+    tests, so nothing leans on `--changed` being safe enough for a release, and
+    a hundred files is not a useful answer to "no test mentions this one". What
+    replaces the widening is saying so — a file the selector could not place is
+    printed by name, which is the part a silent skip would lose.
     """
     text = TESTS.read_text(encoding='utf-8')
-    wide = text.split('is_wide()', 1)[1].split('}', 1)[0]
-    conditional = [line for line in wide.splitlines() if 'version_line_only' in line]
-    assert len(conditional) == 1, 'the version-line exception is not a single rule any more'
-    for carrier in ['crucible/__init__.py', 'pyproject.toml']:
-        assert carrier in conditional[0], f'{carrier} no longer goes through version_line_only'
-        assert f'{carrier})' in conditional[0] or f'{carrier}|' in conditional[0]
+    assert 'unnamed="$unnamed $path"' in text, (
+        'tests.sh no longer collects the files no test names')
+    assert 'no test in tests/ names:$unnamed' in text, (
+        'tests.sh collects them and does not print them, which is the silent '
+        'skip this was written against')
 
 
 # ------------------------------------------------------------------ the README
@@ -186,15 +177,24 @@ def test_the_selector_discards_a_name_that_matches_almost_everything():
     assert re.search(r'total \* \d+ / \d+', text), 'the guard no longer compares against the total'
 
 
-def test_the_selector_only_uses_a_directory_name_inside_the_package():
-    """Outside `crucible/`, a directory is a place, not a subject.
+def test_the_selector_never_searches_on_a_directory_name():
+    """A directory is a place, not a subject.
 
-    "scripts" appears in twenty-three test files and says nothing about any of
-    them; "voices" is what a test means when it reads `crucible/voices/*.toml`.
+    It was a candidate for one case: `crucible/voices/*.toml`, a family of data
+    files a test reads together and names as "voices". Under PHASE20 7 only
+    `.py`, `.ts` and `.sh` select anything at all, so no `.toml` ever reaches
+    the name search and the only thing a directory name can still do is widen a
+    module past the tests that actually name it.
     """
     text = TESTS.read_text(encoding='utf-8')
-    assert 'case "$path" in crucible/*/*) candidates="$candidates $parent" ;; esac' in text, (
-        'the directory candidate is no longer restricted to package data directories')
+    # NOT a bare search for `dirname`: every script in this repo opens with
+    # `cd "$(dirname "${BASH_SOURCE[0]}")/.."`, so that spelling matched the
+    # very file this was written to check and the assertion could not fail for
+    # the reason it names. What it is looking for is a directory turned into a
+    # grep TERM, which is `basename "$(dirname ...)"` and the variable it fed.
+    assert 'basename "$(dirname' not in text, (
+        'a directory is being made into a search term again')
+    assert '$parent' not in text, 'the directory candidate is back'
 
 
 def test_the_selector_fetches_tags_before_deciding_what_is_new():

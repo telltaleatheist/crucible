@@ -29,9 +29,18 @@
 # Every installer here is idempotent and re-runnable after a failure; that is
 # their own contract, not an assumption of this script.
 #
+# THE MACHINES ARE INSTALLED AT THE SAME TIME, each in its own subshell, with
+# every line named for the machine it came from. They share nothing — `wsl` and
+# `windows` are two installs on one box and `mac` is at the end of an ssh — so
+# a queue only ever added their times together, and carried up to a minute of
+# `await_release` polling behind each one. One machine failing does not stop the
+# others, and the summary names it. See "the work" below.
+#
 # THIS RESTARTS SERVICES. The WSL engine, the Windows tray host and the Mac
-# launchd agent all go down and come back. It asks before it does that unless
-# --yes is passed.
+# launchd agent all go down and come back — now at once rather than in turn. It
+# asks before it does that unless --yes is passed, and it asks ONCE, before the
+# fan-out: three subshells share one stdin, so a prompt inside one of them would
+# be answered for the other two by whichever read first.
 
 set -euo pipefail
 
@@ -67,7 +76,7 @@ while [ $# -gt 0 ]; do
     --only)    [ $# -ge 2 ] || fail "--only needs a comma-separated list"; only="$2"; shift 2 ;;
     --yes|-y)  assume_yes=1; shift ;;
     --force)   force=1; shift ;;
-    -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown argument $1" ;;
   esac
 done
@@ -196,10 +205,19 @@ install_mac() {
 install_windows() {
   # `irm | iex` cannot take a parameter, so the script is fetched to a file
   # first — the same reason its own header gives for -Uninstall.
-  local script="${TMPDIR:-/tmp}/crucible-install-$1.ps1"
+  local script="${TMPDIR:-/tmp}/crucible-install-$1.ps1" status=0
   curl -fsSL -o "$script" "$(install_ps1_url "$1")"
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$script" 2>/dev/null || echo "$script")" -Release "$1"
-  rm -f "$script"
+  # THE INSTALLER'S STATUS, NOT THE CLEANUP'S. `rm -f` was the last command in
+  # this function, so it WAS this function's exit status — and `set -e` is
+  # disabled inside a function called as an `if` condition, which is how this
+  # is called. A refused install.ps1 therefore returned 0, and the only thing
+  # that noticed was the after-check a minute of polling later, reporting a
+  # machine that "still reports" the old version rather than one whose
+  # installer said no. Caught by tests/test_deploy_parallel.py, 2026-09-18.
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$script" 2>/dev/null || echo "$script")" -Release "$1" || status=$?
+  # A cleanup failure is not an install failure. It is not silent either.
+  rm -f "$script" || echo "deploy: could not remove $script" >&2
+  return "$status"
 }
 
 # THE RECORD IS NOT ALWAYS WRITTEN BY THE INSTALLER. `installation.json` is
@@ -209,14 +227,21 @@ install_windows() {
 # installer has exited successfully. Reading it once, immediately, is reading a
 # race. This waits for the value to become the one asked for, and gives up with
 # whatever it last saw so the caller reports the truth rather than a timeout.
+#
+# TWO SECONDS, THIRTY TIMES — the same sixty-second ceiling that three seconds
+# twenty times was, asked often enough that a record published one second after
+# the installer returns is not read back two seconds later. With the fleet
+# installing at once this poll is the tail of the whole run rather than a third
+# of it, so its granularity is the last thing standing between an install
+# finishing and deploy saying so.
 await_release() {
   local machine="$1" want="$2" seen=""
   local attempt=0
-  while [ "$attempt" -lt 20 ]; do
+  while [ "$attempt" -lt 30 ]; do
     seen="$("read_$machine")"
     [ "$seen" = "$want" ] && { echo "$seen"; return; }
     attempt=$(( attempt + 1 ))
-    sleep 3
+    sleep 2
   done
   echo "$seen"
 }
@@ -263,8 +288,59 @@ if [ "$assume_yes" != "1" ]; then
 fi
 
 # ------------------------------------------------------------------- the work
+#
+# ALL AT ONCE. The three machines share nothing, so installing them one after
+# another only ever added their times together, and each carried up to sixty
+# seconds of `await_release` polling behind it. Measured 2026-09-18: a release
+# whose actual installing was about ninety seconds spent several minutes of
+# wall-clock in that queue.
+#
+# Each machine therefore gets its own subshell, and its verdict comes back
+# through a FILE rather than through an exit status: a background job's status
+# says that A job failed and cannot say which machine it was, and every line of
+# the summary below names a machine.
+#
+# EVERY LINE IS PREFIXED with the machine it came from, because three installers
+# writing to one terminal at the same moment is unreadable otherwise — and that
+# includes the installers' own progress lines, which are most of what they
+# print. stderr is merged into stdout for the same reason: two streams through
+# two prefixers interleave by buffer rather than by line, and half a line with
+# somebody else's name on it is worse than a line on the wrong stream. The
+# failure summary at the end is still stderr.
+#
+# `sed` prefixes at newlines, so a progress bar that repaints with a bare
+# carriage return would arrive as one enormous unprefixed line. None of these
+# three installers is run with a terminal on either side — `wsl.exe --exec`,
+# `ssh -n` and `powershell.exe -File` — which is the condition under which pip
+# and curl print progress as whole lines instead of repainting.
+
+work="$(mktemp -d)"
+# A cleanup failure is not a deploy failure. It is not silent either.
+trap 'rm -rf "$work" 2>/dev/null || echo "deploy: could not remove $work" >&2' EXIT
+
+# One machine, whole: install it, wait for its record, and leave two files —
+# `<machine>.seconds` always, `<machine>.why` only when something went wrong.
+# An absent `.why` beside a present `.seconds` is the success signal, and an
+# absent `.seconds` means this function did not finish, which is reported.
+deploy_one() {
+  local machine="$1" want="$2" started after
+  started="$(date +%s)"
+  if "install_$machine" "$want"; then
+    after="$(await_release "$machine" "$want")"
+    if [ "$after" = "$want" ]; then
+      echo "now runs $after"
+    else
+      echo "still reports $after a minute after installing $want"
+      echo "reports:$after" > "$work/$machine.why"
+    fi
+  else
+    echo "installer failed" > "$work/$machine.why"
+  fi
+  echo $(( $(date +%s) - started )) > "$work/$machine.seconds"
+}
 
 failed=""
+running=""
 for machine in $FLEET; do
   selected "$machine" || continue
   case "${BEFORE[$machine]}" in
@@ -275,18 +351,30 @@ for machine in $FLEET; do
       failed="$failed $machine(unreachable)"; continue ;;
   esac
 
+  running="$running $machine"
   echo
   echo "deploy: $machine  ${BEFORE[$machine]} -> $release"
-  if "install_$machine" "$release"; then
-    after="$(await_release "$machine" "$release")"
-    if [ "$after" = "$release" ]; then
-      echo "deploy: $machine now runs $after"
-    else
-      echo "deploy: $machine still reports $after a minute after installing $release" >&2
-      failed="$failed $machine(reports:$after)"
-    fi
-  else
-    failed="$failed $machine(installer failed)"
+  deploy_one "$machine" "$release" 2>&1 | sed "s/^/$machine: /" &
+done
+
+# No arguments: every machine, however long the slowest takes. The verdicts are
+# read out of $work below rather than from this status, which cannot name one.
+wait
+
+echo
+for machine in $running; do
+  if [ ! -f "$work/$machine.seconds" ]; then
+    # Its subshell was killed, or died before it could record anything. That is
+    # a machine in an unknown state, which is never reported as done.
+    failed="$failed $machine(no result: its subshell left no record)"
+    continue
+  fi
+  # READ BY `ship.sh`, which folds these into its own table. deploy.sh is what
+  # knows: it forked the installs and it joined them, and a caller timing the
+  # whole call would only ever learn the slowest machine.
+  echo "deploy: timing $machine $(cat "$work/$machine.seconds")"
+  if [ -s "$work/$machine.why" ]; then
+    failed="$failed $machine($(cat "$work/$machine.why"))"
   fi
 done
 
