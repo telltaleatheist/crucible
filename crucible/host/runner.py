@@ -15,10 +15,16 @@ Three rules carried over from that file, each of which was a defect somewhere:
    `wsl.exe` never return, and a tray that hangs is a tray with no menu.
 3. **A failure is a RESULT, not an exception.** The caller decides what a
    non-zero exit means; several of them mean "not yet" rather than "wrong".
+
+And a fourth this file learned on its own, deploy 1.0.4:
+
+4. **The pipes are BYTES, and this module decides what they say.** `wsl.exe`
+   writes its own diagnostics as UTF-16LE; see `_decode_pipe`.
 """
 
 from __future__ import annotations
 
+import codecs
 import subprocess
 import urllib.error
 import urllib.request
@@ -176,8 +182,9 @@ class ProcessRunner:
                 # A tray program has no console; a child that opens one is a
                 # window flashing on somebody's desktop every fifteen seconds.
                 creationflags=_no_window_flag(self._platform),
-                text=True,
-                errors="replace",
+                # NOT `text=True`. Asking subprocess to decode means asking it
+                # to decode with the LOCALE codec, and one of the two programs
+                # on the other end of this pipe does not use it — `_decode_pipe`.
             )
         except subprocess.TimeoutExpired:
             return RunResult(
@@ -190,8 +197,8 @@ class ProcessRunner:
             return RunResult(code=None, stdout="", stderr="", failure=str(exc))
         return RunResult(
             code=completed.returncode,
-            stdout=completed.stdout or "",
-            stderr=completed.stderr or "",
+            stdout=_decode_pipe(completed.stdout),
+            stderr=_decode_pipe(completed.stderr),
             failure=None,
         )
 
@@ -225,6 +232,62 @@ class ProcessRunner:
         )
         return ControlledChild(child) if controlled else child  # type: ignore[return-value]
 
+
+
+#: How many bytes of a stream are enough to recognise UTF-16LE by its shape.
+#: A whole `wsl -l -v` table would do as well; the point of a window is that
+#: the guest's own output, which can be megabytes, is not walked twice.
+_UTF16_SNIFF_BYTES = 64
+
+
+def _decode_pipe(raw: bytes | None) -> str:
+    """Turn one captured pipe into text, and MEASURE which codec wrote it.
+
+    `wsl.exe` IS THE ONLY TOOL THIS HOST RUNS THAT NEEDS THIS, and the reason
+    is that it is really two programs. Its OWN messages — "There is no
+    distribution with the supplied name.", "Error code: Wsl/Service/
+    WSL_E_DISTRO_NOT_FOUND", the `wsl -l -v` table — are written by the Windows
+    side as UTF-16LE, which is what the Windows console API takes. Everything
+    it `--exec`s is a program inside the guest, and its bytes are RELAYED, so
+    they arrive exactly as Linux wrote them: UTF-8. One command can therefore
+    produce a UTF-16 stderr and a UTF-8 stdout, which is why this decides per
+    stream and not once per call.
+
+    MEASURED 2026-09-19, deploy 1.0.4. The runner asked `subprocess.run` for
+    text, so both streams were decoded with the locale codec — under which
+    every NUL of a UTF-16LE string is a perfectly good character — and the one
+    sentence naming why the deploy had failed reached `host.log` as
+    `T\\x00h\\x00e\\x00r\\x00e\\x00 \\x00i\\x00s\\x00 …`. Nothing was lost; it
+    was simply unreadable, which for a diagnostic is the same thing.
+
+    Two facts identify it, both from the bytes themselves rather than from the
+    argv, because a runner that decided by command name would be a second
+    owner of the question "what is wsl.exe": a UTF-16LE byte-order mark, and —
+    for the streams that carry none, which is what 1.0.4 measured — a high
+    byte of zero under every ASCII character in the opening window.
+
+    `errors="replace"` and never `"ignore"`: a byte nothing can decode becomes
+    U+FFFD, a character a person reading the log can SEE, rather than a hole in
+    a sentence that reads as if it were complete.
+    """
+    if not raw:
+        return ""
+    if raw.startswith(codecs.BOM_UTF16_LE):
+        return _newlines(raw[len(codecs.BOM_UTF16_LE) :].decode("utf-16-le", errors="replace"))
+    window = raw[:_UTF16_SNIFF_BYTES]
+    if len(window) >= 2 and all(window[i] == 0 for i in range(1, len(window), 2)):
+        return _newlines(raw.decode("utf-16-le", errors="replace"))
+    return _newlines(raw.decode("utf-8", errors="replace"))
+
+
+def _newlines(text: str) -> str:
+    """CRLF and CR to LF — what `text=True` used to do on the way past.
+
+    Not cosmetic and not new behaviour: `parse_wsl_list` and every other reader
+    in this package was written against universal-newline output, and wsl.exe
+    is a Windows program that ends its lines the Windows way.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _no_window_flag(platform: str) -> int:

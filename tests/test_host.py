@@ -32,7 +32,7 @@ from crucible.host.catalog import CatalogRefusal, Subject
 from crucible.host.errors import HOST_ERROR_CODES, HostError
 from crucible.host.menu import Distro, Engine, Owner
 from crucible.host.runner import RunResult
-from crucible.host.wsl_states import WSL_STATE_CODES, WSL_STATES
+from crucible.host.wsl_states import CRUCIBLE_DISTRO, WSL_STATE_CODES, WSL_STATES
 
 WINDOWS_ENV = {
     "LOCALAPPDATA": r"C:\Users\tellt\AppData\Local",
@@ -3534,8 +3534,10 @@ def test_children_start_in_crucible_home_not_in_the_installation(monkeypatch) ->
 
     class Done:
         returncode = 0
-        stdout = ""
-        stderr = ""
+        # BYTES, because that is what the pipes carry now: the runner decodes
+        # them itself rather than letting the locale codec at wsl.exe's UTF-16.
+        stdout = b""
+        stderr = b""
 
     def fake_run(argv, **kwargs):
         seen["cwd"] = kwargs.get("cwd")
@@ -3545,6 +3547,100 @@ def test_children_start_in_crucible_home_not_in_the_installation(monkeypatch) ->
     runner = ProcessRunner("win32", {}, cwd="C:/Users/x/AppData/Local/Crucible")
     runner.run(["wsl.exe", "-l", "-v"], timeout_s=5)
     assert seen["cwd"] == "C:/Users/x/AppData/Local/Crucible"
+
+
+# --------------------------------------------- what wsl.exe says about ITSELF
+#
+# MEASURED 1.0.4, 2026-09-19 03:10, in host.log:
+#
+#   line: {'text': 'T\x00h\x00e\x00r\x00e\x00 \x00i\x00s\x00 \x00n\x00o\x00 …
+#
+# `wsl.exe` writes its OWN diagnostics as UTF-16LE. The runner asked
+# `subprocess.run` for text, so they were decoded with the locale codec — under
+# which a NUL is a perfectly good character — and the one sentence naming why
+# the deploy failed reached the log as a row of interleaved NULs.
+
+WSL_E_DISTRO_NOT_FOUND = (
+    "There is no distribution with the supplied name.\n"
+    "Error code: Wsl/Service/WSL_E_DISTRO_NOT_FOUND\n"
+)
+
+
+def piping(stdout: bytes = b"", stderr: bytes = b"", code: int = 0):
+    """A `subprocess.run` that obeys subprocess's OWN contract about decoding.
+
+    Asked for text it decodes with the locale codec and hands back a string;
+    not asked, it hands back the bytes the pipe carried. That is the whole
+    difference this keeper is about, so the fake may not paper over it — a fake
+    that always returned bytes would make the pre-fix failure an artefact of
+    the fake rather than the 1.0.4 defect.
+    """
+
+    def fake_run(argv, **kwargs):
+        class Done:
+            returncode = code
+
+        if kwargs.get("text") or kwargs.get("encoding"):
+            Done.stdout = stdout.decode("utf-8", errors=kwargs.get("errors", "strict"))
+            Done.stderr = stderr.decode("utf-8", errors=kwargs.get("errors", "strict"))
+        else:
+            Done.stdout = stdout
+            Done.stderr = stderr
+        return Done()
+
+    return fake_run
+
+
+def a_runner(monkeypatch, fake_run) -> object:
+    import subprocess as sp
+
+    from crucible.host.runner import ProcessRunner
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    return ProcessRunner("win32", {}, cwd="C:/Users/x/AppData/Local/Crucible")
+
+
+def test_wsl_exes_own_utf16_message_is_read_as_a_sentence(monkeypatch) -> None:
+    """The 1.0.4 failure, byte for byte, and what the log must have said.
+
+    CRLF on the wire, because wsl.exe is a Windows program and that is what it
+    writes — and `\\n` out, because `text=True` used to do that translation and
+    everything that parses `wsl -l -v` was written against the result.
+    """
+    utf16 = WSL_E_DISTRO_NOT_FOUND.replace("\n", "\r\n").encode("utf-16-le")
+    runner = a_runner(monkeypatch, piping(stderr=utf16, code=4294967295))
+    result = runner.run(["wsl.exe", "-d", "crucible", "--exec", "bash"], timeout_s=5)
+
+    assert result.stderr == WSL_E_DISTRO_NOT_FOUND
+    assert "\x00" not in result.stderr
+    # `said()` is what `step_failed` puts in front of a person.
+    assert result.said().startswith("There is no distribution with the supplied name.")
+
+
+def test_a_bom_marks_the_same_stream_even_when_it_is_one_word(monkeypatch) -> None:
+    """The other shape wsl.exe emits. A one-word line has no second byte to
+    count NULs in, so the BOM is the fact that has to be read."""
+    runner = a_runner(monkeypatch, piping(stdout=b"\xff\xfe" + "Ubuntu\n".encode("utf-16-le")))
+    assert runner.run(["wsl.exe", "-l", "-q"], timeout_s=5).stdout == "Ubuntu\n"
+
+
+def test_the_guests_own_utf8_output_is_untouched(monkeypatch) -> None:
+    """Everything `--exec` runs writes UTF-8 and it passes through as written —
+    including the non-ASCII that would break a UTF-16 guess."""
+    runner = a_runner(monkeypatch, piping(stdout="/home/telltale/.crucible — café\n".encode("utf-8")))
+    assert runner.run(["wsl.exe", "-d", "Ubuntu", "--exec", "bash"], timeout_s=5).stdout == (
+        "/home/telltale/.crucible — café\n"
+    )
+
+
+def test_a_byte_that_decodes_as_neither_is_replaced_and_therefore_visible(
+    monkeypatch,
+) -> None:
+    """`errors="replace"`, never `"ignore"`: a byte nothing can read becomes a
+    character a person reading host.log can SEE, instead of a sentence with a
+    silent hole in it."""
+    runner = a_runner(monkeypatch, piping(stdout=b"release \xff 1.0.4\n"))
+    assert runner.run(["wsl.exe", "-l", "-v"], timeout_s=5).stdout == "release \ufffd 1.0.4\n"
 
 
 # ------------------------------------------------ the from-scratch WSL walk
@@ -3864,3 +3960,107 @@ def test_a_presence_that_never_settles_is_a_line_and_not_a_thread_that_waits_for
     # The shipped ceiling outlasts the first tick it is waiting for, which is
     # the only property a number composed from the watch's own constants has.
     assert app_module.PRESENCE_SETTLE_CEILING_SECONDS > presence.WATCH_SECONDS
+
+
+# ------------------------- …INTO THE DISTRO THIS HOST MANAGES, NOT A DEFAULT NAME
+#
+# MEASURED on the second real deploy (1.0.4, 2026-09-19 03:10). The carry now
+# waited for presence and got `owner=wsl-unit` — and then ran `install.sh` in a
+# distro called "crucible", which on Owen's PC does not exist:
+#
+#   step_failed: install.sh exited 4294967295 inside "crucible":
+#   There is no distribution with the supplied name.
+#
+# The host had claimed "Ubuntu" seconds earlier. One fact, two owners: the
+# claim read the watcher and the carry read `EngineInstall`'s default.
+
+
+def consented_watcher(
+    runner: Scripted, host_log: log.HostLog, distro: str
+) -> presence.PresenceWatcher:
+    """The watcher `main()` builds when config.toml names a distro (PHASE17 2.5)."""
+    return presence.PresenceWatcher(
+        runner,
+        host_log,
+        distro=distro,
+        consented=True,
+        monotonic=ticking(),
+        sleep=lambda _s: None,
+    )
+
+
+def a_consented_machine_whose_guest_is_behind() -> Scripted:
+    """Owen's PC at 1.0.4: Ubuntu, a system unit, and a guest on the old release."""
+    return Scripted(
+        answers={
+            "-l -v": ok(OWENS_PC_LIST),
+            "-u root --exec systemctl is-enabled": ok("enabled" + chr(10)),
+            "installation.json": ok(guest_record("0.6.9")),
+            "printf %s": ok("/home/crucible/.crucible"),
+        },
+        pings=[200] * 50,
+    )
+
+
+def test_the_carry_runs_in_the_distro_this_host_consented_to(tmp_path: Path) -> None:
+    """The distro has ONE owner — the watcher — and the carry asks it.
+
+    A host that claims the engine in "Ubuntu" and then installs into "crucible"
+    is two answers to one question, and the second one is the one the guest
+    never hears.
+    """
+    runner = a_consented_machine_whose_guest_is_behind()
+    context = _context(tmp_path, runner)
+    context.release = "0.7.0"
+    context.presence = presence.Presence(
+        Distro.PRESENT, Engine.STARTING, "starting", Owner.NONE
+    )
+    context.watcher = consented_watcher(runner, context.log, "Ubuntu")
+    host = fast_watching_host(context)
+    settle_presence(host)
+    assert context.presence.owner is Owner.WSL_UNIT
+
+    host.carry_guest_to_this_release(settle_ceiling_s=10.0)
+
+    installs = [
+        argv for argv in runner.calls if "crucible-install.sh" in " ".join(argv)
+    ]
+    assert len(installs) == 1, installs
+    assert installs[0][:3] == ["wsl.exe", "-d", "Ubuntu"], installs[0]
+    # And every OTHER wsl.exe the carry made — the `installation.json` read it
+    # decides on, above all — went to the same distro. A carry that read one
+    # guest and installed into another would still be two owners.
+    assert not [
+        argv for argv in runner.calls if CRUCIBLE_DISTRO in argv
+    ], "the carry named the default distro on a machine that consented to another"
+
+
+def test_an_unconsented_host_still_carries_the_distro_crucible_imported(
+    tmp_path: Path,
+) -> None:
+    """The other half of one owner. With no consent the watcher's distro IS
+    `CRUCIBLE_DISTRO`, so reading the watcher changes nothing here — which is
+    what makes it safe to read it everywhere."""
+    runner = Scripted(
+        answers={
+            "installation.json": ok(guest_record("0.6.9")),
+            "printf %s": ok("/home/crucible/.crucible"),
+        },
+        pings=[200] * 50,
+    )
+    context = _context(tmp_path, runner)
+    context.release = "0.7.0"
+    context.presence = presence.Presence(
+        Distro.PRESENT, Engine.STARTING, "starting", Owner.NONE
+    )
+    host = fast_watching_host(context)
+    settle_presence(host)
+    assert context.presence.owner is Owner.WSL_UNIT
+
+    host.carry_guest_to_this_release(settle_ceiling_s=10.0)
+
+    installs = [
+        argv for argv in runner.calls if "crucible-install.sh" in " ".join(argv)
+    ]
+    assert len(installs) == 1, installs
+    assert installs[0][:3] == ["wsl.exe", "-d", CRUCIBLE_DISTRO], installs[0]

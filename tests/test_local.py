@@ -93,7 +93,7 @@ def test_windows_failed_stop_does_not_publish_stopped(tmp_path):
         # A guest whose unit is a USER one, which is the path this test is
         # about: `probe_unit` is what the stop now asks FIRST to decide
         # which manager to speak to.
-        watcher=SimpleNamespace(guest_uid=lambda: "1000", _distro="crucible",
+        watcher=SimpleNamespace(guest_uid=lambda: "1000", distro="crucible",
             probe_unit=lambda: UnitProbe(True, "enabled", "user unit",
                 SCOPE_USER)),
         presence=Presence(Distro.PRESENT, Engine.RUNNING, "running", Owner.WSL_UNIT), release="test")
@@ -170,7 +170,7 @@ def test_wsl_move_publishes_only_the_authenticated_guest(tmp_path, monkeypatch, 
     old = SimpleNamespace(release=lambda: events.append("old hold released"))
     guest = SimpleNamespace(boot=lambda: Presence(Distro.PRESENT, Engine.RUNNING, "guest up", Owner.WSL_UNIT),
                             read_guest_pairing=lambda distro: line,
-                            _distro="crucible", hold=lambda distro: events.append("guest held"))
+                            distro="crucible", hold=lambda distro: events.append("guest held"))
     context = app.HostContext(runner=SimpleNamespace(), log=HostLog(tmp_path / "log", tmp_path / "old"),
         home=tmp_path, watcher=old,
         presence=Presence(Distro.ABSENT, Engine.RUNNING, "native", Owner.HOST_CHILD), release="test")

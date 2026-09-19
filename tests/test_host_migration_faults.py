@@ -68,7 +68,7 @@ def move_host(tmp_path, monkeypatch, base):
     guest = SimpleNamespace(
         boot=lambda: presence.Presence(Distro.PRESENT, Engine.RUNNING, 'guest ready', Owner.WSL_UNIT),
         read_guest_pairing=lambda distro: 'crucible://guest@127.0.0.1:7100/#token',
-        _distro='crucible', hold=lambda distro: None, release=lambda: None,
+        distro='crucible', hold=lambda distro: None, release=lambda: None,
     )
     monkeypatch.setattr(app, 'PresenceWatcher', lambda *args, **kwargs: guest)
     monkeypatch.setattr(app, 'engine_url', lambda path='': base + path)
