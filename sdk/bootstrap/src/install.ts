@@ -109,11 +109,33 @@ export interface InstallOptions {
   /** `CRUCIBLE_HOME` for every `crucible` verb, as the target spells it. Omit for the server's default. */
   home?: string;
   /**
-   * Which release's packs to install. Defaults to {@link BOOTSTRAP_VERSION} —
-   * the bootstrapper ships at the server's version, so the default IS the
-   * answer rather than a guess at one.
+   * Which release's packs to install.
+   *
+   * AN APP PASSES THE RELEASE CHANNEL'S ANSWER (INSTALL-UNINSTALL.md §6.5.1):
+   * `latestRelease()` reads `releases/latest`, and the app's own never-older
+   * gate decides whether to install it at all. It used to say the default
+   * "IS the answer rather than a guess at one" — that sentence was written when
+   * the bootstrapper's version and the release a machine should have were one
+   * fact, and §6.5.2 separated them: a vendored 1.0.1 installing 1.0.1 over a
+   * running 1.0.2 is the defect.
+   *
+   * Omitted, it is {@link BOOTSTRAP_VERSION} — the release this library was cut
+   * with, which is the hand-install case (`npm i @crucible/bootstrap@<v>` and
+   * call this) and nothing else. It is never reached FOR a channel that would
+   * not answer: that is `release_channel_unreadable` at the caller, before this.
    */
   release?: string;
+  /**
+   * AN OPERATOR ROLLBACK, and the only way an install goes backwards.
+   *
+   * `installPack` refuses `install_would_downgrade` when `<home>/server/.pack`
+   * names a release newer than the one being installed (INSTALL-UNINSTALL.md
+   * §6.5.4). This is how somebody says "yes, put 1.0.1 back" — and it must be
+   * the SAME version as {@link InstallOptions.release}, because a rollback is an
+   * operator naming the Crucible they want rather than a flag that means
+   * "downgrade to whatever". A different version is `rollback_version_mismatch`.
+   */
+  rollbackTo?: string;
   /** Every line a step prints, as it prints it. */
   onLine: (line: string, stream: OutputStream, step: string) => void;
   /** Optional: a step beginning, finishing, or being skipped. */
@@ -232,6 +254,22 @@ async function installThroughHost(options: InstallOptions, release: string, runn
   // The plan itself is thrown away — the host builds its own from the same list.
   planJobTypes(options.jobTypes);
 
+  // A ROLLBACK HAS NO WAY THROUGH THE HOST'S DOOR, so it is refused rather than
+  // dropped. The door's request body (`hostdoor.ts`) carries release, job types,
+  // home and bind and nothing else, and the host would walk an ordinary install
+  // — which `install.ps1`'s own never-older gate then refuses as
+  // `install_would_downgrade`, from inside a process this caller cannot see.
+  // Naming it here puts the refusal where the option was set, with the line an
+  // operator actually runs to go back.
+  if (options.rollbackTo !== undefined) {
+    throw new BootstrapRefusal(
+      'host_rollback_unsupported',
+      `rollbackTo is a POSIX-side option: on Windows the host owns the install sequence (PHASE15 4.3) and its door `
+        + 'takes no rollback. Roll the host pack back by hand with the line below, from an ordinary PowerShell.',
+      { command: `.\\install.ps1 -Release ${options.rollbackTo} -RollbackTo ${options.rollbackTo}` },
+    );
+  }
+
   if (!hostInstalled(runner)) {
     throw new BootstrapRefusal(
       'host_not_installed',
@@ -261,6 +299,17 @@ async function installThroughHost(options: InstallOptions, release: string, runn
 
 export async function install(options: InstallOptions, runner: Runner = processRunner()): Promise<InstallResult> {
   const release = options.release ?? BOOTSTRAP_VERSION;
+  // The rollback is checked HERE rather than at the pack, so that a caller who
+  // named two different versions is told so before a single guest command runs.
+  const rollback = options.rollbackTo === undefined ? null : options.rollbackTo;
+  if (rollback !== null && rollback !== release) {
+    throw new BootstrapRefusal(
+      'rollback_version_mismatch',
+      `rollbackTo names ${rollback} and the release being installed is ${release}. A rollback is an `
+        + 'operator naming the exact Crucible they want back, so the two are the same version or this '
+        + 'is a downgrade nobody asked for.',
+    );
+  }
   if (runner.platform === 'win32') return await installThroughHost(options, release, runner);
   // ---------------------------------------------------------------------
   // linux and darwin only, from here down: win32 returned above. Every step,
@@ -358,6 +407,7 @@ export async function install(options: InstallOptions, runner: Runner = processR
           home: guest.home,
           freeBytes: guest.freeBytes,
           installed: guest.server,
+          rollbackTo: rollback,
           timeoutMs: timeouts.packMs,
           onLine: (line, stream) => options.onLine(line, stream, step.name),
         });

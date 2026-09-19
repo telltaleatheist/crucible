@@ -28,6 +28,35 @@ export type BootstrapRefusalCode =
   | 'guest_missing_tool'
   /** No `<CRUCIBLE_HOME>/server/bin/crucible`: this machine has no server pack yet. `install()` puts one there. */
   | 'no_server_pack'
+  /**
+   * The release channel would not say what its latest release is — it did not
+   * answer, answered an error, or answered a document with no usable `tag_name`
+   * (INSTALL-UNINSTALL.md §6.5.2). Also what an unreadable version string is
+   * refused as, because a version nothing can order is a channel answer nothing
+   * can use. There is no fallback behind it: the one override is an operator
+   * naming an exact release, which pins which release and still downloads it.
+   */
+  | 'release_channel_unreadable'
+  /**
+   * The pack already on this disk is NEWER than the release being installed
+   * (§6.5.4). Read from `<CRUCIBLE_HOME>/server/.pack`'s `release=`. The one
+   * legitimate downgrade is an operator rollback, and it names its version.
+   */
+  | 'install_would_downgrade'
+  /**
+   * `rollbackTo` named a version that is not the one being installed. A rollback
+   * is an operator saying which older Crucible they want, so the two have to be
+   * the same word; anything else is a downgrade nobody actually named.
+   */
+  | 'rollback_version_mismatch'
+  /**
+   * A rollback was asked for on win32, where the host owns the install sequence
+   * (PHASE15 4.3) and its door carries no rollback field. Its own name rather
+   * than `rollback_version_mismatch`, because nothing here mismatches: the
+   * versions agree and the route cannot express them. Carries the `install.ps1`
+   * line that performs the rollback by hand.
+   */
+  | 'host_rollback_unsupported'
   /** `envpacks.json` for this release could not be fetched, or is not the manifest. */
   | 'pack_manifest_unreadable'
   /** The manifest has no pack for this (name, backend). Never a quiet build (PHASE14 section 2). */

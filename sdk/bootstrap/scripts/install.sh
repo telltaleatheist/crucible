@@ -20,21 +20,28 @@
 #
 #   curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh | sh -s -- --uninstall
 #
-# CRUCIBLE_RELEASE=<version> or --release <version> installs a NAMED release.
-# Given neither, this asks GitHub which release is newest and installs that.
+# CRUCIBLE_RELEASE=<version> or --release <version> installs a NAMED release,
+# and that is the one override there is. It still downloads that release from
+# GitHub -- it takes the CHOICE off the channel, not the install off the
+# network (INSTALL-UNINSTALL.md 6.5.2). Given neither, this asks the release
+# channel what its latest is and installs that.
 # Everything here is idempotent: run it again after a failure.
 #
-# THERE IS NO BAKED DEFAULT, and that is the point. This file used to carry
-# the version it was GENERATED at, which is wrong in the one situation that
-# matters: the documented way to get this script is
+# THERE IS NO BAKED DEFAULT AND NO FALLBACK, and that is the point. This file
+# used to carry the version it was GENERATED at, which is wrong in the one
+# situation that matters: the documented way to get this script is
 # `releases/latest/download/install.sh`, so the copy you run is whichever one
 # GitHub calls latest. Every release is cut `--prerelease --latest=false` and
 # becomes latest only when promote_release.py says so, so on 2026-09-16 that
 # URL served the v0.6.0 script, which then installed 0.6.0 and its packs --
 # six versions behind, silently, with nothing in the output looking wrong.
-# Asking at RUN time cannot drift that way, and a baked value that is only
-# right on the day it was written is exactly the kind of default this repo
-# does not keep.
+# Asking at RUN time cannot drift that way, and a channel that will not
+# answer is `release_channel_unreadable` rather than a quiet older install.
+#
+# AND IT NEVER GOES BACKWARDS. `<home>/server/.pack` records which release is
+# on this disk; installing an older one over it is refused by name
+# (INSTALL-UNINSTALL.md 6.5.4), and the one way down is --rollback-to naming
+# the exact version.
 
 set -eu
 
@@ -60,7 +67,12 @@ Install:
                        tts names its engine: --install tts=higgs-v3
   --from-source <ref>  build the server from a git ref instead of the
                        published pack (a branch, a tag or a sha)
-  --release <version>  install this release rather than the built-in one
+  --release <version>  install this exact release rather than the channel's
+                       latest. The one override; it still downloads from that
+                       release, so it is a pin and not an offline install.
+  --rollback-to <ver>  an operator rollback: install this EXACT older release
+                       over a newer one already on this disk. Must name the
+                       same version as --release; there is no other way down.
   --min-free-gib <n>   refuse unless this much disk is free for the weights
 
 Remove:
@@ -79,6 +91,7 @@ BIND=""
 JOB_TYPES=""
 FROM_SOURCE=""
 MIN_FREE_GIB=""
+ROLLBACK_TO=""
 need() { [ "$1" -ge 2 ] || die "flag_needs_value: $2 takes a value"; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -91,6 +104,7 @@ while [ $# -gt 0 ]; do
     --install) need $# "--install"; shift; JOB_TYPES="$JOB_TYPES $1" ;;
     --from-source) need $# "--from-source"; shift; FROM_SOURCE="$1" ;;
     --release) need $# "--release"; shift; RELEASE="$1" ;;
+    --rollback-to) need $# "--rollback-to"; shift; ROLLBACK_TO="$1" ;;
     --min-free-gib) need $# "--min-free-gib"; shift; MIN_FREE_GIB="$1" ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown_flag: $1 is not a flag this installer takes; run with --help" ;;
@@ -99,6 +113,11 @@ while [ $# -gt 0 ]; do
 done
 if [ "$UNINSTALL" = 0 ] && [ "$PURGE_WEIGHTS" = 1 ]; then
   die "flag_needs_uninstall: --purge-weights deletes weights and only means something with --uninstall"
+fi
+# An uninstall removes what is on this disk and installs nothing, so a
+# rollback version handed to one is a flag that would be silently ignored.
+if [ "$UNINSTALL" = 1 ] && [ -n "$ROLLBACK_TO" ]; then
+  die "flag_needs_install: --rollback-to names a release to INSTALL and means nothing with --uninstall"
 fi
 
 # --- backend -------------------------------------------------------------
@@ -114,8 +133,15 @@ esac
 # which removes what is on this disk and must work with no network.
 # The failure is loud: no fallback to a version this script was built beside,
 # because installing a silently-wrong release is the defect being fixed.
+# THE POINTER IS `releases/latest`, AND NOT `releases?per_page=1`.
+# INSTALL-UNINSTALL.md 6.5.1: every cut is created --prerelease
+# --latest=false and becomes the channel latest only when
+# promote_release.py --publish flips it, after its packs and a fresh-install
+# smoke have been verified. `per_page=1` answers "the newest TAG created",
+# which on every day between a cut and its promotion is the unverified
+# candidate that gate exists to keep off people machines.
 newest_release() {
-  curl -fsSL --retry 3 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/telltaleatheist/crucible/releases?per_page=1" |
+  curl -fsSL --retry 3 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/telltaleatheist/crucible/releases/latest" |
     grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4
 }
 if [ "$UNINSTALL" = 1 ]; then
@@ -125,7 +151,8 @@ else
     tag="$(newest_release)" || tag=""
     RELEASE="${tag#v}"
   fi
-  [ -n "$RELEASE" ] || die "release_lookup_failed: could not learn the newest release from https://api.github.com/repos/telltaleatheist/crucible/releases -- name one with --release <version> or CRUCIBLE_RELEASE=<version>"
+  [ -n "$RELEASE" ] || die "release_channel_unreadable: could not read the release channel at https://api.github.com/repos/telltaleatheist/crucible/releases/latest -- name a release with --release <version> or CRUCIBLE_RELEASE=<version>"
+  [ -z "$ROLLBACK_TO" ] || [ "$ROLLBACK_TO" = "$RELEASE" ] || die "rollback_version_mismatch: --rollback-to names $ROLLBACK_TO and the release being installed is $RELEASE; a rollback names the exact Crucible you want back"
   say "release $RELEASE, backend $BACKEND"
 fi
 
@@ -174,6 +201,7 @@ CRUCIBLE_HOME="$(printf '%s\n' "$probe_out" | sed -n 's/^home=//p')"
 GUEST_USER="$(printf '%s\n' "$probe_out" | sed -n 's/^user=//p')"
 free_kib="$(printf '%s\n' "$probe_out" | sed -n 's/^free_kib=//p')"
 stamp_sha="$(printf '%s\n' "$probe_out" | sed -n 's/^sha256=//p')"
+stamp_release="$(printf '%s\n' "$probe_out" | sed -n 's/^release=//p')"
 missing="$(printf '%s\n' "$probe_out" | sed -n 's/^missing=//p' | tr '\n' ' ')"
 if [ -n "$missing" ]; then die "guest_missing_tool: this machine has no $missing; a pack is fetched with curl and unpacked with tar --zstd"; fi
 
@@ -264,6 +292,13 @@ else
   if [ "$stamp_sha" = "$want_sha" ] && [ -x "$dest/bin/crucible" ]; then
     say "server-pack: already installed ($want_sha)"
   else
+    crucible_older() {
+      awk -v a="$1" -v b="$2" 'BEGIN { split(a, x, "."); split(b, y, ".");
+        for (i = 1; i <= 3; i++) { if ((x[i]+0) < (y[i]+0)) exit 0; if ((x[i]+0) > (y[i]+0)) exit 1 } exit 1 }'
+    }
+    if [ -n "$stamp_release" ] && crucible_older "$RELEASE" "$stamp_release"; then
+      [ "$ROLLBACK_TO" = "$RELEASE" ] || die "install_would_downgrade: $dest is the $stamp_release pack and this would install $RELEASE over it. Nothing was downloaded. An operator who means to go back names the version: --rollback-to $RELEASE"
+    fi
     n=0; for part in $parts; do n=$(( n + 1 )); done
     need_kib=$(( (unpacked + archive_bytes + archive_bytes / n) / 1024 ))
     [ "$free_kib" -ge "$need_kib" ] || die "pack_disk: the server pack needs $(( need_kib / 1048576 )) GiB free and there is $(( free_kib / 1048576 )) GiB"

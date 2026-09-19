@@ -90,9 +90,18 @@ await install({
 });
 ```
 
+- **WHICH RELEASE IS THE CHANNEL'S ANSWER, AND AN APP ASKS IT** (`docs/INSTALL-UNINSTALL.md`
+  §6.5). `latestRelease()` reads `releases/latest` — the release `promote_release.py`
+  promoted, not the newest tag — and an app passes what it says as `release`. It is NOT
+  this package's own version: a vendored 1.0.1 bootstrapper installing 1.0.1 over a running
+  1.0.2 is the defect that section is about. A channel that will not answer is
+  `release_channel_unreadable`, never a quieter older install.
+- **Never over a newer pack.** `<home>/server/.pack` records `release=`, so `install()`
+  refuses `install_would_downgrade` before anything is downloaded when this disk already
+  holds a newer Crucible. The one way down is `rollbackTo`, naming the exact version being
+  installed; anything else is `rollback_version_mismatch`.
 - **The interpreter arrives with the server.** `release` names a Crucible version and
-  defaults to this package's own — the bootstrapper ships AT the server's version, so
-  "which release" is not a question anybody has to answer. The server pack is fetched
+  defaults to this package's own, which is the hand-install case and nothing else. The server pack is fetched
   INSIDE the guest with the guest's `curl`, never through `/mnt/c`; parts are appended and
   deleted one at a time (peak extra disk is one part), the sha256 is computed in the guest
   and compared here, and the unpack is renamed into place only after the tree runs its own

@@ -142,6 +142,11 @@ export function hostFactsSh(): string {
     + `GUEST_USER="$(printf '%s\\n' "$probe_out" | sed -n 's/^user=//p')"\n`
     + `free_kib="$(printf '%s\\n' "$probe_out" | sed -n 's/^free_kib=//p')"\n`
     + `stamp_sha="$(printf '%s\\n' "$probe_out" | sed -n 's/^sha256=//p')"\n`
+    // WHAT IS ALREADY ON THIS DISK, which is what the never-older gate compares
+    // against (INSTALL-UNINSTALL.md 6.5.4). Empty on a tree that predates the
+    // stamp, and an empty one is not read as "older": a version nobody recorded
+    // cannot be compared with one.
+    + `stamp_release="$(printf '%s\\n' "$probe_out" | sed -n 's/^release=//p')"\n`
     + `missing="$(printf '%s\\n' "$probe_out" | sed -n 's/^missing=//p' | tr '\\n' ' ')"\n`
     + `if [ -n "$missing" ]; then die "guest_missing_tool: this machine has no $missing; a pack is fetched with curl and unpacked with tar --zstd"; fi\n`;
 }
@@ -192,6 +197,17 @@ export function serverPackSh(): string {
     + `if [ "$stamp_sha" = "$want_sha" ] && [ -x "$dest/bin/crucible" ]; then\n`
     + `  say "server-pack: already installed ($want_sha)"\n`
     + `else\n`
+    // NEVER OVER A NEWER PACK, the same rule and the same two refusal names
+    // `installPack()` uses (INSTALL-UNINSTALL.md 6.5.4). Number by number in
+    // awk, because a string comparison puts 1.0.10 before 1.0.2 and this is the
+    // one question here that has to get that right. Exit 0 means older.
+    + `  crucible_older() {\n`
+    + `    awk -v a="$1" -v b="$2" 'BEGIN { split(a, x, "."); split(b, y, ".");\n`
+    + `      for (i = 1; i <= 3; i++) { if ((x[i]+0) < (y[i]+0)) exit 0; if ((x[i]+0) > (y[i]+0)) exit 1 } exit 1 }'\n`
+    + `  }\n`
+    + `  if [ -n "$stamp_release" ] && crucible_older "$RELEASE" "$stamp_release"; then\n`
+    + `    [ "$ROLLBACK_TO" = "$RELEASE" ] || die "install_would_downgrade: $dest is the $stamp_release pack and this would install $RELEASE over it. Nothing was downloaded. An operator who means to go back names the version: --rollback-to $RELEASE"\n`
+    + `  fi\n`
     // The SAME sum as pack.ts's requiredBytes(): unpacked + the whole archive
     // + one part, a part being the archive over the part count.
     + `  n=0; for part in $parts; do n=$(( n + 1 )); done\n`

@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import { asciiOnly, GENERATED, generateInstallPs1, generateInstallSh } from '../scripts/gen-install-scripts.js';
-import { CURL_ARGS, ENVPACKS_ASSET, HOST_BACKEND, HOST_PACK, installSteps, TAR_ARGS } from '../src/index.js';
+import { CURL_ARGS, ENVPACKS_ASSET, HOST_BACKEND, HOST_PACK, installSteps, LATEST_RELEASE_URL, TAR_ARGS } from '../src/index.js';
 import { guestProbeScript } from '../src/pack.js';
 import { installJobTypesSh, renderArgv, uninstallSh } from '../src/steps.js';
 
@@ -188,9 +188,47 @@ test('install.sh names every refusal the TypeScript names for the same failure',
     'pack_download_failed',
     'pack_sha_mismatch',
     'pack_unpack_failed',
+    'release_channel_unreadable',
+    'install_would_downgrade',
+    'rollback_version_mismatch',
   ]) {
     assert.ok(sh.includes(`${code}:`), `install.sh refuses ${code} by the same name`);
   }
+});
+
+/**
+ * INSTALL-UNINSTALL.md §6.5, in both hand installers.
+ *
+ * `releases?per_page=1` is the newest TAG, which between a cut and its
+ * promotion is the unverified candidate `promote_release.py` exists to hold
+ * back; `releases/latest` is the promoted one. And neither script may walk a
+ * machine backwards without an operator naming the version.
+ */
+test('both installers read the channel\'s releases/latest, never the newest tag', () => {
+  for (const [name, text] of [['install.sh', generateInstallSh()], ['install.ps1', generateInstallPs1()]] as const) {
+    assert.ok(text.includes(LATEST_RELEASE_URL), `${name} does not read ${LATEST_RELEASE_URL}`);
+    // What is FETCHED, not what is mentioned: both scripts name the old feed in
+    // the comment that says why they stopped reading it.
+    const fetched = text.split('\n').filter((line) => /curl/.test(line) && !line.trimStart().startsWith('#'));
+    assert.equal(fetched.some((line) => line.includes('per_page')), false, `${name} still fetches the newest tag created`);
+  }
+});
+
+test('both installers refuse to install over a newer pack, and take an exact-version rollback', () => {
+  const sh = generateInstallSh();
+  // The FLAG is parsed and the value is what the gate reads — one assertion each,
+  // because a script that takes `--rollback-to` and never reads it would pass a
+  // regex that only looked for the word.
+  assert.match(sh, /--rollback-to\) need \$# "--rollback-to"; shift; ROLLBACK_TO="\$1"/);
+  assert.match(sh, /\[ "\$ROLLBACK_TO" = "\$RELEASE" \]/);
+  assert.match(sh, /stamp_release=/, 'install.sh must read the release the stamp records');
+  assert.match(sh, /crucible_older "\$RELEASE" "\$stamp_release"/);
+  assert.match(sh, /install_would_downgrade: \$dest is the \$stamp_release pack/);
+
+  const ps1 = generateInstallPs1();
+  assert.match(ps1, /\$RollbackTo/);
+  assert.match(ps1, /\$haveRelease/, 'install.ps1 must read the release the stamp records');
+  assert.match(ps1, /install_would_downgrade: \$HostDir is the \$haveRelease host pack/);
 });
 
 test('install.sh mints its own token and keeps an existing config\'s', () => {

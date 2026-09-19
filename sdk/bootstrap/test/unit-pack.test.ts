@@ -106,6 +106,7 @@ test('installPack records exactly the guest commands PHASE14 section 4 describes
     home: '/home/owen/.crucible',
     freeBytes: 900_000_000,
     installed: null,
+    rollbackTo: null,
     timeoutMs: 1000,
     onLine: SILENT,
   });
@@ -129,6 +130,7 @@ test('installPack is a skip when the stamp is already the manifest\'s sha', asyn
     home: '/home/owen/.crucible',
     freeBytes: 900_000_000,
     installed: { crucible: `${DEST}/bin/crucible`, python: `${DEST}/bin/python3`, version: 'crucible 0.6.0', sha256: PACK_SHA, release: '0.6.0' },
+    rollbackTo: null,
     timeoutMs: 1000,
     onLine: SILENT,
   });
@@ -142,7 +144,7 @@ test('a part that will not download is pack_download_failed naming the URL', asy
     { argv: () => true, code: 22, stderr: 'curl: (22) The requested URL returned error: 404' },
   ]);
   const r = await refusal(installPack(runner, TARGET, MANIFEST, 'server', {
-    release: '0.6.0', backend: 'cuda-linux', home: '/home/owen/.crucible', freeBytes: 900_000_000, installed: null, timeoutMs: 1000, onLine: SILENT,
+    release: '0.6.0', backend: 'cuda-linux', home: '/home/owen/.crucible', freeBytes: 900_000_000, installed: null, rollbackTo: null, timeoutMs: 1000, onLine: SILENT,
   }));
   assert.equal(r.code, 'pack_download_failed');
   assert.match(r.message, /download https:\/\/github\.com\/telltaleatheist\/crucible\/releases\/download\/v0\.6\.0\/crucible-env-server-cuda-linux-0\.6\.0\.tar\.zst\.part00/);
@@ -154,7 +156,7 @@ test('a tar that will not open leaves .partial where a person can look at it', a
     { argv: () => true, code: 2, stderr: 'tar: Unrecognized archive format' },
   ]);
   const r = await refusal(installPack(runner, TARGET, MANIFEST, 'server', {
-    release: '0.6.0', backend: 'cuda-linux', home: '/home/owen/.crucible', freeBytes: 900_000_000, installed: null, timeoutMs: 1000, onLine: SILENT,
+    release: '0.6.0', backend: 'cuda-linux', home: '/home/owen/.crucible', freeBytes: 900_000_000, installed: null, rollbackTo: null, timeoutMs: 1000, onLine: SILENT,
   }));
   assert.equal(r.code, 'pack_unpack_failed');
   assert.match(r.message, /Unrecognized archive format/);
@@ -166,7 +168,7 @@ test('a pack that unpacks but will not run its own --version never becomes the s
     { argv: () => true, code: 127, stderr: 'bash: line 1: bin/crucible: cannot execute binary file' },
   ]);
   const r = await refusal(installPack(runner, TARGET, MANIFEST, 'server', {
-    release: '0.6.0', backend: 'cuda-linux', home: '/home/owen/.crucible', freeBytes: 900_000_000, installed: null, timeoutMs: 1000, onLine: SILENT,
+    release: '0.6.0', backend: 'cuda-linux', home: '/home/owen/.crucible', freeBytes: 900_000_000, installed: null, rollbackTo: null, timeoutMs: 1000, onLine: SILENT,
   }));
   assert.equal(r.code, 'pack_unpack_failed');
   assert.match(r.message, /cannot execute binary file/);
