@@ -220,7 +220,13 @@ for path in $changed; do
   hits=""
   matched=""
   for name in $candidates; do
-    found="$(grep -rlw -- "$name" tests/ --include='test_*.py' 2>/dev/null || true)"
+    # `--include` BEFORE the `--`, and that is the whole of a real defect.
+    # After `--` it is not an option at all, it is a FILE OPERAND named
+    # `--include=test_*.py`, so the filter never applied: the search walked
+    # everything under tests/, `__pycache__/*.pyc` included, and pytest was
+    # handed a list of compiled caches it answers `ERROR: not found` to. Latent
+    # until somebody ran pytest locally, which is everybody.
+    found="$(grep -rlw --include='test_*.py' -- "$name" tests/ 2>/dev/null || true)"
     [ -z "$found" ] && continue
     count="$(echo "$found" | wc -l)"
     if [ "$count" -gt $(( total * 3 / 5 )) ]; then
