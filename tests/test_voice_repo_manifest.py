@@ -90,6 +90,17 @@ max_num_seqs_note = "vllm-omni's own stage-0 value, measured at 0.35 + 0.10."
 """
 
 
+#: The one line of `GOOD` that carries a measured pace's prose, and the sentence
+#: an INHERITED one owes instead. Named because six tests swap between them, and
+#: a literal retyped six times is a literal that will disagree with GOOD once.
+MEASURED_LINE = (
+    'measured_from      = "mb_hp_rvcbed1 ckpt-4257, n=51 in the 500-800 band"'
+)
+INHERITED = (
+    "ow_v8_rvcbed1 ckpt-966; these weights have no ladder yet, re-measurement owed"
+)
+
+
 def parse(text: str):
     return parse_repo_manifest(text, Path(REPO_MANIFEST_NAME))
 
@@ -238,16 +249,77 @@ def test_a_measured_pace_owes_its_prose() -> None:
     assert "is 'measured' and there is no measured_from" in message
 
 
-def test_an_inherited_pace_needs_no_prose() -> None:
-    """Section 1: owen's pace is INHERITED from the predecessor run and the
-    re-measurement is owed. The schema's job is to make that state SAYABLE."""
+def test_an_inherited_pace_owes_its_own_sentence() -> None:
+    """RULED 2026-09-19, and it is `estimate_basis`'s rule.
+
+    Section 1: owen's pace is INHERITED from the predecessor run and the
+    re-measurement is owed. The schema's job is to make that state SAYABLE — and
+    then to make it ACTIONABLE, which the word alone is not: inheriting from a
+    sibling checkpoint of the same corpus is near enough (mistborn 13.29 / 13.33
+    / 13.76 across three retrains) while inheriting from a different corpus two
+    versions back is the deathstalker defect (16.64 onto weights that measured
+    15.91). Only the sentence separates them.
+    """
     repo = parse(
         swap('basis              = "measured"', 'basis = "inherited"').replace(
-            'measured_from      = "mb_hp_rvcbed1 ckpt-4257, n=51 in the 500-800 band"\n',
-            "",
+            MEASURED_LINE, f'inherited_from = "{INHERITED}"'
         )
     )
     assert repo.pace_basis == "inherited"
+    assert repo.inherited_from == INHERITED
+    assert repo.measured_from is None
+
+
+def test_an_inherited_pace_with_no_inherited_from_is_refused() -> None:
+    message = refused(
+        swap('basis              = "measured"', 'basis = "inherited"').replace(
+            MEASURED_LINE + "\n", ""
+        )
+    )
+    assert "basis is 'inherited' and there is no inherited_from" in message
+    assert "16.64 onto weights that measured 15.91" in message
+
+
+def test_inherited_from_on_a_measured_pace_is_refused() -> None:
+    """Prose about a measurement this voice did not make."""
+    message = refused(
+        swap(MEASURED_LINE, MEASURED_LINE + f'\ninherited_from = "{INHERITED}"')
+    )
+    assert "basis is 'measured' and it also carries inherited_from" in message
+    assert "owes exactly its own sentence" in message
+
+
+def test_measured_from_on_an_inherited_pace_is_refused() -> None:
+    message = refused(
+        swap('basis              = "measured"', 'basis = "inherited"').replace(
+            MEASURED_LINE, MEASURED_LINE + f'\ninherited_from = "{INHERITED}"'
+        )
+    )
+    assert "basis is 'inherited' and it also carries measured_from" in message
+
+
+def test_an_inherited_pace_rides_on_the_row(host: Path) -> None:
+    """The sentence reaches a client, beside the word."""
+    a_pin(host)
+    a_cached_manifest(
+        host,
+        swap('basis              = "measured"', 'basis = "inherited"').replace(
+            MEASURED_LINE, f'inherited_from = "{INHERITED}"'
+        ),
+    )
+    voice = load_all_voices()[PINNED_ID]
+    assert voice.pace_basis == "inherited"
+    assert voice.inherited_from == INHERITED
+    assert voice.to_dict()["inherited_from"] == INHERITED
+
+
+def test_a_measured_pace_reports_a_null_inherited_from(host: Path) -> None:
+    """Null means NOT INHERITED, never "inherited from somewhere unstated"."""
+    a_pin(host)
+    a_cached_manifest(host)
+    voice = load_all_voices()[PINNED_ID]
+    assert voice.pace_basis == "measured"
+    assert voice.inherited_from is None
 
 
 def test_a_voice_may_omit_its_pace_table_in_whole(host: Path) -> None:
@@ -778,6 +850,7 @@ def test_a_packaged_manifest_converted_and_merged_is_the_same_voice(
         packaged,
         pace_basis="measured",
         measured_from=f"{voice_id}'s own length ladder, per its packaged manifest",
+        inherited_from=None,
         max_chars_basis="measured",
         uncertified=False,
     )

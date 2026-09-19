@@ -195,6 +195,7 @@ def test_an_export_refuses_to_invent_the_two_bases() -> None:
             manifest,
             pace_basis=None,
             measured_from=None,
+        inherited_from=None,
             max_chars_basis="measured",
             uncertified=False,
         )
@@ -206,6 +207,7 @@ def test_an_export_refuses_to_invent_the_two_bases() -> None:
             manifest,
             pace_basis="measured",
             measured_from="ckpt-5368's own ladder, n=51",
+        inherited_from=None,
             max_chars_basis=None,
             uncertified=False,
         )
@@ -218,6 +220,7 @@ def test_a_measured_pace_owes_its_prose_on_the_way_out() -> None:
             load_voice("mistborn"),
             pace_basis="measured",
             measured_from=" ",
+        inherited_from=None,
             max_chars_basis="measured",
             uncertified=False,
         )
@@ -231,6 +234,7 @@ def test_an_exported_manifest_parses_as_a_repo_manifest() -> None:
         manifest,
         pace_basis="measured",
         measured_from="mb_ha_rvcbed1 ckpt-5368's own ladder, n=51 in the band",
+        inherited_from=None,
         max_chars_basis="measured",
         uncertified=False,
     )
@@ -254,6 +258,7 @@ def test_the_machine_rows_it_drops_are_returned_so_nothing_is_lost_silently(
         manifest,
         pace_basis="measured",
         measured_from="ckpt-5368's own ladder",
+        inherited_from=None,
         max_chars_basis="measured",
         uncertified=False,
     )
@@ -271,6 +276,7 @@ def test_an_exported_file_carries_no_machine_fact() -> None:
         load_voice("mistborn"),
         pace_basis="measured",
         measured_from="ckpt-5368's own ladder",
+        inherited_from=None,
         max_chars_basis="measured",
         uncertified=False,
     )
@@ -316,6 +322,7 @@ def test_an_uncertified_export_omits_the_pace_table_in_whole() -> None:
             blank,
             pace_basis=None,
             measured_from=None,
+        inherited_from=None,
             max_chars_basis="placeholder",
             uncertified=False,
         )
@@ -324,6 +331,7 @@ def test_an_uncertified_export_omits_the_pace_table_in_whole() -> None:
         blank,
         pace_basis=None,
         measured_from=None,
+        inherited_from=None,
         max_chars_basis="placeholder",
         uncertified=True,
     )
@@ -332,3 +340,70 @@ def test_an_uncertified_export_omits_the_pace_table_in_whole() -> None:
     assert "pace" not in tomllib.loads(text)["voice"]
     repo_manifest = parse_repo_manifest(text, Path(REPO_MANIFEST_NAME))
     assert repo_manifest.pace is None
+
+
+# --------------------------------------------- each basis owes its own sentence
+#
+# RULED 2026-09-19. The rule is `estimate_basis`'s — `declared` requires a note,
+# `measured` refuses one — and it is worth four refusals here because the word
+# "inherited" covers a sibling checkpoint of the same corpus (mistborn
+# 13.29/13.33/13.76 across three retrains, near enough) and a different corpus
+# two versions back (deathstalker's 16.64 onto weights that measured 15.91).
+
+INHERITED_TOML = GOOD.replace('basis              = "measured"', 'basis = "inherited"').replace(
+    'measured_from      = "mb_hp_rvcbed1 ckpt-4257, n=51 in the 500-800 band"',
+    'inherited_from = "ow_v8_rvcbed1 ckpt-966; these weights have no ladder yet"',
+)
+
+
+def test_the_card_names_the_weights_an_inherited_pace_came_from() -> None:
+    section = render_limits(parse_repo_manifest(INHERITED_TOML, Path(REPO_MANIFEST_NAME)))
+    assert "(inherited)" in section
+    assert "Inherited from ow_v8_rvcbed1 ckpt-966" in section
+    # And the frontmatter still states the basis beside the number.
+    rendered, _ = render_card(
+        parse_repo_manifest(INHERITED_TOML, Path(REPO_MANIFEST_NAME)), CARD
+    )
+    assert read_frontmatter(rendered)["higgs_pace_basis"] == "inherited"
+
+
+def test_an_export_refuses_to_invent_the_inherited_sentence() -> None:
+    with pytest.raises(VoiceError) as caught:
+        export_manifest(
+            load_voice("mistborn"),
+            pace_basis="inherited",
+            measured_from=None,
+            inherited_from=None,
+            max_chars_basis="measured",
+            uncertified=False,
+        )
+    assert "--pace-basis inherited owes --inherited-from" in str(caught.value)
+    assert "16.64" in str(caught.value)
+
+
+def test_an_export_refuses_the_sentence_the_other_basis_owes() -> None:
+    with pytest.raises(VoiceError) as caught:
+        export_manifest(
+            load_voice("mistborn"),
+            pace_basis="measured",
+            measured_from="ckpt-5368's own ladder",
+            inherited_from="ow_v8_rvcbed1 ckpt-966",
+            max_chars_basis="measured",
+            uncertified=False,
+        )
+    assert "was given --inherited-from as well" in str(caught.value)
+
+
+def test_an_inherited_export_round_trips() -> None:
+    text, _dropped = export_manifest(
+        load_voice("mistborn"),
+        pace_basis="inherited",
+        measured_from=None,
+        inherited_from="mb_full_rvc1 ckpt-5947; these weights have no ladder yet",
+        max_chars_basis="measured",
+        uncertified=False,
+    )
+    repo_manifest = parse_repo_manifest(text, Path(REPO_MANIFEST_NAME))
+    assert repo_manifest.pace_basis == "inherited"
+    assert repo_manifest.inherited_from.startswith("mb_full_rvc1 ckpt-5947")
+    assert repo_manifest.measured_from is None

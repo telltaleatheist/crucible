@@ -142,6 +142,16 @@ _REFUSED_IN_REPO: dict[str, str] = {
 #: `"measured"`.
 _PACE_BASIS = "basis"
 _PACE_MEASURED_FROM = "measured_from"
+_PACE_INHERITED_FROM = "inherited_from"
+
+#: WHICH SENTENCE EACH BASIS OWES, and it owes exactly that one. The shape is
+#: `estimate_basis`'s, where `declared` requires a note and `measured` refuses
+#: one: a reason attached to the wrong basis is a reason a reader will trust the
+#: next time it means something. Ruled 2026-09-19.
+_PACE_BASIS_PROSE: dict[str, str] = {
+    "measured": _PACE_MEASURED_FROM,
+    "inherited": _PACE_INHERITED_FROM,
+}
 
 _ARM_REQUIRED: dict[str, type] = {
     "max_chars": int,
@@ -360,13 +370,24 @@ def _check_no_machine_facts(where: str, table: dict[str, Any]) -> None:
 
 def _repo_pace(
     where: str, table: dict[str, Any]
-) -> tuple[dict[str, Any], str, str | None]:
-    """The internal `[voice.pace]` table and its `basis`, out of the repo one.
+) -> tuple[dict[str, Any], str, str | None, str | None]:
+    """The internal `[voice.pace]` table, its `basis`, and the basis's prose.
 
-    `basis` and `measured_from` are stripped here and do not reach `_parse`:
-    the internal schema has no such keys, they say how the numbers were GOT
-    rather than what they are, and the one that survives to the wire does so as
-    `pace_basis` on the `/v1/voices` row.
+    `basis`, `measured_from` and `inherited_from` are stripped here and do not
+    reach `_parse`: the internal schema has no such keys, they say how the
+    numbers were GOT rather than what they are, and what survives to the wire
+    does so as `pace_basis` and `inherited_from` on the `/v1/voices` row.
+
+    EACH BASIS OWES EXACTLY ITS OWN SENTENCE (`_PACE_BASIS_PROSE`, ruled
+    2026-09-19). A measured pace owes `measured_from` and refuses
+    `inherited_from`; an inherited pace owes `inherited_from` and refuses
+    `measured_from`. The rule is `estimate_basis`'s, and it is worth the four
+    refusals because "inherited" covers two very different situations: a
+    sibling checkpoint of the same corpus (mistborn 13.29 / 13.33 / 13.76
+    across three retrains — near enough) and a different corpus two versions
+    back (deathstalker's 16.64 onto weights that measured 15.91 — 4.4% fast,
+    enough to mis-size the duration guard from the first chunk). The word
+    cannot separate them; the sentence can.
     """
     basis = table.get(_PACE_BASIS)
     if basis is None:
@@ -381,26 +402,49 @@ def _repo_pace(
         raise VoiceError(
             f"{where}: {_PACE_BASIS} {basis!r} is not one of {sorted(PACE_BASES)}"
         )
-    measured_from = table.get(_PACE_MEASURED_FROM)
-    if basis == "measured" and (
-        not isinstance(measured_from, str) or measured_from.strip() == ""
-    ):
+    owed = _PACE_BASIS_PROSE[basis]
+    refused = _PACE_BASIS_PROSE["inherited" if basis == "measured" else "measured"]
+
+    prose = table.get(owed)
+    if prose is not None and not isinstance(prose, str):
         raise VoiceError(
-            f"{where}: {_PACE_BASIS} is 'measured' and there is no "
-            f"{_PACE_MEASURED_FROM}. A measured pace was measured on something — "
-            "a checkpoint, a ladder, a sample count — and the number is only "
-            "worth what the reader can find out about where it came from"
+            f"{where}: {owed} must be prose, got {type(prose).__name__}"
         )
-    if measured_from is not None and not isinstance(measured_from, str):
+    if prose is None or prose.strip() == "":
         raise VoiceError(
-            f"{where}: {_PACE_MEASURED_FROM} must be prose, got "
-            f"{type(measured_from).__name__}"
+            f"{where}: {_PACE_BASIS} is {basis!r} and there is no {owed}. "
+            + (
+                "A measured pace was measured on something — a checkpoint, a "
+                "ladder, a sample count — and the number is only worth what the "
+                "reader can find out about where it came from"
+                if basis == "measured"
+                else "An inherited pace was measured on OTHER weights, and WHICH "
+                "ones decides whether it is near enough: a sibling checkpoint of "
+                "the same corpus is (mistborn 13.29/13.33/13.76 across three "
+                "retrains), a different corpus two versions back is the "
+                "deathstalker defect (16.64 onto weights that measured 15.91). "
+                "Name the run and checkpoint it came from, and say why these "
+                "weights have no ladder yet"
+            )
+        )
+    if table.get(refused) is not None:
+        raise VoiceError(
+            f"{where}: {_PACE_BASIS} is {basis!r} and it also carries {refused}. "
+            f"Each basis owes exactly its own sentence — {owed} — and a "
+            f"{refused} beside a {basis!r} pace is prose about a measurement this "
+            "voice did not make. It is the rule estimate_basis has, for the same "
+            "reason: a reason attached to the wrong basis is a reason a reader "
+            "will trust the next time it means something"
         )
     return (
-        {k: v for k, v in table.items()
-         if k not in (_PACE_BASIS, _PACE_MEASURED_FROM)},
+        {
+            k: v
+            for k, v in table.items()
+            if k not in (_PACE_BASIS, _PACE_MEASURED_FROM, _PACE_INHERITED_FROM)
+        },
         basis,
-        measured_from,
+        prose if basis == "measured" else None,
+        prose if basis == "inherited" else None,
     )
 
 
@@ -423,6 +467,10 @@ class RepoManifest:
     #: into the card's `## Measured limits` section verbatim. That is the one
     #: piece of prose the card no longer has to be typed with per deploy.
     measured_from: str | None
+    #: The prose an INHERITED pace owes — the run and checkpoint its number came
+    #: from, and why these weights have no ladder. Rides on the `/v1/voices` row
+    #: beside `pace_basis`, null when the pace is not inherited.
+    inherited_from: str | None
     arms: dict[str, dict[str, Any]]
     #: `max_chars_basis` per arm, stripped out of the arm tables for the reason
     #: `_repo_pace` strips `basis`: the internal schema has no such key.
@@ -481,10 +529,11 @@ def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
     pace: dict[str, Any] | None = None
     pace_basis: str | None = None
     measured_from: str | None = None
+    inherited_from: str | None = None
     if "pace" in voice:
         if not isinstance(voice["pace"], dict):
             raise VoiceError(f"{path.name}: [voice.pace] must be a table")
-        pace, pace_basis, measured_from = _repo_pace(
+        pace, pace_basis, measured_from, inherited_from = _repo_pace(
             f"{path.name} [voice.pace]", voice["pace"]
         )
 
@@ -534,6 +583,7 @@ def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
         pace=pace,
         pace_basis=pace_basis,
         measured_from=measured_from,
+        inherited_from=inherited_from,
         arms=arms,
         max_chars_basis=bases,
         takes=takes,
@@ -611,6 +661,7 @@ def merge(repo: RepoManifest, pin: Pin, footprint: Any):
         backends=backends,
         manifest_source=MANIFEST_REPO,
         pace_basis=repo.pace_basis,
+        inherited_from=repo.inherited_from,
     )
 
 

@@ -1454,6 +1454,7 @@ def cmd_voices_list(args: argparse.Namespace) -> int:
                 "max_chars": spec.max_chars,
                 "max_chars_basis": spec.max_chars_basis,
                 "pace_basis": manifest.pace_basis,
+                "inherited_from": manifest.inherited_from,
                 "manifest": manifest.manifest_source,
                 # A LOCAL VOICE IS NOT PULLABLE, so its line must not offer a
                 # pull (PHASE18-UNCERTIFIED.md section 3): `crucible voices
@@ -1637,6 +1638,8 @@ def cmd_voices_check(args: argparse.Namespace) -> int:
             f"pace:     {pace.pace_chars_per_sec} chars/s ({voice.pace_basis}), "
             f"band {pace.min_chars_per_sec}-{pace.max_chars_per_sec}"
         )
+        if voice.inherited_from is not None:
+            print(f"          inherited from {voice.inherited_from}")
     if pace.safe_min_chars is not None:
         print(f"packs:    {pace.safe_min_chars}-{pace.safe_max_chars} chars")
     elif pace.target_chars is not None:
@@ -1757,6 +1760,7 @@ def cmd_voices_export(args: argparse.Namespace) -> int:
             manifest,
             pace_basis=args.pace_basis,
             measured_from=args.measured_from,
+            inherited_from=args.inherited_from,
             max_chars_basis=args.max_chars_basis,
             uncertified=args.uncertified,
         )
@@ -3125,6 +3129,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--measured-from",
         help="what a measured pace was measured on; required with "
         "--pace-basis measured",
+    )
+    voices_export.add_argument(
+        "--inherited-from",
+        help="which run and checkpoint an inherited pace came from, and why "
+        "these weights have no ladder; required with --pace-basis inherited",
     )
     voices_export.add_argument(
         "--max-chars-basis",

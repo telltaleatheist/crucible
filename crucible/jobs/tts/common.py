@@ -327,6 +327,15 @@ def voice_rows(
                 # 16.64 survived onto weights that measured 15.91.
                 "max_chars_basis": max_chars_basis,
                 "pace_basis": manifest.pace_basis,
+                # WHICH OTHER WEIGHTS AN INHERITED PACE CAME FROM, in the
+                # manifest's own prose, and null unless `pace_basis` is
+                # `"inherited"`. On the row because the word alone cannot be
+                # acted on: inheriting from a sibling checkpoint of the same
+                # corpus is near enough (mistborn 13.29/13.33/13.76 across three
+                # retrains) and inheriting from a different corpus two versions
+                # back is deathstalker's 16.64 onto weights that measured 15.91.
+                # A reader deciding whether to trust a band needs the sentence.
+                "inherited_from": manifest.inherited_from,
                 # WHICH KIND OF FILE THIS ROW'S FACTS CAME OUT OF: `"repo"` is
                 # a `crucible-voice.toml` in the weights' own repo at the
                 # pinned revision, `"override"` a whole manifest written to

@@ -628,6 +628,22 @@ class VoiceManifest:
     #: indistinguishable from a measured one at the point of use; this is the
     #: field that tells them apart, and it rides on the row.
     pace_basis: str | None = None
+    #: WHERE AN INHERITED PACE CAME FROM, in prose — the run and checkpoint the
+    #: number was measured on, and why it was not measured on these weights. None
+    #: unless `pace_basis` is `"inherited"`.
+    #:
+    #: RULED 2026-09-19, and it mirrors `estimate_basis` exactly: a `declared`
+    #: estimate REQUIRES its note and a `measured` one refuses it, because each
+    #: basis owes its own sentence and no other. The reason it matters here is
+    #: that "inherited" covers two situations a reader must be able to tell
+    #: apart. An inherited pace from a SIBLING checkpoint of the same corpus is
+    #: near enough — mistborn measured 13.29, 13.33 and 13.76 across three
+    #: retrains. An inherited pace from a DIFFERENT corpus two versions back is
+    #: the deathstalker defect: 16.64 carried from `ds_v5_prod` onto weights
+    #: that measured 15.91, 4.4% fast, enough to mis-size narrator's duration
+    #: guard from the first chunk. The word alone cannot separate them; the
+    #: sentence can, so the sentence is required and rides on the row.
+    inherited_from: str | None = None
 
     #: Which subtree of `~/.crucible/` this thing's weights live under. A voice id
     #: and a model id are separate namespaces and must not be able to collide on
@@ -688,6 +704,7 @@ class VoiceManifest:
             "takes": [take.to_dict() for take in self.takes],
             "manifest": self.manifest_source,
             "pace_basis": self.pace_basis,
+            "inherited_from": self.inherited_from,
         }
 
 

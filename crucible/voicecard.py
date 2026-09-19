@@ -160,8 +160,14 @@ def render_limits(repo: RepoManifest) -> str:
             f"({repo.pace_basis}), with the band running "
             f"{pace['min_chars_per_sec']} to {pace['max_chars_per_sec']}."
         )
+        # THE BASIS'S OWN SENTENCE, whichever basis it is. An inherited pace
+        # is served exactly like a measured one — it is a certificate the voice
+        # states — and the card is where a person finds out WHICH other weights
+        # it came from, which is the whole of whether to trust it.
         if repo.measured_from:
             lines.append(f"  {repo.measured_from}")
+        if repo.inherited_from:
+            lines.append(f"  Inherited from {repo.inherited_from}")
     if pace.get("safe_min_chars") is not None:
         lines.append(
             f"- **Safe chunk band:** {pace['safe_min_chars']}-"
@@ -283,6 +289,7 @@ def export_manifest(
     *,
     pace_basis: str | None,
     measured_from: str | None,
+    inherited_from: str | None,
     max_chars_basis: str | None,
     uncertified: bool,
 ) -> tuple[str, list[str]]:
@@ -319,13 +326,35 @@ def export_manifest(
                 "which is exactly how deathstalker's 16.64 survived onto weights "
                 "that measured 15.91"
             )
-        if pace_basis == "measured" and (
-            measured_from is None or measured_from.strip() == ""
-        ):
+        # EACH BASIS OWES EXACTLY ITS OWN SENTENCE, and this writer refuses to
+        # invent either (ruled 2026-09-19; `voicerepo._repo_pace` is the reader
+        # of the same rule). The packaged schema states neither, so there is
+        # nothing here to carry across — only a person who knows.
+        owed, given, refused_name, refused_value = (
+            ("--measured-from", measured_from, "--inherited-from", inherited_from)
+            if pace_basis == "measured"
+            else ("--inherited-from", inherited_from, "--measured-from", measured_from)
+        )
+        if given is None or given.strip() == "":
             raise CardError(
-                "--pace-basis measured owes --measured-from: what was measured, "
-                "on which checkpoint, over how many renders. The number is only "
-                "worth what the next reader can find out about it"
+                f"--pace-basis {pace_basis} owes {owed}: "
+                + (
+                    "what was measured, on which checkpoint, over how many "
+                    "renders. The number is only worth what the next reader can "
+                    "find out about it"
+                    if pace_basis == "measured"
+                    else "which run and checkpoint the number came from, and why "
+                    "these weights have no ladder yet. A sibling checkpoint of "
+                    "the same corpus is near enough; a different corpus two "
+                    "versions back is deathstalker's 16.64 onto weights that "
+                    "measured 15.91"
+                )
+            )
+        if refused_value is not None and refused_value.strip() != "":
+            raise CardError(
+                f"--pace-basis {pace_basis} was given {refused_name} as well. "
+                f"Each basis owes exactly its own sentence — {owed} — and the "
+                "other would be prose about a measurement this voice did not make"
             )
     if max_chars_basis not in MAX_CHARS_BASES:
         raise CardError(
@@ -368,8 +397,14 @@ def export_manifest(
             lines.append(
                 "min_chars_per_sec  = " + _toml_number(pace.min_chars_per_sec)
             )
-            if measured_from:
-                lines.append(f"measured_from      = {_toml_string(measured_from)}")
+            if pace_basis == "measured":
+                lines.append(
+                    f"measured_from      = {_toml_string(measured_from)}"
+                )
+            else:
+                lines.append(
+                    f"inherited_from     = {_toml_string(inherited_from)}"
+                )
         for key in ("target_chars", "safe_min_chars", "safe_max_chars"):
             value = getattr(pace, key)
             if value is not None:

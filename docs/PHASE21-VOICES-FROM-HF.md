@@ -56,6 +56,15 @@ the two in section 9 are still his.
 > 7. A `[voice.pace]` table that is PRESENT owes `basis` even when it states only a packing
 >    target and no rates — the contract's "present ⇒ basis required", read literally. `basis`
 >    certifies the table.
+>
+> **AMENDED 2026-09-19 (ruled after the training-PC session's argument, built here):** deviation 7's
+> open question — whether `inherited` should owe prose — is closed the strict way. §2.1 now requires
+> `inherited_from` on an inherited pace and refuses it on a measured one, and requires
+> `measured_from` on a measured pace and refuses it on an inherited one: each basis owes exactly its
+> own sentence, which is `estimate_basis`'s rule. `inherited_from` rides the `/v1/voices` row beside
+> `pace_basis`, appears in the card's limits line, and `crucible voices export --inherited-from`
+> refuses to invent it. Four refusals and the two carries, each seen to fail once against the code
+> without the rule.
 
 ## 0. Why, in one paragraph
 
@@ -137,7 +146,9 @@ min_chars_per_sec  = 10.58
 safe_min_chars     = 500
 safe_max_chars     = 800
 # or target_chars = 600; or edges = "percentile" — exactly today's rules, unchanged
-measured_from      = "mb_hp_rvcbed1 ckpt-4257, n=51 in the 500-800 band"   # prose, required when basis = measured
+measured_from      = "mb_hp_rvcbed1 ckpt-4257, n=51 in the 500-800 band"   # prose, REQUIRED when basis = measured; refused when inherited
+# inherited_from   = "ow_v8_rvcbed1 ckpt-966; these weights have no ladder yet, re-measurement owed"
+#                                          prose, REQUIRED when basis = inherited; refused when measured
 
 [voice.arms.cuda-linux]
 max_chars       = 800
@@ -165,6 +176,23 @@ and a placeholder cap are real states that shipped, and a schema that cannot say
 measured facts. Both are REFUSED when absent. `inherited` and `placeholder` are served exactly like
 `measured` — they are certificates the voice states — and both ride the `/v1/voices` row
 (`pace_basis`, `max_chars_basis`) so a person can see them.
+
+**EACH BASIS OWES EXACTLY ITS OWN SENTENCE — RULED 2026-09-19**, after the training-PC session's
+argument, and the shape is the loader's own `estimate_basis` rule: `declared` REQUIRES a note and
+`measured` REFUSES one. So `basis = "measured"` requires `measured_from` and refuses
+`inherited_from`; `basis = "inherited"` requires `inherited_from` — prose naming the run and
+checkpoint the number came from and why it was not measured on these weights — and refuses
+`measured_from`. Four refusals, each by name.
+
+The reason the word alone is not enough: **an inherited pace from a sibling checkpoint of the same
+corpus is near enough** — mistborn measured 13.29, 13.33 and 13.76 across three retrains — **and an
+inherited pace from a different corpus two versions back is the deathstalker defect**, 16.64 carried
+from `ds_v5_prod` onto weights that measured 15.91, 4.4% fast, enough to mis-size narrator's
+duration guard from the first chunk. A reader deciding whether to trust a band has to be able to
+tell those two apart, and only the sentence does it. `inherited_from` therefore rides the
+`/v1/voices` row beside `pace_basis` (null when the pace is not inherited) and is printed in the
+card's `## Measured limits` line for an inherited pace. `crucible voices export` gains
+`--inherited-from` and refuses to invent it, exactly as it refuses to invent `basis`.
 
 **The two arms stay per-arm tables in one file**, because there are no per-arm bytes on HF and the
 numbers are not always equal (thirdreich 1623 vs 900 today). `arms` replaces the word `backends` in
