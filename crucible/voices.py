@@ -56,6 +56,24 @@ Where the voices live
 `models/` does, and `$CRUCIBLE_VOICES_DIR` overrides it so a test can point at a
 fixture directory. If neither exists the loader refuses by name; it never falls
 back to "no voices".
+
+`load_all_voices()` reads FOUR sources now, and this file is still the owner of
+what a voice MEANS in all four (PHASE21-VOICES-FROM-HF.md): a PIN, whose
+`crucible-voice.toml` comes out of the weights' own repo at the pinned revision
+(`crucible/voicerepo.py`, which translates it into this module's document and
+hands it to the same `_parse`); the ENGINE's own base rows
+(`crucible/engines/<engine>/base.toml`, section 2.6); the packaged set; and this
+machine's overlay. `load_all_voices` documents the precedence and is its one
+owner.
+
+One consequence for the two blocks below. For a voice that comes out of a REPO
+manifest, `memory_bytes_estimate`, `estimate_basis`, `estimate_note` and
+`[voice.serving]` are not in the file at all — a manifest cannot make a claim
+about a box it has never run on, and the repo schema refuses each of them by
+name. They come from that server's `config.toml` `[tts.<engine>]` table
+(section 2.3), and `voicerepo.merge` fills them in before `_parse` ever sees
+them. The fields, the rules and the refusals here are unchanged; what moved is
+who states the numbers.
 """
 
 from __future__ import annotations
@@ -271,6 +289,14 @@ _PACE_HALF_ULP = 0.005
 #: (The number itself stays OFF `/v1/voices`: it is engine tuning, the server's
 #: business, and a client has no decision to make with it — see
 #: `crucible/jobs/tts/common.py`'s `voice_rows`.)
+#:
+#: WHO WRITES IT DEPENDS ON WHERE THE VOICE CAME FROM (PHASE21 section 2.3). A
+#: packaged `voices/<id>.toml` and a `PUT` override state it themselves, as they
+#: always have. A voice that comes out of its own repo does NOT — the repo
+#: schema refuses `[voice.serving]` by name, because the width sizes the server
+#: narrator starts on a particular box — and `voicerepo.merge` fills this table
+#: from that machine's `config.toml` `[tts.<engine>]` before `_parse` runs. The
+#: rules below are the same either way.
 _SERVING_REQUIRED: dict[str, type] = {
     "max_num_seqs": int,
     "max_num_seqs_note": str,
