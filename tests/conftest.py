@@ -23,7 +23,13 @@ from crucible import API_VERSION, accelerator, jobenv
 from crucible.accelerator import GIB
 from crucible.api import create_app
 from crucible.backend import Backend, Gpu
-from crucible.config import DEFAULT_OPEN_PAIRING, load_config, mint_token, write_config
+from crucible.config import (
+    DEFAULT_OPEN_PAIRING,
+    declared_tts_footprints,
+    load_config,
+    mint_token,
+    write_config,
+)
 from crucible import residency as residency_module
 from crucible.manifests import load_manifest
 
@@ -86,6 +92,12 @@ def make_app(home: Path) -> Callable[..., FastAPI]:
         # test asserting the open behaviour actually fails if the product's
         # default changes. A test about the approval step passes False here.
         open_pairing: bool = DEFAULT_OPEN_PAIRING,
+        # WHAT `crucible init` WRITES ON THIS BACKEND (PHASE21 section 2.3),
+        # taken from the one function that states it rather than restated here:
+        # a server that has never been told what a narrator engine costs refuses
+        # every repo-manifest voice by name, and a fixture that silently was
+        # that server would make the refusal look like a bug in the door.
+        tts_engines: Any = None,
     ) -> FastAPI:
         write_config(
             home,
@@ -104,6 +116,11 @@ def make_app(home: Path) -> Callable[..., FastAPI]:
             desktop_allowance_bytes=desktop_allowance_bytes,
             capability=capability,
             open_pairing=open_pairing,
+            tts_engines=(
+                declared_tts_footprints(backend.kind)
+                if tts_engines is None
+                else tts_engines
+            ),
         )
         return create_app(load_config(home), backend)
 

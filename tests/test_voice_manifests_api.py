@@ -329,3 +329,207 @@ def test_a_half_written_manifest_never_appears(
     assert list((home / "voices").glob("*")) == [], (
         "the temporary file was left behind, so the next load_all_voices() sees it"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The `pin` body — PHASE21-VOICES-FROM-HF.md section 2.4
+#
+# `PUT /v1/voices/{id}` went back to being an override, and gained the body a
+# deploy actually sends: which published revision THIS machine serves a voice
+# from. Its facts then come down with its weights, out of a `crucible-voice.toml`
+# committed in the same commit as the bytes.
+#
+# Nothing here reaches the Hub: the manifest is written where a fetch would have
+# left it (the home's content-addressed cache), which is the seam the loader
+# already reads before it asks the network.
+# ─────────────────────────────────────────────────────────────────────────────
+
+REPO_MANIFEST = """
+schema = 1
+
+[voice]
+display         = "Nightingale"
+kind            = "checkpoint"
+narrator_engine = "higgs-v3"
+language        = "en"
+sample_rate     = 24000
+
+[voice.pace]
+basis              = "measured"
+pace_chars_per_sec = 13.76
+max_chars_per_sec  = 17.89
+min_chars_per_sec  = 10.58
+safe_min_chars     = 500
+safe_max_chars     = 800
+measured_from      = "ng_v1 ckpt-4257, n=51 in the 500-800 band"
+
+[voice.arms.cuda-linux]
+max_chars       = 800
+max_chars_basis = "measured"
+sampling        = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+"""
+
+PIN_REPO = "owenmorgan/nightingale-higgs-v3"
+
+
+def a_cached_repo_manifest(
+    home: Path, revision: str = SHA, text: str = REPO_MANIFEST
+) -> Path:
+    path = (
+        home
+        / "voice-manifests"
+        / PIN_REPO.replace("/", "--")
+        / revision
+        / "crucible-voice.toml"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_a_pin_body_writes_the_home_pins_row(
+    tts_client: TestClient, auth: dict[str, str], home: Path, no_hub: list[str]
+) -> None:
+    a_cached_repo_manifest(home)
+    response = tts_client.put(
+        f"/v1/voices/{CUSTOM}",
+        json={"pin": {"hf_repo": PIN_REPO, "revision": SHA}},
+        headers=auth,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["path"].endswith("pins.toml")
+    assert no_hub == [], "a stated revision was resolved anyway"
+    row = body["voice"]
+    assert row["id"] == CUSTOM
+    assert row["display"] == "Nightingale"
+    # THE ROW'S THREE NEW FACTS (section 6).
+    assert row["manifest"] == "repo"
+    assert row["pace_basis"] == "measured"
+    assert row["max_chars_basis"] == "measured"
+    assert row["revision"] == SHA
+    # And the machine facts came from THIS BOX rather than from the manifest.
+    assert row["memory_bytes_estimate"] == 19_000_000_000
+    assert row["estimate_basis"] == "declared"
+
+
+def test_a_pin_with_no_revision_resolves_the_head(
+    tts_client: TestClient, auth: dict[str, str], home: Path, no_hub: list[str]
+) -> None:
+    """Nobody knows their own repo's head sha, and the engine is what holds the
+    HuggingFace credential and does the fetching."""
+    a_cached_repo_manifest(home)
+    response = tts_client.put(
+        f"/v1/voices/{CUSTOM}",
+        json={"pin": {"hf_repo": PIN_REPO, "revision": None}},
+        headers=auth,
+    )
+    assert response.status_code == 200, response.text
+    assert no_hub == [PIN_REPO]
+    assert response.json()["voice"]["revision"] == SHA
+
+
+def test_a_pin_to_a_revision_with_no_manifest_writes_nothing(
+    tts_client: TestClient,
+    auth: dict[str, str],
+    home: Path,
+    no_hub: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A door that wrote first would leave a server holding a pin nothing can
+    load, and would report that by breaking the catalog."""
+    import huggingface_hub
+    from huggingface_hub.errors import EntryNotFoundError
+
+    def missing(**_kwargs: Any) -> str:
+        raise EntryNotFoundError("404")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", missing)
+    response = tts_client.put(
+        f"/v1/voices/{CUSTOM}",
+        json={"pin": {"hf_repo": PIN_REPO, "revision": SHA}},
+        headers=auth,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "voice_invalid"
+    assert "voice_manifest_missing" in response.json()["error"]["message"]
+    assert not (home / "voices" / "pins.toml").exists()
+
+
+def test_a_body_with_both_a_pin_and_a_voice_is_refused(
+    tts_client: TestClient, auth: dict[str, str], no_hub: list[str]
+) -> None:
+    response = tts_client.put(
+        f"/v1/voices/{CUSTOM}",
+        json={"pin": {"hf_repo": PIN_REPO, "revision": SHA}, "voice": a_voice()},
+        headers=auth,
+    )
+    assert response.status_code == 400
+    assert "both a `pin` and a `voice`" in response.json()["error"]["message"]
+
+
+def test_a_body_with_neither_says_what_the_two_shapes_are(
+    tts_client: TestClient, auth: dict[str, str], no_hub: list[str]
+) -> None:
+    response = tts_client.put(
+        f"/v1/voices/{CUSTOM}", json={"something": 1}, headers=auth
+    )
+    assert response.status_code == 400
+    message = response.json()["error"]["message"]
+    assert "pin" in message and "voice" in message
+
+
+def test_an_unknown_key_in_a_pin_is_refused(
+    tts_client: TestClient, auth: dict[str, str], no_hub: list[str]
+) -> None:
+    response = tts_client.put(
+        f"/v1/voices/{CUSTOM}",
+        json={"pin": {"hf_repo": PIN_REPO, "revision": SHA, "pace": 13.3}},
+        headers=auth,
+    )
+    assert response.status_code == 400
+    assert "unknown key(s) [\'pace\']" in response.json()["error"]["message"]
+
+
+def test_delete_removes_a_pin_row_as_well_as_an_override(
+    tts_client: TestClient, auth: dict[str, str], home: Path, no_hub: list[str]
+) -> None:
+    """Section 2.4: whichever the id has. A person deleting a voice knows only
+    that they added it."""
+    a_cached_repo_manifest(home)
+    assert tts_client.put(
+        f"/v1/voices/{CUSTOM}",
+        json={"pin": {"hf_repo": PIN_REPO, "revision": SHA}},
+        headers=auth,
+    ).status_code == 200
+    assert CUSTOM in load_all_voices()
+    assert tts_client.delete(f"/v1/voices/{CUSTOM}", headers=auth).status_code == 204
+    assert CUSTOM not in load_all_voices()
+    # And a second delete is a 404 rather than a quiet success.
+    assert tts_client.delete(f"/v1/voices/{CUSTOM}", headers=auth).status_code == 404
+
+
+def test_an_override_row_still_says_it_is_one(
+    tts_client: TestClient, auth: dict[str, str], no_hub: list[str]
+) -> None:
+    """The `voice` body is unchanged, and the row now says which kind of file
+    its facts came out of."""
+    # `a_voice()` IS the whole document — a table with a `voice` key, exactly as
+    # voices/<id>.toml holds it — which is what this door has always taken.
+    response = tts_client.put(f"/v1/voices/{CUSTOM}", json=a_voice(), headers=auth)
+    assert response.status_code == 200, response.text
+    row = response.json()["voice"]
+    assert row["manifest"] == "override"
+    # A `voices/<id>.toml` has no basis keys, and null means THIS SCHEMA CANNOT
+    # SAY rather than a third word for "measured".
+    assert row["pace_basis"] is None
+    assert row["max_chars_basis"] is None
+
+
+def test_a_packaged_voice_row_says_packaged(
+    tts_client: TestClient, auth: dict[str, str]
+) -> None:
+    rows = tts_client.get("/v1/voices", headers=auth).json()
+    by_id = {row["id"]: row for row in rows}
+    assert by_id["mistborn"]["manifest"] == "packaged"
+    assert by_id["zeroshot"]["manifest"] == "engine"
