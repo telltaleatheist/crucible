@@ -27,7 +27,7 @@ import pytest
 from crucible.host import app as app_module
 from crucible.host import catalog as catalog_module
 from crucible.host import door as door_module
-from crucible.host import installer, landoor, log, menu, paths, presence, startup, wslstate
+from crucible.host import installer, landoor, log, menu, outcome, paths, presence, startup, wslstate
 from crucible.host.catalog import CatalogRefusal, Subject
 from crucible.host.errors import HOST_ERROR_CODES, HostError
 from crucible.host.menu import Distro, Engine, Owner
@@ -871,6 +871,111 @@ def test_a_generated_row_with_no_predicate_is_refused_by_name(monkeypatch) -> No
     assert caught.value.code == "wsl_state_unknown"
 
 
+# ------------------------------------------------- PHASE19 2.2 the outcome
+
+
+def test_an_outcome_round_trips_every_field_2_2_names(tmp_path: Path) -> None:
+    written = outcome.write(
+        tmp_path,
+        state=outcome.CANNOT,
+        code="virtualization_disabled",
+        sentence="Windows cannot start a virtual machine: no",
+        release="1.0.5",
+        attempts=1,
+        now=lambda: "2026-09-19T00:00:00+00:00",
+    )
+    assert (tmp_path / "wsl-outcome.json").is_file()
+    read_back = outcome.read(tmp_path)
+    assert read_back == written
+    assert read_back is not None
+    assert read_back.to_dict() == {
+        "state": "cannot",
+        "code": "virtualization_disabled",
+        "sentence": "Windows cannot start a virtual machine: no",
+        "at": "2026-09-19T00:00:00+00:00",
+        "release": "1.0.5",
+        "attempts": 1,
+    }
+
+
+def test_a_machine_that_never_recorded_one_reads_None_and_never_a_blank(
+    tmp_path: Path,
+) -> None:
+    assert outcome.read(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "{not json",
+        '["a list"]',
+        '{"state": "sideways", "at": "x", "release": "1.0.5", "attempts": 0}',
+        '{"state": "done", "at": "x", "release": "1.0.5", "attempts": "two"}',
+        '{"state": "done", "at": "x", "release": "", "attempts": 0}',
+        '{"state": "done", "at": "", "release": "1.0.5", "attempts": 0}',
+        '{"state": "failed", "at": "x", "release": "1.0.5", "attempts": 1, "code": 7}',
+    ],
+)
+def test_a_present_outcome_that_cannot_be_read_is_REFUSED_and_never_treated_as_absent(
+    tmp_path: Path, document: str
+) -> None:
+    """2.3 branches opposite ways on None and on `cannot`.
+
+    So a file that is there and unreadable must not answer the question the
+    same way an absent one does: reading it as None would start a move on a
+    machine that had already said it cannot run one.
+    """
+    (tmp_path / "wsl-outcome.json").write_text(document, encoding="utf-8")
+    with pytest.raises(HostError) as caught:
+        outcome.read(tmp_path)
+    assert caught.value.code == "wsl_outcome_invalid"
+    assert caught.value.code in HOST_ERROR_CODES
+
+
+def test_a_state_nobody_defined_is_refused_at_the_WRITE(tmp_path: Path) -> None:
+    with pytest.raises(HostError) as caught:
+        outcome.write(tmp_path, state="nearly", release="1.0.5", attempts=0)
+    assert caught.value.code == "wsl_outcome_invalid"
+    assert not (tmp_path / "wsl-outcome.json").exists()
+
+
+def test_the_classifier_reads_the_TABLES_partition_and_keeps_no_list_of_its_own() -> None:
+    """2.2's three non-trivial endings, each derived rather than listed.
+
+    A refusal naming a row the tray cannot carry IS a `cannot`; one naming a row
+    it can carry is a `failed`, because the action ran and the machine still
+    answers the same way; the reboot is its own code.
+    """
+    for row in WSL_STATES:
+        expected = outcome.FAILED if row.automatic else outcome.CANNOT
+        assert outcome.classify(row.code) == expected, row.code
+    assert outcome.classify("wsl_reboot_required") == outcome.REBOOT_PENDING
+    assert outcome.classify("wsl_reboot_again") == outcome.CANNOT
+    # Not a state code at all: a download that died is retried, not refused.
+    assert outcome.classify("rootfs_download_failed") == outcome.FAILED
+    assert outcome.classify("step_failed") == outcome.FAILED
+
+
+def test_a_second_reboot_demand_is_terminal_and_says_twice(tmp_path: Path) -> None:
+    """2.4. The first demand is Windows being asked what it needs; the second,
+    on the run that already followed a restart, is a machine to look at."""
+    events: list[installer.Event] = []
+    runner = Scripted(answers={"--status": bad("not recognized")})
+    walk = installer.EngineInstall(
+        runner,
+        events.append,
+        release="1.0.5",
+        home=tmp_path,
+        install_sh_url="https://example.invalid/install.sh",
+        resuming=True,
+    )
+    with pytest.raises(HostError) as caught:
+        walk.run()
+    assert caught.value.code == "wsl_reboot_again"
+    assert "twice" in caught.value.message
+    assert outcome.classify(caught.value.code) == outcome.CANNOT
+
+
 # ------------------------------------------------------------ 4.1 LAN door
 
 
@@ -1065,14 +1170,17 @@ def test_a_reboot_state_ends_the_task_with_the_sentence_4_7_requires(
     with pytest.raises(HostError) as caught:
         walk.run()
     assert caught.value.code == "wsl_reboot_required"
-    # NOT "Crucible continues": the Startup item brings the tray back and the
-    # tray does not re-post the task (app.py's INSTALL_ENGINE opens the console
-    # and the PAGE posts it). The sentence says what actually happens.
-    assert "reboot, then start this again" in caught.value.message
-    assert "picks this up where it stopped" not in caught.value.message
-    assert (tmp_path / installer.REBOOT_PENDING).is_file(), (
-        "nothing recorded that this machine stopped for a reboot"
-    )
+    # PHASE19 2.3: the tray resumes, so the sentence no longer asks for a press
+    # that nothing is waiting for. It still says the machine has to restart and
+    # that nothing downloaded is lost.
+    assert "has to restart" in caught.value.message
+    assert "goes on from here" in caught.value.message
+    assert "press Install" not in caught.value.message
+    # The MARKER is gone with it (2.2): the file that records this is
+    # `wsl-outcome.json`, written by the one caller that knows a terminal point
+    # when it sees one — `app._sequence`, which is tested where it lives.
+    assert not (tmp_path / "wsl-reboot-pending").exists()
+    assert outcome.classify(caught.value.code) == outcome.REBOOT_PENDING
     kinds = [event.event for event in events]
     assert kinds[0] == "step", "a line must never precede a step"
     assert kinds[-1] == "failed"

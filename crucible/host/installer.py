@@ -63,11 +63,13 @@ from .wsl_states import CRUCIBLE_DISTRO
 ENGINE_TARGET_WSL = "wsl"
 CLEANUP_RECORD = "migration-cleanup.json"
 
-#: Written when the walk stops for the reboot `wsl --install` needs, removed as
-#: soon as a later walk gets past `wsl-state`. It exists so that "continue where
-#: it stopped" is a fact something can READ rather than a sentence this module
-#: asserts — see `_wsl_state`'s reboot branch for what used to be promised.
-REBOOT_PENDING = "wsl-reboot-pending"
+#: THE MARKER IS GONE. `wsl-reboot-pending` used to be written here and read
+#: nowhere else; PHASE19 2.2 replaces it with `wsl-outcome.json`, which records
+#: the reboot as one of five endings instead of being a file whose only meaning
+#: was its own existence. `crucible/host/outcome.py` is its one owner, and
+#: `app._sequence` is what writes it at every terminal point of a move — this
+#: class raises, as it always did, and the code it raises is what chooses the
+#: state (`outcome.classify`).
 
 
 def cleanup_subjects(home: Path) -> set[tuple[str, str]]:
@@ -136,11 +138,27 @@ MIGRATE_POLL_SECONDS = 5.0
 MIGRATE_IN_USE_ROUNDS = 60
 
 #: The sentence 4.7 requires for the reboot states, verbatim in one place.
+#:
+#: REWRITTEN BY PHASE19 2.3. It used to say "press Install once more and it will
+#: go on from here", because nothing on the machine resumed by itself: the tray
+#: came back at login and the APP had to ask again. The tray now decides at
+#: every start (2.3) and resumes a `reboot-pending` on its own, so the sentence
+#: no longer asks for a press that nothing is waiting for.
 REBOOT_SENTENCE = (
-    "reboot, then start this again — this machine has to restart before "
-    "Windows can start a Linux virtual machine. Crucible's icon comes back by "
-    "itself when you log in; the install does not, so press Install once more "
-    "and it will go on from here. Nothing downloaded so far is lost."
+    "this machine has to restart before Windows can start a Linux virtual "
+    "machine. Nothing downloaded so far is lost: Crucible comes back by itself "
+    "when you log in and goes on from here."
+)
+
+#: 2.4's second demand. `wsl --install` ran, the machine restarted, and
+#: `wsl --status` asks for a restart again — which is not a state anything can
+#: repair and not one to loop on.
+REBOOT_AGAIN_SENTENCE = (
+    "Windows asked for a restart twice. `wsl --install` has already run and "
+    "this machine has already been restarted, and Windows still says it needs "
+    "another one before it can start a Linux virtual machine — so Crucible has "
+    "stopped rather than asking again. The Windows engine keeps working; this "
+    "is a machine somebody has to look at."
 )
 
 
@@ -241,6 +259,7 @@ class EngineInstall:
         install_sh_url: str,
         distro: str = CRUCIBLE_DISTRO,
         elevate: bool = True,
+        resuming: bool = False,
         share_lan: bool | None = None,
         windows_catalog: CatalogPort | None = None,
         guest_catalog: CatalogPort | None = None,
@@ -269,6 +288,15 @@ class EngineInstall:
         #: `False` in a test and in `--install --no-elevate`: the argv is still
         #: reported, and nothing raises a consent dialog.
         self._elevate = elevate
+        #: PHASE19 2.4: is this run the one AFTER the reboot Windows demanded?
+        #:
+        #: Resume is "run the sequence from the top", because every step is
+        #: already idempotent — so the only thing this changes is what a SECOND
+        #: reboot demand means. The first is a machine doing what Windows asked;
+        #: the second, on a machine that has already restarted, is a state
+        #: nothing here can repair, and asking for a third restart would be a
+        #: loop with a person in it.
+        self._resuming = resuming
         #: Whether this install should open the LAN door (`crucible lan`).
         #:
         #: THREE STATES, and `None` is the useful one. `True`/`False` is an
@@ -501,10 +529,6 @@ class EngineInstall:
             state = wslstate.detect(self._runner, release=self._release, **inputs)  # type: ignore[arg-type]
             self._state(state)
             if state.code in stop:
-                # Past the reboot, whether or not this run is the one that
-                # caused it. A marker left behind would have an app offering to
-                # continue something already continued.
-                self._home.joinpath(REBOOT_PENDING).unlink(missing_ok=True)
                 self._finish(step, state.sentence)
                 return
             if state.action_kind == "instruct" or state.action_kind == "link":
@@ -531,16 +555,18 @@ class EngineInstall:
                     )
                 # Enabling WSL always needs a restart, and there is no probe
                 # that says so — `wsl --status` answers the same before and
-                # after. 4.7: the task ends here, and the tray's Startup item
-                # brings the tray back. It does NOT bring the INSTALL back:
-                # `app.py`'s INSTALL_ENGINE opens the console and the page posts
-                # the task, so nothing on this machine resumes by itself. The
-                # sentence used to say it did. Now a file says where we got to,
-                # and the app that asked for the install is the one that offers
-                # to go on — which is also where Owen's Ollama ruling puts it.
-                self._home.joinpath(REBOOT_PENDING).write_text(
-                    self._release, encoding="utf-8"
-                )
+                # after. The task ends here, the tray's Startup item brings the
+                # tray back, and PHASE19 2.3 is what brings the INSTALL back:
+                # the tray reads `reboot-pending` out of `wsl-outcome.json` at
+                # its next start and resumes. That used to be the app's job and
+                # the sentence used to ask for a press; 2.3 ruled it the tray's,
+                # because the tray is the process that is already there.
+                #
+                # A SECOND DEMAND IS NOT A SECOND RESTART (2.4). This run is
+                # already the one after the reboot, and Windows asking again is
+                # a machine a person has to look at rather than a loop.
+                if self._resuming:
+                    raise self._fail("wsl_reboot_again", REBOOT_AGAIN_SENTENCE)
                 raise self._fail("wsl_reboot_required", REBOOT_SENTENCE)
             if state.code in never_repair:
                 raise self._fail(
