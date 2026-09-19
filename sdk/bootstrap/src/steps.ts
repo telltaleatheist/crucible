@@ -180,6 +180,49 @@ export function serverSh(): string {
 }
 
 /** The interpreter half: fetch, verify, unpack, swap. Once, ever. */
+/**
+ * The prefix `crucible/interpreter.py` puts in front of a progress line, and
+ * the three fields `parse_progress_line` accepts. WRITTEN HERE AND PARSED
+ * THERE, and tied by `tests/test_host.py`'s
+ * `test_install_sh_emits_the_progress_wire_interpreter_py_parses`.
+ *
+ * PHASE19 2.12 asked for one of two things: stream `install.sh`'s own progress
+ * lines, or have it emit a parseable byte line. This is the second, and the
+ * reason is that the WIRE already exists and already has an owner —
+ * `crucible/interpreter.py` declares it, writes it from Python and parses it,
+ * and `crucible/tasks.py` already lifts it out of an install's output. A shell
+ * that prints the same three fields joins a protocol rather than inventing
+ * one; the alternative, parsing curl's own meter, is CR-separated,
+ * locale-shaped and version-dependent, and there is no owner of that shape at
+ * all.
+ */
+export const PROGRESS_PREFIX = 'crucible-progress ';
+
+/**
+ * `curl` into a file, printing `bytes_done` / `bytes_total` while it runs.
+ *
+ * The total comes from a HEAD; a server that will not give a `Content-Length`
+ * yields `null`, which is exactly what the wire means by "the size is not
+ * known yet" (`HostProgressData` says so) and not a number invented to fill
+ * the field. The done figure is the file's own size, because that is the one
+ * thing POSIX sh can measure about a download in flight.
+ */
+export function progressFetchSh(destination: string, url: string): string {
+  return `  total="$(curl -fsSLI -m 20 ${url} | tr -d '\\r' `
+    + `| awk 'tolower($1) == "content-length:" { print $2 }' | tail -n 1)"\n`
+    + `  case "$total" in ''|*[!0-9]*) total=null ;; esac\n`
+    + `  curl ${CURL_ARGS.join(' ')} -o ${destination} ${url} &\n`
+    + `  fetch_pid=$!\n`
+    + `  while kill -0 "$fetch_pid" 2>/dev/null; do\n`
+    + `    got=0\n`
+    + `    if [ -f ${destination} ]; then got="$(wc -c < ${destination} | tr -d ' ')"; fi\n`
+    + `    printf '${PROGRESS_PREFIX}{"bytes_done": %s, "bytes_total": %s, "file": "%s"}\\n' `
+    + `"$got" "$total" "$py_asset"\n`
+    + `    sleep 1\n`
+    + `  done\n`
+    + `  wait "$fetch_pid" || die "runtime_download_failed: $py_url"\n`;
+}
+
 export function interpreterSh(): string {
   // The pin, per backend, as a `case` — the generated script is run on a
   // machine whose backend is `$BACKEND` and cannot be known here. Only the two
@@ -213,7 +256,7 @@ export function interpreterSh(): string {
     + `else\n`
     + `  say "server: python $py_version from python-build-standalone"\n`
     + `  mkdir -p "$downloads"; rm -f "$downloads/$py_asset"\n`
-    + `  curl ${CURL_ARGS.join(' ')} -o "$downloads/$py_asset" "$py_url" || die "runtime_download_failed: $py_url"\n`
+    + progressFetchSh('"$downloads/$py_asset"', '"$py_url"')
     + `  got_sha="$($SHA_TOOL "$downloads/$py_asset" | awk '{print $1}')"\n`
     + `  if [ "$got_sha" != "$py_sha" ]; then rm -f "$downloads/$py_asset"; die "runtime_sha_mismatch: $py_asset hashes $got_sha and this installer pins $py_sha. The download was deleted"; fi\n`
     + `  rm -rf "$partial" && mkdir -p "$partial"\n`

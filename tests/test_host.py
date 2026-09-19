@@ -54,6 +54,7 @@ class Scripted:
     calls: list[list[str]] = field(default_factory=list)
     gets: list[str] = field(default_factory=list)
     spawned: list[list[str]] = field(default_factory=list)
+    downloads: list[tuple[str, str, int]] = field(default_factory=list)
     platform: str = "win32"
     env: Mapping[str, str] = field(default_factory=lambda: dict(WINDOWS_ENV))
     default: RunResult = RunResult(code=0, stdout="", stderr="", failure=None)
@@ -70,6 +71,50 @@ class Scripted:
             if needle in " ".join(argv):
                 return answer
         return self.default
+
+    def stream(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout_s: float,
+        on_line: Callable[[str, str], None],
+        env: Mapping[str, str] | None = None,
+    ) -> RunResult:
+        """`run`, then the lines — the SAME answers, so a scripted test is
+        unchanged by PHASE19 2.12's move to streaming.
+
+        It is not a second script: the point of the production change is WHEN a
+        line arrives, and a test that needs to pin that says so by supplying
+        its own `stream` (see the guest-install one).
+        """
+        result = self.run(argv, timeout_s=timeout_s, env=env)
+        for line in result.stdout.splitlines():
+            on_line(line, "stdout")
+        for line in result.stderr.splitlines():
+            on_line(line, "stderr")
+        return result
+
+    def download(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        timeout_s: float,
+        on_progress: Callable[[int, int | None, str], None] | None = None,
+        attempts: int = 1,
+    ) -> RunResult:
+        """It lands, empty, and the call is recorded.
+
+        The same answer the default `run` gave when this was `curl.exe -o`: the
+        bytes are then checked against a digest by the step itself, which is
+        what every one of these tests is really about.
+        """
+        self.downloads.append((url, str(destination), attempts))
+        Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        Path(destination).write_bytes(b"")
+        if on_progress is not None:
+            on_progress(0, None, Path(destination).name)
+        return RunResult(code=0, stdout=str(destination), stderr="", failure=None)
 
     def get(self, url: str, *, timeout_s: float) -> int | None:
         self.gets.append(url)
@@ -893,6 +938,128 @@ def test_a_generated_row_with_no_predicate_is_refused_by_name(monkeypatch) -> No
     with pytest.raises(HostError) as caught:
         wslstate.detect(Scripted(), release="0.6.0")
     assert caught.value.code == "wsl_state_unknown"
+
+
+# --------------------------------------- PHASE19 2.12 the two downloads emit bytes
+
+
+def test_the_ubuntu_image_download_emits_pulls_own_byte_shape(tmp_path: Path) -> None:
+    """2.12: the 340 MB image reached the event stream as nothing at all."""
+    events: list[installer.Event] = []
+
+    class Downloading(Scripted):
+        def download(self, url, destination, *, timeout_s, on_progress=None, attempts=1):  # type: ignore[no-untyped-def]
+            self.downloads.append((url, str(destination), attempts))
+            assert on_progress is not None, "the step asked for no bytes at all"
+            on_progress(1 << 20, 356515840, Path(destination).name)
+            on_progress(356515840, 356515840, Path(destination).name)
+            Path(destination).parent.mkdir(parents=True, exist_ok=True)
+            Path(destination).write_bytes(b"")
+            return RunResult(code=0, stdout=str(destination), stderr="", failure=None)
+
+    runner = Downloading(
+        answers={
+            "-l -v": ok("  NAME   STATE   VERSION\n"),
+            "SHA256SUMS": ok("deadbeef  ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz\n"),
+            "certutil": ok("nope\n"),
+        }
+    )
+    walk = installer.EngineInstall(
+        runner, events.append, release="1.0.5", home=tmp_path,
+        install_sh_url="https://example.invalid/install.sh",
+    )
+    with pytest.raises(HostError):
+        # The sha will not match the fabricated sums file; the import is
+        # refused AFTER the download, which is the part under test.
+        walk._import_distro()
+    url, _destination, attempts = runner.downloads[0]
+    assert url.endswith("ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz")
+    assert attempts == installer.IMAGE_DOWNLOAD_ATTEMPTS == 3, "curl's --retry 3, kept"
+    progress = [event for event in events if event.event == "progress"]
+    assert progress, "the image downloaded and nothing said how far it had got"
+    assert set(progress[0].data) == {"bytes_done", "bytes_total", "file"}, (
+        "the shape is `pull`'s, in crucible/tasks.py"
+    )
+    assert progress[-1].data["bytes_done"] == progress[-1].data["bytes_total"]
+
+
+def test_install_sh_emits_the_progress_wire_interpreter_py_parses() -> None:
+    """2.12, the guest half. The shell WRITES the line and Python PARSES it.
+
+    The wire has one owner — `crucible/interpreter.py` declares it, writes it
+    from Python and parses it — and `install.sh` is a second writer of the same
+    three fields. This is the test that ties them: a prefix or a field renamed
+    on either side fails here rather than at a person's first install.
+    """
+    from crucible.interpreter import PROGRESS_PREFIX, parse_progress_line
+
+    root = Path(__file__).resolve().parent.parent
+    script = (root / "sdk" / "bootstrap" / "scripts" / "install.sh").read_text(encoding="utf-8")
+    line = next(
+        (raw.strip() for raw in script.splitlines() if PROGRESS_PREFIX in raw),
+        None,
+    )
+    assert line is not None, "install.sh emits no progress line for the interpreter fetch"
+    # The printf format, with its three %s filled in the way the shell would.
+    emitted = (
+        line.split("'", 1)[1].rsplit("'", 1)[0]
+        .replace("\\n", "")
+        .replace("%s", "1", 1)
+        .replace("%s", "2", 1)
+        .replace("%s", "cpython.tar.gz", 1)
+    )
+    assert parse_progress_line(emitted) == {
+        "bytes_done": 1,
+        "bytes_total": 2,
+        "file": "cpython.tar.gz",
+    }
+
+
+def test_a_guest_progress_line_becomes_a_progress_EVENT_not_a_log_line(tmp_path: Path) -> None:
+    """A person watching an install must not be shown a JSON blob."""
+    from crucible.interpreter import progress_line
+
+    events: list[installer.Event] = []
+    walk = installer.EngineInstall(
+        Scripted(), events.append, release="1.0.5", home=tmp_path,
+        install_sh_url="https://example.invalid/install.sh",
+    )
+    walk._line(progress_line(17, 100, "cpython.tar.gz"))
+    walk._line("server: python 3.11.16 from python-build-standalone")
+    assert [event.event for event in events] == ["progress", "line"]
+    assert events[0].data == {"bytes_done": 17, "bytes_total": 100, "file": "cpython.tar.gz"}
+
+
+def test_the_guest_install_streams_its_lines_rather_than_collecting_them(
+    tmp_path: Path,
+) -> None:
+    """2.12: `guest-install` pips for twenty minutes, and every line of it used
+    to arrive in one burst at the end."""
+    events: list[installer.Event] = []
+    seen_before_exit: list[str] = []
+
+    class Streaming(Scripted):
+        def stream(self, argv, *, timeout_s, on_line, env=None):  # type: ignore[no-untyped-def]
+            self.calls.append(list(argv))
+            on_line("Collecting torch==2.13.0", "stdout")
+            seen_before_exit.append(
+                "progress" if any(e.event == "line" for e in events) else "nothing"
+            )
+            on_line("Successfully installed torch", "stdout")
+            return RunResult(code=0, stdout="", stderr="", failure=None)
+
+    walk = installer.EngineInstall(
+        Streaming(), events.append, release="1.0.5", home=tmp_path,
+        install_sh_url="https://example.invalid/install.sh",
+    )
+    walk._guest_install()
+    assert seen_before_exit == ["progress"], (
+        "the first line reached the stream before the process had exited"
+    )
+    assert [event.data["text"] for event in events if event.event == "line"] == [
+        "Collecting torch==2.13.0",
+        "Successfully installed torch",
+    ]
 
 
 # ----------------------------------- PHASE19 2.12 the probe proves EVERY route

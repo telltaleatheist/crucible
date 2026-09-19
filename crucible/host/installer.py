@@ -116,6 +116,12 @@ STEPS: tuple[str, ...] = (
 #: Long enough for a `wsl --import` of a multi-gigabyte ext4 file, and for a
 #: guest-side install that pips a job type's recipe over somebody's home line.
 IMPORT_TIMEOUT_SECONDS = 30 * 60.0
+
+#: The Ubuntu image download. An hour, which is what the `curl.exe` call it
+#: replaced was given, and 3 tries, which is `CURL_ARGS`' `--retry 3` in
+#: `sdk/bootstrap/src/runtime.ts` — the same number, kept rather than re-chosen.
+IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 3600.0
+IMAGE_DOWNLOAD_ATTEMPTS = 3
 GUEST_INSTALL_TIMEOUT_SECONDS = 120 * 60.0
 QUICK_TIMEOUT_SECONDS = 5 * 60.0
 
@@ -323,6 +329,8 @@ class EngineInstall:
         self._sleep = sleep
         self._index = 0
         self._records: list[StepRecord] = []
+        #: When the last `progress` event went out, for `_bytes`'s throttle.
+        self._last_bytes = 0.0
 
     # ---------------------------------------------------------------- events
 
@@ -352,7 +360,39 @@ class EngineInstall:
         raise HostError("wsl_state_unknown", f"no step called {name!r} was begun")
 
     def _line(self, text: str, stream: str = "stdout") -> None:
+        """One line of a step's output — UNLESS it is a progress line.
+
+        PHASE19 2.12: `install.sh` prints `crucible-progress {...}` while it
+        fetches the guest's interpreter, in the wire `crucible/interpreter.py`
+        declares and parses. Lifting it here is what puts the guest's bytes on
+        the SAME `progress` event the image download and `pull` use, instead of
+        showing a person a JSON blob in a log pane.
+        """
+        from ..interpreter import parse_progress_line
+
+        measured = parse_progress_line(text)
+        if measured is not None:
+            self._emit(Event("progress", measured))
+            return
         self._emit(Event("line", {"text": text, "stream": stream}))
+
+    def _bytes(self, done: int, total: int | None, name: str) -> None:
+        """`pull`'s shape, exactly (`crucible/tasks.py`'s `_pull_blocking`).
+
+        Throttled the same way and for the same reason: a megabyte-chunk loop
+        over 340 MB would otherwise put 340 events on a stream a person is
+        watching, and the interval is `tasks.PROGRESS_INTERVAL_SECONDS` rather
+        than a second number invented here.
+        """
+        from ..tasks import PROGRESS_INTERVAL_SECONDS
+
+        now = self._monotonic()
+        if done != total and now - self._last_bytes < PROGRESS_INTERVAL_SECONDS:
+            return
+        self._last_bytes = now
+        self._emit(
+            Event("progress", {"bytes_done": done, "bytes_total": total, "file": name})
+        )
 
     def _state(self, state: wslstate.WslState) -> None:
         self._emit(
@@ -629,7 +669,19 @@ class EngineInstall:
             raise self._fail("distro_import_incomplete", f"{destination} is not empty but no distro is registered. Its files were kept for recovery")
         archive = downloads / asset
         self._line(f"Downloading Ubuntu's own WSL image ({asset})")
-        fetched = self._runner.run(["curl.exe", "-fL", "--retry", "3", "-o", str(archive), UBUNTU_WSL_ROOTFS_URL], timeout_s=3600)
+        # THE BYTES REACH THE STREAM (PHASE19 2.12). This was `curl.exe -fL
+        # --retry 3 -o`, blocking for up to an hour, and the event stream
+        # carried nothing at all behind it — 340 MB of silence on the step an
+        # app draws a bar for. `runner.download` reports in `pull`'s own shape
+        # (`tasks.py`: bytes_done / bytes_total / file), which is the shape the
+        # client already reads, and `--retry 3` survives as `attempts=3`.
+        fetched = self._runner.download(
+            UBUNTU_WSL_ROOTFS_URL,
+            archive,
+            timeout_s=IMAGE_DOWNLOAD_TIMEOUT_SECONDS,
+            on_progress=self._bytes,
+            attempts=IMAGE_DOWNLOAD_ATTEMPTS,
+        )
         digest = self._runner.run(["curl.exe", "-fsSL", "--retry", "3", UBUNTU_WSL_SUMS_URL], timeout_s=300) if fetched.ok else fetched
         if not fetched.ok or not digest.ok:
             raise self._fail("rootfs_download_failed", f"Ubuntu's WSL image or its SHA256SUMS could not be downloaded: {digest.said()}")
@@ -1118,18 +1170,28 @@ class EngineInstall:
     # ------------------------------------------------------------- plumbing
 
     def _stream_guest(self, argv: Sequence[str], timeout_s: float) -> RunResult:
-        """Run inside the distro and put every line on the event stream.
+        """Run inside the distro and put every line on the event stream AS IT ARRIVES.
 
         `--exec`, always: wsl.exe pre-expands `$var` in its implicit-shell form
         and `--exec` is the spelling everything else in this system uses.
+
+        IT STREAMS SINCE PHASE19 2.12. It used to `run` and then walk the two
+        collected pipes, so `guest-install` — an `install.sh` that pips for
+        twenty minutes — arrived as one burst at the end, which is `door.py`'s
+        own rule about progress bars broken one layer down. `_line` lifts the
+        `crucible-progress` lines out on the way past.
         """
         full = ["wsl.exe", "-d", self._distro, "--exec", *argv]
-        result = self._runner.run(full, timeout_s=timeout_s)
-        for line in result.stdout.splitlines():
-            self._line(re.sub(r"crucible://\S+", "<pairing code redacted>", line))
-        for line in result.stderr.splitlines():
-            self._line(line, "stderr")
-        return result
+        return self._runner.stream(
+            full,
+            timeout_s=timeout_s,
+            on_line=lambda text, stream: self._line(
+                re.sub(r"crucible://\S+", "<pairing code redacted>", text)
+                if stream == "stdout"
+                else text,
+                stream,
+            ),
+        )
 
 
 def elevated(argv: Sequence[str]) -> list[str]:
