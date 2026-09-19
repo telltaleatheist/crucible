@@ -64,7 +64,7 @@ import os
 import re
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import tomli_w
@@ -72,6 +72,7 @@ import tomli_w
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
 from .manifests import check_table
+from .weights import LOCAL, PINNED
 
 VOICES_DIR_ENV = "CRUCIBLE_VOICES_DIR"
 
@@ -124,6 +125,14 @@ VOICE_BACKENDS = frozenset({CUDA_LINUX, MLX_DARWIN})
 CLIPS_FROM_REQUEST = "from-request"
 
 ESTIMATE_BASES = frozenset({"measured", "declared"})
+
+#: How much a backend block's `identity` is worth, and it rides on the
+#: `/v1/voices` row for `estimate_basis`'s reason: a reader must not be able to
+#: mistake one for the other (PHASE18-UNCERTIFIED.md section 3.1). `PINNED` and
+#: `LOCAL` — where the bytes come from — live in `crucible/weights.py`, which is
+#: the module that acts on the difference.
+VERIFIED = "verified"
+ASSERTED = "asserted"
 
 _VOICE_REQUIRED: dict[str, type] = {
     "id": str,
@@ -235,9 +244,36 @@ _SERVING_REQUIRED: dict[str, type] = {
     "max_num_seqs_note": str,
 }
 
-_BACKEND_REQUIRED: dict[str, type] = {
+#: THE SOURCE KEYS, and a block declares EXACTLY ONE of the two shapes
+#: (PHASE18-UNCERTIFIED.md section 3). They are optional here and checked as a
+#: pair below, because "one of these two groups" is not a thing `check_table`
+#: can say.
+#:
+#:     hf_repo + revision    a PIN. Crucible fetches it, stamps it, and the
+#:                           catalog owns the bytes.
+#:     path + identity       a DIRECTORY somebody else put there. Crucible
+#:                           never fetches it, never stamps it, never deletes
+#:                           it, and tolerates it vanishing between jobs.
+#:
+#: The second shape is why a voice can exist at all while Owen's HuggingFace
+#: private storage is full (HIGGS_FIELD_NOTES.md 4n.74 open item (a)) and is
+#: what a screening checkpoint uses, its 8 GiB merge being scratch that is
+#: deleted minutes later.
+_SOURCE_KEYS: dict[str, type] = {
     "hf_repo": str,
     "revision": str,
+    "path": str,
+    # WHAT A LOCAL BLOCK CLAIMS TO BE, and the reason it is required of one.
+    # A pin's identity is VERIFIED — the sha is what was fetched — and a
+    # directory's cannot be, so this is the registrant's ASSERTION and the
+    # `/v1/voices` row says so. It is what `fingerprint()` records in place of
+    # a revision, so two screened checkpoints can be told apart in a client's
+    # own output; without it every merge at a reused path would render as the
+    # same voice.
+    "identity": str,
+}
+
+_BACKEND_REQUIRED: dict[str, type] = {
     "memory_bytes_estimate": int,
     "estimate_basis": str,
     # The cap certificate for (voice, backend), in CHARACTERS. Per backend and it
@@ -250,6 +286,7 @@ _BACKEND_REQUIRED: dict[str, type] = {
     "sampling": dict,
 }
 _BACKEND_OPTIONAL: dict[str, type] = {
+    **_SOURCE_KEYS,
     "estimate_note": str,
     "sampling_reason": str,
     # A list of clip tables, or the literal CLIPS_FROM_REQUEST. Required of a
@@ -335,8 +372,12 @@ class VoiceBackendSpec:
     """One `[voice.backends.<kind>]` block."""
 
     backend: str
-    hf_repo: str
-    revision: str
+    #: Set together, and None on a local block. See `_SOURCE_KEYS`.
+    hf_repo: str | None
+    revision: str | None
+    #: Set together, and None on a pinned block.
+    path: str | None
+    identity: str | None
     memory_bytes_estimate: int
     estimate_basis: str
     estimate_note: str | None
@@ -350,6 +391,55 @@ class VoiceBackendSpec:
     @property
     def clips_from_request(self) -> bool:
         return self.clips == CLIPS_FROM_REQUEST
+
+    @property
+    def source(self) -> str:
+        """`"pinned"` or `"local"`. `_parse` has already refused everything else."""
+        return PINNED if self.hf_repo is not None else LOCAL
+
+    @property
+    def identity_basis(self) -> str:
+        """How much the `identity` on the row is worth.
+
+        `"verified"` for a pin — the sha is what `snapshot_download` fetched and
+        what the stamp records. `"asserted"` for a path — the registrant said so
+        and nothing checked. The distinction rides on the row for
+        `estimate_basis`'s reason: a reader must not be able to mistake one for
+        the other, and asserted identity is the honest shape for a directory
+        whose bytes this server did not fetch.
+        """
+        return VERIFIED if self.hf_repo is not None else ASSERTED
+
+    @property
+    def weights_identity(self) -> str:
+        """WHAT THIS BLOCK SAYS ITS WEIGHTS ARE — the pin's sha, or the local
+        block's asserted `identity`.
+
+        One reader for one fact. Four places want it — `fingerprint()`, the
+        `/v1/voices` row, the render's provenance sidecar and the resident
+        record `residency.ResidentVoice` — and a copy of `revision if revision
+        is not None else identity` in each is four chances to leave one of them
+        reporting `None` for a voice whose identity was stated. Two of the four
+        were left reading `spec.revision` when the source axis first landed, and
+        both published a `fingerprint` naming a checkpoint beside a `revision`
+        of null: one record, two answers, which is the failure `identity_basis`
+        exists to make impossible.
+
+        Never None: `_check_source` has already refused a block that sets
+        neither.
+        """
+        return self.revision if self.revision is not None else self.identity
+
+    @property
+    def local_path(self) -> Path | None:
+        """The directory this block names, or None for a pin.
+
+        `crucible/weights.py` asks every spec this through `getattr`, because
+        only a VOICE can be local today: a model is a catalog subject with a
+        download, an installer and a host migration behind it, and none of
+        those have been designed for bytes Crucible does not own.
+        """
+        return None if self.path is None else Path(self.path)
 
     @property
     def files(self) -> tuple[str, ...]:
@@ -372,8 +462,12 @@ class VoiceBackendSpec:
             clips = [clip.to_dict() for clip in self.clips]
         return {
             "backend": self.backend,
+            "source": self.source,
             "hf_repo": self.hf_repo,
             "revision": self.revision,
+            "path": self.path,
+            "identity": self.identity,
+            "identity_basis": self.identity_basis,
             "memory_bytes_estimate": self.memory_bytes_estimate,
             "estimate_basis": self.estimate_basis,
             "estimate_note": self.estimate_note,
@@ -480,8 +574,17 @@ class VoiceManifest:
         return self.takes[index]
 
     def fingerprint(self, backend_kind: str) -> str:
-        """`<id>@<revision>` — what a render records as the voice it used."""
-        return f"{self.id}@{self.spec(backend_kind).revision}"
+        """`<id>@<identity>` — what a render records as the voice it used.
+
+        The identity is the PIN's sha for a pinned block and the block's own
+        asserted `identity` for a local one. Same shape either way, and
+        deliberately: a client comparing two renders is asking "were these the
+        same weights", and that question has an answer in both cases. How much
+        the answer is worth is `identity_basis` on the row, not a second
+        spelling here — two fingerprint formats would make every consumer
+        parse before it could compare.
+        """
+        return f"{self.id}@{self.spec(backend_kind).weights_identity}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -698,6 +801,130 @@ def _check_pace(where: str, table: dict[str, Any]) -> Pace:
         target_chars=target,
         safe_min_chars=floor,
         safe_max_chars=ceiling,
+    )
+
+
+@dataclass(frozen=True)
+class _Source:
+    """The four source fields after `_check_source` has settled which shape a
+    block is. Exactly one pair is set."""
+
+    hf_repo: str | None
+    revision: str | None
+    path: str | None
+    identity: str | None
+
+
+def _blank(value: Any) -> bool:
+    """True for a key that is absent or is whitespace.
+
+    An EMPTY STRING IS NOT A DECLARATION. `path = ""` reads as "this block
+    declares a path" to `in`, and would then be refused for not being
+    absolute — a confusing second-order message about a block that really
+    declared no source at all. Treated as absent so the refusal names the
+    actual problem.
+    """
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _is_absolute(value: str) -> bool:
+    """Absolute in EITHER flavour, and that is deliberate.
+
+    A `cuda-linux` block names a POSIX path and an `mlx-darwin` block names
+    one too, but the loader that reads them may be running on Windows — a
+    test, `crucible voices show`, or an operator checking a manifest before
+    sending it to the machine that will serve it. `Path('/home/x')
+    .is_absolute()` is FALSE on Windows (no drive letter), so asking the host
+    would refuse a perfectly good Linux manifest for being on the wrong
+    machine.
+    """
+    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
+
+
+def _check_source(where: str, block: dict[str, Any]) -> _Source:
+    """Which of `_SOURCE_KEYS`' two shapes this block is, or a named refusal.
+
+    EXACTLY ONE, and both halves of the refusal are named rather than sharing
+    a "bad source" message: a block with both has two answers to "where are
+    these weights" and a block with neither has none, and they are different
+    mistakes to have made.
+    """
+    pinned = not _blank(block.get("hf_repo"))
+    local = not _blank(block.get("path"))
+
+    if pinned and local:
+        raise VoiceError(
+            f"{where}: declares both hf_repo {block['hf_repo']!r} and path "
+            f"{block['path']!r}. A backend block names ONE source — a pin Crucible "
+            "fetches and owns, or a directory somebody else put there and still "
+            "owns — and a block with two would let the loader pick which weights "
+            "the voice is"
+        )
+    if not pinned and not local:
+        raise VoiceError(
+            f"{where}: names no weights. A backend block declares either "
+            "hf_repo + revision (a pin) or path + identity (a directory on the "
+            "machine that serves it); see PHASE18-UNCERTIFIED.md section 3"
+        )
+
+    if pinned:
+        for key in ("path", "identity"):
+            if not _blank(block.get(key)):
+                raise VoiceError(
+                    f"{where}: is a pinned block and also carries {key}. A pin's "
+                    "identity is its revision, which is VERIFIED — the sha is what "
+                    f"was fetched — so a second {key} beside it would be a fact with "
+                    "two owners"
+                )
+        if not _HF_REPO.match(block["hf_repo"]):
+            raise VoiceError(
+                f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
+                "HuggingFace repo id"
+            )
+        if _blank(block.get("revision")):
+            raise VoiceError(
+                f"{where}: declares hf_repo {block['hf_repo']!r} and no revision. A "
+                "pin is a repo AND a commit; `PUT /v1/voices/{id}` is the door that "
+                "may omit one, and it resolves it before the manifest is written"
+            )
+        if not _REVISION.match(block["revision"]):
+            raise VoiceError(
+                f"{where}: revision {block['revision']!r} must be a full 40-character "
+                "commit sha, so a pull is reproducible; branch names are not pins"
+            )
+        return _Source(
+            hf_repo=block["hf_repo"],
+            revision=block["revision"],
+            path=None,
+            identity=None,
+        )
+
+    for key in ("hf_repo", "revision"):
+        if not _blank(block.get(key)):
+            raise VoiceError(
+                f"{where}: is a local block and also carries {key}. Crucible does not "
+                "fetch these bytes, does not stamp them and cannot check them against "
+                f"a pin, so a {key} here would describe a download that never happens"
+            )
+    if not _is_absolute(block["path"]):
+        raise VoiceError(
+            f"{where}: path {block['path']!r} is not absolute. The SERVER resolves it, "
+            "so a relative path would resolve against whatever directory that process "
+            "happens to have been started in"
+        )
+    if _blank(block.get("identity")):
+        raise VoiceError(
+            f"{where}: declares path {block['path']!r} and no identity. A directory "
+            "cannot say what weights it holds, so the registrant states it and the "
+            "row marks it ASSERTED. Without one, every checkpoint served from a "
+            "reused path would render under the same fingerprint and no client could "
+            "tell two of them apart"
+        )
+    return _Source(
+        hf_repo=None,
+        revision=None,
+        path=block["path"],
+        identity=block["identity"],
     )
 
 
@@ -1002,16 +1229,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
             where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL, error=VoiceError
         )
 
-        if not _HF_REPO.match(block["hf_repo"]):
-            raise VoiceError(
-                f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
-                "HuggingFace repo id"
-            )
-        if not _REVISION.match(block["revision"]):
-            raise VoiceError(
-                f"{where}: revision {block['revision']!r} must be a full 40-character "
-                "commit sha, so a pull is reproducible; branch names are not pins"
-            )
+        source = _check_source(where, block)
         if block["memory_bytes_estimate"] <= 0:
             raise VoiceError(
                 f"{where}: memory_bytes_estimate must be positive, got "
@@ -1063,8 +1281,10 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
 
         backends[kind] = VoiceBackendSpec(
             backend=kind,
-            hf_repo=block["hf_repo"],
-            revision=block["revision"],
+            hf_repo=source.hf_repo,
+            revision=source.revision,
+            path=source.path,
+            identity=source.identity,
             memory_bytes_estimate=block["memory_bytes_estimate"],
             estimate_basis=basis,
             estimate_note=note,

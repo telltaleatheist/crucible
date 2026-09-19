@@ -50,6 +50,23 @@ from .errors import CrucibleError
 HF_TOKEN_ENV = "HF_TOKEN"
 STAMP_NAME = "crucible-pull.json"
 
+#: WHERE A BACKEND BLOCK'S BYTES COME FROM (PHASE18-UNCERTIFIED.md section 3).
+#:
+#:   PINNED  bytes Crucible FETCHED at something it can name — an HF repo at a
+#:           commit for a model, a voice or an RVC archive, and the llama.cpp
+#:           release for the engine row (`crucible/llamacpp.py`). This module
+#:           fetches it, stamps it, and the catalog owns it.
+#:   LOCAL   a directory somebody else put on the serving machine. This module
+#:           NEVER fetches, stamps or deletes it, and it may vanish between
+#:           jobs without that being an error.
+#:
+#: The vocabulary lives here rather than in `crucible/voices.py` because this is
+#: the module that ACTS on the difference — everything downstream only reports
+#: it — and because `crucible/llamacpp.py` needs the word too and has no
+#: business importing a voice schema.
+PINNED = "pinned"
+LOCAL = "local"
+
 #: What to call the thing, and which command pulls it, per weights family. A
 #: refusal that says "run `crucible models pull deathstalker`" for a voice sends
 #: its reader to a command that will tell them there is no such model.
@@ -97,8 +114,15 @@ class WeightsSource(Protocol):
     """
 
     backend: str
-    hf_repo: str
-    revision: str
+    #: BOTH None ON A LOCAL VOICE BLOCK, which names a `path` instead
+    #: (PHASE18-UNCERTIFIED.md section 3). Declared nullable here rather than
+    #: left saying `str`, because this protocol is what a reader consults
+    #: before writing `spec.revision[:12]` — and every such line is a
+    #: TypeError on the shape that declares no pin. `local_source` is the
+    #: question to ask first; it answers None for the three spec types that
+    #: can only ever be pinned.
+    hf_repo: str | None
+    revision: str | None
     files: tuple[str, ...]
 
 
@@ -141,10 +165,21 @@ ProgressHook = Callable[[int, "int | None", str], None]
 @dataclass(frozen=True)
 class InstalledWeights:
     path: Path
-    hf_repo: str
-    revision: str
+    hf_repo: str | None
+    revision: str | None
     bytes: int
-    pulled: str
+    #: When the pull finished. None for a LOCAL entry: no download ever
+    #: happened, and a timestamp there would make a directory that has sat on
+    #: the machine for a month read as a recent install.
+    pulled: str | None
+    #: `"pinned"` or `"local"` (`crucible/voices.py`). A LOCAL entry is not an
+    #: install: nothing was fetched, there is no stamp, `hf_repo` and `pulled`
+    #: are None because no download ever happened, and the bytes may be gone
+    #: by the next job. It is reported through this type anyway because every
+    #: caller is asking the same question — "can this be served, and from
+    #: where" — and a second return type would make each of them branch before
+    #: it could read a path.
+    source: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -153,6 +188,7 @@ class InstalledWeights:
             "revision": self.revision,
             "bytes": self.bytes,
             "pulled": self.pulled,
+            "source": self.source,
         }
 
 
@@ -185,6 +221,54 @@ def missing_files(directory: Path, spec: WeightsSource) -> tuple[str, ...]:
     return tuple(name for name in spec.files if not (directory / name).is_file())
 
 
+def local_source(spec: Any) -> Path | None:
+    """The directory a LOCAL spec names, or None for a pinned one.
+
+    `getattr` and not an attribute on `WeightsSource`, because only a VOICE can
+    be local today (PHASE18-UNCERTIFIED.md section 3). A model is a catalog
+    subject with a download, an installer, a host migration and a `crucible
+    models pull` behind it, and not one of those has been designed for bytes
+    this server does not own; adding the member to the protocol would advertise
+    a capability three spec types do not have.
+    """
+    found = getattr(spec, "local_path", None)
+    return None if found is None else Path(found)
+
+
+def _local_installed(directory: Path, spec: Any) -> InstalledWeights | None:
+    """A local directory reported as servable, or None when it is not there.
+
+    NOTHING IS VERIFIED HERE beyond existence and the files the spec names. The
+    bytes were not fetched by this server, there is no stamp to compare a pin
+    against, and the `identity` on the row is the registrant's word (section
+    3.1). `pulled` is None because no download ever happened — reporting a
+    timestamp would make a directory that has sat there for a month look like a
+    recent install.
+
+    `bytes` is a stat walk rather than a read: it is the same
+    `directory_bytes` every other caller uses and it costs nothing next to an
+    8 GiB checkpoint load.
+    """
+    if not directory.is_dir():
+        return None
+    if missing_files(directory, spec):
+        return None
+    return InstalledWeights(
+        path=directory,
+        hf_repo=None,
+        # `spec.identity` and NOT `getattr(spec, "identity", None)`. The
+        # `getattr` in `local_source` asks a question every spec type may
+        # answer no to; this one is reached only after it answered yes, so a
+        # spec that names a path and no identity is a schema the loader let
+        # through — and a None here would be reported as this voice's
+        # revision. Loud by name is the answer to that, not a default.
+        revision=spec.identity,
+        bytes=directory_bytes(directory),
+        pulled=None,
+        source=LOCAL,
+    )
+
+
 def installed(
     config: Config, manifest: WeightsSubject, spec: WeightsSource
 ) -> InstalledWeights | None:
@@ -198,7 +282,14 @@ def installed(
     not the same check wearing a second hat: the stamp says a pull finished,
     and `spec.files` says what finishing means for this backend. A subject
     whose mmproj was deleted by hand has a perfectly good stamp.
+
+    A LOCAL SPEC IS NEVER STAMPED and is answered off the directory itself —
+    see `_local_installed`.
     """
+    local = local_source(spec)
+    if local is not None:
+        return _local_installed(local, spec)
+
     family = manifest.weights_family
     directory = weights_dir(config, family, manifest.id, spec.backend)
     stamp = stamp_path(config, family, manifest.id, spec.backend)
@@ -213,6 +304,7 @@ def installed(
         path=weights_dir(config, family, manifest.id, spec.backend),
         hf_repo=record["hf_repo"],
         revision=record["revision"],
+        source=PINNED,
         bytes=record["bytes"],
         pulled=record["pulled"],
     )
@@ -225,6 +317,30 @@ def require_installed(
     found = installed(config, manifest, spec)
     if found is not None:
         return found
+
+    local = local_source(spec)
+    if local is not None:
+        # NOT "not installed", and not an instruction to pull. Nothing here was
+        # ever installed, and there is no command that would fetch it: the
+        # directory belongs to whoever put it there (section 3), so a refusal
+        # that said `crucible voices pull` would send its reader to a command
+        # that cannot help. The bytes going away mid-run is EXPECTED of a
+        # screening merge — 8 GiB deleted the moment its renders land — so this
+        # is a plain statement of what is not there.
+        absent = missing_files(local, spec)
+        if local.is_dir() and absent:
+            raise WeightsError(
+                f"voice {manifest.id!r} names {local} for {spec.backend} and the "
+                f"directory is there, but {len(absent)} of the file(s) it needs are "
+                f"not: {', '.join(absent)}"
+            )
+        raise WeightsError(
+            f"voice {manifest.id!r} names {local} for {spec.backend} and there is no "
+            "such directory on this server. Crucible does not fetch a local voice's "
+            "weights and cannot replace them — whatever put them there has to put "
+            "them back, or the voice's manifest should be removed"
+        )
+
     family = manifest.weights_family
     noun, command = _FAMILY_WORDS[family]
     directory = weights_dir(config, family, manifest.id, spec.backend)
@@ -307,12 +423,33 @@ def _prune_empty(directory: Path, stop: Path) -> None:
         return
 
 
+def _refuse_local(spec: Any, manifest: WeightsSubject, verb: str, why: str) -> None:
+    """Refuse a door that would fetch or delete bytes this server does not own.
+
+    Both refusals in one place because they are one rule — Crucible manages a
+    PIN and does not manage a PATH (PHASE18-UNCERTIFIED.md section 3) — and two
+    hand-written copies would be two answers about one voice the first time
+    either was edited.
+    """
+    local = local_source(spec)
+    if local is None:
+        return
+    raise WeightsError(
+        f"{manifest.id!r} cannot be {verb}: {why}. Its {spec.backend} block names "
+        f"{local}"
+    )
+
+
 def remove(config: Config, manifest: WeightsSubject, spec: WeightsSource) -> Path:
     """Delete this subject's weights for this backend. Returns what went.
 
     PHASE15-HOST.md 3.5a, and it is the door the host's weights migration
     needs so that it never reaches into this module's layout from outside
     (`crucible/host/catalog.py` says why at length).
+
+    A LOCAL SPEC IS REFUSED (section 3): the bytes are not Crucible's and
+    deleting somebody else's 8 GiB directory because a manifest mentioned it is
+    the one thing this door must never do.
 
     **The whole backend directory**, not a file list, and the difference is
     only visible on `llama-windows`: that backend's directory holds exactly
@@ -324,6 +461,14 @@ def remove(config: Config, manifest: WeightsSubject, spec: WeightsSource) -> Pat
     machine that ran `cuda-linux` yesterday and `llama-windows` today has
     two, and 3.5's migration deletes one of them.
     """
+    _refuse_local(
+        spec,
+        manifest,
+        "removed",
+        "its weights are a directory on this server that something else owns, "
+        "and deleting them because a manifest mentioned them is the one thing "
+        "this door must never do",
+    )
     directory = weights_dir(config, manifest.weights_family, manifest.id, spec.backend)
     _remove(directory)
     _prune_empty(
@@ -495,6 +640,14 @@ def pull(
     on_progress: ProgressHook | None = None,
 ) -> InstalledWeights:
     """Fetch this model's or voice's weights for this backend at its pin."""
+    _refuse_local(
+        spec,
+        manifest,
+        "pulled",
+        "its weights are a directory on this server that something else put "
+        "there, and fetching would overwrite them from a repo the block does "
+        "not name",
+    )
     try:
         from huggingface_hub import snapshot_download
         from huggingface_hub.errors import (
@@ -837,6 +990,7 @@ def files_installed(
         revision=record["revision"],
         bytes=record["bytes"],
         pulled=record["pulled"],
+        source=PINNED,
     )
 
 

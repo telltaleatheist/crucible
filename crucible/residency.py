@@ -967,7 +967,13 @@ class Residency:
             voice_id=manifest.id,
             backend=spec.backend,
             narrator_engine=manifest.narrator_engine,
-            revision=spec.revision,
+            # The block's IDENTITY, which is the pin's sha on a pinned block and
+            # the asserted `identity` on a local one. `spec.revision` here is
+            # None for a local voice, and this record's own `fingerprint` — the
+            # line below — already carries that identity: one record cannot say
+            # the weights were `screening@mb_ha_rvcbed1@5368` and that their
+            # revision is nothing (PHASE18-UNCERTIFIED.md section 3.1).
+            revision=spec.weights_identity,
             fingerprint=manifest.fingerprint(spec.backend),
             sample_rate=manifest.sample_rate,
             max_chars=spec.max_chars,

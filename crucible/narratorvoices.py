@@ -129,6 +129,7 @@ from .backend import CUDA_LINUX, MLX_DARWIN
 from .engines.base import EngineError
 from .voicereference import ClipEntry, VoiceReference, place
 from .voices import VoiceBackendSpec, VoiceManifest
+from .weights import PINNED
 
 #: The variable narrator reads the document's PATH from
 #: (`engine/higgs/config.py:VOICES_ENV`). A path and not a value: a transcript
@@ -353,13 +354,23 @@ def voice_entry(
             "clone from the clip and ignore the weights this load names"
         )
     if kind == "default" and spec.backend == CUDA_LINUX:
+        # WHICH BYTES CRUCIBLE MEANT, named in whichever shape the block has.
+        # `spec.revision[:12]` subscripted None the moment a token voice
+        # declared a `path` instead of a pin (PHASE18-UNCERTIFIED.md section
+        # 3), so the voice was still refused — by a TypeError instead of by
+        # this sentence.
+        meant = (
+            f"pulled at {spec.hf_repo}@{spec.revision[:12]}"
+            if spec.source == PINNED
+            else f"named by this voice's {spec.backend} block"
+        )
         raise NarratorVoicesError(
             f"voice {manifest.id!r} is a token voice, and narrator's served arm "
             f"on {CUDA_LINUX} serves a default voice from the HuggingFace cache "
             "rather than from a directory Crucible names: its launcher reads "
             "HIGGS_MODEL_DIR for a checkpoint voice only and otherwise picks "
             "whatever base snapshot the cache holds. That is not the directory "
-            f"pulled at {spec.hf_repo}@{spec.revision[:12]} ({weights_dir}), and "
+            f"{meant} ({weights_dir}), and "
             "a server started on other bytes would render under this voice's "
             "fingerprint. RULING OWED on narrator's side; until then a token "
             f"voice loads on {MLX_DARWIN} only"

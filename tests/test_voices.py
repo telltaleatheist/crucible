@@ -957,3 +957,118 @@ def test_the_full_override_still_replaces_everything(tmp_path, monkeypatch) -> N
     a_voice_file(tmp_path / "home" / "voices", "ignored-because-overridden")
     monkeypatch.setenv(VOICES_DIR_ENV, str(only))
     assert sorted(load_all_voices()) == ["just-this-one"]
+
+
+# ------------------------------------------------- the source axis (PHASE18)
+#
+# A backend block names ONE source: a pin Crucible fetches and owns, or a
+# directory somebody else put on the serving machine
+# (PHASE18-UNCERTIFIED.md section 3). Both halves of "exactly one" are refused
+# by their own name, because a block with two sources and a block with none are
+# different mistakes.
+
+PIN = (
+    'hf_repo = "owenmorgan/probe-higgs-v3"\n'
+    'revision = "0123456789abcdef0123456789abcdef01234567"'
+)
+LOCAL_SOURCE = (
+    'path = "/home/telltale/higgs_v3_merged/mb_ha_rvcbed1_5368"\n'
+    'identity = "mb_ha_rvcbed1@5368"'
+)
+
+
+def test_a_local_block_loads_and_says_what_it_is() -> None:
+    voice = parse(swap(PIN, LOCAL_SOURCE))
+    spec = voice.spec("cuda-linux")
+    assert spec.source == "local"
+    assert spec.hf_repo is None and spec.revision is None
+    assert spec.path == "/home/telltale/higgs_v3_merged/mb_ha_rvcbed1_5368"
+    assert spec.identity == "mb_ha_rvcbed1@5368"
+    # ASSERTED, not verified: nothing checked that directory against anything.
+    assert spec.identity_basis == "asserted"
+    assert str(spec.local_path).replace("\\", "/").endswith("mb_ha_rvcbed1_5368")
+
+
+def test_a_pinned_block_is_still_verified() -> None:
+    spec = parse(GOOD).spec("cuda-linux")
+    assert spec.source == "pinned"
+    assert spec.identity_basis == "verified"
+    assert spec.path is None and spec.identity is None
+    assert spec.local_path is None
+
+
+def test_the_fingerprint_is_the_identity_either_way() -> None:
+    # One shape, so a client comparing two renders never parses before it can
+    # compare. How much the answer is worth is `identity_basis` on the row.
+    assert parse(GOOD).fingerprint("cuda-linux") == (
+        "probe@0123456789abcdef0123456789abcdef01234567"
+    )
+    assert parse(swap(PIN, LOCAL_SOURCE)).fingerprint("cuda-linux") == (
+        "probe@mb_ha_rvcbed1@5368"
+    )
+
+
+def test_two_sources_are_refused_as_two_sources() -> None:
+    message = refused(swap(PIN, PIN + "\n" + LOCAL_SOURCE))
+    assert "declares both hf_repo" in message
+    assert "names ONE source" in message
+
+
+def test_no_source_at_all_is_refused_as_none() -> None:
+    message = refused(swap(PIN + "\n", ""))
+    assert "names no weights" in message
+    assert "hf_repo + revision" in message and "path + identity" in message
+
+
+def test_a_local_block_may_not_also_carry_a_pin_field() -> None:
+    message = refused(
+        swap(PIN, LOCAL_SOURCE + '\nhf_repo = "owenmorgan/probe-higgs-v3"')
+    )
+    assert "declares both" in message
+
+
+def test_a_pinned_block_may_not_carry_an_identity() -> None:
+    message = refused(swap(PIN, PIN + '\nidentity = "mb_ha_rvcbed1@5368"'))
+    assert "is a pinned block and also carries identity" in message
+    assert "VERIFIED" in message
+
+
+def test_a_local_path_must_be_absolute() -> None:
+    message = refused(swap(PIN, LOCAL_SOURCE.replace("/home/telltale", "merged")))
+    assert "is not absolute" in message
+    assert "whatever directory that process happens to have been started in" in message
+
+
+def test_a_windows_path_is_absolute_too() -> None:
+    # The loader may be running on a different OS than the one that will serve
+    # the voice, so "absolute" is asked of the PATH and not of this host.
+    voice = parse(
+        swap(PIN, 'path = "C:/merged/mb_5368"\nidentity = "mb_ha_rvcbed1@5368"')
+    )
+    assert voice.spec("cuda-linux").source == "local"
+
+
+def test_a_local_block_without_an_identity_is_refused() -> None:
+    message = refused(swap(PIN, LOCAL_SOURCE.split("\n")[0]))
+    assert "and no identity" in message
+    assert "no client could tell two of them apart" in message
+
+
+def test_an_empty_path_is_no_source_rather_than_a_bad_one() -> None:
+    # `path = ""` reads as a declaration to `in`, and would otherwise be
+    # refused for not being absolute — a second-order message about a block
+    # that really declared no source at all.
+    message = refused(swap(PIN, 'path = ""\nidentity = "x"'))
+    assert "names no weights" in message
+
+
+def test_a_pin_without_a_revision_says_which_door_may_omit_one() -> None:
+    message = refused(swap(PIN, PIN.split("\n")[0]))
+    assert "and no revision" in message
+    assert "PUT /v1/voices" in message
+
+
+# The pin's own two checks — the `<owner>/<name>` shape and the 40-character
+# sha — moved into `_check_source` with everything else and are NOT re-tested
+# here: `test_a_branch_name_is_not_a_pin` and `test_a_bare_repo_name_is_refused`
+# above run through the moved code and are the owners of those two facts.

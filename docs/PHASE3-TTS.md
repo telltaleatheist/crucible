@@ -240,6 +240,28 @@ function — the same rule, and for the same reason, as `llm`'s models (PHASE2-L
 `null` when `backend_supported` is false, because they live in the backend block this host
 does not have — and `0` would read as "needs nothing".
 
+**`source` and `identity_basis` say where the weights came from and how much `fingerprint`
+is worth** (PHASE18-UNCERTIFIED.md section 3). A backend block declares EXACTLY ONE source:
+
+    hf_repo + revision    source "pinned", identity_basis "verified" — Crucible fetched
+                          the sha, stamped it, and owns the bytes.
+    path + identity       source "local", identity_basis "asserted" — a directory on the
+                          machine that serves it, which Crucible never fetches, never
+                          stamps, never deletes, and which may vanish between jobs
+                          without that being an error. `identity` is what the registrant
+                          says those weights are, and nothing checked it.
+
+A block with both, or with neither, is refused by its own name. `fingerprint` keeps ONE
+shape either way — `<id>@<revision>` or `<id>@<identity>` — so a client comparing two
+renders never has to parse before it can compare; `identity_basis` is how it learns what
+the comparison is worth. **`revision` on the row is that same identity**, which is the
+sha on a pinned block and the asserted string on a local one, so the row's own
+`fingerprint == <id>@<revision>` holds for both shapes; `identity_basis` is the only
+thing that says which kind of identity it is, and a client that needs a verifiable
+commit must read it rather than assume the field is a sha. `PUT /v1/voices/{id}` may omit
+`revision` on a PINNED block and the server resolves it; a LOCAL block has nothing to
+resolve and is written as sent.
+
 **`takes` is how many rungs this voice's ladder has**, and it is on the row so a client can
 ask before it submits. A `take` past the end is `unknown_take` and is never clamped, and a
 client spreading N candidates across the ladder (BookForge's Correct Sentences does exactly

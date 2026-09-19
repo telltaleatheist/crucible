@@ -1970,6 +1970,13 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         A block that is not a table, or names no `hf_repo`, is left ALONE rather
         than repaired: the validator has a sentence for each of those and it is
         better than anything invented here.
+
+        THAT IS ALSO WHAT KEEPS A LOCAL BLOCK OUT OF THIS
+        (PHASE18-UNCERTIFIED.md section 3). One that names `path` names no
+        `hf_repo`, so there is nothing to resolve a revision from and nothing
+        here touches it — which is right rather than lucky: a directory has no
+        commit to look up, and a `revision` beside a `path` is refused by the
+        validator anyway.
         """
         backends = block.get("backends")
         if not isinstance(backends, dict):
