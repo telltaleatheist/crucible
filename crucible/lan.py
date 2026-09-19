@@ -6,7 +6,7 @@ always has; what no one owned was the step from *this machine's* network
 addresses to that loopback. This module owns it, on exactly the terms
 `crucible/sharing.py` owns the Tailscale one:
 
-- the host owns a record (`landoor.json`) and the two Windows rows it created,
+- the host owns a record (`landoor.json`) and the Windows rows it created,
 - `lan_advertise` in the engine is its PROJECTION, not its source of truth,
 - `reconcile` repairs an opted-in door after the addresses change,
 - an existing forward is adopted only with `--adopt`,
@@ -24,6 +24,20 @@ without buying reachability — the worst of both. The crossing is a Windows-sid
 fact and belongs to the Windows-side host. On a native Linux or macOS server
 `--host 0.0.0.0` IS the whole answer and this module has nothing to do; it
 refuses to run anywhere but Windows rather than pretending otherwise.
+
+ONE ROW PER ADDRESS, NEVER THE WILDCARD
+----------------------------------------
+Until 2026-09-18 this added a single row listening on `0.0.0.0`. That is not
+"all the LAN addresses": it is every address this machine answers on,
+`127.0.0.1` included — which is the address the row forwards TO. The portproxy
+service therefore accepted its own connection and dialled itself. Measured on
+Owen's PC 2026-09-17: 15.5k of 16.4k ephemeral ports in TIME_WAIT, with
+localhost keepers failing at random.
+
+So the addresses are ENUMERATED and each one gets its own row, and
+`landoor.add_argv` refuses `portproxy_self_loop` before any argv is composed.
+Naming the addresses is also what lets `reconcile` see that one has moved,
+which a wildcard row never could.
 
 ONE PROMPT, AND NO SCRIPT FILE
 -------------------------------
@@ -130,25 +144,95 @@ def _require_windows(runner: Runner) -> None:
         )
 
 
-def _authorities(port: int) -> list[str]:
-    """Every address the forward listens on, as `host:port`.
+def addresses() -> list[str]:
+    """Every address this door may listen on, asked of the OS.
 
-    The portproxy listens on `0.0.0.0`, so EVERY non-loopback address of this
-    machine genuinely reaches the engine and every one of them is reported —
-    the same answer `pairing.reachable_urls` already gives for a wildcard bind.
-    Picking a subset would mean deciding which of a person's networks is "the"
-    LAN, which is a guess this codebase does not get to make.
+    EVERY one of them, and one row each. Picking a subset would mean deciding
+    which of a person's networks is "the" LAN, which is a guess this codebase
+    does not get to make; the tailnet address gets a row for the same reason
+    `pairing.reachable_urls` already lists it.
+
+    `ipv4_addresses` excludes loopback, link-local and the unspecified address,
+    which is why `door_commands` needs no second predicate to keep `0.0.0.0`
+    out of the listen set: an address this function returns is by construction
+    an address a row may listen on.
     """
     try:
-        addresses = ipv4_addresses()
+        found = ipv4_addresses()
     except InterfaceError as exc:
         raise LanError(f"lan_addresses_unreadable: {exc}") from exc
-    if not addresses:
+    if not found:
         raise LanError(
             "lan_no_addresses: this machine has no non-loopback IPv4 address, so "
             "opening a forward would publish nothing an app could dial"
         )
-    return [f"{address}:{port}" for address in addresses]
+    return found
+
+
+def _authorities(found: Sequence[str], port: int) -> list[str]:
+    """Those same addresses as `host:port`, which is what gets published."""
+    return [f"{address}:{port}" for address in found]
+
+
+def door_commands(door: landoor.LanDoor, found: Sequence[str],
+                  port: int) -> list[list[str]]:
+    """The rows this machine is missing, and the rows it has to lose.
+
+    The removals are ONE rule: any row listening somewhere `found` does not
+    name comes out. Because `addresses()` never reports `0.0.0.0` or a loopback
+    address, that single rule takes out both the stale row a DHCP move left
+    behind and the wildcard self-loop row Owen's PC carries today — no second
+    predicate that could drift out of step with
+    `landoor.covers_connect_address`.
+
+    Removals are ordered FIRST so that a machine whose wildcard row is being
+    replaced spends no moment carrying both it and the row that supersedes it.
+    """
+    commands = [
+        landoor.remove_argv(listen, port)
+        for listen in door.forwards
+        if listen not in found
+    ]
+    commands += [
+        landoor.add_argv(address, port)
+        for address in found
+        if address not in door.forwards
+    ]
+    if not door.firewall:
+        commands.append(landoor.firewall_add_argv(port))
+    return commands
+
+
+def _require_rows(after: landoor.LanDoor, found: Sequence[str], port: int) -> None:
+    """The machine as it is NOW, believed over any exit code.
+
+    `netsh` answers a delete it may not perform with "requires elevation" and
+    still exits 0, so a row is gone only when the listing no longer shows it.
+    Both directions are checked because both are silent otherwise: a row that
+    would not go is a self-loop still running, and a row that would not come is
+    a door reported open onto nothing.
+    """
+    remaining = [listen for listen in after.forwards if listen not in found]
+    if remaining:
+        raise LanError(
+            "lan_rows_not_removed: Windows still forwards port "
+            f"{port} from {', '.join(remaining)}, which is not an address this "
+            "machine has"
+            + ("" if not after.self_loops else
+               f" — and {', '.join(after.self_loops)} covers "
+               f"{landoor.CONNECT_ADDRESS}, so that row dials itself and eats "
+               "this machine's ephemeral ports")
+            + '. `netsh` answers a delete it may not perform with "requires '
+            'elevation" and still exits 0, so run this again and accept the '
+            "administrator prompt"
+        )
+    missing = [address for address in found if address not in after.forwards]
+    if missing or not after.firewall:
+        raise LanError(
+            "lan_verification_failed: the rows are not all there after asking "
+            f"for them ({after.detail}). If the administrator prompt was "
+            "dismissed, nothing was changed; run this again and accept it"
+        )
 
 
 def enable(home: Path, runner: Runner, engine: Engine, *, port: int = ENGINE_PORT,
@@ -175,7 +259,8 @@ def enable(home: Path, runner: Runner, engine: Engine, *, port: int = ENGINE_POR
             "lan_unowned: a port forward for this port already exists and "
             "Crucible did not create it; use --adopt to take ownership of it"
         )
-    authorities = _authorities(port)
+    listens = addresses()
+    authorities = _authorities(listens, port)
     record: dict[str, Any] = {
         "schema_version": 1,
         "port": port,
@@ -186,23 +271,11 @@ def enable(home: Path, runner: Runner, engine: Engine, *, port: int = ENGINE_POR
     # Durable intent before a mutation, exactly as `sharing.enable` does it: a
     # publish that dies half way leaves a record `reconcile` can finish from.
     _write(home, record)
-    missing = [
-        command
-        for present, command in (
-            (door.forward, landoor.add_argv(port)),
-            (door.firewall, landoor.firewall_add_argv(port)),
-        )
-        if not present
-    ]
-    if missing:
-        runner.run(elevated_argv(missing), timeout_s=ELEVATION_TIMEOUT)
+    commands = door_commands(door, listens, port)
+    if commands:
+        runner.run(elevated_argv(commands), timeout_s=ELEVATION_TIMEOUT)
     after = landoor.detect(runner, port)
-    if not (after.forward and after.firewall):
-        raise LanError(
-            "lan_verification_failed: the rows are not both there after asking "
-            f"for them ({after.detail}). If the administrator prompt was "
-            "dismissed, nothing was changed; run this again and accept it"
-        )
+    _require_rows(after, listens, port)
     # THE ROWS EXIST NOW, AND THE RECORD SAYS SO BEFORE THE PUBLISH IS TRIED.
     #
     # This is the durable-intent write completed, not repeated: the first one
@@ -238,8 +311,16 @@ def disable(home: Path, runner: Runner, engine: Engine) -> dict[str, Any]:
     # and the rows are retained so a retry still knows what it has to clean up.
     engine.advertise("lan_advertise", [])
     port = record["port"]
+    # Read the rows off the MACHINE rather than off the record's addresses: a
+    # lease that moved between the last reconcile and now would otherwise leave
+    # a row nothing owns, and a wildcard row adopted from before this rule
+    # existed is not in the record's address list at all.
+    door = landoor.detect(runner, port)
     runner.run(
-        elevated_argv([landoor.remove_argv(port), landoor.firewall_remove_argv(port)]),
+        elevated_argv(
+            [landoor.remove_argv(listen, port) for listen in door.forwards]
+            + [landoor.firewall_remove_argv(port)]
+        ),
         timeout_s=ELEVATION_TIMEOUT,
     )
     after = landoor.detect(runner, port)
@@ -264,9 +345,15 @@ def status(home: Path, runner: Runner, engine: Engine) -> dict[str, Any]:
     engine.verify()
     door = landoor.detect(runner, record["port"])
     published = engine.request("GET", "settings").get("lan_advertise")
-    current = _authorities(record["port"])
+    current = _authorities(addresses(), record["port"])
     addresses_match = published == record["authorities"] == current
-    configured = door.forward and door.firewall and door.private_network is not False
+    # `door.open` rather than the three facts re-tested here, which is what
+    # this line used to do. `detect` already folds in the fourth: a machine
+    # carrying a row whose listen set covers the connect address has both rows,
+    # a Private network and matching addresses, and is still not a door anyone
+    # wants — it is the port-eating self-loop. Re-deriving "configured" here
+    # meant one of the two readers could forget a term, and this one had.
+    configured = door.open
     return {
         **record,
         "state": "configured" if configured and addresses_match else "degraded",
@@ -286,9 +373,13 @@ def reconcile(home: Path, runner: Runner | None = None, *,
 
     The addresses are the reason this exists: a DHCP lease changes and the
     published `lan_advertise` becomes a list of places nothing answers. `enable`
-    recomputes them from the OS and republishes, and it adds no Windows row that
-    is already there, so this is cheap and prompts for nothing on the ordinary
-    path where only the addresses moved.
+    recomputes them from the OS, re-points the rows and republishes.
+
+    It asks for administrator when the rows actually have to move, which is the
+    price of naming the addresses rather than listening on `0.0.0.0`. The
+    wildcard row needed no repair because it listened on everything — including
+    the loopback address it forwarded to, which is what made it dial itself. A
+    reconcile that changes nothing still prompts for nothing.
     """
     record = read(home)
     if record is None:

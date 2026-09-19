@@ -15,9 +15,9 @@ TWO MECHANISMS, DETECTED BY NAME, NEVER GUESSED
   address and a portproxy would be a second, redundant hop. Nothing to do, and
   saying "nothing to do" is the answer, not a silence.
 - **portproxy.** Everything else: `netsh interface portproxy add v4tov4
-  listenport=7100 listenaddress=0.0.0.0 connectport=7100
-  connectaddress=127.0.0.1`. It needs administrator ONCE, and the host asks by
-  name with the sentence that says why.
+  listenport=7100 listenaddress=192.168.68.100 connectport=7100
+  connectaddress=127.0.0.1`, ONE ROW PER ADDRESS THIS MACHINE HAS. It needs
+  administrator ONCE, and the host asks by name with the sentence that says why.
 
 `connectaddress=127.0.0.1` and not the guest's address, which is the whole
 reason this is cheap: WSL's own localhost forwarding already carries
@@ -25,6 +25,28 @@ reason this is cheap: WSL's own localhost forwarding already carries
 changing on every boot. A forward aimed at `eth0`'s address would need
 re-pointing each time the distro started, which is a maintenance burden this
 design simply does not have.
+
+NEVER `listenaddress=0.0.0.0`, AND THAT IS ONE RULE ABOUT THE LISTEN SET
+------------------------------------------------------------------------
+The wildcard is not "all the LAN addresses". It is every address this machine
+answers on, `127.0.0.1` included — which is the address the row FORWARDS TO.
+So the portproxy service accepted its own connection and dialled itself.
+Measured on Owen's PC 2026-09-17: 15.5k of 16.4k ephemeral ports in TIME_WAIT
+and localhost keepers failing at random.
+
+The refusal is `portproxy_self_loop` and it asks one question — does what
+this row would answer on include what it would dial? — rather than asking which
+engine is behind the connect address. That is deliberate, because the answer is
+the same either way: `llama-windows` puts the engine itself on 127.0.0.1:7100,
+and the WSL engine is reached at the same loopback address by way of WSL's own
+localhost forwarding. Two backends, one connect address, ONE rule. A check
+keyed on the backend would have been a second rule that could disagree with
+this one.
+
+So `add_argv` takes the listen address and requires it to be one of this
+machine's own; `crucible/lan.py` enumerates them and asks for a row each.
+`remove_argv` takes one too and refuses nothing, because a wildcard row a
+machine already carries is precisely the row that has to come back out.
 
 THE FORWARD ALONE IS A DEAD DOOR
 ---------------------------------
@@ -65,6 +87,7 @@ from dataclasses import dataclass
 from pathlib import PureWindowsPath
 from typing import Mapping
 
+from .errors import HostError
 from .paths import ENGINE_PORT
 from .runner import Runner
 
@@ -80,6 +103,16 @@ RULE_NAME = "Crucible engine (LAN)"
 #: The firewall profile the allow is scoped to. See the module docstring.
 RULE_PROFILE = "private"
 
+#: Where every row Crucible adds points, and why one address serves both
+#: backends: WSL carries loopback into the guest, and a native Windows engine
+#: binds loopback directly. One constant, because the reader of the listing and
+#: the builders of the argv must not disagree about what "the engine" means.
+CONNECT_ADDRESS = "127.0.0.1"
+
+#: `netsh`'s spelling of "every address this machine answers on", loopback
+#: included. Named so the refusal and the reader share one word for it.
+WILDCARD_ADDRESS = "0.0.0.0"
+
 WSLCONFIG_TIMEOUT_SECONDS = 15.0
 
 
@@ -92,14 +125,27 @@ class LanDoor:
     #: BOTH a portproxy row and an inbound allow.
     open: bool
     detail: str
-    #: A portproxy row already forwards this port. False under `mirrored`,
-    #: where the question does not arise.
-    forward: bool = False
+    #: Every listen address already forwarding this port to the engine, in the
+    #: order `netsh` listed them. Addresses rather than a boolean, because the
+    #: wildcard row that has to come out and the per-address rows that go in are
+    #: different rows on one machine and a boolean cannot tell them apart.
+    #: Empty under `mirrored`, where the question does not arise.
+    forwards: tuple[str, ...] = ()
     #: An inbound allow named `RULE_NAME` already exists.
     firewall: bool = False
     #: At least one connected network is in the profile the rule is scoped to.
     #: None when the question could not be asked, which is not the same as no.
     private_network: bool | None = None
+
+    @property
+    def forward(self) -> bool:
+        """Is there ANY row? The half-open report's question, unchanged."""
+        return bool(self.forwards)
+
+    @property
+    def self_loops(self) -> tuple[str, ...]:
+        """The rows on this machine that dial themselves. Derived, never stored."""
+        return tuple(a for a in self.forwards if covers_connect_address(a))
 
 
 def wslconfig_path(env: Mapping[str, str]) -> PureWindowsPath | None:
@@ -131,8 +177,35 @@ def show_argv() -> list[str]:
     return ["netsh", "interface", "portproxy", "show", "v4tov4"]
 
 
-def add_argv(port: int = ENGINE_PORT) -> list[str]:
-    """The forward, as one argv. Run ELEVATED; `netsh` refuses otherwise."""
+def covers_connect_address(
+    listen_address: str, connect_address: str = CONNECT_ADDRESS
+) -> bool:
+    """Does a row listening here also answer at the address it forwards TO?
+
+    `0.0.0.0` is every address this machine has, loopback included, so a
+    wildcard row always covers its own target; a row that names the target
+    outright is the same fact spelled shorter. Either way the forward dials
+    itself, so either way it is the loop.
+    """
+    return listen_address in (WILDCARD_ADDRESS, connect_address)
+
+
+def add_argv(listen_address: str, port: int = ENGINE_PORT) -> list[str]:
+    """One forward, as one argv. Run ELEVATED; `netsh` refuses otherwise.
+
+    `listen_address` is REQUIRED and has no default. It was `0.0.0.0` until
+    2026-09-18, and a default spelling the one value this function must never
+    emit is a defect waiting for its next caller.
+    """
+    if covers_connect_address(listen_address):
+        raise HostError(
+            "portproxy_self_loop",
+            f"a forward listening on {listen_address} would also answer at "
+            f"{CONNECT_ADDRESS}:{port}, which is where it sends what it "
+            "accepts, so it would dial itself until this machine ran out of "
+            "ephemeral ports. Listen on one of this machine's own LAN "
+            "addresses instead",
+        )
     return [
         "netsh",
         "interface",
@@ -140,13 +213,19 @@ def add_argv(port: int = ENGINE_PORT) -> list[str]:
         "add",
         "v4tov4",
         f"listenport={port}",
-        "listenaddress=0.0.0.0",
+        f"listenaddress={listen_address}",
         f"connectport={port}",
-        "connectaddress=127.0.0.1",
+        f"connectaddress={CONNECT_ADDRESS}",
     ]
 
 
-def remove_argv(port: int = ENGINE_PORT) -> list[str]:
+def remove_argv(listen_address: str, port: int = ENGINE_PORT) -> list[str]:
+    """One forward, taken back out.
+
+    It refuses nothing. The wildcard row a machine already carries is exactly
+    the row this has to be able to remove, so the rule that stops `add_argv`
+    composing one must not also stop this deleting one.
+    """
     return [
         "netsh",
         "interface",
@@ -154,7 +233,7 @@ def remove_argv(port: int = ENGINE_PORT) -> list[str]:
         "delete",
         "v4tov4",
         f"listenport={port}",
-        "listenaddress=0.0.0.0",
+        f"listenaddress={listen_address}",
     ]
 
 
@@ -239,23 +318,27 @@ def has_private_network(profile_json: str) -> bool | None:
     return False if seen else None
 
 
-def has_forward(show_output: str, port: int = ENGINE_PORT) -> bool:
-    """Is a v4tov4 row already listening on this port?
+def forward_addresses(show_output: str, port: int = ENGINE_PORT) -> tuple[str, ...]:
+    """Every listen address already forwarding this port to the engine.
 
     Parsed by the two NUMBERS on a row rather than by column position: `netsh`
     localises its headers and pads its columns differently per locale, and a
     reader keyed on "the third word" is a reader that is wrong in German.
+
+    A wildcard row is REPORTED, never filtered away. It is the row `crucible
+    lan` has to take out, and a reader that skipped it would leave the
+    self-loop running while saying the door was correct.
     """
+    found: list[str] = []
     for raw in show_output.replace("\x00", "").splitlines():
         parts = raw.split()
-        if len(parts) < 4:
+        if len(parts) < 4 or not parts[1].isdigit() or not parts[3].isdigit():
             continue
-        if not parts[1].isdigit():
+        if parts[2] != CONNECT_ADDRESS:
             continue
-        if (parts[0] == "0.0.0.0" and parts[2] == "127.0.0.1"
-                and int(parts[1]) == port and parts[3].isdigit() and int(parts[3]) == port):
-            return True
-    return False
+        if int(parts[1]) == port and int(parts[3]) == port and parts[0] not in found:
+            found.append(parts[0])
+    return tuple(found)
 
 
 def detect(runner: Runner, port: int = ENGINE_PORT) -> LanDoor:
@@ -289,14 +372,24 @@ def detect(runner: Runner, port: int = ENGINE_PORT) -> LanDoor:
             open=False,
             detail=f"netsh could not be read ({shown.said()}); the LAN door is unknown",
         )
-    forward = has_forward(shown.stdout, port)
+    forwards = forward_addresses(shown.stdout, port)
     # ABSENCE IS THE EXIT CODE, not the message: `netsh` prints a LOCALISED
     # "No rules match the specified criteria." and exits non-zero. Measured
     # 2026-09-17 unelevated: exit 1 absent, exit 0 present.
     firewall = runner.run(firewall_show_argv(), timeout_s=WSLCONFIG_TIMEOUT_SECONDS).ok
     profiled = runner.run(connection_profile_argv(), timeout_s=WSLCONFIG_TIMEOUT_SECONDS)
     private = has_private_network(profiled.stdout) if profiled.ok else None
-    if forward and firewall:
+    listed = ", ".join(f"{address}:{port}" for address in forwards)
+    # A row that covers its own target is named in the DETAIL as well as
+    # refused at composition time: `crucible lan status` on a machine that
+    # already carries one is where a person meets it.
+    looping = tuple(a for a in forwards if covers_connect_address(a))
+    loop = (
+        "" if not looping else
+        f" — and {', '.join(looping)} covers {CONNECT_ADDRESS}, so that row "
+        "forwards to itself and eats this machine's ephemeral ports"
+    )
+    if forwards and firewall:
         shut_out = (
             "" if private is not False else
             f", but no connected network is {RULE_PROFILE}, so the rule admits "
@@ -304,25 +397,25 @@ def detect(runner: Runner, port: int = ENGINE_PORT) -> LanDoor:
         )
         return LanDoor(
             mechanism=PORTPROXY,
-            open=private is not False,
+            open=private is not False and not looping,
             detail=(
-                f"a portproxy forwards 0.0.0.0:{port} to 127.0.0.1:{port} and "
-                f'"{RULE_NAME}" admits it{shut_out}'
+                f"a portproxy forwards {listed} to {CONNECT_ADDRESS}:{port} and "
+                f'"{RULE_NAME}" admits it{shut_out}{loop}'
             ),
-            forward=True,
+            forwards=forwards,
             firewall=True,
             private_network=private,
         )
-    if forward:
+    if forwards:
         return LanDoor(
             mechanism=PORTPROXY,
             open=False,
             detail=(
-                f"a portproxy forwards 0.0.0.0:{port}, but no inbound rule named "
+                f"a portproxy forwards {listed}, but no inbound rule named "
                 f'"{RULE_NAME}" admits it, so Windows drops the connection before '
-                "the forward sees it"
+                f"the forward sees it{loop}"
             ),
-            forward=True,
+            forwards=forwards,
             firewall=False,
             private_network=private,
         )
@@ -333,7 +426,7 @@ def detect(runner: Runner, port: int = ENGINE_PORT) -> LanDoor:
             f"nothing forwards this machine's LAN addresses on {port} to the WSL "
             "engine, so only this computer can reach it"
         ),
-        forward=False,
+        forwards=(),
         firewall=firewall,
         private_network=private,
     )
@@ -350,9 +443,11 @@ def detect(runner: Runner, port: int = ENGINE_PORT) -> LanDoor:
 #: which is what the sentence now says.
 ELEVATION_SENTENCE = (
     "Crucible needs administrator once, to let other devices on your network "
-    "reach the engine. It adds two things to Windows: a port forward from this "
-    f"machine's network addresses on port {ENGINE_PORT} to the Linux engine, and "
-    f'an inbound rule named "{RULE_NAME}" allowing TCP {ENGINE_PORT} on '
-    f"{RULE_PROFILE} networks. Both stay until you run `crucible lan disable`, "
-    "which removes exactly these two and nothing else."
+    "reach the engine. It adds two things to Windows: a port forward to the "
+    "engine from each of this machine's own network addresses on port "
+    f"{ENGINE_PORT} — never from every address, which would include this "
+    "machine's loopback and make the forward dial itself — and an inbound "
+    f'rule named "{RULE_NAME}" allowing TCP {ENGINE_PORT} on {RULE_PROFILE} '
+    "networks. Both stay until you run `crucible lan disable`, which removes "
+    "exactly these and nothing else."
 )

@@ -858,26 +858,46 @@ def test_a_nat_machine_with_no_forward_is_the_portproxy_case() -> None:
     assert "only this computer can reach it" in door.detail
 
 
-def test_an_existing_forward_is_read_by_its_numbers_not_by_a_column() -> None:
+def test_existing_forwards_are_read_by_their_numbers_not_by_a_column() -> None:
     listing = (
         "Listen on ipv4:             Connect to ipv4:\n\n"
         "Address         Port        Address         Port\n"
         "--------------- ----------  --------------- ----------\n"
-        "0.0.0.0         7100        127.0.0.1       7100\n"
+        "192.168.68.100  7100        127.0.0.1       7100\n"
+        "100.64.0.1      7100        127.0.0.1       7100\n"
     )
-    assert landoor.has_forward(listing) is True
-    assert landoor.has_forward(listing.replace("7100        127", "7101        127")) is False
+    assert landoor.forward_addresses(listing) == ("192.168.68.100", "100.64.0.1")
+    assert landoor.forward_addresses(listing.replace("7100", "7101")) == ()
+
+
+def test_a_wildcard_row_is_reported_rather_than_filtered_away() -> None:
+    """It is the row that has to come OUT, so a reader that hid it would leave
+    the self-loop running while calling the door correct."""
+    assert landoor.forward_addresses(WILDCARD_LISTING) == ("0.0.0.0",)
+    assert landoor.covers_connect_address("0.0.0.0") is True
+    assert landoor.covers_connect_address(landoor.CONNECT_ADDRESS) is True
+    assert landoor.covers_connect_address("192.168.68.100") is False
 
 
 def test_the_netsh_argv_is_data_and_the_consent_sentence_is_one_sentence() -> None:
-    assert landoor.add_argv() == [
+    assert landoor.add_argv("192.168.68.100") == [
         "netsh", "interface", "portproxy", "add", "v4tov4",
-        "listenport=7100", "listenaddress=0.0.0.0",
+        "listenport=7100", "listenaddress=192.168.68.100",
         "connectport=7100", "connectaddress=127.0.0.1",
     ]
-    assert landoor.remove_argv()[3] == "delete"
+    assert landoor.remove_argv("192.168.68.100")[3] == "delete"
     assert "administrator" in landoor.ELEVATION_SENTENCE
     assert "7100" in landoor.ELEVATION_SENTENCE
+
+
+def test_a_forward_that_would_dial_itself_is_refused_before_any_netsh_runs() -> None:
+    """`0.0.0.0` contains `127.0.0.1`, which is where every row points."""
+    with pytest.raises(HostError) as caught:
+        landoor.add_argv("0.0.0.0")
+    assert caught.value.code == "portproxy_self_loop"
+    assert caught.value.code in HOST_ERROR_CODES
+    with pytest.raises(HostError):
+        landoor.add_argv("127.0.0.1")
 
 
 def test_wslconfig_networking_mode_ignores_a_comment_and_reports_absence_as_None() -> None:
@@ -889,16 +909,22 @@ FORWARD_ROW = (
     "Listen on ipv4:             Connect to ipv4:\n\n"
     "Address         Port        Address         Port\n"
     "--------------- ----------  --------------- ----------\n"
-    "0.0.0.0         7100        127.0.0.1       7100\n"
+    "192.168.68.100  7100        127.0.0.1       7100\n"
 )
 
+#: The row Owen's PC carried until 2026-09-18, kept as its own constant because
+#: it is a DIFFERENT machine state from `FORWARD_ROW`: this one dials itself.
+WILDCARD_LISTING = FORWARD_ROW.replace("192.168.68.100  ", "0.0.0.0         ")
 
-def _door(*, forward: bool, firewall: bool, category: str = "Private") -> landoor.LanDoor:
+
+def _door(*, forward: bool, firewall: bool, category: str = "Private",
+          rows: str | None = None) -> landoor.LanDoor:
     """`detect` against a machine described by three facts."""
     runner = Scripted(
         answers={
             "type": ok("[wsl2]\nmemory=13GB\n"),
-            "portproxy show": ok(FORWARD_ROW if forward else ""),
+            "portproxy show": ok((rows if rows is not None else FORWARD_ROW)
+                                 if forward else ""),
             "advfirewall firewall show": (
                 ok("Rule Name: Crucible engine (LAN)\n") if firewall
                 else RunResult(code=1, stdout="No rules match.", stderr="", failure=None)
@@ -923,6 +949,17 @@ def test_both_rows_on_a_private_network_is_the_only_open_door() -> None:
     door = _door(forward=True, firewall=True)
     assert door.open is True
     assert door.private_network is True
+    assert door.forwards == ("192.168.68.100",)
+    assert door.self_loops == ()
+
+
+def test_a_machine_carrying_the_wildcard_row_is_not_called_open() -> None:
+    """Both rows present, Private network, and still shut — because the forward
+    answers at 127.0.0.1 too and spends the machine's ports dialling itself."""
+    door = _door(forward=True, firewall=True, rows=WILDCARD_LISTING)
+    assert door.self_loops == ("0.0.0.0",)
+    assert door.open is False
+    assert "forwards to itself" in door.detail
 
 
 def test_both_rows_on_a_public_only_network_is_not_called_open() -> None:

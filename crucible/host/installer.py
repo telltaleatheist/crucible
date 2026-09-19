@@ -902,14 +902,23 @@ class EngineInstall:
         from ..sharing import Engine
 
         door = landoor.detect(self._runner, ENGINE_PORT)
-        missing = [
-            command
-            for present, command in (
-                (door.forward, landoor.add_argv(ENGINE_PORT)),
-                (door.firewall, landoor.firewall_add_argv(ENGINE_PORT)),
+        try:
+            # `lan.door_commands` and not a second list built here: an install
+            # that composed its own netsh rows would be the same defect this
+            # step's docstring refuses, one layer down. It is also what keeps
+            # the `--no-elevate` report honest about the REMOVALS a machine
+            # carrying a wildcard self-loop row needs.
+            missing = lan_door.door_commands(
+                door, lan_door.addresses(), ENGINE_PORT
             )
-            if not present
-        ]
+        except CrucibleError as exc:
+            raise self._fail(
+                "lan_door_failed",
+                "the engine is installed and working on this machine, but the "
+                f"rows network sharing needs could not be worked out: {exc}. Run "
+                "`crucible lan enable` to retry; nothing else about this install "
+                "is affected.",
+            )
         if missing and not self._elevate:
             # `--no-elevate` REPORTS the argv and changes nothing. Saying "done"
             # here would be the one lie this whole step exists to avoid.

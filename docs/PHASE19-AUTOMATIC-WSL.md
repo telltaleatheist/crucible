@@ -187,6 +187,14 @@ real machines stay in, `lan enable` on `owner: child` refuses `lan_native_engine
 the native engine binds the LAN address itself when asked (`[server] host`), and the
 firewall rule alone is what it adds. A test asserts the refusal.
 
+**AMENDED 2026-09-18.** The first sentence above is no longer true of the code: `lan enable`
+adds one row per enumerated address and refuses `portproxy_self_loop` for any listen set that
+covers the connect address, so the self-loop is closed on a native machine and on WSL alike by
+one rule about the listen set (PHASE15-HOST.md 4.1, amendment of 2026-09-18). What is still open
+for this phase is the SECOND half — whether a native machine should get a portproxy at all, or
+only the firewall rule and a wider `[server] host`. That is a question about which door is the
+tidier one; the port exhaustion it was raised over is fixed.
+
 ### 2.10 Where the distro lives — RULING NEEDED
 
 `wsl --import` lands the vhdx under `%LOCALAPPDATA%\Crucible` on C:. On Owen's PC the

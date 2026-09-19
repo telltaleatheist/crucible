@@ -704,6 +704,28 @@ the notification area. It is the front door Owen asked for. It owns exactly four
   rule was missing, which is the difference between this feature working and not — measured on
   Owen's PC, where the only inbound rule naming 7100 was Zoom's, scoped to Zoom's own binary.
 
+  **AMENDED 2026-09-18: one row per address, and never `0.0.0.0`.** The forward listens on
+  each of this machine's own IPv4 addresses — `listenaddress=192.168.68.100`, one `netsh`
+  row each — and never on the wildcard. `0.0.0.0` is not "all the LAN addresses": it is
+  every address this machine answers on, `127.0.0.1` included, and `127.0.0.1` is the
+  address the row forwards TO. So the portproxy service accepted its own connection and
+  dialled itself. Measured on Owen's PC 2026-09-17: 15.5k of this machine's 16.4k ephemeral
+  ports in TIME_WAIT, with localhost keepers failing at random. The refusal is
+  `portproxy_self_loop`, it is raised before any argv is composed, and it asks about the
+  LISTEN SET rather than about which engine is behind the connect address — `llama-windows`
+  puts the engine itself on `127.0.0.1:7100` and the WSL engine is reached at the same
+  loopback address through WSL's own localhost forwarding, so one rule covers both backends
+  and a second rule keyed on the backend could only have disagreed with it. `enable` and
+  `reconcile` therefore also REMOVE every row for this port that listens somewhere this
+  machine has no address, which takes out the stale row a DHCP move left behind and the
+  wildcard row a machine made before this rule existed by the same single test. That
+  removal needs administrator, and because `netsh` answers a delete it may not perform with
+  "requires elevation" and still exits 0, the listing is re-read afterwards and a surviving
+  row is refused `lan_rows_not_removed` rather than reported as a door now put right. The
+  price of naming the addresses is that a moved lease costs one UAC prompt to re-point the
+  rows, where a wildcard row cost none — it cost none because it listened on everything,
+  which is the whole defect.
+
   The verb is `crucible lan {enable,disable,status,reconcile,explain}` (`crucible/lan.py`),
   shaped exactly like `crucible sharing`: an ownership record (`landoor.json`), `lan_advertise`
   in the engine as its projection, `--adopt` for a forward somebody else made, and `reconcile`
@@ -2815,6 +2837,15 @@ netsh advfirewall firewall add rule name="Crucible engine (LAN)" dir=in action=a
 
 `connectaddress=127.0.0.1`, not the guest's address: WSL's own localhost forwarding carries
 loopback into the guest, so the row does not need re-pointing when `eth0` changes on boot.
+
+**`listenaddress=0.0.0.0` in that block is SUPERSEDED — see the amendment of 2026-09-18 in
+4.1 above.** The wildcard listen set contains `127.0.0.1`, which is the connect address on
+the same line, so the row forwarded to itself; this is the row that ate 15.5k ephemeral
+ports here. The code now adds one row per enumerated address and refuses the wildcard by
+name. The row this entry recorded is still on this machine and has to be deleted with
+`netsh interface portproxy delete v4tov4 listenport=7100 listenaddress=0.0.0.0` from an
+elevated prompt — `crucible lan reconcile` composes exactly that delete, but it needs the
+administrator prompt accepted to land.
 
 **The measurement that matters.** From the Mac, over plain LAN, no tailnet:
 

@@ -63,6 +63,13 @@ HOST_ERROR_CODES: dict[str, str] = {
         "watching, claiming and the unit restart; it never widens this "
         "(PHASE15-HOST.md 4.1a, PHASE17 2.5)."
     ),
+    "portproxy_self_loop": (
+        "a portproxy row was asked for whose LISTEN SET contains the address it "
+        "forwards TO, so it would accept its own connection and dial itself. "
+        "`0.0.0.0` is the case that bit: it includes `127.0.0.1`, which is where "
+        "every Crucible forward points. Measured on Owen's PC 2026-09-17, 15.5k "
+        "of 16.4k ephemeral ports in TIME_WAIT."
+    ),
     "wsl_state_unknown": (
         "the 4c table answered a code this build has no predicate for, which "
         "means the generated table and the predicates have drifted."
