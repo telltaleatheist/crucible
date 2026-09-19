@@ -1109,6 +1109,80 @@ def test_a_narrator_row_that_fails_on_its_own_is_reported_not_restarted(
             assert not stream.of("done")
 
 
+def test_a_retiring_row_carries_the_gap_the_player_must_insert(
+    streaming_server: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    """THE PACING IS ON THE WIRE (Owen, 2026-09-18: *"yes, it paces like the
+    book... maybe the browser extension should handle the gaps for itself"*).
+
+    The audio on this door is bare speech: narrator classifies the silence that
+    belongs after each row with the same function that writes a book's
+    `gaps.json`, and the PLAYER inserts it, because on a stream there is no
+    assembler but the player. This server neither computes it nor pads anything
+    — it relays the number VERBATIM on `done`.
+
+    Steered to 1.25 s, which is no floor anybody ships, so the assertion cannot
+    pass on a number invented at either end.
+    """
+    with streaming_server(gap_sec=1.25) as base:
+        session = opened(base, auth)
+        sid = session["session_id"]
+        with listen(base, auth, sid) as stream:
+            stream.wait_for(lambda s: s.of("ready"), "the ready frame")
+            say(base, auth, sid, "r1", "He had been walking for some time.")
+            stream.wait_for(lambda s: s.of("done"), "r1 to retire")
+            done = stream.of("done")[0]
+            assert done["gap_sec"] == 1.25
+            # And the relay is the WHOLE of it: no silence was inserted into the
+            # audio on the way past.
+            pcm = pcm_of(stream, "r1")
+            assert abs(seconds_of(pcm) - done["seconds"]) < 0.01
+
+
+def test_a_row_narrator_retires_without_a_gap_is_refused_by_name(
+    streaming_server: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    """A NARRATOR THAT DOES NOT STATE THE GAP IS OLDER THAN THIS SERVER, and its
+    audio is not bare: it still has the flat 0.3 s this field replaced baked into
+    every row. A client told to insert a gap as well would pace that stream by
+    the sum of two numbers, neither of which anybody chose — so the row fails by
+    name and nothing is defaulted.
+    """
+    with streaming_server(omit_gap=1) as base:
+        session = opened(base, auth)
+        sid = session["session_id"]
+        with listen(base, auth, sid) as stream:
+            stream.wait_for(lambda s: s.of("ready"), "the ready frame")
+            say(base, auth, sid, "r1", "Rain.")
+            stream.wait_for(lambda s: s.of("error"), "r1 to be refused")
+            error = stream.of("error")[0]
+            assert error["id"] == "r1"
+            assert error["code"] == "narrator_protocol"
+            assert "gapSec" in error["message"]
+            assert not stream.of("done")
+
+
+def test_a_cancelled_row_has_no_gap_to_keep(
+    streaming_server: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    """`null` is the ONE other answer, and it means the row was cancelled: it
+    delivered no complete audio, so there is nothing for a player to pace after.
+    It is never "the server did not say" — that case is the refusal above."""
+    with streaming_server(chunk_delay_ms=60) as base:
+        session = opened(base, auth)
+        sid = session["session_id"]
+        with listen(base, auth, sid) as stream:
+            stream.wait_for(lambda s: s.of("ready"), "the ready frame")
+            say(base, auth, sid, "r1", LONG_TEXT)
+            stream.wait_for(lambda s: len(s.audio_for("r1")) >= 2, "r1 to be in flight")
+            response = post_op(base, auth, sid, op="cancel", id="r1")
+            assert response.status_code == 202, response.text
+            stream.wait_for(lambda s: s.of("done"), "r1 to retire cancelled")
+            done = stream.of("done")[0]
+            assert done["cancelled"] is True
+            assert done["gap_sec"] is None
+
+
 def test_the_batch_width_has_no_default_for_an_unmeasured_engine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

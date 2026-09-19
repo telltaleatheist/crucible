@@ -1219,7 +1219,7 @@ Events on the stream, each with the usual strictly-increasing id:
 ready   {voice, fingerprint, sample_rate, backend}
 audio   {id, seq, pcm_base64, seconds}
 restart {id, from_seq, reason}          # added while building — DIFFERENCE 1 below
-done    {id, seconds, chars, chars_per_sec, capped, cancelled}
+done    {id, seconds, chars, chars_per_sec, capped, cancelled, gap_sec}
 error   {id?, code, message}
 closed  {reason}
 ```
@@ -1232,6 +1232,19 @@ Ops on the post:
 {"op": "cancel_all"}
 {"op": "close"}
 ```
+
+`gap_sec` (2026-09-18) is **the silence the CLIENT inserts after that row**, and the audio on
+this door is bare speech. narrator classifies it for the row's own text
+(`text/gaps.classify_gap`, the same call that writes a book's `gaps.json`) and this server
+relays it verbatim: on a stream there is no assembler, so the client that concatenates the
+rows is the only thing that can separate two of them (Owen: *"yes, it paces like the book...
+maybe the browser extension should handle the gaps for itself"*). It rides the TERMINAL frame
+only — the gap follows the row's last sample, a `done` happens exactly once per row, and a
+copy on every `audio` frame would be one number with many owners, which is what it replaced (a
+flat 0.3 s baked into narrator's audio against the 0.6 s the book asked its assembler for).
+**`null` means the row was cancelled** and delivered no complete audio; a row that retires
+normally without narrator stating a gap is failed as `narrator_protocol` rather than paced by
+a number this server invented.
 
 Out-of-order retirement falls out of the shape: ids are the client's, `seq` counts within an
 id, and `done` for one row may arrive while another is still emitting. There is no batching
