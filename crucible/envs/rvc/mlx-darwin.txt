@@ -1,5 +1,14 @@
 # crucible `rvc` env — mlx-darwin (ultimate-rvc on Apple Silicon, through Metal).
 #
+# archive-bytes: 900000000  PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's "~0.9 GB mlx", measured 2026-09-18
+#   THE MLX TOTAL, and the only measured mlx number there is: that table prices
+#   the five cuda recipes one by one and the five mlx ones together. So every
+#   mlx recipe carries the total rather than a share of it invented here — it
+#   overstates one env and can never understate it, and a floor may only ever
+#   be wrong in that direction (PHASE19-AUTOMATIC-WSL.md ruling 6). An ARCHIVE
+#   size; the unpacked env is larger. Replace this line the day one mlx env is
+#   measured on its own — one recipe, one measured number, one owner.
+#
 # The Mac IS a real rvc backend, unlike `asr`. ultimate-rvc is torch, torch has
 # an MPS backend, and the app runs this on Owen's Mac today — the 96-file recycle
 # in `crucible/jobs/rvc/worker.py` exists BECAUSE of what a 64 GB Mac did without

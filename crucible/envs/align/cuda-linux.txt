@@ -1,5 +1,11 @@
 # crucible `align` env — cuda-linux (Qwen3-ForcedAligner on an NVIDIA card).
 #
+# archive-bytes: 2900000000  PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's table, measured 2026-09-18
+#   What `crucible install align` refuses on a disk with less (`env_disk`,
+#   PHASE19-AUTOMATIC-WSL.md 2.12 and ruling 6). An ARCHIVE size — what this
+#   recipe weighed while it was re-hosted as a pack — so the unpacked env is
+#   LARGER and this number is a floor, never an estimate.
+#
 # Installed by `crucible install align` into ~/.crucible/envs/align/ as a venv
 # built from the server's own interpreter. Everything here comes from PyPI; heavy
 # wheels are never hosted on GitHub Releases (DESIGN.md section 5).

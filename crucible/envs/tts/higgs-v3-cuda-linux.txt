@@ -1,5 +1,11 @@
 # crucible `tts` env - narrator's `higgs-v3` engine on cuda-linux, SGLang-Omni.
 #
+# archive-bytes: 5300000000  PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's table, measured 2026-09-18
+#   What `crucible install tts` refuses on a disk with less (`env_disk`,
+#   PHASE19-AUTOMATIC-WSL.md 2.12 and ruling 6). The largest recipe in the tree,
+#   and an ARCHIVE size — what it weighed while it was re-hosted as a pack — so
+#   the unpacked env is LARGER and this number is a floor, never an estimate.
+#
 # Installed by `crucible install tts --narrator-engine higgs-v3` into
 # ~/.crucible/envs/tts-higgs-v3/. The server process never imports any of this:
 # narrator is started as a subprocess of this env's python

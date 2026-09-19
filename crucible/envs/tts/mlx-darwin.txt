@@ -1,5 +1,14 @@
 # crucible `tts` env — EVERY narrator engine on mlx-darwin.
 #
+# archive-bytes: 900000000  PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's "~0.9 GB mlx", measured 2026-09-18
+#   THE MLX TOTAL, and the only measured mlx number there is: that table prices
+#   the five cuda recipes one by one and the five mlx ones together. So every
+#   mlx recipe carries the total rather than a share of it invented here — it
+#   overstates one env and can never understate it, and a floor may only ever
+#   be wrong in that direction (PHASE19-AUTOMATIC-WSL.md ruling 6). An ARCHIVE
+#   size; the unpacked env is larger. Replace this line the day one mlx env is
+#   measured on its own — one recipe, one measured number, one owner.
+#
 # Installed by `crucible install tts --narrator-engine <engine>` into
 # ~/.crucible/envs/tts/ — one directory, whichever engine is named, because on
 # the Mac they genuinely do share a stack. `jobenv.tts_env()` resolves every

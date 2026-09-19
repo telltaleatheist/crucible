@@ -517,6 +517,14 @@ def install_worker_env(
     python_version: str | None = None
 
     if plan.action == jobenv.PLAN_BUILD:
+        # BEFORE the venv, and long before pip dials a mirror. The shared
+        # guard, for the shared reason — see `jobenv.refuse_without_room`.
+        try:
+            jobenv.refuse_without_room(
+                job_type=job_type, recipe=recipe, directory=directory
+            )
+        except jobenv.EnvError as exc:
+            raise WorkerEnvError(str(exc)) from exc
         directory.parent.mkdir(parents=True, exist_ok=True)
         if directory.exists():
             shutil.rmtree(directory)

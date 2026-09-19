@@ -427,6 +427,121 @@ def recipe_pins(path: Path) -> dict[str, str]:
     return pins
 
 
+#: How a recipe states what installing it costs, in its own header:
+#:
+#:     # archive-bytes: 5300000000  PHASE20-…md section 0, measured 2026-09-18
+#:
+#: One integer of BYTES, then a CITATION that the parser requires to be there.
+#: An uncited constant is invented, and a number somebody later believes is
+#: worse than no number at all — so a line carrying a bare integer is refused
+#: exactly as a missing line is.
+#:
+#: A comment and not a `--option` line, because it is not an instruction to pip:
+#: `_requirement_lines` already drops `#` and `-` lines, so this shape is
+#: invisible to `recipe_pins`, to `recipe_direct_references` and to pip itself,
+#: and it lives in the header beside the pins where PHASE19 2.12 put it.
+_ARCHIVE_BYTES = re.compile(
+    r"^#\s*archive-bytes:\s*(?P<bytes>\d+)(?P<citation>\s+\S.*?)?\s*$"
+)
+
+
+def recipe_archive_bytes(path: Path) -> int:
+    """What this recipe MEASURED, in bytes, or a named refusal.
+
+    Read by the same loader that reads the pins, from the same file, because
+    "what this env costs" is a fact about the recipe and belongs beside the
+    lines that cost it (PHASE19-AUTOMATIC-WSL.md 2.12, ruling 6).
+
+    It is an ARCHIVE size — what the packs weighed when PHASE20 measured them —
+    and an unpacked env is larger, so every sentence built on it says "at
+    least". A floor that is too low still beats a pip that dies at 4.9 GB.
+    """
+    found: list[re.Match[str]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = _ARCHIVE_BYTES.match(line.strip())
+        if match is not None:
+            found.append(match)
+    if not found:
+        raise EnvError(
+            f"recipe_unsized: {path.name} carries no `# archive-bytes:` line, so "
+            "there is no telling what installing it needs. The measured sizes "
+            "are PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's table and they go "
+            "in the recipe's header; guessing one here would be a number "
+            "somebody later believes"
+        )
+    if len(found) > 1:
+        raise EnvError(
+            f"recipe_size_invalid: {path.name} carries {len(found)} "
+            "`# archive-bytes:` lines. One recipe, one size, one owner"
+        )
+    match = found[0]
+    if match.group("citation") is None:
+        raise EnvError(
+            f"recipe_size_invalid: {path.name}'s `# archive-bytes:` line names "
+            "no source. Where a number was measured is part of the number: "
+            "write it after the integer"
+        )
+    size = int(match.group("bytes"))
+    if size <= 0:
+        raise EnvError(
+            f"recipe_size_invalid: {path.name} states an archive size of {size} "
+            "bytes, which no env has ever weighed"
+        )
+    return size
+
+
+def _filesystem_of(directory: Path) -> Path:
+    """The nearest existing ancestor of a path — what `disk_usage` can be asked.
+
+    `~/.crucible/envs/<key>/` does not exist yet on the install this guard is
+    for, and neither may `envs/`. The free space that matters is the
+    filesystem the venv will land ON, which is the same one its nearest
+    existing parent is on.
+    """
+    path = directory.expanduser().absolute()
+    for candidate in (path, *path.parents):
+        if candidate.is_dir():
+            return candidate
+    raise EnvError(
+        f"env_disk_unreadable: no existing directory above {directory}, so the "
+        "free space where this env would land cannot be measured"
+    )
+
+
+def refuse_without_room(*, job_type: str, recipe: Path, directory: Path) -> None:
+    """`env_disk` — PHASE19-AUTOMATIC-WSL.md 2.12 and ruling 6.
+
+    BEFORE pip touches the network. PHASE20 moved the gigabytes off our
+    releases and onto the mirrors, which means a first install now downloads
+    5.3 GB of tts over minutes and finds out about the disk at the end of it.
+    `_guest_ready` deliberately passes no `required_bytes` (the move itself is
+    ~31 MB), so `pack_disk` never fires and this is where the disk question
+    now lives.
+
+    ONLY ON A FRESH BUILD. The measured number is what a recipe costs to
+    install from nothing; what a DRIFT costs is the difference between two
+    resolutions and was never measured. Requiring a whole archive's worth of
+    free space before reinstalling one narrator line would be a floor invented
+    here, and it would refuse on a machine where the env is already sitting in
+    most of that space. `install_env` and `install_worker_env` therefore call
+    this on `PLAN_BUILD` and on nothing else.
+    """
+    required = recipe_archive_bytes(recipe)
+    filesystem = _filesystem_of(directory)
+    free = shutil.disk_usage(filesystem).free
+    if free >= required:
+        return
+    raise EnvError(
+        f"env_disk: installing {job_type!r} needs at least "
+        f"{required / 1_000_000_000:.1f} GB free and {filesystem} has "
+        f"{free / 1_000_000_000:.1f} GB ({free} bytes of the {required} "
+        f"{recipe.name} states). That figure is the ARCHIVE size PHASE20 "
+        "measured for this recipe and an unpacked env is larger, so it is a "
+        "floor and not an estimate. Free space on that drive, or move "
+        "$CRUCIBLE_HOME to one that has it, before running this again"
+    )
+
+
 def recipe_direct_references(path: Path) -> dict[str, str]:
     """The commit each `name @ url` line pins, by lower-cased name.
 
@@ -853,6 +968,10 @@ def install_env(
     python_version: str | None = None
 
     if plan.action == PLAN_BUILD:
+        # BEFORE the venv, and long before pip dials a mirror.
+        refuse_without_room(
+            job_type=spec.job_type, recipe=recipe, directory=directory
+        )
         directory.parent.mkdir(parents=True, exist_ok=True)
         if directory.exists():
             shutil.rmtree(directory)
