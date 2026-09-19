@@ -42,9 +42,31 @@ The frames
     ready   {voice, fingerprint, sample_rate, backend}
     audio   {id, seq, pcm_base64, seconds}
     restart {id, from_seq, reason}
-    done    {id, seconds, chars, chars_per_sec, capped, cancelled}
+    done    {id, seconds, chars, chars_per_sec, capped, cancelled, gap_sec}
     error   {id?, code, message}
     closed  {reason}
+
+`gap_sec` IS THE PACING, AND IT IS THE PLAYER'S TO REALIZE
+---------------------------------------------------------
+The audio on this door is BARE SPEECH. The silence that belongs after a row is
+`narrator`'s answer for that row's own text — `text/gaps.classify_gap`, the same
+call its prep makes to write a book's `gaps.json` — and it arrives here as
+`gapSec` on narrator's `batch_item`. This server relays it verbatim on `done`
+and inserts nothing: on a stream there is no assembler, so the client that
+concatenates the rows is the only thing that can separate two of them (Owen,
+2026-09-18: *"yes, it paces like the book... maybe the browser extension should
+handle the gaps for itself"*).
+
+It rides the TERMINAL frame only, never `audio`, because the gap follows the
+row's last sample: nothing can be realized from it until the row is over, a
+`done` is emitted exactly once per row while a row has many chunks, and N copies
+of one number is the two-owner shape this field replaced (a flat 0.3 s baked
+into narrator's audio while the book asked its assembler for 0.6 s).
+
+**`null` means the row was cancelled** and delivered no complete audio, which is
+the only reading it has: a row that retires normally without narrator having
+stated a gap is FAILED by name in `_on_item` rather than passed on with a number
+this server invented.
 
 `restart` is this file's addition to section 7's list, and the reason is under
 `_abort_for_cancel` below: it is the frame a client needs to know that the audio
@@ -238,6 +260,12 @@ class _Row:
     #: anything at all. `None` means "narrator did not say" and is NEVER to be
     #: read as `false` (PHASE3-TTS.md section 6).
     capped: bool | None = None
+    #: The silence that belongs AFTER this row, in seconds, exactly as narrator
+    #: classified it (`gapSec`). `None` until the row retires with audio — and a
+    #: row that retires with audio and no number never gets here, because
+    #: `_on_item` fails it by name instead. So a `None` on the wire means the row
+    #: was cancelled, and nothing else.
+    gap_sec: float | None = None
     #: The `message` narrator retired this row with, if it retired it without
     #: audio. Held rather than acted on until the batch ends, because whether it
     #: means "this row failed" or "this row was collateral" is only knowable once
@@ -823,9 +851,10 @@ class StreamSession:
         """A row retiring. **Worker thread.**
 
         narrator reports a per-row failure as a `message` and no `data`; a
-        streamed row that finished carries `cancelled` and the duration it
-        emitted. Both shapes end the row here, and which of the three endings it
-        gets is decided in `_abort_for_cancel` for the rows a cancel touched.
+        streamed row that finished carries `cancelled`, the duration it emitted
+        and the gap it classified. Both shapes end the row here, and which of the
+        three endings it gets is decided in `_abort_for_cancel` for the rows a
+        cancel touched.
         """
         row = self._row_for(message)
         if row is None:
@@ -858,6 +887,27 @@ class StreamSession:
                 return
         capped = message.get("capped")
         row.capped = capped if isinstance(capped, bool) else None
+        # THE GAP IS REQUIRED ON A ROW THAT RETIRED WITH AUDIO, and a narrator
+        # that does not state it is refused BY NAME rather than defaulted. The
+        # client inserts this silence itself now, so a missing number is not a
+        # missing niceness: it is either a narrator that predates the field —
+        # whose audio still has narrator's old flat 0.3 s baked in, which the
+        # client would then pad AGAIN — or a bug. Both are errors, and 0.6 s
+        # guessed here would be the app quietly pacing a stream by a number
+        # nothing measured.
+        gap = message.get("gapSec")
+        if not isinstance(gap, (int, float)) or isinstance(gap, bool) or gap < 0:
+            row.state = FINISHED
+            self._fail(
+                row,
+                "narrator_protocol",
+                f"narrator retired row {row.id} with gapSec {gap!r}, which is not "
+                "a gap in seconds. The player realizes the silence between rows on "
+                "this door, so narrator has to state the one it classified; a "
+                "narrator without the field is older than this server",
+            )
+            return
+        row.gap_sec = float(gap)
         row.state = FINISHED
         self._retire(row, cancelled=False)
 
@@ -991,6 +1041,12 @@ class StreamSession:
             "chars_per_sec": (row.chars / seconds) if seconds > 0 else None,
             "capped": row.capped,
             "cancelled": cancelled,
+            # Relayed VERBATIM from narrator's `gapSec`, never recomputed here:
+            # the rule is narrator's (`text/gaps.classify_gap`, the book's own),
+            # and a second implementation of it in this server would be a second
+            # answer to how long this voice pauses. `None` only on a cancelled
+            # row — see the header.
+            "gap_sec": row.gap_sec,
         }
         if note is not None:
             data["note"] = note

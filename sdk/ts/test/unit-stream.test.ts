@@ -337,6 +337,7 @@ test('iterating yields decoded audio, the row retiring, and then ends on closed'
       chars_per_sec: 170,
       capped: null,
       cancelled: false,
+      gap_sec: 0.6,
     });
     frame(response, 4, 'closed', { reason: 'the client closed the session' });
     response.end();
@@ -360,6 +361,55 @@ test('iterating yields decoded audio, the row retiring, and then ends on closed'
   assert.equal(done.chars, 34);
   // `null` means narrator did not say, and must never be read as `false`.
   assert.equal(done.capped, null);
+  // The silence the caller must insert after this row — narrator's own
+  // classification of its text, relayed verbatim.
+  assert.equal(done.gapSec, 0.6);
+});
+
+test('a done carries the gap the player realizes, and one without it is refused', async () => {
+  // THE PACING IS ON THE WIRE (Owen, 2026-09-18). The audio is bare speech, so
+  // this number is the whole of the silence between two rows: read it wrong and
+  // a Listen either runs its sentences together or paces by a constant nobody
+  // measured. A `done` that does not carry it is a server older than this
+  // client and is a protocol error, NOT a reason to substitute a default.
+  reset();
+  serving((response) => {
+    frame(response, 1, 'ready', READY);
+    frame(response, 2, 'done', {
+      id: 'r1', seconds: 1.5, chars: 30, chars_per_sec: 20, capped: null,
+      cancelled: false, gap_sec: 2.5,
+    });
+    frame(response, 3, 'done', {
+      id: 'r2', seconds: 0, chars: 30, chars_per_sec: null, capped: null,
+      cancelled: true, gap_sec: null,
+    });
+    frame(response, 4, 'closed', { reason: 'the client closed the session' });
+    response.end();
+  });
+  const session = await client().stream({ voice: 'deathstalker', language: 'en' });
+  const events = await collect(session);
+  assert.equal(events.length, 2, JSON.stringify(events));
+  const [spoken, stopped] = events as [StreamEvent, StreamEvent];
+  if (spoken.kind !== 'done' || stopped.kind !== 'done') throw new Error('expected two dones');
+  // An explicit [pause:2.5] in the row's text: proof the number travels rather
+  // than being a floor either side invented.
+  assert.equal(spoken.gapSec, 2.5);
+  // null ONLY on a cancelled row, which delivered no complete audio.
+  assert.equal(stopped.cancelled, true);
+  assert.equal(stopped.gapSec, null);
+
+  reset();
+  serving((response) => {
+    frame(response, 1, 'ready', READY);
+    frame(response, 2, 'done', {
+      id: 'r1', seconds: 1.5, chars: 30, chars_per_sec: 20, capped: null,
+      cancelled: false,
+    });
+    frame(response, 3, 'closed', { reason: 'the client closed the session' });
+    response.end();
+  });
+  const older = await client().stream({ voice: 'deathstalker', language: 'en' });
+  await assert.rejects(collect(older), /gap_sec/);
 });
 
 test('a restart frame says which of a row s audio is void', async () => {
@@ -616,6 +666,7 @@ test('an id that does not follow the last one is a protocol error', async () => 
     frame(response, 5, 'ready', READY);
     frame(response, 3, 'done', {
       id: 'r1', seconds: 1, chars: 5, chars_per_sec: 5, capped: null, cancelled: false,
+      gap_sec: 0.6,
     });
     response.end();
   });
@@ -652,6 +703,7 @@ test('a dropped stream reattaches with Last-Event-ID and loses nothing', async (
     frame(response, 3, 'audio', { id: 'r1', seq: 1, pcm_base64: pcmBytes([2]), seconds: 0.1 });
     frame(response, 4, 'done', {
       id: 'r1', seconds: 0.2, chars: 5, chars_per_sec: 25, capped: null, cancelled: false,
+      gap_sec: 0.6,
     });
     frame(response, 5, 'closed', { reason: 'done' });
     response.end();

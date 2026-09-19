@@ -21,9 +21,9 @@ a fake that is generous is a fake that lets a real bug through.
     stdout  {"type": "ready", "device": ..., "backend": ...}
             {"type": "loaded", "voice", "backend", "engine", "sampleRate", "pads", "edgeFadeMs"}
             {"type": "chunk", "seq", "format": "pcm16", "data", "duration", "sampleRate"}
-            {"type": "done", "duration", "chunks", "cancelled"}
+            {"type": "done", "duration", "chunks", "cancelled", "gapSec"}
             {"type": "batch_chunk", "i", "seq", "format": "pcm16", "data", "duration", "sampleRate"}
-            {"type": "batch_item", "i", "duration", "chunks"}
+            {"type": "batch_item", "i", "duration", "chunks", "gapSec"?}
             {"type": "batch_done"}
             {"type": "audio", "format": "pcm16", "data", "duration", "sampleRate"}
             {"type": "error", "message"}
@@ -166,6 +166,13 @@ must not be bent into passing test fixtures through it:
                                   The `stopped` acknowledgement is still sent: this
                                   is an engine that HEARD and did not act, which is
                                   the failure, rather than one that went deaf.
+    CRUCIBLE_FAKE_GAP_SEC         the silence a retiring LISTEN row states as
+                                  `gapSec` — what the player must insert after it.
+                                  Default 0.6, `text/gaps.classify_gap`'s floor.
+                                  The real narrator CLASSIFIES this per row; this
+                                  file models the WIRE, not the rule, so a test
+                                  that wants to prove the number travelled steers
+                                  it to something no floor would produce.
     CRUCIBLE_FAKE_CHUNK_MS        milliseconds of audio per streamed sub-sentence
                                   chunk. Default 200.
     CRUCIBLE_FAKE_CHUNK_DELAY_MS  milliseconds of REAL time to spend on each of
@@ -230,6 +237,23 @@ def _env_float(name: str, default: float) -> float:
 def _env_int(name: str) -> int | None:
     raw = os.environ.get(name)
     return None if raw is None or raw == "" else int(raw)
+
+
+def _gap_fields() -> dict[str, object]:
+    """What a retiring Listen row says the player must insert after it.
+
+    The real worker asks `text/gaps.classify_gap` for the row's own text; this
+    file is a model of the WIRE and states one configured number, because a
+    second implementation of the gap RULE here would be a fake that could agree
+    with itself while disagreeing with narrator.
+
+    `CRUCIBLE_FAKE_OMIT_GAP` sends no key at all, which is what a narrator older
+    than 2026-09-18 does - and that narrator's audio is NOT bare, so it is a
+    case Crucible has to refuse rather than paper over.
+    """
+    if (os.environ.get("CRUCIBLE_FAKE_OMIT_GAP") or "").strip():
+        return {}
+    return {"gapSec": _env_float("CRUCIBLE_FAKE_GAP_SEC", 0.6)}
 
 
 def send(message_type: str, **fields: object) -> None:
@@ -481,7 +505,11 @@ def _emit_whole_row(text: str, row: int | None) -> None:
         "capped": capped,
     }
     if row is None:
-        send("audio", **fields)
+        # `generate` is one LISTEN sentence, so it carries the gap the player
+        # must insert after it. A BATCH row that did not ask to stream is the
+        # guarded/render arm on a `higgs-v3` narrator, and that door carries no
+        # `gapSec` at all: the assembler behind it realizes `gaps.json`.
+        send("audio", **fields, **_gap_fields())
     else:
         send("batch_item", i=row, **fields, **_guard_for(row))
 
@@ -529,12 +557,19 @@ def _stream_row(text: str, row: int | None) -> Iterator[None]:
 
     cancelled = _cancelled.is_set()
     emitted = seconds - max(0.0, remaining)
+    # THE GAP IS A NUMBER ON THE TERMINAL RECORD, never a silent chunk. narrator
+    # used to append a flat 0.3 s of zeros to a streamed row as its last chunk;
+    # since 2026-09-18 the audio is bare and the row STATES what the player must
+    # insert after it. A cancelled row still states it - it is a property of the
+    # text, not of how far the render got - and Crucible is what decides that a
+    # cancelled row's `done` carries `null` instead.
     if row is None:
         send("done", duration=emitted, chunks=seq, cancelled=cancelled,
-             chars=chars, capped=capped and not cancelled)
+             chars=chars, capped=capped and not cancelled, **_gap_fields())
     else:
         send("batch_item", i=row, streamed=True, duration=emitted, chunks=seq,
-             cancelled=cancelled, chars=chars, capped=capped and not cancelled)
+             cancelled=cancelled, chars=chars, capped=capped and not cancelled,
+             **_gap_fields())
 
 
 def _interleave(rows: list[Iterator[None]]) -> None:

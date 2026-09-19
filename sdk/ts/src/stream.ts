@@ -118,6 +118,25 @@ export interface StreamRowDone {
   readonly capped: boolean | null;
   /** Whether this row was stopped rather than finished. */
   readonly cancelled: boolean;
+  /**
+   * The silence that belongs AFTER this row, in seconds — **and the caller is
+   * what realizes it.**
+   *
+   * The audio on this door is bare speech. This number is narrator's own
+   * classification of the row's text (`text/gaps.classify_gap`, the same call
+   * that writes a book's `gaps.json`), relayed by the server verbatim, so a
+   * sentence heard on a stream is paced exactly as it would be inside an
+   * audiobook — the voice's inject included. A player that concatenates rows
+   * without inserting it runs its sentences together; one that adds a constant
+   * of its own is back to two owners of one silence, which is the defect this
+   * field replaced.
+   *
+   * **`null` means the row was CANCELLED** and delivered no complete audio, so
+   * there is no gap to keep. It is never "the server did not say": a row that
+   * retires normally without narrator stating a gap is failed by name as
+   * `narrator_protocol` and arrives as a {@link StreamRowError} instead.
+   */
+  readonly gapSec: number | null;
 }
 
 /**
@@ -593,6 +612,10 @@ class Session implements TtsStreamSession {
         charsPerSec: nullableNum(body, 'chars_per_sec', 'done'),
         capped: nullableBool(body, 'capped', 'done'),
         cancelled: bool(body, 'cancelled', 'done'),
+        // REQUIRED, and a `done` without it is a protocol error like any other
+        // missing field: the caller inserts this silence itself, so a server too
+        // old to state it would have the caller pad audio that is not bare.
+        gapSec: nullableNum(body, 'gap_sec', 'done'),
       };
     }
     if (event === 'restart') {
