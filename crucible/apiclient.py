@@ -540,6 +540,36 @@ def cmd_catalog_remove(connection: Connection, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_voice_write(connection: Connection, args: argparse.Namespace) -> int:
+    """`PUT /v1/voices/{id}` — the manifest document, as the file holds it.
+
+    The whole document goes, never a patch: `voices/<id>.toml` is read as one
+    table and a half-sent manifest is a voice with no pace or no weights, which
+    the server would have to either refuse or invent. The answer is the voice's
+    own `/v1/voices` row after the write, so a caller sees what the file was
+    shaped into rather than an echo of what it sent.
+    """
+    document = read_json_argument(args.manifest, "--manifest")
+    emit(call(
+        connection, "PUT", f"/v1/voices/{args.voice_id}", json_body=document,
+    ))
+    return EXIT_OK
+
+
+def cmd_voice_remove(connection: Connection, args: argparse.Namespace) -> int:
+    """`DELETE /v1/voices/{id}` — this machine's overlay manifest, not the weights.
+
+    A 204, so the printed object is this command's own, `cmd_catalog_remove`'s
+    shape. It says `manifest` because that is the thing that went: a voice that
+    was shadowing a packaged one is still there afterwards, reverted, and the
+    8 GB it pulled is still on the card's disk — `api catalog-remove voice <id>`
+    is the door for those.
+    """
+    call(connection, "DELETE", f"/v1/voices/{args.voice_id}")
+    emit({"removed": {"manifest": args.voice_id}})
+    return EXIT_OK
+
+
 def cmd_settings(connection: Connection, args: argparse.Namespace) -> int:
     """`GET /v1/settings`, or `PUT` when `--patch` is given.
 
@@ -1101,6 +1131,20 @@ def add_parser(subparsers: Any) -> None:
     catalog_remove.add_argument("kind", help="model, voice, rvc, denoise, asr, align")
     catalog_remove.add_argument("subject_id")
     catalog_remove.set_defaults(api_func=cmd_catalog_remove)
+
+    voice_write = verb("voice-write", "add or replace a voice this server owns")
+    voice_write.add_argument("voice_id")
+    voice_write.add_argument(
+        "--manifest", required=True,
+        help="the whole manifest document, as JSON or @file — the table a "
+             "voices/<id>.toml holds. An overlay wins over a packaged voice of "
+             "the same id, and `api voice-remove` is the undo",
+    )
+    voice_write.set_defaults(api_func=cmd_voice_write)
+
+    voice_remove = verb("voice-remove", "delete this server's own manifest for a voice")
+    voice_remove.add_argument("voice_id")
+    voice_remove.set_defaults(api_func=cmd_voice_remove)
 
     settings = verb("settings", "read the settings document, or PUT a patch")
     settings.add_argument(

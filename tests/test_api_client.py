@@ -514,6 +514,44 @@ def test_a_post_with_no_body_at_all_reaches_its_route(
     assert second["error"]["code"] == "unknown_lease"
 
 
+@pytest.fixture
+def tts_base(make_app: Callable[..., FastAPI]) -> Iterator[str]:
+    """The same real server with `tts` on, for the two voice-manifest verbs.
+
+    `voice_write` and `voice_remove` check `enable_tts` before anything else, so
+    against the plain `base` they would answer the same 503 whatever argv sent
+    them and prove nothing about the request that was built.
+    """
+    with serve(make_app(enable_tts=True)) as url:
+        yield url
+
+
+def test_voice_write_carries_the_whole_manifest_document(
+    tts_base: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The refusal is the server reading the BODY — `voice_invalid` names the table.
+
+    A document with no `voice` key is rejected by `write_home_voice`, which runs
+    after `await request.json()`, so a 400 saying so is only reachable if the
+    file's contents travelled and parsed as a dict.
+    """
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"not_a_voice": {}}), encoding="utf-8")
+    assert run(tts_base, "voice-write", "made-up",
+               "--manifest", f"@{manifest}") == 1
+    refusal = json.loads(capsys.readouterr().err.split("\n", 1)[1])
+    assert refusal["error"]["code"] == "voice_invalid"
+
+
+def test_voice_remove_reaches_the_route_and_is_told_there_is_no_overlay(
+    tts_base: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`voice_not_custom` is the route's own 404, and only it says that word."""
+    assert run(tts_base, "voice-remove", "made-up") == 1
+    refusal = json.loads(capsys.readouterr().err.split("\n", 1)[1])
+    assert refusal["error"]["code"] == "voice_not_custom"
+
+
 def test_a_params_file_is_read_and_sent(
     base: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -548,6 +586,8 @@ COVERED: dict[str, str] = {
     "GET /v1/activity": "api activity",
     "GET /v1/models": "api models",
     "GET /v1/voices": "api voices",
+    "PUT /v1/voices/{voice_id}": "api voice-write",
+    "DELETE /v1/voices/{voice_id}": "api voice-remove",
     "GET /v1/catalog": "api catalog",
     "DELETE /v1/catalog/{kind}/{subject_id}": "api catalog-remove",
     "GET /v1/settings": "api settings",
