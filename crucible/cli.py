@@ -14,6 +14,13 @@
     crucible token      print the bearer token (--show) or the pairing line (--url)
     crucible uninstall  install, run backwards; weights kept unless --purge-weights
 
+    crucible api        THE CLIENT HALF: submit jobs, stream tts, chat, read
+                        state — over HTTP, against a server that may be this
+                        machine's, the one in WSL, or one across the network.
+                        Every verb above acts on THIS machine's installation and
+                        takes no address; these take --url and --token. See
+                        crucible/apiclient.py and docs/API-CLI.md.
+
 Exit codes: 0 success, 1 refused (named reason on stderr), 2 usage.
 """
 
@@ -3142,6 +3149,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_sharing_parser(subparsers)
     from .lan import add_parser as add_lan_parser
     add_lan_parser(subparsers)
+
+    # THE CLIENT HALF, and the one namespace in this file whose verbs take an
+    # address. Everything above acts on THIS machine's installation and has
+    # nothing to point at; `crucible api …` speaks HTTP to a server that may be
+    # in WSL or on the Mac. Imported here rather than at module scope for
+    # `local`'s and `sharing`'s reason — `build_parser` is the only caller and a
+    # CLI's import time is its `--help` time.
+    from .apiclient import add_parser as add_api_parser
+    add_api_parser(subparsers)
     return parser
 
 

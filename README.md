@@ -173,6 +173,22 @@ crucible denoise list           # separator manifests and their standing here
 crucible denoise pull <id>      # fetch one separator's checkpoint and its config
 ```
 
+Every verb above acts on **this machine's installation** and takes no address.
+`crucible api …` is the other half — a **client**, over HTTP, against a server that may be
+this machine's, the one in WSL, or one across the tailnet:
+
+```bash
+crucible api info                                    # the local engine
+crucible api info --url http://192.168.68.20:7100 --token <token>   # or anywhere
+crucible api job submit --type tts --model deathstalker \
+    --params @chunks.json --follow --artifacts-dir ./out
+crucible api stream open --voice sigma --language en  # serialized tts, one row at a time
+crucible api chat --model qwen3.5-9b --message "…"    # the cleanup / translation door
+```
+
+One binary, two kinds of verb; the full command list, the job-type bodies and what a
+fine-tuning script calls are in `docs/API-CLI.md`.
+
 `crucible init` refuses if a config already exists (`--force` replaces it and mints a
 **new** token, which every client then needs). It refuses outright if no backend is
 viable, naming the reason.
