@@ -72,6 +72,7 @@ Three invariants, each one BookForge's and each one measured
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -570,7 +571,7 @@ class DenoiseJobType:
             # The session is dead or the worker broke the protocol. Take the
             # separator off the card: `Residency` must not go on advertising a
             # resident thing whose process has gone.
-            self._forget(model)
+            self._forget(ctx, model)
             raise JobError("worker_failed", str(exc)) from None
 
         stems = results[0]["stems"]
@@ -643,7 +644,7 @@ class DenoiseJobType:
                 f"the resident {model} worker is gone (its log is "
                 f"{session.log_path}); loading it again"
             )
-            self._forget(model)
+            self._forget(ctx, model)
 
         try:
             state = accelerator.guard(
@@ -688,17 +689,25 @@ class DenoiseJobType:
             )
         return loaded
 
-    def _forget(self, model: str) -> None:
+    def _forget(self, ctx: JobContext, model: str) -> None:
         """Take a dead separator off the card without letting the tidy-up win.
 
         The failure being reported is the worker's, and a `stop()` that also
         fails must not replace it — the caller is about to raise the one error
         that explains what happened.
+
+        NOT RAISING IS NOT THE SAME AS NOT SAYING (2026-09-18), and the reason
+        is `align`'s word for word: a `WorkerError` here is a worker that did
+        not go on SIGTERM, and since `Residency.unload` unpublishes before it
+        stops, the row is gone and the process is not. Said in the log and on
+        this job's stream, never raised.
         """
         try:
             self._residency.unload(model)
-        except (KeyError, workers.WorkerError):
-            pass
+        except (KeyError, workers.WorkerError) as exc:
+            line = f"could not take {model} off the card: {type(exc).__name__}: {exc}"
+            print(f"crucible: {line}", file=sys.stderr)
+            ctx.note(line)
 
     @staticmethod
     def _input(ctx: JobContext) -> Path:

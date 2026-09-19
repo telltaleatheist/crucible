@@ -70,6 +70,7 @@ the artifact is all-or-nothing and the cues are not.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -557,7 +558,7 @@ class AlignJobType:
             # The session is dead or the worker broke the protocol. Take the
             # aligner off the card: `Residency` must not go on advertising a
             # resident thing whose process has gone.
-            self._forget(model)
+            self._forget(ctx, model)
             raise JobError("worker_failed", str(exc)) from None
         except JobCancelled:
             # A cancel stops the worker mid-exchange, so the session is gone too
@@ -565,13 +566,13 @@ class AlignJobType:
             # stream it can no longer parse. The resident row has to go with it,
             # or `/v1/health` advertises an aligner that is not there until some
             # later job notices and reloads.
-            self._forget(model)
+            self._forget(ctx, model)
             raise
 
         try:
             results = workers.require_positional_results(outcome, total, "chunk")
         except workers.WorkerError as exc:
-            self._forget(model)
+            self._forget(ctx, model)
             raise JobError("worker_failed", str(exc)) from None
 
         # A result is matched to its chunk by POSITION — the worker reported no
@@ -701,7 +702,7 @@ class AlignJobType:
                 f"the resident {model} worker is gone (its log is "
                 f"{session.log_path}); loading it again"
             )
-            self._forget(model)
+            self._forget(ctx, model)
 
         try:
             state = accelerator.guard(
@@ -740,17 +741,29 @@ class AlignJobType:
             )
         return loaded
 
-    def _forget(self, model: str) -> None:
+    def _forget(self, ctx: JobContext, model: str) -> None:
         """Take a dead aligner off the card without letting the tidy-up win.
 
         The failure being reported is the worker's, and a `stop()` that also
         fails must not replace it — the caller is about to raise the one error
         that explains what happened.
+
+        NOT RAISING IS NOT THE SAME AS NOT SAYING, and until 2026-09-18 this
+        did both. A `WorkerError` here is a worker that did not go on SIGTERM:
+        `Residency.unload` unpublishes before it stops, so the resident row is
+        gone and the process is not, and the card is held by something no row
+        points at. That is exactly the fact a reader chasing a card that will
+        not free needs, and it has nowhere else to appear. So it is said the
+        way every other cleanup failure on this server is — a line in the log
+        for whoever is watching the server, and a `note` on the stream of the
+        job it happened to (`Settlement.settle_quietly`, `JobStore._settle`).
         """
         try:
             self._residency.unload(model)
-        except (KeyError, workers.WorkerError):
-            pass
+        except (KeyError, workers.WorkerError) as exc:
+            line = f"could not take {model} off the card: {type(exc).__name__}: {exc}"
+            print(f"crucible: {line}", file=sys.stderr)
+            ctx.note(line)
 
 
 # --------------------------------------------------------------- unload job
