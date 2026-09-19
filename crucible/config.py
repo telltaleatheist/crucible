@@ -254,6 +254,57 @@ class CapabilityRecord:
         }
 
 
+#: A TTS ENGINE'S FOOTPRINT ON THIS BOX, and the two bases it may be stated on.
+#: The same two words `crucible/voices.py` uses of a voice, because it is the
+#: same claim about the same kind of number: `"measured"` is somebody watched
+#: the card, `"declared"` is the engine's own configured reservation and owes a
+#: note saying whose.
+TTS_ESTIMATE_BASES = frozenset({"measured", "declared"})
+
+
+@dataclass(frozen=True)
+class EngineFootprint:
+    """`[tts.<engine>]` — what serving ONE narrator engine costs on THIS machine.
+
+    PHASE21-VOICES-FROM-HF.md section 2.3. Until 2026-09-19 these five values
+    sat in every voice manifest, and all seven shipped manifests carried the
+    same numbers on the same arms — 19_000_000_000 on every `cuda-linux` block,
+    12_133_000_000 on every `mlx-darwin` one, `max_num_seqs = 16` on every
+    voice. Identical across seven voices is the proof they are facts about a BOX
+    and an ENGINE rather than about a voice, and a fact in seven files is a fact
+    with seven owners: mistborn's estimate could be edited without deathstalker's
+    and nothing would notice.
+
+    So they live here, once per engine, on the machine they are true of. A voice
+    that comes out of its own repo (section 2.2) carries none of them, and the
+    server it is being served on supplies them — which is also why a server with
+    no such table cannot serve that engine's voices and says `engine_footprint_
+    unset` rather than reaching for a number.
+    """
+
+    engine: str
+    memory_bytes_estimate: int
+    estimate_basis: str
+    #: Required when `estimate_basis` is `"declared"` and REFUSED when it is
+    #: `"measured"`, exactly as `crucible/voices.py` requires and refuses it: a
+    #: declared number came from somewhere and a reader has to be able to find
+    #: out where, while a note beside a measured one reads as an excuse.
+    estimate_note: str | None
+    max_num_seqs: int
+    max_num_seqs_note: str
+
+    def to_dict(self) -> dict[str, Any]:
+        document: dict[str, Any] = {
+            "memory_bytes_estimate": self.memory_bytes_estimate,
+            "estimate_basis": self.estimate_basis,
+        }
+        if self.estimate_note is not None:
+            document["estimate_note"] = self.estimate_note
+        document["max_num_seqs"] = self.max_num_seqs
+        document["max_num_seqs_note"] = self.max_num_seqs_note
+        return document
+
+
 @dataclass(frozen=True)
 class Config:
     path: Path
@@ -346,6 +397,18 @@ class Config:
     #: what every config written before this field says, so an old one needs
     #: no migration.
     local_models: tuple[LocalModelRecord, ...] = ()
+    #: `[tts.<engine>]` — this box's serving footprint per narrator engine
+    #: (PHASE21 section 2.3). Empty means nobody has stated one here, which is
+    #: what every config written before this phase says; a voice that needs one
+    #: is refused by name rather than defaulted.
+    tts_engines: tuple[EngineFootprint, ...] = ()
+
+    def engine_footprint(self, narrator_engine: str) -> EngineFootprint | None:
+        """This box's `[tts.<engine>]` row, or None because none was written."""
+        for entry in self.tts_engines:
+            if entry.engine == narrator_engine:
+                return entry
+        return None
 
     def route_model(self, capability: str) -> str | None:
         """The upstream model this class runs on, or None because it runs local."""
@@ -886,6 +949,232 @@ def _local_model_records(table: dict[str, Any]) -> tuple[LocalModelRecord, ...]:
     return tuple(found)
 
 
+#: `[tts.<engine>]`'s keys. `estimate_note` is the one optional, on the pairing
+#: rule `EngineFootprint.estimate_note` states.
+_TTS_ENGINE_REQUIRED: dict[str, type] = {
+    "memory_bytes_estimate": int,
+    "estimate_basis": str,
+    "max_num_seqs": int,
+    "max_num_seqs_note": str,
+}
+_TTS_ENGINE_OPTIONAL: dict[str, type] = {"estimate_note": str}
+
+
+def _tts_engine_records(table: dict[str, Any]) -> tuple[EngineFootprint, ...]:
+    """`[tts.*]`, validated here and nowhere else.
+
+    ONE PARSER, TWO ENTRY POINTS. `load_config` reads it into `Config` for a
+    server that is running, and `tts_engine_footprints()` reads it off the
+    document for `crucible/voicerepo.py`, which merges a repo manifest without
+    ever holding a Config. Both call this, so a hand-edited table is refused the
+    same way whichever door found it.
+    """
+    # Imported here rather than at module scope: `crucible/voices.py` reads
+    # `crucible_home()` out of this module, and `crucible/manifests.py` is the
+    # owner of what "every required key, no unknown key" means for a TOML table
+    # in this repo — one checker, in its own vocabulary, refusing with this
+    # module's error type.
+    from .manifests import check_table
+    from .voices import NARRATOR_ENGINE_SAMPLING
+
+    section = table.get("tts")
+    if section is None:
+        return ()
+    if not isinstance(section, dict):
+        raise ConfigError("config key tts must be a table")
+    found: list[EngineFootprint] = []
+    for engine in sorted(section):
+        where = f"config [tts.{engine}]"
+        if engine not in NARRATOR_ENGINE_SAMPLING:
+            raise ConfigError(
+                f"{where}: {engine!r} is not one of narrator's engines; they are "
+                f"{sorted(NARRATOR_ENGINE_SAMPLING)}. A footprint for an engine "
+                "nothing serves is a number nothing reads"
+            )
+        block = section[engine]
+        if not isinstance(block, dict):
+            raise ConfigError(f"{where}: must be a table")
+        check_table(
+            where, block, _TTS_ENGINE_REQUIRED, _TTS_ENGINE_OPTIONAL, error=ConfigError
+        )
+        if block["memory_bytes_estimate"] <= 0:
+            raise ConfigError(
+                f"{where}: memory_bytes_estimate must be positive, got "
+                f"{block['memory_bytes_estimate']}"
+            )
+        basis = block["estimate_basis"]
+        if basis not in TTS_ESTIMATE_BASES:
+            raise ConfigError(
+                f"{where}: estimate_basis {basis!r} is not one of "
+                f"{sorted(TTS_ESTIMATE_BASES)}"
+            )
+        note = block.get("estimate_note")
+        if basis == "declared" and (note is None or note.strip() == ""):
+            raise ConfigError(
+                f"{where}: estimate_basis is 'declared' and there is no "
+                "estimate_note. A declared number came from somewhere — an "
+                "engine's configured reservation, a sibling machine's "
+                "measurement — and the reader of a /v1/voices row has to be able "
+                "to find out where"
+            )
+        if basis == "measured" and note is not None:
+            raise ConfigError(
+                f"{where}: estimate_basis is 'measured' and it also carries an "
+                "estimate_note. Put the measurement in a comment beside the "
+                "number; estimate_note is what a DECLARED number owes"
+            )
+        if block["max_num_seqs"] < 1:
+            raise ConfigError(
+                f"{where}: max_num_seqs must be at least 1, got "
+                f"{block['max_num_seqs']}"
+            )
+        if block["max_num_seqs_note"].strip() == "":
+            raise ConfigError(
+                f"{where}: max_num_seqs carries no note. The number is contested "
+                "— the deathstalker cap certificate was measured at 64 while the "
+                "shipped width is 16 — so the next person to touch it has to be "
+                "able to find out where it came from"
+            )
+        found.append(
+            EngineFootprint(
+                engine=engine,
+                memory_bytes_estimate=block["memory_bytes_estimate"],
+                estimate_basis=basis,
+                estimate_note=note,
+                max_num_seqs=block["max_num_seqs"],
+                max_num_seqs_note=block["max_num_seqs_note"],
+            )
+        )
+    return tuple(found)
+
+
+def declared_tts_footprints(backend_kind: str) -> tuple[EngineFootprint, ...]:
+    """What `crucible init` writes into `[tts.*]` for a backend, or nothing.
+
+    PHASE21-VOICES-FROM-HF.md section 2.3, and section 9's ruling 2 is still
+    Owen's: either init copies today's declared numbers per backend (this, the
+    recommended shape) or the table is left unset until `crucible capability`
+    measures one and nothing serves a pinned voice until then. **THE WRITE IS
+    THIS ONE FUNCTION** so that taking the second option is deleting a call,
+    not unpicking a writer.
+
+    ── Where these numbers come from, and why they are not measurements ───────
+
+    Every one of them is READ OFF THE SEVEN PACKAGED MANIFESTS AS OF 2026-09-19,
+    which is what section 2.3 asks for — the point of this table is that the
+    numbers stop being repeated once per voice, not that they change. They were
+    identical in all seven files on each arm, which is the evidence they are
+    facts about a box and an engine:
+
+      cuda-linux  19_000_000_000  SGLang-Omni's CONFIGURED RESERVATION on the
+                  3090 Ti — `--mem-fraction-static 0.60 holds ~19 GB at 16 in
+                  flight` (BookForge `electron/data/higgs-models.json`
+                  `serving.sglang._memFractionStaticNote`, owens-pc RTX 3090 Ti,
+                  2026-09-05). Nobody watched the card, so the basis is
+                  `declared` and it owes this note.
+
+      mlx-darwin  12_133_000_000  the one recorded MLX figure for Higgs v3
+                  weights of this shape — 11.3 GiB peak at a 900-character chunk,
+                  from deathstalker's MLX cap certificate (mlx-audio 0.4.8 /
+                  mlx 0.32.0 on owens-mac-studio, 2026-09-05). A sibling
+                  measurement carried across, which is exactly what `declared`
+                  means.
+
+      both        max_num_seqs 16 — vllm-omni's OWN stage-0 value in
+                  `higgs_multimodal_qwen3.yaml`, and a measured ceiling at the
+                  shipped fractions: 16 concurrent at 0.35 + 0.10 ran
+                  11,387-11,584 chars/min over three runs on owens-pc
+                  (2026-09-05) while 32 filled the card and stalled.
+
+    A BACKEND THAT SERVES NO NARRATOR ENGINE GETS NOTHING — `llama-windows`
+    returns an empty tuple, and its config carries no `[tts.*]` table at all,
+    which is the honest record of a box that cannot serve a voice.
+
+    These are a STARTING POINT and are meant to be overwritten: the note on each
+    says the measurement is owed, and a person or `crucible capability` may
+    rewrite the table on the machine it is wrong about.
+    """
+    from .backend import CUDA_LINUX, MLX_DARWIN
+
+    if backend_kind == CUDA_LINUX:
+        return (
+            EngineFootprint(
+                engine="higgs-v3",
+                memory_bytes_estimate=19_000_000_000,
+                estimate_basis="declared",
+                estimate_note=(
+                    "SGLang-Omni's configured reservation on this arm, not a "
+                    "watched card: `--mem-fraction-static 0.60 holds ~19 GB at 16 "
+                    "in flight` (BookForge higgs-models.json "
+                    "serving.sglang._memFractionStaticNote, owens-pc RTX 3090 Ti, "
+                    "2026-09-05). It is the SERVER's footprint rather than any "
+                    "one checkpoint's, which is why every Higgs v3 voice on this "
+                    "arm declared it until 2026-09-19 and why it is stated once "
+                    "here now. Owed: a real reading on this card."
+                ),
+                max_num_seqs=16,
+                max_num_seqs_note=(
+                    "16 is vllm-omni's OWN stage-0 value in "
+                    "higgs_multimodal_qwen3.yaml, and a measured ceiling at the "
+                    "shipped memory fractions: on owens-pc (RTX 3090 Ti, "
+                    "2026-09-05) 16 concurrent at 0.35 + 0.10 ran 11,387-11,584 "
+                    "chars/min over three runs while 32 filled the card and "
+                    "stalled. THE deathstalker CAP CERTIFICATE RAN AT 64, at the "
+                    "older fractions and before that stall was measured, so 16 is "
+                    "not the width its cap was certified at; nothing measured says "
+                    "whether batch width moves the safe chunk length, and if it "
+                    "does, that certificate is bound to 64 and this is the field "
+                    "that would have to change. It is also the width of narrator's "
+                    "own batch (v3_served.serve_concurrency), so raising it raises "
+                    "concurrent POSTs and VRAM pressure together."
+                ),
+            ),
+        )
+    if backend_kind == MLX_DARWIN:
+        return (
+            EngineFootprint(
+                engine="higgs-v3",
+                memory_bytes_estimate=12_133_000_000,
+                estimate_basis="declared",
+                estimate_note=(
+                    "The one recorded MLX figure for Higgs v3 weights of this "
+                    "shape — 11.3 GiB peak at a 900-character chunk, from "
+                    "deathstalker's MLX cap certificate (mlx-audio 0.4.8 / mlx "
+                    "0.32.0 on owens-mac-studio, 2026-09-05). Somebody else's "
+                    "reading carried across, which is exactly what 'declared' "
+                    "means. Owed: watch this machine's own allocator."
+                ),
+                max_num_seqs=16,
+                max_num_seqs_note=(
+                    "16 is vllm-omni's own stage-0 value and the width narrator "
+                    "batches at (v3_served.serve_concurrency), which is the number "
+                    "every packaged voice declared until 2026-09-19. The mlx arm "
+                    "starts no server under narrator, so what this sizes here is "
+                    "narrator's own batch. Owed: a width sweep on this machine."
+                ),
+            ),
+        )
+    return ()
+
+
+def tts_engine_footprints(home: Path | None = None) -> dict[str, EngineFootprint]:
+    """`[tts.*]` off this installation's config, by engine. Empty when there is none.
+
+    A MISSING CONFIG IS AN EMPTY ANSWER HERE, and that is not a fallback hiding
+    one. The caller is `crucible/voicerepo.py`, merging a manifest on a machine
+    that may have no config at all — a test, or `crucible voices check` run on a
+    laptop — and what it does with the emptiness is refuse the voice by name
+    (`engine_footprint_unset`). Raising here would turn "this box has not been
+    told its footprint" into "there is no Crucible here", which is a different
+    thing and not this function's to say.
+    """
+    try:
+        _root, _path, table = _read_document(home)
+    except ConfigError:
+        return {}
+    return {entry.engine: entry for entry in _tts_engine_records(table)}
+
+
 def _read_document(home: Path | None) -> tuple[Path, Path, dict[str, Any]]:
     """The home, the path and the parsed document — or a ConfigError saying why.
 
@@ -962,6 +1251,7 @@ def load_config(home: Path | None = None) -> Config:
         routes=_route_records(table, upstreams),
         local_models=_local_model_records(table),
         upstreams=upstreams,
+        tts_engines=_tts_engine_records(table),
     )
 
 
@@ -1008,6 +1298,12 @@ def write_config(
     tailscale_advertise: tuple[str, ...] = (),
     lan_advertise: tuple[str, ...] = (),
     open_pairing: bool = DEFAULT_OPEN_PAIRING,
+    #: `[tts.<engine>]`, on the same terms as `routes` above: defaulted to
+    #: empty, written only when there is one, and **a caller that REWRITES an
+    #: existing config must pass the loaded values** or the rewrite silently
+    #: takes this box's serving footprint away and every repo-manifest voice
+    #: stops loading with `engine_footprint_unset`.
+    tts_engines: tuple[EngineFootprint, ...] = (),
     #: Whole top-level tables to copy in VERBATIM, or None.
     #:
     #: `crucible init --config-from` (PHASE15-HOST.md 4.3) is the one caller:
@@ -1070,6 +1366,12 @@ def write_config(
         # read the same, and writing the empty one would put a section in every
         # config on earth to say nothing.
         document["routes"] = {entry.capability: entry.model for entry in routes}
+    if tts_engines:
+        # Only when there is one, for the reason `routes` gives just above. A
+        # backend that serves no narrator engine — `llama-windows` — writes no
+        # table here, which is the honest record of a box that cannot serve a
+        # voice at all.
+        document["tts"] = {entry.engine: entry.to_dict() for entry in tts_engines}
     if local_models:
         # Only when there is one, for the reason `routes` gives just above.
         document["local_models"] = {

@@ -81,6 +81,13 @@ from .tasks import TASK_TYPES, ReloadRefused, Task, TaskStore
 # that name resolves to the route function from anywhere below it and every
 # `voices.X` is an AttributeError on a function. Caught by the new tests; the
 # fix is to never hold the module by a name something else in this file uses.
+from .voicerepo import (
+    home_pins_path,
+    remove_home_pin,
+    voice_for_pin,
+    write_home_pin,
+)
+from .voicerepo import Pin as VoicePin
 from .voices import (
     NARRATOR_ENGINE_SAMPLING,
     VoiceError,
@@ -2051,6 +2058,73 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     # would disagree the first time a field grew a type — silently, because the
     # file would still parse.
 
+    def _repin(live: Config, voice_id: str, body: Any) -> dict[str, Any]:
+        """`{"pin": {...}}` — write this machine's pins row. Section 2.4.
+
+        THE PIN IS LOADED BEFORE IT IS WRITTEN. `voice_for_pin` fetches the
+        `crucible-voice.toml` at that revision, parses it and merges it with this
+        box's `[tts.<engine>]` table, so a revision that carries no manifest, a
+        manifest this build's schema cannot read, and a server that has never
+        been told what this engine costs are each refused HERE, by name, with
+        nothing written. A door that wrote first would leave a server holding a
+        pin nothing can load and would report that by breaking the catalog.
+
+        `revision: null` and an ABSENT revision both mean "pin the head for me",
+        exactly as `_pinned_backends` reads them on the other body: nobody knows
+        their own repo's head sha, and the engine is what holds the HuggingFace
+        credential and does the fetching.
+        """
+        if not isinstance(body, dict):
+            raise ApiError(
+                400,
+                "voice_invalid",
+                "`pin` must be a table of hf_repo and revision, got "
+                f"{type(body).__name__}",
+            )
+        unknown = sorted(set(body) - {"hf_repo", "revision"})
+        if unknown:
+            raise ApiError(
+                400,
+                "voice_invalid",
+                f"`pin` carries unknown key(s) {unknown}; a pin is exactly "
+                "hf_repo and revision. Everything else about a voice lives in "
+                "its own repo's crucible-voice.toml at that revision",
+            )
+        repo = body.get("hf_repo")
+        if not isinstance(repo, str) or repo.strip() == "":
+            raise ApiError(
+                400, "voice_invalid", "`pin` names no hf_repo"
+            )
+        revision = body.get("revision")
+        if revision is not None and not isinstance(revision, str):
+            raise ApiError(
+                400,
+                "voice_invalid",
+                "`pin.revision` must be a 40-character commit sha, or null to "
+                f"resolve this repo's head, got {type(revision).__name__}",
+            )
+        if revision is None or revision.strip() == "":
+            try:
+                revision = resolve_revision(live, repo)
+            except WeightsError as exc:
+                raise ApiError(400, "revision_unresolved", str(exc)) from exc
+
+        candidate = VoicePin(
+            id=voice_id,
+            hf_repo=repo,
+            revision=revision,
+            path=home_pins_path(),
+        )
+        try:
+            voice_for_pin(candidate)
+            pin = write_home_pin(voice_id, repo, revision)
+        except VoiceError as exc:
+            raise ApiError(400, "voice_invalid", str(exc)) from exc
+
+        rows = [row for row in voice_rows(live, backend, residency)
+                if row.get("id") == voice_id]
+        return {"voice": rows[0] if rows else None, "path": str(pin.path)}
+
     @private.put("/voices/{voice_id}")
     async def voice_write(request: Request, voice_id: str) -> dict[str, Any]:
         """Add or replace a voice this machine owns. Returns its `/v1/voices` row.
@@ -2098,6 +2172,49 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 {"id": voice_id},
             )
 
+        # TWO BODIES, TOLD APART BY SHAPE (PHASE21 section 2.4), and the two are
+        # different decisions rather than two spellings of one.
+        #
+        #   {"pin": {...}}    REPIN. The voice's facts live in its own repo at
+        #                     the named sha, and this machine is choosing which
+        #                     sha. This is what a deploy does, per machine, and
+        #                     it is the door this phase exists to make ordinary.
+        #
+        #   {"voice": {...}}  A LOCAL OVERRIDE: a whole manifest, exactly as
+        #                     `voices/<id>.toml` holds it, written into this
+        #                     machine's overlay. The PHASE18 `path` + `identity`
+        #                     arm lives here, and so does a person retuning a
+        #                     shipped voice on their own machine.
+        #
+        # BOTH IS REFUSED and so is NEITHER. A body carrying both has two
+        # answers to "what is this voice" and the loader would pick one
+        # (`load_all_voices` prefers the override); a body carrying neither is
+        # not a manifest at all.
+        has_pin = "pin" in document
+        has_voice = "voice" in document
+        if has_pin and has_voice:
+            raise ApiError(
+                400,
+                "voice_invalid",
+                "the body carries both a `pin` and a `voice`. They are two "
+                "different decisions — which published revision this machine "
+                "serves, and a whole manifest written on this machine — and a "
+                "request making both leaves which one wins to the loader. Send "
+                "one",
+            )
+        if not has_pin and not has_voice:
+            raise ApiError(
+                400,
+                "voice_invalid",
+                "the body must be either {\"pin\": {hf_repo, revision}} — the "
+                "repo and commit this machine serves this voice from — or "
+                "{\"voice\": {...}}, the manifest document exactly as "
+                "voices/<id>.toml holds it",
+            )
+
+        if has_pin:
+            return _repin(live, voice_id, document["pin"])
+
         block = document.get("voice")
         if isinstance(block, dict):
             document = {**document, "voice": _pinned_backends(live, block)}
@@ -2139,17 +2256,25 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 "it before removing the manifest it is running from",
                 {"id": voice_id},
             )
+        # THE PIN ROW OR THE OVERRIDE, WHICHEVER THIS ID HAS (section 2.4), and
+        # both are tried rather than one being guessed at from the request:
+        # `PUT` writes one or the other and a person deleting a voice knows only
+        # that they added it. Never the weights — those are a catalog subject and
+        # `DELETE /v1/catalog/voice/{id}` is what removes them, because somebody
+        # re-describing a voice they have just downloaded 8.5 GB of should not
+        # lose the download.
         try:
-            gone = remove_home_voice(voice_id)
+            gone_pin = remove_home_pin(voice_id)
+            gone_voice = remove_home_voice(voice_id)
         except VoiceError as exc:
             raise ApiError(400, "voice_invalid", str(exc)) from exc
-        if not gone:
+        if not gone_pin and not gone_voice:
             raise ApiError(
                 404,
                 "voice_not_custom",
-                f"this server has no manifest of its own for {voice_id!r}. Only "
-                "voices added here can be removed here; the packaged set is the "
-                "install and is restored by it",
+                f"this server has no pin and no manifest of its own for "
+                f"{voice_id!r}. Only voices added here can be removed here; the "
+                "packaged set is the install and is restored by it",
                 {"id": voice_id},
             )
         return Response(status_code=204)

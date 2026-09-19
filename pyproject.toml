@@ -75,6 +75,11 @@ crucible = [
   "ui/**/*",
   "models/*.toml",
   "voices/*.toml",
+  # The ENGINE's own base rows (PHASE21 section 2.6): higgs-default and
+  # zeroshot sit on Boson's repo, which cannot carry a `crucible-voice.toml`,
+  # so they stay in the install — out of `voices/`, where "Crucible ships no
+  # voices" now holds exactly.
+  "engines/*/*.toml",
   "denoise/*.toml",
   "rvc/*.toml",
   "rvcbase/*.toml",

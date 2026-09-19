@@ -56,6 +56,24 @@ Where the voices live
 `models/` does, and `$CRUCIBLE_VOICES_DIR` overrides it so a test can point at a
 fixture directory. If neither exists the loader refuses by name; it never falls
 back to "no voices".
+
+`load_all_voices()` reads FOUR sources now, and this file is still the owner of
+what a voice MEANS in all four (PHASE21-VOICES-FROM-HF.md): a PIN, whose
+`crucible-voice.toml` comes out of the weights' own repo at the pinned revision
+(`crucible/voicerepo.py`, which translates it into this module's document and
+hands it to the same `_parse`); the ENGINE's own base rows
+(`crucible/engines/<engine>/base.toml`, section 2.6); the packaged set; and this
+machine's overlay. `load_all_voices` documents the precedence and is its one
+owner.
+
+One consequence for the two blocks below. For a voice that comes out of a REPO
+manifest, `memory_bytes_estimate`, `estimate_basis`, `estimate_note` and
+`[voice.serving]` are not in the file at all — a manifest cannot make a claim
+about a box it has never run on, and the repo schema refuses each of them by
+name. They come from that server's `config.toml` `[tts.<engine>]` table
+(section 2.3), and `voicerepo.merge` fills them in before `_parse` ever sees
+them. The fields, the rules and the refusals here are unchanged; what moved is
+who states the numbers.
 """
 
 from __future__ import annotations
@@ -63,7 +81,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -133,6 +151,38 @@ ESTIMATE_BASES = frozenset({"measured", "declared"})
 #: the module that acts on the difference.
 VERIFIED = "verified"
 ASSERTED = "asserted"
+
+#: WHICH KIND OF FILE A VOICE CAME OUT OF — the `manifest` column on the
+#: `/v1/voices` row (PHASE21-VOICES-FROM-HF.md sections 2.4 and 2.6).
+#:
+#: FOUR WORDS AND NOT THE CONTRACT'S THREE. Sections 2.4 and 2.6 name `repo`,
+#: `override` and `engine`, and they are the three that survive section 8: at
+#: the end of the migration every fine-tune is a pin, the two base rows are the
+#: engine's, and a person's own file is an override. `packaged` is the FIFTH
+#: state that exists only while section 8.1 is true — the five
+#: `crucible/voices/*.toml` fine-tunes this build still ships and still prefers
+#: — and it is a word rather than a silence because "this row's numbers come
+#: from a file inside the install" is a real and temporary fact a reader has to
+#: be able to see. Section 8.3 deletes those five files and this word with them.
+MANIFEST_REPO = "repo"
+MANIFEST_OVERRIDE = "override"
+MANIFEST_ENGINE = "engine"
+MANIFEST_PACKAGED = "packaged"
+
+#: HOW A `[voice.pace]` BAND WAS GOT, and how a `max_chars` was. Both are
+#: certificates the manifest states about its own numbers, both are REQUIRED by
+#: the repo schema, and both ride on the `/v1/voices` row — see
+#: `VoiceManifest.pace_basis` and `VoiceBackendSpec.max_chars_basis` for why
+#: the states they name are real rather than pedantic.
+PACE_BASES = frozenset({"measured", "inherited"})
+MAX_CHARS_BASES = frozenset({"measured", "placeholder"})
+
+#: `pins.toml` IS NOT A VOICE, and it lives in the directory voices are read
+#: from (PHASE21 section 2.2), so the glob that finds `<id>.toml` would find it
+#: and try to load a voice called `pins`. Reserved here, in the module that owns
+#: what a voice id is, rather than filtered at each of the two globs.
+PINS_FILE = "pins.toml"
+RESERVED_VOICE_IDS = frozenset({"pins"})
 
 _VOICE_REQUIRED: dict[str, type] = {
     "id": str,
@@ -239,6 +289,14 @@ _PACE_HALF_ULP = 0.005
 #: (The number itself stays OFF `/v1/voices`: it is engine tuning, the server's
 #: business, and a client has no decision to make with it — see
 #: `crucible/jobs/tts/common.py`'s `voice_rows`.)
+#:
+#: WHO WRITES IT DEPENDS ON WHERE THE VOICE CAME FROM (PHASE21 section 2.3). A
+#: packaged `voices/<id>.toml` and a `PUT` override state it themselves, as they
+#: always have. A voice that comes out of its own repo does NOT — the repo
+#: schema refuses `[voice.serving]` by name, because the width sizes the server
+#: narrator starts on a particular box — and `voicerepo.merge` fills this table
+#: from that machine's `config.toml` `[tts.<engine>]` before `_parse` runs. The
+#: rules below are the same either way.
 _SERVING_REQUIRED: dict[str, type] = {
     "max_num_seqs": int,
     "max_num_seqs_note": str,
@@ -387,6 +445,18 @@ class VoiceBackendSpec:
     #: The clips this voice is conditioned on, `CLIPS_FROM_REQUEST`, or None for
     #: a voice that carries none.
     clips: tuple[ReferenceClip, ...] | str | None
+    #: HOW `max_chars` WAS GOT — `"measured"` (a sweep was run on these weights
+    #: on this arm) or `"placeholder"` (a number somebody wrote down so the arm
+    #: could be served at all). PHASE21 section 2.1.
+    #:
+    #: `None` means THIS MANIFEST'S SCHEMA CANNOT SAY, which is a different
+    #: statement from either word and is what every manifest written before the
+    #: repo schema reports: `voices/*.toml` has no such key, so a value here
+    #: would be this loader deciding which of the two a number was. It rides on
+    #: the `/v1/voices` row for `estimate_basis`'s reason — thirdreich shipped
+    #: `higgs_max_chars_mlx: 900`, a placeholder nobody measured, and a schema
+    #: that cannot say so ships it as a measured fact.
+    max_chars_basis: str | None = None
 
     @property
     def clips_from_request(self) -> bool:
@@ -475,6 +545,7 @@ class VoiceBackendSpec:
             "sampling": dict(self.sampling),
             "sampling_reason": self.sampling_reason,
             "clips": clips,
+            "max_chars_basis": self.max_chars_basis,
         }
 
 
@@ -540,6 +611,39 @@ class VoiceManifest:
     backends: dict[str, VoiceBackendSpec]
     takes: tuple[Take, ...]
     path: Path
+    #: WHICH KIND OF FILE THIS VOICE CAME OUT OF (PHASE21 section 2.4), on the
+    #: `/v1/voices` row as `manifest`. `MANIFEST_REPO` is a `crucible-voice.toml`
+    #: in the weights' own repo at the pinned revision — the shape Phase 21
+    #: exists to make ordinary; `MANIFEST_OVERRIDE` is a whole manifest written
+    #: to this machine through `PUT /v1/voices/{id}`; `MANIFEST_ENGINE` is the
+    #: engine's own base behaviour, which is not a voice anybody trains
+    #: (section 2.6); `MANIFEST_PACKAGED` is a `crucible/voices/*.toml` this
+    #: build still ships, and it is TRANSITIONAL — section 8.3 deletes the last
+    #: five and the word goes with them.
+    manifest_source: str = MANIFEST_PACKAGED
+    #: HOW THE PACE BAND WAS GOT — `"measured"` or `"inherited"` — or None
+    #: because this manifest's schema cannot say (`voices/*.toml` has no such
+    #: key) or because there is no band. deathstalker's 16.64 survived onto
+    #: weights that measured 15.91 precisely because an inherited pace is
+    #: indistinguishable from a measured one at the point of use; this is the
+    #: field that tells them apart, and it rides on the row.
+    pace_basis: str | None = None
+    #: WHERE AN INHERITED PACE CAME FROM, in prose — the run and checkpoint the
+    #: number was measured on, and why it was not measured on these weights. None
+    #: unless `pace_basis` is `"inherited"`.
+    #:
+    #: RULED 2026-09-19, and it mirrors `estimate_basis` exactly: a `declared`
+    #: estimate REQUIRES its note and a `measured` one refuses it, because each
+    #: basis owes its own sentence and no other. The reason it matters here is
+    #: that "inherited" covers two situations a reader must be able to tell
+    #: apart. An inherited pace from a SIBLING checkpoint of the same corpus is
+    #: near enough — mistborn measured 13.29, 13.33 and 13.76 across three
+    #: retrains. An inherited pace from a DIFFERENT corpus two versions back is
+    #: the deathstalker defect: 16.64 carried from `ds_v5_prod` onto weights
+    #: that measured 15.91, 4.4% fast, enough to mis-size narrator's duration
+    #: guard from the first chunk. The word alone cannot separate them; the
+    #: sentence can, so the sentence is required and rides on the row.
+    inherited_from: str | None = None
 
     #: Which subtree of `~/.crucible/` this thing's weights live under. A voice id
     #: and a model id are separate namespaces and must not be able to collide on
@@ -598,6 +702,9 @@ class VoiceManifest:
             "serving": None if self.serving is None else self.serving.to_dict(),
             "backends": {k: v.to_dict() for k, v in sorted(self.backends.items())},
             "takes": [take.to_dict() for take in self.takes],
+            "manifest": self.manifest_source,
+            "pace_basis": self.pace_basis,
+            "inherited_from": self.inherited_from,
         }
 
 
@@ -609,6 +716,19 @@ def home_voices_dir() -> Path:
     from .config import crucible_home
 
     return crucible_home() / "voices"
+
+
+def voices_dir_is_overridden() -> bool:
+    """Is `$CRUCIBLE_VOICES_DIR` set, i.e. does it REPLACE the whole catalog?
+
+    Asked by three readers now rather than one, so it is stated once. The
+    variable's meaning has always been *"run this exact set and nothing else"*,
+    and PHASE21 gives a host two more sources of a voice — the pins and the
+    engine's base rows — that "nothing else" has to cover, or the escape hatch
+    would quietly stop being one.
+    """
+    override = os.environ.get(VOICES_DIR_ENV)
+    return override is not None and override != ""
 
 
 def voice_dirs() -> tuple[Path, ...]:
@@ -639,6 +759,29 @@ def voice_dirs() -> tuple[Path, ...]:
     home = home_voices_dir()
     packaged = voices_dir()
     return (packaged, home) if home.is_dir() and home != packaged else (packaged,)
+
+
+def engine_voices_dir() -> Path:
+    """`crucible/engines/` — where an ENGINE's own base rows live.
+
+    ONE PLACE, ON PURPOSE (PHASE21 section 2.6, ruling 1 still Owen's).
+    `higgs-default` and `zeroshot` sit on `bosonai/higgs-tts-3-4b`, which is not
+    ours and cannot carry a `crucible-voice.toml`; they are not voices anybody
+    trains but the engine's own base behaviour — the token default narrator
+    renders with on the mlx arm, and "clips from the request". So they stay
+    packaged, and they stay packaged HERE rather than among the voices, so that
+    "Crucible ships no voices" is exactly true of voices.
+
+    If Owen takes the alternative — a manifest-only repo of ours pointing at
+    Boson's weights — this function and `engine_voices_path` are the whole of
+    what moves.
+    """
+    return Path(__file__).resolve().parent / "engines"
+
+
+def engine_voices_path(narrator_engine: str) -> Path:
+    """The `base.toml` for one narrator engine. May not exist."""
+    return engine_voices_dir() / narrator_engine / "base.toml"
 
 
 def voices_dir() -> Path:
@@ -1324,22 +1467,43 @@ def parse_voice(text: str, path: Path, expected_id: str) -> VoiceManifest:
 
 
 def load_voice(voice_id: str, directory: Path | None = None) -> VoiceManifest:
-    """Load `<voice_id>.toml`. Raises VoiceError if no directory holds it.
+    """The manifest for `voice_id`, from whichever source this host has for it.
 
-    Searched HIGHEST precedence first, so `<CRUCIBLE_HOME>/voices` answers
-    before the packaged set — the same order `load_all_voices` merges in, read
-    from the other end.
+    ONE PRECEDENCE, ONE OWNER. With no `directory` this is a lookup in
+    `load_all_voices()` rather than a second search of its own: the two used to
+    walk `voice_dirs()` from opposite ends and agreed only because there were
+    two directories, and PHASE21 makes four sources of a voice (a pin, the
+    engine's base rows, the packaged set, this machine's overlay). A second
+    hand-written order over four sources is two answers to "which manifest is
+    this voice", which is the whole of ARCHITECTURE.md section 1.
+
+    `directory` still reads exactly that directory and nothing else, because
+    that is what `_voices_in` and `--voices-dir` mean.
     """
-    roots = (directory,) if directory is not None else tuple(reversed(voice_dirs()))
-    for root in roots:
-        path = root / f"{voice_id}.toml"
-        if path.is_file():
-            break
-    else:
-        known = sorted({p.stem for root in roots for p in root.glob("*.toml")})
-        where = ", ".join(str(r) for r in roots)
+    if directory is not None:
+        return _load_voice_file(directory / f"{voice_id}.toml", voice_id)
+    served = load_all_voices()
+    found = served.get(voice_id)
+    if found is None:
+        where = ", ".join(str(r) for r in voice_dirs())
         raise VoiceError(
-            f"no manifest for voice {voice_id!r} in {where}; this host serves {known}"
+            f"no manifest for voice {voice_id!r} in {where}; this host serves "
+            f"{sorted(served)}"
+        )
+    return found
+
+
+def _load_voice_file(path: Path, voice_id: str) -> VoiceManifest:
+    """One `<id>.toml` off the disk, refused by name if it is not there."""
+    if not path.is_file():
+        known = (
+            sorted(p.stem for p in path.parent.glob("*.toml"))
+            if path.parent.is_dir()
+            else []
+        )
+        raise VoiceError(
+            f"no manifest for voice {voice_id!r} at {path}; that directory holds "
+            f"{known}"
         )
     try:
         text = path.read_text(encoding="utf-8")
@@ -1351,18 +1515,98 @@ def load_voice(voice_id: str, directory: Path | None = None) -> VoiceManifest:
 def load_all_voices(directory: Path | None = None) -> dict[str, VoiceManifest]:
     """Every voice this host serves, by id, in id order.
 
-    Packaged first, then `<CRUCIBLE_HOME>/voices`, so a home manifest sharing an
-    id REPLACES the shipped one — see `voice_dirs()`. Passing `directory`
-    reads exactly that one, which is what the tests and `--voices-dir` want.
+    FOUR SOURCES, LOWEST PRECEDENCE FIRST, and the order is the whole of what
+    PHASE21 section 8.1 asks for -- *"the loader accepts pins; the five packaged
+    manifests STILL ship and still win"*:
+
+        1. the PINS (`crucible/voices/pins.toml` + `<home>/voices/pins.toml`,
+           home winning per id) -- each one a `crucible-voice.toml` read out of
+           the weights' own repo at the pinned revision;
+        2. the ENGINE's own base rows (`crucible/engines/<engine>/base.toml`,
+           section 2.6);
+        3. the PACKAGED voices (`crucible/voices/*.toml`) -- the five fine-tunes
+           this build still ships, which section 8.3 deletes;
+        4. this machine's OVERLAY (`<CRUCIBLE_HOME>/voices/*.toml`), which is
+           what `PUT /v1/voices/{id}` with a `voice` body writes.
+
+    So a packaged manifest beats a pin for the same id while both exist, which
+    is what makes section 8's order safe: adding the pins regresses nothing, and
+    deleting the packaged files is the step that hands the id over.
+
+    THE PINS ARE LOADED EVEN WHERE THEY ARE SHADOWED. Skipping a shadowed pin
+    would save a file read and hide a broken one until the day the packaged
+    manifest went away, which is exactly the failure section 8's order exists to
+    prevent.
+
+    Passing `directory` reads exactly that one -- no pins, no engine rows --
+    which is what the tests and `--voices-dir` mean by it.
     """
-    roots = (directory,) if directory is not None else voice_dirs()
+    if directory is not None:
+        return dict(sorted(_voices_in(directory).items()))
+    from . import voicerepo
+
     voices: dict[str, VoiceManifest] = {}
-    for root in roots:
+    voices.update(voicerepo.pinned_voices())
+    if not voices_dir_is_overridden():
+        # THE ENGINE'S BASE ROWS ARE PART OF THE INSTALL, so `CRUCIBLE_VOICES_DIR`
+        # replaces them along with everything else: the variable means "run this
+        # exact set", and a catalog that still carried two rows the caller did not
+        # put in that directory would not be that set.
+        voices.update(_engine_voices())
+    for root in voice_dirs():
         voices.update(_voices_in(root))
-    # Re-sorted because the merge is by directory and the ORDER is by id: a home
+    # Re-sorted because the merge is by SOURCE and the ORDER is by id: a home
     # voice inserted in the middle of the shipped set must list in the middle,
     # not at the end. `/v1/voices` lists in this order and it is documented.
     return {vid: voices[vid] for vid in sorted(voices)}
+
+
+def _engine_voices() -> dict[str, VoiceManifest]:
+    """The base rows every narrator engine in this build declares.
+
+    Keyed by id out of `crucible/engines/<engine>/base.toml`'s `[voices.<id>]`
+    tables, each of which is exactly the `[voice]` table a `voices/*.toml`
+    holds -- the SAME `_parse`, so the base rows are held to every rule a voice
+    is and cannot drift into a schema of their own.
+
+    An engine with no such file contributes nothing and is not an error: a
+    second narrator engine will arrive before its base rows do.
+    """
+    found: dict[str, VoiceManifest] = {}
+    for engine in sorted(NARRATOR_ENGINE_SAMPLING):
+        path = engine_voices_path(engine)
+        if not path.is_file():
+            continue
+        try:
+            document = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise VoiceError(f"{path}: not valid TOML: {exc}") from exc
+        unknown = sorted(set(document) - {"voices"})
+        if unknown:
+            raise VoiceError(
+                f"{path.name}: unknown top-level table(s) {unknown}; an engine's "
+                "base rows are exactly [voices.<id>], one table per row"
+            )
+        table = document.get("voices")
+        if not isinstance(table, dict) or not table:
+            raise VoiceError(
+                f"{path.name}: declares no [voices.<id>] table. A base file with "
+                "no rows in it is a file nothing reads; delete it instead"
+            )
+        for voice_id in sorted(table):
+            block = table[voice_id]
+            if not isinstance(block, dict):
+                raise VoiceError(f"{path.name}: [voices.{voice_id}] must be a table")
+            manifest = _parse({"voice": block}, path, voice_id)
+            if manifest.narrator_engine != engine:
+                raise VoiceError(
+                    f"{path.name}: [voices.{voice_id}] names narrator_engine "
+                    f"{manifest.narrator_engine!r} but sits under {engine!r}. A "
+                    "base row is the engine's own behaviour, so the directory it "
+                    "is in and the engine it names are one fact"
+                )
+            found[voice_id] = replace(manifest, manifest_source=MANIFEST_ENGINE)
+    return found
 
 
 #: The id a caller may write. Same shape a file stem has to have, checked here
@@ -1385,6 +1629,12 @@ def home_voice_path(voice_id: str) -> Path:
             "letters, digits, dot, dash and underscore, starting with a letter or "
             "digit, at most 64 characters. The id becomes a FILENAME, so anything "
             "else is a path rather than a name"
+        )
+    if voice_id in RESERVED_VOICE_IDS:
+        raise VoiceError(
+            f"voice id {voice_id!r} is reserved: {PINS_FILE} in this directory is "
+            "this machine's pin list (PHASE21 section 2.2), so a voice of that "
+            "name would be written over it"
         )
     return home_voices_dir() / f"{voice_id}.toml"
 
@@ -1478,14 +1728,29 @@ def is_home_voice(voice_id: str) -> bool:
 
 
 def _voices_in(root: Path) -> dict[str, VoiceManifest]:
-    """The manifests in one directory, by id."""
+    """The manifests in one directory, by id.
+
+    `pins.toml` IS SKIPPED. It lives here by section 2.2's design -- a machine's
+    pins belong beside that machine's voices -- and it is not one, so the glob
+    that finds `<id>.toml` would otherwise try to load a voice called `pins` and
+    refuse the whole directory over a file that is doing its job.
+    """
     voices: dict[str, VoiceManifest] = {}
-    # By id — `path.stem` — and not by path, for the reason `load_all_manifests`
+    source = (
+        MANIFEST_OVERRIDE
+        if root == home_voices_dir() and root != voices_dir()
+        else MANIFEST_PACKAGED
+    )
+    # By id -- `path.stem` -- and not by path, for the reason `load_all_manifests`
     # gives: the two orders differ whenever one id is a prefix of another, because
     # the extension gets in the way ('-' is 0x2D, '.' is 0x2E). Here that is not
-    # hypothetical — `zeroshot` and `zeroshot-deathstalker` are exactly that pair.
+    # hypothetical -- `zeroshot` and `zeroshot-deathstalker` are exactly that pair.
     # This function's order is what `/v1/voices` lists in, so it is the documented
     # one.
     for path in sorted(root.glob("*.toml"), key=lambda p: p.stem):
-        voices[path.stem] = load_voice(path.stem, root)
+        if path.name == PINS_FILE:
+            continue
+        voices[path.stem] = replace(
+            _load_voice_file(path, path.stem), manifest_source=source
+        )
     return voices

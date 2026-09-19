@@ -1,0 +1,39 @@
+# THE REPOS THIS BUILD MAY OFFER — PHASE21-VOICES-FROM-HF.md section 2.2.
+#
+# One row per voice id, each naming a HuggingFace repo and one 40-character
+# commit sha:
+#
+#     [mistborn]
+#     hf_repo  = "owenmorgan/mistborn-higgs-v3"
+#     revision = "10b797e3e4f4a42fb356ff7c62f8365e9b24b1e6"
+#
+# At that sha the repo carries a `crucible-voice.toml` beside the weights, in
+# the SAME commit, and that file is the voice: its pace band, its per-arm caps,
+# its sampling and its retake ladder. A sha still names one byte-state, so
+# reproducibility is unchanged; what changes is that the manifest at that sha
+# cannot disagree with the weights at that sha.
+#
+# `<CRUCIBLE_HOME>/voices/pins.toml` holds the same shape and WINS PER ID — a
+# deploy repins one machine at a time (`crucible voices pin <id> <repo>@<sha>`,
+# or `PUT /v1/voices/{id}` with a `pin` body). Deleting a home row puts the
+# packaged pin back.
+#
+# ── EMPTY, AND ON PURPOSE (section 8, step 1) ────────────────────────────────
+#
+# The five fine-tunes — deathstalker, mistborn, owen, sigma, thirdreich — are
+# still described by `crucible/voices/*.toml` in this build, and a packaged
+# manifest BEATS a pin for the same id (`voices.load_all_voices`). They move
+# here at step 8.3, in the same commit that deletes those five files, and NOT
+# before: their HF repos do not carry a `crucible-voice.toml` yet (step 8.2 is
+# the training side's), and a pin to a revision with no manifest is refused by
+# name and not served. That refusal is what makes this order safe.
+#
+# deathstalker and owen are about to be retrained, so those two are the first
+# deploys through the new door end to end and their manifests are written
+# `measured` by the retrain's own ladder. No migration of their old numbers is
+# worth doing first.
+#
+# `higgs-default` and `zeroshot` are never listed here. They sit on Boson's
+# repo, which is not ours and cannot carry a manifest, and they are the ENGINE's
+# own base behaviour rather than voices anybody trains — see
+# `crucible/engines/higgs-v3/base.toml` and section 2.6.

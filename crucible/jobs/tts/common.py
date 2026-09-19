@@ -218,6 +218,7 @@ def voice_rows(
         identity_basis: str | None = None
         fingerprint: str | None = None
         max_chars: int | None = None
+        max_chars_basis: str | None = None
         is_installed = False
         reason: str | None = None
         if not supported:
@@ -241,6 +242,7 @@ def voice_rows(
             identity_basis = spec.identity_basis
             fingerprint = manifest.fingerprint(backend_kind)
             max_chars = spec.max_chars
+            max_chars_basis = spec.max_chars_basis
             is_installed = weights.installed(config, manifest, spec) is not None
             env = jobenv.env_status(
                 config.home,
@@ -311,6 +313,37 @@ def voice_rows(
                 # one for the other (crucible/voices.py).
                 "estimate_basis": basis,
                 "max_chars": max_chars,
+                # HOW THE CAP AND THE BAND WERE GOT, beside the numbers
+                # themselves (PHASE21 sections 2.1 and 6). `"measured"` is a
+                # sweep on these weights on this arm; `"placeholder"` is a
+                # number somebody wrote down so the arm could be served at all;
+                # `"inherited"` is a pace taken from a predecessor run. NULL
+                # MEANS THIS VOICE'S MANIFEST SCHEMA CANNOT SAY, which is a
+                # third statement and not a fourth word for "measured" — every
+                # `voices/*.toml` reports null, because that schema has no such
+                # key. Both ride on the row for `estimate_basis`'s reason: an
+                # inherited pace is indistinguishable from a measured one at
+                # the point of use, and that is exactly how deathstalker's
+                # 16.64 survived onto weights that measured 15.91.
+                "max_chars_basis": max_chars_basis,
+                "pace_basis": manifest.pace_basis,
+                # WHICH OTHER WEIGHTS AN INHERITED PACE CAME FROM, in the
+                # manifest's own prose, and null unless `pace_basis` is
+                # `"inherited"`. On the row because the word alone cannot be
+                # acted on: inheriting from a sibling checkpoint of the same
+                # corpus is near enough (mistborn 13.29/13.33/13.76 across three
+                # retrains) and inheriting from a different corpus two versions
+                # back is deathstalker's 16.64 onto weights that measured 15.91.
+                # A reader deciding whether to trust a band needs the sentence.
+                "inherited_from": manifest.inherited_from,
+                # WHICH KIND OF FILE THIS ROW'S FACTS CAME OUT OF: `"repo"` is
+                # a `crucible-voice.toml` in the weights' own repo at the
+                # pinned revision, `"override"` a whole manifest written to
+                # this machine through `PUT /v1/voices/{id}`, `"engine"` the
+                # narrator engine's own base behaviour (section 2.6), and
+                # `"packaged"` one of the manifests this build still ships,
+                # which section 8.3 deletes.
+                "manifest": manifest.manifest_source,
                 "sample_rate": manifest.sample_rate,
                 # How many rungs this voice's ladder has, so a client can ask
                 # how many takes exist BEFORE it submits one — `take: N` is
