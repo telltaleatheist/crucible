@@ -33,6 +33,10 @@
 [CmdletBinding()]
 param(
   [string]$Release = '',
+  # An operator rollback: install this EXACT older release over a newer host
+  # pack already on this machine. Must name the same version as -Release;
+  # there is no other way down (INSTALL-UNINSTALL.md 6.5.4).
+  [string]$RollbackTo = '',
   [string]$Root = "$env:LOCALAPPDATA\Crucible",
   # The inverse. `crucible uninstall` does the work inside the home; this
   # script removes the host pack, because this script is what unpacked it.
@@ -143,14 +147,18 @@ if ($tarVersion -notmatch "zstd") {
 # --- 1. which pack -------------------------------------------------------
 # Asked only when nobody named one. -Uninstall returned long before here,
 # so taking Crucible off a machine still needs no network.
+# THE POINTER IS `releases/latest` (INSTALL-UNINSTALL.md 6.5.1): the promoted
+# release, not the newest tag created, which between a cut and its promotion
+# is an unverified candidate.
 if (-not $Release) {
-  $feed = "https://api.github.com/repos/telltaleatheist/crucible/releases?per_page=1"
+  $feed = "https://api.github.com/repos/telltaleatheist/crucible/releases/latest"
   $feedRaw = & curl.exe -fsSL --retry 3 -H "Accept: application/vnd.github+json" "$feed"
-  if ($LASTEXITCODE -ne 0) { Die "release_lookup_failed: could not read $feed -- name one with -Release <version>" }
-  try { $feedJson = $feedRaw | Out-String | ConvertFrom-Json } catch { Die "release_lookup_failed: $feed is not JSON" }
-  $Release = ($feedJson[0].tag_name) -replace '^v',''
-  if (-not $Release) { Die "release_lookup_failed: $feed named no release" }
+  if ($LASTEXITCODE -ne 0) { Die "release_channel_unreadable: could not read the release channel at $feed -- name a release with -Release <version>" }
+  try { $feedJson = $feedRaw | Out-String | ConvertFrom-Json } catch { Die "release_channel_unreadable: $feed is not JSON" }
+  $Release = ($feedJson.tag_name) -replace '^v',''
+  if (-not $Release) { Die "release_channel_unreadable: $feed named no release" }
 }
+if ($RollbackTo -and $RollbackTo -ne $Release) { Die "rollback_version_mismatch: -RollbackTo names $RollbackTo and the release being installed is $Release; a rollback names the exact Crucible you want back" }
 Say "release $Release"
 $manifestUrl = "https://github.com/telltaleatheist/crucible/releases/download/v$Release/envpacks.json"
 $manifestRaw = & curl.exe -fsSL --retry 3 "$manifestUrl"
@@ -165,12 +173,31 @@ if ($null -eq $pack) { Die "pack_not_published: the $Release release publishes n
 # The stamp is the same two lines the guest-side install writes, read the
 # same way: a matching sha means these bytes are already unpacked.
 $have = ""
+$haveRelease = ""
 if (Test-Path $Stamp) {
-  foreach ($line in (Get-Content $Stamp)) { if ($line -match "^sha256=(.+)$") { $have = $Matches[1].Trim() } }
+  foreach ($line in (Get-Content $Stamp)) {
+    if ($line -match "^sha256=(.+)$") { $have = $Matches[1].Trim() }
+    if ($line -match "^release=(.+)$") { $haveRelease = $Matches[1].Trim() }
+  }
 }
 if ($have -eq $pack.sha256 -and (Test-Path $Cmd)) {
   Say "host-pack: already installed ($($pack.sha256))"
 } else {
+  # --- 2a. never over a newer pack -----------------------------------------
+  # INSTALL-UNINSTALL.md 6.5.4, the same rule and the same refusal names the
+  # POSIX installer and installPack() use. [version] compares number by
+  # number, which is the thing a string comparison gets wrong at 1.0.10.
+  # An unstamped pack is not read as older: a version nobody recorded cannot
+  # be compared with one.
+  if ($haveRelease) {
+    $onDisk = $null; $wanted = $null
+    if ([version]::TryParse($haveRelease, [ref]$onDisk) -and [version]::TryParse($Release, [ref]$wanted) -and $wanted -lt $onDisk) {
+      if ($RollbackTo -ne $Release) {
+        Die "install_would_downgrade: $HostDir is the $haveRelease host pack and this would install $Release over it. Nothing has been downloaded. An operator who means to go back names the version: -RollbackTo $Release"
+      }
+    }
+  }
+
   # --- 3. disk ------------------------------------------------------------
   # The same sum pack.ts requiredBytes() uses: unpacked + the whole archive
   # + one part, a part being the archive over the part count.

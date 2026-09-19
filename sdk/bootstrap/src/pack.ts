@@ -22,9 +22,16 @@
  *    deletes the archive and refuses by name — `pack_sha_mismatch` — because the
  *    next run must start clean rather than resume into a corrupt file.
  *
+ * 4. **Never over a newer pack.** `<home>/server/.pack` records `release=`, so
+ *    this knows what is on the disk before it writes to it, and an older release
+ *    over a newer one is `install_would_downgrade` before anything downloads
+ *    (INSTALL-UNINSTALL.md §6.5.4). The one legitimate downgrade is an operator
+ *    rollback and it names its exact version.
+ *
  * The unpack is `tar --zstd -xf … -C <dest>.partial` followed by a rename, so a
  * half-unpacked tree is never at the path everything else runs from.
  */
+import { compareReleases } from './channel.js';
 import { BootstrapRefusal } from './errors.js';
 import { findPack, packAssetName, parseEnvpacks, releaseAssetUrl, type EnvPacks, type PackBackend, type PackEntry } from './envpacks.js';
 import type { RunResult, Runner } from './runner.js';
@@ -279,6 +286,14 @@ export interface PackInstallOptions {
   freeBytes: number;
   /** The pack already there, from {@link probeGuest} — a matching sha is a skip. */
   installed: InstalledPack | null;
+  /**
+   * An operator rollback: the EXACT older release being put back, or null.
+   *
+   * REQUIRED AND EXPLICITLY NULL rather than optional, because it is the one
+   * thing that opens {@link installPack}'s never-older gate and a caller that
+   * forgot to think about it must say so in the type. See §6.5.4.
+   */
+  rollbackTo: string | null;
   timeoutMs: number;
   onLine: (line: string, stream: 'stdout' | 'stderr') => void;
 }
@@ -309,6 +324,34 @@ export async function installPack(
 
   if (options.installed !== null && options.installed.sha256 === entry.sha256) {
     return { entry, paths, skipped: true, ran };
+  }
+
+  // NEVER OVER A NEWER PACK (INSTALL-UNINSTALL.md §6.5.4). The stamp's
+  // `release=` is what this disk already holds, and writing an older tree over
+  // it is how one app's set-up button silently took another app's engine back a
+  // version. Checked BEFORE the disk pre-flight and before any guest command, so
+  // a refused downgrade downloads nothing and leaves nothing half-written.
+  //
+  // An unstamped pack is not read as "older": `installed.release` is null on a
+  // tree that predates the stamp, and a version nobody recorded cannot be
+  // compared, so there is nothing here to refuse.
+  if (options.installed !== null && options.installed.release !== null
+    && compareReleases(options.installed.release, options.release) > 0) {
+    if (options.rollbackTo === null) {
+      throw new BootstrapRefusal(
+        'install_would_downgrade',
+        `${paths.dest} inside ${describeTarget(target)} is the ${options.installed.release} pack and this would `
+          + `install ${options.release} over it. Nothing was downloaded. An operator who means to go back names `
+          + `the version: rollbackTo: "${options.release}".`,
+      );
+    }
+    if (options.rollbackTo !== options.release) {
+      throw new BootstrapRefusal(
+        'rollback_version_mismatch',
+        `rollbackTo names ${options.rollbackTo} and the pack being installed is ${options.release}. A rollback is `
+          + 'an operator naming the exact Crucible they want back, so the two are the same version.',
+      );
+    }
   }
 
   const needed = requiredBytes(entry);

@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import { asciiOnly, GENERATED, generateInstallPs1, generateInstallSh } from '../scripts/gen-install-scripts.js';
-import { CURL_ARGS, ENVPACKS_ASSET, HOST_BACKEND, HOST_PACK, installSteps, TAR_ARGS } from '../src/index.js';
+import { CURL_ARGS, ENVPACKS_ASSET, HOST_BACKEND, HOST_PACK, installSteps, LATEST_RELEASE_URL, TAR_ARGS } from '../src/index.js';
 import { guestProbeScript } from '../src/pack.js';
 import { installJobTypesSh, renderArgv, uninstallSh } from '../src/steps.js';
 
@@ -188,9 +188,47 @@ test('install.sh names every refusal the TypeScript names for the same failure',
     'pack_download_failed',
     'pack_sha_mismatch',
     'pack_unpack_failed',
+    'release_channel_unreadable',
+    'install_would_downgrade',
+    'rollback_version_mismatch',
   ]) {
     assert.ok(sh.includes(`${code}:`), `install.sh refuses ${code} by the same name`);
   }
+});
+
+/**
+ * INSTALL-UNINSTALL.md §6.5, in both hand installers.
+ *
+ * `releases?per_page=1` is the newest TAG, which between a cut and its
+ * promotion is the unverified candidate `promote_release.py` exists to hold
+ * back; `releases/latest` is the promoted one. And neither script may walk a
+ * machine backwards without an operator naming the version.
+ */
+test('both installers read the channel\'s releases/latest, never the newest tag', () => {
+  for (const [name, text] of [['install.sh', generateInstallSh()], ['install.ps1', generateInstallPs1()]] as const) {
+    assert.ok(text.includes(LATEST_RELEASE_URL), `${name} does not read ${LATEST_RELEASE_URL}`);
+    // What is FETCHED, not what is mentioned: both scripts name the old feed in
+    // the comment that says why they stopped reading it.
+    const fetched = text.split('\n').filter((line) => /curl/.test(line) && !line.trimStart().startsWith('#'));
+    assert.equal(fetched.some((line) => line.includes('per_page')), false, `${name} still fetches the newest tag created`);
+  }
+});
+
+test('both installers refuse to install over a newer pack, and take an exact-version rollback', () => {
+  const sh = generateInstallSh();
+  // The FLAG is parsed and the value is what the gate reads — one assertion each,
+  // because a script that takes `--rollback-to` and never reads it would pass a
+  // regex that only looked for the word.
+  assert.match(sh, /--rollback-to\) need \$# "--rollback-to"; shift; ROLLBACK_TO="\$1"/);
+  assert.match(sh, /\[ "\$ROLLBACK_TO" = "\$RELEASE" \]/);
+  assert.match(sh, /stamp_release=/, 'install.sh must read the release the stamp records');
+  assert.match(sh, /crucible_older "\$RELEASE" "\$stamp_release"/);
+  assert.match(sh, /install_would_downgrade: \$dest is the \$stamp_release pack/);
+
+  const ps1 = generateInstallPs1();
+  assert.match(ps1, /\$RollbackTo/);
+  assert.match(ps1, /\$haveRelease/, 'install.ps1 must read the release the stamp records');
+  assert.match(ps1, /install_would_downgrade: \$HostDir is the \$haveRelease host pack/);
 });
 
 test('install.sh mints its own token and keeps an existing config\'s', () => {
@@ -215,7 +253,13 @@ test('install.ps1 installs the HOST and stops — it no longer walks 4c itself (
   // app's install() and a hand install alike. A .ps1 that still did it would
   // be the second walk this phase exists to delete.
   const ps1 = generateInstallPs1();
-  const order = ['tar.exe --version', 'pack_not_published', 'pack_disk', 'Get-FileHash', 'Move-Item $Partial $HostDir', '& $Cmd local $action', 'Start-Process -WindowStyle Hidden'];
+  // `& $Tar --version` and not `tar.exe --version`: `282871b` ("Name the
+  // Windows tar where the installer is actually written") stopped resolving
+  // `tar` through PATH, which from a Git Bash shell found GNU tar 1.32 and
+  // refused a machine whose System32 bsdtar reads zstd perfectly well. The
+  // probe and the unpack both go through the one named binary now, and these
+  // three rows had been red since.
+  const order = ['& $Tar --version', 'pack_not_published', 'pack_disk', 'Get-FileHash', 'Move-Item $Partial $HostDir', '& $Cmd local $action', 'Start-Process -WindowStyle Hidden'];
   let at = -1;
   for (const marker of order) {
     const found = ps1.indexOf(marker);
@@ -249,17 +293,29 @@ test('install.ps1 downloads the host pack for THIS release, by the manifest, int
   assert.match(ps1, /\[string\]\$Root = "\$env:LOCALAPPDATA\\Crucible"/);
   assert.ok(ps1.includes(ENVPACKS_ASSET), 'the same manifest asset name the TypeScript uses');
   assert.ok(ps1.includes(`& curl.exe ${CURL_ARGS.join(' ')} -o $partPath`), 'the same curl flags');
-  assert.ok(ps1.includes(`& tar.exe ${TAR_ARGS.join(' ')} $archive -C $Partial`), 'the same tar flags');
+  assert.ok(ps1.includes(`& $Tar ${TAR_ARGS.join(' ')} $archive -C $Partial`), 'the same tar flags');
 });
 
 test('install.ps1 checks that THIS machine tar carries zstd rather than assuming it', () => {
   // Measured 2026-09-14: C:\Windows\System32\tar.exe is bsdtar 3.8.1 with
   // libzstd 1.5.5, and no zstd.exe ships at all. A machine whose tar has no
   // zstd would half-unpack in silence.
+  //
+  // AND IT CHECKS THE TAR IT WILL USE. Measured 2026-09-17 deploying 0.6.8:
+  // resolving `tar` through PATH from a Git Bash shell found GNU tar 1.32 in
+  // Git's usr/bin and refused a machine whose System32 bsdtar reads zstd.
+  // Checking one tool and unpacking with another is how a check passes and the
+  // unpack still half-works, so the binary is NAMED once and both go through
+  // it (`282871b`).
   const ps1 = generateInstallPs1();
-  assert.match(ps1, /tar\.exe --version/);
+  assert.match(ps1, /\$Tar = Join-Path \$env:SystemRoot "System32\\tar\.exe"/);
+  assert.match(ps1, /& \$Tar --version/);
   assert.match(ps1, /\$tarVersion -notmatch "zstd"/);
   assert.match(ps1, /guest_missing_tool/);
+  assert.equal(
+    / tar\.exe /.test(ps1), false,
+    'no bare tar.exe survives: PATH is the caller\'s, and the caller may be Git Bash',
+  );
 });
 
 test('install.ps1 verifies the rootfs before importing it, and is Windows PowerShell 5.1 safe', () => {
@@ -324,7 +380,7 @@ test('install.ps1 -Uninstall calls the verb, then removes the pack the verb cann
   const pack = ps1.indexOf('foreach ($gone in @($Partial, $DownloadDir, $HostDir))');
   assert.ok(verb > 0 && verb < pack);
   // And it exits before the install half.
-  assert.ok(ps1.indexOf('if ($Uninstall) {') < ps1.indexOf('tar.exe --version'));
+  assert.ok(ps1.indexOf('if ($Uninstall) {') < ps1.indexOf('& $Tar --version'));
   assert.ok(ps1.includes('not_installed:'), 'a machine with no host pack is refused by name');
   assert.ok(ps1.includes('host_pack_locked:'), 'a file still held is refused by name, and re-running is the fix');
 });

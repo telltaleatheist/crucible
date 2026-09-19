@@ -20,6 +20,8 @@ export type { DetectOptions, GpuFacts, HostFacts, WslFacts } from './host.js';
 export { install, mintToken, planJobTypes, DEFAULT_INSTALL_TIMEOUTS, INSTALLABLE_JOB_TYPES, JOB_TYPES } from './install.js';
 export type { InstallOptions, InstallResult, InstallStep, InstallTimeouts, JobType, JobTypeRequest } from './install.js';
 
+export { compareReleases, latestRelease, LATEST_RELEASE_URL, parseLatestRelease } from './channel.js';
+
 export {
   backendFor,
   envpacksUrl,

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -254,3 +255,64 @@ def test_changing_the_published_number_moves_the_arithmetic() -> None:
         check=True,
     )
     assert result.stdout.strip() == "3", result.stderr
+
+
+# ------------------------------------------------- and the SDK's third copy
+
+
+SDK_CLIENT_TS = (
+    Path(__file__).resolve().parent.parent / "sdk" / "ts" / "src" / "client.ts"
+)
+
+
+def sdk_keys() -> tuple[set[str], set[str]]:
+    """The wire keys `readPagesEngine` asks for: (block keys, request keys).
+
+    Read out of the source rather than by running the TypeScript, for
+    `test_sdk_subject_kinds.py`'s reason: the two spellings of one fact are
+    hand-maintained on either side of a language boundary, and the only thing
+    that can keep them together is something that compares them. Every reader
+    in `shape.ts` takes the object first and the wire key second, so the key
+    is the quoted argument after `block` or `request`.
+    """
+    source = SDK_CLIENT_TS.read_text(encoding="utf-8")
+    start = source.index("function readPagesEngine(")
+    # `\r?\n` and not `\n`: this repo is worked on from Windows, and a keeper
+    # anchored on a bare newline reports an empty function on a CRLF checkout
+    # — green by finding nothing, which is the failure mode a comparison
+    # exists to prevent.
+    end = re.search(r"\r?\n\}\r?\n", source[start:])
+    assert end is not None, "readPagesEngine has no closing brace at column 0"
+    body = source[start : start + end.start()]
+    readers = r"(?:str|num|bool|nullableStr|nullableNum|nullableBool|objectField)"
+    block = set(re.findall(readers + r"\(\s*block,\s*'([a-z_]+)'", body))
+    request = set(re.findall(readers + r"\(\s*request,\s*'([a-z_]+)'", body))
+    # `request` is taken off the block by `objectField(block, 'request', …)`,
+    # which is the same call shape; it is the CONTAINER, not a leaf, so it
+    # comes out here and is compared as the second half of the pair instead.
+    return block - {"request"}, request
+
+
+def test_the_sdk_reads_every_key_the_server_publishes_and_no_other() -> None:
+    """`pages.request_shape()` and the SDK's reader are ONE list, compared.
+
+    docs/ARCHITECTURE.md R1, in its three-owner form. The block went on the
+    wire so that a client would stop pinning a prompt and a pixel budget in
+    its own source — and the SDK is a client's first reader of it, so a key
+    the SDK silently drops is the pin coming straight back: Foundry would
+    take the field it could see and keep its own copy of the one it could
+    not, which is worse OCR and never an error.
+    """
+    block_keys, request_keys = sdk_keys()
+    assert request_keys == set(pages.request_shape()), (
+        "sdk/ts/src/client.ts's readPagesEngine and crucible/pages.py's "
+        "request_shape() have drifted. The Python is the owner; the SDK "
+        "mirrors it, and a key it does not read is a fact about the weights "
+        "that a client goes on pinning for itself."
+    )
+    published = set(
+        pages.engine_block(engine=None, installed=False, detail="")
+    ) - {"request"}
+    assert block_keys == published, (
+        "readPagesEngine and pages.engine_block() name different fields"
+    )

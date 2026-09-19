@@ -349,3 +349,74 @@ def test_deploy_can_reinstall_a_machine_that_already_names_the_release():
     assert '--force' in text
     assert 'force=0' in text, 'and it must default to off'
 
+
+# ------------------------------------------------------------------- the CI
+#
+# A guard that has gone red and cannot say so is not a guard. `sdk/bootstrap`
+# had 278 tests and five of them had been failing since the install scripts
+# were rewritten — nothing ran them on a push, so nothing said. `sdk/ts` was
+# installed, built and packed by the `sdk` job and its 300-odd tests were never
+# run either. These hold the door open once it has been opened.
+
+CI = REPO / '.github/workflows/ci.yml'
+
+#: Every npm package in this repo whose tests CI must run. Derived from the
+#: tree rather than typed twice: a third SDK added beside these two gets the
+#: same treatment or fails here, which is the whole reason the list is not a
+#: literal.
+SDK_PACKAGES = sorted(
+    path.parent.relative_to(REPO).as_posix()
+    for path in (REPO / 'sdk').glob('*/package.json')
+)
+
+
+def test_there_are_sdk_packages_to_run_at_all():
+    """An empty list would make every assertion below vacuously true."""
+    assert SDK_PACKAGES == ['sdk/bootstrap', 'sdk/ts'], SDK_PACKAGES
+
+
+@pytest.mark.parametrize('package', SDK_PACKAGES)
+def test_ci_runs_the_tests_of_every_sdk_package(package):
+    """A `run: npm test` attached to THIS package's directory.
+
+    The directory alone proves nothing: `sdk/ts` was entered three times — to
+    install, to build and to pack — and ran no test in any of them. A step is
+    two lines, so the pairing is what is asserted.
+    """
+    text = CI.read_text(encoding='utf-8')
+    assert f'working-directory: {package}' in text, (
+        f'.github/workflows/ci.yml never enters {package}')
+    steps = [
+        f'working-directory: {package}\n        run: npm test',
+        f'run: npm test\n        working-directory: {package}',
+    ]
+    assert any(step in text for step in steps), (
+        f'ci.yml enters {package} but never runs `npm test` there')
+
+
+def test_ci_runs_npm_test_once_per_sdk_package():
+    """One `npm test` per package, counted, because one for both is one untested.
+
+    The defect this replaces was not "no tests anywhere" — it was a job that
+    did enough with `sdk/ts` to look thorough. A count is what tells a job that
+    runs both from a job that runs the one somebody remembered.
+    """
+    text = CI.read_text(encoding='utf-8')
+    assert text.count('run: npm test') == len(SDK_PACKAGES), (
+        f'ci.yml runs `npm test` {text.count("run: npm test")} time(s) for '
+        f'{len(SDK_PACKAGES)} SDK package(s)')
+
+
+def test_ci_builds_the_client_before_installing_the_bootstrap():
+    """`sdk/bootstrap` depends on `@crucible/client` as `file:../ts`.
+
+    npm links the directory rather than packing it, so bootstrap's compile
+    reads `sdk/ts/dist/esm/index.d.ts` off disk. A job that installed bootstrap
+    before building the client would fail on a missing types file, which reads
+    as a broken SDK rather than as a step in the wrong order.
+    """
+    text = CI.read_text(encoding='utf-8')
+    build_client = text.index('working-directory: sdk/ts\n        run: npm run build')
+    bootstrap = text.index('working-directory: sdk/bootstrap')
+    assert build_client < bootstrap, (
+        'ci.yml installs sdk/bootstrap before sdk/ts has been built')

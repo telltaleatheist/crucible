@@ -102,7 +102,9 @@ jobs:
           # Electron. 20 is the floor, so 20 is what CI proves.
           node-version: "20"
           cache: npm
-          cache-dependency-path: sdk/ts/package-lock.json
+          cache-dependency-path: |
+            sdk/ts/package-lock.json
+            sdk/bootstrap/package-lock.json
 
       - name: install
         working-directory: sdk/ts
@@ -112,12 +114,44 @@ jobs:
         working-directory: sdk/ts
         run: npm run build
 
+      # BOTH SDKs' TESTS RUN HERE, AND THEY DID NOT UNTIL 2026-09-18.
+      #
+      # This job installed, built and packed `sdk/ts` and never ran a test;
+      # `sdk/bootstrap` appeared in no workflow but `envpacks.yml`, as a rootfs
+      # build step. Measured the day that was found: `sdk/ts` 318 green when
+      # run by hand, `sdk/bootstrap` 263 green and FIVE RED — assertions about
+      # install.ps1's tar and the envpack schema that had been failing since the
+      # scripts they guard were rewritten. Nothing on a push could say so, which
+      # is the same defect as a test nobody wrote, with the extra cost that
+      # somebody had already written it.
+      #
+      # `npm test` and not `npm run test:unit`: the package decides what its own
+      # suite is, and a workflow that named the inner script would silently stop
+      # covering whatever a package adds to `test`.
+      - name: test the client
+        working-directory: sdk/ts
+        run: npm test
+
       - name: pack
         # `npm pack` is how the SDK is released, so a tarball that cannot be built is
         # a release that cannot be cut. Failing here is cheaper than failing in
         # scripts/release.sh with a tag half-created.
         working-directory: sdk/ts
         run: npm pack --silent --pack-destination "$RUNNER_TEMP"
+
+      # AFTER the client is built, not before. `sdk/bootstrap` depends on
+      # `@crucible/client` as `file:../ts`, which npm LINKS rather than packs —
+      # so its compile reads `sdk/ts/dist/esm/index.d.ts` off disk, and this job
+      # is what put it there. Installing bootstrap first would fail on a missing
+      # types file and read as a broken SDK rather than as two steps in the
+      # wrong order.
+      - name: install the bootstrap
+        working-directory: sdk/bootstrap
+        run: npm ci --no-audit --no-fund
+
+      - name: test the bootstrap
+        working-directory: sdk/bootstrap
+        run: npm test
 
   dist:
     name: sdist and wheel

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { crucibleAddress, startPairing, pollPairing, CrucibleConnectionError, CrucibleClient, CrucibleProtocolError } from '../src/index.js';
+import { API_VERSION, crucibleAddress, startPairing, pollPairing, CrucibleConnectionError, CrucibleClient, CrucibleProtocolError } from '../src/index.js';
 
 test('IP and hostname discovery uses the canonical port, preserving explicit ports and HTTPS', () => {
   assert.equal(crucibleAddress('192.168.1.9'), 'http://192.168.1.9:7100');
@@ -87,10 +87,35 @@ test('approval_required crosses the seam, both ways and when absent', async () =
   }
 });
 
+/**
+ * INSTALL-UNINSTALL.md §6.5.5: compatibility is the API VERSION, and a Crucible
+ * that speaks another one is refused BY NAME rather than folded into
+ * `not_crucible`, which said "this address is not a compatible Crucible engine"
+ * about a Crucible and told nobody which half was wrong. The SDK's own
+ * `SDK_VERSION` never enters it — a client and a server at different builds of
+ * one API version talk to each other, which is the whole point of the header.
+ */
+test('a Crucible speaking another api_version is refused by name, saying both versions', async () => {
+  let calls = 0;
+  const fake = (async () => {
+    calls++;
+    return new Response(JSON.stringify({ crucible: true, name: 'future', api_version: 2, pairing_version: 1 }));
+  }) as typeof fetch;
+  await assert.rejects(startPairing('fixture', 'app', { fetch: fake }), (error: unknown) => {
+    assert.ok(error instanceof CrucibleConnectionError);
+    assert.equal(error.code, 'api_version_mismatch');
+    assert.match(error.message, /API version 2/);
+    assert.match(error.message, new RegExp(`speaks ${API_VERSION}`));
+    return true;
+  });
+  assert.equal(calls, 1, 'nothing is posted to a server this client cannot speak to');
+});
+
 test('old engines and wrong services refuse pairing without probing secrets', async () => {
   for (const [ping, code] of [
     [{ crucible: true, name: 'old', api_version: 1 }, 'pairing_unavailable'],
     [{ service: 'unrelated' }, 'not_crucible'],
+    [{ crucible: true, name: 'nameless' }, 'not_crucible'],
   ] as const) {
     let calls = 0;
     const fake = (async () => { calls++; return new Response(JSON.stringify(ping)); }) as typeof fetch;

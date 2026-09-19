@@ -167,6 +167,70 @@ export interface EngineRef {
   readonly owner: EngineOwner;
 }
 
+/**
+ * What a page request IS, from {@link PagesEngine.request}.
+ * PHASE15-HOST.md 3.10 fact 7; `crucible/pages.py` is the owner.
+ *
+ * Page reading has no job type of its own — a page is a chat completion with
+ * one `image_url` part — so the CLIENT builds the request, and it was building
+ * it out of constants pinned in its own source. A prompt and a pixel budget
+ * are facts about the WEIGHTS, so the server publishes them and every backend
+ * answers from the same function: vLLM, llama.cpp and mlx-vlm hand back the
+ * same block, which is the whole of "an app cannot tell which one read a page".
+ *
+ * NOTHING HERE IS OPTIONAL AND NOTHING HERE HAS A DEFAULT. A field the server
+ * did not send is refused by name rather than filled in, because a nearly-right
+ * prompt or a nearly-right budget does not error — it answers worse, and costs
+ * a whole book before anybody notices.
+ */
+export interface PageRequest {
+  /** The Crucible model id to send as `model`. One id, three engines. */
+  readonly model: string;
+  /** What the CLIENT rasterises at. The bboxes come back in this frame's scale. */
+  readonly dpi: number;
+  /** The processor's own pixel limit — the frame the model's boxes are in. */
+  readonly maxPixels: number;
+  /**
+   * The CEILING, never a budget. A client may send less — a per-page cap
+   * derived from the book — and must re-read at the full ceiling any page that
+   * came back with {@link PageRequest.truncatedFinishReason}.
+   */
+  readonly maxTokens: number;
+  /** A layout is not a thing to be creative about. */
+  readonly temperature: number;
+  /** The model card's prompt, byte for byte. Never templated, never shortened. */
+  readonly prompt: string;
+  /** What the answer is shaped like, e.g. `dots-json`. The client owns the parser. */
+  readonly dialect: string;
+  /**
+   * How many page requests a client may have open at once. The server's own
+   * arithmetic for whether the weights FIT is sized for this number, so a
+   * client that picked its own was reasoning about different work than the
+   * machine it was talking to.
+   */
+  readonly concurrency: number;
+  /** The `finish_reason` that means the model was still writing. */
+  readonly truncatedFinishReason: string;
+}
+
+/**
+ * `GET /v1/info`'s `pages_engine` — which engine reads a page HERE, and what a
+ * page request is anywhere.
+ *
+ * The two halves are not equals. `engine` is for an operator looking at a
+ * machine and a client must never branch on it; `request` is the load-bearing
+ * one and says the same thing on every backend.
+ */
+export interface PagesEngine {
+  /** `vllm`, `llama-server`, `mlx-vlm` — or `null`, meaning this host serves none. */
+  readonly engine: string | null;
+  readonly installed: boolean;
+  /** Why, in words, for an operator. Never parsed. */
+  readonly detail: string;
+  /** Published whether or not this host can answer one. */
+  readonly request: PageRequest;
+}
+
 /** `GET /v1/info`. */
 export interface ServerInfo {
   readonly server: {
@@ -223,6 +287,21 @@ export interface ServerInfo {
    * Read it with {@link engineOf}, which is the whole of the rule.
    */
   readonly engine: EngineRef | null;
+  /**
+   * What a page request is on this server, or `null` where the document does
+   * not carry the block at all.
+   *
+   * `null` IS THE VINTAGE, not an empty contract — PHASE15 3.3's all-or-nothing
+   * reading rule, the same one {@link ServerInfo.role} gets. A server that
+   * predates 3.10 fact 7 published no `pages_engine`, and no prompt or budget
+   * is invented for it here: a client that needs the contract refuses that
+   * server by name, because building a page request out of its own constants
+   * is precisely what the block exists to stop.
+   *
+   * A host that serves no pages is NOT null — it answers with
+   * {@link PagesEngine.engine} `null` and the request block beside it.
+   */
+  readonly pagesEngine: PagesEngine | null;
 }
 
 /**
@@ -1069,10 +1148,28 @@ export interface ChatResponse {
  * both.
  */
 export interface VoicePace {
-  /** The measured pace this voice reads at. */
-  readonly paceCharsPerSec: number;
-  readonly maxCharsPerSec: number;
-  readonly minCharsPerSec: number;
+  /**
+   * The measured pace this voice reads at, with the two edges derived from it
+   * — ALL THREE OR NONE, and `null` means nobody measured this voice.
+   *
+   * Optional as a group since 2026-09-18, and the reason is worth carrying
+   * here rather than only in the server. They used to be required, so the two
+   * voices that are the BASE WEIGHTS rather than a fine-tune met the
+   * requirement by copying narrator's own Higgs v3 constants back to it: a
+   * pace of 15.0, which is the divisor the frame cap is sized against and was
+   * never measured as a speaking rate, inside a band written around a real
+   * book pace nearer 17.2. narrator keeps a band's RATIOS and re-centres them
+   * on the book's running median, so that pairing judged healthy chunks
+   * run-ons and drove them to the bottom of the retake ladder.
+   *
+   * SO NOTHING DERIVES A CENTRE FROM A NULL — not the server and not this
+   * client. A voice with no band is narrator reaching for its engine's own,
+   * centred on the geometric mean of the edges, which is one owner for that
+   * derivation. A client packing to these must ask whether they are there.
+   */
+  readonly paceCharsPerSec: number | null;
+  readonly maxCharsPerSec: number | null;
+  readonly minCharsPerSec: number | null;
   readonly targetChars: number | null;
   readonly safeMinChars: number | null;
   readonly safeMaxChars: number | null;
