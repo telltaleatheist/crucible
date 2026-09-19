@@ -194,7 +194,9 @@ def render_limits(repo: RepoManifest) -> str:
         f"- **Retake ladder:** {rungs} rung(s). A client asks for take N; what "
         "take N is belongs to the server."
     )
-    lines.append("")
+    # ONE trailing newline, not two. The section is spliced in where another one
+    # was, and the blank line before the next `##` heading is that heading's own
+    # — a second one here widens the gap every time the card is re-rendered.
     return "\n".join(lines) + "\n"
 
 
@@ -216,7 +218,15 @@ def render_card(repo: RepoManifest, existing: str) -> tuple[str, bool]:
     limits = render_limits(repo)
     body, replaced = _LIMITS_SECTION.subn(lambda _m: limits, body, count=1)
     if replaced == 0:
-        body = limits + "\n" + body
+        # BEFORE THE FIRST OTHER SECTION, so a card that has no limits section
+        # today — thirdreich's and sigma's, which carry no safe band at all
+        # (section 1) — gets one where a reader expects it rather than above the
+        # title. A card with no `##` heading at all gets it at the end.
+        at = body.find("\n## ")
+        if at == -1:
+            body = body.rstrip("\n") + "\n\n" + limits
+        else:
+            body = body[: at + 1] + limits + "\n" + body[at + 1 :]
     return (
         "---\n" + render_frontmatter(repo, frontmatter) + "\n---\n" + body,
         replaced == 0,
