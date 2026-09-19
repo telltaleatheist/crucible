@@ -3,14 +3,15 @@
 #
 #   ./scripts/deploy.sh                    # what each machine runs today
 #   ./scripts/deploy.sh --release 0.6.8    # install that release everywhere
-#   ./scripts/deploy.sh --release 0.6.8 --only wsl,mac
+#   ./scripts/deploy.sh --release 0.6.8 --only pc
 #   ./scripts/deploy.sh --release 0.6.8 --yes     # do not ask first
 #
-# THREE MACHINES RUN CRUCIBLE and until now each was upgraded by hand, in its
-# own shell, with its own spelling of the same command. That is why they drift:
-# on 2026-09-16 the WSL engine was 0.6.3, the Mac 0.6.3 and the Windows host
-# 0.6.5, while the newest release was 0.6.7. Nothing was broken. Three manual
-# steps had simply been done a different number of times.
+# TWO MACHINES RUN CRUCIBLE — the PC and the Mac — and until this existed each
+# was upgraded by hand, in its own shell, with its own spelling of the same
+# command. That is why they drift: on 2026-09-16 the WSL engine was 0.6.3, the
+# Mac 0.6.3 and the Windows host 0.6.5, while the newest release was 0.6.7.
+# Nothing was broken. Three manual steps had simply been done a different
+# number of times.
 #
 # WHAT A MACHINE RUNS IS READ FROM THE MACHINE, never assumed: every install
 # writes `<CRUCIBLE_HOME>/installation.json` with the release it unpacked, and
@@ -18,6 +19,25 @@
 # BEFORE (to decide whether there is anything to do) and AFTER (to prove the
 # install did what it said). An install whose after-value is not the release
 # asked for is a FAILURE here, however cheerful its own output was.
+#
+# THE PC HAS TWO OF THOSE RECORDS AND ONE INSTALL. The host's, on Windows, and
+# the engine's, inside the distro — and only install.ps1 is run here, because
+# the host is what drives the guest (PHASE15-HOST.md 4.3/4.4). Both records are
+# read, and the PC is upgraded only when both name the release.
+#
+# **KNOWN GAP, 2026-09-18, and this script does not paper over it.** The host
+# does NOT carry the guest forward on its own after install.ps1 restarts it.
+# `crucible/host/app.py:1175` hands the install sequence to the door and
+# nothing in `main()` ever calls it, so it runs only on a `POST /install`; and
+# on a machine the guest already owns — every upgrade — `app.py:1221` takes the
+# `Owner.WSL_UNIT` branch and calls `walk._complete()` (`app.py:1231`), which
+# `installer.py:404` implements as "emit `done` describing the engine that is
+# already there". `_guest_install`, the one place `install.sh --release` runs
+# inside the distro, is `installer.py:607` and is reached only from `run()`
+# (`installer.py:381`). So a deploy today upgrades the host and leaves the
+# guest where it was; this script WAITS for the guest record and then reports
+# the PC by name with both halves in the line. Poking the door from here would
+# be a second driver of the guest, which is the thing that was just removed.
 #
 # THE INSTALLER COMES FROM THE RELEASE BEING INSTALLED, not from
 # `releases/latest/download/`. The documented one-liner deliberately uses
@@ -30,32 +50,49 @@
 # their own contract, not an assumption of this script.
 #
 # THE MACHINES ARE INSTALLED AT THE SAME TIME, each in its own subshell, with
-# every line named for the machine it came from. They share nothing — `wsl` and
-# `windows` are two installs on one box and `mac` is at the end of an ssh — so
-# a queue only ever added their times together, and carried up to a minute of
-# `await_release` polling behind each one. One machine failing does not stop the
-# others, and the summary names it. See "the work" below.
+# every line named for the machine it came from. They share nothing — one is a
+# box and the other is at the end of an ssh — so a queue only ever added their
+# times together, and carried up to a minute of `await_release` polling behind
+# each one. One machine failing does not stop the other, and the summary names
+# it. See "the work" below.
 #
-# THIS RESTARTS SERVICES. The WSL engine, the Windows tray host and the Mac
-# launchd agent all go down and come back — now at once rather than in turn. It
-# asks before it does that unless --yes is passed, and it asks ONCE, before the
-# fan-out: three subshells share one stdin, so a prompt inside one of them would
-# be answered for the other two by whichever read first.
+# THIS RESTARTS SERVICES. The Windows tray host, the WSL engine it owns and the
+# Mac launchd agent all go down and come back — now at once rather than in turn.
+# It asks before it does that unless --yes is passed, and it asks ONCE, before
+# the fan-out: the subshells share one stdin, so a prompt inside one of them
+# would be answered for the others by whichever read first.
 
 set -euo pipefail
 
 REPO_SLUG="telltaleatheist/crucible"
 
-# THE FLEET. These three are a fact about this deployment, not about Crucible —
-# a different operator has a different list, and there is nothing secret here:
-# `mac` is an ssh alias from ~/.ssh/config, and `Ubuntu` is the WSL distro name.
+# THE FLEET. Two machines, which is a fact about this deployment and not about
+# Crucible — a different operator has a different list, and there is nothing
+# secret here: `mac` is an ssh alias from ~/.ssh/config, and `Ubuntu` is the WSL
+# distro name.
 #
-# `windows` is the HOST, not an engine: since PHASE15-HOST.md 4.4 install.ps1
-# installs `crucible host` and stops, and the host owns the WSL sequence from
-# there. So `wsl` and `windows` are two installs on one physical machine, and
-# both are listed because both have their own installation.json and drift
-# independently — which is precisely what happened (0.6.3 beside 0.6.5).
-FLEET="wsl windows mac"
+# `pc` USED TO BE TWO ENTRIES, `wsl` and `windows`, and that was the bug. Owen,
+# 2026-09-18: *"windows is the driver; the thing moving wsl forward. use the
+# established, installed, functional system to drive the new one."* Since
+# PHASE15-HOST.md 4.4 install.ps1 installs `crucible host` and STOPS, and 4.3
+# puts the whole WSL sequence behind the host's own door — "ONE implementation
+# of the sequence, the host's; the bootstrap is its client". A `wsl` entry here
+# that curled install.sh into the guest was a SECOND driver of that guest,
+# racing the one the design names.
+#
+# So the PC is one entry and one install: install.ps1 at the tag. Its VERDICT
+# still reads both records, because the machine has two — the host's in
+# %LOCALAPPDATA% and the guest's in the distro — and the PC is done only when
+# both name the release. That is what caught the drift this script was written
+# for (0.6.3 beside 0.6.5) and it catches it from one entry just as well.
+#
+# `mac` is at the end of an ssh, has no host, and shares nothing with the PC,
+# so the two run at the same time.
+FLEET="pc mac"
+
+# The distro whose record is the PC's second half. `install.ps1` does not take
+# it; the host knows its own.
+DISTRO="Ubuntu"
 
 fail() { echo "deploy: $*" >&2; exit 1; }
 
@@ -76,7 +113,7 @@ while [ $# -gt 0 ]; do
     --only)    [ $# -ge 2 ] || fail "--only needs a comma-separated list"; only="$2"; shift 2 ;;
     --yes|-y)  assume_yes=1; shift ;;
     --force)   force=1; shift ;;
-    -h|--help) sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,63p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown argument $1" ;;
   esac
 done
@@ -95,13 +132,31 @@ selected() {
   return 1
 }
 
+# EVERY NAME IN --only IS A MACHINE, checked here rather than silently matching
+# nothing. `wsl` and `windows` were two of the three names this script took
+# until 2026-09-18 and both are now one machine, so they are refused BY NAME
+# with what replaced them — a typo that installs nothing and reports success is
+# the failure this whole script exists to end.
+for name in $(echo "$only" | tr ',' ' '); do
+  case " $FLEET " in *" $name "*) continue ;; esac
+  case "$name" in
+    wsl)     fail "there is no 'wsl' machine any more: the host drives the guest (PHASE15-HOST.md 4.3), so the PC is one entry. Use --only pc" ;;
+    windows) fail "'windows' and 'wsl' are one machine now, called pc. Use --only pc" ;;
+    *)       fail "--only names '$name', which is not one of: $FLEET" ;;
+  esac
+done
+
 # ------------------------------------------------------- what each machine runs
 #
-# Each `read_*` prints the installed release, or the word `none` when the
-# machine has no installation.json, or `unreachable` when it cannot be asked.
-# The three are told apart because they mean different things: `none` is a
-# machine to install onto, `unreachable` is a machine whose state is UNKNOWN
+# Each `read_<machine>` prints the installed release, or the word `none` when
+# the machine has no installation.json, or `unreachable` when it cannot be
+# asked. The three are told apart because they mean different things: `none` is
+# a machine to install onto, `unreachable` is a machine whose state is UNKNOWN
 # and which is therefore never reported as up to date.
+#
+# A machine's reader may consult more than one record — the PC has two — and
+# whatever it prints is compared to the release as a single string, so a
+# machine that is only half upgraded prints something that cannot equal it.
 
 # Printed by every reader, so the parsing lives in one place. Reads the file on
 # stdin and prints its `release`, and prints nothing at all if it cannot.
@@ -115,21 +170,39 @@ except Exception:
 '
 }
 
-read_wsl() {
+# THE PC'S TWO RECORDS. The host's, written on Windows, and the guest's,
+# written inside the distro. They are separate files because they are separate
+# installs of separate things; they are read together because one machine is
+# not upgraded until both of them say so.
+record_guest() {
   local out
-  out="$(wsl.exe -d Ubuntu --exec bash -c 'cat "$HOME/.crucible/installation.json" 2>/dev/null' </dev/null 2>/dev/null | parse_release || true)"
+  out="$(wsl.exe -d "$DISTRO" --exec bash -c 'cat "$HOME/.crucible/installation.json" 2>/dev/null' </dev/null 2>/dev/null | parse_release || true)"
   if [ -z "$out" ]; then
-    wsl.exe -d Ubuntu --exec bash -c 'exit 0' </dev/null >/dev/null 2>&1 || { echo unreachable; return; }
+    wsl.exe -d "$DISTRO" --exec bash -c 'exit 0' </dev/null >/dev/null 2>&1 || { echo unreachable; return; }
     echo none; return
   fi
   echo "$out"
 }
 
-read_windows() {
+record_host() {
   local out
   out="$(cat "$LOCALAPPDATA/crucible/installation.json" 2>/dev/null | parse_release || true)"
   [ -n "$out" ] && { echo "$out"; return; }
   echo none
+}
+
+# ONE ANSWER FROM TWO RECORDS, and the answer only collapses to a bare version
+# when they AGREE. Anything else prints `host:<a> guest:<b>`, which can never
+# equal the release asked for — so `await_release` keeps waiting, the summary
+# reports the machine by name, and the halves it is stuck between are in the
+# line. A PC whose guest never moves reads `pc(reports:host:0.6.9 guest:0.6.8)`,
+# which says what is wrong without anybody having to go and look.
+read_pc() {
+  local host guest
+  host="$(record_host)"
+  guest="$(record_guest)"
+  [ "$host" = "$guest" ] && { echo "$host"; return; }
+  echo "host:$host guest:$guest"
 }
 
 read_mac() {
@@ -160,17 +233,17 @@ install_ps1_url() { echo "https://github.com/$REPO_SLUG/releases/download/v$1/in
 #
 # Written to a file, curl's failure is the command's failure. `sh -n` after
 # it is the second half: a truncation that still parses would otherwise run.
-# install_windows has fetched to a file all along, for its own reason.
+# install_pc has fetched to a file all along, for its own reason.
 # The format string is SINGLE-quoted so `$(mktemp)` and `$f` reach the far
 # machine as text. Double-quoted, bash ran mktemp HERE and expanded $f to
 # nothing, and the payload came out as `curl -o ""` - caught by printing it
 # before trusting it, which is the only reason this note is not a defect.
-# ONE MORE SHELL PARSE ON THE MAC THAN IN WSL. `wsl.exe --exec bash -lc
-# <payload>` hands the payload over as an argv element and nothing re-reads
-# it; `ssh mac '"$SHELL" -lc <payload>'` is a STRING the remote shell parses
-# before $SHELL ever sees it, so a payload containing double quotes (and the
-# one below must, for $f) ends that string early. Measured while building
-# this: WSL took it and the Mac answered `no such file or directory`.
+# ONE MORE SHELL PARSE ON THE MAC THAN THERE WAS IN WSL. `ssh mac '"$SHELL"
+# -lc <payload>'` is a STRING the remote shell parses before $SHELL ever sees
+# it, so a payload containing double quotes (and the one below must, for $f)
+# ends that string early. Measured while building this against the WSL caller
+# that no longer exists: it took the payload and the Mac answered `no such
+# file or directory`.
 shquote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
@@ -178,13 +251,6 @@ shquote() {
 remote_install_payload() {
   printf 'set -e; f=$(mktemp); curl -fsSL --retry 3 -o "$f" %s; sh -n "$f"; sh "$f" --release %s; rm -f "$f"' \
     "'$1'" "'$2'"
-}
-
-install_wsl() {
-  # --exec, so wsl.exe hands the string to bash instead of letting the Windows
-  # side pre-expand a `$` in it first.
-  wsl.exe -d Ubuntu --exec bash -lc \
-    "$(remote_install_payload "$(install_sh_url "$1")" "$1")"
 }
 
 install_mac() {
@@ -202,7 +268,11 @@ install_mac() {
     "\"\$SHELL\" -lc $(shquote "$(remote_install_payload "$(install_sh_url "$1")" "$1")")"
 }
 
-install_windows() {
+# THE PC'S ONE INSTALL. install.ps1 unpacks the host pack, writes the Startup
+# shortcut, starts `crucible host` and stops (PHASE15-HOST.md 4.4); the guest is
+# the host's to carry from there (4.3). Nothing here touches the distro — a
+# second driver of it is exactly what was removed on 2026-09-18.
+install_pc() {
   # `irm | iex` cannot take a parameter, so the script is fetched to a file
   # first — the same reason its own header gives for -Uninstall.
   local script="${TMPDIR:-/tmp}/crucible-install-$1.ps1" status=0
@@ -289,11 +359,11 @@ fi
 
 # ------------------------------------------------------------------- the work
 #
-# ALL AT ONCE. The three machines share nothing, so installing them one after
-# another only ever added their times together, and each carried up to sixty
-# seconds of `await_release` polling behind it. Measured 2026-09-18: a release
-# whose actual installing was about ninety seconds spent several minutes of
-# wall-clock in that queue.
+# BOTH AT ONCE. The two machines share nothing — the PC is one box and `mac` is
+# at the end of an ssh — so installing them one after another only ever added
+# their times together, and each carried up to sixty seconds of `await_release`
+# polling behind it. Measured 2026-09-18: a release whose actual installing was
+# about ninety seconds spent several minutes of wall-clock in that queue.
 #
 # Each machine therefore gets its own subshell, and its verdict comes back
 # through a FILE rather than through an exit status: a background job's status

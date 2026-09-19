@@ -89,14 +89,41 @@ def test_ship_never_passes_the_install_attestation_itself():
             f'ship.sh does something other than print the attestation flag: {stripped}')
 
 
-def test_deploy_reads_the_same_file_on_every_machine():
-    """installation.json is the one fact with one meaning on all three platforms."""
+def test_deploy_reads_the_same_file_wherever_it_lives():
+    """installation.json is the one fact with one meaning on all three platforms.
+
+    THREE RECORDS, TWO MACHINES, since the PC became one entry: the host's on
+    Windows, the engine's inside the distro, and the Mac's. Every one of them is
+    that same file and every one goes through the same parser — a second way of
+    reading it is a second answer to "what does this machine run".
+    """
     text = DEPLOY.read_text(encoding='utf-8')
-    readers = re.findall(r'^read_(\w+)\(\) \{(.*?)^\}', text, re.MULTILINE | re.DOTALL)
-    assert len(readers) == 3, f'expected three machines, found {[name for name, _ in readers]}'
-    for name, body in readers:
-        assert 'installation.json' in body, f'read_{name} does not read installation.json'
-        assert 'parse_release' in body, f'read_{name} does not use the shared parser'
+    records = re.findall(r'^(record_\w+|read_mac)\(\) \{(.*?)^\}', text,
+                         re.MULTILINE | re.DOTALL)
+    assert sorted(name for name, _ in records) == ['read_mac', 'record_guest', 'record_host'], (
+        [name for name, _ in records])
+    for name, body in records:
+        assert 'installation.json' in body, f'{name} does not read installation.json'
+        assert 'parse_release' in body, f'{name} does not use the shared parser'
+
+
+def test_the_pc_verdict_is_taken_from_both_of_its_records():
+    """One machine with two records is done when BOTH name the release.
+
+    install.ps1 returns once the host is up (PHASE15-HOST.md 4.4) and the guest
+    follows afterwards, so a verdict read from the host record alone would call
+    the PC finished while its engine was still on the old release — the drift
+    this script exists to catch, arriving from inside one machine instead of
+    between two.
+    """
+    text = DEPLOY.read_text(encoding='utf-8')
+    start = text.index('read_pc() {')
+    body = text[start:text.index('\n}', start)]
+    for half in ['record_host', 'record_guest']:
+        assert half in body, f'read_pc no longer consults {half}'
+    assert 'host:$host guest:$guest' in body, (
+        'a PC whose two records disagree must print both halves, or the '
+        'summary cannot say which one is behind')
 
 
 def test_deploy_never_reports_an_unreachable_machine_as_current():
@@ -278,7 +305,7 @@ def test_the_mac_install_runs_under_the_accounts_own_login_shell():
     """
     text = DEPLOY.read_text(encoding='utf-8')
     start = text.index('install_mac()')
-    body = text[start:text.index('install_windows()')]
+    body = text[start:text.index('install_pc()')]
     code = '{}'.format(chr(10)).join(
         line for line in body.splitlines() if not line.lstrip().startswith('#')
     )
@@ -334,7 +361,7 @@ def test_the_mac_payload_is_quoted_for_its_extra_shell():
     text = DEPLOY.read_text(encoding='utf-8')
     assert 'shquote()' in text, 'the extra parse needs a quoter'
     start = text.index('install_mac()')
-    body = text[start:text.index('install_windows()')]
+    body = text[start:text.index('install_pc()')]
     assert 'shquote' in body, 'the mac payload must go through it'
 
 

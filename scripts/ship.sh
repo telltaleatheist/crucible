@@ -6,14 +6,14 @@
 #   ./scripts/ship.sh 0.7.0
 #   ./scripts/ship.sh patch --dry-run    # everything except creating anything
 #   ./scripts/ship.sh --no-bump          # cut the version the tree already names
-#   ./scripts/ship.sh patch --deploy     # and put it on the three machines afterwards
+#   ./scripts/ship.sh patch --deploy     # and put it on the machines afterwards
 #
 # RELEASING WAS NINE STEPS IN FOUR PLACES, and the reason it was slow had almost
 # nothing to do with the work: seven version literals edited by hand, two
 # generators that had to be remembered, a commit, a push, a build, a workflow
-# watched in a browser tab, three machines upgraded in three shells, and a
-# promotion that was forgotten six times in a row. Every one of those steps was
-# correct. There were just too many of them to do reliably at 5am.
+# watched in a browser tab, the machines upgraded by hand in their own shells,
+# and a promotion that was forgotten six times in a row. Every one of those
+# steps was correct. There were just too many of them to do reliably at 5am.
 #
 # So this is the order, and each step's refusal is its own:
 #
@@ -21,7 +21,7 @@
 #   2. bump.py writes the seven and regenerates      (scripts/bump.py)
 #   3. commit and push
 #   4. the cut                               (scripts/release.sh)
-#   5. the machines, all at once             (scripts/deploy.sh; --deploy only)
+#   5. the machines, at the same time        (scripts/deploy.sh; --deploy only)
 #   6. the promote command, printed          (scripts/promote_release.py — not run)
 #   7. where it went                         (a row per step, and per machine)
 #
@@ -193,7 +193,7 @@ step "the build and the cut of v$version"
 if [ "$do_deploy" = "1" ]; then
   step "the machines"
   # `--yes` BECAUSE NOBODY IS AT THE KEYBOARD. deploy.sh's "this restarts the
-  # WSL engine, the Windows tray host and the Mac agent, y/N" is the right
+  # Windows tray host, the WSL engine it owns and the Mac agent, y/N" is the right
   # question when a person typed `deploy.sh`; reached through here it is a
   # prompt with no stdin behind it, and the cutover agent watched a release sit
   # at it (`cutover-progress.log`, 02:16:32). The person answered it when they
@@ -227,7 +227,7 @@ fi
 echo
 echo "ship: v$version is cut, built and downloadable."
 if [ "$do_deploy" != "1" ]; then
-  echo "ship: put it on the three machines:"
+  echo "ship: put it on the machines:"
   echo "  ./scripts/deploy.sh --release $version"
 fi
 echo "ship: then promote it — this is the step that makes releases/latest serve $version,"
