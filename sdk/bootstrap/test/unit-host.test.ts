@@ -4,7 +4,7 @@ import { test } from 'node:test';
 
 import { detectHost } from '../src/index.js';
 import { NVIDIA_SMI_SCRIPT, parseNvidiaSmi, pickProbeDistro } from '../src/host.js';
-import { guestProbeScript } from '../src/pack.js';
+import { guestProbeScript } from '../src/runtime.js';
 import { probeArgv } from '../src/wsl-states.js';
 import { CRUCIBLE_BIN, FakeRunner, GUEST_BARE, GUEST_INSTALLED, refusal, WSL_LIST, WSL_LIST_WITH_CRUCIBLE } from './fake.js';
 
@@ -19,10 +19,10 @@ const STATE_OK: { argv: string[]; stdout: string }[] = [
   { argv: probeArgv('wsl-list', INPUTS), stdout: WSL_LIST },
 ];
 
-test('the guest probe script: home, user, free space, the three tools, the pack and its stamp', () => {
+test('the guest probe script: home, user, free space, the two tools, the runtime and its stamp', () => {
   const script = guestProbeScript(undefined);
   assert.match(script, /h="\$\{CRUCIBLE_HOME:-\$HOME\/\.crucible\}"/);
-  assert.match(script, /for t in curl tar zstd; do command -v/);
+  assert.match(script, /for t in curl tar; do command -v/);
   assert.match(script, /c="\$h\/server\/bin\/crucible"/);
   assert.doesNotMatch(script, /conda/);
   assert.doesNotMatch(script, /\\/);
@@ -58,7 +58,7 @@ test('win32: the guest\'s facts, read through the default distro, with the pack 
   assert.equal(facts.wslState?.code, 'no_crucible_distro');
 });
 
-test('win32: a machine with no server pack says so as a STATE, not a refusal', async () => {
+test('win32: a machine with no server runtime says so as a STATE, not a refusal', async () => {
   const runner = new FakeRunner({ platform: 'win32' }, [
     { argv: LIST, stdout: WSL_LIST },
     { argv: GPU, stdout: SMI },

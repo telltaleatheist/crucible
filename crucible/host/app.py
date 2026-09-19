@@ -552,6 +552,50 @@ class Host:
                 f"The WSL engine is running, but its saved network sharing could not be restored: {exc}",
             ) from exc
 
+    def carry_guest_to_this_release(self) -> None:
+        """ONE RELEASE PER MACHINE, and this host is what makes it true.
+
+        Owen, 2026-09-18: *"windows is the driver; the thing moving wsl
+        forward."* `install.ps1` upgrades the Windows half; until this existed,
+        nothing upgraded the other one, because the install sequence ran on
+        `POST /install` and on a WSL-owned machine that sequence reported the
+        engine already there rather than installing anything
+        (`installer.EngineInstall.upgrade_guest` records the measurement).
+
+        ONLY WHEN THE ENGINE IS THE GUEST'S. On a machine whose engine is the
+        Windows one there is no guest to carry, and on one this host did not
+        claim there is no guest of OURS — `Owner.WSL_UNIT` is the single
+        question, asked of the presence the watcher already measured.
+
+        IT NEVER RAISES OUT OF THE THREAD. A guest that is ahead, unreadable or
+        simply unreachable is a LINE IN THE LOG and a host that carries on
+        supervising the engine it has; the alternative is a tray that dies on
+        startup because a VM was busy. Everything it decided is named, so the
+        log says which of the three answers this machine got.
+        """
+        if self._c.presence.owner is not Owner.WSL_UNIT:
+            return
+        walk = installer.EngineInstall(
+            self._c.runner,
+            lambda event: self._c.log.write(f"guest release: {event.event}: {event.data}"),
+            release=self._c.release,
+            home=self._c.home,
+            install_sh_url=INSTALL_SH_URL.format(release=self._c.release),
+        )
+        try:
+            carried = walk.upgrade_guest()
+        except HostError as exc:
+            self._c.log.write(f"guest release: {exc.code}: {exc.message}")
+            return
+        except Exception as exc:  # noqa: BLE001 - a thread that dies silently is worse
+            self._c.log.write(f"guest release: could not be read or carried: {exc}")
+            return
+        if carried is None:
+            self._c.log.write(f"guest release: already {self._c.release}")
+        else:
+            self._c.log.write(f"guest release: carried the guest to {carried}")
+            self._refresh()
+
     def stopped_windows_catalog(self) -> CatalogPort:
         """Deletion is allowed only after ownership and authenticated guest proof."""
         from ..backend import detect_backend
@@ -1189,6 +1233,16 @@ def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
 
     from ..local import publish_installation
     publish_installation(home)
+    # AFTER the record that says what THIS half is, because the guest's release
+    # is only worth comparing against a host release something has published.
+    # ON A THREAD, because carrying a guest is a pip run inside a VM and the
+    # tray has to appear in the meantime — and a daemon one, so quitting the
+    # host does not wait for it.
+    threading.Thread(
+        target=host.carry_guest_to_this_release,
+        name="crucible-guest-release",
+        daemon=True,
+    ).start()
     if headless:
         host._shutdown_complete.wait()
         if host._door_server is not None:

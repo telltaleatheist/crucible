@@ -22,7 +22,7 @@ import {
   hostConfigPath,
   hostInstallCommand,
   hostInstalled,
-  hostPackDir,
+  hostRuntimeDir,
   hostToken,
   requestHostInstall,
   type HostEvent,
@@ -58,15 +58,15 @@ test('the door is 127.0.0.1:7101, and the URL is built from the port rather than
 
 test('the host pack is %LOCALAPPDATA%\\Crucible\\host, read from the environment and never assembled', () => {
   const runner = hostMachine();
-  assert.equal(hostPackDir(runner), HOST_DIR);
+  assert.equal(hostRuntimeDir(runner), HOST_DIR);
   assert.equal(hostConfigPath(runner), HOST_CONFIG_PATH);
   // A username appears nowhere in the code that built it: the env said so.
-  assert.equal(hostPackDir(new FakeRunner({ platform: 'win32', env: { LOCALAPPDATA: 'D:\\appdata' } }, [])), 'D:\\appdata\\Crucible\\host');
+  assert.equal(hostRuntimeDir(new FakeRunner({ platform: 'win32', env: { LOCALAPPDATA: 'D:\\appdata' } }, [])), 'D:\\appdata\\Crucible\\host');
 });
 
 test('LOCALAPPDATA unset refuses host_unresponsive rather than guessing a path', async () => {
   const runner = new FakeRunner({ platform: 'win32', env: {} }, []);
-  const r = await refusal(Promise.resolve().then(() => hostPackDir(runner)));
+  const r = await refusal(Promise.resolve().then(() => hostRuntimeDir(runner)));
   assert.equal(r.code, 'host_unresponsive');
   assert.match(r.message, /LOCALAPPDATA is not set/);
 });
@@ -154,9 +154,9 @@ test('every event reaches the callbacks as it arrives: state, step, progress, li
   const door = fakeHostDoor({
     events: [
       ['state', { code: 'no_crucible_distro', sentence: 'There is no Crucible distro on this machine yet.', action: 'run-elevated' }],
-      STEP('server-pack', 2, 7),
-      ['progress', { bytes_done: 4194304, bytes_total: 120000000, file: 'crucible-env-server-cuda-linux-0.6.0.tar.zst.part00' }],
-      ['line', { text: 'server-pack: part00', stream: 'stdout' }],
+      STEP('server', 2, 7),
+      ['progress', { bytes_done: 4194304, bytes_total: 120000000, file: 'cpython-3.11.16+20260901-x86_64-unknown-linux-gnu-install_only.tar.gz' }],
+      ['line', { text: 'server: cpython-3.11.16', stream: 'stdout' }],
       STEP('install-llm', 4, 7),
       ['line', { text: 'WARNING: slow mirror', stream: 'stderr' }],
       HOST_DONE,
@@ -176,14 +176,14 @@ test('every event reaches the callbacks as it arrives: state, step, progress, li
   assert.deepEqual(events.map((e) => e.event), ['state', 'step', 'progress', 'line', 'step', 'line', 'done']);
   // The ids are the envelope's, monotonic and 1-based, as tasks.py writes them.
   assert.deepEqual(events.map((e) => e.id), [1, 2, 3, 4, 5, 6, 7]);
-  assert.deepEqual(steps, ['server-pack:running:step 2 of 7', 'install-llm:running:step 4 of 7']);
+  assert.deepEqual(steps, ['server:running:step 2 of 7', 'install-llm:running:step 4 of 7']);
   // A line carries no step of its own: it belongs to the last step announced.
   assert.deepEqual(lines, [
     'state/stdout: There is no Crucible distro on this machine yet.',
-    'server-pack/stdout: server-pack: part00',
+    'server/stdout: server: cpython-3.11.16',
     'install-llm/stderr: WARNING: slow mirror',
   ]);
-  assert.deepEqual(result.steps.map((s) => s.name), ['host-facts', 'server-pack', 'init', 'service-install', 'linger', 'capability-write']);
+  assert.deepEqual(result.steps.map((s) => s.name), ['host-facts', 'server', 'init', 'service-install', 'linger', 'capability-write']);
   assert.deepEqual(result.server, {
     name: HOST_DONE_DATA.server.name,
     url: HOST_DONE_DATA.server.url,
@@ -196,7 +196,7 @@ test('the bytes are on the progress event and nowhere else: no invented progress
   const bytes: number[] = [];
   const door = fakeHostDoor({
     events: [
-      STEP('server-pack', 2, 7),
+      STEP('server', 2, 7),
       ['progress', { bytes_done: 1024, bytes_total: null, file: 'part00' }],
       HOST_DONE,
     ],
@@ -265,7 +265,7 @@ test('a done event on the last line WITHOUT a trailing newline still finishes th
 
 test('a stream that ends without a done event is host_install_failed — a truncated stream is not a success', async () => {
   const door = fakeHostDoor({
-    events: [STEP('server-pack', 2, 7), ['line', { text: 'server-pack: part00', stream: 'stdout' }]],
+    events: [STEP('server', 2, 7), ['line', { text: 'server: cpython-3.11.16', stream: 'stdout' }]],
   });
   const r = await refusal(requestHostInstall({ release: '0.6.0', jobTypes: ['echo'], fetchImpl: door.fetchImpl }, hostMachine()));
   assert.equal(r.code, 'host_install_failed');

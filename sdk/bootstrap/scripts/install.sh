@@ -5,8 +5,9 @@
 # differ (PHASE14-ENVPACKS.md 4a). Regenerate: npm run gen:install
 #
 # Install a Crucible on this machine (Linux x86_64, macOS arm64, or inside a
-# WSL2 distro). Downloads the server pack from the release, initialises it,
-# installs the service, and prints the line that pairs an app with it.
+# WSL2 distro). Downloads the pinned CPython from python-build-standalone,
+# pip-installs the release's wheel into it, initialises it, installs the
+# service, and prints the line that pairs an app with it.
 #
 #   curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh | sh
 #
@@ -33,12 +34,12 @@
 # `releases/latest/download/install.sh`, so the copy you run is whichever one
 # GitHub calls latest. Every release is cut `--prerelease --latest=false` and
 # becomes latest only when promote_release.py says so, so on 2026-09-16 that
-# URL served the v0.6.0 script, which then installed 0.6.0 and its packs --
+# URL served the v0.6.0 script, which then installed 0.6.0 --
 # six versions behind, silently, with nothing in the output looking wrong.
 # Asking at RUN time cannot drift that way, and a channel that will not
 # answer is `release_channel_unreadable` rather than a quiet older install.
 #
-# AND IT NEVER GOES BACKWARDS. `<home>/server/.pack` records which release is
+# AND IT NEVER GOES BACKWARDS. `<home>/server/.crucible` records which release is
 # on this disk; installing an older one over it is refused by name
 # (INSTALL-UNINSTALL.md 6.5.4), and the one way down is --rollback-to naming
 # the exact version.
@@ -63,10 +64,10 @@ Install:
                        a rented box is reached over the network, so it
                        wants 0.0.0.0 — the bearer token is the lock)
   --port <n>           bind port (default 7100)
-  --install <type>     also install this job type from its pack. Repeatable.
+  --install <type>     also install this job type, from its recipe. Repeatable.
                        tts names its engine: --install tts=higgs-v3
-  --from-source <ref>  build the server from a git ref instead of the
-                       published pack (a branch, a tag or a sha)
+  --from-source <ref>  install the server from a git ref instead of the
+                       release's wheel (a branch, a tag or a sha)
   --release <version>  install this exact release rather than the channel's
                        latest. The one override; it still downloads from that
                        release, so it is a pin and not an offline install.
@@ -158,7 +159,7 @@ fi
 
 # --- uninstall -----------------------------------------------------------
 # The inverse, and then this script exits: `crucible uninstall` does the
-# nine steps inside CRUCIBLE_HOME and this removes the pack it unpacked.
+# nine steps inside CRUCIBLE_HOME and this removes the interpreter it unpacked.
 if [ "$UNINSTALL" = 1 ]; then
   say "uninstall"
   CRUCIBLE_HOME="${CRUCIBLE_HOME:-$HOME/.crucible}"
@@ -170,15 +171,15 @@ if [ "$UNINSTALL" = 1 ]; then
   if [ "$PURGE_WEIGHTS" = 1 ]; then UNINSTALL_FLAGS="$UNINSTALL_FLAGS --purge-weights"; fi
   if [ "$DRY_RUN" = 1 ]; then UNINSTALL_FLAGS="$UNINSTALL_FLAGS --dry-run"; fi
   "$CRUCIBLE" 'uninstall' $UNINSTALL_FLAGS || die "step_failed: uninstall"
-  # The pack, which the verb deliberately leaves: it is the interpreter
+  # The runtime, which the verb deliberately leaves: it is the interpreter
   # that just ran, and this script is what unpacked it.
-  say "server-pack"
+  say "server"
   if [ "$DRY_RUN" = 1 ]; then
-    say "server-pack: would remove $CRUCIBLE_HOME/server and $CRUCIBLE_HOME/downloads"
+    say "server: would remove $CRUCIBLE_HOME/server and $CRUCIBLE_HOME/downloads"
     say "home: would remove $CRUCIBLE_HOME if it were then empty"
   else
     rm -rf "$CRUCIBLE_HOME/server" "$CRUCIBLE_HOME/server.partial" "$CRUCIBLE_HOME/downloads"
-    say "server-pack: removed $CRUCIBLE_HOME/server"
+    say "server: removed $CRUCIBLE_HOME/server"
     if rmdir "$CRUCIBLE_HOME" 2>/dev/null; then
       say "home: removed $CRUCIBLE_HOME"
     else
@@ -191,19 +192,19 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 # --- host-facts ----------------------------------------------------------
-# read this host: CRUCIBLE_HOME, the user, free disk, the tools a pack needs
+# read this host: CRUCIBLE_HOME, the user, free disk, the tools an install needs
 say "host-facts"
 crucible_probe() {
-  h="${CRUCIBLE_HOME:-$HOME/.crucible}"; echo "home=$h"; echo "user=$(id -un)"; d="$h"; while [ ! -d "$d" ] && [ "$d" != "/" ]; do d=$(dirname "$d"); done; echo "free_kib=$(df -Pk "$d" | awk 'NR==2 {print $4}')"; for t in curl tar zstd; do command -v "$t" >/dev/null 2>&1 || echo "missing=$t"; done; c="$h/server/bin/crucible"; if test -x "$c"; then echo "crucible=$c"; echo "version=$("$c" --version 2>&1 | head -1)"; fi; s="$h/server/.pack"; if test -f "$s"; then cat "$s"; fi; exit 0
+  h="${CRUCIBLE_HOME:-$HOME/.crucible}"; echo "home=$h"; echo "user=$(id -un)"; d="$h"; while [ ! -d "$d" ] && [ "$d" != "/" ]; do d=$(dirname "$d"); done; echo "free_kib=$(df -Pk "$d" | awk 'NR==2 {print $4}')"; for t in curl tar; do command -v "$t" >/dev/null 2>&1 || echo "missing=$t"; done; c="$h/server/bin/crucible"; if test -x "$c"; then echo "crucible=$c"; echo "version=$("$c" --version 2>&1 | head -1)"; fi; s="$h/server/.crucible"; if test -f "$s"; then cat "$s"; fi; exit 0
 }
 probe_out="$(crucible_probe)"
 CRUCIBLE_HOME="$(printf '%s\n' "$probe_out" | sed -n 's/^home=//p')"
 GUEST_USER="$(printf '%s\n' "$probe_out" | sed -n 's/^user=//p')"
 free_kib="$(printf '%s\n' "$probe_out" | sed -n 's/^free_kib=//p')"
-stamp_sha="$(printf '%s\n' "$probe_out" | sed -n 's/^sha256=//p')"
+stamp_python_sha="$(printf '%s\n' "$probe_out" | sed -n 's/^python_sha256=//p')"
 stamp_release="$(printf '%s\n' "$probe_out" | sed -n 's/^release=//p')"
 missing="$(printf '%s\n' "$probe_out" | sed -n 's/^missing=//p' | tr '\n' ' ')"
-if [ -n "$missing" ]; then die "guest_missing_tool: this machine has no $missing; a pack is fetched with curl and unpacked with tar --zstd"; fi
+if [ -n "$missing" ]; then die "guest_missing_tool: this machine has no $missing; the interpreter is fetched with curl and unpacked with tar"; fi
 
 # --- prerequisites -------------------------------------------------------
 # Named, and never guessed around. A missing one is a refusal here rather
@@ -235,105 +236,82 @@ if [ -n "$MIN_FREE_GIB" ]; then
 fi
 say "prerequisites: $(( free_kib / 1048576 )) GiB free at $CRUCIBLE_HOME. Weights are pulled later and priced then — a 9B model is ~18 GiB, a Higgs voice ~8.5 GiB"
 
-# --- server-pack ---------------------------------------------------------
-# download, verify and unpack the server pack — the interpreter comes WITH it
-say "server-pack"
+# --- server --------------------------------------------------------------
+# download the pinned interpreter (once) and pip-install this release's wheel into it
+say "server"
+dest="$CRUCIBLE_HOME/server"
+partial="$dest.partial"
+downloads="$CRUCIBLE_HOME/downloads"
+case "$BACKEND" in
+  cuda-linux) py_asset='cpython-3.11.16+20260901-x86_64-unknown-linux-gnu-install_only.tar.gz'; py_sha='faa0758583a63f14c5eee516af82738403b59c13edda6fc0a21d953febd89eed'; py_version='3.11.16'; py_url='https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.11.16+20260901-x86_64-unknown-linux-gnu-install_only.tar.gz' ;;
+  mlx-darwin) py_asset='cpython-3.11.16+20260901-aarch64-apple-darwin-install_only.tar.gz'; py_sha='50424fa409e8ae84b82a3052522f64695b47dff2158b70bb7358e0ebd6c085c9'; py_version='3.11.16'; py_url='https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.11.16+20260901-aarch64-apple-darwin-install_only.tar.gz' ;;
+  *) die "unsupported_platform: no interpreter is pinned for $BACKEND" ;;
+esac
+crucible_older() {
+  awk -v a="$1" -v b="$2" 'BEGIN { split(a, x, "."); split(b, y, ".");
+    for (i = 1; i <= 3; i++) { if ((x[i]+0) < (y[i]+0)) exit 0; if ((x[i]+0) > (y[i]+0)) exit 1 } exit 1 }'
+}
+if [ -n "$stamp_release" ] && crucible_older "$RELEASE" "$stamp_release"; then
+  [ "$ROLLBACK_TO" = "$RELEASE" ] || die "install_would_downgrade: $dest is the $stamp_release release and this would install $RELEASE over it. Nothing was downloaded. An operator who means to go back names the version: --rollback-to $RELEASE"
+fi
+if [ "$stamp_python_sha" = "$py_sha" ] && [ -x "$dest/bin/python3" ]; then
+  say "server: python $py_version is already at $dest"
+else
+  say "server: python $py_version from python-build-standalone"
+  mkdir -p "$downloads"; rm -f "$downloads/$py_asset"
+  curl -fL --retry 3 --retry-delay 2 --create-dirs -o "$downloads/$py_asset" "$py_url" || die "runtime_download_failed: $py_url"
+  got_sha="$($SHA_TOOL "$downloads/$py_asset" | awk '{print $1}')"
+  if [ "$got_sha" != "$py_sha" ]; then rm -f "$downloads/$py_asset"; die "runtime_sha_mismatch: $py_asset hashes $got_sha and this installer pins $py_sha. The download was deleted"; fi
+  rm -rf "$partial" && mkdir -p "$partial"
+  tar -xzf "$downloads/$py_asset" -C "$partial" || die "runtime_unpack_failed: tar would not open $downloads/$py_asset"
+  [ -x "$partial/python/bin/python3" ] || die "runtime_unpack_failed: $py_asset unpacked without a python/bin/python3"
+  activate_crucible_runtime() {
+  _crucible_dest="$dest"; _crucible_partial="$partial/python"; _crucible_previous="$_crucible_dest.previous"
+  if [ -e "$_crucible_previous" ]; then echo "upgrade_recovery_required: $_crucible_previous was preserved from an interrupted upgrade" >&2; return 1; fi
+  if [ -e "$_crucible_dest" ]; then
+    if [ -x "$_crucible_dest/bin/crucible" ]; then "$_crucible_dest/bin/crucible" local shutdown || return 1; fi
+    mv "$_crucible_dest" "$_crucible_previous" || return 1
+  fi
+  if mv "$_crucible_partial" "$_crucible_dest" && "$_crucible_dest/bin/python3" --version; then
+    rm -rf "$_crucible_previous" || return 1
+  else
+    if [ -e "$_crucible_dest" ] && [ ! -e "$_crucible_partial" ]; then mv "$_crucible_dest" "$_crucible_partial" || return 1; fi
+    if [ -e "$_crucible_previous" ]; then mv "$_crucible_previous" "$_crucible_dest" || return 1; fi
+    echo "upgrade_activation_failed: the previous runtime was preserved" >&2; return 1
+  fi
+}
+activate_crucible_runtime || die "runtime_unpack_failed: the previous runtime was preserved"
+  rm -rf "$partial" "$downloads/$py_asset"
+fi
 if [ -n "$FROM_SOURCE" ]; then
-  say "server-pack: --from-source $FROM_SOURCE, building instead of downloading"
+  say "server: --from-source $FROM_SOURCE, installing from a checkout instead of the wheel"
   command -v git >/dev/null 2>&1 || die "guest_missing_tool: --from-source needs git"
-  command -v python3 >/dev/null 2>&1 || die "guest_missing_tool: --from-source needs a python3 on this machine to build the venv with. The published pack brings its own interpreter; a source build cannot"
-  dest="$CRUCIBLE_HOME/server"
   src="$CRUCIBLE_HOME/src"
   rm -rf "$src"
   git clone --filter=blob:none "https://github.com/telltaleatheist/crucible" "$src" || die "from_source_clone_failed: https://github.com/telltaleatheist/crucible"
   git -C "$src" checkout --detach "$FROM_SOURCE" || die "from_source_ref_unknown: the checkout has no ref called $FROM_SOURCE"
-  partial="$dest.partial"
-  rm -rf "$partial"
-  python3 -m venv "$partial" || die "from_source_venv_failed: python3 -m venv would not make $partial"
-  "$partial/bin/python" -m pip install --upgrade pip setuptools wheel || die "from_source_install_failed: pip would not update itself in $partial"
-  "$partial/bin/python" -m pip install "$src" || die "from_source_install_failed: pip would not install $src into $partial"
-  if [ "$(uname -s)" = Darwin ]; then "$partial/bin/python" -m pip install pystray pillow || die "from_source_install_failed: desktop packages could not be installed"; fi
-  "$partial/bin/python" -c 'from pathlib import Path; import sys; from crucible.envpack import relocate_console_scripts; relocate_console_scripts(Path(sys.argv[1]))' "$partial" || die "from_source_install_failed: console scripts could not be relocated"
-  "$partial/bin/crucible" --version >/dev/null || die "from_source_install_failed: $partial/bin/crucible would not run"
-  activate_crucible_pack() {
-    _crucible_dest="$dest"; _crucible_partial="$partial"; _crucible_previous="$_crucible_dest.previous"
-    if [ -e "$_crucible_previous" ]; then echo "upgrade_recovery_required: $_crucible_previous was preserved from an interrupted upgrade" >&2; return 1; fi
-    if [ -e "$_crucible_dest" ]; then
-      "$_crucible_partial/bin/crucible" local shutdown || return 1
-      mv "$_crucible_dest" "$_crucible_previous" || return 1
-    fi
-    if mv "$_crucible_partial" "$_crucible_dest" && "$_crucible_dest/bin/crucible" --version; then
-      rm -rf "$_crucible_previous" || return 1
-    else
-      if [ -e "$_crucible_dest" ] && [ ! -e "$_crucible_partial" ]; then mv "$_crucible_dest" "$_crucible_partial" || return 1; fi
-      if [ -e "$_crucible_previous" ]; then mv "$_crucible_previous" "$_crucible_dest" || return 1; fi
-      echo "upgrade_activation_failed: the previous runtime was preserved" >&2; return 1
-    fi
-  }
-  activate_crucible_pack || die "from_source_install_failed: runtime activation failed; previous runtime preserved"
-  printf 'sha256=%s\nrelease=%s\n' "from-source" "$(git -C "$src" rev-parse HEAD)" > "$dest/.pack"
+  if [ -x "$dest/bin/crucible" ]; then "$dest/bin/crucible" local shutdown || true; fi
+  "$dest/bin/python3" -m pip install --upgrade --no-input "$src" || die "from_source_install_failed: pip would not install $src into $dest"
+  if [ "$(uname -s)" = Darwin ]; then "$dest/bin/python3" -m pip install pystray pillow || die "from_source_install_failed: desktop packages could not be installed"; fi
+  printf 'python_sha256=%s\npython_version=%s\nrelease=%s\n' "$py_sha" "$py_version" "$(git -C "$src" rev-parse HEAD)" > "$dest/.crucible"
   CRUCIBLE="$dest/bin/crucible"
-  say "server-pack: built $("$CRUCIBLE" --version) from $(git -C "$src" rev-parse --short HEAD)"
+  say "server: installed $("$CRUCIBLE" --version) from $(git -C "$src" rev-parse --short HEAD)"
 else
-  dest="$CRUCIBLE_HOME/server"
-  partial="$dest.partial"
-  downloads="$CRUCIBLE_HOME/downloads"
-  manifest_url="https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/envpacks.json"
-  manifest="$(curl -fsSL --retry 3 "$manifest_url")" || die "pack_manifest_unreadable: could not fetch $manifest_url"
-  pack="$(printf '%s' "$manifest" | awk -v RS='}' -v b="$BACKEND" '$0 ~ /"name"[[:space:]]*:[[:space:]]*"server"/ && $0 ~ ("\"backend\"[[:space:]]*:[[:space:]]*\"" b "\"")' | tr -d '\r\n')"
-  [ -n "$pack" ] || die "pack_not_published: the $RELEASE release publishes no server pack for $BACKEND"
-  want_sha="$(printf '%s' "$pack" | sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p')"
-  unpacked="$(printf '%s' "$pack" | sed -n 's/.*"unpacked_bytes"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')"
-  archive_bytes="$(printf '%s' "$pack" | sed -n 's/.*"bytes"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')"
-  parts="$(printf '%s' "$pack" | sed -n 's/.*"parts"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' | tr -d '[:space:]"' | tr ',' ' ')"
-  pack_release="$(printf '%s' "$pack" | sed -n 's/.*"release"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-  [ -n "$pack_release" ] || pack_release="$RELEASE"
-  [ -n "$want_sha" ] && [ -n "$parts" ] && [ -n "$unpacked" ] && [ -n "$archive_bytes" ] || die "pack_manifest_unreadable: $manifest_url does not describe the server pack"
-  if [ "$stamp_sha" = "$want_sha" ] && [ -x "$dest/bin/crucible" ]; then
-    say "server-pack: already installed ($want_sha)"
-  else
-    crucible_older() {
-      awk -v a="$1" -v b="$2" 'BEGIN { split(a, x, "."); split(b, y, ".");
-        for (i = 1; i <= 3; i++) { if ((x[i]+0) < (y[i]+0)) exit 0; if ((x[i]+0) > (y[i]+0)) exit 1 } exit 1 }'
-    }
-    if [ -n "$stamp_release" ] && crucible_older "$RELEASE" "$stamp_release"; then
-      [ "$ROLLBACK_TO" = "$RELEASE" ] || die "install_would_downgrade: $dest is the $stamp_release pack and this would install $RELEASE over it. Nothing was downloaded. An operator who means to go back names the version: --rollback-to $RELEASE"
-    fi
-    n=0; for part in $parts; do n=$(( n + 1 )); done
-    need_kib=$(( (unpacked + archive_bytes + archive_bytes / n) / 1024 ))
-    [ "$free_kib" -ge "$need_kib" ] || die "pack_disk: the server pack needs $(( need_kib / 1048576 )) GiB free and there is $(( free_kib / 1048576 )) GiB"
-    archive="$downloads/$(printf '%s' "$parts" | awk '{print $1}' | sed 's/\.part[0-9]*$//')"
-    rm -f "$archive"; mkdir -p "$downloads"
-    for part in $parts; do
-      say "server-pack: $part"
-      curl -fL --retry 3 --retry-delay 2 --continue-at - --create-dirs -o "$downloads/$part" "https://github.com/telltaleatheist/crucible/releases/download/v$pack_release/$part" || die "pack_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$pack_release/$part"
-      cat "$downloads/$part" >> "$archive" && rm -f "$downloads/$part"
-    done
-    got_sha="$($SHA_TOOL "$archive" | awk '{print $1}')"
-    if [ "$got_sha" != "$want_sha" ]; then rm -f "$archive"; die "pack_sha_mismatch: $archive hashes $got_sha, the manifest says $want_sha"; fi
-    rm -rf "$partial" && mkdir -p "$partial"
-    tar --zstd -xf "$archive" -C "$partial" || die "pack_unpack_failed: tar would not open $archive"
-    "$partial/bin/crucible" --version >/dev/null || die "pack_unpack_failed: $partial/bin/crucible would not run"
-    activate_crucible_pack() {
-    _crucible_dest="$dest"; _crucible_partial="$partial"; _crucible_previous="$_crucible_dest.previous"
-    if [ -e "$_crucible_previous" ]; then echo "upgrade_recovery_required: $_crucible_previous was preserved from an interrupted upgrade" >&2; return 1; fi
-    if [ -e "$_crucible_dest" ]; then
-      "$_crucible_partial/bin/crucible" local shutdown || return 1
-      mv "$_crucible_dest" "$_crucible_previous" || return 1
-    fi
-    if mv "$_crucible_partial" "$_crucible_dest" && "$_crucible_dest/bin/crucible" --version; then
-      rm -rf "$_crucible_previous" || return 1
-    else
-      if [ -e "$_crucible_dest" ] && [ ! -e "$_crucible_partial" ]; then mv "$_crucible_dest" "$_crucible_partial" || return 1; fi
-      if [ -e "$_crucible_previous" ]; then mv "$_crucible_previous" "$_crucible_dest" || return 1; fi
-      echo "upgrade_activation_failed: the previous runtime was preserved" >&2; return 1
-    fi
-  }
-  activate_crucible_pack || die "pack_activation_failed: the previous runtime was preserved"
-    printf 'sha256=%s\nrelease=%s\n' "$want_sha" "$RELEASE" > "$dest/.pack"
-    rm -f "$archive"
-  fi
+  wheel="crucible-$RELEASE-py3-none-any.whl"
+  say "server: $wheel"
+  mkdir -p "$downloads"; rm -f "$downloads/$wheel"
+  curl -fL --retry 3 --retry-delay 2 --create-dirs -o "$downloads/$wheel" "https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/$wheel" || die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/$wheel"
+  want_sha="$(curl -fsSL --retry 3 "https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/crucible-$RELEASE-py3-none-any.whl.sha256" | awk '{print $1}')" || die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/crucible-$RELEASE-py3-none-any.whl.sha256"
+  case "$want_sha" in *[!0-9a-f]*|"") die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/crucible-$RELEASE-py3-none-any.whl.sha256 is not a sha256" ;; esac
+  got_sha="$($SHA_TOOL "$downloads/$wheel" | awk '{print $1}')"
+  if [ "$got_sha" != "$want_sha" ]; then rm -f "$downloads/$wheel"; die "runtime_sha_mismatch: $wheel hashes $got_sha, the release says $want_sha. The download was deleted"; fi
+  if [ -x "$dest/bin/crucible" ]; then "$dest/bin/crucible" local shutdown || true; fi
+  "$dest/bin/python3" -m pip install --upgrade --no-input "$downloads/$wheel" || die "runtime_install_failed: pip would not install $wheel"
+  if [ "$(uname -s)" = Darwin ]; then "$dest/bin/python3" -m pip install pystray pillow || die "runtime_install_failed: the desktop packages would not install"; fi
+  rm -f "$downloads/$wheel"
+  printf 'python_sha256=%s\npython_version=%s\nrelease=%s\n' "$py_sha" "$py_version" "$RELEASE" > "$dest/.crucible"
   CRUCIBLE="$dest/bin/crucible"
+  "$CRUCIBLE" --version >/dev/null || die "runtime_install_failed: $CRUCIBLE would not run"
 fi
 
 # --- init ----------------------------------------------------------------
@@ -349,7 +327,7 @@ else
 fi
 
 # --- install-job-types ---------------------------------------------------
-# `--install <type>`, from the published packs. Empty on a bare run, which
+# `--install <type>`, from its recipe. Empty on a bare run, which
 # is 4a: a Crucible that serves nothing until somebody asks.
 if [ -n "$JOB_TYPES" ]; then
   for entry in $JOB_TYPES; do

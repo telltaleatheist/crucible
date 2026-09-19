@@ -56,14 +56,18 @@ def test_a_version_never_goes_backwards_or_sideways(wanted):
 
 
 def test_a_measurement_is_not_a_version_place():
-    """Three files name a version to record what was MEASURED between two releases.
+    """A file that names a version to record what was MEASURED is not bumped.
 
-    A search-and-replace bump would rewrite them into claims about versions the
-    measurement was never taken on. They are named here so that adding one of
-    them to PLACES fails a test rather than quietly falsifying a record.
+    A search-and-replace bump would rewrite it into a claim about versions the
+    measurement was never taken on. It is named here so that adding it to
+    PLACES fails a test rather than quietly falsifying a record.
+
+    There were THREE of these. `scripts/plan_packs.py` and
+    `.github/workflows/envpacks.yml` recorded the same v0.6.6 -> v0.6.7 pack
+    decision and went with the packs (PHASE20 section 6); PHASE14's own
+    measurement stays, in a section that now says what superseded it.
     """
-    prose = ['docs/PHASE14-ENVPACKS.md', 'scripts/plan_packs.py',
-             '.github/workflows/envpacks.yml']
+    prose = ['docs/PHASE14-ENVPACKS.md']
     bumped = {relative for relative, _, _ in bump.PLACES}
     for relative in prose:
         assert relative not in bumped

@@ -30,9 +30,9 @@ install and an app-driven install "cannot differ"), so this list is the same one
 `@crucible/bootstrap`'s `install()` walks:
 
 ```
-host-facts        CRUCIBLE_HOME, the user, free disk, curl/tar/zstd
+host-facts        CRUCIBLE_HOME, the user, free disk, curl/tar
 prerequisites     (install.sh only) the card, the driver, ffmpeg, the disk
-server-pack       download + verify + unpack into <home>/server — the interpreter comes WITH it
+server            the pinned CPython into <home>/server (ONCE), then pip <this release's wheel>
 init              crucible init --token … [--host …] [--port …]      (SKIPPED when a config exists)
 install-<type>    crucible install <type>                            (only what --install named)
 service-install   crucible service install
@@ -44,9 +44,40 @@ done              crucible token --url  →  the crucible:// pairing line
 `init` is skipped when `<home>/config.toml` exists, **and its token is kept**. That is what
 makes a reinstall over an existing home leave every paired app paired.
 
-WHICH RELEASE those packs come from is decided before the first step and is §6.5's: the
+WHICH RELEASE the wheel comes from is decided before the first step and is §6.5's: the
 channel's `releases/latest`, unless an operator named an exact version. Nothing in the list
 above defaults to the version the installer was built beside.
+
+### What a FIRST install downloads, and from where
+
+| what | from | on |
+|---|---|---|
+| CPython 3.11.16, `install_only` | astral-sh/python-build-standalone, release `20260901` | every backend |
+| `crucible-<ver>-py3-none-any.whl` + its `.sha256` | **our release** | every backend |
+| the wheel's dependencies (fastapi, uvicorn, httpx, …) | PyPI, through pip | every backend |
+| `pystray` + `pillow`, the tray | PyPI, through pip | mlx-darwin and the Windows host |
+| Ubuntu 24.04's WSL image | `cloud-images.ubuntu.com/wsl/releases/24.04/current/` | the Windows host, once |
+
+**Only the second row is ours.** Two of these have a MEASURED size and the
+others do not, so only those two are given one: PHASE20's own table prices an
+interpreter change at *"one ~30 MB download per machine"*, and the Ubuntu image
+was checked on 2026-09-18 at 340 MB. Everything else is whatever pip resolves
+on the day, and a number invented here would be a number somebody later
+believes.
+
+A JOB TYPE is separate and is where the gigabytes are: `crucible install <type>`
+pips its recipe from PyPI and the pinned indexes. PHASE20 measured what those
+recipes cost when they were re-hosted on our releases — tts 5.3 GB, llm 3.3,
+rvc 3.3, align 2.9, asr 1.3 on cuda-linux, ~0.9 GB for the Mac's — and those
+are ARCHIVE sizes, so an unpacked env is larger. They come from the mirrors per
+machine now, and only when the recipe moved.
+
+### What an UPGRADE downloads
+
+The wheel, its digest, and whatever of `pyproject.toml`'s dependencies actually
+moved — normally nothing. Under a minute. The interpreter step short-circuits on
+`<home>/server/.crucible`'s `python_sha256`, so an upgrade fetches no CPython at
+all unless the PIN changed; a job env is touched only when its own recipe moved.
 
 ## 2. The uninstall sequence — the same list, read upwards
 
@@ -464,8 +495,8 @@ silent downgrade is the defect this section is about and a second source would
 be a second answer to "which Crucible is this".
 
 What that override does is take the CHOICE off the channel; it does not take the
-install off the network. `--release 1.0.1` still fetches `envpacks.json` and the
-pack's parts from `releases/download/v1.0.1/`, so it is the door for an operator
+install off the network. `--release 1.0.1` still fetches the wheel and its
+digest from `releases/download/v1.0.1/`, so it is the door for an operator
 whose channel read was refused rather than absent — a rate limit, a proxy that
 allows `github.com` and not `api.github.com`, or a deliberate pin to a release
 that is not latest. **A machine with no route to GitHub at all has no install

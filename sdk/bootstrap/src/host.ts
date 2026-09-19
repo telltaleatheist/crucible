@@ -2,24 +2,24 @@
  * `detectHost()` — what this machine can run a Crucible with, measured.
  *
  * On win32 the facts are the GUEST's, read through `wsl.exe`: the card the
- * guest's `nvidia-smi` sees, the space on its disk, the server pack it already
+ * guest's `nvidia-smi` sees, the space on its disk, the server runtime it already
  * has. On darwin and linux they are the machine's own. Every null carries a
  * named refusal in `refusals`, with the command the host must run; nothing is
  * inferred from a null.
  *
  * **There is no conda here any more** (PHASE14-ENVPACKS.md section 0). The
- * server's interpreter arrives IN the server pack — a relocatable CPython with
- * the crucible wheel already installed — so the thing this file used to do,
+ * server's interpreter is downloaded from python-build-standalone and the
+ * release's wheel is pip-installed into it, so the thing this file used to do,
  * walk `~/anaconda3 | ~/miniconda3 | ~/miniforge3` looking for an env named
  * `crucible` and refuse on every fresh machine, is deleted rather than kept as
- * a second path. What replaces it is `pack.ts`'s probe: either
+ * a second path. What replaces it is `runtime.ts`'s probe: either
  * `<CRUCIBLE_HOME>/server/bin/crucible` is there or it is not, and if it is
  * not, `install()` downloads it.
  */
 import { BootstrapRefusal } from './errors.js';
 import { CRUCIBLE_DISTRO, listDistros } from './distro.js';
-import { backendFor, type PackBackend } from './envpacks.js';
-import { probeGuest, type GuestFacts, type InstalledPack } from './pack.js';
+import { backendFor, type ServerBackend } from './release.js';
+import { probeGuest, type GuestFacts, type InstalledRuntime } from './runtime.js';
 import { processRunner, type Runner } from './runner.js';
 import { describeTarget, refuseIfUnrun, resolveTarget, runOn, type Target } from './target.js';
 import { BOOTSTRAP_VERSION } from './version.js';
@@ -50,7 +50,7 @@ export interface GpuFacts {
 export interface HostFacts {
   platform: NodeJS.Platform;
   /** The backend this host is: `cuda-linux` or `mlx-darwin`. Windows is never one. */
-  backend: PackBackend;
+  backend: ServerBackend;
   /** win32 only; null elsewhere. */
   wsl: WslFacts | null;
   /**
@@ -61,8 +61,8 @@ export interface HostFacts {
   gpu: GpuFacts | null;
   /** `<CRUCIBLE_HOME>`, the guest user, free disk, missing tools — one probe. */
   guest: GuestFacts | null;
-  /** The server pack already installed, or null. A null is a STATE, not a refusal: `install()` fixes it. */
-  server: InstalledPack | null;
+  /** The server runtime already installed, or null. A null is a STATE, not a refusal: `install()` fixes it. */
+  server: InstalledRuntime | null;
   /** One named refusal per null above, with the command that clears it. Empty when nothing is missing. */
   refusals: BootstrapRefusal[];
 }

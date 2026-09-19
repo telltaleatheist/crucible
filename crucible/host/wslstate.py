@@ -8,8 +8,6 @@ generator that emitted predicates would be emitting a second implementation.
 
 So the predicates are written once here, keyed by the generated codes, and
 `tests/test_host_wslstate.py` asserts that the two sets are exactly equal. That
-is the same seam `crucible/envpack.py`'s `SMOKE_IMPORT` has with
-`cli.INSTALLABLE_JOB_TYPES` — "tied by a check instead of by an import" — and it
 is why a row renamed in TypeScript fails a Python test rather than silently
 never matching.
 
@@ -100,7 +98,7 @@ MEANS: dict[str, Predicate] = {
         and not _systemd_on(result)
     ),
     "guest_no_network": lambda result, _: not result.ok,
-    "pack_disk": lambda result, seen: (
+    "guest_no_disk": lambda result, seen: (
         _free_bytes(result) is not None and _free_bytes(result) < seen.required_bytes  # type: ignore[operator]
     ),
     "guest_root_unreachable": lambda result, _: not result.ok or result.stdout.strip() != "0",
@@ -198,7 +196,7 @@ def detect(
     for state in WSL_STATES:
         if state.optional:
             wanted = (state.code == "guest_no_network" and check_network) or (
-                state.code == "pack_disk" and required_bytes > 0
+                state.code == "guest_no_disk" and required_bytes > 0
             )
             if not wanted:
                 continue

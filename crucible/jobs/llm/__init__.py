@@ -63,7 +63,7 @@ __all__ = [
 # serves a model is a Python env `crucible install llm` builds, and the engine
 # is a module inside it. On `llama-windows` it is `llama-server.exe` — a zip
 # from a pinned llama.cpp release, the `engine` SUBJECT (PHASE15-HOST.md 3.10,
-# fact 1) — and there is no env at all: `crucible/envpack.py` publishes no
+# fact 1) — and there is no env at all: this build ships no
 # `envs/llm/llama-windows.txt` and there is nothing for one to contain.
 #
 # Both answers are the same THREE facts — is it here, what do we say about it,

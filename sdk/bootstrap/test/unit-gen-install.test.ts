@@ -7,9 +7,13 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import { asciiOnly, GENERATED, generateInstallPs1, generateInstallSh } from '../scripts/gen-install-scripts.js';
-import { CURL_ARGS, ENVPACKS_ASSET, HOST_BACKEND, HOST_PACK, installSteps, LATEST_RELEASE_URL, TAR_ARGS } from '../src/index.js';
-import { guestProbeScript } from '../src/pack.js';
+import { CURL_ARGS, HOST_BACKEND, installSteps, interpreterFor, interpreterUrl, LATEST_RELEASE_URL, TAR_ARGS, wheelAssetName } from '../src/index.js';
+import { UBUNTU_WSL_ROOTFS } from '../src/distro.js';
+import { guestProbeScript } from '../src/runtime.js';
 import { installJobTypesSh, renderArgv, uninstallSh } from '../src/steps.js';
+
+/** The Windows host's pinned interpreter, from the one table both scripts read. */
+const HOST_PIN = interpreterFor(HOST_BACKEND);
 
 const STANDALONE = { enableFlags: [], installs: [], bind: [{ sh: '$BIND' }], linger: true };
 
@@ -23,8 +27,8 @@ test('install.sh and install.ps1 on disk ARE what the generator writes (npm run 
 /**
  * The install half of the script: everything from `host-facts` down.
  *
- * The `--uninstall` branch above it says `say "server-pack"` too — it removes
- * the pack this script unpacked — so an order assertion that used `indexOf`
+ * The `--uninstall` branch above it says `say "server"` too — it removes
+ * the interpreter this script unpacked — so an order assertion that used `indexOf`
  * over the whole file would find that one first. Slicing is the honest fix:
  * the two halves are two sequences, and only one of them is the step list.
  */
@@ -37,7 +41,7 @@ function installHalf(sh: string): string {
 test('install.sh walks the same step list, in the same order, with the same names', () => {
   const sh = installHalf(generateInstallSh());
   const names = installSteps(STANDALONE).map((step) => step.name);
-  assert.deepEqual(names, ['host-facts', 'server-pack', 'init', 'service-install', 'local-register', 'local-install-cli', 'local-install-desktop', 'linger', 'capability-write', 'local-start']);
+  assert.deepEqual(names, ['host-facts', 'server', 'init', 'service-install', 'local-register', 'local-install-cli', 'local-install-desktop', 'linger', 'capability-write', 'local-start']);
   let at = -1;
   for (const name of names) {
     const found = sh.indexOf(`say "${name}"`);
@@ -91,14 +95,14 @@ test('install.sh checks the droplet prerequisites BY NAME, before it downloads a
   }
   // Only on the backend that has a card to refuse over.
   assert.match(sh, /if \[ "\$BACKEND" = cuda-linux \]; then\n  command -v nvidia-smi/);
-  // After the probe that measured the disk, before the pack that spends it.
-  // On the install half, because the `--uninstall` branch says "server-pack"
-  // too — that one is the pack being REMOVED.
+  // After the probe that measured the disk, before the download that spends it.
+  // On the install half, because the `--uninstall` branch says "server" too —
+  // that one is the runtime being REMOVED.
   const half = installHalf(sh);
   const probe = half.indexOf('say "host-facts"');
   const prereq = half.indexOf('say "prerequisites"');
-  const pack = half.indexOf('say "server-pack"\n');
-  assert.ok(probe < prereq && prereq < pack, 'host-facts, then prerequisites, then the download');
+  const server = half.indexOf('say "server"\n');
+  assert.ok(probe < prereq && prereq < server, 'host-facts, then prerequisites, then the download');
   // ffmpeg is required only when something that decodes audio was asked for.
   assert.match(sh, /\*" tts"\*\|\*" asr"\*\|\*" rvc"\*\|\*" align"\*\|\*" denoise"\*\)/);
   assert.match(sh, /NO ffmpeg on PATH\. Nothing asked for today needs it/);
@@ -108,18 +112,24 @@ test('install.sh --from-source is a ROUTE and never a fallback for a failed down
   const sh = generateInstallSh();
   assert.match(sh, /if \[ -n "\$FROM_SOURCE" \]; then/);
   assert.match(sh, /git -C "\$src" checkout --detach "\$FROM_SOURCE"/);
-  for (const code of ['from_source_clone_failed', 'from_source_ref_unknown', 'from_source_venv_failed', 'from_source_install_failed']) {
+  for (const code of ['from_source_clone_failed', 'from_source_ref_unknown', 'from_source_install_failed']) {
     assert.ok(sh.includes(`${code}:`), `${code} is refused by name`);
   }
-  // The pack route still refuses its own failures by their own names — the
-  // source build is reached by an argument, never by a download that failed.
-  const fromSource = sh.indexOf('--from-source $FROM_SOURCE, building instead');
-  const packFail = sh.indexOf('pack_download_failed');
-  assert.ok(fromSource < packFail, 'the branch is chosen before anything is fetched');
-  assert.equal(/pack_download_failed[\s\S]{0,200}FROM_SOURCE/.test(sh), false, 'no failure leads into the source build');
+  // IT REPLACES THE WHEEL HALF ONLY (PHASE20 section 3): the same pinned
+  // interpreter is already at $dest either way, which is why this route needs
+  // no python3 on the machine and builds no venv of its own.
+  assert.equal(/--from-source needs a python3/.test(sh), false, 'the interpreter arrives before the branch');
+  assert.equal(/python3 -m venv/.test(sh), false, 'no second venv: pip goes into the tree that is there');
+  assert.match(sh, /"\$dest\/bin\/python3" -m pip install --upgrade --no-input "\$src"/);
+  // The wheel route still refuses its own failures by their own names — the
+  // source install is reached by an argument, never by a download that failed.
+  const fromSource = sh.indexOf('--from-source $FROM_SOURCE, installing from a checkout');
+  const wheelFail = sh.lastIndexOf('runtime_download_failed');
+  assert.ok(fromSource > 0 && fromSource < wheelFail, 'the branch is chosen before the wheel is fetched');
+  assert.equal(/runtime_download_failed[\s\S]{0,200}FROM_SOURCE/.test(sh), false, 'no failure leads into the source install');
 });
 
-test('install.sh --uninstall calls the verb, then removes the pack the verb cannot', () => {
+test('install.sh --uninstall calls the verb, then removes the interpreter the verb cannot', () => {
   const sh = generateInstallSh();
   const [firstLine = ''] = uninstallSh().trimEnd().split('\n');
   assert.ok(firstLine !== '' && sh.includes(firstLine), 'the block is steps.ts\'s');
@@ -127,8 +137,8 @@ test('install.sh --uninstall calls the verb, then removes the pack the verb cann
   // Order: the verb first, because it is running out of the directory the
   // next line deletes.
   const verb = sh.indexOf(`"$CRUCIBLE" 'uninstall'`);
-  const pack = sh.indexOf('rm -rf "$CRUCIBLE_HOME/server"');
-  assert.ok(verb > 0 && verb < pack, 'the interpreter runs before it is removed');
+  const removal = sh.indexOf('rm -rf "$CRUCIBLE_HOME/server"');
+  assert.ok(verb > 0 && verb < removal, 'the interpreter runs before it is removed');
   // And the whole branch exits: an uninstall never falls through to an install.
   assert.match(sh, /say "uninstalled\."\n  exit 0\nfi/);
   assert.ok(sh.indexOf('if [ "$UNINSTALL" = 1 ]; then') < sh.indexOf('say "host-facts"'));
@@ -147,9 +157,9 @@ test('install.sh --uninstall keeps the weights, and the home, unless asked', () 
   assert.ok(sh.includes('flag_needs_uninstall:'));
 });
 
-test('install.sh --uninstall --dry-run describes the pack removal instead of doing it', () => {
+test('install.sh --uninstall --dry-run describes the removal instead of doing it', () => {
   const sh = generateInstallSh();
-  assert.match(sh, /say "server-pack: would remove \$CRUCIBLE_HOME\/server and \$CRUCIBLE_HOME\/downloads"/);
+  assert.match(sh, /say "server: would remove \$CRUCIBLE_HOME\/server and \$CRUCIBLE_HOME\/downloads"/);
   assert.match(sh, /say "home: would remove \$CRUCIBLE_HOME if it were then empty"/);
 });
 
@@ -160,14 +170,21 @@ test('install.sh refuses a flag it does not take, rather than ignoring it', () =
   assert.match(sh, /-h\|--help\) usage; exit 0 ;;/);
 });
 
-test('install.sh uses the same probe script, curl flags and tar flags the TypeScript does', () => {
+test('install.sh uses the same probe script, pin, curl flags and tar flags the TypeScript does', () => {
   const sh = generateInstallSh();
   assert.ok(sh.includes(guestProbeScript(undefined)), 'the host probe is ONE script, not two');
-  assert.ok(sh.includes(`curl ${CURL_ARGS.join(' ')} -o "$downloads/$part"`));
-  assert.ok(sh.includes(`tar ${TAR_ARGS.join(' ')} "$archive" -C "$partial"`));
-  assert.ok(sh.includes('activate_crucible_pack'), 'the shared verified activation transaction');
+  assert.ok(sh.includes(`curl ${CURL_ARGS.join(' ')} -o "$downloads/$py_asset"`));
+  assert.ok(sh.includes(`tar ${TAR_ARGS.join(' ')} "$downloads/$py_asset" -C "$partial"`));
+  // The PIN, not a copy of it: a script that spelled its own digest would be a
+  // second owner of the one thing PHASE20 section 2 says has exactly one.
+  const linux = interpreterFor('cuda-linux');
+  assert.ok(sh.includes(`py_sha='${linux.sha256}'`), 'the cuda-linux digest is the table\'s');
+  assert.ok(sh.includes(`py_url='${interpreterUrl(linux)}'`));
+  assert.ok(sh.includes(interpreterFor('mlx-darwin').sha256), 'and the Mac\'s');
+  assert.ok(sh.includes(`wheel="${wheelAssetName('$RELEASE')}"`), 'the wheel is named the one way');
+  assert.ok(sh.includes('activate_crucible_runtime'), 'the shared verified activation transaction');
   assert.ok(sh.includes('local shutdown || return 1'), 'the runtime is stopped before replacement');
-  assert.ok(sh.includes('printf \'sha256=%s\\nrelease=%s\\n\''), 'the same stamp');
+  assert.ok(sh.includes('printf \'python_sha256=%s\\npython_version=%s\\nrelease=%s\\n\''), 'the same stamp');
 });
 
 test('install.sh detects the two backends and refuses a third, and never assumes WSL2', () => {
@@ -182,12 +199,10 @@ test('install.sh names every refusal the TypeScript names for the same failure',
   const sh = generateInstallSh();
   for (const code of [
     'guest_missing_tool',
-    'pack_manifest_unreadable',
-    'pack_not_published',
-    'pack_disk',
-    'pack_download_failed',
-    'pack_sha_mismatch',
-    'pack_unpack_failed',
+    'runtime_download_failed',
+    'runtime_sha_mismatch',
+    'runtime_unpack_failed',
+    'runtime_install_failed',
     'release_channel_unreadable',
     'install_would_downgrade',
     'rollback_version_mismatch',
@@ -214,7 +229,7 @@ test('both installers read the channel\'s releases/latest, never the newest tag'
   }
 });
 
-test('both installers refuse to install over a newer pack, and take an exact-version rollback', () => {
+test('both installers refuse to install over a newer release, and take an exact-version rollback', () => {
   const sh = generateInstallSh();
   // The FLAG is parsed and the value is what the gate reads — one assertion each,
   // because a script that takes `--rollback-to` and never reads it would pass a
@@ -223,12 +238,12 @@ test('both installers refuse to install over a newer pack, and take an exact-ver
   assert.match(sh, /\[ "\$ROLLBACK_TO" = "\$RELEASE" \]/);
   assert.match(sh, /stamp_release=/, 'install.sh must read the release the stamp records');
   assert.match(sh, /crucible_older "\$RELEASE" "\$stamp_release"/);
-  assert.match(sh, /install_would_downgrade: \$dest is the \$stamp_release pack/);
+  assert.match(sh, /install_would_downgrade: \$dest is the \$stamp_release release/);
 
   const ps1 = generateInstallPs1();
   assert.match(ps1, /\$RollbackTo/);
   assert.match(ps1, /\$haveRelease/, 'install.ps1 must read the release the stamp records');
-  assert.match(ps1, /install_would_downgrade: \$HostDir is the \$haveRelease host pack/);
+  assert.match(ps1, /install_would_downgrade: \$HostDir is the \$haveRelease release/);
 });
 
 test('install.sh mints its own token and keeps an existing config\'s', () => {
@@ -259,7 +274,7 @@ test('install.ps1 installs the HOST and stops — it no longer walks 4c itself (
   // refused a machine whose System32 bsdtar reads zstd perfectly well. The
   // probe and the unpack both go through the one named binary now, and these
   // three rows had been red since.
-  const order = ['& $Tar --version', 'pack_not_published', 'pack_disk', 'Get-FileHash', 'Move-Item $Partial $HostDir', '& $Cmd local $action', 'Start-Process -WindowStyle Hidden'];
+  const order = ['$Tar = Join-Path', '$PyUrl =', 'Get-FileHash', 'Move-Item $staged $HostDir', 'pip install --upgrade --no-input', '& $Cmd local $action', 'Start-Process -WindowStyle Hidden'];
   let at = -1;
   for (const marker of order) {
     const found = ps1.indexOf(marker);
@@ -285,43 +300,45 @@ test('install.ps1 needs no admin, and starts the tray with pythonw rather than t
   assert.equal(/New-Object -ComObject WScript\.Shell/.test(ps1), false, 'it does not write a .lnk of its own');
 });
 
-test('install.ps1 downloads the host pack for THIS release, by the manifest, into %LOCALAPPDATA%', () => {
+test('install.ps1 installs the PINNED interpreter and THIS release\'s wheel into %LOCALAPPDATA%', () => {
   const ps1 = generateInstallPs1();
-  assert.ok(ps1.includes(`$entry.name -eq '${HOST_PACK}'`), 'it asks the manifest for the host pack');
-  assert.ok(ps1.includes(`$entry.backend -eq '${HOST_BACKEND}'`), 'for this backend, by the shared constant');
+  // The same table install.sh reads, for the Windows backend. A .ps1 that
+  // spelled its own digest would install a different interpreter under one
+  // version number (PHASE20 section 2).
+  assert.ok(ps1.includes(`$PySha = '${HOST_PIN.sha256}'`), 'the pin is the table\'s');
+  assert.ok(ps1.includes(`$PyAsset = '${HOST_PIN.asset}'`));
+  assert.ok(ps1.includes(interpreterUrl(HOST_PIN)), 'from python-build-standalone, not from our release');
   assert.match(ps1, /\$HostDir = Join-Path \$Root 'host'/);
   assert.match(ps1, /\[string\]\$Root = "\$env:LOCALAPPDATA\\Crucible"/);
-  assert.ok(ps1.includes(ENVPACKS_ASSET), 'the same manifest asset name the TypeScript uses');
-  assert.ok(ps1.includes(`& curl.exe ${CURL_ARGS.join(' ')} -o $partPath`), 'the same curl flags');
+  assert.ok(ps1.includes(`& curl.exe ${CURL_ARGS.join(' ')} -o $archive`), 'the same curl flags');
   assert.ok(ps1.includes(`& $Tar ${TAR_ARGS.join(' ')} $archive -C $Partial`), 'the same tar flags');
+  assert.ok(ps1.includes(`$Wheel = "${wheelAssetName('$Release')}"`), 'the wheel is named the one way');
+  assert.match(ps1, /pip install --upgrade --no-input \$WheelPath/);
+  assert.match(ps1, /pip install pystray pillow/, 'the tray, which is not a wheel dependency');
 });
 
-test('install.ps1 checks that THIS machine tar carries zstd rather than assuming it', () => {
-  // Measured 2026-09-14: C:\Windows\System32\tar.exe is bsdtar 3.8.1 with
-  // libzstd 1.5.5, and no zstd.exe ships at all. A machine whose tar has no
-  // zstd would half-unpack in silence.
+test('install.ps1 names the tar it uses rather than resolving one through PATH', () => {
+  // Measured 2026-09-17 deploying 0.6.8: resolving `tar` through PATH from a
+  // Git Bash shell found GNU tar 1.32 in Git's usr/bin and refused a machine
+  // whose System32 bsdtar was fine. The binary is NAMED once (`282871b`).
   //
-  // AND IT CHECKS THE TAR IT WILL USE. Measured 2026-09-17 deploying 0.6.8:
-  // resolving `tar` through PATH from a Git Bash shell found GNU tar 1.32 in
-  // Git's usr/bin and refused a machine whose System32 bsdtar reads zstd.
-  // Checking one tool and unpacking with another is how a check passes and the
-  // unpack still half-works, so the binary is NAMED once and both go through
-  // it (`282871b`).
+  // THE ZSTD CHECK IS GONE WITH THE PACKS. python-build-standalone publishes
+  // gzip, which every tar reads, so a probe for a format nothing downloads
+  // would refuse a machine for a tool it does not need.
   const ps1 = generateInstallPs1();
   assert.match(ps1, /\$Tar = Join-Path \$env:SystemRoot "System32\\tar\.exe"/);
-  assert.match(ps1, /& \$Tar --version/);
-  assert.match(ps1, /\$tarVersion -notmatch "zstd"/);
   assert.match(ps1, /guest_missing_tool/);
+  assert.equal(ps1.includes('zstd'), false, 'nothing this installer fetches is zstd');
   assert.equal(
     / tar\.exe /.test(ps1), false,
     'no bare tar.exe survives: PATH is the caller\'s, and the caller may be Git Bash',
   );
 });
 
-test('install.ps1 verifies the rootfs before importing it, and is Windows PowerShell 5.1 safe', () => {
+test('install.ps1 verifies every download before it is used, and is Windows PowerShell 5.1 safe', () => {
   const ps1 = generateInstallPs1();
   assert.match(ps1, /Get-FileHash -Algorithm SHA256/);
-  assert.match(ps1, /pack_sha_mismatch/);
+  assert.match(ps1, /runtime_sha_mismatch/);
   // 5.1 has no && / || chain operators, no ternary, no null-coalescing. The
   // bash this script hands to the guest is exempt: that is a string, and bash
   // has all three.
@@ -334,19 +351,23 @@ test('install.ps1 verifies the rootfs before importing it, and is Windows PowerS
   assert.match(ps1, /\$ErrorActionPreference = "Continue"/);
 });
 
-test('install.ps1 unpacks BESIDE, proves the moved pack runs, and only then renames', () => {
+test('install.ps1 unpacks BESIDE, then moves, and pips ONLY into the final path', () => {
   // PHASE14 7.2a's defect, in its Windows form: pip writes Scripts\*.exe
-  // launchers with the BUILD tree's interpreter path inside the binary, which
-  // no shebang rewrite can reach. The .cmd derives its interpreter from
-  // %~dp0, and the only proof of that is running it somewhere else.
+  // launchers with the interpreter's absolute path inside the BINARY, which no
+  // shebang rewrite can reach. PHASE20 removes the defect rather than
+  // correcting it — pip runs from the tree at %LOCALAPPDATA%\Crucible\host,
+  // which is where it stays, so the path the launcher bakes is the right one.
   const ps1 = generateInstallPs1();
   assert.match(ps1, /\$Partial = "\$HostDir\.partial"/);
-  assert.match(ps1, /& \(Join-Path \$Partial "crucible\.cmd"\) --version/);
-  assert.match(ps1, /Move-Item \$Partial \$HostDir/);
+  assert.match(ps1, /& \(Join-Path \$staged "python\.exe"\) --version/);
+  assert.match(ps1, /Move-Item \$staged \$HostDir/);
   assert.ok(
-    ps1.indexOf('crucible.cmd") --version') < ps1.indexOf('Move-Item $Partial $HostDir'),
-    'it runs BEFORE the rename, so a pack that cannot run never becomes the installed one',
+    ps1.indexOf('Move-Item $staged $HostDir') < ps1.indexOf('pip install --upgrade --no-input'),
+    'the tree is at its FINAL path before pip writes a launcher into it',
   );
+  // And the .cmd, which every other part of Crucible spells (host/paths.py).
+  assert.match(ps1, /\[System\.IO\.File\]::WriteAllText\(\$Cmd, \$shim/);
+  assert.match(ps1, /%~dp0python\.exe/);
 });
 
 test('install.ps1 is ASCII, because Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI', () => {
@@ -366,7 +387,7 @@ test('asciiOnly refuses a character it has no spelling for, rather than dropping
   assert.throws(() => asciiOnly('a ☃ b', 'a test'), /U\+2603/);
 });
 
-test('install.ps1 -Uninstall calls the verb, then removes the pack the verb cannot', () => {
+test('install.ps1 -Uninstall calls the verb, then removes the runtime the verb cannot', () => {
   const ps1 = generateInstallPs1();
   assert.match(ps1, /\[switch\]\$Uninstall,/);
   assert.match(ps1, /\[switch\]\$PurgeWeights,/);
@@ -377,12 +398,12 @@ test('install.ps1 -Uninstall calls the verb, then removes the pack the verb cann
   // Order, and it is the only order that works: the verb runs out of the
   // directory the next lines delete.
   const verb = ps1.indexOf('& $Cmd @verb');
-  const pack = ps1.indexOf('foreach ($gone in @($Partial, $DownloadDir, $HostDir))');
-  assert.ok(verb > 0 && verb < pack);
+  const removal = ps1.indexOf('foreach ($gone in @($Partial, $DownloadDir, $HostDir))');
+  assert.ok(verb > 0 && verb < removal);
   // And it exits before the install half.
-  assert.ok(ps1.indexOf('if ($Uninstall) {') < ps1.indexOf('& $Tar --version'));
-  assert.ok(ps1.includes('not_installed:'), 'a machine with no host pack is refused by name');
-  assert.ok(ps1.includes('host_pack_locked:'), 'a file still held is refused by name, and re-running is the fix');
+  assert.ok(ps1.indexOf('if ($Uninstall) {') < ps1.indexOf('$Tar = Join-Path'));
+  assert.ok(ps1.includes('not_installed:'), 'a machine with no host is refused by name');
+  assert.ok(ps1.includes('host_runtime_locked:'), 'a file still held is refused by name, and re-running is the fix');
 });
 
 test('install.ps1 -Uninstall removes the home only when it is empty, never recursively-by-default', () => {
@@ -413,4 +434,33 @@ test('install.sh is unchanged by PHASE15: linux and darwin have no host', () => 
   assert.match(sh, /Darwin\/arm64\)  BACKEND=mlx-darwin/);
   assert.equal(sh.includes('llama-windows'), false);
   assert.equal(sh.includes('crucible.cmd'), false);
+});
+
+test('neither installer names an asset of ours that PHASE20 deleted', () => {
+  // The grep `tests/test_no_packs.py` runs over the repo, applied to the two
+  // GENERATED files — which that grep reads too, but only after this suite has
+  // regenerated them.
+  for (const [name, text] of [['install.sh', generateInstallSh()], ['install.ps1', generateInstallPs1()]] as const) {
+    for (const gone of ['envpacks.json', 'crucible-env-', 'crucible-rootfs-']) {
+      assert.equal(text.includes(gone), false, `${name} still names ${gone}`);
+    }
+  }
+});
+
+test('the WSL image comes from Canonical, and its digest from Canonical\'s own sums file', () => {
+  // PHASE20 section 2. The host imports it (install.ps1 does not), so what this
+  // asserts is the generated PYTHON table — the one owner crossing the seam.
+  const py = GENERATED.find((file) => file.path.endsWith('wsl_states.py'));
+  assert.ok(py !== undefined, 'the generator still writes the Python table');
+  assert.ok(py.text.includes(UBUNTU_WSL_ROOTFS));
+  assert.ok(py.text.includes('cloud-images.ubuntu.com/wsl/releases/24.04/current'));
+  assert.ok(py.text.includes('SHA256SUMS'));
+  assert.equal(py.text.includes('ROOTFS_ASSET_TEMPLATE'), false, 'no asset of ours any more');
+  // And what the guest network probe reaches for is an asset that still exists.
+  assert.ok(py.text.includes('crucible-{release}-py3-none-any.whl'), 'the probe curls the wheel');
+  assert.equal(py.text.includes('envpacks.json'), false);
+  // The four things Canonical's image does not have, as ONE script with ONE owner.
+  assert.ok(py.text.includes('FINISH_IMPORT_SCRIPT'));
+  assert.ok(py.text.includes('useradd --create-home --shell /bin/bash crucible'));
+  assert.ok(py.text.includes('# crucible-rootfs'));
 });

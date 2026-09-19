@@ -487,10 +487,10 @@ def higgs_env_prefix(python: Path, serving_stack: str) -> Path:
        interpreter's prefix, which is not the env Crucible installed vllm-omni
        into. The prefix is where the env IS, so the symlink is not followed.
     2. **`pyvenv.cfg` was made the definition of a prefix.** A conda env has
-       none (it has `conda-meta/`), and a relocatable pack (`envpack`) is a
-       standalone CPython with neither — so the check refused two of the three
-       layouts Crucible can be pointed at, and the one it refused tonight was
-       the base of the very venv it had just walked into.
+       none (it has `conda-meta/`), and a downloaded python-build-standalone
+       tree (`crucible/interpreter.py`) has neither — so the check refused
+       two of the three layouts Crucible can be pointed at, and the one it
+       refused tonight was the base of the very venv it had just walked into.
 
     What is read, in the order the evidence answers the launcher's question:
 

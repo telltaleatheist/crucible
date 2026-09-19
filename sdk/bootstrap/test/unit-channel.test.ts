@@ -3,37 +3,33 @@
  *
  * INSTALL-UNINSTALL.md §6.5: "latest" has one owner and it is
  * `releases/latest`; an unreachable channel is a refusal by name and never a
- * reason to install something older out of a cache; and a pack install over a
- * NEWER pack is refused unless an operator named the exact older version.
+ * reason to install something older out of a cache; and an install over a
+ * NEWER release is refused unless an operator named the exact older version.
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-  compareReleases, install, installPack, latestRelease, LATEST_RELEASE_URL, parseEnvpacks, parseLatestRelease,
+  compareReleases, install, installRuntime, latestRelease, LATEST_RELEASE_URL, parseLatestRelease,
 } from '../src/index.js';
-import { envpacksUrl } from '../src/envpacks.js';
-import { ENVPACKS_JSON, FakeRunner, PACK_SHA, refusal } from './fake.js';
+import { FakeRunner, PY_SHA, refusal } from './fake.js';
 
 const TARGET = { kind: 'wsl', distro: 'Ubuntu' } as const;
-const URL = envpacksUrl('0.6.0');
-const MANIFEST = parseEnvpacks(ENVPACKS_JSON, URL, '0.6.0');
 const SILENT = (): void => undefined;
 
-/** A pack already on the disk, at whatever release the test is about. */
-const stamped = (release: string, sha256: string) => ({
+/** A runtime already on the disk, at whatever release the test is about. */
+const stamped = (release: string, pythonSha256: string) => ({
   crucible: '/home/owen/.crucible/server/bin/crucible',
   python: '/home/owen/.crucible/server/bin/python3',
   version: `crucible ${release}`,
-  sha256,
+  pythonSha256,
   release,
 });
 
-const packOptions = (installed: ReturnType<typeof stamped> | null, rollbackTo: string | null) => ({
+const runtimeOptions = (installed: ReturnType<typeof stamped> | null, rollbackTo: string | null) => ({
   release: '0.6.0',
   backend: 'cuda-linux' as const,
   home: '/home/owen/.crucible',
-  freeBytes: 900_000_000_000,
   installed,
   rollbackTo,
   timeoutMs: 1000,
@@ -87,11 +83,11 @@ test('releases order by their three numbers, so "newer" is a comparison and not 
 
 // -------------------------------------------- the bootstrapper's own never-older
 
-test('installing over a NEWER pack is refused by name, and nothing is downloaded', async () => {
+test('installing over a NEWER release is refused by name, and nothing is downloaded', async () => {
   // Nothing is scripted on the runner: a refusal that ran a command would show
   // up here as "unexpected call", which is the half of this that matters.
   const runner = new FakeRunner({ platform: 'win32' }, []);
-  const r = await refusal(installPack(runner, TARGET, MANIFEST, 'server', packOptions(stamped('0.6.3', 'f'.repeat(64)), null)));
+  const r = await refusal(installRuntime(runner, TARGET, runtimeOptions(stamped('0.6.3', 'f'.repeat(64)), null)));
   assert.equal(r.code, 'install_would_downgrade');
   assert.match(r.message, /0\.6\.3/);
   assert.match(r.message, /0\.6\.0/);
@@ -101,16 +97,16 @@ test('installing over a NEWER pack is refused by name, and nothing is downloaded
 
 test('an operator rollback naming the EXACT version is allowed, and only that version', async () => {
   const mismatched = new FakeRunner({ platform: 'win32' }, []);
-  const r = await refusal(installPack(mismatched, TARGET, MANIFEST, 'server', packOptions(stamped('0.6.3', 'f'.repeat(64)), '0.5.9')));
+  const r = await refusal(installRuntime(mismatched, TARGET, runtimeOptions(stamped('0.6.3', 'f'.repeat(64)), '0.5.9')));
   assert.equal(r.code, 'rollback_version_mismatch');
   assert.match(r.message, /0\.5\.9/);
   assert.equal(mismatched.calls.length, 0);
 
-  // Named exactly, the downgrade proceeds: the first thing it does is clear the
-  // download directory, which is how this test knows the gate opened.
-  const rolling = new FakeRunner({ platform: 'win32' }, [{ argv: (argv) => argv.join(' ').includes('rm -f'), code: 0 }]);
+  // Named exactly, the downgrade proceeds: the first thing it does is fetch the
+  // interpreter, which is how this test knows the gate opened.
+  const rolling = new FakeRunner({ platform: 'win32' }, [{ argv: (argv) => argv.join(' ').includes('curl'), code: 0 }]);
   await assert.rejects(
-    installPack(rolling, TARGET, MANIFEST, 'server', packOptions(stamped('0.6.3', 'f'.repeat(64)), '0.6.0')),
+    installRuntime(rolling, TARGET, runtimeOptions(stamped('0.6.3', 'f'.repeat(64)), '0.6.0')),
     /unexpected call/,
     'the rollback should have got past the gate and started downloading',
   );
@@ -136,17 +132,22 @@ test('rollbackTo must name the release being installed, checked before any guest
   assert.equal(runner.calls.length, 0);
 });
 
-test('the same pack already on the disk is still a skip, and an older one still installs', async () => {
-  const same = new FakeRunner({ platform: 'win32' }, []);
-  const skipped = await installPack(same, TARGET, MANIFEST, 'server', packOptions(stamped('0.6.0', PACK_SHA), null));
-  assert.equal(skipped.skipped, true);
-  assert.equal(same.calls.length, 0);
-
-  const older = new FakeRunner({ platform: 'win32' }, [{ argv: (argv) => argv.join(' ').includes('rm -f'), code: 0 }]);
+test('the pinned interpreter already on the disk is skipped, and the wheel still installs', async () => {
+  // NOT a whole-step skip any more: the wheel IS the deploy and always runs.
+  // What the stamp saves is the 30 MB nobody needs to fetch twice.
+  const same = new FakeRunner({ platform: 'win32' }, [{ argv: (argv) => argv.join(' ').includes('curl'), code: 0 }]);
   await assert.rejects(
-    installPack(older, TARGET, MANIFEST, 'server', packOptions(stamped('0.5.1', 'f'.repeat(64)), null)),
+    installRuntime(same, TARGET, runtimeOptions(stamped('0.6.0', PY_SHA), null)),
+    /unexpected call/,
+  );
+  assert.equal(same.calls.length, 1);
+  assert.ok(!(same.calls[0]?.argv.join(' ') ?? '').includes('python-build-standalone'), 'the interpreter was not re-fetched');
+
+  const older = new FakeRunner({ platform: 'win32' }, [{ argv: (argv) => argv.join(' ').includes('curl'), code: 0 }]);
+  await assert.rejects(
+    installRuntime(older, TARGET, runtimeOptions(stamped('0.5.1', 'f'.repeat(64)), null)),
     /unexpected call/,
     'an upgrade is not gated at all',
   );
-  assert.ok(older.calls.length >= 1);
+  assert.ok((older.calls[0]?.argv.join(' ') ?? '').includes('python-build-standalone'), 'a different digest IS re-fetched');
 });

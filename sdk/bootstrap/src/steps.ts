@@ -10,21 +10,23 @@
  * What is shared, exactly:
  *
  * - the step NAMES, their ORDER, and what each is for;
- * - the skip rules (an existing config keeps its token; a matching pack stamp
- *   is not re-downloaded);
+ * - the skip rules (an existing config keeps its token; a matching interpreter
+ *   digest is not re-downloaded);
  * - every argv-shaped step, once — `renderArgv` produces the array `install()`
  *   spawns and `renderSh` produces the shell line, from the same words;
- * - the paths, the curl flags, the tar flags and the URL shapes, which live in
- *   `pack.ts` and `envpacks.ts` and are imported by both sides.
+ * - the paths, the curl flags, the tar flags, the interpreter pin and the URL
+ *   shapes, which live in `runtime.ts`, `interpreter.ts` and `release.ts` and
+ *   are imported by both sides.
  *
  * Three steps are PROGRAMS rather than single commands — probing the host,
- * fetching the pack, granting linger. Those carry their shell in `sh`, beside
- * the TypeScript that performs them, and the tests assert that both use the
- * same constants. Their iteration is spelled twice because two languages; the
- * facts they iterate over are spelled once.
+ * putting the server runtime in place, granting linger. Those carry their shell
+ * in `sh`, beside the TypeScript that performs them, and the tests assert that
+ * both use the same constants. Their iteration is spelled twice because two
+ * languages; the facts they iterate over are spelled once.
  */
-import { activatePackSh, CURL_ARGS, DOWNLOADS_SUBDIR, guestProbeScript, PARTIAL_SUFFIX, SERVER_SUBDIR, STAMP_NAME, TAR_ARGS } from './pack.js';
-import { ENVPACKS_ASSET, RELEASE_REPO } from './envpacks.js';
+import { DESKTOP_PACKAGES, interpreterFor, interpreterUrl } from './interpreter.js';
+import { wheelAssetName, wheelShaAssetName, RELEASE_REPO } from './release.js';
+import { activateRuntimeSh, CURL_ARGS, DOWNLOADS_SUBDIR, guestProbeScript, PARTIAL_SUFFIX, SERVER_SUBDIR, STAMP_NAME, TAR_ARGS } from './runtime.js';
 
 /**
  * A word in a step's argv: a literal, one of the values the install carries,
@@ -58,7 +60,7 @@ export const SHELL_VARIABLE: Readonly<Record<RefName, string>> = {
   user: 'GUEST_USER',
 };
 
-export type SkipRule = 'config-exists' | 'pack-stamp-matches' | 'root-only';
+export type SkipRule = 'config-exists' | 'interpreter-stamp-matches' | 'root-only';
 
 export interface StepDef {
   name: string;
@@ -71,7 +73,7 @@ export interface StepDef {
   /** Why `install()` may not run it. */
   skip: SkipRule | null;
   /** Which of `install()`'s timeouts this step gets. */
-  timeout: 'quickMs' | 'packMs' | 'envMs';
+  timeout: 'quickMs' | 'runtimeMs' | 'envMs';
 }
 
 export interface StepPlan {
@@ -141,95 +143,120 @@ export function hostFactsSh(): string {
     + `CRUCIBLE_HOME="$(printf '%s\\n' "$probe_out" | sed -n 's/^home=//p')"\n`
     + `GUEST_USER="$(printf '%s\\n' "$probe_out" | sed -n 's/^user=//p')"\n`
     + `free_kib="$(printf '%s\\n' "$probe_out" | sed -n 's/^free_kib=//p')"\n`
-    + `stamp_sha="$(printf '%s\\n' "$probe_out" | sed -n 's/^sha256=//p')"\n`
+    + `stamp_python_sha="$(printf '%s\\n' "$probe_out" | sed -n 's/^python_sha256=//p')"\n`
     // WHAT IS ALREADY ON THIS DISK, which is what the never-older gate compares
     // against (INSTALL-UNINSTALL.md 6.5.4). Empty on a tree that predates the
     // stamp, and an empty one is not read as "older": a version nobody recorded
     // cannot be compared with one.
     + `stamp_release="$(printf '%s\\n' "$probe_out" | sed -n 's/^release=//p')"\n`
     + `missing="$(printf '%s\\n' "$probe_out" | sed -n 's/^missing=//p' | tr '\\n' ' ')"\n`
-    + `if [ -n "$missing" ]; then die "guest_missing_tool: this machine has no $missing; a pack is fetched with curl and unpacked with tar --zstd"; fi\n`;
+    + `if [ -n "$missing" ]; then die "guest_missing_tool: this machine has no $missing; the interpreter is fetched with curl and unpacked with tar"; fi\n`;
 }
 
 /**
- * The server pack, sh side. Same manifest URL, same curl flags, same tar
- * flags, same paths, same order as `installPack()` — every one of them
- * interpolated from the constants that function uses.
+ * The server runtime, sh side: the interpreter half and then the wheel half.
  *
- * The manifest is read with awk rather than a JSON parser because a fresh
- * machine has no jq and may have no python. `RS="}"` puts one pack object per
- * record, which is sound because no value in the manifest contains a brace.
+ * Same pin, same curl flags, same tar flags, same paths, same order as
+ * `installRuntime()` — every one of them interpolated from the constants that
+ * function uses.
+ *
+ * TWO HALVES, AND ONLY THE SECOND ONE RUNS ON AN UPGRADE (PHASE20 section 4).
+ * The interpreter is a publisher's bytes pinned by digest, so a tree whose
+ * stamp names that digest IS those bytes and there is nothing a second download
+ * could correct. The wheel always installs: it is the deploy, it is one
+ * megabyte, and re-running it is how a half-finished install is repaired.
+ *
+ * THEY ARE TWO FUNCTIONS BECAUSE `--from-source` REPLACES ONE OF THEM. The
+ * generated `install.sh` can take a git ref instead of a release, and what that
+ * changes is the wheel and nothing else — the interpreter is the same pinned
+ * CPython either way, which is what makes `--from-source` stop needing a
+ * `python3` on the machine at all.
+ *
+ * There is no manifest to parse and no jq to parse it with. The one thing this
+ * reads off the network that is not bytes is `<wheel>.sha256`, one line.
  */
-export function serverPackSh(): string {
-  const manifest = `https://github.com/${RELEASE_REPO}/releases/download/v$RELEASE/${ENVPACKS_ASSET}`;
-  // NOT a fixed base. A pack row NAMES the release its bytes are in, because an
-  // unchanged pack is carried by reference rather than rebuilt (PackEntry.release),
-  // and the shell reads that field exactly like it reads the other four.
-  //
-  // Today the SERVER pack always rebuilds -- it embeds the Crucible source, so
-  // `release_packs.plan()` never marks it reusable -- and a fixed base would
-  // work. It reads the field anyway, because a silent dependence on one pack's
-  // build policy is the kind of coupling that is correct right up until somebody
-  // changes the policy and nothing here says why it broke.
-  const base = `https://github.com/${RELEASE_REPO}/releases/download/v$pack_release`;
+export function serverSh(): string {
+  return interpreterSh() + wheelSh();
+}
+
+/** The interpreter half: fetch, verify, unpack, swap. Once, ever. */
+export function interpreterSh(): string {
+  // The pin, per backend, as a `case` — the generated script is run on a
+  // machine whose backend is `$BACKEND` and cannot be known here. Only the two
+  // POSIX backends: the Windows interpreter is `install.ps1`'s, from the same
+  // table.
+  const cases = (['cuda-linux', 'mlx-darwin'] as const).map((backend) => {
+    const pin = interpreterFor(backend);
+    return `  ${backend}) py_asset='${pin.asset}'; py_sha='${pin.sha256}'; py_version='${pin.version}'; py_url='${interpreterUrl(pin)}' ;;\n`;
+  }).join('');
   return `dest="$CRUCIBLE_HOME/${SERVER_SUBDIR}"\n`
     + `partial="$dest${PARTIAL_SUFFIX}"\n`
     + `downloads="$CRUCIBLE_HOME/${DOWNLOADS_SUBDIR}"\n`
-    + `manifest_url="${manifest}"\n`
-    + `manifest="$(curl -fsSL --retry 3 "$manifest_url")" || die "pack_manifest_unreadable: could not fetch $manifest_url"\n`
-    // One pack per awk record (no value in the manifest contains a brace), then
-    // flattened to one line so the field reads work whether the JSON is
-    // pretty-printed or not. JSON whitespace includes CRLF: stripping LF alone
-    // leaves CR around the part names and constructs an invalid download URL.
-    // No jq, no python: a fresh machine has neither.
-    + `pack="$(printf '%s' "$manifest" | awk -v RS='}' -v b="$BACKEND" '$0 ~ /"name"[[:space:]]*:[[:space:]]*"server"/ && $0 ~ ("\\"backend\\"[[:space:]]*:[[:space:]]*\\"" b "\\"")' | tr -d '\\r\\n')"\n`
-    + `[ -n "$pack" ] || die "pack_not_published: the $RELEASE release publishes no server pack for $BACKEND"\n`
-    + `want_sha="$(printf '%s' "$pack" | sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\\([0-9a-f]*\\)".*/\\1/p')"\n`
-    + `unpacked="$(printf '%s' "$pack" | sed -n 's/.*"unpacked_bytes"[[:space:]]*:[[:space:]]*\\([0-9]*\\).*/\\1/p')"\n`
-    + `archive_bytes="$(printf '%s' "$pack" | sed -n 's/.*"bytes"[[:space:]]*:[[:space:]]*\\([0-9]*\\).*/\\1/p')"\n`
-    + `parts="$(printf '%s' "$pack" | sed -n 's/.*"parts"[[:space:]]*:[[:space:]]*\\[\\([^]]*\\)\\].*/\\1/p' | tr -d '[:space:]"' | tr ',' ' ')"\n`
-    // Schema 2 states it; schema 1 did not need to, having placed every pack
-    // on its own release. An absent field therefore RECOVERS `$RELEASE` -- the
-    // fact that schema stated structurally -- rather than defaulting to it.
-    + `pack_release="$(printf '%s' "$pack" | sed -n 's/.*"release"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')"\n`
-    + `[ -n "$pack_release" ] || pack_release="$RELEASE"\n`
-    + `[ -n "$want_sha" ] && [ -n "$parts" ] && [ -n "$unpacked" ] && [ -n "$archive_bytes" ] || die "pack_manifest_unreadable: $manifest_url does not describe the server pack"\n`
-    + `if [ "$stamp_sha" = "$want_sha" ] && [ -x "$dest/bin/crucible" ]; then\n`
-    + `  say "server-pack: already installed ($want_sha)"\n`
-    + `else\n`
-    // NEVER OVER A NEWER PACK, the same rule and the same two refusal names
-    // `installPack()` uses (INSTALL-UNINSTALL.md 6.5.4). Number by number in
-    // awk, because a string comparison puts 1.0.10 before 1.0.2 and this is the
-    // one question here that has to get that right. Exit 0 means older.
-    + `  crucible_older() {\n`
-    + `    awk -v a="$1" -v b="$2" 'BEGIN { split(a, x, "."); split(b, y, ".");\n`
-    + `      for (i = 1; i <= 3; i++) { if ((x[i]+0) < (y[i]+0)) exit 0; if ((x[i]+0) > (y[i]+0)) exit 1 } exit 1 }'\n`
-    + `  }\n`
-    + `  if [ -n "$stamp_release" ] && crucible_older "$RELEASE" "$stamp_release"; then\n`
-    + `    [ "$ROLLBACK_TO" = "$RELEASE" ] || die "install_would_downgrade: $dest is the $stamp_release pack and this would install $RELEASE over it. Nothing was downloaded. An operator who means to go back names the version: --rollback-to $RELEASE"\n`
-    + `  fi\n`
-    // The SAME sum as pack.ts's requiredBytes(): unpacked + the whole archive
-    // + one part, a part being the archive over the part count.
-    + `  n=0; for part in $parts; do n=$(( n + 1 )); done\n`
-    + `  need_kib=$(( (unpacked + archive_bytes + archive_bytes / n) / 1024 ))\n`
-    + `  [ "$free_kib" -ge "$need_kib" ] || die "pack_disk: the server pack needs $(( need_kib / 1048576 )) GiB free and there is $(( free_kib / 1048576 )) GiB"\n`
-    + `  archive="$downloads/$(printf '%s' "$parts" | awk '{print $1}' | sed 's/\\.part[0-9]*$//')"\n`
-    + `  rm -f "$archive"; mkdir -p "$downloads"\n`
-    + `  for part in $parts; do\n`
-    + `    say "server-pack: $part"\n`
-    + `    curl ${CURL_ARGS.join(' ')} -o "$downloads/$part" "${base}/$part" || die "pack_download_failed: ${base}/$part"\n`
-    + `    cat "$downloads/$part" >> "$archive" && rm -f "$downloads/$part"\n`
-    + `  done\n`
-    + `  got_sha="$($SHA_TOOL "$archive" | awk '{print $1}')"\n`
-    + `  if [ "$got_sha" != "$want_sha" ]; then rm -f "$archive"; die "pack_sha_mismatch: $archive hashes $got_sha, the manifest says $want_sha"; fi\n`
-    + `  rm -rf "$partial" && mkdir -p "$partial"\n`
-    + `  tar ${TAR_ARGS.join(' ')} "$archive" -C "$partial" || die "pack_unpack_failed: tar would not open $archive"\n`
-    + `  "$partial/bin/crucible" --version >/dev/null || die "pack_unpack_failed: $partial/bin/crucible would not run"\n`
-    + `  ${activatePackSh('"$dest"', '"$partial"')} || die "pack_activation_failed: the previous runtime was preserved"\n`
-    + `  printf 'sha256=%s\\nrelease=%s\\n' "$want_sha" "$RELEASE" > "$dest/${STAMP_NAME}"\n`
-    + `  rm -f "$archive"\n`
+    + `case "$BACKEND" in\n`
+    + cases
+    + `  *) die "unsupported_platform: no interpreter is pinned for $BACKEND" ;;\n`
+    + `esac\n`
+    // NEVER OVER A NEWER RELEASE (INSTALL-UNINSTALL.md 6.5.4). Checked before
+    // either half, because the wheel install is the thing that would take this
+    // machine back a version. Number by number in awk, because a string
+    // comparison puts 1.0.10 before 1.0.2 and this is the one question here
+    // that has to get that right. Exit 0 means older.
+    + `crucible_older() {\n`
+    + `  awk -v a="$1" -v b="$2" 'BEGIN { split(a, x, "."); split(b, y, ".");\n`
+    + `    for (i = 1; i <= 3; i++) { if ((x[i]+0) < (y[i]+0)) exit 0; if ((x[i]+0) > (y[i]+0)) exit 1 } exit 1 }'\n`
+    + `}\n`
+    + `if [ -n "$stamp_release" ] && crucible_older "$RELEASE" "$stamp_release"; then\n`
+    + `  [ "$ROLLBACK_TO" = "$RELEASE" ] || die "install_would_downgrade: $dest is the $stamp_release release and this would install $RELEASE over it. Nothing was downloaded. An operator who means to go back names the version: --rollback-to $RELEASE"\n`
     + `fi\n`
-    + `CRUCIBLE="$dest/bin/crucible"\n`;
+    + `if [ "$stamp_python_sha" = "$py_sha" ] && [ -x "$dest/bin/python3" ]; then\n`
+    + `  say "server: python $py_version is already at $dest"\n`
+    + `else\n`
+    + `  say "server: python $py_version from python-build-standalone"\n`
+    + `  mkdir -p "$downloads"; rm -f "$downloads/$py_asset"\n`
+    + `  curl ${CURL_ARGS.join(' ')} -o "$downloads/$py_asset" "$py_url" || die "runtime_download_failed: $py_url"\n`
+    + `  got_sha="$($SHA_TOOL "$downloads/$py_asset" | awk '{print $1}')"\n`
+    + `  if [ "$got_sha" != "$py_sha" ]; then rm -f "$downloads/$py_asset"; die "runtime_sha_mismatch: $py_asset hashes $got_sha and this installer pins $py_sha. The download was deleted"; fi\n`
+    + `  rm -rf "$partial" && mkdir -p "$partial"\n`
+    + `  tar ${TAR_ARGS.join(' ')} "$downloads/$py_asset" -C "$partial" || die "runtime_unpack_failed: tar would not open $downloads/$py_asset"\n`
+    // `install_only` archives carry ONE top-level `python/` directory and that
+    // directory IS the interpreter, so the swap moves `python/` rather than the
+    // archive's root.
+    + `  [ -x "$partial/python/bin/python3" ] || die "runtime_unpack_failed: $py_asset unpacked without a python/bin/python3"\n`
+    + `  ${activateRuntimeSh('"$dest"', '"$partial/python"')} || die "runtime_unpack_failed: the previous runtime was preserved"\n`
+    + `  rm -rf "$partial" "$downloads/$py_asset"\n`
+    + `fi\n`;
+}
+
+/**
+ * The wheel half: fetch, verify against the release's own `<wheel>.sha256`, pip
+ * it into the interpreter, stamp what is now there.
+ *
+ * THE SERVER IS SHUT DOWN FIRST, because this rewrites its own `site-packages`
+ * under it. `local shutdown` is a no-op on a machine where nothing is running,
+ * and `service-install` later in the sequence starts it again.
+ */
+export function wheelSh(): string {
+  const base = `https://github.com/${RELEASE_REPO}/releases/download/v$RELEASE`;
+  return `wheel="${wheelAssetName('$RELEASE')}"\n`
+    + `say "server: $wheel"\n`
+    + `mkdir -p "$downloads"; rm -f "$downloads/$wheel"\n`
+    + `curl ${CURL_ARGS.join(' ')} -o "$downloads/$wheel" "${base}/$wheel" || die "runtime_download_failed: ${base}/$wheel"\n`
+    + `want_sha="$(curl -fsSL --retry 3 "${base}/${wheelShaAssetName('$RELEASE')}" | awk '{print $1}')" || die "runtime_download_failed: ${base}/${wheelShaAssetName('$RELEASE')}"\n`
+    + `case "$want_sha" in *[!0-9a-f]*|"") die "runtime_download_failed: ${base}/${wheelShaAssetName('$RELEASE')} is not a sha256" ;; esac\n`
+    + `got_sha="$($SHA_TOOL "$downloads/$wheel" | awk '{print $1}')"\n`
+    + `if [ "$got_sha" != "$want_sha" ]; then rm -f "$downloads/$wheel"; die "runtime_sha_mismatch: $wheel hashes $got_sha, the release says $want_sha. The download was deleted"; fi\n`
+    // The server is shut down before its own site-packages is rewritten under
+    // it. A no-op where nothing is running; `service-install` starts it again.
+    + `if [ -x "$dest/bin/crucible" ]; then "$dest/bin/crucible" local shutdown || true; fi\n`
+    + `"$dest/bin/python3" -m pip install --upgrade --no-input "$downloads/$wheel" || die "runtime_install_failed: pip would not install $wheel"\n`
+    // The tray's two packages, on the platform that has a desktop. Declared in
+    // `interpreter.ts` rather than in `pyproject.toml`, so a headless Linux
+    // server never carries a GUI toolkit — see DESKTOP_PACKAGES.
+    + `if [ "$(uname -s)" = Darwin ]; then "$dest/bin/python3" -m pip install ${DESKTOP_PACKAGES.join(' ')} || die "runtime_install_failed: the desktop packages would not install"; fi\n`
+    + `rm -f "$downloads/$wheel"\n`
+    + `printf 'python_sha256=%s\\npython_version=%s\\nrelease=%s\\n' "$py_sha" "$py_version" "$RELEASE" > "$dest/${STAMP_NAME}"\n`
+    + `CRUCIBLE="$dest/bin/crucible"\n`
+    + `"$CRUCIBLE" --version >/dev/null || die "runtime_install_failed: $CRUCIBLE would not run"\n`;
 }
 
 /**
@@ -291,7 +318,7 @@ export function installJobTypesSh(): string {
 }
 
 /**
- * `install.sh --uninstall`, whole: the CLI verb, and then the pack.
+ * `install.sh --uninstall`, whole: the CLI verb, and then the runtime.
  *
  * TWO HALVES, AND THE SPLIT IS NOT ARBITRARY. `crucible uninstall`
  * (`crucible/uninstall.py`) stops the server, removes the service and takes
@@ -301,7 +328,7 @@ export function installJobTypesSh(): string {
  * unpacked that interpreter, so this script removes it, after the verb has
  * returned. One owner per artefact, and the order is the only one that works.
  *
- * `--dry-run` is passed through and the pack removal becomes a sentence, so
+ * `--dry-run` is passed through and the runtime removal becomes a sentence, so
  * the wrapper's dry run is as complete a description as the verb's.
  */
 export function uninstallSh(): string {
@@ -316,15 +343,15 @@ export function uninstallSh(): string {
     + `if [ "$PURGE_WEIGHTS" = 1 ]; then UNINSTALL_FLAGS="$UNINSTALL_FLAGS --purge-weights"; fi\n`
     + `if [ "$DRY_RUN" = 1 ]; then UNINSTALL_FLAGS="$UNINSTALL_FLAGS --dry-run"; fi\n`
     + `${verb} || die "step_failed: uninstall"\n`
-    + `# The pack, which the verb deliberately leaves: it is the interpreter\n`
+    + `# The runtime, which the verb deliberately leaves: it is the interpreter\n`
     + `# that just ran, and this script is what unpacked it.\n`
-    + `say "server-pack"\n`
+    + `say "server"\n`
     + `if [ "$DRY_RUN" = 1 ]; then\n`
-    + `  say "server-pack: would remove $CRUCIBLE_HOME/${SERVER_SUBDIR} and $CRUCIBLE_HOME/${DOWNLOADS_SUBDIR}"\n`
+    + `  say "server: would remove $CRUCIBLE_HOME/${SERVER_SUBDIR} and $CRUCIBLE_HOME/${DOWNLOADS_SUBDIR}"\n`
     + `  say "home: would remove $CRUCIBLE_HOME if it were then empty"\n`
     + `else\n`
     + `  rm -rf "$CRUCIBLE_HOME/${SERVER_SUBDIR}" "$CRUCIBLE_HOME/${SERVER_SUBDIR}${PARTIAL_SUFFIX}" "$CRUCIBLE_HOME/${DOWNLOADS_SUBDIR}"\n`
-    + `  say "server-pack: removed $CRUCIBLE_HOME/${SERVER_SUBDIR}"\n`
+    + `  say "server: removed $CRUCIBLE_HOME/${SERVER_SUBDIR}"\n`
     + `  if rmdir "$CRUCIBLE_HOME" 2>/dev/null; then\n`
     + `    say "home: removed $CRUCIBLE_HOME"\n`
     + `  else\n`
@@ -340,7 +367,7 @@ export function uninstallSh(): string {
  * The sequence, by name. PHASE14 section 4:
  *
  *     host-facts       what this machine is; the conda walk is DELETED
- *     server-pack      download + verify + unpack into <CRUCIBLE_HOME>/server
+ *     server           the pinned interpreter (once) + this release's wheel, into <CRUCIBLE_HOME>/server
  *     init             <server>/bin/crucible init --token …   (skipped when a config exists)
  *     install-<type>   <server>/bin/crucible install <type>   (none in the standalone installer)
  *     service-install  <server>/bin/crucible service install
@@ -352,19 +379,19 @@ export function installSteps(plan: StepPlan): StepDef[] {
   const steps: StepDef[] = [
     {
       name: 'host-facts',
-      what: 'read this host: CRUCIBLE_HOME, the user, free disk, the tools a pack needs',
+      what: 'read this host: CRUCIBLE_HOME, the user, free disk, the tools an install needs',
       words: null,
       sh: hostFactsSh(),
       skip: null,
       timeout: 'quickMs',
     },
     {
-      name: 'server-pack',
-      what: 'download, verify and unpack the server pack — the interpreter comes WITH it',
+      name: 'server',
+      what: "download the pinned interpreter (once) and pip-install this release's wheel into it",
       words: null,
-      sh: serverPackSh(),
-      skip: 'pack-stamp-matches',
-      timeout: 'packMs',
+      sh: serverSh(),
+      skip: 'interpreter-stamp-matches',
+      timeout: 'runtimeMs',
     },
     {
       name: 'init',
@@ -392,7 +419,7 @@ export function installSteps(plan: StepPlan): StepDef[] {
     const words: Word[] = [crucible, ...entry.argv];
     steps.push({
       name: `install-${entry.type}`,
-      what: `download the ${entry.type} environment pack`,
+      what: `build the ${entry.type} environment from its recipe`,
       words,
       sh: `${renderSh(words)} || die "step_failed: install-${entry.type}"\n`,
       skip: null,

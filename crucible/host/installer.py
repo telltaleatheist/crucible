@@ -112,7 +112,7 @@ STEPS: tuple[str, ...] = (
 )
 
 #: Long enough for a `wsl --import` of a multi-gigabyte ext4 file, and for a
-#: guest-side install that downloads a server pack over somebody's home line.
+#: guest-side install that pips a job type's recipe over somebody's home line.
 IMPORT_TIMEOUT_SECONDS = 30 * 60.0
 GUEST_INSTALL_TIMEOUT_SECONDS = 120 * 60.0
 QUICK_TIMEOUT_SECONDS = 5 * 60.0
@@ -446,16 +446,12 @@ class EngineInstall:
         guest and turns a VPN into a sentence instead of a failed download.
 
         `required_bytes` is deliberately NOT passed, and `pack_disk` therefore
-        still never fires. THE GUEST ALREADY ASKS IT, BETTER: `install.sh`
-        reads `envpacks.json` for the pack it is about to fetch and refuses
-        `pack_disk: the server pack needs N GiB free and there is M GiB` before
-        a byte moves (`sdk/bootstrap/src/steps.ts`, the same sum as
-        `pack.ts:requiredBytes` — unpacked + archive + one part). Pricing it
-        here would mean this side fetching the same manifest to compute the
-        same number a step later, which is ARCHITECTURE.md R1's two owners of
-        one fact — and it would put a network call inside a walk that is
-        otherwise entirely `wsl.exe`. The row stays in the table for a caller
-        that knows a bigger number, such as one about to pull weights.
+        still never fires. SINCE PHASE20 THERE IS NOTHING HERE TO PRICE: what
+        goes into the guest is a ~30 MB interpreter and a 1 MB wheel with its
+        PyPI dependencies, and a disk guard for a hundred megabytes is a
+        sentence nobody needs. The row stays in the table for a caller that
+        knows a bigger number — one about to pull weights, or `crucible install
+        tts`, which is where the gigabytes actually are.
         """
         self._walk(
             "guest-ready",
@@ -575,34 +571,154 @@ class EngineInstall:
             self._line(f'"{self._distro}" is already imported')
             self._finish("import-distro", f'"{self._distro}" was already there')
             return
-        from .wsl_states import ROOTFS_ASSET_TEMPLATE, RELEASE_REPOSITORY, WSL_CONF_MARKER
-        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?", self._release):
-            raise self._fail("invalid_release", "The rootfs release must be a version")
-        asset = ROOTFS_ASSET_TEMPLATE.replace("{version}", self._release)
-        base = f"https://github.com/{RELEASE_REPOSITORY}/releases/download/v{self._release}"
+        # CANONICAL'S IMAGE, AND CANONICAL'S OWN DIGEST (PHASE20 section 2).
+        # It used to be `crucible-rootfs-<version>.tar.zst` off our own release,
+        # rebuilt by a Docker job on every tag for an image whose contents had
+        # not moved in a month. Every constant below is GENERATED from
+        # `sdk/bootstrap/src/distro.ts`, which is the one owner: this side and
+        # `@crucible/bootstrap`'s `ensureDistro()` import the same bytes and
+        # finish the import the same way, or they are two installs again.
+        from .wsl_states import (
+            FINISH_IMPORT_SCRIPT,
+            UBUNTU_WSL_ROOTFS,
+            UBUNTU_WSL_ROOTFS_URL,
+            UBUNTU_WSL_SUMS_URL,
+            WSL_CONF_MARKER,
+        )
+        asset = UBUNTU_WSL_ROOTFS
         downloads, destination = self._home / "downloads", self._home / "wsl"
         downloads.mkdir(parents=True, exist_ok=True)
         destination.mkdir(parents=True, exist_ok=True)
         if any(destination.iterdir()):
             raise self._fail("distro_import_incomplete", f"{destination} is not empty but no distro is registered. Its files were kept for recovery")
         archive = downloads / asset
-        self._line(f"Downloading the verified Crucible Linux image for {self._release}")
-        fetched = self._runner.run(["curl.exe", "-fL", "--retry", "3", "-o", str(archive), f"{base}/{asset}"], timeout_s=3600)
-        digest = self._runner.run(["curl.exe", "-fsSL", "--retry", "3", f"{base}/{asset}.sha256"], timeout_s=300) if fetched.ok else fetched
+        self._line(f"Downloading Ubuntu's own WSL image ({asset})")
+        fetched = self._runner.run(["curl.exe", "-fL", "--retry", "3", "-o", str(archive), UBUNTU_WSL_ROOTFS_URL], timeout_s=3600)
+        digest = self._runner.run(["curl.exe", "-fsSL", "--retry", "3", UBUNTU_WSL_SUMS_URL], timeout_s=300) if fetched.ok else fetched
         if not fetched.ok or not digest.ok:
-            raise self._fail("rootfs_download_failed", f"The release's rootfs or checksum could not be downloaded: {digest.said()}")
-        want = digest.stdout.split()[0].lower() if digest.stdout.split() else ""
+            raise self._fail("rootfs_download_failed", f"Ubuntu's WSL image or its SHA256SUMS could not be downloaded: {digest.said()}")
+        # THE ROW FOR OUR FILE, by name. The sums file lists every image in
+        # that directory, and `current/` is a moving pointer — so a sums file
+        # that does not name this download is exactly what upstream renaming
+        # the file looks like, and it must refuse rather than compare nothing.
+        rows = [line.split() for line in digest.stdout.splitlines() if line.strip()]
+        want = next(
+            (row[0].lower() for row in rows if len(row) >= 2 and row[1].lstrip("*").strip() == asset),
+            "",
+        )
         hashed = self._runner.run(["certutil", "-hashfile", str(archive), "SHA256"], timeout_s=300)
         candidates = [line.replace(" ", "").strip().lower() for line in hashed.stdout.splitlines()]
-        if not re.fullmatch(r"[0-9a-f]{64}", want) or not hashed.ok or want not in candidates:
-            raise self._fail("pack_sha_mismatch", "The downloaded rootfs does not match the release checksum; no distro was imported")
+        if not re.fullmatch(r"[0-9a-f]{64}", want):
+            raise self._fail("rootfs_sha_mismatch", f"{UBUNTU_WSL_SUMS_URL} names no sha256 for {asset}; no distro was imported")
+        if not hashed.ok or want not in candidates:
+            raise self._fail("rootfs_sha_mismatch", "The downloaded image does not match Ubuntu's own checksum; no distro was imported")
         imported = self._runner.run(["wsl.exe", "--import", self._distro, str(destination), str(archive), "--version", "2"], timeout_s=IMPORT_TIMEOUT_SECONDS)
         if not imported.ok:
             raise self._fail("distro_import_failed", imported.said())
+        # WHAT `build-rootfs.sh` USED TO BAKE, done here instead: the crucible
+        # user, passwordless sudo, and the `/etc/wsl.conf` whose first line is
+        # the marker every later check looks for. Canonical's image has none of
+        # them, and it is ours — just imported under our name into our
+        # directory — so writing them is finishing the import.
+        finished = self._runner.run(
+            ["wsl.exe", "-d", self._distro, "-u", "root", "--exec", "bash", "-c", FINISH_IMPORT_SCRIPT],
+            timeout_s=QUICK_TIMEOUT_SECONDS,
+        )
+        if not finished.ok:
+            raise self._fail("distro_import_failed", f"The imported image could not be prepared: {finished.said()}")
         marked = self._runner.run(["wsl.exe", "-d", self._distro, "--exec", "cat", "/etc/wsl.conf"], timeout_s=300)
         if not marked.ok or WSL_CONF_MARKER not in marked.stdout:
             raise self._fail("distro_import_invalid", "The imported image did not contain its ownership marker; it was preserved for inspection")
-        self._finish("import-distro", f'Imported the verified {asset} as "{self._distro}"')
+        self._finish("import-distro", f'Imported {asset} as "{self._distro}"')
+
+    # --------------------------------------------- one release per machine
+
+    def guest_release(self) -> str | None:
+        """What `installation.json` inside the distro says the guest is.
+
+        None when there is no record to read. That is not the same as "up to
+        date": `crucible/local.py`'s `publish_installation` writes the file
+        when the RUNTIME STARTS, so an absent one means nothing has run in
+        there — a guest to bring up to this release rather than one to leave at
+        a version nobody can name.
+        """
+        read = self._runner.run(
+            [
+                "wsl.exe", "-d", self._distro, "--exec", "bash", "-lc",
+                'cat "${CRUCIBLE_HOME:-$HOME/.crucible}/installation.json"',
+            ],
+            timeout_s=QUICK_TIMEOUT_SECONDS,
+        )
+        if not read.ok or read.stdout.strip() == "":
+            return None
+        try:
+            record = json.loads(read.stdout)
+        except json.JSONDecodeError:
+            return None
+        release = record.get("release")
+        return release if isinstance(release, str) and release else None
+
+    def upgrade_guest(self) -> str | None:
+        """Carry the guest to THIS host's release. Returns it, or None.
+
+        ONE RELEASE PER MACHINE, AND THE HOST IS THE DRIVER (Owen, 2026-09-18:
+        *"windows is the driver; the thing moving wsl forward."*).
+
+        THE DEFECT THIS EXISTS FOR, measured rather than remembered.
+        `crucible/host/app.py` handed the install sequence to the door and
+        nowhere else, so the walk ran on `POST /install`; and on a machine the
+        guest already owns, that sequence called `_complete()` — which emits a
+        `done` describing the engine that is already there — instead of
+        installing anything. `_guest_install` below, the ONE place
+        `install.sh --release` runs inside the distro, is reached only from
+        `run()`. So `install.ps1` upgraded the Windows half and the guest sat
+        at whatever release it was installed at, which is why `deploy.sh` had
+        grown a second driver for the same machine.
+
+        THREE ANSWERS, AND ONLY ONE OF THEM DOES ANYTHING:
+
+          * the guest names an OLDER release, or names none → it is carried, by
+            the same `install.sh --release <this host's version>` the move runs.
+            That script is generated from `sdk/bootstrap/src/steps.ts`, so what
+            the guest gets is the pinned interpreter (skipped when its digest is
+            already stamped), this release's wheel, and then the service,
+            capability and readiness steps it already ends with — which is why
+            nothing here repeats them.
+          * the guest names THIS release → nothing. Re-running an install that
+            has nothing to do is a minute of somebody's startup for no change.
+          * the guest names a NEWER one → `guest_ahead_of_host`, by name, and
+            the guest is left exactly as it is. A host that silently took a
+            guest BACKWARDS would be the never-older rule the installers
+            themselves refuse (INSTALL-UNINSTALL.md 6.5.4), broken by the one
+            process that is supposed to enforce it.
+        """
+        from ..local import LocalError, release_order
+
+        theirs = self.guest_release()
+        if theirs is not None:
+            try:
+                order = release_order(theirs, self._release)
+            except LocalError as exc:
+                raise self._fail(
+                    "guest_release_unreadable",
+                    f'the "{self._distro}" guest records a release this build cannot '
+                    f"order against its own ({exc}). It was left alone rather than "
+                    "carried: a version nothing can compare is not a version anything "
+                    "should act on.",
+                ) from exc
+            if order == 0:
+                return None
+            if order > 0:
+                raise self._fail(
+                    "guest_ahead_of_host",
+                    f'the "{self._distro}" guest is Crucible {theirs} and this host is '
+                    f"{self._release}. It was left alone: a host does not take a guest "
+                    "backwards, and the two halves of this machine are meant to be one "
+                    "release. Upgrade the host, or uninstall the guest and let this "
+                    "install it.",
+                )
+        self._guest_install()
+        return self._release
 
     def _guest_install(self) -> None:
         """`install.sh`, inside the distro. The guest half has ONE owner."""

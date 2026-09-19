@@ -6,9 +6,10 @@
  * WALKS that list rather than restating it, so the generated `install.sh`
  * cannot describe a different install from the one an app performs:
  *
- *   host-facts       CRUCIBLE_HOME, the guest user, free disk, curl/tar/zstd
- *   server-pack      download + verify + unpack the release's server pack into
- *                    <CRUCIBLE_HOME>/server — the interpreter comes WITH it
+ *   host-facts       CRUCIBLE_HOME, the guest user, free disk, curl/tar
+ *   server           the pinned interpreter into <CRUCIBLE_HOME>/server (ONCE,
+ *                    skipped when its digest is the one stamped there) and this
+ *                    release's wheel pip-installed into it
  *   init             <server>/bin/crucible init --token <minted here> --enable-<type>…
  *                    SKIPPED when a config already exists (its token is kept)
  *   install-<type>   <server>/bin/crucible install <type>
@@ -17,13 +18,13 @@
  *                    which since PHASE15 means the HOST runs it, never this file
  *   capability-write <server>/bin/crucible capability --write
  *
- * **There is no conda step and no pip step.** A fresh machine has no Python at
- * all and does not need one: the server pack is a relocatable CPython with the
- * crucible wheel already installed in it (PHASE14 section 1). `release` — a
- * version string — replaced `wheel` and the conda options, and it defaults to
- * this package's own version, which is the one legitimate default in here: the
- * bootstrapper ships AT the server's version, so "which release" is not a
- * question anybody has to answer.
+ * **There is no conda step.** A fresh machine has no Python at all and does not
+ * need one: the `server` step downloads a relocatable CPython from
+ * python-build-standalone at a pinned digest (PHASE20 section 2) and pip-installs
+ * the release's wheel into it. `release` — a version string — replaced `wheel`
+ * and the conda options, and it defaults to this package's own version, which is
+ * the one legitimate default in here: the bootstrapper ships AT the server's
+ * version, so "which release" is not a question anybody has to answer.
  *
  * Pulls are NOT part of this: weights are the app's, later, per model.
  *
@@ -54,11 +55,11 @@
 import { randomBytes } from 'node:crypto';
 
 import { readLocalConfig, type LocalConfig } from './config.js';
-import { backendFor, envpacksUrl, type PackBackend } from './envpacks.js';
+import { backendFor, type ServerBackend } from './release.js';
 import { BootstrapRefusal, BootstrapStepFailed } from './errors.js';
-import { hostInstallCommand, hostInstalled, hostPackDir, requestHostInstall, type HostEvent, type HostFetch } from './hostdoor.js';
+import { hostInstallCommand, hostInstalled, hostRuntimeDir, requestHostInstall, type HostEvent, type HostFetch } from './hostdoor.js';
 import { ensureLinger } from './linger.js';
-import { fetchManifest, installPack, probeGuest, refuseMissingTools, SERVER_SUBDIR } from './pack.js';
+import { installRuntime, probeGuest, refuseMissingTools, SERVER_SUBDIR } from './runtime.js';
 import { processRunner, type OutputStream, type Runner } from './runner.js';
 import { installSteps, renderArgv, type RefName, type StepPlan } from './steps.js';
 import { describeTarget, resolveTarget, streamOn, type Target } from './target.js';
@@ -81,15 +82,15 @@ export type JobTypeRequest = Exclude<JobType, 'tts'> | { type: 'tts'; narratorEn
 export interface InstallTimeouts {
   /** Every `crucible` verb that builds nothing, and the host probe. */
   quickMs: number;
-  /** The server pack: a multi-gigabyte download over somebody's home line. */
-  packMs: number;
-  /** `crucible install <type>`, which downloads a job env pack. */
+  /** The server runtime: a ~30 MB interpreter and a 1 MB wheel, over somebody's home line. */
+  runtimeMs: number;
+  /** `crucible install <type>`, which pips a recipe — gigabytes, from the mirrors. */
   envMs: number;
 }
 
 export const DEFAULT_INSTALL_TIMEOUTS: InstallTimeouts = {
   quickMs: 5 * 60_000,
-  packMs: 120 * 60_000,
+  runtimeMs: 30 * 60_000,
   envMs: 120 * 60_000,
 };
 
@@ -109,7 +110,7 @@ export interface InstallOptions {
   /** `CRUCIBLE_HOME` for every `crucible` verb, as the target spells it. Omit for the server's default. */
   home?: string;
   /**
-   * Which release's packs to install.
+   * Which release's wheel to install.
    *
    * AN APP PASSES THE RELEASE CHANNEL'S ANSWER (INSTALL-UNINSTALL.md §6.5.1):
    * `latestRelease()` reads `releases/latest`, and the app's own never-older
@@ -128,8 +129,9 @@ export interface InstallOptions {
   /**
    * AN OPERATOR ROLLBACK, and the only way an install goes backwards.
    *
-   * `installPack` refuses `install_would_downgrade` when `<home>/server/.pack`
-   * names a release newer than the one being installed (INSTALL-UNINSTALL.md
+   * `installRuntime` refuses `install_would_downgrade` when
+   * `<home>/server/.crucible` names a release newer than the one being
+   * installed (INSTALL-UNINSTALL.md
    * §6.5.4). This is how somebody says "yes, put 1.0.1 back" — and it must be
    * the SAME version as {@link InstallOptions.release}, because a rollback is an
    * operator naming the Crucible they want rather than a flag that means
@@ -170,9 +172,9 @@ export interface InstallResult {
   steps: InstallStep[];
   /** The server as its config now describes it. The token is not here; `readLocalConfig()` is. */
   server: { name: string; url: string; configPath: string };
-  /** Which release's packs are on this host, and which backend they are for. */
+  /** Which release is on this host, and which backend it serves. */
   release: string;
-  backend: PackBackend;
+  backend: ServerBackend;
   /** `<CRUCIBLE_HOME>/server/bin/crucible`, as the target spells it. */
   crucible: string;
 }
@@ -265,7 +267,7 @@ async function installThroughHost(options: InstallOptions, release: string, runn
     throw new BootstrapRefusal(
       'host_rollback_unsupported',
       `rollbackTo is a POSIX-side option: on Windows the host owns the install sequence (PHASE15 4.3) and its door `
-        + 'takes no rollback. Roll the host pack back by hand with the line below, from an ordinary PowerShell.',
+        + 'takes no rollback. Roll the host back by hand with the line below, from an ordinary PowerShell.',
       { command: `.\\install.ps1 -Release ${options.rollbackTo} -RollbackTo ${options.rollbackTo}` },
     );
   }
@@ -273,7 +275,7 @@ async function installThroughHost(options: InstallOptions, release: string, runn
   if (!hostInstalled(runner)) {
     throw new BootstrapRefusal(
       'host_not_installed',
-      `there is no Crucible host at ${hostPackDir(runner)} on this machine, and on Windows the host is what installs `
+      `there is no Crucible host at ${hostRuntimeDir(runner)} on this machine, and on Windows the host is what installs `
         + 'a Crucible: it walks the WSL state table, raises the two UAC prompts a WSL install needs, and shows the '
         + 'steps in its own window. Run the line below once, then call install() again. '
         + 'It is not run from here on purpose — a library that downloads and elevates an installer from a background '
@@ -299,7 +301,7 @@ async function installThroughHost(options: InstallOptions, release: string, runn
 
 export async function install(options: InstallOptions, runner: Runner = processRunner()): Promise<InstallResult> {
   const release = options.release ?? BOOTSTRAP_VERSION;
-  // The rollback is checked HERE rather than at the pack, so that a caller who
+  // The rollback is checked HERE rather than in `installRuntime`, so that a caller who
   // named two different versions is told so before a single guest command runs.
   const rollback = options.rollbackTo === undefined ? null : options.rollbackTo;
   if (rollback !== null && rollback !== release) {
@@ -369,10 +371,9 @@ export async function install(options: InstallOptions, runner: Runner = processR
   const configOptions = options.home === undefined ? {} : { home: options.home };
   const values: Partial<Record<RefName, string>> = { release, backend };
   let crucible: string | null = null;
-  // Measured by `host-facts`, consumed by `server-pack`. Locals rather than a
+  // Measured by `host-facts`, consumed by `server`. A local rather than a
   // state object threaded through the walk: the sequence is a sequence, and
   // the one step that reads them is the next one.
-  let manifest: Awaited<ReturnType<typeof fetchManifest>> | null = null;
   let guest: Awaited<ReturnType<typeof probeGuest>> | null = null;
 
   for (const step of installSteps(plan)) {
@@ -388,38 +389,32 @@ export async function install(options: InstallOptions, runner: Runner = processR
           status: 'ok',
           detail: `${describeTarget(target)}: CRUCIBLE_HOME ${guest.home}, user ${guest.user}, `
             + `${(guest.freeBytes / 1024 ** 3).toFixed(1)} GiB free`
-            + `${guest.server === null ? '' : `, server pack ${guest.server.release ?? 'unstamped'}`}`,
+            + `${guest.server === null ? '' : `, server ${guest.server.release ?? 'unstamped'}`}`,
         });
         done.push(step.name);
-
-        // The pack fetch needs the manifest, and the manifest is fetched with
-        // the GUEST's curl — nothing here reaches the network itself, so a
-        // proxy or a VPN inside the distro is the guest's own answer.
-        manifest = await fetchManifest(runner, target, release, envpacksUrl(release), timeouts.quickMs);
         break;
       }
-      case 'server-pack': {
-        if (manifest === null || guest === null) throw new Error('unreachable: host-facts did not run before server-pack');
-        const packStep = report({ name: step.name, argv: [], status: 'running', detail: `${SERVER_SUBDIR} pack for ${backend}, release ${release}` });
-        const result = await installPack(runner, target, manifest, 'server', {
+      case 'server': {
+        if (guest === null) throw new Error('unreachable: host-facts did not run before server');
+        const serverStep = report({ name: step.name, argv: [], status: 'running', detail: `${SERVER_SUBDIR} for ${backend}, release ${release}` });
+        const result = await installRuntime(runner, target, {
           release,
           backend,
           home: guest.home,
-          freeBytes: guest.freeBytes,
           installed: guest.server,
           rollbackTo: rollback,
-          timeoutMs: timeouts.packMs,
+          timeoutMs: timeouts.runtimeMs,
           onLine: (line, stream) => options.onLine(line, stream, step.name),
         });
         crucible = result.paths.crucible;
         values.crucible = crucible;
-        packStep.status = result.skipped ? 'skipped' : 'ok';
-        packStep.detail = result.skipped
-          ? `${result.paths.dest} is already the ${release} pack (sha ${result.entry.sha256.slice(0, 12)}…)`
-          : `unpacked ${result.entry.parts.length} part(s) into ${result.paths.dest} (Python ${result.entry.python})`;
-        packStep.argv = result.skipped ? [] : [result.paths.crucible];
-        options.onStep?.(packStep);
-        if (!result.skipped) done.push(step.name);
+        serverStep.status = 'ok';
+        serverStep.detail = result.interpreterSkipped
+          ? `python ${result.pin.version} was already at ${result.paths.dest}; installed the ${release} wheel into it`
+          : `python ${result.pin.version} from python-build-standalone into ${result.paths.dest}, then the ${release} wheel`;
+        serverStep.argv = [result.paths.crucible];
+        options.onStep?.(serverStep);
+        done.push(step.name);
         break;
       }
       case 'init': {
@@ -455,7 +450,7 @@ export async function install(options: InstallOptions, runner: Runner = processR
     }
   }
 
-  if (crucible === null) throw new Error('unreachable: no server pack after the sequence');
+  if (crucible === null) throw new Error('unreachable: no server runtime after the sequence');
   const config = await readLocalConfig(configOptions, runner);
   return {
     steps,

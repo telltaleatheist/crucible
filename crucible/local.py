@@ -29,6 +29,41 @@ class LocalError(RuntimeError):
     pass
 
 
+#: Three numbers and nothing else. A release that does not match is not
+#: ordered — see `release_order`.
+_RELEASE = __import__("re").compile(r"^v?(\d+)\.(\d+)\.(\d+)")
+
+
+def release_order(left: str, right: str) -> int:
+    """-1, 0 or 1, comparing two releases NUMBER BY NUMBER.
+
+    Not a string comparison, which puts `1.0.10` before `1.0.2` — the one
+    question in this area that has to get that right, and the reason
+    `install.sh` spells the same rule in awk and `install.ps1` in `[version]`.
+
+    THIS FILE OWNS IT because this file owns `installation.json`, whose
+    `release` is what anybody asking "is that machine behind" is reading. A
+    comparator beside each caller would be three answers to one question.
+
+    A version this cannot read is REFUSED rather than ordered. "I could not
+    parse it so I will assume it is older" is how a machine gets taken
+    backwards by something that meant to move it forward.
+    """
+    numbers = []
+    for value in (left, right):
+        match = _RELEASE.match(value.strip())
+        if match is None:
+            raise LocalError(
+                f"release_unreadable: {value!r} is not a Crucible release, so it "
+                "cannot be compared with one"
+            )
+        numbers.append(tuple(int(part) for part in match.groups()))
+    first, second = numbers
+    if first == second:
+        return 0
+    return -1 if first < second else 1
+
+
 def publish_installation(home: Path | None = None) -> Path:
     home = (home if home is not None else crucible_home()).resolve()
     # Preserve venv/bin/python itself: resolving its symlink selects the base

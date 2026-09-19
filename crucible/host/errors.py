@@ -39,8 +39,18 @@ HOST_ERROR_CODES: dict[str, str] = {
         "would boot the same distro twice and watch each other's recoveries."
     ),
     "host_no_pack": (
-        "this machine has no unpacked host pack, so there is no `crucible.cmd` "
-        "to start a host-mode server with."
+        "this machine has no host runtime installed, so there is no "
+        "`crucible.cmd` to start a host-mode server with."
+    ),
+    "guest_ahead_of_host": (
+        "the WSL guest is a NEWER Crucible than this host. One release per "
+        "machine, and the host is what moves the guest forward — never "
+        "backwards, so it was left exactly as it is and this is the report."
+    ),
+    "guest_release_unreadable": (
+        "the WSL guest's installation.json names a release this build cannot "
+        "order against its own, so nothing could say whether it is behind. It "
+        "was left alone rather than carried."
     ),
     "config_from_unreadable": "`--config-from` was given a file that is not TOML.",
     "config_from_no_token": (

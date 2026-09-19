@@ -10,7 +10,7 @@ import pytest
 
 from urllib.parse import quote
 
-from crucible import cli, jobenv, pairing
+from crucible import cli, jobenv, pairing, workerenv
 from crucible.config import config_path, load_config
 from crucible.errors import NoViableBackend
 from crucible.interfaces import InterfaceError
@@ -564,3 +564,66 @@ def test_init_refuses_a_blank_or_spaced_token(home: Path, viable: None) -> None:
     assert cli.main(["init", "--token", "   "]) == 1
     assert cli.main(["init", "--token", "has a space"]) == 1
     assert not config_path(home).exists()
+
+
+# --------------------------------------------- what an install proves it built
+
+
+def test_every_installable_name_has_a_smoke_import() -> None:
+    """R1: `INSTALLER_FOR` and `SMOKE_IMPORT` are two halves of one answer.
+
+    They used to be two modules — `cli` and `envpack` — tied by a pytest,
+    because `envpack` could not import `cli` without a cycle. The packs went
+    (PHASE20 section 6) and so did the separation; this check stayed, because
+    a job type `crucible install` can install and nothing can prove it IMPORTS
+    is an env the command would call ready without ever opening it.
+    """
+    for backend_kind in ("cuda-linux", "mlx-darwin"):
+        for job_type in cli.INSTALLABLE_JOB_TYPES:
+            if job_type in workerenv.WORKER_JOB_TYPES:
+                try:
+                    workerenv.recipe_for(job_type, backend_kind)
+                except workerenv.WorkerEnvError:
+                    continue
+                keys = [job_type]
+            elif job_type == "llm":
+                keys = [jobenv.llm_env(backend_kind).key]
+            else:
+                keys = sorted(
+                    {
+                        jobenv.tts_env(engine, backend_kind).key
+                        for engine in NARRATOR_ENGINE_SAMPLING
+                    }
+                )
+            for key in keys:
+                assert cli.SMOKE_IMPORT.get(key, {}).get(backend_kind), (
+                    f"{job_type}/{backend_kind}: the {key!r} env has no smoke import"
+                )
+
+
+def test_an_env_with_no_smoke_import_is_refused_rather_than_called_installed(
+    tmp_path: Path,
+) -> None:
+    """The gap is named, not shrugged at: a table this build does not cover is
+    a bug in this build, and the sentence says which file owns it."""
+    refusal = cli._smoke_import(tmp_path / "python", "llm", "rocm-linux")
+    assert refusal is not None
+    assert "SMOKE_IMPORT" in refusal
+
+
+def test_a_failing_import_is_refused_by_name_with_the_last_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pip returning 0 says the wheels resolved and says nothing about whether
+    the thing they are for loads."""
+
+    class _Completed:
+        returncode = 1
+        stdout = ""
+        stderr = "Traceback\nImportError: libcudart.so.12: cannot open shared object file"
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _Completed())
+    refusal = cli._smoke_import(tmp_path / "python", "llm", "cuda-linux")
+    assert refusal is not None
+    assert refusal.startswith("env_smoke_failed:")
+    assert "libcudart" in refusal

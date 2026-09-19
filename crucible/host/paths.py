@@ -31,7 +31,7 @@ from .errors import HostError
 #: `tests/test_host_paths.py`, which reads that file.
 APPDATA_DIRNAME = "Crucible"
 
-#: The host pack unpacks here (4.4), so this is where `crucible.cmd` is.
+#: The host runtime is installed here (4.4), so this is where `crucible.cmd` is.
 PACK_SUBDIR = "host"
 
 #: The tray's log (4.1). One file, appended, rolled at `LOG_ROLL_BYTES`.
@@ -84,7 +84,7 @@ def crucible_root(env: Mapping[str, str]) -> PureWindowsPath:
 
 
 def host_pack_dir(env: Mapping[str, str]) -> PureWindowsPath:
-    """`%LOCALAPPDATA%\\Crucible\\host` — where the host pack unpacked."""
+    """`%LOCALAPPDATA%\\Crucible\\host` — where the host runtime lives."""
     return crucible_root(env) / PACK_SUBDIR
 
 

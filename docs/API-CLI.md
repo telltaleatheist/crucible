@@ -2,7 +2,7 @@
 
 Built 2026-09-16, because there was no way to run a job from a command line. The
 3,100 lines already in `crucible/cli.py` are entirely operator and lifecycle —
-`init`, `install`, `envpack`, `capability`, `models pull`, `serve`, `service`,
+`init`, `install`, `capability`, `models pull`, `serve`, `service`,
 `doctor`, `token`, `uninstall` — and **not one of them submits a job**. A
 fine-tuning script that wanted a retake ladder, a cleanup pass, a translation or
 a batch of renders had to write its own HTTP client. This is that client, and it

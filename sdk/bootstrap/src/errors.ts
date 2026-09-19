@@ -24,10 +24,10 @@ export type BootstrapRefusalCode =
   | 'no_nvidia_driver'
   /** darwin on something other than arm64. `mlx-darwin` is Apple Silicon only. */
   | 'not_apple_silicon'
-  /** The guest (or the Mac) lacks a tool the pack install needs: `curl`, `tar`, `zstd`, the sha tool. */
+  /** The guest (or the Mac) lacks a tool the install needs: `curl`, `tar`, the sha tool. */
   | 'guest_missing_tool'
-  /** No `<CRUCIBLE_HOME>/server/bin/crucible`: this machine has no server pack yet. `install()` puts one there. */
-  | 'no_server_pack'
+  /** No `<CRUCIBLE_HOME>/server/bin/crucible`: this machine has no server runtime yet. `install()` puts one there. */
+  | 'no_server_runtime'
   /**
    * The release channel would not say what its latest release is — it did not
    * answer, answered an error, or answered a document with no usable `tag_name`
@@ -38,8 +38,8 @@ export type BootstrapRefusalCode =
    */
   | 'release_channel_unreadable'
   /**
-   * The pack already on this disk is NEWER than the release being installed
-   * (§6.5.4). Read from `<CRUCIBLE_HOME>/server/.pack`'s `release=`. The one
+   * The runtime already on this disk is NEWER than the release being installed
+   * (§6.5.4). Read from `<CRUCIBLE_HOME>/server/.crucible`'s `release=`. The one
    * legitimate downgrade is an operator rollback, and it names its version.
    */
   | 'install_would_downgrade'
@@ -57,18 +57,21 @@ export type BootstrapRefusalCode =
    * line that performs the rollback by hand.
    */
   | 'host_rollback_unsupported'
-  /** `envpacks.json` for this release could not be fetched, or is not the manifest. */
-  | 'pack_manifest_unreadable'
-  /** The manifest has no pack for this (name, backend). Never a quiet build (PHASE14 section 2). */
-  | 'pack_not_published'
-  /** A part would not download. Carries the URL that failed. */
-  | 'pack_download_failed'
-  /** The reassembled archive's sha256 is not the manifest's. The archive is deleted. */
-  | 'pack_sha_mismatch'
-  /** Not enough free disk for `unpacked_bytes` + one part. Carries the numbers, before anything is fetched. */
-  | 'pack_disk'
-  /** `tar --zstd` would not unpack the archive. The `.partial` directory is left for reading. */
-  | 'pack_unpack_failed'
+  /** The interpreter or the wheel would not download. Carries the URL that failed. */
+  | 'runtime_download_failed'
+  /**
+   * A download's sha256 is not the one pinned for it — `interpreter.ts`'s for
+   * the CPython, the release's own `<wheel>.sha256` for the wheel. The file is
+   * deleted, because the next run must start clean rather than pip-install
+   * bytes nobody vouched for.
+   */
+  | 'runtime_sha_mismatch'
+  /** `tar` would not unpack the interpreter. The `.partial` directory is left for reading. */
+  | 'runtime_unpack_failed'
+  /** pip would not install the wheel into the interpreter. Carries pip's last lines. */
+  | 'runtime_install_failed'
+  /** Not enough free disk in the WSL guest for what a caller is about to fetch. Carries the numbers. */
+  | 'guest_no_disk'
   /** No `config.toml` where the local server would keep one. A state, not a bug. */
   | 'no_local_config'
   /** The config exists and is not TOML, or could not be read. */
@@ -138,7 +141,7 @@ export type BootstrapRefusalCode =
    * a library does not download and run an elevated installer of its own accord.
    */
   | 'host_not_installed'
-  /** win32 only. The host pack IS installed and its loopback door did not answer. */
+  /** win32 only. The host IS installed and its loopback door did not answer. */
   | 'host_unreachable'
   /** win32 only. The host refused the engine token this side read from its config (401). */
   | 'host_unauthorized'

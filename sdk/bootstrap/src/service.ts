@@ -29,7 +29,7 @@
 import { resolveDistro } from './distro.js';
 import { BootstrapRefusal } from './errors.js';
 import { ensureLinger, type LingerOutcome } from './linger.js';
-import { probeGuest, requirePack } from './pack.js';
+import { probeGuest, requireRuntime } from './runtime.js';
 import { processRunner, type Runner } from './runner.js';
 import { describeTarget, resolveTarget, runOn, type Target } from './target.js';
 
@@ -127,7 +127,7 @@ export async function ensureRunning(options: EnsureRunningOptions = {}, runner: 
   // THE SERVER PACK, not an interpreter found on the machine: there is nothing
   // to find on a fresh host, and a host with no pack has no service either, so
   // that is one named refusal rather than a hunt (PHASE14 section 0).
-  const crucible = requirePack(target, await probeGuest(runner, target, options.home)).crucible;
+  const crucible = requireRuntime(target, await probeGuest(runner, target, options.home)).crucible;
   const env = options.home === undefined ? undefined : { CRUCIBLE_HOME: options.home };
   const where = describeTarget(target);
 

@@ -117,7 +117,7 @@ def default_desktop_allowance_bytes(backend_kind: str, total_bytes: int) -> int:
 #: `~/.crucible`, because on Windows a dot-directory in the user profile is
 #: roamed by some configurations and backed up by others, and this directory
 #: holds tens of gigabytes of GGUF that must never leave the machine. It is
-#: also the directory the host pack unpacks beside (section 4.4), so the
+#: also the directory the host runtime is installed beside (section 4.4), so the
 #: engine and the weights it reads are under one root.
 WINDOWS_HOME_DIRNAME = "Crucible"
 
