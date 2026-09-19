@@ -31,9 +31,14 @@
 # not what its name says. The stage is run from the Mac side; 7c's M-steps are
 # the recipe.
 #
-# STAGING IS NOT THIS SCRIPT'S EITHER. S1 and S2 are
-# `scripts/stage-phase15.sh`; a button that also did 15 GB of downloads would
-# be a button whose first press takes an hour.
+# STAGING IS NOT THIS SCRIPT'S EITHER, and its script is GONE. S1 and S2 were
+# `scripts/stage-phase15.sh`, which built the Windows host PACK and unpacked it
+# into a staging root — machinery PHASE20 deleted (section 6). What stages a
+# Windows host now is `install.ps1 -Root <a staging directory>`, which fetches
+# the pinned interpreter and this release's wheel; the rest of S2 (init on the
+# staged port, pull the engine and the two GGUFs) is ordinary CLI. A button that
+# also did 15 GB of downloads would still be a button whose first press takes an
+# hour, which is why none of it is in here.
 #
 set -u -o pipefail
 
@@ -362,9 +367,10 @@ fi
 if wanted T7; then
   begin "T7 — llama-windows on ${STAGED_PORT} (NEEDS THE CARD)"
   if present "the staged Windows home" "${RUN_ROOT}/home/config.toml" \
-      "T7 starts the staged Windows server. Run \`scripts/stage-phase15.sh s2\`
-first — it builds the host pack, initialises the home on ${STAGED_PORT} and
-pulls the engine and the two GGUFs."; then
+      "T7 starts the staged Windows server. Stage it first: \`install.ps1 -Root
+<staging root>\` for the runtime, then \`crucible init\` on ${STAGED_PORT} and
+\`crucible install llm\` + \`crucible models pull\` for the engine and the two
+GGUFs. (\`scripts/stage-phase15.sh\` did this and went with the packs.)"; then
     if [ "$DRY_RUN" = "1" ]; then
       note "WOULD RUN: crucible serve on ${STAGED_PORT}; load-model dots-ocr; the T6 page; load-model qwen3.5-9b; one cleanup chunk; unload; stop"
       pass "(dry run)"

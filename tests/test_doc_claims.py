@@ -189,38 +189,7 @@ def test_a_comment_that_counts_is_counted(sentence: str, actual: int) -> None:
 
 
 
-# ------------------------------------------- the schema the doc puts in a code block
-
-def test_the_envpacks_doc_shows_the_schema_the_code_emits() -> None:
-    """A JSON sample in a document is a CLAIM, and this one is copied by hand.
-
-    Section 2 of PHASE14-ENVPACKS.md prints an `envpacks.json` and calls itself
-    "the single owner of what packs exist". A sample showing a schema the code
-    no longer writes is worse than no sample: it is authoritative-looking and
-    wrong, and the reader has no reason to doubt it.
-    """
-    from crucible import envpack
-
-    doc = text(ENVPACKS_DOC)
-    assert f'"schema": {envpack.PACK_SCHEMA},' in doc, (
-        f"the doc's example manifest does not show schema {envpack.PACK_SCHEMA}"
-    )
-
-
-def test_every_row_field_the_code_requires_appears_in_the_example() -> None:
-    """The eight-then-nine fields, held to the code's own list.
-
-    `_ENTRY_FIELDS` is what `parse_manifest` demands. A field the code requires
-    and the example omits is a document that teaches somebody to write a
-    manifest this build refuses.
-    """
-    from crucible import envpack
-
-    doc = text(ENVPACKS_DOC)
-    required = envpack._ENTRY_FIELDS + envpack._ENTRY_FIELDS_V2
-    for field, _kind in required:
-        assert f'"{field}"' in doc, f"the example manifest has no {field!r}"
-
+# ------------------------- what PHASE14 still claims after PHASE20 superseded it
 
 def test_the_weakened_invariant_is_written_down_where_it_changed() -> None:
     """NOT just in a commit message, and not only in the code.

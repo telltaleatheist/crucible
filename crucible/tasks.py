@@ -59,7 +59,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from . import capability, catalog, envpack, jobenv, workerenv
+from . import capability, catalog, interpreter, jobenv, workerenv
 from .backend import LLAMA_WINDOWS, Backend
 from .config import Config
 from .errors import ApiError, CrucibleError
@@ -1243,7 +1243,7 @@ class TaskStore:
                 f"{type(exc).__name__}: {exc}. A host started this server "
                 f"(${HOST_DOOR_ENV} is set) and its door is not answering "
                 "now. Start it from the Startup item, or run `crucible host` "
-                "from the host pack, and press it again",
+                "from the host runtime, and press it again",
                 {"door": door},
             ) from None
         return terminal
@@ -1371,14 +1371,16 @@ class TaskStore:
                 # second at best and, on a quiet stretch, never fires.
                 if task.cancel_requested and process.poll() is None:
                     process.terminate()
-                # SINCE 0.6.0 AN INSTALL IS USUALLY A DOWNLOAD, and a download
-                # reports bytes. `crucible install` prints a sentinel line
-                # carrying the three fields the PULL task already emits
-                # (`envpack.PROGRESS_PREFIX` owns the shape and says why the
-                # child's stdout is the transport), so the operator page draws
-                # an env install with exactly the code that draws a weights
-                # pull instead of a second progress shape.
-                measured = envpack.parse_progress_line(stripped)
+                # AN INSTALL THAT DOWNLOADS AN INTERPRETER REPORTS ITS BYTES.
+                # `crucible install` prints a sentinel line carrying the three
+                # fields the PULL task already emits
+                # (`interpreter.PROGRESS_PREFIX` owns the shape and says why
+                # the child's stdout is the transport), so the operator page
+                # draws that part of an env install with exactly the code that
+                # draws a weights pull instead of a second progress shape. The
+                # recipe's own wheels come from pip, whose prose goes through
+                # the `line` branch below.
+                measured = interpreter.parse_progress_line(stripped)
                 if measured is not None:
                     now = time.monotonic()
                     if now - last_bytes < PROGRESS_INTERVAL_SECONDS:

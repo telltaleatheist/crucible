@@ -154,6 +154,13 @@ findings written into the manifests rather than around them: `qwen3.8:27b-24g` i
 Modelfile (404 on ollama.com — labelled stopgap, ruling owed), and Foundry's page reader
 pins a different GGUF projector than the one ruled.
 
+> **REVERSED, 2026-09-18, by `PHASE20-CODE-NOT-ENVIRONMENTS.md`.** The two entries
+> below record what phase 14 landed and are kept as that record. The environment
+> packs, `envpacks.json`, `crucible envpack`, the rootfs asset and
+> `crucible install --build` are all deleted: an interpreter comes from
+> python-build-standalone, an environment from its recipe on the machine, and the
+> WSL image from Canonical. A release carries our code and nothing else.
+
 **Landed, 2026-09-14: phase 14's SERVER SIDE — an env comes off the release**
 (`PHASE14-ENVPACKS.md` sections 0-3, 5 and 7). Owen: *"we should use gh releases to
 download the environments we need to run it, just like we do in bookforge."*

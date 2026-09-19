@@ -199,44 +199,66 @@ def test_only_the_sglang_tts_env_wants_an_interpreter_of_its_own() -> None:
     assert llm_env("mlx-darwin").python_version is None
 
 
-def test_an_env_wanting_an_interpreter_this_host_lacks_is_refused_by_name(
-    monkeypatch: pytest.MonkeyPatch,
+def test_an_env_wanting_another_python_downloads_it_and_never_searches_path(
+    home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Refused BEFORE `venv` runs. A venv inherits its maker's version, so a
-    3.11 interpreter cannot produce a 3.12 env — it produces a 3.11 one that
-    pip fails to fill several GB in, with a wheel-compatibility error naming
-    neither the env nor the reason."""
-    monkeypatch.setattr(jobenv.shutil, "which", lambda name: None)
+    """PHASE20 section 3, item 4: a recipe that names a CPython the server does
+    not run gets that CPython FROM THE SAME PUBLISHER, into
+    `<home>/interpreters/<version>/`. The PATH search is deleted, not kept as a
+    second path — `python3.12` on PATH is a distro's or a conda's, of unknown
+    provenance and unknown digest, and a venv inherits whatever it is.
+    """
     monkeypatch.setattr(jobenv.sys, "version_info", (3, 11, 16))
-    with pytest.raises(EnvError) as caught:
-        jobenv.interpreter_for(tts_env("higgs-v3", "cuda-linux"))
-    message = str(caught.value)
-    assert "python 3.12" in message
-    assert "3.11" in message
-    # It names the way out rather than only the problem.
-    assert "uv python install 3.12" in message
+
+    def which(name: str) -> str | None:  # pragma: no cover - must never run
+        raise AssertionError(f"interpreter_for searched PATH for {name!r}")
+
+    monkeypatch.setattr(jobenv.shutil, "which", which)
+    asked: list[tuple[Path, str, str]] = []
+
+    def ensure(home_: Path, backend_kind: str, minor: str, **kw: object) -> Path:
+        asked.append((home_, backend_kind, minor))
+        return home_ / "interpreters" / "3.12.14" / "bin" / "python"
+
+    monkeypatch.setattr(jobenv.interpreter, "ensure_interpreter", ensure)
+    found = jobenv.interpreter_for(
+        tts_env("higgs-v3", "cuda-linux"), home, "cuda-linux"
+    )
+    assert asked == [(home, "cuda-linux", "3.12")]
+    assert found == str(home / "interpreters" / "3.12.14" / "bin" / "python")
 
 
-def test_an_interpreter_of_the_wanted_version_on_path_is_used() -> None:
-    """The second of the two sources, and the only one a host that is not
-    already running 3.12 can offer."""
-    spec = tts_env("higgs-v3", "cuda-linux")
+def test_an_interpreter_whose_digest_does_not_match_is_refused_by_name(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The download is the only source, so its refusal is the env's refusal:
+    it carries the publisher's name and the two digests, and no venv is made."""
+    monkeypatch.setattr(jobenv.sys, "version_info", (3, 11, 16))
 
-    def which(name: str) -> str | None:
-        return "/usr/bin/python3.12" if name == "python3.12" else None
+    def ensure(home_: Path, backend_kind: str, minor: str, **kw: object) -> Path:
+        raise jobenv.interpreter.InterpreterError(
+            "interpreter_sha_mismatch",
+            "cpython-3.12.14+20260901-x86_64-unknown-linux-gnu-install_only.tar.gz "
+            "hashes 0000 and crucible/interpreter.py pins 936c",
+        )
 
-    import unittest.mock as mock
-    with mock.patch.object(jobenv.shutil, "which", which):
-        with mock.patch.object(jobenv.sys, "version_info", (3, 11, 16)):
-            assert jobenv.interpreter_for(spec) == "/usr/bin/python3.12"
+    monkeypatch.setattr(jobenv.interpreter, "ensure_interpreter", ensure)
+    with pytest.raises(jobenv.interpreter.InterpreterError) as caught:
+        jobenv.interpreter_for(tts_env("higgs-v3", "cuda-linux"), home, "cuda-linux")
+    assert caught.value.code == "interpreter_sha_mismatch"
 
 
-def test_a_spec_wanting_no_version_takes_the_servers_own_interpreter() -> None:
+def test_a_spec_wanting_no_version_takes_the_servers_own_interpreter(
+    home: Path,
+) -> None:
     """Every env but one, and it is not a fallback: `None` is the answer that
     says "this env is whatever Crucible itself runs on"."""
-    assert jobenv.interpreter_for(llm_env("cuda-linux")) == jobenv.sys.executable
     assert (
-        jobenv.interpreter_for(tts_env("higgs-v3", "mlx-darwin"))
+        jobenv.interpreter_for(llm_env("cuda-linux"), home, "cuda-linux")
+        == jobenv.sys.executable
+    )
+    assert (
+        jobenv.interpreter_for(tts_env("higgs-v3", "mlx-darwin"), home, "mlx-darwin")
         == jobenv.sys.executable
     )
 
@@ -330,6 +352,77 @@ def test_require_env_refuses_rather_than_guessing_an_interpreter(home: Path) -> 
     with pytest.raises(EnvError) as caught:
         require_env(home, llm_env("cuda-linux"), "cuda-linux")
     assert "crucible install llm" in str(caught.value)
+
+
+# ------------------------------------------------ how a recipe is hashed
+#
+# MEASURED 2026-09-15: the same commit of one file hashed to `1ab85cc3…` from
+# the main checkout and `cc4fda38…` from a worktree of that SAME commit, while
+# `git hash-object` said both were blob `5ef53a3`. CRLF versus LF, on a machine
+# with `core.autocrlf=true`. Left alone, an env on a Windows desk calls itself
+# drifted from the very recipe it was installed from. These lived in
+# `tests/test_envpack.py` until the packs went; the rule they hold is
+# `jobenv`'s and always was.
+
+
+def test_a_recipe_hashes_THE_SAME_whatever_line_endings_it_arrived_with(
+    tmp_path: Path,
+) -> None:
+    """The half that fixes the defect."""
+    import hashlib
+
+    body = "torch==2.5.1\nvllm==0.7.3\nnumpy==1.26.4\n"
+    lf = tmp_path / "lf.txt"
+    crlf = tmp_path / "crlf.txt"
+    lf.write_bytes(body.encode())
+    crlf.write_bytes(body.replace("\n", "\r\n").encode())
+    assert lf.read_bytes() != crlf.read_bytes(), "the two files really do differ"
+    assert jobenv.recipe_sha256(lf) == jobenv.recipe_sha256(crlf)
+    # And the value is the LF one, which is what every Linux and macOS machine
+    # computes. A rule that agreed with neither side would call every installed
+    # env drifted at once.
+    assert jobenv.recipe_sha256(crlf) == hashlib.sha256(body.encode()).hexdigest()
+
+
+def test_a_real_edit_STILL_changes_the_recipe_hash(tmp_path: Path) -> None:
+    """The half that keeps it a hash.
+
+    Normalising a line ENDING cannot erase what is on the line, so every edit a
+    recipe can receive — a pin moved, a package added, a line removed — is still
+    a different digest.
+    """
+    first = tmp_path / "a.txt"
+    first.write_bytes(b"torch==2.5.1\r\nvllm==0.7.3\r\n")
+    moved = tmp_path / "b.txt"
+    moved.write_bytes(b"torch==2.6.0\r\nvllm==0.7.3\r\n")
+    added = tmp_path / "c.txt"
+    added.write_bytes(b"torch==2.5.1\r\nvllm==0.7.3\r\nnumpy==1.26.4\r\n")
+    removed = tmp_path / "d.txt"
+    removed.write_bytes(b"torch==2.5.1\r\n")
+    digests = {jobenv.recipe_sha256(p) for p in (first, moved, added, removed)}
+    assert len(digests) == 4
+
+
+def test_the_environment_half_ignores_the_reference_lines_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    """THE SPLIT, in one assertion each way.
+
+    A moved narrator sha leaves the environment half alone — that is what makes
+    the 1b case one `pip install --no-deps`. A moved torch pin does not.
+    """
+    base = "torch==2.13.0\n" + REFERENCE + "\n"
+    same = tmp_path / "same.txt"
+    same.write_text(base.replace(SHA, "b" * 40), encoding="utf-8")
+    first = tmp_path / "first.txt"
+    first.write_text(base, encoding="utf-8")
+    assert jobenv.environment_sha256(first) == jobenv.environment_sha256(same)
+    moved = tmp_path / "moved.txt"
+    moved.write_text(base.replace("2.13.0", "2.13.1"), encoding="utf-8")
+    assert jobenv.environment_sha256(first) != jobenv.environment_sha256(moved)
+    # And it is not the whole file's digest: that is the hash the two halves
+    # replaced, and reusing it here would be the single answer all over again.
+    assert jobenv.environment_sha256(first) != jobenv.recipe_sha256(first)
 
 
 # ------------------------------------------------- pinning what is not on PyPI
@@ -442,3 +535,193 @@ def test_an_env_built_from_another_commit_is_not_ready(
     assert status.installed is False
     assert "narrator was installed from 0000000" in status.detail
     assert SHA in status.detail
+
+
+# --------------------------------------------------- what an install DOES now
+#
+# PHASE20-CODE-NOT-ENVIRONMENTS.md section 4. An env is touched only when its
+# recipe moved, and then by pip INTO the existing venv — never a delete and
+# rebuild, never a tarball. The two halves of a recipe move for different
+# reasons and cost different amounts, so they are stamped and answered apart.
+
+
+NARRATOR_LINE = (
+    "narrator[higgs-v3-server] @ git+https://github.com/telltaleatheist/bookforge"
+    f"@{SHA}#subdirectory=python"
+)
+MOVED = "b" * 40
+TTS_RECIPE = f"""# the tts env
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.13.0
+{NARRATOR_LINE}
+"""
+
+
+def _installed_env(
+    home: Path,
+    spec: jobenv.EnvSpec,
+    backend_kind: str,
+    recipe: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    references: dict[str, str] | None = None,
+) -> Path:
+    """A venv on disk, stamped exactly the way `install_env` leaves one."""
+    directory = env_dir(home, spec)
+    (directory / "bin").mkdir(parents=True, exist_ok=True)
+    (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    jobenv._write_stamp(
+        home,
+        spec,
+        backend_kind,
+        recipe=recipe,
+        python_version="3.12.14",
+        seconds=1.0,
+        references=references if references is not None
+        else jobenv.recipe_direct_references(recipe),
+    )
+    # `pip list` reports narrator too — it is installed from a git sha, so its
+    # presence is a package and its COMMIT is the separate direct-reference
+    # check below.
+    monkeypatch.setattr(
+        jobenv,
+        "installed_packages",
+        lambda _h, _s: {**recipe_pins(recipe), spec.headline: "0.1.0"},
+    )
+    monkeypatch.setattr(
+        jobenv,
+        "installed_direct_references",
+        lambda _h, _s: dict(references if references is not None
+                            else jobenv.recipe_direct_references(recipe)),
+    )
+    return directory
+
+
+def _record_runs(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        jobenv, "_run", lambda command, failure, on_line: ran.append(list(command))
+    )
+    monkeypatch.setattr(
+        jobenv.shutil,
+        "rmtree",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("rmtree: the env was deleted")),
+    )
+    return ran
+
+
+def test_a_moved_narrator_sha_reinstalls_one_line_and_touches_nothing_else(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE 1b CASE (design section 4). A narrator edit is one git sha in one
+    line of one recipe; the 13 GB of torch and SGLang beside it did not move.
+    So the environment half is compared on its own, and when only the sha
+    moved the answer is one `pip install --no-deps --force-reinstall` of that
+    line — not a rebuild, not a `pip install -r` that would re-resolve the lot.
+    """
+    spec = tts_env("higgs-v3", "cuda-linux")
+    recipe = _recipe(tmp_path, monkeypatch, TTS_RECIPE)
+    _installed_env(
+        home, spec, "cuda-linux", recipe, monkeypatch,
+        references={"narrator": MOVED},
+    )
+    # The recipe now pins a different commit; the stamp records the old one.
+    ran = _record_runs(monkeypatch)
+    plan = jobenv.plan_install(home, spec, "cuda-linux")
+    assert plan.action == jobenv.PLAN_REFERENCES
+    assert plan.lines == (NARRATOR_LINE,)
+
+    jobenv.install_env(home, spec, "cuda-linux")
+    python = str(env_dir(home, spec) / "bin" / "python")
+    assert ran == [
+        [python, "-m", "pip", "install", "--no-deps", "--force-reinstall", NARRATOR_LINE]
+    ]
+    stamp = json.loads((env_dir(home, spec) / "crucible-env.json").read_text())
+    assert stamp["direct_references"] == {"narrator": SHA}
+    # The venv's interpreter did not change, so the stamp keeps the version it
+    # already recorded rather than asking a python that was never rebuilt.
+    assert stamp["python_version"] == "3.12.14"
+    # And once pip has actually done what it was told — `_run` is a fake here,
+    # so PEP 610's record is written by this line instead — nothing is left to
+    # do: the plan is empty and `crucible doctor` has no drift to report.
+    monkeypatch.setattr(
+        jobenv, "installed_direct_references", lambda _h, _s: {"narrator": SHA}
+    )
+    assert env_status(home, spec, "cuda-linux").installed is True
+    assert jobenv.plan_install(home, spec, "cuda-linux").action == jobenv.PLAN_NOTHING
+
+
+def test_a_moved_environment_half_pips_into_the_venv_that_is_there(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`pip install -r <recipe>` into the existing venv; pip skips what is
+    already satisfied, so the cost is the diff and not the env."""
+    spec = tts_env("higgs-v3", "cuda-linux")
+    recipe = _recipe(tmp_path, monkeypatch, TTS_RECIPE)
+    _installed_env(home, spec, "cuda-linux", recipe, monkeypatch)
+    # The environment half moves: a pin, not the direct reference.
+    recipe.write_text(TTS_RECIPE.replace("2.13.0", "2.13.1"), encoding="utf-8")
+    monkeypatch.setattr(
+        jobenv,
+        "installed_packages",
+        lambda _h, _s: {"torch": "2.13.1", "narrator": "0.1.0"},
+    )
+    ran = _record_runs(monkeypatch)
+    monkeypatch.setattr(jobenv.narratorpatches, "apply", lambda *a, **k: None)
+    monkeypatch.setattr(
+        jobenv.narratorpatches, "ensure_cuda_toolkit_links", lambda *a, **k: None
+    )
+    plan = jobenv.plan_install(home, spec, "cuda-linux")
+    assert plan.action == jobenv.PLAN_RECIPE
+
+    jobenv.install_env(home, spec, "cuda-linux")
+    python = str(env_dir(home, spec) / "bin" / "python")
+    assert ran == [[python, "-m", "pip", "install", "-r", str(recipe)]]
+    stamp = json.loads((env_dir(home, spec) / "crucible-env.json").read_text())
+    assert stamp["environment_sha256"] == jobenv.environment_sha256(recipe)
+
+
+def test_an_env_that_matches_its_recipe_runs_nothing_at_all(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = tts_env("higgs-v3", "cuda-linux")
+    recipe = _recipe(tmp_path, monkeypatch, TTS_RECIPE)
+    _installed_env(home, spec, "cuda-linux", recipe, monkeypatch)
+    ran = _record_runs(monkeypatch)
+    assert jobenv.plan_install(home, spec, "cuda-linux").action == jobenv.PLAN_NOTHING
+    jobenv.install_env(home, spec, "cuda-linux")
+    assert ran == []
+
+
+def test_force_is_the_one_path_that_deletes_and_rebuilds(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--force` keeps its meaning for a genuinely broken env — the only
+    remaining reason to throw several GB away and start again."""
+    spec = llm_env("cuda-linux")
+    recipe = recipe_for(spec)
+    _installed_env(home, spec, "cuda-linux", recipe, monkeypatch)
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        jobenv, "_run", lambda command, failure, on_line: ran.append(list(command))
+    )
+    removed: list[Path] = []
+    monkeypatch.setattr(jobenv.shutil, "rmtree", lambda path: removed.append(Path(path)))
+    monkeypatch.setattr(
+        jobenv.subprocess, "run", lambda *a, **k: _Completed("3.11.16")
+    )
+    plan = jobenv.plan_install(home, spec, "cuda-linux", force=True)
+    assert plan.action == jobenv.PLAN_BUILD
+
+    # The venv's python has to exist after `venv` "ran"; the fake `_run` makes
+    # no directory, and the file the fixture wrote is still there.
+    jobenv.install_env(home, spec, "cuda-linux", force=True)
+    assert removed == [env_dir(home, spec)]
+    assert ran[0][1:] == ["-m", "venv", str(env_dir(home, spec))]
+    assert ran[-1][1:] == ["-m", "pip", "install", "-r", str(recipe)]
+
+
+class _Completed:
+    def __init__(self, out: str) -> None:
+        self.stdout = out
+        self.returncode = 0

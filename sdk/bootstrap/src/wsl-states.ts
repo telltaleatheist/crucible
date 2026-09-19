@@ -23,7 +23,7 @@
  */
 import type { BootstrapRefusalCode } from './errors.js';
 import { CRUCIBLE_DISTRO, WSL_CONF_MARKER } from './distro.js';
-import { envpacksUrl } from './envpacks.js';
+import { wheelUrl } from './release.js';
 import type { RunResult, Runner } from './runner.js';
 import { parseWslList } from './wsl.js';
 
@@ -67,7 +67,7 @@ export interface Evidence {
 }
 
 export interface WslStateInputs {
-  /** The release whose `envpacks.json` the network probe fetches. */
+  /** The release whose WHEEL the network probe fetches, to prove a route. */
   release: string;
   /** The app's own WSL distro setting, when it has one. Only used by the "somebody else's distro" row. */
   appDistro?: string;
@@ -93,7 +93,7 @@ export function probeArgv(key: ProbeKey, inputs: WslStateInputs): string[] {
     case 'app-distro-conf':
       return ['wsl.exe', '-d', inputs.appDistro ?? CRUCIBLE_DISTRO, '-u', 'root', '--exec', 'bash', '-c', 'test -f /etc/wsl.conf && cat /etc/wsl.conf || true'];
     case 'guest-network':
-      return ['wsl.exe', '-d', CRUCIBLE_DISTRO, '--exec', 'curl', '-fsS', '-m', '20', '-o', '/dev/null', envpacksUrl(inputs.release)];
+      return ['wsl.exe', '-d', CRUCIBLE_DISTRO, '--exec', 'curl', '-fsS', '-m', '20', '-o', '/dev/null', wheelUrl(inputs.release)];
     case 'guest-disk':
       return ['wsl.exe', '-d', CRUCIBLE_DISTRO, '--exec', 'bash', '-c', 'df -Pk "$HOME" | awk \'NR==2 {print $4}\''];
     case 'guest-root':
@@ -192,12 +192,12 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
       probe: 'guest-network',
       enabled: inputs.checkNetwork === true,
       means: (result) => result.failure !== null || result.code !== 0,
-      sentence: (result) => `The "${CRUCIBLE_DISTRO}" distribution cannot reach ${envpacksUrl(inputs.release)} `
+      sentence: (result) => `The "${CRUCIBLE_DISTRO}" distribution cannot reach ${wheelUrl(inputs.release)} `
         + `(${said(result)}). A VPN or a proxy on this machine usually explains it; there is nothing to install until it can.`,
-      action: () => ({ kind: 'link', url: envpacksUrl(inputs.release) }),
+      action: () => ({ kind: 'link', url: wheelUrl(inputs.release) }),
     },
     {
-      code: 'pack_disk',
+      code: 'guest_no_disk',
       probe: 'guest-disk',
       enabled: required > 0,
       means: (result) => {

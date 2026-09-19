@@ -6,15 +6,27 @@
 #   ./scripts/release.sh --dry-run       # build and check, create nothing
 #   ./scripts/release.sh --branch <name> # release a branch (see below)
 #
-# One version, one tag, one release, six assets:
+# A RELEASE CARRIES OUR CODE AND NOTHING THAT IS PUBLISHED ELSEWHERE
+# (PHASE20-CODE-NOT-ENVIRONMENTS.md section 1). One version, one tag, one
+# release, seven assets:
 #
-#   crucible-<ver>.tar.gz          the server sdist
-#   crucible-<ver>-py3-none-any.whl  the server wheel
-#   crucible-client-<ver>.tgz      the TypeScript SDK, installable by URL
-#   crucible-bootstrap-<ver>.tgz   the app-side installer/ensurer (PHASE5-APPS.md 6.0),
-#                                  peer-depending on the client at this exact version
-#   install.sh                     the standalone installer for Linux/WSL and macOS
-#   install.ps1                    the same for Windows: the HOST pack, and stop
+#   crucible-<ver>.tar.gz              the server sdist
+#   crucible-<ver>-py3-none-any.whl    the server wheel — THE deploy
+#   crucible-<ver>-py3-none-any.whl.sha256  its digest, one line, which is what
+#                                      install.sh and install.ps1 check the
+#                                      download against before pip sees it
+#   crucible-client-<ver>.tgz          the TypeScript SDK, installable by URL
+#   crucible-bootstrap-<ver>.tgz       the app-side installer/ensurer (PHASE5-APPS.md 6.0),
+#                                      peer-depending on the client at this exact version
+#   install.sh                         the standalone installer for Linux/WSL and macOS
+#   install.ps1                        the same for Windows: the HOST, and stop
+#
+# WHAT IS NO LONGER HERE, and where it comes from instead: the interpreter
+# (python-build-standalone, pinned by digest in `crucible/interpreter.py` and
+# `sdk/bootstrap/src/interpreter.ts`), every job environment (PyPI and the
+# mirrors, through `crucible/envs/<type>/<recipe>.txt`), and the WSL image
+# (Canonical's `cloud-images.ubuntu.com/wsl/`). Before PHASE20 a tag uploaded
+# ~190 MB of those per release, rebuilt because our 1 MB of code changed.
 #
 # The two installers are GENERATED from bootstrap's own step list
 # (PHASE14-ENVPACKS.md 4a), so an app-driven install and a hand install cannot
@@ -22,20 +34,6 @@
 # no longer walks the WSL states itself: it installs `crucible host` and stops,
 # and the host owns the sequence from there — for the page's engine switch
 # (4.7), for an app's `install()` and for a hand install alike.
-#
-# THE WORKFLOW BELOW UPLOADS AN ELEVENTH PACK. `.github/workflows/envpacks.yml`
-# gained a `windows-latest` job for `crucible-env-host-llama-windows-<ver>`
-# (4.4), which is what `install.ps1` downloads. A release without it is one
-# where the first thing anybody runs on Windows refuses `pack_not_published`,
-# which is why the manifest job waits for it.
-#
-# The ENVIRONMENT PACKS are not built here. `.github/workflows/envpacks.yml`
-# is dispatched with this tag afterwards and uploads them beside the four,
-# because a pack is built on the backend it targets and this script runs on
-# one machine
-# (PHASE14-ENVPACKS.md section 3.3). What this script does about them is refuse
-# to cut a tag when that workflow is absent, and name the packs the tag will
-# attempt in the notes.
 #
 # The version is read from seven places and every one of them must agree:
 # crucible/__init__.py, pyproject.toml, sdk/ts/package.json, sdk/ts/src/version.ts (which
@@ -86,36 +84,6 @@ NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
 [ "$NODE_MAJOR" -ge 20 ] || fail "node $NODE_MAJOR is too old; the SDK needs 20+"
 python -c 'import build' 2>/dev/null || fail "python has no \`build\` module (pip install build)"
 gh auth status >/dev/null 2>&1 || fail "gh is not logged in (gh auth login)"
-
-# The packs are listed in the notes below and they are generated from
-# `crucible/envpack.py`, which is the one owner of what packs exist. A release
-# machine that cannot import the package would get notes that silently omit
-# them, which is worse than a refusal here.
-python -c 'import crucible.envpack' 2>/dev/null \
-  || fail "crucible is not importable in this python (pip install -e .); the notes list the packs this tag carries and are generated from crucible/envpack.py"
-
-# -------------------------------------------------- the packs have a builder
-#
-# THE PACKS ARE PUBLISHED BY AN EXPLICIT DISPATCH, not by this tag.
-# `.github/workflows/envpacks.yml` takes the tag as a `workflow_dispatch`
-# input and NO trigger of its own — deliberately, as 0.6.2 recorded: "tag
-# creation cannot launch another builder that overwrites verified candidate
-# assets." The dispatch is this script's, after the release exists, so there
-# is exactly one caller. A patch release rebuilds only the CORE runtime packs
-# (they carry this code) and REUSES the unchanged inference archives under
-# their original filenames, which `scripts/release_packs.py` plans and stages.
-#
-# Since 0.6.0 `crucible install <type>` DOWNLOADS a pack by default and
-# refuses `pack_not_published` when the release has none, so a release whose
-# packs were never built is one where every fresh machine's first install
-# fails by name — the worst kind of working release. THIS SCRIPT DISPATCHES
-# THEM: `gh workflow run envpacks.yml -f tag=$TAG` runs once the release
-# exists, at the bottom of this file. The check here is the earlier half —
-# that the workflow is in the tree at all — so a cut refuses up front rather
-# than creating a release and then failing to dispatch anything.
-ENVPACKS_WORKFLOW=".github/workflows/envpacks.yml"
-[ -f "$ENVPACKS_WORKFLOW" ] \
-  || fail "$ENVPACKS_WORKFLOW is not in this tree, so the tag would build no environment packs and \`crucible install\` would refuse every job type \`pack_not_published\` (PHASE14-ENVPACKS.md section 3.3)"
 
 # ------------------------------------------------------------------ the tree
 
@@ -240,8 +208,23 @@ BOOT="$OUT/crucible-bootstrap-$VERSION.tgz"
 for asset in "$SDIST" "$WHEEL" "$TGZ" "$BOOT"; do
   [ -f "$asset" ] || fail "expected asset $asset was not built"
 done
+
+# THE WHEEL'S DIGEST, BESIDE THE WHEEL. Both installers fetch this one line and
+# compare it before pip is allowed near the download (PHASE20 section 3): the
+# interpreter is pinned by a digest in our source, and our own code cannot be,
+# so the release is what vouches for it. One line, the digest first, the shape
+# `sha256sum` writes and `awk '{print $1}'` reads.
+WHEEL_SHA="$WHEEL.sha256"
+if command -v sha256sum >/dev/null 2>&1; then
+  ( cd "$OUT" && sha256sum "$(basename "$WHEEL")" > "$(basename "$WHEEL_SHA")" )
+else
+  # macOS has no sha256sum; `shasum -a 256` writes the same two columns.
+  ( cd "$OUT" && shasum -a 256 "$(basename "$WHEEL")" > "$(basename "$WHEEL_SHA")" )
+fi
+[ -s "$WHEEL_SHA" ] || fail "could not write $WHEEL_SHA"
+
 echo "release: built"
-for asset in "$SDIST" "$WHEEL" "$TGZ" "$BOOT"; do
+for asset in "$SDIST" "$WHEEL" "$WHEEL_SHA" "$TGZ" "$BOOT"; do
   echo "  $(basename "$asset")"
 done
 
@@ -267,33 +250,20 @@ npm install https://github.com/$REPO_SLUG/releases/download/$TAG/crucible-client
 npm install https://github.com/$REPO_SLUG/releases/download/$TAG/crucible-bootstrap-$VERSION.tgz
 \`\`\`"
 
-# --------------------------------------------------- what the packs will be
+# ------------------------------------------- what this release does NOT carry
 #
-# NAMED IN THE NOTES, from `crucible envpack list`'s own source, so a reader of
-# the release page can tell a pack that was never meant to exist from one whose
-# CI job failed. The manifest (`envpacks.json`) is uploaded LAST by
-# `envpacks.yml`, so its presence is the release's own statement of what
-# actually built; this list is what was ATTEMPTED.
-PACK_LIST="$(python -c '
-from crucible import envpack
-for name, backend in envpack.every_pack():
-    print(f"- `{name}` / {backend}")
-')"
+# SAID OUT LOUD ON THE PAGE, because a reader who remembers the old releases
+# will look for the environment archives and find none. PHASE20 section 1.
 NOTES_HEADER="$NOTES_HEADER
 
-### Environment packs
+### Environments
 
-\`crucible install <type>\` downloads a pack from this release and unpacks it; it
-builds nothing. This release script explicitly dispatches
-\`.github/workflows/envpacks.yml\` for this tag and attempts:
-
-$PACK_LIST
-
-Each is \`crucible-env-<name>-<backend>-$VERSION.tar.zst\`, split into
-\`.part00\`… under 1900 MiB, with \`envpacks.json\` naming the sha256 of the
-reassembled whole. A pack missing from \`envpacks.json\` is one whose job did not
-finish; \`crucible install\` refuses it \`pack_not_published\` rather than building
-it quietly, and \`crucible envpack build <name>\` is the way to make it by hand."
+This release carries CODE. \`crucible install <type>\` builds a job env from its
+recipe (\`crucible/envs/<type>/<recipe>.txt\`) with pip, from PyPI and the
+pinned indexes; \`install.sh\` and \`install.ps1\` download the pinned CPython from
+python-build-standalone and pip this release's wheel into it; the Windows host
+imports Ubuntu's own WSL image from cloud-images.ubuntu.com. None of those bytes
+are ours, so none of them are here."
 
 gh release create "$TAG" \
   --repo "$REPO_SLUG" \
@@ -302,11 +272,10 @@ gh release create "$TAG" \
   --prerelease --latest=false \
   --generate-notes \
   --notes "$NOTES_HEADER" \
-  "$SDIST" "$WHEEL" "$TGZ" "$BOOT" \
+  "$SDIST" "$WHEEL" "$WHEEL_SHA" "$TGZ" "$BOOT" \
   "$INSTALL_SH" "$INSTALL_PS1"
 
 echo "release: $TAG candidate created (prerelease, not latest)"
-gh workflow run envpacks.yml --repo "$REPO_SLUG" -f tag="$TAG"
-echo "release: wait for every pack and rootfs, test fresh native installs, then run python scripts/promote_release.py --tag $TAG --publish --confirmed-install-smoke"
+echo "release: test a fresh install, then run python scripts/promote_release.py --tag $TAG --publish --confirmed-install-smoke"
 gh release view "$TAG" --repo "$REPO_SLUG" --json tagName,url,assets \
   --jq '.tagName + "  " + .url, (.assets[] | "  asset: " + .name + " (" + (.size|tostring) + " bytes)")'

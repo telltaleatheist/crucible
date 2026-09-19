@@ -22,19 +22,19 @@
  * in it the same way it does for the two scripts. What is NOT emitted is the
  * `means` predicates, which are code rather than data — those live in
  * `crucible/host/wslstate.py`, one per code, and a pytest asserts the two sets
- * are equal. It is the seam `steps.ts` already uses for its three programs and
- * the one `envpack.SMOKE_IMPORT` uses for `cli.INSTALLABLE_JOB_TYPES`.
+ * are equal. It is the seam `steps.ts` already uses for its three programs.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { LATEST_RELEASE_URL } from '../src/channel.js';
-import { CRUCIBLE_DISTRO, WSL_CONF_MARKER, WSL_CONF_TEXT } from '../src/distro.js';
-import { ENVPACKS_ASSET, HOST_BACKEND, HOST_PACK, RELEASE_REPO, rootfsAssetName } from '../src/envpacks.js';
-import { activatePackSh, CURL_ARGS, DOWNLOADS_SUBDIR, HOST_SUBDIR, PARTIAL_SUFFIX, SERVER_SUBDIR, STAMP_NAME, TAR_ARGS } from '../src/pack.js';
+import { CRUCIBLE_DISTRO, finishImportScript, UBUNTU_WSL_ROOTFS, UBUNTU_WSL_SERIES, rootfsSumsUrl, rootfsUrl, WSL_CONF_MARKER, WSL_CONF_TEXT } from '../src/distro.js';
+import { DESKTOP_PACKAGES, interpreterFor, interpreterUrl } from '../src/interpreter.js';
+import { HOST_BACKEND, RELEASE_REPO, wheelAssetName, wheelShaAssetName } from '../src/release.js';
+import { activateRuntimeSh, CURL_ARGS, DOWNLOADS_SUBDIR, HOST_SUBDIR, PARTIAL_SUFFIX, SERVER_SUBDIR, STAMP_NAME, TAR_ARGS } from '../src/runtime.js';
 import type { RunResult } from '../src/runner.js';
-import { installJobTypesSh, installSteps, uninstallSh, type StepPlan } from '../src/steps.js';
+import { installJobTypesSh, installSteps, interpreterSh, uninstallSh, wheelSh, type StepPlan } from '../src/steps.js';
 import { BOOTSTRAP_VERSION } from '../src/version.js';
 import { probeArgv, wslStates, type ProbeKey, type WslStateDef } from '../src/wsl-states.js';
 
@@ -152,10 +152,10 @@ function argumentsSh(): string {
     '                       a rented box is reached over the network, so it',
     '                       wants 0.0.0.0 — the bearer token is the lock)',
     '  --port <n>           bind port (default 7100)',
-    '  --install <type>     also install this job type from its pack. Repeatable.',
+    '  --install <type>     also install this job type, from its recipe. Repeatable.',
     '                       tts names its engine: --install tts=higgs-v3',
-    '  --from-source <ref>  build the server from a git ref instead of the',
-    '                       published pack (a branch, a tag or a sha)',
+    '  --from-source <ref>  install the server from a git ref instead of the',
+    "                       release's wheel (a branch, a tag or a sha)",
     '  --release <version>  install this exact release rather than the channel\'s',
     '                       latest. The one override; it still downloads from that',
     '                       release, so it is a pin and not an offline install.',
@@ -226,10 +226,11 @@ function argumentsSh(): string {
  * would be an installer inventing a requirement. It is required when a job
  * type that decodes audio was asked for, and REPORTED otherwise.
  *
- * Disk is the other conditional. The server pack states its own size and the
- * pack step already refuses `pack_disk` against it; WEIGHTS do not have a
- * size until somebody names a model, so the only honest disk rule here is the
- * one the operator states — `--min-free-gib` — plus the free figure, printed.
+ * Disk is the other conditional. Since PHASE20 the server itself is a ~30 MB
+ * interpreter and a 1 MB wheel, which is not worth a guard; WEIGHTS and job
+ * envs do not have a size until somebody names a model or a recipe. So the only
+ * honest disk rule here is the one the operator states — `--min-free-gib` —
+ * plus the free figure, printed.
  */
 function prerequisitesSh(): string {
   return [
@@ -262,40 +263,39 @@ function prerequisitesSh(): string {
 }
 
 /**
- * `--from-source <ref>`: the server built from a checkout, not from a pack.
+ * `--from-source <ref>`: the server installed from a checkout, not from the
+ * release's wheel.
  *
- * For the night a branch is what exists — tonight's `feat/phase6-remote-render`
- * is exactly that case — and for a droplet, where there is no app to ask for
- * a release. It is a SEPARATE path and never a fallback: a pack that failed to
- * download is `pack_download_failed` and stays that, because "the release is
- * broken" and "I want this branch" are different sentences and only one of
- * them is an argument.
+ * For the night a branch is what exists, and for a droplet where there is no
+ * app to ask for a release. It is a SEPARATE path and never a fallback: a wheel
+ * that failed to download is `runtime_download_failed` and stays that, because
+ * "the release is broken" and "I want this branch" are different sentences and
+ * only one of them is an argument.
  *
- * It needs a `python3` on the machine, and says so by name, because this is
- * the one route where the interpreter does not arrive with the code.
+ * IT REPLACES THE WHEEL HALF AND NOTHING ELSE (PHASE20 section 3). The
+ * interpreter step above has already put the same pinned CPython at
+ * `$dest`, so this is `pip install <checkout>` into it — which is why this
+ * route no longer needs a `python3` on the machine, no longer builds a venv of
+ * its own, and no longer has console scripts to relocate: pip writes them
+ * straight into the tree they will run from.
  */
 function fromSourceSh(): string {
   return [
-    `say "server-pack: --from-source $FROM_SOURCE, building instead of downloading"`,
+    `say "server: --from-source $FROM_SOURCE, installing from a checkout instead of the wheel"`,
     'command -v git >/dev/null 2>&1 || die "guest_missing_tool: --from-source needs git"',
-    'command -v python3 >/dev/null 2>&1 || die "guest_missing_tool: --from-source needs a python3 on this machine to build the venv with. The published pack brings its own interpreter; a source build cannot"',
-    `dest="$CRUCIBLE_HOME/${SERVER_SUBDIR}"`,
     'src="$CRUCIBLE_HOME/src"',
     'rm -rf "$src"',
     `git clone --filter=blob:none "https://github.com/${RELEASE_REPO}" "$src" || die "from_source_clone_failed: https://github.com/${RELEASE_REPO}"`,
     'git -C "$src" checkout --detach "$FROM_SOURCE" || die "from_source_ref_unknown: the checkout has no ref called $FROM_SOURCE"',
-    'partial="$dest.partial"',
-    'rm -rf "$partial"',
-    'python3 -m venv "$partial" || die "from_source_venv_failed: python3 -m venv would not make $partial"',
-    '"$partial/bin/python" -m pip install --upgrade pip setuptools wheel || die "from_source_install_failed: pip would not update itself in $partial"',
-    '"$partial/bin/python" -m pip install "$src" || die "from_source_install_failed: pip would not install $src into $partial"',
-    'if [ "$(uname -s)" = Darwin ]; then "$partial/bin/python" -m pip install pystray pillow || die "from_source_install_failed: desktop packages could not be installed"; fi',
-    `"$partial/bin/python" -c 'from pathlib import Path; import sys; from crucible.envpack import relocate_console_scripts; relocate_console_scripts(Path(sys.argv[1]))' "$partial" || die "from_source_install_failed: console scripts could not be relocated"`,
-    '"$partial/bin/crucible" --version >/dev/null || die "from_source_install_failed: $partial/bin/crucible would not run"',
-    activatePackSh('"$dest"', '"$partial"') + ' || die "from_source_install_failed: runtime activation failed; previous runtime preserved"',
-    `printf 'sha256=%s\\nrelease=%s\\n' "from-source" "$(git -C "$src" rev-parse HEAD)" > "$dest/${STAMP_NAME}"`,
+    'if [ -x "$dest/bin/crucible" ]; then "$dest/bin/crucible" local shutdown || true; fi',
+    '"$dest/bin/python3" -m pip install --upgrade --no-input "$src" || die "from_source_install_failed: pip would not install $src into $dest"',
+    `if [ "$(uname -s)" = Darwin ]; then "$dest/bin/python3" -m pip install ${DESKTOP_PACKAGES.join(' ')} || die "from_source_install_failed: desktop packages could not be installed"; fi`,
+    // The stamp records the COMMIT as the release, because that is what is
+    // installed. The never-older gate then reads a version it cannot order and
+    // says so rather than comparing a sha with a version number.
+    `printf 'python_sha256=%s\\npython_version=%s\\nrelease=%s\\n' "$py_sha" "$py_version" "$(git -C "$src" rev-parse HEAD)" > "$dest/${STAMP_NAME}"`,
     'CRUCIBLE="$dest/bin/crucible"',
-    'say "server-pack: built $("$CRUCIBLE" --version) from $(git -C "$src" rev-parse --short HEAD)"',
+    'say "server: installed $("$CRUCIBLE" --version) from $(git -C "$src" rev-parse --short HEAD)"',
   ].join('\n');
 }
 
@@ -306,8 +306,9 @@ export function generateInstallSh(): string {
     BANNER('#').trimEnd(),
     '#',
     '# Install a Crucible on this machine (Linux x86_64, macOS arm64, or inside a',
-    '# WSL2 distro). Downloads the server pack from the release, initialises it,',
-    '# installs the service, and prints the line that pairs an app with it.',
+    '# WSL2 distro). Downloads the pinned CPython from python-build-standalone,',
+    "# pip-installs the release's wheel into it, initialises it, installs the",
+    '# service, and prints the line that pairs an app with it.',
     '#',
     '#   curl -fsSL https://github.com/' + RELEASE_REPO + '/releases/latest/download/install.sh | sh',
     '#',
@@ -334,12 +335,12 @@ export function generateInstallSh(): string {
     '# `releases/latest/download/install.sh`, so the copy you run is whichever one',
     '# GitHub calls latest. Every release is cut `--prerelease --latest=false` and',
     '# becomes latest only when promote_release.py says so, so on 2026-09-16 that',
-    '# URL served the v0.6.0 script, which then installed 0.6.0 and its packs --',
+    '# URL served the v0.6.0 script, which then installed 0.6.0 --',
     '# six versions behind, silently, with nothing in the output looking wrong.',
     '# Asking at RUN time cannot drift that way, and a channel that will not',
     '# answer is `release_channel_unreadable` rather than a quiet older install.',
     '#',
-    '# AND IT NEVER GOES BACKWARDS. `<home>/server/.pack` records which release is',
+    '# AND IT NEVER GOES BACKWARDS. `<home>/server/.crucible` records which release is',
     '# on this disk; installing an older one over it is refused by name',
     '# (INSTALL-UNINSTALL.md 6.5.4), and the one way down is --rollback-to naming',
     '# the exact version.',
@@ -395,7 +396,7 @@ export function generateInstallSh(): string {
     '',
     '# --- uninstall -----------------------------------------------------------',
     '# The inverse, and then this script exits: `crucible uninstall` does the',
-    '# nine steps inside CRUCIBLE_HOME and this removes the pack it unpacked.',
+    '# nine steps inside CRUCIBLE_HOME and this removes the interpreter it unpacked.',
     'if [ "$UNINSTALL" = 1 ]; then',
     '  say "uninstall"',
     indent(uninstallSh().trimEnd()),
@@ -408,14 +409,16 @@ export function generateInstallSh(): string {
     lines.push(`# --- ${step.name} ${'-'.repeat(Math.max(0, 68 - step.name.length))}`);
     lines.push(`# ${step.what}`);
     lines.push(`say "${step.name}"`);
-    if (step.name === 'server-pack') {
-      // The pack and the source build are two routes to one artefact, and the
-      // `if` is the whole of their relationship: neither is the other's
-      // fallback. `serverPackSh()` stays the one owner of the pack route.
+    if (step.name === 'server') {
+      // THE INTERPRETER IS SHARED AND THE WHEEL IS NOT. `--from-source`
+      // replaces the second half only, so the first is emitted once, outside
+      // the `if` — which is also the one place this file would otherwise have
+      // two copies of a pin. Neither branch is the other's fallback.
+      lines.push(interpreterSh().trimEnd());
       lines.push('if [ -n "$FROM_SOURCE" ]; then');
       lines.push(indent(fromSourceSh()));
       lines.push('else');
-      lines.push(indent(step.sh.trimEnd()));
+      lines.push(indent(wheelSh().trimEnd()));
       lines.push('fi');
     } else {
       lines.push(step.sh.trimEnd());
@@ -435,7 +438,7 @@ export function generateInstallSh(): string {
     if (step.name === 'init') {
       // Exactly where `installSteps` puts `install-<type>` for an app.
       lines.push('# --- install-job-types ---------------------------------------------------');
-      lines.push('# `--install <type>`, from the published packs. Empty on a bare run, which');
+      lines.push('# `--install <type>`, from its recipe. Empty on a bare run, which');
       lines.push('# is 4a: a Crucible that serves nothing until somebody asks.');
       lines.push(installJobTypesSh().trimEnd());
       lines.push('');
@@ -478,6 +481,8 @@ export function generateInstallPs1(): string {
     throw new Error('gen-install-scripts: the WSL table changed shape; install.ps1 must be re-thought, not re-run');
   }
   const base = `https://github.com/${RELEASE_REPO}/releases/download/v$Release`;
+  // The Windows host's interpreter, from the ONE table `install.sh` reads.
+  const pin = interpreterFor(HOST_BACKEND);
   const lines: string[] = [
     BANNER('#').trimEnd(),
     '#',
@@ -491,9 +496,9 @@ export function generateInstallPs1(): string {
     '# to the SAME implementation through the host loopback door. Two walks of',
     '# one table was the thing being removed.',
     '#',
-    '# So: download the host pack for this release, verify it, unpack it to',
-    '# %LOCALAPPDATA%\\Crucible\\host\\, register the Startup item, start the',
-    '# host, and STOP.',
+    '# So: download the pinned CPython, unpack it to',
+    "# %LOCALAPPDATA%\\Crucible\\host\\, pip-install this release's wheel and the",
+    '# tray into it, register the Startup item, start the host, and STOP.',
     '#',
     '#   irm https://github.com/' + RELEASE_REPO + '/releases/latest/download/install.ps1 | iex',
     '#',
@@ -515,12 +520,12 @@ export function generateInstallPs1(): string {
     // cannot go stale in a file served from `releases/latest/download/`.
     "  [string]$Release = '',",
     '  # An operator rollback: install this EXACT older release over a newer host',
-    '  # pack already on this machine. Must name the same version as -Release;',
+    '  # runtime already on this machine. Must name the same version as -Release;',
     '  # there is no other way down (INSTALL-UNINSTALL.md 6.5.4).',
     "  [string]$RollbackTo = '',",
     '  [string]$Root = "$env:LOCALAPPDATA\\Crucible",',
     '  # The inverse. `crucible uninstall` does the work inside the home; this',
-    '  # script removes the host pack, because this script is what unpacked it.',
+    '  # script removes the host runtime, because this script is what unpacked it.',
     '  [switch]$Uninstall,',
     '  [switch]$PurgeWeights,',
     '  [switch]$DryRun,',
@@ -574,23 +579,23 @@ export function generateInstallPs1(): string {
     '  if ($WslToo) { $verb += "--wsl-too" }',
     '  Say "uninstall: $Cmd $($verb -join \' \')"',
     '  & $Cmd @verb',
-    '  if ($LASTEXITCODE -ne 0) { Die "step_failed: uninstall (crucible uninstall exited $LASTEXITCODE; nothing of the pack has been removed)" }',
+    '  if ($LASTEXITCODE -ne 0) { Die "step_failed: uninstall (crucible uninstall exited $LASTEXITCODE; nothing of the runtime has been removed)" }',
     '  if ($DryRun) {',
-    '    Say "host-pack: would remove $HostDir and $DownloadDir"',
+    '    Say "host: would remove $HostDir and $DownloadDir"',
     '    Say "home: would remove $Root if it were then empty"',
     '    exit 0',
     '  }',
-    '  Say "host-pack"',
+    '  Say "host"',
     '  foreach ($gone in @($Partial, $DownloadDir, $HostDir)) {',
     '    if (Test-Path $gone) {',
     '      try {',
     '        Remove-Item $gone -Recurse -Force -ErrorAction Stop',
     '      } catch {',
-    '        Die "host_pack_locked: $gone could not be removed ($($_.Exception.Message)). Something still holds a file in it — the tray was just ended, so log out and back in, then run this again. It is idempotent."',
+    '        Die "host_runtime_locked: $gone could not be removed ($($_.Exception.Message)). Something still holds a file in it — the tray was just ended, so log out and back in, then run this again. It is idempotent."',
     '      }',
     '    }',
     '  }',
-    '  Say "host-pack: removed $HostDir"',
+    '  Say "host: removed $HostDir"',
     '  $left = @(Get-ChildItem -Force -Path $Root -ErrorAction SilentlyContinue)',
     '  if ($left.Count -eq 0) {',
     '    Remove-Item $Root -Force -Recurse',
@@ -603,30 +608,19 @@ export function generateInstallPs1(): string {
     '  exit 0',
     '}',
     '',
-    '# A pack is a zstd tarball. Windows 10 1803+ and Windows 11 ship bsdtar',
-    '# linked with libzstd, so no zstd.exe is needed — MEASURED on 2026-09-14:',
-    '# bsdtar 3.8.1 / libarchive 3.8.1 / libzstd 1.5.5. A machine whose tar has',
-    '# no zstd would half-unpack in silence, so it is CHECKED, not assumed.',
+    '# python-build-standalone publishes gzip, which every tar reads.',
     '#',
     '# NAMED, NOT LOOKED UP. `tar` used to be resolved through PATH, and PATH',
     '# is the CALLERS: launched from a Git Bash shell this found',
-    '# C:\\Program Files\\Git\\usr\\bin\\tar.exe - GNU tar 1.32, no zstd at all -',
-    '# and refused a Windows 11 box whose System32 bsdtar has read zstd the',
-    '# whole time. Measured 2026-09-17 deploying 0.6.8 via scripts/deploy.sh.',
-    '# The tar Windows GUARANTEES is now the one this checks AND the one it',
-    '# unpacks with: checking one tool and using another is how a check',
-    '# passes and the unpack still half-works.',
+    '# C:\\Program Files\\Git\\usr\\bin\\tar.exe and refused a Windows 11 box',
+    '# whose System32 bsdtar was fine. Measured 2026-09-17 deploying 0.6.8 via',
+    '# scripts/deploy.sh. The tar Windows GUARANTEES is the one this uses.',
     '$Tar = Join-Path $env:SystemRoot "System32\\tar.exe"',
     'if (-not (Test-Path $Tar)) {',
-    '  Die "guest_missing_tool: there is no $Tar on this machine. Windows 10 1803+ and Windows 11 ship a bsdtar there that reads zstd, and a pack cannot be unpacked without one."',
-    '}',
-    '$tarVersion = ""',
-    'try { $tarVersion = (& $Tar --version | Out-String) } catch { $tarVersion = "" }',
-    'if ($tarVersion -notmatch "zstd") {',
-    '  Die "guest_missing_tool: $Tar cannot read zstd (tar --version said: $($tarVersion.Trim())). Windows 10 1803+ and Windows 11 ship one that can."',
+    '  Die "guest_missing_tool: there is no $Tar on this machine. Windows 10 1803+ and Windows 11 ship a bsdtar there, and the interpreter archive cannot be unpacked without one."',
     '}',
     '',
-    '# --- 1. which pack -------------------------------------------------------',
+    '# --- 1. which release -----------------------------------------------------',
     '# Asked only when nobody named one. -Uninstall returned long before here,',
     '# so taking Crucible off a machine still needs no network.',
     '# THE POINTER IS `releases/latest` (INSTALL-UNINSTALL.md 6.5.1): the promoted',
@@ -642,115 +636,136 @@ export function generateInstallPs1(): string {
     '}',
     'if ($RollbackTo -and $RollbackTo -ne $Release) { Die "rollback_version_mismatch: -RollbackTo names $RollbackTo and the release being installed is $Release; a rollback names the exact Crucible you want back" }',
     'Say "release $Release"',
-    `$manifestUrl = "${base}/${ENVPACKS_ASSET}"`,
-    '$manifestRaw = & curl.exe -fsSL --retry 3 "$manifestUrl"',
-    'if ($LASTEXITCODE -ne 0) { Die "pack_manifest_unreadable: could not fetch $manifestUrl" }',
-    'try { $manifest = $manifestRaw | Out-String | ConvertFrom-Json } catch { Die "pack_manifest_unreadable: $manifestUrl is not JSON" }',
-    'if ($manifest.schema -ne 1 -and $manifest.schema -ne 2) { Die "pack_manifest_unreadable: $manifestUrl declares schema $($manifest.schema), this installer reads 1 or 2" }',
-    '$pack = $null',
-    `foreach ($entry in $manifest.packs) { if ($entry.name -eq ${psQuote(HOST_PACK)} -and $entry.backend -eq ${psQuote(HOST_BACKEND)}) { $pack = $entry } }`,
-    `if ($null -eq $pack) { Die "pack_not_published: the $Release release publishes no ${HOST_PACK} pack for ${HOST_BACKEND}" }`,
     '',
-    '# --- 2. already installed? ------------------------------------------------',
-    '# The stamp is the same two lines the guest-side install writes, read the',
-    '# same way: a matching sha means these bytes are already unpacked.',
+    '# --- 2. the pinned interpreter --------------------------------------------',
+    '# THE SAME TABLE `install.sh` READS (sdk/bootstrap/src/interpreter.ts), and',
+    '# the same rule: pinned by version AND digest, downloaded ONCE. The stamp',
+    '# carries the digest, so an upgrade skips this whole block.',
+    `$PyAsset = ${psQuote(pin.asset)}`,
+    `$PySha = ${psQuote(pin.sha256)}`,
+    `$PyVersion = ${psQuote(pin.version)}`,
+    `$PyUrl = ${psQuote(interpreterUrl(pin))}`,
+    '$PythonExe = Join-Path $HostDir "python.exe"',
     '$have = ""',
     '$haveRelease = ""',
     'if (Test-Path $Stamp) {',
     '  foreach ($line in (Get-Content $Stamp)) {',
-    '    if ($line -match "^sha256=(.+)$") { $have = $Matches[1].Trim() }',
+    '    if ($line -match "^python_sha256=(.+)$") { $have = $Matches[1].Trim() }',
     '    if ($line -match "^release=(.+)$") { $haveRelease = $Matches[1].Trim() }',
     '  }',
     '}',
-    'if ($have -eq $pack.sha256 -and (Test-Path $Cmd)) {',
-    '  Say "host-pack: already installed ($($pack.sha256))"',
-    '} else {',
-    '  # --- 2a. never over a newer pack -----------------------------------------',
-    '  # INSTALL-UNINSTALL.md 6.5.4, the same rule and the same refusal names the',
-    '  # POSIX installer and installPack() use. [version] compares number by',
-    '  # number, which is the thing a string comparison gets wrong at 1.0.10.',
-    '  # An unstamped pack is not read as older: a version nobody recorded cannot',
-    '  # be compared with one.',
-    '  if ($haveRelease) {',
-    '    $onDisk = $null; $wanted = $null',
-    '    if ([version]::TryParse($haveRelease, [ref]$onDisk) -and [version]::TryParse($Release, [ref]$wanted) -and $wanted -lt $onDisk) {',
-    '      if ($RollbackTo -ne $Release) {',
-    '        Die "install_would_downgrade: $HostDir is the $haveRelease host pack and this would install $Release over it. Nothing has been downloaded. An operator who means to go back names the version: -RollbackTo $Release"',
-    '      }',
+    '# --- 2a. never over a newer release ---------------------------------------',
+    '# INSTALL-UNINSTALL.md 6.5.4, the same rule and the same refusal names the',
+    '# POSIX installer and installRuntime() use. [version] compares number by',
+    '# number, which is the thing a string comparison gets wrong at 1.0.10.',
+    '# An unstamped runtime is not read as older: a version nobody recorded',
+    '# cannot be compared with one.',
+    'if ($haveRelease) {',
+    '  $onDisk = $null; $wanted = $null',
+    '  if ([version]::TryParse($haveRelease, [ref]$onDisk) -and [version]::TryParse($Release, [ref]$wanted) -and $wanted -lt $onDisk) {',
+    '    if ($RollbackTo -ne $Release) {',
+    '      Die "install_would_downgrade: $HostDir is the $haveRelease release and this would install $Release over it. Nothing has been downloaded. An operator who means to go back names the version: -RollbackTo $Release"',
     '    }',
     '  }',
-    '',
-    '  # --- 3. disk ------------------------------------------------------------',
-    '  # The same sum pack.ts requiredBytes() uses: unpacked + the whole archive',
-    '  # + one part, a part being the archive over the part count.',
-    '  $need = $pack.unpacked_bytes + $pack.bytes + [math]::Floor($pack.bytes / $pack.parts.Count)',
-    '  $drive = (Get-Item $env:LOCALAPPDATA).PSDrive',
-    '  if ($drive.Free -lt $need) {',
-    '    Die "pack_disk: the host pack needs $([math]::Round($need/1GB,1)) GiB free on $($drive.Name): and there is $([math]::Round($drive.Free/1GB,1)) GiB. Nothing has been downloaded."',
-    '  }',
-    '',
-    '  # --- 4. download, join, verify -------------------------------------------',
+    '}',
+    'if ($have -eq $PySha -and (Test-Path $PythonExe)) {',
+    '  Say "host: python $PyVersion is already at $HostDir"',
+    '} else {',
     '  New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null',
-    '  $archiveName = $pack.parts[0] -replace "\\.part[0-9]+$", ""',
-    '  $archive = Join-Path $DownloadDir $archiveName',
-    // THE ROW'S RELEASE. An unchanged pack is carried by reference rather
-    // than rebuilt or copied, so its parts stay in the release that built them
-    // and the row says which that is. Schema 1 has no such field and needs
-    // none: it placed every pack on its own release, so `$Release` IS the
-    // answer there — recovered, not defaulted.
-    '  $packRelease = if ($pack.PSObject.Properties.Name -contains "release") { $pack.release } else { $Release }',
-    `  $packBase = "https://github.com/${RELEASE_REPO}/releases/download/v$packRelease"`,
+    '  $archive = Join-Path $DownloadDir $PyAsset',
     '  if (Test-Path $archive) { Remove-Item $archive -Force }',
-    '  foreach ($part in $pack.parts) {',
-    '    Say "host-pack: $part"',
-    '    $partPath = Join-Path $DownloadDir $part',
-    '    & curl.exe ' + CURL_ARGS.join(' ') + ' -o $partPath "$packBase/$part"',
-    '    if ($LASTEXITCODE -ne 0) { Die "pack_download_failed: $packBase/$part" }',
-    '    # Byte-for-byte append, then delete: peak extra disk is ONE part and',
-    '    # not the whole set. Add-Content would re-encode the bytes as text.',
-    '    $in = [System.IO.File]::OpenRead($partPath)',
-    '    $out = [System.IO.File]::Open($archive, "Append", "Write")',
-    '    try { $in.CopyTo($out) } finally { $out.Close(); $in.Close() }',
-    '    Remove-Item $partPath -Force',
-    '  }',
+    '  Say "host: python $PyVersion from python-build-standalone"',
+    '  & curl.exe ' + CURL_ARGS.join(' ') + ' -o $archive "$PyUrl"',
+    '  if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: $PyUrl" }',
     '  $got = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLower()',
-    '  if ($got -ne $pack.sha256) {',
+    '  if ($got -ne $PySha) {',
     '    Remove-Item $archive -Force',
-    '    Die "pack_sha_mismatch: $archiveName hashes $got, the manifest says $($pack.sha256)"',
+    '    Die "runtime_sha_mismatch: $PyAsset hashes $got, this installer pins $PySha. The download was deleted"',
     '  }',
     '',
-    '  # --- 5. unpack beside, prove it runs, THEN move --------------------------',
+    '  # --- 2b. unpack beside, prove it runs, THEN move -------------------------',
+    '  # `install_only` archives carry ONE top-level python/ directory and that',
+    '  # directory IS the interpreter, so what moves is $Partial\\python.',
     '  if (Test-Path $Partial) { Remove-Item $Partial -Recurse -Force }',
     '  New-Item -ItemType Directory -Force -Path $Partial | Out-Null',
     `  & $Tar ${TAR_ARGS.join(' ')} $archive -C $Partial`,
-    '  if ($LASTEXITCODE -ne 0) { Die "pack_unpack_failed: tar would not open $archive" }',
-    '  # The .cmd and not the .exe: pip Scripts\\*.exe launchers bake the build',
-    '  # tree interpreter path into the binary and do not survive this move',
-    '  # (PHASE15-HOST.md 4.4, and PHASE14 7.2a for the POSIX half of it).',
-    '  & (Join-Path $Partial "crucible.cmd") --version | Out-Null',
-    '  if ($LASTEXITCODE -ne 0) { Die "pack_unpack_failed: crucible.cmd in $Partial would not run" }',
-    '  # Stop with the new staged control code before touching the installed runtime.',
-    '  # A shutdown failure leaves both the old runtime and verified staging intact.',
+    '  if ($LASTEXITCODE -ne 0) { Die "runtime_unpack_failed: tar would not open $archive" }',
+    '  $staged = Join-Path $Partial "python"',
+    '  & (Join-Path $staged "python.exe") --version | Out-Null',
+    '  if ($LASTEXITCODE -ne 0) { Die "runtime_unpack_failed: python.exe in $staged would not run" }',
     '  if (Test-Path -LiteralPath $Previous) { Die "upgrade_recovery_required: $Previous exists from an interrupted upgrade; restore or inspect it before retrying" }',
     '  if (Test-Path -LiteralPath $HostDir) {',
-    '    & (Join-Path $Partial "crucible.cmd") local shutdown',
-    '    if ($LASTEXITCODE -ne 0) { Die "upgrade_stop_failed: the old runtime was kept because Crucible did not stop cleanly" }',
+    '    if (Test-Path -LiteralPath $Cmd) {',
+    '      & $Cmd local shutdown',
+    '      if ($LASTEXITCODE -ne 0) { Die "upgrade_stop_failed: the old runtime was kept because Crucible did not stop cleanly" }',
+    '    }',
     '    Move-Item -LiteralPath $HostDir -Destination $Previous -ErrorAction Stop',
     '  }',
     '  try {',
-    '    Move-Item $Partial $HostDir -ErrorAction Stop',
-    '    & $Cmd --version | Out-Null',
-    '    if ($LASTEXITCODE -ne 0) { throw "the installed runtime failed its startup check" }',
+    '    Move-Item $staged $HostDir -ErrorAction Stop',
+    '    & $PythonExe --version | Out-Null',
+    '    if ($LASTEXITCODE -ne 0) { throw "the installed interpreter failed its startup check" }',
     '  } catch {',
-    '    if ((Test-Path -LiteralPath $Previous) -and (Test-Path -LiteralPath $HostDir) -and -not (Test-Path -LiteralPath $Partial)) { Move-Item -LiteralPath $HostDir -Destination $Partial -ErrorAction Stop }',
+    '    if ((Test-Path -LiteralPath $Previous) -and (Test-Path -LiteralPath $HostDir)) { Remove-Item -LiteralPath $HostDir -Recurse -Force }',
     '    if ((Test-Path -LiteralPath $Previous) -and -not (Test-Path -LiteralPath $HostDir)) { Move-Item -LiteralPath $Previous -Destination $HostDir }',
     '    Die "upgrade_swap_failed: $_. The previous runtime is retained at $Previous when present."',
     '  }',
     '  if (Test-Path -LiteralPath $Previous) { Remove-Item -LiteralPath $Previous -Recurse -Force }',
-    '  Set-Content -Path $Stamp -Encoding ascii -Value @("sha256=$($pack.sha256)", "release=$Release")',
+    '  Remove-Item $Partial -Recurse -Force',
     '  Remove-Item $archive -Force',
-    '  Say "host-pack: unpacked $($pack.parts.Count) part(s) into $HostDir (Python $($pack.python))"',
+    '  Say "host: python $PyVersion at $HostDir"',
     '}',
+    '',
+    '# --- 3. the wheel, which IS the deploy ------------------------------------',
+    '# It always installs. One megabyte, and re-running it is how a half-finished',
+    '# install is repaired. pip runs from the tree at its FINAL path, which is',
+    '# what makes Scripts\\*.exe launchers correct without being rewritten.',
+    'New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null',
+    `$Wheel = "${wheelAssetName('$Release')}"`,
+    '$WheelPath = Join-Path $DownloadDir $Wheel',
+    'if (Test-Path $WheelPath) { Remove-Item $WheelPath -Force }',
+    'Say "host: $Wheel"',
+    `& curl.exe ${CURL_ARGS.join(' ')} -o $WheelPath "${base}/$Wheel"`,
+    `if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: ${base}/$Wheel" }`,
+    `$wantRaw = & curl.exe -fsSL --retry 3 "${base}/${wheelShaAssetName('$Release')}"`,
+    `if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: ${base}/${wheelShaAssetName('$Release')}" }`,
+    "$want = ($wantRaw | Out-String).Trim().Split()[0].ToLower()",
+    `if ($want -notmatch '^[0-9a-f]{64}$') { Die "runtime_download_failed: ${base}/${wheelShaAssetName('$Release')} is not a sha256" }`,
+    '$gotWheel = (Get-FileHash -Algorithm SHA256 -Path $WheelPath).Hash.ToLower()',
+    'if ($gotWheel -ne $want) {',
+    '  Remove-Item $WheelPath -Force',
+    '  Die "runtime_sha_mismatch: $Wheel hashes $gotWheel, the release says $want. The download was deleted"',
+    '}',
+    'if (Test-Path -LiteralPath $Cmd) { & $Cmd local shutdown | Out-Null }',
+    '& $PythonExe -m pip install --upgrade --no-input $WheelPath',
+    'if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: pip would not install $Wheel into $HostDir" }',
+    '# The tray, which is not a dependency of the wheel: pyproject.toml is what',
+    '# every Crucible installs from, and a headless Linux server must not carry',
+    '# a GUI toolkit. See DESKTOP_PACKAGES in sdk/bootstrap/src/interpreter.ts.',
+    `& $PythonExe -m pip install ${DESKTOP_PACKAGES.join(' ')}`,
+    'if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: the tray packages would not install" }',
+    'Remove-Item $WheelPath -Force',
+    '',
+    '# --- 4. the console shim --------------------------------------------------',
+    '# pip does not write a shebang script into Scripts\\ on Windows; it writes',
+    '# Scripts\\crucible.exe, a launcher BINARY. That one works here — pip ran',
+    '# from this very directory — but everything else in Crucible spells the',
+    '# console entry point `<host>\\crucible.cmd` (crucible/host/paths.py\'s',
+    '# CONSOLE_CMD), so the shim is written beside python.exe.',
+    '#',
+    '# CRLF, not LF: cmd.exe\'s batch parser is line-oriented on CRLF, and an',
+    '# LF-only .cmd can swallow its own last line — a shim that silently does',
+    '# nothing rather than one that reports a syntax error.',
+    '#',
+    '# `%~dp0` is the directory of the running batch file, WITH a trailing',
+    '# backslash, quoted because %LOCALAPPDATA% holds the user\'s name and a user',
+    '# called "Owen Morgan" would otherwise split the command in two.',
+    '$shim = "@echo off`r`n""%~dp0python.exe"" -m crucible.cli %*`r`n"',
+    '[System.IO.File]::WriteAllText($Cmd, $shim, [System.Text.Encoding]::ASCII)',
+    '& $Cmd --version | Out-Null',
+    'if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: $Cmd would not run" }',
+    'Set-Content -Path $Stamp -Encoding ascii -Value @("python_sha256=$PySha", "python_version=$PyVersion", "release=$Release")',
+    'Say "host: $Release installed at $HostDir (Python $PyVersion)"',
     '',
     '# --- 6. start at login ----------------------------------------------------',
     '# The host OWNS that shortcut (4.1). This script asks for it by verb rather',
@@ -905,14 +920,26 @@ export function generateWslStatesPy(): string {
     '',
     '#: The distro Crucible owns. One name, and its owner is sdk/bootstrap/src/distro.ts.',
     `CRUCIBLE_DISTRO = ${pyString(CRUCIBLE_DISTRO)}`,
-    `ROOTFS_ASSET_TEMPLATE = ${pyString(rootfsAssetName('{version}'))}`,
     `RELEASE_REPOSITORY = ${pyString(RELEASE_REPO)}`,
     '',
-    '#: The line /etc/wsl.conf carries in the Crucible rootfs and nowhere else.',
+    '#: CANONICAL\'S OWN WSL IMAGE, and the sums file beside it. PHASE20 section 2:',
+    '#: the release carries no rootfs of ours any more, and we store no digest of',
+    '#: theirs -- the sums file in the same directory is the digest\'s one owner.',
+    `UBUNTU_WSL_SERIES = ${pyString(UBUNTU_WSL_SERIES)}`,
+    `UBUNTU_WSL_ROOTFS = ${pyString(UBUNTU_WSL_ROOTFS)}`,
+    `UBUNTU_WSL_ROOTFS_URL = ${pyString(rootfsUrl())}`,
+    `UBUNTU_WSL_SUMS_URL = ${pyString(rootfsSumsUrl())}`,
+    '',
+    '#: The line /etc/wsl.conf carries in a Crucible distro and nowhere else.',
     `WSL_CONF_MARKER = ${pyString(WSL_CONF_MARKER)}`,
     '',
-    '#: /etc/wsl.conf, exactly as the rootfs ships it and as the repair writes it.',
+    '#: /etc/wsl.conf, exactly as the import writes it and as the repair rewrites it.',
     `WSL_CONF_TEXT = ${pyString(WSL_CONF_TEXT)}`,
+    '',
+    '#: What an imported Canonical image needs before anything can be installed',
+    '#: into it: the crucible user, passwordless sudo, and the wsl.conf above.',
+    '#: One root script, and its owner is distro.ts -- see `finishImportScript`.',
+    `FINISH_IMPORT_SCRIPT = ${pyString(finishImportScript())}`,
     '',
     '',
     '@dataclass(frozen=True)',

@@ -100,7 +100,7 @@ STARTUP = "startup"
 #: whose `config.toml` has already been deleted by a previous half-run — and
 #: because asking `detect_backend()` would probe a card to answer a question
 #: about a service manager. `tests/test_uninstall.py` pins the two against each
-#: other, the same tied-by-a-check seam `envpack.SMOKE_IMPORT` uses.
+#: other, tied by a check rather than by an import.
 UNINSTALL_MECHANISM: dict[str, str] = {
     "linux": service.SYSTEMD,
     "darwin": service.LAUNCHD,
@@ -156,7 +156,7 @@ STATE_FILES: tuple[str, ...] = (
     "narrator-reference.wav",
 )
 
-#: The env packs' directory. One step removes the lot: `crucible install`
+#: The job envs' directory. One step removes the lot: `crucible install`
 #: rebuilds any of them from a published pack.
 ENVS_DIR = "envs"
 

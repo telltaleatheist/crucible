@@ -24,8 +24,8 @@
 #
 #   conda-pack==0.9.2   the tool that PACKED that env into the published
 #                       tarball. It is BookForge's packaging step, not something
-#                       the aligner imports, and `crucible envpack` does its own
-#                       packing with its own machinery.
+#                       the aligner imports, and Crucible packs nothing at all:
+#                       it pips this file into a venv on the machine that runs it.
 #   torchaudio==2.11.0  present in BookForge's env and absent from the WORKING
 #                       cuda env beside this file, which is the proof it is not
 #                       needed: `qwen-asr` 0.0.6 does not declare it

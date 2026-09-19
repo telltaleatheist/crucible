@@ -24,37 +24,40 @@ export { compareReleases, latestRelease, LATEST_RELEASE_URL, parseLatestRelease 
 
 export {
   backendFor,
-  envpacksUrl,
-  ENVPACKS_ASSET,
-  findPack,
   HOST_BACKEND,
-  HOST_PACK,
-  packAssetName,
-  parseEnvpacks,
   releaseAssetUrl,
   RELEASE_REPO,
-  rootfsAssetName,
-  SERVER_PACK,
-} from './envpacks.js';
-export type { EnvPacks, PackBackend, PackEntry } from './envpacks.js';
+  wheelAssetName,
+  wheelShaAssetName,
+  wheelShaUrl,
+  wheelUrl,
+} from './release.js';
+export type { ServerBackend } from './release.js';
+
+export {
+  DESKTOP_PACKAGES,
+  interpreterFor,
+  interpreterUrl,
+  SERVER_PYTHON,
+  STANDALONE_BASE,
+} from './interpreter.js';
+export type { StandalonePython } from './interpreter.js';
 
 export {
   CURL_ARGS,
   DOWNLOADS_SUBDIR,
-  fetchManifest,
   guestProbeScript,
-  installPack,
+  installRuntime,
   HOST_SUBDIR,
-  packPaths,
   probeGuest,
-  requiredBytes,
-  requirePack,
+  requireRuntime,
+  runtimePaths,
   SERVER_SUBDIR,
   shaArgv,
   STAMP_NAME,
   TAR_ARGS,
-} from './pack.js';
-export type { GuestFacts, InstalledPack, PackInstallOptions, PackInstallResult, PackPaths } from './pack.js';
+} from './runtime.js';
+export type { GuestFacts, InstalledRuntime, RuntimeInstallOptions, RuntimeInstallResult, RuntimePaths } from './runtime.js';
 
 export {
   CRUCIBLE_DISTRO,
@@ -82,7 +85,7 @@ export {
   hostConfigPath,
   hostInstallCommand,
   hostInstalled,
-  hostPackDir,
+  hostRuntimeDir,
   hostToken,
   requestHostInstall,
 } from './hostdoor.js';

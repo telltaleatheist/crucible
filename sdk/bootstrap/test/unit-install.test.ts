@@ -1,9 +1,9 @@
 /**
  * `install()` — two shapes, one per kind of machine (PHASE15-HOST.md 4.3).
  *
- * **linux and darwin:** the PHASE14 sequence by name, the pack fetched with the
- * machine's own curl, the token never shown. The machine IS the server, so
- * `install()` walks `installSteps()` exactly as it always did.
+ * **linux and darwin:** the sequence by name, the interpreter and the wheel
+ * fetched with the machine's own curl, the token never shown. The machine IS
+ * the server, so `install()` walks `installSteps()` exactly as it always did.
  *
  * **win32:** two branches and nothing else — ask the host, or refuse
  * `host_not_installed` carrying the `irm … | iex` line. The sequence has ONE
@@ -17,14 +17,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { BOOTSTRAP_VERSION, BootstrapStepFailed, install as installCurrent, planJobTypes, type InstallStep, type OutputStream } from '../src/index.js';
-import { envpacksUrl } from '../src/envpacks.js';
-import { guestProbeScript } from '../src/pack.js';
+import { interpreterFor, interpreterUrl } from '../src/interpreter.js';
+import { wheelShaUrl, wheelUrl } from '../src/release.js';
+import { guestProbeScript } from '../src/runtime.js';
 import {
   ARCHIVE,
   CRUCIBLE_BIN,
   DEST,
   DOWNLOADS,
-  ENVPACKS_JSON,
   fakeHostDoor,
   FakeRunner,
   GUEST_BARE,
@@ -36,7 +36,9 @@ import {
   HOST_DIR,
   HOST_DONE,
   HOST_DONE_DATA,
-  PACK_SHA,
+  WHEEL,
+  PIN,
+  PY_SHA,
   refusal,
   WIN_ENV,
   type Expectation,
@@ -57,25 +59,45 @@ const N = (...argv: string[]): string[] => [...argv];
 /** The script a `bash -c` call carries, wherever it is in the argv. */
 const script = (argv: readonly string[]): string => argv[2] ?? '';
 const PROBE = (home?: string): string[] => N('bash', '-c', guestProbeScript(home));
-const MANIFEST = { argv: N('curl', '-fsSL', '--retry', '3', envpacksUrl('0.6.0')), stdout: ENVPACKS_JSON };
 const CONFIG_PATH = '/home/owen/.crucible/config.toml';
 /** The config read on a native host is a FILE read, not a call: it lives in `files`. */
 const HAS_CONFIG = { [CONFIG_PATH]: GUEST_CONFIG };
 
-const PART0 = 'crucible-env-server-cuda-linux-0.6.0.tar.zst.part00';
-const PART1 = 'crucible-env-server-cuda-linux-0.6.0.tar.zst.part01';
-const BASE = 'https://github.com/telltaleatheist/crucible/releases/download/v0.6.0';
+const WHEEL_SHA = 'c'.repeat(64);
 
-/** The seven commands a server-pack fetch is, in order. */
-const PACK_FETCH: Expectation[] = [
-  { argv: N('bash', '-c', `rm -f '${ARCHIVE}' && mkdir -p '${DOWNLOADS}'`) },
-  { argv: (argv) => script(argv).startsWith(`curl -fL --retry 3 --retry-delay 2 --continue-at - --create-dirs -o '${DOWNLOADS}/${PART0}' '${BASE}/${PART0}'`) },
-  { argv: (argv) => script(argv).includes(`${BASE}/${PART1}`) },
-  { argv: N('sha256sum', ARCHIVE), stdout: `${PACK_SHA}  ${ARCHIVE}\n` },
-  { argv: (argv) => script(argv).startsWith(`rm -rf '${DEST}.partial'`) && script(argv).includes('tar --zstd -xf') },
-  { argv: (argv) => script(argv).includes(`'${DEST}.partial/bin/crucible' --version`) },
-  { argv: (argv) => script(argv).includes('activate_crucible_pack') && script(argv).includes(`_crucible_dest='${DEST}'`) && script(argv).includes('sha256=%s') },
-];
+/**
+ * The four commands the WHEEL half is, in order. It runs on every install.
+ *
+ * A FUNCTION OF THE HOME AND THE SHA TOOL, because two of these tests are
+ * about exactly those: `{home}` moves every path, and a Mac has `shasum -a
+ * 256` where Linux has `sha256sum`. A fixture that hard-coded either would be
+ * a fixture that could not be used to test it.
+ */
+const wheelFetch = (home = '/home/owen/.crucible', sha = ['sha256sum']): Expectation[] => {
+  const wheel = `${home}/downloads/crucible-0.6.0-py3-none-any.whl`;
+  return [
+    { argv: (argv) => script(argv).includes(`-o '${wheel}' '${wheelUrl('0.6.0')}'`) },
+    { argv: N('curl', '-fsSL', '--retry', '3', wheelShaUrl('0.6.0')), stdout: `${WHEEL_SHA}  crucible-0.6.0-py3-none-any.whl\n` },
+    { argv: N(...sha, wheel), stdout: `${WHEEL_SHA}  ${wheel}\n` },
+    { argv: (argv) => script(argv).includes('pip install --upgrade --no-input') && script(argv).includes('python_sha256=%s') },
+  ];
+};
+
+/** The three the INTERPRETER half is. Skipped when the stamp already names it. */
+const pythonFetch = (pin = PIN, home = '/home/owen/.crucible', sha = ['sha256sum']): Expectation[] => {
+  const archive = `${home}/downloads/${pin.asset}`;
+  return [
+    { argv: (argv) => script(argv).includes(`-o '${archive}' '${interpreterUrl(pin)}'`) },
+    { argv: N(...sha, archive), stdout: `${pin.sha256}  ${archive}\n` },
+    { argv: (argv) => script(argv).includes('tar -xzf') && script(argv).includes('activate_crucible_runtime') },
+  ];
+};
+
+const WHEEL_FETCH = wheelFetch();
+const PYTHON_FETCH = pythonFetch();
+
+/** A clean first install: the interpreter, then the wheel. */
+const SERVER: Expectation[] = [...PYTHON_FETCH, ...WHEEL_FETCH];
 
 function collector(): { lines: string[]; steps: string[]; onLine: (line: string, stream: OutputStream, step: string) => void; onStep: (step: InstallStep) => void } {
   const lines: string[] = [];
@@ -125,8 +147,7 @@ test('linux: the whole PHASE14 sequence, each step by name, the token redacted e
   let tokenSeen: string | null = null;
   const expectations: Expectation[] = [
     { argv: PROBE(), stdout: GUEST_BARE },
-    MANIFEST,
-    ...PACK_FETCH,
+    ...SERVER,
     {
       argv: (argv) => {
         const ok = argv.slice(0, 2).join(' ') === `${CRUCIBLE_BIN} init` && argv[2] === '--token' && argv.slice(4).join(' ') === '--enable-llm --enable-tts';
@@ -135,7 +156,7 @@ test('linux: the whole PHASE14 sequence, each step by name, the token redacted e
       },
       lines: [['backend:  cuda-linux', 'stdout'], ['token:    minted; print it with `crucible token --show`', 'stdout']],
     },
-    { argv: N(CRUCIBLE_BIN, 'install', 'llm', '--verbose'), lines: [['  downloading llm pack', 'stdout'], ['installed in 400s', 'stdout']] },
+    { argv: N(CRUCIBLE_BIN, 'install', 'llm', '--verbose'), lines: [['  Collecting vllm==0.29.0', 'stdout'], ['installed in 400s', 'stdout']] },
     { argv: N(CRUCIBLE_BIN, 'install', 'tts', '--narrator-engine', 'higgs-v3', '--verbose'), lines: [['installed in 300s', 'stdout']] },
     { argv: N(CRUCIBLE_BIN, 'service', 'install'), lines: [['enabled and started crucible.service', 'stdout']] },
     { argv: N(CRUCIBLE_BIN, 'local', 'register') },
@@ -160,7 +181,7 @@ test('linux: the whole PHASE14 sequence, each step by name, the token redacted e
   runner.assertDrained();
 
   assert.deepEqual(result.steps.map((s) => `${s.name}:${s.status}`), [
-    'host-facts:ok', 'server-pack:ok', 'init:ok', 'install-llm:ok', 'install-tts:ok', 'service-install:ok', 'local-register:ok', 'local-install-cli:ok', 'local-install-desktop:ok', 'capability-write:ok', 'local-start:ok',
+    'host-facts:ok', 'server:ok', 'init:ok', 'install-llm:ok', 'install-tts:ok', 'service-install:ok', 'local-register:ok', 'local-install-cli:ok', 'local-install-desktop:ok', 'capability-write:ok', 'local-start:ok',
   ]);
   assert.deepEqual(result.server, { name: 'crucible@owens-pc-wsl', url: 'http://127.0.0.1:7100', configPath: CONFIG_PATH });
   assert.equal(result.release, '0.6.0');
@@ -174,23 +195,24 @@ test('linux: the whole PHASE14 sequence, each step by name, the token redacted e
   const everything = JSON.stringify(result) + c.lines.join('\n') + c.steps.join('\n');
   assert.equal(everything.includes(tokenSeen as string), false, 'the token appears nowhere the host can log');
 
-  const pack = result.steps.find((s) => s.name === 'server-pack');
-  assert.match(pack?.detail ?? '', /unpacked 2 part\(s\) into \/home\/owen\/\.crucible\/server \(Python 3\.11\.13\)/);
-  assert.ok(c.lines.includes('install-llm/stdout:   downloading llm pack'));
+  const server = result.steps.find((s) => s.name === 'server');
+  assert.match(server?.detail ?? '', /python 3\.11\.16 from python-build-standalone into \/home\/owen\/\.crucible\/server, then the 0\.6\.0 wheel/);
+  assert.ok(c.lines.includes('install-llm/stdout:   Collecting vllm==0.29.0'));
   assert.equal(c.steps[0], 'host-facts:ok');
-  assert.equal(c.steps[1], 'server-pack:running');
-  assert.equal(c.steps[2], 'server-pack:ok');
-  // NOTHING pip, nothing conda, anywhere in the argv this install would run.
+  assert.equal(c.steps[1], 'server:running');
+  assert.equal(c.steps[2], 'server:ok');
+  // NO CONDA, anywhere in the argv this install would run. `pip install` IS
+  // here now and that is the change: PHASE20 made the wheel the deploy, so the
+  // thing the old assertion forbade is the thing the new sequence is.
   const spelled = runner.calls.map((call) => call.argv.join(' ')).join('\n');
-  assert.equal(/conda|pip install|\.whl/.test(spelled), false, 'the conda and wheel path is gone, not hidden');
+  assert.equal(/conda/.test(spelled), false, 'the conda walk is gone, not hidden');
 });
 
-test('the pack download happens with the machine\'s own tools: curl, sha256sum, tar --zstd, atomic rename', async () => {
+test('the download happens with the machine\'s own tools: curl, sha256sum, tar, atomic rename', async () => {
   const c = collector();
   const runner = linuxRunner([
     { argv: PROBE(), stdout: GUEST_BARE },
-    MANIFEST,
-    ...PACK_FETCH,
+    ...SERVER,
     { argv: N(CRUCIBLE_BIN, 'service', 'install') },
     { argv: N(CRUCIBLE_BIN, 'local', 'register') },
     { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
@@ -201,24 +223,23 @@ test('the pack download happens with the machine\'s own tools: curl, sha256sum, 
   await install({ jobTypes: ['echo'], onLine: c.onLine }, runner);
   runner.assertDrained();
   const commands = runner.calls.map((call) => (call.argv[0] === 'bash' ? script(call.argv) : call.argv.join(' ')));
-  const curls = commands.filter((line) => line.startsWith('curl -fL'));
-  assert.equal(curls.length, 2, 'one curl per part');
+  const curls = commands.filter((line) => line.includes('curl -fL'));
+  assert.equal(curls.length, 2, 'one for the interpreter, one for the wheel');
   for (const line of curls) {
-    assert.match(line, /--continue-at -/, 'a killed part resumes');
-    assert.match(line, /cat '\/home\/owen\/\.crucible\/downloads\/[^']+' >> '\/home\/owen\/\.crucible\/downloads\/crucible-env-server-cuda-linux-0\.6\.0\.tar\.zst'/);
-    assert.match(line, /&& rm -f /, 'the part is deleted once appended: peak extra disk is one part');
+    assert.equal(line.includes('--continue-at'), false, 'nothing here is big enough to resume: it is fetched whole and hashed');
     assert.equal(line.includes('/mnt/'), false, 'nothing crosses /mnt/c');
   }
-  assert.ok(commands.includes(`sha256sum ${ARCHIVE}`), 'the digest is computed beside the archive');
-  assert.ok(commands.some((line) => line.includes(`tar --zstd -xf '${ARCHIVE}' -C '${DEST}.partial'`)));
+  assert.ok(commands.includes(`sha256sum ${ARCHIVE}`), 'the interpreter is hashed beside the archive');
+  assert.ok(commands.includes(`sha256sum ${WHEEL}`), 'so is the wheel');
+  assert.ok(commands.some((line) => line.includes(`tar -xzf '${ARCHIVE}' -C '${DEST}.partial'`)));
   assert.ok(commands.some((line) => line.includes(`_crucible_dest='${DEST}'`) && line.includes('mv "$_crucible_partial" "$_crucible_dest"')), 'the unpack is renamed into place, never unpacked over');
 });
 
-test('a pack whose stamp already matches the manifest is skipped, and nothing is downloaded', async () => {
+test('an interpreter whose digest is already stamped is not re-fetched; the wheel still installs', async () => {
   const c = collector();
   const runner = linuxRunner([
     { argv: PROBE(), stdout: GUEST_INSTALLED },
-    MANIFEST,
+    ...WHEEL_FETCH,
     { argv: N(CRUCIBLE_BIN, 'service', 'install') },
     { argv: N(CRUCIBLE_BIN, 'local', 'register') },
     { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
@@ -228,69 +249,43 @@ test('a pack whose stamp already matches the manifest is skipped, and nothing is
   ], HAS_CONFIG);
   const result = await install({ jobTypes: ['echo'], onLine: c.onLine }, runner);
   runner.assertDrained();
-  const pack = result.steps.find((s) => s.name === 'server-pack');
-  assert.equal(pack?.status, 'skipped');
-  assert.match(pack?.detail ?? '', /already the 0\.6\.0 pack/);
+  const server = result.steps.find((s) => s.name === 'server');
+  assert.equal(server?.status, 'ok');
+  assert.match(server?.detail ?? '', /python 3\.11\.16 was already at \/home\/owen\/\.crucible\/server; installed the 0\.6\.0 wheel into it/);
+  assert.equal(runner.calls.some((call) => call.argv.join(' ').includes('python-build-standalone')), false);
 });
 
-test('a sha that is not the manifest\'s deletes the archive and refuses by name', async () => {
+test('an interpreter digest that is not the pin deletes the archive and refuses by name', async () => {
   const c = collector();
   const runner = linuxRunner([
     { argv: PROBE(), stdout: GUEST_BARE },
-    MANIFEST,
-    ...PACK_FETCH.slice(0, 3),
+    ...PYTHON_FETCH.slice(0, 1),
     { argv: N('sha256sum', ARCHIVE), stdout: `${'9'.repeat(64)}  ${ARCHIVE}\n` },
     { argv: N('bash', '-c', `rm -f '${ARCHIVE}'`) },
   ]);
   const r = await refusal(install({ jobTypes: ['echo'], onLine: c.onLine }, runner));
   runner.assertDrained();
-  assert.equal(r.code, 'pack_sha_mismatch');
-  assert.match(r.message, /hashes 9{64} and the 0\.6\.0 manifest says a{64}/);
+  assert.equal(r.code, 'runtime_sha_mismatch');
+  assert.match(r.message, /hashes 9{64}/);
   assert.match(r.message, /The archive was deleted/);
 });
 
-test('the disk pre-flight refuses with the numbers BEFORE anything is fetched', async () => {
+test('a host with no curl or tar refuses before anything is fetched', async () => {
   const c = collector();
   const runner = linuxRunner([
-    { argv: PROBE(), stdout: 'home=/home/owen/.crucible\nuser=owen\nfree_kib=100000\n' },
-    MANIFEST,
-  ]);
-  const r = await refusal(install({ jobTypes: ['echo'], onLine: c.onLine }, runner));
-  runner.assertDrained();
-  assert.equal(r.code, 'pack_disk');
-  assert.match(r.message, /needs 0\.5 GiB free .* and there is 0\.1 GiB/);
-  assert.match(r.message, /Nothing was downloaded/);
-});
-
-test('a release with no server pack for this backend is pack_not_published, never a build', async () => {
-  const c = collector();
-  const manifest = JSON.stringify({ schema: 1, version: '0.6.0', packs: [JSON.parse(ENVPACKS_JSON).packs[2]] });
-  const runner = linuxRunner([
-    { argv: PROBE(), stdout: GUEST_BARE },
-    { argv: MANIFEST.argv, stdout: manifest },
-  ]);
-  const r = await refusal(install({ jobTypes: ['echo'], onLine: c.onLine }, runner));
-  assert.equal(r.code, 'pack_not_published');
-  assert.match(r.message, /publishes no "server" pack for cuda-linux/);
-  assert.match(r.message, /lists llm for that backend/);
-});
-
-test('a host with no curl, tar or zstd refuses before the manifest is even asked for', async () => {
-  const c = collector();
-  const runner = linuxRunner([
-    { argv: PROBE(), stdout: `${GUEST_BARE}missing=zstd\n` },
+    { argv: PROBE(), stdout: `${GUEST_BARE}missing=curl\n` },
   ]);
   const r = await refusal(install({ jobTypes: ['echo'], onLine: c.onLine }, runner));
   runner.assertDrained();
   assert.equal(r.code, 'guest_missing_tool');
-  assert.equal(r.command, 'sudo apt-get update && sudo apt-get install -y zstd');
+  assert.equal(r.command, 'sudo apt-get update && sudo apt-get install -y curl');
 });
 
 test('init is skipped when a config already exists, and its token is kept', async () => {
   const c = collector();
   const runner = linuxRunner([
     { argv: PROBE(), stdout: GUEST_INSTALLED },
-    MANIFEST,
+    ...WHEEL_FETCH,
     { argv: N(CRUCIBLE_BIN, 'install', 'asr', '--verbose') },
     { argv: N(CRUCIBLE_BIN, 'service', 'install') },
     { argv: N(CRUCIBLE_BIN, 'local', 'register') },
@@ -311,8 +306,8 @@ test('a failing step stops the sequence with its name, exit code, tail and the s
   const c = collector();
   const runner = linuxRunner([
     { argv: PROBE(), stdout: GUEST_INSTALLED },
-    MANIFEST,
-    { argv: N(CRUCIBLE_BIN, 'install', 'llm', '--verbose'), code: 1, lines: [['recipe: llm/cuda-linux', 'stdout'], ['ERROR: pack_not_published', 'stderr']] },
+    ...WHEEL_FETCH,
+    { argv: N(CRUCIBLE_BIN, 'install', 'llm', '--verbose'), code: 1, lines: [['recipe: llm/cuda-linux', 'stdout'], ['ERROR: env_smoke_failed', 'stderr']] },
   ], HAS_CONFIG);
   const err = await refusal(install({ jobTypes: ['llm'], onLine: c.onLine }, runner));
   runner.assertDrained();
@@ -321,15 +316,17 @@ test('a failing step stops the sequence with its name, exit code, tail and the s
   assert.ok(failed instanceof BootstrapStepFailed);
   assert.equal(failed.step, 'install-llm');
   assert.equal(failed.exitCode, 1);
-  assert.deepEqual(failed.stepsDone, ['host-facts']);
-  assert.deepEqual(failed.tail, ['recipe: llm/cuda-linux', '! ERROR: pack_not_published']);
+  // `server` is done: the wheel installed. It is a step that ALWAYS runs now,
+  // where the pack step used to be skipped whenever its stamp matched.
+  assert.deepEqual(failed.stepsDone, ['host-facts', 'server']);
+  assert.deepEqual(failed.tail, ['recipe: llm/cuda-linux', '! ERROR: env_smoke_failed']);
   assert.match(failed.message, /install step "install-llm" exited 1 inside this machine/);
 });
 
 for (const detail of ['local_start_failed: engine did not answer', 'unauthorized: engine info returned HTTP 401']) {
   test(`install refuses readiness failure after service installation: ${detail}`, async () => {
     const runner = linuxRunner([
-      { argv: PROBE(), stdout: GUEST_INSTALLED }, MANIFEST,
+      { argv: PROBE(), stdout: GUEST_INSTALLED }, ...WHEEL_FETCH,
       { argv: N(CRUCIBLE_BIN, 'service', 'install') },
       { argv: N(CRUCIBLE_BIN, 'local', 'register') },
       { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
@@ -348,7 +345,7 @@ for (const detail of ['local_start_failed: engine did not answer', 'unauthorized
 
 test('install does not return while local authenticated readiness is pending', async () => {
   const runner = linuxRunner([
-    { argv: PROBE(), stdout: GUEST_INSTALLED }, MANIFEST,
+    { argv: PROBE(), stdout: GUEST_INSTALLED }, ...WHEEL_FETCH,
     { argv: N(CRUCIBLE_BIN, 'service', 'install') },
     { argv: N(CRUCIBLE_BIN, 'local', 'register') },
     { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
@@ -386,7 +383,7 @@ test('a step that never returns is a failure naming the timeout, not a hang', as
   const c = collector();
   const runner = linuxRunner([
     { argv: PROBE(), stdout: GUEST_INSTALLED },
-    MANIFEST,
+    ...WHEEL_FETCH,
     { argv: () => true, failure: 'crucible did not answer within 1800s' },
   ], HAS_CONFIG);
   const err = await refusal(install({ jobTypes: ['llm'], onLine: c.onLine }, runner));
@@ -400,7 +397,7 @@ test('a broken existing config is refused by name rather than re-initialised ove
   const c = collector();
   const runner = linuxRunner([
     { argv: PROBE(), stdout: GUEST_INSTALLED },
-    MANIFEST,
+    ...WHEEL_FETCH,
   ], { [CONFIG_PATH]: '[server]\nname = "n"\n' });
   const r = await refusal(install({ jobTypes: ['llm'], onLine: c.onLine }, runner));
   assert.equal(r.code, 'config_missing_key');
@@ -412,8 +409,8 @@ test('{home} travels as CRUCIBLE_HOME into every crucible verb, and {bind} into 
   const CRUCIBLE = '/srv/crucible/server/bin/crucible';
   const ENV = { CRUCIBLE_HOME: '/srv/crucible' };
   const runner = linuxRunner([
-    { argv: PROBE('/srv/crucible'), stdout: `home=/srv/crucible\nuser=owen\nfree_kib=400000000\ncrucible=${CRUCIBLE}\nversion=crucible 0.6.0\nsha256=${PACK_SHA}\nrelease=0.6.0\n` },
-    MANIFEST,
+    { argv: PROBE('/srv/crucible'), stdout: `home=/srv/crucible\nuser=owen\nfree_kib=400000000\ncrucible=${CRUCIBLE}\nversion=crucible 0.6.0\npython_sha256=${PY_SHA}\nrelease=0.6.0\n` },
+    ...wheelFetch('/srv/crucible'),
     { argv: (argv) => argv.slice(0, 2).join(' ') === `${CRUCIBLE} init` && argv[2] === '--token' && argv.slice(4).join(' ') === '--host 0.0.0.0 --port 7200 --enable-echo', env: ENV },
     { argv: N(CRUCIBLE, 'service', 'install'), env: ENV },
     { argv: N(CRUCIBLE, 'local', 'register'), env: ENV },
@@ -443,13 +440,11 @@ test('darwin: the same steps run natively, shasum instead of sha256sum, no linge
   const N = (...argv: string[]): string[] => [...argv];
   const runner = new FakeRunner({ platform: 'darwin', homedir: '/Users/owen' }, [
     { argv: N('bash', '-c', guestProbeScript(undefined)), stdout: 'home=/Users/owen/.crucible\nuser=owen\nfree_kib=900000000\n' },
-    { argv: N('curl', '-fsSL', '--retry', '3', envpacksUrl('0.6.0')), stdout: ENVPACKS_JSON },
-    { argv: N('bash', '-c', `rm -f '/Users/owen/.crucible/downloads/crucible-env-server-mlx-darwin-0.6.0.tar.zst' && mkdir -p '/Users/owen/.crucible/downloads'`) },
-    { argv: (argv) => (argv[2] ?? '').includes('crucible-env-server-mlx-darwin-0.6.0.tar.zst.part00') },
-    { argv: N('shasum', '-a', '256', '/Users/owen/.crucible/downloads/crucible-env-server-mlx-darwin-0.6.0.tar.zst'), stdout: `${'b'.repeat(64)}  x\n` },
-    { argv: (argv) => (argv[2] ?? '').includes('tar --zstd -xf') },
-    { argv: (argv) => (argv[2] ?? '').includes('--version') },
-    { argv: (argv) => (argv[2] ?? '').includes('mv ') },
+    // THE MAC'S OWN PIN, and its own sha tool. Both come off the same tables
+    // the Linux expectations above use, so a pin edited for one backend cannot
+    // leave this test passing about the other.
+    ...pythonFetch(interpreterFor('mlx-darwin'), '/Users/owen/.crucible', ['shasum', '-a', '256']),
+    ...wheelFetch('/Users/owen/.crucible', ['shasum', '-a', '256']),
     { argv: (argv) => argv[1] === 'init' },
     { argv: ['/Users/owen/.crucible/server/bin/crucible', 'install', 'llm', '--verbose'] },
     { argv: ['/Users/owen/.crucible/server/bin/crucible', 'service', 'install'] },
@@ -475,7 +470,7 @@ test('darwin: the same steps run natively, shasum instead of sha256sum, no linge
 
 // ------------------------------------------------------- win32: the two branches
 
-/** A Windows machine with the host pack unpacked and its host-mode config written. */
+/** A Windows machine with the host runtime installed and its host-mode config written. */
 function winRunner(files: Record<string, string> = { [HOST_CMD]: '@echo off', [HOST_CONFIG_PATH]: HOST_CONFIG }): FakeRunner {
   return new FakeRunner({ platform: 'win32', env: WIN_ENV, files }, []);
 }
@@ -485,8 +480,8 @@ test('win32 + a host: install() asks the door and returns the HOST\'s result, sp
   const door = fakeHostDoor({
     events: [
       ['state', { code: 'no_crucible_distro', sentence: 'There is no Crucible distro on this machine yet.', action: 'run-elevated' }],
-      ['step', { name: 'server-pack', index: 2, total: 7 }],
-      ['line', { text: 'server-pack: part00', stream: 'stdout' }],
+      ['step', { name: 'server', index: 2, total: 7 }],
+      ['line', { text: 'server: cpython-3.11.16', stream: 'stdout' }],
       HOST_DONE,
     ],
   });
@@ -512,7 +507,7 @@ test('win32 + a host: install() asks the door and returns the HOST\'s result, sp
 
   // The result is the host's, verbatim — including the linger step, which only
   // the host can perform now because only the host has the guest.
-  assert.deepEqual(result.steps.map((s) => s.name), ['host-facts', 'server-pack', 'init', 'service-install', 'linger', 'capability-write']);
+  assert.deepEqual(result.steps.map((s) => s.name), ['host-facts', 'server', 'init', 'service-install', 'linger', 'capability-write']);
   assert.deepEqual(result.server, {
     name: HOST_DONE_DATA.server.name,
     url: HOST_DONE_DATA.server.url,
@@ -523,10 +518,10 @@ test('win32 + a host: install() asks the door and returns the HOST\'s result, sp
   assert.equal(result.crucible, '/home/crucible/.crucible/server/bin/crucible');
 
   // Relayed through the callbacks install() already had.
-  assert.deepEqual(c.steps, ['server-pack:running']);
+  assert.deepEqual(c.steps, ['server:running']);
   assert.deepEqual(c.lines, [
     'state/stdout: There is no Crucible distro on this machine yet.',
-    'server-pack/stdout: server-pack: part00',
+    'server/stdout: server: cpython-3.11.16',
   ]);
 
   // The whole point of 4.3: bootstrap does not ALSO walk the sequence. Nothing
@@ -560,7 +555,7 @@ test('win32 + a host: onHostEvent sees every event verbatim, including the 4c st
   const door = fakeHostDoor({
     events: [
       ['state', { code: 'wsl_ready', sentence: 'WSL2 is ready.', action: 'run' }],
-      ['step', { name: 'server-pack', index: 2, total: 7 }],
+      ['step', { name: 'server', index: 2, total: 7 }],
       ['progress', { bytes_done: 4194304, bytes_total: 120000000, file: 'part00' }],
       ['line', { text: 'backend:  cuda-linux', stream: 'stdout' }],
       HOST_DONE,

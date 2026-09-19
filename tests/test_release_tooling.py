@@ -135,12 +135,49 @@ def test_the_two_files_every_release_touches_are_not_unconditionally_wide():
         assert f'{carrier})' in conditional[0] or f'{carrier}|' in conditional[0]
 
 
-# ------------------------------------------------------------------ the README
+# ------------------------------------------------------- what a release IS
 #
-# The release section of the README is the first thing a person reads before
-# cutting one, and prose outliving the code it describes is the failure this
-# repo keeps finding. It claimed a manifest "names the actual uploaded parts"
-# for a day after pack reuse made that false. These hold the replacement.
+# PHASE20-CODE-NOT-ENVIRONMENTS.md section 1, in the two places a person reads
+# it: the script that cuts one, and the README section they read first. Prose
+# outliving the code it describes is the failure this repo keeps finding.
+
+RELEASE = REPO / 'scripts/release.sh'
+
+
+def test_the_release_uploads_our_code_and_nothing_that_is_published_elsewhere():
+    """The asset list, exactly. A release that carried an interpreter or an
+    environment again would be the 190-MB-per-tag shape PHASE20 deleted, and
+    the only place that can be seen is the `gh release create` line."""
+    text = RELEASE.read_text(encoding='utf-8')
+    upload = text[text.index('gh release create'):]
+    upload = upload[:upload.index('\n\n')]
+    assert '"$SDIST" "$WHEEL" "$WHEEL_SHA" "$TGZ" "$BOOT"' in upload, upload
+    assert '"$INSTALL_SH" "$INSTALL_PS1"' in upload, upload
+    for gone in ('envpacks', 'rootfs', 'part0', '.tar.zst'):
+        assert gone not in upload, f'the release still uploads {gone!r}'
+
+
+def test_the_wheel_ships_its_own_digest_because_the_installers_check_it():
+    """The one thing a release publishes about ITS OWN bytes that an installer
+    can check: the interpreter is pinned by a digest in our source, and our
+    code cannot be, so the sidecar is what vouches for the wheel."""
+    text = RELEASE.read_text(encoding='utf-8')
+    assert 'WHEEL_SHA="$WHEEL.sha256"' in text
+    assert 'sha256sum' in text and 'shasum -a 256' in text, (
+        'macOS has no sha256sum, and a release is cut from whichever desk is free'
+    )
+
+
+def test_the_release_dispatches_no_workflow_and_there_is_none_to_dispatch():
+    """`release.sh` used to `gh workflow run envpacks.yml` after the cut, and
+    then a person waited 13 minutes per backend for archives of somebody
+    else's bytes. Both halves are gone: the dispatch, and the workflow."""
+    text = RELEASE.read_text(encoding='utf-8')
+    assert 'gh workflow run' not in text
+    for workflow in ('envpacks.yml', 'release-core.yml', 'release-preflight.yml'):
+        assert not (REPO / '.github/workflows' / workflow).exists(), (
+            f'{workflow} is back; PHASE20 section 6 deleted what it built'
+        )
 
 README = REPO / 'README.md'
 
@@ -158,12 +195,30 @@ def test_the_readme_names_every_step_of_the_release_path():
         assert script in section, f'the README no longer tells anyone about {script}'
 
 
-def test_the_readme_does_not_promise_a_self_contained_manifest():
-    """The sentence that pack reuse falsified, kept falsified."""
+def test_the_readme_says_what_a_release_carries_and_what_it_does_not():
+    """PHASE20 section 1, in the section a person reads before cutting one.
+
+    This test used to hold the opposite claim honest — "the manifest does not
+    name only its own assets", which was true of the pack world. There is no
+    manifest now and nothing carried by reference, so what it holds is the
+    ruling that replaced both.
+    """
     section = release_section()
-    assert 'names the actual uploaded parts' not in section
-    assert 'carried by reference' in section
-    assert 'RESOLVES' in section
+    assert 'A release carries CODE' in section
+    assert 'crucible-<ver>-py3-none-any.whl.sha256' in section
+    assert 'python-build-standalone' in section
+    assert 'Canonical' in section
+    for gone in ('envpacks.json', 'WSL rootfs', 'carried by reference'):
+        assert gone not in section, f'the README still describes {gone!r}'
+
+
+def test_the_readme_says_a_deploy_runs_no_tests():
+    """PHASE20 section 7. 25 of the 39 minutes before the first byte of the
+    2026-09-18 cutover moved were suites that had already passed at merge."""
+    section = release_section()
+    assert 'no CI to wait for' in section
+    assert 'scripts/tests.sh' in section, 'the branch still has a suite, and it is still named'
+    assert 'a deploy runs none' in section
 
 
 def test_the_readme_says_cutting_and_promoting_are_two_jobs():
@@ -244,13 +299,16 @@ INSTALL_PS1 = REPO / 'sdk/bootstrap/scripts/install.ps1'
 INSTALL_SH = REPO / 'sdk/bootstrap/scripts/install.sh'
 
 
-def test_windows_unpacks_with_the_same_tar_it_checked():
-    """One tool, named once. Checking one tar and unpacking with another is how
-    a check passes and the unpack still half-works.
+def test_windows_unpacks_with_the_tar_windows_guarantees():
+    """One tool, named once, never resolved through PATH.
 
-    `tar` resolved through PATH found Git Bash's GNU tar 1.32 (no zstd) on a
-    Windows 11 machine whose System32 bsdtar has read zstd all along, and the
-    0.6.8 deploy refused it (measured 2026-09-17).
+    `tar` resolved through PATH found Git Bash's GNU tar 1.32 on a Windows 11
+    machine whose System32 bsdtar was fine, and the 0.6.8 deploy refused it
+    (measured 2026-09-17).
+
+    THE ZSTD CHECK WENT WITH THE PACKS. python-build-standalone publishes gzip,
+    which every tar reads, so a probe for a format nothing downloads would
+    refuse a machine over a capability it does not need.
     """
     text = INSTALL_PS1.read_text(encoding='utf-8')
     body = '{}'.format(chr(10)).join(
@@ -263,9 +321,9 @@ def test_windows_unpacks_with_the_same_tar_it_checked():
         'a PATH-resolved tar.exe is back; it is the caller shell that decides '
         'which one that is'
     )
-    assert body.count('& $Tar') >= 2, (
-        'both the capability check and the unpack have to use the named tar'
-    )
+    assert body.count('& $Tar') >= 1, 'the unpack has to use the named tar'
+    assert 'zstd' not in body, 'nothing this installer fetches is zstd'
+
 
 
 def test_the_mac_install_runs_under_the_accounts_own_login_shell():
@@ -292,12 +350,20 @@ def test_the_mac_install_runs_under_the_accounts_own_login_shell():
 
 
 def test_every_installer_probes_for_the_tools_it_actually_runs():
-    """The probe list and the tools the script runs must not drift apart."""
+    """The probe list and the tools the script runs must not drift apart.
+
+    It was `curl tar zstd` while the installer fetched 8 GB environment
+    archives. PHASE20 deleted those; python-build-standalone publishes gzip,
+    which every tar reads, so `zstd` became a tool the probe demanded and
+    nothing used — a refusal that costs somebody an afternoon over nothing.
+    """
     text = INSTALL_SH.read_text(encoding='utf-8')
-    assert 'for t in curl tar zstd' in text, (
-        'the POSIX installer probes curl, tar and zstd by name; if that list '
-        'moved, this test is the place to say what it moved to'
+    assert 'for t in curl tar;' in text, (
+        'the POSIX installer probes curl and tar by name; if that list moved, '
+        'this test is the place to say what it moved to'
     )
+    assert 'zstd' not in text, 'nothing this installer fetches is zstd'
+    assert 'tar -xzf' in text, 'and what it probed for is what it runs'
 
 def test_no_installer_is_piped_straight_into_a_shell():
     """`curl | sh` throws curl's exit status away.

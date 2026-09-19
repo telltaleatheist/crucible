@@ -146,24 +146,35 @@ def test_every_manifest_in_the_checkout_is_in_the_wheel(
     assert not missing, f"in the checkout and not in the wheel: {missing}"
 
 
-def test_the_recipes_every_published_pack_builds_from_travel(
+def test_every_recipe_an_install_can_be_asked_for_travels(
     wheel_names: list[str],
 ) -> None:
-    """`envpack build` reads `envs/`, and a pack is built from an install."""
-    from crucible import envpack, workerenv
+    """`crucible install <type>` reads `envs/<type>/<recipe>.txt` ON THE
+    MACHINE, out of the installed wheel.
+
+    It used to read them to BUILD a pack, on a runner, from a checkout — so a
+    recipe missing from the wheel cost a CI job. Since PHASE20 there is no
+    build and no checkout: the recipe is what pip is handed, so one missing
+    from the wheel is a job type that cannot be installed at all.
+    """
+    from crucible import jobenv, workerenv
+    from crucible.voices import NARRATOR_ENGINE_SAMPLING
 
     wanted: set[str] = set()
-    for pack, backend_kind in envpack.every_pack():
-        if pack in (envpack.SERVER_PACK, envpack.HOST_PACK):
-            # `pyproject.toml` is their recipe, and that is the wheel's own
-            # metadata rather than a file inside it.
-            continue
-        if pack in workerenv.WORKER_JOB_TYPES:
-            recipe = workerenv.recipe_for(pack, backend_kind)
-        else:
-            recipe = envpack.pack_target(pack, backend_kind).recipe
-        wanted.add(recipe.resolve().relative_to(REPO_ROOT).as_posix())
-    missing = sorted(name for name in wanted if name not in wheel_names)
+    for backend_kind in ("cuda-linux", "mlx-darwin"):
+        wanted.add(jobenv.recipe_for(jobenv.llm_env(backend_kind)))
+        for engine in NARRATOR_ENGINE_SAMPLING:
+            wanted.add(jobenv.recipe_for(jobenv.tts_env(engine, backend_kind)))
+        for job_type in workerenv.WORKER_JOB_TYPES:
+            try:
+                wanted.add(workerenv.recipe_for(job_type, backend_kind))
+            except workerenv.WorkerEnvError:
+                # No recipe for that backend is a FACT rather than a gap —
+                # `envs/asr/mlx-darwin.md` is prose saying CTranslate2 has no
+                # Metal backend — and a missing file cannot be in the wheel.
+                continue
+    names = {path.resolve().relative_to(REPO_ROOT).as_posix() for path in wanted}
+    missing = sorted(name for name in names if name not in wheel_names)
     assert not missing, f"recipes not in the wheel: {missing}"
 
 

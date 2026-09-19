@@ -24,6 +24,15 @@ that PRODUCES the packs.
 
 ## 1. What a pack is
 
+> **SUPERSEDED BY `docs/PHASE20-CODE-NOT-ENVIRONMENTS.md` (2026-09-18).** Sections 1-3
+> describe the environment PACKS — built on a runner, uploaded to every release, split
+> into parts, catalogued by `envpacks.json` — and none of that exists any more: an
+> interpreter comes from python-build-standalone and an environment comes from its
+> recipe, on the machine. Kept because §0's ruling and §4b/§4c's distro table are still
+> live and read in their own terms, and because a reader who finds a `crucible-env-`
+> asset name on an old release deserves to find out what it was.
+
+
 A pack is a **relocatable, self-contained Python tree**: a standalone CPython build
 (python-build-standalone, the interpreter `uv` ships — relocatable by construction, relative
 rpaths, no absolute paths baked in) with the env's packages installed INTO it (not a venv
@@ -411,6 +420,14 @@ the point: `distro_not_systemd` is repaired without asking (the distro is ours),
 ---
 
 ## 7. What was built, 2026-09-14 — the server side
+
+> **SUPERSEDED BY `docs/PHASE20-CODE-NOT-ENVIRONMENTS.md` (2026-09-18).** Sections 7 and
+> 7b record what the pack system was when it was built, including the two measured
+> defects (7.2a's unrelocatable shebang, 7b's Windows `.exe` launcher) that are worth
+> keeping: PHASE20 removes them by pip-installing into the tree at its final path rather
+> than by correcting a rewrite. Everything here about building, splitting, uploading or
+> downloading a pack describes machinery that has been deleted.
+
 
 Sections 0-3 and 5. Sections 4, 4a, 4b and 4c are the bootstrap's and are not touched here.
 

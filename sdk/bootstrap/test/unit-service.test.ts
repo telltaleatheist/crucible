@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { ensureRunning, parseServiceStatus } from '../src/index.js';
-import { guestProbeScript } from '../src/pack.js';
+import { guestProbeScript } from '../src/runtime.js';
 import { CRUCIBLE_BIN, FakeRunner, GUEST_BARE, GUEST_INSTALLED, refusal, WSL_LIST } from './fake.js';
 
 const W = (...argv: string[]): string[] => ['wsl.exe', '-d', 'Ubuntu', '--exec', ...argv];
@@ -251,12 +251,12 @@ test('{home} travels as env CRUCIBLE_HOME= on every verb', async () => {
   runner.assertDrained();
 });
 
-test('no server pack: the named refusal, nothing else asked', async () => {
+test('no server runtime: the named refusal, nothing else asked', async () => {
   const runner = new FakeRunner({ platform: 'win32' }, [LIST, { argv: PROBE.argv, stdout: GUEST_BARE }]);
   const r = await refusal(ensureRunning({ distro: 'Ubuntu' }, runner));
-  assert.equal(r.code, 'no_server_pack');
+  assert.equal(r.code, 'no_server_runtime');
   assert.match(r.message, /\/home\/owen\/\.crucible\/server\/bin\/crucible/);
-  assert.match(r.message, /install\(\) downloads the server pack/);
+  assert.match(r.message, /install\(\) downloads the pinned interpreter/);
   runner.assertDrained();
 });
 

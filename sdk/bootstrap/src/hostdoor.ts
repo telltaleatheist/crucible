@@ -34,12 +34,12 @@
  * **Bootstrap never elevates and never installs the host.** `wsl-states.ts`
  * states the rule for `run-elevated`: "a UAC prompt raised by a library, from a
  * background probe, is a dialog nobody asked for". The same rule is why a
- * machine with no host pack is a NAMED refusal carrying the `irm … | iex` line
+ * machine with no host runtime is a NAMED refusal carrying the `irm … | iex` line
  * rather than a library that downloads and runs an elevated installer of its
  * own accord.
  */
 import { crucibleAppData } from './distro.js';
-import { backendFor, releaseAssetUrl } from './envpacks.js';
+import { backendFor, releaseAssetUrl } from './release.js';
 import { BootstrapRefusal } from './errors.js';
 import type { InstallResult, InstallStep, JobTypeRequest } from './install.js';
 import { processRunner, type OutputStream, type Runner } from './runner.js';
@@ -61,16 +61,16 @@ export const HOST_DOOR_URL = `http://127.0.0.1:${HOST_DOOR_PORT}`;
 export const HOST_INSTALL_PATH = '/install';
 
 /**
- * The Windows host pack's relocatable entry point (PHASE15 4.4). A `.cmd` and
+ * The Windows host's relocatable entry point (PHASE15 4.4). A `.cmd` and
  * not an `.exe`: pip writes `Scripts\<name>.exe` launchers with the BUILDING
  * interpreter's absolute path baked into the binary, which a move breaks and
- * no shebang rewrite can reach, so the pack ships a `%~dp0`-relative shim
+ * no shebang rewrite can reach, so the install writes a `%~dp0`-relative shim
  * instead. Its presence is what "the host is installed" means.
  */
 export const HOST_ENTRY_POINT = 'crucible.cmd';
 
 /**
- * `%LOCALAPPDATA%\Crucible\host` — where `install.ps1` unpacks the host pack.
+ * `%LOCALAPPDATA%\Crucible\host` — where `install.ps1` puts the host runtime.
  *
  * The directory comes from {@link crucibleAppData}, which reads `LOCALAPPDATA`
  * from the environment and NEVER assembles it from a username, and which
@@ -80,7 +80,7 @@ export const HOST_ENTRY_POINT = 'crucible.cmd';
  * `%LOCALAPPDATA%\Crucible\` spelled in exactly one place — `wsl\`,
  * `downloads\`, `host\` and `config.toml` are all members of it (PHASE15 3.6).
  */
-export function hostPackDir(runner: Runner): string {
+export function hostRuntimeDir(runner: Runner): string {
   return crucibleAppData(runner, 'host');
 }
 
@@ -90,13 +90,13 @@ export function hostConfigPath(runner: Runner): string {
 }
 
 /**
- * Is the host pack on this machine? A file test, not a ping: a host that is
+ * Is the host runtime on this machine? A file test, not a ping: a host that is
  * installed and not answering is `host_unreachable`, which is a different
  * problem with a different answer (start it) from `host_not_installed`
  * (install it).
  */
 export function hostInstalled(runner: Runner): boolean {
-  return runner.fileExists(`${hostPackDir(runner)}\\${HOST_ENTRY_POINT}`);
+  return runner.fileExists(`${hostRuntimeDir(runner)}\\${HOST_ENTRY_POINT}`);
 }
 
 /** The line a person runs to put a host on this machine (PHASE15 4.4). */
@@ -165,10 +165,10 @@ export function hostToken(runner: Runner): string {
  * produces:
  *
  * ```text
- * {"id": 1, "event": "step",     "data": {"name": "server-pack", "index": 2, "total": 7}}
+ * {"id": 1, "event": "step",     "data": {"name": "server", "index": 2, "total": 7}}
  * {"id": 2, "event": "progress", "data": {"bytes_done": 4194304, "bytes_total": 120000000, "file": "…part00"}}
  * {"id": 3, "event": "state",    "data": {"code": "no_crucible_distro", "sentence": "…", "action": "run-elevated"}}
- * {"id": 4, "event": "line",     "data": {"text": "server-pack: part00", "stream": "stdout"}}
+ * {"id": 4, "event": "line",     "data": {"text": "server: cpython-3.11.16…", "stream": "stdout"}}
  * {"id": 5, "event": "failed",   "data": {"code": "virtualization_disabled", "message": "…"}}
  * {"id": 6, "event": "done",     "data": {"server": {…}, "release": "…", "backend": "…", "crucible": "…", "steps": […]}}
  * ```
@@ -177,8 +177,8 @@ export function hostToken(runner: Runner): string {
  * this stream under a task id, and a relay that RESHAPES is a second owner of
  * the shape. So the envelope is tasks.py's, `failed` is called `failed`
  * because that is what tasks.py calls it, and the fields are snake_case
- * because every Crucible wire is — `envpacks.json`'s `unpacked_bytes` is read
- * into a camelCase type by `envpacks.ts` in exactly the same way.
+ * because every Crucible wire is, and this package reads every one of them
+ * into a camelCase type in exactly the same way.
  *
  * **Two kinds tasks.py does not have, and why they are here.** `state` is the
  * 4c table's answer for this machine — the only stream that walks that table
@@ -286,7 +286,7 @@ export interface HostInstallRequestBody {
 export type HostFetch = typeof globalThis.fetch;
 
 export interface HostInstallOptions {
-  /** Which release's packs the host installs. Required here: `install()` has already resolved it. */
+  /** Which release the host installs. Required here: `install()` has already resolved it. */
   release: string;
   jobTypes: readonly JobTypeRequest[];
   /** `CRUCIBLE_HOME` inside the guest. Omit for the server's own default. */
@@ -356,12 +356,12 @@ export async function requestHostInstall(
   } catch (err) {
     // fetch rejects for exactly one class of reason: the request never
     // completed — ECONNREFUSED, ENOTFOUND, a dropped socket, a timeout. The
-    // host pack is installed (`install()` checked) and the door did not answer.
+    // host runtime is installed (`install()` checked) and the door did not answer.
     throw new BootstrapRefusal(
       'host_unreachable',
       `the Crucible host is installed on this machine and ${url} did not answer (${(err as Error).message}). `
-        + 'Start it from the Startup item, or run `crucible host` from the host pack.',
-      { command: `${hostPackDir(runner)}\\${HOST_ENTRY_POINT} host`, cause: err },
+        + 'Start it from the Startup item, or run `crucible host` from the host runtime.',
+      { command: `${hostRuntimeDir(runner)}\\${HOST_ENTRY_POINT} host`, cause: err },
     );
   }
 
@@ -601,7 +601,7 @@ function doneResult(data: HostDoneData, url: string): InstallResult {
   // This door installs the WSL engine (4.7: target `wsl`) and the guest is
   // Linux, so there is exactly one backend a successful install can report.
   // Asked for by name rather than checked against a list this file would then
-  // have to keep in step with `envpacks.ts`.
+  // have to keep in step with `release.ts`.
   const expected = backendFor('linux');
   const backend = want(data.backend, 'backend');
   if (backend !== expected) {

@@ -20,14 +20,26 @@ from dataclasses import dataclass
 
 #: The distro Crucible owns. One name, and its owner is sdk/bootstrap/src/distro.ts.
 CRUCIBLE_DISTRO = "crucible"
-ROOTFS_ASSET_TEMPLATE = "crucible-rootfs-{version}.tar.zst"
 RELEASE_REPOSITORY = "telltaleatheist/crucible"
 
-#: The line /etc/wsl.conf carries in the Crucible rootfs and nowhere else.
+#: CANONICAL'S OWN WSL IMAGE, and the sums file beside it. PHASE20 section 2:
+#: the release carries no rootfs of ours any more, and we store no digest of
+#: theirs -- the sums file in the same directory is the digest's one owner.
+UBUNTU_WSL_SERIES = "24.04"
+UBUNTU_WSL_ROOTFS = "ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
+UBUNTU_WSL_ROOTFS_URL = "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
+UBUNTU_WSL_SUMS_URL = "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/SHA256SUMS"
+
+#: The line /etc/wsl.conf carries in a Crucible distro and nowhere else.
 WSL_CONF_MARKER = "# crucible-rootfs"
 
-#: /etc/wsl.conf, exactly as the rootfs ships it and as the repair writes it.
+#: /etc/wsl.conf, exactly as the import writes it and as the repair rewrites it.
 WSL_CONF_TEXT = "# crucible-rootfs\n[boot]\nsystemd=true\n[user]\ndefault=crucible\n"
+
+#: What an imported Canonical image needs before anything can be installed
+#: into it: the crucible user, passwordless sudo, and the wsl.conf above.
+#: One root script, and its owner is distro.ts -- see `finishImportScript`.
+FINISH_IMPORT_SCRIPT = "id -u crucible >/dev/null 2>&1 || useradd --create-home --shell /bin/bash crucible\npasswd --delete crucible >/dev/null\nprintf 'crucible ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/crucible\nchmod 0440 /etc/sudoers.d/crucible\ncat > /etc/wsl.conf <<'EOF'\n# crucible-rootfs\n[boot]\nsystemd=true\n[user]\ndefault=crucible\nEOF"
 
 
 @dataclass(frozen=True)
@@ -115,16 +127,16 @@ WSL_STATES: tuple[WslStateDef, ...] = (
     WslStateDef(
         code="guest_no_network",
         probe="guest-network",
-        probe_argv=("wsl.exe", "-d", "crucible", "--exec", "curl", "-fsS", "-m", "20", "-o", "/dev/null", "https://github.com/telltaleatheist/crucible/releases/download/v{release}/envpacks.json", ),
-        sentence="The \"crucible\" distribution cannot reach https://github.com/telltaleatheist/crucible/releases/download/v{release}/envpacks.json ({said}). A VPN or a proxy on this machine usually explains it; there is nothing to install until it can.",
+        probe_argv=("wsl.exe", "-d", "crucible", "--exec", "curl", "-fsS", "-m", "20", "-o", "/dev/null", "https://github.com/telltaleatheist/crucible/releases/download/v{release}/crucible-{release}-py3-none-any.whl", ),
+        sentence="The \"crucible\" distribution cannot reach https://github.com/telltaleatheist/crucible/releases/download/v{release}/crucible-{release}-py3-none-any.whl ({said}). A VPN or a proxy on this machine usually explains it; there is nothing to install until it can.",
         action_kind="link",
         action_argv=(),
         action_text="",
-        action_url="https://github.com/telltaleatheist/crucible/releases/download/v{release}/envpacks.json",
+        action_url="https://github.com/telltaleatheist/crucible/releases/download/v{release}/crucible-{release}-py3-none-any.whl",
         optional=True,
     ),
     WslStateDef(
-        code="pack_disk",
+        code="guest_no_disk",
         probe="guest-disk",
         probe_argv=("wsl.exe", "-d", "crucible", "--exec", "bash", "-c", "df -Pk \"$HOME\" | awk 'NR==2 {print $4}'", ),
         sentence="This install needs {required} free and the \"crucible\" distribution has {free}. Nothing has been downloaded.",

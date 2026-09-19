@@ -75,13 +75,13 @@ if block:
 
 print("fake installer: collecting torch", flush=True)
 
-# Since 0.6.0 an install is usually a DOWNLOAD, and a download reports bytes
-# on the sentinel line `crucible/envpack.py` owns. Three of them, so the test
-# can see both that the first becomes a typed event and that the rest are
-# throttled rather than leaking into the line stream.
-from crucible.envpack import progress_line
+# AN INSTALL THAT DOWNLOADS AN INTERPRETER reports its bytes on the sentinel
+# line `crucible/interpreter.py` owns. Three of them, so the test can see both
+# that the first becomes a typed event and that the rest are throttled rather
+# than leaking into the line stream.
+from crucible.interpreter import progress_line
 for done in (1000, 2000, 3000):
-    print(progress_line(done, 3000, "crucible-env-llm-cuda-linux.tar.zst.part00"),
+    print(progress_line(done, 3000, "cpython-3.12.14+20260901-x86_64-unknown-linux-gnu-install_only.tar.gz"),
           flush=True)
 
 if os.environ.get("FAKE_INSTALL_FAIL") == "1":
@@ -556,7 +556,7 @@ def test_an_install_reports_its_download_in_the_shape_a_pull_does(
     assert measured[0] == {
         "bytes_done": 1000,
         "bytes_total": 3000,
-        "file": "crucible-env-llm-cuda-linux.tar.zst.part00",
+        "file": "cpython-3.12.14+20260901-x86_64-unknown-linux-gnu-install_only.tar.gz",
     }
     # Every byte event carries exactly the pull's three keys, and no line
     # event carries the sentinel's text.

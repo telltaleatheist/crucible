@@ -17,7 +17,7 @@
  * The one override is an operator naming an exact release — which pins WHICH
  * release, and still downloads it from GitHub. There is no offline install.
  */
-import { RELEASE_REPO } from './envpacks.js';
+import { RELEASE_REPO } from './release.js';
 import { BootstrapRefusal } from './errors.js';
 
 /** GitHub's own pointer at the promoted release. One URL, spelled once. */

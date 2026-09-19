@@ -23,7 +23,7 @@ test('the table is total, ordered deepest-cause-first, and every row carries a s
     'distro_not_systemd',
     'foreign_distro_not_systemd',
     'guest_no_network',
-    'pack_disk',
+    'guest_no_disk',
     'guest_root_unreachable',
     'wsl_ready',
   ]);
@@ -146,7 +146,7 @@ test('the disk row is the numbers, and only when a number was given', async () =
   ]);
   const state = await detectWslState(inputs, runner);
   runner.assertDrained();
-  assert.equal(state.code, 'pack_disk');
+  assert.equal(state.code, 'guest_no_disk');
   assert.match(state.sentence, /needs 9\.0 GiB free and the "crucible" distribution has 1\.9 GiB/);
   assert.match(state.sentence, /Nothing has been downloaded/);
 });

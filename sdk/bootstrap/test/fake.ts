@@ -6,6 +6,9 @@
  */
 import assert from 'node:assert/strict';
 
+import { interpreterFor } from '../src/interpreter.js';
+import { wheelAssetName } from '../src/release.js';
+
 import type { HostFetch, OutputStream, RunOptions, RunResult, Runner, StreamOptions } from '../src/index.js';
 
 export interface Expectation {
@@ -157,57 +160,27 @@ export const WSL_LIST_WITH_CRUCIBLE = '  NAME        STATE           VERSION\r\n
 /** The guest probe's answer on a host with nothing installed yet. */
 export const GUEST_BARE = 'home=/home/owen/.crucible\nuser=owen\nfree_kib=400000000\n';
 
-/** The archive sha256 the fixture manifest names. 64 hex, like a real one. */
-export const PACK_SHA = 'a'.repeat(64);
+/**
+ * The pinned interpreter for the fixture's backend, IMPORTED rather than typed.
+ *
+ * A fixture that spelled its own digest would be a second copy of the pin, and
+ * every test below would keep passing about an interpreter this package stopped
+ * installing.
+ */
+export const PIN = interpreterFor('cuda-linux');
+export const PY_SHA = PIN.sha256;
 
-/** The guest probe's answer on a host whose server pack is already the fixture's. */
+/** The guest probe's answer on a host whose runtime is already the fixture's. */
 export const GUEST_INSTALLED = `home=/home/owen/.crucible\nuser=owen\nfree_kib=400000000\n`
-  + `crucible=/home/owen/.crucible/server/bin/crucible\nversion=crucible 0.6.0\nsha256=${PACK_SHA}\nrelease=0.6.0\n`;
+  + `crucible=/home/owen/.crucible/server/bin/crucible\nversion=crucible 0.6.0\n`
+  + `python_sha256=${PY_SHA}\npython_version=${PIN.version}\nrelease=0.6.0\n`;
 
-/** `envpacks.json` for 0.6.0, as the release publishes it (two parts, both backends). */
-export const ENVPACKS_JSON = JSON.stringify({
-  schema: 1,
-  version: '0.6.0',
-  packs: [
-    {
-      name: 'server',
-      backend: 'cuda-linux',
-      python: '3.11.13',
-      bytes: 120_000_000,
-      sha256: PACK_SHA,
-      parts: ['crucible-env-server-cuda-linux-0.6.0.tar.zst.part00', 'crucible-env-server-cuda-linux-0.6.0.tar.zst.part01'],
-      // The server pack has no envs/ recipe; `envpack.server_recipe()` hashes
-      // pyproject.toml, which already owns those dependencies (section 7.3).
-      recipe_sha256: 'e'.repeat(64),
-      unpacked_bytes: 400_000_000,
-    },
-    {
-      name: 'server',
-      backend: 'mlx-darwin',
-      python: '3.11.13',
-      bytes: 110_000_000,
-      sha256: 'b'.repeat(64),
-      parts: ['crucible-env-server-mlx-darwin-0.6.0.tar.zst.part00'],
-      unpacked_bytes: 380_000_000,
-    },
-    {
-      name: 'llm',
-      backend: 'cuda-linux',
-      python: '3.11.13',
-      bytes: 8_000_000_000,
-      sha256: 'c'.repeat(64),
-      parts: ['crucible-env-llm-cuda-linux-0.6.0.tar.zst.part00'],
-      recipe_sha256: 'd'.repeat(64),
-      unpacked_bytes: 9_000_000_000,
-    },
-  ],
-});
-
-/** The server pack's console script, where every install puts it. */
+/** The server's console script, where every install puts it. */
 export const CRUCIBLE_BIN = '/home/owen/.crucible/server/bin/crucible';
-/** Where the fixture's parts and reassembled archive land. */
+/** Where the interpreter archive and the wheel land while they are used. */
 export const DOWNLOADS = '/home/owen/.crucible/downloads';
-export const ARCHIVE = `${DOWNLOADS}/crucible-env-server-cuda-linux-0.6.0.tar.zst`;
+export const ARCHIVE = `${DOWNLOADS}/${PIN.asset}`;
+export const WHEEL = `${DOWNLOADS}/${wheelAssetName('0.6.0')}`;
 export const DEST = '/home/owen/.crucible/server';
 
 // ---------------------------------------------------- the host's loopback door
@@ -313,7 +286,7 @@ export const HOST_DONE_DATA = {
   crucible: GUEST_CRUCIBLE,
   steps: [
     { name: 'host-facts', argv: [], status: 'ok', detail: 'crucible: CRUCIBLE_HOME /home/crucible/.crucible, user crucible, 380.0 GiB free' },
-    { name: 'server-pack', argv: [GUEST_CRUCIBLE], status: 'ok', detail: 'unpacked 2 part(s)' },
+    { name: 'server', argv: [GUEST_CRUCIBLE], status: 'ok', detail: 'python 3.11.16, then the 0.6.0 wheel' },
     { name: 'init', argv: [GUEST_CRUCIBLE, 'init', '--token', '<redacted>', '--enable-llm'], status: 'ok', detail: 'exit 0' },
     { name: 'service-install', argv: [GUEST_CRUCIBLE, 'service', 'install'], status: 'ok', detail: 'exit 0' },
     { name: 'linger', argv: ['loginctl', 'enable-linger', 'crucible'], status: 'ok', detail: 'granted' },

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { CRUCIBLE_DISTRO, crucibleAppData, ensureDistro, importArgv, resolveDistro, terminateArgv, unregisterArgv, WSL_CONF_MARKER } from '../src/index.js';
+import { finishImportScript, rootfsSumsUrl, rootfsUrl, UBUNTU_WSL_ROOTFS } from '../src/distro.js';
 import { FakeRunner, refusal, WSL_LIST, WSL_LIST_WITH_CRUCIBLE } from './fake.js';
 
 const LIST = ['wsl.exe', '-l', '-v'];
@@ -12,8 +13,11 @@ const MARKED = `${WSL_CONF_MARKER}\n[boot]\nsystemd=true\n[user]\ndefault=crucib
 const ENV = { LOCALAPPDATA: 'C:\\Users\\owen\\AppData\\Local' };
 const INSTALL_DIR = 'C:\\Users\\owen\\AppData\\Local\\Crucible\\wsl';
 const DOWNLOAD_DIR = 'C:\\Users\\owen\\AppData\\Local\\Crucible\\downloads';
-const ROOTFS = `${DOWNLOAD_DIR}\\crucible-rootfs-0.6.0.tar.zst`;
-const BASE = 'https://github.com/telltaleatheist/crucible/releases/download/v0.6.0';
+const ROOTFS = `${DOWNLOAD_DIR}\\${UBUNTU_WSL_ROOTFS}`;
+/** Canonical's sums file names every image in the directory; ours is one row. */
+const SUMS = `${'a'.repeat(64)} *ubuntu-noble-server-cloudimg-amd64-root.tar.xz\n${'f'.repeat(64)} *${UBUNTU_WSL_ROOTFS}\n`;
+/** The one root script that does what `build-rootfs.sh` used to bake in. */
+const FINISH = ['wsl.exe', '-d', 'crucible', '-u', 'root', '--exec', 'bash', '-c', finishImportScript()];
 
 test('the argv this file builds: import at version 2, terminate ONE distro, unregister ours', () => {
   assert.deepEqual(importArgv(INSTALL_DIR, ROOTFS), ['wsl.exe', '--import', 'crucible', INSTALL_DIR, ROOTFS, '--version', '2']);
@@ -83,35 +87,54 @@ test('ensureDistro: a marked distro is used as it is, and nothing is downloaded 
   assert.deepEqual(outcome, { name: 'crucible', imported: false, installDir: null, repaired: false, detail: '"crucible" is already imported and marked' });
 });
 
-test('ensureDistro: absent — download, verify, import, mark, terminate once', async () => {
+test('ensureDistro: absent — download Canonical\'s image, verify, import, finish, terminate once', async () => {
   const runner = new FakeRunner({ platform: 'win32', env: ENV }, [
     { argv: LIST, stdout: WSL_LIST },
-    { argv: ['curl.exe', '-fL', '--retry', '3', '--create-dirs', '-o', ROOTFS, `${BASE}/crucible-rootfs-0.6.0.tar.zst`] },
-    { argv: ['curl.exe', '-fsSL', '--retry', '3', `${BASE}/crucible-rootfs-0.6.0.tar.zst.sha256`], stdout: `${'f'.repeat(64)}  crucible-rootfs-0.6.0.tar.zst\n` },
+    { argv: ['curl.exe', '-fL', '--retry', '3', '--create-dirs', '-o', ROOTFS, rootfsUrl()] },
+    { argv: ['curl.exe', '-fsSL', '--retry', '3', rootfsSumsUrl()], stdout: SUMS },
     { argv: ['certutil', '-hashfile', ROOTFS, 'SHA256'], stdout: `SHA256 hash of ${ROOTFS}:\r\n${'f'.repeat(64)}\r\nCertUtil: -hashfile command completed successfully.\r\n` },
     { argv: importArgv(INSTALL_DIR, ROOTFS) },
-    { argv: CONF('crucible'), stdout: MARKED },
+    { argv: FINISH },
     { argv: terminateArgv() },
   ]);
   const outcome = await ensureDistro({ release: '0.6.0' }, runner);
   runner.assertDrained();
   assert.equal(outcome.imported, true);
   assert.equal(outcome.installDir, INSTALL_DIR);
-  assert.equal(outcome.repaired, false);
-  assert.match(outcome.detail, /imported crucible-rootfs-0\.6\.0\.tar\.zst/);
+  // TRUE ON EVERY IMPORT NOW: Canonical's image carries no /etc/wsl.conf, so
+  // finishing the import is what writes the marker we later detect.
+  assert.equal(outcome.repaired, true);
+  assert.match(outcome.detail, /imported ubuntu-noble-wsl-amd64-wsl\.rootfs\.tar\.gz/);
+  assert.match(outcome.detail, /created the crucible user/);
 });
 
-test('ensureDistro: a rootfs whose digest is not the release\'s is pack_sha_mismatch, before the import', async () => {
+test('ensureDistro: a digest that is not Canonical\'s own is refused before the import', async () => {
   const runner = new FakeRunner({ platform: 'win32', env: ENV }, [
     { argv: LIST, stdout: WSL_LIST },
     { argv: () => true },
-    { argv: () => true, stdout: `${'f'.repeat(64)}  x\n` },
+    { argv: () => true, stdout: SUMS },
     { argv: () => true, stdout: `SHA256 hash:\r\n${'0'.repeat(64)}\r\n` },
   ]);
   const r = await refusal(ensureDistro({ release: '0.6.0' }, runner));
   runner.assertDrained();
-  assert.equal(r.code, 'pack_sha_mismatch');
+  assert.equal(r.code, 'runtime_sha_mismatch');
   assert.match(r.message, /Delete .* and run this again/);
+});
+
+test('ensureDistro: a sums file that does not name our image is `current/` having moved', async () => {
+  // WE STORE NO DIGEST OF THEIRS, so this is the only shape "the file was
+  // renamed upstream" can take — and it must be a refusal rather than a check
+  // that compared nothing and passed.
+  const runner = new FakeRunner({ platform: 'win32', env: ENV }, [
+    { argv: LIST, stdout: WSL_LIST },
+    { argv: () => true },
+    { argv: () => true, stdout: `${'f'.repeat(64)} *ubuntu-plucky-wsl-amd64-wsl.rootfs.tar.gz\n` },
+  ]);
+  const r = await refusal(ensureDistro({ release: '0.6.0' }, runner));
+  runner.assertDrained();
+  assert.equal(r.code, 'runtime_sha_mismatch');
+  assert.match(r.message, /names no sha256 for ubuntu-noble/);
+  assert.match(r.message, /current\//);
 });
 
 test('ensureDistro: an image the CALLER named is imported and marked by us, and says whose digest it is', async () => {
@@ -119,14 +142,13 @@ test('ensureDistro: an image the CALLER named is imported and marked by us, and 
     { argv: LIST, stdout: WSL_LIST },
     { argv: (argv) => argv[0] === 'curl.exe' && argv.includes('https://example.invalid/ubuntu.tar.gz') },
     { argv: importArgv(INSTALL_DIR, ROOTFS) },
-    { argv: CONF('crucible'), stdout: '' },
-    { argv: (argv) => argv[0] === 'wsl.exe' && argv[4] === 'root' && (argv[8] ?? '').includes('cat > /etc/wsl.conf') },
+    { argv: FINISH },
     { argv: terminateArgv() },
   ]);
   const lines: string[] = [];
   const outcome = await ensureDistro({ release: '0.6.0', rootfsUrl: 'https://example.invalid/ubuntu.tar.gz', onLine: (line) => lines.push(line) }, runner);
   runner.assertDrained();
-  assert.equal(outcome.repaired, true, 'a stock image has no marker, so the import finishes by writing one');
+  assert.equal(outcome.repaired, true, 'an image we did not publish has no marker, so the import writes one');
   assert.ok(lines.some((line) => /digest is the caller's to vouch for/.test(line)));
 });
 
@@ -149,10 +171,10 @@ test('ensureDistro: an unmarked EMPTY distro is a partial import — unregistere
     { argv: HAS_CONFIG('crucible'), code: 1 },
     { argv: unregisterArgv() },
     { argv: (argv) => argv[0] === 'curl.exe' && argv.includes(ROOTFS) },
-    { argv: (argv) => argv[0] === 'curl.exe' && argv[4]?.endsWith('.sha256') === true, stdout: `${'f'.repeat(64)}\n` },
+    { argv: (argv) => argv[0] === 'curl.exe' && argv[4] === rootfsSumsUrl(), stdout: SUMS },
     { argv: (argv) => argv[0] === 'certutil', stdout: `hash:\r\n${'f'.repeat(64)}\r\n` },
     { argv: importArgv(INSTALL_DIR, ROOTFS) },
-    { argv: CONF('crucible'), stdout: MARKED },
+    { argv: FINISH },
     { argv: terminateArgv() },
   ]);
   const outcome = await ensureDistro({ release: '0.6.0' }, runner);
@@ -173,7 +195,7 @@ test('ensureDistro: an import that fails is distro_import_failed with what wsl.e
   const runner = new FakeRunner({ platform: 'win32', env: ENV }, [
     { argv: LIST, stdout: WSL_LIST },
     { argv: () => true },
-    { argv: () => true, stdout: `${'f'.repeat(64)}\n` },
+    { argv: () => true, stdout: SUMS },
     { argv: () => true, stdout: `hash:\r\n${'f'.repeat(64)}\r\n` },
     { argv: importArgv(INSTALL_DIR, ROOTFS), code: 1, stderr: 'The system cannot find the path specified.' },
   ]);

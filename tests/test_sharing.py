@@ -203,8 +203,14 @@ def test_guided_import_downloads_verifies_and_imports_only_owned_distro(tmp_path
             self.calls.append(argv)
             if argv[:3] == ["wsl.exe", "-l", "-v"]:
                 output = "Ubuntu Running 2\n"
-            elif argv[0] == "certutil" or argv[-1].endswith(".sha256"):
+            elif argv[0] == "certutil":
                 output = "a" * 64
+            elif argv[-1].endswith("SHA256SUMS"):
+                # CANONICAL'S OWN sums file, which names every image in that
+                # directory: the row is found by FILENAME, so a fixture that
+                # answered a bare digest would be checking nothing.
+                from crucible.host.wsl_states import UBUNTU_WSL_ROOTFS
+                output = f"{chr(98) * 64} *other.tar.gz\n{chr(97) * 64} *{UBUNTU_WSL_ROOTFS}\n"
             elif argv[-1] == "/etc/wsl.conf":
                 output = "# crucible-rootfs\n[boot]\nsystemd=true\n"
             else:

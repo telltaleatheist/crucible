@@ -3,7 +3,7 @@
 ONE BINARY, TWO KINDS OF VERB, AND THE DIFFERENCE IS THE ADDRESS
 ----------------------------------------------------------------
 Everything already in `crucible/cli.py` acts on **this machine's installation**:
-`init` writes config.toml, `install` unpacks an env pack, `service` writes a
+`init` writes config.toml, `install` pips an env's recipe, `service` writes a
 unit, `models pull` puts weights on this disk. None of them takes a `--url`,
 because there is nothing to point them at — the subject is the filesystem they
 are running on.

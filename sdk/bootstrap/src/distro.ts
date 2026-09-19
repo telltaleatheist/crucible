@@ -1,11 +1,11 @@
 /**
- * The Crucible-owned WSL distro (PHASE14-ENVPACKS.md section 4b).
+ * The Crucible-owned WSL distro (PHASE14-ENVPACKS.md 4b, image by PHASE20 §2).
  *
  * **Owen, 2026-09-14: "yes, lets do it. make it idiot proof."**
  *
  * On Windows a Crucible does not live in the person's Ubuntu. It lives in a
- * distro named `crucible`, imported from a rootfs asset on the same release,
- * under `%LOCALAPPDATA%\Crucible\wsl\`. Four reasons, each of which is why some
+ * distro named `crucible`, imported from CANONICAL'S OWN WSL image under
+ * `%LOCALAPPDATA%\Crucible\wsl\`. Four reasons, each of which is why some
  * other approach was rejected:
  *
  * - **No first-run prompt.** `wsl --install -d Ubuntu` opens an interactive
@@ -15,22 +15,42 @@
  *   five years of state in it — is never written to. A machine that has BOTH a
  *   `crucible` distro and a config in another distro is `two_local_crucibles`,
  *   refused by name, because which one is `local` is not a thing to guess.
- * - **systemd is a fact, not a probe.** The image ships `[boot] systemd=true`.
- *   The repair path in 4c exists for distros a person chose by hand.
+ * - **systemd is a fact, not a probe.** `finishImport` writes `[boot]
+ *   systemd=true` into the distro it just created. The repair path in 4c exists
+ *   for distros a person chose by hand.
  * - **The GPU is the host's driver.** WSL exposes the Windows NVIDIA driver
  *   into every distro; there is nothing to install in the guest.
  *
- * The rootfs is downloaded on the WINDOWS side — `wsl --import` reads a Windows
+ * WHERE THE IMAGE COMES FROM, AND WHY IT STOPPED BEING OURS
+ * ---------------------------------------------------------
+ * It used to be `crucible-rootfs-<version>.tar.zst`, built by a Docker job on
+ * every tag and uploaded to every release: ~30 MB of Ubuntu, rebuilt because
+ * OUR code changed, for an image whose contents had not moved in a month
+ * (PHASE20's measurement — 190 MB uploaded per release for a 1 MB wheel).
+ * Canonical publishes exactly this image, for WSL, with a `SHA256SUMS` beside
+ * it, so the release carries neither any more.
+ *
+ * The four things `build-rootfs.sh` baked in are now done INSIDE the distro
+ * right after the import ({@link finishImport}) — the `crucible` user,
+ * passwordless sudo, the `# crucible-rootfs` marker and `[boot] systemd=true`.
+ * Canonical's image already carries curl and ca-certificates.
+ *
+ * WE STORE NO DIGEST OF THEIRS. The mirror's own `SHA256SUMS`, fetched from the
+ * same directory, is the digest's owner; a pin of ours would be a second copy
+ * of somebody else's fact, stale the day they rebuild. What `current/` moving
+ * looks like is therefore a sums file that no longer names our download — which
+ * is detected, by name — rather than a check that quietly passes.
+ *
+ * The image is downloaded on the WINDOWS side — `wsl --import` reads a Windows
  * path, so there is no guest to download it into yet — with `curl.exe` and
- * verified with `certutil -hashfile`, both of which ship with Windows 10 and
- * 11. Its digest is a sibling asset, `<rootfs>.sha256`, one line.
+ * verified with `certutil -hashfile`, both of which ship with Windows 10 and 11.
  *
  * Nothing here ever runs `wsl --shutdown`: that stops EVERY distro, including
  * the one with somebody's training run in it. `wsl --terminate crucible` is the
  * only stop this file performs, and only on the distro it created.
  */
 import { BootstrapRefusal } from './errors.js';
-import { rootfsAssetName, releaseAssetUrl } from './envpacks.js';
+
 import type { RunResult, Runner, StreamOptions } from './runner.js';
 import { parseWslList, wslArgv, wslListArgv, wslRootArgv, type WslDistro } from './wsl.js';
 
@@ -38,9 +58,40 @@ import { parseWslList, wslArgv, wslListArgv, wslRootArgv, type WslDistro } from 
 export const CRUCIBLE_DISTRO = 'crucible';
 
 /**
- * The line `/etc/wsl.conf` carries in the Crucible rootfs and nowhere else.
- * A `crucible` distro without it was not imported from our image — either a
- * half-finished import, or somebody's own distro wearing the name.
+ * CANONICAL'S WSL IMAGES, and the release series we import. ONE PLACE.
+ *
+ * `current/` is a moving pointer by design — Canonical republishes the point
+ * release there — and that is what we want: an image a month old is a longer
+ * `apt-get upgrade` for no benefit, and nothing of ours depends on its bytes
+ * beyond "Ubuntu 24.04 with systemd". What pins it is the SERIES, `24.04`, and
+ * what proves the download is the `SHA256SUMS` in the same directory, which is
+ * the digest's one owner (see this file's header).
+ *
+ * Checked 2026-09-18: 200, 340 MB.
+ */
+export const UBUNTU_WSL_SERIES = '24.04';
+export const UBUNTU_WSL_BASE = `https://cloud-images.ubuntu.com/wsl/releases/${UBUNTU_WSL_SERIES}/current`;
+export const UBUNTU_WSL_ROOTFS = 'ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz';
+export const UBUNTU_WSL_SUMS = 'SHA256SUMS';
+
+export function rootfsUrl(): string {
+  return `${UBUNTU_WSL_BASE}/${UBUNTU_WSL_ROOTFS}`;
+}
+
+export function rootfsSumsUrl(): string {
+  return `${UBUNTU_WSL_BASE}/${UBUNTU_WSL_SUMS}`;
+}
+
+/**
+ * The line `/etc/wsl.conf` carries in a Crucible distro and nowhere else.
+ *
+ * THE MARKER IS STILL OURS. The IMAGE is Canonical's and carries no `wsl.conf`
+ * at all, so this is written by {@link finishImport} moments after the import
+ * rather than baked in — and it is still exactly what tells our distro from
+ * somebody's own wearing the same name. A `crucible` distro without it is
+ * either a half-finished import (unregistered and redone) or theirs (refused,
+ * `distro_unmarked`), which is the §4c rule unchanged: we write it, then we
+ * detect it.
  */
 export const WSL_CONF_MARKER = '# crucible-rootfs';
 
@@ -151,16 +202,24 @@ async function hasConfig(runner: Runner, distro: string): Promise<boolean> {
 // ------------------------------------------------------------------ import
 
 export interface EnsureDistroOptions {
-  /** The release whose rootfs asset is imported. */
+  /**
+   * The Crucible release this install is for.
+   *
+   * **It no longer decides which image is imported** — that is Canonical's
+   * `current/` — and it is kept because the refusals and the lines this prints
+   * say which install they belong to, and because every other entry point in
+   * this package takes one.
+   */
   release: string;
   /** Where the distro's ext4 file goes. Defaults to `%LOCALAPPDATA%\\Crucible\\wsl`. */
   installDir?: string;
   /** Where the rootfs is downloaded to. Defaults to `%LOCALAPPDATA%\\Crucible\\downloads`. */
   downloadDir?: string;
   /**
-   * A rootfs URL to import INSTEAD of the release asset. For a live check
-   * against a stock image before the release carries one; never a fallback —
-   * the caller names it or the release's asset is used.
+   * A rootfs URL to import INSTEAD of Canonical's. For a live check against a
+   * local file or a mirror; never a fallback — the caller names it or
+   * Canonical's is used, and a caller that names one is the one vouching for
+   * its bytes, out loud, because there is no `SHA256SUMS` beside it to check.
    */
   rootfsUrl?: string;
   /** Every line the import prints. */
@@ -173,7 +232,15 @@ export interface DistroOutcome {
   imported: boolean;
   /** Where its ext4 file is, when this call imported it. */
   installDir: string | null;
-  /** Was `/etc/wsl.conf` written by this call (the 4c repair)? */
+  /**
+   * Was `/etc/wsl.conf` written by this call?
+   *
+   * TRUE ON EVERY IMPORT NOW, and that is the change rather than a bug:
+   * Canonical's image carries no `wsl.conf`, so `finishImport` always writes
+   * one. It stays `false` for a distro that was already there and already
+   * marked, which is the question a caller is really asking — did anything
+   * change on this machine.
+   */
   repaired: boolean;
   detail: string;
 }
@@ -255,26 +322,25 @@ export async function ensureDistro(options: EnsureDistroOptions, runner: Runner)
 
   const installDir = options.installDir ?? crucibleAppData(runner, 'wsl');
   const downloadDir = options.downloadDir ?? crucibleAppData(runner, 'downloads');
-  const asset = rootfsAssetName(options.release);
-  const url = options.rootfsUrl ?? releaseAssetUrl(options.release, asset);
+  const asset = UBUNTU_WSL_ROOTFS;
+  const url = options.rootfsUrl ?? rootfsUrl();
   const rootfs = `${downloadDir}\\${asset}`;
 
   const fetch = await runner.stream(['curl.exe', '-fL', '--retry', '3', '--create-dirs', '-o', rootfs, url], { timeoutMs: DOWNLOAD_TIMEOUT_MS, onLine });
   if (fetch.failure !== null || fetch.code !== 0) {
     throw new BootstrapRefusal(
-      'pack_download_failed',
-      `the Crucible rootfs would not download from ${url} (${fetch.failure ?? `curl exit ${fetch.code}`}).`,
+      'runtime_download_failed',
+      `the Ubuntu WSL image would not download from ${url} (${fetch.failure ?? `curl exit ${fetch.code}`}).`,
       { detail: (fetch.stderr || fetch.stdout).trim() },
     );
   }
 
-  // The digest, when the release publishes one beside the image. `rootfsUrl`
-  // names an image that is not ours (a live check against a stock Ubuntu), and
-  // there is no digest asset for it — so the caller that supplied the URL is
-  // the one vouching for it, and that is said out loud rather than checked
-  // against a file that does not exist.
+  // Canonical's own SHA256SUMS, from the same directory as the image. A
+  // `rootfsUrl` names something else, which has no sums file beside it — so the
+  // caller that supplied the URL is the one vouching for it, and that is said
+  // out loud rather than checked against a file that does not exist.
   if (options.rootfsUrl === undefined) {
-    await verifyRootfs(runner, options.release, asset, rootfs, onLine);
+    await verifyRootfs(runner, asset, rootfs, onLine);
   } else {
     onLine(`rootfs came from {rootfsUrl} ${url}; its digest is the caller's to vouch for`, 'stderr');
   }
@@ -289,15 +355,11 @@ export async function ensureDistro(options: EnsureDistroOptions, runner: Runner)
     );
   }
 
-  const conf = await readWslConf(runner, CRUCIBLE_DISTRO);
-  let repaired = false;
-  if (!conf.includes(WSL_CONF_MARKER)) {
-    // A stock image (or an older rootfs) has no marker. It is OURS — we just
-    // imported it under our name into our directory — so writing wsl.conf is
-    // not a change to somebody's machine, it is finishing the import.
-    await writeWslConf(runner, CRUCIBLE_DISTRO);
-    repaired = true;
-  }
+  // WHAT `build-rootfs.sh` USED TO BAKE, done here instead. Canonical's image
+  // has no `crucible` user, no sudoers file and no `/etc/wsl.conf`, and it is
+  // OURS — just imported under our name into our directory — so writing them is
+  // finishing the import rather than touching somebody's machine.
+  await finishImport(runner, CRUCIBLE_DISTRO);
 
   // Once, so systemd and the default user take. `--terminate`, never
   // `--shutdown`: the other distros on this machine are not ours to stop.
@@ -314,43 +376,103 @@ export async function ensureDistro(options: EnsureDistroOptions, runner: Runner)
     name: CRUCIBLE_DISTRO,
     imported: true,
     installDir,
-    repaired,
-    detail: `imported ${asset} into ${installDir} as "${CRUCIBLE_DISTRO}" (WSL2)${repaired ? ', wrote /etc/wsl.conf' : ''}`,
+    repaired: true,
+    detail: `imported ${asset} into ${installDir} as "${CRUCIBLE_DISTRO}" (WSL2), `
+      + 'created the crucible user and wrote /etc/wsl.conf',
   };
 }
 
-/** `certutil -hashfile <file> SHA256` against the `<asset>.sha256` the release publishes. */
+/**
+ * The four things a Crucible distro needs that Canonical's image does not have,
+ * as ONE root script.
+ *
+ * IT IS A STRING RATHER THAN FOUR CALLS because it has a SECOND reader:
+ * `crucible/host/wsl_states.py` carries it as data, emitted by
+ * `scripts/gen-install-scripts.ts`, so the Windows host's own importer
+ * (`crucible/host/installer.py`) finishes an import exactly the way this
+ * package does. That is the seam PHASE15-HOST.md 4.3 names — the table crosses
+ * into Python by GENERATION, never by a second hand-written copy.
+ *
+ * `wsl -u root` is a process launch each time, and these four are lines that
+ * have to either all be there or none. Idempotent — `useradd` is guarded, the
+ * sudoers file and `wsl.conf` are rewritten — because the 4c repair path can
+ * call it on a distro that already has some of it.
+ */
+export function finishImportScript(): string {
+  return [
+    "id -u crucible >/dev/null 2>&1 || useradd --create-home --shell /bin/bash crucible",
+    'passwd --delete crucible >/dev/null',
+    "printf 'crucible ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/crucible",
+    'chmod 0440 /etc/sudoers.d/crucible',
+    `cat > /etc/wsl.conf <<'EOF'\n${WSL_CONF_TEXT}EOF`,
+  ].join('\n');
+}
+
+/**
+ * Run {@link finishImportScript} in a distro we just imported.
+ *
+ * The caller decides whether the distro is ours to write to; this does not ask.
+ */
+export async function finishImport(runner: Runner, distro: string): Promise<void> {
+  const result = await runner.run(
+    wslRootArgv(distro, ['bash', '-c', finishImportScript()]),
+    { timeoutMs: PROBE_TIMEOUT_MS },
+  );
+  if (result.failure !== null || result.code !== 0) {
+    throw new BootstrapRefusal(
+      'distro_import_failed',
+      `"${distro}" was imported and could not be finished (${result.failure ?? `exit ${result.code}`}): `
+        + `${(result.stderr.trim() || result.stdout.trim()) || 'no output'}. It has no crucible user, no `
+        + 'passwordless sudo or no /etc/wsl.conf, so nothing can be installed into it.',
+      { command: `wsl.exe --unregister ${distro}` },
+    );
+  }
+}
+
+/**
+ * `certutil -hashfile <file> SHA256` against Canonical's own `SHA256SUMS`.
+ *
+ * THE SUMS FILE LISTS EVERY IMAGE IN THAT DIRECTORY, one `<digest>  *<name>`
+ * line each, so the row is found BY FILENAME. A sums file that does not name
+ * our download is exactly what `current/` moving under us looks like, and it is
+ * refused by name rather than passing because no row was compared.
+ */
 async function verifyRootfs(
   runner: Runner,
-  release: string,
   asset: string,
   rootfs: string,
   onLine: StreamOptions['onLine'],
 ): Promise<void> {
-  const url = releaseAssetUrl(release, `${asset}.sha256`);
+  const url = rootfsSumsUrl();
   const expected = await runner.run(['curl.exe', '-fsSL', '--retry', '3', url], { timeoutMs: DOWNLOAD_TIMEOUT_MS });
   if (expected.failure !== null || expected.code !== 0) {
     throw new BootstrapRefusal(
-      'pack_download_failed',
-      `the rootfs digest ${url} would not download (${expected.failure ?? `curl exit ${expected.code}`}), so the image cannot be verified.`,
+      'runtime_download_failed',
+      `Canonical's ${url} would not download (${expected.failure ?? `curl exit ${expected.code}`}), so the image cannot be verified.`,
       { detail: (expected.stderr || expected.stdout).trim() },
     );
   }
-  const want = (expected.stdout.trim().split(/\s+/)[0] ?? '').toLowerCase();
+  const row = expected.stdout.split(/\r?\n/).find((line) => line.trim().endsWith(asset));
+  const want = (row?.trim().split(/\s+/)[0] ?? '').toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(want)) {
-    throw new BootstrapRefusal('pack_sha_mismatch', `${url} is not a sha256: ${JSON.stringify(expected.stdout.trim().slice(0, 80))}`);
+    throw new BootstrapRefusal(
+      'runtime_sha_mismatch',
+      `${url} names no sha256 for ${asset}. Canonical republishes ${UBUNTU_WSL_SERIES}'s point releases under `
+        + `current/, so an image that is not in its own sums file means the file this installer asks for has `
+        + `been renamed there: ${JSON.stringify(expected.stdout.trim().slice(0, 120))}`,
+    );
   }
   const got = await runner.run(['certutil', '-hashfile', rootfs, 'SHA256'], { timeoutMs: DOWNLOAD_TIMEOUT_MS });
   const hex = /^[0-9a-f ]{64,}$/im.exec(got.stdout.replace(/\r/g, ''))?.[0]?.replace(/ /g, '').toLowerCase() ?? '';
   if (got.failure !== null || got.code !== 0 || hex.length !== 64) {
     throw new BootstrapRefusal(
-      'pack_download_failed',
+      'runtime_download_failed',
       `certutil would not hash ${rootfs} (${got.failure ?? `exit ${got.code}`}): ${(got.stderr.trim() || got.stdout.trim()) || 'no output'}`,
     );
   }
   if (hex !== want) {
     throw new BootstrapRefusal(
-      'pack_sha_mismatch',
+      'runtime_sha_mismatch',
       `the downloaded rootfs hashes ${hex} and ${url} says ${want}. Delete ${rootfs} and run this again.`,
     );
   }

@@ -41,8 +41,8 @@ from .errors import CrucibleError
 
 RECIPES_DIR_ENV = "CRUCIBLE_WORKER_RECIPES_DIR"
 
-#: One name for the stamp, shared with `jobenv` (which declares it) so that a
-#: pack and a pip build cannot leave two different files behind.
+#: One name for the stamp, shared with `jobenv` (which declares it) so the two
+#: env modules cannot leave two different files behind.
 ENV_STAMP_NAME = jobenv.ENV_STAMP_NAME
 
 #: What `crucible doctor` and `crucible install <type>` report the version of:
@@ -129,12 +129,12 @@ class EnvStatus:
     detail: str
     python_version: str | None
     packages: dict[str, str]
-    #: The pack this env was unpacked from, or None when it was built here by
-    #: `crucible install --build`. `jobenv.EnvStatus` carries the same two
-    #: fields and says why at length; the two classes stay separate only until
-    #: the modules are merged (see this module's header).
-    pack_sha256: str | None = None
-    recipe_sha256: str | None = None
+    #: The recipe's two halves as stamped. `jobenv.EnvStatus` carries the same
+    #: three fields and says why at length; the two classes stay separate only
+    #: until the modules are merged (see this module's header).
+    environment_sha256: str | None = None
+    direct_references: dict[str, str] | None = None
+    recipe_text: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -144,8 +144,11 @@ class EnvStatus:
             "detail": self.detail,
             "python_version": self.python_version,
             "packages": dict(self.packages),
-            "pack_sha256": self.pack_sha256,
-            "recipe_sha256": self.recipe_sha256,
+            "environment_sha256": self.environment_sha256,
+            "direct_references": (
+                None if self.direct_references is None
+                else dict(self.direct_references)
+            ),
         }
 
 
@@ -162,10 +165,10 @@ def worker_env_python(home: Path, job_type: str) -> Path:
 
 
 def stamp_path(home: Path, job_type: str) -> Path:
-    """Written after `pip install -r <recipe>` returns 0, or by a pack.
+    """Written after pip returned 0 in this venv, and at no other moment.
 
-    Public for `crucible/envpack.py`'s sake, and named after `jobenv`'s
-    constant so the two doors cannot write two different filenames.
+    Named after `jobenv`'s constant so the two env modules cannot write two
+    different filenames.
     """
     return worker_env_dir(home, job_type) / ENV_STAMP_NAME
 
@@ -362,11 +365,12 @@ def env_status(home: Path, job_type: str, backend_kind: str) -> EnvStatus:
             packages={},
         )
     record = json.loads(stamp.read_text(encoding="utf-8"))
-    # `.get` for these two alone: a stamp written before 0.6.0 predates env
-    # packs and carries neither. See `jobenv.env_status`, which says why at
-    # length — absent is an answer, not a default.
-    pack_sha256 = record.get("pack_sha256")
-    recipe_sha256 = record.get("recipe_sha256")
+    # `.get` for these three alone: a stamp written before PHASE20 hashed the
+    # recipe whole and recorded no references. See `jobenv.env_status`, which
+    # says why at length — absent is an answer, not a default.
+    environment_sha256 = record.get("environment_sha256")
+    direct_references = record.get("direct_references")
+    recipe_text = record.get("recipe_text")
     if record["backend"] != backend_kind:
         return EnvStatus(
             job_type=job_type,
@@ -378,8 +382,9 @@ def env_status(home: Path, job_type: str, backend_kind: str) -> EnvStatus:
             ),
             python_version=record["python_version"],
             packages={},
-            pack_sha256=pack_sha256,
-            recipe_sha256=recipe_sha256,
+            environment_sha256=environment_sha256,
+            direct_references=direct_references,
+            recipe_text=recipe_text,
         )
 
     present = installed_packages(home, job_type)
@@ -410,8 +415,9 @@ def env_status(home: Path, job_type: str, backend_kind: str) -> EnvStatus:
             ),
             python_version=record["python_version"],
             packages=present,
-            pack_sha256=pack_sha256,
-            recipe_sha256=recipe_sha256,
+            environment_sha256=environment_sha256,
+            direct_references=direct_references,
+            recipe_text=recipe_text,
         )
     headline = headline_package(job_type, backend_kind)
     if headline in references:
@@ -439,8 +445,9 @@ def env_status(home: Path, job_type: str, backend_kind: str) -> EnvStatus:
         ),
         python_version=record["python_version"],
         packages=present,
-        pack_sha256=pack_sha256,
-        recipe_sha256=recipe_sha256,
+        environment_sha256=environment_sha256,
+        direct_references=direct_references,
+        recipe_text=recipe_text,
     )
 
 
@@ -455,6 +462,26 @@ def require_env(home: Path, job_type: str, backend_kind: str) -> Path:
 # ------------------------------------------------------------------ install
 
 
+def plan_install(
+    home: Path, job_type: str, backend_kind: str, *, force: bool = False
+) -> jobenv.EnvPlan:
+    """What `install_worker_env` would do here, without doing any of it.
+
+    `jobenv.plan_env` is THE rule and this is the worker env's spelling of the
+    question. Two copies of "does this env need anything" is two answers, and
+    the doctor and the installer must give one (ARCHITECTURE.md R1).
+    """
+    return jobenv.plan_env(
+        directory=worker_env_dir(home, job_type),
+        stamp=stamp_path(home, job_type),
+        recipe=recipe_for(job_type, backend_kind),
+        backend_kind=backend_kind,
+        installed=env_status(home, job_type, backend_kind).installed,
+        force=force,
+        install_command=f"crucible install {job_type}",
+    )
+
+
 def install_worker_env(
     home: Path,
     job_type: str,
@@ -463,76 +490,105 @@ def install_worker_env(
     force: bool = False,
     on_line: Callable[[str], None] | None = None,
 ) -> EnvStatus:
-    """Create `~/.crucible/envs/<type>/` and install this backend's recipe.
+    """Bring `~/.crucible/envs/<type>/` to this backend's recipe, and stamp it.
+
+    PHASE20 section 4, the same sequence `jobenv.install_env` walks: the plan
+    decides, the venv is rebuilt only under `--force`, and every other drift is
+    pip into the venv that is already there.
 
     `on_line` is called with each line of pip's output so the CLI can show it.
     Returns the resulting status. Raises WorkerEnvError naming what went wrong.
     """
     recipe = recipe_for(job_type, backend_kind)
     directory = worker_env_dir(home, job_type)
-    stamp = stamp_path(home, job_type)
-
-    if directory.exists() and not force:
-        existing = env_status(home, job_type, backend_kind)
-        if existing.installed:
-            return existing
-        if stamp.is_file():
-            raise WorkerEnvError(
-                f"{directory} exists but does not match this host: {existing.detail}. "
-                "Pass --force to rebuild it."
-            )
-        # A half-built venv from an interrupted install: no stamp, so nothing
-        # downstream has ever trusted it. Rebuilding it is the only correct move.
+    try:
+        plan = plan_install(home, job_type, backend_kind, force=force)
+    except jobenv.EnvError as exc:
+        # The shared planner speaks `jobenv`'s error; this module's callers
+        # catch this module's, so it is re-raised rather than leaking a second
+        # exception type out of one command.
+        raise WorkerEnvError(str(exc)) from exc
+    if plan.action == jobenv.PLAN_NOTHING:
+        return env_status(home, job_type, backend_kind)
+    if on_line is not None:
+        on_line(f"{plan.action}: {plan.detail}")
 
     started = time.monotonic()
-    directory.parent.mkdir(parents=True, exist_ok=True)
-    if directory.exists():
-        shutil.rmtree(directory)
+    python_version: str | None = None
 
-    _run(
-        [sys.executable, "-m", "venv", str(directory)],
-        f"could not create the venv at {directory}",
-        on_line,
-    )
-    python = worker_env_python(home, job_type)
-    if not python.is_file():
-        raise WorkerEnvError(
-            f"`python -m venv {directory}` returned 0 but there is no {python}"
+    if plan.action == jobenv.PLAN_BUILD:
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        if directory.exists():
+            shutil.rmtree(directory)
+        _run(
+            [sys.executable, "-m", "venv", str(directory)],
+            f"could not create the venv at {directory}",
+            on_line,
         )
-    _run(
-        [str(python), "-m", "pip", "install", "--upgrade", "pip", "wheel"],
-        f"could not upgrade pip in the {job_type} env",
-        on_line,
-    )
-    _run(
-        [str(python), "-m", "pip", "install", "-r", str(recipe)],
-        f"could not install {recipe} into {directory}",
-        on_line,
-    )
+        python = worker_env_python(home, job_type)
+        if not python.is_file():
+            raise WorkerEnvError(
+                f"`python -m venv {directory}` returned 0 but there is no {python}"
+            )
+        _run(
+            [str(python), "-m", "pip", "install", "--upgrade", "pip", "wheel"],
+            f"could not upgrade pip in the {job_type} env",
+            on_line,
+        )
+    else:
+        python = worker_env_python(home, job_type)
+        # The venv was not rebuilt, so its interpreter is the one the stamp
+        # already names.
+        python_version = json.loads(
+            stamp_path(home, job_type).read_text(encoding="utf-8")
+        )["python_version"]
 
-    version = subprocess.run(
-        [
-            str(python),
-            "-c",
-            "import sys; print('.'.join(map(str, sys.version_info[:3])))",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    ).stdout.strip()
-    elapsed = time.monotonic() - started
-    stamp.write_text(
+    if plan.action == jobenv.PLAN_REFERENCES:
+        # One git sha moved and the environment half hashed the same, so the
+        # 3 GB of torch under `ultimate-rvc` is exactly what the recipe asks
+        # for. `--no-deps` because those dependencies were just proved
+        # unchanged; `--force-reinstall` because both Owen's fork and the PyPI
+        # release call themselves 0.5.11, so pip sees nothing to do.
+        for line in plan.lines:
+            _run(
+                [
+                    str(python), "-m", "pip", "install",
+                    "--no-deps", "--force-reinstall", line,
+                ],
+                f"could not reinstall {line} into {directory}",
+                on_line,
+            )
+    else:
+        _run(
+            [str(python), "-m", "pip", "install", "-r", str(recipe)],
+            f"could not install {recipe} into {directory}",
+            on_line,
+        )
+
+    if python_version is None:
+        python_version = subprocess.run(
+            [
+                str(python),
+                "-c",
+                "import sys; print('.'.join(map(str, sys.version_info[:3])))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        ).stdout.strip()
+    stamp_path(home, job_type).write_text(
         json.dumps(
             {
                 "job_type": job_type,
                 "backend": backend_kind,
                 "recipe": recipe.name,
-                # Both recorded on the `--build` path too; `jobenv.install_env`
-                # says why. `pack_sha256: null` means "built here".
-                "recipe_sha256": jobenv.recipe_sha256(recipe),
-                "pack_sha256": None,
-                "python_version": version,
-                "seconds": round(elapsed, 1),
+                # THE TWO HALVES, apart, hashed and parsed by `jobenv` so the
+                # two env modules cannot disagree about what a recipe says.
+                "environment_sha256": jobenv.environment_sha256(recipe),
+                "direct_references": jobenv.recipe_direct_references(recipe),
+                "recipe_text": jobenv.recipe_text(recipe),
+                "python_version": python_version,
+                "seconds": round(time.monotonic() - started, 1),
             },
             indent=2,
         )

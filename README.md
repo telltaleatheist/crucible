@@ -91,33 +91,43 @@ candidate is not promoted until its complete assets and installation checks pass
 plan for an app. Weights are KEPT unless `--purge-weights`, and the bearer token is not —
 `config.toml` goes on every uninstall, so a reinstall re-pairs.
 
-### The envs come off the release — they are not built here
+### An environment comes from its publisher, once
 
-`crucible install <type>` **downloads** a pre-built environment pack from this version's
-GitHub release and unpacks it (`docs/PHASE14-ENVPACKS.md`). A pack is a relocatable
-CPython with that job type's recipe installed into it (3.11 for most packs; 3.12
-for CUDA SGLang Higgs), split into parts under
-1900 MiB, with the sha256 of the reassembled whole in `envpacks.json`:
+`crucible install <type>` builds that job type's environment from its recipe
+(`crucible/envs/<type>/<recipe>.txt`) with pip, into
+`~/.crucible/envs/<type>/`, from PyPI and the indexes the recipe pins
+(`docs/PHASE20-CODE-NOT-ENVIRONMENTS.md`):
 
 ```bash
-crucible install asr            # ~1.3 GB down, ~2.9 GB on disk, about a minute
+crucible install asr            # ~2.9 GB on disk, from the mirrors
 crucible install llm
 crucible install tts --narrator-engine higgs-v3
 crucible install rvc            # also installs denoise, which shares the env
 ```
 
-Nothing about this depends on the machine's own Python, its version or its packages. A
-pack that the release does not carry is refused by name (`pack_not_published`) rather
-than built quietly, and `--build` is the explicit way to build one here from its recipe
-with pip:
+Nothing about this depends on the machine's own Python, its version or its
+packages. The venv is made from the server's own interpreter, or — for a recipe
+that names a version the server does not run, as the CUDA SGLang Higgs one does
+— from a CPython downloaded from python-build-standalone at a pinned digest,
+into `~/.crucible/interpreters/<version>/`, once. There is no PATH search: an
+interpreter nobody pinned is `interpreter_not_pinned` before `venv` runs.
+
+**An env is touched only when its own recipe moved**, and then by
+`pip install -r` into the venv that is already there — pip skips what is
+satisfied, so the cost is the difference. `--force` is the one thing that
+deletes an env, for one that is genuinely broken. The recipe's two halves are
+stamped apart, because they move for different reasons: a moved `narrator` git
+sha costs one `pip install --no-deps` of that line and leaves the 13 GB around
+it alone.
 
 ```bash
-crucible install asr --build    # the developer's path; minutes of pip instead of seconds
-crucible install asr --manifest-url file:///tmp/packs/envpacks.json   # a mirror, or a test
+crucible install tts --narrator-engine higgs-v3          # bring it to the recipe
+crucible install tts --narrator-engine higgs-v3 --force  # delete it and start again
 ```
 
-`crucible doctor` says which way each env arrived — `pack <sha>` or `built here` — beside
-the hash of the recipe it came from.
+`crucible doctor` says, per env, which recipe it was installed from and what an
+install would do to it now — nothing, `narrator_sha_drift` or
+`env_recipe_drift`.
 
 ### The server itself
 
@@ -127,23 +137,10 @@ conda activate crucible
 pip install -e .            # add [test] for the test suite: pip install -e '.[test]'
 ```
 
-A conda env is how a DEVELOPER runs a checkout. A machine that only runs Crucible gets
-the `server` pack, which carries its own interpreter and needs no conda at all
-(`docs/PHASE14-ENVPACKS.md` section 4 — `@crucible/bootstrap`'s job).
-
-### Building the packs
-
-On the backend they target, one per command, each smoke-tested by unpacking it somewhere
-else and running it before it counts as an asset:
-
-```bash
-crucible envpack list                     # the ten (pack, backend) pairs a tag carries
-crucible envpack build asr --out packs    # -> packs/*.part00 and packs/envpacks.json
-crucible envpack build asr --out packs --check   # the parts still match, and the recipe
-```
-
-`.github/workflows/envpacks.yml` does this on every `v*` tag and uploads `envpacks.json`
-last, so a release whose manifest exists carries every pack that manifest names.
+A conda env is how a DEVELOPER runs a checkout. A machine that only runs
+Crucible gets `install.sh` or `install.ps1`, which download the pinned CPython
+and pip the release's wheel into it, and need no conda at all
+(`@crucible/bootstrap`'s job).
 
 ## Use
 
@@ -157,10 +154,9 @@ crucible token --show           # print the bearer token
 crucible serve                  # foreground; 127.0.0.1:7100 by default
 crucible service install        # …or run it as this machine's service (PHASE11-SERVICE.md);
                                 #   also start|stop|status|uninstall, all idempotent
-crucible install llm            # download the llm env pack for this host's backend
+crucible install llm            # build the llm env from envs/llm/<backend>.txt
 crucible install tts --narrator-engine higgs-v3   # ...and a tts env, one per engine
-crucible install llm --build    # ...or build it here from envs/llm/<backend>.txt instead
-crucible envpack build llm      # produce the pack a release carries (developer / CI)
+crucible install llm --force    # ...or delete a broken one and build it again
 crucible capability             # what this host's card can hold, and why (dry run)
 crucible capability --write     # record that verdict in config.toml
 crucible models list            # model manifests and their standing here
@@ -249,15 +245,17 @@ config.toml        mode 0600 — server name, bind defaults, backend, and the to
 jobs/<id>/inputs/  the job's inputs, materialised before it is queued
 jobs/<id>/artifacts/   its outputs and their .provenance.json sidecars
 uploads/<blob_id>  blobs from POST /v1/uploads
-envs/llm/          the llm job type's env, unpacked by `crucible install llm`
+envs/llm/          the llm job type's env, built by `crucible install llm`
 envs/tts-<engine>/ the tts job type's env, one per narrator engine on cuda-linux
                    (one shared `envs/tts/` on mlx-darwin, where they can share)
-envs/<type>/       a worker job type's env — `asr`, `align`, `rvc` — unpacked by
-                   `crucible install <type>` from that release's pack, or built
-                   here with `--build` from `envs/<type>/<backend>.txt`
-envs/<key>.partial/    an unpack in flight; removed by the next install, never read
-downloads/         a pack's parts and the archive they join into, while one
-                   installs. Empty afterwards — peak extra disk is one part
+envs/<type>/       a worker job type's env — `asr`, `align`, `rvc` — built by
+                   `crucible install <type>` from `envs/<type>/<backend>.txt`
+interpreters/<v>/  a CPython a RECIPE asked for that the server does not run,
+                   from python-build-standalone at a pinned digest, once
+server/            the server's own CPython with the release's wheel in it,
+                   stamped `.crucible` with that interpreter's digest
+downloads/         an interpreter archive or a wheel, while one installs.
+                   Empty afterwards
 models/<id>/<backend>/  weights, stamped with the revision they were pulled at
 voices/<id>/<backend>/  the same for voices — a separate namespace on purpose
 rvc/<id>/<backend>/     the same for RVC models — a third namespace, because
@@ -420,7 +418,7 @@ two differ the backend block says so, and where it is silent the model's number 
 
 ```bash
 crucible init --enable-llm        # or add [jobs] enable_llm = true to an existing config
-crucible install llm              # download ~/.crucible/envs/llm (--build to pip it here)
+crucible install llm              # pip envs/llm/<backend>.txt into ~/.crucible/envs/llm
 crucible models list              # what this build ships and where each one stands here
 crucible models pull qwen3.5-9b   # ~19 GB from HuggingFace at the manifest's pinned sha
 crucible doctor                   # reports the env's presence and the versions installed
@@ -485,17 +483,16 @@ without one, a private repo is refused by name.
 #### Envs are recipes
 
 `envs/llm/cuda-linux.txt` (vLLM) and `envs/llm/mlx-darwin.txt` (mlx-lm) are pinned pip
-requirements, and they are the source of truth in both directions: `crucible install llm
---build` installs them into `~/.crucible/envs/llm/` with pip, and `crucible envpack build
-llm` installs the same file into a standalone CPython to PRODUCE the pack the default
-`crucible install llm` downloads. The manifest records the recipe's sha256, so a pack
-built from a recipe this build no longer has is refused `pack_recipe_drift` rather than
-treated as close enough. Engines are spawned from that env's python, so the API server
-process never imports torch or mlx.
+requirements, and they are THE source of truth: `crucible install llm` installs them into
+`~/.crucible/envs/llm/` with pip and stamps `crucible-env.json` with what it installed.
+The stamp records the recipe's two halves apart — the environment's digest and each
+direct reference's commit — so `crucible doctor` can say which moved, and
+`crucible install` can answer each with the command that costs what that change is
+worth. Engines are spawned from that env's python, so the API server process never
+imports torch or mlx.
 
-Heavy wheels still never come from GitHub Releases — they come from PyPI, at pack BUILD
-time, once per release rather than once per machine. What the release carries is the
-result.
+Heavy wheels never come from GitHub Releases: they come from PyPI and the indexes the
+recipe pins, per machine, and only when the recipe moved.
 
 #### The accelerator guard
 
@@ -914,7 +911,7 @@ registry publish: the tarball on the release is the distribution.
 ## Releases
 
 ```bash
-./scripts/ship.sh patch              # bump, test, cut, and watch the packs build
+./scripts/ship.sh patch              # bump, commit, push, cut
 ./scripts/ship.sh patch --dry-run    # everything up to creating anything
 ./scripts/ship.sh patch --deploy     # and install it on every machine afterwards
 ```
@@ -925,25 +922,34 @@ also usable alone, which is what to reach for when one of them is what went wron
 | | | |
 |---|---|---|
 | 1 | `scripts/bump.py patch` | writes the version to all seven places and regenerates the modules and the API reference |
-| 2 | `scripts/tests.sh --changed` | runs the tests the diff since the last tag can reach; `--all` for the suite |
-| 3 | `scripts/release.sh` | builds the six assets, cuts `v<ver>` as a prerelease, dispatches the pack build |
-| 4 | `scripts/deploy.sh --release <ver>` | installs it on every machine and proves each one took it |
-| 5 | `scripts/promote_release.py` | validates the candidate, and on `--publish` makes it `latest` |
+| 2 | `scripts/release.sh` | builds the assets, cuts `v<ver>` as a prerelease |
+| 3 | `scripts/deploy.sh --release <ver>` | installs it on every machine and proves each one took it |
+| 4 | `scripts/promote_release.py` | validates the candidate, and on `--publish` makes it `latest` |
 
-One version, one tag, one release. `v<ver>` carries the Python source archive
-`crucible-<ver>.tar.gz`, the wheel `crucible-<ver>-py3-none-any.whl`, both SDK
-packages, `crucible-client-<ver>.tgz` and `crucible-bootstrap-<ver>.tgz`, the two
-generated installers, the WSL rootfs, and `envpacks.json`.
+**There is no CI to wait for.** `scripts/tests.sh` is still how a branch is
+tested, on the branch, before it is merged; a deploy runs none, because by then
+what is being shipped is meant to be known-good
+(`docs/PHASE20-CODE-NOT-ENVIRONMENTS.md` section 7). A code patch is about three
+minutes end to end.
 
-**A release does not carry every pack, and its manifest does not name only its own
-assets.** An environment pack is a function of its recipe, so when a recipe and its
-standalone-Python pin are unchanged the pack is not rebuilt and not re-uploaded:
-the row is carried by reference and keeps naming the release that already holds the
-bytes. Measured across v0.6.6 to v0.6.7, three of thirteen packs had genuinely
-changed. What is guaranteed is that every row RESOLVES — the manifest job HEADs
-every carried part before publishing, and `promote_release.py` checks each pack
-against the release its own row names. Core runtimes embed Crucible's source and
-are therefore never carried; that is checked by name, not by convention.
+**A release carries CODE.** `v<ver>` carries the Python source archive
+`crucible-<ver>.tar.gz`, the wheel `crucible-<ver>-py3-none-any.whl` and its
+digest `crucible-<ver>-py3-none-any.whl.sha256`, both SDK packages
+`crucible-client-<ver>.tgz` and `crucible-bootstrap-<ver>.tgz`, and the two
+generated installers. Nothing else, ever: everything a Crucible also needs comes
+from whoever publishes it, pinned by version and digest where it is used —
+CPython from python-build-standalone, each job environment from PyPI and the
+pinned indexes through its own recipe, the WSL image from Canonical,
+`llama-server` from ggml-org, the weights from Hugging Face. Before PHASE20 a tag
+uploaded about 190 MB of other people's bytes for a 1 MB change of ours, and
+every environment archive was rebuilt whether or not its recipe had moved.
+
+**An upgrade is a wheel.** `install.sh` and `install.ps1` fetch the pinned
+interpreter ONCE — an install that finds its digest already stamped skips it —
+and pip the release's wheel into it, so a patch is the wheel and whatever of
+its dependencies actually moved.
+A job environment is touched only when its own recipe moved, and then by
+`pip install -r` into the venv that is already there.
 
 Server, client and bootstrap version declarations and the bootstrap client peer pin
 must agree. A dirty tree, an unpushed HEAD, and an existing tag are refused.
@@ -958,7 +964,6 @@ serving the 0.6.0 script. Installers no longer bake a version (they ask GitHub f
 the newest release at run time), and `deploy.sh` installs from the tag rather than
 from `latest`, so a missed promotion no longer silently installs an old release —
 but it still leaves `latest` pointing at the wrong one.
-
 ## Tests
 
 ```bash

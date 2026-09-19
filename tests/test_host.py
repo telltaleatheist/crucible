@@ -813,7 +813,7 @@ def test_the_disk_row_fills_both_of_its_figures_when_it_is_asked_for() -> None:
         }
     )
     state = wslstate.detect(runner, release="0.6.0", required_bytes=8 * 1024 ** 3)
-    assert state.code == "pack_disk"
+    assert state.code == "guest_no_disk"
     assert "8.0 GiB" in state.sentence
     assert "1.0 GiB" in state.sentence
     assert "{required}" not in state.sentence and "{free}" not in state.sentence
@@ -1086,8 +1086,13 @@ def test_a_missing_rootfs_refuses_rather_than_importing_somebody_elses_image(
     )
     with pytest.raises(HostError) as caught:
         walk.run()
-    assert caught.value.code == "pack_sha_mismatch"
-    assert "rootfs" in caught.value.message
+    assert caught.value.code == "rootfs_sha_mismatch"
+    # The image is Canonical's now (PHASE20 section 2), and so is the digest:
+    # a `Scripted` runner that answers nothing for the sums file is exactly the
+    # shape "there is no row for our file", which must refuse rather than
+    # import bytes nobody checked.
+    assert "SHA256SUMS" in caught.value.message
+    assert "ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz" in caught.value.message
 
 
 def test_every_event_a_step_emits_is_shaped_like_a_tasks_py_event(tmp_path: Path) -> None:
@@ -3603,7 +3608,7 @@ def test_the_root_door_is_probed_before_the_guest_install_needs_it(
         "-d crucible -u root --exec id -u" in call for call in asked
     ), f"nothing asked whether root is reachable in the guest: {asked}"
     # And the row that turns a VPN into a sentence instead of a failed download.
-    assert any("envpacks.json" in call for call in asked), (
+    assert any("py3-none-any.whl" in call for call in asked), (
         f"nothing asked whether the guest can reach the release: {asked}"
     )
 
@@ -3638,3 +3643,108 @@ def test_a_repair_that_changes_nothing_ends_the_walk_instead_of_looping(
         call for call in runner.calls if "--terminate" in " ".join(call)
     ]
     assert len(terminates) == 1, f"the repair ran {len(terminates)} times: {terminates}"
+
+
+# ------------------------------------- ONE RELEASE PER MACHINE, and who drives
+#
+# Owen, 2026-09-18: *"windows is the driver; the thing moving wsl forward."*
+#
+# MEASURED, not remembered: `crucible/host/app.py` passed `_sequence` only to
+# `OrchestratorDoor`, so the install walk ran on `POST /install` and nowhere
+# else; on a machine the guest already owns that sequence called `walk._complete()`,
+# which emits `done` about the engine that is already there. `_guest_install()` —
+# the one place `install.sh --release` runs inside the distro — is reached only
+# from `run()`. So `install.ps1` upgraded the HOST and the guest stayed where it
+# was, and `deploy.sh` had grown a second driver to paper over it.
+
+
+def upgrade_walk(runner: object, tmp_path: Path, *, release: str = "0.7.0"):
+    events: list[installer.Event] = []
+    walk = installer.EngineInstall(
+        runner,
+        events.append,
+        release=release,
+        home=tmp_path,
+        install_sh_url=f"https://example.invalid/v{release}/install.sh",
+    )
+    return walk, events
+
+
+def guest_record(release: str) -> str:
+    return json.dumps({"schema_version": 1, "platform": "linux", "release": release,
+                       "home": "/home/crucible/.crucible"})
+
+
+def test_a_guest_behind_the_host_is_carried_to_the_hosts_release(tmp_path: Path) -> None:
+    """The host is the driver. A guest on 0.6.9 under a 0.7.0 host is upgraded
+    through the SAME `install.sh --release <host version>` the move uses."""
+    runner = Scripted(
+        answers={
+            "installation.json": ok(guest_record("0.6.9")),
+            "printf %s": ok("/home/crucible/.crucible"),
+        }
+    )
+    walk, events = upgrade_walk(runner, tmp_path)
+    assert walk.upgrade_guest() == "0.7.0"
+    installs = [
+        " ".join(argv) for argv in runner.calls
+        if "crucible-install.sh" in " ".join(argv)
+    ]
+    assert len(installs) == 1, installs
+    assert "--release 0.7.0" in installs[0]
+    # And it is the SAME step the move emits, so the host's log and window
+    # describe an upgrade in the words they already use for an install.
+    assert [event.data.get("name") for event in events if event.event == "step"] == [
+        "guest-install"
+    ]
+    assert [record.name for record in walk._records] == ["guest-install"]
+    assert [record.status for record in walk._records] == ["ok"]
+
+
+def test_a_guest_already_at_the_hosts_release_is_left_alone(tmp_path: Path) -> None:
+    runner = Scripted(answers={"installation.json": ok(guest_record("0.7.0"))})
+    walk, events = upgrade_walk(runner, tmp_path)
+    assert walk.upgrade_guest() is None
+    assert not [argv for argv in runner.calls if "crucible-install.sh" in " ".join(argv)]
+
+
+def test_a_guest_ahead_of_the_host_is_refused_by_name_and_never_downgraded(
+    tmp_path: Path,
+) -> None:
+    """The one direction that must never be automatic. A guest somebody
+    installed by hand at a newer release is a fact to report, not to undo."""
+    runner = Scripted(answers={"installation.json": ok(guest_record("0.8.0"))})
+    walk, _ = upgrade_walk(runner, tmp_path)
+    with pytest.raises(HostError) as caught:
+        walk.upgrade_guest()
+    assert caught.value.code == "guest_ahead_of_host"
+    assert "0.8.0" in caught.value.message and "0.7.0" in caught.value.message
+    assert not [argv for argv in runner.calls if "crucible-install.sh" in " ".join(argv)]
+
+
+def test_a_guest_with_no_record_is_carried_rather_than_guessed_about(
+    tmp_path: Path,
+) -> None:
+    """`installation.json` is written when the RUNTIME starts, so an absent one
+    means nothing has run in there — which is a guest to bring up to this
+    release, not one to leave at a version nobody can name."""
+    runner = Scripted(
+        answers={"installation.json": RunResult(code=1, stdout="", stderr="No such file", failure=None)}
+    )
+    walk, _ = upgrade_walk(runner, tmp_path)
+    assert walk.upgrade_guest() == "0.7.0"
+    assert [argv for argv in runner.calls if "crucible-install.sh" in " ".join(argv)]
+
+
+def test_the_guest_sequence_the_host_runs_is_the_phase20_one(tmp_path: Path) -> None:
+    """It runs `install.sh`, which is GENERATED from the step list — so what
+    the guest gets is the interpreter, the wheel and the recipes, and this
+    asserts the generated file rather than trusting the URL's name."""
+    generated = (
+        Path(__file__).resolve().parents[1] / "sdk/bootstrap/scripts/install.sh"
+    ).read_text(encoding="utf-8")
+    assert 'say "server"' in generated
+    assert "python-build-standalone" in generated
+    assert "py3-none-any.whl" in generated
+    assert "pip install --upgrade --no-input" in generated
+    assert 'say "install-$type"' in generated

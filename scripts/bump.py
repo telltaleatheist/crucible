@@ -10,14 +10,16 @@ all seven agree — a good rule that, until now, was enforced against seven hand
 edits. Every release began by finding them again. This finds them once, and the
 list lives beside the refusal that depends on it.
 
-WHAT THIS WILL NOT DO IS SEARCH AND REPLACE. Three other places in the tree name
-0.6.7 and must keep naming it: `docs/PHASE14-ENVPACKS.md`, `scripts/plan_packs.py`
-and `.github/workflows/envpacks.yml` each record a MEASUREMENT of the v0.6.6 ->
-v0.6.7 pack decision. A measurement is about the versions it was taken on; a bump
-that rewrote those sentences would turn a fact into a lie, quietly, and the next
-reader would have no way to tell. So each place below is matched by its own
-anchored pattern and must match EXACTLY ONCE — a file that has changed shape
-refuses the bump instead of being edited by guesswork.
+WHAT THIS WILL NOT DO IS SEARCH AND REPLACE. One other place in the tree names
+0.6.7 and must keep naming it: `docs/PHASE14-ENVPACKS.md` records a MEASUREMENT
+of the v0.6.6 -> v0.6.7 pack decision. A measurement is about the versions it was
+taken on; a bump that rewrote that sentence would turn a fact into a lie,
+quietly, and the next reader would have no way to tell. (There were three such
+files. The other two, `scripts/plan_packs.py` and
+`.github/workflows/envpacks.yml`, went with the packs themselves — PHASE20
+section 6.) So each place below is matched by its own anchored pattern and must
+match EXACTLY ONCE — a file that has changed shape refuses the bump instead of
+being edited by guesswork.
 
 The generated files that carry the version — `modules/*.module.json` — are
 regenerated here, because v0.6.3 shipped them stale: the seven agreed and nothing

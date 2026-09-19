@@ -13,9 +13,9 @@
 # to the SAME implementation through the host loopback door. Two walks of
 # one table was the thing being removed.
 #
-# So: download the host pack for this release, verify it, unpack it to
-# %LOCALAPPDATA%\Crucible\host\, register the Startup item, start the
-# host, and STOP.
+# So: download the pinned CPython, unpack it to
+# %LOCALAPPDATA%\Crucible\host\, pip-install this release's wheel and the
+# tray into it, register the Startup item, start the host, and STOP.
 #
 #   irm https://github.com/telltaleatheist/crucible/releases/latest/download/install.ps1 | iex
 #
@@ -34,12 +34,12 @@
 param(
   [string]$Release = '',
   # An operator rollback: install this EXACT older release over a newer host
-  # pack already on this machine. Must name the same version as -Release;
+  # runtime already on this machine. Must name the same version as -Release;
   # there is no other way down (INSTALL-UNINSTALL.md 6.5.4).
   [string]$RollbackTo = '',
   [string]$Root = "$env:LOCALAPPDATA\Crucible",
   # The inverse. `crucible uninstall` does the work inside the home; this
-  # script removes the host pack, because this script is what unpacked it.
+  # script removes the host runtime, because this script is what unpacked it.
   [switch]$Uninstall,
   [switch]$PurgeWeights,
   [switch]$DryRun,
@@ -54,7 +54,7 @@ $env:CRUCIBLE_HOME = $Root
 $HostDir = Join-Path $Root 'host'
 $DownloadDir = Join-Path $Root 'downloads'
 $Partial = "$HostDir.partial"
-$Stamp = Join-Path $HostDir '.pack'
+$Stamp = Join-Path $HostDir '.crucible'
 $Cmd = Join-Path $HostDir "crucible.cmd"
 $Pythonw = Join-Path $HostDir "pythonw.exe"
 
@@ -92,23 +92,23 @@ if ($Uninstall) {
   if ($WslToo) { $verb += "--wsl-too" }
   Say "uninstall: $Cmd $($verb -join ' ')"
   & $Cmd @verb
-  if ($LASTEXITCODE -ne 0) { Die "step_failed: uninstall (crucible uninstall exited $LASTEXITCODE; nothing of the pack has been removed)" }
+  if ($LASTEXITCODE -ne 0) { Die "step_failed: uninstall (crucible uninstall exited $LASTEXITCODE; nothing of the runtime has been removed)" }
   if ($DryRun) {
-    Say "host-pack: would remove $HostDir and $DownloadDir"
+    Say "host: would remove $HostDir and $DownloadDir"
     Say "home: would remove $Root if it were then empty"
     exit 0
   }
-  Say "host-pack"
+  Say "host"
   foreach ($gone in @($Partial, $DownloadDir, $HostDir)) {
     if (Test-Path $gone) {
       try {
         Remove-Item $gone -Recurse -Force -ErrorAction Stop
       } catch {
-        Die "host_pack_locked: $gone could not be removed ($($_.Exception.Message)). Something still holds a file in it  -  the tray was just ended, so log out and back in, then run this again. It is idempotent."
+        Die "host_runtime_locked: $gone could not be removed ($($_.Exception.Message)). Something still holds a file in it  -  the tray was just ended, so log out and back in, then run this again. It is idempotent."
       }
     }
   }
-  Say "host-pack: removed $HostDir"
+  Say "host: removed $HostDir"
   $left = @(Get-ChildItem -Force -Path $Root -ErrorAction SilentlyContinue)
   if ($left.Count -eq 0) {
     Remove-Item $Root -Force -Recurse
@@ -121,30 +121,19 @@ if ($Uninstall) {
   exit 0
 }
 
-# A pack is a zstd tarball. Windows 10 1803+ and Windows 11 ship bsdtar
-# linked with libzstd, so no zstd.exe is needed  -  MEASURED on 2026-09-14:
-# bsdtar 3.8.1 / libarchive 3.8.1 / libzstd 1.5.5. A machine whose tar has
-# no zstd would half-unpack in silence, so it is CHECKED, not assumed.
+# python-build-standalone publishes gzip, which every tar reads.
 #
 # NAMED, NOT LOOKED UP. `tar` used to be resolved through PATH, and PATH
 # is the CALLERS: launched from a Git Bash shell this found
-# C:\Program Files\Git\usr\bin\tar.exe - GNU tar 1.32, no zstd at all -
-# and refused a Windows 11 box whose System32 bsdtar has read zstd the
-# whole time. Measured 2026-09-17 deploying 0.6.8 via scripts/deploy.sh.
-# The tar Windows GUARANTEES is now the one this checks AND the one it
-# unpacks with: checking one tool and using another is how a check
-# passes and the unpack still half-works.
+# C:\Program Files\Git\usr\bin\tar.exe and refused a Windows 11 box
+# whose System32 bsdtar was fine. Measured 2026-09-17 deploying 0.6.8 via
+# scripts/deploy.sh. The tar Windows GUARANTEES is the one this uses.
 $Tar = Join-Path $env:SystemRoot "System32\tar.exe"
 if (-not (Test-Path $Tar)) {
-  Die "guest_missing_tool: there is no $Tar on this machine. Windows 10 1803+ and Windows 11 ship a bsdtar there that reads zstd, and a pack cannot be unpacked without one."
-}
-$tarVersion = ""
-try { $tarVersion = (& $Tar --version | Out-String) } catch { $tarVersion = "" }
-if ($tarVersion -notmatch "zstd") {
-  Die "guest_missing_tool: $Tar cannot read zstd (tar --version said: $($tarVersion.Trim())). Windows 10 1803+ and Windows 11 ship one that can."
+  Die "guest_missing_tool: there is no $Tar on this machine. Windows 10 1803+ and Windows 11 ship a bsdtar there, and the interpreter archive cannot be unpacked without one."
 }
 
-# --- 1. which pack -------------------------------------------------------
+# --- 1. which release -----------------------------------------------------
 # Asked only when nobody named one. -Uninstall returned long before here,
 # so taking Crucible off a machine still needs no network.
 # THE POINTER IS `releases/latest` (INSTALL-UNINSTALL.md 6.5.1): the promoted
@@ -160,110 +149,136 @@ if (-not $Release) {
 }
 if ($RollbackTo -and $RollbackTo -ne $Release) { Die "rollback_version_mismatch: -RollbackTo names $RollbackTo and the release being installed is $Release; a rollback names the exact Crucible you want back" }
 Say "release $Release"
-$manifestUrl = "https://github.com/telltaleatheist/crucible/releases/download/v$Release/envpacks.json"
-$manifestRaw = & curl.exe -fsSL --retry 3 "$manifestUrl"
-if ($LASTEXITCODE -ne 0) { Die "pack_manifest_unreadable: could not fetch $manifestUrl" }
-try { $manifest = $manifestRaw | Out-String | ConvertFrom-Json } catch { Die "pack_manifest_unreadable: $manifestUrl is not JSON" }
-if ($manifest.schema -ne 1 -and $manifest.schema -ne 2) { Die "pack_manifest_unreadable: $manifestUrl declares schema $($manifest.schema), this installer reads 1 or 2" }
-$pack = $null
-foreach ($entry in $manifest.packs) { if ($entry.name -eq 'host' -and $entry.backend -eq 'llama-windows') { $pack = $entry } }
-if ($null -eq $pack) { Die "pack_not_published: the $Release release publishes no host pack for llama-windows" }
 
-# --- 2. already installed? ------------------------------------------------
-# The stamp is the same two lines the guest-side install writes, read the
-# same way: a matching sha means these bytes are already unpacked.
+# --- 2. the pinned interpreter --------------------------------------------
+# THE SAME TABLE `install.sh` READS (sdk/bootstrap/src/interpreter.ts), and
+# the same rule: pinned by version AND digest, downloaded ONCE. The stamp
+# carries the digest, so an upgrade skips this whole block.
+$PyAsset = 'cpython-3.11.16+20260901-x86_64-pc-windows-msvc-install_only.tar.gz'
+$PySha = '6be524fa6752af802146a4adc7d098565425b0b1c166e19a5a7a4c8cccb86bf6'
+$PyVersion = '3.11.16'
+$PyUrl = 'https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.11.16+20260901-x86_64-pc-windows-msvc-install_only.tar.gz'
+$PythonExe = Join-Path $HostDir "python.exe"
 $have = ""
 $haveRelease = ""
 if (Test-Path $Stamp) {
   foreach ($line in (Get-Content $Stamp)) {
-    if ($line -match "^sha256=(.+)$") { $have = $Matches[1].Trim() }
+    if ($line -match "^python_sha256=(.+)$") { $have = $Matches[1].Trim() }
     if ($line -match "^release=(.+)$") { $haveRelease = $Matches[1].Trim() }
   }
 }
-if ($have -eq $pack.sha256 -and (Test-Path $Cmd)) {
-  Say "host-pack: already installed ($($pack.sha256))"
-} else {
-  # --- 2a. never over a newer pack -----------------------------------------
-  # INSTALL-UNINSTALL.md 6.5.4, the same rule and the same refusal names the
-  # POSIX installer and installPack() use. [version] compares number by
-  # number, which is the thing a string comparison gets wrong at 1.0.10.
-  # An unstamped pack is not read as older: a version nobody recorded cannot
-  # be compared with one.
-  if ($haveRelease) {
-    $onDisk = $null; $wanted = $null
-    if ([version]::TryParse($haveRelease, [ref]$onDisk) -and [version]::TryParse($Release, [ref]$wanted) -and $wanted -lt $onDisk) {
-      if ($RollbackTo -ne $Release) {
-        Die "install_would_downgrade: $HostDir is the $haveRelease host pack and this would install $Release over it. Nothing has been downloaded. An operator who means to go back names the version: -RollbackTo $Release"
-      }
+# --- 2a. never over a newer release ---------------------------------------
+# INSTALL-UNINSTALL.md 6.5.4, the same rule and the same refusal names the
+# POSIX installer and installRuntime() use. [version] compares number by
+# number, which is the thing a string comparison gets wrong at 1.0.10.
+# An unstamped runtime is not read as older: a version nobody recorded
+# cannot be compared with one.
+if ($haveRelease) {
+  $onDisk = $null; $wanted = $null
+  if ([version]::TryParse($haveRelease, [ref]$onDisk) -and [version]::TryParse($Release, [ref]$wanted) -and $wanted -lt $onDisk) {
+    if ($RollbackTo -ne $Release) {
+      Die "install_would_downgrade: $HostDir is the $haveRelease release and this would install $Release over it. Nothing has been downloaded. An operator who means to go back names the version: -RollbackTo $Release"
     }
   }
-
-  # --- 3. disk ------------------------------------------------------------
-  # The same sum pack.ts requiredBytes() uses: unpacked + the whole archive
-  # + one part, a part being the archive over the part count.
-  $need = $pack.unpacked_bytes + $pack.bytes + [math]::Floor($pack.bytes / $pack.parts.Count)
-  $drive = (Get-Item $env:LOCALAPPDATA).PSDrive
-  if ($drive.Free -lt $need) {
-    Die "pack_disk: the host pack needs $([math]::Round($need/1GB,1)) GiB free on $($drive.Name): and there is $([math]::Round($drive.Free/1GB,1)) GiB. Nothing has been downloaded."
-  }
-
-  # --- 4. download, join, verify -------------------------------------------
+}
+if ($have -eq $PySha -and (Test-Path $PythonExe)) {
+  Say "host: python $PyVersion is already at $HostDir"
+} else {
   New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null
-  $archiveName = $pack.parts[0] -replace "\.part[0-9]+$", ""
-  $archive = Join-Path $DownloadDir $archiveName
-  $packRelease = if ($pack.PSObject.Properties.Name -contains "release") { $pack.release } else { $Release }
-  $packBase = "https://github.com/telltaleatheist/crucible/releases/download/v$packRelease"
+  $archive = Join-Path $DownloadDir $PyAsset
   if (Test-Path $archive) { Remove-Item $archive -Force }
-  foreach ($part in $pack.parts) {
-    Say "host-pack: $part"
-    $partPath = Join-Path $DownloadDir $part
-    & curl.exe -fL --retry 3 --retry-delay 2 --continue-at - --create-dirs -o $partPath "$packBase/$part"
-    if ($LASTEXITCODE -ne 0) { Die "pack_download_failed: $packBase/$part" }
-    # Byte-for-byte append, then delete: peak extra disk is ONE part and
-    # not the whole set. Add-Content would re-encode the bytes as text.
-    $in = [System.IO.File]::OpenRead($partPath)
-    $out = [System.IO.File]::Open($archive, "Append", "Write")
-    try { $in.CopyTo($out) } finally { $out.Close(); $in.Close() }
-    Remove-Item $partPath -Force
-  }
+  Say "host: python $PyVersion from python-build-standalone"
+  & curl.exe -fL --retry 3 --retry-delay 2 --create-dirs -o $archive "$PyUrl"
+  if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: $PyUrl" }
   $got = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLower()
-  if ($got -ne $pack.sha256) {
+  if ($got -ne $PySha) {
     Remove-Item $archive -Force
-    Die "pack_sha_mismatch: $archiveName hashes $got, the manifest says $($pack.sha256)"
+    Die "runtime_sha_mismatch: $PyAsset hashes $got, this installer pins $PySha. The download was deleted"
   }
 
-  # --- 5. unpack beside, prove it runs, THEN move --------------------------
+  # --- 2b. unpack beside, prove it runs, THEN move -------------------------
+  # `install_only` archives carry ONE top-level python/ directory and that
+  # directory IS the interpreter, so what moves is $Partial\python.
   if (Test-Path $Partial) { Remove-Item $Partial -Recurse -Force }
   New-Item -ItemType Directory -Force -Path $Partial | Out-Null
-  & $Tar --zstd -xf $archive -C $Partial
-  if ($LASTEXITCODE -ne 0) { Die "pack_unpack_failed: tar would not open $archive" }
-  # The .cmd and not the .exe: pip Scripts\*.exe launchers bake the build
-  # tree interpreter path into the binary and do not survive this move
-  # (PHASE15-HOST.md 4.4, and PHASE14 7.2a for the POSIX half of it).
-  & (Join-Path $Partial "crucible.cmd") --version | Out-Null
-  if ($LASTEXITCODE -ne 0) { Die "pack_unpack_failed: crucible.cmd in $Partial would not run" }
-  # Stop with the new staged control code before touching the installed runtime.
-  # A shutdown failure leaves both the old runtime and verified staging intact.
+  & $Tar -xzf $archive -C $Partial
+  if ($LASTEXITCODE -ne 0) { Die "runtime_unpack_failed: tar would not open $archive" }
+  $staged = Join-Path $Partial "python"
+  & (Join-Path $staged "python.exe") --version | Out-Null
+  if ($LASTEXITCODE -ne 0) { Die "runtime_unpack_failed: python.exe in $staged would not run" }
   if (Test-Path -LiteralPath $Previous) { Die "upgrade_recovery_required: $Previous exists from an interrupted upgrade; restore or inspect it before retrying" }
   if (Test-Path -LiteralPath $HostDir) {
-    & (Join-Path $Partial "crucible.cmd") local shutdown
-    if ($LASTEXITCODE -ne 0) { Die "upgrade_stop_failed: the old runtime was kept because Crucible did not stop cleanly" }
+    if (Test-Path -LiteralPath $Cmd) {
+      & $Cmd local shutdown
+      if ($LASTEXITCODE -ne 0) { Die "upgrade_stop_failed: the old runtime was kept because Crucible did not stop cleanly" }
+    }
     Move-Item -LiteralPath $HostDir -Destination $Previous -ErrorAction Stop
   }
   try {
-    Move-Item $Partial $HostDir -ErrorAction Stop
-    & $Cmd --version | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "the installed runtime failed its startup check" }
+    Move-Item $staged $HostDir -ErrorAction Stop
+    & $PythonExe --version | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "the installed interpreter failed its startup check" }
   } catch {
-    if ((Test-Path -LiteralPath $Previous) -and (Test-Path -LiteralPath $HostDir) -and -not (Test-Path -LiteralPath $Partial)) { Move-Item -LiteralPath $HostDir -Destination $Partial -ErrorAction Stop }
+    if ((Test-Path -LiteralPath $Previous) -and (Test-Path -LiteralPath $HostDir)) { Remove-Item -LiteralPath $HostDir -Recurse -Force }
     if ((Test-Path -LiteralPath $Previous) -and -not (Test-Path -LiteralPath $HostDir)) { Move-Item -LiteralPath $Previous -Destination $HostDir }
     Die "upgrade_swap_failed: $_. The previous runtime is retained at $Previous when present."
   }
   if (Test-Path -LiteralPath $Previous) { Remove-Item -LiteralPath $Previous -Recurse -Force }
-  Set-Content -Path $Stamp -Encoding ascii -Value @("sha256=$($pack.sha256)", "release=$Release")
+  Remove-Item $Partial -Recurse -Force
   Remove-Item $archive -Force
-  Say "host-pack: unpacked $($pack.parts.Count) part(s) into $HostDir (Python $($pack.python))"
+  Say "host: python $PyVersion at $HostDir"
 }
+
+# --- 3. the wheel, which IS the deploy ------------------------------------
+# It always installs. One megabyte, and re-running it is how a half-finished
+# install is repaired. pip runs from the tree at its FINAL path, which is
+# what makes Scripts\*.exe launchers correct without being rewritten.
+New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null
+$Wheel = "crucible-$Release-py3-none-any.whl"
+$WheelPath = Join-Path $DownloadDir $Wheel
+if (Test-Path $WheelPath) { Remove-Item $WheelPath -Force }
+Say "host: $Wheel"
+& curl.exe -fL --retry 3 --retry-delay 2 --create-dirs -o $WheelPath "https://github.com/telltaleatheist/crucible/releases/download/v$Release/$Wheel"
+if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$Release/$Wheel" }
+$wantRaw = & curl.exe -fsSL --retry 3 "https://github.com/telltaleatheist/crucible/releases/download/v$Release/crucible-$Release-py3-none-any.whl.sha256"
+if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$Release/crucible-$Release-py3-none-any.whl.sha256" }
+$want = ($wantRaw | Out-String).Trim().Split()[0].ToLower()
+if ($want -notmatch '^[0-9a-f]{64}$') { Die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$Release/crucible-$Release-py3-none-any.whl.sha256 is not a sha256" }
+$gotWheel = (Get-FileHash -Algorithm SHA256 -Path $WheelPath).Hash.ToLower()
+if ($gotWheel -ne $want) {
+  Remove-Item $WheelPath -Force
+  Die "runtime_sha_mismatch: $Wheel hashes $gotWheel, the release says $want. The download was deleted"
+}
+if (Test-Path -LiteralPath $Cmd) { & $Cmd local shutdown | Out-Null }
+& $PythonExe -m pip install --upgrade --no-input $WheelPath
+if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: pip would not install $Wheel into $HostDir" }
+# The tray, which is not a dependency of the wheel: pyproject.toml is what
+# every Crucible installs from, and a headless Linux server must not carry
+# a GUI toolkit. See DESKTOP_PACKAGES in sdk/bootstrap/src/interpreter.ts.
+& $PythonExe -m pip install pystray pillow
+if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: the tray packages would not install" }
+Remove-Item $WheelPath -Force
+
+# --- 4. the console shim --------------------------------------------------
+# pip does not write a shebang script into Scripts\ on Windows; it writes
+# Scripts\crucible.exe, a launcher BINARY. That one works here  -  pip ran
+# from this very directory  -  but everything else in Crucible spells the
+# console entry point `<host>\crucible.cmd` (crucible/host/paths.py's
+# CONSOLE_CMD), so the shim is written beside python.exe.
+#
+# CRLF, not LF: cmd.exe's batch parser is line-oriented on CRLF, and an
+# LF-only .cmd can swallow its own last line  -  a shim that silently does
+# nothing rather than one that reports a syntax error.
+#
+# `%~dp0` is the directory of the running batch file, WITH a trailing
+# backslash, quoted because %LOCALAPPDATA% holds the user's name and a user
+# called "Owen Morgan" would otherwise split the command in two.
+$shim = "@echo off`r`n""%~dp0python.exe"" -m crucible.cli %*`r`n"
+[System.IO.File]::WriteAllText($Cmd, $shim, [System.Text.Encoding]::ASCII)
+& $Cmd --version | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: $Cmd would not run" }
+Set-Content -Path $Stamp -Encoding ascii -Value @("python_sha256=$PySha", "python_version=$PyVersion", "release=$Release")
+Say "host: $Release installed at $HostDir (Python $PyVersion)"
 
 # --- 6. start at login ----------------------------------------------------
 # The host OWNS that shortcut (4.1). This script asks for it by verb rather

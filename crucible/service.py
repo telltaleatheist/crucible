@@ -61,12 +61,12 @@ no service is installed — and is reported as that rather than as an empty
 PATH.
 
 **The server's own `bin/` is APPENDED to that PATH, and only appended.** Since
-0.6.0 the server can arrive as an env pack (PHASE14-ENVPACKS.md), and then the
+0.6.0 the server can be a downloaded interpreter with the wheel in it, and then the
 shell that runs `crucible service install` is a `wsl.exe --exec` shell whose
 PATH is the guest's default — which cannot contain a directory that was created
 a minute earlier. Recording it is what makes "this is the PATH the service has"
 true of the process rather than of the installer. **Appended and never
-prepended**, because the pack's `bin/` also holds `python3`, `uvicorn` and half
+prepended**, because that `bin/` also holds `python3`, `uvicorn` and half
 a dozen of its dependencies' scripts, and putting those in front of a host's
 own would silently change what every bare name means in order to fix nothing.
 This closes no live defect — `tasks.install_command()` resolves the script
