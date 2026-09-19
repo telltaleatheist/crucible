@@ -1,35 +1,47 @@
 #!/usr/bin/env bash
-# Run the tests that can say something about what changed.
+# Run the tests that name what changed.
 #
 #   ./scripts/tests.sh              # same as --changed
-#   ./scripts/tests.sh --changed    # only what the diff since the last tag reaches
+#   ./scripts/tests.sh --changed    # only the tests that name the change
 #   ./scripts/tests.sh --all        # everything
 #   ./scripts/tests.sh --list       # what --changed WOULD run, and why
 #
-# Owen, 2026-09-17: *"We don't have to run a billion tests every time we cut a
-# release. Only test the things that changed."* The full suite is 2112 tests and
-# takes ten minutes, nearly all of it spent waiting rather than computing, and a
-# patch release usually touches one module.
+# Owen, 2026-09-18 (PHASE20-CODE-NOT-ENVIRONMENTS.md 7): *"If we change
+# crucible's handshake logic, we don't need to re-run the GPU test. We can test
+# the handshake logic we just built and assume the GPU works since it did last
+# time we changed anything. If it breaks, we can debug from there."*
 #
-# HOW A CHANGED FILE IS TURNED INTO TESTS, and the one rule that matters:
+# THE WHOLE SELECTION RULE:
 #
-#   tests/test_x.py changed   -> run tests/test_x.py
-#   any other file changed    -> run every test file that names it: by path, by
-#                                module stem, or failing those by its directory
-#   anything WIDE changed     -> run everything (the list is below)
-#   nothing names it usefully -> run everything, and say which file caused it
+#   tests/test_x.py changed     -> run tests/test_x.py
+#   any other .py, .ts or .sh   -> run every test file that names it: by its
+#                                  repo path, by its module, or by its basename
+#   a file whose only change is -> nothing. A version literal is not a
+#     a version literal            behaviour change, and the files that carry
+#                                  one change on every single release
+#   anything else               -> nothing
 #
-# THE LAST LINE IS THE IMPORTANT ONE. A selector that silently skips what it does
-# not understand is a selector that gets quieter as the codebase grows, which is
-# the exact moment it should get louder. Not knowing what a file affects is a
-# reason to run everything, never a reason to run less — so the default direction
-# of every uncertainty here is MORE tests.
+# THE LAST LINE USED TO SAY "run everything", and above it sat a list of files
+# whose change fanned out to the whole suite: conftest, the fakes, app.py,
+# config.py, and anything under .github/. The reasoning was that not knowing
+# what a file affects is a reason to run MORE, and it was right while a release
+# leaned on this. Nothing leans on it now — `ship.sh` runs no tests at all
+# (PHASE20 7) and this is a person's tool for the branch they are on. A
+# selector that answers "all 101 files, ten minutes" to a one-line change is a
+# selector nobody runs, which is how the suite came to be on the deploy path in
+# the first place. So the direction of every uncertainty here is now FEWER
+# tests, and `--all` is the answer when something is wrong or we're debugging.
 #
-# And the mapping is textual, not semantic: "a test file that mentions this
-# module" over-selects (a comment counts) and can under-select (a module reached
-# only through a re-export is not named). The under-selection is the real risk,
-# which is why WIDE exists and why --all is what a release ultimately runs when
-# anything structural moved. This is a way to iterate quickly, not a proof.
+# The mapping is textual, not semantic: "a test file that mentions this module"
+# over-selects (a comment counts) and can under-select (a module reached only
+# through a re-export is not named). Both are said out loud — an unnamed file
+# is reported by name rather than quietly widening — and neither is a proof.
+# This is a way to iterate quickly. `--all` is the proof.
+#
+# NOTHING HERE CAN SELECT A LIVE KEEPER. `scripts/keeper-live.sh`,
+# `keeper-tts-live.sh` and `keeper-llm-live.sh` are how this repo marks a check
+# that needs a real model on a real card; they are shell scripts, not pytest
+# files, and every candidate below is looked for only inside `tests/test_*.py`.
 
 set -uo pipefail
 
@@ -78,32 +90,14 @@ else
   esac
 fi
 
-#: Files whose change can affect anything, so they select the whole suite.
-#: `conftest.py` and the fakes are every test's environment; `app.py` and
-#: `config.py` are reached from almost everywhere. The last line is the
-#: exception that makes the rest work -- see `version_line_only`.
-is_wide() {
-  case "$1" in
-    tests/conftest.py|tests/live_server.py|tests/fake_*.py) return 0 ;;
-    crucible/app.py|crucible/config.py) return 0 ;;
-    # CI configuration can change how anything runs. The release SCRIPTS
-    # cannot -- nothing under test imports them -- so they go through the
-    # ordinary rule, which finds tests/test_release_tooling.py by name.
-    .github/*) return 0 ;;
-    crucible/__init__.py|pyproject.toml) version_line_only "$1" && return 1 || return 0 ;;
-  esac
-  return 1
-}
-
 #: True when the ONLY thing that changed in a file is its version literal.
 #:
-#: TWO FILES CHANGE ON EVERY SINGLE RELEASE and both would otherwise be wide:
-#: `crucible/__init__.py` holds the package surface AND the version, and
-#: `pyproject.toml` holds the pytest configuration AND the version. Treating
-#: either as wide means every release runs the whole suite no matter what the
-#: release actually contains -- a selector switched off precisely when it is
-#: being asked to work. A one-line version change is not a behaviour change, and
-#: the tests that care about the version find it by name like any other module.
+#: TWO FILES CHANGE ON EVERY SINGLE RELEASE: `crucible/__init__.py` holds the
+#: package surface AND the version, and `pyproject.toml` holds the pytest
+#: configuration AND the version. Both are named by tests — this repo's own
+#: release-tooling tests name `crucible/__init__.py` by path — so without this
+#: rule every release would select those tests for a one-line change that is
+#: not a behaviour change at all.
 version_line_only() {
   local diff
   # `$base` to the WORKING TREE, which is where an uncommitted bump lives.
@@ -111,20 +105,8 @@ version_line_only() {
   [ -n "$diff" ] || return 1
   # Every +/- line that is not a diff header must be a version literal, and
   # both are anchored at column 0 -- so a dependency pin changing inside a
-  # pyproject table is not one of them and still widens.
+  # pyproject table is not one of them and is an ordinary change.
   ! echo "$diff" | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | grep -qvE '^[+-](VERSION|version) = "'
-}
-
-#: Files that cannot affect the Python tests at all. Every one of these is here
-#: because it has no importer in `tests/` -- documentation, the vendored SDK's
-#: own test suites (which `release.sh` builds and runs separately), and licences.
-is_irrelevant() {
-  case "$1" in
-    docs/*|README.md|LICENSE|*.md) return 0 ;;
-    sdk/*) return 0 ;;
-    modules/*.module.json) return 0 ;;
-  esac
-  return 1
 }
 
 mode="--changed"
@@ -132,11 +114,13 @@ case "${1:-}" in
   ""|--changed) mode="--changed" ;;
   --all) mode="--all" ;;
   --list) mode="--list" ;;
-  -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,44p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) fail "unknown argument $1 (try --changed, --all or --list)" ;;
 esac
 
 run_all() {
+  # `--list` is a question, not an instruction, whichever branch reaches here.
+  [ "$mode" = "--list" ] && { echo "tests: would run the whole suite"; exit 0; }
   echo "tests: the whole suite ($WHERE)"
   pytest_cmd
   exit $?
@@ -156,6 +140,10 @@ run_all() {
 # answered with a tag seven releases old and "what changed since the last
 # release" was seven releases of changes -- which is not wrong so much as
 # useless, and silently so, because it just runs everything and looks careful.
+#
+# A base that cannot be trusted is the one thing left that still widens, and it
+# widens because there is nothing to narrow AGAINST — not because a file was
+# not understood.
 if ! git fetch --tags --quiet origin 2>/dev/null; then
   echo "tests: could not fetch tags, so 'since the last release' cannot be trusted"
   run_all
@@ -177,97 +165,99 @@ fi
 
 selected=""
 reasons=""
-everything=""
+unnamed=""
 
-add() { selected="$selected $1"; reasons="$reasons
-  $1  <- $2"; }
+#: One reason per selected file: the FIRST that chose it. Two changed files can
+#: reach the same test, and printing both reasons beside one file reads as two
+#: selections of it.
+add() {
+  case " $selected " in *" $1 "*) return 0 ;; esac
+  selected="$selected $1"
+  reasons="$reasons$1|$2
+"
+}
 
 for path in $changed; do
   [ -e "$path" ] || continue        # deleted files select nothing of their own
-  if is_irrelevant "$path"; then
-    continue
-  fi
-  if is_wide "$path"; then
-    everything="$everything $path"
-    continue
-  fi
   case "$path" in
     tests/test_*.py)
       add "$path" "it is the test that changed"
+      continue
       ;;
-    *)
-      # THREE NAMES ARE TRIED, most specific first, and the first that finds
-      # anything wins:
-      #
-      #   the file's own repo-relative path  — how a test names a script or a
-      #                                        data file it reads
-      #   its module stem, for crucible/*.py — how a test names an import
-      #   its directory                      — how a test names a family of
-      #                                        data files it does not name one
-      #                                        by one (crucible/voices/*.toml)
-      #
-      # AND A NAME THAT MATCHES ALMOST EVERYTHING IS NOT A MATCH. `scripts/
-      # tests.sh` has the stem "tests", which appears in every test file in the
-      # repo, so it selected all of them while printing a confident per-file
-      # reason for each. A selector that cannot tell "this really is everything"
-      # from "my search term was useless" is worse than no selector, because it
-      # looks like it worked. Over the threshold, the name is discarded and the
-      # next one is tried; if none survives, the answer is the whole suite.
-      total="$(ls tests/test_*.py | wc -l)"
-      stem="$(basename "$path")"
-      stem="${stem%.*}"
-      parent="$(basename "$(dirname "$path")")"
-      candidates="$path"
-      case "$path" in crucible/*.py) candidates="$candidates $stem" ;; esac
-      # THE DIRECTORY IS ONLY A USEFUL NAME INSIDE THE PACKAGE, where it names a
-      # family of data files a test reads together (crucible/voices/*.toml is
-      # what tests mean by "voices"). Outside it, a directory is just a place:
-      # "scripts" appears in twenty-three test files and says nothing about any
-      # of them.
-      case "$path" in crucible/*/*) candidates="$candidates $parent" ;; esac
-      hits=""
-      matched=""
-      for name in $candidates; do
-        found="$(grep -rlw -- "$name" tests/ --include='test_*.py' 2>/dev/null || true)"
-        [ -z "$found" ] && continue
-        count="$(echo "$found" | wc -l)"
-        if [ "$count" -gt $(( total * 3 / 5 )) ]; then
-          echo "tests: '"'"'$name'"'"' matches $count of $total test files, which narrows nothing — ignoring it"
-          continue
-        fi
-        hits="$found"; matched="$name"; break
-      done
-      if [ -z "$hits" ]; then
-        # A file no test names — or names only uselessly — is either untested or
-        # reached indirectly, and this cannot tell those apart. Both are reasons
-        # to run everything.
-        everything="$everything $path(no test names it)"
-      else
-        for hit in $hits; do add "$hit" "names $matched"; done
-      fi
-      ;;
+    # ONLY CODE SELECTS TESTS. A workflow, a doc, an `envs/*.txt` recipe, a
+    # module.json, a licence: nothing under tests/ runs any of them, and the
+    # one that used to widen -- .github/* -- widened on the grounds that CI
+    # configuration can change how anything runs, which is true of the run CI
+    # does and nothing to do with the run a person is about to do here.
+    *.py|*.ts|*.sh) ;;
+    *) continue ;;
   esac
+
+  version_line_only "$path" && continue
+
+  # THREE NAMES ARE TRIED, most specific first, and the first that finds
+  # anything wins:
+  #
+  #   the file's own repo-relative path  — how a test names a script or a
+  #                                        data file it reads
+  #   its module stem, for crucible/*.py — how a test names an import
+  #   its basename                       — how a test names a file it does not
+  #                                        reach through the repo root
+  #
+  # AND A NAME THAT MATCHES ALMOST EVERYTHING IS NOT A MATCH. `scripts/
+  # tests.sh` has the stem "tests", which appears in every test file in the
+  # repo, so it selected all of them while printing a confident per-file
+  # reason for each. A selector that cannot tell "this really is everything"
+  # from "my search term was useless" is worse than no selector, because it
+  # looks like it worked. Over the threshold, the name is discarded and the
+  # next one is tried.
+  total="$(ls tests/test_*.py | wc -l)"
+  base_name="$(basename "$path")"
+  stem="${base_name%.*}"
+  candidates="$path"
+  case "$path" in crucible/*.py) candidates="$candidates $stem" ;; esac
+  candidates="$candidates $base_name"
+  hits=""
+  matched=""
+  for name in $candidates; do
+    found="$(grep -rlw -- "$name" tests/ --include='test_*.py' 2>/dev/null || true)"
+    [ -z "$found" ] && continue
+    count="$(echo "$found" | wc -l)"
+    if [ "$count" -gt $(( total * 3 / 5 )) ]; then
+      echo "tests: '$name' matches $count of $total test files, which narrows nothing — ignoring it"
+      continue
+    fi
+    hits="$found"; matched="$name"; break
+  done
+  if [ -z "$hits" ]; then
+    # SAID, NOT WIDENED. A file no test names is either untested or reached
+    # only through a re-export, and this cannot tell those apart — but under
+    # PHASE20 7 neither is a reason to run the other hundred files. It is a
+    # reason to name the file, so the person reading the list can decide.
+    unnamed="$unnamed $path"
+  else
+    for hit in $hits; do add "$hit" "names $matched"; done
+  fi
 done
-
-if [ -n "$everything" ]; then
-  echo "tests: these changes reach further than this can narrow:$everything"
-  [ "$mode" = "--list" ] && { echo "tests: would run the whole suite"; exit 0; }
-  run_all
-fi
-
-selected="$(echo $selected | tr ' ' '\n' | sort -u | tr '\n' ' ')"
-if [ -z "$(echo "$selected" | tr -d ' ')" ]; then
-  echo "tests: nothing changed that any test covers (docs and the SDK only)"
-  exit 0
-fi
 
 echo "tests: since $base, these files changed:"
 echo "$changed" | sed 's/^/  /'
-echo "tests: selecting$reasons"
+[ -n "$unnamed" ] && echo "tests: no test in tests/ names:$unnamed"
+
+if [ -z "$(echo "$selected" | tr -d ' ')" ]; then
+  echo "tests: nothing that changed is named by any test — run --all if that is a surprise"
+  exit 0
+fi
+
+echo "tests: selecting"
+printf '%s' "$reasons" | while IFS='|' read -r path reason; do
+  [ -n "$path" ] || continue
+  printf '  %s  <- %s\n' "$path" "$reason"
+done
 echo
 
 if [ "$mode" = "--list" ]; then
-  echo "tests: would run: $selected"
+  echo "tests: would run:$selected"
   exit 0
 fi
 
