@@ -699,5 +699,3 @@ One named input: either an uploaded blob or bytes inline in the request.
 | `loc` | array of string or integer | yes | — |  |
 | `msg` | string | yes | — |  |
 | `type` | string | yes | — |  |
-| `input` | Input | no | — |  |
-| `ctx` | Context | no | — |  |
