@@ -304,10 +304,21 @@ install_pc() {
 # installing at once this poll is the tail of the whole run rather than a third
 # of it, so its granularity is the last thing standing between an install
 # finishing and deploy saying so.
+# THE CEILING IS THE PC's, SIZED FROM THE HOST's OWN CONSTANTS, not a feeling.
+# On the PC the record this waits for is the GUEST's, and the guest is carried
+# by the host AFTER install.ps1 has returned: a presence settle of up to
+# PRESENCE_SETTLE_CEILING_SECONDS (195 s when a recovery recipe runs first;
+# 7 s measured on 1.0.3), then install.sh in the guest (23-33 s measured on the
+# Mac for the same script), then the engine restart and publish (~30 s). The
+# 60 s this had until 1.0.4 held 12 s of margin on the happy path and could
+# not report the recovery path at all, and a low ceiling costs a WRONG verdict
+# on a correct install, while a high one costs nothing on a machine that
+# succeeded because this returns the instant the record matches. 258 s
+# rounded up: 150 polls of 2 s.
 await_release() {
   local machine="$1" want="$2" seen=""
   local attempt=0
-  while [ "$attempt" -lt 30 ]; do
+  while [ "$attempt" -lt 150 ]; do
     seen="$("read_$machine")"
     [ "$seen" = "$want" ] && { echo "$seen"; return; }
     attempt=$(( attempt + 1 ))
