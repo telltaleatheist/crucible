@@ -54,6 +54,11 @@ class WslStateDef:
     action_argv: tuple[str, ...]
     action_text: str
     action_url: str
+    #: PHASE19 2.1: can the tray carry a machine past this state with
+    #: nobody in front of it? True for the rows whose action is something
+    #: we run, and for `wsl_ready`, which needs nothing run at all. False
+    #: is the tray writing `cannot` and stopping.
+    automatic: bool
     optional: bool
 
 
@@ -67,6 +72,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=(),
         action_text="Virtualization is turned off in this machine's firmware. Restart, open the BIOS/UEFI setup (usually Del or F2 during boot), and enable Intel VT-x (Intel) or SVM Mode (AMD). Then run Enable WSL again.",
         action_url="",
+        automatic=False,
         optional=False,
     ),
     WslStateDef(
@@ -78,6 +84,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=("wsl.exe", "--install", "--no-distribution", ),
         action_text="",
         action_url="",
+        automatic=True,
         optional=False,
     ),
     WslStateDef(
@@ -89,6 +96,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=("wsl.exe", "--set-default-version", "2", ),
         action_text="",
         action_url="",
+        automatic=True,
         optional=False,
     ),
     WslStateDef(
@@ -100,6 +108,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=("wsl.exe", "--import", "crucible", "<install dir>", "<rootfs>", "--version", "2", ),
         action_text="",
         action_url="",
+        automatic=True,
         optional=False,
     ),
     WslStateDef(
@@ -111,6 +120,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=("wsl.exe", "--terminate", "crucible", ),
         action_text="",
         action_url="",
+        automatic=True,
         optional=False,
     ),
     WslStateDef(
@@ -122,6 +132,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=(),
         action_text="Add [boot] systemd=true to /etc/wsl.conf in \"{app_distro}\" and run wsl --terminate {app_distro}, or let Crucible import its own distribution instead.",
         action_url="",
+        automatic=False,
         optional=True,
     ),
     WslStateDef(
@@ -133,6 +144,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=(),
         action_text="",
         action_url="https://github.com/telltaleatheist/crucible/releases/download/v{release}/crucible-{release}-py3-none-any.whl",
+        automatic=False,
         optional=True,
     ),
     WslStateDef(
@@ -144,6 +156,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=(),
         action_text="Free some space on the drive WSL keeps its disk on, then try again.",
         action_url="",
+        automatic=False,
         optional=True,
     ),
     WslStateDef(
@@ -155,6 +168,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=(),
         action_text="Enable the root account in \"crucible\", or let Crucible import its own distribution, which grants root through wsl.exe with no password.",
         action_url="",
+        automatic=False,
         optional=False,
     ),
     WslStateDef(
@@ -166,6 +180,7 @@ WSL_STATES: tuple[WslStateDef, ...] = (
         action_argv=(),
         action_text="Nothing to do.",
         action_url="",
+        automatic=True,
         optional=False,
     ),
 )

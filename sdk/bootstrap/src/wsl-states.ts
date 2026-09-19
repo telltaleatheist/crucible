@@ -46,6 +46,25 @@ export interface WslStateDef {
   /** Which command answers this row. */
   probe: ProbeKey;
   /**
+   * CAN THE TRAY CARRY A MACHINE PAST THIS STATE WITHOUT A PERSON?
+   * (PHASE19-AUTOMATIC-WSL.md 1 and 2.1.)
+   *
+   * True for every row whose action is something we run — `run`,
+   * `run-elevated`, and the reboot a `run-elevated` leads to. False for
+   * `instruct` and `link`, which are a firmware setting, a VPN, a disk or a
+   * distro somebody else owns: a person changes something first, and the tray
+   * writes `cannot` and stops.
+   *
+   * IT IS A FIELD AND NOT A FUNCTION OF `action.kind`, because `wsl_ready` is
+   * the one row where the two disagree: its action is `instruct` with the text
+   * "Nothing to do.", and a machine that is already there is the most
+   * automatic state of all. So the partition is DATA — every row states it —
+   * and `gen-install-scripts.ts` ASSERTS the derivation for every other row,
+   * which is what stops this from becoming a second opinion about a row's
+   * action.
+   */
+  automatic: boolean;
+  /**
    * Whether this row applies to this caller at all. A disabled row's probe is
    * NOT run — which is the difference between "the disk is fine" and "nobody
    * asked about the disk", and it is why reading a machine's facts does not
@@ -133,6 +152,7 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
       // person told to "enable WSL" on a machine with VT-x disabled will press
       // that button forever.
       code: 'virtualization_disabled',
+      automatic: false,
       probe: 'wsl-status',
       means: (result) => (result.failure !== null || result.code !== 0) && NO_HYPERVISOR.test(`${result.stdout}${result.stderr}${result.failure ?? ''}`),
       sentence: (result) => `Windows cannot start a virtual machine: ${said(result)}`,
@@ -140,6 +160,7 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
     },
     {
       code: 'wsl_missing',
+      automatic: true,
       probe: 'wsl-status',
       means: (result) => result.failure !== null || result.code !== 0,
       sentence: (result) => result.failure !== null
@@ -149,6 +170,7 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
     },
     {
       code: 'wsl1_only',
+      automatic: true,
       probe: 'wsl-status',
       means: (result) => /Default Version:\s*1\b/i.test(result.stdout),
       sentence: () => 'WSL is set to version 1, which has no GPU. Crucible needs WSL2.',
@@ -156,6 +178,7 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
     },
     {
       code: 'no_crucible_distro',
+      automatic: true,
       probe: 'wsl-list',
       means: (_result, seen) => !seen.distros.some((entry) => entry.name === CRUCIBLE_DISTRO),
       sentence: () => `Crucible has no Linux of its own on this machine yet (the "${CRUCIBLE_DISTRO}" distribution). `
@@ -164,6 +187,7 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
     },
     {
       code: 'distro_not_systemd',
+      automatic: true,
       probe: 'wsl-conf',
       means: (result) => !/systemd\s*=\s*true/i.test(result.stdout),
       sentence: () => `The "${CRUCIBLE_DISTRO}" distribution is not running systemd, so the Crucible service cannot start in it. `
@@ -175,6 +199,7 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
       // wrong and ask, because writing /etc/wsl.conf in somebody's Ubuntu and
       // terminating it is a change to their machine.
       code: 'foreign_distro_not_systemd',
+      automatic: false,
       probe: 'app-distro-conf',
       enabled: inputs.appDistro !== undefined && inputs.appDistro !== CRUCIBLE_DISTRO,
       means: (result, seen) => seen.distros.some((entry) => entry.name === inputs.appDistro)
@@ -189,6 +214,7 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
     },
     {
       code: 'guest_no_network',
+      automatic: false,
       probe: 'guest-network',
       enabled: inputs.checkNetwork === true,
       means: (result) => result.failure !== null || result.code !== 0,
@@ -198,6 +224,7 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
     },
     {
       code: 'guest_no_disk',
+      automatic: false,
       probe: 'guest-disk',
       enabled: required > 0,
       means: (result) => {
@@ -224,6 +251,7 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
       // linger.ts about actual linger, so the old name was one code meaning two
       // different machine states.
       code: 'guest_root_unreachable',
+      automatic: false,
       probe: 'guest-root',
       means: (result) => result.failure !== null || result.code !== 0 || result.stdout.trim() !== '0',
       sentence: (result) => `The "${CRUCIBLE_DISTRO}" distribution will not let Crucible in as root (${said(result)}). `
@@ -235,6 +263,10 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
     },
     {
       code: 'wsl_ready',
+      // The one row whose `automatic` is not its action kind: the action is
+      // `instruct` "Nothing to do." and a machine already there is carried
+      // past it by doing nothing at all.
+      automatic: true,
       probe: 'wsl-list',
       means: () => true,
       sentence: () => `WSL2 is ready and the "${CRUCIBLE_DISTRO}" distribution is there.`,
@@ -248,6 +280,8 @@ export interface WslState {
   code: WslStateDef['code'];
   sentence: string;
   action: WslAction;
+  /** {@link WslStateDef.automatic}, carried through, so a caller branches on the row's own answer. */
+  automatic: boolean;
   /** What the probe said, for a log. */
   evidence: string;
 }
@@ -277,7 +311,13 @@ export async function detectWslState(
     if (row.enabled === false) continue;
     const result = await ask(row.probe);
     if (!row.means(result, seen)) continue;
-    return { code: row.code, sentence: row.sentence(result, seen), action: row.action(result, seen), evidence: said(result) };
+    return {
+      code: row.code,
+      sentence: row.sentence(result, seen),
+      action: row.action(result, seen),
+      automatic: row.automatic,
+      evidence: said(result),
+    };
   }
   // Unreachable while the last row's `means` is `() => true`; a table whose
   // last row stops being total is a bug, not a state.

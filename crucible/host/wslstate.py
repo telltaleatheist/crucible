@@ -118,6 +118,12 @@ class WslState:
     action_argv: tuple[str, ...]
     action_text: str
     action_url: str
+    #: The generated row's own answer to "can the tray carry a machine past
+    #: this without a person" (PHASE19 2.1). Carried through rather than
+    #: re-derived from `action_kind`: `wsl_ready` instructs and is automatic,
+    #: and a second derivation here would be the second opinion the field
+    #: exists to remove.
+    automatic: bool
     evidence: str
 
 
@@ -223,6 +229,7 @@ def detect(
             action_argv=tuple(substitute(word) for word in state.action_argv),
             action_text=render(state.action_text, result, seen),
             action_url=render(state.action_url, result, seen),
+            automatic=state.automatic,
             evidence=_said(result),
         )
     # Unreachable while `wsl_ready` matches everything. A table whose last row

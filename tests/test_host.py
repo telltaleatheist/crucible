@@ -734,6 +734,37 @@ def test_the_generated_table_kept_4cs_order_deepest_cause_first() -> None:
     assert codes[-1] == "wsl_ready", "the last row must be total"
 
 
+def test_every_row_says_whether_the_tray_can_carry_it_and_agrees_with_its_action() -> None:
+    """PHASE19 2.1: the can/cannot partition is DATA, and it is checked.
+
+    `automatic` is a field rather than a reading of `action_kind` because
+    `wsl_ready` instructs ("Nothing to do.") and is the most automatic state
+    there is. Every other row must still agree with its own action, or the
+    field has become a second opinion about what the row does.
+    """
+    carried = {"run", "run-elevated"}
+    for state in WSL_STATES:
+        assert isinstance(state.automatic, bool), f"{state.code} has no partition"
+        if state.code == "wsl_ready":
+            assert state.automatic is True
+            continue
+        assert state.automatic is (state.action_kind in carried), (
+            f"{state.code} says automatic={state.automatic} and its action is "
+            f"{state.action_kind!r}"
+        )
+    # The two halves are both non-empty, because a partition with one side
+    # empty is not a partition and would make `decide_engine` a single branch.
+    assert any(state.automatic for state in WSL_STATES)
+    assert any(not state.automatic for state in WSL_STATES)
+
+
+def test_a_detected_state_carries_the_partition_so_a_caller_never_re_derives_it() -> None:
+    runner = Scripted(answers={"--status": bad("not recognized", code=None)})
+    state = wslstate.detect(runner, release="1.0.5")
+    assert state.code == "wsl_missing"
+    assert state.automatic is True, "an elevated action is one the tray carries"
+
+
 def test_no_sentinel_survived_the_generation() -> None:
     for state in WSL_STATES:
         blob = state.sentence + state.action_text + state.action_url + " ".join(state.probe_argv)
@@ -831,6 +862,7 @@ def test_a_generated_row_with_no_predicate_is_refused_by_name(monkeypatch) -> No
         action_argv=(),
         action_text="",
         action_url="",
+        automatic=False,
         optional=False,
     )
     monkeypatch.setattr(wslstate, "WSL_STATES", (extra,) + generated.WSL_STATES)

@@ -872,6 +872,20 @@ export function generateWslStatesPy(): string {
   const rows = states.map((state: WslStateDef) => {
     const sentence = templated(state.sentence(result, seen), state.code, fired);
     const action = state.action(result, seen);
+    // THE PARTITION, CHECKED RATHER THAN COPIED (PHASE19 2.1). `automatic` is
+    // a field because `wsl_ready` is the one row where it is not the action
+    // kind — so every OTHER row must agree with its action, or the boolean has
+    // quietly become a second opinion about what the row does.
+    if (state.code !== 'wsl_ready') {
+      const carried = action.kind === 'run' || action.kind === 'run-elevated';
+      if (state.automatic !== carried) {
+        throw new Error(
+          `gen-install-scripts: ${state.code} says automatic=${state.automatic} and its action is `
+          + `"${action.kind}". A row the tray can carry is one whose action is something we RUN; `
+          + 'wsl_ready is the only exception and this is not it.',
+        );
+      }
+    }
     const argv = probeArgv(state.probe as ProbeKey, inputs).map((word) => templated(word, `${state.code}.probe_argv`, fired));
     const actionArgv = (action.kind === 'run' || action.kind === 'run-elevated' ? action.argv : [])
       .map((word) => templated(word, `${state.code}.action_argv`, fired));
@@ -884,6 +898,7 @@ export function generateWslStatesPy(): string {
       `        action_argv=${pyList(actionArgv)},`,
       `        action_text=${pyString(action.kind === 'instruct' ? templated(action.text, `${state.code}.action_text`, fired) : '')},`,
       `        action_url=${pyString(action.kind === 'link' ? templated(action.url, `${state.code}.action_url`, fired) : '')},`,
+      `        automatic=${state.automatic ? 'True' : 'False'},`,
       `        optional=${optionalCodes.has(state.code) ? 'True' : 'False'},`,
     ];
     return `    WslStateDef(\n${parts.join('\n')}\n    ),`;
@@ -954,6 +969,11 @@ export function generateWslStatesPy(): string {
     '    action_argv: tuple[str, ...]',
     '    action_text: str',
     '    action_url: str',
+    '    #: PHASE19 2.1: can the tray carry a machine past this state with',
+    '    #: nobody in front of it? True for the rows whose action is something',
+    '    #: we run, and for `wsl_ready`, which needs nothing run at all. False',
+    '    #: is the tray writing `cannot` and stopping.',
+    '    automatic: bool',
     '    optional: bool',
     '',
     '',
