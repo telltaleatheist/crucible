@@ -306,6 +306,7 @@ const ACTIVITY = {
     since: '2026-09-14T02:40:00+00:00',
     memory_bytes_estimate: 19000000000,
   },
+  stopping: null,
   warming: null,
   claim: null,
   streaming: null,

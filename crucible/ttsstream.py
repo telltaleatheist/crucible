@@ -1140,6 +1140,18 @@ class StreamManager:
                     "whole attention. Close it first",
                     {"session_id": existing.id, "voice": existing.voice},
                 )
+            # ASKED BEFORE `voice_not_resident`, AND THAT ORDER IS THE POINT
+            # (ledger R14). `unload` unpublishes the voice before it signals
+            # the process, so a narrator that would not stop leaves
+            # `resident_voice` None — and the check below would send this
+            # client away with "post a load-voice job first", which is a job
+            # that is itself refused `engine_still_stopping`. Two round trips
+            # to reach a refusal this door already had in hand. The named
+            # reason wins over the incidental one.
+            try:
+                residency.refuse_if_stopping(f"stream {voice!r}")
+            except JobError as exc:
+                raise ApiError(409, exc.code, exc.message) from None
             resident = residency.resident_voice
             if resident is None or resident.voice_id != voice:
                 # The streaming door never loads, exactly as chat never loads:
@@ -1165,13 +1177,20 @@ class StreamManager:
                 )
             session_id = uuid.uuid4().hex
             holder = f"tts stream {session_id}"
-            try:
-                # `may_mutate=False`: the streaming door never loads a voice,
-                # so no thread is exempted from the guard and a `load-voice`
-                # arriving from anywhere is refused while this session is open.
-                residency.claim(holder, may_mutate=False)
-            except JobError as exc:
-                raise ApiError(409, exc.code, exc.message) from None
+            # BUILT BEFORE THE CARD IS CLAIMED, and that order is the fix rather
+            # than an arrangement. The only thing that ever releases a stream
+            # claim is the worker thread `start()` begins — a claim has no
+            # expiry and no watchdog — so while the claim came first, every
+            # refusal between the two lines held the card for the life of the
+            # process, and every later load, unload and render was answered
+            # `engine_in_use` naming a session that was never opened.
+            #
+            # Validating before claiming rather than unwinding after it, because
+            # the constructor's one refusal is derivable from what is already in
+            # hand: `batch_width_for(narrator_engine)`, which has deliberately
+            # no default width. Moving the whole construction up states that
+            # once rather than checking half of it twice, and leaves the claim
+            # as the last thing here that can fail.
             session = StreamSession(
                 session_id=session_id,
                 voice=voice,
@@ -1186,6 +1205,13 @@ class StreamManager:
                 residency=residency,
                 loop=loop,
             )
+            try:
+                # `may_mutate=False`: the streaming door never loads a voice,
+                # so no thread is exempted from the guard and a `load-voice`
+                # arriving from anywhere is refused while this session is open.
+                residency.claim(holder, may_mutate=False)
+            except JobError as exc:
+                raise ApiError(409, exc.code, exc.message) from None
             self._session = session
             self._ensure_watchdog()
         session.start()

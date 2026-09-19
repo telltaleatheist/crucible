@@ -107,6 +107,32 @@ MAX_TOKENS = 8192
 #: A layout is not a thing to be creative about.
 TEMPERATURE = 0.0
 
+#: How many pages a client may have IN FLIGHT against this server at once.
+#:
+#: THE ONE OWNER OF THIS FACT (ledger N3, Owen's ruling 2026-09-18). It was two
+#: facts: `crucible/capability.py` declared `concurrency=1` for the `pages`
+#: class — so the fits arithmetic sized the KV pool for one page — while both
+#: apps sent twelve, which is the number `models/dots-ocr.toml` was actually
+#: configured against. A guard that refuses on one number while the work
+#: arrives at another is not a guard. `capability.py` imports THIS and declares
+#: no literal of its own.
+#:
+#: TWELVE, and it comes from the manifest's own measurement note
+#: (`models/dots-ocr.toml`, the `[backends.cuda-linux]` estimate): *"a page in
+#: flight is ~3_450 image tokens plus the prompt plus up to 8192 of answer, so
+#: at the worst case 12 concurrent pages want about 4.1 GiB of KV. If the pool
+#: comes out under that vLLM PREEMPTS and the run slows down; it does not fail,
+#: and it does not OOM the host."* That last sentence is why twelve is safe to
+#: publish before the card has been measured: over-asking costs throughput,
+#: never the run.
+#:
+#: It is a statement about the REQUEST, on `DPI`'s terms, so it is the same
+#: number on every backend — a client cannot tell which engine read its page.
+#: `llama-server` on Windows takes `--parallel 1` in that manifest and will
+#: serve these twelve one after another; that is the ENGINE's business and the
+#: reason it is not the client's.
+PAGE_CONCURRENCY = 12
+
 #: What the answer is shaped like. `parseDotsPage` is the reader.
 DIALECT = "dots-json"
 
@@ -203,6 +229,12 @@ def request_shape() -> dict[str, Any]:
         "temperature": TEMPERATURE,
         "prompt": DOTS_PROMPT,
         "dialect": DIALECT,
+        # How many of these a client may have open at once. On the wire for
+        # the same reason the prompt is: it is a fact about the weights and
+        # the card, the server's arithmetic is sized for it
+        # (`crucible/capability.py` reads `PAGE_CONCURRENCY`), and an app that
+        # picked its own number was the defect (ledger N3).
+        "concurrency": PAGE_CONCURRENCY,
         # What a client must do about a page that came back cut off. Named
         # rather than implied, because "re-read it at the full cap" is the
         # part of the contract an app gets wrong by doing nothing.
@@ -237,6 +269,7 @@ __all__ = [
     "MAX_PIXELS",
     "MAX_TOKENS",
     "MODEL_ID",
+    "PAGE_CONCURRENCY",
     "TEMPERATURE",
     "TRUNCATED_FINISH_REASON",
     "data_uri",

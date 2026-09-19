@@ -40,6 +40,7 @@ from crucible import ttsstream
 
 from . import fake_narrator_engine
 from .live_server import run_job, serve
+from .test_residency import STUBBORN_PID, a_process_that_will_not_stop
 from .test_tts_api import (  # noqa: F401 — imported to be used as fixtures
     fake_env,
     fake_weights,
@@ -367,6 +368,51 @@ def test_a_second_session_is_refused_by_name(
         error = response.json()["error"]
         assert error["code"] == "stream_session_open"
         assert first["session_id"] in error["message"]
+
+
+def test_a_session_that_cannot_be_built_does_not_keep_the_card(
+    streaming_server: Callable[..., Any],
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ledger C4: the claim was taken before the thing that releases it existed.
+
+    `StreamManager.open` claimed the card and then CONSTRUCTED the session, and
+    the only thing that ever releases a claim is the worker thread `start()`
+    would have begun. So any refusal between those two lines held the card for
+    the life of the process: no expiry, no watchdog, and every later load,
+    unload and render answered `engine_in_use` naming a session that was never
+    opened.
+
+    The refusal used here is the one the constructor actually has —
+    `batch_width_for`, which has deliberately NO default, because a guessed
+    streaming batch width is wrong in both directions. Emptying the table is
+    how a build reaches that state today: every voice in the catalog is
+    `higgs-v3`, so the live case is the day a second narrator engine ships
+    without a measured width.
+    """
+    with streaming_server() as base:
+        measured = dict(ttsstream.STREAM_BATCH_WIDTH)
+        monkeypatch.setattr(ttsstream, "STREAM_BATCH_WIDTH", {})
+        refused = open_session(base, auth)
+        assert refused.status_code == 500, refused.text
+        error = refused.json()["error"]
+        assert error["code"] == "unknown_narrator_engine"
+        assert "higgs-v3" in error["message"]
+
+        # THE CARD IS FREE. `/v1/activity` is where the claim is reported, and
+        # `claim` there is null exactly when `Residency.claimed_by` is None and
+        # `{"held_by": ...}` otherwise (crucible/api.py) — so this is the same
+        # read the bench tests at the bottom of this file make, asserted for
+        # the opposite answer.
+        activity = httpx.get(f"{base}/v1/activity", headers=auth, timeout=30.0)
+        assert activity.json()["claim"] is None, activity.text
+
+        # And free in the way that matters: with the widths back, the next
+        # client gets a session rather than an `engine_in_use` naming a holder
+        # that never existed.
+        monkeypatch.setattr(ttsstream, "STREAM_BATCH_WIDTH", measured)
+        assert opened(base, auth)["voice"] == VOICE
 
 
 def test_an_unknown_session_is_a_named_404(
@@ -1238,3 +1284,36 @@ def test_the_bench_names_the_client_that_opened_the_session_or_says_it_did_not(
             headers=auth,
             timeout=30.0,
         )
+
+
+def test_the_door_names_the_dying_process_before_it_names_the_voice(
+    make_client: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    """Ledger R14, and the ORDER is the point.
+
+    `unload` unpublishes the voice before it signals the process, so a
+    narrator that will not stop leaves `resident_voice` None — and the
+    `voice_not_resident` check would send this client away with "post a
+    load-voice job first", which is a job that is itself refused
+    `engine_still_stopping`. Two round trips to reach a refusal this door
+    already had in hand.
+
+    Through `TestClient` rather than a live server, alone in this file: what
+    is under test is a refusal made before anything is claimed, spawned or
+    streamed, so none of the reasons in the module docstring apply.
+    """
+    with make_client(enable_tts=True, enable_echo=False) as client:
+        with a_process_that_will_not_stop(client.app.state.residency):
+            response = client.post(
+                "/v1/tts/stream",
+                json={"voice": VOICE, "language": "en"},
+                headers=auth,
+            )
+            assert response.status_code == 409, response.text
+            error = response.json()["error"]
+            assert error["code"] == "engine_still_stopping"
+            assert str(STUBBORN_PID) in error["message"]
+            # And no session was opened on the way to saying so.
+            assert (
+                client.get("/v1/activity", headers=auth).json()["streaming"] is None
+            )

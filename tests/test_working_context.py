@@ -30,6 +30,7 @@ import pytest
 from crucible.backend import Backend, Gpu
 from crucible.capability import CLASSES, Candidate, WorkingContext, decide, decide_all
 from crucible.manifests import MemoryTerms
+from crucible.pages import PAGE_CONCURRENCY
 
 #: Owen's card, and the one every measured number in the catalog came off.
 THREE_NINETY_TI = 25_757_220_864
@@ -315,3 +316,24 @@ def test_the_trained_context_is_published_even_where_the_backend_is_not(
     for row in rows_for(pc).values():
         assert isinstance(row["trained_context"], int)
         assert row["trained_context"] > 0
+
+
+def test_the_pages_class_asks_for_the_width_its_own_module_publishes() -> None:
+    """Ledger N3: `concurrency=1` here was the stale copy.
+
+    The comment beside it said "one page at a time is what the guard and the
+    lease already assume", and both apps were sending twelve — the number
+    `models/dots-ocr.toml`'s KV note is written against. So the arithmetic
+    that decides whether `dots-ocr` fits was sized for a twelfth of the work.
+    `crucible/pages.py` owns the number now, on the wire and here.
+    """
+    pages_class = next(entry for entry in CLASSES if entry.name == "pages")
+    assert pages_class.work is not None
+    assert pages_class.work.concurrency == PAGE_CONCURRENCY == 12
+    assert pages_class.work.tokens == 32768
+
+    # It reaches the arithmetic, which is the whole reason it matters: a
+    # candidate with terms costs twelve pages' KV, not one page's.
+    candidate = a_candidate()
+    one = WorkingContext(tokens=32768, concurrency=1, source="a test")
+    assert candidate.need_bytes(pages_class.work) > candidate.need_bytes(one)

@@ -667,6 +667,10 @@ def apply(config: Config, resolved: Resolved, *, gpu_vendor: str) -> None:
         enable_align=config.enable_align,
         enable_rvc=config.enable_rvc,
         enable_denoise=config.enable_denoise,
+        # Carried for the reason `write_config`'s parameter states: a settings
+        # write rewrites the whole document, and a retention window left out
+        # here would go back to the default without anybody asking it to.
+        retention_days=config.retention_days,
         desktop_allowance_bytes=resolved.desktop_allowance_bytes,
         capability=recomputed_capability(config, resolved, gpu_vendor=gpu_vendor),
         routes=routes,

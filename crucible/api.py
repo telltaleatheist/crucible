@@ -14,8 +14,8 @@ import base64
 import binascii
 import hashlib
 import json
+import os
 import secrets
-import shutil
 import sys
 import time
 import uuid
@@ -1200,6 +1200,19 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # reads it, and one id is one id whatever kind of thing it names.
             "resident_models": residency.ids(),
             "resident_kind": residency.resident_kind,
+            # WHAT WAS TOLD TO GO AND HAS NOT (ledger R13, Owen's ruling
+            # 2026-09-18). Null when nothing is. It belongs on the smallest
+            # read this server has because it is the reason every load, the
+            # claim and the streaming door are refusing. `status` is untouched
+            # and still reports the LANE — `ok` there has always meant "no job
+            # is running", never "the card is free" — so this is the field
+            # that makes the difference readable instead of a redefinition of
+            # one every phase-2 client already reads. The object is
+            # `Residency.stopping`'s own (`DyingResident.to_dict`), so this
+            # and `/v1/activity` cannot tell two stories.
+            "stopping": (
+                None if residency.stopping is None else residency.stopping.to_dict()
+            ),
         }
 
     # ----------------------------------------------------------------- setup
@@ -1655,6 +1668,25 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     # say" (PHASE3-TTS.md section 5).
                     "reference": getattr(resident, "reference", None),
                 }
+            ),
+            # WHAT WAS TOLD TO GO AND HAS NOT (ledger R13, Owen's ruling
+            # 2026-09-18). `resident` above says what may be USED; this says
+            # what is still ON THE CARD after a stop that was asked for and
+            # never confirmed (`crucible/residency.py`'s dying slot). The two
+            # are never both set.
+            #
+            # It is on the bench read because it is a state a human has to
+            # end: `engines/base.py` never SIGKILLs — a killed CUDA process
+            # wedges WSL2 until Windows reboots — so nothing in Crucible will
+            # clear this, and every load, the claim and the streaming door go
+            # on refusing `engine_still_stopping` until somebody stops those
+            # pids. `accepts_work` below is untouched and still true, and
+            # truthfully so — the lane is free and an `echo` or a render
+            # against nothing resident is still admitted. What was missing
+            # was any way for a bench to explain the load that comes back
+            # `engine_still_stopping` off a server that looks idle.
+            "stopping": (
+                None if residency.stopping is None else residency.stopping.to_dict()
             ),
             # `warming` is neither running nor queued and a bench that ignored it
             # would draw an idle machine that is in fact spending two minutes
@@ -2322,7 +2354,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
 
         job = store.create(body.type, model, body.params, client=_client_agent(request))
         try:
-            _materialise_inputs(config, job, body.inputs)
+            _materialise_inputs(config, store, job, body.inputs)
             # `enqueue` asks admission again and is the authority on it; nothing
             # awaits between here and the check above, so the two are one atomic
             # stretch on the event loop. Inside the same `try` so that a refusal
@@ -2372,6 +2404,13 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 "unknown_artifact",
                 f"job {job.id} has no artifact {name!r}; it has {job.artifacts}",
             )
+        # THE FETCH IS RECORDED HERE, and here is the only place that knows it
+        # happened (Owen's ruling, 2026-09-18). A job whose every artifact and
+        # sidecar has been through this line is a job whose directory is a
+        # second copy of what the client now holds, and `JobStore.reap` deletes
+        # it on the next idle tick. Recorded after the file check, so a 404 for
+        # a name that is not there never counts as a collection.
+        store.mark_fetched(job, name)
         media_type = (
             "application/json"
             if name.endswith(".provenance.json")
@@ -3464,9 +3503,25 @@ def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
 
 
 def _materialise_inputs(
-    config: Config, job: Job, inputs: dict[str, JobInput]
+    config: Config, store: JobStore, job: Job, inputs: dict[str, JobInput]
 ) -> None:
-    """Write every declared input into the job's scratch dir before it is queued."""
+    """Write every declared input into the job's scratch dir before it is queued.
+
+    **AN UPLOAD IS MOVED, NOT COPIED** (Owen's ruling, 2026-09-18). It used to
+    be `copyfile`d with the original left in `uploads/`, so every byte a client
+    sent was on this disk twice for ever: nothing deleted an upload, and the PC
+    was measured at 2.4 GB in 2,935 of them. A blob exists to become a job's
+    input, and `os.replace` is the same operation with one copy — and, on one
+    filesystem, without reading the bytes at all.
+
+    **EVERYTHING IS CHECKED BEFORE ANYTHING MOVES**, which the copy did not
+    have to care about. A refusal on the third input used to leave the first
+    two copied and the uploads untouched; now it would leave the first two
+    MOVED, and a job that is then discarded takes them with it. So the two
+    passes below: nothing is written until every name, every blob and every
+    inline payload has been read and accepted.
+    """
+    planned: list[tuple[str, Path, str | None, bytes | None]] = []
     for name, declared in inputs.items():
         try:
             validate_member_name(name)
@@ -3478,6 +3533,12 @@ def _materialise_inputs(
                 validate_member_name(declared.blob_id)
             except ValueError as exc:
                 raise ApiError(400, "invalid_blob_id", str(exc)) from None
+            # Asked BEFORE the file check, because the two are different
+            # answers about the same missing file: a blob some job already
+            # took is not one this server never had, and telling a client the
+            # second when the first is true sends it looking for a bug in its
+            # own upload.
+            store.refuse_if_blob_consumed(declared.blob_id)
             source = Path(config.uploads_dir) / declared.blob_id
             if not source.is_file():
                 raise ApiError(
@@ -3486,7 +3547,7 @@ def _materialise_inputs(
                     f"input {name!r} names blob {declared.blob_id!r}, which this "
                     "server does not hold",
                 )
-            shutil.copyfile(source, target)
+            planned.append((name, target, declared.blob_id, None))
         elif declared.inline_base64 is not None:
             try:
                 payload = base64.b64decode(declared.inline_base64, validate=True)
@@ -3496,12 +3557,41 @@ def _materialise_inputs(
                     "invalid_inline_input",
                     f"input {name!r} is not valid base64: {exc}",
                 ) from None
-            target.write_bytes(payload)
+            planned.append((name, target, None, payload))
         else:  # unreachable: JobInput's validator requires exactly one source
             raise ApiError(
                 400,
                 "invalid_input",
                 f"input {name!r} names neither a blob nor inline bytes",
+            )
+
+    for name, target, blob_id, payload in planned:
+        if blob_id is None:
+            assert payload is not None  # one of the two, by the loop above
+            target.write_bytes(payload)
+            continue
+        # The record first, so that the one line that makes the bytes
+        # unreachable from `uploads/` is the one line that says who has them.
+        # Two inputs of one request naming the same blob land here, and are
+        # refused naming this job — which is what happened: the first of them
+        # took it.
+        store.consume_blob(blob_id, job)
+        source = Path(config.uploads_dir) / blob_id
+        os.replace(source, target)
+        # The upload's metadata sidecar describes a blob that is no longer in
+        # `uploads/`. It is written by `POST /v1/uploads` and read by nothing,
+        # so it goes with the blob rather than being moved beside it. A
+        # CLEANUP FAILURE IS NOT AN OPERATION FAILURE: the input is in place
+        # and the job is going to run, so a sidecar that will not unlink is
+        # said out loud and left.
+        meta = Path(config.uploads_dir) / f"{blob_id}.json"
+        try:
+            meta.unlink(missing_ok=True)
+        except OSError as exc:
+            print(
+                f"crucible: blob {blob_id} moved into job {job.id} but its "
+                f"metadata {meta} would not delete: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
             )
 
 

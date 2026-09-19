@@ -114,6 +114,10 @@ def test_health(client: TestClient, auth: dict[str, str]) -> None:
         "queue_depth": 0,
         "resident_models": [],
         "resident_kind": None,
+        # Present and null, never absent (ledger R13). An omitted key leaves a
+        # client unable to tell "nothing is stopping" from "this build cannot
+        # say"; tests/test_activity.py holds what it carries when something is.
+        "stopping": None,
     }
 
 
