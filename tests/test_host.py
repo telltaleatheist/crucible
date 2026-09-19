@@ -1312,6 +1312,27 @@ class FakeOrchestrator:
     def quit(self) -> None:
         self.quits.append("quit")
 
+    #: PHASE19 2.6's two reads. `where` is a home the test writes an outcome
+    #: into, so the door's answer comes from the real reader.
+    where: Path | None = None
+    seen: dict = field(
+        default_factory=lambda: {
+            "distro": "absent",
+            "engine": "running",
+            "owner": "child",
+            "detail": "the Windows engine",
+        }
+    )
+
+    def presence(self) -> dict:
+        return dict(self.seen)
+
+    def install_outcome(self) -> dict | None:
+        if self.where is None:
+            return None
+        recorded = outcome.read(self.where)
+        return None if recorded is None else recorded.to_dict()
+
 
 def a_door(
     host_log: log.HostLog,
@@ -4204,3 +4225,381 @@ def test_an_unconsented_host_still_carries_the_distro_crucible_imported(
     ]
     assert len(installs) == 1, installs
     assert installs[0][:3] == ["wsl.exe", "-d", CRUCIBLE_DISTRO], installs[0]
+
+
+
+# ------------------------------------------- PHASE19 2.3 the tray decides
+
+
+def _native(tmp_path: Path, runner: Scripted, *, owner: Owner = Owner.HOST_CHILD,
+            release: str = "1.0.5") -> app_module.HostContext:
+    """A machine whose engine is NOT a guest of ours â€” where 2.3 applies."""
+    context = _context(tmp_path, runner)
+    context.release = release
+    context.presence = presence.Presence(
+        Distro.ABSENT, Engine.RUNNING, "the Windows engine", owner
+    )
+    return context
+
+
+def _decider(
+    context: app_module.HostContext, sequence=None
+) -> tuple[app_module.Host, list[str]]:
+    """A host with a REAL door, so the move takes the real claim (2.3)."""
+    ran: list[str] = []
+
+    def default(emit: Callable[[installer.Event], None]) -> None:
+        ran.append("the move ran")
+        emit(installer.Event("step", {"name": "wsl-state", "index": 1, "total": 11}))
+        emit(installer.Event("done", {}))
+
+    host = app_module.Host(context)
+    host._install_door = door_module.OrchestratorDoor(
+        context.log,
+        sequence or default,
+        token=lambda: "t",
+        orchestrator=FakeOrchestrator(),
+    )
+    return host, ran
+
+
+def _recorded(tmp_path: Path, state: str, **fields) -> None:
+    outcome.write(
+        tmp_path,
+        state=state,
+        release=fields.pop("release", "1.0.5"),
+        attempts=fields.pop("attempts", 1),
+        **fields,
+    )
+
+
+def test_an_engine_this_orchestrator_did_not_start_is_NEVER_moved(tmp_path: Path) -> None:
+    """PHASE17 4.1a survives PHASE19 whole: `found` is watched, never acted on."""
+    context = _native(tmp_path, Scripted(), owner=Owner.FOUND)
+    host, ran = _decider(context)
+    assert host.decide_engine() == "found"
+    assert ran == []
+    assert outcome.read(tmp_path) is None, "nothing was recorded about somebody else's engine"
+
+
+def test_a_machine_that_declined_stays_native_and_says_so_once(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text(
+        '[orchestrator]\nwsl = "never"\n', encoding="utf-8"
+    )
+    context = _native(tmp_path, Scripted())
+    host, ran = _decider(context)
+    assert host.decide_engine() == "declined"
+    assert ran == []
+    recorded = outcome.read(tmp_path)
+    assert recorded is not None and recorded.state == "declined"
+    # And it is not rewritten on every start: the file is the record of a
+    # decision, and a new `at` every fifteen minutes is a file that looks like
+    # something keeps happening.
+    was = recorded.at
+    assert host.decide_engine() == "declined"
+    after = outcome.read(tmp_path)
+    assert after is not None and after.at == was
+
+
+def test_a_wsl_key_nobody_defined_is_refused_and_moves_nothing(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text(
+        '[orchestrator]\nwsl = "sometimes"\n', encoding="utf-8"
+    )
+    context = _native(tmp_path, Scripted())
+    host, ran = _decider(context)
+    assert host.decide_engine() == "unreadable"
+    assert ran == [], "a setting this build cannot carry out is not a licence to move"
+
+
+def test_cannot_is_TERMINAL_for_the_tray_and_is_never_retried(tmp_path: Path) -> None:
+    _recorded(tmp_path, "cannot", code="virtualization_disabled", sentence="VT-x is off")
+    context = _native(tmp_path, Scripted())
+    host, ran = _decider(context)
+    assert host.decide_engine() == "cannot"
+    assert ran == [], "a person changes the BIOS and presses Try again (2.5)"
+
+
+def test_a_failed_move_is_retried_ONCE_and_then_left_alone(tmp_path: Path) -> None:
+    """2.2: `failed` is retried at the next start, once."""
+    _recorded(tmp_path, "failed", code="rootfs_download_failed", sentence="the download died", attempts=1)
+    context = _native(tmp_path, Scripted())
+    host, ran = _decider(context)
+    assert host.decide_engine() == "done"
+    assert ran == ["the move ran"], "the first failure earns one retry"
+
+    _recorded(tmp_path, "failed", code="rootfs_download_failed", sentence="again", attempts=2)
+    context = _native(tmp_path, Scripted())
+    host, again = _decider(context)
+    assert host.decide_engine() == "failed"
+    assert again == [], "a second consecutive failure stays failed until Try again"
+
+
+def test_a_machine_with_no_outcome_at_all_is_MOVED_without_anybody_choosing(
+    tmp_path: Path,
+) -> None:
+    """The whole phase in one assertion: nothing was asked and it moved."""
+    context = _native(tmp_path, Scripted())
+    host, ran = _decider(context)
+    assert host.decide_engine() == "done"
+    assert ran == ["the move ran"]
+
+
+def test_an_unreadable_outcome_stops_the_decision_rather_than_starting_a_move(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "wsl-outcome.json").write_text("{not json", encoding="utf-8")
+    context = _native(tmp_path, Scripted())
+    host, ran = _decider(context)
+    assert host.decide_engine() == "unreadable"
+    assert ran == []
+
+
+def test_the_carry_thread_is_the_one_that_decides_and_it_waits_for_the_owner(
+    tmp_path: Path,
+) -> None:
+    """2.12: the decision lives in the carry thread, not in a second one.
+
+    A machine with no distro settles as `child`, and the SAME thread that would
+    have carried a guest is the one that asks whether to make one.
+    """
+    runner = Scripted(answers={"-l -v": bad("no distributions")})
+    context = _native(tmp_path, runner)
+    host = fast_watching_host(context)
+    decisions: list[str] = []
+    host.decide_engine = lambda: decisions.append("asked") or "found"  # type: ignore[assignment]
+    settle_presence(host)
+    host.carry_guest_to_this_release(settle_ceiling_s=10.0)
+    assert decisions == ["asked"]
+
+
+# ------------------------------- PHASE19 2.3/2.2 the move records its ending
+
+
+def _real_sequence_host(
+    tmp_path: Path, runner: Scripted
+) -> tuple[app_module.Host, app_module.HostContext]:
+    context = _native(tmp_path, runner)
+    host = app_module.Host(context)
+    host._install_door = door_module.OrchestratorDoor(
+        context.log,
+        app_module._sequence(context, host),
+        token=lambda: "t",
+        orchestrator=FakeOrchestrator(),
+    )
+    return host, context
+
+
+def test_a_machine_that_cannot_writes_cannot_with_the_tables_own_sentence(
+    tmp_path: Path,
+) -> None:
+    """2.3's `automatic == false` branch, reached the way the code reaches it.
+
+    The plan writes this as a probe the tray makes BEFORE starting the move;
+    the walk's first step is that same probe, so the probe is made once and the
+    refusal it raises is what becomes the outcome. What 2.3 requires is
+    observable either way: `cannot`, the code, the sentence, and no move.
+    """
+    runner = Scripted(
+        answers={"--status": bad("HCS_E_HYPERV_NOT_INSTALLED 0x80370102")}
+    )
+    host, _context = _real_sequence_host(tmp_path, runner)
+    assert host.decide_engine() == "cannot"
+    recorded = outcome.read(tmp_path)
+    assert recorded is not None
+    assert recorded.state == "cannot"
+    assert recorded.code == "virtualization_disabled"
+    assert recorded.sentence is not None and "virtual machine" in recorded.sentence
+    assert recorded.release == "1.0.5"
+    # Nothing was imported: the walk stopped at its first step.
+    assert not any("--import" in " ".join(call) for call in runner.calls)
+
+
+def test_a_reboot_writes_reboot_pending_and_the_NEXT_start_resumes(
+    tmp_path: Path,
+) -> None:
+    """2.3 and 2.4 together, on one machine, twice."""
+    runner = Scripted(answers={"--status": bad("not recognized")})
+    host, _context = _real_sequence_host(tmp_path, runner)
+    assert host.decide_engine() == "reboot-pending"
+    first = outcome.read(tmp_path)
+    assert first is not None and first.state == "reboot-pending"
+    assert first.code == "wsl_reboot_required"
+
+    # The machine restarts, the Startup item brings the tray back, and Windows
+    # asks for a restart AGAIN. That is 2.4's `cannot`, not a third restart.
+    again = Scripted(answers={"--status": bad("not recognized")})
+    host2, _c2 = _real_sequence_host(tmp_path, again)
+    assert host2.decide_engine() == "cannot"
+    second = outcome.read(tmp_path)
+    assert second is not None and second.state == "cannot"
+    assert second.code == "wsl_reboot_again"
+    assert second.sentence is not None and "twice" in second.sentence
+
+
+# ------------------------------------------- PHASE19 2.6 watching the door
+
+
+def _get(port: int, path: str, *, bearer: str | None = "tok") -> tuple[int, object]:
+    import urllib.error
+    import urllib.request
+
+    headers = {} if bearer is None else {"Authorization": f"Bearer {bearer}"}
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.status, json.loads(response.read().decode())
+    except urllib.error.HTTPError as refused:
+        return refused.code, json.loads(refused.read().decode())
+
+
+def test_get_install_answers_running_outcome_and_presence(
+    host_log: log.HostLog, tmp_path: Path
+) -> None:
+    outcome.write(
+        tmp_path, state="cannot", code="wsl1_only", sentence="WSL is version 1",
+        release="1.0.5", attempts=1,
+    )
+    fake = FakeOrchestrator(where=tmp_path)
+    door = a_door(host_log, token="tok", orchestrator=fake)
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    try:
+        status, body = _get(port, "/install")
+    finally:
+        server.shutdown()
+    assert status == 200
+    assert isinstance(body, dict)
+    assert body["running"] is False
+    assert body["outcome"]["state"] == "cannot"
+    assert body["outcome"]["code"] == "wsl1_only"
+    assert body["presence"]["owner"] == "child"
+
+
+def test_nothing_to_watch_is_a_404_by_name_and_not_an_empty_success(
+    host_log: log.HostLog, tmp_path: Path
+) -> None:
+    door = a_door(host_log, token="tok", orchestrator=FakeOrchestrator(where=tmp_path))
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    try:
+        status, body = _get(port, "/install/events")
+    finally:
+        server.shutdown()
+    assert status == 404
+    assert isinstance(body, dict)
+    assert body["error"]["code"] == "no_install_running"
+
+
+def test_a_late_attacher_sees_the_step_it_joined_at_and_then_follows(
+    host_log: log.HostLog, tmp_path: Path
+) -> None:
+    """2.6's ring. The attacher arrives after four events and must still be
+    told which step is running, or it draws a blank page for twenty minutes."""
+    import urllib.request
+
+    started = threading.Event()
+    go = threading.Event()
+
+    def sequence(emit: Callable[[installer.Event], None]) -> None:
+        emit(installer.Event("step", {"name": "wsl-state", "index": 1, "total": 11}))
+        emit(installer.Event("state", {"code": "wsl_ready", "sentence": "ready", "action": "instruct"}))
+        emit(installer.Event("step", {"name": "import-distro", "index": 2, "total": 11}))
+        emit(installer.Event("line", {"text": "Downloading Ubuntu's own WSL image", "stream": "stdout"}))
+        started.set()
+        assert go.wait(20.0)
+        emit(installer.Event("done", {"steps": []}))
+
+    door = a_door(host_log, sequence, token="tok", orchestrator=FakeOrchestrator(where=tmp_path))
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    mover = threading.Thread(target=_post_install, args=(port,), daemon=True)
+    try:
+        mover.start()
+        assert started.wait(20.0), "the move never began"
+        # It is running, and the status says so.
+        status, body = _get(port, "/install")
+        assert status == 200 and isinstance(body, dict) and body["running"] is True
+        # A SECOND POST is refused by name and told where to watch.
+        refused_status, refused = _post_install(port)
+        assert refused_status == 409
+        assert isinstance(refused, dict)
+        assert refused["error"]["code"] == "host_install_running"
+        assert "/install/events" in refused["error"]["message"]
+
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/install/events",
+            headers={"Authorization": "Bearer tok"},
+        )
+        response = urllib.request.urlopen(request, timeout=20)
+        go.set()
+        lines = [json.loads(line) for line in response.read().decode().splitlines() if line]
+    finally:
+        go.set()
+        mover.join(timeout=20.0)
+        server.shutdown()
+    # The four it missed, in order, and then the one it was there for.
+    assert [line["id"] for line in lines] == [1, 2, 3, 4, 5]
+    assert [line["event"] for line in lines] == ["step", "state", "step", "line", "done"]
+    assert lines[2]["data"]["name"] == "import-distro", "the step it joined at"
+
+
+def _post_install(port: int) -> tuple[int, object]:
+    """`POST /install` with the body the door takes, refusals included."""
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/install",
+        data=json.dumps({"target": "wsl"}).encode(),
+        headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.status, response.read().decode()
+    except urllib.error.HTTPError as refused:
+        return refused.code, json.loads(refused.read().decode())
+
+
+def test_the_ring_keeps_the_LAST_events_and_not_the_whole_transcript(
+    host_log: log.HostLog,
+) -> None:
+    """A guest install prints thousands of pip lines into a tray process."""
+    def sequence(emit: Callable[[installer.Event], None]) -> None:
+        emit(installer.Event("step", {"name": "guest-install", "index": 4, "total": 11}))
+        for index in range(door_module.MAX_RING_EVENTS + 50):
+            emit(installer.Event("line", {"text": f"pip line {index}", "stream": "stdout"}))
+        emit(installer.Event("done", {}))
+
+    door = a_door(host_log, sequence, token="tok")
+    assert door.claim()
+    try:
+        door.run_recorded()
+    finally:
+        door.release()
+    backlog, _watcher = door.attach()
+    assert len(backlog) == door_module.MAX_RING_EVENTS
+    assert backlog[-1]["event"] == "done"
+    assert backlog[-1]["id"] == door_module.MAX_RING_EVENTS + 52
+
+
+def test_a_move_that_throws_records_a_terminal_event_for_every_watcher(
+    host_log: log.HostLog,
+) -> None:
+    """A watcher whose stream merely stopped cannot tell a failure from a
+    socket that died, so `run_recorded` always records an ending."""
+    def sequence(emit: Callable[[installer.Event], None]) -> None:
+        emit(installer.Event("step", {"name": "wsl-state", "index": 1, "total": 11}))
+        raise HostError("rootfs_download_failed", "the image would not download")
+
+    door = a_door(host_log, sequence, token="tok")
+    assert door.claim()
+    with pytest.raises(HostError):
+        try:
+            door.run_recorded()
+        finally:
+            door.release()
+    backlog, watcher = door.attach()
+    assert [event["event"] for event in backlog] == ["step", "failed"]
+    assert backlog[-1]["data"]["code"] == "rootfs_download_failed"
+    assert watcher.get_nowait() is None, "a finished move closes the queue it hands out"

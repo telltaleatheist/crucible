@@ -67,6 +67,11 @@ HOST_ERROR_CODES: dict[str, str] = {
         "not a distribution name. A person who wrote it meant to grant "
         "something, so it is refused rather than ignored (PHASE17 2.5)."
     ),
+    "orchestrator_wsl_invalid": (
+        "`[orchestrator] wsl` in the Windows config holds something other than "
+        '"never". It is the one way to keep a machine native on purpose '
+        "(PHASE19 1), so a value nobody defined is refused rather than ignored."
+    ),
     "orchestrator_recipe_not_ours": (
         "a recovery recipe that restarts everything uid 1000 owns was asked "
         "for in a distribution Crucible did not import. CONSENT widens "

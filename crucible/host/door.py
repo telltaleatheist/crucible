@@ -1,12 +1,21 @@
 """The orchestrator's door on 127.0.0.1:7101. PHASE15-HOST.md 4.3, PHASE17 3.2/4.2.
 
-FIVE ROUTES, AND THEY ARE THE WHOLE OF WHAT AN ORCHESTRATOR SERVES
--------------------------------------------------------------------
-    POST /install    the engine move (PHASE15 4.7)              — unchanged
-    POST /restart    restart this orchestrator's engine (4.2)   — new
-    POST /quit       stop THIS orchestrator (4.4)               — new
-    GET  /v1/info    who this process is, and its engine (3.2)  — new
-    GET  /v1/ping    "is this a Crucible"                       — new
+SEVEN ROUTES, AND THEY ARE THE WHOLE OF WHAT AN ORCHESTRATOR SERVES
+--------------------------------------------------------------------
+    POST /install         the engine move (PHASE15 4.7)
+    GET  /install         running, outcome, presence (PHASE19 2.6)  — new
+    GET  /install/events  attach to a move in flight (PHASE19 2.6)  — new
+    POST /restart         restart this orchestrator's engine (4.2)
+    POST /quit            stop THIS orchestrator (4.4)
+    GET  /v1/info         who this process is, and its engine (3.2)
+    GET  /v1/ping         "is this a Crucible"
+
+**THE DOOR CAN BE WATCHED, NOT ONLY DRIVEN** (PHASE19 2.6). The tray now starts
+the move itself at every start (2.3), so by the time an app asks, the thing it
+wanted to start is usually already running — which is why `POST /install`'s 409
+is a normal answer rather than an error, and why the two GETs exist: the client
+reads the status, attaches to the stream from its current step, and never posts
+a second walk over the same distro.
 
 This is NOT a second API surface. An orchestrator serves ZERO job types and
 never carries a byte of anybody's data (PHASE17 section 0: control is
@@ -44,6 +53,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import queue
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Protocol
@@ -58,6 +68,7 @@ from .paths import DOOR_HOST, DOOR_PORT
 #: The routes. Anything else is 404 with a named body, so a caller that
 #: guessed a path is told what the door is rather than nothing.
 INSTALL_PATH = "/install"
+INSTALL_EVENTS_PATH = "/install/events"
 RESTART_PATH = "/restart"
 QUIT_PATH = "/quit"
 INFO_PATH = "/v1/info"
@@ -109,6 +120,22 @@ class OrchestratorPort(Protocol):
         implementation; the menu item and this door are its two callers.
         """
 
+    def presence(self) -> dict[str, object]:
+        """The tray's presence, for `GET /install` (PHASE19 2.6).
+
+        The four words `presence.Presence` already holds, and not a fifth
+        composed here: an app reading this and the tray's own log must be
+        reading the same measurement.
+        """
+
+    def install_outcome(self) -> dict[str, object] | None:
+        """`wsl-outcome.json` as 2.2 shapes it, or None when there is none.
+
+        Asked of the orchestrator rather than read here, because the file lives
+        in CRUCIBLE_HOME and this door does not know where that is — the tray
+        does, and `crucible/host/outcome.py` is the reader.
+        """
+
 #: What the body may contain. 4.7: the reverse move is not in this phase.
 TARGETS = (ENGINE_TARGET_WSL,)
 
@@ -120,6 +147,24 @@ MAX_BODY_BYTES = 4096
 
 #: Runs the sequence, emitting events. Injected so the test drives a fake one.
 Sequence_ = Callable[[Callable[[Event], None]], None]
+
+#: PHASE19 2.6: how many events a move keeps so that a LATE attacher sees the
+#: step it joined at. The number is the plan's — "a ring of the last 200 events
+#: is kept" — and it is a ring rather than the whole stream because
+#: `install.sh` inside the guest prints thousands of pip lines and this is the
+#: tray, which must not grow a transcript of one in memory.
+MAX_RING_EVENTS = 200
+
+#: How long a watcher waits on its queue before asking the door whether the
+#: move is still running. Not a heartbeat — nothing is written on a timeout —
+#: it is the interval at which a handler thread notices that the move it was
+#: following is gone. One second, because that is a tray thread doing nothing.
+WATCH_POLL_SECONDS = 1.0
+
+#: The sentinel a watcher's queue gets when the move ends. `None` and not a
+#: fabricated `done`: the real terminal event has already been sent through the
+#: same queue, and a second one invented here would be an event no step emitted.
+_END = None
 
 
 class OrchestratorDoor:
@@ -154,6 +199,26 @@ class OrchestratorDoor:
         self._token_detail = token_detail
         self._lock = threading.Lock()
         self._running = False
+        #: PHASE19 2.6's ring and its watchers. One lock over both, because an
+        #: attacher that read the backlog and subscribed in two steps would
+        #: miss every event that landed between them — the one defect a
+        #: "replay then follow" stream has.
+        self._events = threading.Lock()
+        self._ring: list[dict[str, object]] = []
+        self._emitted = 0
+        self._watchers: list["queue.Queue[dict[str, object] | None]"] = []
+        #: Whether MORE EVENTS CAN STILL ARRIVE. Not the same fact as the claim:
+        #: the claim is released by the caller after `run_recorded` returns, and
+        #: an attacher that subscribed in that gap would wait for an `_END`
+        #: nobody is left to send. Set and cleared under `_events`, which is the
+        #: lock `attach` decides under.
+        self._move_open = False
+
+    @property
+    def running(self) -> bool:
+        """Is a move in flight? The claim IS the answer; there is no second flag."""
+        with self._lock:
+            return self._running
 
     def authorised(self, header: str | None) -> bool:
         """Constant-time, and `host_no_token` is NOT an authorisation failure."""
@@ -182,6 +247,101 @@ class OrchestratorDoor:
     def release(self) -> None:
         with self._lock:
             self._running = False
+
+    # -------------------------------------------- PHASE19 2.6 the watchers
+
+    def _begin_move(self) -> None:
+        """A new move starts a new ring. The last one's events are not this one's."""
+        with self._events:
+            self._ring = []
+            self._emitted = 0
+            self._move_open = True
+
+    def _record(self, event: Event) -> dict[str, object]:
+        """One event into the ring and out to every watcher. Returns the envelope."""
+        with self._events:
+            self._emitted += 1
+            envelope: dict[str, object] = {
+                "id": self._emitted,
+                "event": event.event,
+                "data": event.data,
+            }
+            self._ring.append(envelope)
+            if len(self._ring) > MAX_RING_EVENTS:
+                del self._ring[: len(self._ring) - MAX_RING_EVENTS]
+            watchers = list(self._watchers)
+        for watcher in watchers:
+            watcher.put(envelope)
+        return envelope
+
+    def attach(self) -> tuple[list[dict[str, object]], "queue.Queue[dict[str, object] | None]"]:
+        """The ring as it stands, and a queue of everything after it.
+
+        Both taken under ONE lock, so the join is seamless: an attacher gets
+        every event exactly once, in order, whether it arrived before or after
+        it asked.
+        """
+        watcher: "queue.Queue[dict[str, object] | None]" = queue.Queue()
+        with self._events:
+            backlog = list(self._ring)
+            if self._move_open:
+                self._watchers.append(watcher)
+            else:
+                # Nothing is running, so nothing more will arrive: the queue is
+                # closed before it is handed over rather than left to wait for
+                # an event that cannot come.
+                watcher.put(_END)
+        return backlog, watcher
+
+    def detach(self, watcher: "queue.Queue[dict[str, object] | None]") -> None:
+        with self._events:
+            if watcher in self._watchers:
+                self._watchers.remove(watcher)
+
+    def has_events(self) -> bool:
+        with self._events:
+            return len(self._ring) > 0
+
+    def run_recorded(self, sink: Callable[[dict[str, object]], None] | None = None) -> None:
+        """The move, with every event recorded and fanned out.
+
+        THE ONE PATH BOTH CALLERS TAKE (PHASE19 2.3): the tray's own start-time
+        decision and `POST /install` run this, so the ring an attacher reads is
+        the same stream the poster is reading, and there is one place a move's
+        events are numbered.
+
+        It RAISES what the sequence raised, but only after a terminal event has
+        been recorded — a watcher whose stream simply stopped cannot tell a
+        failure from a socket that died.
+        """
+        self._begin_move()
+        terminal = False
+
+        def emit(event: Event) -> None:
+            nonlocal terminal
+            terminal = terminal or event.event in ("done", "failed")
+            envelope = self._record(event)
+            if sink is not None:
+                sink(envelope)
+
+        try:
+            self._run_sequence(emit)
+        except BaseException as exc:
+            if not terminal:
+                code = exc.code if isinstance(exc, HostError) else "task_failed"
+                message = (
+                    exc.message
+                    if isinstance(exc, HostError)
+                    else f"{type(exc).__name__}: {exc}"
+                )
+                emit(Event("failed", {"code": code, "message": message}))
+            raise
+        finally:
+            with self._events:
+                self._move_open = False
+                watchers, self._watchers = list(self._watchers), []
+            for watcher in watchers:
+                watcher.put(_END)
 
     def run(self, emit: Callable[[Event], None]) -> None:
         self._run_sequence(emit)
@@ -244,6 +404,12 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
                 if self._authorised():
                     self._answer(door._orchestrator.local_status())
                 return
+            if path == INSTALL_EVENTS_PATH:
+                self._watch_install()
+                return
+            if path == INSTALL_PATH:
+                self._install_status()
+                return
             if path == PING_PATH:
                 self._answer(
                     {
@@ -261,9 +427,94 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
                 return
             self._answer(door.info())
 
+        def _install_status(self) -> None:
+            """`GET /install` — PHASE19 2.6.
+
+            Three facts and no fourth: whether a move is in flight, what the
+            last one ENDED as (`wsl-outcome.json`, 2.2), and the tray's
+            presence. An app that has just pressed Install reads this to know
+            whether to attach; one that has been away reads it to know how the
+            machine ended up.
+            """
+            if not self._authorised():
+                return
+            try:
+                recorded = door._orchestrator.install_outcome()
+            except HostError as exc:
+                # A present-and-unreadable outcome is refused by name rather
+                # than answered as `null`, which an app would read as "nothing
+                # has happened here yet" (2.2).
+                self._refuse(503, exc.code, exc.message)
+                return
+            self._answer(
+                {
+                    "running": door.running,
+                    "outcome": recorded,
+                    "presence": door._orchestrator.presence(),
+                }
+            )
+
+        def _watch_install(self) -> None:
+            """`GET /install/events` — attach to the move, from where it is.
+
+            The ring is replayed first, so a client that arrives twenty minutes
+            into a guest install sees the step it joined at instead of silence
+            until the next line. Then it follows, and the stream ends when the
+            move does.
+
+            **A machine with no move to watch is a 404 by name**, not an empty
+            200: "there is nothing running and nothing has run" is a fact an app
+            acts on (it posts one), and an empty success is that fact spelled as
+            an absence.
+            """
+            if not self._authorised():
+                return
+            if not door.running and not door.has_events():
+                self._refuse(
+                    404,
+                    "no_install_running",
+                    "no engine move is running on this machine and none has run "
+                    f"since this orchestrator started. {INSTALL_PATH} says what "
+                    "the last one ENDED as; a POST to it starts one.",
+                )
+                return
+            backlog, watcher = door.attach()
+            self.send_response(200)
+            self.send_header("Content-Type", CONTENT_TYPE)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                for envelope in backlog:
+                    self._send_event(envelope)
+                while True:
+                    try:
+                        envelope = watcher.get(timeout=WATCH_POLL_SECONDS)
+                    except queue.Empty:
+                        # The `_END` can only be lost if the move's thread died
+                        # between clearing `_move_open` and posting it. Asking
+                        # again is how this handler stops being a thread waiting
+                        # for a sentinel nobody will send.
+                        if not door.running:
+                            return
+                        continue
+                    if envelope is _END:
+                        return
+                    self._send_event(envelope)
+            except OSError:
+                # The watcher hung up. That is not a failure of the move, and
+                # the move is not told about it.
+                return
+            finally:
+                door.detach(watcher)
+
+        def _send_event(self, envelope: dict[str, object]) -> None:
+            self.wfile.write(json.dumps(envelope).encode("utf-8") + b"\n")
+            self.wfile.flush()
+
         def _what_this_door_is(self) -> str:
             return (
-                f"this orchestrator serves {INSTALL_PATH}, {RESTART_PATH}, "
+                f"this orchestrator serves {INSTALL_PATH}, {INSTALL_EVENTS_PATH}, "
+                f"{RESTART_PATH}, "
                 f"{QUIT_PATH}, {INFO_PATH} and {PING_PATH}, and nothing else "
                 f"(PHASE17-ORCHESTRATOR.md 3.2); {self.path} is not a door. An "
                 f"app wanting anything else reads {INFO_PATH}'s `engine.url` "
@@ -364,11 +615,48 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
                     409,
                     "host_install_running",
                     "an engine move is already running on this machine. There is "
-                    "one install on a machine; watch the one in flight rather than "
-                    "starting a second.",
+                    f"one install on a machine; attach to {INSTALL_EVENTS_PATH} "
+                    "and watch the one in flight rather than starting a second. "
+                    "On a fresh install the runner is usually this machine's own "
+                    "tray, which starts the move at every start (PHASE19 2.3).",
                 )
                 return
-            self._stream(door.run)
+            self._install()
+
+        def _install(self) -> None:
+            """The move's own stream, and the ring every other watcher reads.
+
+            PHASE19 2.6: this and the tray's start-time decision go through
+            `run_recorded`, so there is ONE numbering of a move's events and one
+            ring, whoever started it.
+            """
+            self.send_response(200)
+            self.send_header("Content-Type", CONTENT_TYPE)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            dead = False
+
+            def sink(envelope: dict[str, object]) -> None:
+                nonlocal dead
+                if dead:
+                    return
+                try:
+                    self._send_event(envelope)
+                except OSError:
+                    # The POSTER hung up. The move goes on — it is installing
+                    # software on this machine and stopping halfway because
+                    # nobody is reading would be worse than finishing unwatched.
+                    dead = True
+                    door._log.write("door: the install's caller hung up; the move continues")
+
+            try:
+                door.run_recorded(sink)
+            except HostError as exc:
+                door._log.write(f"door: install failed: {exc.code}: {exc.message}")
+            except Exception as exc:  # noqa: BLE001 - the stream must terminate
+                door._log.write(f"door: install crashed: {type(exc).__name__}: {exc}")
+            finally:
+                door.release()
 
         def _restart(self) -> None:
             """`POST /restart` — PHASE17 4.2.
