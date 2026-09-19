@@ -708,6 +708,30 @@ def test_the_install_script_is_powershell_that_parses() -> None:
     assert "}}" not in script and "{{" not in script
 
 
+def _install_ps1() -> str:
+    root = Path(__file__).resolve().parent.parent
+    return (root / "sdk" / "bootstrap" / "scripts" / "install.ps1").read_text(encoding="utf-8")
+
+
+def test_install_ps1_ends_by_READING_the_outcome_and_never_by_asserting_one() -> None:
+    """PHASE19 2.7. The script stopped being able to say what happens next the
+    moment the tray began starting the move itself (2.3), so it reads."""
+    script = _install_ps1()
+    # It names the SAME file `outcome.py` writes, because both spellings are
+    # generated from `sdk/bootstrap/src/distro.ts`.
+    assert f"Join-Path $Root '{outcome.OUTCOME_NAME}'" in script
+    assert "It is setting up its Linux engine now" in script
+    assert "Say $Verdict.sentence" in script, "a machine that cannot gets the outcome's OWN words"
+    # And the sentence the phase deletes is no longer SAID. It survives in the
+    # comment that records why, which is the one place a deleted sentence
+    # belongs.
+    assert 'Say "Crucible is ready in your notification area."' in script
+    assert "Say \"Crucible is ready in your notification area. The Windows engine works now" not in script
+    # No logic of its own: it decides nothing, it reads a field.
+    assert "wsl --install" not in script
+    assert script.count("{") == script.count("}")
+
+
 def test_remove_startup_says_whether_there_was_one() -> None:
     there = Scripted(default=ok("removed\n"))
     assert startup.remove(there).changed is True

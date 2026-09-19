@@ -30,6 +30,11 @@ UBUNTU_WSL_ROOTFS = "ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
 UBUNTU_WSL_ROOTFS_URL = "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
 UBUNTU_WSL_SUMS_URL = "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/SHA256SUMS"
 
+#: PHASE19 2.2's record of what happened to the engine move, in the host
+#: home. Read by `crucible/host/outcome.py`, which is its writer and parser,
+#: and by `install.ps1` for its closing sentence (2.7).
+WSL_OUTCOME_NAME = "wsl-outcome.json"
+
 #: The line /etc/wsl.conf carries in a Crucible distro and nowhere else.
 WSL_CONF_MARKER = "# crucible-rootfs"
 

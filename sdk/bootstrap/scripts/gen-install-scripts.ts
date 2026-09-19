@@ -29,7 +29,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { LATEST_RELEASE_URL } from '../src/channel.js';
-import { CRUCIBLE_DISTRO, finishImportScript, UBUNTU_WSL_ROOTFS, UBUNTU_WSL_SERIES, rootfsSumsUrl, rootfsUrl, WSL_CONF_MARKER, WSL_CONF_TEXT } from '../src/distro.js';
+import { CRUCIBLE_DISTRO, finishImportScript, UBUNTU_WSL_ROOTFS, UBUNTU_WSL_SERIES, rootfsSumsUrl, rootfsUrl, WSL_CONF_MARKER, WSL_CONF_TEXT, WSL_OUTCOME_NAME } from '../src/distro.js';
 import { DESKTOP_PACKAGES, interpreterFor, interpreterUrl } from '../src/interpreter.js';
 import { HOST_BACKEND, RELEASE_REPO, wheelAssetName, wheelShaAssetName } from '../src/release.js';
 import { activateRuntimeSh, CURL_ARGS, DOWNLOADS_SUBDIR, HOST_SUBDIR, PARTIAL_SUFFIX, SERVER_SUBDIR, STAMP_NAME, TAR_ARGS } from '../src/runtime.js';
@@ -463,6 +463,21 @@ function psQuote(value: string): string {
 }
 
 /**
+ * How long `install.ps1` waits for the tray's outcome before saying the
+ * general sentence (PHASE19 2.7: "reads the outcome the tray writes within a
+ * few seconds").
+ *
+ * TEN, and the number is the tray's own first tick: `crucible/host/app.py`
+ * starts its decision thread behind `presence.WATCH_SECONDS` (15 s) at worst
+ * and behind nothing at best, and a machine that CANNOT run WSL learns so from
+ * `wsl --status`, which answers immediately. So this is long enough for the
+ * verdict that matters and short enough that a working machine is not left
+ * looking at a console. A file that has not appeared is not an error: the
+ * general sentence is true of that machine too.
+ */
+const OUTCOME_WAIT_SECONDS = 10;
+
+/**
  * `/etc/wsl.conf` as ONE bash command, from {@link WSL_CONF_TEXT}. `printf`
  * with a `%s\n` per line and the lines as arguments: wsl.exe halves
  * backslashes before bash exists, so the `\n` is doubled here to arrive whole.
@@ -782,7 +797,35 @@ export function generateInstallPs1(): string {
     'Start-Process -WindowStyle Hidden -FilePath $Pythonw -ArgumentList "-m","crucible.cli","host"',
     '& $Cmd local start',
     'if ($LASTEXITCODE -ne 0) { Die "Crucible installed but did not become ready. Run crucible local status for the named failure." }',
-    'Say "Crucible is ready in your notification area. The Windows engine works now; the optional Linux engine is available from its console."',
+    '',
+    '# --- 8. what happens next, read rather than asserted ----------------------',
+    '# PHASE19-AUTOMATIC-WSL.md 2.7. This script used to end by saying the Linux',
+    '# engine was "available from its console", which stopped being true the',
+    '# moment the tray began starting the move by itself at every start (2.3).',
+    '#',
+    '# It has no logic of its own and does not decide anything: the tray writes',
+    '# wsl-outcome.json within seconds of coming up, and this READS it. A machine',
+    "# that cannot run the Linux engine has that file's own sentence, verbatim, and",
+    '# every other machine is told the move is under way. Waiting a few seconds is',
+    '# the whole of the mechanism - the tray has to settle a presence first - and a',
+    '# file that never appears means the move has not been decided yet, which is',
+    '# what the general sentence already says.',
+    `$Outcome = Join-Path $Root ${psQuote(WSL_OUTCOME_NAME)}`,
+    `$Deadline = (Get-Date).AddSeconds(${OUTCOME_WAIT_SECONDS})`,
+    '$Verdict = $null',
+    'while ((Get-Date) -lt $Deadline) {',
+    '  if (Test-Path -LiteralPath $Outcome) {',
+    '    try { $Verdict = Get-Content -Raw $Outcome | ConvertFrom-Json } catch { $Verdict = $null }',
+    '    if ($Verdict) { break }',
+    '  }',
+    '  Start-Sleep -Milliseconds 500',
+    '}',
+    'Say "Crucible is ready in your notification area."',
+    'if ($Verdict -and $Verdict.sentence) {',
+    '  Say $Verdict.sentence',
+    '} else {',
+    '  Say "It is setting up its Linux engine now; the app you installed from will show its progress."',
+    '}',
     '',
   ];
   // ASCII, because Windows PowerShell 5.1 reads a BOM-less .ps1 as the ANSI
@@ -944,6 +987,11 @@ export function generateWslStatesPy(): string {
     `UBUNTU_WSL_ROOTFS = ${pyString(UBUNTU_WSL_ROOTFS)}`,
     `UBUNTU_WSL_ROOTFS_URL = ${pyString(rootfsUrl())}`,
     `UBUNTU_WSL_SUMS_URL = ${pyString(rootfsSumsUrl())}`,
+    '',
+    "#: PHASE19 2.2's record of what happened to the engine move, in the host",
+    '#: home. Read by `crucible/host/outcome.py`, which is its writer and parser,',
+    '#: and by `install.ps1` for its closing sentence (2.7).',
+    `WSL_OUTCOME_NAME = ${pyString(WSL_OUTCOME_NAME)}`,
     '',
     '#: The line /etc/wsl.conf carries in a Crucible distro and nowhere else.',
     `WSL_CONF_MARKER = ${pyString(WSL_CONF_MARKER)}`,

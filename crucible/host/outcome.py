@@ -29,10 +29,15 @@ from pathlib import Path
 from typing import Callable
 
 from .errors import HostError
-from .wsl_states import WSL_STATES
+from .wsl_states import WSL_OUTCOME_NAME, WSL_STATES
 
 #: In the host home, beside `config.toml` and `pairing` (PHASE15 3.6).
-OUTCOME_NAME = "wsl-outcome.json"
+#:
+#: GENERATED, from `sdk/bootstrap/src/distro.ts`, because `install.ps1` reads
+#: the same file for its closing sentence (2.7) and that script is generated
+#: from the same place. A name spelled here and again in a shell script is a
+#: file two programs can disagree about the location of.
+OUTCOME_NAME = WSL_OUTCOME_NAME
 
 #: The five endings of 2.2, and there is no sixth. `done` and `declined` carry
 #: no code and no sentence; the other three always carry both.
