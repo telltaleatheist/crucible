@@ -64,7 +64,7 @@ import os
 import re
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import tomli_w
@@ -72,6 +72,7 @@ import tomli_w
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
 from .manifests import check_table
+from .weights import LOCAL, PINNED
 
 VOICES_DIR_ENV = "CRUCIBLE_VOICES_DIR"
 
@@ -125,6 +126,14 @@ CLIPS_FROM_REQUEST = "from-request"
 
 ESTIMATE_BASES = frozenset({"measured", "declared"})
 
+#: How much a backend block's `identity` is worth, and it rides on the
+#: `/v1/voices` row for `estimate_basis`'s reason: a reader must not be able to
+#: mistake one for the other (PHASE18-UNCERTIFIED.md section 3.1). `PINNED` and
+#: `LOCAL` — where the bytes come from — live in `crucible/weights.py`, which is
+#: the module that acts on the difference.
+VERIFIED = "verified"
+ASSERTED = "asserted"
+
 _VOICE_REQUIRED: dict[str, type] = {
     "id": str,
     "display": str,
@@ -139,15 +148,36 @@ _VOICE_REQUIRED: dict[str, type] = {
     "sample_rate": int,
 }
 
-#: The three rates are a property of the VOICE and are required of every one:
-#: BookForge measures them per voice from clean renders, and a voice with no
-#: measurement of its own carries the narrator engine's default band, which is
-#: still a real recorded number rather than a guess.
+#: The three rates are a property of the VOICE, measured per voice by BookForge
+#: from clean renders, and they travel as ONE statement: all three or none.
+#: That is narrator's own rule in `engine/higgs/config.py`'s `_length_band`,
+#: which refuses a partial triple by name, and this is the same rule rather
+#: than a second copy of it — the band is a measured pace and the two edges
+#: derived from it, so a subset is a band nobody finished writing.
+#:
+#: OPTIONAL AS A GROUP SINCE 2026-09-18, and the reason is the point of the
+#: block. They were required, and the two voices in this build that are the
+#: BASE WEIGHTS rather than a fine-tune — `higgs-default` and `zeroshot`, which
+#: no ladder has ever been run on — met the requirement by copying narrator's
+#: Higgs v3 defaults out of its source: `HiggsDefaults.CHARS_PER_SEC` 15.0 as
+#: the pace, with `HiggsV3Defaults.MAX_CHARS_PER_SEC` 20.0 and
+#: `MIN_CHARS_PER_SEC` 14.5 as the edges. That is not one fact: 15.0 is the
+#: DIVISOR `cap_frames()` sizes the frame cap against and nothing was ever
+#: measured speaking at it, while the edges were written around a real book
+#: pace nearer 17.2. narrator keeps a band's RATIOS and re-centres them on the
+#: book's running median, and those ratios are 1.333 on the short side against
+#: 1.034 on the long — so after warm-up healthy chunks fell under
+#: `median x 0.967`, were judged run-ons, and went re-roll -> split -> re-roll
+#: to MAX_DEPTH. A manifest states what was measured; with nothing stated
+#: narrator uses its own default band and derives the centre as the geometric
+#: mean of the edges (`truncation.tracker_for`), and that derivation keeps its
+#: one owner. Crucible does not compute a centre.
+#:
 #: `object` rather than `float` because TOML's 16 is an int and its 16.0 is a
 #: float, and a pace that happens to land on a whole number is still a pace.
 #: `_number()` does the real check and refuses a bool, which `isinstance` would
 #: not.
-_PACE_REQUIRED: dict[str, type] = {
+_PACE_RATES: dict[str, type] = {
     "pace_chars_per_sec": object,
     "max_chars_per_sec": object,
     "min_chars_per_sec": object,
@@ -165,6 +195,31 @@ _PACE_OPTIONAL: dict[str, type] = {
     "safe_min_chars": int,
     "safe_max_chars": int,
 }
+#: HOW THE TWO EDGES WERE GOT, stated only when it is not the usual way.
+#:
+#: Every ladder run in this build wrote `max = pace x 1.3` and `min = pace /
+#: 1.3`, so a triple whose two ratios disagree is edges that were not derived
+#: from that pace — the defect of 2026-09-18, where narrator's `CHARS_PER_SEC`
+#: 15.0 sat between `HiggsV3Defaults`' 20.0/14.5 and gave 1.333 long against
+#: 1.034 short. `_check_pace` therefore refuses a lopsided triple by default,
+#: and this key is the manifest saying the lopsidedness is real: a band read
+#: off a distribution's percentiles is lopsided because the distribution is.
+#:
+#: It does NOT reach the wire. Nothing downstream branches on how the edges
+#: were got — narrator keeps the RATIOS whatever produced them — so this is a
+#: statement to this loader and stays here, rather than a seventh `Pace` field
+#: every client must learn to ignore.
+_PACE_EDGES = "edges"
+#: The one word `edges` takes. A closed set, so a typo is refused rather than
+#: read as "not percentile, therefore check the symmetry".
+_PACE_EDGES_WORDS = ("percentile",)
+#: HALF THE LAST PLACE OF A MANIFEST NUMBER. Every rate in this catalog is
+#: written to two decimals (`deathstalker.toml` 15.91 / 20.68 / 12.24), so a
+#: stated rate stands for a real one up to 0.005 either side, and the two
+#: ratios computed from three such numbers cannot be compared for exact
+#: equality. The tolerance in `_check_pace` is this propagated through the two
+#: divisions rather than a round number chosen to make the catalog pass.
+_PACE_HALF_ULP = 0.005
 
 #: `[voice.serving]` — WHAT THE SERVER narrator STARTS IS CONFIGURED WITH.
 #:
@@ -189,9 +244,36 @@ _SERVING_REQUIRED: dict[str, type] = {
     "max_num_seqs_note": str,
 }
 
-_BACKEND_REQUIRED: dict[str, type] = {
+#: THE SOURCE KEYS, and a block declares EXACTLY ONE of the two shapes
+#: (PHASE18-UNCERTIFIED.md section 3). They are optional here and checked as a
+#: pair below, because "one of these two groups" is not a thing `check_table`
+#: can say.
+#:
+#:     hf_repo + revision    a PIN. Crucible fetches it, stamps it, and the
+#:                           catalog owns the bytes.
+#:     path + identity       a DIRECTORY somebody else put there. Crucible
+#:                           never fetches it, never stamps it, never deletes
+#:                           it, and tolerates it vanishing between jobs.
+#:
+#: The second shape is why a voice can exist at all while Owen's HuggingFace
+#: private storage is full (HIGGS_FIELD_NOTES.md 4n.74 open item (a)) and is
+#: what a screening checkpoint uses, its 8 GiB merge being scratch that is
+#: deleted minutes later.
+_SOURCE_KEYS: dict[str, type] = {
     "hf_repo": str,
     "revision": str,
+    "path": str,
+    # WHAT A LOCAL BLOCK CLAIMS TO BE, and the reason it is required of one.
+    # A pin's identity is VERIFIED — the sha is what was fetched — and a
+    # directory's cannot be, so this is the registrant's ASSERTION and the
+    # `/v1/voices` row says so. It is what `fingerprint()` records in place of
+    # a revision, so two screened checkpoints can be told apart in a client's
+    # own output; without it every merge at a reused path would render as the
+    # same voice.
+    "identity": str,
+}
+
+_BACKEND_REQUIRED: dict[str, type] = {
     "memory_bytes_estimate": int,
     "estimate_basis": str,
     # The cap certificate for (voice, backend), in CHARACTERS. Per backend and it
@@ -204,6 +286,7 @@ _BACKEND_REQUIRED: dict[str, type] = {
     "sampling": dict,
 }
 _BACKEND_OPTIONAL: dict[str, type] = {
+    **_SOURCE_KEYS,
     "estimate_note": str,
     "sampling_reason": str,
     # A list of clip tables, or the literal CLIPS_FROM_REQUEST. Required of a
@@ -258,11 +341,17 @@ class Pace:
     The server states the shape; the client does the packing. At most one of
     `target_chars` and the `safe_*` pair is set; with neither, the client packs
     to the backend's `max_chars` — see `_PACE_OPTIONAL`.
+
+    THE THREE RATES ARE ALL THREE OR ALL NONE (`_PACE_RATES`). `None` is a
+    voice nobody measured, and it means exactly that rather than a default
+    standing in for one: a client reading it derives nothing here, and narrator
+    reaches for its engine's own band. A caller may test any one of the three
+    to know which it has.
     """
 
-    pace_chars_per_sec: float
-    max_chars_per_sec: float
-    min_chars_per_sec: float
+    pace_chars_per_sec: float | None
+    max_chars_per_sec: float | None
+    min_chars_per_sec: float | None
     target_chars: int | None
     safe_min_chars: int | None
     safe_max_chars: int | None
@@ -283,8 +372,12 @@ class VoiceBackendSpec:
     """One `[voice.backends.<kind>]` block."""
 
     backend: str
-    hf_repo: str
-    revision: str
+    #: Set together, and None on a local block. See `_SOURCE_KEYS`.
+    hf_repo: str | None
+    revision: str | None
+    #: Set together, and None on a pinned block.
+    path: str | None
+    identity: str | None
     memory_bytes_estimate: int
     estimate_basis: str
     estimate_note: str | None
@@ -298,6 +391,55 @@ class VoiceBackendSpec:
     @property
     def clips_from_request(self) -> bool:
         return self.clips == CLIPS_FROM_REQUEST
+
+    @property
+    def source(self) -> str:
+        """`"pinned"` or `"local"`. `_parse` has already refused everything else."""
+        return PINNED if self.hf_repo is not None else LOCAL
+
+    @property
+    def identity_basis(self) -> str:
+        """How much the `identity` on the row is worth.
+
+        `"verified"` for a pin — the sha is what `snapshot_download` fetched and
+        what the stamp records. `"asserted"` for a path — the registrant said so
+        and nothing checked. The distinction rides on the row for
+        `estimate_basis`'s reason: a reader must not be able to mistake one for
+        the other, and asserted identity is the honest shape for a directory
+        whose bytes this server did not fetch.
+        """
+        return VERIFIED if self.hf_repo is not None else ASSERTED
+
+    @property
+    def weights_identity(self) -> str:
+        """WHAT THIS BLOCK SAYS ITS WEIGHTS ARE — the pin's sha, or the local
+        block's asserted `identity`.
+
+        One reader for one fact. Four places want it — `fingerprint()`, the
+        `/v1/voices` row, the render's provenance sidecar and the resident
+        record `residency.ResidentVoice` — and a copy of `revision if revision
+        is not None else identity` in each is four chances to leave one of them
+        reporting `None` for a voice whose identity was stated. Two of the four
+        were left reading `spec.revision` when the source axis first landed, and
+        both published a `fingerprint` naming a checkpoint beside a `revision`
+        of null: one record, two answers, which is the failure `identity_basis`
+        exists to make impossible.
+
+        Never None: `_check_source` has already refused a block that sets
+        neither.
+        """
+        return self.revision if self.revision is not None else self.identity
+
+    @property
+    def local_path(self) -> Path | None:
+        """The directory this block names, or None for a pin.
+
+        `crucible/weights.py` asks every spec this through `getattr`, because
+        only a VOICE can be local today: a model is a catalog subject with a
+        download, an installer and a host migration behind it, and none of
+        those have been designed for bytes Crucible does not own.
+        """
+        return None if self.path is None else Path(self.path)
 
     @property
     def files(self) -> tuple[str, ...]:
@@ -320,8 +462,12 @@ class VoiceBackendSpec:
             clips = [clip.to_dict() for clip in self.clips]
         return {
             "backend": self.backend,
+            "source": self.source,
             "hf_repo": self.hf_repo,
             "revision": self.revision,
+            "path": self.path,
+            "identity": self.identity,
+            "identity_basis": self.identity_basis,
             "memory_bytes_estimate": self.memory_bytes_estimate,
             "estimate_basis": self.estimate_basis,
             "estimate_note": self.estimate_note,
@@ -428,8 +574,17 @@ class VoiceManifest:
         return self.takes[index]
 
     def fingerprint(self, backend_kind: str) -> str:
-        """`<id>@<revision>` — what a render records as the voice it used."""
-        return f"{self.id}@{self.spec(backend_kind).revision}"
+        """`<id>@<identity>` — what a render records as the voice it used.
+
+        The identity is the PIN's sha for a pinned block and the block's own
+        asserted `identity` for a local one. Same shape either way, and
+        deliberately: a client comparing two renders is asking "were these the
+        same weights", and that question has an answer in both cases. How much
+        the answer is worth is `identity_basis` on the row, not a second
+        spelling here — two fingerprint formats would make every consumer
+        parse before it could compare.
+        """
+        return f"{self.id}@{self.spec(backend_kind).weights_identity}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -521,29 +676,94 @@ def _number(where: str, key: str, value: Any) -> float:
 
 
 def _check_pace(where: str, table: dict[str, Any]) -> Pace:
-    check_table(where, table, _PACE_REQUIRED, _PACE_OPTIONAL, error=VoiceError)
-    rates = {
-        key: _number(where, key, table[key]) for key in _PACE_REQUIRED
-    }
-    for key, value in rates.items():
-        if value <= 0:
-            raise VoiceError(f"{where}: {key} must be positive, got {value}")
-    # min < pace < max, narrator's own rule (`engine/higgs/config.py`
-    # `_length_band`): the band is the measured pace and the two edges DERIVED
-    # from it, so a pace outside its own edges is a band nobody finished writing.
-    # narrator keeps only the band's RATIOS and re-centres them on the running
-    # median of the book's own shipped takes, which it cannot do without knowing
-    # what the edges were centred on.
-    if not (
-        rates["min_chars_per_sec"]
-        < rates["pace_chars_per_sec"]
-        < rates["max_chars_per_sec"]
-    ):
+    check_table(
+        where,
+        table,
+        {},
+        {**_PACE_RATES, **_PACE_OPTIONAL, _PACE_EDGES: str},
+        error=VoiceError,
+    )
+    edges = table.get(_PACE_EDGES)
+    if edges is not None and edges not in _PACE_EDGES_WORDS:
         raise VoiceError(
-            f"{where}: min_chars_per_sec {rates['min_chars_per_sec']}, "
-            f"pace_chars_per_sec {rates['pace_chars_per_sec']}, max_chars_per_sec "
-            f"{rates['max_chars_per_sec']} are out of order; the band is "
-            "min < pace < max"
+            f"{where}: {_PACE_EDGES} {edges!r} is not one of "
+            f"{sorted(_PACE_EDGES_WORDS)}; the key says how the two edges were "
+            "got, and a word this loader does not know would silently read as "
+            "'derived from the pace'"
+        )
+    # ALL THREE OR NONE, refused by name on the subset — narrator's `_length_band`
+    # refuses the same subset with the same sentence, and a manifest that got past
+    # this door would only be refused later, at the engine, on somebody's book.
+    stated = set(_PACE_RATES) & set(table)
+    if stated and stated != set(_PACE_RATES):
+        raise VoiceError(
+            f"{where}: declares only part of its rate band, missing "
+            f"{sorted(set(_PACE_RATES) - stated)}. The band is a measured pace "
+            "and the two edges derived from it; write all three or none"
+        )
+    rates: dict[str, float | None] = dict.fromkeys(_PACE_RATES)
+    if stated:
+        rates = {key: _number(where, key, table[key]) for key in _PACE_RATES}
+        for key, value in rates.items():
+            if value <= 0:
+                raise VoiceError(f"{where}: {key} must be positive, got {value}")
+        # min < pace < max, narrator's own rule (`engine/higgs/config.py`
+        # `_length_band`): the band is the measured pace and the two edges DERIVED
+        # from it, so a pace outside its own edges is a band nobody finished
+        # writing. narrator keeps only the band's RATIOS and re-centres them on the
+        # running median of the book's own shipped takes, which it cannot do
+        # without knowing what the edges were centred on.
+        if not (
+            rates["min_chars_per_sec"]
+            < rates["pace_chars_per_sec"]
+            < rates["max_chars_per_sec"]
+        ):
+            raise VoiceError(
+                f"{where}: min_chars_per_sec {rates['min_chars_per_sec']}, "
+                f"pace_chars_per_sec {rates['pace_chars_per_sec']}, "
+                f"max_chars_per_sec {rates['max_chars_per_sec']} are out of order; "
+                "the band is min < pace < max"
+            )
+
+        # THE TWO EDGES ARE DERIVED FROM THE PACE, so the band is symmetric in
+        # ratio — every ladder run in this build wrote `max = pace x 1.3` and
+        # `min = pace / 1.3`, and the five fine-tunes here all measure 1.30 on
+        # both sides. A triple whose ratios disagree is edges that came from
+        # somewhere else: the 15.0 / 20.0 / 14.5 that shipped until 2026-09-18
+        # passed `min < pace < max` and was still a splice of two different
+        # centres, 1.333 long against 1.034 short. narrator keeps only the
+        # RATIOS (`engine/higgs/truncation.PaceTracker`), so a lopsided pair
+        # re-centred on the book's running median judged healthy chunks run-ons
+        # and re-rolled them to MAX_DEPTH — a band nobody can read as a band.
+        #
+        # The tolerance is the rounding, not a fudge: each rate is written to
+        # two decimals, so it stands for a real number within `_PACE_HALF_ULP`,
+        # and that uncertainty propagates through each division as
+        # `half_ulp x (1 + ratio) / divisor` — the divisor's own rounding
+        # scaled by the ratio, plus the numerator's. Nothing wider.
+        long_side = rates["max_chars_per_sec"] / rates["pace_chars_per_sec"]
+        short_side = rates["pace_chars_per_sec"] / rates["min_chars_per_sec"]
+        rounding = _PACE_HALF_ULP * (1 + long_side) / rates[
+            "pace_chars_per_sec"
+        ] + _PACE_HALF_ULP * (1 + short_side) / rates["min_chars_per_sec"]
+        if edges is None and abs(long_side - short_side) > rounding:
+            raise VoiceError(
+                f"{where}: the band is not symmetric — max_chars_per_sec is "
+                f"{long_side:.3f} x pace_chars_per_sec but pace_chars_per_sec "
+                f"is only {short_side:.3f} x min_chars_per_sec, further apart "
+                f"than two-decimal rounding allows ({rounding:.4f}). The two "
+                "edges are derived from the measured pace, so both ratios are "
+                "the same number; a band whose edges came off a distribution "
+                f'instead says so with {_PACE_EDGES} = "percentile"'
+            )
+    elif edges is not None:
+        # An `edges` with no edges to describe. It is the leftover of a triple
+        # somebody deleted, and left alone it reads as a band this loader
+        # checked and passed.
+        raise VoiceError(
+            f"{where}: states {_PACE_EDGES} = {edges!r} but states no rate "
+            "band for it to describe; the key says how max_chars_per_sec and "
+            "min_chars_per_sec were got, and there are none"
         )
 
     target = table.get("target_chars")
@@ -581,6 +801,130 @@ def _check_pace(where: str, table: dict[str, Any]) -> Pace:
         target_chars=target,
         safe_min_chars=floor,
         safe_max_chars=ceiling,
+    )
+
+
+@dataclass(frozen=True)
+class _Source:
+    """The four source fields after `_check_source` has settled which shape a
+    block is. Exactly one pair is set."""
+
+    hf_repo: str | None
+    revision: str | None
+    path: str | None
+    identity: str | None
+
+
+def _blank(value: Any) -> bool:
+    """True for a key that is absent or is whitespace.
+
+    An EMPTY STRING IS NOT A DECLARATION. `path = ""` reads as "this block
+    declares a path" to `in`, and would then be refused for not being
+    absolute — a confusing second-order message about a block that really
+    declared no source at all. Treated as absent so the refusal names the
+    actual problem.
+    """
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _is_absolute(value: str) -> bool:
+    """Absolute in EITHER flavour, and that is deliberate.
+
+    A `cuda-linux` block names a POSIX path and an `mlx-darwin` block names
+    one too, but the loader that reads them may be running on Windows — a
+    test, `crucible voices show`, or an operator checking a manifest before
+    sending it to the machine that will serve it. `Path('/home/x')
+    .is_absolute()` is FALSE on Windows (no drive letter), so asking the host
+    would refuse a perfectly good Linux manifest for being on the wrong
+    machine.
+    """
+    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
+
+
+def _check_source(where: str, block: dict[str, Any]) -> _Source:
+    """Which of `_SOURCE_KEYS`' two shapes this block is, or a named refusal.
+
+    EXACTLY ONE, and both halves of the refusal are named rather than sharing
+    a "bad source" message: a block with both has two answers to "where are
+    these weights" and a block with neither has none, and they are different
+    mistakes to have made.
+    """
+    pinned = not _blank(block.get("hf_repo"))
+    local = not _blank(block.get("path"))
+
+    if pinned and local:
+        raise VoiceError(
+            f"{where}: declares both hf_repo {block['hf_repo']!r} and path "
+            f"{block['path']!r}. A backend block names ONE source — a pin Crucible "
+            "fetches and owns, or a directory somebody else put there and still "
+            "owns — and a block with two would let the loader pick which weights "
+            "the voice is"
+        )
+    if not pinned and not local:
+        raise VoiceError(
+            f"{where}: names no weights. A backend block declares either "
+            "hf_repo + revision (a pin) or path + identity (a directory on the "
+            "machine that serves it); see PHASE18-UNCERTIFIED.md section 3"
+        )
+
+    if pinned:
+        for key in ("path", "identity"):
+            if not _blank(block.get(key)):
+                raise VoiceError(
+                    f"{where}: is a pinned block and also carries {key}. A pin's "
+                    "identity is its revision, which is VERIFIED — the sha is what "
+                    f"was fetched — so a second {key} beside it would be a fact with "
+                    "two owners"
+                )
+        if not _HF_REPO.match(block["hf_repo"]):
+            raise VoiceError(
+                f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
+                "HuggingFace repo id"
+            )
+        if _blank(block.get("revision")):
+            raise VoiceError(
+                f"{where}: declares hf_repo {block['hf_repo']!r} and no revision. A "
+                "pin is a repo AND a commit; `PUT /v1/voices/{id}` is the door that "
+                "may omit one, and it resolves it before the manifest is written"
+            )
+        if not _REVISION.match(block["revision"]):
+            raise VoiceError(
+                f"{where}: revision {block['revision']!r} must be a full 40-character "
+                "commit sha, so a pull is reproducible; branch names are not pins"
+            )
+        return _Source(
+            hf_repo=block["hf_repo"],
+            revision=block["revision"],
+            path=None,
+            identity=None,
+        )
+
+    for key in ("hf_repo", "revision"):
+        if not _blank(block.get(key)):
+            raise VoiceError(
+                f"{where}: is a local block and also carries {key}. Crucible does not "
+                "fetch these bytes, does not stamp them and cannot check them against "
+                f"a pin, so a {key} here would describe a download that never happens"
+            )
+    if not _is_absolute(block["path"]):
+        raise VoiceError(
+            f"{where}: path {block['path']!r} is not absolute. The SERVER resolves it, "
+            "so a relative path would resolve against whatever directory that process "
+            "happens to have been started in"
+        )
+    if _blank(block.get("identity")):
+        raise VoiceError(
+            f"{where}: declares path {block['path']!r} and no identity. A directory "
+            "cannot say what weights it holds, so the registrant states it and the "
+            "row marks it ASSERTED. Without one, every checkpoint served from a "
+            "reused path would render under the same fingerprint and no client could "
+            "tell two of them apart"
+        )
+    return _Source(
+        hf_repo=None,
+        revision=None,
+        path=block["path"],
+        identity=block["identity"],
     )
 
 
@@ -885,16 +1229,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
             where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL, error=VoiceError
         )
 
-        if not _HF_REPO.match(block["hf_repo"]):
-            raise VoiceError(
-                f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
-                "HuggingFace repo id"
-            )
-        if not _REVISION.match(block["revision"]):
-            raise VoiceError(
-                f"{where}: revision {block['revision']!r} must be a full 40-character "
-                "commit sha, so a pull is reproducible; branch names are not pins"
-            )
+        source = _check_source(where, block)
         if block["memory_bytes_estimate"] <= 0:
             raise VoiceError(
                 f"{where}: memory_bytes_estimate must be positive, got "
@@ -946,8 +1281,10 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
 
         backends[kind] = VoiceBackendSpec(
             backend=kind,
-            hf_repo=block["hf_repo"],
-            revision=block["revision"],
+            hf_repo=source.hf_repo,
+            revision=source.revision,
+            path=source.path,
+            identity=source.identity,
             memory_bytes_estimate=block["memory_bytes_estimate"],
             estimate_basis=basis,
             estimate_note=note,

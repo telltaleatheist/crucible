@@ -10,7 +10,28 @@ Rule for every phase: BookForge changes little or nothing until Crucible is read
 first BookForge consumer is `bookforge-cli` (it drives the compiled pipeline, so it proves
 the seam without touching the app UI).
 
-**Newest first, 2026-09-15: PHASE17 — orchestrator and engine.** Every Crucible process now
+**Newest first, 2026-09-18: PHASE18 — uncertified voices. THE SOURCE AXIS IS BUILT; THE
+REST IS A RULING.** A voice
+may name its weights by PATH as well as by HF pin (the deploy problem has been blocked since
+2026-09-15 by full HF private storage), and a voice's certificates — cap, pace band, serving
+width — become facts a manifest may decline to state and a render may decline to be bound by,
+stated as `"voice"` / a value / `null` and never omitted. Two findings reverse earlier
+beliefs: the fine-tuning ladder needs NO `seed` wire field, because narrator's draw is a pure
+function of `(index, take)` and is weights-independent; and the unguarded render arm already
+exists in `narrator/serve/worker.py`, chosen today by engine capability rather than by the
+caller. An uncertified voice cannot be guarded at all — narrator's guard IS the certificate,
+so `guard: true` on a voice that states no pace triple and no cap is refused by name; and the
+certificate is not merely absent there but UNKNOWABLE, since the pace a guard enforces is the
+median of the voice's own clean renders, which is what the refused render would produce. Three
+schema relaxations carry it: the source axis, `[voice.pace]` omissible in whole (absent, never
+zeroed — an inherited pace is how deathstalker's 16.64 survived a promotion), and a numberless
+rung above take 0. **The first of those three is built**: a backend block declares a pin or
+a `path`, a local voice carries `source` and `identity_basis` on its `/v1/voices` row, and
+Crucible refuses to fetch, stamp, delete or catalogue bytes it does not own. The other two
+are not.
+Contract: `docs/PHASE18-UNCERTIFIED.md`. Owen has not ruled on the rest of the build order.
+
+**2026-09-15: PHASE17 — orchestrator and engine.** Every Crucible process now
 has a `role` on `/v1/info`. `crucible host` was always an orchestrator and is now named one
 (`crucible orchestrator`, `host` kept as an alias); it CLAIMS the one engine it manages,
 restarts it by the owner-appropriate means, and still never carries a byte of data. Apps keep

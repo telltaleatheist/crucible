@@ -183,6 +183,18 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
         if not voice.supports(backend.kind):
             continue
         spec = voice.spec(backend.kind)
+        if spec.source == weights.LOCAL:
+            # A LOCAL VOICE IS NOT A CATALOG SUBJECT (PHASE18-UNCERTIFIED.md
+            # section 3), and the catalog is exactly the wrong place to list it:
+            # every row here offers a `pull` and a `remove`, and this voice's
+            # bytes are a directory somebody else owns — which `weights.py`
+            # refuses to fetch or delete. A row promising two buttons that both
+            # refuse is worse than no row.
+            #
+            # It is still on `GET /v1/voices` with `source: "local"`, which is
+            # where a client asks what it can render. This list answers a
+            # different question: what does this machine DOWNLOAD.
+            continue
         found.append(
             Subject(
                 kind="voice",

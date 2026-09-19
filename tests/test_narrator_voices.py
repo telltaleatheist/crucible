@@ -428,6 +428,58 @@ def test_a_voice_the_document_does_not_carry_is_named_with_the_ones_it_does(
 # -------------------------------------------------------- the real catalog
 
 
+#: The three rate keys narrator reads as ONE statement. Its `_length_band`
+#: (`engine/higgs/config.py`) takes all three or none and refuses a partial
+#: triple by name, so this wire may never carry a subset.
+BAND_KEYS = ("paceCharsPerSec", "maxCharsPerSec", "minCharsPerSec")
+
+
+def _assert_band_is_the_manifest(entry: dict, manifest) -> None:
+    """The entry states the manifest's measured band, or states none at all.
+
+    THE POINT OF THE SECOND HALF (2026-09-18): a voice nobody measured used to
+    reach narrator carrying `paceCharsPerSec` 15.0 — narrator's own frame-cap
+    divisor, not a narration rate — between edges measured around a different
+    pace, and narrator, which keeps a band's RATIOS, then judged healthy chunks
+    run-ons. With the keys absent narrator falls to its engine's default band
+    and derives the centre itself (`truncation.tracker_for`), which is the one
+    owner that derivation is allowed to have.
+    """
+    if manifest.pace.pace_chars_per_sec is None:
+        for key in BAND_KEYS:
+            assert key not in entry, f"{manifest.id} sends an unmeasured {key}"
+        return
+    assert entry["paceCharsPerSec"] == manifest.pace.pace_chars_per_sec
+    assert entry["maxCharsPerSec"] == manifest.pace.max_chars_per_sec
+    assert entry["minCharsPerSec"] == manifest.pace.min_chars_per_sec
+
+
+def test_the_unmeasured_voices_send_narrator_no_band_at_all(tmp_path: Path) -> None:
+    """The base-weights pair, through the real writer, key by key.
+
+    Named separately from the sweep below because "these two send nothing" is
+    the ruling, and a sweep that quietly stopped covering them would still be
+    green.
+    """
+    clip = a_clip(tmp_path)
+    catalog = load_all_voices()
+    for voice_id in ("higgs-default", "zeroshot"):
+        manifest = catalog[voice_id]
+        assert manifest.pace.pace_chars_per_sec is None, voice_id
+        for backend, spec in sorted(manifest.backends.items()):
+            try:
+                entry = voice_entry(
+                    manifest, spec, tmp_path / voice_id / backend,
+                    clip if manifest.kind == "zeroshot" else None,
+                )
+            except NarratorVoicesError:
+                # A token voice on cuda-linux is refused by name and writes no
+                # entry at all; that refusal is pinned by the sweep below.
+                continue
+            for key in BAND_KEYS:
+                assert key not in entry, f"{voice_id}/{backend} sends {key}"
+
+
 def test_every_shipped_higgs_voice_writes_an_entry_on_the_arm_it_can(
     tmp_path: Path,
 ) -> None:
@@ -454,7 +506,7 @@ def test_every_shipped_higgs_voice_writes_an_entry_on_the_arm_it_can(
                 continue
             written.append((voice_id, backend))
             assert entry["maxChars"] == spec.max_chars
-            assert entry["paceCharsPerSec"] == manifest.pace.pace_chars_per_sec
+            _assert_band_is_the_manifest(entry, manifest)
             assert entry["sampling"] == {
                 "temperature": spec.sampling["temperature"],
                 "topP": spec.sampling["top_p"],

@@ -1535,13 +1535,25 @@ def cmd_voices_list(args: argparse.Namespace) -> int:
                 "backend_supported": True,
                 "installed": found is not None,
                 "hf_repo": spec.hf_repo,
-                "revision": spec.revision,
+                "revision": spec.weights_identity,
+                "source": spec.source,
+                "identity_basis": spec.identity_basis,
                 "memory_bytes_estimate": spec.memory_bytes_estimate,
                 "estimate_basis": spec.estimate_basis,
                 "max_chars": spec.max_chars,
+                # A LOCAL VOICE IS NOT PULLABLE, so its line must not offer a
+                # pull (PHASE18-UNCERTIFIED.md section 3): `crucible voices
+                # pull` on one is refused by name, and a screening merge that
+                # is gone is the expected end of its life rather than a broken
+                # install. The `/v1/voices` row's `reason` says the same thing
+                # for a client; this is the same question asked at a terminal.
                 "detail": (
                     f"{found.bytes / 1e9:.2f} GB at {found.path}"
                     if found is not None
+                    else f"no weights at {spec.path} — this voice names a "
+                    "directory on this server, which Crucible does not fetch "
+                    "and cannot replace"
+                    if spec.source == weights.LOCAL
                     else f"not pulled — `crucible voices pull {manifest.id}`"
                 ),
             }
@@ -1572,7 +1584,15 @@ def cmd_voices_pull(args: argparse.Namespace) -> int:
             f"{manifest.path.name} declares {sorted(manifest.backends)}"
         )
     spec = manifest.spec(backend.kind)
-    print(f"{manifest.id}: {spec.hf_repo}@{spec.revision[:12]} for {backend.kind}")
+    # WHAT THE BLOCK NAMES, in whichever of its two shapes (PHASE18-
+    # UNCERTIFIED.md section 3). `spec.revision[:12]` subscripted None on a
+    # local block, so this line raised a TypeError BEFORE `weights.pull` could
+    # refuse it by name — the operator got a traceback where there is a
+    # sentence saying the bytes are somebody else's.
+    if spec.source == weights.LOCAL:
+        print(f"{manifest.id}: {spec.path} for {backend.kind}")
+    else:
+        print(f"{manifest.id}: {spec.hf_repo}@{spec.revision[:12]} for {backend.kind}")
     try:
         result = weights.pull(
             config, manifest, spec, force=args.force,

@@ -148,9 +148,17 @@ def describe_voices(config: Config, residency: Residency) -> list[ModelDescripto
     for manifest in load_voices().values():
         if manifest.supports(backend_kind):
             spec = manifest.spec(backend_kind)
+            # A LOCAL BLOCK HAS NO REVISION AND NO REPO (PHASE18-UNCERTIFIED.md
+            # section 3), so the row carries what it does have: the identity its
+            # registrant asserted, and the directory instead of a repo id. The
+            # `path:` prefix is what keeps `source` one column meaning one
+            # thing — every other row here is a bare `<owner>/<name>`, and an
+            # unprefixed directory beside those would be a reader's problem to
+            # tell apart. (`crucible/catalog.py` prefixes BOTH shapes, `hf:`
+            # included; this row does not, so only the new shape is marked.)
             revision, source, estimate = (
-                spec.revision,
-                spec.hf_repo,
+                spec.weights_identity,
+                spec.hf_repo if spec.hf_repo is not None else f"path:{spec.path}",
                 spec.memory_bytes_estimate,
             )
             # The same predicate `voice_rows` and `require_loadable` read: the
@@ -206,6 +214,8 @@ def voice_rows(
         estimate: int | None = None
         basis: str | None = None
         revision: str | None = None
+        source: str | None = None
+        identity_basis: str | None = None
         fingerprint: str | None = None
         max_chars: int | None = None
         is_installed = False
@@ -219,7 +229,16 @@ def voice_rows(
             spec = manifest.spec(backend_kind)
             estimate = spec.memory_bytes_estimate
             basis = spec.estimate_basis
-            revision = spec.revision
+            # THE BLOCK'S IDENTITY AND NOT `spec.revision`, because this row
+            # states `fingerprint == f"{id}@{revision}"` and a local block has
+            # no revision: read off the raw field, a local voice published a
+            # fingerprint naming a checkpoint beside a `revision` of null, and
+            # the two halves of one record disagreed. `weights_identity` is the
+            # one owner of that fact (crucible/voices.py) and `identity_basis`
+            # below is what says how much it is worth.
+            revision = spec.weights_identity
+            source = spec.source
+            identity_basis = spec.identity_basis
             fingerprint = manifest.fingerprint(backend_kind)
             max_chars = spec.max_chars
             is_installed = weights.installed(config, manifest, spec) is not None
@@ -240,6 +259,16 @@ def voice_rows(
                 reason = (
                     f"the tts env for {manifest.narrator_engine} is not ready: "
                     f"{env.detail}"
+                )
+            elif not is_installed and spec.source == weights.LOCAL:
+                # A LOCAL VOICE IS NOT PULLABLE, so the reason must not tell its
+                # reader to pull it (PHASE18-UNCERTIFIED.md section 3). The
+                # directory belongs to whatever put it there, and a screening
+                # merge being gone is the expected end of its life rather than a
+                # broken install.
+                reason = (
+                    f"no weights at {spec.path} — this voice names a directory on "
+                    "this server, which Crucible does not fetch and cannot replace"
                 )
             elif not is_installed:
                 directory = weights.weights_dir(
@@ -266,6 +295,15 @@ def voice_rows(
                 # would read as "needs nothing" and an empty revision as a pin.
                 "revision": revision,
                 "fingerprint": fingerprint,
+                # WHERE THE BYTES COME FROM, and how much `fingerprint` is
+                # worth. `"pinned"` means the sha was fetched and stamped and
+                # the identity is VERIFIED; `"local"` means a directory on this
+                # machine whose identity the registrant ASSERTED and nothing
+                # checked. Both on the row for `estimate_basis`'s reason: a
+                # client comparing two renders must not be able to mistake one
+                # kind of identity for the other.
+                "source": source,
+                "identity_basis": identity_basis,
                 "memory_bytes_estimate": estimate,
                 # Whether somebody watched the card for that number or it came
                 # off the engine's own configured reservation. On the row rather
@@ -345,7 +383,16 @@ def require_loadable(
             409,
             "voice_not_installed",
             str(exc),
-            {"voice": voice_id, "hf_repo": spec.hf_repo, "revision": spec.revision},
+            {
+                "voice": voice_id,
+                "source": spec.source,
+                # Both null on a local block, which is what it has: no repo was
+                # named and no commit was pinned. The directory is in the
+                # message `weights.require_installed` already wrote.
+                "hf_repo": spec.hf_repo,
+                "revision": spec.revision,
+                "path": spec.path,
+            },
         ) from None
     return manifest, spec, (python, installed)
 
@@ -361,6 +408,15 @@ def voice_provenance(backend_kind: str, voice_id: str | None) -> dict[str, Any] 
     and a finished audiobook that says which voice rendered it should also say
     which merge of that voice, because two merges of one fine-tune are two
     narrators.
+
+    ON A LOCAL VOICE THE REVISION IS THE ASSERTED IDENTITY, and `identity_basis`
+    beside it says so (PHASE18-UNCERTIFIED.md section 3.1). Leaving `revision`
+    null there would be the worse of the two available lies: a sidecar whose
+    `fingerprint` names a checkpoint and whose `revision` says nothing reads as
+    a render whose weights were never established, when in fact they were
+    stated — just by a person rather than by a sha. What must never happen is
+    an ASSERTED identity being read as a VERIFIED one, and that is what the
+    basis is for.
     """
     if voice_id is None:
         return None
@@ -370,9 +426,15 @@ def voice_provenance(backend_kind: str, voice_id: str | None) -> dict[str, Any] 
         # Unreachable through the API: `preflight` refuses `backend_unsupported`
         # before a job exists. A sidecar still has to say something true if it is
         # reached another way, and inventing a revision is not it.
-        return {"id": voice_id, "revision": None, "fingerprint": None}
+        return {
+            "id": voice_id,
+            "revision": None,
+            "identity_basis": None,
+            "fingerprint": None,
+        }
     return {
         "id": voice_id,
-        "revision": spec.revision,
+        "revision": spec.weights_identity,
+        "identity_basis": spec.identity_basis,
         "fingerprint": manifest.fingerprint(backend_kind),
     }

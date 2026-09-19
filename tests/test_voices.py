@@ -176,15 +176,106 @@ def test_a_voice_with_no_pace_is_refused() -> None:
 
 def test_half_a_band_is_refused() -> None:
     """narrator's rule: the band is a triple, write all three or none."""
-    assert "missing required key(s) ['min_chars_per_sec']" in refused(
-        swap("min_chars_per_sec = 12.3\n", "")
+    message = refused(swap("min_chars_per_sec = 12.3\n", ""))
+    assert "declares only part of its rate band" in message
+    assert "['min_chars_per_sec']" in message
+
+
+def test_a_voice_may_state_no_rates_at_all() -> None:
+    """THE OTHER HALF OF "all three or none": none is a legal statement.
+
+    A voice nobody ran a ladder on has no pace to state, and narrator already
+    knows what to do with one — given no band it uses its engine's own default
+    and derives the centre as the geometric mean of the two edges
+    (`engine/higgs/truncation.tracker_for`). The alternative, which the loader
+    obliged until 2026-09-18, is a manifest made to invent three numbers.
+    """
+    voice = parse(
+        swap(
+            "pace_chars_per_sec = 16.0\nmax_chars_per_sec = 20.8\n"
+            "min_chars_per_sec = 12.3\n",
+            "",
+        )
     )
+    assert voice.pace.pace_chars_per_sec is None
+    assert voice.pace.max_chars_per_sec is None
+    assert voice.pace.min_chars_per_sec is None
+    # The packing shape is a different fact in the same table and is untouched.
+    assert voice.pace.safe_min_chars == 600
+    assert voice.pace.safe_max_chars == 800
 
 
 def test_a_pace_outside_its_own_edges_is_refused() -> None:
     message = refused(swap("pace_chars_per_sec = 16.0", "pace_chars_per_sec = 24.0"))
     assert "out of order" in message
     assert "the band is min < pace < max" in message
+
+
+#: THE TRIPLE THAT CAUSED THE RULING — narrator's Higgs v3 defaults spliced
+#: together, `HiggsDefaults.CHARS_PER_SEC` 15.0 between `HiggsV3Defaults`'
+#: 20.0/14.5 edges. It satisfies `min < pace < max` and is still wrong: the two
+#: halves were written around different centres, so the band is 1.333 long and
+#: 1.034 short, and narrator — which keeps only the RATIOS — judged healthy
+#: chunks run-ons and re-rolled them to MAX_DEPTH.
+SPLICED = swap(
+    "pace_chars_per_sec = 16.0\nmax_chars_per_sec = 20.8\nmin_chars_per_sec = 12.3",
+    "pace_chars_per_sec = 15.0\nmax_chars_per_sec = 20.0\nmin_chars_per_sec = 14.5",
+)
+
+
+def test_a_lopsided_triple_is_refused_naming_both_ratios() -> None:
+    """A BAND IS SYMMETRIC UNLESS IT SAYS OTHERWISE (ruled 2026-09-18).
+
+    `min < pace < max` passes this triple, which is how it shipped. The defect
+    is one level up: the edges were not derived from the pace at all.
+    """
+    message = refused(SPLICED)
+    assert "1.333" in message
+    assert "1.034" in message
+    assert "edges" in message
+
+
+def test_a_percentile_band_may_be_lopsided() -> None:
+    """The escape hatch, and it is a STATEMENT rather than a tolerance.
+
+    A band read off a distribution's percentiles is lopsided because the
+    distribution is, and there is nothing to refuse. Saying so in the manifest
+    is what separates that voice from one whose edges were spliced.
+    """
+    voice = parse(
+        SPLICED.replace(
+            "min_chars_per_sec = 14.5",
+            'min_chars_per_sec = 14.5\nedges = "percentile"',
+        )
+    )
+    assert voice.pace.pace_chars_per_sec == 15.0
+    assert voice.pace.max_chars_per_sec == 20.0
+    assert voice.pace.min_chars_per_sec == 14.5
+
+
+def test_an_unknown_edges_word_is_refused() -> None:
+    """A typo in the escape hatch must not read as "not percentile, so check"."""
+    message = refused(
+        SPLICED.replace(
+            "min_chars_per_sec = 14.5",
+            'min_chars_per_sec = 14.5\nedges = "percentiles"',
+        )
+    )
+    assert "edges" in message
+    assert "'percentiles'" in message
+
+
+def test_edges_without_a_band_is_refused() -> None:
+    """A key that describes edges the manifest does not state is a leftover."""
+    message = refused(
+        swap(
+            "pace_chars_per_sec = 16.0\nmax_chars_per_sec = 20.8\n"
+            "min_chars_per_sec = 12.3\n",
+            'edges = "percentile"\n',
+        )
+    )
+    assert "edges" in message
+    assert "states no rate band" in message
 
 
 def test_a_negative_rate_is_refused() -> None:
@@ -643,8 +734,65 @@ SHIPPED = {
 }
 
 
+#: The two voices in this build that are the BASE WEIGHTS rather than a
+#: fine-tune, and therefore the two nobody has run a length ladder on. They are
+#: named here because "which voices have no measured pace" is a fact about the
+#: catalog, and a third one appearing must be a deliberate edit to this line
+#: rather than a manifest quietly shipping without a band.
+UNMEASURED_PACE = ("higgs-default", "zeroshot")
+
+
 def test_this_build_ships_the_voices_it_says_it_does() -> None:
     assert sorted(load_all_voices()) == sorted(SHIPPED)
+
+
+@pytest.mark.parametrize("voice_id", sorted(SHIPPED))
+def test_a_manifest_states_the_pace_it_measured_and_no_other(voice_id: str) -> None:
+    """A MANIFEST STATES WHAT WAS MEASURED (ruling of 2026-09-18).
+
+    `higgs-default` and `zeroshot` are the base weights, no ladder has been run
+    on either, and until 2026-09-18 both satisfied a required-triple rule by
+    copying narrator's Higgs v3 defaults out of its source — `CHARS_PER_SEC`
+    15.0, which is the DIVISOR `cap_frames()` sizes the frame cap against and
+    not a rate anything was measured speaking at, between edges written around
+    a book pace nearer 17.2. narrator keeps a band's RATIOS, and those ratios
+    are 1.333 short against 1.034 long, so it judged healthy chunks run-ons and
+    re-rolled them to MAX_DEPTH. Stating nothing puts the derivation back where
+    it has one owner: narrator centres its own default band on the geometric
+    mean of the edges.
+
+    The five fine-tunes DO state all three, each from its own ladder, and this
+    test is the pair of those two statements.
+    """
+    pace = load_voice(voice_id).pace
+    rates = (pace.pace_chars_per_sec, pace.max_chars_per_sec, pace.min_chars_per_sec)
+    if voice_id in UNMEASURED_PACE:
+        assert rates == (None, None, None)
+        # Dropping the rates did not take the packing shape with them: they are
+        # two different facts in one table, and zeroshot still packs to the
+        # catalog's single 600-character target.
+        if voice_id == "zeroshot":
+            assert pace.target_chars == 600
+        return
+    assert all(rate is not None for rate in rates), voice_id
+    assert pace.min_chars_per_sec < pace.pace_chars_per_sec < pace.max_chars_per_sec
+
+
+@pytest.mark.parametrize("voice_id", sorted(set(SHIPPED) - set(UNMEASURED_PACE)))
+def test_every_measured_band_in_this_catalog_is_symmetric(voice_id: str) -> None:
+    """EVERY LADDER IN THIS BUILD WROTE max = pace x 1.3 AND min = pace / 1.3.
+
+    Not a rule the loader imposes — `edges = "percentile"` exists for a band
+    read off a distribution instead — but a fact about the five manifests that
+    are here, and the reason the symmetry check can be the default. A sixth
+    voice arriving with genuinely lopsided edges must say so in its manifest,
+    and this test is where that shows up.
+    """
+    pace = load_voice(voice_id).pace
+    long_side = pace.max_chars_per_sec / pace.pace_chars_per_sec
+    short_side = pace.pace_chars_per_sec / pace.min_chars_per_sec
+    assert round(long_side, 2) == 1.3, voice_id
+    assert round(short_side, 2) == 1.3, voice_id
 
 
 @pytest.mark.parametrize("voice_id", sorted(SHIPPED))
@@ -809,3 +957,118 @@ def test_the_full_override_still_replaces_everything(tmp_path, monkeypatch) -> N
     a_voice_file(tmp_path / "home" / "voices", "ignored-because-overridden")
     monkeypatch.setenv(VOICES_DIR_ENV, str(only))
     assert sorted(load_all_voices()) == ["just-this-one"]
+
+
+# ------------------------------------------------- the source axis (PHASE18)
+#
+# A backend block names ONE source: a pin Crucible fetches and owns, or a
+# directory somebody else put on the serving machine
+# (PHASE18-UNCERTIFIED.md section 3). Both halves of "exactly one" are refused
+# by their own name, because a block with two sources and a block with none are
+# different mistakes.
+
+PIN = (
+    'hf_repo = "owenmorgan/probe-higgs-v3"\n'
+    'revision = "0123456789abcdef0123456789abcdef01234567"'
+)
+LOCAL_SOURCE = (
+    'path = "/home/telltale/higgs_v3_merged/mb_ha_rvcbed1_5368"\n'
+    'identity = "mb_ha_rvcbed1@5368"'
+)
+
+
+def test_a_local_block_loads_and_says_what_it_is() -> None:
+    voice = parse(swap(PIN, LOCAL_SOURCE))
+    spec = voice.spec("cuda-linux")
+    assert spec.source == "local"
+    assert spec.hf_repo is None and spec.revision is None
+    assert spec.path == "/home/telltale/higgs_v3_merged/mb_ha_rvcbed1_5368"
+    assert spec.identity == "mb_ha_rvcbed1@5368"
+    # ASSERTED, not verified: nothing checked that directory against anything.
+    assert spec.identity_basis == "asserted"
+    assert str(spec.local_path).replace("\\", "/").endswith("mb_ha_rvcbed1_5368")
+
+
+def test_a_pinned_block_is_still_verified() -> None:
+    spec = parse(GOOD).spec("cuda-linux")
+    assert spec.source == "pinned"
+    assert spec.identity_basis == "verified"
+    assert spec.path is None and spec.identity is None
+    assert spec.local_path is None
+
+
+def test_the_fingerprint_is_the_identity_either_way() -> None:
+    # One shape, so a client comparing two renders never parses before it can
+    # compare. How much the answer is worth is `identity_basis` on the row.
+    assert parse(GOOD).fingerprint("cuda-linux") == (
+        "probe@0123456789abcdef0123456789abcdef01234567"
+    )
+    assert parse(swap(PIN, LOCAL_SOURCE)).fingerprint("cuda-linux") == (
+        "probe@mb_ha_rvcbed1@5368"
+    )
+
+
+def test_two_sources_are_refused_as_two_sources() -> None:
+    message = refused(swap(PIN, PIN + "\n" + LOCAL_SOURCE))
+    assert "declares both hf_repo" in message
+    assert "names ONE source" in message
+
+
+def test_no_source_at_all_is_refused_as_none() -> None:
+    message = refused(swap(PIN + "\n", ""))
+    assert "names no weights" in message
+    assert "hf_repo + revision" in message and "path + identity" in message
+
+
+def test_a_local_block_may_not_also_carry_a_pin_field() -> None:
+    message = refused(
+        swap(PIN, LOCAL_SOURCE + '\nhf_repo = "owenmorgan/probe-higgs-v3"')
+    )
+    assert "declares both" in message
+
+
+def test_a_pinned_block_may_not_carry_an_identity() -> None:
+    message = refused(swap(PIN, PIN + '\nidentity = "mb_ha_rvcbed1@5368"'))
+    assert "is a pinned block and also carries identity" in message
+    assert "VERIFIED" in message
+
+
+def test_a_local_path_must_be_absolute() -> None:
+    message = refused(swap(PIN, LOCAL_SOURCE.replace("/home/telltale", "merged")))
+    assert "is not absolute" in message
+    assert "whatever directory that process happens to have been started in" in message
+
+
+def test_a_windows_path_is_absolute_too() -> None:
+    # The loader may be running on a different OS than the one that will serve
+    # the voice, so "absolute" is asked of the PATH and not of this host.
+    voice = parse(
+        swap(PIN, 'path = "C:/merged/mb_5368"\nidentity = "mb_ha_rvcbed1@5368"')
+    )
+    assert voice.spec("cuda-linux").source == "local"
+
+
+def test_a_local_block_without_an_identity_is_refused() -> None:
+    message = refused(swap(PIN, LOCAL_SOURCE.split("\n")[0]))
+    assert "and no identity" in message
+    assert "no client could tell two of them apart" in message
+
+
+def test_an_empty_path_is_no_source_rather_than_a_bad_one() -> None:
+    # `path = ""` reads as a declaration to `in`, and would otherwise be
+    # refused for not being absolute — a second-order message about a block
+    # that really declared no source at all.
+    message = refused(swap(PIN, 'path = ""\nidentity = "x"'))
+    assert "names no weights" in message
+
+
+def test_a_pin_without_a_revision_says_which_door_may_omit_one() -> None:
+    message = refused(swap(PIN, PIN.split("\n")[0]))
+    assert "and no revision" in message
+    assert "PUT /v1/voices" in message
+
+
+# The pin's own two checks — the `<owner>/<name>` shape and the 40-character
+# sha — moved into `_check_source` with everything else and are NOT re-tested
+# here: `test_a_branch_name_is_not_a_pin` and `test_a_bare_repo_name_is_refused`
+# above run through the moved code and are the owners of those two facts.

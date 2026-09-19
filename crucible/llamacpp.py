@@ -49,6 +49,7 @@ from typing import Callable
 from .config import Config
 from .errors import CrucibleError
 from .weights import (
+    PINNED,
     InstalledWeights,
     ProgressHook,
     PullCancelled,
@@ -220,6 +221,7 @@ def installed(config: Config, build: str) -> InstalledWeights | None:
         revision=record["tag"],
         bytes=int(record["bytes"]),
         pulled=str(record["pulled"]),
+        source=PINNED,
     )
 
 

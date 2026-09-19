@@ -52,9 +52,10 @@ sample_rate = 24000
 # client does the packing, the server states the shape. These are the numbers that
 # live in BookForge's higgs-models.json voice document today.
 [voice.pace]
-pace_chars_per_sec = 16.64      # required
-max_chars_per_sec = 21.63       # required
-min_chars_per_sec = 12.80       # required; min < pace < max
+pace_chars_per_sec = 16.64      # the measured triple: all three, or none at all
+max_chars_per_sec = 21.63       # (a voice nobody measured writes none of them)
+min_chars_per_sec = 12.80       # min < pace < max, and symmetric in ratio
+# edges = "percentile"          # ...unless the edges came off a distribution
 safe_min_chars = 600            # this voice's packing shape: a band...
 safe_max_chars = 800
 # target_chars = 600            # ...or a single target. Never both; neither is
@@ -105,20 +106,44 @@ manifest carries the catalog's name and the catalog's meaning; the token budget 
 it is computed. **Nothing in `tts` carries a token cap on the wire**, and the `chunk` event's
 `capped` (section 6) is therefore about the frame cap narrator computed, not about this.
 
-**DIFFERENCE 2 — the pace block is three required rates plus an OPTIONAL packing shape.**
+**DIFFERENCE 2 — the pace block is a measured rate triple plus an OPTIONAL packing shape.**
 As drafted it required all seven numbers, and no voice in the catalog declares all seven.
-The three rates (`pace_chars_per_sec`, `max_chars_per_sec`, `min_chars_per_sec`) are
-required of every voice and must satisfy `min < pace < max`, which is narrator's own rule in
+The three rates (`pace_chars_per_sec`, `max_chars_per_sec`, `min_chars_per_sec`) are ALL
+THREE OR NONE and must satisfy `min < pace < max`, which is narrator's own rule in
 `engine/higgs/config.py`'s `_length_band` — the band is the measured pace and the two edges
 derived from it, and narrator keeps only the RATIOS and re-centres them on the book's own
-running median. A voice with no measurement of its own carries the narrator engine's default
-band, which is still a recorded number (Higgs v3: 15.0 / 20.0 / 14.5, read off
-`HiggsDefaults` and `HiggsV3Defaults`). What the client packs to is then EITHER a
+running median. **A voice with no measurement of its own states none of the three** (ruled
+2026-09-18): the base-weights pair used to restate narrator's Higgs v3 defaults instead —
+15.0 / 20.0 / 14.5 — and the 15.0 in that triple is `HiggsDefaults.CHARS_PER_SEC`, the
+divisor `cap_frames()` sizes the frame cap with, not a rate anything was measured speaking
+at. Against edges written around a book pace nearer 17.2 it gave narrator 1.034 tolerance on
+the long side and re-rolled healthy chunks to MAX_DEPTH. With the keys absent the voices
+document carries none of them, narrator uses its engine's own default band, and it derives
+the centre as the geometric mean of the edges (`truncation.tracker_for`) — one owner for
+that derivation, and Crucible is not it. What the client packs to is then EITHER a
 `safe_min_chars`/`safe_max_chars` band (what the five fine-tunes declare — their training
 corpus's interquartile range, measured 2026-09-09) OR a single `target_chars` (what the
 zero-shot voices declare), never both, and a voice declaring neither packs to the backend's
 `max_chars`, which is what BookForge does today. The loader refuses a band whose ceiling
 exceeds the arm's `max_chars`, the same rule BookForge and narrator both refuse on.
+
+**The stated triple must also be SYMMETRIC IN RATIO, and `edges` is how a manifest says it
+is not** (ruled 2026-09-18). Every length ladder run in this build wrote `max = pace × 1.3`
+and `min = pace ÷ 1.3`, and all five measured manifests here still round to 1.30 on both
+sides, so `max / pace` and `pace / min` are one number twice. The spliced 15.0 / 20.0 / 14.5
+above satisfied `min < pace < max` and was still 1.333 long against 1.034 short — two halves
+written around different centres — which is exactly what `min < pace < max` cannot see. The
+loader therefore refuses a triple whose two ratios disagree, naming both, with a tolerance
+that is the manifest's own rounding and nothing wider: these rates are written to two
+decimals, so each stands for a real number within 0.005, and that uncertainty is propagated
+through the two divisions rather than replaced by a round number chosen to make the catalog
+pass. The one escape is the optional `edges = "percentile"` under `[voice.pace]`: a band read
+off a distribution's percentiles is lopsided because the distribution is, and there is
+nothing to refuse. It is a statement to the loader and **does not reach the wire** — nothing
+downstream branches on how the edges were got, since narrator keeps only the ratios — so
+`/v1/voices` carries the same six pace fields it always did. The word is a closed set, so a
+typo is refused rather than read as "not percentile, therefore check the symmetry", and
+`edges` stated with no rate band to describe is refused as the leftover it is.
 
 **DIFFERENCE 3 — `sample_rate` is required in `[voice]`.** The `/v1/voices` row carries it
 and a client writing FLACs cannot be handed a null. It is 24000 for every voice in the
@@ -214,6 +239,28 @@ function — the same rule, and for the same reason, as `llm`'s models (PHASE2-L
 `revision`, `fingerprint`, `memory_bytes_estimate`, `estimate_basis` and `max_chars` are
 `null` when `backend_supported` is false, because they live in the backend block this host
 does not have — and `0` would read as "needs nothing".
+
+**`source` and `identity_basis` say where the weights came from and how much `fingerprint`
+is worth** (PHASE18-UNCERTIFIED.md section 3). A backend block declares EXACTLY ONE source:
+
+    hf_repo + revision    source "pinned", identity_basis "verified" — Crucible fetched
+                          the sha, stamped it, and owns the bytes.
+    path + identity       source "local", identity_basis "asserted" — a directory on the
+                          machine that serves it, which Crucible never fetches, never
+                          stamps, never deletes, and which may vanish between jobs
+                          without that being an error. `identity` is what the registrant
+                          says those weights are, and nothing checked it.
+
+A block with both, or with neither, is refused by its own name. `fingerprint` keeps ONE
+shape either way — `<id>@<revision>` or `<id>@<identity>` — so a client comparing two
+renders never has to parse before it can compare; `identity_basis` is how it learns what
+the comparison is worth. **`revision` on the row is that same identity**, which is the
+sha on a pinned block and the asserted string on a local one, so the row's own
+`fingerprint == <id>@<revision>` holds for both shapes; `identity_basis` is the only
+thing that says which kind of identity it is, and a client that needs a verifiable
+commit must read it rather than assume the field is a sha. `PUT /v1/voices/{id}` may omit
+`revision` on a PINNED block and the server resolves it; a LOCAL block has nothing to
+resolve and is written as sent.
 
 **`takes` is how many rungs this voice's ladder has**, and it is on the row so a client can
 ask before it submits. A `take` past the end is `unknown_take` and is never clamped, and a

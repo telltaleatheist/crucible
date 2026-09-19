@@ -34,17 +34,20 @@ narrator_engine = "higgs-v3"
 language = "en"
 sample_rate = 24000
 
-# No measured pace exists for a zero-shot voice — what it sounds like depends on
-# the clip, and the catalog's four carry no `pace` block. These are narrator's own
-# Higgs v3 default band, read off `engine/higgs/config.py` and `v3_engine.py`:
-# CHARS_PER_SEC 15.0, MAX_CHARS_PER_SEC 20.0, MIN_CHARS_PER_SEC 14.5. See
-# voices/higgs-default.toml for what each edge means.
+# NO PACE IS STATED, because none was measured and none can be from here: what a
+# zero-shot voice sounds like depends on the clip the JOB carries, and the
+# catalog's four carry no `pace` block either. Until 2026-09-18 this table copied
+# narrator's Higgs v3 defaults back to it — CHARS_PER_SEC 15.0 as the pace, with
+# MAX_CHARS_PER_SEC 20.0 and MIN_CHARS_PER_SEC 14.5 as the edges — and 15.0 is the
+# frame cap's DIVISOR rather than a rate anything speaks at, so the band centred
+# 1.034 wide on the long side and narrator, which keeps the RATIOS, re-rolled
+# healthy chunks to MAX_DEPTH. voices/higgs-default.toml carries the long form.
+# Absent, narrator uses that engine default band itself and centres it on the
+# geometric mean of its edges, which is one owner for the derivation.
 [voice.pace]
-pace_chars_per_sec = 15.0
-max_chars_per_sec = 20.0
-min_chars_per_sec = 14.5
-# The catalog's four zero-shot voices all declare targetChars 600 == maxChars 600,
-# and no safe band. So: one target, packed to.
+# The packing shape is a different fact and is still stated: the catalog's four
+# zero-shot voices all declare targetChars 600 == maxChars 600, and no safe band.
+# So: one target, packed to.
 target_chars = 600
 # WHAT THE SERVER narrator STARTS IS SIZED BY, and the one number it refuses to
 # render without: `HIGGS_MAX_NUM_SEQS` is stage 0's admission width on the
