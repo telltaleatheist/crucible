@@ -629,6 +629,15 @@ class Host:
             release=self._c.release,
             home=self._c.home,
             install_sh_url=INSTALL_SH_URL.format(release=self._c.release),
+            # IN THE DISTRO THIS HOST CLAIMED, which is the watcher's and not a
+            # default. Measured on 1.0.4 (2026-09-19 03:10): the carry left this
+            # off, took `EngineInstall`'s `CRUCIBLE_DISTRO`, and ran `install.sh`
+            # inside "crucible" on a machine whose engine this host had claimed
+            # in "Ubuntu" seconds earlier — `step_failed: install.sh exited
+            # 4294967295 inside "crucible": There is no distribution with the
+            # supplied name.` A guest carried is the guest that was claimed, so
+            # this asks the one object that knows which guest that is.
+            distro=self._c.watcher.distro,
         )
         try:
             carried = walk.upgrade_guest()
@@ -694,7 +703,7 @@ class Host:
     def _hold(self) -> None:
         """7b.4c: hold the distro the engine is in, or it goes away by itself."""
         if self._c.presence.owner is Owner.WSL_UNIT:
-            name = self._c.watcher._distro  # noqa: SLF001 - one object, one loop
+            name = self._c.watcher.distro
         elif (
             self._c.presence.owner is Owner.FOUND
             and self._c.watcher.found is not None
@@ -1051,7 +1060,7 @@ class Host:
             if probe.scope == presence_module.SCOPE_SYSTEM:
                 result = self._c.runner.run(
                     presence_module.system_systemctl_argv(
-                        self._c.watcher._distro,  # noqa: SLF001
+                        self._c.watcher.distro,
                         "stop",
                     ),
                     timeout_s=60.0,
@@ -1081,7 +1090,7 @@ class Host:
                 raise HostError("engine_stop_failed", "The guest uid could not be read; engine was not stopped")
             result = self._c.runner.run(
                 presence_module.user_systemctl_argv(
-                    self._c.watcher._distro,  # noqa: SLF001
+                    self._c.watcher.distro,
                     uid,
                     "stop",
                 ),
@@ -1389,7 +1398,7 @@ def _guest_line(context: HostContext) -> str | None:
     owner = context.presence.owner
     if owner is Owner.WSL_UNIT:
         return context.watcher.read_guest_pairing(
-            context.watcher._distro  # noqa: SLF001 - one object, one loop
+            context.watcher.distro
         )
     if owner is Owner.FOUND:
         return None if context.watcher.found is None else context.watcher.found.line

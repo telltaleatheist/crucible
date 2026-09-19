@@ -487,6 +487,21 @@ class PresenceWatcher:
         #: once is asked again.
         self._uid: str | None = None
 
+    @property
+    def distro(self) -> str:
+        """THE name of the distro this orchestrator manages. One owner.
+
+        Written for PHASE17 2.5's consequence rather than for tidiness: consent
+        makes this "Ubuntu" on Owen's PC while `CRUCIBLE_DISTRO` stays
+        "crucible", so every part of the host that acts on the guest has to ask
+        the SAME object which one it means. On 1.0.4 the hold and the claim read
+        this attribute and the guest carry read `EngineInstall`'s default
+        instead, so the host claimed the engine in "Ubuntu" and ran `install.sh`
+        in "crucible" — "There is no distribution with the supplied name.",
+        measured 2026-09-19 03:10.
+        """
+        return self._distro
+
     # ------------------------------------------------------------- probes
 
     def probe_distro(self) -> tuple[Distro, str]:

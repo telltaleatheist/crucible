@@ -255,6 +255,16 @@ class EngineInstall:
         self._release = release
         self._home = Path(home)
         self._install_sh_url = install_sh_url
+        #: WHICH GUEST. The default is the distro Crucible IMPORTS, and it is
+        #: the right one for the walk this class was written for: a first
+        #: install has no consented distro to ask about, because `_import_distro`
+        #: is the step that brings the only one into existence.
+        #:
+        #: It is NOT the right one for a machine that already has an engine in a
+        #: distro a person named in config.toml. Every such caller passes the
+        #: name the watcher holds — `PresenceWatcher.distro`, the one owner of
+        #: that fact — and 1.0.4 is what happens when one of them forgets to
+        #: (`app.carry_guest_to_this_release`, 2026-09-19).
         self._distro = distro
         #: `False` in a test and in `--install --no-elevate`: the argv is still
         #: reported, and nothing raises a consent dialog.
