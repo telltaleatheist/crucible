@@ -112,12 +112,51 @@ export function probeArgv(key: ProbeKey, inputs: WslStateInputs): string[] {
     case 'app-distro-conf':
       return ['wsl.exe', '-d', inputs.appDistro ?? CRUCIBLE_DISTRO, '-u', 'root', '--exec', 'bash', '-c', 'test -f /etc/wsl.conf && cat /etc/wsl.conf || true'];
     case 'guest-network':
-      return ['wsl.exe', '-d', CRUCIBLE_DISTRO, '--exec', 'curl', '-fsS', '-m', '20', '-o', '/dev/null', wheelUrl(inputs.release)];
+      // EVERY PLACE THE INSTALL DOWNLOADS FROM, one cheap HEAD each, and the
+      // FIRST one it cannot reach named on stderr (PHASE19 2.12).
+      //
+      // It used to be one `curl` at the release wheel, which proved one route
+      // out of five: a VPN or a proxy that passes GitHub and blocks PyPI,
+      // `download.pytorch.org`, the SGLang index or Hugging Face passed the
+      // probe and failed minutes later inside pip, with pip's own message.
+      //
+      // `{indexes}` is filled in by `crucible/host/wslstate.py` from the
+      // RECIPE FILES (`jobenv.recipe_index_urls`) plus the interpreter pin and
+      // this release's wheel. The list is not spelled here, and it is not
+      // spelled in the generated table either: a list written down anywhere
+      // drifts the first time a recipe gains an `--extra-index-url`, and the
+      // drift is invisible — the probe goes on passing and pip goes on
+      // failing. What lives here is the SHAPE of the probe, which is this
+      // package's to own.
+      return ['wsl.exe', '-d', CRUCIBLE_DISTRO, '--exec', 'bash', '-c', networkProbeScript()];
     case 'guest-disk':
       return ['wsl.exe', '-d', CRUCIBLE_DISTRO, '--exec', 'bash', '-c', 'df -Pk "$HOME" | awk \'NR==2 {print $4}\''];
     case 'guest-root':
       return ['wsl.exe', '-d', CRUCIBLE_DISTRO, '-u', 'root', '--exec', 'id', '-u'];
   }
+}
+
+/**
+ * The placeholder `crucible/host/wslstate.py` fills with the space-separated
+ * list of URLs to probe. It is a `{name}` because that is the seam the
+ * generator and `wslstate.render`/`substitute` already use for every other
+ * value the CALLER measures (`{release}`, `{app_distro}`, `{required}`).
+ */
+export const INDEXES_PLACEHOLDER = '{indexes}';
+
+/**
+ * One HEAD per index, stopping at the first that will not answer and naming it.
+ *
+ * `-I` rather than a body: an index page is megabytes and the question is
+ * whether the machine can reach it at all. `-L` because a release asset is a
+ * redirect to a CDN and the CDN is the thing a proxy blocks. The URL goes to
+ * STDERR because `said()` prefers stderr, so the sentence a person reads names
+ * the host that failed rather than curl's exit code.
+ */
+export function networkProbeScript(): string {
+  return `set -e; for u in ${INDEXES_PLACEHOLDER}; do `
+    + 'curl -fsSL -I -m 20 -o /dev/null "$u" || { echo "$u could not be reached" >&2; exit 1; }; '
+    + 'done';
 }
 
 /** The error text Windows prints when the hypervisor is not available. */
@@ -218,8 +257,9 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
       probe: 'guest-network',
       enabled: inputs.checkNetwork === true,
       means: (result) => result.failure !== null || result.code !== 0,
-      sentence: (result) => `The "${CRUCIBLE_DISTRO}" distribution cannot reach ${wheelUrl(inputs.release)} `
-        + `(${said(result)}). A VPN or a proxy on this machine usually explains it; there is nothing to install until it can.`,
+      sentence: (result) => `The "${CRUCIBLE_DISTRO}" distribution cannot reach one of the places this install `
+        + `downloads from: ${said(result)}. A VPN or a proxy on this machine usually explains it; `
+        + 'there is nothing to install until it can.',
       action: () => ({ kind: 'link', url: wheelUrl(inputs.release) }),
     },
     {

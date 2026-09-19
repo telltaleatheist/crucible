@@ -143,8 +143,8 @@ WSL_STATES: tuple[WslStateDef, ...] = (
     WslStateDef(
         code="guest_no_network",
         probe="guest-network",
-        probe_argv=("wsl.exe", "-d", "crucible", "--exec", "curl", "-fsS", "-m", "20", "-o", "/dev/null", "https://github.com/telltaleatheist/crucible/releases/download/v{release}/crucible-{release}-py3-none-any.whl", ),
-        sentence="The \"crucible\" distribution cannot reach https://github.com/telltaleatheist/crucible/releases/download/v{release}/crucible-{release}-py3-none-any.whl ({said}). A VPN or a proxy on this machine usually explains it; there is nothing to install until it can.",
+        probe_argv=("wsl.exe", "-d", "crucible", "--exec", "bash", "-c", "set -e; for u in {indexes}; do curl -fsSL -I -m 20 -o /dev/null \"$u\" || { echo \"$u could not be reached\" >&2; exit 1; }; done", ),
+        sentence="The \"crucible\" distribution cannot reach one of the places this install downloads from: {said}. A VPN or a proxy on this machine usually explains it; there is nothing to install until it can.",
         action_kind="link",
         action_argv=(),
         action_text="",

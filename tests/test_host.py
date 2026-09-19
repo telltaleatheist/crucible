@@ -895,6 +895,70 @@ def test_a_generated_row_with_no_predicate_is_refused_by_name(monkeypatch) -> No
     assert caught.value.code == "wsl_state_unknown"
 
 
+# ----------------------------------- PHASE19 2.12 the probe proves EVERY route
+
+
+def test_the_network_probe_names_every_index_a_recipe_names() -> None:
+    """2.12: the probe proved one route and the install needs five.
+
+    Derived, not listed: the recipes under `crucible/envs/` are read, so a
+    recipe that gains an `--extra-index-url` gains a probe with it. A list
+    written into this test would be the same drift one level down, so the test
+    reads the recipes too — and asserts that the two agree.
+    """
+    import re as _re
+
+    from crucible import jobenv
+
+    urls = wslstate.install_index_urls("1.0.5")
+    assert urls[0] == "https://pypi.org/simple", "a recipe with no index still uses one"
+    # Every option line in every recipe, read here independently of the code
+    # under test, must be in the list.
+    named: set[str] = set()
+    for directory in jobenv.recipe_roots():
+        for recipe in directory.glob("*.txt"):
+            for line in recipe.read_text(encoding="utf-8").splitlines():
+                found = _re.match(
+                    r"^\s*(?:--index-url|--extra-index-url|-f|--find-links)[=\s]+(\S+)\s*$", line
+                )
+                if found is not None:
+                    named.add(found.group(1))
+    assert named, "no recipe in this build names an index; the probe would prove nothing"
+    assert named <= set(urls), f"not probed: {sorted(named - set(urls))}"
+    # And the three no recipe names.
+    assert any("huggingface" in url for url in urls), "the weights come from somewhere"
+    assert any("python-build-standalone" in url for url in urls), "so does the interpreter"
+    assert any(url.endswith("crucible-1.0.5-py3-none-any.whl") for url in urls)
+
+
+def test_the_probe_runs_one_HEAD_per_index_and_names_the_FIRST_it_cannot_reach() -> None:
+    runner = Scripted(
+        answers={
+            "--status": ok("WSL version: 2.3.26.0\nDefault Version: 2\n"),
+            "-l -v": ok("  NAME        STATE           VERSION\n* crucible    Running         2\n"),
+            "/etc/wsl.conf": ok("# crucible-rootfs\n[boot]\nsystemd=true\n"),
+            "for u in": bad("https://download.pytorch.org/whl/cu128 could not be reached"),
+        }
+    )
+    state = wslstate.detect(runner, release="1.0.5", check_network=True)
+    assert state.code == "guest_no_network"
+    assert "download.pytorch.org" in state.sentence, "the sentence names the one that failed"
+    probe = next(call for call in runner.calls if "for u in" in " ".join(call))
+    script = probe[-1]
+    assert "{indexes}" not in script, "the placeholder was filled from the recipes"
+    assert "curl -fsSL -I -m 20" in script, "one cheap HEAD each"
+    for url in wslstate.install_index_urls("1.0.5"):
+        assert url in script, f"{url} is not probed"
+
+
+def test_reading_a_machines_facts_still_costs_nothing_it_was_not_asked_for() -> None:
+    """The network row is OFF by default, and its index list is not even built."""
+    runner = Scripted(answers={"--status": bad("not recognized")})
+    state = wslstate.detect(runner, release="1.0.5")
+    assert state.code == "wsl_missing"
+    assert not any("for u in" in " ".join(call) for call in runner.calls)
+
+
 # ------------------------------------------------- PHASE19 2.2 the outcome
 
 
