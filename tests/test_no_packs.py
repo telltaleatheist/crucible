@@ -72,12 +72,7 @@ def python_sources() -> list[Path]:
 
 
 def test_no_python_module_imports_the_deleted_one() -> None:
-    """An import is the only thing that can RUN it, so an import is the check.
-
-    `scripts/promote_release.py` is the one place this is currently expected to
-    fail, and it is not this branch's to fix — see the exemption below, which
-    is a LABELLED STOPGAP and not a rule.
-    """
+    """An import is the only thing that can RUN it, so an import is the check."""
     pattern = re.compile(
         r"^\s*(?:from\s+\.?\s*envpack\s+import|"
         r"from\s+crucible\.envpack\s+import|"
@@ -89,24 +84,9 @@ def test_no_python_module_imports_the_deleted_one() -> None:
     offenders = []
     for path in python_sources():
         relative = path.relative_to(ROOT).as_posix()
-        if relative in STOPGAP_OWNED_BY_FIX34:
-            continue
         if pattern.search(path.read_text(encoding="utf-8")):
             offenders.append(relative)
     assert offenders == [], f"these still import crucible.envpack: {offenders}"
-
-
-#: **LABELLED STOPGAP.** `scripts/promote_release.py` validates a candidate
-#: release's asset list and still imports `crucible.envpack`, so it raises
-#: ImportError the moment it is run. It is not exempt because the import is
-#: acceptable — it is exempt because that file belongs to the branch that
-#: rewrites the release path beside this one, and two branches editing it is a
-#: merge conflict in the one script nobody can test twice.
-#:
-#: THE OPEN QUESTION this stopgap stands in for: what does promotion VALIDATE
-#: now that a release is a wheel, a digest, two tarballs and two installers?
-#: When that is answered, the entry below goes and this check covers the file.
-STOPGAP_OWNED_BY_FIX34 = frozenset({"scripts/promote_release.py"})
 
 
 def typescript_sources() -> list[Path]:
