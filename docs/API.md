@@ -178,7 +178,7 @@ Every model this build has a manifest for, and where it stands here.
 
 Take the one lease this server holds at a time, on ANY resident kind. The order of the checks is their specificity, which is the job door's rule: a bad ttl and an unknown act are true of the request whatever this server is doing, so a client with a typo is told about the typo rather than about somebody else's lease. Residency comes next, because leasing a thing that is not here is a different mistake from being too late for one that is. **The id may name a model, a voice or an aligner** (PHASE7-LANES.md section 5.2, extended 2026-09-14). The route keeps its `/models/` path and its one route family, because the question it asks does not change with the kind: *is this the thing on the card?* The card holds ONE thing, so the kind is read off the residency rather than sent — and the namespaces being separate (a voice may be called `qwen3.5-9b`) cannot produce an ambiguity here, since only one of two colliding ids can be resident at a time and a lease is only ever on the resident one. Without this a book rendered chapter by chapter paid a narrator load per chapter and a book aligned chapter by chapter paid an aligner load per chapter, because the unload ruling clears the card the moment nothing holds it and the lease — the one thing that can hold it — could only name a model.
 
-*Door:* open
+*Door:* token + `X-Crucible-Api: 1`
 
 | parameter | in | required | type | what it is |
 | --- | --- | --- | --- | --- |
@@ -699,3 +699,5 @@ One named input: either an uploaded blob or bytes inline in the request.
 | `loc` | array of string or integer | yes | — |  |
 | `msg` | string | yes | — |  |
 | `type` | string | yes | — |  |
+| `input` | Input | no | — |  |
+| `ctx` | Context | no | — |  |

@@ -188,25 +188,64 @@ def auth_scopes(app: Any) -> dict[tuple[str, str], tuple[bool, bool]]:
     Read off each route's resolved dependency tree rather than off the router it
     was registered on, because the routers are built inside `create_app` and a
     route moved between them must not go on claiming the old scope here.
+
+    THE WALK DESCENDS, and it did not. A flat pass over `app.routes` finds ONE
+    route — `GET /`, the operator page — so every other door in this reference
+    was written "open", which is how `docs/API.md` shipped in 1.0.1 and 1.0.2
+    saying that `/v1/info` and `/v1/capability` need no token. Measured here on
+    fastapi 0.141.1 / starlette 1.6.0: `include_router` no longer splices the
+    routes in, it appends a `_IncludedRouter` whose real ones hang off
+    `original_router`, with the prefix and the router-level dependencies in a
+    separate `include_context`. `tests/test_api_client.py` met the same wrapper
+    from the other side on 2026-09-16 and answered it by asking `app.openapi()`;
+    that document says nothing about auth, so this asks the tree and follows it
+    down.
     """
     from crucible.api import require_api_version, require_auth
 
     scopes: dict[tuple[str, str], tuple[bool, bool]] = {}
-    for route in app.routes:
-        dependant = getattr(route, "dependant", None)
-        if dependant is None:
-            continue
-        calls = {dependant.call}
-        stack = list(dependant.dependencies)
-        while stack:
-            found = stack.pop()
-            calls.add(found.call)
-            stack.extend(found.dependencies)
-        for method in getattr(route, "methods", ()) or ():
-            scopes[(route.path, method.upper())] = (
-                require_auth in calls,
-                require_api_version in calls,
-            )
+
+    def walk(routes: Any, prefix: str, inherited: tuple[Any, ...]) -> None:
+        for route in routes:
+            included = getattr(route, "original_router", None)
+            if included is not None:
+                context = route.include_context
+                walk(
+                    included.routes,
+                    prefix + (context.prefix or ""),
+                    inherited + tuple(context.dependencies or ()),
+                )
+                continue
+            dependant = getattr(route, "dependant", None)
+            if dependant is None:
+                continue
+            calls = {dependant.call}
+            # The router-level `dependencies=[…]` a route was included under are
+            # folded into its own dependant by FastAPI, but they are carried down
+            # here as well rather than trusted to be. A door is stated in two
+            # places and reading only one of them is what this function was
+            # already doing wrong.
+            stack = list(dependant.dependencies) + [
+                one.dependency for one in inherited if one.dependency is not None
+            ]
+            while stack:
+                found = stack.pop()
+                calls.add(getattr(found, "call", found))
+                stack.extend(getattr(found, "dependencies", ()))
+            # `path_format`, not `path`: one route is registered with a
+            # converter — `/v1/models/{subject_id:path}/lease`, so that a model
+            # id with a slash in it survives — and the OpenAPI document this is
+            # joined to keys on the bare `{subject_id}`. `path_format` is the
+            # spelling FastAPI's own generator uses, which is what makes the two
+            # halves the same list.
+            spelling = getattr(route, "path_format", route.path)
+            for method in getattr(route, "methods", ()) or ():
+                scopes[(prefix + spelling, method.upper())] = (
+                    require_auth in calls,
+                    require_api_version in calls,
+                )
+
+    walk(app.routes, "", ())
     return scopes
 
 
@@ -348,7 +387,17 @@ def render(app: Any) -> str:
         if blurb:
             out += [blurb, ""]
         for path, method, operation in rows:
-            needs_token, needs_version = scopes.get((path, method), (False, False))
+            # NOT `.get(…, (False, False))`. A path the walk did not reach is a
+            # walk that is wrong, and defaulting it prints "open" — the one
+            # answer that reads like somebody decided it. That default is what
+            # kept the flat walk above invisible for two releases.
+            if (path, method) not in scopes:
+                raise SystemExit(
+                    f"{method} {path} is in the OpenAPI document but auth_scopes "
+                    "never reached it, so its door is unknown. The route walk "
+                    "does not match how this FastAPI nests routers"
+                )
+            needs_token, needs_version = scopes[(path, method)]
             if needs_token:
                 door = "token + `X-Crucible-Api: 1`"
             elif needs_version:
