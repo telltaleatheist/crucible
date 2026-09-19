@@ -671,6 +671,13 @@ def apply(config: Config, resolved: Resolved, *, gpu_vendor: str) -> None:
         # write rewrites the whole document, and a retention window left out
         # here would go back to the default without anybody asking it to.
         retention_days=config.retention_days,
+        # THIS BOX'S TTS FOOTPRINT SURVIVES THE REWRITE, on the same terms as
+        # the retention window above (PHASE21 section 2.3): `write_config`
+        # writes the whole document, so leaving `[tts.*]` out would take away
+        # the one place a repo-manifest voice gets its memory estimate and its
+        # serving width, and every such voice would start refusing with
+        # `engine_footprint_unset`.
+        tts_engines=config.tts_engines,
         desktop_allowance_bytes=resolved.desktop_allowance_bytes,
         capability=recomputed_capability(config, resolved, gpu_vendor=gpu_vendor),
         routes=routes,

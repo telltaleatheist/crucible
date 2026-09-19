@@ -358,7 +358,9 @@ def _check_no_machine_facts(where: str, table: dict[str, Any]) -> None:
         )
 
 
-def _repo_pace(where: str, table: dict[str, Any]) -> tuple[dict[str, Any], str]:
+def _repo_pace(
+    where: str, table: dict[str, Any]
+) -> tuple[dict[str, Any], str, str | None]:
     """The internal `[voice.pace]` table and its `basis`, out of the repo one.
 
     `basis` and `measured_from` are stripped here and do not reach `_parse`:
@@ -398,6 +400,7 @@ def _repo_pace(where: str, table: dict[str, Any]) -> tuple[dict[str, Any], str]:
         {k: v for k, v in table.items()
          if k not in (_PACE_BASIS, _PACE_MEASURED_FROM)},
         basis,
+        measured_from,
     )
 
 
@@ -415,6 +418,11 @@ class RepoManifest:
     voice: dict[str, Any]
     pace: dict[str, Any] | None
     pace_basis: str | None
+    #: The prose behind a measured pace, kept off the internal table (which has
+    #: no such key) and on this record, because `crucible voices card` prints it
+    #: into the card's `## Measured limits` section verbatim. That is the one
+    #: piece of prose the card no longer has to be typed with per deploy.
+    measured_from: str | None
     arms: dict[str, dict[str, Any]]
     #: `max_chars_basis` per arm, stripped out of the arm tables for the reason
     #: `_repo_pace` strips `basis`: the internal schema has no such key.
@@ -472,10 +480,13 @@ def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
 
     pace: dict[str, Any] | None = None
     pace_basis: str | None = None
+    measured_from: str | None = None
     if "pace" in voice:
         if not isinstance(voice["pace"], dict):
             raise VoiceError(f"{path.name}: [voice.pace] must be a table")
-        pace, pace_basis = _repo_pace(f"{path.name} [voice.pace]", voice["pace"])
+        pace, pace_basis, measured_from = _repo_pace(
+            f"{path.name} [voice.pace]", voice["pace"]
+        )
 
     if "arms" not in voice:
         raise VoiceError(
@@ -522,6 +533,7 @@ def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
         voice=scalars,
         pace=pace,
         pace_basis=pace_basis,
+        measured_from=measured_from,
         arms=arms,
         max_chars_basis=bases,
         takes=takes,
@@ -747,6 +759,36 @@ def _read(path: Path) -> str:
 # ------------------------------------------------------------ the whole set
 
 
+def voice_for_pin(pin: Pin) -> Any:
+    """One pin -> one `VoiceManifest`, or the named refusal that stops it.
+
+    The whole of "a pinned repo whose manifest is missing is NOT served and is
+    NOT read from any other source" lives here, and so does
+    `engine_footprint_unset`. It is a function rather than a loop body because
+    `PUT /v1/voices/{id}` calls it BEFORE it writes a pin: a door that wrote the
+    row first and discovered the refusal on the next listing would leave a
+    server holding a pin nothing can load, and the operator would be told about
+    it by a catalog that had stopped working.
+    """
+    from .config import crucible_home, tts_engine_footprints
+
+    home = crucible_home()
+    text, path = fetch_repo_manifest(home, pin)
+    repo = parse_repo_manifest(text, path)
+    engine = repo.voice["narrator_engine"]
+    footprint = tts_engine_footprints(home).get(engine)
+    if footprint is None:
+        raise VoiceError(
+            f"engine_footprint_unset: voice {pin.id!r} is served by {engine!r} "
+            f"and this server's config states no [tts.{engine}] table, so there "
+            "is no memory estimate and no serving width for it. A voice's facts "
+            "travel with its weights and a BOX's facts stay with the box "
+            "(PHASE21 section 2.3) — nothing here is defaulted. Run `crucible "
+            "init` on this machine, or write the table into config.toml by hand"
+        )
+    return merge(repo, pin, footprint)
+
+
 def pinned_voices() -> dict[str, Any]:
     """Every pinned voice this host offers, by id, as a `VoiceManifest`.
 
@@ -754,28 +796,4 @@ def pinned_voices() -> dict[str, Any]:
     precedence — so a packaged manifest still wins on a shared id while section
     8.1 is true, and adding a pin regresses nothing.
     """
-    from .config import crucible_home, tts_engine_footprints
-
-    pins = load_pins()
-    if not pins:
-        return {}
-    home = crucible_home()
-    footprints = tts_engine_footprints(home)
-    voices: dict[str, Any] = {}
-    for voice_id, pin in pins.items():
-        text, path = fetch_repo_manifest(home, pin)
-        repo = parse_repo_manifest(text, path)
-        engine = repo.voice["narrator_engine"]
-        footprint = footprints.get(engine)
-        if footprint is None:
-            raise VoiceError(
-                f"engine_footprint_unset: voice {voice_id!r} is served by "
-                f"{engine!r} and this server's config states no [tts.{engine}] "
-                "table, so there is no memory estimate and no serving width for "
-                "it. A voice's facts travel with its weights and a BOX's facts "
-                "stay with the box (PHASE21 section 2.3) — nothing here is "
-                f"defaulted. Run `crucible init` on this machine, or write the "
-                "table by hand"
-            )
-        voices[voice_id] = merge(repo, pin, footprint)
-    return voices
+    return {voice_id: voice_for_pin(pin) for voice_id, pin in load_pins().items()}

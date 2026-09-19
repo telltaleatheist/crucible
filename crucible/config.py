@@ -1048,6 +1048,115 @@ def _tts_engine_records(table: dict[str, Any]) -> tuple[EngineFootprint, ...]:
     return tuple(found)
 
 
+def declared_tts_footprints(backend_kind: str) -> tuple[EngineFootprint, ...]:
+    """What `crucible init` writes into `[tts.*]` for a backend, or nothing.
+
+    PHASE21-VOICES-FROM-HF.md section 2.3, and section 9's ruling 2 is still
+    Owen's: either init copies today's declared numbers per backend (this, the
+    recommended shape) or the table is left unset until `crucible capability`
+    measures one and nothing serves a pinned voice until then. **THE WRITE IS
+    THIS ONE FUNCTION** so that taking the second option is deleting a call,
+    not unpicking a writer.
+
+    ── Where these numbers come from, and why they are not measurements ───────
+
+    Every one of them is READ OFF THE SEVEN PACKAGED MANIFESTS AS OF 2026-09-19,
+    which is what section 2.3 asks for — the point of this table is that the
+    numbers stop being repeated once per voice, not that they change. They were
+    identical in all seven files on each arm, which is the evidence they are
+    facts about a box and an engine:
+
+      cuda-linux  19_000_000_000  SGLang-Omni's CONFIGURED RESERVATION on the
+                  3090 Ti — `--mem-fraction-static 0.60 holds ~19 GB at 16 in
+                  flight` (BookForge `electron/data/higgs-models.json`
+                  `serving.sglang._memFractionStaticNote`, owens-pc RTX 3090 Ti,
+                  2026-09-05). Nobody watched the card, so the basis is
+                  `declared` and it owes this note.
+
+      mlx-darwin  12_133_000_000  the one recorded MLX figure for Higgs v3
+                  weights of this shape — 11.3 GiB peak at a 900-character chunk,
+                  from deathstalker's MLX cap certificate (mlx-audio 0.4.8 /
+                  mlx 0.32.0 on owens-mac-studio, 2026-09-05). A sibling
+                  measurement carried across, which is exactly what `declared`
+                  means.
+
+      both        max_num_seqs 16 — vllm-omni's OWN stage-0 value in
+                  `higgs_multimodal_qwen3.yaml`, and a measured ceiling at the
+                  shipped fractions: 16 concurrent at 0.35 + 0.10 ran
+                  11,387-11,584 chars/min over three runs on owens-pc
+                  (2026-09-05) while 32 filled the card and stalled.
+
+    A BACKEND THAT SERVES NO NARRATOR ENGINE GETS NOTHING — `llama-windows`
+    returns an empty tuple, and its config carries no `[tts.*]` table at all,
+    which is the honest record of a box that cannot serve a voice.
+
+    These are a STARTING POINT and are meant to be overwritten: the note on each
+    says the measurement is owed, and a person or `crucible capability` may
+    rewrite the table on the machine it is wrong about.
+    """
+    from .backend import CUDA_LINUX, MLX_DARWIN
+
+    if backend_kind == CUDA_LINUX:
+        return (
+            EngineFootprint(
+                engine="higgs-v3",
+                memory_bytes_estimate=19_000_000_000,
+                estimate_basis="declared",
+                estimate_note=(
+                    "SGLang-Omni's configured reservation on this arm, not a "
+                    "watched card: `--mem-fraction-static 0.60 holds ~19 GB at 16 "
+                    "in flight` (BookForge higgs-models.json "
+                    "serving.sglang._memFractionStaticNote, owens-pc RTX 3090 Ti, "
+                    "2026-09-05). It is the SERVER's footprint rather than any "
+                    "one checkpoint's, which is why every Higgs v3 voice on this "
+                    "arm declared it until 2026-09-19 and why it is stated once "
+                    "here now. Owed: a real reading on this card."
+                ),
+                max_num_seqs=16,
+                max_num_seqs_note=(
+                    "16 is vllm-omni's OWN stage-0 value in "
+                    "higgs_multimodal_qwen3.yaml, and a measured ceiling at the "
+                    "shipped memory fractions: on owens-pc (RTX 3090 Ti, "
+                    "2026-09-05) 16 concurrent at 0.35 + 0.10 ran 11,387-11,584 "
+                    "chars/min over three runs while 32 filled the card and "
+                    "stalled. THE deathstalker CAP CERTIFICATE RAN AT 64, at the "
+                    "older fractions and before that stall was measured, so 16 is "
+                    "not the width its cap was certified at; nothing measured says "
+                    "whether batch width moves the safe chunk length, and if it "
+                    "does, that certificate is bound to 64 and this is the field "
+                    "that would have to change. It is also the width of narrator's "
+                    "own batch (v3_served.serve_concurrency), so raising it raises "
+                    "concurrent POSTs and VRAM pressure together."
+                ),
+            ),
+        )
+    if backend_kind == MLX_DARWIN:
+        return (
+            EngineFootprint(
+                engine="higgs-v3",
+                memory_bytes_estimate=12_133_000_000,
+                estimate_basis="declared",
+                estimate_note=(
+                    "The one recorded MLX figure for Higgs v3 weights of this "
+                    "shape — 11.3 GiB peak at a 900-character chunk, from "
+                    "deathstalker's MLX cap certificate (mlx-audio 0.4.8 / mlx "
+                    "0.32.0 on owens-mac-studio, 2026-09-05). Somebody else's "
+                    "reading carried across, which is exactly what 'declared' "
+                    "means. Owed: watch this machine's own allocator."
+                ),
+                max_num_seqs=16,
+                max_num_seqs_note=(
+                    "16 is vllm-omni's own stage-0 value and the width narrator "
+                    "batches at (v3_served.serve_concurrency), which is the number "
+                    "every packaged voice declared until 2026-09-19. The mlx arm "
+                    "starts no server under narrator, so what this sizes here is "
+                    "narrator's own batch. Owed: a width sweep on this machine."
+                ),
+            ),
+        )
+    return ()
+
+
 def tts_engine_footprints(home: Path | None = None) -> dict[str, EngineFootprint]:
     """`[tts.*]` off this installation's config, by engine. Empty when there is none.
 
