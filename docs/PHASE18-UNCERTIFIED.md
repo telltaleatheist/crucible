@@ -158,7 +158,7 @@ omitted, to express two decisions and one number.
 
     retake: bool          optional; absent is false
     band:   {pace_chars_per_sec, max_chars_per_sec, min_chars_per_sec}   optional
-    width:  int >= 1      optional; absent is the voice's own max_num_seqs
+    width:  int >= 1      optional; absent sends NO width, and the engine keeps its own
 
 **`retake` chooses the ARM.** `true` is narrator's guarded driver — the PaceTracker, the
 re-roll on truncation/runaway/loop, the split ladder — measured against THAT band. `false`,
@@ -187,13 +187,34 @@ A band sent with `retake` false or absent is accepted, CHECKED, and not acted on
 *"it won't do anything with the number because it wasn't asked to."* Checked anyway, because
 a malformed band is a client mistake whether or not this run would have used it.
 
-**`width` is how many of this job's chunks are in flight**, and absent is the resident
-voice's own `[voice.serving].max_num_seqs` — the width the ENGINE was started at, which is a
-stated number with an owner rather than a default. Above it is `width_over_serving` and
-never a clamp: a job that thought it was running 16 wide and was not would report a
-throughput nobody can reproduce. Narrowing restarts nothing. Measured 2026-09-19: 0.60 mem
-fraction at 16 wide summed to 24.2 GB on a 24 GB card and WDDM then pages to host RAM 4-10x
-slower with no error; the ladder's baseline is 4, on voices whose manifests say 16.
+**`width` is how many of this job's chunks are in flight**, and absent means **no width
+leaves this server**: the engine renders at the width it was STARTED at. Narrowing restarts
+nothing. Measured 2026-09-19: 0.60 mem fraction at 16 wide summed to 24.2 GB on a 24 GB card
+and WDDM then pages to host RAM 4-10x slower with no error; the ladder's baseline is 4, on
+voices whose manifests say 16.
+
+> **AMENDED 2026-09-20, and the amendment is a measured 2.3x.** This paragraph said absent
+> was "the resident voice's own `[voice.serving].max_num_seqs` — the width the ENGINE was
+> started at, which is a stated number with an owner rather than a default", and Crucible
+> substituted that number on every batch. It is the width the engine was started at **on the
+> served arm only**: `crucible/residency.py` emits it as `HIGGS_MAX_NUM_SEQS` where the tts
+> env installs a serving stack. On `mlx-darwin` narrator starts no server, reads no `HIGGS_*`
+> variable, and batches at `NARRATOR_HIGGS3_MLX_BATCH` off `engines/narrator.py:MLX_TIERS` by
+> the machine's own memory — 64 on the 64 GB Mac Studio. So the substitution narrowed every
+> Mac batch to 16, a vllm-omni stage-0 admission width measured on a 3090 Ti, and narrator
+> logged `MLX batch narrowed 64 rows -> 16 (depth 2957 positions, cap 16, budget 42 GB)` each
+> time. Measured on mistborn/Shift Book 2, chunk lengths equal and zero retakes: **12.9x
+> realtime / 189 sentences/min at 64, 5.5x / 78 at 16.** One fact, two owners, nothing
+> comparing them — `docs/ARCHITECTURE.md`'s shape. The width now has ONE owner: the client
+> states it or nobody does.
+
+**Above the engine's width is `width_over_serving` and never a clamp** — a job that thought
+it was running 16 wide and was not would report a throughput nobody can reproduce — and WHICH
+SIDE refuses it follows from who knows the ceiling. On the served arm Crucible knows it
+(it started the stack at `max_num_seqs`) and this door refuses early, before the job exists.
+On `mlx-darwin` Crucible does not, so the stated width is forwarded and narrator's own
+`width_over_serving` — added on the narrator side the same day — answers for the width it
+actually has.
 
 ### 4.0.1 What the RESULT carries back, and why
 
@@ -509,17 +530,29 @@ so it re-submits the missing cells. A server-side resume would be a second owner
 the client holds, and `index` is documented as the client's and never renumbered — which is
 what makes client-side resume correct.
 
-**Concurrency — AMENDED 2026-09-19; the manifest's number is now a CEILING, not the whole
-answer.** `[voice.serving].max_num_seqs` is still stage 0's admission width,
-`--tts_engine.factory.max_running_requests` on SGLang, and the width of narrator's own batch,
-and it is still what the engine is STARTED with. What it stopped being is the only say in how
-wide a JOB runs: `params.width` narrows a job under it, `width_over_serving` refuses one
-above it, and nothing is restarted either way.
+**Concurrency — AMENDED 2026-09-19, and AMENDED AGAIN 2026-09-20.**
+`[voice.serving].max_num_seqs` is stage 0's admission width,
+`--tts_engine.factory.max_running_requests` on SGLang, and the width of narrator's own batch
+— **on the SERVED arm**, which is where Crucible starts a stack and emits
+`HIGGS_MAX_NUM_SEQS`. What it stopped being on 2026-09-19 is the only say in how wide a JOB
+runs: `params.width` narrows a job under it and `width_over_serving` refuses one above it,
+with nothing restarted either way.
 
 The reason is a measurement rather than a preference. 0.60 mem fraction at 16 in flight
 summed to 24.2 GB on a 24 GB card and WDDM paged to host RAM 4-10x slower with no error at
 all. A screening job needs 4 on voices whose manifests say 16, and a manifest that said 4
 would size the SERVER at 4 for every other client of that voice.
+
+**What the second amendment corrects.** The 2026-09-19 version of this paragraph — written
+here, in this document — said an absent `width` was the manifest's width, and the code did
+that. It is the engine's started width on `cuda-linux` and a number that describes nothing on
+`mlx-darwin`, where narrator batches at `NARRATOR_HIGGS3_MLX_BATCH` off `MLX_TIERS` (64 on
+the 64 GB Mac Studio) and honours a batch `width` as an in-flight ceiling. Every Mac batch
+between 1.0.7 and 2026-09-20 was therefore narrowed 64 -> 16: measured on mistborn/Shift
+Book 2, chunk lengths equal and zero retakes, **12.9x realtime / 189 sentences/min before,
+5.5x / 78 after**. So absent now means **absent** — no `width` key on the batch envelope, the
+engine keeps the width it was started at, and the job's `done` reports `null` rather than a
+number this server invented. Section 4.0's `width` paragraph carries the same ruling.
 
 **And two more serving fields, same day, same shape** (`<field>` plus a required
 `<field>_note`, both optional, both on `/v1/voices`): `mem_fraction` and `context_length`.
@@ -560,7 +593,7 @@ than of a manifest:**
 |---|---|
 | `retake_without_band` | `retake: true` and the request states no `band`. Never filled in from the voice and never downgraded to the bare arm. |
 | `band_malformed` | a `band` that is not one — a missing rate, a value that is not a number, a rate at or below zero, or an order other than `min < pace < max`. ONE code for all of them, because a band is one statement, and it refuses the WHOLE request because there is no row a band belongs to. |
-| `width_over_serving` | `params.width` above the voice's `[voice.serving].max_num_seqs`. Both numbers in the detail. Never clamped. |
+| `width_over_serving` | `params.width` above the voice's `[voice.serving].max_num_seqs`, **on the served arm** — where that number is the width Crucible started the stack at. Both numbers in the detail. Never clamped. On `mlx-darwin` the same code comes from narrator, against the width it actually has. |
 
 **The two names the first draft of this section invented are GONE**, and neither was built:
 `certificate_unstated` (a render omitting a certificate key) went with the certificate

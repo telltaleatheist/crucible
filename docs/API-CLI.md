@@ -260,10 +260,17 @@ that take's seed lane (2026-09-19) and is never clamped — take 4 is never take
 
 `params` may also carry `retake` (which ARM renders the batch), `band` (the
 three rates the guarded arm measures against — required when `retake` is true,
-`retake_without_band` otherwise) and `width` (how many chunks are in flight,
-under the voice's `[voice.serving].max_num_seqs`, `width_over_serving` above
-it). The job's `done` names the FULL sampling triple the engine applied and the
-weights it ran on, so a screening record is self-describing.
+`retake_without_band` otherwise) and `width` (how many chunks are in flight).
+A `width` you do not send is **not sent on to narrator either**, and the engine
+then renders at the width it was STARTED at — `HIGGS_MAX_NUM_SEQS` from
+`[voice.serving].max_num_seqs` on a `cuda-linux` server, `NARRATOR_HIGGS3_MLX_BATCH`
+off the measured tier table on a Mac. On `cuda-linux` a `width` above
+`max_num_seqs` is `width_over_serving` from this server; on `mlx-darwin` the
+stated width travels and narrator answers for the width it actually has.
+The job's `done` reports the width **you stated**, and `null` when you stated
+none — never a number this server invented. The `done` also names the FULL
+sampling triple the engine applied and the weights it ran on, so a screening
+record is self-describing.
 
 ### AI cleanup and translation
 

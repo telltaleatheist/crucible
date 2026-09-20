@@ -215,10 +215,24 @@ def voice_rows(
     them are `null` when the manifest states none, which means "narrator's own
     launcher default" and never a number this row invented.
 
+    **`max_num_seqs` IS THE SERVED ARM'S WIDTH AND NOBODY ELSE'S** (Owen's
+    ruling of 2026-09-20). It is `HIGGS_MAX_NUM_SEQS` — stage 0's admission
+    width and the width of narrator's own batch — on a host whose tts env
+    installs a serving stack, which is `cuda-linux` today. On `mlx-darwin`
+    narrator starts no server, reads no `HIGGS_*` variable, and batches at
+    `NARRATOR_HIGGS3_MLX_BATCH` out of `engines/narrator.py:MLX_TIERS`, chosen
+    by that machine's own memory. So this number is what a render's `width` is
+    refused against HERE on the served arm only; on darwin a stated width goes
+    to narrator, which refuses it against the width it actually has. Reading
+    this row as "the width my render will run at" is what cost the Mac a
+    measured 2.3x between 1.0.7 and 2026-09-20 (see `render.py:_require_width`).
+    The row is honest either way — it says what the MANIFEST states — but a
+    client on darwin has no ceiling to compute from it.
+
     The levers themselves still reach narrator through the engine's environment
     (`crucible/engines/narrator.py`) and are still never SENT by a client: the
     row publishes what the server chose, and the only thing a request may say
-    about any of it is a width at or under the ceiling.
+    about any of it is a width the engine can actually run.
     """
     backend_kind = backend.kind
     rows: list[dict[str, Any]] = []
@@ -327,9 +341,12 @@ def voice_rows(
                 "estimate_basis": basis,
                 # THE SERVING TABLE, or null for a voice that declares none —
                 # a shape the next narrator engine will have and no manifest
-                # has today. `max_num_seqs` is the CEILING a job's `width` must
-                # sit under; the other two are what the server will configure
-                # narrator with, null meaning its launcher's own default.
+                # has today. `max_num_seqs` is the SERVED ARM's width (see the
+                # docstring): the ceiling a job's `width` is refused against on
+                # `cuda-linux`, and a number that describes nothing on darwin,
+                # where narrator batches at its own measured tier width. The
+                # other two are what the server will configure narrator with,
+                # null meaning its launcher's own default.
                 "serving": (
                     None if manifest.serving is None else manifest.serving.to_dict()
                 ),

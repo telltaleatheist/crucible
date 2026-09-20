@@ -1292,12 +1292,22 @@ export interface VoiceInfo {
    * declares no serving table (a shape the next narrator engine will have and
    * no manifest has today).
    *
-   * **`maxNumSeqs` is the ceiling a render's {@link RenderOptions.width} must
-   * sit under**, which is why this is published at all: it was deliberately
-   * NOT on the row until 2026-09-19, on the true-at-the-time ground that a
-   * client had no decision to make with it. Giving a job its own width made
-   * that false — without the number here, the only way to find the ceiling is
-   * to be refused by it.
+   * **`maxNumSeqs` is the SERVED ARM's width** — `HIGGS_MAX_NUM_SEQS`, the
+   * number Crucible starts narrator's serving stack at on a `cuda-linux`
+   * server — and it is the ceiling a render's {@link RenderOptions.width} is
+   * refused against THERE. That is why it is published at all: it was
+   * deliberately NOT on the row until 2026-09-19, on the true-at-the-time
+   * ground that a client had no decision to make with it, and giving a job its
+   * own width made that false.
+   *
+   * **On `mlx-darwin` it is not the width anything runs at.** narrator starts
+   * no server there and batches at `NARRATOR_HIGGS3_MLX_BATCH` out of a
+   * measured tier table chosen by the machine's own memory — 64 on the 64 GB
+   * Mac Studio against a manifest that says 16. Reading this number as "the
+   * width my render will run at" is what cost the Mac a measured 2.3x between
+   * Crucible 1.0.7 and 2026-09-20 (12.9x realtime / 189 sentences per minute
+   * down to 5.5x / 78). On that arm, state a width only if you mean it, and
+   * narrator answers for one it cannot run.
    *
    * `memFraction` and `contextLength` are `null` when the voice states none,
    * meaning narrator's own launcher defaults (0.60, and the Higgs builder's
@@ -1484,13 +1494,22 @@ export interface RenderOptions {
     readonly min_chars_per_sec: number;
   };
   /**
-   * How many of this job's chunks may be IN FLIGHT at once (2026-09-19).
+   * How many of this job's chunks may be IN FLIGHT at once (2026-09-19,
+   * amended 2026-09-20).
    *
-   * Absent is the resident voice's own `[voice.serving].max_num_seqs` — the
-   * width the engine was started at — which is a stated number with an owner
-   * rather than a default. A width ABOVE it is refused as `width_over_serving`
-   * and never clamped: a job that thought it was running 16 wide and was not
-   * would report a throughput nobody can reproduce.
+   * **Absent sends nothing**, and the engine then renders at the width it was
+   * STARTED at — `HIGGS_MAX_NUM_SEQS` from the voice's serving table on a
+   * `cuda-linux` server, `NARRATOR_HIGGS3_MLX_BATCH` off a measured tier table
+   * on a Mac. Until 2026-09-20 the server substituted the manifest's number
+   * here, which narrowed every Mac batch from 64 to 16 and cost a measured
+   * 12.9x realtime / 189 sentences per minute down to 5.5x / 78.
+   *
+   * A width ABOVE the engine's is refused as `width_over_serving` and never
+   * clamped: a job that thought it was running 16 wide and was not would
+   * report a throughput nobody can reproduce. On a `cuda-linux` server that
+   * refusal comes from Crucible, against
+   * {@link VoiceServing.maxNumSeqs}; on `mlx-darwin` it comes from narrator,
+   * against the width it actually has.
    *
    * Narrowing restarts nothing. The server keeps the `--max-running-requests`
    * and CUDA-graph budget it was loaded with; this only caps what narrator
@@ -1560,11 +1579,14 @@ export interface RenderResult {
     readonly identityBasis: string;
   };
   /**
-   * How many chunks were in flight at once — the request's
-   * {@link RenderOptions.width}, or the voice's own serving width when the
-   * request stated none. `null` only for a voice whose manifest declares no
-   * serving table at all. A throughput figure is comparable against this and
-   * nothing else.
+   * The width the REQUEST stated — its {@link RenderOptions.width} — and
+   * `null` when it stated none (2026-09-20). A throughput figure is comparable
+   * against this and nothing else.
+   *
+   * `null` is a fact, not a gap: it means the engine rendered at the width it
+   * was started at, which narrator knows and this server does not on every
+   * arm. Until 2026-09-20 it reported the voice's `maxNumSeqs` instead, which
+   * on a Mac named a width nothing ran at.
    */
   readonly width: number | null;
   /** The rate the voice was loaded at, and the rate every FLAC was written at. */

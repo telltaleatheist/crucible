@@ -98,8 +98,11 @@ job rather than a fact about the voice.
 - `band` — the three rates the guard measures against, STATED by the caller and never
   looked up. A server that found a band would be answering with a number nobody measured
   for those weights, which is the defect `pace_basis` exists to expose.
-- `width` — how many of this job's chunks are in flight, under the voice's own
-  configured `max_num_seqs`. A ceiling the job lowers; never one it raises.
+- `width` — how many of this job's chunks are in flight. A ceiling the job lowers; never
+  one it raises. Absent means the request says nothing about width, so the engine keeps
+  the width it was started at — which is the voice's `max_num_seqs` on the served arm and
+  a measured MLX tier row on `mlx-darwin`, and is narrator's to know rather than
+  Crucible's to restate (2026-09-20).
 
 Still NOT on the wire, and deliberately: sampling. The client asks for a take; the server
 says what that take means. What the wire gained instead is the RESULT saying which triple

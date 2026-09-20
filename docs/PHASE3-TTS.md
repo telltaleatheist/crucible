@@ -1000,14 +1000,28 @@ narrator's own frame-cap divisor (15.0, not a narration rate), and deathstalker 
 pace 16.64 onto weights that measured 15.91. A band sent with `retake` false or absent is
 accepted, checked, and not acted on: the server was not asked to judge anything.
 
-**`width` caps what is in flight**, and absent is the resident voice's own
-`[voice.serving].max_num_seqs` — the width the engine was STARTED at, which is a stated
-number with an owner rather than a default. Above it is `width_over_serving` and never a
-silent clamp. Narrowing restarts nothing: SGLang's `--max-running-requests` and
-`cuda_graph_max_bs` stay whatever the voice was loaded with, and only narrator's in-flight
-set is capped. Measured 2026-09-19: 0.60 mem fraction at 16 wide summed to 24.2 GB on a
-24 GB card, and WDDM then pages to host RAM 4-10x slower with no error at all; the ladder's
-baseline is 4 wide on voices whose manifests say 16.
+**`width` caps what is in flight**, and absent means **no `width` on the batch envelope at
+all**, so the engine renders at the width it was STARTED at. Narrowing restarts nothing:
+SGLang's `--max-running-requests` and `cuda_graph_max_bs` stay whatever the voice was loaded
+with, and only narrator's in-flight set is capped. Measured 2026-09-19: 0.60 mem fraction at
+16 wide summed to 24.2 GB on a 24 GB card, and WDDM then pages to host RAM 4-10x slower with
+no error at all; the ladder's baseline is 4 wide on voices whose manifests say 16.
+
+The width above it is `width_over_serving` and never a silent clamp — and WHO says so
+depends on the arm, because the ceiling is the width the ENGINE was started at and Crucible
+knows that number on one arm only. On the served arm it is `[voice.serving].max_num_seqs`,
+which this server emitted as `HIGGS_MAX_NUM_SEQS`, so this door refuses early. On
+`mlx-darwin` narrator starts no server and batches at `NARRATOR_HIGGS3_MLX_BATCH` off the
+measured tier table, so the stated width travels and narrator's own `width_over_serving`
+answers.
+
+> **AMENDED 2026-09-20.** From 2026-09-19 an absent width was substituted here with
+> `[voice.serving].max_num_seqs`. That is the engine's started width on `cuda-linux` and 16
+> in every packaged manifest — a vllm-omni stage-0 number measured on a 3090 Ti — so every
+> Mac batch logged `MLX batch narrowed 64 rows -> 16` against an engine started at 64 out of
+> its own tier row. Measured on mistborn/Shift Book 2, chunk lengths equal and zero retakes:
+> **12.9x realtime / 189 sentences/min at 64, 5.5x / 78 at 16.** The substitution is deleted.
+> The job's `done` now reports the width the caller STATED, and `null` when it stated none.
 
 **`model` is the voice id.** The wire's word for "the thing that produces the bytes" is
 `model`, and for `tts` that thing is the voice — which for Higgs is not a pun but the
@@ -1161,7 +1175,7 @@ note), `invalid_params`, `ffmpeg_missing`, `backend_unsupported`, `env_missing`,
 | `sampling_not_wired` | the narrator ON THIS WIRE did not announce `itemTake` on its `ready` line, so it has no per-item rung channel and a take above 0 would come back as take 0 under take N's name. Asked of the live process, because the tts env pins narrator by commit and a pin may be older than the channel — on 2026-09-15 it was, and two takes of one sentence returned byte-identical audio. **Only above take 0**: take 0 asks for the numbers and the seed lane every narrator ever built already uses. *Its ORIGINAL meaning — "this contract has no channel" — was deleted on 2026-09-14 when `narrator/engine/item_sampling.py` made it false; the code and the name came back a day later with the subject above (sections 3 and 4).* |
 | `retake_without_band` | `retake: true` and no `band`. Not filled in from the voice and not silently downgraded to the bare arm — a client that asked to be guarded and was not would read every clean row as a verdict. |
 | `band_malformed` | a `band` that is not one: a missing rate, a value that is not a number, a rate at or below zero, or an order other than `min < pace < max`. ONE code for all of them, because a band is one statement; it refuses the whole request, because there is no row a band belongs to. |
-| `width_over_serving` | a `width` above the voice's `[voice.serving].max_num_seqs`. Both numbers ride in the detail. Never clamped: a job that thought it was running 16 wide and was not would report a throughput nobody can reproduce. |
+| `width_over_serving` | a `width` above the voice's `[voice.serving].max_num_seqs`, **on the served arm only** — that is the width Crucible started the stack at, and on `mlx-darwin` the same refusal comes from narrator against the width it actually has. Both numbers ride in the detail. Never clamped: a job that thought it was running 16 wide and was not would report a throughput nobody can reproduce. |
 
 **Two refusals were RETIRED here on 2026-09-19** (PHASE18-UNCERTIFIED.md sections 4 and 5),
 and both are retired rather than relaxed:

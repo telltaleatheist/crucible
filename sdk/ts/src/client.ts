@@ -1336,9 +1336,11 @@ export class CrucibleClient {
           chunks: readRenderChunks(given.chunks),
           // ABSENT STAYS ABSENT for all three. `retake` omitted is the bare
           // arm, a `band` nobody stated is a band nobody can be held to, and
-          // `width` omitted is the voice's own serving width — each is a real
-          // state the server names, so sending a key this client invented
-          // would be answering a question the caller did not.
+          // `width` omitted is a render that says nothing about width, which
+          // the server passes on as silence so the engine keeps the width it
+          // was STARTED at. Each is a real state the server names, so sending
+          // a key this client invented would be answering a question the
+          // caller did not.
           ...(given.retake === undefined ? {} : { retake: given.retake }),
           ...(given.band === undefined ? {} : { band: given.band }),
           ...(given.width === undefined ? {} : { width: given.width }),

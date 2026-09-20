@@ -625,6 +625,13 @@ def _record_batch(message: dict) -> None:
     log that raised on a missing `band` could never show that Crucible sent
     none. This file never invents a value in a reply; recording `None` for a
     key that did not arrive is the reverse — it records that it did not.
+
+    `keys` IS THE SAME QUESTION ASKED EXACTLY (2026-09-20). `.get` cannot tell
+    an absent key from one sent as `null`, and after the MLX width regression
+    the difference is the whole assertion: an absent `width` means the engine
+    keeps the width it was started at, and a `width: null` would be Crucible
+    stating one it does not have. So the key NAMES this worker actually
+    received travel beside the values.
     """
     path = (os.environ.get("CRUCIBLE_FAKE_BATCH_LOG") or "").strip()
     if not path:
@@ -638,6 +645,7 @@ def _record_batch(message: dict) -> None:
                         "retake": message.get("retake"),
                         "band": message.get("band"),
                         "width": message.get("width"),
+                        "keys": sorted(message),
                         "items": len(message.get("items") or []),
                     }
                 )

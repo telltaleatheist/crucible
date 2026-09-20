@@ -21,13 +21,16 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, residency as residency_module
+from crucible import accelerator, jobenv, residency as residency_module
 from crucible.accelerator import GIB
+from crucible.errors import ApiError
 from crucible.jobs import asr as asr_jobs
+from crucible.jobs.tts import render as render_jobs
 from crucible.residency import KIND_TTS
+from crucible.voices import load_voice
 
 from . import fake_narrator_engine
-from .conftest import holding_the_card, parse_sse, wav_base64, wav_bytes
+from .conftest import FAKE_BACKEND, holding_the_card, parse_sse, wav_base64, wav_bytes
 from .test_tts_api import (  # noqa: F401 — imported to be used as fixtures
     fake_env,
     fake_weights,
@@ -898,17 +901,30 @@ def test_a_band_on_a_bare_render_travels_and_is_not_acted_on(
     assert batch_log()[0]["band"]["paceCharsPerSec"] == 15.91
 
 
-def test_a_job_with_no_width_runs_at_the_voices_own_serving_width(
+def test_a_job_that_states_no_width_sends_none_and_the_engine_keeps_its_own(
     rendered: Callable[..., list[dict[str, Any]]],
     batch_log: Callable[[], list[dict[str, Any]]],
 ) -> None:
-    """Absent is not a default: it resolves to `[voice.serving].max_num_seqs`,
-    which is the width the ENGINE was started at (`HIGGS_MAX_NUM_SEQS`) and a
-    number with an owner. deathstalker declares 16."""
+    """THE MLX REGRESSION, WRITTEN DOWN (Owen's ruling of 2026-09-20).
+
+    Between 2026-09-19 and 2026-09-20 an absent width resolved to
+    `[voice.serving].max_num_seqs` — 16 in every packaged manifest, a
+    vllm-omni stage-0 admission width measured on a 3090 Ti. narrator's MLX
+    backend honours a batch `width` as an in-flight ceiling and was started at
+    64 out of its own measured tier row, so it logged "MLX batch narrowed 64
+    rows -> 16" on every batch. Measured on mistborn/Shift Book 2, chunk
+    lengths equal and zero retakes: 12.9x realtime and 189 sentences/min
+    before, 5.5x and 78 after.
+
+    So an unstated width is now ABSENT FROM THE ENVELOPE, not a substituted
+    number — `keys` and not `.get`, because a `width: null` would be this
+    server stating a width it does not have — and `done` says `null`, which is
+    the fact rather than a gap.
+    """
     events = rendered()
     assert terminal(events)["data"]["rendered"] == len(CHUNKS)
-    assert batch_log()[0]["width"] == 16
-    assert terminal(events)["data"]["width"] == 16
+    assert "width" not in batch_log()[0]["keys"], batch_log()[0]["keys"]
+    assert terminal(events)["data"]["width"] is None
 
 
 def test_a_narrower_width_is_forwarded_and_nothing_is_restarted(
@@ -929,6 +945,40 @@ def test_a_narrower_width_is_forwarded_and_nothing_is_restarted(
     assert batch_log()[0]["width"] == 4
     assert terminal(events)["data"]["width"] == 4
     assert len(narrator) == 1, "narrowing a job restarted the engine"
+
+
+def test_on_the_mlx_arm_a_stated_width_travels_and_this_door_refuses_none() -> None:
+    """THE CEILING BELONGS TO THE ENGINE, AND CRUCIBLE KNOWS IT ON ONE ARM.
+
+    `[voice.serving].max_num_seqs` is `HIGGS_MAX_NUM_SEQS` — the width this
+    server itself starts narrator's serving stack at — so on the served arm
+    this door can refuse a wider job before the card is touched. On
+    `mlx-darwin` narrator starts no server, reads no `HIGGS_*` variable and
+    batches at `NARRATOR_HIGGS3_MLX_BATCH` off `engines/narrator.py:MLX_TIERS`
+    — 64 on the 64 GB Mac Studio against deathstalker's 16 — so `max_num_seqs`
+    describes nothing there and refusing against it would refuse a width the
+    engine can run. The stated width travels, and narrator's own
+    `width_over_serving` answers for the width it actually has.
+
+    Asked of `_require_width` directly rather than through a whole Mac render:
+    the two arms differ in exactly one input (`spec.backend`), and a test that
+    stood up a second client would be asserting about its own fixtures.
+    """
+    manifest = load_voice(VOICE)
+    wide = render_jobs.TtsParams(language="en", take=0, chunks=CHUNKS, width=32)
+
+    mlx = manifest.spec("mlx-darwin")
+    assert jobenv.tts_env(manifest.narrator_engine, mlx.backend).serving_stack is None
+    assert render_jobs._require_width(manifest, mlx, wide) == 32
+
+    served = manifest.spec(FAKE_BACKEND.kind)
+    assert (
+        jobenv.tts_env(manifest.narrator_engine, served.backend).serving_stack
+        is not None
+    )
+    with pytest.raises(ApiError) as refusal:
+        render_jobs._require_width(manifest, served, wide)
+    assert refusal.value.code == "width_over_serving"
 
 
 def test_the_result_names_the_full_sampling_and_the_weights_that_ran(
@@ -1104,7 +1154,11 @@ def test_a_width_above_the_voices_serving_width_is_refused_never_clamped(
     """narrator cannot keep more in flight than the server admits, and a clamp
     would be a job reporting a width it did not run at — which makes its
     throughput reproducible by nobody. Both numbers ride in the detail so a
-    client can fix the request without reading `/v1/voices` again."""
+    client can fix the request without reading `/v1/voices` again.
+
+    THIS IS THE SERVED ARM, which is what makes the early refusal Crucible's to
+    make: `max_num_seqs` is the number this server started narrator's serving
+    stack at. The darwin half of the same rule is the test above."""
     fake_weights(VOICE)
     error = _refuse(tts_client, auth, width=32)
     assert error["code"] == "width_over_serving"

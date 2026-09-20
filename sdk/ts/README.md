@@ -437,8 +437,12 @@ that is not one is `band_malformed`. The server never looks a band up for you: a
 band is indistinguishable from a measured one at the point of use, which is how pace 16.64
 survived onto weights that measured 15.91.
 
-**`width` caps what is in flight.** Absent is the voice's own `[voice.serving].max_num_seqs`;
-above it is `width_over_serving`, never a silent clamp. Narrowing restarts nothing.
+**`width` caps what is in flight.** Absent sends no width at all, and the engine then renders
+at the width it was STARTED at — `[voice.serving].max_num_seqs` on a `cuda-linux` server, a
+measured MLX tier width on a Mac. Above the engine's width is `width_over_serving`, never a
+silent clamp: from Crucible on `cuda-linux`, from narrator on `mlx-darwin`, where
+`max_num_seqs` describes a stack that is not running. Narrowing restarts nothing. The job's
+`done` reports the width you STATED and `null` when you stated none.
 
 The `index` is yours too, and nothing renumbers it. It goes out, comes back on the retiring
 row, and becomes the artifact's name.

@@ -174,7 +174,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ... import accelerator, hosttools
+from ... import accelerator, hosttools, jobenv
 from ...config import Config
 from ...engines import EngineError, EngineWouldNotStop, NarratorEngine
 from ...errors import ApiError, JobCancelled, JobError
@@ -296,26 +296,40 @@ class TtsParams(BaseModel):
     #: would sort the same mistake into `invalid_params` by which key it
     #: landed on, which is two names for one thing.
     band: dict[str, Any] | None = None
-    #: HOW MANY OF THIS JOB'S CHUNKS MAY BE IN FLIGHT AT ONCE, or absent for the
-    #: resident voice's own `[voice.serving].max_num_seqs` (Owen's ruling of
-    #: 2026-09-19).
+    #: HOW MANY OF THIS JOB'S CHUNKS MAY BE IN FLIGHT AT ONCE, or absent for
+    #: THE WIDTH THE ENGINE WAS STARTED WITH — which is narrator's to know and
+    #: not this file's to restate (Owen's ruling of 2026-09-20).
     #:
-    #: Absent is not a default and not a fallback: `max_num_seqs` is the width
-    #: the ENGINE was started with — the server's admission width and the width
-    #: of narrator's own batch — so "as wide as the voice was loaded" is a
-    #: stated number with an owner, exactly as "take 0's sampling" is.
+    #: Absent means NO `width` ON THE BATCH, so the running engine keeps the
+    #: width it was started at. On the served arm that is `HIGGS_MAX_NUM_SEQS`,
+    #: which Crucible did state, out of `[voice.serving].max_num_seqs`; on
+    #: `mlx-darwin` it is `NARRATOR_HIGGS3_MLX_BATCH`, which comes off
+    #: `engines/narrator.py:MLX_TIERS` — a different number, out of a different
+    #: table, measured on a different machine.
     #:
-    #: A width ABOVE it is `width_over_serving`, never clamped. The engine
-    #: cannot run wider than it was configured, and a job that believed it was
-    #: running 16 wide while narrator ran 4 would report a throughput nobody
-    #: can reproduce. Narrowing needs no restart and gets none: SGLang's
-    #: `--max-running-requests` and `cuda_graph_max_bs` stay whatever the voice
-    #: was loaded with, and this only limits what narrator keeps in flight.
+    #: THE SUBSTITUTION IS DELETED, AND IT COST A MEASURED 2.3x. Between
+    #: 2026-09-19 and 2026-09-20 an absent width resolved HERE to
+    #: `[voice.serving].max_num_seqs`, which is 16 in every packaged manifest
+    #: and whose own note says it was measured on a 3090 Ti as vllm-omni's
+    #: stage-0 admission width. narrator's MLX backend honours a batch `width`
+    #: as an in-flight ceiling, so every Mac batch logged "MLX batch narrowed
+    #: 64 rows -> 16" against an engine started at 64 out of its own tier row.
+    #: Measured on mistborn/Shift Book 2, chunk lengths equal and zero retakes:
+    #: 12.9x realtime and 189 sentences/min at 64, 5.5x and 78 at 16. One fact,
+    #: two owners, nothing comparing them — `docs/ARCHITECTURE.md`'s shape.
+    #:
+    #: A width above the engine's is `width_over_serving`, never clamped: a job
+    #: that believed it was running 16 wide while narrator ran 4 would report a
+    #: throughput nobody can reproduce. WHO refuses it depends on the arm, and
+    #: `_require_width` below says why.
     #:
     #: Why a screening job needs it (measured by the ladder's author,
     #: 2026-09-19): 0.60 mem fraction at 16 wide summed to 24.2 GB on a 24 GB
     #: card, and WDDM then pages to host RAM 4-10x slower with no error at all.
     #: The ladder's baseline is 4 wide, on voices whose manifests say 16.
+    #: Narrowing needs no restart and gets none: SGLang's
+    #: `--max-running-requests` and `cuda_graph_max_bs` stay whatever the voice
+    #: was loaded with, and this only limits what narrator keeps in flight.
     width: int | None = Field(default=None, ge=1)
 
     @field_validator("language")
@@ -476,30 +490,63 @@ def _require_band(params: TtsParams) -> dict[str, float] | None:
     return {wire: rates[key] for key, wire in _BAND_ON_THE_WIRE.items()}
 
 
-def _require_width(manifest: VoiceManifest, params: TtsParams) -> int | None:
-    """How wide this job runs, or `width_over_serving` by name.
+def _require_width(
+    manifest: VoiceManifest, spec: Any, params: TtsParams
+) -> int | None:
+    """The width the CALLER stated, verbatim, or `width_over_serving` by name.
 
-    Absent means the voice's own `[voice.serving].max_num_seqs`, which is the
-    width the engine was STARTED with (`HIGGS_MAX_NUM_SEQS`) — a stated number
-    with an owner rather than one this file chose.
+    **There is one owner of the width and it is not this file** (Owen's ruling
+    of 2026-09-20). A width the client stated is forwarded exactly as stated; a
+    width the client did not state is ABSENT from the batch, and the engine
+    then keeps the width it was started with. Nothing here substitutes.
 
-    **Above that number is a refusal and never a clamp.** narrator cannot keep
-    more in flight than the server admits, so a clamp would be a job reporting
-    a width it did not run at, and the throughput of a screening run is one of
-    the things the run exists to measure.
+    *What this replaced, and what it cost.* From 2026-09-19 this function
+    answered an absent width with `[voice.serving].max_num_seqs`, on the
+    reasoning that it is "the width the engine was STARTED with" — and on the
+    served arm it is: `crucible/residency.py` hands it to the engine and
+    `engines/narrator.py:environment()` emits it as `HIGGS_MAX_NUM_SEQS`.
+    On `mlx-darwin` it is not. narrator starts no server
+    there, reads no `HIGGS_*` variable, and takes its width from
+    `engines/narrator.py:MLX_TIERS` by the machine's own memory — 64 on the
+    64 GB Mac Studio, emitted as `NARRATOR_HIGGS3_MLX_BATCH`. So every Mac
+    batch since 1.0.7 carried 16, a vllm-omni stage-0 number measured on a
+    3090 Ti, and narrator's MLX backend (which honours a batch width as an
+    in-flight ceiling) logged "MLX batch narrowed 64 rows -> 16 (depth 2957
+    positions, cap 16, budget 42 GB)" on every one. Measured on mistborn/Shift
+    Book 2 with chunk lengths equal and zero retakes: **12.9x realtime and 189
+    sentences/min before, 5.5x and 78 after.** The width was the whole
+    difference.
 
-    None comes back only for a voice with no `[voice.serving]` table at all —
-    an engine that reads no `HIGGS_*` variable, which is a shape the next
-    narrator engine will have and no manifest has today. There is then no
-    configured width to compare against and none to forward, so the key is
-    omitted and narrator's own default stands, which is the same discipline
-    every other absent key on this wire has.
+    **A width above the engine's is still a refusal and never a clamp** — a
+    clamp would be a job reporting a width it did not run at, and the
+    throughput of a screening run is one of the things the run exists to
+    measure. What changed is WHO refuses it. The ceiling is the width the
+    ENGINE was started at, and Crucible knows that number on exactly one arm:
+    the SERVED one, where the env recipe installs a serving stack and this
+    server itself stated `max_num_seqs`. There this door refuses early, before
+    the job exists and before the card is touched. On `mlx-darwin` Crucible
+    knows no such number — `max_num_seqs` describes a stack that is not
+    running — so the stated width is forwarded and narrator's own
+    `width_over_serving` (added on the narrator side 2026-09-19) answers for
+    the width it actually has.
+
+    `jobenv.tts_env(...).serving_stack` is the question asked, rather than
+    `spec.backend == "mlx-darwin"`, because that is the same authority
+    `crucible/engines/narrator.py:environment()` uses to decide whether to emit
+    `HIGGS_MAX_NUM_SEQS` at all. Two files reading one fact, not two files
+    stating it.
     """
+    if params.width is None:
+        return None
     serving = manifest.serving
     if serving is None:
+        # A voice whose engine reads no `HIGGS_*` variable — the shape the next
+        # narrator engine will have and no manifest has today. No configured
+        # width to compare against, so the stated one travels and the engine
+        # answers for it.
         return params.width
-    if params.width is None:
-        return serving.max_num_seqs
+    if jobenv.tts_env(manifest.narrator_engine, spec.backend).serving_stack is None:
+        return params.width
     if params.width > serving.max_num_seqs:
         raise ApiError(
             400,
@@ -611,7 +658,7 @@ def _require_renderable(
 
     return (
         manifest, spec, interpreter,
-        _require_band(params), _require_width(manifest, params),
+        _require_band(params), _require_width(manifest, spec, params),
     )
 
 
@@ -1035,7 +1082,9 @@ class TtsJobType:
 
         `band` is the request's own band in narrator's spelling, already
         checked by `_require_band`, or None because none was stated. `width` is
-        the in-flight cap, already checked by `_require_width`.
+        the in-flight cap THE CALLER STATED, already checked by
+        `_require_width`, or None because the caller stated none — in which
+        case no width leaves this server and the engine keeps its own.
 
         **The whole job is one batch, and how wide it runs is now sayable.**
         The list is never cut up here — `generate_batch` does its own
@@ -1128,12 +1177,15 @@ class TtsJobType:
             # said, not to decide which of its statements narrator will find
             # useful.
             **({} if band is None else {"band": band}),
-            # HOW MANY ROWS MAY BE IN FLIGHT, batch-level beside the other two.
-            # Absent only for a voice with no `[voice.serving]` table, which is
-            # a shape the next narrator engine will have and none has today;
-            # then narrator's own default stands, because there is no
-            # configured width to forward and inventing one would be this file
-            # choosing a number it never measured.
+            # HOW MANY ROWS MAY BE IN FLIGHT, batch-level beside the other two,
+            # forwarded exactly as stated and ABSENT when the caller stated
+            # none — `band`'s discipline, and for the same reason. An absent
+            # width means the engine keeps the width it was STARTED at, which
+            # narrator knows on both arms and Crucible knows on one
+            # (`HIGGS_MAX_NUM_SEQS` on the served arm, `MLX_TIERS` on darwin).
+            # Substituting `max_num_seqs` here is what narrowed every Mac batch
+            # from 64 to 16 between 1.0.7 and 2026-09-20 — 12.9x realtime to
+            # 5.5x, 189 sentences/min to 78, measured on mistborn/Shift Book 2.
             **({} if width is None else {"width": width}),
             # No `stream` flag anywhere in the list. narrator's own docstring:
             # "A generate_batch with no `stream` flag anywhere takes the
@@ -1303,8 +1355,12 @@ class TtsJobType:
                 "identity": spec.weights_identity,
                 "identity_basis": spec.identity_basis,
             },
-            # The width this job ran at, stated because it is the number a
-            # throughput figure is only comparable against.
+            # THE WIDTH THIS JOB STATED, because it is the number a throughput
+            # figure is only comparable against — and `null` when it stated
+            # none, which is a fact and not a gap. The engine's own started
+            # width is narrator's to know; reporting it here would mean this
+            # server inventing a number on the arm where it does not have one,
+            # which is exactly the 2026-09-19 defect this is the fix for.
             width=width,
         )
 
