@@ -242,6 +242,16 @@ class Held:
     def __str__(self) -> str:
         return f"{self.fact} holds it: {self.who}"
 
+    def to_dict(self) -> dict[str, Any]:
+        """For `/v1/activity`'s `resident.held_by`.
+
+        `fact` and `who` are the two the refusals already print; `details` is
+        the holding fact's OWN shape, unchanged from the class docstring's rule
+        — a job's `server_busy` body, a lease's receipt — so a client that can
+        read a refusal can read this without learning a second vocabulary.
+        """
+        return {"fact": self.fact, "who": self.who, "details": self.details}
+
 
 @dataclass(frozen=True)
 class Settled:
@@ -296,6 +306,10 @@ class Settlement:
         self._leases = leases
         self._inflight = inflight
         self._log = log
+        #: When a SUCCEEDED load left something resident that nothing holds.
+        #: See `unheld_since()`; the one state this module's ruling does not
+        #: reach, recorded rather than inferred.
+        self._unheld_since: datetime | None = None
         # One settlement at a time. Two threads finding an empty card together
         # would have the second one raise `KeyError` out of `Residency.unload`
         # for a subject the first already took off.
@@ -452,6 +466,65 @@ class Settlement:
         self._log(settled.line)
         return settled
 
+    def unheld_since(self) -> datetime | None:
+        """Since when has the resident thing been held by NOTHING? None if held.
+
+        Two moments produce a resident-but-unheld card and this reports the
+        later of them, because both are real events with real timestamps:
+
+        1. **A load that succeeded** — `settle_for_job` stamps it above.
+        2. **A lease that LAPSED** — `Leases.lapsed_at()`. Expiry is read and
+           never swept, so no code path runs at the moment it happens; the
+           lease's own `expires_at` is that moment, written when it opened.
+
+        Every other way a holder lets go runs `settle()`, which clears the card,
+        so there is nothing left to date.
+
+        **Guarded by a live read of `holder()`**, so a stamp can never be
+        reported while something actually holds the card: the stamp is history,
+        the holder is now, and `None` from here means "held, or nothing is
+        resident". That is also why nothing clears the stamp — it is only ever
+        readable in the state that produced it.
+
+        This is a READ. It starts no timer and ends no residency; what may be
+        done about a card that has been unheld for a while is a ruling
+        (`docs/BUG-HUNT-2026-09-20.md` §F.8), not this function.
+
+        **IT DOES NOT TAKE `_lock`, and that is deliberate.** A settlement holds
+        that lock for the whole of an unload, and `SubprocessEngine.stop()`
+        waits up to 180 s for SIGTERM — so a reader that queued behind it would
+        make `/v1/activity` hang for three minutes, which this module's own
+        docstring calls indistinguishable from a dead server. The four sources
+        below each lock themselves; what this cannot promise is that they were
+        read in the same instant, and it does not need to: this is the bench
+        read, and *"display and admission are different questions and only one
+        may be answered from a poll"*.
+        """
+        if self.holder() is not None:
+            return None
+        if self._residency.resident is None:
+            return None
+        lapsed = self._leases.lapsed_at()
+        stamped = self._unheld_since
+        if lapsed is None:
+            return stamped
+        if stamped is None:
+            return lapsed
+        return max(lapsed, stamped)
+
+    def held_by(self) -> Held | None:
+        """The public name for `holder()`: what holds the card right now.
+
+        One owner of this fact, as the class docstring insists — `/v1/activity`
+        reads it here rather than re-deriving four facts of its own, which is
+        the one-fact-two-owners shape `docs/ARCHITECTURE.md` says this repo
+        keeps finding.
+
+        No `_lock`, for the reason `unheld_since()` gives at length: a bench
+        read must never queue behind a 180 s unload.
+        """
+        return self.holder()
+
     def settle_quietly(self, trigger: str) -> Settled | None:
         """`settle`, for a caller that has nothing to fail. **Never the loop.**
 
@@ -486,6 +559,22 @@ class Settlement:
         every load would find itself un-exempt and clear its own card.
         """
         if job.type in LEAVES_IT_RESIDENT and outcome == DONE:
+            # THE ONE MOMENT THIS MODULE'S RULING DOES NOT REACH, and now the
+            # one moment it is written down. A load that succeeded is not a
+            # holder letting go, so the card is left loaded on purpose — and
+            # until something leases it, chats it or renders on it, it is
+            # resident and held by NOTHING. On 2026-09-20 a hosted runner was
+            # stopped one second after its `load-model` reached `done`; the
+            # cancel was refused `job_not_cancellable` (the job was terminal),
+            # no lease was ever opened, and a 21 GB model sat on the card with
+            # all four facts false until a person noticed.
+            #
+            # This does not decide anything — deciding is `docs/BUG-HUNT`'s
+            # §F.8 and needs Owen. It makes the state VISIBLE, which is the
+            # half that needs no ruling: `/v1/activity` can now say "resident,
+            # held by nothing, since 18:29:37Z" and a reconciler on either side
+            # can act on a fact instead of a poll's timing.
+            self._unheld_since = datetime.now(timezone.utc)
             return None
         return self.settle(
             f"job {job.id} ({job.type}) finished", excluding_job=job.id

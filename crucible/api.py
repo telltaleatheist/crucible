@@ -1651,6 +1651,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         session = streams.session
         lease = leases.current()
         chat_limit, chat_limit_basis = _chat_limit_of(residency)
+        settlement: Settlement = request.app.state.settlement
+        held = settlement.held_by()
+        unclaimed = settlement.unheld_since()
 
         body: dict[str, Any] = {
             "server": {
@@ -1677,6 +1680,33 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     # present: an absent key would mean "this build does not
                     # say" (PHASE3-TTS.md section 5).
                     "reference": getattr(resident, "reference", None),
+                    # WHAT HOLDS IT, and since when it has been held by
+                    # nothing (2026-09-20). `resident` says what is on the
+                    # card; these say whether anybody is coming back for it.
+                    #
+                    # Both read `crucible/settle.py`, which is the ONE owner of
+                    # "what holds the card" — four facts, one function. Deriving
+                    # them again here would be the one-fact-two-owners shape
+                    # `docs/ARCHITECTURE.md` says this repo keeps finding, and
+                    # the copy would drift the first time a fifth kind of
+                    # holder arrived.
+                    #
+                    # `held_by` null with `resident` set is the stranded card: a
+                    # `load-model` that succeeded and was never claimed, or a
+                    # lease that lapsed with nothing asking again. Neither is
+                    # hypothetical — the first happened on this server at
+                    # 18:29:37Z on 2026-09-20, when a runner was stopped one
+                    # second after its load reached `done`.
+                    #
+                    # REPORTING ONLY. Nothing here unloads anything and there is
+                    # no timer: what should be DONE about a card nobody holds is
+                    # a ruling (`docs/BUG-HUNT-2026-09-20.md` §F.8). This is the
+                    # half that needs no ruling, because a reconciler on either
+                    # side cannot act on a state the server will not say.
+                    "held_by": (None if held is None else held.to_dict()),
+                    "unclaimed_since": (
+                        None if unclaimed is None else unclaimed.isoformat()
+                    ),
                 }
             ),
             # WHAT WAS TOLD TO GO AND HAS NOT (ledger R13, Owen's ruling

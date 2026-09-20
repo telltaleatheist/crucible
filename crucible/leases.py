@@ -360,6 +360,29 @@ class Leases:
         with self._lock:
             return self._open_locked()
 
+    def lapsed_at(self) -> datetime | None:
+        """When the stored lease LAPSED, or None if none did.
+
+        A released lease is not a lapse: release triggers a settlement, so the
+        card is already clear and there is nothing left unheld to date. A lapse
+        is the other exit — "EXPIRY IS READ, NEVER SWEPT" (module docstring), so
+        a lease whose ttl ran out with nothing asking again leaves the resident
+        thing unheld at a moment NO code path observed. `expires_at` is that
+        moment exactly, which is why this can be answered without a timer and
+        without a sweep: the number was written when the lease was opened.
+
+        Read-only. It reports a lapse; it does not end one, and nothing here
+        clears `_lease`, because a reader arriving later must still be able to
+        say when the card went quiet.
+        """
+        with self._lock:
+            lease = self._lease
+            if lease is None or self._closed is not None:
+                return None
+            if not lease.expired(self._now()):
+                return None
+            return lease.expires_at
+
     def _open_locked(self) -> Lease | None:
         lease = self._lease
         if lease is None or self._closed is not None:
