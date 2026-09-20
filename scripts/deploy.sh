@@ -5,6 +5,7 @@
 #   ./scripts/deploy.sh --release 0.6.8    # install that release everywhere
 #   ./scripts/deploy.sh --release 0.6.8 --only pc
 #   ./scripts/deploy.sh --release 0.6.8 --yes     # do not ask first
+#   ./scripts/deploy.sh --release 0.6.8 --interrupt  # restart a BUSY server too
 #
 # TWO MACHINES RUN CRUCIBLE — the PC and the Mac — and until this existed each
 # was upgraded by hand, in its own shell, with its own spelling of the same
@@ -106,6 +107,9 @@ assume_yes=0
 # `curl | sh` stopped after local-register, and the retry then skipped the
 # machine as already done. --force installs anyway.
 force=0
+# A deploy RESTARTS a server. `--interrupt` says do it even to one that is
+# working. See `busy_one` below for what this cost before it existed.
+interrupt=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -113,6 +117,7 @@ while [ $# -gt 0 ]; do
     --only)    [ $# -ge 2 ] || fail "--only needs a comma-separated list"; only="$2"; shift 2 ;;
     --yes|-y)  assume_yes=1; shift ;;
     --force)   force=1; shift ;;
+    --interrupt) interrupt=1; shift ;;
     -h|--help) sed -n '2,63p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown argument $1" ;;
   esac
@@ -403,6 +408,78 @@ trap 'rm -rf "$work" 2>/dev/null || echo "deploy: could not remove $work" >&2' E
 # `<machine>.seconds` always, `<machine>.why` only when something went wrong.
 # An absent `.why` beside a present `.seconds` is the success signal, and an
 # absent `.seconds` means this function did not finish, which is reported.
+# IS THIS MACHINE WORKING RIGHT NOW?
+#
+# THE INCIDENT, 2026-09-20. A deploy of 1.0.14 restarted the PC's Crucible six
+# minutes into a fine-tuning ladder's first real render — 128 chunks in one job,
+# generating steadily, the card at 79%. The client saw `Connection refused`, the
+# engine died with the server, and because a render writes nothing until it
+# completes, six minutes of GPU produced an empty `artifacts/`. The session that
+# lost it spent an hour looking for a crash: `NRestarts=0` and "Deactivated
+# successfully" in the journal say plainly that systemd stopped it ON REQUEST,
+# and the request was this script.
+#
+# Nothing was wrong with the deploy except that it never asked. The server knows
+# exactly what it is doing and says so — `GET /v1/activity` reports `running`,
+# `queued`, `streaming`, `chat.in_flight` and `lease` — and six deploys in one
+# night went past it without looking. A standing authorisation to deploy makes
+# that MORE dangerous, not less, because then nobody is asked either.
+#
+# So: asked, on the machine, over its own loopback with its own token. A server
+# that is working is REFUSED BY NAME with what it is working on in the sentence,
+# and `--interrupt` is how a person says do it anyway.
+#
+# A RESIDENT MODEL IS NOT BUSY. A card with something loaded and nothing using
+# it is exactly what a deploy may take — the settlement would unload it anyway.
+# A LEASE is different and does count: a lease is a client saying "I am mid-run".
+#
+# UNREACHABLE IS NOT BUSY EITHER. A server that will not answer cannot be losing
+# work, and refusing to deploy to it would make a broken machine unfixable by
+# the tool that fixes machines. Every failure to ask reads `idle(<why>)`, so the
+# reason is in the summary rather than swallowed.
+busy_probe() {
+  cat <<'PROBE'
+tok=$(sed -n 's/^token *= *"\(.*\)"/\1/p' "$HOME/.crucible/config.toml" 2>/dev/null | head -1)
+[ -n "$tok" ] || { echo "idle(no token to ask with)"; exit 0; }
+body=$(curl -sS -m 8 -H "Authorization: Bearer $tok" -H "X-Crucible-Api: 1" \
+  http://127.0.0.1:7100/v1/activity 2>/dev/null) || { echo "idle(not answering)"; exit 0; }
+[ -n "$body" ] || { echo "idle(not answering)"; exit 0; }
+printf '%s' "$body" | "$HOME/.crucible/server/bin/python" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("idle(activity unreadable)"); raise SystemExit(0)
+busy = []
+for row in d.get("running") or []:
+    busy.append("job %s (%s) %d%% done" % (row.get("job_id"), row.get("type"),
+                                           round((row.get("progress") or 0) * 100)))
+queued = len(d.get("queued") or [])
+if queued:
+    busy.append("%d queued" % queued)
+if d.get("streaming"):
+    busy.append("a streaming session")
+chat = (d.get("chat") or {}).get("in_flight") or 0
+if chat:
+    busy.append("%d chat completion(s) in flight" % chat)
+lease = d.get("lease")
+if lease:
+    busy.append("a lease held by %s for %s until %s" % (
+        lease.get("client") or "an unnamed client", lease.get("act"),
+        lease.get("expires_at")))
+print(("busy(" + "; ".join(busy) + ")") if busy else "idle")
+' 
+PROBE
+}
+
+busy_pc() {
+  wsl.exe -d "$DISTRO" --exec bash -c "$(busy_probe)" </dev/null 2>/dev/null     || echo "idle(could not ask)"
+}
+
+busy_mac() {
+  ssh -n -o ConnectTimeout=8 -o BatchMode=yes mac "$(busy_probe)" 2>/dev/null     || echo "idle(could not ask)"
+}
+
 deploy_one() {
   local machine="$1" want="$2" started after
   started="$(date +%s)"
@@ -431,6 +508,22 @@ for machine in $FLEET; do
       # is unknown, and the summary must say so rather than imply it is fine.
       failed="$failed $machine(unreachable)"; continue ;;
   esac
+
+  # ASKED BEFORE THE RESTART, never after. See `busy_pc` above for what this
+  # cost the night it did not exist.
+  if [ "$interrupt" != "1" ]; then
+    state="$("busy_$machine")"
+    case "$state" in
+      busy*)
+        echo
+        echo "deploy: $machine is WORKING and was not touched: ${state#busy}"
+        echo "deploy:   it would have been restarted mid-job, which loses"
+        echo "deploy:   whatever the job had not yet written to disk."
+        echo "deploy:   Wait for it, or re-run with --interrupt to take it anyway."
+        failed="$failed $machine(busy)"
+        continue ;;
+    esac
+  fi
 
   running="$running $machine"
   echo
