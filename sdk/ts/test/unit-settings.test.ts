@@ -107,7 +107,7 @@ const DOCUMENT = {
   // would be testing a server that does not exist.
   local_models: { clean: 'qwen3.5-9b', translate: null, simplify: null, analysis: null },
   local_model_choices: {
-    clean: [{ id: 'qwen3.5-9b', memory_bytes_estimate: 20950548480, fits: true, installed: true }],
+    clean: [{ id: 'qwen3.5-9b', memory_bytes_estimate: 20950548480, held_by: null, unclaimed_since: null, fits: true, installed: true }],
     translate: [], simplify: [], analysis: [],
   },
 };

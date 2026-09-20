@@ -44,6 +44,7 @@ class _FakeLeases:
     def __init__(self, current: Any = None, lapsed: datetime | None = None) -> None:
         self._current = current
         self._lapsed = lapsed
+        self.forgotten = 0
 
     def current(self) -> Any:
         return self._current
@@ -51,11 +52,26 @@ class _FakeLeases:
     def lapsed_at(self) -> datetime | None:
         return self._lapsed
 
+    def forget_lapse(self) -> None:
+        self.forgotten += 1
+        self._lapsed = None
+
 
 class _FakeResidency:
     def __init__(self, resident: Any = "a-model") -> None:
         self.resident = resident
         self.claimed_by = None
+        self.unloaded: list[str] = []
+
+    def claim(self, _who: str, **_kwargs: Any) -> None:
+        return None
+
+    def release(self, _who: str) -> None:
+        return None
+
+    def unload(self, subject_id: str) -> None:
+        self.unloaded.append(subject_id)
+        self.resident = None
 
 
 class _FakeInFlight:
@@ -234,3 +250,79 @@ def test_the_readers_do_not_take_the_settlement_lock() -> None:
     with settlement._lock:  # noqa: SLF001
         assert settlement.held_by() is None
         assert settlement.unheld_since() is None
+
+
+# ---------------------------------------------------------------------------
+# The lease that ran out — the one holder whose end fires nothing
+# ---------------------------------------------------------------------------
+
+
+class _Resident:
+    """What `settle()` reads off the resident thing."""
+
+    def __init__(self, ident: str = "a-model") -> None:
+        self.id = ident
+        self.kind = "llm"
+
+
+def test_a_lapsed_lease_clears_the_card() -> None:
+    """THE HOLDER WHOSE END NOBODY OBSERVES.
+
+    A released lease settles at the release. A lease that simply runs out is
+    read and never swept, so until this existed nothing ran at the moment it
+    lapsed — which is survivable while a lease is only a refusal, and is not
+    once a lease is what HOLDS a load.
+    """
+    settlement = _settlement(
+        resident=_Resident(), lapsed=datetime.now(timezone.utc) - timedelta(minutes=1)
+    )
+    settled = settlement.settle_for_lapsed_lease()
+
+    assert settled is not None
+    assert settled.subject_id == "a-model"
+    assert settlement._residency.unloaded == ["a-model"]  # noqa: SLF001
+
+
+def test_a_lease_that_has_not_lapsed_clears_nothing() -> None:
+    settlement = _settlement(resident=_Resident(), lapsed=None)
+    assert settlement.settle_for_lapsed_lease() is None
+    assert settlement._residency.unloaded == []  # noqa: SLF001
+
+
+def test_a_lapse_is_spent_once_even_when_it_cleared_nothing() -> None:
+    """THE LOADED GUN. `_lease` is kept after expiry so the 404 can still say
+    when it expired — so a lapse that went on being offered would, on the first
+    idle tick after somebody loaded a model WITHOUT a lease, be read as a holder
+    letting go and unload a model that had nothing to do with it.
+    """
+    settlement = _settlement(
+        resident=None, lapsed=datetime.now(timezone.utc) - timedelta(minutes=1)
+    )
+    # Nothing resident, so nothing to clear — and the lapse is still spent.
+    assert settlement.settle_for_lapsed_lease() is None
+    assert settlement._leases.forgotten == 1  # noqa: SLF001
+
+    # A model loaded afterwards, by somebody who took no lease, is SAFE.
+    settlement._residency.resident = _Resident("a-later-model")  # noqa: SLF001
+    assert settlement.settle_for_lapsed_lease() is None
+    assert settlement._residency.unloaded == []  # noqa: SLF001
+
+
+def test_a_settlement_that_raises_still_spends_the_lapse() -> None:
+    """A lapse retried for ever against a card it cannot clear is the same gun
+    with a slower trigger, so the spend is in a `finally`."""
+
+    class _Exploding(_FakeResidency):
+        def unload(self, subject_id: str) -> None:
+            raise RuntimeError("the engine would not stop")
+
+    settlement = Settlement(
+        residency=_Exploding(_Resident()),
+        store=_FakeStore(None),
+        leases=_FakeLeases(None, datetime.now(timezone.utc) - timedelta(minutes=1)),
+        inflight=_FakeInFlight(0),
+        log=lambda _line: None,
+    )
+    with pytest.raises(RuntimeError):
+        settlement.settle_for_lapsed_lease()
+    assert settlement._leases.forgotten == 1  # noqa: SLF001

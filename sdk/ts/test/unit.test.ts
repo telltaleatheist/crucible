@@ -369,7 +369,7 @@ test('only refusals about a SERVER travel to the next one', () => {
 /** A `/v1/activity` body with a session open and the lane free. */
 const ACTIVITY_WITH_SESSION = {
   server: { name: 'crucible@mac', version: '0.4.0', api_version: 1, backend: 'mlx-darwin', uptime_s: 12.5 },
-  resident: { kind: 'tts', id: 'deathstalker', since: '2026-09-13T18:00:00Z', memory_bytes_estimate: 19000000000 },
+  resident: { kind: 'tts', id: 'deathstalker', since: '2026-09-13T18:00:00Z', memory_bytes_estimate: 19000000000, held_by: null, unclaimed_since: null },
   // Nothing was told to go: present and null, like `claim` and `lease` below.
   stopping: null,
   warming: null,
@@ -388,7 +388,7 @@ const ACTIVITY_WITH_SESSION = {
     seconds: 41.2,
     chars: 903,
   },
-  chat: { in_flight: 0, rows: [] },
+  chat: { in_flight: 0, max_in_flight: null, max_in_flight_basis: null, rows: [] },
   // Nobody has said they are mid-run. Present and null, like `claim` above:
   // an absent key would mean a build that does not speak the field.
   lease: null,
@@ -467,7 +467,7 @@ test('a chat in flight is named as the act it IS, and does not gate work', async
     claim: null,
     streaming: null,
     chat: {
-      in_flight: 2,
+      in_flight: 2, max_in_flight: null, max_in_flight_basis: null,
       rows: [
         { id: 1, act: 'simplify', model: 'qwen3.8-27b-4bit', client: 'foundry/0.9.0', since: '2026-09-13T19:00:00Z' },
         { id: 2, act: null, model: 'qwen3.8-27b-4bit', client: null, since: '2026-09-13T19:00:04Z' },

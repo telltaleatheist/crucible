@@ -91,7 +91,7 @@ const MODEL_ROW = {
   installed: true,
   resident: true,
   loadable: true,
-  memory_bytes_estimate: 21000000000,
+  memory_bytes_estimate: 21000000000, held_by: null, unclaimed_since: null,
   context_default: 12288,
   max_model_len: 12288,
 };
@@ -151,7 +151,7 @@ test('models() reads every field /v1/models promises', async () => {
         resident: false,
         loadable: false,
         reason: 'not installed: run `crucible models pull qwen3.8-27b`',
-        memory_bytes_estimate: 54000000000,
+        memory_bytes_estimate: 54000000000, held_by: null, unclaimed_since: null,
         context_default: 12288,
         max_model_len: 12288,
       },

@@ -59,7 +59,10 @@ ALL_JOB_TYPES: dict[str, str] = {
 
 
 def build_registry(
-    config: Any, backend: Any, residency: Residency | None = None
+    config: Any,
+    backend: Any,
+    residency: Residency | None = None,
+    leases: Any | None = None,
 ) -> dict[str, JobType]:
     """Instantiate the job types this config enables.
 
@@ -79,10 +82,18 @@ def build_registry(
     if config.enable_echo:
         registry[EchoJobType.name] = EchoJobType()
     if config.enable_llm:
-        registry[LoadModelJobType.name] = LoadModelJobType(config, backend, holder)
+        # `leases` reaches the LOADERS and nothing else: a load can be asked to
+        # hold what it made resident (`params.lease`), which is the one place a
+        # job opens a lease rather than refusing against one. `crucible doctor`
+        # passes none and the loaders refuse `params.lease` by name.
+        registry[LoadModelJobType.name] = LoadModelJobType(
+            config, backend, holder, leases
+        )
         registry[UnloadModelJobType.name] = UnloadModelJobType(config, backend, holder)
     if config.enable_tts:
-        registry[LoadVoiceJobType.name] = LoadVoiceJobType(config, backend, holder)
+        registry[LoadVoiceJobType.name] = LoadVoiceJobType(
+            config, backend, holder, leases
+        )
         registry[UnloadVoiceJobType.name] = UnloadVoiceJobType(config, backend, holder)
         registry[TtsJobType.name] = TtsJobType(config, backend, holder)
     if config.enable_asr:

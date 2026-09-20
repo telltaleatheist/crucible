@@ -86,6 +86,8 @@ import {
   type JobState,
   type JobStatus,
   type Lease,
+  type LeaseOnLoad,
+  type LoadModelOptions,
   type LoadVoiceOptions,
   type ModelDescriptor,
   type ModelInfo,
@@ -603,6 +605,19 @@ export class CrucibleClient {
                 'memory_bytes_estimate',
                 'activity.resident',
               ),
+              // THE STRANDED CARD, and the two fields that let a client see it.
+              // `heldBy` null with `resident` set means nothing is coming back
+              // for what is on the card. `details` is passed through as the
+              // holding fact's own shape rather than reshaped here: a job's is
+              // the `server_busy` body a client already parses, and rebuilding
+              // it would be this SDK inventing a second vocabulary for a
+              // document the server already speaks.
+              heldBy: readHeldBy(resident),
+              unclaimedSince: nullableStr(
+                resident,
+                'unclaimed_since',
+                'activity.resident',
+              ),
             },
       stopping: readStopping(body, 'activity'),
       warming: nullableStr(body, 'warming', 'activity'),
@@ -611,6 +626,10 @@ export class CrucibleClient {
       lease: lease === null ? null : readLease(lease, 'activity.lease'),
       chat: {
         inFlight: num(chat, 'in_flight', 'activity.chat'),
+        // What this engine admits at once. Null for an engine that states no
+        // concurrency AND for an empty card — never "unlimited".
+        maxInFlight: nullableNum(chat, 'max_in_flight', 'activity.chat'),
+        maxInFlightBasis: nullableStr(chat, 'max_in_flight_basis', 'activity.chat'),
         rows: asArray(field(chat, 'rows', 'activity.chat'), 'activity.chat.rows').map(
           (entry, index) => {
             const where = `activity.chat.rows[${index}]`;
@@ -992,11 +1011,11 @@ export class CrucibleClient {
    * installed, unsupported on this backend, too big for the free VRAM, or the
    * card is busy with someone else's work.
    */
-  async loadModel(model: string): Promise<string> {
+  async loadModel(model: string, options?: LoadModelOptions): Promise<string> {
     return this.submit({
       type: 'load-model',
       model: requireText(model, 'model'),
-      params: {},
+      params: leaseParams(options?.lease),
       inputs: {},
     });
   }
@@ -1229,14 +1248,17 @@ export class CrucibleClient {
     return this.submit({
       type: 'load-voice',
       model: requireText(voice, 'voice'),
-      params: reference === undefined ? {} : {
-        reference: {
-          data: requireText(reference.data, 'reference.data'),
-          transcript: requireText(reference.transcript, 'reference.transcript'),
-          // Omitted rather than sent as null when there is none: the load door
-          // forbids unknown keys and a null label is not a label.
-          ...(reference.name === undefined ? {} : {name: reference.name}),
-        },
+      params: {
+        ...leaseParams(options?.lease),
+        ...(reference === undefined ? {} : {
+          reference: {
+            data: requireText(reference.data, 'reference.data'),
+            transcript: requireText(reference.transcript, 'reference.transcript'),
+            // Omitted rather than sent as null when there is none: the load door
+            // forbids unknown keys and a null label is not a label.
+            ...(reference.name === undefined ? {} : {name: reference.name}),
+          },
+        }),
       },
       inputs: {},
     });
@@ -3673,6 +3695,53 @@ function readStopping(body: Json, where: string): Stopping | null {
 }
 
 /** The six fields a lease carries wherever it appears. */
+/**
+ * `resident.held_by`, or null — **which is the stranded card, not an idle one.**
+ *
+ * `details` is handed through unchanged. It is the holding fact's OWN shape
+ * (`crucible/settle.py`'s `Held`): a job's is the `server_busy` body this SDK
+ * already types, a lease's is the lease receipt. Reshaping it here would make
+ * this file a second owner of documents the server already speaks, which is
+ * exactly the drift the field exists to avoid.
+ */
+function readHeldBy(
+  resident: Json,
+): { fact: string; who: string; details: Record<string, unknown> } | null {
+  const held = nullableObject(resident, 'held_by', 'activity.resident');
+  if (held === null) {
+    return null;
+  }
+  const where = 'activity.resident.held_by';
+  return {
+    fact: str(held, 'fact', where),
+    who: str(held, 'who', where),
+    details: asObject(field(held, 'details', where), `${where}.details`) as Record<
+      string,
+      unknown
+    >,
+  };
+}
+
+/**
+ * `params` for a load, carrying the lease when one was asked for.
+ *
+ * Snake_case on the wire because that is what the server's `LeaseOnLoad` model
+ * declares, and it forbids unknown keys — a camelCase `ttlSeconds` would be a
+ * 400 rather than a lease that quietly did nothing, which is the right failure
+ * and still a failure this function exists to never cause.
+ */
+function leaseParams(lease: LeaseOnLoad | undefined): Record<string, unknown> {
+  if (lease === undefined) {
+    return {};
+  }
+  return {
+    lease: {
+      act: requireText(lease.act, 'lease.act'),
+      ttl_seconds: lease.ttlSeconds,
+    },
+  };
+}
+
 function readLease(data: Json, where: string): ActivityLease {
   return {
     leaseId: str(data, 'lease_id', where),

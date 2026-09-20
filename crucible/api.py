@@ -505,7 +505,14 @@ def require_peer_api_version(request: Request) -> None:
 def create_app(config: Config, backend: Backend) -> FastAPI:
     """Build the ASGI app for one server instance."""
     residency = Residency(config)
-    registry = build_registry(config, backend, residency)
+    # CONSTRUCTED HERE, not at `app.state.leases` below, because the registry
+    # needs it: since 2026-09-20 a `load-model`/`load-voice` can be asked to
+    # hold what it made resident (`params.lease`), and the loaders are built in
+    # `build_registry`. One register, handed to both, so the lease a load opens
+    # and the lease `POST /v1/models/{id}/lease` opens are the same one — a
+    # second instance would be two servers disagreeing about who holds the card.
+    leases = Leases()
+    registry = build_registry(config, backend, residency, leases)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -589,8 +596,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     # the construction site.
     app.state.pairing_requests = PairingRequests(open_pairing=config.open_pairing)
     # In memory, and a restart forgets: a lease protects a resident model, and a
-    # restarted server holds none (crucible/leases.py).
-    app.state.leases = Leases()
+    # restarted server holds none (crucible/leases.py). Built at the top of
+    # `create_app` because the loaders need it too — see there.
+    app.state.leases = leases
     # OWEN'S RULING, 2026-09-14: *"Models should always be unloaded when we're
     # done with them. Every time."* The settlement is the one place that decides
     # nothing holds the card any more, and it is wired to all four of the things
@@ -639,7 +647,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         # replaced rather than the dict, because `JobStore` holds it by
         # reference and a store pointed at the old mapping would accept exactly
         # the job types the rest of the server had stopped offering.
-        rebuilt = build_registry(config, backend, residency)
+        rebuilt = build_registry(config, backend, residency, leases)
         registry.clear()
         registry.update(rebuilt)
         return sorted(registry)
@@ -3750,6 +3758,25 @@ async def _stream_from_upstream(
 # ------------------------------------------------------------------- helpers
 
 
+#: The keys `_job_state` owns. A job type's `done_extra` may add to the record
+#: and may never rewrite these.
+_JOB_STATE_KEYS: frozenset[str] = frozenset(
+    {
+        "job_id",
+        "type",
+        "model",
+        "status",
+        "progress",
+        "position",
+        "error",
+        "artifacts",
+        "created",
+        "started",
+        "finished",
+    }
+)
+
+
 def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
     return {
         "job_id": job.id,
@@ -3763,6 +3790,17 @@ def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
         "created": job.created,
         "started": job.started,
         "finished": job.finished,
+        # THE TERMINAL FACTS, READABLE AFTER THE STREAM IS GONE (2026-09-20).
+        # `done_extra` is what a job adds to its own `done` event — `resident`
+        # for a loader, and since the lease moved onto the load, `lease_id`. A
+        # client that lost the events stream could not read those back, and a
+        # `lease_id` a client cannot recover is a hold nobody can release: the
+        # exact shape of the strandings this release exists to end. Same rule as
+        # the cancel door's receipt — the frame is not the fact.
+        #
+        # Merged UNDER the keys above so a job type can never rename `status` or
+        # `error` by accident; a collision keeps this function's answer.
+        **{k: v for k, v in job.done_extra.items() if k not in _JOB_STATE_KEYS},
     }
 
 

@@ -46,6 +46,7 @@ from ... import accelerator
 from ...config import Config
 from ...engines import EngineError
 from ...errors import ApiError, JobError
+from ..llm import LeaseOnLoad, _open_lease_for_load
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
     KIND_TTS,
@@ -112,6 +113,17 @@ class LoadVoiceParams(BaseModel):
     #: body, and a refusal that cannot name the voice is a refusal a client
     #: has to guess at.
     reference: ReferenceInput | None = None
+    #: Hold the voice this load makes resident, from the instant it exists.
+    #: Same field, same reason and same validators as `load-model`'s — see
+    #: `crucible/jobs/llm/__init__.py`'s `LeaseOnLoad`. Absent means today's
+    #: behaviour exactly: loaded, and held by nothing.
+    #:
+    #: It matters MORE here than for a model. `settle.py`'s own "RULING OWED"
+    #: says the streaming door is safe only because `load-voice` is: the gap
+    #: between `load-voice` finishing and `POST /v1/tts/stream` opening is held
+    #: by nothing, and survives today only because a load is not a settlement
+    #: trigger. This is that gap closed.
+    lease: LeaseOnLoad | None = None
 
 
 class UnloadVoiceParams(BaseModel):
@@ -126,10 +138,19 @@ class LoadVoiceJobType:
 
     name = "load-voice"
 
-    def __init__(self, config: Config, backend: Any, residency: Residency) -> None:
+    def __init__(
+        self,
+        config: Config,
+        backend: Any,
+        residency: Residency,
+        leases: Any | None = None,
+    ) -> None:
         self._config = config
         self._backend = backend
         self._residency = residency
+        #: See `LoadModelJobType`: the one register, or None where there is no
+        #: server, in which case `params.lease` is refused rather than ignored.
+        self._leases = leases
 
     @property
     def residency(self) -> Residency:
@@ -200,11 +221,21 @@ class LoadVoiceJobType:
         # is warming a voice from the moment the lane picks the job up.
         self._residency.begin_warming(model)
         try:
-            self._load(ctx, model, params)
+            self._load(ctx, model, params, job.client)
         finally:
             self._residency.end_warming()
 
-    def _load(self, ctx: JobContext, model: str, params: LoadVoiceParams) -> None:
+    def _load(
+        self,
+        ctx: JobContext,
+        model: str,
+        params: LoadVoiceParams,
+        client: str | None,
+    ) -> None:
+        """`client` is `job.client`, carried in because a lease records who
+        holds it and this helper is the only place with the resident thing in
+        hand. Threaded rather than read off a second source: `Job.client` is
+        what every other holder is recorded under."""
         try:
             manifest, spec, (python, installed) = require_loadable(
                 self._config, self._backend, model
@@ -262,11 +293,24 @@ class LoadVoiceJobType:
         # `reference` on `done` for the same reason it is on the residency
         # report: two clients loading `zeroshot` see one voice id, and the
         # digest is the only thing that says whose clip won.
-        ctx.done_extra(
-            resident=resident.voice_id,
-            fingerprint=resident.fingerprint,
-            reference=resident.reference,
-        )
+        extra: dict[str, Any] = {
+            "resident": resident.voice_id,
+            "fingerprint": resident.fingerprint,
+            "reference": resident.reference,
+        }
+        if params.lease is not None:
+            # AFTER the cancel check above, for `load-model`'s reason: a lease
+            # opened before it would be held by a job about to raise
+            # `JobCancelled`, and the settlement would find a holder and leave
+            # the card stranded behind our own lease until its ttl ran out.
+            extra["lease_id"] = _open_lease_for_load(
+                self._leases,
+                kind=resident.kind,
+                subject=resident.voice_id,
+                request=params.lease,
+                client=client,
+            )
+        ctx.done_extra(**extra)
 
 
 # --------------------------------------------------------------- unload job

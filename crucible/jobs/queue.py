@@ -747,6 +747,15 @@ class JobStore:
                         f"{type(exc).__name__}: {exc}",
                         file=sys.stderr,
                     )
+                # AND THE LEASE NOBODY CAME BACK FOR. A lease that is RELEASED
+                # settles at the release; a lease that simply runs out is read
+                # and never swept (`crucible/leases.py`), so until this line
+                # nothing ran at the moment it lapsed and the card sat resident
+                # and unheld. It belongs on this tick rather than on a clock of
+                # its own for the reason the reap does: this is the thing that
+                # already runs when the lane is idle, which is exactly when a
+                # lapse goes unnoticed.
+                await self._settle_lapsed_lease()
                 try:
                     await asyncio.wait_for(
                         self._wake.wait(), timeout=REAP_INTERVAL_SECONDS
@@ -855,6 +864,29 @@ class JobStore:
             return
         if settled is not None:
             self.append_event(job, "note", settled.to_dict())
+
+    async def _settle_lapsed_lease(self) -> None:
+        """Clear the card when a lease ran out and nobody heartbeated it.
+
+        No job to hang a note on — that is the whole difficulty with a lapse and
+        the reason `settle.py` logs every clearance it makes. A failure here is a
+        cleanup failure and says so loudly without touching the lane, which is
+        `settle_quietly`'s rule applied to the one trigger that has no caller.
+        """
+        if self._settlement is None:
+            return
+        try:
+            await asyncio.to_thread(self._settlement.settle_for_lapsed_lease)
+        except Exception as exc:
+            # THE LANE OUTLIVES THIS, exactly as it outlives the reaper: letting
+            # one out here would kill the coroutine that IS the lane, and every
+            # later job would sit at `queued` for ever while the server went on
+            # answering 202.
+            print(
+                f"crucible: could not clear the card after a lease lapsed: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
 
     def _fail_out_of_band(self, job: Job, exc: BaseException) -> None:
         """Mark a job failed when the queue's own machinery is what broke.

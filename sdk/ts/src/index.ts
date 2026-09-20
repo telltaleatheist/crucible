@@ -151,6 +151,8 @@ export type {
   JobStatus,
   Lease,
   LlmCapability,
+  LeaseOnLoad,
+  LoadModelOptions,
   LoadVoiceOptions,
   CrucibleRole,
   EngineOwner,

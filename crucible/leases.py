@@ -352,6 +352,11 @@ class Leases:
         #: recorded here — it is derived from the clock, so that a lease stops
         #: being open at its deadline whether or not anybody looked.
         self._closed: str | None = None
+        #: The id of a lapsed lease whose settlement has already been EVALUATED.
+        #: See `forget_lapse()`; without it a lease that lapsed once would go on
+        #: offering itself as a reason to clear the card for ever, and would
+        #: eventually unload something loaded long after it died.
+        self._lapse_handled: str | None = None
 
     # ------------------------------------------------------------------ reads
 
@@ -378,6 +383,8 @@ class Leases:
         with self._lock:
             lease = self._lease
             if lease is None or self._closed is not None:
+                return None
+            if lease.id == self._lapse_handled:
                 return None
             if not lease.expired(self._now()):
                 return None
@@ -425,7 +432,30 @@ class Leases:
             )
             self._lease = lease
             self._closed = None
+            self._lapse_handled = None
             return lease
+
+    def forget_lapse(self) -> None:
+        """This lapse has been acted on; stop offering it as a reason.
+
+        Called by the settlement AFTER it has evaluated a lapsed lease, whatever
+        the outcome — including "there was nothing resident to clear". A lapse is
+        a one-shot fact: its whole remaining job was to trigger one settlement.
+
+        WITHOUT THIS IT IS A LOADED GUN. `_lease` is kept after expiry on
+        purpose, so `_unknown_locked` can still say *"it expired at … and nothing
+        heartbeated it"* rather than "unknown lease". But a lapsed lease that
+        goes on being reported would, on the next idle tick after somebody loads
+        a model WITHOUT a lease, be read as a holder letting go — and unload a
+        model that had nothing to do with it. Evaluated once, then silent.
+
+        `_closed` is deliberately untouched: that field is the SENTENCE a client
+        gets back, and "it lapsed" is a worse answer than the expiry time it
+        gives today.
+        """
+        with self._lock:
+            if self._lease is not None:
+                self._lapse_handled = self._lease.id
 
     def heartbeat(self, lease_id: str) -> Lease:
         """Push the deadline out by the ttl the lease was opened with."""

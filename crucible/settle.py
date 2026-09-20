@@ -525,6 +525,42 @@ class Settlement:
         """
         return self.holder()
 
+    def settle_for_lapsed_lease(self) -> Settled | None:
+        """A lease that ran out is a holder letting go that NOBODY OBSERVED.
+
+        THE ONE HOLDER WHOSE END FIRES NOTHING. Every other way a holder lets go
+        is an edge this server sees — a job ends, a session closes, a chat
+        returns, a lease is RELEASED — and each of those calls `settle()`. A
+        lease that simply runs out is read and never swept (`crucible/leases.py`),
+        so the card sits resident and unheld with no code path having run.
+
+        That was harmless while a lease was only a refusal: the thing it
+        protected had been loaded by somebody who was still expected to unload
+        it. It stops being harmless the moment a lease is what HOLDS a load
+        (`lease` on `load-model`), because then the lease running out is the
+        whole of the client's disappearance, and nothing else is coming.
+
+        **This is not the timer this module rejected.** That rejection was about
+        answering *"is this operator done?"*, which is a guess. A ttl is not a
+        guess — it is a number the client stated, about itself, and extended
+        every time it heartbeated. Acting when it runs out is taking the client
+        at its word, which is the opposite of inventing a policy.
+
+        Evaluated ONCE per lapse, whatever the outcome: see
+        `Leases.forget_lapse`. A lapse that kept being offered would, on the
+        first idle tick after somebody loaded a model without a lease, be read
+        as a holder letting go and unload a model that had nothing to do with it.
+        """
+        if self._leases.lapsed_at() is None:
+            return None
+        try:
+            return self.settle("a lease lapsed and nothing heartbeated it")
+        finally:
+            # In the `finally` so that a settlement which RAISES still spends the
+            # lapse. A lapse retried for ever against a card it cannot clear is
+            # the loaded gun the docstring above describes.
+            self._leases.forget_lapse()
+
     def settle_quietly(self, trigger: str) -> Settled | None:
         """`settle`, for a caller that has nothing to fail. **Never the loop.**
 

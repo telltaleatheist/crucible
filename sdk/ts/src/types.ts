@@ -518,6 +518,40 @@ export interface Activity {
     readonly id: string;
     readonly since: string;
     readonly memoryBytesEstimate: number | null;
+    /**
+     * What holds this resident thing, or `null` — **which is the stranded
+     * card**, not an idle one.
+     *
+     * The server's own answer, from the one function that owns "what holds the
+     * card" (`crucible/settle.py`'s four facts). `null` here with `resident`
+     * set means nothing is coming back for it: a load that succeeded and was
+     * never claimed, or a lease that lapsed with nothing asking again. A
+     * reconciler acts on exactly this.
+     *
+     * `details` is the holding fact's OWN shape — a job's is the `server_busy`
+     * body, a lease's is the lease receipt — so a client that can read a
+     * refusal can read this without a second vocabulary.
+     */
+    readonly heldBy: {
+      readonly fact: string;
+      readonly who: string;
+      readonly details: Record<string, unknown>;
+    } | null;
+    /**
+     * Since when nothing has held it, or `null` because something does.
+     *
+     * **Never a poll artefact.** Both ways a card becomes unheld fire no event
+     * — a successful load is exempt from settling, and a lapsed lease is read
+     * rather than swept — so this is the later of two real timestamps: the
+     * moment the exempt load returned, and the lapsed lease's own
+     * `expires_at`. It means what it says even if nobody polled for ten
+     * minutes.
+     *
+     * Non-null already implies "and nothing holds it right now": the server
+     * checks the live holder before reporting the stamp, so a reconciler need
+     * not check both.
+     */
+    readonly unclaimedSince: string | null;
   } | null;
   /**
    * What was told to go and has not, or `null`. See {@link Stopping}.
@@ -540,9 +574,28 @@ export interface Activity {
   readonly claim: { readonly heldBy: string } | null;
   /** The open streaming session, or null. */
   readonly streaming: ActivityStreaming | null;
-  /** Chat completions open right now. Counted, never gating. */
+  /**
+   * Chat completions open right now, and what this engine will admit at once.
+   *
+   * **Counted, and — since 1.0.10 — bounded for a SERIAL engine.** mlx-lm
+   * accepts every connection on a threading HTTP server and then generates on
+   * one thread, so twelve accepted requests are one running and eleven waiting
+   * with nothing on the wire saying so. A client sizes its pool from
+   * `maxInFlight` rather than discovering the ceiling as a starved socket.
+   */
   readonly chat: {
     readonly inFlight: number;
+    /**
+     * What this engine's chat door admits at once, or `null`.
+     *
+     * `null` means the resident engine states no concurrency — vLLM batches and
+     * nothing has ever measured starvation against it — **or that nothing is
+     * resident**, because the limit belongs to the engine. It never means
+     * "unlimited", and a client must not read it as a licence to fan out.
+     */
+    readonly maxInFlight: number | null;
+    /** Where `maxInFlight` came from, in a sentence. `null` when it is null. */
+    readonly maxInFlightBasis: string | null;
     readonly rows: readonly ActivityChat[];
   };
   /**
@@ -1379,6 +1432,46 @@ export interface LoadVoiceOptions {
    * refused on any other kind.
    */
   readonly reference?: VoiceReference;
+  /** Hold the voice from the instant it is resident. See {@link LeaseOnLoad}. */
+  readonly lease?: LeaseOnLoad;
+}
+
+/**
+ * Hold what a load makes resident, from the instant it exists.
+ *
+ * **Why you want this on every programmatic load.** A load that succeeds cannot
+ * clear the card — its whole content is "be resident" — so without a lease the
+ * window between `done` and your own `POST /v1/models/{id}/lease` is held by
+ * NOTHING, and a client that dies in that window strands the card for ever,
+ * because a quiet hold has no end. Ask for a lease and the same death is
+ * bounded: the ttl runs out and the server clears the card itself.
+ *
+ * The job's `done` frame carries `lease_id`, and so does
+ * {@link CrucibleClient.job} — a lease id you cannot recover is a hold nobody
+ * can release.
+ *
+ * **Omit it for an operator-style load**, where a human will decide when the
+ * card is free. Absent means exactly today's behaviour.
+ */
+export interface LeaseOnLoad {
+  /**
+   * What the run is for: one of the capability classes, the same vocabulary
+   * `POST /v1/models/{id}/lease` takes. A value that is not one is refused by
+   * name (`unknown_act`) rather than recorded.
+   */
+  readonly act: string;
+  /**
+   * Seconds. Bounded by the server (30-3600) and extended by each heartbeat —
+   * this is how long the card survives your process disappearing, so short
+   * enough to matter and long enough to outlive a slow act.
+   */
+  readonly ttlSeconds: number;
+}
+
+/** Options for {@link CrucibleClient.loadModel}. */
+export interface LoadModelOptions {
+  /** Hold the model from the instant it is resident. See {@link LeaseOnLoad}. */
+  readonly lease?: LeaseOnLoad;
 }
 
 /**

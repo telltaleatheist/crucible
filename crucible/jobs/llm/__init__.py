@@ -32,6 +32,8 @@ from ... import ollamastore
 from ...config import Config
 from ...engines import EngineError
 from ...errors import ApiError, JobError
+from ...inflight import require_act_name
+from ...leases import require_ttl
 from ...manifests import (
     ManifestError,
     ModelManifest,
@@ -114,12 +116,41 @@ def llm_engine_status(config: Config, backend: Any) -> LlmEngineStatus:
     )
 
 
+class LeaseOnLoad(BaseModel):
+    """`params.lease` — hold what this load makes resident, from the instant it exists.
+
+    `settle.py`'s "half that is still open", closed 2026-09-20. A load that
+    succeeds is exempt from settling, so between its `done` and its client's
+    `POST /v1/models/{id}/lease` the card is held by NOTHING — and a client that
+    dies in that window strands it for ever, because a quiet hold has no end.
+    That is exactly how a 21 GB model sat on the PC on 2026-09-20.
+
+    The earlier ruling against this said *"a lease is another holder"* that would
+    hold the card for its whole ttl and refuse everybody. True of a HUMAN typing
+    `crucible load` and walking away — and backwards for a programmatic client,
+    because a quiet hold never expires and a lease does. The two cases separate
+    without anyone guessing which is which: **by whether the request asks for
+    one.** An operator asks for nothing and keeps today's behaviour.
+
+    Same `act` vocabulary and same ttl bounds as `POST /v1/models/{id}/lease`,
+    validated by that door's own functions — a second spelling of "what is a
+    valid lease" would be a second owner of it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    act: str
+    ttl_seconds: int
+
+
 class LoadParams(BaseModel):
     """`params` for a load-model job. Unknown keys are refused, not ignored."""
 
     model_config = ConfigDict(extra="forbid")
 
     timeout_s: float = Field(default=DEFAULT_READY_TIMEOUT_SECONDS, ge=30, le=7200)
+    #: Absent means today's behaviour exactly: loaded, and held by nothing.
+    lease: LeaseOnLoad | None = None
 
 
 class UnloadParams(BaseModel):
@@ -578,11 +609,21 @@ class LoadModelJobType:
     name = "load-model"
 
     def __init__(
-        self, config: Config, backend: Any, residency: Residency
+        self,
+        config: Config,
+        backend: Any,
+        residency: Residency,
+        leases: Any | None = None,
     ) -> None:
         self._config = config
         self._backend = backend
         self._residency = residency
+        #: The server's one lease register, or None where there is no server —
+        #: `crucible doctor` builds a registry with neither. A `lease` param
+        #: against a build that has none is REFUSED by name rather than
+        #: quietly ignored: a client that asked to hold the card and was told
+        #: nothing would believe it holds it.
+        self._leases = leases
 
     @property
     def residency(self) -> Residency:
@@ -663,11 +704,21 @@ class LoadModelJobType:
         # is warming a model from the moment the lane picks the job up.
         self._residency.begin_warming(model)
         try:
-            self._load(ctx, model, params)
+            self._load(ctx, model, params, job.client)
         finally:
             self._residency.end_warming()
 
-    def _load(self, ctx: JobContext, model: str, params: LoadParams) -> None:
+    def _load(
+        self,
+        ctx: JobContext,
+        model: str,
+        params: LoadParams,
+        client: str | None,
+    ) -> None:
+        """`client` is `job.client`, carried in because a lease records who
+        holds it and this helper is the only place with the resident thing in
+        hand. Threaded rather than read off a second source: `Job.client` is
+        what every other holder is recorded under."""
         try:
             manifest, spec, (python, installed) = _require_loadable(
                 self._config, self._backend, model
@@ -731,9 +782,68 @@ class LoadModelJobType:
         # since 2026-09-18 exempts a load only when it ended `done`
         # (crucible/settle.py): a client told `cancelled` never sends an
         # unload, so a job that does not settle strands what it just loaded.
+        # AFTER THE LAST CANCEL CHECK, and that order is the whole of its
+        # safety. A lease opened before it would be held by a job about to raise
+        # `JobCancelled` — and the settlement, finding a lease, would leave the
+        # card exactly as stranded as before, only now behind our own hold until
+        # its ttl ran out. Cancelled here means no lease, which means the
+        # cancelled load settles as it has since 2026-09-18.
         ctx.raise_if_cancelled()
+        extra: dict[str, Any] = {"resident": resident.model_id}
+        if params.lease is not None:
+            extra["lease_id"] = _open_lease_for_load(
+                self._leases,
+                kind=resident.kind,
+                subject=resident.model_id,
+                request=params.lease,
+                client=client,
+            )
         ctx.progress(1.0, f"{model} is resident")
-        ctx.done_extra(resident=resident.model_id)
+        ctx.done_extra(**extra)
+
+
+def _open_lease_for_load(
+    leases: Any | None,
+    *,
+    kind: str,
+    subject: str,
+    request: LeaseOnLoad,
+    client: str | None,
+) -> str:
+    """Hold what this load just made resident. Returns the lease id.
+
+    Validated through `crucible/leases.py`'s OWN functions — `require_act_name`
+    and `require_ttl` — rather than through a second spelling here, so a load's
+    lease and a `POST /v1/models/{id}/lease` cannot come to disagree about what
+    a valid act or a valid ttl is.
+
+    `kind` and `subject` are read off the thing that is NOW resident, never off
+    the request: the card holds one thing, the load just put it there, and a
+    client naming its own subject would be a second owner of a fact this
+    function is standing next to.
+    """
+    if leases is None:
+        raise JobError(
+            "leases_unavailable",
+            "this build has no lease register, so `params.lease` cannot be "
+            "honoured. It is refused rather than ignored: a client told nothing "
+            "would believe it holds the card",
+        )
+    try:
+        act = require_act_name(request.act.strip(), "a load's `params.lease.act`")
+        ttl = require_ttl(request.ttl_seconds)
+    except ApiError as exc:
+        raise JobError(exc.code, exc.message) from None
+    try:
+        lease = leases.open(
+            kind=kind, subject=subject, act=act, client=client, ttl_seconds=ttl
+        )
+    except ApiError as exc:
+        # Somebody else's lease. The load itself succeeded and the card is
+        # theirs to keep; what failed is the hold, and saying so by name beats
+        # reporting a load that worked as a failure with no reason attached.
+        raise JobError(exc.code, exc.message) from None
+    return lease.id
 
 
 # --------------------------------------------------------------- unload job
