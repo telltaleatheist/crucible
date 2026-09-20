@@ -12,12 +12,26 @@ import sys
 import threading
 from typing import Any
 
+from .. import KEEP_ALIVE_SECONDS
+
 
 def run_owned_server(app: Any, *, host: str, port: int, log_level: str) -> None:
     import uvicorn
 
     descriptor = sys.stdin.fileno()
-    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level=log_level))
+    # THE SAME KEEP-ALIVE AS THE OTHER DOOR, from the one constant. An owned
+    # engine answers the same clients `crucible serve` does, so uvicorn's 5 s
+    # default would put the 2026-09-20 ECONNRESET back on this door alone —
+    # which is the shape a second statement of one number always takes.
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            log_level=log_level,
+            timeout_keep_alive=KEEP_ALIVE_SECONDS,
+        )
+    )
     finished = threading.Event()
 
     def watch_controller() -> None:

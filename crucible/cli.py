@@ -37,6 +37,7 @@ from typing import Any
 
 from . import (
     API_VERSION,
+    KEEP_ALIVE_SECONDS,
     VERSION,
     capability,
     catalog,
@@ -453,7 +454,20 @@ def cmd_serve(args: argparse.Namespace) -> int:
         from .host.child_lifecycle import run_owned_server
         run_owned_server(app, host=host, port=port, log_level=args.log_level)
     else:
-        uvicorn.run(app, host=host, port=port, log_level=args.log_level)
+        # `timeout_keep_alive` IS STATED, and the default is what broke.
+        # uvicorn holds an idle connection 5 s; Node's undici keeps a pooled
+        # one about 4 s, so a client's next request lands on a socket this
+        # server is closing and reads ECONNRESET while the server is fine.
+        # Four times: align's first `GET /v1/info` after a render's last
+        # artifact fetch, Sep 18 and Sep 19 against the PC and 2026-09-20 00:57
+        # against the Mac on 127.0.0.1. See `KEEP_ALIVE_SECONDS`.
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level=args.log_level,
+            timeout_keep_alive=KEEP_ALIVE_SECONDS,
+        )
     return EXIT_OK
 
 

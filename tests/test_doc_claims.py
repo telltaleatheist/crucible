@@ -204,3 +204,44 @@ def test_the_weakened_invariant_is_written_down_where_it_changed() -> None:
     assert "resolves" in doc
     for measured in ("thirteen packs", "three that genuinely changed"):
         assert measured in doc, f"the doc no longer carries the measurement: {measured!r}"
+
+
+# ------------------------------- one keep-alive, and every uvicorn door has it
+
+def test_every_uvicorn_this_repo_starts_states_the_one_keep_alive() -> None:
+    """`crucible/__init__.py:KEEP_ALIVE_SECONDS` says "for every uvicorn this
+    repo starts", and there are two doors that start one.
+
+    THE CLAIM IS CHECKABLE BECAUSE THE DEFECT WAS INVISIBLE. uvicorn's default
+    `timeout_keep_alive` is 5 s and undici's idle pool is about 4 s, so a door
+    that took the default answers the client's next request with an ECONNRESET
+    on a server that is up — measured four times between 2026-09-18 and
+    2026-09-20. A second door left on the default would reproduce it on that
+    door alone, which is the failure this scan exists to make loud.
+
+    Deliberately a SOURCE scan rather than a monkeypatched call: what must hold
+    is "no uvicorn anywhere in `crucible/` takes the default", and a test that
+    called the two doors it knows about could not say that about a third.
+    """
+    starts = re.compile(r"uvicorn\.(?:run|Config)\s*\(")
+    found: list[tuple[Path, str]] = []
+    for path in sorted((ROOT / "crucible").rglob("*.py")):
+        source = text(path)
+        for match in starts.finditer(source):
+            # The call's own text, to its balanced closing paren.
+            depth, index = 0, match.end() - 1
+            while index < len(source):
+                if source[index] == "(":
+                    depth += 1
+                elif source[index] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                index += 1
+            found.append((path.relative_to(ROOT), source[match.start() : index + 1]))
+    assert len(found) == 2, f"a uvicorn door was added or removed: {[p for p, _ in found]}"
+    for path, call in found:
+        assert "timeout_keep_alive=KEEP_ALIVE_SECONDS" in call, (
+            f"{path} starts a uvicorn on the 5 s default keep-alive; "
+            "state KEEP_ALIVE_SECONDS, which is why it exists"
+        )

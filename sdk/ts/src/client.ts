@@ -1664,26 +1664,37 @@ export class CrucibleClient {
       headers.set(API_HEADER, String(API_VERSION));
     }
     const target = `${this.url}${path}`;
-    // ONE PLACE, so no door can be built that forgets the clock. A call that
-    // brought its own `signal` keeps it untouched: the caller owning a
-    // request has already decided when it ends, and quietly ANDing a second
-    // deadline onto their cancel would end a stream they were still reading.
-    const timed =
-      this.#timeoutMs !== null && init.signal === undefined
-        ? { ...init, headers, signal: AbortSignal.timeout(this.#timeoutMs) }
-        : { ...init, headers };
-    try {
-      return await fetch(target, timed);
-    } catch (cause) {
-      // The caller cancelling is not the server dying. When the signal they
-      // handed us is the reason the fetch rejected, the rejection is theirs and
-      // travels back untouched (a DOM `AbortError`, or whatever reason they
-      // passed to `abort`), so `error.name === 'AbortError'` still holds.
-      const signal = timed.signal;
-      if (signal !== undefined && signal !== null && signal.aborted) throw cause;
-      // Otherwise fetch rejects only for a transport failure; every HTTP status
-      // resolves.
-      throw new CrucibleUnreachable(this.url, describeCause(cause), cause);
+    // A STALE POOLED SOCKET IS RETRIED ONCE, AND ONLY ON A SAFE METHOD.
+    // See `isStaleConnection` below for what that means and `retryable` for
+    // which methods qualify. The loop runs at most twice.
+    const retryable = isSafeMethod(init.method);
+    for (let attempt = 0; ; attempt += 1) {
+      // ONE PLACE, so no door can be built that forgets the clock. A call that
+      // brought its own `signal` keeps it untouched: the caller owning a
+      // request has already decided when it ends, and quietly ANDing a second
+      // deadline onto their cancel would end a stream they were still reading.
+      //
+      // BUILT PER ATTEMPT, because `AbortSignal.timeout` starts counting when
+      // it is created: reusing the first attempt's signal would give the retry
+      // whatever was left of a clock the first attempt already spent.
+      const timed =
+        this.#timeoutMs !== null && init.signal === undefined
+          ? { ...init, headers, signal: AbortSignal.timeout(this.#timeoutMs) }
+          : { ...init, headers };
+      try {
+        return await fetch(target, timed);
+      } catch (cause) {
+        // The caller cancelling is not the server dying. When the signal they
+        // handed us is the reason the fetch rejected, the rejection is theirs and
+        // travels back untouched (a DOM `AbortError`, or whatever reason they
+        // passed to `abort`), so `error.name === 'AbortError'` still holds.
+        const signal = timed.signal;
+        if (signal !== undefined && signal !== null && signal.aborted) throw cause;
+        if (attempt === 0 && retryable && isStaleConnection(cause)) continue;
+        // Otherwise fetch rejects only for a transport failure; every HTTP status
+        // resolves.
+        throw new CrucibleUnreachable(this.url, describeCause(cause), cause);
+      }
     }
   }
 
@@ -3722,6 +3733,67 @@ function readStreaming(data: Json): ActivityStreaming {
     seconds: num(data, 'seconds', where),
     chars: num(data, 'chars', where),
   };
+}
+
+/**
+ * The methods a stale-socket retry is allowed on: the ones with no side
+ * effect to repeat, and no body to re-send.
+ *
+ * `undefined` is GET — `fetch` with no method is a GET, and every probe in
+ * this file relies on that. A POST, PUT, PATCH or DELETE is NEVER retried
+ * here, even though the failure looks identical from the outside: a reset
+ * arrives with no way to know whether the server read the request first, and
+ * a silently repeated `POST /v1/jobs` is a second render of somebody's book.
+ * That risk belongs to the caller, who knows whether their call was idempotent.
+ */
+function isSafeMethod(method: string | undefined): boolean {
+  const name = (method ?? 'GET').toUpperCase();
+  return name === 'GET' || name === 'HEAD';
+}
+
+/**
+ * Is this rejection a connection the server had already closed?
+ *
+ * WHY THIS EXISTS, in four occurrences. align's first `GET /v1/info` after a
+ * render's last artifact fetch failed `read ECONNRESET` on 2026-09-18 and
+ * 2026-09-19 against the PC and on 2026-09-20 at 00:57 against the Mac on
+ * 127.0.0.1 — with the server up before and after each time (`serve.log` shows
+ * no gap, `crucible api ping` answered). The cause was a race nobody can win
+ * by timing: Node's `fetch` (undici) keeps an idle pooled connection about
+ * **4 s** and uvicorn's default `timeout_keep_alive` is **5 s**, so a request
+ * a few seconds after the last one is written onto a socket the server is
+ * closing. Crucible now states `KEEP_ALIVE_SECONDS = 75` on both of its
+ * uvicorn doors, which makes it rare rather than impossible — a restart, a
+ * proxy in the middle or a dropped network can close a pooled connection at
+ * any time — so this half must exist too.
+ *
+ * THE RULE, exactly: **an idempotent request is retried once, and only when
+ * the connection failed before any response byte arrived.** `fetch` rejecting
+ * IS that condition — once it resolves, a Response exists and a later failure
+ * surfaces on the body stream, which this function never sees. Never a POST,
+ * PUT, PATCH or DELETE ({@link isSafeMethod}); never more than once; never
+ * after the caller's own `signal` aborted, which is checked first. An
+ * unconditional retry loop would turn a server that is genuinely down into a
+ * client that hangs twice as long for the same answer.
+ *
+ * **The apps cannot do this themselves.** This client takes no custom `fetch`,
+ * so there is no seam outside this file to wrap.
+ *
+ * What is matched: undici raises `TypeError: fetch failed` whose `cause`
+ * carries `code: 'ECONNRESET'` (the peer closed a socket we had written to) or
+ * `code: 'UND_ERR_SOCKET'` (undici's own name for a socket that closed while a
+ * request was on it). Both are read off the nested cause AND off the error
+ * itself, because a non-undici `fetch` may raise the coded error directly.
+ */
+const STALE_CONNECTION_CODES = new Set(['ECONNRESET', 'UND_ERR_SOCKET']);
+
+function isStaleConnection(cause: unknown): boolean {
+  for (let error: unknown = cause, depth = 0; error instanceof Error && depth < 4; depth += 1) {
+    const code = (error as Error & { code?: unknown }).code;
+    if (typeof code === 'string' && STALE_CONNECTION_CODES.has(code)) return true;
+    error = (error as Error & { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 function describeCause(cause: unknown): string {
