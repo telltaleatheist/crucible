@@ -18,7 +18,7 @@ keep-alive that differed between them would be the defect below on one door
 only.
 """
 
-VERSION = "1.0.13"
+VERSION = "1.0.14"
 API_VERSION = 1
 API_HEADER = "X-Crucible-Api"
 
