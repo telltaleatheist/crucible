@@ -80,6 +80,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .errors import CrucibleError, JobCancelled
+from .logtail import tail_of_last_run
 
 #: How long `stop()` waits for SIGTERM to be honoured before it gives up and says
 #: so. It never escalates to SIGKILL. Same number and same reason as
@@ -255,11 +256,21 @@ def _spawn(
 
 
 def _open_log(python: Path, script: Path, log_path: Path) -> Any:
+    """Open a worker's log for APPEND, with a header that delimits this run.
+
+    Truncating here was the same defect `SubprocessEngine.start()` had until
+    2026-09-20 and is fixed for the same reason: a worker that hangs is
+    investigated by running it again, and truncating means the second run erases
+    what the first one was doing. One `asr` or `rvc` worker's log is a handful of
+    kilobytes, so runs accumulate and the header below is what separates them.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = log_path.open("wb")
+    existed = log_path.is_file() and log_path.stat().st_size > 0
+    handle = log_path.open("ab")
     handle.write(
         (
-            f"=== crucible worker {script.name}, "
+            ("\n" if existed else "")
+            + f"=== crucible worker {script.name}, "
             f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"=== {python} {script}\n"
         ).encode("utf-8")
@@ -745,12 +756,19 @@ def _log_tail(log_path: Path, lines: int = LOG_TAIL_LINES) -> str:
 
     PHASE4-AUDIO.md section 6: an error body carries what went wrong, not a
     pointer to a file on a machine the client may not be able to read.
+
+    Scoped to the LATEST run — see `crucible/logtail.py`.
     """
     if not Path(log_path).is_file():
         return f"Its log is {log_path} (not written)."
-    try:
-        text = Path(log_path).read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return f"Its log is {log_path} (unreadable: {exc})."
-    tail = "\n".join(text.splitlines()[-lines:])
-    return f"Last {lines} lines of {log_path}:\n{tail}"
+    # THIS RUN's lines, not the file's. Worker logs append since 2026-09-20, so
+    # "the last 40 lines" would otherwise quote the previous run's failure into
+    # this run's error — the most confusing thing a log can do to a reader.
+    tail = tail_of_last_run(Path(log_path), lines)
+    if not tail:
+        # Two cases that are not worth separating in an error body: the file is
+        # there and empty, or it would not read. Saying which would mean a
+        # second stat and a second open to decorate a message that is already
+        # about something else.
+        return f"Its log is {log_path} (empty or unreadable)."
+    return f"Last {lines} lines of the latest run in {log_path}:\n{tail}"

@@ -4,7 +4,9 @@ PHASE2-LLM.md section 3: `start(model_dir, served_name, port, args)`, `ready()`
 polling the engine's own `/v1/models`, `stop()` by SIGTERM with a wait and
 **never SIGKILL** (a killed CUDA process wedges WSL until Windows reboots), and
 `base_url`. The engine binds 127.0.0.1 on a free port; only Crucible talks to it.
-Its stdout and stderr go to `~/.crucible/logs/engine-<id>.log`.
+Its stdout and stderr go to `~/.crucible/logs/engine-<id>.log`, **appended**:
+runs ACCUMULATE in that file and the `=== crucible <id> engine, <date>`
+header delimits them. See `start()` for why truncating was a defect.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, runtime_checkable
 
 from ..errors import CrucibleError
+from ..logtail import tail_of_last_run
 
 #: How long `stop()` waits for SIGTERM to be honoured before it gives up and says
 #: so. It never escalates to SIGKILL.
@@ -237,9 +240,31 @@ class SubprocessEngine:
 
         command = self.command(model_dir, served_name, port, args)
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._log_handle = self._log_path.open("wb")
+        # APPEND, NOT TRUNCATE (2026-09-20). This was `open("wb")`, so every
+        # engine start rewrote the file from the header down — and the one thing
+        # an operator does when an engine hangs is reload the voice, which is a
+        # start, which destroyed the log of the hang being investigated. Found
+        # by a BookForge session hunting what the model server did during a
+        # 300 s clean-text timeout and finding a kilobyte written two minutes
+        # earlier. A log that a diagnosis erases is worse than no log, because
+        # it still looks like evidence.
+        #
+        # UNBOUNDED rather than a `.1` rotation, deliberately: a rotation keeps
+        # exactly one previous run, so the SECOND reload of a hang — which is
+        # the normal way one is investigated — destroys it again. That is the
+        # same defect with one more step in front of it. Growth is measured,
+        # not assumed: the busiest engine log on the Mac after a week of renders
+        # is 168 KB (`engine-mistborn.log`), and `serve.log` — which systemd and
+        # launchd have always appended to across every restart — is 8.7 MB.
+        # `log_tail()` reads from the END, so it stays cheap however long this
+        # gets.
+        existed = self._log_path.is_file() and self._log_path.stat().st_size > 0
+        self._log_handle = self._log_path.open("ab")
         header = (
-            f"=== crucible {self.name} engine, {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            # A blank line before every run but the first, so the delimiter is
+            # visible to a person scrolling and not only to a parser.
+            ("\n" if existed else "")
+            + f"=== crucible {self.name} engine, {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"=== {' '.join(command)}\n"
         ).encode("utf-8")
         self._log_handle.write(header)
@@ -366,13 +391,16 @@ class SubprocessEngine:
         self._served_name = None
 
     def log_tail(self, lines: int = LOG_TAIL_LINES) -> str:
-        if not self._log_path.is_file():
-            return ""
-        try:
-            text = self._log_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return ""
-        return "\n".join(text.splitlines()[-lines:])
+        """The last `lines` lines OF THIS RUN, read from the end of the log.
+
+        Not simply the last lines of the file: runs accumulate there now (see
+        `start()`), and `logtail.tail_of_last_run` stops at the run header so
+        that an earlier run's output is never reported as this one's. That is
+        not cosmetic — `LlamaServerEngine._fatal_in_log()` REFUSES a start on a
+        fatal line it finds here, and a dead run's "out of memory" would
+        otherwise refuse every start after it.
+        """
+        return tail_of_last_run(self._log_path, lines)
 
     def _close_log(self) -> None:
         if self._log_handle is not None:
