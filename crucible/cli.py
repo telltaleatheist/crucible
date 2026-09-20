@@ -1646,8 +1646,17 @@ def cmd_voices_check(args: argparse.Namespace) -> int:
         print(f"packs:    {pace.target_chars} chars")
     for arm in sorted(voice.backends):
         spec = voice.backends[arm]
+        # "not measured" rather than a blank or a zero: a voice may state no
+        # cap since 2026-09-19 (PHASE18-UNCERTIFIED.md section 4), and an
+        # operator reading `cap None` would not know whether the number is
+        # missing or the field is broken.
+        cap = (
+            "not measured"
+            if spec.max_chars is None
+            else f"{spec.max_chars} ({spec.max_chars_basis})"
+        )
         print(
-            f"{arm}: cap {spec.max_chars} ({spec.max_chars_basis}), sampling "
+            f"{arm}: cap {cap}, sampling "
             + ", ".join(f"{k} {v}" for k, v in sorted(spec.sampling.items()))
         )
     print(f"takes:    {len(voice.takes)} rung(s)")

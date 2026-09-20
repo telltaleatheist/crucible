@@ -263,9 +263,11 @@ commit must read it rather than assume the field is a sha. `PUT /v1/voices/{id}`
 resolve and is written as sent.
 
 **`takes` is how many rungs this voice's ladder has**, and it is on the row so a client can
-ask before it submits. A `take` past the end is `unknown_take` and is never clamped, and a
-client spreading N candidates across the ladder (BookForge's Correct Sentences does exactly
-that) has to know where the ladder ends. What each rung MEANS is deliberately not published,
+ask before it submits. A `take` past the end is a SEED LANE at the voice's own sampling
+since 2026-09-19 (it was `unknown_take`) and is still never clamped, so a client spreading N
+candidates across the ladder (BookForge's Correct Sentences does exactly that) reads this to
+know where the DIFFERENT SETTINGS end — a retake must not reuse the settings that produced
+the problem, while a screening sweep wants nothing else. What each rung MEANS is deliberately not published,
 for the same reason `sampling` is not: the numbers are engine tuning and publishing them
 invites a client to send them back. It is never below 1 — take 0 exists whether or not the
 file declares it.
@@ -309,9 +311,21 @@ reason = "measured 2026-09-11 over the same 88 chunks: 0.8 gave 4 guard fires / 
 
 A `tts` job carries `take: N`, an index into that list, and nothing else about sampling. The
 client decides *that* a row needs another take and *which* take it keeps; the server decides
-what take 1 means for this voice on this backend. A `take` past the end of the list is
-refused by name (`unknown_take`) rather than clamped — a silent clamp is a retake ladder
-that stops climbing without telling anyone.
+what take 1 means for this voice on this backend. A `take` past the end of the list is a
+DIFFERENT DRAW at the voice's own sampling (2026-09-19) rather than a clamp — narrator seeds
+`base + index + REROLL_SEED_STRIDE * (TAKE_REROLL_LANES * take + attempt)`, so take N with
+no declared rung is a lane nothing else draws in. It is still never the LAST rung's numbers:
+a silent clamp is a retake ladder that stops climbing without telling anyone, and take 4
+carrying take 2's temperature under take 4's name is exactly that.
+
+**The job's RESULT says what was actually applied** (2026-09-19, and section 7 of
+PHASE18-UNCERTIFIED.md discharged): `done.sampling` is the FULL triple — the voice's take-0
+numbers with this take's rung laid over them, never the override alone — and `done.voice` is
+`{id, identity, identity_basis}`. Sampling living on the manifest is the right shape and
+leaves exactly one hole: a manifest edited between two runs makes two incomparable records
+that both say "take 0". Every Higgs measurement before 2026-09-06 was rendered at
+temperature 1.0 and the whole prior ladder record had to be marked "at the wrong
+temperature" once already; pinned into the result, the next such move is visible.
 
 This is the one place where the division of knowledge had a genuinely arguable alternative
 (move the whole ladder, judgment included). It is written here so that changing it later is
@@ -779,6 +793,47 @@ property of the server. `build_registry()` hands the SAME holder to every job ty
 touches the card, which is what makes the rule true rather than aspirational, and a test
 asserts it.
 
+**What a load STATES to the engine, and where each number comes from.**
+`[voice.serving]` is the voice manifest's table of what the SERVER under narrator is sized
+by — never published on `/v1/voices` until 2026-09-19, and published in full since, because
+an operator comparing two machines has to be able to see it.
+
+| field | variable | absent means |
+|---|---|---|
+| `max_num_seqs` | `HIGGS_MAX_NUM_SEQS` | nothing — it is REQUIRED of a `higgs-v3` voice, and narrator refuses it by name (`v3_served.serve_concurrency`: "a guessed width is either a server idling at 1 or a queue the render never asked for"). |
+| `mem_fraction` | `HIGGS_SGL_MEM_FRACTION` | narrator's own launcher default, **0.60**, written at `engine/higgs/launch/serve_higgs_sgl.sh:59`. |
+| `context_length` | `HIGGS_CONTEXT_LENGTH` | SGLang-Omni's `HiggsTtsEngineBuilder.context_length`, **4096**. |
+
+The last two are OPTIONAL and were added on 2026-09-19 (Owen's ruling; it decides
+PHASE18-UNCERTIFIED.md section 11). Each owes a `<field>_note` when it is stated, exactly as
+`max_num_seqs` does, and a note with no number is refused as the leftover it is. Absent
+means the launcher's own number — a value in a file with an owner — and Crucible does not
+write it back, because restating a number it did not choose is how narrator's own
+`CHARS_PER_SEC` 15.0 ended up in two voice manifests.
+
+**Why each is a field rather than something the width could imply.** `mem_fraction` is
+preallocated as KV on top of ~7.7 GiB of weights WHATEVER the width is, so narrowing a job
+does not lower that floor: 0.55 measured 24.0-24.1 GB on a 24 GB card and WDDM then pages to
+host RAM 4-10x slower with no error, while 0.48 with width 4 is about 20 GB. `context_length`
+is a different wall again: 4096 tokens holds roughly 2,000 characters of prompt plus its
+frames, so a bank whose longest prompt is 2,008 truncates because the CONTEXT ran out and a
+screening run records that as the VOICE's length wall — plausible, wrong, and silent. A
+screening voice states 0.48 and 8192.
+
+**Both go to BOTH arms**, which is the difference from `max_num_seqs`. That one is emitted
+only where a server is started, because the MLX arm takes its width from a measured tier
+table and `HIGGS_MAX_NUM_SEQS` means nothing in process. These two are stated wherever the
+manifest states them — Owen, 2026-09-19: *"we're going to want to configure darwin to work
+the same way. context limits and such."* — and a knob narrator's MLX backend does not have
+is narrator's to refuse **by name at load**, never Crucible's to drop silently.
+
+> **`HIGGS_CONTEXT_LENGTH` has no reader yet, and that is stated rather than discovered.**
+> At bookforge HEAD on 2026-09-19, `engine/higgs/sgl_served.py:217-221` records the 4096 as
+> a class attribute of SGLang-Omni's `HiggsTtsEngineBuilder` "with no CLI flag and no config
+> path — the value cannot be raised from here, from the launcher, or from a request", and no
+> such variable exists anywhere in that tree. The name is the one narrator is growing the
+> reader under; until the tts env's pin moves, Crucible sets it and nothing reads it.
+
 Two things fell out of the generalisation that the draft did not anticipate, and both are
 about ids:
 
@@ -904,6 +959,13 @@ A normal job on the exclusive lane.
   "params": {
     "language": "en",
     "take": 0,
+    "retake": true,
+    "band": {
+      "pace_chars_per_sec": 15.91,
+      "max_chars_per_sec": 20.68,
+      "min_chars_per_sec": 12.24
+    },
+    "width": 4,
     "chunks": [
       { "index": 41, "text": "He had been walking for some time." },
       { "index": 42, "text": "The road did not appear to end." }
@@ -911,6 +973,41 @@ A normal job on the exclusive lane.
   }
 }
 ```
+
+**`language`, `take` and `chunks` are required. `retake`, `band` and `width` are the three
+whose ABSENCE is a statement** (Owen's ruling of 2026-09-19, PHASE18-UNCERTIFIED.md
+sections 4, 6 and 8).
+
+**`retake` chooses the arm.** `true` runs narrator's guarded driver — the PaceTracker, the
+re-roll on truncation/runaway/loop, the split ladder — against the `band` this same request
+states. Absent, or `false`, runs the bare arm: every chunk rendered once as sent, at the
+requested take's sampling, nothing judged and nothing retaken, and `guard` on every chunk
+row is then `null` at its most exact — nobody judged it, because nobody was asked to. Before
+this the arm was chosen INSIDE narrator by a capability probe
+(`serve/worker.py:_guards_its_own_batch`), so what happened to a book depended on what the
+engine offered and the caller had no say.
+
+Bare is what absence means because bare is the primitive, and because the first client that
+needs it is measuring the failures a guard hides: a re-roll that succeeds is
+indistinguishable from a good first draw, so a guarded screen under-counts exactly what the
+instrument exists to detect.
+
+**`band` is the caller's to state and is never looked up.** All three rates positive, with
+`min < pace < max`. BookForge echoes back the row it read from `/v1/voices`; a screening
+client states nothing and therefore cannot be guarded. Looking it up is the shape that
+produced two measured defects — `higgs-default` satisfying a mandatory triple with
+narrator's own frame-cap divisor (15.0, not a narration rate), and deathstalker inheriting
+pace 16.64 onto weights that measured 15.91. A band sent with `retake` false or absent is
+accepted, checked, and not acted on: the server was not asked to judge anything.
+
+**`width` caps what is in flight**, and absent is the resident voice's own
+`[voice.serving].max_num_seqs` — the width the engine was STARTED at, which is a stated
+number with an owner rather than a default. Above it is `width_over_serving` and never a
+silent clamp. Narrowing restarts nothing: SGLang's `--max-running-requests` and
+`cuda_graph_max_bs` stay whatever the voice was loaded with, and only narrator's in-flight
+set is capped. Measured 2026-09-19: 0.60 mem fraction at 16 wide summed to 24.2 GB on a
+24 GB card, and WDDM then pages to host RAM 4-10x slower with no error at all; the ladder's
+baseline is 4 wide on voices whose manifests say 16.
 
 **`model` is the voice id.** The wire's word for "the thing that produces the bytes" is
 `model`, and for `tts` that thing is the voice — which for Higgs is not a pun but the
@@ -1011,7 +1108,15 @@ to prevent. `tests/fake_narrator.py` does send them, which is how the reporting 
 tested, and its docstring now says in as many words that a test asserting `capped is True` is
 asserting about that file rather than about narrator.
 
-**Owed on narrator's side:** `capped` and `tokens` on each `batch_item` (and on `done` for a
+**Being closed from narrator's side (2026-09-19).** The narrator change that reads `retake`
+and `band` also puts `"capped": bool` on every retiring row, so against a narrator that
+carries it the `chunk` event's `capped` is a real boolean. Crucible needs no change for it —
+`_optional_bool` has always read "present and a bool" as the value and "absent" as `None` —
+and must not grow one: a reader that turned an absent key into `false` the day the wire was
+supposed to carry it would report every runaway as a finished sentence. Against the
+currently PINNED narrator (`crucible/envs/tts/*.txt`, not yet moved) it is still `null`.
+
+**Still owed on narrator's side:** `tokens` on each `batch_item` (and on `done` for a
 streamed row). It is a few lines where `cap_frames` is already in scope, and until it lands
 BookForge's PaceTracker gets a duration and a `null` where it wants a flag.
 
@@ -1048,14 +1153,23 @@ for an index nobody asked for.
 
 **Refusals, all before the job is queued.** `unknown_model` (via `resolve_model`, section 5's
 note), `invalid_params`, `ffmpeg_missing`, `backend_unsupported`, `env_missing`,
-`voice_not_installed`, `accelerator_busy`, `insufficient_memory`, and four this door adds:
+`voice_not_installed`, `accelerator_busy`, `insufficient_memory`, and five this door adds:
 
 | code | what it means |
 |---|---|
 | `voice_kind_unsupported` | the voice is `kind = "zeroshot"` **and is not already resident**. A render job loads its own voice (below), a zero-shot load needs the reference clip only `load-voice` carries (`params.reference`, section 5's amendment), and this job's params are `language`, `take` and `chunks` — a second clip channel here would be two doors owning one fact. Load it first, then render. *Narrowed 2026-09-14; it used to refuse the KIND outright, on the true-at-the-time grounds that narrator's `load` message carried no clips at all.* |
 | `sampling_not_wired` | the narrator ON THIS WIRE did not announce `itemTake` on its `ready` line, so it has no per-item rung channel and a take above 0 would come back as take 0 under take N's name. Asked of the live process, because the tts env pins narrator by commit and a pin may be older than the channel — on 2026-09-15 it was, and two takes of one sentence returned byte-identical audio. **Only above take 0**: take 0 asks for the numbers and the seed lane every narrator ever built already uses. *Its ORIGINAL meaning — "this contract has no channel" — was deleted on 2026-09-14 when `narrator/engine/item_sampling.py` made it false; the code and the name came back a day later with the subject above (sections 3 and 4).* |
-| `unknown_take` | a take past the end of the ladder. Never clamped. |
-| `chunk_too_long` | a chunk longer than the (voice, backend) `max_chars`. **Refused, not re-split**: chunking is the client's (section 1), and a server that quietly cut a chunk in half would return two files where one was asked for. |
+| `retake_without_band` | `retake: true` and no `band`. Not filled in from the voice and not silently downgraded to the bare arm — a client that asked to be guarded and was not would read every clean row as a verdict. |
+| `band_malformed` | a `band` that is not one: a missing rate, a value that is not a number, a rate at or below zero, or an order other than `min < pace < max`. ONE code for all of them, because a band is one statement; it refuses the whole request, because there is no row a band belongs to. |
+| `width_over_serving` | a `width` above the voice's `[voice.serving].max_num_seqs`. Both numbers ride in the detail. Never clamped: a job that thought it was running 16 wide and was not would report a throughput nobody can reproduce. |
+
+**Two refusals were RETIRED here on 2026-09-19** (PHASE18-UNCERTIFIED.md sections 4 and 5),
+and both are retired rather than relaxed:
+
+| retired code | what happens instead |
+|---|---|
+| `unknown_take` | a take at or past the end of the ladder renders at the voice's OWN sampling in take N's own seed lane. Still never clamped — take 4 is never take 2's numbers under take 4's name — and the case it makes possible is a screening sweep naming takes 0..N on a voice that declares no ladder at all. |
+| `chunk_too_long` | the chunk is rendered as sent and reported honestly, on this door and on the streaming door alike. Chunking is still the client's and the cap is still published on `/v1/voices`; what the server stopped doing is ACTING on a number a screening checkpoint may not have and that a second TTS engine's frame arithmetic is not described by. Owen: *"I don't think it's crucible's place to refuse chunks outside the band... especially if we add a different tts engine."* |
 
 `invalid_params` also covers two shapes worth naming: a blank `text` (narrator answers an
 empty generate with a whole-request `error`, which would take the other rows with it) and two

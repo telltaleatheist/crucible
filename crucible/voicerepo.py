@@ -154,11 +154,25 @@ _PACE_BASIS_PROSE: dict[str, str] = {
 }
 
 _ARM_REQUIRED: dict[str, type] = {
-    "max_chars": int,
-    "max_chars_basis": str,
     "sampling": dict,
 }
-_ARM_OPTIONAL: dict[str, type] = {"sampling_reason": str, "clips": object}
+#: `max_chars` IS OPTIONAL HERE FOR `[voice.pace]`'S REASON, and it moved on the
+#: same day (2026-09-19, PHASE18-UNCERTIFIED.md section 4). A cap is a result —
+#: the longest chunk a sweep on these weights on this arm came back whole from —
+#: so a repo published before that sweep has none, and the internal schema
+#: (`voices.py:_BACKEND_OPTIONAL`) stopped requiring it in the same commit.
+#: These two schemas describe one voice from two sides and must agree, or a
+#: manifest would be publishable and unloadable, or the reverse.
+#:
+#: A STATED CAP STILL OWES ITS BASIS, and a basis with no cap is refused as the
+#: leftover it is — `_check_arm_cap` below. That pairing is the whole of what
+#: `max_chars_basis` is for.
+_ARM_OPTIONAL: dict[str, type] = {
+    "max_chars": int,
+    "max_chars_basis": str,
+    "sampling_reason": str,
+    "clips": object,
+}
 
 _PIN_REQUIRED: dict[str, type] = {"hf_repo": str, "revision": str}
 
@@ -368,6 +382,45 @@ def _check_no_machine_facts(where: str, table: dict[str, Any]) -> None:
         )
 
 
+def _check_arm_cap(where: str, block: dict[str, Any]) -> str | None:
+    """The arm's `max_chars_basis`, or None because it states no cap.
+
+    The two keys are one statement and travel together (2026-09-19). A cap
+    without a basis ships an unmeasured number as a measured fact — thirdreich's
+    `higgs_max_chars_mlx: 900`, which no sweep ever produced — and a basis
+    without a cap is the leftover of a number somebody deleted, which reads as a
+    cap this loader checked and passed. `_check_pace` refuses its own `edges`
+    the same way and for the same sentence.
+    """
+    cap = block.get("max_chars")
+    basis = block.get("max_chars_basis")
+    if cap is None:
+        if basis is not None:
+            raise VoiceError(
+                f"{where}: states max_chars_basis {basis!r} and no max_chars. "
+                "The basis says how a cap was got and there is no cap; drop it, "
+                "or state the number it describes"
+            )
+        return None
+    if basis is None:
+        raise VoiceError(
+            f"{where}: states max_chars {cap} and no max_chars_basis. A cap is "
+            "either a number a sweep produced on these weights on this arm or a "
+            "number somebody wrote down so the arm could be served, and a file "
+            "that cannot say which ships the second as the first"
+        )
+    if basis not in MAX_CHARS_BASES:
+        raise VoiceError(
+            f"{where}: max_chars_basis {basis!r} is not one of "
+            f"{sorted(MAX_CHARS_BASES)}. A cap is either a number a sweep "
+            "produced on these weights on this arm or a number somebody wrote "
+            "down so the arm could be served — thirdreich shipped a "
+            "`higgs_max_chars_mlx: 900` that was never measured, and a schema "
+            "that cannot say so ships it as a measured fact"
+        )
+    return basis
+
+
 def _repo_pace(
     where: str, table: dict[str, Any]
 ) -> tuple[dict[str, Any], str, str | None, str | None]:
@@ -474,7 +527,12 @@ class RepoManifest:
     arms: dict[str, dict[str, Any]]
     #: `max_chars_basis` per arm, stripped out of the arm tables for the reason
     #: `_repo_pace` strips `basis`: the internal schema has no such key.
-    max_chars_basis: dict[str, str]
+    #:
+    #: EVERY ARM HAS AN ENTRY, and it is `None` for an arm that states no cap
+    #: (2026-09-19). Keyed for every arm rather than only for the arms that have
+    #: one, so `merge` indexes it directly and a missing key stays what it is —
+    #: a bug — instead of becoming a silent `None` through a `.get`.
+    max_chars_basis: dict[str, str | None]
     takes: list[dict[str, Any]] | None
     path: Path
 
@@ -549,7 +607,7 @@ def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
             "least one"
         )
     arms: dict[str, dict[str, Any]] = {}
-    bases: dict[str, str] = {}
+    bases: dict[str, str | None] = {}
     for arm in sorted(arms_table):
         where = f"{path.name} [voice.arms.{arm}]"
         block = arms_table[arm]
@@ -557,17 +615,7 @@ def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
             raise VoiceError(f"{where}: must be a table")
         _check_no_machine_facts(where, block)
         check_table(where, block, _ARM_REQUIRED, _ARM_OPTIONAL, error=VoiceError)
-        basis = block["max_chars_basis"]
-        if basis not in MAX_CHARS_BASES:
-            raise VoiceError(
-                f"{where}: max_chars_basis {basis!r} is not one of "
-                f"{sorted(MAX_CHARS_BASES)}. A cap is either a number a sweep "
-                "produced on these weights on this arm or a number somebody wrote "
-                "down so the arm could be served — thirdreich shipped a "
-                "`higgs_max_chars_mlx: 900` that was never measured, and a schema "
-                "that cannot say so ships it as a measured fact"
-            )
-        bases[arm] = basis
+        bases[arm] = _check_arm_cap(where, block)
         arms[arm] = {k: v for k, v in block.items() if k != "max_chars_basis"}
 
     takes = voice.get("takes")
@@ -614,16 +662,41 @@ def merge(repo: RepoManifest, pin: Pin, footprint: Any):
         "voice": {
             "id": pin.id,
             **repo.voice,
-            # ABSENT MEANS ABSENT, and it reaches `_parse` as an EMPTY table
-            # rather than as a missing one: `_check_pace` reads an empty table as
-            # "nothing was measured" and builds a `Pace` of Nones, which is
-            # PHASE18 section 4.1's uncertified voice. A missing table is refused
-            # by `_parse`, and rightly — inside voices/<id>.toml it means somebody
-            # deleted a block.
+            # ABSENT MEANS ABSENT, and it reaches `_parse` as an EMPTY table.
+            # `_check_pace` reads an empty table as "nothing was measured" and
+            # builds a `Pace` of Nones, which is PHASE18 section 4.1's
+            # uncertified voice. Since 2026-09-19 a MISSING table means the same
+            # thing to `_parse` — it stopped refusing one — so this line is no
+            # longer translating between two meanings, only between two
+            # spellings of one.
             "pace": dict(repo.pace) if repo.pace is not None else {},
+            # THE SERVING TABLE IS THE MACHINE'S, ALL OF IT. A repo manifest
+            # states none of these by name (`_REFUSED_IN_REPO`), because what
+            # sizes the server narrator starts is a property of the box and the
+            # engine and a repo published once cannot know which card it will be
+            # served on. The two levers added on 2026-09-19 follow the same
+            # rule and come from the same `[tts.<engine>]` table; absent there
+            # means absent here, which `_check_serving` reads as narrator's own
+            # launcher defaults.
             "serving": {
                 "max_num_seqs": footprint.max_num_seqs,
                 "max_num_seqs_note": footprint.max_num_seqs_note,
+                **(
+                    {}
+                    if footprint.mem_fraction is None
+                    else {
+                        "mem_fraction": footprint.mem_fraction,
+                        "mem_fraction_note": footprint.mem_fraction_note,
+                    }
+                ),
+                **(
+                    {}
+                    if footprint.context_length is None
+                    else {
+                        "context_length": footprint.context_length,
+                        "context_length_note": footprint.context_length_note,
+                    }
+                ),
             },
             "backends": {
                 arm: {

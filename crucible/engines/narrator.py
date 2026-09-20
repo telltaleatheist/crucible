@@ -160,6 +160,19 @@ ENGINE_VARIABLE = "NARRATOR_ENGINE"
 STACK_VARIABLE = "HIGGS_STACK"
 MAX_NUM_SEQS_VARIABLE = "HIGGS_MAX_NUM_SEQS"
 
+#: SGLANG'S `--mem-fraction-static`, from `[voice.serving].mem_fraction`.
+#: narrator's `engine/higgs/launch/serve_higgs_sgl.sh:59` reads it and defaults
+#: it to 0.60, so an unset variable is that script's stated number rather than
+#: an absence. See `crucible/voices.py:_SERVING_OPTIONAL` for the measurement
+#: that made it a field.
+MEM_FRACTION_VARIABLE = "HIGGS_SGL_MEM_FRACTION"
+
+#: THE ENGINE'S CONTEXT IN TOKENS, from `[voice.serving].context_length`.
+#: **No narrator on any pin reads this yet** — see `environment()`, which says
+#: so at the line that sets it — and the name is the one narrator is growing the
+#: reader under. Stated here so the two sides cannot pick different spellings.
+CONTEXT_LENGTH_VARIABLE = "HIGGS_CONTEXT_LENGTH"
+
 #: THE ENV PREFIX VARIABLE IS THE STACK'S, NOT ONE NAME FOR BOTH — and each
 #: launcher reads ONLY its own.
 #:
@@ -578,6 +591,8 @@ class NarratorEngine(SubprocessEngine):
         *,
         serving_stack: str | None,
         max_num_seqs: int | None,
+        mem_fraction: float | None,
+        context_length: int | None,
         voices: VoicesDocument | None,
         mlx_total_bytes: int | None,
     ) -> None:
@@ -614,6 +629,13 @@ class NarratorEngine(SubprocessEngine):
         self._narrator_engine = narrator_engine
         self._serving_stack = serving_stack
         self._max_num_seqs = max_num_seqs
+        # NOT VALIDATED AGAIN HERE. `voices.py:_check_serving` is the one owner
+        # of what a fraction and a context length may be — (0, 1) and positive,
+        # each owing its note — and a second copy of those rules in this file is
+        # the two-owners shape `docs/ARCHITECTURE.md` catalogues. What this
+        # class owns is whether the variable is EMITTED, which is below.
+        self._mem_fraction = mem_fraction
+        self._context_length = context_length
         if narrator_engine == HIGGS_V3:
             if voices is None:
                 # THE DOCUMENT IS HOW A HIGGS VOICE IS NAMED, on both arms.
@@ -831,6 +853,36 @@ class NarratorEngine(SubprocessEngine):
                 self._env_prefix
             )
             environment[MAX_NUM_SEQS_VARIABLE] = str(self._max_num_seqs)
+        # THE TWO LEVERS THE MANIFEST MAY STATE, ON EITHER ARM (2026-09-19).
+        # Outside the `_env_prefix` block above deliberately: `HIGGS_STACK`,
+        # `HIGGS_ENV` and `HIGGS_MAX_NUM_SEQS` are the SERVED arm's vocabulary
+        # and mean nothing in process, but Owen ruled the same day that darwin
+        # is to be configured the same way — "context limits and such" — so
+        # these two are stated wherever the manifest states them and narrator
+        # answers for the arm it is on.
+        #
+        # ONLY WHEN THE MANIFEST STATED ONE. Absent means narrator's own
+        # launcher default, which is a number in a file with an owner
+        # (`serve_higgs_sgl.sh:59` writes 0.60), and writing it back here would
+        # be Crucible restating a value it did not choose — the shape that put
+        # narrator's `CHARS_PER_SEC` 15.0 into two voice manifests.
+        if self._mem_fraction is not None:
+            # `:g` for `MLX_MEM_BUDGET_VARIABLE`'s reason: narrator parses with
+            # `float()` and the launcher's `case` test takes `0.48` either way,
+            # and a `/proc/<pid>/environ` read from two machines compares
+            # without a reader wondering what a `.0` means.
+            environment[MEM_FRACTION_VARIABLE] = f"{self._mem_fraction:g}"
+        if self._context_length is not None:
+            # NARRATOR DOES NOT READ THIS YET, and that is said out loud rather
+            # than discovered. At bookforge HEAD (2026-09-19)
+            # `engine/higgs/sgl_served.py:217-221` states the 4096 as a class
+            # attribute of SGLang-Omni's `HiggsTtsEngineBuilder` "with no CLI
+            # flag and no config path - the value cannot be raised from here,
+            # from the launcher, or from a request", and no `HIGGS_CONTEXT_
+            # LENGTH` exists anywhere in that tree. The variable is the agreed
+            # name for the channel narrator is growing on its own branch; until
+            # the tts env's pin moves to it, this is set and read by nothing.
+            environment[CONTEXT_LENGTH_VARIABLE] = str(self._context_length)
         if self._mlx_tier is not None:
             # ONE ROW, THREE VARIABLES, and that is the whole point of the row.
             # The width is a CEILING TO ASK FOR, never a promise to allocate:

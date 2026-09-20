@@ -120,6 +120,7 @@ import {
   type VoiceInfo,
   type VoiceKind,
   type VoicePace,
+  type VoiceServing,
   type WrittenArtifact,
 } from './types.js';
 import { SDK_VERSION } from './version.js';
@@ -1302,13 +1303,16 @@ export class CrucibleClient {
    * `voice_not_installed`, `accelerator_busy`, `insufficient_memory`,
    * `voice_kind_unsupported` (a zero-shot voice that is not already resident:
    * a render job loads its own voice, and a zero-shot load needs the clip only
-   * {@link loadVoice} carries), `unknown_take`, and `chunk_too_long`.
+   * {@link loadVoice} carries), `retake_without_band`, `band_malformed` and
+   * `width_over_serving`.
    *
-   * The `chunk_too_long` cap is **not** re-checked here. It is per (voice,
-   * backend) and it lives on the voice row ({@link VoiceInfo.maxChars}); a
-   * second copy of it in this file would be a second thing to drift, exactly as
-   * {@link asr} keeps no copy of faster-whisper's language list. Pack against
-   * the row you read from {@link voices}.
+   * **`chunk_too_long` and `unknown_take` are retired** (2026-09-19). The
+   * server no longer refuses a chunk by length at all, and a take past the end
+   * of the ladder is a seed lane at the voice's own sampling rather than an
+   * error. Pack against the row you read from {@link voices} because that is
+   * still where a voice's cap and band are published; nothing in this file
+   * keeps a copy of either, for the reason {@link asr} keeps no copy of
+   * faster-whisper's language list.
    */
   async render(options: RenderOptions): Promise<string> {
     const given = options as Partial<RenderOptions> | undefined;
@@ -1330,6 +1334,14 @@ export class CrucibleClient {
           language: requireText(given.language, 'language'),
           take: requireIndex(given.take, 'take'),
           chunks: readRenderChunks(given.chunks),
+          // ABSENT STAYS ABSENT for all three. `retake` omitted is the bare
+          // arm, a `band` nobody stated is a band nobody can be held to, and
+          // `width` omitted is the voice's own serving width — each is a real
+          // state the server names, so sending a key this client invented
+          // would be answering a question the caller did not.
+          ...(given.retake === undefined ? {} : { retake: given.retake }),
+          ...(given.band === undefined ? {} : { band: given.band }),
+          ...(given.width === undefined ? {} : { width: given.width }),
         },
         inputs: {},
       },
@@ -2703,11 +2715,52 @@ export function readRenderResult(done: DoneData): RenderResult {
       readRenderFailure(asObject(entry, `${where}.failed[${index}]`), `${where}.failed[${index}]`),
     ),
     take: num(extra, 'take', where),
+    // THE TRIPLE THE ENGINE APPLIED, and the weights it applied them to. Read
+    // strictly — a result that omits either is a protocol error and not a
+    // null — because the whole point of pinning them is that a record which
+    // cannot say what it ran at is comparable to nothing.
+    sampling: readSampling(asObject(field(extra, 'sampling', where), `${where}.sampling`),
+      `${where}.sampling`),
+    voice: readRenderVoice(
+      asObject(field(extra, 'voice', where), `${where}.voice`), `${where}.voice`),
+    // `null` only for a voice whose manifest declares no serving table.
+    width: nullableNum(extra, 'width', where),
     // The rate the voice was loaded at, which the load already reconciled
     // against the manifest — so it is both the engine's truth and the
     // manifest's, and the FLAC headers on disk say the same thing.
     sampleRate: num(extra, 'sample_rate', where),
     artifacts,
+  };
+}
+
+/**
+ * The sampling triple off a `done`, unopened beyond "every value is a number".
+ *
+ * NOT a fixed set of three keys. The levers a voice may state are the engine's
+ * — `temperature`, `top_p`, `top_k`, and `repetition_penalty` on the arm that
+ * has one — and a reader that named them would refuse a result the server
+ * produced perfectly well the day a fifth arrives. This is `guard`'s discipline
+ * one field over: carry it, do not interpret it.
+ */
+function readSampling(entry: Json, where: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const key of Object.keys(entry as Record<string, unknown>)) {
+    out[key] = num(entry, key, where);
+  }
+  return out;
+}
+
+function readRenderVoice(
+  entry: Json,
+  where: string,
+): { id: string; identity: string; identityBasis: string } {
+  return {
+    id: str(entry, 'id', where),
+    identity: str(entry, 'identity', where),
+    // `verified` for a pin — the sha is what was fetched — `asserted` for a
+    // directory somebody pointed at. Carried as the server's own word rather
+    // than narrowed to a union here, for `readSampling`'s reason.
+    identityBasis: str(entry, 'identity_basis', where),
   };
 }
 
@@ -2872,8 +2925,34 @@ function readVoiceInfo(
     // and a client that packs cannot be handed half a pace block.
     sampleRate: num(entry, 'sample_rate', where),
     takes: num(entry, 'takes', where),
+    // `null` for a voice with no serving table; read strictly otherwise, for
+    // `pace`'s reason — a client picking a render width against half a
+    // serving block would pick against a ceiling nobody stated.
+    serving: readVoiceServing(entry, where),
     needsReference,
     pace: readVoicePace(objectField(entry, 'pace', where), `${where}.pace`),
+  };
+}
+
+/**
+ * `[voice.serving]` off the row, or null for a voice that declares none.
+ *
+ * The two optional levers are read with the nullable readers and **the null is
+ * kept**: `null` means "this voice states none, so narrator's own launcher
+ * default applies", which is a different fact from any number, exactly as
+ * `capped: null` is a different fact from `false`.
+ */
+function readVoiceServing(entry: Json, where: string): VoiceServing | null {
+  const block = nullableObject(entry, 'serving', where);
+  if (block === null) return null;
+  const at = `${where}.serving`;
+  return {
+    maxNumSeqs: num(block, 'max_num_seqs', at),
+    maxNumSeqsNote: str(block, 'max_num_seqs_note', at),
+    memFraction: nullableNum(block, 'mem_fraction', at),
+    memFractionNote: nullableStr(block, 'mem_fraction_note', at),
+    contextLength: nullableNum(block, 'context_length', at),
+    contextLengthNote: nullableStr(block, 'context_length_note', at),
   };
 }
 

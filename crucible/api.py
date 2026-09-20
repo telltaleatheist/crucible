@@ -297,8 +297,9 @@ class StreamOp(BaseModel):
     `say(id, text, take?)` defaults it to 0 in the caller's own code, which is a
     client choosing; a default on the wire would be the server choosing, and now
     that the five fine-tunes declare a second rung that would be a render at a
-    take nobody asked for. A take past the end of the voice's ladder is
-    `unknown_take` and is never clamped.
+    take nobody asked for. A take past the end of the voice's ladder is a SEED
+    LANE at the voice's own sampling (2026-09-19) and is still never clamped —
+    take 4 is never take 2's numbers under take 4's name.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -2351,20 +2352,16 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         if body.op == "say":
             manifest = known_voice(session.voice)
             sampling = require_sayable(manifest, body.take)
-            if len(body.text) > session.max_chars:
-                # The cap certificate, refused rather than re-split: chunking is
-                # the client's (PHASE3-TTS.md section 1), and a server that
-                # quietly cut a sentence in half would stream two rows where one
-                # was asked for and retire an id the client never sees again.
-                raise ApiError(
-                    400,
-                    "chunk_too_long",
-                    f"this row is {len(body.text)} characters and the cap for "
-                    f"{session.voice!r} on {session.backend} is "
-                    f"{session.max_chars}. Chunking is the client's, so this is "
-                    "a refusal and not a re-split",
-                    {"voice": session.voice, "max_chars": session.max_chars},
-                )
+            # NO LENGTH REFUSAL HERE SINCE 2026-09-19. `chunk_too_long` stood
+            # between these two lines — the cap certificate, refused rather
+            # than re-split — and it is retired with the render door's twin
+            # (PHASE18-UNCERTIFIED.md section 4, `jobs/tts/render.py`). Owen:
+            # *"I don't think it's crucible's place to refuse chunks outside
+            # the band… especially if we add a different tts engine."*
+            # Chunking is still the client's and the cap is still advertised on
+            # `/v1/voices` for it to pack to; what this server no longer does
+            # is act on a number that a screening checkpoint may not have and
+            # that another engine's frame arithmetic would not be described by.
             return {"id": session.say(body.id, body.text, body.take, sampling)}
         if body.op == "cancel":
             return {"id": body.id, "outcome": session.cancel(body.id)}

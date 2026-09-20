@@ -660,7 +660,7 @@ One named input: either an uploaded blob or bytes inline in the request.
 
 ### `StreamOp`
 
-`POST /v1/tts/stream/{id}` — one op. {"op": "say", "id": "r12", "text": "...", "take": 0} {"op": "cancel", "id": "r12"} {"op": "cancel_all"} {"op": "close"} `take` is **required** on `say` and has no default here. The SDK's `say(id, text, take?)` defaults it to 0 in the caller's own code, which is a client choosing; a default on the wire would be the server choosing, and now that the five fine-tunes declare a second rung that would be a render at a take nobody asked for. A take past the end of the voice's ladder is `unknown_take` and is never clamped.
+`POST /v1/tts/stream/{id}` — one op. {"op": "say", "id": "r12", "text": "...", "take": 0} {"op": "cancel", "id": "r12"} {"op": "cancel_all"} {"op": "close"} `take` is **required** on `say` and has no default here. The SDK's `say(id, text, take?)` defaults it to 0 in the caller's own code, which is a client choosing; a default on the wire would be the server choosing, and now that the five fine-tunes declare a second rung that would be a render at a take nobody asked for. A take past the end of the voice's ladder is a SEED LANE at the voice's own sampling (2026-09-19) and is still never clamped — take 4 is never take 2's numbers under take 4's name.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |

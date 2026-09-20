@@ -200,6 +200,7 @@ export type {
   VoiceInfo,
   VoiceKind,
   VoicePace,
+  VoiceServing,
   VoiceReference,
   WarmingData,
   WrittenArtifact,

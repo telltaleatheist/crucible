@@ -91,6 +91,8 @@ def build_voice_engine(
     *,
     serving_stack: str | None,
     max_num_seqs: int | None,
+    mem_fraction: float | None,
+    context_length: int | None,
     voices: "VoicesDocument | None",
     mlx_total_bytes: int | None,
 ) -> NarratorEngine:
@@ -114,6 +116,15 @@ def build_voice_engine(
     arm). All are mandatory keywords: `None` is a real answer and a default
     would hide a caller that forgot.
 
+    `mem_fraction` and `context_length` (2026-09-19) belong to the VOICE
+    MANIFEST too, beside `max_num_seqs` in `[voice.serving]`, and `None` for
+    each means "narrator's own launcher default" — 0.60 and the Higgs builder's
+    4096 — which is a number stated in a file that has an owner rather than one
+    chosen here. Unlike `max_num_seqs` they go to BOTH arms: Owen ruled on
+    2026-09-19 that darwin is to be configured the same way, so an MLX backend
+    with no knob for one of them is narrator's refusal to make, by name, and
+    never this server's to hide.
+
     THE LAST ONE IS THE MACHINE'S AND NOT THE VOICE'S, which is why it is not in
     the manifest beside `max_num_seqs`. The served arm's width is a property of
     the card the voice was certified on and travels with the voice; the
@@ -133,6 +144,8 @@ def build_voice_engine(
         log_path=log_path,
         serving_stack=serving_stack,
         max_num_seqs=max_num_seqs,
+        mem_fraction=mem_fraction,
+        context_length=context_length,
         voices=voices,
         mlx_total_bytes=mlx_total_bytes,
     )

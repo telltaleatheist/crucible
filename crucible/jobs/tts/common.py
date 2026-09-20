@@ -201,11 +201,24 @@ def voice_rows(
     gets is the shape it must pack to (`pace`, `max_chars`) and the identity it
     must record (`fingerprint`).
 
-    `[voice.serving].max_num_seqs` IS NOT ON THE ROW EITHER, by that same rule
-    and by the division-of-knowledge ruling behind it: it is how wide the
-    server admits, a Crucible-side configuration number, and a client has no
-    decision to make with it. It reaches narrator through the engine's
-    environment (`crucible/engines/narrator.py`) and stops there.
+    **`serving` IS ON THE ROW SINCE 2026-09-19, and the rule above is what
+    changed rather than being broken.** It read: `[voice.serving].max_num_seqs`
+    is how wide the server admits, a Crucible-side configuration number, and a
+    client has no decision to make with it. That was true while the width was
+    the manifest's alone. Owen's ruling of 2026-09-19 gave a `tts` job its own
+    `params.width`, under that number and refused above it
+    (`width_over_serving`) — so a client now HAS a decision to make with it, and
+    without the row the only way to find the ceiling is to be refused by it.
+    `mem_fraction` and `context_length` ride with it for the same reason one
+    step removed: they are what a person comparing two servers, or deciding
+    whether this one can hold a screening run, has to be able to read. All of
+    them are `null` when the manifest states none, which means "narrator's own
+    launcher default" and never a number this row invented.
+
+    The levers themselves still reach narrator through the engine's environment
+    (`crucible/engines/narrator.py`) and are still never SENT by a client: the
+    row publishes what the server chose, and the only thing a request may say
+    about any of it is a width at or under the ceiling.
     """
     backend_kind = backend.kind
     rows: list[dict[str, Any]] = []
@@ -312,6 +325,14 @@ def voice_rows(
                 # than only in the manifest, so nothing downstream can mistake
                 # one for the other (crucible/voices.py).
                 "estimate_basis": basis,
+                # THE SERVING TABLE, or null for a voice that declares none —
+                # a shape the next narrator engine will have and no manifest
+                # has today. `max_num_seqs` is the CEILING a job's `width` must
+                # sit under; the other two are what the server will configure
+                # narrator with, null meaning its launcher's own default.
+                "serving": (
+                    None if manifest.serving is None else manifest.serving.to_dict()
+                ),
                 "max_chars": max_chars,
                 # HOW THE CAP AND THE BAND WERE GOT, beside the numbers
                 # themselves (PHASE21 sections 2.1 and 6). `"measured"` is a

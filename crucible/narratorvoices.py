@@ -45,8 +45,11 @@ catalog's camelCase is the WIRE), and nothing it does not read is written:
     clips            the reference a `load-voice` carried, as narrator's own
                      `[{path, transcript, seconds}]` — zeroshot voices only,
                      and required of them. See `crucible/voicereference.py`.
-    maxChars         the backend block's `max_chars` — CHARACTERS, and the one
-                     field narrator refuses a checkpoint voice without.
+    maxChars         the backend block's `max_chars` — CHARACTERS — when the
+                     manifest states one. It was "the one field narrator
+                     refuses a checkpoint voice without" until 2026-09-19;
+                     since then a screening checkpoint may carry no cap and
+                     this key is absent rather than invented.
     targetChars      `[voice.pace].target_chars`, when declared.
     safeMinChars /   `[voice.pace].safe_min_chars` / `safe_max_chars`, when
     safeMaxChars     declared. `crucible/voices.py` has already refused a band
@@ -266,7 +269,14 @@ def _sampling_entry(manifest: VoiceManifest, spec: VoiceBackendSpec) -> dict[str
 
 
 def take_sampling(manifest: VoiceManifest, take: int) -> dict[str, Any] | None:
-    """The rung's sampling in narrator's PER-ITEM spelling, or None for take 0.
+    """The rung's sampling in narrator's PER-ITEM spelling, or None.
+
+    None at take 0, and None at any take AT OR PAST the end of the declared
+    ladder — `VoiceManifest.take` answers both with a rung that overrides
+    nothing, and its docstring carries the 2026-09-19 ruling for why past-the-
+    end is the voice's own sampling rather than the last rung's. The seed lane
+    still moves: `take` rides on every item regardless, which is what makes a
+    numberless take a different draw.
 
     The document's `sampling` (above) is the voice's take-0 numbers and is
     written per LOAD. A rung is per RENDER, and since 2026-09-14 narrator has a
@@ -404,7 +414,19 @@ def voice_entry(
         # clone is not supported"), so several clips are pre-joined into one
         # wav by whoever cut them, and this wire carries the one.
         entry["clips"] = [clip.to_dict()]
-    entry["maxChars"] = spec.max_chars
+    # THE CAP ONLY WHEN THE MANIFEST MEASURED ONE (2026-09-19). It was written
+    # unconditionally, and it could be, because `max_chars` was the one field
+    # every backend block had to carry — "the one field narrator refuses a
+    # checkpoint voice without". Both halves moved on the same day: the
+    # manifest may decline to state a cap (PHASE18-UNCERTIFIED.md section 4,
+    # `voices.py:_BACKEND_OPTIONAL`) and narrator no longer refuses a
+    # checkpoint voice that carries none.
+    #
+    # Omitted rather than sent as null, for `paceCharsPerSec`'s reason below: a
+    # key that is absent is a fact nobody stated, and narrator's own default
+    # frame arithmetic is narrator's to own. Crucible does not pick a cap.
+    if spec.max_chars is not None:
+        entry["maxChars"] = spec.max_chars
     pace = manifest.pace
     if pace.target_chars is not None:
         entry["targetChars"] = pace.target_chars

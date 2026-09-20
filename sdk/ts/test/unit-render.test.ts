@@ -347,34 +347,58 @@ test('a take or an index that is not a whole count is refused, never rounded', a
   }
 });
 
-test('render() keeps no copy of max_chars; the voice row is the authority', async () => {
-  // The cap is per (voice, backend) and rides on the voice row. A second copy in
-  // the client is a second thing to drift — the same reason asr() keeps no copy
-  // of faster-whisper's language list. So an over-long chunk goes out and comes
-  // back as the server's own refusal, naming the index and the cap.
-  answers(400, {
-    error: {
-      code: 'chunk_too_long',
-      message:
-        "1 chunk(s) are longer than the 800-character cap for 'deathstalker' on " +
-        'cuda-linux: index 41 is 1200. Chunking is the client\'s, so this is a ' +
-        'refusal and not a re-split',
-    },
+test('render() keeps no copy of max_chars, and the server no longer has one either', async () => {
+  // The cap rides on the voice row and a second copy in the client would be a
+  // second thing to drift - the same reason asr() keeps no copy of
+  // faster-whisper's language list. What CHANGED on 2026-09-19 is the other
+  // end: `chunk_too_long` is retired, so an over-long chunk goes out unaltered
+  // and is RENDERED rather than refused (PHASE18-UNCERTIFIED.md section 4). A
+  // screening checkpoint has no measured cap to be refused against, and a
+  // second TTS engine's frame arithmetic is not described by this number.
+  answers(202, { job_id: 'job-tts-1' });
+  const id = await client().render({
+    voice: 'deathstalker',
+    language: 'en',
+    take: 0,
+    chunks: [{ index: 41, text: 'x'.repeat(1200) }],
   });
-  await assert.rejects(
-    client().render({
-      voice: 'deathstalker',
-      language: 'en',
-      take: 0,
-      chunks: [{ index: 41, text: 'x'.repeat(1200) }],
-    }),
-    (error: unknown) => {
-      assert.ok(error instanceof CrucibleRefused, `got ${String(error)}`);
-      assert.equal(error.code, 'chunk_too_long');
-      return true;
-    },
-  );
+  assert.equal(id, 'job-tts-1');
   assert.match(lastBody, /"index":41/, 'the chunk went out unaltered');
+});
+
+test('the arm, the band and the width travel only when the caller states them', async () => {
+  // ABSENT STAYS ABSENT. `retake` omitted is the bare arm, a band nobody stated
+  // is a band nobody can be held to, and an absent width is the voice's own
+  // serving width - three real states the SERVER names, so a client that
+  // invented any of them would be answering a question the caller did not ask.
+  answers(202, { job_id: 'job-tts-1' });
+  await client().render({
+    voice: 'deathstalker',
+    language: 'en',
+    take: 0,
+    chunks: [{ index: 41, text: 'Rain.' }],
+  });
+  assert.equal(lastBody.includes('retake'), false);
+  assert.equal(lastBody.includes('band'), false);
+  assert.equal(lastBody.includes('width'), false);
+
+  answers(202, { job_id: 'job-tts-2' });
+  await client().render({
+    voice: 'deathstalker',
+    language: 'en',
+    take: 0,
+    chunks: [{ index: 41, text: 'Rain.' }],
+    retake: true,
+    band: {
+      pace_chars_per_sec: 15.91,
+      max_chars_per_sec: 20.68,
+      min_chars_per_sec: 12.24,
+    },
+    width: 4,
+  });
+  assert.match(lastBody, /"retake":true/);
+  assert.match(lastBody, /"pace_chars_per_sec":15\.91/);
+  assert.match(lastBody, /"width":4/);
 });
 
 test("render()'s signal aborts the submit, and the abort is the caller's own error", async () => {
@@ -579,6 +603,17 @@ const RENDER_DONE = {
   rendered: 1,
   failed: [{ index: 42, message: 'No audio generated' }],
   take: 0,
+  // THE TRIPLE AS APPLIED and the weights that ran (2026-09-19). Whole, never
+  // the rung's override alone: a record saying only `temperature` says nothing
+  // about the top-p and top-k it ran at, and those are what a ladder's
+  // comparison rests on.
+  sampling: { temperature: 0.8, top_p: 0.95, top_k: 50 },
+  voice: {
+    id: 'deathstalker',
+    identity: '9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c',
+    identity_basis: 'verified',
+  },
+  width: 16,
   sample_rate: 24000,
 };
 
@@ -594,6 +629,13 @@ test("a done frame's own terminal news reaches the caller instead of being dropp
     rendered: 1,
     failed: [{ index: 42, message: 'No audio generated' }],
     take: 0,
+    sampling: { temperature: 0.8, top_p: 0.95, top_k: 50 },
+    voice: {
+      id: 'deathstalker',
+      identity: '9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c',
+      identity_basis: 'verified',
+    },
+    width: 16,
     sample_rate: 24000,
   });
 });
@@ -637,9 +679,45 @@ test('readRenderResult reads the authoritative list of chunks to ask for again',
     // other 1,399, and this is how a client learns which index is missing.
     failed: [{ index: 42, message: 'No audio generated' }],
     take: 0,
+    sampling: { temperature: 0.8, top_p: 0.95, top_k: 50 },
+    voice: {
+      id: 'deathstalker',
+      identity: '9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c',
+      identityBasis: 'verified',
+    },
+    width: 16,
     sampleRate: 24000,
     artifacts: ['41.flac'],
   });
+});
+
+test('the render result names the sampling that ran and the weights it ran on', async () => {
+  // PHASE18 section 7's promise, discharged once per job. Read STRICTLY - a
+  // result that cannot say what it sampled with is comparable to nothing, and
+  // every Higgs measurement before 2026-09-06 was rendered at temperature 1.0.
+  streams(frame(1, 'done', RENDER_DONE));
+  const events = await drain('job-tts-1');
+  const done = events[0]!;
+  assert.ok(done.event === 'done');
+  const result = readRenderResult(done.data);
+  assert.deepEqual(result.sampling, { temperature: 0.8, top_p: 0.95, top_k: 50 });
+  assert.equal(result.voice.id, 'deathstalker');
+  assert.equal(result.voice.identityBasis, 'verified');
+  assert.equal(result.width, 16);
+});
+
+test('a result that cannot say what it sampled with is a protocol error', async () => {
+  const { sampling: _sampling, ...withoutSampling } = RENDER_DONE;
+  streams(frame(1, 'done', withoutSampling));
+  const events = await drain('job-tts-1');
+  assert.throws(
+    () => readRenderResult(events[0]!.data as never),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+      assert.match(error.message, /has no field "sampling"/);
+      return true;
+    },
+  );
 });
 
 test('readRenderResult refuses a done frame without a failed list, rather than reading it as clean', async () => {

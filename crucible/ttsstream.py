@@ -120,7 +120,7 @@ from .jobs.base import utcnow
 from .errors import ApiError, JobCancelled, JobError
 from .narratorvoices import take_sampling
 from .residency import KIND_TTS, Residency, describe_resident
-from .voices import VoiceError, VoiceManifest
+from .voices import VoiceManifest
 
 __all__ = [
     "GRACE_SECONDS",
@@ -307,7 +307,6 @@ class StreamSession:
         fingerprint: str,
         sample_rate: int,
         backend: str,
-        max_chars: int,
         narrator_engine: str,
         client: str | None,
         engine: NarratorEngine,
@@ -328,7 +327,6 @@ class StreamSession:
         self.fingerprint = fingerprint
         self.sample_rate = sample_rate
         self.backend = backend
-        self.max_chars = max_chars
         self.narrator_engine = narrator_engine
         self.batch_width = batch_width_for(narrator_engine)
 
@@ -1254,7 +1252,6 @@ class StreamManager:
                 fingerprint=resident.fingerprint,
                 sample_rate=resident.sample_rate,
                 backend=resident.backend,
-                max_chars=resident.max_chars,
                 narrator_engine=manifest.narrator_engine,
                 client=client,
                 engine=engine,
@@ -1384,18 +1381,17 @@ def require_sayable(
     """What a `say` may ask for, and the rung it resolves to.
 
     The render door's rules, one row at a time. Returns the take's sampling in
-    narrator's per-item spelling, or `None` at take 0 — which is the loaded
-    voice's own sampling and is what sending no key means.
+    narrator's per-item spelling, or `None` — at take 0, and at any take AT OR
+    PAST the end of the voice's declared ladder, both of which mean "the loaded
+    voice's own sampling" and are what sending no key means.
+
+    **`unknown_take` was raised here and is retired** (2026-09-19,
+    PHASE18-UNCERTIFIED.md section 5). A take past the ladder is a seed lane at
+    the voice's own numbers rather than an error, so there is nothing left for
+    this function to refuse: `take` is `Field(ge=0)` on `StreamOp`, which is
+    the one owner of "a take is not negative", and `VoiceManifest.take` answers
+    everything at or above 0. It is still never CLAMPED — the numbers are take
+    0's, not the last rung's, so no client can ask for take 4 and be handed
+    take 2's draw under take 4's name.
     """
-    try:
-        manifest.take(take)
-    except VoiceError as exc:
-        # Never clamped to the last rung: a silent clamp is a retake ladder that
-        # stops climbing without telling anyone.
-        raise ApiError(
-            400,
-            "unknown_take",
-            str(exc),
-            {"voice": manifest.id, "take": take, "takes": len(manifest.takes)},
-        ) from None
     return take_sampling(manifest, take)

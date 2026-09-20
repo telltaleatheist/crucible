@@ -51,6 +51,29 @@ file-writing sink removed) and puts its verdict on `batch_item`; this file's job
 is to carry it across unopened. `crucible/docs/PHASE6-REMOTE-RENDER.md` sections
 0, 2, 3 and 4; it amends PHASE3-TTS.md sections 1, 3 and 6.
 
+**And WHICH arm judges is the request's to say** (PHASE18-UNCERTIFIED.md
+sections 4 and 6, Owen's ruling of 2026-09-19). `retake: true` runs the
+paragraph above — narrator's guarded driver, measured against the `band` the
+same request states — and `retake: false`, which is what absence means, runs
+the bare arm: every chunk rendered once as sent, at the requested take's
+sampling, nothing judged and nothing retaken. The measurements come back on
+both arms, because they are this server's own count of bytes that arrived;
+`guard` on a bare row is `null`, and here that `null` has its most exact
+meaning yet — nobody judged it, because nobody was asked to.
+
+The bare arm is the default because it is the primitive, and because the first
+client that needs it is measuring the very failures a guard hides: the
+fine-tuning ladder renders 512 matched cells per checkpoint and scores the
+failure count, and a re-roll that succeeds is indistinguishable from a good
+first draw. A guarded screen under-counts, invisibly, in the direction that
+makes a good checkpoint look bad — narrator falls back to its ENGINE's default
+band for a voice that states none, centred at 15.0 against a real book pace
+nearer 17.2, and re-rolls healthy chunks to MAX_DEPTH. Hence the band being
+the caller's to state and `retake_without_band` rather than a lookup.
+
+**This door does not refuse a chunk by length.** `chunk_too_long` was retired
+on 2026-09-19 — see `_require_renderable`.
+
 **One artifact per requested index, always** (PHASE6 section 5). The ladder may
 decide a chunk is unsalvageable whole and render it as two halves, but
 `truncation.join_parts` joins them before the chunk retires, so a split arrives
@@ -105,9 +128,21 @@ So both are `None` when narrator does not say, and `None` is published as JSON
 a runaway reported as "not capped" is exactly the failure the field exists to
 prevent. PHASE3-TTS.md section 6 records the owed change on narrator's side.
 
+**`capped` is being closed from narrator's end, and this file needs no change
+for it.** The 2026-09-19 narrator work that reads `retake` and `band` also puts
+`"capped": bool` on every retiring row, so against a narrator that carries it
+the `chunk` event's `capped` is a real boolean. `_optional_bool` already reads
+it exactly that way and has since this door was built — present and a bool, it
+travels; absent, it is `None`. There is no branch here to add and there must
+not be one: a reader that turned an absent key into `false` the day the wire
+was supposed to carry it would report every runaway as a finished sentence.
+Against the currently PINNED narrator (`crucible/envs/tts/*.txt`, not yet
+moved) it is still `null` on every row.
+
 `guard` obeys the same rule one level up. A `null` guard means narrator sent no
-verdict — an engine with no `render_many` to offer, or a row that failed
-before the ladder reached a decision
+verdict — a bare render (`retake: false`, which is what nobody asking for a
+guard looks like), an engine with no `render_many` to offer, or a row that
+failed before the ladder reached a decision
 — and it is never to be read as "the take was clean". `clean` is a key INSIDE a
 verdict that exists; the absence of a verdict says nothing about the take.
 
@@ -145,7 +180,7 @@ from ...engines import EngineError, EngineWouldNotStop, NarratorEngine
 from ...errors import ApiError, JobCancelled, JobError
 from ...narratorvoices import take_sampling
 from ...residency import KIND_TTS, Residency, describe_resident
-from ...voices import VoiceError, VoiceManifest
+from ...voices import VoiceManifest
 from .. import asr
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from .common import (
@@ -210,10 +245,17 @@ class TtsChunk(BaseModel):
 class TtsParams(BaseModel):
     """`params` for a tts job. Unknown keys are refused, not ignored.
 
-    Nothing has a default. `language` and `take` are both decisions — a book
-    rendered in the wrong language, or at a take the client did not choose, is a
-    silent substitution — and a default here would let a client make neither and
-    still get audio.
+    `language`, `take` and `chunks` have no default. All three are decisions —
+    a book rendered in the wrong language, or at a take the client did not
+    choose, is a silent substitution — and a default here would let a client
+    make neither and still get audio.
+
+    `retake` and `band` DO have an absent meaning, and that is the 2026-09-19
+    ruling rather than a lapse in the same rule (PHASE18-UNCERTIFIED.md
+    section 4). A default is the server inventing a value for a fact that has a
+    right answer. An absent constraint is nobody having asked for one — and
+    "nobody asked me to judge this render" is a real, sayable state, which is
+    what a bare render IS.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -221,6 +263,60 @@ class TtsParams(BaseModel):
     language: str
     take: int = Field(ge=0)
     chunks: list[TtsChunk] = Field(min_length=1)
+    #: WHICH ARM RENDERS THIS BATCH, and the whole of Crucible's say in it.
+    #:
+    #: `true` is narrator's guarded driver — `render_many`, the PaceTracker,
+    #: the re-roll on truncation/runaway/loop and the split ladder — measured
+    #: against the `band` this request states. `false` (and absent) is the bare
+    #: arm: every chunk rendered ONCE as sent, at the requested take's
+    #: sampling, nothing judged and nothing retaken.
+    #:
+    #: Bare is the default because it is the primitive. The guarded arm is a
+    #: narration behaviour a client asks for; a server that guarded by default
+    #: would be deciding, for the screening ladder that is measuring a failure
+    #: curve, to hide the failures — a re-roll that succeeds looks exactly like
+    #: a good first draw, and the numbers come out systematically clean in
+    #: precisely the way the instrument exists to detect.
+    retake: bool = False
+    #: THE BAND THE GUARD MEASURES AGAINST, stated by the caller, in the
+    #: manifest's own spelling: `{pace_chars_per_sec, max_chars_per_sec,
+    #: min_chars_per_sec}`, all three positive with min < pace < max.
+    #:
+    #: **Not read off the voice.** BookForge echoes back the row it read from
+    #: `/v1/voices`; the screening ladder sends nothing and cannot be guarded.
+    #: The alternative — `retake: true` and the server finds a band — is the
+    #: shape that produced the 2026-09-18 defect twice over: `higgs-default`
+    #: satisfied a mandatory triple with narrator's own `CHARS_PER_SEC` 15.0,
+    #: which is the frame cap's DIVISOR and not a narration rate, and
+    #: deathstalker inherited 16.64 onto weights that measured 15.91. A band
+    #: nobody stated is a band nobody can be held to.
+    #:
+    #: `dict` and not a sub-model on purpose: every way a band can be wrong is
+    #: ONE refusal, `band_malformed`, raised by `_check_band` below. Pydantic
+    #: would sort the same mistake into `invalid_params` by which key it
+    #: landed on, which is two names for one thing.
+    band: dict[str, Any] | None = None
+    #: HOW MANY OF THIS JOB'S CHUNKS MAY BE IN FLIGHT AT ONCE, or absent for the
+    #: resident voice's own `[voice.serving].max_num_seqs` (Owen's ruling of
+    #: 2026-09-19).
+    #:
+    #: Absent is not a default and not a fallback: `max_num_seqs` is the width
+    #: the ENGINE was started with — the server's admission width and the width
+    #: of narrator's own batch — so "as wide as the voice was loaded" is a
+    #: stated number with an owner, exactly as "take 0's sampling" is.
+    #:
+    #: A width ABOVE it is `width_over_serving`, never clamped. The engine
+    #: cannot run wider than it was configured, and a job that believed it was
+    #: running 16 wide while narrator ran 4 would report a throughput nobody
+    #: can reproduce. Narrowing needs no restart and gets none: SGLang's
+    #: `--max-running-requests` and `cuda_graph_max_bs` stay whatever the voice
+    #: was loaded with, and this only limits what narrator keeps in flight.
+    #:
+    #: Why a screening job needs it (measured by the ladder's author,
+    #: 2026-09-19): 0.60 mem fraction at 16 wide summed to 24.2 GB on a 24 GB
+    #: card, and WDDM then pages to host RAM 4-10x slower with no error at all.
+    #: The ladder's baseline is 4 wide, on voices whose manifests say 16.
+    width: int | None = Field(default=None, ge=1)
 
     @field_validator("language")
     @classmethod
@@ -273,14 +369,179 @@ def _require_ffmpeg() -> str:
     return found
 
 
+#: The three rates in narrator's spelling, in the order a message prints them.
+#: One map, so the request's key names and the wire's key names cannot drift
+#: apart — the shape `docs/ARCHITECTURE.md`'s audit found seven times.
+_BAND_ON_THE_WIRE: dict[str, str] = {
+    "pace_chars_per_sec": "paceCharsPerSec",
+    "max_chars_per_sec": "maxCharsPerSec",
+    "min_chars_per_sec": "minCharsPerSec",
+}
+
+
+def _require_band(params: TtsParams) -> dict[str, float] | None:
+    """The stated band in narrator's spelling, or None, or a refusal by name.
+
+    Two refusals and they are both about the REQUEST rather than about a
+    manifest, which is why they are codes here and not `voice_invalid`
+    messages (PHASE18-UNCERTIFIED.md section 9):
+
+    `retake_without_band` — the guarded arm was asked for and no band was
+    stated. Not filled in from the voice: see `TtsParams.band` for the two
+    measured incidents that shape is responsible for. Not silently downgraded
+    to the bare arm either — a client that asked to be guarded and was not
+    would read every clean row as a verdict.
+
+    `band_malformed` — a band was stated and is not one: a missing rate, a
+    value that is not a number, a rate at or below zero, or an order other
+    than min < pace < max. It refuses the WHOLE request, because a band is one
+    statement and there is no row it belongs to.
+
+    **A band with `retake` false or absent is accepted and does nothing.**
+    Owen, 2026-09-19: *"it won't do anything with the number because it wasn't
+    asked to."* It is still CHECKED — a malformed band is a client mistake
+    whether or not this run would have used it, and reporting it only on the
+    runs that happen to be guarded would hide it until the day it matters.
+    """
+    band = params.band
+    if band is None:
+        if params.retake:
+            raise ApiError(
+                400,
+                "retake_without_band",
+                "retake is true and this request states no band. The guarded "
+                "arm re-rolls a chunk against a pace band, and the band is the "
+                "caller's to state: Crucible does not read one off the voice, "
+                "because an inherited band is indistinguishable from a measured "
+                "one at the point of use (deathstalker carried pace 16.64 onto "
+                "weights that measured 15.91). Send `band` "
+                f"{{{', '.join(_BAND_ON_THE_WIRE)}}}, or render bare",
+                {"retake": True},
+            )
+        return None
+
+    missing = sorted(set(_BAND_ON_THE_WIRE) - set(band))
+    unknown = sorted(set(band) - set(_BAND_ON_THE_WIRE))
+    if missing or unknown:
+        raise ApiError(
+            400,
+            "band_malformed",
+            f"band is {band!r}. A band is the measured pace and the two edges "
+            f"derived from it, and it travels as one statement: "
+            f"{sorted(_BAND_ON_THE_WIRE)}, all three"
+            + (f". Missing {missing}" if missing else "")
+            + (f". Unknown {unknown}" if unknown else ""),
+            {"band": band},
+        )
+    rates: dict[str, float] = {}
+    for key in _BAND_ON_THE_WIRE:
+        value = band[key]
+        # A bool is an int in Python, and `True` as a rate would read as 1.0.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ApiError(
+                400,
+                "band_malformed",
+                f"band.{key} is {value!r}, which is not a rate in characters "
+                "per second",
+                {"band": band, "field": key},
+            )
+        if value <= 0:
+            raise ApiError(
+                400,
+                "band_malformed",
+                f"band.{key} is {value}. Every rate is characters per second "
+                "and positive; a zero or a negative is a band nobody finished "
+                "writing, not a band with no floor",
+                {"band": band, "field": key},
+            )
+        rates[key] = float(value)
+    if not (
+        rates["min_chars_per_sec"]
+        < rates["pace_chars_per_sec"]
+        < rates["max_chars_per_sec"]
+    ):
+        # narrator's own rule (`engine/higgs/config.py:_length_band`) and
+        # `voices.py:_check_pace`'s, asked here so a request that could only be
+        # refused at the engine, on somebody's book, is refused at the door.
+        raise ApiError(
+            400,
+            "band_malformed",
+            f"band is min {rates['min_chars_per_sec']}, pace "
+            f"{rates['pace_chars_per_sec']}, max {rates['max_chars_per_sec']}, "
+            "which are out of order; the band is min < pace < max, because "
+            "narrator keeps only the band's RATIOS and re-centres them on the "
+            "book's running median",
+            {"band": band},
+        )
+    return {wire: rates[key] for key, wire in _BAND_ON_THE_WIRE.items()}
+
+
+def _require_width(manifest: VoiceManifest, params: TtsParams) -> int | None:
+    """How wide this job runs, or `width_over_serving` by name.
+
+    Absent means the voice's own `[voice.serving].max_num_seqs`, which is the
+    width the engine was STARTED with (`HIGGS_MAX_NUM_SEQS`) — a stated number
+    with an owner rather than one this file chose.
+
+    **Above that number is a refusal and never a clamp.** narrator cannot keep
+    more in flight than the server admits, so a clamp would be a job reporting
+    a width it did not run at, and the throughput of a screening run is one of
+    the things the run exists to measure.
+
+    None comes back only for a voice with no `[voice.serving]` table at all —
+    an engine that reads no `HIGGS_*` variable, which is a shape the next
+    narrator engine will have and no manifest has today. There is then no
+    configured width to compare against and none to forward, so the key is
+    omitted and narrator's own default stands, which is the same discipline
+    every other absent key on this wire has.
+    """
+    serving = manifest.serving
+    if serving is None:
+        return params.width
+    if params.width is None:
+        return serving.max_num_seqs
+    if params.width > serving.max_num_seqs:
+        raise ApiError(
+            400,
+            "width_over_serving",
+            f"this job asks for {params.width} chunk(s) in flight and "
+            f"{manifest.id!r} was configured for {serving.max_num_seqs} "
+            f"([voice.serving].max_num_seqs, which is the server's admission "
+            f"width and the width of narrator's own batch). A job cannot run "
+            f"wider than the engine was started; ask for "
+            f"{serving.max_num_seqs} or fewer, or change the voice's serving "
+            f"width and reload it. Never clamped: a job that thought it was "
+            f"running {params.width} wide and was not would report a number "
+            f"nobody can reproduce",
+            {"width": params.width, "max_num_seqs": serving.max_num_seqs},
+        )
+    return params.width
+
+
 def _require_renderable(
     config: Config, backend: Any, voice_id: str, params: TtsParams, resident: bool
-) -> tuple[VoiceManifest, Any, Any]:
+) -> tuple[VoiceManifest, Any, Any, dict[str, float] | None, int | None]:
     """Everything a render needs, or the first refusal, by name.
 
-    The order is `require_loadable`'s and then this door's own three: what the
-    voice IS, what the ladder can honour, and whether the text fits the cap
-    certificate. Each of them is cheap and none of them needs the card.
+    The order is `require_loadable`'s and then this door's own two: what the
+    voice IS, and what this request asks the guard to do. Both are cheap and
+    neither needs the card. Returns the band in narrator's spelling beside the
+    three things it always returned, so the rule that validates it has one
+    reader and `_render` does not re-derive it.
+
+    **This door no longer asks whether the text fits.** `chunk_too_long` was
+    the third check here until 2026-09-19 and it is retired, not relaxed.
+    Owen: *"I don't think it's crucible's place to refuse chunks outside the
+    band… especially if we add a different tts engine."* Chunking and packing
+    are the client's (PHASE3-TTS.md section 1) — that has never changed — and
+    the cap a voice carries is advertised on `/v1/voices` so the client can
+    pack to it. What changed is who acts on it: an oversize chunk now surfaces
+    as whatever the engine does with it, reported honestly on the `chunk` row,
+    rather than as a server refusing a render it was never asked to judge. The
+    two facts that made the refusal untenable arrived together: a screening
+    checkpoint has no measured cap to be refused against, and a second TTS
+    engine would have its own frame arithmetic that this number describes
+    nothing about.
 
     `resident` is whether this voice is the one already on the card. It bears
     on exactly one refusal — see below.
@@ -339,40 +600,19 @@ def _require_renderable(
     # pins narrator by commit and a pin is allowed to be older than the channel.
     # On 2026-09-15 it was, and two takes of one sentence came back byte-
     # identical. The check needs the engine, so it is not in this function.
-    try:
-        manifest.take(params.take)
-    except VoiceError as exc:
-        # Never clamped to the last rung: a silent clamp is a retake ladder that
-        # stops climbing without telling anyone, and the client would keep asking
-        # for take 4 and keep getting take 2's draw.
-        raise ApiError(
-            400,
-            "unknown_take",
-            str(exc),
-            {"voice": voice_id, "take": params.take, "takes": len(manifest.takes)},
-        ) from None
+    # AND A TAKE PAST THE END OF THE LADDER IS NO LONGER REFUSED (2026-09-19).
+    # `unknown_take` lived here and is retired with the rule it enforced: a
+    # take at or past the last declared rung is a SEED LANE at the voice's own
+    # sampling, which `VoiceManifest.take` now answers with directly. It is
+    # still not a clamp — the numbers are take 0's, never take 2's under take
+    # 4's name — and `take` still rides on every item, so the draw moves.
+    # Screening names takes 0..N on a voice that declares no ladder at all, and
+    # that is the case the refusal made inexpressible.
 
-    over = [
-        {"index": chunk.index, "chars": len(chunk.text)}
-        for chunk in params.chunks
-        if len(chunk.text) > spec.max_chars
-    ]
-    if over:
-        # The cap certificate doing the one job it exists for. It is per (voice,
-        # backend) and refused rather than re-split: chunking is BookForge's
-        # (section 1), and a server that quietly cut a chunk in half would be
-        # returning two files where a client asked for one.
-        raise ApiError(
-            400,
-            "chunk_too_long",
-            f"{len(over)} chunk(s) are longer than the {spec.max_chars}-character "
-            f"cap for {voice_id!r} on {spec.backend}: "
-            + ", ".join(f"index {row['index']} is {row['chars']}" for row in over[:8])
-            + ("" if len(over) <= 8 else f", and {len(over) - 8} more")
-            + ". Chunking is the client's, so this is a refusal and not a re-split",
-            {"voice": voice_id, "max_chars": spec.max_chars, "chunks": over},
-        )
-    return manifest, spec, interpreter
+    return (
+        manifest, spec, interpreter,
+        _require_band(params), _require_width(manifest, params),
+    )
 
 
 # ------------------------------------------------------------------ encoding
@@ -621,7 +861,7 @@ class TtsJobType:
         self._residency.refuse_if_claimed("a tts render")
         _require_ffmpeg()
         resident = self._residency.is_resident(KIND_TTS, model)
-        _, spec, _ = _require_renderable(
+        _, spec, _, _, _ = _require_renderable(
             self._config, self._backend, model, checked, resident
         )
         if resident:
@@ -668,7 +908,7 @@ class TtsJobType:
 
         try:
             ffmpeg = _require_ffmpeg()
-            manifest, spec, (python, installed) = _require_renderable(
+            manifest, spec, (python, installed), band, width = _require_renderable(
                 self._config, self._backend, voice_id, params,
                 self._residency.is_resident(KIND_TTS, voice_id),
             )
@@ -693,7 +933,7 @@ class TtsJobType:
             try:
                 self._render(
                     ctx, params, engine, resident.sample_rate, ffmpeg,
-                    take_sampling(manifest, params.take),
+                    manifest, spec, band, width,
                 )
             except EngineWouldNotStop as exc:
                 # THE CANCEL WAS REAL AND THE ENGINE IS NOT. `_until` already
@@ -781,24 +1021,33 @@ class TtsJobType:
         engine: NarratorEngine,
         sample_rate: int,
         ffmpeg: str,
-        sampling: dict[str, Any] | None,
+        manifest: VoiceManifest,
+        spec: Any,
+        band: dict[str, float] | None,
+        width: int | None,
     ) -> None:
         """One `generate_batch`, and one FLAC per row as the row retires.
 
-        `sampling` is the requested take's rung, already resolved against this
-        voice's ladder and already in narrator's per-item spelling — `None` at
-        take 0, which is the loaded voice's own sampling and is what sending no
-        key means.
+        `manifest` and `spec` are the voice this job resolved to. They are here
+        rather than a pre-computed pair of dicts because this method owes the
+        job's terminal event two facts about them — see `done_extra` at the
+        end — and resolving the rung is the same lookup.
 
-        **The whole job is one batch.** How many rows the engine runs at once is
-        engine tuning and belongs to the server (section 7 says so about the
-        streaming door, and it is the same rule here) — but "the server" in that
-        sentence is narrator, not this file: `generate_batch` does its own
+        `band` is the request's own band in narrator's spelling, already
+        checked by `_require_band`, or None because none was stated. `width` is
+        the in-flight cap, already checked by `_require_width`.
+
+        **The whole job is one batch, and how wide it runs is now sayable.**
+        The list is never cut up here — `generate_batch` does its own
         scheduling, grouping consecutive rows on MLX and dispatching singly on
-        vLLM, and cutting the list up here would be Crucible second-guessing a
-        read-ahead window it cannot see. Rows come back **out of order**, which
-        is why nothing below indexes by position.
+        vLLM, and slicing it in this file would be Crucible second-guessing a
+        read-ahead window it cannot see. `width` is not that: it is a NUMBER on
+        the envelope that narrator applies to its own in-flight set, so the
+        scheduling stays the engine's and only the ceiling is the job's. Rows
+        come back **out of order**, which is why nothing below indexes by
+        position.
         """
+        sampling = take_sampling(manifest, params.take)
         # A RUNG NEEDS A NARRATOR THAT HAS THE CHANNEL, and that is asked, not
         # assumed. `sampling_not_wired` came back on 2026-09-15 with a new
         # meaning. It used to say "narrator's `generate_batch` takes no sampling"
@@ -846,6 +1095,7 @@ class TtsJobType:
             )
 
         by_index = {chunk.index: chunk for chunk in params.chunks}
+
         expected = set(by_index)
         answered: set[int] = set()
         failures: list[dict[str, Any]] = []
@@ -855,6 +1105,36 @@ class TtsJobType:
         request = {
             "action": "generate_batch",
             "language": params.language,
+            # WHICH ARM, SAID OUT LOUD, ON EVERY BATCH (2026-09-19). Until
+            # this key existed the arm was chosen by a CAPABILITY PROBE inside
+            # narrator — `serve/worker.py`'s `_guards_its_own_batch`, which is
+            # `callable(getattr(engine, 'render_many', None))` — so what
+            # happened to a book depended on what the engine offered and the
+            # caller had no say. The request says now, both ways: `false` takes
+            # the plain `_generate_audio_batch` branch that ran for everything
+            # before the 2026-09-13 ruling.
+            #
+            # BATCH-LEVEL AND NOT PER ITEM, and the asymmetry with `sampling`
+            # is real rather than an oversight. A rung is per row because a
+            # batch may legitimately mix rungs; the guard is a DRIVER — one
+            # `render_many` call with one PaceTracker running a median across
+            # the batch — and a batch half of whose rows were judged and half
+            # not is not a thing narrator can be asked for.
+            "retake": params.retake,
+            # THE BAND THE GUARD MEASURES AGAINST, forwarded exactly as stated
+            # and absent when nothing was stated. Sent even on a bare render
+            # (Owen: "it won't do anything with the number because it wasn't
+            # asked to"), because this door's job is to carry what the caller
+            # said, not to decide which of its statements narrator will find
+            # useful.
+            **({} if band is None else {"band": band}),
+            # HOW MANY ROWS MAY BE IN FLIGHT, batch-level beside the other two.
+            # Absent only for a voice with no `[voice.serving]` table, which is
+            # a shape the next narrator engine will have and none has today;
+            # then narrator's own default stands, because there is no
+            # configured width to forward and inventing one would be this file
+            # choosing a number it never measured.
+            **({} if width is None else {"width": width}),
             # No `stream` flag anywhere in the list. narrator's own docstring:
             # "A generate_batch with no `stream` flag anywhere takes the
             # pre-existing code path, byte for byte." The render door wants whole
@@ -997,6 +1277,35 @@ class TtsJobType:
             failed=failures,
             take=params.take,
             sample_rate=sample_rate,
+            # WHAT THE ENGINE ACTUALLY SAMPLED WITH, once per job (2026-09-19).
+            # The FULL triple as applied — the voice's take-0 numbers with this
+            # take's rung laid over them — and never just the override, because
+            # the override is meaningless without what it deviates from.
+            #
+            # It is here because SAMPLING LIVES ON THE MANIFEST AND NOT ON THE
+            # REQUEST, which is the right shape (PHASE3-TTS.md section 3: the
+            # client asks for take N, the server says what N means) and leaves
+            # exactly one hole: a manifest edited between two runs makes two
+            # incomparable records that both say "take 0". That is not
+            # hypothetical — every Higgs measurement before 2026-09-06 was
+            # rendered at temperature 1.0 and is comparable to nothing since,
+            # and the entire prior ladder record had to be marked "at the wrong
+            # temperature" once already. Pinned into the result, a mismatch is
+            # visible instead of silent.
+            sampling=manifest.applied_sampling(spec.backend, params.take),
+            # AND WHICH WEIGHTS RAN, in the `/v1/voices` row's own three words.
+            # `identity` is the pin's sha or the local block's asserted string,
+            # and `identity_basis` says which — `verified` or `asserted` — so a
+            # ladder's record is self-describing and a reader cannot mistake a
+            # directory somebody pointed at for a commit somebody fetched.
+            voice={
+                "id": manifest.id,
+                "identity": spec.weights_identity,
+                "identity_basis": spec.identity_basis,
+            },
+            # The width this job ran at, stated because it is the number a
+            # throughput figure is only comparable against.
+            width=width,
         )
 
     def _one_row(

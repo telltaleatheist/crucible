@@ -121,6 +121,19 @@ must not be bent into passing test fixtures through it:
                                   what Crucible put on the wire, because narrator
                                   does not echo a rung back and a fake that did
                                   would be a fake asserting about itself.
+    CRUCIBLE_FAKE_BATCH_LOG       a path this process appends one JSON line to per
+                                  `generate_batch`, carrying the BATCH-LEVEL
+                                  envelope exactly as it arrived:
+                                  `{"retake", "band", "width", "language",
+                                  "items"}` where `items` is the row count. The sampling log
+                                  above is per ITEM and cannot see a key that
+                                  rides on the request, and `retake`/`band` ride
+                                  there deliberately — the guard is a driver over
+                                  the whole batch, not a per-row lever
+                                  (PHASE18-UNCERTIFIED.md section 6). Absent keys
+                                  are logged as `null`, which is how a test tells
+                                  "Crucible sent no band" from "Crucible sent an
+                                  empty one".
     CRUCIBLE_FAKE_NO_ITEM_TAKE    omit `itemTake` from the `ready` line, which is
                                   what a narrator built before
                                   `engine/item_sampling.py` looks like: it has no
@@ -605,7 +618,35 @@ def _run_generate(message: dict) -> None:
         _emit_whole_row(text, None)
 
 
+def _record_batch(message: dict) -> None:
+    """Append the batch-level envelope, for a test to read.
+
+    `.get(...)` and not `[...]`: the whole point is to record ABSENCE, and a
+    log that raised on a missing `band` could never show that Crucible sent
+    none. This file never invents a value in a reply; recording `None` for a
+    key that did not arrive is the reverse — it records that it did not.
+    """
+    path = (os.environ.get("CRUCIBLE_FAKE_BATCH_LOG") or "").strip()
+    if not path:
+        return
+    with _stdout_lock:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "language": message.get("language"),
+                        "retake": message.get("retake"),
+                        "band": message.get("band"),
+                        "width": message.get("width"),
+                        "items": len(message.get("items") or []),
+                    }
+                )
+                + "\n"
+            )
+
+
 def _run_batch(message: dict) -> None:
+    _record_batch(message)
     items = message.get("items") or []
     # Reversed, deliberately. Rows come back out of order within a batch on the
     # real engine (a short row finishes while a long one is still going), and a
@@ -688,11 +729,15 @@ def _refuse_load_as_narrator_would(message: dict) -> str | None:
             "'checkpointDir'. The checkpoint IS the voice - there is nothing to "
             "serve without it."
         )
-    if entry.get("kind") == "checkpoint" and entry.get("maxChars") is None:
-        return (
-            f"{path}: voice '{name}' is a fine-tune (kind 'checkpoint') and "
-            "carries no 'maxChars'."
-        )
+    # A CHECKPOINT WITH NO `maxChars` USED TO BE REFUSED HERE, mirroring
+    # narrator's own refusal — "the one field narrator refuses a checkpoint
+    # voice without". Both went on 2026-09-19 (PHASE18-UNCERTIFIED.md section
+    # 4): a cap is a sweep's result, a checkpoint being screened has none, and
+    # narrator now computes its frame budget from its own arithmetic when the
+    # document states no cap. This fake tracks narrator's refusals exactly,
+    # so a refusal narrator no longer makes must not survive here — a fake
+    # that refuses what the real worker accepts turns a shipped capability
+    # into a red test.
     # A CLIPS VOICE'S CLIPS ARE FILES ON THIS HOST, and narrator checks that
     # they exist — `config.load_voices` calls `os.path.isfile` on every
     # `clips[].path` and refuses a clip with no `path` or no `transcript`

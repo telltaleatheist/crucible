@@ -301,6 +301,48 @@ _SERVING_REQUIRED: dict[str, type] = {
     "max_num_seqs": int,
     "max_num_seqs_note": str,
 }
+#: TWO MORE LEVERS ON THE SERVER narrator STARTS, both OPTIONAL and both owing a
+#: note when stated (Owen's ruling of 2026-09-19, PHASE18-UNCERTIFIED.md
+#: section 11, which this decides). Optional because every manifest this build
+#: ships and every Phase 21 repo manifest written so far states neither, and
+#: they must keep loading; absent means what narrator's own launcher already
+#: does, which is a STATED default in a file rather than a number invented here.
+#:
+#: `mem_fraction` -> `HIGGS_SGL_MEM_FRACTION`, SGLang's `--mem-fraction-static`.
+#: narrator's `engine/higgs/launch/serve_higgs_sgl.sh:59` defaults it to 0.60
+#: and its own comment measures that at "~19 GB of a 24.5 GB card at 16 in
+#: flight". The fraction is preallocated as KV ON TOP of 7.7 GiB of weights
+#: whatever the width is, so NARROWING THE BATCH DOES NOT LOWER THIS FLOOR —
+#: which is exactly why it is a field of its own beside the width. Measured by
+#: the ladder's author, 2026-09-19: 0.55 sat at 24.0-24.1 GB on a 24 GB card and
+#: WDDM then pages to host RAM 4-10x slower with NO ERROR; Crucible's own sigma
+#: serve sat at 23,561 MiB of 24,564 at the unset default the same day. 0.48
+#: with width 4 is ~20 GB.
+#:
+#: `context_length` -> `HIGGS_CONTEXT_LENGTH`. SGLang-Omni's
+#: `models/higgs_tts/engine_builder.py` carries `class HiggsTtsEngineBuilder:
+#: context_length = 4096` as a CLASS ATTRIBUTE, which narrator records at
+#: `engine/higgs/sgl_served.py:217-221` with the note that it has "no CLI flag
+#: and no config path". 4096 tokens holds roughly 2,000 characters of prompt
+#: plus its frames, and the ladder's Third Reich bank tops out at 2,008 — so at
+#: the default the longest rungs truncate because the CONTEXT ran out, and a
+#: screen would record that as the VOICE's length wall. Plausible, wrong, and
+#: silent, which is the class of defect this repo keeps finding. A screening
+#: voice states 8192.
+#:
+#: BOTH ARMS, NOT `cuda-linux` ONLY (Owen, 2026-09-19: *"we're going to want to
+#: configure darwin to work the same way. context limits and such."*). So they
+#: are not refused on a voice that declares an `mlx-darwin` block and they are
+#: emitted at every engine start; whether narrator's MLX backend has a knob for
+#: each is NARRATOR's to answer, by name, at load — never by ignoring one.
+_SERVING_OPTIONAL: dict[str, type] = {
+    # `object` for `_PACE_RATES`' reason: TOML's `0.5` is a float and its `1` is
+    # an int, and `_number` is what refuses a bool.
+    "mem_fraction": object,
+    "mem_fraction_note": str,
+    "context_length": int,
+    "context_length_note": str,
+}
 
 #: THE SOURCE KEYS, and a block declares EXACTLY ONE of the two shapes
 #: (PHASE18-UNCERTIFIED.md section 3). They are optional here and checked as a
@@ -334,19 +376,34 @@ _SOURCE_KEYS: dict[str, type] = {
 _BACKEND_REQUIRED: dict[str, type] = {
     "memory_bytes_estimate": int,
     "estimate_basis": str,
-    # The cap certificate for (voice, backend), in CHARACTERS. Per backend and it
-    # must stay per backend: every voice's two blocks carry identical numbers
-    # today, and that is a coincidence of the current catalog rather than a
-    # property of the world — a cap is produced by RENDERING, and the two arms
-    # sample through different implementations of top-k/top-p over different
-    # runtimes.
-    "max_chars": int,
     "sampling": dict,
 }
 _BACKEND_OPTIONAL: dict[str, type] = {
     **_SOURCE_KEYS,
     "estimate_note": str,
     "sampling_reason": str,
+    # The cap certificate for (voice, backend), in CHARACTERS. Per backend and it
+    # must stay per backend: every voice's two blocks carry identical numbers
+    # today, and that is a coincidence of the current catalog rather than a
+    # property of the world — a cap is produced by RENDERING, and the two arms
+    # sample through different implementations of top-k/top-p over different
+    # runtimes.
+    #
+    # OPTIONAL SINCE 2026-09-19, and for `_PACE_RATES`' reason exactly
+    # (PHASE18-UNCERTIFIED.md section 4). A cap is a RESULT — the longest chunk
+    # a sweep on these weights on this arm came back whole from — so a
+    # checkpoint that is being screened has none, and not having one is the
+    # reason it is on the card. Requiring it made a screening voice
+    # inexpressible, which is the circularity section 1 of that document is
+    # about.
+    #
+    # ABSENCE PROPAGATES AS ABSENCE. The `/v1/voices` row reports `max_chars:
+    # null` meaning NOT MEASURED — never the other arm's number, never a
+    # sibling's, never the engine's — `narratorvoices.voice_entry` omits
+    # `maxChars` rather than inventing one, and the render door no longer
+    # refuses a chunk by length at all (section 8's `chunk_too_long`, retired
+    # the same day). `max_chars_basis` still governs a cap that IS stated.
+    "max_chars": int,
     # A list of clip tables, or the literal CLIPS_FROM_REQUEST. Required of a
     # zeroshot voice and refused on any other kind — a checkpoint's voice is in
     # its weights, and a token voice's is in the engine.
@@ -398,7 +455,10 @@ class Pace:
 
     The server states the shape; the client does the packing. At most one of
     `target_chars` and the `safe_*` pair is set; with neither, the client packs
-    to the backend's `max_chars` — see `_PACE_OPTIONAL`.
+    to the backend's `max_chars` when the manifest states one — see
+    `_PACE_OPTIONAL` and `_BACKEND_OPTIONAL`. With neither of those either, the
+    voice is uncertified and the client packs to its own judgement: the server
+    stopped refusing a chunk by length on 2026-09-19.
 
     THE THREE RATES ARE ALL THREE OR ALL NONE (`_PACE_RATES`). `None` is a
     voice nobody measured, and it means exactly that rather than a default
@@ -439,7 +499,11 @@ class VoiceBackendSpec:
     memory_bytes_estimate: int
     estimate_basis: str
     estimate_note: str | None
-    max_chars: int
+    #: The per-chunk cap in CHARACTERS, or None because nobody measured one —
+    #: see `_BACKEND_OPTIONAL`. Never stood in for: the render door does not
+    #: refuse by length (PHASE18-UNCERTIFIED.md section 4), and every reader
+    #: downstream omits the number rather than choosing one.
+    max_chars: int | None
     sampling: dict[str, float]
     sampling_reason: str | None
     #: The clips this voice is conditioned on, `CLIPS_FROM_REQUEST`, or None for
@@ -563,11 +627,28 @@ class Serving:
 
     max_num_seqs: int
     max_num_seqs_note: str
+    #: SGLang's `--mem-fraction-static`, or None meaning the launcher's own
+    #: default (0.60, `serve_higgs_sgl.sh:59`). See `_SERVING_OPTIONAL`.
+    mem_fraction: float | None = None
+    mem_fraction_note: str | None = None
+    #: The engine's context in TOKENS, or None meaning the Higgs builder's
+    #: hard-coded 4096. See `_SERVING_OPTIONAL`.
+    context_length: int | None = None
+    context_length_note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        # EVERY KEY ALWAYS, `null` for a lever nobody set. An absent key on this
+        # row would mean "this build does not have the field", which is a
+        # different statement from "this voice takes the launcher's default",
+        # and an operator comparing two servers needs to be able to tell them
+        # apart.
         return {
             "max_num_seqs": self.max_num_seqs,
             "max_num_seqs_note": self.max_num_seqs_note,
+            "mem_fraction": self.mem_fraction,
+            "mem_fraction_note": self.mem_fraction_note,
+            "context_length": self.context_length,
+            "context_length_note": self.context_length_note,
         }
 
 
@@ -664,18 +745,69 @@ class VoiceManifest:
         return found
 
     def take(self, index: int) -> Take:
-        """Take `index`, or `unknown_take` by name.
+        """What take `index` MEANS for this voice: the declared rung, or none.
 
-        Never clamped to the last rung: a silent clamp is a retake ladder that
-        stops climbing without telling anyone, and the client would keep asking
-        for take 4 and keep getting take 2's draw.
+        **Within the declared ladder** the answer is that rung, as it always
+        was. **At or past its end** the answer is a rung with no overrides —
+        take 0's sampling, in take `index`'s own seed lane. That is not a
+        clamp and the distinction is the whole of the 2026-09-19 ruling
+        (PHASE18-UNCERTIFIED.md section 5): a clamp would render take 2's
+        NUMBERS and call them take 4, which is the silent substitution this
+        door exists to prevent; this renders the voice's own sampling in a lane
+        nothing else draws in, because narrator seeds
+        `base + index + REROLL_SEED_STRIDE * (TAKE_REROLL_LANES * take +
+        attempt)` and the `take` on every item is the one asked for.
+
+        It is NOT the last rung's override, and the difference is the ladder.
+        A screening sweep names takes 0..N on a voice that declares no
+        `[[voice.takes]]` at all and needs all N+1 to be the same sampling —
+        the matched-cell property its Wilson-bound comparison rests on — so
+        "past the end" must mean the voice's own numbers. BookForge's retake
+        ladder climbs DECLARED rungs and stops where they stop; past that it is
+        asking for another draw, which is what it gets.
+
+        `unknown_take` was this method's refusal and is retired with it. A
+        NEGATIVE index is still refused — it is not a lane, it is a bug in the
+        caller — and no door can reach it: both carry `Field(ge=0)`.
         """
-        if index < 0 or index >= len(self.takes):
+        if index < 0:
             raise VoiceError(
-                f"voice {self.id!r} has no take {index}; {self.path.name} declares "
-                f"{len(self.takes)} take(s), 0 to {len(self.takes) - 1}"
+                f"voice {self.id!r}: take {index} is below take 0. A take names "
+                "a rung of the ladder and a seed lane, and counts up from 0"
             )
+        if index >= len(self.takes):
+            return Take(index=index, overrides={}, reason=None)
         return self.takes[index]
+
+    def applied_sampling(self, backend_kind: str, take: int) -> dict[str, float]:
+        """THE FULL TRIPLE a render at `take` actually samples with.
+
+        The backend block's own `sampling` — which is take 0, and which
+        `narratorvoices.voice_entry` sends on the load as the engine's override
+        — with this take's rung laid over it key by key, the same way narrator's
+        `item_sampling` lays the per-item keys over the loaded numbers. So this
+        is a statement about what the ENGINE will do, assembled from the two
+        halves Crucible sends it, rather than a restatement of either.
+
+        **Whole, never the override alone.** `take_sampling` deliberately
+        returns only the keys a rung declares, because sending the other two
+        back at take 0's values would be Crucible restating numbers it was not
+        asked about. That is right for the WIRE and wrong for a RECORD: a run
+        that logged `{temperature: 0.7}` says nothing about the top-p and top-k
+        it ran at, and those are exactly what a ladder's comparison rests on.
+
+        The reason it exists at all (2026-09-19): sampling lives on the
+        manifest, so a manifest edited between two runs produces two
+        incomparable records that both claim "take 0" and both look right. Every
+        Higgs measurement before 2026-09-06 was rendered at temperature 1.0 and
+        is comparable to nothing since; the prior ladder record had to be marked
+        "at the wrong temperature" once already when the default moved. A job's
+        result that names its own numbers makes the next such move visible.
+
+        Manifest spelling (`top_p`, `top_k`), not narrator's — this is a fact
+        about the voice, and `narratorvoices` owns the translation to the wire.
+        """
+        return {**self.spec(backend_kind).sampling, **self.take(take).overrides}
 
     def fingerprint(self, backend_kind: str) -> str:
         """`<id>@<identity>` — what a render records as the voice it used.
@@ -1218,7 +1350,9 @@ def _check_serving(
         )
     if not isinstance(block, dict):
         raise VoiceError(f"{where}: must be a table")
-    check_table(where, block, _SERVING_REQUIRED, {}, error=VoiceError)
+    check_table(
+        where, block, _SERVING_REQUIRED, _SERVING_OPTIONAL, error=VoiceError
+    )
     if block["max_num_seqs"] < 1:
         raise VoiceError(
             f"{where}: max_num_seqs must be at least 1, got "
@@ -1231,10 +1365,71 @@ def _check_serving(
             "shipped width is 16 — so a reader of a /v1/voices row has to be "
             "able to find out where it came from"
         )
+    mem_fraction = _check_serving_extra(
+        where, block, "mem_fraction",
+        "the fraction is preallocated as KV on top of the weights whatever the "
+        "width is, and 0.55 measured 24.0-24.1 GB on a 24 GB card, where WDDM "
+        "pages to host RAM 4-10x slower and says nothing",
+    )
+    if mem_fraction is not None:
+        mem_fraction = _number(where, "mem_fraction", mem_fraction)
+        if not 0 < mem_fraction < 1:
+            raise VoiceError(
+                f"{where}: mem_fraction must be a fraction in (0, 1), got "
+                f"{mem_fraction}. It is SGLang's --mem-fraction-static, and "
+                "narrator's launcher refuses anything else by name "
+                "(serve_higgs_sgl.sh)"
+            )
+    context_length = _check_serving_extra(
+        where, block, "context_length",
+        "4096 is the engine builder's class attribute and holds about 2,000 "
+        "characters, so a bank whose longest prompt is 2,008 truncates on the "
+        "CONTEXT and the run records it as the voice's length wall",
+    )
+    if context_length is not None and context_length <= 0:
+        raise VoiceError(
+            f"{where}: context_length must be positive, got {context_length}"
+        )
     return Serving(
         max_num_seqs=block["max_num_seqs"],
         max_num_seqs_note=block["max_num_seqs_note"],
+        mem_fraction=mem_fraction,
+        mem_fraction_note=block.get("mem_fraction_note"),
+        context_length=context_length,
+        context_length_note=block.get("context_length_note"),
     )
+
+
+def _check_serving_extra(
+    where: str, block: dict[str, Any], key: str, why: str
+) -> Any:
+    """One optional serving lever and its note, or None because neither is there.
+
+    `max_num_seqs`'s rule, applied to the two levers added on 2026-09-19: a
+    number here reconfigures the server narrator starts, and a reader of a
+    `/v1/voices` row has to be able to find out where it came from. A note with
+    no number is refused as the leftover it is — the same sentence
+    `_check_pace` gives its `edges` key, and `voicerepo._check_arm_cap` gives
+    `max_chars_basis`.
+    """
+    note_key = f"{key}_note"
+    value = block.get(key)
+    note = block.get(note_key)
+    if value is None:
+        if note is not None:
+            raise VoiceError(
+                f"{where}: states {note_key} and no {key}. The note says where a "
+                "number came from and there is no number; drop it, or state the "
+                "number it describes"
+            )
+        return None
+    if note is None or note.strip() == "":
+        raise VoiceError(
+            f"{where}: {key} carries no note. It reconfigures the server "
+            f"narrator starts — {why} — so a reader of a /v1/voices row has to "
+            "be able to find out where the number came from"
+        )
+    return value
 
 
 def _check_takes(
@@ -1272,12 +1467,27 @@ def _check_takes(
                 "draw every render starts from; a ladder whose first rung is "
                 "already a deviation has no baseline to climb from"
             )
-        if index > 0 and not overrides:
-            raise VoiceError(
-                f"{at}: take {index} changes nothing. A rung that is the same "
-                "sampling as the one below it is a different DRAW, which is what "
-                "a re-roll is for — say so with a reason and a value, or drop it"
-            )
+        # A NUMBERLESS RUNG ABOVE 0 IS LEGAL SINCE 2026-09-19, and the rule it
+        # replaces was true when it was written (PHASE18-UNCERTIFIED.md
+        # section 5). It read: "take N changes nothing. A rung that is the same
+        # sampling as the one below it is a different DRAW, which is what a
+        # re-roll is for" — and that was correct while a take could not move
+        # the seed. Since 2026-09-15 it can: narrator draws
+        # `base + index + REROLL_SEED_STRIDE * (TAKE_REROLL_LANES * take +
+        # attempt)` (`engine/higgs/truncation.py`), so take 1 with no numbers at
+        # all is a DIFFERENT draw at IDENTICAL sampling. narrator's own
+        # `item_sampling.py` says so and hands the decision over verbatim:
+        # "whether to allow it is Crucible's ruling, not narrator's."
+        #
+        # And the screening ladder needs exactly this rung and no other. Its
+        # takes must be PURE seed lanes — every band in the record, back to
+        # thirdreich's 500-800, was measured at 0.8/0.95/50 — so a sweep whose
+        # take 1 carried a declared deviation would measure four sampling
+        # points rather than four draws of one.
+        #
+        # The two rules that survive are the ones about what a rung SAYS, not
+        # about whether it differs: take 0 may not deviate, and a deviation
+        # owes its reason.
         if overrides and (reason is None or reason.strip() == ""):
             raise VoiceError(
                 f"{at}: deviates from the {narrator_engine} default "
@@ -1339,11 +1549,22 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
             f"{voice['sample_rate']}"
         )
 
-    if "pace" not in voice:
-        raise VoiceError(f"{path.name}: missing the [voice.pace] table")
-    if not isinstance(voice["pace"], dict):
+    # THE TABLE ITSELF IS OMISSIBLE SINCE 2026-09-19, and an absent
+    # `[voice.pace]` means exactly what an empty one means: this voice states
+    # no band and no packing hint (PHASE18-UNCERTIFIED.md section 4.1). It used
+    # to be refused — "missing the [voice.pace] table" — which, with the three
+    # rates optional as a group since 2026-09-18, was the last thing making a
+    # screening checkpoint inexpressible: the only way past it was an empty
+    # table written to satisfy a door, which is a manifest saying something to
+    # a parser rather than about a voice.
+    #
+    # An absent table is NOT a band of zeros and NOT an inherited one. A pace
+    # is the median chars/s over a run's clean renders, so a checkpoint that
+    # has never been rendered has none, and deathstalker's 16.64 — carried onto
+    # weights that measured 15.91 — is what inheriting one costs.
+    if "pace" in voice and not isinstance(voice["pace"], dict):
         raise VoiceError(f"{path.name}: [voice.pace] must be a table")
-    pace = _check_pace(f"{path.name} [voice.pace]", voice["pace"])
+    pace = _check_pace(f"{path.name} [voice.pace]", voice.get("pace", {}))
     serving = _check_serving(path, voice, narrator_engine)
 
     if "backends" not in voice:
@@ -1400,23 +1621,27 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
                 "number owes, and a row carrying one for a measured number would "
                 "read as an excuse"
             )
-        if block["max_chars"] <= 0:
-            raise VoiceError(
-                f"{where}: max_chars must be positive, got {block['max_chars']}"
-            )
-        if pace.safe_max_chars is not None and pace.safe_max_chars > block["max_chars"]:
-            raise VoiceError(
-                f"{where}: this backend caps the voice at {block['max_chars']} "
-                f"characters, but [voice.pace] packs up to safe_max_chars "
-                f"{pace.safe_max_chars}. The band may never exceed the arm's cap — "
-                "the same rule BookForge and narrator both refuse on"
-            )
-        if pace.target_chars is not None and pace.target_chars > block["max_chars"]:
-            raise VoiceError(
-                f"{where}: this backend caps the voice at {block['max_chars']} "
-                f"characters, but [voice.pace] packs to target_chars "
-                f"{pace.target_chars}"
-            )
+        # A CAP THAT IS STATED IS CHECKED EXACTLY AS IT ALWAYS WAS; a cap that
+        # is absent has nothing to check, and nothing here substitutes one.
+        max_chars = block.get("max_chars")
+        if max_chars is not None:
+            if max_chars <= 0:
+                raise VoiceError(
+                    f"{where}: max_chars must be positive, got {max_chars}"
+                )
+            if pace.safe_max_chars is not None and pace.safe_max_chars > max_chars:
+                raise VoiceError(
+                    f"{where}: this backend caps the voice at {max_chars} "
+                    f"characters, but [voice.pace] packs up to safe_max_chars "
+                    f"{pace.safe_max_chars}. The band may never exceed the arm's "
+                    "cap — the same rule BookForge and narrator both refuse on"
+                )
+            if pace.target_chars is not None and pace.target_chars > max_chars:
+                raise VoiceError(
+                    f"{where}: this backend caps the voice at {max_chars} "
+                    f"characters, but [voice.pace] packs to target_chars "
+                    f"{pace.target_chars}"
+                )
         if not isinstance(block["sampling"], dict):
             raise VoiceError(f"{where}: sampling must be a table")
         sampling, reason = _check_sampling(where, block, narrator_engine)
@@ -1431,7 +1656,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
             memory_bytes_estimate=block["memory_bytes_estimate"],
             estimate_basis=basis,
             estimate_note=note,
-            max_chars=block["max_chars"],
+            max_chars=max_chars,
             sampling=sampling,
             sampling_reason=reason,
             clips=clips,

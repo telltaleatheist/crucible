@@ -168,9 +168,36 @@ def test_a_zero_sample_rate_is_refused() -> None:
 # -------------------------------------------------------------- [voice.pace]
 
 
-def test_a_voice_with_no_pace_is_refused() -> None:
-    assert "missing the [voice.pace] table" in refused(
-        GOOD[: GOOD.index("[voice.pace]")] + GOOD[GOOD.index("[voice.backends"):]
+def test_a_voice_may_omit_the_pace_table_entirely() -> None:
+    """THE TABLE ITSELF, not only its rates (PHASE18 section 4.1, 2026-09-19).
+
+    `missing the [voice.pace] table` was the refusal here, and with the three
+    rates optional as a group since 2026-09-18 it was the last thing making a
+    screening checkpoint inexpressible: the only way past it was an empty table
+    written to satisfy a parser. Absent and empty now mean the same thing, which
+    is "nothing was measured", and neither is a band of zeros or a predecessor's
+    numbers.
+    """
+    voice = parse(
+        GOOD[: GOOD.index("[voice.pace]")]
+        + GOOD[GOOD.index("[voice.serving]"):]
+    )
+    assert voice.pace.pace_chars_per_sec is None
+    assert voice.pace.max_chars_per_sec is None
+    assert voice.pace.min_chars_per_sec is None
+    assert voice.pace.safe_min_chars is None
+    assert voice.pace.safe_max_chars is None
+    assert voice.pace.target_chars is None
+
+
+def test_a_pace_that_is_not_a_table_is_still_refused() -> None:
+    """Omissible is not the same as "anything goes": a `pace` that is a number
+    is a file somebody got wrong, and reading it as absent would pass it."""
+    without_pace = (
+        GOOD[: GOOD.index("[voice.pace]")] + GOOD[GOOD.index("[voice.serving]"):]
+    )
+    assert "[voice.pace] must be a table" in refused(
+        without_pace.replace("sample_rate = 24000", "sample_rate = 24000\npace = 16.0")
     )
 
 
@@ -386,6 +413,35 @@ def test_a_zero_cap_is_refused() -> None:
     )
 
 
+def test_a_backend_may_state_no_cap_at_all() -> None:
+    """PHASE18 section 4, 2026-09-19. `max_chars` was `_BACKEND_REQUIRED` and
+    narratorvoices called it "the one field narrator refuses a checkpoint voice
+    without"; both moved on the same day.
+
+    A cap is a RESULT — the longest chunk a sweep on these weights on this arm
+    came back whole from — so a checkpoint being screened has none, and
+    requiring it made a screening voice inexpressible. `None` means NOT
+    MEASURED and nothing substitutes: not the other arm's number, not a
+    sibling's, not the engine's.
+    """
+    voice = parse(
+        swap("safe_min_chars = 600\nsafe_max_chars = 800\n", "").replace(
+            "max_chars = 800\n", ""
+        )
+    )
+    assert voice.spec("cuda-linux").max_chars is None
+    assert voice.spec("cuda-linux").to_dict()["max_chars"] is None
+
+
+def test_a_packing_band_above_a_cap_is_still_refused_when_a_cap_is_stated() -> None:
+    """The relaxation is "may be absent", not "is no longer checked": a stated
+    cap keeps every rule it had, so the band-above-the-cap refusal below is not
+    reachable only by accident."""
+    assert "The band may never exceed the arm's cap" in refused(
+        swap("safe_max_chars = 800", "safe_max_chars = 900")
+    )
+
+
 # ---------------------------------------------------------- estimate_basis
 
 
@@ -527,6 +583,122 @@ def test_an_unknown_serving_key_is_refused() -> None:
     )
 
 
+#: The two levers added on 2026-09-19, as a screening voice states them.
+SCREENING_SERVING = """mem_fraction = 0.48
+mem_fraction_note = "0.48 + width 4 is ~20 GB; 0.55 measured 24.0-24.1 GB on this 24 GB card and WDDM then pages to host RAM"
+context_length = 8192
+context_length_note = "the Third Reich bank tops at 2,008 chars and 4096 tokens holds ~2,000, so the top rungs truncate on the context"
+"""
+
+
+def test_a_voice_may_state_a_mem_fraction_and_a_context_length() -> None:
+    """Owen's ruling of 2026-09-19, which decides PHASE18 section 11.
+
+    Both OPTIONAL — every manifest this build ships states neither and must
+    keep loading — and both reach narrator at engine start on BOTH arms.
+    """
+    voice = parse(swap("max_num_seqs = 16\n", "max_num_seqs = 16\n" + SCREENING_SERVING))
+    assert voice.serving.mem_fraction == 0.48
+    assert voice.serving.context_length == 8192
+    assert "24 GB card" in voice.serving.mem_fraction_note
+    assert "2,008" in voice.serving.context_length_note
+
+
+def test_a_voice_stating_neither_reports_them_as_null_on_its_row() -> None:
+    """Absent means narrator's own launcher default — 0.60
+    (`serve_higgs_sgl.sh:59`) and the Higgs builder's 4096 — which is a number
+    in a file with an owner. The KEYS are still on the row, because an absent
+    key would say "this build has no such field"."""
+    row = parse(GOOD).serving.to_dict()
+    assert row["mem_fraction"] is None and row["mem_fraction_note"] is None
+    assert row["context_length"] is None and row["context_length_note"] is None
+
+
+@pytest.mark.parametrize("key", ["mem_fraction", "context_length"])
+def test_a_serving_lever_with_no_note_is_refused(key: str) -> None:
+    """`max_num_seqs`'s contract, applied to both: a number that reconfigures
+    the server narrator starts owes the measurement that chose it."""
+    stated = {"mem_fraction": "0.48", "context_length": "8192"}[key]
+    message = refused(
+        swap("max_num_seqs = 16\n", f"max_num_seqs = 16\n{key} = {stated}\n")
+    )
+    assert f"{key} carries no note" in message
+
+
+@pytest.mark.parametrize("key", ["mem_fraction", "context_length"])
+def test_a_serving_note_with_no_number_is_refused_as_the_leftover_it_is(
+    key: str,
+) -> None:
+    """The other half. A note describing a number that is not there reads as a
+    lever this loader checked and passed — `[voice.pace]`'s `edges` key and the
+    repo schema's `max_chars_basis` are refused with the same sentence."""
+    message = refused(
+        swap("max_num_seqs = 16\n", f'max_num_seqs = 16\n{key}_note = "x"\n')
+    )
+    assert f"states {key}_note and no {key}" in message
+
+
+def test_a_mem_fraction_outside_zero_to_one_is_refused() -> None:
+    """narrator's launcher refuses anything else by name
+    (`serve_higgs_sgl.sh:129-131`), so the manifest refuses it first — a
+    fraction of 1.2 would otherwise be a worker that exits 4 after a load."""
+    message = refused(
+        swap(
+            "max_num_seqs = 16\n",
+            'max_num_seqs = 16\nmem_fraction = 1.2\nmem_fraction_note = "x"\n',
+        )
+    )
+    assert "must be a fraction in (0, 1)" in message
+
+
+def test_a_zero_context_length_is_refused() -> None:
+    message = refused(
+        swap(
+            "max_num_seqs = 16\n",
+            'max_num_seqs = 16\ncontext_length = 0\ncontext_length_note = "x"\n',
+        )
+    )
+    assert "context_length must be positive" in message
+
+
+def test_the_two_levers_are_not_refused_on_a_voice_with_an_mlx_arm() -> None:
+    """Owen, 2026-09-19: *"we're going to want to configure darwin to work the
+    same way. context limits and such."* So these are NOT cuda-linux only, and
+    a voice that serves on MLX may state both. What narrator's MLX backend has
+    no knob for is narrator's refusal to make, by name, at load."""
+    mlx = GOOD + """
+[voice.backends.mlx-darwin]
+hf_repo = "owenmorgan/probe-higgs-v3"
+revision = "0123456789abcdef0123456789abcdef01234567"
+memory_bytes_estimate = 12_133_000_000
+estimate_basis = "measured"
+max_chars = 800
+sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+"""
+    voice = parse(
+        mlx.replace("max_num_seqs = 16\n", "max_num_seqs = 16\n" + SCREENING_SERVING)
+    )
+    assert voice.serving.context_length == 8192
+    assert sorted(voice.backends) == ["cuda-linux", "mlx-darwin"]
+
+
+def test_applied_sampling_is_the_whole_triple_and_not_the_rungs_override() -> None:
+    """What the job result pins (2026-09-19). The rung's override alone says
+    nothing about the top-p and top-k a run actually used, and those are what a
+    ladder's comparison rests on."""
+    voice = parse(GOOD + LADDER)
+    assert voice.applied_sampling("cuda-linux", 0) == {
+        "temperature": 0.8, "top_p": 0.95, "top_k": 50,
+    }
+    assert voice.applied_sampling("cuda-linux", 1) == {
+        "temperature": 0.7, "top_p": 0.95, "top_k": 50,
+    }
+    # And past the ladder it is take 0's, which is what a seed lane means.
+    assert voice.applied_sampling("cuda-linux", 5) == {
+        "temperature": 0.8, "top_p": 0.95, "top_k": 50,
+    }
+
+
 def test_every_shipped_higgs_voice_declares_one() -> None:
     """Not a fixture: the real manifests. A voice that loads but cannot be
     started is a row on /v1/voices that fails at the spawn."""
@@ -625,12 +797,39 @@ def test_a_voice_with_no_ladder_still_has_take_zero() -> None:
     assert voice.take(0).reason is None
 
 
-def test_a_take_past_the_end_is_refused_rather_than_clamped() -> None:
-    """A silent clamp is a ladder that stops climbing without telling anyone."""
+def test_a_take_past_the_end_is_a_seed_lane_at_take_zeros_sampling() -> None:
+    """PHASE18 section 5, 2026-09-19. It used to be `unknown_take`.
+
+    A screening sweep names takes 0..N on a voice that declares no ladder at
+    all and needs every one of them to be the SAME sampling — the matched-cell
+    property its Wilson-bound comparison rests on — so "past the end" has to
+    mean the voice's own numbers. narrator still moves the draw, because `take`
+    rides on every item and seeds `base + index + stride * take`.
+    """
+    rung = parse(GOOD).take(3)
+    assert rung.index == 3
+    assert rung.overrides == {}
+    assert rung.reason is None
+    # And the ladder is still what the manifest declares: a lane is not a rung.
+    assert len(parse(GOOD).takes) == 1
+
+
+def test_a_take_past_a_DECLARED_ladder_is_not_the_last_rungs_numbers() -> None:
+    """Not a clamp, and this is the assertion that says so. A clamp would hand
+    back take 1's `temperature = 0.7` under take 4's name, which is the silent
+    substitution the old refusal existed to prevent — and the relaxation keeps
+    preventing it by answering with take 0's sampling instead."""
+    rung = parse(GOOD + LADDER).take(4)
+    assert rung.overrides == {}
+    assert parse(GOOD + LADDER).take(1).overrides == {"temperature": 0.7}
+
+
+def test_a_negative_take_is_still_refused() -> None:
+    """The one thing `take` still refuses. No door can reach it — both carry
+    `Field(ge=0)` — but a lane below 0 is a bug in a caller, not a draw."""
     with pytest.raises(VoiceError) as caught:
-        parse(GOOD).take(3)
-    assert "has no take 3" in str(caught.value)
-    assert "declares 1 take(s), 0 to 0" in str(caught.value)
+        parse(GOOD).take(-1)
+    assert "is below take 0" in str(caught.value)
 
 
 LADDER = """
@@ -655,9 +854,31 @@ def test_take_zero_may_not_deviate() -> None:
     assert "take 0 is the engine default and may not deviate" in message
 
 
-def test_a_rung_that_changes_nothing_is_refused() -> None:
-    message = refused(GOOD + "\n[[voice.takes]]\n\n[[voice.takes]]\n")
-    assert "take 1 changes nothing" in message
+def test_a_rung_that_changes_nothing_is_a_different_draw_and_is_allowed() -> None:
+    """PHASE18 section 5, 2026-09-19. This was `take 1 changes nothing`.
+
+    The refusal was true when written — a rung could not move the seed, so a
+    numberless one rendered take 0 byte for byte. Since 2026-09-15 narrator
+    draws `base + index + REROLL_SEED_STRIDE * (TAKE_REROLL_LANES * take +
+    attempt)`, so the same numbers in another lane is a different draw, which
+    is the screening ladder's entire unit of work. narrator's own
+    `item_sampling.py` says so and leaves the ruling to Crucible.
+    """
+    voice = parse(GOOD + "\n[[voice.takes]]\n\n[[voice.takes]]\n")
+    assert len(voice.takes) == 2
+    assert voice.take(1).overrides == {}
+    assert voice.take(1).reason is None
+
+
+def test_take_zero_still_may_not_deviate_and_a_deviation_still_owes_a_reason() -> None:
+    """The two rules the relaxation does NOT touch, pinned together so a future
+    edit cannot take all three out as one."""
+    assert "take 0 is the engine default and may not deviate" in refused(
+        GOOD + '\n[[voice.takes]]\ntemperature = 0.7\nreason = "x"\n'
+    )
+    assert "each one owes the measurement that chose it" in refused(
+        GOOD + "\n[[voice.takes]]\n\n[[voice.takes]]\ntemperature = 0.7\n"
+    )
 
 
 def test_a_rung_without_a_reason_is_refused() -> None:

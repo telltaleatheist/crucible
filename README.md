@@ -647,10 +647,12 @@ which server to send it to; the server knows how to run it.
 
 **The take ladder is the retake.** `[[voice.takes]]` per voice: take 0 is the boson
 default, take 1 the measured alternative, and a client asks for a NUMBER. Crucible resolves
-the rung and sends narrator the numbers on each item; a take past the end of the ladder is
-`unknown_take` and is never clamped, and `GET /v1/voices` carries `takes` so a client can ask
-how long the ladder is before it submits. Owen's ruling, 2026-09-14: a retake must not reuse
-the settings that produced the problem.
+the rung and sends narrator the numbers on each item; a take past the end of the ladder is a
+SEED LANE at the voice's own sampling (2026-09-19) and is never clamped, and
+`GET /v1/voices` carries `takes` so a client can ask how long the ladder is before it
+submits. Owen's ruling, 2026-09-14: a retake must not reuse the settings that produced the
+problem — so a client climbing the ladder reads `takes` to know where the DIFFERENT settings
+run out, while a screening sweep asks for nothing but the lane.
 
 **A zero-shot voice loads with its clip.** `load-voice` takes
 `params.reference {data, transcript, name?}` — a base64 WAV and the book-exact text spoken in
@@ -659,7 +661,17 @@ it — required of a `kind = "zeroshot"` voice (`reference_required`), refused o
 (`reference_malformed`). The weights are the server's and the clip is the client's; the row
 says `needs_reference` so a picker knows which is which.
 
-A chunk over the voice's `max_chars` is `chunk_too_long`, never silently re-split.
+**The guard is the caller's to ask for.** `retake: true` on a render runs narrator's
+guarded driver — the PaceTracker, the re-roll, the split ladder — against the `band` the
+same request states (`{pace_chars_per_sec, max_chars_per_sec, min_chars_per_sec}`). Omit it
+and every chunk is rendered once as sent, nothing judged, `guard` null on every row.
+`retake: true` with no band is `retake_without_band`; the server never looks a band up,
+because an inherited band is indistinguishable from a measured one at the point of use.
+`width` caps what is in flight, under the voice's own `[voice.serving].max_num_seqs`.
+
+A chunk over the voice's `max_chars` is **rendered**, not refused (2026-09-19). Chunking
+stays the client's and the cap is still on the row, but the server stopped acting on a
+number a screening checkpoint may not have. Crucible still never re-splits.
 
 FLACs are encoded through **ffmpeg**, which this server already requires for `asr`.
 `soundfile` would mean a compiled audio dependency in a process that deliberately imports

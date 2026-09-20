@@ -117,6 +117,29 @@ def test_a_voice_declaring_no_band_writes_none(tmp_path: Path) -> None:
         assert key not in entry
 
 
+def test_a_voice_that_measured_no_cap_sends_narrator_no_maxChars(
+    tmp_path: Path,
+) -> None:
+    """PHASE18 section 4, 2026-09-19 — the band's rule, applied to the cap.
+
+    `maxChars` was written unconditionally and this module's own docstring
+    called it "the one field narrator refuses a checkpoint voice without".
+    Both halves moved together: a manifest may state no cap, and narrator no
+    longer refuses a checkpoint that carries none. Omitted rather than sent as
+    null — a null on this wire is "declared, and not a number" — and nothing
+    here picks a cap, because the frame arithmetic behind one is narrator's.
+    """
+    uncapped = BOTH_ARMS.replace("max_chars = 800\n", "")
+    manifest = manifest_of(uncapped)
+    assert manifest.spec(CUDA).max_chars is None
+    entry = voice_entry(manifest, manifest.spec(CUDA), tmp_path)
+    assert "maxChars" not in entry
+    # And a stated cap still travels, so the test above is about absence and
+    # not about the key having quietly stopped being written.
+    capped = manifest_of(BOTH_ARMS)
+    assert voice_entry(capped, capped.spec(CUDA), tmp_path)["maxChars"] == 800
+
+
 def test_a_target_travels_when_the_manifest_declares_one() -> None:
     text = BOTH_ARMS.replace(
         "min_chars_per_sec = 12.3\n", "min_chars_per_sec = 12.3\ntarget_chars = 600\n"
@@ -368,11 +391,18 @@ def test_a_rung_is_spelled_the_way_the_document_spells_it() -> None:
     assert isinstance(take_sampling(manifest_of(text), 1)["topK"], int)
 
 
-def test_a_take_past_the_ladder_raises_the_manifests_own_refusal() -> None:
-    """`unknown_take`'s text, from `VoiceManifest.take`. Never clamped."""
-    with pytest.raises(Exception) as caught:
-        take_sampling(manifest_of(LADDER), 2)
-    assert "has no take 2" in str(caught.value)
+def test_a_take_past_the_ladder_sends_no_sampling_key_at_all() -> None:
+    """PHASE18 section 5, 2026-09-19. This raised `unknown_take`'s text.
+
+    A take past the declared ladder is a SEED LANE at the voice's own sampling,
+    so the item carries no `sampling` key — which is exactly what take 0 sends
+    and exactly what "the voice's loaded numbers" means on narrator's wire. Not
+    the last rung's numbers: that would be take 1's `temperature = 0.7`
+    delivered under take 2's name, which is the clamp the old refusal existed
+    to prevent.
+    """
+    assert take_sampling(manifest_of(LADDER), 2) is None
+    assert take_sampling(manifest_of(LADDER), 1) == {"temperature": 0.7}
 
 
 def test_the_document_readers_are_the_rule_the_writer_refuses_from() -> None:
@@ -505,7 +535,10 @@ def test_every_shipped_higgs_voice_writes_an_entry_on_the_arm_it_can(
                 refused.append((voice_id, backend))
                 continue
             written.append((voice_id, backend))
-            assert entry["maxChars"] == spec.max_chars
+            if spec.max_chars is None:
+                assert "maxChars" not in entry, voice_id
+            else:
+                assert entry["maxChars"] == spec.max_chars
             _assert_band_is_the_manifest(entry, manifest)
             assert entry["sampling"] == {
                 "temperature": spec.sampling["temperature"],

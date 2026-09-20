@@ -431,6 +431,33 @@ def test_a_failed_chunk_is_reported_and_its_neighbours_still_land(
 
 
 @pytest.fixture
+def batch_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Callable[[], list[dict[str, Any]]]:
+    """The BATCH-LEVEL envelope the fake worker was sent, per `generate_batch`.
+
+    `sampling_log` is per item and structurally cannot see `retake` or `band`:
+    they ride on the request because the guard is a driver over the whole
+    batch, not a per-row lever (PHASE18-UNCERTIFIED.md section 6). Read off a
+    file for `sampling_log`'s reason — narrator echoes nothing back, and a fake
+    that did would let a test assert about the fake.
+    """
+    path = tmp_path / "batch.jsonl"
+    fake_narrator_engine.steer(monkeypatch, batch_log=str(path))
+
+    def read() -> list[dict[str, Any]]:
+        if not path.is_file():
+            return []
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+
+    return read
+
+
+@pytest.fixture
 def sampling_log(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Callable[[], list[dict[str, Any]]]:
@@ -788,6 +815,153 @@ def test_a_render_of_a_voice_that_is_not_resident_still_asks(
     assert response.json()["error"]["code"] == "accelerator_busy"
 
 
+# ------------------------------------------------- the arm, and the band
+#
+# PHASE18-UNCERTIFIED.md sections 4 and 6, Owen's ruling of 2026-09-19. Which
+# arm renders a batch is the REQUEST's to say, and the band the guarded arm
+# measures against is the CALLER's to state. Both ride on the batch envelope,
+# because the guard is a driver over the whole batch rather than a per-row
+# lever — which is why `sampling_log` cannot see them and `batch_log` can.
+
+
+def test_a_render_with_no_flag_asks_for_the_bare_arm_by_name(
+    rendered: Callable[..., list[dict[str, Any]]],
+    batch_log: Callable[[], list[dict[str, Any]]],
+) -> None:
+    """Absent means `retake: false`, and it is SENT rather than left absent.
+
+    The arm used to be chosen inside narrator by a capability probe
+    (`serve/worker.py:_guards_its_own_batch`), so what happened to a book
+    depended on what the engine offered and the caller had no say. Sending the
+    word both ways is what makes the choice the request's: an omitted key would
+    put the decision straight back where it was.
+    """
+    events = rendered()
+    assert terminal(events)["data"]["rendered"] == len(CHUNKS)
+    batches = batch_log()
+    assert len(batches) == 1, batches
+    assert batches[0]["retake"] is False
+    # And no band, because none was stated. `null` here is the fake recording
+    # an absent key, which is the difference between "sent nothing" and "sent
+    # an empty band".
+    assert batches[0]["band"] is None
+    # Nobody judged it, so there is no verdict — `null` at its most exact.
+    assert all(row["guard"] is None for row in events_of(events, "chunk"))
+
+
+def test_retake_true_with_a_band_sends_both_in_narrators_spelling(
+    rendered: Callable[..., list[dict[str, Any]]],
+    batch_log: Callable[[], list[dict[str, Any]]],
+) -> None:
+    """The guarded arm, and the band it measures against, forwarded verbatim.
+
+    camelCase because that is narrator's spelling for these three rates on
+    every other wire it has (`voice_entry`'s `paceCharsPerSec`); one map does
+    the translation in `render.py` so the request's names and the wire's names
+    cannot drift.
+    """
+    events = rendered(
+        retake=True,
+        band={
+            "pace_chars_per_sec": 15.91,
+            "max_chars_per_sec": 20.68,
+            "min_chars_per_sec": 12.24,
+        },
+    )
+    assert terminal(events)["data"]["rendered"] == len(CHUNKS)
+    batches = batch_log()
+    assert len(batches) == 1, batches
+    assert batches[0]["retake"] is True
+    assert batches[0]["band"] == {
+        "paceCharsPerSec": 15.91,
+        "maxCharsPerSec": 20.68,
+        "minCharsPerSec": 12.24,
+    }
+
+
+def test_a_band_on_a_bare_render_travels_and_is_not_acted_on(
+    rendered: Callable[..., list[dict[str, Any]]],
+    batch_log: Callable[[], list[dict[str, Any]]],
+) -> None:
+    """Owen, 2026-09-19: *"it won't do anything with the number because it
+    wasn't asked to."* Accepted, checked, forwarded — and `retake` still says
+    false, which is the key narrator reads to choose the arm."""
+    events = rendered(
+        band={
+            "pace_chars_per_sec": 15.91,
+            "max_chars_per_sec": 20.68,
+            "min_chars_per_sec": 12.24,
+        },
+    )
+    assert terminal(events)["data"]["rendered"] == len(CHUNKS)
+    assert batch_log()[0]["retake"] is False
+    assert batch_log()[0]["band"]["paceCharsPerSec"] == 15.91
+
+
+def test_a_job_with_no_width_runs_at_the_voices_own_serving_width(
+    rendered: Callable[..., list[dict[str, Any]]],
+    batch_log: Callable[[], list[dict[str, Any]]],
+) -> None:
+    """Absent is not a default: it resolves to `[voice.serving].max_num_seqs`,
+    which is the width the ENGINE was started at (`HIGGS_MAX_NUM_SEQS`) and a
+    number with an owner. deathstalker declares 16."""
+    events = rendered()
+    assert terminal(events)["data"]["rendered"] == len(CHUNKS)
+    assert batch_log()[0]["width"] == 16
+    assert terminal(events)["data"]["width"] == 16
+
+
+def test_a_narrower_width_is_forwarded_and_nothing_is_restarted(
+    rendered: Callable[..., list[dict[str, Any]]],
+    batch_log: Callable[[], list[dict[str, Any]]],
+    narrator: list[Any],
+) -> None:
+    """The ladder's baseline is 4 wide on a voice whose manifest says 16.
+
+    Measured 2026-09-19 by the ladder's author: 0.60 mem fraction at 16 in
+    flight summed to 24.2 GB on a 24 GB card, and WDDM then pages to host RAM
+    4-10x slower with no error. Narrowing is a number on the envelope and
+    nothing else — the server keeps the `--max-running-requests` and
+    `cuda_graph_max_bs` it was loaded with, so ONE engine serves the job.
+    """
+    events = rendered(width=4)
+    assert terminal(events)["data"]["rendered"] == len(CHUNKS)
+    assert batch_log()[0]["width"] == 4
+    assert terminal(events)["data"]["width"] == 4
+    assert len(narrator) == 1, "narrowing a job restarted the engine"
+
+
+def test_the_result_names_the_full_sampling_and_the_weights_that_ran(
+    rendered: Callable[..., list[dict[str, Any]]],
+) -> None:
+    """PHASE18 section 7's promise, discharged once per job (2026-09-19).
+
+    THE FULL TRIPLE, not the rung's override. deathstalker's rung 1 is one
+    line, `temperature = 0.7`, and a record saying only that says nothing about
+    the top-p and top-k it ran at — which is what a ladder's comparison rests
+    on. Sampling lives on the MANIFEST, so a manifest edited between two runs
+    would otherwise make two incomparable records that both claim take 1: every
+    Higgs measurement before 2026-09-06 was at temperature 1.0 and the whole
+    prior ladder record had to be marked "at the wrong temperature" once
+    already.
+
+    AND THE WEIGHTS, in the `/v1/voices` row's own three words, so a mismatch is
+    visible rather than reconstructed from a fingerprint somebody parsed.
+    """
+    take_zero = terminal(rendered(take=0))["data"]
+    assert take_zero["sampling"] == {
+        "temperature": 0.8, "top_p": 0.95, "top_k": 50,
+    }
+    take_one = terminal(rendered(take=1))["data"]
+    assert take_one["sampling"] == {
+        "temperature": 0.7, "top_p": 0.95, "top_k": 50,
+    }
+    assert take_one["voice"]["id"] == VOICE
+    # A pinned voice: the identity IS the fetched sha, and the basis says so.
+    assert take_one["voice"]["identity_basis"] == "verified"
+    assert len(take_one["voice"]["identity"]) == 40
+
+
 # ---------------------------------------------------------------- refusals
 
 
@@ -801,34 +975,141 @@ def _refuse(
     return response.json()["error"]
 
 
-def test_a_take_past_the_end_of_the_ladder_is_refused_and_never_clamped(
+def test_a_take_past_the_end_of_the_ladder_renders_in_its_own_seed_lane(
+    rendered: Callable[..., list[dict[str, Any]]],
+    sampling_log: Callable[[], list[dict[str, Any]]],
+) -> None:
+    """PHASE18 section 5, 2026-09-19. This was `unknown_take`.
+
+    deathstalker declares two rungs, and take 4 is past them. It is not
+    refused and it is not clamped: every item carries `take: 4` — the seed
+    lane, which is the whole of what a numberless take asks for — and NO
+    `sampling` key, which is the voice's own numbers rather than rung 1's
+    `temperature = 0.7` delivered under take 4's name.
+    """
+    events = rendered(take=4)
+    assert terminal(events)["data"]["rendered"] == len(CHUNKS)
+    rows = sampling_log()
+    assert sorted(row["i"] for row in rows) == [41, 42, 43]
+    assert all(row["take"] == 4 for row in rows), rows
+    assert all(row["sampling"] is None for row in rows), rows
+    assert {row["take"] for row in events_of(events, "chunk")} == {4}
+
+
+def test_a_chunk_over_the_cap_renders_instead_of_being_refused(
+    rendered: Callable[..., list[dict[str, Any]]],
+) -> None:
+    """`chunk_too_long` is RETIRED (PHASE18 section 4, 2026-09-19).
+
+    Owen: *"I don't think it's crucible's place to refuse chunks outside the
+    band… especially if we add a different tts engine."* Chunking is still the
+    client's and deathstalker still advertises an 800-character cap on
+    `/v1/voices`; what this server no longer does is act on it. A 900-character
+    chunk goes to the engine as sent and comes back measured — which is the
+    only way a sweep can find out what the cap actually is.
+    """
+    events = rendered(chunks=[{"index": 0, "text": "x" * 900}])
+    assert terminal(events)["event"] == "done", terminal(events)
+    assert terminal(events)["data"]["rendered"] == 1
+    assert terminal(events)["data"]["failed"] == []
+    row = events_of(events, "chunk")[0]
+    assert row["chars"] == 900
+
+
+def test_retake_true_with_no_band_is_refused_by_name(
     tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],  # noqa: F811
 ) -> None:
-    """A silent clamp is a retake ladder that stops climbing without telling
-    anyone: the client keeps asking for take 4 and keeps getting take 2's draw."""
+    """Not filled in from the voice, and not quietly downgraded to bare.
+
+    Filling it in from the voice is the shape that produced the 2026-09-18
+    defect twice: `higgs-default` satisfied a mandatory triple with narrator's
+    own frame-cap divisor, and deathstalker inherited 16.64 onto weights that
+    measured 15.91. Downgrading is worse — a client that asked to be guarded
+    and was not would read every clean row as a verdict.
+    """
     fake_weights(VOICE)
-    error = _refuse(tts_client, auth, take=4)
-    assert error["code"] == "unknown_take"
-    assert "has no take 4" in error["message"]
+    error = _refuse(tts_client, auth, retake=True)
+    assert error["code"] == "retake_without_band"
+    assert "states no band" in error["message"]
+    assert "pace_chars_per_sec" in error["message"]
 
 
-def test_a_chunk_over_the_cap_is_refused_rather_than_re_split(
+@pytest.mark.parametrize(
+    "band, names",
+    [
+        ({"pace_chars_per_sec": 15.9, "max_chars_per_sec": 20.7}, "min_chars_per_sec"),
+        (
+            {
+                "pace_chars_per_sec": 15.9,
+                "max_chars_per_sec": 20.7,
+                "min_chars_per_sec": 12.2,
+                "safe_max_chars": 800,
+            },
+            "safe_max_chars",
+        ),
+        (
+            {
+                "pace_chars_per_sec": "fast",
+                "max_chars_per_sec": 20.7,
+                "min_chars_per_sec": 12.2,
+            },
+            "not a rate",
+        ),
+        (
+            {
+                "pace_chars_per_sec": 15.9,
+                "max_chars_per_sec": 20.7,
+                "min_chars_per_sec": 0,
+            },
+            "positive",
+        ),
+        (
+            {
+                "pace_chars_per_sec": 25.0,
+                "max_chars_per_sec": 20.7,
+                "min_chars_per_sec": 12.2,
+            },
+            "out of order",
+        ),
+    ],
+)
+def test_every_way_a_band_can_be_wrong_is_one_refusal(
+    tts_client: TestClient,  # noqa: F811
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    band: dict[str, Any],
+    names: str,
+) -> None:
+    """ONE code for one rule (PHASE18 section 9). A band is a single statement
+    — the measured pace and the two edges derived from it — so a missing rate,
+    a rate that is not a number, a rate at or below zero and an order other
+    than min < pace < max are five spellings of the same mistake, and sorting
+    them into different codes would be two ways to learn one thing.
+
+    It refuses the WHOLE request, like `sampling_malformed` and unlike a per-row
+    failure: there is no row a band belongs to."""
+    fake_weights(VOICE)
+    error = _refuse(tts_client, auth, band=band)
+    assert error["code"] == "band_malformed", error
+    assert names in error["message"], error
+
+
+def test_a_width_above_the_voices_serving_width_is_refused_never_clamped(
     tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],  # noqa: F811
 ) -> None:
-    """Chunking is the client's (section 1), so the cap certificate refuses."""
+    """narrator cannot keep more in flight than the server admits, and a clamp
+    would be a job reporting a width it did not run at — which makes its
+    throughput reproducible by nobody. Both numbers ride in the detail so a
+    client can fix the request without reading `/v1/voices` again."""
     fake_weights(VOICE)
-    error = _refuse(
-        tts_client,
-        auth,
-        chunks=[{"index": 0, "text": "x" * 900}],
-    )
-    assert error["code"] == "chunk_too_long"
-    assert "800-character cap" in error["message"]
-    assert "index 0 is 900" in error["message"]
+    error = _refuse(tts_client, auth, width=32)
+    assert error["code"] == "width_over_serving"
+    assert error["details"] == {"width": 32, "max_num_seqs": 16}
+    assert "Never clamped" in error["message"]
 
 
 def test_a_zeroshot_voice_that_is_not_resident_is_refused_because_this_door_cannot_load_it(

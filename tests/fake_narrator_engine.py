@@ -72,6 +72,8 @@ def install(monkeypatch: pytest.MonkeyPatch) -> list[FakeNarratorEngine]:
         *,
         serving_stack: str | None,
         max_num_seqs: int | None,
+        mem_fraction: float | None,
+        context_length: int | None,
         voices: VoicesDocument | None,
         mlx_total_bytes: int | None,
     ) -> FakeNarratorEngine:
@@ -100,6 +102,8 @@ def install(monkeypatch: pytest.MonkeyPatch) -> list[FakeNarratorEngine]:
             log_path=log_path,
             serving_stack=None,
             max_num_seqs=None,
+            mem_fraction=None,
+            context_length=None,
             voices=voices,
             mlx_total_bytes=FAKE_TOTAL_BYTES,
         )

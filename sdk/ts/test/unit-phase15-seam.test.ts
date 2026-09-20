@@ -624,6 +624,14 @@ const PRE_FIELD_VOICE = {
   sample_rate: 24000,
   takes: 2,
   // NO `needs_reference`. That is the whole fixture.
+  serving: {
+    max_num_seqs: 16,
+    max_num_seqs_note: "vllm-omni's own stage-0 value, measured at 0.35 + 0.10.",
+    mem_fraction: null,
+    mem_fraction_note: null,
+    context_length: null,
+    context_length_note: null,
+  },
   pace: {
     pace_chars_per_sec: 16.64,
     max_chars_per_sec: 21.63,

@@ -339,9 +339,51 @@ def test_a_voice_may_omit_its_pace_table_in_whole(host: Path) -> None:
     assert voice.pace_basis is None
 
 
-def test_an_arm_without_a_max_chars_basis_is_refused() -> None:
+def test_a_cap_without_a_basis_is_refused() -> None:
+    """The two keys are ONE statement, and since 2026-09-19 the pairing is what
+    is enforced rather than the presence of either: `max_chars` moved to
+    optional here exactly as it did in `voices.py`, so the refusal had to move
+    from "this key is missing" to "this key is missing BESIDE a cap"."""
     message = refused(swap('max_chars_basis = "measured"\n', ""))
-    assert "missing required key(s) ['max_chars_basis']" in message
+    assert "states max_chars 800 and no max_chars_basis" in message
+
+
+def test_a_basis_without_a_cap_is_refused_as_the_leftover_it_is() -> None:
+    """The other half. A basis describing a cap that is not there reads as a
+    cap this loader checked and passed — `_check_pace` refuses its own `edges`
+    key the same way and for the same sentence."""
+    message = refused(
+        GOOD.replace(
+            'max_chars       = 800\nmax_chars_basis = "measured"',
+            'max_chars_basis = "measured"',
+        )
+    )
+    assert "states max_chars_basis 'measured' and no max_chars" in message
+
+
+#: The two arms with neither key — a repo published before any sweep has run on
+#: its weights. Both arms, because a cap comes out of one sweep.
+UNCAPPED_ARMS = (
+    GOOD.replace('max_chars       = 800\nmax_chars_basis = "measured"\n', "")
+    .replace('max_chars       = 800\nmax_chars_basis = "placeholder"\n', "")
+)
+
+
+def test_an_arm_may_state_no_cap_at_all(host: Path) -> None:
+    """PHASE18 section 4, 2026-09-19 — and it must be expressible in BOTH
+    schemas or a voice would be publishable and unloadable, or the reverse.
+
+    The merged `VoiceManifest` carries `max_chars` None and `max_chars_basis`
+    None, which is "not measured" and not "no limit".
+    """
+    repo = parse(UNCAPPED_ARMS)
+    assert repo.max_chars_basis == {"cuda-linux": None, "mlx-darwin": None}
+    a_pin(host)
+    a_cached_manifest(host, UNCAPPED_ARMS)
+    voice = load_all_voices()[PINNED_ID]
+    for arm in ("cuda-linux", "mlx-darwin"):
+        assert voice.spec(arm).max_chars is None, arm
+        assert voice.spec(arm).max_chars_basis is None, arm
 
 
 def test_an_unknown_max_chars_basis_is_refused() -> None:
@@ -763,6 +805,68 @@ def test_a_serving_width_with_no_note_is_refused(tmp_path: Path) -> None:
     )
     assert "max_num_seqs carries no note" in message
     assert "measured at 64" in message
+
+
+#: The two levers added 2026-09-19, as this machine would state them.
+MACHINE_LEVERS = """mem_fraction = 0.48
+mem_fraction_note = "0.48 + width 4 is ~20 GB; 0.55 measured 24.0-24.1 GB here and WDDM then pages to host RAM"
+context_length = 8192
+context_length_note = "4096 holds ~2,000 chars and this bank tops at 2,008, so the top rungs truncate on the context"
+"""
+
+
+def test_the_machine_table_may_state_the_two_serving_levers(tmp_path: Path) -> None:
+    """They live in `[tts.<engine>]` and not in the repo manifest, because
+    `[voice.serving]` is REFUSED in a repo manifest by name: what sizes the
+    server narrator starts is a property of the box and the engine, and a repo
+    published once cannot know which card it will be served on."""
+    from crucible.config import tts_engine_footprints
+
+    a_config(tmp_path, CONFIG + MACHINE_LEVERS)
+    found = tts_engine_footprints(tmp_path)["higgs-v3"]
+    assert found.mem_fraction == 0.48
+    assert found.context_length == 8192
+    assert "24 GB card" in found.mem_fraction_note or "24.0-24.1 GB" in found.mem_fraction_note
+    assert "2,008" in found.context_length_note
+
+
+def test_a_repo_voice_inherits_the_machines_serving_levers(
+    host: Path, tmp_path: Path
+) -> None:
+    """End to end: the box states them, and the voice that comes down from a
+    repo is served with them. Absent in the table means absent on the voice,
+    which `_check_serving` reads as narrator's own launcher defaults."""
+    a_pin(host)
+    a_cached_manifest(host, GOOD)
+    a_config(host, CONFIG + MACHINE_LEVERS)
+    voice = load_all_voices()[PINNED_ID]
+    assert voice.serving.mem_fraction == 0.48
+    assert voice.serving.context_length == 8192
+
+
+def test_a_machine_lever_with_no_note_is_refused(tmp_path: Path) -> None:
+    """`max_num_seqs`'s contract, applied to both: a number that reconfigures
+    the server narrator starts owes the measurement that chose it."""
+    message = footprint_refused(
+        tmp_path, CONFIG + "mem_fraction = 0.48\n"
+    )
+    assert "mem_fraction carries no note" in message
+
+
+def test_a_machine_note_with_no_number_is_refused(tmp_path: Path) -> None:
+    message = footprint_refused(
+        tmp_path, CONFIG + 'context_length_note = "x"\n'
+    )
+    assert "states context_length_note and no context_length" in message
+
+
+def test_a_machine_mem_fraction_outside_zero_to_one_is_refused(tmp_path: Path) -> None:
+    """narrator's launcher refuses anything else by name, so the config refuses
+    it first — a fraction of 1.2 would otherwise be a worker that exits 4."""
+    message = footprint_refused(
+        tmp_path, CONFIG + 'mem_fraction = 1.2\nmem_fraction_note = "x"\n'
+    )
+    assert "must be a fraction in (0, 1)" in message
 
 
 def test_an_unknown_key_in_the_machine_table_is_refused(tmp_path: Path) -> None:

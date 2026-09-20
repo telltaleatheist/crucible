@@ -518,9 +518,15 @@ def test_two_rows_cannot_share_an_id(
             assert response.json()["error"]["code"] == "duplicate_row_id"
 
 
-def test_a_row_longer_than_the_cap_is_refused_not_re_split(
+def test_a_row_longer_than_the_cap_is_said_rather_than_refused(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
+    """`chunk_too_long` is RETIRED on this door too (PHASE18 section 4,
+    2026-09-19), and it mattered that both went together: two doors refusing a
+    chunk by two readings of one number is exactly the "fact with two owners"
+    shape `docs/ARCHITECTURE.md` catalogues. Chunking stays the client's; the
+    server stops acting on a cap a screening voice may not have and a second
+    engine would not be described by."""
     with streaming_server() as base:
         session = opened(base, auth)
         with listen(base, auth, session["session_id"]) as stream:
@@ -529,15 +535,21 @@ def test_a_row_longer_than_the_cap_is_refused_not_re_split(
                 base, auth, session["session_id"], op="say", id="r1",
                 text="x" * 801, take=0,
             )
-            assert response.status_code == 400, response.text
-            error = response.json()["error"]
-            assert error["code"] == "chunk_too_long"
-            assert error["details"]["max_chars"] == 800
+            assert response.status_code == 202, response.text
+            assert response.json()["id"] == "r1"
+            stream.wait_for(
+                lambda s: [d for d in s.of("done") if d["id"] == "r1"],
+                "r1's done",
+            )
 
 
-def test_a_take_above_the_ladder_is_never_clamped(
+def test_a_take_above_the_ladder_renders_in_its_own_lane_and_is_never_clamped(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
+    """PHASE18 section 5, 2026-09-19. This was `unknown_take`.
+
+    Past the declared ladder is a seed lane at the voice's own sampling — not
+    a refusal, and still not rung 1's numbers under take 3's name."""
     with streaming_server() as base:
         session = opened(base, auth)
         with listen(base, auth, session["session_id"]) as stream:
@@ -546,8 +558,11 @@ def test_a_take_above_the_ladder_is_never_clamped(
                 base, auth, session["session_id"], op="say", id="r1", text="Rain.",
                 take=3,
             )
-            assert response.status_code == 400, response.text
-            assert response.json()["error"]["code"] == "unknown_take"
+            assert response.status_code == 202, response.text
+            stream.wait_for(
+                lambda s: [d for d in s.of("done") if d["id"] == "r1"],
+                "r1's done",
+            )
 
 
 def test_a_row_at_take_one_carries_that_rungs_numbers_and_take_zero_carries_none(

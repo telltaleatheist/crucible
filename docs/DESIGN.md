@@ -56,7 +56,7 @@ declaring: the env it needs, the models it can serve, a VRAM estimate per model,
 | Type | In | Out | Notes |
 |---|---|---|---|
 | `llm` | chat messages, model id, sampling | text | OpenAI-compatible endpoint (`/v1/openai/...`), so vLLM / SGLang / mlx-lm batching comes for free. Phase 2, `PHASE2-LLM.md`. |
-| `tts` | text chunks, voice id, take | audio (FLAC per chunk) + measurements | Higgs v3 through narrator (the one narrator engine Crucible names — PLAN.md, the ruling of 2026-09-14). Two doors: a render job and a streaming connection. Voices are the server's, and so is every knob that tunes an engine to one. Phase 3b, `PHASE3-TTS.md`. |
+| `tts` | text chunks, voice id, take, and three optional decisions (`retake`, `band`, `width`) | audio (FLAC per chunk) + measurements, and a result naming the sampling and the weights that ran | Higgs v3 through narrator (the one narrator engine Crucible names — PLAN.md, the ruling of 2026-09-14). Two doors: a render job and a streaming connection. Voices are the server's, and so is every knob that tunes an engine to one. Phase 3b, `PHASE3-TTS.md`. |
 | `align` | audio + text | timestamped items | Qwen3-ForcedAligner-0.6B, resident across a whole book. Phase 4, `PHASE4-AUDIO.md`. |
 | `asr` | one audio file | transcript with word timestamps | faster-whisper, six sizes, no default. Phase 4, `PHASE4-AUDIO.md`. |
 | `rvc` | audio + model id + params | audio | ultimate-rvc. Phase 4, `PHASE4-AUDIO.md`. |
@@ -87,6 +87,23 @@ voice id and the take number; the server's voice config decides the rest. Where 
 genuinely needs to steer a knob (a temperature the operator set, a cap override), the
 job contract names that knob explicitly, one at a time, with a reason. The default is
 that it does not cross the seam.
+
+**Three knobs are named that way, ruled 2026-09-19** (PHASE18-UNCERTIFIED.md sections 4,
+6 and 8), and the reason each earned its name is the same: it is a DECISION about this
+job rather than a fact about the voice.
+
+- `retake` — whether narrator's guarded driver judges and re-rolls this batch, or whether
+  every chunk is rendered once as sent. Before this the arm was chosen by a capability
+  probe inside narrator, so what happened to a book depended on what the engine offered.
+- `band` — the three rates the guard measures against, STATED by the caller and never
+  looked up. A server that found a band would be answering with a number nobody measured
+  for those weights, which is the defect `pace_basis` exists to expose.
+- `width` — how many of this job's chunks are in flight, under the voice's own
+  configured `max_num_seqs`. A ceiling the job lowers; never one it raises.
+
+Still NOT on the wire, and deliberately: sampling. The client asks for a take; the server
+says what that take means. What the wire gained instead is the RESULT saying which triple
+was applied, so two runs against an edited manifest cannot both claim "take 0".
 
 This is the reading of `docs/CLIENT-SURFACES.md` section 10, tier 3: those rows describe
 what the *server* must implement, not what the *client* must send.

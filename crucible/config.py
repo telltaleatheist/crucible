@@ -292,6 +292,14 @@ class EngineFootprint:
     estimate_note: str | None
     max_num_seqs: int
     max_num_seqs_note: str
+    #: SGLang's `--mem-fraction-static` and the engine's context in tokens, or
+    #: None for narrator's own launcher defaults (0.60 and 4096). Optional
+    #: because every `[tts.<engine>]` table written before 2026-09-19 states
+    #: neither and must keep loading, and each owes its note when stated.
+    mem_fraction: float | None = None
+    mem_fraction_note: str | None = None
+    context_length: int | None = None
+    context_length_note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         document: dict[str, Any] = {
@@ -302,6 +310,16 @@ class EngineFootprint:
             document["estimate_note"] = self.estimate_note
         document["max_num_seqs"] = self.max_num_seqs
         document["max_num_seqs_note"] = self.max_num_seqs_note
+        # Written only when stated, unlike the `/v1/voices` row's null: this
+        # document is a config FILE, and a key written back as null would be a
+        # line an operator has to delete before the default applies again.
+        for key in (
+            "mem_fraction", "mem_fraction_note",
+            "context_length", "context_length_note",
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                document[key] = value
         return document
 
 
@@ -957,7 +975,60 @@ _TTS_ENGINE_REQUIRED: dict[str, type] = {
     "max_num_seqs": int,
     "max_num_seqs_note": str,
 }
-_TTS_ENGINE_OPTIONAL: dict[str, type] = {"estimate_note": str}
+#: AND THE TWO SERVING LEVERS ADDED 2026-09-19, each with its required note.
+#: They are here rather than in the repo manifest because `[voice.serving]` is
+#: REFUSED in a repo manifest by name (PHASE21 section 2.3,
+#: `voicerepo._REFUSED_IN_REPO`): what sizes the server narrator starts is a
+#: property of the BOX and the ENGINE, and a repo published once cannot know
+#: which card it will be served on. So a voice that comes out of its own repo
+#: gets them from the machine, exactly as it already gets `max_num_seqs` and
+#: the memory estimate.
+#:
+#: `mem_fraction` is unambiguously a machine fact — it is a share of one card's
+#: VRAM. `context_length` is the arguable one: the ladder wants 8192 because
+#: its own bank tops at 2,008 characters, which is a fact about a CORPUS. It is
+#: here anyway, because a context is paid for in the same VRAM as the fraction
+#: and a repo that demanded 8192 on a card that cannot hold it would be a voice
+#: that refuses to load on the machine it was published for. A screening voice
+#: states both in its OWN `voices/<id>.toml`, which is an override written on
+#: the machine it runs on and is the shape that fits.
+#:
+#: See `crucible/voices.py:_SERVING_OPTIONAL` for what each number does and the
+#: measurements behind them; the rules are the same and are checked there too,
+#: because a packaged manifest may state them directly.
+_TTS_ENGINE_OPTIONAL: dict[str, type] = {
+    "estimate_note": str,
+    "mem_fraction": object,
+    "mem_fraction_note": str,
+    "context_length": int,
+    "context_length_note": str,
+}
+
+
+def _tts_engine_lever(where: str, block: dict[str, Any], key: str) -> Any:
+    """One optional serving lever, or None — and its note, which it owes.
+
+    `voices.py:_check_serving_extra`'s rule stated again for the machine's own
+    table, because a number here reconfigures the server narrator starts and a
+    person reading `[tts.<engine>]` has to be able to find out where it came
+    from. A note with no number is the leftover of a number somebody deleted.
+    """
+    note = block.get(f"{key}_note")
+    value = block.get(key)
+    if value is None:
+        if note is not None:
+            raise ConfigError(
+                f"{where}: states {key}_note and no {key}. The note says where a "
+                "number came from and there is no number"
+            )
+        return None
+    if note is None or note.strip() == "":
+        raise ConfigError(
+            f"{where}: {key} carries no note. It reconfigures the server "
+            "narrator starts, so the next person to touch it has to be able to "
+            "find out where the number came from"
+        )
+    return value
 
 
 def _tts_engine_records(table: dict[str, Any]) -> tuple[EngineFootprint, ...]:
@@ -1035,6 +1106,27 @@ def _tts_engine_records(table: dict[str, Any]) -> tuple[EngineFootprint, ...]:
                 "shipped width is 16 — so the next person to touch it has to be "
                 "able to find out where it came from"
             )
+        mem_fraction = _tts_engine_lever(where, block, "mem_fraction")
+        if mem_fraction is not None:
+            if isinstance(mem_fraction, bool) or not isinstance(
+                mem_fraction, (int, float)
+            ):
+                raise ConfigError(
+                    f"{where}: mem_fraction is {mem_fraction!r}, which is not a "
+                    "fraction"
+                )
+            if not 0 < mem_fraction < 1:
+                raise ConfigError(
+                    f"{where}: mem_fraction must be a fraction in (0, 1), got "
+                    f"{mem_fraction}. It is SGLang's --mem-fraction-static, and "
+                    "narrator's launcher refuses anything else by name"
+                )
+            mem_fraction = float(mem_fraction)
+        context_length = _tts_engine_lever(where, block, "context_length")
+        if context_length is not None and context_length <= 0:
+            raise ConfigError(
+                f"{where}: context_length must be positive, got {context_length}"
+            )
         found.append(
             EngineFootprint(
                 engine=engine,
@@ -1043,6 +1135,10 @@ def _tts_engine_records(table: dict[str, Any]) -> tuple[EngineFootprint, ...]:
                 estimate_note=note,
                 max_num_seqs=block["max_num_seqs"],
                 max_num_seqs_note=block["max_num_seqs_note"],
+                mem_fraction=mem_fraction,
+                mem_fraction_note=block.get("mem_fraction_note"),
+                context_length=context_length,
+                context_length_note=block.get("context_length_note"),
             )
         )
     return tuple(found)

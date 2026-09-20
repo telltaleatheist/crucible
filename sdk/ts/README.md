@@ -420,10 +420,25 @@ duration and is an operator's explicit order, so it loads its own voice if it ha
 emitting `warming` as `loadVoice()` does. That is the one asymmetry with `llm`, where a
 fine-grained unattended chat never loads.
 
-**Chunking is yours.** Pack to the voice's `pace` and `maxChars` before you get here: a chunk
-over the cap is refused (`chunk_too_long`) and never re-split, because a server that quietly
-cut a chunk in half would return two files where one was asked for. The client keeps no copy
-of `maxChars` — it is per (voice, backend) and it is on the row you already read.
+**Chunking is yours.** Pack to the voice's `pace` and `maxChars` before you get here. The
+client keeps no copy of `maxChars` — it is per (voice, backend) and it is on the row you
+already read — and since 2026-09-19 neither does the server act on it: `chunk_too_long` is
+retired, so an oversize chunk is rendered as sent and reported honestly. A cap is a
+measurement a screening checkpoint may not have, and a second TTS engine's frame arithmetic
+is not described by that number. Crucible still never re-splits: a server that quietly cut a
+chunk in half would return two files where one was asked for.
+
+**The guard is yours to ask for.** `retake: true` runs narrator's guarded driver against the
+`band` you state in the same call — `{pace_chars_per_sec, max_chars_per_sec,
+min_chars_per_sec}`, echoed back from the row you read. Omit `retake` and every chunk is
+rendered once as sent, nothing judged and nothing retaken, and `guard` on each chunk row is
+`null` meaning nobody looked. `retake: true` with no band is `retake_without_band`; a band
+that is not one is `band_malformed`. The server never looks a band up for you: an inherited
+band is indistinguishable from a measured one at the point of use, which is how pace 16.64
+survived onto weights that measured 15.91.
+
+**`width` caps what is in flight.** Absent is the voice's own `[voice.serving].max_num_seqs`;
+above it is `width_over_serving`, never a silent clamp. Narrowing restarts nothing.
 
 The `index` is yours too, and nothing renumbers it. It goes out, comes back on the retiring
 row, and becomes the artifact's name.

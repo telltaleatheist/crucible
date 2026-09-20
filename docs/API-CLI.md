@@ -74,10 +74,13 @@ guest's pairing file rather than `config.toml`. The pairing line is parsed by
 A followed job that ends `failed` or `cancelled` exits **1**, even though every
 HTTP request in it succeeded. A script must not read a failed render as success.
 
-Refusals are never paraphrased. `chunk_too_long`, `unknown_take`,
-`stream_session_open`, `server_busy`, `not_resident` — those strings are what a
-person greps this repo for, and a client that rewrote them into nicer English
-would have deleted the only handle on them.
+Refusals are never paraphrased. `retake_without_band`, `band_malformed`,
+`width_over_serving`, `stream_session_open`, `server_busy`, `not_resident` —
+those strings are what a person greps this repo for, and a client that rewrote
+them into nicer English would have deleted the only handle on them.
+(`chunk_too_long` and `unknown_take` were two of them until 2026-09-19 and are
+retired: the server no longer refuses a chunk by length, and a take past the
+ladder is a seed lane rather than an error.)
 
 ## The commands
 
@@ -251,7 +254,16 @@ crucible api job submit --type tts --model sigma \
   --params @retakes-take-1.json --follow --artifacts-dir ./out
 ```
 
-A take past the end of a voice's ladder is `unknown_take` and is never clamped.
+A take past the end of a voice's ladder renders at the voice's own sampling in
+that take's seed lane (2026-09-19) and is never clamped — take 4 is never take
+2's numbers under take 4's name.
+
+`params` may also carry `retake` (which ARM renders the batch), `band` (the
+three rates the guarded arm measures against — required when `retake` is true,
+`retake_without_band` otherwise) and `width` (how many chunks are in flight,
+under the voice's `[voice.serving].max_num_seqs`, `width_over_serving` above
+it). The job's `done` names the FULL sampling triple the engine applied and the
+weights it ran on, so a screening record is self-describing.
 
 ### AI cleanup and translation
 

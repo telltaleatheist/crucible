@@ -118,6 +118,14 @@ const VOICE_ROW = {
   sample_rate: 24000,
   takes: 2,
   needs_reference: false,
+  serving: {
+    max_num_seqs: 16,
+    max_num_seqs_note: "vllm-omni's own stage-0 value, measured at 0.35 + 0.10.",
+    mem_fraction: null,
+    mem_fraction_note: null,
+    context_length: null,
+    context_length_note: null,
+  },
   pace: {
     pace_chars_per_sec: 16.64,
     max_chars_per_sec: 21.63,
@@ -181,6 +189,14 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
       maxChars: 800,
       sampleRate: 24000,
       takes: 2,
+      serving: {
+        maxNumSeqs: 16,
+        maxNumSeqsNote: "vllm-omni's own stage-0 value, measured at 0.35 + 0.10.",
+        memFraction: null,
+        memFractionNote: null,
+        contextLength: null,
+        contextLengthNote: null,
+      },
       needsReference: false,
       pace: {
         paceCharsPerSec: 16.64,
@@ -212,6 +228,14 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
       // These three are facts about the voice and survive the missing block.
       sampleRate: 24000,
       takes: 2,
+      serving: {
+        maxNumSeqs: 16,
+        maxNumSeqsNote: "vllm-omni's own stage-0 value, measured at 0.35 + 0.10.",
+        memFraction: null,
+        memFractionNote: null,
+        contextLength: null,
+        contextLengthNote: null,
+      },
       // A zero-shot row says a load must carry a clip, whatever this host can
       // serve: it is a fact about the KIND, not about the backend block.
       needsReference: true,

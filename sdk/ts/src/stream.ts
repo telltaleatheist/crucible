@@ -200,8 +200,10 @@ export interface TtsStreamSession extends AsyncIterable<StreamEvent> {
    * own sampling, which is what asking for nothing gets; take N is the Nth rung
    * of that voice's ladder, resolved by the SERVER into the numbers it sends
    * the engine. A temperature never travels on this wire. How many rungs a
-   * voice has is {@link VoiceInfo.takes}, and a take past the end is
-   * `unknown_take` — never clamped.
+   * voice has is {@link VoiceInfo.takes}, and a take past the end is a SEED
+   * LANE at the voice's own sampling since 2026-09-19 (it was `unknown_take`)
+   * — still never clamped, so take 4 is never take 2's numbers under take 4's
+   * name.
    *
    * **Rows in one session may be at different takes.** Which is the point: a
    * retake must not reuse the settings that produced the problem, so spread

@@ -128,7 +128,12 @@ def render_frontmatter(repo: RepoManifest, existing: str) -> str:
     owned = list(_pace_lines(repo))
     for key, arm in _CAP_KEYS.items():
         block = repo.arms.get(arm)
-        if block is None:
+        if block is None or "max_chars" not in block:
+            # An arm with no measured cap writes no line at all, rather than a
+            # line saying zero or null: the frontmatter is read by audit
+            # scripts, and `higgs_max_chars_served: null` is a field one of them
+            # reads as a cap. Absence is the only honest spelling here
+            # (2026-09-19, PHASE18-UNCERTIFIED.md section 4).
             continue
         owned.append(f"{key}: {block['max_chars']}")
         owned.append(f"{key}_basis: {repo.max_chars_basis[arm]}")
@@ -150,9 +155,9 @@ def render_limits(repo: RepoManifest) -> str:
     if rate is None:
         lines.append(
             "- **Pace:** not measured on these weights. This voice states no "
-            "pace band, so a client packs to the per-chunk cap below and "
-            "narrator guards against its engine's own default band rather than "
-            "against a number measured here."
+            "pace band, so a client packs to the per-chunk cap below if this "
+            "repo states one, and narrator guards against its engine's own "
+            "default band rather than against a number measured here."
         )
     else:
         lines.append(
@@ -181,6 +186,14 @@ def render_limits(repo: RepoManifest) -> str:
         )
     for arm in sorted(repo.arms):
         block = repo.arms[arm]
+        if "max_chars" not in block:
+            lines.append(
+                f"- **Per-chunk cap, {arm}:** not measured on these weights. "
+                "No sweep has run here, so this voice states no cap and nothing "
+                "downstream substitutes one — Crucible's render door does not "
+                "refuse a chunk by length."
+            )
+            continue
         lines.append(
             f"- **Per-chunk cap, {arm}:** {block['max_chars']} characters "
             f"({repo.max_chars_basis[arm]})."
@@ -356,13 +369,29 @@ def export_manifest(
                 f"Each basis owes exactly its own sentence — {owed} — and the "
                 "other would be prose about a measurement this voice did not make"
             )
-    if max_chars_basis not in MAX_CHARS_BASES:
+    # THE BASIS IS OWED BY THE CAPS THAT EXIST, and by nothing else
+    # (2026-09-19). A packaged manifest whose arms state no `max_chars` is an
+    # uncertified voice — no sweep has run on these weights — and demanding a
+    # word describing how its absent caps were got would be asking for a
+    # certificate about a number that is not there. Every arm carries a cap or
+    # none does: they come from one sweep.
+    capped_arms = [
+        arm for arm in sorted(manifest.backends)
+        if manifest.backends[arm].max_chars is not None
+    ]
+    if capped_arms and max_chars_basis not in MAX_CHARS_BASES:
         raise CardError(
             f"voice {manifest.id!r}'s per-arm caps carry no basis and the "
             "packaged schema cannot say. Pass --max-chars-basis "
             f"{'|'.join(sorted(MAX_CHARS_BASES))}: thirdreich shipped a "
             "`higgs_max_chars_mlx: 900` that no sweep ever produced, and a file "
             "that cannot say so ships it as a measured fact"
+        )
+    if not capped_arms and max_chars_basis is not None:
+        raise CardError(
+            f"voice {manifest.id!r} states no per-arm cap on any arm, and "
+            f"--max-chars-basis {max_chars_basis} describes how a cap was got. "
+            "There is no cap; drop the flag"
         )
 
     lines = [
@@ -424,11 +453,23 @@ def export_manifest(
             "-> config.toml [tts."
             f"{manifest.narrator_engine}] max_num_seqs (+ its note)"
         )
+        # The two levers added 2026-09-19 go the same way and for the same
+        # reason: they size the SERVER, which is a fact about the box.
+        for key in ("mem_fraction", "context_length"):
+            value = getattr(manifest.serving, key)
+            if value is not None:
+                dropped.append(
+                    f"[voice.serving] {key} = {value} -> config.toml "
+                    f"[tts.{manifest.narrator_engine}] {key} (+ its note)"
+                )
     for arm in sorted(manifest.backends):
         spec = manifest.backends[arm]
         lines += ["", f"[voice.arms.{arm}]"]
-        lines.append(f"max_chars       = {spec.max_chars}")
-        lines.append(f"max_chars_basis = {_toml_string(max_chars_basis)}")
+        # The cap and its basis are one statement and are written together or
+        # not at all — `voicerepo._check_arm_cap` refuses either alone.
+        if spec.max_chars is not None:
+            lines.append(f"max_chars       = {spec.max_chars}")
+            lines.append(f"max_chars_basis = {_toml_string(max_chars_basis)}")
         sampling = ", ".join(
             f"{key} = {_toml_number(value)}" for key, value in spec.sampling.items()
         )

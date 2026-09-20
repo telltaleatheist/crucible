@@ -195,7 +195,12 @@ class ResidentVoice:
     revision: str
     fingerprint: str
     sample_rate: int
-    max_chars: int
+    #: The voice's per-chunk cap in characters, or None because its manifest
+    #: measured none (PHASE18-UNCERTIFIED.md section 4). Reported as `null` on
+    #: `/v1/activity`, which is "not measured" and not "no limit" — nothing on
+    #: this server acts on it since the render and stream doors stopped
+    #: refusing a chunk by length on 2026-09-19.
+    max_chars: int | None
     memory_bytes_estimate: int
     log_path: Path
     loaded_at: str
@@ -1053,6 +1058,22 @@ class Residency:
             max_num_seqs=(
                 None if manifest.serving is None
                 else manifest.serving.max_num_seqs
+            ),
+            # THE TWO LEVERS ADDED ON 2026-09-19, and they go to BOTH arms.
+            # `max_num_seqs` above is emitted only on the served arm, because
+            # the MLX arm has a width of its own out of a measured tier table
+            # and `HIGGS_MAX_NUM_SEQS` means nothing to it. These two are not
+            # like that: Owen ruled the same day that darwin is to be
+            # configurable the same way ("context limits and such"), so they
+            # are stated here on either backend and it is NARRATOR that answers
+            # — by name at load — for a knob its MLX backend does not have.
+            mem_fraction=(
+                None if manifest.serving is None
+                else manifest.serving.mem_fraction
+            ),
+            context_length=(
+                None if manifest.serving is None
+                else manifest.serving.context_length
             ),
             voices=voices,
             # THE MACHINE'S OWN MEMORY, on the arm that sizes a batch from it.

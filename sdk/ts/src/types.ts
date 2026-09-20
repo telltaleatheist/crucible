@@ -1276,13 +1276,37 @@ export interface VoiceInfo {
    * How many rungs this voice's take ladder has. Never null, never below 1 —
    * take 0 exists whether or not the manifest says so.
    *
-   * **Ask before you submit.** A `take` past the end is refused
-   * (`unknown_take`) and never clamped, so a client spreading N candidates
-   * across the ladder reads this to know where it ends. What each rung MEANS
-   * is deliberately not published: the numbers are engine tuning, they are the
-   * server's, and publishing them invites a client to send them back.
+   * **Read it before you spread candidates.** A `take` past the end is not
+   * refused (it was `unknown_take` until 2026-09-19): it renders at the
+   * voice's OWN sampling in take N's own seed lane, which is what a screening
+   * sweep wants and what a retake ladder does NOT — a retake must not reuse the
+   * settings that produced the problem, so a client climbing rungs reads this
+   * to know where the DIFFERENT settings run out. Still never clamped. What
+   * each rung MEANS is deliberately not published: the numbers are engine
+   * tuning, they are the server's, and publishing them invites a client to send
+   * them back.
    */
   readonly takes: number;
+  /**
+   * What the SERVER under narrator is sized by, or `null` for a voice that
+   * declares no serving table (a shape the next narrator engine will have and
+   * no manifest has today).
+   *
+   * **`maxNumSeqs` is the ceiling a render's {@link RenderOptions.width} must
+   * sit under**, which is why this is published at all: it was deliberately
+   * NOT on the row until 2026-09-19, on the true-at-the-time ground that a
+   * client had no decision to make with it. Giving a job its own width made
+   * that false — without the number here, the only way to find the ceiling is
+   * to be refused by it.
+   *
+   * `memFraction` and `contextLength` are `null` when the voice states none,
+   * meaning narrator's own launcher defaults (0.60, and the Higgs builder's
+   * 4096) — never a number this row invented. Each note is the measurement
+   * that chose its number. Nothing here is ever SENT by a client: the row
+   * publishes what the server chose, and `width` is the only thing a request
+   * may say about any of it.
+   */
+  readonly serving: VoiceServing | null;
   /**
    * Whether loading this voice requires a reference clip
    * ({@link LoadVoiceOptions.reference}) — true for a `zeroshot` voice, false
@@ -1353,11 +1377,27 @@ export interface LoadVoiceOptions {
  *
  * **Chunking is the client's and stays the client's** (PHASE3-TTS.md section 1).
  * Crucible does no packing and no text normalisation; pack to the voice's own
- * {@link VoicePace} and {@link VoiceInfo.maxChars} before you get here, because
- * a chunk over the cap is refused (`chunk_too_long`) and never re-split — a
- * server that quietly cut a chunk in half would return two files where one was
- * asked for.
+ * {@link VoicePace} and {@link VoiceInfo.maxChars} before you get here.
+ *
+ * **The server no longer refuses an oversize chunk** (2026-09-19). It used to,
+ * as `chunk_too_long`, and that refusal is retired rather than relaxed: the cap
+ * is a measurement a screening checkpoint may not have, and a second TTS engine
+ * would have its own frame arithmetic that this number describes nothing about.
+ * A chunk over the cap now goes to the engine as sent and comes back measured —
+ * which is how a sweep finds out what the cap actually is. Crucible still never
+ * re-splits: a server that quietly cut a chunk in half would return two files
+ * where one was asked for.
  */
+/** `[voice.serving]` — what the server under narrator is sized by. */
+export interface VoiceServing {
+  readonly maxNumSeqs: number;
+  readonly maxNumSeqsNote: string;
+  readonly memFraction: number | null;
+  readonly memFractionNote: string | null;
+  readonly contextLength: number | null;
+  readonly contextLengthNote: string | null;
+}
+
 export interface RenderChunk {
   /**
    * The client's number for this chunk, and the name of the artifact it
@@ -1394,14 +1434,71 @@ export interface RenderOptions {
   /** The manifest's language tag for this text, e.g. `en`. */
   readonly language: string;
   /**
-   * Which rung of the voice's take ladder to render at. `0` is the engine's own
-   * sampling, which is what asking for nothing gets. A rung past the end of the
-   * ladder is `unknown_take` and is **never clamped**: a silent clamp is a
-   * ladder that stops climbing without telling anyone.
+   * Which rung of the voice's take ladder to render at, and which SEED LANE to
+   * draw in. `0` is the engine's own sampling, which is what asking for nothing
+   * gets.
+   *
+   * A take past the end of the declared ladder is legal since 2026-09-19 (it
+   * was `unknown_take`): it renders at the voice's OWN sampling in take N's own
+   * seed lane, which is what a screening sweep asks for when it names takes
+   * 0..N on a voice with no ladder at all. Still **never clamped** — take 4 is
+   * never take 2's numbers under take 4's name.
    */
   readonly take: number;
   /** At least one. Two chunks may not share an index — an index is a file name. */
   readonly chunks: readonly RenderChunk[];
+  /**
+   * Which ARM renders this batch (2026-09-19, PHASE18-UNCERTIFIED.md sections 4
+   * and 6). `true` is narrator's guarded driver — the PaceTracker, the re-roll
+   * on truncation/runaway/loop and the split ladder — measured against
+   * {@link RenderOptions.band}. Absent, or `false`, is the bare arm: every
+   * chunk rendered once as sent, nothing judged and nothing retaken, and
+   * `guard` on every chunk row is then `null` at its most exact — nobody judged
+   * it, because nobody was asked to.
+   *
+   * Bare is the default because it is the primitive. A guarded screen
+   * under-counts the failures it exists to measure: a re-roll that succeeds is
+   * indistinguishable from a good first draw.
+   *
+   * `retake: true` with no `band` is refused as `retake_without_band`.
+   */
+  readonly retake?: boolean;
+  /**
+   * The pace band the guarded arm measures against, in the voice manifest's own
+   * spelling. All three positive, with `min < pace < max`, or the whole request
+   * is refused as `band_malformed`.
+   *
+   * **The caller states it; the server never looks it up.** BookForge echoes
+   * back the row it read from {@link CrucibleClient.voices}; a screening client
+   * sends nothing and cannot be guarded. Looking it up is the shape that
+   * produced two measured defects: a base voice satisfying a mandatory triple
+   * with narrator's own frame-cap divisor (15.0, not a narration rate), and
+   * deathstalker inheriting pace 16.64 onto weights that measured 15.91.
+   *
+   * Sent with `retake` false or absent, it is accepted, checked and not acted
+   * on — the server was not asked to judge anything.
+   */
+  readonly band?: {
+    readonly pace_chars_per_sec: number;
+    readonly max_chars_per_sec: number;
+    readonly min_chars_per_sec: number;
+  };
+  /**
+   * How many of this job's chunks may be IN FLIGHT at once (2026-09-19).
+   *
+   * Absent is the resident voice's own `[voice.serving].max_num_seqs` — the
+   * width the engine was started at — which is a stated number with an owner
+   * rather than a default. A width ABOVE it is refused as `width_over_serving`
+   * and never clamped: a job that thought it was running 16 wide and was not
+   * would report a throughput nobody can reproduce.
+   *
+   * Narrowing restarts nothing. The server keeps the `--max-running-requests`
+   * and CUDA-graph budget it was loaded with; this only caps what narrator
+   * keeps in flight. Measured 2026-09-19: 0.60 mem fraction at 16 wide summed
+   * to 24.2 GB on a 24 GB card, and WDDM then pages to host RAM 4-10x slower
+   * with no error at all.
+   */
+  readonly width?: number;
   /**
    * Aborts the submit itself. A 1,400-chunk book is a large POST, and this is
    * the caller's handle on it. It does **not** cancel a job that was already
@@ -1434,6 +1531,42 @@ export interface RenderResult {
   readonly failed: readonly RenderFailure[];
   /** The rung this render actually ran at. */
   readonly take: number;
+  /**
+   * THE FULL SAMPLING TRIPLE the engine actually applied — the voice's take-0
+   * numbers with this take's rung laid over them, never the rung's override
+   * alone (2026-09-19).
+   *
+   * It is here because sampling lives on the MANIFEST and not on the request,
+   * which is the right shape and leaves exactly one hole: a manifest edited
+   * between two runs makes two incomparable records that both say "take 0".
+   * That is not hypothetical — every Higgs measurement before 2026-09-06 was
+   * rendered at temperature 1.0 and the whole prior ladder record had to be
+   * marked "at the wrong temperature" once already. Pinned here, a mismatch is
+   * visible instead of silent.
+   *
+   * Manifest spelling (`top_p`, `top_k`), because it is a fact about the voice.
+   */
+  readonly sampling: Readonly<Record<string, number>>;
+  /**
+   * WHICH WEIGHTS RAN, in the `/v1/voices` row's own three words, so a ladder's
+   * record is self-describing. `identity` is the pin's 40-character sha or a
+   * local block's asserted string; `identityBasis` is `verified` or `asserted`
+   * and says which, so a directory somebody pointed at cannot be mistaken for a
+   * commit somebody fetched.
+   */
+  readonly voice: {
+    readonly id: string;
+    readonly identity: string;
+    readonly identityBasis: string;
+  };
+  /**
+   * How many chunks were in flight at once — the request's
+   * {@link RenderOptions.width}, or the voice's own serving width when the
+   * request stated none. `null` only for a voice whose manifest declares no
+   * serving table at all. A throughput figure is comparable against this and
+   * nothing else.
+   */
+  readonly width: number | null;
   /** The rate the voice was loaded at, and the rate every FLAC was written at. */
   readonly sampleRate: number;
   /** The artifacts the job published — one `<index>.flac` per rendered chunk. */
