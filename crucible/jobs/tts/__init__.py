@@ -298,6 +298,11 @@ class LoadVoiceJobType:
             "fingerprint": resident.fingerprint,
             "reference": resident.reference,
         }
+        # STATED EVEN WHEN THERE IS NONE. `null` here is "this load was not
+        # asked to hold anything"; an ABSENT key would mean "this server does
+        # not speak leases on a load", and a client cannot tell those apart
+        # from a hole. The SDK's own rule, applied on the server side of it.
+        extra["lease_id"] = None
         if params.lease is not None:
             # AFTER the cancel check above, for `load-model`'s reason: a lease
             # opened before it would be held by a job about to raise

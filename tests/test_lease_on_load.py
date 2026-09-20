@@ -71,7 +71,10 @@ def test_a_load_without_a_lease_is_exactly_what_it_was(
     done = _done(_events(llm_client, auth, type="load-model", model=MODEL))
 
     assert done["resident"] == MODEL
-    assert "lease_id" not in done
+    # STATED, AND NULL. "this load held nothing" and "this server does not speak
+    # leases on a load" are different pieces of news, and an absent key would be
+    # the second one. A client cannot tell them apart from a hole.
+    assert done["lease_id"] is None
     activity = llm_client.get("/v1/activity", headers=auth).json()
     assert activity["lease"] is None
     # And this is the stranded card the 1.0.11 fields exist to say out loud.
@@ -133,15 +136,27 @@ def test_the_lease_id_is_readable_after_the_stream_is_gone(
         params={"lease": {"act": "clean", "ttl_seconds": 120}},
     )
     job_id = response.json()["job_id"]
+    frames: list[str] = []
     with llm_client.stream(
         "GET", f"/v1/jobs/{job_id}/events", headers=auth
     ) as stream:
-        for _ in stream.iter_lines():
-            pass
+        for line in stream.iter_lines():
+            frames.append(line)
+    import json as _json
+
+    payloads = [
+        _json.loads(line[len("data: ") :])
+        for line in frames
+        if line.startswith("data: ")
+    ]
+    done_frame_lease_id = next(
+        payload["lease_id"] for payload in payloads if "lease_id" in payload
+    )
 
     record = llm_client.get(f"/v1/jobs/{job_id}", headers=auth).json()
     assert record["status"] == "done"
     assert record["lease_id"]
+    assert record["lease_id"] == done_frame_lease_id
     assert record["resident"] == MODEL
     # And the job record's own keys are still its own.
     assert record["job_id"] == job_id

@@ -790,6 +790,11 @@ class LoadModelJobType:
         # cancelled load settles as it has since 2026-09-18.
         ctx.raise_if_cancelled()
         extra: dict[str, Any] = {"resident": resident.model_id}
+        # STATED EVEN WHEN THERE IS NONE. `null` here is "this load was not
+        # asked to hold anything"; an ABSENT key would mean "this server does
+        # not speak leases on a load", and a client cannot tell those apart
+        # from a hole. The SDK's own rule, applied on the server side of it.
+        extra["lease_id"] = None
         if params.lease is not None:
             extra["lease_id"] = _open_lease_for_load(
                 self._leases,

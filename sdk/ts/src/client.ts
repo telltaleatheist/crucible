@@ -864,6 +864,14 @@ export class CrucibleClient {
       created: str(body, 'created', 'job'),
       started: nullableStr(body, 'started', 'job'),
       finished: nullableStr(body, 'finished', 'job'),
+      // ABSENT IS A FACT HERE, unlike everywhere else in this file. A loader
+      // always states `lease_id` — null when it was asked to hold nothing — so
+      // for those two job types the strict reading applies and "no lease" is
+      // distinguishable from "old server". Every OTHER job type cannot hold a
+      // lease at all and carries no such key: a `tts` render takes the lane
+      // instead. Demanding the key from them would be demanding a field about
+      // a question they are not asked.
+      leaseId: 'lease_id' in body ? nullableStr(body, 'lease_id', 'job') : null,
     };
   }
 

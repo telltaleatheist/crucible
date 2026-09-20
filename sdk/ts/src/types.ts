@@ -673,6 +673,19 @@ export interface JobStatus {
   readonly created: string;
   readonly started: string | null;
   readonly finished: string | null;
+  /**
+   * The lease this job opened, `null` if it opened none.
+   *
+   * **Readable after the stream is gone**, which is the whole reason it is on
+   * the record and not only in the `done` frame: a lease id you cannot recover
+   * is a hold nobody can release, and that is the stranding lease-on-load
+   * exists to end. A client that lost its events stream reads it here.
+   *
+   * `null` on a loader means the load was not asked to hold anything. `null` on
+   * every other job type means that type cannot hold a lease — a `tts` render
+   * takes the lane instead, and the record simply does not carry the key.
+   */
+  readonly leaseId: string | null;
 }
 
 /** `DELETE /v1/jobs/{id}`. A running job ends `cancelled` at its next checkpoint. */
