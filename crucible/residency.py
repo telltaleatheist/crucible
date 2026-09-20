@@ -1394,10 +1394,39 @@ class Residency:
             engine.ready(timeout, on_progress=say)
             if confirm is not None:
                 confirm()
-        except EngineError as start_failure:
+        except BaseException as start_failure:
             # Tidy up the half-started engine, but report the *start* failure —
             # that is the one that explains the load. A stop failure on top of it
             # is appended, never substituted.
+            #
+            # EVERY exception, not just `EngineError` (2026-09-20). This read
+            # `except EngineError` and was right about the failure it was
+            # written for — a `ready()` timeout is one, and so are narrator's
+            # twenty-six refusals and `EngineWouldNotStop`, which subclasses it
+            # on purpose. It was wrong about every other way this block can
+            # end: `NarratorEngine.load` can raise `JobCancelled`, and a
+            # transport that answers nonsense raises whatever `json` or a dict
+            # lookup raises. Any of those skipped the teardown.
+            #
+            # What that costs is not a leaked object, it is A LIVE GPU PROCESS
+            # NOTHING CAN SEE. `self._engine` and `self._resident` are both
+            # assigned AFTER this returns, so an engine orphaned here is in no
+            # slot: `/v1/activity` reports `resident: null`, the settlement has
+            # nothing to unload, and `owned_pids()` — which reads exactly those
+            # three slots — does not report its pid, so the accelerator guard
+            # calls Crucible's own child a foreign process holding the card.
+            # Only a person with `nvidia-smi` would ever find it.
+            #
+            # This is deliberately NOT the case `settle.py` routes elsewhere. A
+            # CANCELLED load does hand its card to the settlement — but from the
+            # job's own `ctx.cancelled` check AFTER this has returned and the
+            # residency is published. Nothing can clean up after a failure
+            # INSIDE this block except this block, whatever the exception was,
+            # which is why the net is now total.
+            #
+            # `BaseException` rather than `Exception`: a KeyboardInterrupt or a
+            # cancelled task during a load must still take the engine down. The
+            # original is re-raised unchanged on every path.
             try:
                 engine.stop()
             except EngineError as stop_failure:
