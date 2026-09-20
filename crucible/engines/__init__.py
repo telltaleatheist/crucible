@@ -74,6 +74,60 @@ def engine_log_path(home: Path, model_id: str) -> Path:
     return logs_dir(home) / f"engine-{model_id}.log"
 
 
+#: What a chat door may admit at once, and why, for one engine name.
+#:
+#: `(limit, basis)` where `limit` is None when this engine states no
+#: concurrency — in which case the door bounds nothing and says so, exactly as
+#: it behaved before 2026-09-20.
+ChatAdmission = tuple[int | None, str | None]
+
+
+def chat_admission(engine_name: str) -> ChatAdmission:
+    """How many chat completions this engine's door admits at once, and why.
+
+    **The engine's own concurrency, PLUS ONE.** The plus one is not a margin and
+    not a guess: it is the request that is ready to begin the moment the running
+    one finishes, so a serial engine's single generation thread never sits idle
+    between two completions. Bounding at the concurrency itself would trade one
+    defect for a slower version of the same door; bounding at concurrency + 1
+    keeps the engine fed while capping the wait an ADMITTED request can inherit
+    at a single completion ahead of it. For a batching engine the number is its
+    batch width and the plus one changes nothing that matters.
+
+    An engine that states no concurrency is not bounded. That is deliberate:
+    vLLM batches, no starvation has ever been measured against it, and a limit
+    invented here would cap work nobody showed needed capping. See
+    `SubprocessEngine.chat_concurrency`.
+    """
+    cls = ENGINES.get(engine_name)
+    if cls is None:
+        raise EngineError(
+            f"unknown engine {engine_name!r}; this build has {sorted(ENGINES)}"
+        )
+    concurrency = cls.chat_concurrency
+    basis = cls.chat_concurrency_basis
+    if concurrency is None:
+        if basis is not None:
+            raise EngineError(
+                f"{engine_name} states a chat_concurrency_basis and no "
+                "chat_concurrency. The basis says where a number came from and "
+                "there is no number; drop it, or state the number it describes"
+            )
+        return (None, None)
+    if basis is None:
+        raise EngineError(
+            f"{engine_name} states chat_concurrency {concurrency} and no "
+            "chat_concurrency_basis. A concurrency with no provenance is a "
+            "number somebody typed; say where it was measured"
+        )
+    if concurrency < 1:
+        raise EngineError(
+            f"{engine_name} states chat_concurrency {concurrency}, which would "
+            "admit nothing"
+        )
+    return (concurrency + 1, basis)
+
+
 def build_engine(engine_name: str, python: Path, log_path: Path) -> SubprocessEngine:
     """The engine class for this name, instantiated. Refuses unknown names."""
     cls = ENGINES.get(engine_name)
@@ -187,6 +241,8 @@ def engine_model_name(engine_name: str, model_dir: Path, model_id: str) -> str:
 
 
 __all__ = [
+    "ChatAdmission",
+    "chat_admission",
     "ENGINES",
     "NARRATOR_ENGINES",
     "STOP_TIMEOUT_SECONDS",

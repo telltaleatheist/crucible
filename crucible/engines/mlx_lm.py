@@ -61,6 +61,27 @@ CONFIRM_POLL_SECONDS = 5.0
 class MlxLmEngine(SubprocessEngine):
     name = "mlx-lm"
 
+    #: ONE. mlx-lm serves HTTP on a `ThreadingHTTPServer`, so it ACCEPTS any
+    #: number of chat requests at once and looks concurrent from outside — but
+    #: `ResponseGenerator` has a single `self.requests = Queue()` drained by a
+    #: single `self._generation_thread = Thread(target=self._generate)`
+    #: (`mlx_lm/server.py:444,451`, mlx-lm 0.31.3, read in
+    #: `~/.crucible/envs/llm` on the Mac Studio on 2026-09-20). Generation is
+    #: strictly FIFO through that one thread, so the Nth request waits for all
+    #: N-1 before it and nothing about the socket says so.
+    #:
+    #: That is what starved Foundry's clean pass: 12 in flight, a 300 s client
+    #: deadline, and a request that had not started when the deadline passed.
+    #: The accepting is what makes it dangerous — a serial engine that refused
+    #: the connection would have told the client the truth immediately.
+    chat_concurrency = 1
+    chat_concurrency_basis = (
+        "mlx-lm 0.31.3 generates on one thread draining one queue "
+        "(mlx_lm/server.py ResponseGenerator, read on the Mac Studio "
+        "2026-09-20); its ThreadingHTTPServer accepts concurrently but "
+        "generation is strictly serial"
+    )
+
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> list[str]:

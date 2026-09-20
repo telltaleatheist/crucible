@@ -90,7 +90,16 @@ def test_an_idle_server_reports_itself_and_nothing_else(
     # field", which is a different piece of news from "nothing is happening".
     assert body["claim"] is None
     assert body["streaming"] is None
-    assert body["chat"] == {"in_flight": 0, "rows": []}
+    # `max_in_flight` is what THIS engine's chat door admits at once, and it is
+    # null on an idle server for the same reason `claim` is: the limit belongs
+    # to the resident ENGINE and there is no engine to ask. Null here is not
+    # "unlimited" (crucible/engines/__init__.py, `chat_admission`).
+    assert body["chat"] == {
+        "in_flight": 0,
+        "max_in_flight": None,
+        "max_in_flight_basis": None,
+        "rows": [],
+    }
     assert body["slots"]["accelerated"] == {
         "busy": 0,
         "of": 1,

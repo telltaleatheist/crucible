@@ -19,12 +19,34 @@ once and finish sooner than they would in sequence, and that is not an accident
 of the current deployment, it is what the engine is for. Taking the lane would
 serialise them to fix a reporting bug.
 
-So this is a RECORD, not a claim. It gates nothing, refuses nothing and reserves
-nothing. `slots.accelerated.accepts_work` stays true while chats are in flight,
-because the server really will accept more. `/v1/activity`'s own contract — *"it
-reports and nothing else... display and admission are different questions and
-only one may be answered from a poll"* — is what makes that the right shape
-rather than a compromise.
+So this is a RECORD, not a claim. It takes no lane and reserves nothing.
+`slots.accelerated.accepts_work` stays true while chats are in flight, because
+the server really will accept more work of every other kind.
+`/v1/activity`'s own contract — *"it reports and nothing else... display and
+admission are different questions and only one may be answered from a poll"* —
+is what makes that the right shape rather than a compromise.
+
+AMENDED 2026-09-20: IT DOES NOW BOUND ONE THING, AND ONLY FOR A SERIAL ENGINE
+-----------------------------------------------------------------------------
+This paragraph used to end "it gates nothing, refuses nothing", and for a
+batching engine it still behaves exactly that way — vLLM states no
+`chat_concurrency`, so `engines.chat_admission()` returns None and the door
+refuses nobody. Nothing above is reversed: taking the LANE would still serialise
+work the engine exists to overlap.
+
+What the paragraph missed is that not every engine overlaps. mlx-lm serves on a
+`ThreadingHTTPServer`, so it ACCEPTS every connection and looks concurrent, and
+then generates on one thread draining one queue. Twelve accepted requests are
+one running and eleven waiting, with nothing on the wire saying so. Foundry's
+clean pass died in that gap: 12 in flight, a 300 s client deadline, a request
+that had not started when it passed.
+
+So `crucible/api.py`'s chat door refuses `chat_queue_full` (503) past the
+engine's OWN measured concurrency plus one, and `/v1/activity` publishes that
+number as `chat.max_in_flight` with the basis beside it, so a client sizes its
+pool from the server rather than discovering the limit as a starved socket. The
+count is still a record; the ENGINE is what sets the bound, and an engine that
+has not been measured sets none.
 
 THE ACT IS THE CLIENT'S TO STATE
 --------------------------------
@@ -47,7 +69,9 @@ Crucible's vocabulary; BookForge and Foundry are expected to send it.
 from __future__ import annotations
 
 import itertools
+import math
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Iterator
@@ -59,6 +83,12 @@ from .jobs.base import utcnow
 #: The header a client names its act in. One spelling, exported, because the
 #: refusal message and the reader must not disagree about it.
 ACT_HEADER = "X-Crucible-Act"
+
+#: How many recent completion durations are kept for `retry_after()`. Small on
+#: purpose: what a refused caller wants to know is how long the work in front of
+#: it takes NOW, and a long window would answer with a model that was unloaded
+#: an hour ago.
+RECENT_DURATIONS = 20
 
 #: The acts a client may name: exactly the capability classes, because those are
 #: the names `GET /v1/capability` already answers with and a second vocabulary
@@ -112,6 +142,12 @@ class Entry:
     model: str
     client: str | None
     since: str
+    #: `time.monotonic()` when this completion opened. `since` is the wall clock
+    #: a reader sees; this is what a DURATION is measured from, because the wall
+    #: clock can step and a negative completion time would be reported as fact.
+    #: Not in `to_dict()`: it is an implementation detail of the recent-duration
+    #: record below, not part of the activity contract.
+    started: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -139,6 +175,10 @@ class InFlight:
         self._lock = threading.Lock()
         self._entries: dict[int, Entry] = {}
         self._ids = itertools.count(1)
+        #: Seconds each of the last `RECENT_DURATIONS` completions took. Empty
+        #: until this server has finished one, which is why `retry_after()`
+        #: answers None rather than a number on a cold server.
+        self._recent: list[float] = []
 
     def open(self, *, act: str | None, model: str, client: str | None) -> Entry:
         """Record a completion that has started. Pair it with `close`.
@@ -158,7 +198,12 @@ class InFlight:
         context manager below, which is these two with a `try`.
         """
         entry = Entry(
-            id=next(self._ids), act=act, model=model, client=client, since=utcnow()
+            id=next(self._ids),
+            act=act,
+            model=model,
+            client=client,
+            since=utcnow(),
+            started=time.monotonic(),
         )
         with self._lock:
             self._entries[entry.id] = entry
@@ -167,7 +212,17 @@ class InFlight:
     def close(self, entry: Entry) -> None:
         """This completion is over. Idempotent: closing twice is not an error."""
         with self._lock:
-            self._entries.pop(entry.id, None)
+            removed = self._entries.pop(entry.id, None)
+            if removed is not None and removed.started > 0.0:
+                # HOW LONG COMPLETIONS ACTUALLY TAKE ON THIS ENGINE, kept only so
+                # that a `Retry-After` can be a measurement instead of a guess.
+                # `_rate_limited` states the rule this follows: a Retry-After is
+                # copied when there is one and absent when there is not, NEVER
+                # invented. An upstream's number belongs to the upstream; this
+                # door's number has to come from somewhere, and the only honest
+                # source is what this engine has been doing.
+                self._recent.append(time.monotonic() - removed.started)
+                del self._recent[:-RECENT_DURATIONS]
 
     @contextmanager
     def tracked(
@@ -187,6 +242,26 @@ class InFlight:
         with self._lock:
             entries = sorted(self._entries.values(), key=lambda e: e.id)
         return [entry.to_dict() for entry in entries]
+
+    def retry_after(self) -> int | None:
+        """Seconds a refused caller should wait, or None when nothing is known.
+
+        The MEDIAN of the recent completions on this engine, rounded up, floored
+        at one second because `Retry-After: 0` reads as "immediately" and would
+        turn a refusal into a spin. The median rather than the mean: one 27B
+        translation among a run of short cleanups should not tell every refused
+        caller to wait a minute.
+
+        None on a server that has not finished a completion yet. The header is
+        then absent, and absent is the honest answer — `_rate_limited` in
+        `crucible/api.py` states the rule this follows.
+        """
+        with self._lock:
+            recent = sorted(self._recent)
+        if not recent:
+            return None
+        middle = recent[len(recent) // 2]
+        return max(1, math.ceil(middle))
 
     def __len__(self) -> int:
         with self._lock:

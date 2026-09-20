@@ -26,6 +26,7 @@ from crucible import accelerator, jobenv
 from crucible.accelerator import GIB, ComputeApp
 from crucible.config import DEFAULT_DESKTOP_ALLOWANCE_BYTES
 from crucible import residency as residency_module
+from crucible.engines import ENGINES
 from crucible.manifests import load_manifest
 from crucible.settle import SETTLEMENT_HOLDER
 
@@ -1247,6 +1248,97 @@ def test_the_proxy_names_the_resident_model_in_the_409(
     assert len(engines) == 1
 
 
+def test_a_serial_engine_refuses_past_its_width_instead_of_queueing(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engine_factory: Callable[..., list[FakeEngine]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE DOOR, wired. `tests/test_chat_admission.py` covers the pieces.
+
+    Foundry's clean pass died at block 352 of 940 on 2026-09-20 with 12 chats in
+    flight against mlx-lm, which accepts every connection and generates on one
+    thread. The twelfth was accepted, never started, and found out at its own
+    300 s deadline. A refusal it can act on is the fix.
+
+    Every engine class is given a concurrency here rather than only the resident
+    one, because which engine the fake manifest names is not what this test is
+    about.
+    """
+    for cls in ENGINES.values():
+        monkeypatch.setattr(cls, "chat_concurrency", 1, raising=False)
+        monkeypatch.setattr(
+            cls, "chat_concurrency_basis", "one generation thread", raising=False
+        )
+    posts: list[int] = []
+    engine_factory(on_post=lambda: posts.append(1))
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+
+    # The limit is concurrency + 1 = 2: one generating, one ready to start.
+    activity = llm_client.get("/v1/activity", headers=auth).json()
+    assert activity["chat"]["max_in_flight"] == 2
+    assert activity["chat"]["max_in_flight_basis"] == "one generation thread"
+
+    # Two already open, so the third is the one the engine could not have run.
+    inflight = llm_client.app.state.inflight
+    held = [
+        inflight.open(act=None, model=MODEL, client="a-test") for _ in range(2)
+    ]
+    try:
+        response = llm_client.post(
+            "/v1/openai/chat/completions",
+            headers=auth,
+            json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+        )
+    finally:
+        for entry in held:
+            inflight.close(entry)
+
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == "chat_queue_full"
+    assert error["details"]["max_in_flight"] == 2
+    # NOTHING REACHED THE ENGINE. The refusal has to be safe to repeat, and a
+    # request that half-ran would not be. `posts` counts completions the fake
+    # engine actually served, incremented on its own serving thread.
+    assert posts == []
+
+
+def test_an_engine_that_states_no_concurrency_still_admits_everything(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """The batching half, unchanged. vLLM overlaps completions on purpose, and
+    `crucible/inflight.py` still gates nothing for an engine like it."""
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+
+    activity = llm_client.get("/v1/activity", headers=auth).json()
+    assert activity["chat"]["max_in_flight"] is None
+    assert activity["chat"]["max_in_flight_basis"] is None
+
+    inflight = llm_client.app.state.inflight
+    held = [
+        inflight.open(act=None, model=MODEL, client="a-test") for _ in range(12)
+    ]
+    try:
+        response = llm_client.post(
+            "/v1/openai/chat/completions",
+            headers=auth,
+            json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+        )
+    finally:
+        for entry in held:
+            inflight.close(entry)
+    assert response.status_code == 200, response.text
+
+
 def test_a_non_streamed_completion_is_passed_through(
     llm_client: TestClient,
     auth: dict[str, str],
@@ -1699,7 +1791,16 @@ def test_a_chat_with_no_act_header_records_null_rather_than_a_guess(
     # its request would make this server look permanently busy with work that
     # stopped.
     body = llm_client.get("/v1/activity", headers=auth).json()
-    assert body["chat"] == {"in_flight": 0, "rows": []}
+    # The door's own limit rides alongside the count since 2026-09-20: a client
+    # sizes its pool from this rather than discovering the ceiling as a starved
+    # socket. Null for an engine that states no concurrency, which the fake's
+    # engine does.
+    assert body["chat"] == {
+        "in_flight": 0,
+        "max_in_flight": None,
+        "max_in_flight_basis": None,
+        "rows": [],
+    }
 
 
 def test_a_chat_in_flight_is_visible_and_still_does_not_take_the_lane(

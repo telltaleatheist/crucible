@@ -70,6 +70,7 @@ from .jobs.base import Job, validate_member_name
 from .manifests import ManifestError, load_manifest
 from .jobs.queue import JobStore
 from .jobs.tts.common import known_voice
+from .engines import chat_admission
 from .inflight import Entry, InFlight, read_act, require_act_name
 from .leases import Leases, require_ttl
 from .residency import KIND_NOUNS, Residency
@@ -1649,6 +1650,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         resident = residency.resident
         session = streams.session
         lease = leases.current()
+        chat_limit, chat_limit_basis = _chat_limit_of(residency)
 
         body: dict[str, Any] = {
             "server": {
@@ -1754,7 +1756,20 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # this server never guesses one: it cannot tell a simplify from a
             # translate, since both are a chat against the same 27B and the only
             # difference is a prompt it does not own.
-            "chat": {"in_flight": len(inflight), "rows": inflight.rows()},
+            # `max_in_flight` is what THIS engine's door will admit at once,
+            # and `max_in_flight_basis` is where that number came from, so a
+            # client can size its own pool from the server instead of guessing
+            # and discovering the answer as a starved socket. Null for an engine
+            # that states no concurrency — the door then bounds nothing, which
+            # is every engine but mlx-lm today — and null when no model is
+            # resident, because the limit belongs to the engine and there is no
+            # engine to ask.
+            "chat": {
+                "in_flight": len(inflight),
+                "max_in_flight": chat_limit,
+                "max_in_flight_basis": chat_limit_basis,
+                "rows": inflight.rows(),
+            },
             # WHO CHANGED THIS SERVER'S SETTINGS, AND WHEN (PHASE15-HOST.md
             # section 3.2). Two apps and the operator page can all write the
             # same engine, so "why is translate suddenly on Anthropic" needs an
@@ -2743,6 +2758,32 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         # what this machine is doing; it still gates nothing — see
         # crucible/inflight.py for why taking the lane would have been the wrong
         # fix for the right bug.
+        # WHAT THIS ENGINE CAN ACTUALLY HAVE OPEN AT ONCE (2026-09-20). Until
+        # today this door admitted everything and `crucible/inflight.py` said, in
+        # so many words, that the record gates nothing. For a BATCHING engine
+        # that is still exactly right and still what happens: vLLM states no
+        # concurrency, `chat_admission` returns None, and nothing below refuses.
+        #
+        # It was wrong for a SERIAL one. mlx-lm accepts every connection on a
+        # ThreadingHTTPServer and then generates on ONE thread draining ONE
+        # queue, so twelve accepted requests are one running and eleven waiting
+        # with nothing on the wire saying so. Foundry's clean pass died there on
+        # 2026-09-20: 12 in flight, a 300 s client deadline, a request that had
+        # not started when it passed, the pass dead at block 352 of 940.
+        #
+        # A refusal a client can act on beats a socket that goes quiet. The
+        # limit is the engine's own measured concurrency plus one (see
+        # `engines.chat_admission`), the wait is the median of what completions
+        # on this engine have actually been taking, and a server that has
+        # finished none states no `Retry-After` rather than inventing one —
+        # `_rate_limited`'s rule, applied to a number of our own.
+        limit, limit_basis = chat_admission(resident.engine)
+        if limit is not None and len(inflight) >= limit:
+            wait = inflight.retry_after()
+            return _chat_queue_full(
+                resident=resident, limit=limit, basis=limit_basis, wait=wait
+            )
+
         entry = inflight.open(
             act=act, model=resident.model_id, client=_client_agent(request)
         )
@@ -3325,6 +3366,70 @@ def _routed_upstream_rows(config: Config) -> list[dict[str, Any]]:
                 }
             )
     return rows
+
+
+def _chat_limit_of(residency: Residency) -> tuple[int | None, str | None]:
+    """The chat door's admission limit for whatever model is resident, and why.
+
+    `(None, None)` when no model is resident: the limit is a property of the
+    ENGINE, and with nothing loaded there is no engine to ask. That is not the
+    same as "unlimited", and `/v1/activity` reports it as null rather than as a
+    number, so a client reading the field cannot mistake an empty card for a
+    door that will take anything.
+    """
+    resident = residency.resident_model
+    if resident is None:
+        return (None, None)
+    return chat_admission(resident.engine)
+
+
+def _chat_queue_full(
+    *,
+    resident: Any,
+    limit: int,
+    basis: str | None,
+    wait: int | None,
+) -> Response:
+    """503: this engine already has everything it can run, and it will not queue.
+
+    A REFUSAL RATHER THAN A HELD SOCKET, which is the whole point. The failure
+    this replaces looked like a healthy server: the request was accepted, the
+    connection stayed open, nothing was generated, and the client found out at
+    its own deadline. A caller that is told "full, try in 12 seconds" can pace
+    itself; a caller holding an accepted socket cannot.
+
+    503 and not 429: nothing here is a rate limit or a quota. The engine is
+    genuinely at capacity for a moment, which is what 503 means, and it is the
+    status a client is most likely to already treat as "wait and retry".
+
+    A `JSONResponse` rather than a raised `ApiError` for one reason: `Retry-After`
+    is a HEADER, and `ApiError` carries a body. `_rate_limited` below does the
+    same for the same reason, and states the rule both follow — a `Retry-After`
+    is real or it is absent, never invented. Here it is the median of what
+    completions on this engine have recently taken, and a server that has
+    finished none omits the header.
+    """
+    error = ApiError(
+        503,
+        "chat_queue_full",
+        f"this server already has {limit} chat completion(s) open on "
+        f"{resident.model_id!r} and its {resident.engine} engine will not queue "
+        "another: "
+        + (basis or "no basis stated")
+        + ". Nothing was sent to the engine, so this request cost nothing and "
+        "can be made again"
+        + ("" if wait is None else f"; about {wait}s is what completions on this "
+           "engine have recently been taking"),
+        {
+            "model": resident.model_id,
+            "engine": resident.engine,
+            "max_in_flight": limit,
+            "max_in_flight_basis": basis,
+            "retry_after": wait,
+        },
+    )
+    headers = {} if wait is None else {"Retry-After": str(wait)}
+    return JSONResponse(status_code=503, headers=headers, content=error.body())
 
 
 def _upstream_unreachable(name: str, url: str, exc: Exception) -> ApiError:

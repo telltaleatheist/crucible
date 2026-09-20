@@ -104,6 +104,33 @@ class SubprocessEngine:
 
     name = "subprocess"
 
+    #: HOW MANY CHAT COMPLETIONS THIS ENGINE REALLY RUNS AT ONCE, or None when
+    #: nobody has measured it on this engine.
+    #:
+    #: `crucible/inflight.py` says a chat record gates nothing, and for a
+    #: BATCHING engine that is still exactly right: two cleanup passes on one
+    #: resident vLLM genuinely overlap and finish sooner than they would in
+    #: sequence. But a SERIAL engine does not overlap them, it queues them — and
+    #: an unbounded queue behind a socket the client is holding open is how one
+    #: request starves past a deadline while the server reports itself healthy.
+    #: Foundry's clean pass hit that on 2026-09-20 against mlx-lm on the Mac: 12
+    #: in flight, one starved past the client's 300 s deadline, the pass dead at
+    #: block 352 of 940.
+    #:
+    #: So this is the engine's own truth and nothing more. It is NOT a policy
+    #: number and NOT a tuning knob: an engine that has not been read or measured
+    #: states None and is not bounded at all, which is what every engine but
+    #: mlx-lm does today. A guessed number here would cap work that was never
+    #: shown to need capping — the same defect as a `[voice.serving]` field with
+    #: no `_note`, which `crucible/voices.py` refuses outright.
+    chat_concurrency: int | None = None
+
+    #: Where `chat_concurrency` came from, in a sentence a reader of
+    #: `/v1/activity` can check. Required with a number and refused without one
+    #: by `engines.chat_admission()`, for `_check_serving_extra`'s reason: a
+    #: concurrency with no provenance is a number somebody typed.
+    chat_concurrency_basis: str | None = None
+
     def __init__(self, python: Path, log_path: Path) -> None:
         self._python = Path(python)
         self._log_path = Path(log_path)
