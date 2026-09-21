@@ -714,6 +714,7 @@ class Decision:
             enabled=self.enabled,
             selected=self.selected,
             reason=self.reason,
+            summary=self.summary,
             shortfall_bytes=self.shortfall_bytes,
         )
 
@@ -1040,6 +1041,10 @@ def routed_row(row: CapabilityRow, model: str) -> CapabilityRow:
             f"routed to {model.partition('/')[0]}; "
             f"{LOCAL_ANSWER_PREFIX}{row.reason}"
         ),
+        # The person-facing half says WHERE the work goes, not what this card
+        # could not do — a routed class is not a refusal and must not read like
+        # one.
+        summary=f"sends this work to {model.partition('/')[0]}",
         shortfall_bytes=0,
     )
 

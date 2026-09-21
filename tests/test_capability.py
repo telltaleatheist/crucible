@@ -854,3 +854,41 @@ def test_the_reported_pages_case_reads_both_ways() -> None:
     # The operator's half, unchanged — this is what `crucible doctor` prints.
     assert "ships none with a mlx-darwin block" in verdict.reason
     assert "(the VLM door)" in verdict.reason
+
+
+def test_the_summary_reaches_the_wire_and_not_only_the_decision() -> None:
+    """THE GAP THAT SHIPPED ONCE. `summary` was added to `Decision.to_dict()`
+    and announced as live — and `GET /v1/capability` serves `CapabilityRow`,
+    a different projection, which dropped it. The live Mac answered
+    `summary: None` on the very class the field was built for.
+
+    So this asserts the whole path, not the object nearest the code that
+    produces it: decision -> row -> the dict a client parses.
+    """
+    from crucible.capability import CLASSES, decide
+
+    pages = next(entry for entry in CLASSES if entry.name == "pages")
+    verdict = decide(
+        pages, "mlx-darwin", total_bytes=64 * 1024**3,
+        desktop_allowance_bytes=3 * 1024**3, gpu_vendor="apple", chosen=None,
+    )
+    served = verdict.row().to_dict()
+    assert served["summary"] == verdict.summary
+    assert served["summary"].startswith("cannot read pages")
+    # And the operator's half is still beside it, unchanged.
+    assert "ships none with a mlx-darwin block" in served["reason"]
+
+
+def test_a_routed_class_summarises_where_the_work_goes() -> None:
+    """A routed class is not a refusal and must not read like one."""
+    from crucible.capability import CLASSES, decide, routed_row
+
+    entry = next(c for c in CLASSES if c.name == "translate")
+    verdict = decide(
+        entry, "cuda-linux", total_bytes=6 * 1024**3,
+        desktop_allowance_bytes=3 * 1024**3, gpu_vendor="nvidia", chosen=None,
+    )
+    row = routed_row(verdict.row(), "anthropic/claude-sonnet-4")
+    assert row.enabled is True
+    assert row.summary == "sends this work to anthropic"
+    assert "cannot" not in row.summary

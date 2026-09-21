@@ -212,6 +212,15 @@ class CapabilityRow:
     selected: str
     reason: str
     shortfall_bytes: int
+    #: The same verdict for somebody who is not an operator — see
+    #: `capability.Decision.summary`. A bare phrase starting with the verb, so
+    #: the CALLER supplies the subject it is the only one that knows.
+    #:
+    #: DEFAULTED, unlike its neighbours, because this is a RECORD written into
+    #: config.toml and an older config has no such key. Empty means "this row
+    #: was decided before the field existed", which a reader can tell from a
+    #: real answer; `decide()` never produces an empty one.
+    summary: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -219,6 +228,7 @@ class CapabilityRow:
             "enabled": self.enabled,
             "selected": self.selected,
             "reason": self.reason,
+            "summary": self.summary,
             "shortfall_bytes": self.shortfall_bytes,
         }
 
@@ -721,6 +731,23 @@ _CAPABILITY_ROW_REQUIRED: dict[str, type] = {
     "shortfall_bytes": int,
 }
 
+#: Keys a row MAY carry, defaulted when absent.
+#:
+#: SEPARATE FROM `_REQUIRED` BECAUSE A CONFIG OUTLIVES THE BUILD THAT WROTE IT.
+#: This table is read from `config.toml` on a machine that may have been written
+#: to by an older Crucible, and the parser refuses unknown keys — so a field
+#: added to the record makes every pre-existing config unreadable, the record
+#: loads as None, and `crucible doctor` silently stops checking whether the
+#: capability record is stale. That happened on 2026-09-20 with `summary` and is
+#: what this table exists to prevent.
+#:
+#: NOT the lockstep rule (`docs/`, Owen 2026-09-20): that is about a CLIENT and a
+#: SERVER, which this repo upgrades together. A config file on disk has no
+#: version to move in step with.
+_CAPABILITY_ROW_OPTIONAL: dict[str, type] = {
+    "summary": str,
+}
+
 
 def _capability_record(table: dict[str, Any]) -> CapabilityRecord | None:
     """`[capability]`, or None when this config has never had one written.
@@ -773,12 +800,20 @@ def _capability_record(table: dict[str, Any]) -> CapabilityRecord | None:
         where = f"config [[capability.classes]][{index}]"
         if not isinstance(raw, dict):
             raise ConfigError(f"{where} must be a table")
-        unknown = sorted(set(raw) - set(_CAPABILITY_ROW_REQUIRED))
+        allowed = {**_CAPABILITY_ROW_REQUIRED, **_CAPABILITY_ROW_OPTIONAL}
+        unknown = sorted(set(raw) - set(allowed))
         if unknown:
             raise ConfigError(
-                f"{where}: unknown key(s) {unknown}; a row takes exactly "
-                f"{sorted(_CAPABILITY_ROW_REQUIRED)}"
+                f"{where}: unknown key(s) {unknown}; a row takes "
+                f"{sorted(_CAPABILITY_ROW_REQUIRED)} and may carry "
+                f"{sorted(_CAPABILITY_ROW_OPTIONAL)}"
             )
+        for key, kind in _CAPABILITY_ROW_OPTIONAL.items():
+            if key in raw and not isinstance(raw[key], kind):
+                raise ConfigError(
+                    f"{where}: {key} must be {kind.__name__}, got "
+                    f"{type(raw[key]).__name__}"
+                )
         for key, kind in _CAPABILITY_ROW_REQUIRED.items():
             if key not in raw:
                 raise ConfigError(f"{where}: missing required key {key!r}")
@@ -804,6 +839,10 @@ def _capability_record(table: dict[str, Any]) -> CapabilityRecord | None:
                 selected=raw["selected"],
                 reason=raw["reason"],
                 shortfall_bytes=raw["shortfall_bytes"],
+                # Absent on a row written before the field existed, which reads
+                # as "this row has no plain-language half" rather than as a
+                # parse failure that would cost the whole record.
+                summary=raw.get("summary", ""),
             )
         )
     return CapabilityRecord(
