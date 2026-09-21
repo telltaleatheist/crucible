@@ -64,7 +64,7 @@ from .connect import PairingRequests, StartPairing, PollPairing, DecidePairing
 #: the pairing door and another on a job row.
 _CLIENT_NAME = re.compile(r"^[^\x00-\x1f\x7f]{1,80}$")
 
-from .errors import ApiError, CrucibleError
+from .errors import ApiError, ConfigError, CrucibleError
 from .interfaces import InterfaceError
 from .jobs import (
     ALL_JOB_TYPES,
@@ -590,6 +590,44 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.state.config = config
     app.state.backend = backend
     app.state.residency = residency
+
+    @app.middleware("http")
+    async def follow_the_config_file(request: Request, call_next: Any) -> Response:
+        """Every request sees the config.toml that is on disk NOW.
+
+        `Config.follow_file()` — one stat per request, a re-read only when
+        the file moved. The record `GET /v1/capability` serves, the `[jobs]`
+        flags the doors refuse on, the routes and the upstreams all follow,
+        because `adopt()` replaces the one Config object's fields in place
+        and every route, the residency and the store close over that object.
+
+        THE ONE THING THAT DOES NOT FOLLOW is a job type turned ON: the
+        registry is built from the flags at start (`crucible/jobs/__init__.py`
+        `build_registry`), so a flag that goes from off to on needs a start —
+        which `crucible install` performs anyway, since a new job type is a new
+        env. A flag turned OFF is honoured at once, by the doors.
+
+        A file that will not read is REPORTED AND NOT SERVED: the last good
+        document stays, the failure is logged once per stamp rather than per
+        request, and the request proceeds. A half-written config.toml is
+        weather (the writer stages and `os.replace`s, so it should not happen);
+        a broken one is misconfiguration the operator can repair, and refusing
+        every request over it would take `/v1/ping` down with the record.
+        """
+        live: Config = request.app.state.config
+        try:
+            if live.follow_file():
+                print("crucible: config.toml moved on disk; the server adopted it", file=sys.stderr)
+        except ConfigError as exc:
+            failed = getattr(request.app.state, "config_follow_failed", None)
+            if failed != str(exc):
+                request.app.state.config_follow_failed = str(exc)
+                print(
+                    f"crucible: config.toml could not be re-read; serving the last "
+                    f"good document: {exc}",
+                    file=sys.stderr,
+                )
+        return await call_next(request)
     # WHERE THIS SERVER IS REALLY LISTENING, which the config alone cannot say:
     # `crucible serve --host 0.0.0.0` overrides `[server] host` for that run, and
     # `GET /v1/setup` would otherwise hand out pairing lines for the address the

@@ -430,6 +430,47 @@ class Config:
     #: what every config written before this phase says; a voice that needs one
     #: is refused by name rather than defaulted.
     tts_engines: tuple[EngineFootprint, ...] = ()
+    #: `(st_mtime_ns, st_size)` of config.toml as it was when THIS document was
+    #: read — taken BEFORE the read, so a write that lands between the stat and
+    #: the parse leaves the stamp older than the content and the next
+    #: `follow_file()` re-reads once more rather than missing it. None only for
+    #: a Config built by hand (tests); `load_config` always sets it.
+    stamp: tuple[int, int] | None = None
+
+    def follow_file(self) -> bool:
+        """Re-read config.toml if it moved since this document was read.
+
+        THE FILE IS THE AUTHORITY AND THE PROCESS FOLLOWS IT. `adopt()` below
+        exists because a `PUT /v1/settings` or an install *through the server*
+        rewrites the file and then adopts it — but `crucible install` and
+        `crucible capability --write` run in their OWN process, write the same
+        file, and had no way to tell a running server. Measured on the Mac on
+        2026-09-21: `crucible install llm --force` wrote `pages: yes` into
+        config.toml at 13:33 and `GET /v1/capability` went on answering the
+        13:31 document — "ships none with a mlx-darwin block" — until the
+        service was restarted, while the CLI on the same machine said yes. The
+        same defect had already shipped the other way round in 1.0.16, where
+        install restarted the service BEFORE writing the record. Either order
+        leaves the server one write behind its own file; this removes the
+        order from the question.
+
+        One stat per call, a parse only when the stamp moved. Returns whether
+        anything was adopted. A file that will not parse raises `ConfigError`
+        and this document is left as it was: the last good record goes on
+        being served rather than a half-written one, and the caller says so.
+        """
+        try:
+            current = self.path.stat()
+        except FileNotFoundError as exc:
+            raise ConfigError(
+                f"{self.path} is gone from under a running server; the last "
+                "document read from it is still being served"
+            ) from exc
+        seen = (current.st_mtime_ns, current.st_size)
+        if seen == self.stamp:
+            return False
+        self.adopt(load_config(self.home))
+        return True
 
     def engine_footprint(self, narrator_engine: str) -> EngineFootprint | None:
         """This box's `[tts.<engine>]` row, or None because none was written."""
@@ -501,6 +542,11 @@ class Config:
         (`tests/test_tasks_api.py`). The immutability being
         protected is *"a config is not edited field by field from wherever"*, and
         that is intact: this replaces the whole document at once, from a file.
+
+        **AND SINCE 2026-09-21 THE SERVER ALSO CALLS THIS ON ITS OWN**, from
+        `follow_file()` above, whenever the file's stamp moves under it — so a
+        write from another process (`crucible install`, `crucible capability
+        --write`) reaches a live server the same way a settings write does.
 
         **ROUTES AND UPSTREAMS TRAVEL THE SAME WAY** (PHASE15-HOST.md section
         2), and they are why this method matters twice as much as it did: a
@@ -1353,6 +1399,13 @@ def own_engine_backend(home: Path | None = None) -> str | None:
 
 def load_config(home: Path | None = None) -> Config:
     """Read config.toml. Raises ConfigError naming the missing piece."""
+    # The stamp is taken BEFORE the document is read — see `Config.stamp`.
+    stamped = config_path(home if home is not None else crucible_home())
+    try:
+        before = stamped.stat()
+        stamp: tuple[int, int] | None = (before.st_mtime_ns, before.st_size)
+    except FileNotFoundError:
+        stamp = None  # `_read_document` says so, in its own words
     root, path, table = _read_document(home)
 
     upstreams = _upstream_records(table)
@@ -1387,6 +1440,7 @@ def load_config(home: Path | None = None) -> Config:
         local_models=_local_model_records(table),
         upstreams=upstreams,
         tts_engines=_tts_engine_records(table),
+        stamp=stamp,
     )
 
 
