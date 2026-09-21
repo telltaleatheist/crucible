@@ -211,6 +211,7 @@ Admit one job, or refuse with the facts about the one already here. **This door 
 | `model` | string or null | no | — |  |
 | `params` | Params | no | — |  |
 | `inputs` | Inputs | no | — |  |
+| `client_ref` | string or null | no | — |  |
 
 *Answers:* `202`, `422`
 
@@ -626,6 +627,7 @@ Every schema the routes above refer to, for a reader following a nested field.
 | `model` | string or null | no | — |  |
 | `params` | Params | no | — |  |
 | `inputs` | Inputs | no | — |  |
+| `client_ref` | string or null | no | — |  |
 
 ### `JobInput`
 
