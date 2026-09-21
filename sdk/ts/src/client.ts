@@ -143,7 +143,9 @@ const API_HEADER = 'X-Crucible-Api';
  * server prefers this only when it is present and valid.
  */
 const CLIENT_NAME_HEADER = 'X-Crucible-Client';
-const JOB_STATES: readonly JobState[] = ['queued', 'running', 'done', 'failed', 'cancelled'];
+const JOB_STATES: readonly JobState[] = [
+  'queued', 'running', 'done', 'failed', 'cancelled', 'interrupted',
+];
 const HEALTH_STATES = ['ok', 'warming', 'busy'] as const;
 const CHAT_ROLES = ['system', 'user', 'assistant'] as const;
 /** PHASE3-TTS.md section 2. The voice loader refuses any other word. */
@@ -857,6 +859,9 @@ export class CrucibleClient {
       inputs,
     };
     if (request.model !== undefined) payload['model'] = request.model;
+    // OMITTED WHEN ABSENT rather than sent as null: the submit door forbids
+    // unknown keys and validates this one's shape, and `null` is not a name.
+    if (request.clientRef !== undefined) payload['client_ref'] = request.clientRef;
 
     const init: RequestInit = {
       method: 'POST',
@@ -894,6 +899,21 @@ export class CrucibleClient {
       // instead. Demanding the key from them would be demanding a field about
       // a question they are not asked.
       leaseId: 'lease_id' in body ? nullableStr(body, 'lease_id', 'job') : null,
+      clientRef: nullableStr(body, 'client_ref', 'job'),
+      interruptedAt: nullableStr(body, 'interrupted_at', 'job'),
+      // The indices this job published. A resume is `asked - chunksDone`.
+      chunksDone: asArray(field(body, 'chunks_done', 'job'), 'job.chunks_done').map(
+        (entry, index) => {
+          if (typeof entry !== 'number' || !Number.isInteger(entry)) {
+            throw new CrucibleProtocolError(
+              `job.chunks_done[${index}] is not an integer chunk index; it is ` +
+                'what a resume differences against, so a rounded one would ' +
+                're-render a chunk that is already on disk',
+            );
+          }
+          return entry;
+        },
+      ),
     };
   }
 

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import sys
 import uuid
@@ -47,6 +48,7 @@ from .base import (
     FAILED,
     QUEUED,
     RUNNING,
+    INTERRUPTED,
     TERMINAL_STATES,
     Job,
     JobContext,
@@ -360,6 +362,7 @@ class JobStore:
         model: str | None,
         params: dict[str, Any],
         client: str | None = None,
+        client_ref: str | None = None,
     ) -> Job:
         job_id = uuid.uuid4().hex
         directory = Path(self._config.jobs_dir) / job_id
@@ -373,8 +376,13 @@ class JobStore:
             dir=directory,
             created=utcnow(),
             client=client,
+            client_ref=client_ref,
         )
         self._jobs[job_id] = job
+        # RECORDED BEFORE IT IS ANSWERED. A job the client has an id for must be
+        # a job a restart can still describe, or the 202 was a promise this
+        # server could not keep.
+        self._persist(job)
         return job
 
     def enqueue(self, job: Job) -> None:
@@ -654,10 +662,19 @@ class JobStore:
         for waiter in self._subscribers.get(job.id, []):
             waiter.set()
 
-    def record_artifact(self, job: Job, name: str) -> None:
+    def record_artifact(self, job: Job, name: str,
+                        index: int | None = None) -> None:
         if name not in job.artifacts:
             job.artifacts.append(name)
+        if index is not None and index not in job.chunks_done:
+            job.chunks_done.append(index)
         self.append_event(job, "artifact", {"name": name})
+        # WRITTEN THROUGH, because this is the moment the job is worth
+        # recovering. A render publishes each chunk as narrator answers it, so
+        # the record on disk is never more than one chunk behind the audio
+        # beside it — which is the whole of what makes an interrupted job
+        # resumable rather than merely visible.
+        self._persist(job)
 
     def subscribe(self, job: Job) -> asyncio.Event:
         """One waiter per open event stream, so streams never steal each other's wakeup."""
@@ -675,6 +692,175 @@ class JobStore:
             del self._subscribers[job.id]
 
     # -------------------------------------------------------------- provenance
+
+    def restore(self) -> list[str]:
+        """Read the jobs this server left on disk. Returns the ids recovered.
+
+        RUN ONCE, AT STARTUP, BEFORE THE API ANSWERS ANYTHING — a client that
+        asks about its job during the restore must not be told 404 about a job
+        that is about to exist.
+
+        A JOB FOUND `running` OR `queued` WAS INTERRUPTED, and that is a
+        deduction rather than a guess: this process is the only thing that runs
+        jobs, it has just started, and it is running none. Whatever wrote
+        `running` is gone. It comes back `interrupted` with `interrupted_at`
+        stamped now — not `failed`, because this server never judged the work
+        (see `jobs/base.py`'s INTERRUPTED), and not `running`, which would be a
+        lie a bench would draw a progress bar for.
+
+        WHAT IS NOT RESTORED, deliberately: the lane. A recovered job is
+        terminal, so it is never re-queued and never resumed by this server. The
+        client owns that decision, and it already can — the render door's chunk
+        `index` is the CLIENT's and is never renumbered, so a resume is a new
+        job carrying the chunks whose artifacts are missing. There is no resume
+        endpoint to build and no half-run state machine to get wrong.
+
+        `events` are NOT restored either. They are a live stream's backlog, and
+        a client reconnecting to a job that ended before this process existed
+        wants the record, not a replay of a run it already missed.
+        """
+        root = Path(self._config.jobs_dir)
+        if not root.is_dir():
+            return []
+        recovered: list[str] = []
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir() or entry.name in self._jobs:
+                continue
+            path = entry / self.RECORD_NAME
+            if not path.is_file():
+                # A directory from before this record existed, or one whose
+                # write never landed. It is the reaper's business, not this
+                # method's: inventing a record for it would be inventing facts.
+                continue
+            try:
+                document = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                print(
+                    f"crucible: could not read the record in {entry}: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+            job = self._job_from_record(entry, document)
+            if job is None:
+                continue
+            self._jobs[job.id] = job
+            recovered.append(job.id)
+        if recovered:
+            print(
+                f"crucible: recovered {len(recovered)} job(s) from disk; "
+                f"{sum(1 for i in recovered if self._jobs[i].status == INTERRUPTED)}"
+                " were interrupted by a restart",
+                file=sys.stderr,
+            )
+        return recovered
+
+    def _job_from_record(self, directory: Path, document: Any) -> Job | None:
+        """One job out of its own record, or None when the record is not one."""
+        if not isinstance(document, dict) or not document.get("job_id"):
+            return None
+        status = str(document.get("status") or QUEUED)
+        interrupted_at = document.get("interrupted_at")
+        if status not in TERMINAL_STATES:
+            status = INTERRUPTED
+            interrupted_at = interrupted_at or utcnow()
+        job = Job(
+            id=str(document["job_id"]),
+            type=str(document.get("type") or ""),
+            model=document.get("model"),
+            # THE PARAMS ARE GONE and this is where that shows. Nothing this
+            # server does with a recovered job needs them — it will never run
+            # it — and not writing a book's text to this disk twice was the
+            # point (`_record_of`).
+            params={},
+            dir=directory,
+            created=str(document.get("created") or utcnow()),
+            status=status,
+            progress=float(document.get("progress") or 0.0),
+            started=document.get("started"),
+            finished=document.get("finished"),
+            error=document.get("error"),
+            artifacts=list(document.get("artifacts") or []),
+            client=document.get("client"),
+            client_ref=document.get("client_ref"),
+            interrupted_at=interrupted_at,
+            chunks_done=[int(i) for i in (document.get("chunks_done") or [])],
+            done_extra=dict(document.get("done_extra") or {}),
+        )
+        return job
+
+    # ------------------------------------------------------------- durability
+
+    #: The file a job's own record is written to, inside its own directory.
+    RECORD_NAME = "job.json"
+
+    def _persist(self, job: Job) -> None:
+        """Write this job's record beside its artifacts. Never raises.
+
+        WHY THIS EXISTS. `self._jobs` is memory, and until 2026-09-20 it was the
+        ONLY place a job existed. A server that stopped mid-render therefore did
+        not leave a failed job, it left NOTHING: `GET /v1/jobs/{id}` answered 404
+        while the chunks it had already finished sat in `artifacts/`, reachable
+        by nobody, until the retention window deleted them. Six minutes of a
+        fine-tuning ladder's GPU went that way to a deploy of mine.
+
+        WRITTEN AT THE MOMENTS THAT CHANGE WHAT A RECOVERY WOULD SAY — created,
+        started, each artifact published, and every terminal end — and NOT on
+        every progress event. Progress is a hundred writes a minute and is worth
+        nothing after a restart; an artifact is the thing a resume differences
+        against, so the record is never more than one chunk behind the audio
+        next to it.
+
+        A FAILURE HERE IS NOT AN OPERATION FAILURE. The same rule the reaper and
+        the settlement follow: a render that rendered is a render that rendered,
+        and a disk that would not take its bookkeeping must not turn it into an
+        error the client sees. It is said loudly instead.
+        """
+        try:
+            job.dir.mkdir(parents=True, exist_ok=True)
+            document = json.dumps(self._record_of(job), indent=2) + chr(10)
+            path = job.dir / self.RECORD_NAME
+            # Written whole and moved into place: a reader that arrives during
+            # the write must see the previous record or this one, never half of
+            # a JSON document. The reader is a RESTART, so "never" matters more
+            # than it looks.
+            temporary = path.with_suffix(".json.writing")
+            temporary.write_text(document, encoding="utf-8")
+            os.replace(temporary, path)
+        except Exception as exc:
+            print(
+                f"crucible: could not record job {job.id} on disk: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+
+    def _record_of(self, job: Job) -> dict[str, Any]:
+        """What survives a restart.
+
+        NOT `params`. A render's params carry a chapter of somebody's book, and
+        this file would be a second copy of it on this disk for a week. The
+        client keeps its own text — BookForge's `session-state.json` has every
+        chunk — and what it needs from here is which chunks are DONE, which is
+        `chunks_done`. Asked for and agreed with the BookForge session,
+        2026-09-20.
+        """
+        return {
+            "job_id": job.id,
+            "type": job.type,
+            "model": job.model,
+            "status": job.status,
+            "progress": job.progress,
+            "error": job.error,
+            "artifacts": list(job.artifacts),
+            "chunks_done": sorted(job.chunks_done),
+            "created": job.created,
+            "started": job.started,
+            "finished": job.finished,
+            "interrupted_at": job.interrupted_at,
+            "client": job.client,
+            "client_ref": job.client_ref,
+            "done_extra": job.done_extra,
+        }
 
     def provenance(self, job: Job, finished: str | None = None) -> dict[str, Any]:
         """DESIGN.md section 7. Written beside every artifact.
@@ -797,6 +983,9 @@ class JobStore:
     async def _execute(self, job: Job) -> None:
         plugin = self._registry[job.type]
         job.status = RUNNING
+        # The state a restart READS AS AN INTERRUPTION: nothing but a server
+        # going away can leave `running` written on a disk.
+        self._persist(job)
         job.started = utcnow()
         self._running_id = job.id
         self.append_event(job, "progress", {"fraction": 0.0, "message": "started"})
@@ -919,6 +1108,7 @@ class JobStore:
         job.status = status
         job.finished = utcnow()
         job.error = error
+        self._persist(job)
         if status == DONE:
             job.progress = 1.0
             self._restamp_provenance(job)

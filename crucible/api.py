@@ -173,6 +173,20 @@ class JobCreate(BaseModel):
     model: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
     inputs: dict[str, JobInput] = Field(default_factory=dict)
+    #: THE CLIENT'S OWN NAME FOR THIS WORK. Echoed back on the job record,
+    #: never read by this server, never parsed.
+    #:
+    #: It is for the restart. An `interrupted` job has to be matched to whatever
+    #: the client was doing when its own process went away too, and a job id it
+    #: may have lost alongside everything else is a poor key for that.
+    #: BookForge puts its queue step id here.
+    #:
+    #: Bounded like a client name and for the same reason (`_CLIENT_NAME`): it
+    #: is printed into logs and benches, so a control character in it is the
+    #: caller choosing what somebody's terminal does.
+    client_ref: str | None = Field(
+        default=None, max_length=200, pattern=r"^[^\x00-\x1f\x7f]+$"
+    )
 
 
 class StreamOpen(BaseModel):
@@ -530,6 +544,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         # computed across an NTP correction or a DST jump is how a bench ends up
         # reporting that a server has been up for minus four minutes.
         app.state.started_at = time.monotonic()
+        # BEFORE THE LANE AND BEFORE THE FIRST REQUEST. A client asking about
+        # its job during the restore must not be told 404 about a job that is
+        # about to exist, and the lane must not reap a directory whose record
+        # has not been read yet.
+        store.restore()
         store.start()
         app.state.http = httpx.AsyncClient(
             timeout=httpx.Timeout(
@@ -2573,7 +2592,10 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         # refuse `engine_in_use` from here (crucible/residency.py).
         plugin.preflight(model, body.params)
 
-        job = store.create(body.type, model, body.params, client=_client_agent(request))
+        job = store.create(
+            body.type, model, body.params,
+            client=_client_agent(request), client_ref=body.client_ref,
+        )
         try:
             _materialise_inputs(config, store, job, body.inputs)
             # `enqueue` asks admission again and is the authority on it; nothing
@@ -3812,6 +3834,9 @@ _JOB_STATE_KEYS: frozenset[str] = frozenset(
         "created",
         "started",
         "finished",
+        "client_ref",
+        "interrupted_at",
+        "chunks_done",
     }
 )
 
@@ -3829,6 +3854,14 @@ def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
         "created": job.created,
         "started": job.started,
         "finished": job.finished,
+        # THE RESTART'S OWN FIELDS. `client_ref` is what the caller named this
+        # work; `interrupted_at` is when this server was found to have stopped
+        # while it was running (null for every other outcome); `chunks_done` is
+        # the chunk index of every artifact published, so a resume is a set
+        # difference rather than every client parsing `<index>.flac` for itself.
+        "client_ref": job.client_ref,
+        "interrupted_at": job.interrupted_at,
+        "chunks_done": sorted(job.chunks_done),
         # THE TERMINAL FACTS, READABLE AFTER THE STREAM IS GONE (2026-09-20).
         # `done_extra` is what a job adds to its own `done` event — `resident`
         # for a loader, and since the lease moved onto the load, `lease_id`. A

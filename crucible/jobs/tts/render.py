@@ -1396,7 +1396,9 @@ class TtsJobType:
 
         destination = ctx.scratch / f"{chunk.index}.flac"
         encode_flac(ffmpeg, pcm, sample_rate, destination)
-        ctx.artifact(destination.name, destination)
+        # THE CHUNK INDEX travels with the artifact, so an interrupted job can
+        # report which chunks it finished and a resume is a set difference.
+        ctx.artifact(destination.name, destination, index=chunk.index)
 
         chars = len(chunk.text)
         ctx.chunk(

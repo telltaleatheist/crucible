@@ -189,7 +189,7 @@ const PROVENANCE = {
   },
   params: { language: 'en', take: 0 },
   started: '2026-09-13T04:11:02Z',
-  finished: '2026-09-13T04:19:44Z',
+  finished: '2026-09-13T04:19:44Z', client_ref: null, interrupted_at: null, chunks_done: [],
 };
 
 /** The server writes its sidecar with `indent=2` and a trailing newline. */

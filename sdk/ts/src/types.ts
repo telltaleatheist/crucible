@@ -648,10 +648,28 @@ export interface JobRequest {
   readonly model?: string;
   readonly params: Readonly<Record<string, unknown>>;
   readonly inputs: Readonly<Record<string, JobInput>>;
+  /**
+   * Your own name for this work. Echoed back on the job record as
+   * {@link JobStatus.clientRef}; this server never reads or parses it.
+   *
+   * Worth setting on anything long. If the server restarts mid-job it comes
+   * back `interrupted` rather than vanishing, and this is how you recognise it
+   * as yours after YOUR process has restarted too.
+   */
+  readonly clientRef?: string;
 }
 
-/** A job's lifecycle state. `done`, `failed` and `cancelled` are terminal. */
-export type JobState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+/**
+ * A job's lifecycle state. `done`, `failed`, `cancelled` and `interrupted` are
+ * all terminal.
+ *
+ * `interrupted` is the one a client must not treat as a failure: the server
+ * stopped while the job was running — a deploy, a crash, a machine going away —
+ * and the work it had already published is still there to collect. `failed` is
+ * this server judging the work, which is a person's problem; an interruption is
+ * weather, and the answer is to fetch what landed and re-ask for the rest.
+ */
+export type JobState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted';
 
 /** The server's named refusal or failure, as carried on a job and in events. */
 export interface JobFailure {
@@ -686,6 +704,32 @@ export interface JobStatus {
    * takes the lane instead, and the record simply does not carry the key.
    */
   readonly leaseId: string | null;
+  /**
+   * The client's own name for this work, echoed back. `null` when none was
+   * given.
+   *
+   * Set it on submit when you will need to recognise this job after YOUR
+   * process has restarted too — a job id you may have lost alongside
+   * everything else is a poor key for that.
+   */
+  readonly clientRef: string | null;
+  /**
+   * When the server was found to have stopped while this job was running.
+   * `null` for every other outcome.
+   *
+   * Set only by the restart that recovered it. Its presence is what tells an
+   * `interrupted` job from one that ended some other way.
+   */
+  readonly interruptedAt: string | null;
+  /**
+   * The chunk index of every artifact this job published, ascending.
+   *
+   * **This is what a resume differences against.** For a render the artifacts
+   * are `<index>.flac`, and parsing that filename in every client is a
+   * documented contract re-implemented N times; this is the server saying it
+   * once. Empty for a job whose artifacts are not indexed chunks.
+   */
+  readonly chunksDone: readonly number[];
 }
 
 /** `DELETE /v1/jobs/{id}`. A running job ends `cancelled` at its next checkpoint. */

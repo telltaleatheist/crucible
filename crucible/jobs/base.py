@@ -21,7 +21,24 @@ RUNNING = "running"
 DONE = "done"
 FAILED = "failed"
 CANCELLED = "cancelled"
-TERMINAL_STATES = frozenset({DONE, FAILED, CANCELLED})
+#: THE SERVER STOPPED WHILE THIS WAS WORKING, and it is not `failed`.
+#:
+#: A job is `running` only while a process is running it, so a `running` job
+#: found ON DISK at startup is one whose server went away underneath it —
+#: nothing else can leave that state written down. Until 2026-09-20 the store
+#: was in memory only, so such a job was not `failed`, it was GONE: a 404, with
+#: its finished chunks sitting unreachable in `artifacts/`. Six minutes of a
+#: fine-tuning ladder's GPU time was lost that way to a deploy.
+#:
+#: DISTINCT FROM `failed` BECAUSE CLIENTS ACT ON THE DIFFERENCE. `failed` is
+#: this server judging the work — bad input, an engine that would not start —
+#: and BookForge sends such a row to a person. An interruption is weather: the
+#: right response is to collect what landed and re-ask for the rest, which is
+#: what `artifacts-owed.ts` already does for a dropped stream. Reporting one as
+#: the other would put a human in front of a queue that could have healed
+#: itself.
+INTERRUPTED = "interrupted"
+TERMINAL_STATES = frozenset({DONE, FAILED, CANCELLED, INTERRUPTED})
 
 
 def utcnow() -> str:
@@ -98,6 +115,29 @@ class Job:
     #: own would offer Owen a cancel button for a chapter his other machine is
     #: rendering. PHASE7-LANES.md section 5.
     client: str | None = None
+    #: THE CLIENT'S OWN NAME FOR THIS WORK, echoed back and never read by this
+    #: server. `POST /v1/jobs` takes it as `client_ref`.
+    #:
+    #: It exists for the restart that this record exists for. After BOTH sides
+    #: have restarted, a client holding its own ledger has to match an
+    #: `interrupted` job to the step that submitted it, and a job id it may
+    #: have lost with everything else is a poor key to do it with. BookForge
+    #: puts its queue step id here.
+    #:
+    #: `client_ref` and not `render_id`: this server runs `align`, `asr` and
+    #: `rvc` jobs too, and a field called `render_id` on an `asr` job would be
+    #: a name that lies. What it means is the client's, which is the whole
+    #: point — nothing here parses it.
+    client_ref: str | None = None
+    #: When the server was found to have stopped while this was running. Set
+    #: only on the restart that recovers it, never by the job itself.
+    interrupted_at: str | None = None
+    #: The chunk index of every artifact this job has published, for a job
+    #: whose artifacts ARE indexed chunks. A resume is then a set difference
+    #: rather than filename parsing — `<index>.flac` is a documented contract
+    #: (`jobs/tts/render.py`), and a contract every client re-implements is a
+    #: contract that drifts.
+    chunks_done: list[int] = field(default_factory=list)
     #: Extra keys a job type adds to its own `done` event. `load-model` puts
     #: `resident` here (PHASE2-LLM.md section 5); `artifacts` is always present.
     done_extra: dict[str, Any] = field(default_factory=dict)
@@ -368,7 +408,7 @@ class JobContext:
         """Add keys to this job's `done` event, e.g. `resident` on a load."""
         self._job.done_extra.update(keys)
 
-    def artifact(self, name: str, path: Path) -> Path:
+    def artifact(self, name: str, path: Path, *, index: int | None = None) -> Path:
         """Publish `path` as artifact `name`, with its provenance sidecar.
 
         Returns the artifact's final path. The sidecar is written immediately, so
@@ -387,7 +427,14 @@ class JobContext:
             json.dumps(self._store.provenance(self._job), indent=2) + "\n",
             encoding="utf-8",
         )
-        self._loop.call_soon_threadsafe(self._store.record_artifact, self._job, name)
+        # `index` is the CHUNK this artifact is, for a job whose artifacts are
+        # indexed chunks. Optional because most job types have no such notion —
+        # an `asr` transcript is not chunk 12 of anything — and passing it is
+        # how a resume becomes a set difference instead of every client parsing
+        # `<index>.flac` for itself.
+        self._loop.call_soon_threadsafe(
+            self._store.record_artifact, self._job, name, index
+        )
         return destination
 
 

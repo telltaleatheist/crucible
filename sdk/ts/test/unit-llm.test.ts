@@ -726,7 +726,7 @@ test('a provenance sidecar names the weights, not only the model', async () => {
         },
         params: {},
         started: '2026-09-13T00:00:00+00:00',
-        finished: '2026-09-13T00:04:00+00:00',
+        finished: '2026-09-13T00:04:00+00:00', client_ref: null, interrupted_at: null, chunks_done: [],
       }),
     );
   };
@@ -753,7 +753,7 @@ test('a provenance model block with no fingerprint is a protocol error', async (
         model: { id: 'qwen3.5-9b', revision: REVISION },
         params: {},
         started: null,
-        finished: '2026-09-13T00:04:00+00:00',
+        finished: '2026-09-13T00:04:00+00:00', client_ref: null, interrupted_at: null, chunks_done: [],
       }),
     );
   };
