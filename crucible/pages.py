@@ -45,7 +45,18 @@ across rather than re-derived — the whole point of the handover:
   it. Lowering it would trade a real dense page for a fake one. A client may
   send LESS (a per-page cap derived from the book) and must re-read a page
   that came back `finish_reason: "length"` at the full ceiling.
-* **`temperature = 0`**. A layout is not a thing to be creative about.
+* **`temperature = 0`**. A layout is not a thing to be creative about — and
+  since 2026-09-21 that is a measurement rather than a sentence. dots.ocr's own
+  reference code defaults to 0.1 with `top_p` 1.0 (`dots_ocr/parser.py`; the
+  model repo's `generation_config.json` pins nothing). The whole of
+  *Deathstalker Rebellion* — 516 scanned pages, scored against the publisher's
+  EPUB — was read through vLLM at both: pooled CER 0.181% at 0 against 0.183%
+  at 0.1, median page 0.044% against 0.045%, 490 of 506 located pages
+  byte-identical, 11 pages better at 0 and 5 better at 0.1, and NO page hit the
+  8192 ceiling at either. So 0 is at least as good, and it is deterministic,
+  which the other is not. On `mlx-darwin` it is also the only setting the
+  reader has: `engines/mlx_vlm_serve.py` decodes greedily and refuses any
+  other by name.
 * **the prompt, VERBATIM from the model card.** Never templated, never
   shortened: a nearly-right prompt answers worse without erroring, which is
   the failure mode that costs a whole book before anybody notices.
@@ -104,7 +115,8 @@ MAX_PIXELS = 11_289_600
 #: measurement that says why it is not lower.
 MAX_TOKENS = 8192
 
-#: A layout is not a thing to be creative about.
+#: A layout is not a thing to be creative about; the module docstring has the
+#: 516-page measurement against dots.ocr's own 0.1 (2026-09-21).
 TEMPERATURE = 0.0
 
 #: How many pages a client may have IN FLIGHT against this server at once.

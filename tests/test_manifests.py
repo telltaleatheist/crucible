@@ -284,7 +284,9 @@ BACKENDS = {
     # published. `qwen3.8-27b-8bit` has none and gets no row: its FP8 weights
     # are 28.75 GiB before any cache, which is not a thing a 24 GB Windows box
     # runs, and a row with nothing truthful in it is worse than no row.
-    "dots-ocr": ["cuda-linux", "llama-windows"],
+    # `mlx-darwin` on dots-ocr since 2026-09-21: Crucible's own page server
+    # (crucible/engines/mlx_vlm_serve.py) runs it in process.
+    "dots-ocr": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-9b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.8-27b-8bit": ["cuda-linux", "mlx-darwin"],
     "qwen3.8-27b-4bit": ["cuda-linux", "llama-windows", "mlx-darwin"],

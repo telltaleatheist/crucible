@@ -287,16 +287,47 @@ def test_asr_and_align_are_both_enabled_on_the_studio() -> None:
     assert not any(c.id.startswith("faster-whisper-") for c in asr.candidates)
 
 
+def _pages_with_no_block_on_any_backend() -> Any:
+    """`pages` as it stood on the Mac until 2026-09-21: the class exists, the
+    catalog has the model, and no manifest carries a block for this backend.
+
+    SYNTHETIC since dots-ocr grew its mlx-darwin block, because no shipped
+    class reads that way on any shipped backend any more — and the sentence
+    still has to exist for the day one does."""
+    import dataclasses
+
+    from crucible.capability import CLASSES
+
+    pages = next(entry for entry in CLASSES if entry.name == "pages")
+    return dataclasses.replace(pages, candidates=lambda backend_kind: ())
+
+
 def test_a_class_with_nothing_on_this_backend_still_says_which_it_is() -> None:
     """"nothing this build can serve here" and "it does not fit" are different
     facts about a host, and a reader who cannot tell them apart goes looking
-    for a bigger Mac to fix a missing manifest. `pages` is the class that still
-    reads that way on the Mac — see docs/PHASE15-HOST.md 7c."""
-    verdict = _decide("pages", "mlx-darwin", STUDIO, MAC_RESERVE)
+    for a bigger Mac to fix a missing manifest. `pages` read that way on the
+    Mac until 2026-09-21 (docs/PHASE15-HOST.md 7c); the state is kept here
+    synthetically."""
+    from crucible.capability import decide
+
+    verdict = decide(
+        _pages_with_no_block_on_any_backend(), "mlx-darwin",
+        total_bytes=STUDIO, desktop_allowance_bytes=MAC_RESERVE,
+        gpu_vendor="apple", chosen=None,
+    )
     assert verdict.enabled is False
     assert verdict.candidates == ()
     assert verdict.shortfall_bytes == 0
     assert "ships none with a mlx-darwin block" in verdict.reason
+
+
+def test_pages_on_the_mac_is_enabled_since_the_block_landed() -> None:
+    """The other side of the test above, and the whole point of 2026-09-21:
+    a 64 GiB Mac reads pages with dots-ocr, and says so in both voices."""
+    verdict = _decide("pages", "mlx-darwin", STUDIO, MAC_RESERVE, vendor="apple")
+    assert verdict.enabled is True
+    assert verdict.selected == "dots-ocr"
+    assert verdict.summary == "can read pages, using dots-ocr"
 
 
 def test_echo_needs_no_accelerator_and_is_never_disabled_by_a_card() -> None:
@@ -838,10 +869,12 @@ def test_every_decision_carries_a_summary_a_person_can_read() -> None:
 
 
 def test_the_reported_pages_case_reads_both_ways() -> None:
-    """The exact refusal Owen saw, and the sentence that replaces it."""
-    from crucible.capability import CLASSES, decide
+    """The exact refusal Owen saw, and the sentence that replaces it. The
+    state that produced it (no mlx-darwin block on dots-ocr) is synthetic
+    since 2026-09-21 — `_pages_with_no_block_on_any_backend` above."""
+    from crucible.capability import decide
 
-    pages = next(entry for entry in CLASSES if entry.name == "pages")
+    pages = _pages_with_no_block_on_any_backend()
     verdict = decide(
         pages, "mlx-darwin", total_bytes=64 * 1024**3,
         desktop_allowance_bytes=3 * 1024**3, gpu_vendor="apple", chosen=None,
@@ -865,9 +898,9 @@ def test_the_summary_reaches_the_wire_and_not_only_the_decision() -> None:
     So this asserts the whole path, not the object nearest the code that
     produces it: decision -> row -> the dict a client parses.
     """
-    from crucible.capability import CLASSES, decide
+    from crucible.capability import decide
 
-    pages = next(entry for entry in CLASSES if entry.name == "pages")
+    pages = _pages_with_no_block_on_any_backend()
     verdict = decide(
         pages, "mlx-darwin", total_bytes=64 * 1024**3,
         desktop_allowance_bytes=3 * 1024**3, gpu_vendor="apple", chosen=None,

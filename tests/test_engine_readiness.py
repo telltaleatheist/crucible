@@ -172,9 +172,10 @@ class FakeMlxVlmEngine(MlxVlmEngine):
     """The REAL `MlxVlmEngine`, pointed at a fake `mlx_vlm` on PYTHONPATH.
 
     A subclass that overrides `environment()` and nothing else, so the command
-    under test — `python -m mlx_vlm server --model ... --host ... --port ...` —
-    is the one `MlxVlmEngine.command()` actually builds. A double that
-    reimplemented `command()` would test the double.
+    under test — the llm env's python running `mlx_vlm_serve.py` — is the one
+    `MlxVlmEngine.command()` actually builds. A double that reimplemented
+    `command()` would test the double. `tests/test_mlx_vlm_serve.py` drives
+    the wire; these two are the readiness contract only.
     """
 
     def environment(self) -> dict[str, str]:
@@ -186,10 +187,11 @@ def test_mlx_vlm_is_ready_when_v1_models_answers_and_needs_no_confirm(
 ) -> None:
     """The measured difference from mlx-lm, and the reason this class is short.
 
-    mlx-vlm preloads inside FastAPI's lifespan, which uvicorn completes before
-    it accepts — so a 200 from `/v1/models` means the weights are in memory and
-    the base class's poll is the honest check. mlx-lm answers that route while
-    still reading gigabytes, which is why IT needs a one-token completion.
+    Crucible's page server loads BEFORE it binds — the order mlx-vlm's own
+    server had — so a 200 from `/v1/models` means the weights are in memory
+    and the base class's poll is the honest check. mlx-lm answers that route
+    while still reading gigabytes, which is why IT needs a one-token
+    completion.
     """
     assert MlxVlmEngine.confirm is BaseEngine.confirm
     assert MlxLmEngine.confirm is not BaseEngine.confirm
@@ -202,7 +204,7 @@ def test_mlx_vlm_is_ready_when_v1_models_answers_and_needs_no_confirm(
     port = find_free_port()
     # `str(weights)` and not a resolved spelling: what the engine reports is
     # what it was given, and `engine_model_name` has to agree.
-    engine.start(weights, str(weights), port, [])
+    engine.start(weights, str(weights), port, ["--width", "1"])
     try:
         engine.ready(60.0)
         assert engine.base_url == f"http://127.0.0.1:{port}"
@@ -212,7 +214,7 @@ def test_mlx_vlm_is_ready_when_v1_models_answers_and_needs_no_confirm(
     assert engine.pids == frozenset()
     # The command really was the one the class builds.
     log = (tmp_path / "engine.log").read_text(encoding="utf-8", errors="replace")
-    assert "-m mlx_vlm server --model" in log
+    assert "mlx_vlm_serve.py --model" in log
 
 
 def test_mlx_vlm_serving_something_else_is_not_a_not_yet(tmp_path: Path) -> None:
@@ -222,7 +224,9 @@ def test_mlx_vlm_serving_something_else_is_not_a_not_yet(tmp_path: Path) -> None
     engine = FakeMlxVlmEngine(
         python=Path(sys.executable), log_path=tmp_path / "engine.log"
     )
-    engine.start(weights, "some-name-it-will-never-report", find_free_port(), [])
+    engine.start(
+        weights, "some-name-it-will-never-report", find_free_port(), ["--width", "1"]
+    )
     try:
         with pytest.raises(EngineError) as caught:
             engine.ready(60.0)

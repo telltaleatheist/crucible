@@ -253,13 +253,17 @@ def test_an_explicit_subject_this_backend_cannot_hold_is_STILL_unknown_subject(
     which a machine can answer with "nothing here does". An id is "give me
     this one", which it cannot.
     """
+    # `faster-whisper-*` is CTranslate2, which has no Metal backend, so it is
+    # cuda-linux permanently (crucible/catalog.py `backends_declaring`). It
+    # replaced `dots-ocr` here on 2026-09-21, the day dots-ocr grew its
+    # mlx-darwin block.
     with make_client(backend=FAKE_MAC_BACKEND) as mac:
         response = post_module(
-            mac, auth, a_module(subjects=[{"kind": "model", "id": "dots-ocr"}])
+            mac, auth, a_module(subjects=[{"kind": "model", "id": "faster-whisper-large-v3"}])
         )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_module"
-    assert "dots-ocr" in response.json()["error"]["message"]
+    assert "faster-whisper-large-v3" in response.json()["error"]["message"]
 
 
 def test_unmet_is_an_EMPTY_LIST_on_every_other_task(

@@ -157,23 +157,56 @@ def test_the_engine_is_named_for_an_operator_and_the_request_never_varies(
     assert block["request"] == pages.request_shape()
 
 
-def test_a_backend_with_no_page_block_says_so_and_still_publishes_the_request(
+def test_a_backend_whose_weights_are_not_pulled_names_the_engine_and_the_pull(
     make_client, auth: dict[str, str]
 ) -> None:
-    """The Mac today: `models/dots-ocr.toml` has no `mlx-darwin` block.
-
-    `engine: null` is the honest answer and it is NOT a missing key — a
-    client reading the block has to be able to tell "this host reads no
-    pages" from "this document predates the field".
+    """The Mac since 2026-09-21: `models/dots-ocr.toml` HAS a `mlx-darwin`
+    block (Crucible's own in-process page server), so the engine is named
+    even before the weights are pulled — and `installed: false` with the pull
+    command is the honest answer, not `engine: null`, which would say this
+    host reads no pages.
     """
     from .conftest import FAKE_MAC_BACKEND
 
     with make_client(backend=FAKE_MAC_BACKEND) as mac:
         block = mac.get("/v1/info", headers=auth).json()["pages_engine"]
+    assert block["engine"] == "mlx-vlm"
+    assert block["installed"] is False
+    assert "crucible models pull dots-ocr" in block["detail"]
+    # And the request is still there, because it is not a property of the host.
+    assert block["request"] == pages.request_shape()
+
+
+def test_a_backend_with_no_page_block_says_so_and_still_publishes_the_request(
+    make_client, auth: dict[str, str], monkeypatch
+) -> None:
+    """A host with NO block for this model: `engine: null` is the honest answer
+    and it is NOT a missing key — a client reading the block has to be able to
+    tell "this host reads no pages" from "this document predates the field".
+    Since every shipped backend now has a block, the case is made with a
+    manifest that carries only cuda-linux, served to the Mac double.
+    """
+    import dataclasses
+
+    from crucible import manifests as manifests_module
+    from .conftest import FAKE_MAC_BACKEND
+
+    real = manifests_module.load_manifest
+
+    def cuda_only(model_id: str):
+        manifest = real(model_id)
+        if model_id != pages.MODEL_ID:
+            return manifest
+        return dataclasses.replace(
+            manifest, backends={"cuda-linux": manifest.backends["cuda-linux"]}
+        )
+
+    monkeypatch.setattr("crucible.api.load_manifest", cuda_only)
+    with make_client(backend=FAKE_MAC_BACKEND) as mac:
+        block = mac.get("/v1/info", headers=auth).json()["pages_engine"]
     assert block["engine"] is None
     assert block["installed"] is False
     assert "mlx-darwin" in block["detail"]
-    # And the request is still there, because it is not a property of the host.
     assert block["request"] == pages.request_shape()
 
 

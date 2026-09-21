@@ -30,7 +30,9 @@ dependencies = [
 # `build` is `tests/test_wheel.py`'s: that file BUILDS a wheel and looks
 # inside it, because the one defect it exists for is invisible to every
 # other kind of check (a `pip install -e .` makes the checkout the install).
-test = ["pytest>=8", "build>=1.0"]
+# `pillow` is `tests/test_mlx_vlm_serve.py`'s: the page server decodes a real
+# PNG, and a test that handed it a fake decoder would prove the fake.
+test = ["pytest>=8", "build>=1.0", "pillow>=10"]
 
 [project.scripts]
 crucible = "crucible.cli:main"

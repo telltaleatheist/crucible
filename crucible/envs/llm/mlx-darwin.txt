@@ -22,43 +22,58 @@
 # Regenerate after any deliberate bump with:
 #     ~/.crucible/envs/llm/bin/python -m pip freeze
 #
-# MLX-VLM IS NOT HERE, AND THE COST OF PUTTING IT HERE IS MEASURED
-# ----------------------------------------------------------------
-# `mlx-darwin`'s `pages` engine is `mlx-vlm` (crucible/manifests.py), and the
-# plan of record was that this one env would hold both — mlx-vlm 0.6.10 pins
-# `mlx>=0.32.0`, `mlx-lm>=0.31.3` and `transformers>=5.14.0`, every one of
-# which this file already satisfies. It is not added, for two reasons, and the
-# second is the decisive one.
+# MLX-VLM IS HERE, SINCE 2026-09-21 — `mlx-vlm==0.7.1`, THE PAGES ENGINE
+# ------------------------------------------------------------------------
+# `mlx-darwin`'s `pages` engine (crucible/manifests.py) is Crucible's own page
+# server, `crucible/engines/mlx_vlm_serve.py`, which runs dots.ocr through
+# mlx-vlm IN PROCESS out of this env — mlx-vlm's own HTTP server never puts
+# the image into the prompt, which is why this line was missing for a week
+# (the run is in crucible/engines/mlx_vlm.py). It is in THIS env and not a
+# third one because its pins resolve under the set below unchanged.
 #
-# FIRST, the pin set does move, and by more than those three lines. Resolved
-# for macOS 14 arm64 / python 3.11 on 2026-09-14 (a cross-resolve validated by
-# reproducing THIS file exactly from `mlx-lm==0.31.3` alone), adding
-# `mlx-vlm==0.6.10` takes the env from 34 packages to 54. Nothing already here
-# changes version; what arrives is fastapi, starlette, uvicorn,
-# python-multipart, pydantic and pydantic-core (mlx-vlm's server), plus
-# llguidance, miniaudio, opencv-python, Pillow, scipy, cffi, pycparser,
-# annotated-types, typing-inspection, charset-normalizer, requests and urllib3
-# — and `mlx-audio==0.5.4` with `sounddevice`, which mlx-vlm declares and this
-# env has no use for. On a backend where the tts env already pins its own
-# mlx-audio, that is a second copy at a different version in a second env.
+# WHY 0.7.1 AND NOT 0.6.10, MEASURED ON THE MAC STUDIO 2026-09-21. 0.6.10 was
+# the version the in-process path was first validated on, and it does not run
+# on this env's `mlx==0.32.2`: `mlx_vlm/models/dots_ocr/vision.py:286` calls
+# `mx.repeat(seq_len, grid_thw[i, 0])` with an ARRAY count, which 0.32.0
+# accepted and 0.32.2 refuses (`TypeError: repeat(): incompatible function
+# arguments`). 0.7.1 casts it (`int(grid_thw[i, 0])`) and keeps the batch
+# surface the reader uses. So the choice was 0.7.1 on the mlx already here,
+# or 0.6.10 with mlx pinned BACK to 0.32.0 under the text engine that was
+# measured on 0.32.2 — and moving the text engine's stack for the page
+# reader's sake would have been the wrong side to bend.
 #
-# SECOND AND DECISIVE: no manifest names `mlx-vlm` yet, because mlx-vlm's own
-# HTTP server does not put the image into the prompt for dots.ocr — measured
-# on the Mac Studio on 2026-09-14, on 0.6.10 and 0.7.1 alike, with the run
-# written out in `models/dots-ocr.toml`. Installing a package into every Mac
-# that nothing can reach is weight for a capability that is off.
+# THE SET BELOW IS THE RESOLVE OF THE PREVIOUS SET PLUS `mlx-vlm==0.7.1`
+# with every previous line held as a CONSTRAINT (`pip install -c <old>
+# -r <old> mlx-vlm==0.7.1`, python 3.11.16, 2026-09-21), so nothing already
+# here changed version and the 22 names that arrived are exactly mlx-vlm's
+# closure: fastapi, starlette, uvicorn, python-multipart, pydantic and
+# pydantic_core (its server, which Crucible does not run), llguidance,
+# miniaudio, opencv-python, pillow, scipy, cffi, pycparser, annotated-types,
+# typing-inspection, charset-normalizer, requests, urllib3, websockets, and
+# `mlx-audio==0.5.5` with `sounddevice`, which mlx-vlm declares and this env
+# has no use for (the tts env pins its own mlx-audio; that is a second copy
+# at a different version in a second env, known and accepted).
 #
-# So this stays a one-line diff for the day the block can be written: add
-# `mlx-vlm==0.6.10` under the pin below and re-resolve. The twenty names above
-# are what to expect.
+# VALIDATED AS THIS EXACT SET: a venv built from it read four real 200-dpi
+# book pages through the reader's own path byte-identically to
+# `mlx_vlm.batch_generate` (the numbers are in models/dots-ocr.toml's
+# [backends.mlx-darwin] block).
+#
+# Regenerate after any deliberate bump with:
+#     ~/.crucible/envs/llm/bin/python -m pip freeze
 
 mlx-lm==0.31.3
+mlx-vlm==0.7.1
 
-# --- the set pip resolved under it ---
+# --- the set pip resolved under them ---
 annotated-doc==0.0.5
+annotated-types==0.8.0
 anyio==4.15.1
 certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
 click==8.5.0
+fastapi==0.141.1
 filelock==3.32.6
 fsspec==2026.7.0
 h11==0.16.0
@@ -68,23 +83,40 @@ httpx==0.28.1
 huggingface_hub==1.31.0
 idna==3.19
 Jinja2==3.1.6
+llguidance==1.8.0
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 mdurl==0.1.2
+miniaudio==1.71
+mlx-audio==0.5.5
 mlx-metal==0.32.2
 mlx==0.32.2
 numpy==2.4.6
+opencv-python==5.0.0.93
 packaging==26.3
+pillow==12.3.0
 protobuf==7.36.1
+pycparser==3.0
+pydantic==2.13.5
+pydantic_core==2.46.5
 Pygments==2.21.0
+python-multipart==0.0.32
 PyYAML==6.0.3
 regex==2026.9.10
+requests==2.34.2
 rich==15.0.0
 safetensors==0.8.0
+scipy==1.17.1
 sentencepiece==0.2.2
 shellingham==1.5.4
+sounddevice==0.5.6
+starlette==1.6.0
 tokenizers==0.23.2
 tqdm==4.70.1
 transformers==5.17.0
 typer==0.27.2
+typing-inspection==0.4.4
 typing_extensions==4.16.0
+urllib3==2.8.0
+uvicorn==0.53.0
+websockets==17.1

@@ -1110,7 +1110,16 @@ against is the Mac Studio as read on 2026-09-14 (crucible 0.6.0, M1 Ultra 64 GB,
     seven repos measured in the audit (large-v3 2.87 GiB, turbo 1.50 GiB). Nothing on the Mac
     runs mlx-whisper today and BookForge's Mac ASR was CPU faster-whisper, so this is the gap
     with the least standing work behind it.
-  - `pages` — **BUILT AND THEN NOT SHIPPED (7c, measured 2026-09-14):** the engine class and the
+  - `pages` — **SHIPPED 2026-09-21, the way the ruling below recommended.** Crucible serves
+    dots on the Mac through its OWN server, `crucible/engines/mlx_vlm_serve.py`, which runs the
+    in-process path (mlx-vlm 0.7.1's `_generate_batch` call order, every row of a batch
+    inserted before the first step) behind the two proxy routes, `--width` rows at a time from
+    `models/dots-ocr.toml`'s `[backends.mlx-darwin]` block. Validated byte for byte against
+    `batch_generate` on real 200-dpi pages at widths 1, 2, 4 and 8; the numbers are in that
+    block. A continuous-insertion driver was tried first and read one page in four correctly —
+    it is recorded in the server's docstring so nobody tries it again without the comparison.
+    The finding that stopped the block for a week follows, unchanged.
+  - `pages` (as it stood 2026-09-14) — **BUILT AND THEN NOT SHIPPED (7c, measured 2026-09-14):** the engine class and the
     per-family table landed, but `models/dots-ocr.toml` has NO mlx-darwin block on purpose:
     mlx-vlm's own HTTP server (0.6.10 and 0.7.1 alike) does not put the image into dots.ocr's
     prompt — in-process `generate` returns 5 correct blocks in the dialect at 16.3 s/page,
