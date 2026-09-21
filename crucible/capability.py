@@ -316,6 +316,19 @@ class CapabilityClass:
     job_type: str
     #: What the class is for, in a sentence, for `crucible capability`'s output.
     purpose: str
+    #: THE SAME THING, TO SOMEBODY WHO IS NOT AN OPERATOR: a bare verb phrase,
+    #: no jargon, no door names, no backend names. `purpose` is the operator's
+    #: half and keeps its internals — `crucible doctor` and the operator page
+    #: SHOULD say "(the VLM door)" and "with a mlx-darwin block", because an
+    #: operator is the person who can act on those.
+    #:
+    #: Added 2026-09-20 after a `pages` refusal reached a user as *"…cannot
+    #: pages: disabled: reading page images (the VLM door) needs page readers,
+    #: and this build ships none with a mlx-darwin block"*. Owen: *"it looks
+    #: like an error."* It was a correct answer written for the wrong reader.
+    #: Rather than strip the diagnosis — which an operator needs — the decision
+    #: now carries BOTH, and each reader takes its own.
+    plainly: str
     #: The noun for the things that satisfy it, so a refusal reads like English.
     noun: str
     #: Every candidate on a backend, best-first. None for a class that never
@@ -353,6 +366,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
         name="echo",
         job_type="echo",
         purpose="the test job type; it never touches the accelerator",
+        plainly="run the test job",
         noun="engines",
         candidates=None,
     ),
@@ -379,6 +393,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
             ),
         ),
         purpose="cleanup and the other 9B-class text work",
+        plainly="clean up text",
         noun="qwen3.5 variants",
         candidates=_from_catalog(load_all_manifests, "qwen3.5"),
         binary_note=(
@@ -408,6 +423,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
             ),
         ),
         purpose="translation, which needs a 27B-class model",
+        plainly="translate",
         noun="qwen3.8 and qwen3.5 variants",
         candidates=_from_catalog(load_all_manifests, "qwen3.8", "qwen3.5"),
         binary_note=(
@@ -457,6 +473,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
             ),
         ),
         purpose="simplification, which runs on the same 27B translation needs",
+        plainly="simplify text",
         noun="qwen3.8 and qwen3.5 variants",
         candidates=_from_catalog(load_all_manifests, "qwen3.8", "qwen3.5"),
         binary_note=(
@@ -483,6 +500,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
             ),
         ),
         purpose="structured analysis answers, on the same 27B",
+        plainly="analyse text",
         noun="qwen3.8 and qwen3.5 variants",
         candidates=_from_catalog(load_all_manifests, "qwen3.8", "qwen3.5"),
         binary_note=(
@@ -519,6 +537,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
             ),
         ),
         purpose="reading page images (the VLM door)",
+        plainly="read pages",
         noun="page readers",
         candidates=_from_catalog(load_all_manifests, "dots"),
     ),
@@ -526,6 +545,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
         name="tts",
         job_type="tts",
         purpose="narration",
+        plainly="narrate",
         noun="voices",
         candidates=_from_catalog(load_all_voices),
         binary_note=(
@@ -537,6 +557,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
         name="asr",
         job_type="asr",
         purpose="transcription",
+        plainly="transcribe",
         noun="whisper models",
         candidates=_from_catalog(load_all_asr_manifests),
     ),
@@ -544,6 +565,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
         name="align",
         job_type="align",
         purpose="forced alignment",
+        plainly="align audio to text",
         noun="aligners",
         candidates=_from_catalog(load_all_align_manifests),
     ),
@@ -551,6 +573,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
         name="rvc",
         job_type="rvc",
         purpose="voice conversion",
+        plainly="convert a voice",
         noun="RVC models",
         candidates=_from_catalog(load_all_rvc_manifests),
     ),
@@ -562,6 +585,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
         name="denoise",
         job_type="denoise",
         purpose="noise removal and stem separation",
+        plainly="remove noise or split stems",
         noun="separator models",
         candidates=_from_catalog(load_all_denoise_manifests),
     ),
@@ -641,6 +665,26 @@ class Decision:
     #: config's TOML has no null, and an absent key would read as "not recorded".
     selected: str
     reason: str
+    #: THE SAME VERDICT FOR A PERSON WHO IS NOT AN OPERATOR, and `reason` keeps
+    #: every internal it has.
+    #:
+    #: A BARE PHRASE WITH NO SUBJECT, beginning with the verb: *"cannot read
+    #: pages — no page reader runs on this machine's hardware"*. The caller
+    #: supplies the subject, because the caller is the only one who knows what
+    #: to call this server: it asked a particular server this question and has
+    #: its name, while the walk that decides has neither. So BookForge writes
+    #: `${serverName} ${summary}` and gets *"crucible@owens-mac-studio cannot
+    #: read pages — …"*, and an operator page can print it alone.
+    #:
+    #: WHY BOTH EXIST. On 2026-09-20 a `pages` refusal reached a user as
+    #: "…cannot pages: disabled: reading page images (the VLM door) needs page
+    #: readers, and this build ships none with a mlx-darwin block" — a correct
+    #: sentence written for the wrong reader. Stripping it would have cost the
+    #: operator the only line that says WHICH backend's block is missing, so
+    #: neither reader was asked to give way: `reason` diagnoses, `summary`
+    #: tells somebody what they can do, and no client has to parse one to
+    #: produce the other.
+    summary: str
     #: How much more memory the SMALLEST candidate would have needed, or 0. This
     #: is the number that turned the class off, and it is stored as a number and
     #: not only inside the sentence, because a sentence is not load-bearing
@@ -657,6 +701,7 @@ class Decision:
             "enabled": self.enabled,
             "selected": self.selected,
             "reason": self.reason,
+            "summary": self.summary,
             "shortfall_bytes": self.shortfall_bytes,
             "available_bytes": self.available_bytes,
             "fit_count": self.fit_count,
@@ -758,6 +803,10 @@ def decide(
             enabled=False,
             selected="",
             reason=NEEDS_WSL_REASON,
+            summary=(
+                f"cannot {entry.plainly} — this machine has no Linux engine "
+                "installed yet. Finish setting it up, or use another server"
+            ),
             shortfall_bytes=0,
             available_bytes=available_bytes(total_bytes, desktop_allowance_bytes),
             candidates=(),
@@ -777,6 +826,7 @@ def decide(
             enabled=True,
             selected="",
             reason=f"always available: {entry.purpose}",
+            summary=f"can {entry.plainly}",
             shortfall_bytes=0,
             available_bytes=budget,
             candidates=(),
@@ -793,6 +843,10 @@ def decide(
             reason=(
                 f"disabled: {entry.purpose} needs {entry.noun}, and this build "
                 f"ships none with a {backend_kind} block"
+            ),
+            summary=(
+                f"cannot {entry.plainly} — nothing that can do it runs on this "
+                "machine's hardware. Another server has to take this work"
             ),
             shortfall_bytes=0,
             available_bytes=budget,
@@ -835,6 +889,10 @@ def decide(
                     f"not among the {len(found)} {entry.noun} this build ships "
                     f"with a {backend_kind} block"
                 ),
+                summary=(
+                    f"cannot {entry.plainly} — it is set to use {chosen}, which "
+                    "this machine cannot run. Choose another in Settings"
+                ),
                 shortfall_bytes=0,
                 available_bytes=budget,
                 candidates=found,
@@ -860,6 +918,11 @@ def decide(
                     f"the machine it was made on{cpu_note}."
                     + (UPSTREAM_OFFER if entry.routable else "")
                 ),
+                summary=(
+                    f"cannot {entry.plainly} — {picked.id} needs "
+                    f"{_gib(shortfall)} more memory than this machine has free. "
+                    "A smaller choice, or another server"
+                ),
                 shortfall_bytes=shortfall,
                 available_bytes=budget,
                 candidates=found,
@@ -875,6 +938,7 @@ def decide(
                 f"{spell_out(picked, entry.work)} and there is {arithmetic}; "
                 f"{len(fitting)} of {len(found)} {entry.noun} fit{cpu_note}"
             ),
+            summary=f"can {entry.plainly}, using {picked.id}",
             shortfall_bytes=0,
             available_bytes=budget,
             candidates=found,
@@ -893,6 +957,7 @@ def decide(
                 f"there is {arithmetic}; {len(fitting)} of {len(found)} "
                 f"{entry.noun} fit{cpu_note}"
             ),
+            summary=f"can {entry.plainly}, using {best.id}",
             shortfall_bytes=0,
             available_bytes=budget,
             candidates=found,
@@ -912,6 +977,10 @@ def decide(
             f"at {spell_out(smallest, entry.work)} and there is only "
             f"{arithmetic} — short by {_gib(shortfall)}.{note}"
             + (UPSTREAM_OFFER if entry.routable else "")
+        ),
+        summary=(
+            f"cannot {entry.plainly} — the smallest option needs "
+            f"{_gib(shortfall)} more memory than this machine has free"
         ),
         shortfall_bytes=shortfall,
         available_bytes=budget,

@@ -795,3 +795,62 @@ def test_a_server_that_has_decided_nothing_says_so_rather_than_answering_empty(
     body = client.get("/v1/capability", headers=auth)
     assert body.status_code == 503, body.text
     assert body.json()["error"]["code"] == "capability_undecided"
+
+
+def test_every_decision_carries_a_summary_a_person_can_read() -> None:
+    """`reason` diagnoses; `summary` says what somebody can do (2026-09-20).
+
+    A `pages` refusal reached a user as *"…cannot pages: disabled: reading page
+    images (the VLM door) needs page readers, and this build ships none with a
+    mlx-darwin block"*. Owen: *"it looks like an error."* It was a correct
+    sentence written for the wrong reader — and stripping it would have cost the
+    operator the only line naming which backend's block is missing. So the
+    decision carries both, and neither reader gives way.
+
+    EVERY branch, not only the one that was reported. A decision that reached a
+    person with no summary would be the same defect back, on whichever class
+    nobody happened to test.
+    """
+    from crucible.capability import CLASSES, decide
+
+    internals = ("disabled:", "backend", "block", "the VLM door", "_")
+    for entry in CLASSES:
+        for backend, vendor, total in (
+            ("mlx-darwin", "apple", 64 * 1024**3),
+            ("cuda-linux", "nvidia", 24 * 1024**3),
+            ("cuda-linux", "nvidia", 6 * 1024**3),
+        ):
+            verdict = decide(
+                entry, backend, total_bytes=total,
+                desktop_allowance_bytes=3 * 1024**3,
+                gpu_vendor=vendor, chosen=None,
+            )
+            where = f"{entry.name} on {backend} at {total // 1024**3} GiB"
+            assert verdict.summary, f"{where} has no summary"
+            # SUBJECTLESS, so the caller supplies the server's name: the walk
+            # does not know what this server is called and the caller does.
+            assert verdict.summary.startswith(("can ", "cannot ")), where
+            lowered = verdict.summary.lower()
+            for token in internals:
+                assert token not in lowered, f"{where} leaks {token!r}: {verdict.summary}"
+            # And the operator's half keeps everything.
+            assert verdict.reason, where
+
+
+def test_the_reported_pages_case_reads_both_ways() -> None:
+    """The exact refusal Owen saw, and the sentence that replaces it."""
+    from crucible.capability import CLASSES, decide
+
+    pages = next(entry for entry in CLASSES if entry.name == "pages")
+    verdict = decide(
+        pages, "mlx-darwin", total_bytes=64 * 1024**3,
+        desktop_allowance_bytes=3 * 1024**3, gpu_vendor="apple", chosen=None,
+    )
+    assert verdict.enabled is False
+    # The user's half: a subject away from a whole sentence.
+    assert verdict.summary.startswith("cannot read pages")
+    assert "mlx-darwin" not in verdict.summary
+    assert "VLM" not in verdict.summary
+    # The operator's half, unchanged — this is what `crucible doctor` prints.
+    assert "ships none with a mlx-darwin block" in verdict.reason
+    assert "(the VLM door)" in verdict.reason
