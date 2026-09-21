@@ -21,6 +21,16 @@ only.
 VERSION = "1.0.14"
 API_VERSION = 1
 API_HEADER = "X-Crucible-Api"
+#: The header a client NAMES ITSELF in, read by `_client_agent` in preference to
+#: the User-Agent.
+#:
+#: It exists because a browser cannot set a User-Agent — it is a forbidden
+#: header name, so the SDK's `clientName` is silently dropped by Chrome and the
+#: BookForge Reader extension's jobs were recorded under a 120-character
+#: `Mozilla/5.0 …` string. Here beside `API_HEADER` rather than in `api.py`,
+#: for the reason that one is here: the SDK and the server must spell a header
+#: the same way, and a spelling with two homes eventually has two spellings.
+CLIENT_NAME_HEADER = "X-Crucible-Client"
 
 #: HOW LONG AN IDLE HTTP CONNECTION IS HELD OPEN, for every uvicorn this repo
 #: starts. **The requirement is that the SERVER always outlives the CLIENT
@@ -57,4 +67,5 @@ API_HEADER = "X-Crucible-Api"
 #: Sep 18 to Sep 20.
 KEEP_ALIVE_SECONDS = 75
 
-__all__ = ["VERSION", "API_VERSION", "API_HEADER", "KEEP_ALIVE_SECONDS"]
+__all__ = ["VERSION", "API_VERSION", "API_HEADER", "CLIENT_NAME_HEADER",
+           "KEEP_ALIVE_SECONDS"]

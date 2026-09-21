@@ -128,6 +128,21 @@ import {
 import { SDK_VERSION } from './version.js';
 
 const API_HEADER = 'X-Crucible-Api';
+/**
+ * The header a client NAMES ITSELF in — `crucible/__init__.py`'s
+ * `CLIENT_NAME_HEADER`, and it must keep that spelling.
+ *
+ * `User-Agent` is a FORBIDDEN HEADER NAME in a browser: `fetch` silently drops
+ * it, so an extension's `clientName` never reached the server and its jobs were
+ * recorded under `Mozilla/5.0 (Macintosh; …) Chrome/154.0.0.0 Safari/537.36`.
+ * The BookForge Reader popup printed that 120-character string back at Owen as
+ * if it were an error. A bench's "held by" column is the worst place for one.
+ *
+ * Sent ALONGSIDE the User-Agent rather than instead of it: outside a browser the
+ * UA still arrives and is still what curl and the CLI are read by, and the
+ * server prefers this only when it is present and valid.
+ */
+const CLIENT_NAME_HEADER = 'X-Crucible-Client';
 const JOB_STATES: readonly JobState[] = ['queued', 'running', 'done', 'failed', 'cancelled'];
 const HEALTH_STATES = ['ok', 'warming', 'busy'] as const;
 const CHAT_ROLES = ['system', 'user', 'assistant'] as const;
@@ -275,6 +290,7 @@ export class CrucibleClient {
 
   readonly #token: string;
   readonly #userAgent: string;
+  readonly #clientName: string;
   /** The constructor's clock, or null: wait as long as the platform does. */
   readonly #timeoutMs: number | null;
 
@@ -287,6 +303,12 @@ export class CrucibleClient {
     this.#token = requireText(given.token, 'token');
     const clientName = requireText(given.clientName, 'clientName');
     this.#userAgent = `${clientName} crucible-client/${SDK_VERSION}`;
+    // The bare name, for `X-Crucible-Client`. The server validates 1-80
+    // characters with no control characters and falls back to the User-Agent
+    // when that fails, so the full `<name> crucible-client/<version>` string
+    // would be rejected by length on a long client name and silently lose the
+    // whole point. `requireText` has already refused an empty one.
+    this.#clientName = clientName;
     if (given.timeoutMs !== undefined) {
       if (!Number.isFinite(given.timeoutMs) || given.timeoutMs <= 0) {
         throw new CrucibleConfigError(
@@ -1689,6 +1711,10 @@ export class CrucibleClient {
   async #fetch(path: string, init: RequestInit, authenticated: boolean): Promise<Response> {
     const headers = new Headers(init.headers);
     headers.set('User-Agent', this.#userAgent);
+    // THE NAME, IN A HEADER A BROWSER CAN ACTUALLY SET. Unauthenticated too:
+    // the pairing doors record who is asking, and a browser pairing itself
+    // should not be `Mozilla/5.0 …` there either.
+    headers.set(CLIENT_NAME_HEADER, this.#clientName);
     if (authenticated) {
       headers.set('Authorization', `Bearer ${this.#token}`);
       headers.set(API_HEADER, String(API_VERSION));

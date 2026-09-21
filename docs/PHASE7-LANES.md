@@ -786,6 +786,22 @@ already on the wire and is simply not kept. `JobStore.create` records it, `/v1/a
 reports it, and BookForge draws a foreign job as **busy — <client>**, with no progress bar
 it does not own and no cancel button.
 
+**A BROWSER CANNOT SET A USER-AGENT** (2026-09-20), so since Crucible 1.0.15 the SDK
+also sends `X-Crucible-Client: <clientName>` on every call and `_client_agent` prefers it,
+falling back to the User-Agent exactly as before. `User-Agent` is a forbidden header name
+in a browser — `fetch` drops it silently — so the BookForge Reader extension's jobs were
+recorded as `Mozilla/5.0 (Macintosh; …) Chrome/154.0.0.0 Safari/537.36`, and its own popup
+printed that back at Owen as though it were an error.
+
+The header is validated to the shape `connect.py` gives a pairing `client_name` — 1-80
+characters, no control characters — and an invalid one is **ignored in favour of the
+User-Agent**, not refused. Nothing is decided by this field, so nothing here is worth
+refusing a render over; what the validation is actually for is that a name reaches a
+terminal, a log line and a popup, and a control character in any of those is the client
+choosing what your screen does. The 200-character truncation stays where it was and
+applies to the User-Agent; an over-long `X-Crucible-Client` is rejected rather than
+trimmed, because two truncations would be two answers to "how long is a client name".
+
 This is not a security boundary. Everything holding one token is one trust domain
 (DESIGN.md section 8), and a client that lies about its name is lying to a bench widget.
 It is an identification, and it is described as one.
@@ -926,7 +942,8 @@ releases when it is done.
   lease that expires between two heartbeats — the eviction this exists to prevent, on a
   schedule. Longer than an hour is a lease that outlives its own client's crash, which is
   the one thing expiry is for.
-- `client` is `_client_agent(request)` — the same User-Agent, read by the same function,
+- `client` is `_client_agent(request)` — `X-Crucible-Client` when the caller stated a
+  valid one, else the User-Agent, read by the same function,
   that `/v1/activity` reports for a job's holder. One column on a bench, one way of
   filling it. Null means *it did not say*.
 - **One lease at a time, per server.** One card, one resident thing, one lease. A second
