@@ -26,6 +26,10 @@ def prepare_inputs(processor, images, audio, prompts, image_token_index, resize_
     if len(images) != 1:
         raise AssertionError(f"prepare_inputs was handed {len(images)} images; the reader embeds one at a time")
     height, width = images[0].height, images[0].width
+    # The same grid rule the fake image processor applies, so two raw sizes
+    # on one grid get one prompt length — the property batching rests on.
+    height = max(28, round(height / 28) * 28)
+    width = max(28, round(width / 28) * 28)
     prompt_tokens = 34 + (height * width) // 196
     rows = [[height, width, prompt] for prompt in prompts]
     return {

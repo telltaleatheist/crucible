@@ -75,9 +75,26 @@ class _Detokenizer:
         self.text = "".join(chr(code) for code in self._codes)
 
 
+class _ImageProcessor:
+    """The grid rule the reader keys batches on: the real processor resizes to
+    multiples of 28 (patch 14, merged 2x2) and reports `image_grid_thw` as
+    (t, h/14, w/14). Round-to-nearest, like Qwen2-VL's smart_resize."""
+
+    def __call__(self, images, return_tensors=None):
+        # Plain lists rather than an ndarray: the test interpreter has no numpy,
+        # and `Reader.grid_of` reads either shape.
+        grids = []
+        for image in images:
+            h = max(28, round(image.height / 28) * 28)
+            w = max(28, round(image.width / 28) * 28)
+            grids.append([1, h // 14, w // 14])
+        return {"image_grid_thw": grids}
+
+
 class FakeProcessor:
     def __init__(self) -> None:
         self.detokenizer = _Detokenizer()
+        self.image_processor = _ImageProcessor()
 
 
 def load(path_or_hf_repo: str, **kwargs):

@@ -146,17 +146,18 @@ def test_models_refuses_until_the_weights_are_in(tmp_path: Path, monkeypatch: py
 
 def test_a_page_comes_back_as_a_chat_completion_with_usage(served) -> None:
     engine, name, _ = served
-    status, document = post(engine, page_body(name, width=100, height=160))
+    status, document = post(engine, page_body(name, width=112, height=168))
     assert status == 200, document
     choice = document["choices"][0]
-    assert choice["message"]["content"] == "page 160x100 row 0"
+    assert choice["message"]["content"] == "page 168x112 row 0"
     assert choice["finish_reason"] == "stop"
     assert document["model"] == name
     assert document["usage"] == {
-        # 34 + (160 * 100) // 196, the fake's stated rule.
-        "prompt_tokens": 34 + (160 * 100) // 196,
-        "completion_tokens": len("page 160x100 row 0"),
-        "total_tokens": 34 + (160 * 100) // 196 + len("page 160x100 row 0"),
+        # 34 + (168 * 112) // 196, the fake's stated rule (112 and 168 are
+        # multiples of 28, so the grid IS the raw size here).
+        "prompt_tokens": 34 + (168 * 112) // 196,
+        "completion_tokens": len("page 168x112 row 0"),
+        "total_tokens": 34 + (168 * 112) // 196 + len("page 168x112 row 0"),
     }
     assert not pages.was_truncated(choice)
 
@@ -178,9 +179,9 @@ def test_an_rgba_png_is_read_as_rgb(served) -> None:
     """The Mac's finding: a PNG that decodes to RGBA trips the image processor,
     so every image is converted. The fake reports the shape it received."""
     engine, name, _ = served
-    status, document = post(engine, page_body(name, width=64, height=80))
+    status, document = post(engine, page_body(name, width=56, height=84))
     assert status == 200
-    assert document["choices"][0]["message"]["content"] == "page 80x64 row 0"
+    assert document["choices"][0]["message"]["content"] == "page 84x56 row 0"
 
 
 # ------------------------------------------------------------- the refusals
@@ -252,11 +253,11 @@ def test_concurrent_pages_are_batched_to_the_width_and_never_wider(served) -> No
     that IS 2 — a server that quietly read them one at a time would pass the
     first assertion and fail the second."""
     engine, name, batches = served
-    results = _read_many(engine, [page_body(name, width=100, height=160) for _ in range(6)])
+    results = _read_many(engine, [page_body(name, width=112, height=168) for _ in range(6)])
     assert all(status == 200 for status, _ in results), results
     contents = sorted(r["choices"][0]["message"]["content"] for _, r in results)
     # Every page answered from ITS OWN row of its batch.
-    assert all(c.startswith("page 160x100 row ") for c in contents)
+    assert all(c.startswith("page 168x112 row ") for c in contents)
     recorded = [json.loads(line) for line in batches.read_text().splitlines()]
     assert sum(b["rows"] for b in recorded) == 6
     assert max(b["rows"] for b in recorded) <= 2
@@ -266,20 +267,25 @@ def test_concurrent_pages_are_batched_to_the_width_and_never_wider(served) -> No
     assert all(b["batch_size"] == b["rows"] for b in recorded), recorded
 
 
-def test_pages_of_two_shapes_share_a_batch() -> None:
-    """THE LIVE-BOOK FINDING. Scans differ by a few pixels per page, and a
-    batcher that needed twins read a book one row at a time. The batcher is
-    driven directly here, with the reader held on a gate, so the queue's
-    contents at the moment of the take are known rather than raced."""
+def test_two_raw_sizes_on_one_grid_share_a_batch_and_two_grids_do_not() -> None:
+    """THE LIVE-BOOK FINDING, both halves. Scans differ by a few pixels per
+    page and land on one processor grid, so they batch; rows of different
+    grids (different prompt lengths) must not, because the generator's
+    mixed-length path corrupts the shorter rows (measured 2026-09-21). The
+    batcher is driven directly, with the reader held on a gate, so the queue's
+    contents at the moment of each take are known rather than raced."""
     import threading
 
-    taken: list[list[tuple[int, int]]] = []
+    taken: list[list[tuple[int, ...]]] = []
     gate = threading.Event()
     first_started = threading.Event()
 
     class HeldReader:
+        def grid_of(self, image):
+            return image
+
         def read_batch(self, jobs):
-            taken.append([job.shape for job in jobs])
+            taken.append([job.grid for job in jobs])
             if len(taken) == 1:
                 first_started.set()
                 gate.wait(10)
@@ -288,41 +294,62 @@ def test_pages_of_two_shapes_share_a_batch() -> None:
                 for _ in jobs
             ]
 
-    batcher = mlx_vlm_serve.Batcher(HeldReader(), width=2, log=lambda line: None)
-    dummy = mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, shape=(1, 1))
-    batcher.submit(dummy)
+    logged: list[str] = []
+    batcher = mlx_vlm_serve.Batcher(HeldReader(), width=3, log=logged.append)
+    # No image on these rows: the log line reads `image.width`, and a surprise
+    # there must cost the log line, never the row or the thread.
+    batcher.submit(mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, grid=(0,)))
     assert first_started.wait(10)
-    # Three pages of two sizes wait while the first batch is held.
+    grid_a, grid_b = (1, 90, 52), (1, 160, 92)
     waiting = [
-        mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, shape=(160, 100)),
-        mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, shape=(160, 120)),
-        mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, shape=(160, 100)),
+        mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, grid=grid_a),
+        mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, grid=grid_b),
+        mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, grid=grid_a),
+        mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, grid=grid_a),
+        mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, grid=grid_a),
     ]
     for job in waiting:
         batcher.submit(job)
     gate.set()
     for job in waiting:
         assert job.done.wait(10)
-    # Oldest two together, whatever their shapes; the third alone after.
-    assert taken[1] == [(160, 100), (160, 120)], taken
-    assert taken[2] == [(160, 100)], taken
+    # Oldest grid first, up to the width, skipping the other grid; then the
+    # other grid's lone row; then the leftover of the first.
+    assert taken[1] == [grid_a, grid_a, grid_a], taken
+    assert taken[2] == [grid_b], taken
+    assert taken[3] == [grid_a], taken
+    assert all("describing it failed" in line for line in logged), logged
+
+
+def test_the_grid_key_comes_from_the_processor_and_absorbs_pixel_jitter(served) -> None:
+    """Through the real server against the fake: 100 and 110 wide both round
+    to the 112 grid and read as the same page size; 130 does not."""
+    engine, name, batches = served
+    bodies = [page_body(name, width=100, height=168), page_body(name, width=110, height=168)]
+    results = _read_many(engine, bodies)
+    assert all(status == 200 for status, _ in results), results
+    assert {r["choices"][0]["message"]["content"][:14] for _, r in results} == {"page 168x112 r"}
+    status, document = post(engine, page_body(name, width=130, height=168))
+    assert status == 200
+    assert document["choices"][0]["message"]["content"].startswith("page 168x140 row")
 
 
 def test_a_failed_batch_fails_its_rows_and_the_next_page_still_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CRUCIBLE_FAKE_MLX_VLM_RAISE_ON", "77")
+    monkeypatch.setenv("CRUCIBLE_FAKE_MLX_VLM_RAISE_ON", "84")
     weights = tmp_path / "dots"
     weights.mkdir()
     engine = ServedFake(Path(sys.executable), tmp_path / "engine.log")
     engine.start(weights, str(weights), find_free_port(), ["--width", "2"])
     try:
         engine.ready(60.0)
-        status, document = post(engine, page_body(str(weights), width=50, height=77))
+        # 77 rounds to the 84-row grid, and the fake refuses THAT height.
+        status, document = post(engine, page_body(str(weights), width=56, height=77))
         assert status == 500
         assert document["error"]["code"] == "engine_error"
-        assert "77 tall" in document["error"]["message"]
-        status, document = post(engine, page_body(str(weights), width=50, height=78))
+        assert "84 tall" in document["error"]["message"]
+        status, document = post(engine, page_body(str(weights), width=56, height=112))
         assert status == 200, document
-        assert document["choices"][0]["message"]["content"] == "page 78x50 row 0"
+        assert document["choices"][0]["message"]["content"] == "page 112x56 row 0"
     finally:
         engine.stop()
 

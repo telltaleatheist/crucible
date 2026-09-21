@@ -34,22 +34,31 @@ Two shapes were tried on four real 739x1259 book pages against
   throws away and which the page contract needs (`finish_reason: "length"`
   is what tells a client to re-read a cut-off page at the full ceiling).
 
-So the queue is drained `--width` rows at a time: the oldest waiting rows,
-whatever their shapes. Width 1 is serial, and the number is the manifest's
-(`models/dots-ocr.toml`), not this file's.
+So the queue is drained `--width` rows at a time: the oldest waiting row and
+up to width-1 more OF THE SAME GRID. Width 1 is serial, and the number is the
+manifest's (`models/dots-ocr.toml`), not this file's.
 
-THE SAME-SHAPE RULE IS GONE, AND A LIVE BOOK IS WHY. The first release batched
-only rows of one image size, inherited from upstream's whole-batch
-`prepare_inputs(..., pad_to_uniform_size=False)`. On Owen's first whole book
-through the Mac (2026-09-21) the pages were scans, every one a few pixels off
-its neighbours — 1698x1067, 1709x1060, 1685x1089 — so with eleven pages
-waiting the oldest rarely had a twin: 28 of 48 batches were ONE row and the
-book read at ~14 s/page, serial in all but name. Since the vision tower runs
-per image here, each row arrives at the language model with its own
-embeddings and its own length, and `BatchGenerator` batches rows of unequal
-length as any continuous-batching generator does (it sorts them by length and
-builds a mixed prompt batch). The constraint belonged to the batched
-`prepare_inputs` call this file no longer makes.
+THE GRID, NOT THE PIXELS, AND A LIVE BOOK IS WHY. The first release batched
+only rows of identical image size. On Owen's first whole book through the Mac
+(2026-09-21) the pages were scans, every one a few pixels off its neighbours
+— 1698x1067, 1709x1060, 1685x1089 — so with eleven pages waiting the oldest
+rarely had a twin: 28 of 48 batches were ONE row, the book read at ~14 s/page,
+and pages queued behind that serial drain aged past Foundry's request timeout
+and killed the run at page 76 of 384. What a batch actually needs is rows of
+EQUAL PROMPT LENGTH, and the processor decides that: it resizes every image
+to the patch grid (patch 14, merged 2x2, so multiples of 28), and 722x1255,
+739x1267 and 739x1259 all become the same 90x52 grid and the same 1,385
+tokens. So rows are keyed by the processor's own `image_grid_thw`, asked of
+the processor itself at submit time — measured 2026-09-21: four pages of
+three raw sizes and one grid, batched, text identical to each read alone.
+
+ROWS OF DIFFERENT LENGTHS MUST NOT SHARE A BATCH, and that was measured too,
+the same day, because it looked like it should work: each row reaches the
+language model with its own embeddings, and `BatchGenerator` sorts by length
+and builds a mixed prompt batch. Two 1,385-token pages batched with two
+3,895-token pages: the two long ones read correctly and the two short ones
+ran to the 8192 ceiling as garbage. The generator's mixed-length path does
+not carry these per-row embeddings faithfully, and this file does not use it.
 
 THE VISION TOWER RUNS ONE IMAGE AT A TIME, AND THE METAL WATCHDOG IS WHY.
 Upstream embeds a whole batch in one `get_input_embeddings` call. Twelve
@@ -169,7 +178,9 @@ class Job:
     image: Any  # PIL.Image.Image, RGB
     prompt: str
     max_tokens: int
-    shape: tuple[int, int]
+    #: The processor's `image_grid_thw` for this image — the batching key.
+    #: Equal grid means equal prompt length, which is what a batch needs.
+    grid: tuple[int, ...]
     done: threading.Event = field(default_factory=threading.Event)
     row: Row | None = None
     error: Exception | None = None
@@ -186,6 +197,20 @@ class Reader:
         self._mlx_vlm = mlx_vlm
         self._check_upstream()
         self.model, self.processor = mlx_vlm.load(model_dir)
+
+    def grid_of(self, image: Any) -> tuple[int, ...]:
+        """The processor's `image_grid_thw` for one image, as the batching key.
+
+        Asked of the processor rather than recomputed from its rules, so the
+        key cannot drift from what `prepare_inputs` will do to the same image.
+        It is the resize-and-patch half of that call done a second time on
+        the CPU, in the request's own thread; measured well under a second
+        against a 14-to-25-second read, and the price of an exact key.
+        """
+        out = self.processor.image_processor(images=[image], return_tensors="np")
+        grid = out["image_grid_thw"]
+        first = grid[0] if hasattr(grid, "__getitem__") else grid
+        return tuple(int(v) for v in (first.tolist() if hasattr(first, "tolist") else first))
 
     def _check_upstream(self) -> None:
         """Every private name `read_batch` depends on, or a refusal naming it."""
@@ -362,13 +387,18 @@ class Batcher:
             self._waiting.append(job)
             self._lock.notify()
 
+    def key_of(self, image: Any) -> tuple[int, ...]:
+        return self._reader.grid_of(image)
+
     def _take(self) -> list[Job]:
-        """The oldest `width` waiting rows, whatever their shapes."""
+        """The oldest waiting row and up to width-1 more of its grid."""
         with self._lock:
             while not self._waiting:
                 self._lock.wait()
-            batch = self._waiting[: self._width]
-            del self._waiting[: self._width]
+            first = self._waiting[0]
+            batch = [job for job in self._waiting if job.grid == first.grid][: self._width]
+            for job in batch:
+                self._waiting.remove(job)
             return batch
 
     def _run(self) -> None:
@@ -384,17 +414,29 @@ class Batcher:
                     job.done.set()
                 continue
             elapsed = time.monotonic() - started
-            shapes = sorted({f"{job.shape[0]}x{job.shape[1]}" for job in batch})
-            self._log(
-                f"batch of {len(batch)} ({len(shapes)} shape{'s' if len(shapes) != 1 else ''}: "
-                f"{', '.join(shapes[:4])}{', ...' if len(shapes) > 4 else ''}): "
-                f"{elapsed:.1f}s, {elapsed / len(batch):.1f}s/page, "
-                f"finish={[row.finish_reason for row in rows]}, "
-                f"tokens={[row.completion_tokens for row in rows]}"
-            )
+            # HAND THE ROWS BACK BEFORE SAYING ANYTHING ABOUT THEM. The log line
+            # below reads the images and the rows; a surprise there must cost
+            # a log line, never a page — and never this thread, which is the
+            # only one there is.
             for job, row in zip(batch, rows):
                 job.row = row
                 job.done.set()
+            try:
+                self._log(self._describe(batch, rows, elapsed))
+            except Exception as exc:
+                self._log(f"batch of {len(batch)} done in {elapsed:.1f}s (describing it failed: {exc!r})")
+
+    @staticmethod
+    def _describe(batch: list[Job], rows: list[Row], elapsed: float) -> str:
+        grid = "x".join(str(v) for v in batch[0].grid)
+        sizes = sorted({f"{job.image.width}x{job.image.height}" for job in batch})
+        return (
+            f"batch of {len(batch)} at grid {grid} ({len(sizes)} raw size"
+            f"{'s' if len(sizes) != 1 else ''}): "
+            f"{elapsed:.1f}s, {elapsed / len(batch):.1f}s/page, "
+            f"finish={[row.finish_reason for row in rows]}, "
+            f"tokens={[row.completion_tokens for row in rows]}"
+        )
 
 
 # ---------------------------------------------------------------- the request
@@ -568,7 +610,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._refuse(refusal)
             return
         assert self.batcher is not None
-        job = Job(image=image, prompt=prompt, max_tokens=max_tokens, shape=(image.height, image.width))
+        try:
+            grid = self.batcher.key_of(image)
+        except Exception as exc:  # the processor refused this image: say so, keep serving
+            self._send(
+                500,
+                {"error": {"code": "engine_error", "message": f"the processor could not grid this image: {exc!r}", "type": "server_error"}},
+            )
+            return
+        job = Job(image=image, prompt=prompt, max_tokens=max_tokens, grid=grid)
         self.batcher.submit(job)
         job.done.wait()
         if job.error is not None:
