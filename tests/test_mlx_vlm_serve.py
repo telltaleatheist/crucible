@@ -266,16 +266,46 @@ def test_concurrent_pages_are_batched_to_the_width_and_never_wider(served) -> No
     assert all(b["batch_size"] == b["rows"] for b in recorded), recorded
 
 
-def test_pages_of_two_shapes_never_share_a_batch(served) -> None:
-    """Upstream prefills with `pad_to_uniform_size=False`; the fake's
-    `prepare_inputs` asserts on a mixed batch, so a wrong grouping is a 500."""
-    engine, name, batches = served
-    bodies = [page_body(name, width=100, height=160), page_body(name, width=120, height=160)] * 2
-    results = _read_many(engine, bodies)
-    assert all(status == 200 for status, _ in results), results
-    for line in batches.read_text().splitlines():
-        shapes = json.loads(line)["shapes"]
-        assert len({tuple(s) for s in shapes}) == 1, shapes
+def test_pages_of_two_shapes_share_a_batch() -> None:
+    """THE LIVE-BOOK FINDING. Scans differ by a few pixels per page, and a
+    batcher that needed twins read a book one row at a time. The batcher is
+    driven directly here, with the reader held on a gate, so the queue's
+    contents at the moment of the take are known rather than raced."""
+    import threading
+
+    taken: list[list[tuple[int, int]]] = []
+    gate = threading.Event()
+    first_started = threading.Event()
+
+    class HeldReader:
+        def read_batch(self, jobs):
+            taken.append([job.shape for job in jobs])
+            if len(taken) == 1:
+                first_started.set()
+                gate.wait(10)
+            return [
+                mlx_vlm_serve.Row(text="x", finish_reason="stop", prompt_tokens=1, completion_tokens=1)
+                for _ in jobs
+            ]
+
+    batcher = mlx_vlm_serve.Batcher(HeldReader(), width=2, log=lambda line: None)
+    dummy = mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, shape=(1, 1))
+    batcher.submit(dummy)
+    assert first_started.wait(10)
+    # Three pages of two sizes wait while the first batch is held.
+    waiting = [
+        mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, shape=(160, 100)),
+        mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, shape=(160, 120)),
+        mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, shape=(160, 100)),
+    ]
+    for job in waiting:
+        batcher.submit(job)
+    gate.set()
+    for job in waiting:
+        assert job.done.wait(10)
+    # Oldest two together, whatever their shapes; the third alone after.
+    assert taken[1] == [(160, 100), (160, 120)], taken
+    assert taken[2] == [(160, 100)], taken
 
 
 def test_a_failed_batch_fails_its_rows_and_the_next_page_still_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

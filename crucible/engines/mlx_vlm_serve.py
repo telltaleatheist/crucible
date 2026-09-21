@@ -34,11 +34,22 @@ Two shapes were tried on four real 739x1259 book pages against
   throws away and which the page contract needs (`finish_reason: "length"`
   is what tells a client to re-read a cut-off page at the full ceiling).
 
-So the queue is drained `--width` rows at a time. Rows in one batch must share
-an image shape (upstream prefills with `pad_to_uniform_size=False`), so a batch
-is the oldest waiting row plus up to width-1 more of the same shape; a page of
-another shape simply waits for the next batch. Width 1 is serial, and the
-number is the manifest's (`models/dots-ocr.toml`), not this file's.
+So the queue is drained `--width` rows at a time: the oldest waiting rows,
+whatever their shapes. Width 1 is serial, and the number is the manifest's
+(`models/dots-ocr.toml`), not this file's.
+
+THE SAME-SHAPE RULE IS GONE, AND A LIVE BOOK IS WHY. The first release batched
+only rows of one image size, inherited from upstream's whole-batch
+`prepare_inputs(..., pad_to_uniform_size=False)`. On Owen's first whole book
+through the Mac (2026-09-21) the pages were scans, every one a few pixels off
+its neighbours — 1698x1067, 1709x1060, 1685x1089 — so with eleven pages
+waiting the oldest rarely had a twin: 28 of 48 batches were ONE row and the
+book read at ~14 s/page, serial in all but name. Since the vision tower runs
+per image here, each row arrives at the language model with its own
+embeddings and its own length, and `BatchGenerator` batches rows of unequal
+length as any continuous-batching generator does (it sorts them by length and
+builds a mixed prompt batch). The constraint belonged to the batched
+`prepare_inputs` call this file no longer makes.
 
 THE VISION TOWER RUNS ONE IMAGE AT A TIME, AND THE METAL WATCHDOG IS WHY.
 Upstream embeds a whole batch in one `get_input_embeddings` call. Twelve
@@ -352,14 +363,12 @@ class Batcher:
             self._lock.notify()
 
     def _take(self) -> list[Job]:
-        """The oldest waiting row and up to width-1 more of its shape."""
+        """The oldest `width` waiting rows, whatever their shapes."""
         with self._lock:
             while not self._waiting:
                 self._lock.wait()
-            first = self._waiting[0]
-            batch = [job for job in self._waiting if job.shape == first.shape][: self._width]
-            for job in batch:
-                self._waiting.remove(job)
+            batch = self._waiting[: self._width]
+            del self._waiting[: self._width]
             return batch
 
     def _run(self) -> None:
@@ -375,8 +384,10 @@ class Batcher:
                     job.done.set()
                 continue
             elapsed = time.monotonic() - started
+            shapes = sorted({f"{job.shape[0]}x{job.shape[1]}" for job in batch})
             self._log(
-                f"batch of {len(batch)} at {batch[0].shape[0]}x{batch[0].shape[1]}: "
+                f"batch of {len(batch)} ({len(shapes)} shape{'s' if len(shapes) != 1 else ''}: "
+                f"{', '.join(shapes[:4])}{', ...' if len(shapes) > 4 else ''}): "
                 f"{elapsed:.1f}s, {elapsed / len(batch):.1f}s/page, "
                 f"finish={[row.finish_reason for row in rows]}, "
                 f"tokens={[row.completion_tokens for row in rows]}"
