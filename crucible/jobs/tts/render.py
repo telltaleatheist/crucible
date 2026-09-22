@@ -1217,6 +1217,10 @@ class TtsJobType:
             ],
         }
 
+        # On the RECORD, not only on the event: `chunks_total` beside
+        # `chunks_done` is what makes done/total one read after the stream, or
+        # the process, is gone.
+        ctx.expect_chunks(total)
         ctx.progress(
             0.0,
             f"rendering {total} chunk(s) at take {params.take}",

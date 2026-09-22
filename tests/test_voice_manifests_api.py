@@ -505,8 +505,10 @@ def test_delete_removes_a_pin_row_as_well_as_an_override(
     assert CUSTOM in load_all_voices()
     assert tts_client.delete(f"/v1/voices/{CUSTOM}", headers=auth).status_code == 204
     assert CUSTOM not in load_all_voices()
-    # And a second delete is a 404 rather than a quiet success.
-    assert tts_client.delete(f"/v1/voices/{CUSTOM}", headers=auth).status_code == 404
+    # And a second delete is 204 (2026-09-21, the ladder's ask): the state
+    # asked for is the state there is, so a retry after a lost answer is not a
+    # failure. 404 is kept for a SHIPPED voice, which this door cannot remove.
+    assert tts_client.delete(f"/v1/voices/{CUSTOM}", headers=auth).status_code == 204
 
 
 def test_an_override_row_still_says_it_is_one(
@@ -533,3 +535,120 @@ def test_a_packaged_voice_row_says_packaged(
     by_id = {row["id"]: row for row in rows}
     assert by_id["mistborn"]["manifest"] == "packaged"
     assert by_id["zeroshot"]["manifest"] == "engine"
+
+
+# ------------------------------------------------------- the ladder's lifecycle
+#
+# 2026-09-21: a DELETE of the screening voice raced a restart and `ladder-screen`
+# stayed registered for three hours. Two changes, both pinned here: DELETE is
+# idempotent on the state reached, and a local voice nothing holds says so.
+
+
+def test_removing_a_voice_that_is_simply_absent_is_204_and_repeatable(
+    tts_client: TestClient, auth: dict[str, str]
+) -> None:
+    """The state asked for is the state there is. A retry after a lost answer
+    must read as success, not as a second failure."""
+    for _ in range(2):
+        answer = tts_client.delete("/v1/voices/never-registered-here", headers=auth)
+        assert answer.status_code == 204, answer.text
+
+
+def test_removing_an_added_voice_twice_is_204_both_times(
+    tts_client: TestClient, auth: dict[str, str], no_hub: list[str]
+) -> None:
+    put = tts_client.put(f"/v1/voices/{CUSTOM}", json=a_voice(revision=SHA), headers=auth)
+    assert put.status_code == 200, put.text
+    assert CUSTOM in {row["id"] for row in tts_client.get("/v1/voices", headers=auth).json()}
+
+    first = tts_client.delete(f"/v1/voices/{CUSTOM}", headers=auth)
+    assert first.status_code == 204, first.text
+    second = tts_client.delete(f"/v1/voices/{CUSTOM}", headers=auth)
+    assert second.status_code == 204, second.text
+    assert CUSTOM not in {row["id"] for row in tts_client.get("/v1/voices", headers=auth).json()}
+
+
+def test_a_shipped_voice_is_still_refused_by_name_not_silently_204(
+    tts_client: TestClient, auth: dict[str, str]
+) -> None:
+    """Idempotency is about ABSENT voices. A voice that is here and is not this
+    server's own cannot be removed by this door, and 204 would say it was."""
+    answer = tts_client.delete(f"/v1/voices/{SHIPPED}", headers=auth)
+    assert answer.status_code == 404
+    assert answer.json()["error"]["code"] == "voice_not_custom"
+    assert SHIPPED in {row["id"] for row in tts_client.get("/v1/voices", headers=auth).json()}
+
+
+def a_local_voice(directory: Path) -> dict[str, Any]:
+    """`a_voice`, registered from a directory rather than a pin: what a
+    screening ladder PUTs for a checkpoint that has no repo."""
+    document = a_voice()
+    block = document["voice"]["backends"]["cuda-linux"]
+    del block["hf_repo"]
+    block["path"] = str(directory)
+    block["identity"] = "ds_v9_recut1_3510, asserted by the ladder"
+    return document
+
+
+def test_a_local_voice_nothing_holds_reads_orphan_true(
+    tts_client: TestClient, auth: dict[str, str], tmp_path: Path
+) -> None:
+    """After a restart every screening voice whose ladder ended without its
+    DELETE looks like this. The row says so; nothing deletes it."""
+    put = tts_client.put(f"/v1/voices/{CUSTOM}", json=a_local_voice(tmp_path), headers=auth)
+    assert put.status_code == 200, put.text
+    rows = {row["id"]: row for row in tts_client.get("/v1/voices", headers=auth).json()}
+    assert rows[CUSTOM]["source"] == "local"
+    assert rows[CUSTOM]["orphan"] is True
+    # A pinned voice is never an orphan: the pin owns it.
+    assert rows[SHIPPED]["orphan"] is False
+    # And the same rows verbatim on /v1/info (PHASE3-TTS.md section 8).
+    info = tts_client.get("/v1/info", headers=auth).json()
+    tts_rows = next(c["models"] for c in info["capabilities"] if c["job_type"] == "tts")
+    assert {row["id"]: row["orphan"] for row in tts_rows}[CUSTOM] is True
+    # Still there: the server garbage-collects nothing on its own judgment.
+    assert CUSTOM in {row["id"] for row in tts_client.get("/v1/voices", headers=auth).json()}
+
+
+def test_a_lease_or_a_queued_job_on_a_local_voice_is_not_an_orphan(
+    tts_client: TestClient, auth: dict[str, str], tmp_path: Path
+) -> None:
+    """The three holders, each one enough: a lease naming the voice, a job
+    naming it on the lane or in the queue, or residency."""
+    put = tts_client.put(f"/v1/voices/{CUSTOM}", json=a_local_voice(tmp_path), headers=auth)
+    assert put.status_code == 200, put.text
+
+    def orphan() -> bool | None:
+        rows = {row["id"]: row for row in tts_client.get("/v1/voices", headers=auth).json()}
+        return rows[CUSTOM]["orphan"]
+
+    assert orphan() is True
+
+    class _Lease:
+        subject = CUSTOM
+
+    class _Leases:
+        def current(self) -> Any:
+            return _Lease()
+
+    real_leases = tts_client.app.state.leases
+    tts_client.app.state.leases = _Leases()
+    try:
+        assert orphan() is False, "a lease naming the voice holds it"
+    finally:
+        tts_client.app.state.leases = real_leases
+    assert orphan() is True
+
+    store = tts_client.app.state.store
+    job = store.create("load-voice", CUSTOM, {})
+    # ON THE LANE'S OWN QUEUE, not dispatched: `enqueue` would hand the load to
+    # the engine, and what this test is about is the READ of a job that names
+    # the voice while waiting. `_pending` is the structure `queued()` snapshots.
+    store._pending.append(job.id)
+    try:
+        assert job in store.queued()
+        assert orphan() is False, "a job naming the voice holds it"
+    finally:
+        store._pending.remove(job.id)
+        store._jobs.pop(job.id, None)
+    assert orphan() is True

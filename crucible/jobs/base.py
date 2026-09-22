@@ -138,6 +138,16 @@ class Job:
     #: (`jobs/tts/render.py`), and a contract every client re-implements is a
     #: contract that drifts.
     chunks_done: list[int] = field(default_factory=list)
+    #: How many indexed chunks this job was asked for, stated by the job type
+    #: once it knows (`JobContext.expect_chunks`); None for a job whose
+    #: artifacts are not chunks. With `chunks_done` this makes done/total ONE
+    #: read of the record rather than a client's memory of what it sent — the
+    #: ladder's ask of 2026-09-21, after the only mid-run pace it could measure
+    #: was sglang's own log in /tmp, which died with the engine.
+    chunks_total: int | None = None
+    #: When the LAST chunk artifact landed (ISO-8601 UTC), None before any did.
+    #: Two reads of the record a minute apart are a pace, with no engine log.
+    chunk_at: str | None = None
     #: Extra keys a job type adds to its own `done` event. `load-model` puts
     #: `resident` here (PHASE2-LLM.md section 5); `artifacts` is always present.
     done_extra: dict[str, Any] = field(default_factory=dict)
@@ -407,6 +417,18 @@ class JobContext:
     def done_extra(self, **keys: Any) -> None:
         """Add keys to this job's `done` event, e.g. `resident` on a load."""
         self._job.done_extra.update(keys)
+
+    def expect_chunks(self, total: int) -> None:
+        """State how many indexed chunks this job will publish.
+
+        Called once, before the first `artifact(..., index=...)`, by a job type
+        whose artifacts are chunks. Written through with the record, so a
+        client reading `GET /v1/jobs/<id>` after a restart still sees the
+        denominator beside `chunks_done`.
+        """
+        if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+            raise ValueError(f"chunks_total must be a non-negative int, got {total!r}")
+        self._loop.call_soon_threadsafe(self._store.record_chunks_total, self._job, total)
 
     def artifact(self, name: str, path: Path, *, index: int | None = None) -> Path:
         """Publish `path` as artifact `name`, with its provenance sidecar.

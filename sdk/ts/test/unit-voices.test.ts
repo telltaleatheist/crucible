@@ -105,7 +105,7 @@ const VOICE_ROW = {
   kind: 'checkpoint',
   language: 'en',
   narrator_engine: 'higgs-v3',
-  backend_supported: true,
+  orphan: null, backend_supported: true,
   installed: true,
   resident: false,
   loadable: true,
@@ -142,7 +142,7 @@ const UNSUPPORTED_VOICE_ROW = {
   id: 'mac-only-voice',
   kind: 'zeroshot',
   needs_reference: true,
-  backend_supported: false,
+  orphan: null, backend_supported: false,
   installed: false,
   loadable: false,
   reason: 'mac-only-voice.toml has no cuda-linux block; it declares [mlx-darwin]',
@@ -198,6 +198,7 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
         contextLengthNote: null,
       },
       needsReference: false,
+      orphan: null,
       pace: {
         paceCharsPerSec: 16.64,
         maxCharsPerSec: 21.63,
@@ -239,6 +240,7 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
       // A zero-shot row says a load must carry a clip, whatever this host can
       // serve: it is a fact about the KIND, not about the backend block.
       needsReference: true,
+      orphan: null,
       pace: {
         paceCharsPerSec: 15.0,
         maxCharsPerSec: 20.0,

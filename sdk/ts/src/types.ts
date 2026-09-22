@@ -730,6 +730,17 @@ export interface JobStatus {
    * once. Empty for a job whose artifacts are not indexed chunks.
    */
   readonly chunksDone: readonly number[];
+  /**
+   * How many indexed chunks the job was asked for, stated by the job type;
+   * `null` for a job whose artifacts are not chunks, and until a render has
+   * stated it. `chunksDone.length / chunksTotal` is done/total from one read.
+   */
+  readonly chunksTotal: number | null;
+  /**
+   * When the last chunk artifact landed (ISO-8601 UTC); `null` before any
+   * did. Two reads a minute apart are a pace, with no engine log to tail.
+   */
+  readonly chunkAt: string | null;
 }
 
 /** `DELETE /v1/jobs/{id}`. A running job ends `cancelled` at its next checkpoint. */
@@ -1337,6 +1348,15 @@ export interface VoiceInfo {
   readonly backendSupported: boolean;
   readonly installed: boolean;
   readonly resident: boolean;
+  /**
+   * A local (`path`) voice nothing holds: not resident, no lease naming it, no
+   * queued or running job naming it. After a restart that is every screening
+   * voice whose ladder ended without its DELETE. The server SAYS it and never
+   * acts on it; `DELETE /v1/voices/{id}` is idempotent, so the ladder can. `false`
+   * for every pinned voice (the pin owns it); `null` on a read that was not
+   * asked to decide.
+   */
+  readonly orphan: boolean | null;
   readonly loadable: boolean;
   /**
    * Why it is not loadable, in the server's words; `null` when it is loadable.

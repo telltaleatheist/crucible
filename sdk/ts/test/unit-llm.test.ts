@@ -87,7 +87,7 @@ const MODEL_ROW = {
   revision: REVISION,
   fingerprint: `qwen3.5-9b@${REVISION}`,
   modalities: ['text'],
-  backend_supported: true,
+  orphan: null, backend_supported: true,
   installed: true,
   resident: true,
   loadable: true,
@@ -146,7 +146,7 @@ test('models() reads every field /v1/models promises', async () => {
         revision: 'b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
         fingerprint: 'qwen3.8-27b@b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
         modalities: ['text', 'image'],
-        backend_supported: true,
+        orphan: null, backend_supported: true,
         installed: false,
         resident: false,
         loadable: false,
@@ -167,7 +167,7 @@ test('models() reads every field /v1/models promises', async () => {
         // Never null, even here: what a model is offered FOR is the same answer
         // on a host that cannot serve it at all.
         modalities: ['text'],
-        backend_supported: false,
+        orphan: null, backend_supported: false,
         installed: false,
         resident: false,
         loadable: false,
@@ -727,6 +727,7 @@ test('a provenance sidecar names the weights, not only the model', async () => {
         params: {},
         started: '2026-09-13T00:00:00+00:00',
         finished: '2026-09-13T00:04:00+00:00', client_ref: null, interrupted_at: null, chunks_done: [],
+        chunks_total: null, chunk_at: null,
       }),
     );
   };
@@ -754,6 +755,7 @@ test('a provenance model block with no fingerprint is a protocol error', async (
         params: {},
         started: null,
         finished: '2026-09-13T00:04:00+00:00', client_ref: null, interrupted_at: null, chunks_done: [],
+        chunks_total: null, chunk_at: null,
       }),
     );
   };

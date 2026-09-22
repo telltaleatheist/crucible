@@ -180,10 +180,45 @@ def describe_voices(config: Config, residency: Residency) -> list[ModelDescripto
     return rows
 
 
+def _orphan(
+    voice_id: str, source: str | None, residency: Residency,
+    *, leases: Any | None, store: Any | None,
+) -> bool | None:
+    """See `voice_rows`: a local voice nothing holds, or None when not asked."""
+    if leases is None or store is None:
+        return None
+    # `VoiceBackendSpec.source` is `"pinned"` or `"local"`; a row with no
+    # source is a backend this host does not have, which nothing here holds
+    # and nothing here registered from a path either.
+    if source != "local":
+        return False
+    if residency.is_resident(KIND_TTS, voice_id):
+        return False
+    lease = leases.current()
+    if lease is not None and lease.subject == voice_id:
+        return False
+    running = store.running
+    if running is not None and running.model == voice_id:
+        return False
+    return not any(job.model == voice_id for job in store.queued())
+
+
 def voice_rows(
-    config: Config, backend: Any, residency: Residency
+    config: Config, backend: Any, residency: Residency,
+    *, leases: Any | None = None, store: Any | None = None,
 ) -> list[dict[str, Any]]:
     """`GET /v1/voices` — PHASE3-TTS.md section 2.
+
+    **`orphan` (2026-09-21, the ladder's ask).** A voice registered from a
+    `path` — a directory somebody else put there — with nothing holding it:
+    not resident, no lease naming it, no queued or running job naming it. After
+    a restart that is every screening voice whose ladder ended without its
+    DELETE, and the row SAYS so rather than the server deciding for it: nothing
+    here garbage-collects, a person or the ladder sends the DELETE (which is
+    now safe to repeat). A pinned voice is never an orphan — the pin owns it.
+    Decided only when the caller hands over `leases` and `store`, which the two
+    wire doors do; a caller with neither gets `None` on the row, meaning "not
+    asked here", never `False`.
 
     These same rows are the `tts` capability's rows in `GET /v1/info`: one shape,
     one producer, the same rule and the same reason as `llm`'s models. One voice,
@@ -317,6 +352,9 @@ def voice_rows(
                 "backend_supported": supported,
                 "installed": is_installed,
                 "resident": residency.is_resident(KIND_TTS, manifest.id),
+                "orphan": _orphan(
+                    manifest.id, source, residency, leases=leases, store=store
+                ),
                 "loadable": reason is None,
                 "reason": reason,
                 # These four live in the backend block this host may not have,

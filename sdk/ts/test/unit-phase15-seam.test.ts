@@ -611,7 +611,7 @@ const PRE_FIELD_VOICE = {
   kind: 'checkpoint',
   language: 'en',
   narrator_engine: 'higgs-v3',
-  backend_supported: true,
+  orphan: null, backend_supported: true,
   installed: true,
   resident: false,
   loadable: true,

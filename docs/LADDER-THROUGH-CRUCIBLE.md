@@ -6,10 +6,14 @@ list from the ladder's side, checked item by item against Crucible `main` (1.0.2
 and narrator at the pin (bookforge `52807873`), with what is already there, what is
 left, and which of the leftovers is a ruling rather than code.
 
-The one-line summary: **the ladder box is on a stale narrator env.** Items 1, 3 and
-the lease half of 5 are built at the pins above; the box has not seen them. Items 2
-and 4 are half-built and need a keeper and two fields. Item 5's lifecycle half is a
-ruling. Item 7 is the acceptance run and needs the card.
+**Status, 2026-09-21 late.** Items 1, 3 and the lease half of 5 were already built at
+the pins above (the box's measurements predate the narrator repin; its env is now AT
+the pin, verified by `direct_url.json`, so both are "verify on the next run"). Items 2,
+4 and the lifecycle half of 5 were built the same night, Owen having said "go ahead
+and build it out": the seed keeper (bookforge `61357023`), `chunks_total`/`chunk_at` on
+the job read and the DELETE ruling (Crucible 1.0.22). Item 7 is the acceptance run and
+needs the card. Owen also ruled the same day that ladders stop at 1,600 characters
+(deathstalker at 1,200), so the acceptance baseline is re-derived over the same rungs.
 
 ## 1. Judging and batching are separate levers — BUILT, not on the box
 
@@ -28,17 +32,18 @@ On `mlx-darwin` the width comes from the MLX `BatchGenerator` tiers, the same br
 **Left:** nothing to write. The acceptance run (7) is what proves `#running-req`
 reaches the voice's `max_num_seqs`, and it needs the reinstalled env.
 
-## 2. Seed lanes survive batching — RULE HOLDS, KEEPER OWED
+## 2. Seed lanes survive batching — BUILT (keeper)
 
 The seed is `seed + index`, shifted by the take (`HiggsV3Engine._seed_for` and
 `_request_seed`; the fake engine restates the rule at `serve/fake_engine.py:549-558`).
 Batch position, batch size and completion order do not enter it, and the unjudged plan
 pins `attempt` to 0, so cell `(index, take)` draws the same seed on every checkpoint.
 
-**Left:** one explicit keeper, on the batched driver, that renders the same rows in two
-batch orders and at two widths and asserts every chunk's recorded `seed` is identical.
-The fake engine already records `seed` per render (`_record_render`), so the test is
-cheap. Without it the invariant is a comment.
+**Built:** `python/narrator/tests/test_higgs_seed_lanes.py` (bookforge `61357023`), five
+tests through the Higgs fake, which applies the real arms' rule and records the seed each
+render drew at: the rule holds for every cell; row order and widths 1/4/12 draw the same
+seed; takes are disjoint lanes across the bank; a resumed subset draws what the whole run
+would have; an unseeded engine stays unseeded. Test only — the narrator pin stands.
 
 ## 3. Each chunk lands on disk as it completes — BUILT
 
@@ -53,17 +58,18 @@ this version; before believing it, read `artifacts/` during a run on 1.0.21.
 **Left:** nothing to write. The ladder client's skip-if-artifact-exists already makes an
 interrupted job resumable against `chunks_done`.
 
-## 4. Per-chunk progress in the job record — HALF
+## 4. Per-chunk progress in the job record — BUILT (1.0.22)
 
 `GET /v1/jobs/<id>` carries `chunks_done` (sorted indexes, `api.py:3995`) and the
 `progress` fraction and message. The events stream carries a `chunk` event per chunk.
 
-**Left:** two fields on the job read — `chunks_total` (the request's row count, so
-done/total is one read and not a client's memory of what it sent) and `chunk_at`,
-the wall-clock stamp of the last chunk event, so pace is measurable from the record
-without tailing an engine log that dies with the engine.
+**Built (1.0.22):** `chunks_total` (stated by the render through
+`JobContext.expect_chunks`, null for a job whose artifacts are not chunks) and
+`chunk_at` (when the last chunk artifact landed, UTC) on `GET /v1/jobs/<id>`, written
+through with the record so a restart reads them back, and on the SDK's `Job`
+(`chunksTotal`, `chunkAt`). Two reads a minute apart are a pace, with no engine log.
 
-## 5. Lifecycle — ONE RULING, ONE ALREADY-BUILT
+## 5. Lifecycle — BUILT (1.0.22), the read-only orphan flag included
 
 **The lease across takes is built.** `POST /v1/models/{id}/lease {act, ttl_seconds}`
 takes whatever is resident — there is no `kind` on the body; the server reads it off
@@ -88,8 +94,13 @@ no home manifest to remove (`api.py:2415`). A DELETE that raced a restart got ne
   reason), never deleted on the server's own judgment. Garbage collection is a person's
   or the ladder's `DELETE`, which is now safe to repeat.
 
-Needs Owen's yes on the third bullet before it is code: it is the only one that changes
-what a read says about somebody else's voice.
+Built as proposed under Owen's "go ahead and build it out" (2026-09-21): `DELETE
+/v1/voices/{id}` answers 204 for an absent voice and keeps 404 `voice_not_custom` for a
+shipped one; every voice row carries `orphan` (true for a local voice nothing holds,
+false for a pinned one, null on a read not asked to decide), on `/v1/voices` and
+verbatim on `/v1/info`, and the SDK's `VoiceInfo.orphan` reads it. Nothing is deleted
+on the server's own judgment. If Owen answers the relayed question differently, the
+flag is one read and the 204 is one branch.
 
 ## 6. Keep what works — UNCHANGED
 
@@ -110,7 +121,7 @@ One run over `bank_ds_len.json` (128 prompts × takes 0–3) against
   with them;
 - the per-cell seeds identical to the direct-path renders the box holds.
 
-**Order of work:** reinstall the narrator env on the ladder box (the pin, not a copy) →
-the seed keeper (2) → `chunks_total` / `chunk_at` (4) → the DELETE ruling (5) → the
-acceptance run (7) in the GPU slot Owen names. The GPU is training `ds_v10` tonight; the
+**Order of work, as it went:** the box's env was found AT the pin (no reinstall) → the
+seed keeper (2) → `chunks_total` / `chunk_at` (4) → the DELETE ruling (5) → 1.0.22 cut and
+deployed → the acceptance run (7) in the GPU slot Owen names. The GPU is training `ds_v10` tonight; the
 slot is tomorrow or later and is asked for, never taken.

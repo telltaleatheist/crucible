@@ -339,3 +339,16 @@ def test_bad_input_names_are_refused(
     )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_input_name"
+
+
+def test_the_job_read_states_the_denominator_and_the_stamp(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    """`chunks_total` and `chunk_at` are on every job read — null for a job
+    whose artifacts are not chunks (echo's are files, not `<index>.flac`), so a
+    client reads the same shape for every type and null means what it says."""
+    job_id = submit(client, auth, {"alpha.bin": ALPHA}, delay_ms=0)
+    state = wait_for_terminal(client, auth, job_id)
+    assert "chunks_total" in state and "chunk_at" in state
+    assert state["chunks_total"] is None
+    assert state["chunk_at"] is None

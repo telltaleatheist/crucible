@@ -101,6 +101,7 @@ from .voicerepo import Pin as VoicePin
 from .voices import (
     NARRATOR_ENGINE_SAMPLING,
     VoiceError,
+    load_all_voices,
     remove_home_voice,
     write_home_voice,
 )
@@ -1103,7 +1104,10 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # door's job type is literally `tts`, so the loop has already filled
             # this key from its `describe_models()`. The richer row wins, which
             # is the same rule applied one level down.
-            rows_for["tts"] = voice_rows(config, backend, residency)
+            rows_for["tts"] = voice_rows(
+                config, backend, residency,
+                leases=app.state.leases, store=app.state.store,
+            )
         capabilities = [
             {"job_type": capability, "models": rows}
             for capability, rows in sorted(rows_for.items())
@@ -2165,7 +2169,10 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         """Every voice this build has a manifest for, and where it stands here."""
         if not config.enable_tts:
             raise disabled_error("tts", config)
-        return voice_rows(config, backend, residency)
+        return voice_rows(
+            config, backend, residency,
+            leases=request.app.state.leases, store=request.app.state.store,
+        )
 
     def _pinned_backends(live: Config, block: dict[str, Any]) -> dict[str, Any]:
         """Fill in a missing `revision` per backend from the repo's head sha.
@@ -2300,7 +2307,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         except VoiceError as exc:
             raise ApiError(400, "voice_invalid", str(exc)) from exc
 
-        rows = [row for row in voice_rows(live, backend, residency)
+        rows = [row for row in voice_rows(live, backend, residency,
+                                          leases=app.state.leases,
+                                          store=app.state.store)
                 if row.get("id") == voice_id]
         return {"voice": rows[0] if rows else None, "path": str(pin.path)}
 
@@ -2405,7 +2414,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         except VoiceError as exc:
             raise ApiError(400, "voice_invalid", str(exc)) from exc
 
-        rows = [row for row in voice_rows(live, backend, residency)
+        rows = [row for row in voice_rows(live, backend, residency,
+                                          leases=app.state.leases,
+                                          store=app.state.store)
                 if row.get("id") == manifest.id]
         # The row is drawn from the same reader every other caller uses, so what
         # comes back is what `GET /v1/voices` will say — not an echo of the
@@ -2448,14 +2459,24 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         except VoiceError as exc:
             raise ApiError(400, "voice_invalid", str(exc)) from exc
         if not gone_pin and not gone_voice:
-            raise ApiError(
-                404,
-                "voice_not_custom",
-                f"this server has no pin and no manifest of its own for "
-                f"{voice_id!r}. Only voices added here can be removed here; the "
-                "packaged set is the install and is restored by it",
-                {"id": voice_id},
-            )
+            # IDEMPOTENT ON THE STATE REACHED (the ladder's ask, 2026-09-21): a
+            # DELETE whose answer was lost to a restart is sent again, and the
+            # second one must not read as a failure — `ladder-screen` stayed
+            # registered three hours because it did. So a voice this server
+            # simply does not have answers 204: the state asked for is the
+            # state there is. The 404 stays for a voice that IS here and is not
+            # this server's own — packaged, engine-base or a shipped pin —
+            # because that one cannot be removed by this door and saying 204
+            # would be a lie about it.
+            if voice_id in load_all_voices():
+                raise ApiError(
+                    404,
+                    "voice_not_custom",
+                    f"{voice_id!r} is a shipped voice here, not one this server "
+                    "added, and this door removes only what was added. The "
+                    "packaged set is the install and is restored by it",
+                    {"id": voice_id},
+                )
         return Response(status_code=204)
 
     # -------------------------------------------------------- tts streaming
@@ -3968,6 +3989,8 @@ _JOB_STATE_KEYS: frozenset[str] = frozenset(
         "client_ref",
         "interrupted_at",
         "chunks_done",
+        "chunks_total",
+        "chunk_at",
     }
 )
 
@@ -3993,6 +4016,11 @@ def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
         "client_ref": job.client_ref,
         "interrupted_at": job.interrupted_at,
         "chunks_done": sorted(job.chunks_done),
+        # DONE/TOTAL AND A PACE, FROM THE RECORD ALONE (2026-09-21, the ladder's
+        # ask): the denominator the job type stated, and when the last chunk
+        # landed. Both null for a job whose artifacts are not chunks.
+        "chunks_total": job.chunks_total,
+        "chunk_at": job.chunk_at,
         # THE TERMINAL FACTS, READABLE AFTER THE STREAM IS GONE (2026-09-20).
         # `done_extra` is what a job adds to its own `done` event — `resident`
         # for a loader, and since the lease moved onto the load, `lease_id`. A

@@ -914,6 +914,11 @@ export class CrucibleClient {
           return entry;
         },
       ),
+      // Stated by the server since 1.0.22, demanded here for lockstep's reason:
+      // null is a statement (not a chunked job, or none landed yet); absent is
+      // an older server, and this SDK does not run against one.
+      chunksTotal: nullableNum(body, 'chunks_total', 'job'),
+      chunkAt: nullableStr(body, 'chunk_at', 'job'),
     };
   }
 
@@ -2993,6 +2998,11 @@ function readVoiceInfo(
     id: str(entry, 'id', where),
     display: str(entry, 'display', where),
     kind: oneOf(str(entry, 'kind', where), VOICE_KINDS, `${where}.kind`),
+    // A local (`path`) voice nothing holds — not resident, no lease, no job —
+    // after a restart: the ladder's screening voice whose DELETE was lost. Said
+    // by the server, never acted on by it; null means "not decided on this
+    // read" (a producer without the holders), false on every pinned voice.
+    orphan: nullableBool(entry, 'orphan', where),
     language: str(entry, 'language', where),
     narratorEngine: str(entry, 'narrator_engine', where),
     backendSupported: bool(entry, 'backend_supported', where),

@@ -218,3 +218,64 @@ def test_restoring_twice_does_not_duplicate_anything(tmp_path: Path) -> None:
     store = _store(tmp_path)
     assert store.restore() == ["hij456"]
     assert store.restore() == []
+
+
+# ------------------------------------------- done/total and a pace, on the record
+
+
+def test_the_denominator_and_the_last_chunk_stamp_survive_with_it(tmp_path: Path) -> None:
+    """The ladder's ask (2026-09-21): done/total and a pace from the RECORD, not
+    from an engine log in /tmp that died with the engine."""
+    _record(
+        tmp_path / "pqr678",
+        status=RUNNING,
+        artifacts=["0.flac", "1.flac"],
+        chunks_done=[0, 1],
+        chunks_total=128,
+        chunk_at="2026-09-22T02:30:08+00:00",
+    )
+    store = _store(tmp_path)
+    store.restore()
+    job = store.get("pqr678")
+    assert job.chunks_total == 128
+    assert job.chunk_at == "2026-09-22T02:30:08+00:00"
+
+
+def test_a_record_written_before_the_fields_existed_reads_them_as_null(tmp_path: Path) -> None:
+    """A job.json from 1.0.21 has neither key. Null, not a KeyError and not 0 —
+    0 would read as "asked for nothing"."""
+    _record(tmp_path / "stu901", status=RUNNING)
+    store = _store(tmp_path)
+    store.restore()
+    job = store.get("stu901")
+    assert job.chunks_total is None
+    assert job.chunk_at is None
+
+
+def test_publishing_a_chunk_stamps_the_record_and_writes_it_through(tmp_path: Path) -> None:
+    """`expect_chunks` lands the denominator; each indexed artifact moves the
+    stamp; both are on disk before the next chunk, which is what a restart reads."""
+    store = _store(tmp_path)
+    job = store.create("tts", "deathstalker", {})
+    assert job.chunks_total is None and job.chunk_at is None
+
+    store.record_chunks_total(job, 3)
+    assert job.chunks_total == 3
+    store.record_artifact(job, "0.flac", index=0)
+    first = job.chunk_at
+    assert first is not None
+    store.record_artifact(job, "1.flac", index=1)
+    assert job.chunk_at is not None and job.chunk_at >= first
+    # An artifact that is not a chunk moves nothing.
+    store.record_artifact(job, "notes.json")
+    assert job.chunk_at is not None and sorted(job.chunks_done) == [0, 1]
+
+    on_disk = json.loads((job.dir / "job.json").read_text(encoding="utf-8"))
+    assert on_disk["chunks_total"] == 3
+    assert on_disk["chunk_at"] == job.chunk_at
+
+    again = _store(tmp_path)
+    again.restore()
+    recovered = again.get(job.id)
+    assert recovered.chunks_total == 3
+    assert recovered.chunk_at == job.chunk_at

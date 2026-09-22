@@ -662,12 +662,22 @@ class JobStore:
         for waiter in self._subscribers.get(job.id, []):
             waiter.set()
 
+    def record_chunks_total(self, job: Job, total: int) -> None:
+        """`JobContext.expect_chunks`: the denominator, on the record and on disk."""
+        job.chunks_total = int(total)
+        self._persist(job)
+
     def record_artifact(self, job: Job, name: str,
                         index: int | None = None) -> None:
         if name not in job.artifacts:
             job.artifacts.append(name)
-        if index is not None and index not in job.chunks_done:
-            job.chunks_done.append(index)
+        if index is not None:
+            if index not in job.chunks_done:
+                job.chunks_done.append(index)
+            # The moment THIS chunk landed, not the event's own stamp: two
+            # reads of the record are a pace only if the field means "the last
+            # chunk", and the event log is not on the record read.
+            job.chunk_at = utcnow()
         self.append_event(job, "artifact", {"name": name})
         # WRITTEN THROUGH, because this is the moment the job is worth
         # recovering. A render publishes each chunk as narrator answers it, so
@@ -785,6 +795,11 @@ class JobStore:
             client_ref=document.get("client_ref"),
             interrupted_at=interrupted_at,
             chunks_done=[int(i) for i in (document.get("chunks_done") or [])],
+            chunks_total=(
+                None if document.get("chunks_total") is None
+                else int(document["chunks_total"])
+            ),
+            chunk_at=document.get("chunk_at"),
             done_extra=dict(document.get("done_extra") or {}),
         )
         return job
@@ -853,6 +868,8 @@ class JobStore:
             "error": job.error,
             "artifacts": list(job.artifacts),
             "chunks_done": sorted(job.chunks_done),
+            "chunks_total": job.chunks_total,
+            "chunk_at": job.chunk_at,
             "created": job.created,
             "started": job.started,
             "finished": job.finished,
