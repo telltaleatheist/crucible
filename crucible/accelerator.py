@@ -7,7 +7,10 @@ than competing for it. There is no eviction of other people's processes, ever.
                  of ours holding more than 1 GiB is `accelerator_busy`, named.
                  Then `nvidia-smi --query-gpu=memory.free` against the manifest's
                  estimate — short is `insufficient_memory`, naming both numbers.
-    mlx-darwin   the same two questions asked of free unified memory.
+    mlx-darwin   ROOM only, and room is SIZED, not sampled: the estimate against
+                 unified memory less the desktop allowance — the capability walk's
+                 own `available_bytes`. What `vm_stat` calls free is reported,
+                 never the reason: macOS pages an app out for a Metal allocation.
     llama-windows the SECOND question only — is there ROOM — asked of the Windows
                  driver, or, on a machine with no NVIDIA driver at all, of system
                  RAM, which is where a GGUF on the CPU allocates from
@@ -97,6 +100,7 @@ from .backend import (
     nvidia_smi_path,
     physical_memory_figures,
 )
+from .capability import available_bytes
 from .errors import ApiError, CrucibleError, NoViableBackend
 
 GIB = 1024 ** 3
@@ -642,6 +646,48 @@ def guard(
                 "desktop_allowance_bytes": desktop_allowance_bytes,
             },
         )
+
+    if backend_kind == MLX_DARWIN:
+        # A UNIFIED POOL IS SIZED, NOT SAMPLED (Owen, 2026-09-22: *"it shouldnt
+        # put a gate on like that. theres actually plenty of memory available.
+        # it should just work."*).
+        #
+        # This used to refuse against `vm_stat`'s free + inactive + speculative
+        # + purgeable, which leaves out every ACTIVE page — Chrome, the editor,
+        # a Claude session. Those are not a card's squatters: macOS compresses
+        # and pages them out the moment a Metal allocation needs the room, which
+        # is what a unified pool is. So a 64 GB Studio with a browser open read
+        # "37.5 GiB free" and refused the 8-bit 27B (44.1 GiB) that the
+        # capability walk on the same machine had SELECTED for translate, off
+        # the same manifest, a minute earlier. Two owners of one question, and
+        # they disagreed.
+        #
+        # The question has one owner now, and it is the walk's: the pool a
+        # model may take is the machine less the operator's desktop allowance
+        # (`capability.py`, `config.default_desktop_allowance_bytes`). Crucible
+        # holds one resident at a time and evicts it before a load, so nothing
+        # of ours stays beside the incoming model to subtract. The sample is
+        # still read and still reported in `detail`, where it informs; it no
+        # longer decides.
+        room = available_bytes(state.total_bytes, desktop_allowance_bytes)
+        if need_bytes > room:
+            raise ApiError(
+                409,
+                "insufficient_memory",
+                f"cannot load {model_id!r}: it needs {need_bytes / GIB:.1f} GiB and "
+                f"this Mac gives a model {room / GIB:.1f} GiB "
+                f"({state.total_bytes / GIB:.1f} GiB unified memory less the "
+                f"{desktop_allowance_bytes / GIB:.1f} GiB desktop allowance)",
+                {
+                    "model": model_id,
+                    "needed_bytes": need_bytes,
+                    "room_bytes": room,
+                    "free_bytes": state.free_bytes,
+                    "total_bytes": state.total_bytes,
+                    "desktop_allowance_bytes": desktop_allowance_bytes,
+                },
+            )
+        return state
 
     effective_free = state.free_bytes + reclaimable_bytes
     if effective_free < need_bytes:

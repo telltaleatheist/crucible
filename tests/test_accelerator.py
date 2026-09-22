@@ -396,15 +396,58 @@ def test_the_27b_on_a_24_gib_card_is_insufficient_memory(
     assert error.details["free_bytes"] == 22 * GIB
 
 
-def test_unified_memory_is_checked_the_same_way(
+def test_unified_memory_is_sized_not_sampled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_mac(monkeypatch, available=30 * GIB)
-    guard("mlx-darwin", model_id="qwen3.5-9b", need_bytes=19 * GIB)
+    """The Mac's room is the pool less the allowance — never what `vm_stat` says
+    is free at this instant.
+
+    Owen, 2026-09-22: the Studio refused `qwen3.8-27b-8bit` (44.1 GiB) with
+    "37.5 GiB free of 64.0 GiB" while a browser was open, though the capability
+    walk on the same machine had SELECTED that model for translate. Active pages
+    are an app macOS will page out for the load, not a squatter.
+    """
+    fake_mac(monkeypatch, available=int(37.5 * GIB))
+    allowance = 16 * GIB
+    state = guard(
+        "mlx-darwin",
+        model_id="qwen3.8-27b-8bit",
+        need_bytes=47_320_162_000,
+        desktop_allowance_bytes=allowance,
+    )
+    assert state.free_bytes == int(37.5 * GIB), "the sample is still reported"
+
+
+def test_unified_memory_still_refuses_what_the_pool_cannot_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Everything free, and still too big: 55.5 GB against 64 GiB less 16 GiB.
+    fake_mac(monkeypatch, available=63 * GIB)
     with pytest.raises(ApiError) as caught:
-        guard("mlx-darwin", model_id="qwen3.8-27b-8bit", need_bytes=47_320_162_000)
+        guard(
+            "mlx-darwin",
+            model_id="qwen3.8-27b-bf16",
+            need_bytes=55_518_912_853,
+            desktop_allowance_bytes=16 * GIB,
+        )
     assert caught.value.code == "insufficient_memory"
-    assert "30.0 GiB free" in caught.value.message
+    assert "gives a model 48.0 GiB" in caught.value.message
+    assert caught.value.details["room_bytes"] == 48 * GIB
+
+
+def test_the_guard_and_the_walk_answer_the_mac_the_same_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One owner: whatever the walk calls available, the guard lets load."""
+    from crucible.capability import available_bytes
+
+    total, allowance = 64 * GIB, 16 * GIB
+    fake_mac(monkeypatch, available=1 * GIB, total=total)
+    budget = available_bytes(total, allowance)
+    guard("mlx-darwin", model_id="m", need_bytes=budget, desktop_allowance_bytes=allowance)
+    with pytest.raises(ApiError):
+        guard("mlx-darwin", model_id="m", need_bytes=budget + 1,
+              desktop_allowance_bytes=allowance)
 
 
 def test_used_unified_memory_is_not_treated_as_a_squatting_process(
