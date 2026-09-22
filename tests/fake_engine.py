@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import select
 import socket
+import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -72,6 +73,13 @@ class _Handler(BaseHTTPRequestHandler):
     #: tell "twelve at once" from "twelve quickly".
     on_post: Callable[[], None] | None = None
     lock: threading.Lock | None = None
+    #: How many completions, from the first, this engine reads and then answers
+    #: by resetting the connection. From the proxy's side that is exactly what a
+    #: keep-alive socket the engine already closed looks like: the request goes
+    #: out, nothing comes back, the socket dies (`ReadError`, or
+    #: `RemoteProtocolError` when the FIN wins the race with the RST). Bound per
+    #: engine in `FakeEngine.start`; a one-element list so the count can move.
+    drops_left: list[int] | None = None
 
     def log_message(self, *args: Any) -> None:  # keep pytest output clean
         return
@@ -126,6 +134,19 @@ class _Handler(BaseHTTPRequestHandler):
             type(self).request_bytes.append(len(raw))
         if type(self).on_post is not None:
             type(self).on_post()
+
+        with type(self).lock:
+            drop = type(self).drops_left[0] > 0
+            if drop:
+                type(self).drops_left[0] -= 1
+        if drop:
+            # RST rather than FIN: linger of zero makes `close` reset the
+            # connection, which is the incident's shape (an empty `ReadError`).
+            self.connection.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+            )
+            self.close_connection = True
+            return
 
         if type(self).reject_response_format and "response_format" in body:
             # vLLM's own refusal shape for a schema it will not compile. The
@@ -270,6 +291,7 @@ class FakeEngine:
         answer_delay: float = 0.0,
         stream_forever: bool = False,
         on_post: Callable[[], None] | None = None,
+        drop_requests: int = 0,
     ) -> None:
         self._python = Path(python)
         self._log_path = Path(log_path)
@@ -288,6 +310,7 @@ class FakeEngine:
         #: while a load is genuinely in flight.
         self._hold = hold
         self._on_post = on_post
+        self._drop_requests = drop_requests
         #: Set once `ready()` has been entered, so a test knows the lane has
         #: reached the engine without polling on a sleep.
         self.warming_started = threading.Event()
@@ -330,6 +353,7 @@ class FakeEngine:
                 "request_bytes": [],
                 "lock": threading.Lock(),
                 "on_post": self._on_post,
+                "drops_left": [self._drop_requests],
             },
         )
         self._handler = handler

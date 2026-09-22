@@ -130,6 +130,33 @@ UI_DIR = Path(__file__).resolve().parent / "ui"
 PROXY_CONNECT_TIMEOUT = 10.0
 PROXY_READ_TIMEOUT = 900.0
 
+#: How long the proxy keeps an idle socket to an engine before letting it go.
+#: BELOW the engine's own keep-alive, and the gap is the whole point: vLLM's
+#: uvicorn closes an idle connection after `VLLM_HTTP_TIMEOUT_KEEP_ALIVE` = 5 s
+#: (vllm 0.29.0, vllm/envs.py:109), and httpx's pool keeps one for the same
+#: 5.0 s by default (`httpx.Limits().keepalive_expiry`), so at that boundary the
+#: proxy could hand a request to a socket the engine had just closed. On
+#: 2026-09-21 22:03:20 it did: one `ReadError` with an empty message from an
+#: engine that answered nine other completions in the same window, a 502 the
+#: client took as fatal, and a book's page read dropped its lease over it. At
+#: two seconds no pooled socket is ever older than the engine's patience.
+PROXY_KEEPALIVE_EXPIRY = 2.0
+
+#: Transport faults that mean the request was LOST ON THE WAY, not answered and
+#: not refused: a reset, a peer that closed a keep-alive socket under us, a
+#: half-written request. That is weather, not misconfiguration (CLAUDE.md,
+#: "harden transients"), so the proxy sends the request once more on a fresh
+#: socket — httpx discards the connection a network error happened on, and
+#: `PROXY_KEEPALIVE_EXPIRY` keeps the pool clear of the next stale one. Timeouts
+#: are NOT in this set on purpose: an engine that has not answered inside
+#: `PROXY_READ_TIMEOUT` is wedged, and repeating that would be a second 900 s.
+LOST_ON_THE_WIRE: tuple[type[Exception], ...] = (
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+)
+#: The whole budget, stated: the first attempt and one more. Not a loop.
+WIRE_ATTEMPTS = 2
+
 #: The proxy sends the client's own bytes, so it declares the type itself rather
 #: than letting httpx serialise a document and label it.
 JSON_HEADERS = {"Content-Type": "application/json"}
@@ -556,7 +583,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 read=PROXY_READ_TIMEOUT,
                 write=60.0,
                 pool=10.0,
-            )
+            ),
+            # Below the engine's keep-alive; see `PROXY_KEEPALIVE_EXPIRY`.
+            limits=httpx.Limits(keepalive_expiry=PROXY_KEEPALIVE_EXPIRY),
         )
         try:
             yield
@@ -2941,8 +2970,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     when_relayed=_after_the_stream(inflight, entry, chat_over),
                 )
             try:
-                upstream = await _post_unless_the_caller_leaves(
-                    client, url, forwarded, request, JSON_HEADERS
+                upstream = await _sent_across_the_wire(
+                    lambda: _post_unless_the_caller_leaves(
+                        client, url, forwarded, request, JSON_HEADERS
+                    ),
+                    where=f"the engine serving {resident.model_id!r}",
                 )
             except httpx.HTTPError as exc:
                 raise _engine_unreachable(resident, exc) from None
@@ -3146,6 +3178,52 @@ async def _post_unless_the_caller_leaves(
     return None
 
 
+async def _sent_across_the_wire(
+    attempt: Callable[[], Awaitable[Any]], *, where: str
+) -> Any:
+    """`attempt()`, sent once more on a fresh socket if the wire loses it.
+
+    `LOST_ON_THE_WIRE` says which faults qualify and why; `WIRE_ATTEMPTS` is the
+    entire budget. Every loss is said in the server log by name, first attempt
+    or last, so a socket that keeps dying is visible there rather than folded
+    into a success. A caller that hangs up during the first attempt is not a
+    loss: `_post_unless_the_caller_leaves` returns None for that, and None is
+    returned, never repeated.
+    """
+    attempt_number = 0
+    while True:
+        attempt_number += 1
+        try:
+            return await attempt()
+        except LOST_ON_THE_WIRE as exc:
+            detail = type(exc).__name__ + (f": {exc}" if str(exc) else "")
+            if attempt_number >= WIRE_ATTEMPTS:
+                print(
+                    f"crucible: lost on the wire to {where} ({detail}), attempt "
+                    f"{attempt_number} of {WIRE_ATTEMPTS}; giving up",
+                    file=sys.stderr,
+                )
+                raise
+            print(
+                f"crucible: lost on the wire to {where} ({detail}), attempt "
+                f"{attempt_number} of {WIRE_ATTEMPTS}; sending it again on a "
+                "fresh socket",
+                file=sys.stderr,
+            )
+
+
+def _attempts(exc: Exception) -> str:
+    """How many times the wire was tried, for the 502 that ends it.
+
+    A fault in `LOST_ON_THE_WIRE` only reaches a 502 after the whole budget;
+    anything else (a timeout) was tried once, and saying "on 2 attempts" of it
+    would be a lie.
+    """
+    if isinstance(exc, LOST_ON_THE_WIRE):
+        return f" on {WIRE_ATTEMPTS} attempts"
+    return ""
+
+
 def _caller_gone(resident: Any) -> JSONResponse:
     """What the proxy answers a caller who is no longer there to read it.
 
@@ -3172,7 +3250,8 @@ def _engine_unreachable(resident: Any, exc: Exception) -> ApiError:
         502,
         "engine_unreachable",
         f"the engine serving {resident.model_id!r} at {resident.base_url} did not "
-        f"answer: {type(exc).__name__}: {exc}. Its log is {resident.log_path}",
+        f"answer{_attempts(exc)}: {type(exc).__name__}: {exc}. Its log is "
+        f"{resident.log_path}",
     )
 
 
@@ -3369,13 +3448,19 @@ async def _proxy_stream(
         ),
     )
     try:
-        upstream = await client.send(request, stream=True)
+        # Opening the stream is the only moment a retry is honest here: nothing
+        # has been relayed yet. A socket that dies mid-stream is the client's
+        # to notice, because half of an answer has already gone out.
+        upstream = await _sent_across_the_wire(
+            lambda: client.send(request, stream=True),
+            where=f"the engine serving {resident.model_id!r}",
+        )
     except httpx.HTTPError as exc:
         raise ApiError(
             502,
             "engine_unreachable",
-            f"the resident engine at {url} did not answer: {type(exc).__name__}: "
-            f"{exc}. Its log is {log_path}",
+            f"the resident engine at {url} did not answer{_attempts(exc)}: "
+            f"{type(exc).__name__}: {exc}. Its log is {log_path}",
         ) from None
 
     if upstream.status_code != 200:
@@ -3573,7 +3658,8 @@ def _upstream_unreachable(name: str, url: str, exc: Exception) -> ApiError:
     return ApiError(
         502,
         "upstream_unreachable",
-        f"{name} did not answer at {url}: {type(exc).__name__}: {exc}",
+        f"{name} did not answer at {url}{_attempts(exc)}: {type(exc).__name__}: "
+        f"{exc}",
         {"upstream": name},
     )
 
@@ -3702,8 +3788,11 @@ async def _forward_to_upstream(
                 when_relayed=_close_inflight(inflight, entry),
             )
         try:
-            upstream = await _post_unless_the_caller_leaves(
-                client, url, forwarded.body, request, headers
+            upstream = await _sent_across_the_wire(
+                lambda: _post_unless_the_caller_leaves(
+                    client, url, forwarded.body, request, headers
+                ),
+                where=f"{name} at {url}",
             )
         except httpx.HTTPError as exc:
             raise _upstream_unreachable(name, url, exc) from None
@@ -3800,7 +3889,11 @@ async def _stream_from_upstream(
         ),
     )
     try:
-        upstream = await client.send(upstream_request, stream=True)
+        # `_proxy_stream`'s reason: before the first byte, a retry costs nothing.
+        upstream = await _sent_across_the_wire(
+            lambda: client.send(upstream_request, stream=True),
+            where=f"{name} at {url}",
+        )
     except httpx.HTTPError as exc:
         await when_relayed()
         raise _upstream_unreachable(name, url, exc) from None
