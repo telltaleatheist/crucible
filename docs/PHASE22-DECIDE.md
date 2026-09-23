@@ -423,6 +423,38 @@ here for the product door.
    path (as it grew batching)? (Proposed: refuse by name now; grow it when a Mac consumer
    exists.)
 
+## 8a. The live pass so far (2026-09-23, Owen's go for "a basic test with a small model")
+
+Not through the door — the running server is 1.0.23 — but through the reading the door
+calls, against a REAL vLLM: `Qwen/Qwen3.5-0.8B` on vLLM 0.29.0 in Crucible's own WSL llm
+env, launched by hand with the engine's environment (`VLLM_WSL2_ENABLE_PIN_MEMORY=1`,
+`VLLM_USE_FLASHINFER_SAMPLER=0`; without the first it dies `UVA is not available`, exactly
+as `engines/vllm.py` says) and this phase's flags, `--gpu-memory-utilization 0.15`, port
+8500, with Premiere holding the rest of the card. `tools/decide_probe.py` is the driver.
+
+- **`--logprobs-mode raw_logprobs` is what runs, and it is a distribution.** The anger
+  question at temperature 0: B 0.389 / C 0.343 / A 0.267, `<think>` at 0.0002 (thinking
+  is off), `label_mass` 0.999. Not one-hot. `usage.prompt_tokens_details.cached_tokens` is
+  reported (the flag works).
+- **The port's reader parses vLLM's reply and answers the worked example**: billing 0.694,
+  anger 2.08 "Frustrated but civil", urgent 0.893, churn 0.562 — identical, to four places,
+  to snap's `openai-chat` path run sequentially against the same engine. Per question
+  ~57–60 ms wall on the 0.8B for ~120-token prompts (the first, 195 ms, is warm-up).
+- **Batching moves the numbers.** snap at `--concurrency 16` (four questions batched by
+  vLLM) gave anger 0.406 where sequential gave 0.389; team/urgent/churn unchanged. That is
+  bf16 batch-composition noise, ~0.02 on this size, and a calibration built later must
+  tolerate it. Not a defect of either reader.
+- **vLLM's prefix cache on this hybrid model is 544-token blocks.** The engine sets
+  `attention block size to 544 tokens to ensure that attention page size >= mamba page
+  size` (log), so identical 121-token prompts sent three times cached 0 tokens every
+  time, while a 1,345-token prompt sent three times cached 1,088 (= 2 × 544) from the
+  second send (184 → 64 ms). So on vLLM the prime buys reuse in 544-token units: nothing
+  for a ticket-sized state, the full blocks of a long one. The door keeps priming (one
+  ~60 ms request); the win is where the state is long, which is where it matters.
+
+Still owed: the door itself on a card (needs a cut or a branch install), host mode
+(llama-server), the Mac (mlx-lm, cap 11), and Foundry's tile.
+
 ## 8. Owed after the build (the live pass)
 
 - The card: the worked example and snap's live fixtures through `crucible api decide`
