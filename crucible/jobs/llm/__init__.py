@@ -243,6 +243,9 @@ def _in_the_ollama_store(manifest: Any, backend_kind: str) -> dict[str, Any] | N
     """
     if backend_kind != LLAMA_WINDOWS:
         return None
+    # BASE-ONLY (PHASE22 section 2.9): an alias has no `[local]` — the loader
+    # refuses one (`weights_of_local`) — so it can never read as holding
+    # Ollama's blob, which is the base's text GGUF with no projector in it.
     local = manifest.local
     if local is None or getattr(local, "tag", None) is None:
         return None
@@ -377,13 +380,21 @@ def model_rows(
             elif not env.installed:
                 reason = f"the llm env is not ready: {env.detail}"
             elif not is_installed:
-                directory = weights.weights_dir(
-                    config, manifest.weights_family, manifest.id, backend_kind
-                )
-                reason = (
-                    f"no weights at {directory}"
-                    f" — run `crucible models pull {manifest.id}`"
-                )
+                if manifest.weights_of is not None:
+                    # WHICH HALF (PHASE22 section 2.9): the shared download, or
+                    # the alias's own files beside it. The store's refusal says
+                    # it in one sentence, so the row borrows it rather than
+                    # composing a second one.
+                    try:
+                        weights.require_installed(config, manifest, spec)
+                    except weights.WeightsError as exc:
+                        reason = str(exc)
+                else:
+                    directory = weights.subject_dir(config, manifest, backend_kind)
+                    reason = (
+                        f"no weights at {directory}"
+                        f" — run `crucible models pull {manifest.id}`"
+                    )
         row: dict[str, Any] = {
             "id": manifest.id,
             "family": manifest.family,
@@ -422,6 +433,13 @@ def model_rows(
             ),
             "backend_supported": supported,
             "installed": is_installed,
+            # ONE COPY ON DISK, TWO FIT ROWS (PHASE22 section 2.9). The model
+            # whose download this row's weights are, or null for a model that
+            # owns its own — never null-for-unknown: it is a fact of the
+            # manifest, the same on every host. An app shows "shares
+            # qwen3.5-9b's weights" from it, and knows that switching between
+            # the two ids is a full engine reload over the same files.
+            "weights_of": manifest.weights_of,
             # ----------------------------------- a copy this machine already has
             #
             # Owen, 2026-09-16: *"if its possible to use the ollama copies that

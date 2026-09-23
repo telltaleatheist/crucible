@@ -411,6 +411,66 @@ llama-windows (the projector), and `["text"]` on mlx-darwin — because the Mac'
 is Crucible's dots-specific page server, which computes no logprobs, and a model-wide
 `image` would have moved these weights onto it.
 
+**One copy on disk, two fit rows: `weights_of` (built 2026-09-23).** Owen: *"One copy on
+disk, two fit rows in the catalog — i think this is a fine way to do it."* The 9B's and the
+27Bs' rows are measured text-only and clean/translate depend on those numbers, so their
+vision forms are their own ids; `[model] weights_of = "<base id>"` makes such an id an
+ALIAS, whose weights are the base's download and nothing else.
+
+- **The store** (`crucible/weights.py`). `subject_dir(alias, backend)` is the base's folder
+  (`~/.crucible/models/<base>/<backend>`); every read, pull and removal asks it. Pulling the
+  alias pulls the base as the base (same stamp, same folder, never twice) and then only
+  `extra_files` — what the alias's block names beyond the base's: the llama-windows
+  `mmproj-F16.gguf`, nothing on a whole-repo backend. The alias's `installed` is the base's
+  stamp AND its own files present, so a base-only pull leaves it `installed: false` and the
+  catalog row's `missing_files` names the projector. A pulled alias writes
+  `crucible-alias-<id>.json` beside the base's stamp: that record, with the alias installed,
+  is what "an alias exists here" means — on cuda-linux it owns no file, and without the
+  record the base could never be refused there, nor the refusal ended.
+- **The loader** (`crucible/manifests.py`, `resolve_weights_of`) refuses by name:
+  `weights_of_unknown` (no such base beside it), `weights_of_chain` (an alias of an alias, a
+  base that is itself aliased elsewhere, or an alias of itself), `weights_of_backend_missing`
+  (a backend the base does not declare: there is no download there to share),
+  `weights_of_pin_mismatch` (`hf_repo`, `revision` or `file` differ on a shared backend),
+  `weights_of_fact_mismatch` (`family`, `params_b`, `trained_context`, `[defaults]` — facts
+  about the weights) and `weights_of_local` (the local form, and so the Ollama-store reuse,
+  is the base's: Ollama's blob has no projector for an alias). `modalities`, `serves`,
+  `context_default`, `display`, `description`, `engine_args` and memory are the alias's own.
+- **Removal.** Removing a base an alias holds is `weights_shared`, naming the alias — `409`
+  at `DELETE /v1/catalog/model/<base>` with `details.aliases`, the same sentence from
+  `crucible remove`, and the same refusal for a forced re-pull of the base (it empties the
+  folder). Removing the alias takes its extra files and its record, never a byte of the
+  base's. The three HOLDS (resident, lease, running task) are read through every id that
+  reads the folder (`catalog.ids_reading`): an alias on the card holds its base
+  `subject_in_use` whether or not it was ever pulled as itself. The Windows→WSL migration meets `weights_shared` on the base first (it sorts
+  first) and retries it the next round, after the alias has gone.
+- **Rows.** `/v1/models` and `/v1/info`'s llm rows carry `weights_of` (null for a base).
+  `/v1/catalog` rows carry `shares_weights_of` and `missing_files` (null on a non-alias);
+  the download's bytes are the base's row's, and the alias's `expected_bytes` /
+  `installed_bytes` count only its own files — 0 where it has none, `expected_bytes` null
+  where it has a projector no manifest states the size of.
+- **Classes.** `decide` lists the aliases (family match, `aliases=True`); `clean`,
+  `translate`, `simplify` and `analysis` do not — an alias is its base served dearer, and a
+  best-first walk would otherwise put `qwen3.5-9b-vl` ahead of `qwen3.5-9b` for text.
+- **The three aliases**: `qwen3.5-9b-vl`, `qwen3.8-27b-4bit-vl`, `qwen3.8-27b-8bit-vl`, each
+  serving `["text", "image"]` on cuda-linux (vLLM without the two text-only flags, with
+  `--limit-mm-per-prompt {"image": 8, "video": 0}`) and, where the base has one, llama-windows
+  (the base's GGUF + `mmproj-F16.gguf`); no mlx-darwin block. Memory in section 7.3.
+
+**Windows, Owen 2026-09-23 (verbatim):** *"the original intent with windows was that
+everything would go through WSL if it exists and nothing would exist on windows. no models.
+it will all be managed by the engine in WSL, and windows points/orchestrates to WSL. if there
+is no WSL, it all exists in windows crucible. everything is downloaded and managed there"*.
+So every `llama-windows` row, and every projector an alias adds there, serves only a machine
+with no WSL; on a machine with WSL the store and the engine are the guest's.
+
+**The one real cost, and the picker's rule.** A base and its alias are two engine
+configurations over the same files, so switching between them is a full engine reload (~20 s
+on the 9B). An app therefore picks ONE form per server session: **the vision form when it
+fits; otherwise the base for text and `qwen3.5-4b` for image decisions.** That rule is the
+app's, stated here for the picker's author; Crucible offers both rows and the fit table says
+which one this card can hold.
+
 ## 3. Tests (no GPU)
 
 - `tests/fake_engine.py` learns to answer `logprobs` on `/v1/chat/completions`: a test
@@ -496,6 +556,28 @@ here for the product door.
    reserve and ~0.85 GiB of tower carry across; on the 3090 Ti the 9B-vl comes to 18.18 +
    0.85 + 1.90 = 20.93 GiB of non-KV against 21.0 GiB of budget — about 2,000 tokens of KV,
    i.e. it does not usefully fit there, which the fit table would say by itself.
+
+   **RULED AND BUILT 2026-09-23** (Owen: *"One copy on disk, two fit rows in the catalog"*):
+   `[model] weights_of`, section 2.9. The three aliases' memory, COMPUTED as the base's number
+   plus the tower plus the 1.90 GiB (2_040_109_466 B) reserve — the tower term turning out to
+   be ZERO on both 27Bs, because their base figures already hold it:
+
+   | alias | block | estimate | how |
+   |---|---|---|---|
+   | `qwen3.5-9b-vl` | cuda-linux | 22_990_657_946 | base 20_950_548_480 (measured 09-12, tower resident) + 0 + reserve. Terms: weights 18_038_862_643 (calibrated 09-18, text-only) + tower 912_020_960 = 18_950_883_603; overhead 1_476_395_008 + reserve = 3_516_504_474; 40_337 B/token; 23_128_269_485 at 16384 (0.6% over) |
+   | | llama-windows | 11_945_668_128 | base 11_027_502_048 + `mmproj-F16.gguf` 918_166_080 (tree API @ 3885219b), declared |
+   | `qwen3.8-27b-4bit-vl` | cuda-linux | 23_673_280_922 | base 21_633_171_456 + 0 (its measured 17.68 GiB of card weights exceed the file's whole 17.29 GiB — tower resident, pre-`--language-model-only`) + reserve. Terms: 18_983_441_367 / 1_546_188_226 + reserve = 3_586_297_692 / 86_251; 23_982_875_443 at 16384 (1.3% over) |
+   | | llama-windows | 18_892_047_712 | base 17_964_440_224 + `mmproj-F16.gguf` 927_607_488 (tree API @ 4ca72078), declared |
+   | `qwen3.8-27b-8bit-vl` | cuda-linux | 50_725_919_915 | base 48_685_810_449 (computed) + 0 (its weights term is the whole repo's blobs; the base never passed `--language-model-only`) + reserve. Terms: 30_866_866_928 / 17_818_943_521 + reserve = 19_859_052_987 / 65_536; 51_531_226_283 at 12288 (1.6% over) |
+
+   The towers, re-read 2026-09-23: `Qwen/Qwen3.8-27B` @ 1d4bf0f2, `avyukth/Qwen3.8-27B-AWQ-INT4`
+   @ 5a2ee524 and `Qwen/Qwen3.8-27B-FP8` @ 017b9c7a all state vision_config depth 27, hidden
+   1152, intermediate 4304, 16 heads — the 9B's, bar `out_hidden_size` 5120 against 4096 — and
+   both 27B repos' shard headers sum `model.visual.*` to 921_460_192 B (the 9B: 912_020_960).
+   On the 3090 Ti's fit budget (25_757_220_864 − 3 GiB = 22_535_995_392 B) the 9B-vl's
+   intercept 22_467_388_077 leaves **1,700 tokens** of KV (the "~2,000" above, to the byte);
+   its `context_default` stays 16384, so the fit table refuses it there rather than a row
+   serving a context no client could use. Both 27B-vl intercepts exceed that budget outright.
 4. **The Mac**: if mlx-lm 0.31.3 cannot return top logprobs, is `decide_not_served` on
    mlx-darwin acceptable for this phase, or does Crucible's own page server grow a logprobs
    path (as it grew batching)? (Proposed: refuse by name now; grow it when a Mac consumer

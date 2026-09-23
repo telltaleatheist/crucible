@@ -99,12 +99,16 @@ def test_the_text_classes_offer_exactly_what_they_did(backend: str) -> None:
 
 @pytest.mark.parametrize("backend", [CUDA_LINUX, MLX_DARWIN, LLAMA_WINDOWS])
 def test_decide_offers_every_tier_best_first(backend: str) -> None:
+    # The `-vl` aliases (tests/test_weights_of.py) are in this list and in no
+    # text class's: same weights, served with the tower, dearer than the base.
     expected = {
-        CUDA_LINUX: ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b",
-                     "qwen3.5-4b", "qwen3.5-0.8b"],
+        CUDA_LINUX: ["qwen3.8-27b-8bit-vl", "qwen3.8-27b-8bit",
+                     "qwen3.8-27b-4bit-vl", "qwen3.5-9b-vl", "qwen3.8-27b-4bit",
+                     "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-0.8b"],
         MLX_DARWIN: ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b",
                      "qwen3.5-4b", "qwen3.5-0.8b"],
-        LLAMA_WINDOWS: ["qwen3.8-27b-4bit", "qwen3.5-9b", "qwen3.5-4b",
+        LLAMA_WINDOWS: ["qwen3.8-27b-4bit-vl", "qwen3.8-27b-4bit",
+                        "qwen3.5-9b-vl", "qwen3.5-9b", "qwen3.5-4b",
                         "qwen3.5-0.8b"],
     }[backend]
     assert ids("decide", backend) == expected

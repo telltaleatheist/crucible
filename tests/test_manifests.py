@@ -259,6 +259,9 @@ SHIPPED = [
     "dots-ocr", "qwen3.5-0.8b", "qwen3.5-4b", "qwen3.5-9b",
     "qwen3.8-27b-4bit", "qwen3.8-27b-8bit",
 ]
+# The vision forms (PHASE22 section 2.9), aliases that share their base's
+# download. Kept apart so every list above still says what it always said.
+ALIASES = ["qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl", "qwen3.8-27b-8bit-vl"]
 
 #: Each model's `context_default`. The two bf16 manifests carry Owen's pinned
 #: cleanup context; the 4-bit 27B carries the 98304 of his `qwen3.8:27b-24g`
@@ -325,13 +328,13 @@ BACKEND_CONTEXTS = {
 
 def test_this_build_ships_the_manifests_the_contracts_name() -> None:
     manifests = load_all_manifests()
-    assert sorted(manifests) == SHIPPED
+    assert sorted(manifests) == sorted(SHIPPED + ALIASES)
 
 
 def test_the_ids_sort_the_way_the_listing_shows_them() -> None:
     """`qwen3.8-27b-4bit` sits after `qwen3.8-27b-8bit`, not before it."""
     assert sorted(SHIPPED) == SHIPPED
-    assert list(load_all_manifests()) == SHIPPED
+    assert list(load_all_manifests()) == sorted(SHIPPED + ALIASES)
 
 
 def test_an_id_that_is_a_prefix_of_another_still_lists_in_id_order(

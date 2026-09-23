@@ -1305,6 +1305,10 @@ def cmd_remove(args: argparse.Namespace) -> int:
         )
     try:
         gone = subject.remove()
+    except weights.WeightsShared as exc:
+        # The door's code verbatim (PHASE22 section 2.9); the message already
+        # begins with it and names every alias holding the folder.
+        return _fail(str(exc))
     except weights.RemoveFailed as exc:
         return _fail(f"subject_remove_failed: {exc}")
     except CrucibleError as exc:

@@ -1474,6 +1474,21 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             )
         try:
             gone = subject.remove()
+        except weights.WeightsShared as exc:
+            # PHASE22 section 2.9: a base's folder is also an alias's. 409 and
+            # not 500 — nothing is broken, the subject is HELD, by models this
+            # refusal names so a caller can remove them first.
+            raise ApiError(
+                409,
+                "weights_shared",
+                str(exc),
+                {
+                    "kind": kind,
+                    "id": subject_id,
+                    "backend": exc.backend,
+                    "aliases": list(exc.aliases),
+                },
+            ) from None
         except weights.RemoveFailed as exc:
             raise ApiError(
                 500,
@@ -1514,31 +1529,48 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         "is the card busy at all", and a `denoise` separator on disk is not
         made undeletable by a `tts` render.
         """
+        # WHO READS THESE FILES (PHASE22 section 2.9): the subject, and every
+        # alias whose weights are its download. A `qwen3.5-9b-vl` on the card
+        # is serving `qwen3.5-9b`'s folder, so it holds the base exactly as
+        # the base itself would — whether or not the alias was ever pulled as
+        # itself (on cuda-linux it is installed by the base's pull alone).
+        readers = catalog.ids_reading(subject)
+
+        def through(holder_id: str) -> str:
+            return (
+                ""
+                if holder_id == subject.id
+                else f" ({holder_id}, which shares its weights)"
+            )
+
         resident = residency.resident
-        if resident is not None and resident.id == subject.id:
+        if resident is not None and resident.id in readers:
             return {
                 "kind": subject.kind,
                 "id": subject.id,
                 "who": (
                     f"it is the {KIND_NOUNS[resident.kind]} on the card right "
-                    "now; unload it first"
+                    f"now{through(resident.id)}; unload it first"
                 ),
                 "fact": "resident",
             }
         lease = request.app.state.leases.current()
-        if lease is not None and lease.subject == subject.id:
+        if lease is not None and lease.subject in readers:
             return {
                 "kind": subject.kind,
                 "id": subject.id,
                 "who": (
-                    f"{lease.client or 'a client'} holds a lease on it "
+                    f"{lease.client or 'a client'} holds a lease on it"
+                    f"{through(lease.subject)} "
                     f"until {lease.expires_at.isoformat()}"
                 ),
                 "fact": "lease",
                 **lease.receipt(),
             }
         running = request.app.state.tasks.running
-        if running is not None and _task_names(running, subject):
+        if running is not None and any(
+            _task_names(running, subject.kind, reader) for reader in readers
+        ):
             return {
                 "kind": subject.kind,
                 "id": subject.id,
@@ -1548,7 +1580,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             }
         return None
 
-    def _task_names(task: Any, subject: catalog.Subject) -> bool:
+    def _task_names(task: Any, kind: str, subject_id: str) -> bool:
         """Does this running task name this subject? Read off its REQUEST.
 
         The request is the task's own echo of what was asked (`Task.request`),
@@ -1557,15 +1589,15 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         `install` names none.
         """
         body = task.request
-        if body.get("kind") == subject.kind and body.get("id") == subject.id:
+        if body.get("kind") == kind and body.get("id") == subject_id:
             return True
         module = body.get("module")
         if isinstance(module, dict):
             for entry in module.get("subjects", []) or []:
                 if (
                     isinstance(entry, dict)
-                    and entry.get("kind") == subject.kind
-                    and entry.get("id") == subject.id
+                    and entry.get("kind") == kind
+                    and entry.get("id") == subject_id
                 ):
                     return True
         return False

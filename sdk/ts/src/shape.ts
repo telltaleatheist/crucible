@@ -135,6 +135,12 @@ export function strArray(object: Json, key: string, where: string): string[] {
   });
 }
 
+/** A string array the server may honestly answer `null` to. The key must be present. */
+export function nullableStrArray(object: Json, key: string, where: string): string[] | null {
+  if (field(object, key, where) === null) return null;
+  return strArray(object, key, where);
+}
+
 export function objectField(object: Json, key: string, where: string): Json {
   return asObject(field(object, key, where), `${where}.${key}`);
 }

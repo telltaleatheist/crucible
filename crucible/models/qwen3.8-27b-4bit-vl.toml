@@ -1,0 +1,117 @@
+# Qwen3.8 27B, 4-bit, served WITH ITS VISION TOWER — an alias of
+# `qwen3.8-27b-4bit`.
+#
+# The 9B-vl's header says why a vision form is its own id and how it shares one
+# download (models/qwen3.5-9b-vl.toml; PHASE22-DECIDE.md sections 2.9 and 7.3).
+# This is the same shape on the 27B: `weights_of` makes these weights
+# `qwen3.8-27b-4bit`'s, in its folder, and the loader refuses this file if its
+# pins or shared facts ever drift from the base's. On disk it owns only the
+# llama-windows projector.
+#
+# THE TOWER IS THE 9B'S. Read again on 2026-09-23 from `Qwen/Qwen3.8-27B` @
+# 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 and from this block's own
+# `avyukth/Qwen3.8-27B-AWQ-INT4` @ 5a2ee524: vision_config depth 27, hidden 1152,
+# intermediate 4304, 16 heads, patch 16 — identical to Qwen3.5-9B's, except
+# `out_hidden_size` 5120 against 4096 (the merger projects into the 27B's wider
+# hidden size). Summed out of the shard header: 921_460_192 B of `model.visual.*`
+# against the 9B's 912_020_960; the AWQ recipe leaves the tower in bf16.
+#
+# No mlx-darwin block: mlx-lm serves text, and the base covers the Mac.
+
+[model]
+id = "qwen3.8-27b-4bit-vl"
+weights_of = "qwen3.8-27b-4bit"
+# SHARED FACTS — must equal the base's. It states no [defaults], so neither
+# does this file.
+family = "qwen3.8"
+params_b = 27
+trained_context = 262144
+# This row's own. The base's model-level 98304 is its Mac context (Owen's
+# `qwen3.8:27b-24g`), and this row has no mlx-darwin block, so it would reach no
+# engine. 16384 is what both of the base's PC blocks serve, and what every term
+# below is stated at.
+context_default = 16384
+modalities = ["text", "image"]
+display = "Qwen 3.8 · 27B (4-bit) · with vision"
+description = "The 4-bit 27B with its vision tower served, for decisions about images. Shares qwen3.8-27b-4bit's download; costs a 1.90 GiB image reserve on a PC card and the 0.93 GB projector on Windows. A 24 GB card cannot hold its PC form at all; a Windows machine without WSL can."
+
+[backends.cuda-linux]
+engine = "vllm"
+hf_repo = "avyukth/Qwen3.8-27B-AWQ-INT4"
+revision = "5a2ee524cbc9f3ac5df12729ecf0c4b57f311192"
+serves = ["text", "image"]
+# 23_673_280_922 B = 22.05 GiB, COMPUTED (PHASE22 section 7.3's recipe):
+#
+#   the base's MEASURED estimate   21_633_171_456  (2026-09-12, RTX 3090 Ti)
+#   + the vision tower                          0  ALREADY IN IT, and the terms
+#                                                  show it: that load predates
+#                                                  `--language-model-only`
+#                                                  (2026-09-15), and its 17.68
+#                                                  GiB of card weights exceed the
+#                                                  file's whole 17.29 GiB — tower
+#                                                  (0.86 GiB) included
+#   + the image reserve             2_040_109_466  1.90 GiB, the 9B's MEASURED
+#                                                  A/B, carried: same tower
+#                                 = 23_673_280_922
+#
+# The reserve is an UPPER BOUND carried across, not a measurement of this
+# model: the tower is the same, the 27B's page activations feed a wider
+# language model. The first load on a card that holds it replaces it.
+memory_bytes_estimate = 23_673_280_922
+# The base's args less the two text-only flags (refused beside `image`), plus
+# the small tiers' `--limit-mm-per-prompt`. No `--dtype`: compressed-tensors
+# W4A16 carries its own, as the base says. `--gpu-memory-utilization 0.92` is
+# the estimate over 23.99 GiB and INERT (the `[memory]` terms size the pool).
+engine_args = [
+    "--gpu-memory-utilization", "0.92",
+    "--max-num-seqs", "16",
+    "--limit-mm-per-prompt", '{"image": 8, "video": 0}',
+]
+
+# ------------------------------------------------- the same number, taken apart
+#
+#   weights_bytes   18_983_441_367  the base's MEASURED card weights, tower
+#                                   resident (above) — unchanged
+#   overhead_bytes   3_586_297_692 = 1_546_188_226 (the base's MEASURED non-KV
+#                                   overhead) + 2_040_109_466 (the reserve)
+#   kv_bytes_per_token  86_251      the base's MEASURED slope
+#
+# At 16384 the terms come to 23_982_875_443, 1.3% above the estimate — the base
+# sits the same way (its terms are 1.4% above its own). On the 3090 Ti the
+# intercept alone, 22_569_739_059 B, is past the 22_535_995_392 B budget: no KV
+# at all. The fit table refuses it there by itself.
+[backends.cuda-linux.memory]
+weights_bytes = 18_983_441_367
+overhead_bytes = 3_586_297_692
+kv_bytes_per_token = 86_251
+basis = "computed"
+measured_at_context = 16384
+
+# ---------------------------------------------------------------------------
+# llama.cpp on Windows — ONLY ON A MACHINE WITHOUT WSL (PHASE22 section 2.9).
+# The base's GGUF plus this alias's projector, same repo, same revision, from
+# the tree API on 2026-09-23:
+#
+#   unsloth/Qwen3.8-27B-GGUF @ 4ca720788d1e01f1bff70c033e0d0028fd02e502
+#     Qwen3.8-27B-UD-Q4_K_M.gguf  16_464_440_224 B  (the base's `file`)
+#     mmproj-F16.gguf                927_607_488 B  (this alias's own)
+#
+# memory_bytes_estimate = the base's 17_964_440_224 + 927_607_488 =
+# 18_892_047_712, DECLARED as every llama-windows block is; the projector's
+# compute buffer is inside the base's 1.5 GB allowance and unmeasured.
+[backends.llama-windows]
+engine = "llama-server"
+hf_repo = "unsloth/Qwen3.8-27B-GGUF"
+revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
+file = "Qwen3.8-27B-UD-Q4_K_M.gguf"
+mmproj = "mmproj-F16.gguf"
+serves = ["text", "image"]
+memory_bytes_estimate = 18_892_047_712
+engine_args = ["--parallel", "1"]
+
+[backends.llama-windows.memory]
+weights_bytes = 17_392_047_712
+overhead_bytes = 426_258_176
+kv_bytes_per_token = 65_536
+basis = "declared"
+measured_at_context = 16384

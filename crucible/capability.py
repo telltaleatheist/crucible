@@ -273,6 +273,16 @@ class CatalogCandidates:
     #: than 9b"* — without anybody deciding it. A floor that is a side effect of
     #: what happens to be in `models/` is a floor nothing owns.
     min_params_b: float | None = None
+    #: WHETHER A MODEL THAT SHARES ANOTHER'S WEIGHTS IS A CANDIDATE HERE
+    #: (`[model] weights_of`, PHASE22-DECIDE.md section 2.9). An alias is the
+    #: same weights served another way — `qwen3.5-9b-vl` is `qwen3.5-9b` with
+    #: its vision tower loaded and an image reserved for — so it is always the
+    #: DEARER of the two, and a best-first walk would put it ahead of its base
+    #: for work that never sends an image: clean on the 9B-vl, paying a tower
+    #: and a 1.90 GiB reserve for nothing. Off unless a class says it wants the
+    #: served form an alias exists for; `decide` does, because a decision may
+    #: carry images (section 2.7).
+    aliases: bool = False
 
     def __call__(self, backend_kind: str) -> tuple[Candidate, ...]:
         found: list[Candidate] = []
@@ -280,6 +290,11 @@ class CatalogCandidates:
             if self.families is not None and manifest.family not in self.families:
                 continue
             if self.min_params_b is not None and manifest.params_b < self.min_params_b:
+                continue
+            # `getattr` asks which catalog this is: only `models/` manifests
+            # can be aliases, and the voice catalog this class also reads has
+            # no such key.
+            if not self.aliases and getattr(manifest, "weights_of", None) is not None:
                 continue
             if not manifest.supports(backend_kind):
                 continue
@@ -315,8 +330,9 @@ def _from_catalog(
     load: Callable[[], dict[str, Any]],
     *families: str,
     min_params_b: float | None = None,
+    aliases: bool = False,
 ) -> CatalogCandidates:
-    return CatalogCandidates(load, families or None, min_params_b)
+    return CatalogCandidates(load, families or None, min_params_b, aliases)
 
 
 @dataclass(frozen=True)
@@ -603,7 +619,14 @@ CLASSES: tuple[CapabilityClass, ...] = (
         purpose="one-forward-pass decisions (the decision door, PHASE22)",
         plainly="decide",
         noun="qwen3.8 and qwen3.5 variants",
-        candidates=_from_catalog(load_all_manifests, "qwen3.8", "qwen3.5"),
+        # ALIASES INCLUDED (section 2.9): the `-vl` forms are the only way a
+        # 9B or a 27B answers a decision about an image, and they fall into
+        # this list by family like every other tier. Best-first, so a card
+        # that fits the vision form of a model is offered it ahead of the text
+        # form — and a card that does not skips it by the same arithmetic.
+        candidates=_from_catalog(
+            load_all_manifests, "qwen3.8", "qwen3.5", aliases=True
+        ),
     ),
     CapabilityClass(
         name="pages",

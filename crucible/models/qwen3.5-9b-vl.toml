@@ -1,0 +1,156 @@
+# Qwen3.5 9B, served WITH ITS VISION TOWER — an alias of `qwen3.5-9b`.
+#
+# WHY A SECOND ID (PHASE22-DECIDE.md sections 2.9 and 7.3). Owen, 2026-09-23:
+# *"vision should be integrated into crucible's functionality as well … even if
+# it cant do it on this card with this model specifically, crucible is designed
+# to be cross-platform. it should be capable of it."* The 9B's own row cannot
+# carry it: its cuda-linux memory is MEASURED text-only (`--language-model-only`)
+# and clean / translate on the 3090 Ti depend on that number. So the vision form
+# is its own fit row, the way the 27B already has two ids for two forms.
+#
+# ONE COPY ON DISK (Owen: *"One copy on disk, two fit rows in the catalog — i
+# think this is a fine way to do it."*). `weights_of` below makes this model's
+# weights `qwen3.5-9b`'s download, in `qwen3.5-9b`'s folder
+# (`~/.crucible/models/qwen3.5-9b/<backend>`). The loader refuses this file if
+# its pins, `family`, `params_b`, `trained_context` or `[defaults]` ever differ
+# from the base's (`crucible/manifests.py`, `resolve_weights_of`). What it owns
+# on disk is only the llama-windows projector, `mmproj-F16.gguf`.
+#
+# SWITCHING COSTS A RELOAD. The two ids are two engine configurations over the
+# same files, so moving between them is a full engine restart (~20 s on the
+# 9B). An app picks ONE per server session (section 2.9): this form when it
+# fits, else `qwen3.5-9b` for text and `qwen3.5-4b` for image decisions.
+#
+# No mlx-darwin block: the Mac's text engine is mlx-lm, which serves text, and
+# the base's own block already covers the Mac for everything mlx-lm can do.
+
+[model]
+id = "qwen3.5-9b-vl"
+weights_of = "qwen3.5-9b"
+# SHARED FACTS — must equal `qwen3.5-9b`'s, and the loader checks it.
+family = "qwen3.5"
+params_b = 9
+trained_context = 262144
+# This row's own: the 9B's working context, for the base's reasons (four
+# records of 16384, in models/qwen3.5-9b.toml). NOT lowered to what fits the
+# 3090 Ti: at the card's budget there is room for ~1,700 tokens of KV (the
+# cuda-linux terms below), a context no client of this model could use, and
+# writing it here would make a row "fit" by serving nothing. The fit table
+# refuses this row on that card by its own arithmetic instead.
+context_default = 16384
+# The weights accept images (`Qwen3_5ForConditionalGeneration`, vision_config
+# depth 27 / hidden 1152 at the pinned revision), and every block here serves
+# them — that is the whole difference from the base.
+modalities = ["text", "image"]
+display = "Qwen 3.5 · 9B · with vision"
+description = "The 9B with its vision tower served, for decisions about images. Shares qwen3.5-9b's download; costs its 0.85 GiB tower and a 1.90 GiB image reserve on a PC card, and the 0.92 GB projector on Windows. On a 24 GB card it leaves only ~1,700 tokens of KV, so it does not usefully fit there."
+
+# The base's, verbatim — a shared fact (`weights_of_fact_mismatch` otherwise).
+[defaults]
+thinking = false
+
+[backends.cuda-linux]
+engine = "vllm"
+# THE BASE'S PIN, required to be identical (`weights_of_pin_mismatch`).
+hf_repo = "Qwen/Qwen3.5-9B"
+revision = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+serves = ["text", "image"]
+# 22_990_657_946 B = 21.41 GiB, COMPUTED as PHASE22 section 7.3 sets out:
+#
+#   the base's MEASURED estimate   20_950_548_480  (2026-09-12, RTX 3090 Ti)
+#   + the vision tower                          0  ALREADY IN IT: that load ran
+#                                                  before `--language-model-only`
+#                                                  landed (2026-09-15), with the
+#                                                  tower resident — the base's
+#                                                  own comment says so
+#   + the image reserve             2_040_109_466  1.90 GiB, the 9B's MEASURED
+#                                                  A/B (multimodal profiling
+#                                                  -1.97 GiB of KV against
+#                                                  -0.07 with it skipped)
+#                                 = 22_990_657_946
+#
+# The terms below come to 23_128_269_485 at 16384, 0.6% above it, because they
+# start from the 2026-09-18 CALIBRATION (text-only, tower out) and add the tower
+# back explicitly. Both readings are inside the parser's 5%.
+memory_bytes_estimate = 22_990_657_946
+# `--dtype bfloat16` and `--max-num-seqs 16`: the base's, for its measured
+# reasons. NO `--language-model-only` and NO `--skip-mm-profiling` — this block
+# serves images, and the loader refuses either flag beside one. The tower loads,
+# and its reserve is in the terms below.
+#
+# `--limit-mm-per-prompt {"image": 8, "video": 0}`, as the small tiers carry it
+# (models/qwen3.5-4b.toml has the vLLM 0.29 source lines): 8 is the decision
+# door's `MAX_IMAGES`, and no door of Crucible's sends video.
+#
+# `--gpu-memory-utilization 0.89` is the estimate over the 3090 Ti's 23.99 GiB,
+# INERT here as on the 4B: this block has `[memory]` terms, so
+# `vram.plan_vllm_memory` sizes the pool and appends its own utilisation last.
+engine_args = [
+    "--dtype", "bfloat16",
+    "--gpu-memory-utilization", "0.89",
+    "--max-num-seqs", "16",
+    "--limit-mm-per-prompt", '{"image": 8, "video": 0}',
+]
+
+# ------------------------------------------------- the same number, taken apart
+#
+#   weights_bytes   18_950_883_603 = 18_038_862_643 + 912_020_960
+#     18_038_862_643  the base's CALIBRATED card weights (2026-09-18, measured,
+#                     text-only — the tower was not loaded)
+#        912_020_960  the vision tower: every `model.visual.*` tensor in the
+#                     pinned revision's four shard headers, re-read 2026-09-23
+#                     (same figure the base's comment gives)
+#   overhead_bytes   3_516_504_474 = 1_476_395_008 + 2_040_109_466
+#      1_476_395_008  the base's MEASURED non-KV overhead (2026-09-18)
+#      2_040_109_466  the 1.90 GiB image reserve, MEASURED on this model (the
+#                     base's A/B). In the INTERCEPT, because with
+#                     `--kv-cache-memory-bytes` set vLLM skips its own profiling
+#                     and this term is the only thing reserving for a page.
+#   kv_bytes_per_token  40_337, the base's MEASURED slope; KV does not read the
+#                     tower.
+#
+# ON THE 3090 Ti (25_757_220_864 B, 3 GiB desktop allowance -> 22_535_995_392 B
+# of budget): the intercept is 22_467_388_077 B, leaving 68_607_315 B = 1,700
+# tokens of KV at one request. PHASE22 section 7.3's rounder figures (18.18 +
+# 0.85 + 1.90 = 20.93 GiB against 21.0) said ~2,000; this is the same answer to
+# the byte. It does not usefully fit that card; a 32 GB card holds 16384 easily.
+[backends.cuda-linux.memory]
+weights_bytes = 18_950_883_603
+overhead_bytes = 3_516_504_474
+kv_bytes_per_token = 40_337
+basis = "computed"
+measured_at_context = 16384
+
+# ---------------------------------------------------------------------------
+# llama.cpp on Windows — ONLY ON A MACHINE WITHOUT WSL (PHASE22 section 2.9,
+# Owen 2026-09-23: *"if there is no WSL, it all exists in windows crucible"*).
+# The base's GGUF, plus the one file this alias owns: the F16 projector from the
+# SAME repo at the SAME revision, read from the tree API on 2026-09-23:
+#
+#   unsloth/Qwen3.5-9B-GGUF @ 3885219b6810b007914f3a7950a8d1b469d598a5
+#     Qwen3.5-9B-Q8_0.gguf   9_527_502_048 B   (the base's `file`)
+#     mmproj-F16.gguf          918_166_080 B   (this alias's own)
+#
+# F16 for the 4B's reason: it is the projector snap measured on this model
+# (PHASE22 section 2.7: an 800x1100 page ~850 tokens, page-type 0.996-0.999).
+#
+# memory_bytes_estimate = the base's 11_027_502_048 + the projector's
+# 918_166_080 = 11_945_668_128, DECLARED like every llama-windows block: the
+# projector's compute buffer sits inside the base's 1.5 GB allowance, and nobody
+# has measured it on a Windows card.
+[backends.llama-windows]
+engine = "llama-server"
+hf_repo = "unsloth/Qwen3.5-9B-GGUF"
+revision = "3885219b6810b007914f3a7950a8d1b469d598a5"
+file = "Qwen3.5-9B-Q8_0.gguf"
+mmproj = "mmproj-F16.gguf"
+serves = ["text", "image"]
+memory_bytes_estimate = 11_945_668_128
+engine_args = ["--parallel", "1"]
+
+[backends.llama-windows.memory]
+weights_bytes = 10_445_668_128
+overhead_bytes = 963_129_088
+kv_bytes_per_token = 32_768
+basis = "declared"
+measured_at_context = 16384

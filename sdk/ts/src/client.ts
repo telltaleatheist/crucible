@@ -44,6 +44,7 @@ import {
   nullableNum,
   nullableObject,
   nullableStr,
+  nullableStrArray,
   objectField,
   oneOf,
   str,
@@ -2951,6 +2952,9 @@ function readModelInfo(entry: Json, where: string): ModelInfo {
     modalities: strArray(entry, 'modalities', where),
     backendSupported: bool(entry, 'backend_supported', where),
     installed: bool(entry, 'installed', where),
+    // The base whose download this model's weights are, or null for a model
+    // that owns its own (PHASE22 section 2.9). Demanded: null is a statement.
+    weightsOf: nullableStr(entry, 'weights_of', where),
     resident: bool(entry, 'resident', where),
     loadable,
     // Null on a model this backend cannot serve, exactly like `revision`: both
@@ -4266,6 +4270,10 @@ function readCatalogRow(row: Json, where: string): CatalogRow {
     installed: bool(row, 'installed', where),
     installedBytes: nullableNum(row, 'installed_bytes', where),
     expectedBytes: nullableNum(row, 'expected_bytes', where),
+    // PHASE22 section 2.9: both demanded, null on every row that is not an
+    // alias — present-and-null is a statement, absent is an older server.
+    sharesWeightsOf: nullableStr(row, 'shares_weights_of', where),
+    missingFiles: nullableStrArray(row, 'missing_files', where),
     floors: strArray(row, 'floors', where),
     license: nullableStr(row, 'license', where),
     source: str(row, 'source', where),

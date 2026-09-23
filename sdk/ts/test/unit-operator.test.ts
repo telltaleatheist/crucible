@@ -154,6 +154,8 @@ const ROW = {
   installed: true,
   installed_bytes: 20718362624,
   expected_bytes: null,
+  shares_weights_of: null,
+  missing_files: null,
   floors: ['clean'],
   license: null,
   source: 'hf:Qwen/Qwen3.5-9B',
@@ -172,6 +174,8 @@ test('catalog reads its rows and camelCases nothing else', async () => {
     installed: true,
     installedBytes: 20718362624,
     expectedBytes: null,
+    sharesWeightsOf: null,
+    missingFiles: null,
     floors: ['clean'],
     license: null,
     source: 'hf:Qwen/Qwen3.5-9B',
@@ -180,6 +184,25 @@ test('catalog reads its rows and camelCases nothing else', async () => {
   assert.equal(rows[1]!.kind, 'rvc-base');
   assert.equal(rows[1]!.name, null);
   assert.equal(rows[1]!.installedBytes, null);
+});
+
+test('an alias row says whose weights it shares and which of its own files are missing', async () => {
+  // PHASE22-DECIDE.md section 2.9: one copy on disk, two rows.
+  answer(200, {
+    rows: [{
+      ...ROW, id: 'qwen3.5-9b-vl', installed: false, installed_bytes: null,
+      shares_weights_of: 'qwen3.5-9b', missing_files: ['mmproj-F16.gguf'], floors: [],
+    }],
+  });
+  const [row] = await client().catalog();
+  assert.equal(row!.sharesWeightsOf, 'qwen3.5-9b');
+  assert.deepEqual(row!.missingFiles, ['mmproj-F16.gguf']);
+});
+
+test('a catalog row without shares_weights_of is refused, not read as null', async () => {
+  const { shares_weights_of: _dropped, ...without } = ROW;
+  answer(200, { rows: [without] });
+  await assert.rejects(() => client().catalog(), CrucibleProtocolError);
 });
 
 test('a kind outside the five is a protocol error, not a passed-through string', async () => {

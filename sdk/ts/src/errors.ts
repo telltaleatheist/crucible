@@ -655,6 +655,12 @@ export const SUBJECT_NOT_INSTALLED = 'subject_not_installed';
 export const SUBJECT_IN_USE = 'subject_in_use';
 /** The files would not go (500). `details.path` is the one that refused. */
 export const SUBJECT_REMOVE_FAILED = 'subject_remove_failed';
+/**
+ * A base model's weights are also an alias's, pulled on this server (409,
+ * PHASE22-DECIDE.md section 2.9). `details.aliases` names each; remove them
+ * first — removing an alias takes only its own files.
+ */
+export const WEIGHTS_SHARED = 'weights_shared';
 
 // ---------------------------------------------- the settings door's refusals
 //

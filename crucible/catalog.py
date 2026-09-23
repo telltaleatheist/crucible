@@ -131,6 +131,14 @@ class Subject:
     #: 3.5a). Bound per subject for `installed` and `pull`'s reason: the
     #: alternative is a third `match kind:` that goes stale on its own.
     remove: Callable[[], Path]
+    #: The model whose download this one's weights ARE, or None
+    #: (PHASE22-DECIDE.md section 2.9, `[model] weights_of`). Only a `models/`
+    #: manifest can be an alias; every other row says None.
+    shares_weights_of: str | None = None
+    #: An alias's own files that are not in the shared folder, in its block's
+    #: order — empty when all are there. None on every row that is not an
+    #: alias, where "which file is missing" has no answer short of the stamp.
+    missing_files: Callable[[], list[str]] | None = None
 
 
 def subjects(config: Config, backend: Backend) -> list[Subject]:
@@ -162,6 +170,9 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
             if not manifest.supports(backend.kind):
                 continue
             spec = manifest.spec(backend.kind)
+            # `getattr` asks WHICH catalog this is: only `models/` manifests
+            # have `weights_of`; ASR and align manifests own their weights.
+            base_id = getattr(manifest, "weights_of", None)
             found.append(
                 Subject(
                     kind="model",
@@ -170,12 +181,27 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
                     # honest answer and the page prints the id.
                     name=getattr(manifest, "display", None),
                     job_type=job_type,
-                    expected_bytes=None,
+                    # AN ALIAS'S DOWNLOAD IS COUNTED ONCE, ON ITS BASE (section
+                    # 2.9). What its own row expects is only its extra files:
+                    # 0 where it adds none. Where it adds some (a projector),
+                    # null — no manifest states a file's size, for the reason
+                    # the module docstring gives about every model row.
+                    expected_bytes=(
+                        None
+                        if base_id is None or manifest.extra_files(backend.kind)
+                        else 0
+                    ),
                     source=f"hf:{spec.hf_repo}",
                     pull_command=f"crucible models pull {manifest.id}",
                     installed=_installed_weights(config, manifest, spec),
                     pull=_pull_weights(config, manifest, spec),
                     remove=_remove_weights(config, manifest, spec),
+                    shares_weights_of=base_id,
+                    missing_files=(
+                        None
+                        if base_id is None
+                        else _missing_extras(config, manifest, backend.kind)
+                    ),
                 )
             )
 
@@ -312,6 +338,20 @@ def _pull_weights(
     return lambda **kwargs: weights.pull(config, manifest, spec, **kwargs)
 
 
+def _missing_extras(
+    config: Config, manifest: Any, backend_kind: str
+) -> Callable[[], list[str]]:
+    def missing() -> list[str]:
+        directory = weights.subject_dir(config, manifest, backend_kind)
+        return [
+            name
+            for name in manifest.extra_files(backend_kind)
+            if not (directory / name).is_file()
+        ]
+
+    return missing
+
+
 def _pull_archive(
     config: Config, manifest: Any, spec: Any
 ) -> Callable[..., weights.InstalledWeights]:
@@ -369,6 +409,24 @@ def _pull_denoise(
     config: Config, manifest: Any, spec: Any
 ) -> Callable[..., weights.InstalledWeights]:
     return lambda **kwargs: denoisemodels.pull(config, manifest, spec, **kwargs)
+
+
+def ids_reading(subject: Subject) -> frozenset[str]:
+    """Every id whose engine would read THIS subject's files: itself, and — for
+    a model — every alias whose weights are its download (PHASE22-DECIDE.md
+    section 2.9). What a removal asks before it deletes a folder something on
+    the card, under a lease or in a task may be reading through another name.
+    """
+    if subject.kind != "model":
+        return frozenset({subject.id})
+    return frozenset(
+        {subject.id}
+        | {
+            manifest.id
+            for manifest in load_all_manifests().values()
+            if manifest.weights_of == subject.id
+        }
+    )
 
 
 def declared_ids() -> dict[str, list[str]]:
@@ -513,6 +571,19 @@ def rows(config: Config, backend: Backend, residency: Residency) -> list[dict[st
                     "installed": found is not None,
                     "installed_bytes": None if found is None else found.bytes,
                     "expected_bytes": subject.expected_bytes,
+                    # One copy on disk, two rows (PHASE22 section 2.9): the
+                    # base whose download this row's weights are, or null.
+                    # An app shows "shares <base>'s weights" from it, and the
+                    # base's own row carries the download's bytes.
+                    "shares_weights_of": subject.shares_weights_of,
+                    # WHICH of an alias's own files is not there — the answer
+                    # to "why is this row not installed" when its base is.
+                    # Null on every row that is not an alias.
+                    "missing_files": (
+                        None
+                        if subject.missing_files is None
+                        else subject.missing_files()
+                    ),
                     # Only a model can floor a capability class; every other
                     # kind gets the empty list because nothing floors on it, not
                     # because nobody looked.
@@ -597,6 +668,7 @@ __all__ = [
     "Subject",
     "declared_ids",
     "find",
+    "ids_reading",
     "rows",
     "subjects",
 ]

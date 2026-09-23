@@ -34,10 +34,26 @@ which the engine choice, the image-flag rules and the door's `model_text_only` n
 the small tiers read images on cuda-linux and llama-windows and stay text on the Mac's
 mlx-lm. **Qwen3.8 exists on the hub only as 27B, Flash-Next and 2.4T-A95B (+ FP8s) — listed
 2026-09-23 — so there are no 3.8 small tiers to add; do not look again until Qwen publishes
-one.** Qwen3.5 also publishes a 2B (not added). Vision on the 9B and the 27Bs (Owen's §7.3
-ruling, 2026-09-23: "build in the functionality") is BLOCKED on one fact: the weights store
-keys a download by model id, so a `-vl` id beside a text id would download the same repo
-twice — ruling owed on how two ids share one pin (§7.3).
+one.** Qwen3.5 also publishes a 2B (not added).
+
+*Vision on the 9B and the 27Bs — one copy on disk, two fit rows (2026-09-23, §2.9, same
+branch, not cut).* Owen: *"One copy on disk, two fit rows in the catalog — i think this is a
+fine way to do it."* A manifest may declare `[model] weights_of = "<base id>"`: its weights
+are the base's download, in the base's folder, and it owns only the files its block adds
+(the llama-windows `mmproj`). The loader refuses by name `weights_of_unknown`,
+`weights_of_chain` (alias of an alias, a base aliased elsewhere, or itself),
+`weights_of_backend_missing`, `weights_of_pin_mismatch` (`hf_repo`/`revision`/`file`),
+`weights_of_fact_mismatch` (`family`/`params_b`/`trained_context`/`[defaults]`) and
+`weights_of_local`; removing a base an alias was pulled into is `weights_shared` (409 at the
+door, the CLI verbatim, the Windows migration removes the alias first). Three aliases:
+`qwen3.5-9b-vl`, `qwen3.8-27b-4bit-vl`, `qwen3.8-27b-8bit-vl` — in `decide`, in no text
+class. Rows carry `weights_of` (`/v1/models`, `/v1/info`) and `shares_weights_of` +
+`missing_files` (`/v1/catalog`, bytes counted once on the base). Owen's Windows model,
+verbatim: *"the original intent with windows was that everything would go through WSL if it
+exists and nothing would exist on windows. no models. it will all be managed by the engine in
+WSL, and windows points/orchestrates to WSL. if there is no WSL, it all exists in windows
+crucible. everything is downloaded and managed there"* — so the `llama-windows` rows and their
+projectors serve only a machine with no WSL.
 
 **PLANNED 2026-09-19, BUILD STARTED: PHASE21 — a voice's facts travel with its weights; Crucible
 ships no voices.** `crucible-voice.toml` at the HF repo root in the same commit as the weights

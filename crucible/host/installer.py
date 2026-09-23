@@ -996,6 +996,15 @@ class EngineInstall:
                 raise self._fail("migration_cleanup_destination_missing",
                                  "Windows models are kept; the active guest must restore these subjects before cleanup: " + ", ".join(missing))
             held = {}
+            # A BASE AN ALIAS STILL HOLDS (`weights_shared`, PHASE22 section
+            # 2.9) is not a failure and not a hold: `qwen3.5-9b` sorts before
+            # `qwen3.5-9b-vl`, so the base meets its alias's refusal first in
+            # every round and is free the moment the alias has gone. It is
+            # retried on the next round. A round that deferred something and
+            # removed nothing has made no progress, and is refused by that name
+            # rather than spun.
+            deferred: list[str] = []
+            removed_this_round = 0
             for key in sorted(source):
                 subject = source[key]
                 if key not in target:
@@ -1003,6 +1012,13 @@ class EngineInstall:
                 try:
                     self._windows.remove(subject)
                 except CatalogRefusal as refusal:
+                    if refusal.code == "weights_shared":
+                        deferred.append(str(subject))
+                        self._line(
+                            f"migrate-weights: {subject} is shared with an alias "
+                            "that goes first; retried on the next round"
+                        )
+                        continue
                     if refusal.code != "subject_in_use":
                         raise self._fail(
                             refusal.code,
@@ -1021,7 +1037,16 @@ class EngineInstall:
                     )
                     continue
                 moved.append(str(subject))
+                removed_this_round += 1
                 self._line(f"migrate-weights: {subject} is the guest's now, and gone from Windows")
+            if deferred and not held and removed_this_round == 0:
+                raise self._fail(
+                    "weights_shared",
+                    f"{', '.join(deferred)} could not be removed from the Windows "
+                    "engine because an alias still holds its weights, and no alias "
+                    "was removed this round to free them. The guest has every "
+                    "subject; the Windows copies stay until this is answered.",
+                )
             if not held:
                 # Everything this round either moved or was already gone. The
                 # next round re-reads and finds the catalog empty, which is

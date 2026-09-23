@@ -161,6 +161,9 @@ def test_the_three_published_ggufs_are_named_and_the_fourth_is_absent() -> None:
     assert served == {
         "dots-ocr", "qwen3.5-0.8b", "qwen3.5-4b", "qwen3.5-9b",
         "qwen3.8-27b-4bit",
+        # The vision forms of the two above (PHASE22 section 2.9): the same
+        # GGUF plus the projector, in the base's folder.
+        "qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl",
     }
 
 

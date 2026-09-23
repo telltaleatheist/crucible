@@ -260,6 +260,7 @@ class StoppedWindowsCatalog:
 
     def remove(self, subject: Subject) -> None:
         from ..errors import CrucibleError
+        from ..weights import WeightsShared
         from .installer import cleanup_subjects, record_cleanup
         for row in self._subjects():
             if (row.kind, row.id) == subject.key:
@@ -272,6 +273,11 @@ class StoppedWindowsCatalog:
                         record_cleanup(self._config.home, saved | {subject.key})
                     row.remove()
                     self._pending.discard(subject.key)
+                except WeightsShared as exc:
+                    # Its own code, kept verbatim, because the migration ORDERS
+                    # on it: a base whose folder an alias still holds is retried
+                    # after the alias has gone, never failed as a broken delete.
+                    raise CatalogRefusal(exc.code, str(exc)) from exc
                 except (OSError, CrucibleError) as exc:
                     raise CatalogRefusal("subject_remove_failed", str(exc)) from exc
                 return

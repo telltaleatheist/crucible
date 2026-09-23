@@ -208,6 +208,111 @@ def stamp_path(
     return weights_dir(config, family, subject_id, backend_kind) / STAMP_NAME
 
 
+# ------------------------------------------------------ one copy, two rows
+#
+# PHASE22-DECIDE.md section 2.9, Owen 2026-09-23: *"One copy on disk, two fit
+# rows in the catalog."* A model manifest may declare `[model] weights_of =
+# "<base id>"` (crucible/manifests.py, `resolve_weights_of`): an ALIAS. Its
+# weights are the base's download, in the base's folder, and what it owns on
+# disk is only what its block names beyond the base's (`extra_files` — the
+# llama-windows projector). Every function below that touches the store asks
+# `_store_id` where that is, so an alias cannot be downloaded twice by any door.
+
+
+def _store_id(subject: Any) -> str:
+    """The id whose folder holds this subject's weights.
+
+    `getattr` because only a MODEL manifest can be an alias: a voice, an RVC
+    model and an ASR model have no `weights_of` in their schemas, and this is
+    asking which schema the subject is, exactly as `local_source` does.
+    """
+    weights_of = getattr(subject, "weights_of", None)
+    return subject.id if weights_of is None else weights_of
+
+
+def _extra_files(subject: Any, spec: WeightsSource) -> tuple[str, ...]:
+    """What an alias owns on this backend; () for anything that is not one."""
+    if getattr(subject, "weights_of", None) is None:
+        return ()
+    return subject.extra_files(spec.backend)
+
+
+def subject_dir(config: Config, subject: WeightsSubject, backend_kind: str) -> Path:
+    """Where THIS subject's weights are for `backend_kind` — the base's folder
+    for an alias. The one question every reader of the layout should ask."""
+    return weights_dir(config, subject.weights_family, _store_id(subject), backend_kind)
+
+
+#: Beside the base's stamp, one per alias PULLED into that folder. It is the
+#: alias's statement that it was asked for here, and it is what makes "an alias
+#: exists on this machine" a fact on backends where the alias owns no file of
+#: its own (cuda-linux: the whole repo is shared). Without it, removing the
+#: base could never be refused there, and removing the alias could never end
+#: the refusal. It does NOT decide `installed` — the ruling is "the base's
+#: stamp AND its own extra files present" — it decides only whether removing
+#: the base would take a pulled alias away.
+ALIAS_RECORD_PREFIX = "crucible-alias-"
+
+
+def alias_record_path(config: Config, alias: Any, backend_kind: str) -> Path:
+    return subject_dir(config, alias, backend_kind) / f"{ALIAS_RECORD_PREFIX}{alias.id}.json"
+
+
+class WeightsShared(WeightsError):
+    """`weights_shared`: a base's folder is also an alias's, and it was asked
+    to go. Carries the aliases by id so a refusal can name each of them."""
+
+    code = "weights_shared"
+
+    def __init__(self, base_id: str, backend_kind: str, aliases: Sequence[str]) -> None:
+        self.base_id = base_id
+        self.backend = backend_kind
+        self.aliases = tuple(aliases)
+        named = ", ".join(repr(a) for a in self.aliases)
+        super().__init__(
+            f"weights_shared — {base_id!r}'s {backend_kind} weights are also the "
+            f"weights of {named}, pulled on this machine. Removing them would take "
+            f"{'that model' if len(self.aliases) == 1 else 'those models'} away "
+            f"too. Remove {named} first (`crucible remove model <id>` removes only "
+            f"what an alias owns), then {base_id!r}"
+        )
+
+
+def aliases_holding(
+    config: Config, manifest: WeightsSubject, backend_kind: str
+) -> tuple[str, ...]:
+    """The aliases, by id, that were pulled into this base's folder and are
+    installed there now. Empty for anything that is not a model base.
+
+    Installed AND recorded, both: a record beside an alias whose projector was
+    deleted by hand names an alias that is not there any more, and refusing the
+    base for it would leave nothing any door could remove to lift the refusal.
+    """
+    from .manifests import ModelManifest, aliases_of
+
+    if not isinstance(manifest, ModelManifest) or manifest.weights_of is not None:
+        return ()
+    holding: list[str] = []
+    for alias in aliases_of(manifest):
+        if not alias.supports(backend_kind):
+            continue
+        if not alias_record_path(config, alias, backend_kind).is_file():
+            continue
+        if installed(config, alias, alias.spec(backend_kind)) is None:
+            continue
+        holding.append(alias.id)
+    return tuple(holding)
+
+
+def refuse_if_shared(
+    config: Config, manifest: WeightsSubject, backend_kind: str
+) -> None:
+    """`WeightsShared` if deleting this subject's folder would take an alias."""
+    holding = aliases_holding(config, manifest, backend_kind)
+    if holding:
+        raise WeightsShared(manifest.id, backend_kind, holding)
+
+
 def missing_files(directory: Path, spec: WeightsSource) -> tuple[str, ...]:
     """The files this spec NAMES that are not on disk, in the spec's order.
 
@@ -290,9 +395,13 @@ def installed(
     if local is not None:
         return _local_installed(local, spec)
 
-    family = manifest.weights_family
-    directory = weights_dir(config, family, manifest.id, spec.backend)
-    stamp = stamp_path(config, family, manifest.id, spec.backend)
+    # AN ALIAS READS ITS BASE'S FOLDER AND ITS BASE'S STAMP (section 2.9): the
+    # pins are equal by `resolve_weights_of`, so the base's stamp answers for
+    # the alias's pin as well. `missing_files` below then asks for every file
+    # the ALIAS's block names — the base's GGUF and its own projector — so a
+    # base-only pull reads as not installed here, honestly.
+    directory = subject_dir(config, manifest, spec.backend)
+    stamp = directory / STAMP_NAME
     if not stamp.is_file():
         return None
     record = json.loads(stamp.read_text(encoding="utf-8"))
@@ -300,12 +409,21 @@ def installed(
         return None
     if missing_files(directory, spec):
         return None
+    extras = _extra_files(manifest, spec)
     return InstalledWeights(
-        path=weights_dir(config, family, manifest.id, spec.backend),
+        path=directory,
         hf_repo=record["hf_repo"],
         revision=record["revision"],
         source=PINNED,
-        bytes=record["bytes"],
+        # THE BYTES THIS SUBJECT OWNS. An alias's download is its base's and is
+        # counted once, on the base (section 2.9); what the alias adds is its
+        # extra files, which is also exactly what removing it frees — 0 where
+        # it adds none.
+        bytes=(
+            record["bytes"]
+            if getattr(manifest, "weights_of", None) is None
+            else sum((directory / name).stat().st_size for name in extras)
+        ),
         pulled=record["pulled"],
     )
 
@@ -343,8 +461,28 @@ def require_installed(
 
     family = manifest.weights_family
     noun, command = _FAMILY_WORDS[family]
-    directory = weights_dir(config, family, manifest.id, spec.backend)
-    stamp = stamp_path(config, family, manifest.id, spec.backend)
+    directory = subject_dir(config, manifest, spec.backend)
+    stamp = directory / STAMP_NAME
+    base = getattr(manifest, "weights_base", None)
+    if base is not None:
+        # AN ALIAS SAYS WHICH HALF IS MISSING: the shared download, or its own
+        # files beside it. "No weights at <the base's folder>" would send its
+        # reader to look at a directory that may be full.
+        extras = _extra_files(manifest, spec)
+        if installed(config, base, base.spec(spec.backend)) is None:
+            raise WeightsError(
+                f"{noun} {manifest.id!r} shares the weights of {base.id!r}, and "
+                f"{base.id!r} is not installed for {spec.backend} — run "
+                f"`{command} {manifest.id}`, which pulls {base.id!r}'s download"
+                + (f" plus {', '.join(extras)}" if extras else "")
+                + " into one folder"
+            )
+        absent = missing_files(directory, spec)
+        raise WeightsError(
+            f"{noun} {manifest.id!r} shares the weights of {base.id!r}, which is "
+            f"installed at {directory}, and {len(absent)} of its own file(s) are "
+            f"not there: {', '.join(absent)} — run `{command} {manifest.id}`"
+        )
     if stamp.is_file():
         record = json.loads(stamp.read_text(encoding="utf-8"))
         if (
@@ -469,7 +607,19 @@ def remove(config: Config, manifest: WeightsSubject, spec: WeightsSource) -> Pat
         "and deleting them because a manifest mentioned them is the one thing "
         "this door must never do",
     )
-    directory = weights_dir(config, manifest.weights_family, manifest.id, spec.backend)
+    directory = subject_dir(config, manifest, spec.backend)
+    if getattr(manifest, "weights_of", None) is not None:
+        # AN ALIAS TAKES ONLY WHAT IS ITS OWN (section 2.9): its extra files
+        # and its record. Never the folder, never the base's stamp, never a
+        # byte of the shared download.
+        for name in _extra_files(manifest, spec):
+            _remove(directory / name)
+        _remove(alias_record_path(config, manifest, spec.backend))
+        return directory
+    # A BASE'S FOLDER IS REFUSED WHILE AN ALIAS HOLDS IT, by name, here in the
+    # store rather than in either door, so the CLI, the API and the host's
+    # migration cannot come to disagree about it.
+    refuse_if_shared(config, manifest, spec.backend)
     _remove(directory)
     _prune_empty(
         directory.parent, weights_root(config, manifest.weights_family)
@@ -652,7 +802,11 @@ def pull(
     on_line: Callable[[str], None] | None = None,
     on_progress: ProgressHook | None = None,
 ) -> InstalledWeights:
-    """Fetch this model's or voice's weights for this backend at its pin."""
+    """Fetch this model's or voice's weights for this backend at its pin.
+
+    AN ALIAS (`[model] weights_of`) is `_pull_alias`: its base's download, then
+    only the files its own block adds, into the one folder.
+    """
     _refuse_local(
         spec,
         manifest,
@@ -661,23 +815,20 @@ def pull(
         "there, and fetching would overwrite them from a repo the block does "
         "not name",
     )
-    try:
-        from huggingface_hub import snapshot_download
-        from huggingface_hub.errors import (
-            GatedRepoError,
-            RepositoryNotFoundError,
-            RevisionNotFoundError,
+    if getattr(manifest, "weights_of", None) is not None:
+        return _pull_alias(
+            config, manifest, spec, force=force, on_line=on_line,
+            on_progress=on_progress,
         )
-    except ImportError as exc:  # pragma: no cover - a dependency, not a condition
-        raise WeightsError(
-            f"huggingface_hub is not importable in {config.name}'s interpreter: {exc}"
-        ) from exc
 
-    target = weights_dir(config, manifest.weights_family, manifest.id, spec.backend)
+    target = subject_dir(config, manifest, spec.backend)
     existing = installed(config, manifest, spec)
     if existing is not None and not force:
         return existing
     if force and target.exists():
+        # A forced pull empties the folder, and an alias's projector and record
+        # are in it: the same act as a removal, refused by the same rule.
+        refuse_if_shared(config, manifest, spec.backend)
         shutil.rmtree(target)
     target.mkdir(parents=True, exist_ok=True)
     stamp = target / STAMP_NAME
@@ -691,56 +842,18 @@ def pull(
             f"({'with' if token else 'without'} an HF token)"
         )
     started = time.monotonic()
-    extra: dict[str, Any] = {}
-    if on_progress is not None:
-        extra["tqdm_class"] = reporting_tqdm(on_progress)
-    if spec.files:
-        # ONLY THE FILES THIS BACKEND NAMES. Without this a `llama-windows`
-        # row on `unsloth/Qwen3.8-27B-GGUF` fetches every quantization in the
-        # repo — hundreds of gigabytes for one 16 GB file. `allow_patterns`
-        # takes literal names as well as globs, and these are literal: the
-        # manifest names the file, so a pattern that matched two would be this
-        # module deciding which.
-        extra["allow_patterns"] = list(spec.files)
-        if on_line is not None:
-            on_line(
-                f"only {len(spec.files)} file(s) of that repo: "
-                + ", ".join(spec.files)
-            )
+    if spec.files and on_line is not None:
+        on_line(f"only {len(spec.files)} file(s) of that repo: " + ", ".join(spec.files))
     try:
-        snapshot_download(
-            repo_id=spec.hf_repo,
-            revision=spec.revision,
-            local_dir=str(target),
-            token=token,
-            max_workers=8,
-            **extra,
+        _snapshot(
+            config, manifest.path.name, spec, target,
+            patterns=spec.files, on_progress=on_progress,
         )
     except PullCancelled:
         # The caller asked for this. Everything written so far goes, and the
         # cancellation travels untouched — see `PullCancelled`.
         shutil.rmtree(target, ignore_errors=True)
         raise
-    except GatedRepoError as exc:
-        raise WeightsError(
-            f"{spec.hf_repo} is gated and this server has no HF token that opens it "
-            f"(set ${HF_TOKEN_ENV} or [hf] token in {config.path}): {exc}"
-        ) from exc
-    except RepositoryNotFoundError as exc:
-        raise WeightsError(
-            f"{spec.hf_repo} is private or does not exist; if it is private set "
-            f"${HF_TOKEN_ENV} or [hf] token in {config.path}: {exc}"
-        ) from exc
-    except RevisionNotFoundError as exc:
-        raise WeightsError(
-            f"{spec.hf_repo} has no revision {spec.revision}; "
-            f"{manifest.path.name} pins a commit that repo does not have: {exc}"
-        ) from exc
-    except Exception as exc:
-        raise WeightsError(
-            f"pulling {spec.hf_repo}@{spec.revision[:12]} failed: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
 
     elapsed = time.monotonic() - started
     # BEFORE THE STAMP. A stamp is this module's statement that the subject is
@@ -781,6 +894,175 @@ def pull(
     result = installed(config, manifest, spec)
     if result is None:  # pragma: no cover - the stamp was just written
         raise WeightsError(f"wrote {stamp} but it does not read back as installed")
+    return result
+
+
+def _snapshot(
+    config: Config,
+    manifest_name: str,
+    spec: WeightsSource,
+    target: Path,
+    *,
+    patterns: Sequence[str],
+    on_progress: ProgressHook | None,
+) -> None:
+    """`snapshot_download` of `spec`'s pin into `target`, refusals by name.
+
+    `patterns` empty = the whole repo. Non-empty = ONLY those files: without
+    it a `llama-windows` row on `unsloth/Qwen3.8-27B-GGUF` fetches every
+    quantization in the repo — hundreds of gigabytes for one 16 GB file.
+    `allow_patterns` takes literal names as well as globs, and these are
+    literal: the manifest names the file, so a pattern that matched two would
+    be this module deciding which.
+
+    A `PullCancelled` travels out untouched; what to delete on a cancel is the
+    caller's, because a base owns its whole folder and an alias only its files.
+    """
+    try:
+        from huggingface_hub import snapshot_download
+        from huggingface_hub.errors import (
+            GatedRepoError,
+            RepositoryNotFoundError,
+            RevisionNotFoundError,
+        )
+    except ImportError as exc:  # pragma: no cover - a dependency, not a condition
+        raise WeightsError(
+            f"huggingface_hub is not importable in {config.name}'s interpreter: {exc}"
+        ) from exc
+    extra: dict[str, Any] = {}
+    if on_progress is not None:
+        extra["tqdm_class"] = reporting_tqdm(on_progress)
+    if patterns:
+        extra["allow_patterns"] = list(patterns)
+    try:
+        snapshot_download(
+            repo_id=spec.hf_repo,
+            revision=spec.revision,
+            local_dir=str(target),
+            token=hf_token(config),
+            max_workers=8,
+            **extra,
+        )
+    except PullCancelled:
+        raise
+    except GatedRepoError as exc:
+        raise WeightsError(
+            f"{spec.hf_repo} is gated and this server has no HF token that opens it "
+            f"(set ${HF_TOKEN_ENV} or [hf] token in {config.path}): {exc}"
+        ) from exc
+    except RepositoryNotFoundError as exc:
+        raise WeightsError(
+            f"{spec.hf_repo} is private or does not exist; if it is private set "
+            f"${HF_TOKEN_ENV} or [hf] token in {config.path}: {exc}"
+        ) from exc
+    except RevisionNotFoundError as exc:
+        raise WeightsError(
+            f"{spec.hf_repo} has no revision {spec.revision}; "
+            f"{manifest_name} pins a commit that repo does not have: {exc}"
+        ) from exc
+    except Exception as exc:
+        raise WeightsError(
+            f"pulling {spec.hf_repo}@{spec.revision[:12]} failed: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def _pull_alias(
+    config: Config,
+    alias: Any,
+    spec: WeightsSource,
+    *,
+    force: bool,
+    on_line: Callable[[str], None] | None,
+    on_progress: ProgressHook | None,
+) -> InstalledWeights:
+    """An alias's pull: the base's download, then the alias's own files.
+
+    PHASE22-DECIDE.md section 2.9. **The base is pulled as the base** — the
+    same `pull`, the same stamp, the same folder — so a machine that pulls
+    `qwen3.5-9b-vl` first and `qwen3.5-9b` second downloads once. Then only
+    what the alias's block names beyond the base's (`extra_files`: the
+    llama-windows projector; nothing on a whole-repo backend) is fetched into
+    that folder, and the alias's record is written beside the base's stamp.
+
+    `force` re-fetches the ALIAS's files only. It never forces the base: that
+    is a pull of the base, asked for by name, and it is refused while an alias
+    holds the folder (`refuse_if_shared`).
+
+    A cancel removes only the files this pull was fetching. The folder is the
+    base's, and a cancelled projector download must not take a 19 GB model
+    with it.
+    """
+    base = alias.weights_base
+    base_spec = base.spec(spec.backend)
+    target = subject_dir(config, alias, spec.backend)
+    record_path = alias_record_path(config, alias, spec.backend)
+    existing = installed(config, alias, spec)
+    if existing is not None and record_path.is_file() and not force:
+        return existing
+
+    if installed(config, base, base_spec) is None:
+        if on_line is not None:
+            on_line(
+                f"{alias.id} shares the weights of {base.id}; pulling {base.id} "
+                "first, once, into its own folder"
+            )
+        pull(config, base, base_spec, on_line=on_line, on_progress=on_progress)
+
+    extras = alias.extra_files(spec.backend)
+    if force:
+        for name in extras:
+            _remove(target / name)
+    wanted = [name for name in extras if not (target / name).is_file()]
+    started = time.monotonic()
+    if wanted:
+        if on_line is not None:
+            on_line(
+                f"pulling {alias.id}'s own file(s) from "
+                f"{spec.hf_repo}@{spec.revision[:12]} into {target}: "
+                + ", ".join(wanted)
+            )
+        try:
+            _snapshot(
+                config, alias.path.name, spec, target,
+                patterns=wanted, on_progress=on_progress,
+            )
+        except PullCancelled:
+            for name in wanted:
+                (target / name).unlink(missing_ok=True)
+            raise
+    absent = missing_files(target, spec)
+    if absent:
+        raise WeightsError(
+            f"{spec.hf_repo}@{spec.revision[:12]} was fetched but {len(absent)} of "
+            f"the file(s) {alias.path.name} names for {spec.backend} are not in "
+            f"{target}: {', '.join(absent)}. Either the manifest names a file this "
+            "revision does not have, or the download was incomplete; no alias "
+            "record is written either way"
+        )
+    own = sum((target / name).stat().st_size for name in extras)
+    record = {
+        "family": alias.weights_family,
+        "id": alias.id,
+        "weights_of": base.id,
+        "backend": spec.backend,
+        "hf_repo": spec.hf_repo,
+        "revision": spec.revision,
+        # What this alias OWNS in the folder, which is what removing it frees.
+        "files": list(extras),
+        "bytes": own,
+        "seconds": round(time.monotonic() - started, 1),
+        "pulled": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    if on_line is not None:
+        on_line(
+            f"{alias.id}: {own / 1e9:.2f} GB of its own beside {base.id}'s weights "
+            f"at {target}"
+        )
+    result = installed(config, alias, spec)
+    if result is None:  # pragma: no cover - checked just above
+        raise WeightsError(f"wrote {record_path} but {alias.id} does not read as installed")
     return result
 
 

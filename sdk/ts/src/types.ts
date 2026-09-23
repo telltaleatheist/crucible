@@ -1076,6 +1076,14 @@ export interface ModelInfo {
   readonly modalities: readonly string[];
   readonly backendSupported: boolean;
   readonly installed: boolean;
+  /**
+   * The model whose download this one's weights ARE, or null for a model that
+   * owns its own (PHASE22-DECIDE.md section 2.9, `[model] weights_of`). A
+   * fact of the manifest, the same on every host. `qwen3.5-9b-vl` says
+   * `qwen3.5-9b`: one copy on disk, two rows — and switching between the two
+   * is a full engine reload, so a picker chooses one per server session.
+   */
+  readonly weightsOf: string | null;
   readonly resident: boolean;
   readonly loadable: boolean;
   /**
@@ -2245,6 +2253,19 @@ export interface CatalogRow {
    * snapshot no manifest sizes. Never an estimate.
    */
   readonly expectedBytes: number | null;
+  /**
+   * The model whose download this row's weights are, or null (PHASE22 section
+   * 2.9). On such a row the download's bytes are the BASE's row's, and
+   * `installedBytes` / `expectedBytes` count only this row's own files — 0
+   * where it has none, `expectedBytes` null where it adds a projector.
+   */
+  readonly sharesWeightsOf: string | null;
+  /**
+   * An alias's own files that are not on disk, empty when all are there; null
+   * on every row that is not an alias. Why an alias is `installed: false` when
+   * its base is installed.
+   */
+  readonly missingFiles: readonly string[] | null;
   /**
    * The capability classes this model is the FLOOR for — the smallest model
    * the class may run on at all. Only ever non-empty on a `model`.

@@ -87,6 +87,7 @@ const MODEL_ROW = {
   revision: REVISION,
   fingerprint: `qwen3.5-9b@${REVISION}`,
   modalities: ['text'],
+  weights_of: null,
   orphan: null, backend_supported: true,
   installed: true,
   resident: true,
@@ -146,6 +147,7 @@ test('models() reads every field /v1/models promises', async () => {
         revision: 'b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
         fingerprint: 'qwen3.8-27b@b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
         modalities: ['text', 'image'],
+        weights_of: null,
         orphan: null, backend_supported: true,
         installed: false,
         resident: false,
@@ -167,6 +169,7 @@ test('models() reads every field /v1/models promises', async () => {
         // Never null, even here: what a model is offered FOR is the same answer
         // on a host that cannot serve it at all.
         modalities: ['text'],
+        weights_of: null,
         orphan: null, backend_supported: false,
         installed: false,
         resident: false,
@@ -192,6 +195,7 @@ test('models() reads every field /v1/models promises', async () => {
       revision: REVISION,
       fingerprint: `qwen3.5-9b@${REVISION}`,
       modalities: ['text'],
+      weightsOf: null,
       backendSupported: true,
       installed: true,
       resident: true,
@@ -207,6 +211,7 @@ test('models() reads every field /v1/models promises', async () => {
       revision: 'b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
       fingerprint: 'qwen3.8-27b@b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8',
       modalities: ['text', 'image'],
+      weightsOf: null,
       backendSupported: true,
       installed: false,
       resident: false,
@@ -223,6 +228,7 @@ test('models() reads every field /v1/models promises', async () => {
       revision: null,
       fingerprint: null,
       modalities: ['text'],
+      weightsOf: null,
       backendSupported: false,
       installed: false,
       resident: false,
@@ -234,6 +240,18 @@ test('models() reads every field /v1/models promises', async () => {
     },
   ]);
   assert.ok(!('reason' in models[0]!), 'a loadable model carries no reason');
+});
+
+test('a model row carries weights_of: the base, or null, and never absent', async () => {
+  // PHASE22-DECIDE.md section 2.9: one copy on disk, two rows.
+  handle = (_request, response) =>
+    json(response, 200, [MODEL_ROW, { ...MODEL_ROW, id: 'qwen3.5-9b-vl', weights_of: 'qwen3.5-9b' }]);
+  const models = await client().models();
+  assert.equal(models[0]!.weightsOf, null);
+  assert.equal(models[1]!.weightsOf, 'qwen3.5-9b');
+  const { weights_of: _dropped, ...without } = MODEL_ROW;
+  handle = (_request, response) => json(response, 200, [without]);
+  await assert.rejects(client().models(), CrucibleProtocolError);
 });
 
 test('a model that is not loadable and does not say why is a protocol error', async () => {
@@ -333,6 +351,7 @@ test("info() reads the llm capability's rows with the /models reader", async () 
       revision: REVISION,
       fingerprint: `qwen3.5-9b@${REVISION}`,
       modalities: ['text'],
+      weightsOf: null,
       backendSupported: true,
       installed: true,
       resident: true,

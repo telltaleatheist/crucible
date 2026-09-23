@@ -34,7 +34,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -259,6 +259,12 @@ _MODEL_OPTIONAL: dict[str, type] = {
     # name every other catalog in this repo already uses (voices, rvc, denoise).
     "display": str,
     "description": str,
+    # ONE COPY ON DISK, TWO FIT ROWS (PHASE22-DECIDE.md section 2.9, Owen
+    # 2026-09-23). The id of another manifest in this directory whose DOWNLOAD
+    # this one is: its weights are that model's weights, in that model's
+    # folder, and only what this manifest serves differently is its own. See
+    # `resolve_weights_of` for every rule it is held to.
+    "weights_of": str,
 }
 _BACKEND_REQUIRED: dict[str, type] = {
     "engine": str,
@@ -683,11 +689,45 @@ class ModelManifest:
     description: str | None = None
     #: `[local]`, or None: no local form, which the lineup reports by name.
     local: LocalForm | None = None
+    #: `[model] weights_of` — the id whose download this model's weights ARE, or
+    #: None for a model that owns its own (every base). PHASE22-DECIDE.md
+    #: section 2.9: one copy on disk, two fit rows in the catalog.
+    weights_of: str | None = None
+    #: The base manifest itself, resolved and checked by `resolve_weights_of`
+    #: when this manifest was loaded. None exactly where `weights_of` is. Not
+    #: compared and not printed: it is a second reading of a file that has its
+    #: own identity, and two aliases of one base must not differ by it.
+    weights_base: "ModelManifest | None" = field(
+        default=None, compare=False, repr=False
+    )
 
     #: Which subtree of `~/.crucible/` this thing's weights live under. A model id
     #: and a voice id are separate namespaces and must not be able to collide on
     #: disk — see `crucible/weights.py`.
     weights_family = "models"
+
+    @property
+    def store_id(self) -> str:
+        """The id whose folder holds these weights: the base's, or this one's.
+
+        The one answer to "where on disk", asked by `crucible/weights.py` for
+        every read, pull and removal, so an alias can never be stored twice.
+        """
+        return self.id if self.weights_of is None else self.weights_of
+
+    def extra_files(self, backend_kind: str) -> tuple[str, ...]:
+        """The files THIS manifest's block names that its base's block does not.
+
+        Empty for a base, and for an alias whose block names nothing more than
+        its base's (every whole-repo backend). On llama-windows it is the
+        projector: `qwen3.5-9b` is a text GGUF and `qwen3.5-9b-vl` is the same
+        GGUF plus `mmproj-F16.gguf`. What an alias OWNS on disk is exactly this.
+        """
+        spec = self.spec(backend_kind)
+        if self.weights_base is None:
+            return ()
+        shared = self.weights_base.spec(backend_kind).files
+        return tuple(name for name in spec.files if name not in shared)
 
     def supports(self, backend_kind: str) -> bool:
         return backend_kind in self.backends
@@ -748,6 +788,9 @@ class ModelManifest:
             "display": self.display,
             "description": self.description,
             "defaults": self.defaults.to_dict(),
+            # Null for a model that owns its weights; the base's id for one
+            # that shares them (PHASE22 section 2.9).
+            "weights_of": self.weights_of,
             "backends": {k: v.to_dict() for k, v in sorted(self.backends.items())},
             # `local` is deliberately NOT here. It is what a machine WITHOUT
             # Crucible runs, and this dict is what a Crucible tells its clients
@@ -1146,6 +1189,32 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             f"{path.name}: model.id is {model_id!r} but the file is named "
             f"{expected_id!r}; the id and the filename are the same thing"
         )
+    weights_of = model.get("weights_of")
+    if weights_of is not None:
+        if not _MODEL_ID.match(weights_of):
+            raise ManifestError(
+                f"{path.name}: weights_of_unknown — model.weights_of "
+                f"{weights_of!r} is not a model id ([a-z0-9][a-z0-9._-]*)"
+            )
+        if weights_of == model_id:
+            raise ManifestError(
+                f"{path.name}: weights_of_chain — model.weights_of names this "
+                "model itself. A model that shares its own weights shares "
+                "nothing; omit the key"
+            )
+        if "local" in document:
+            # The local form is the BASE's: it is what a machine with no
+            # Crucible runs, it is one Ollama tag or one GGUF, and the lineup
+            # Foundry vendors lists it once. A second [local] here would be the
+            # same download offered as a second tile — and PHASE22 section 2.9
+            # rules the Ollama-store reuse base-only, because Ollama's blob
+            # carries no projector for an alias to be installed from.
+            raise ManifestError(
+                f"{path.name}: weights_of_local — this model shares the weights "
+                f"of {weights_of!r} and carries a [local] table. The local form "
+                f"belongs to the model that owns the download; take [local] out "
+                f"of this file"
+            )
     if model["params_b"] <= 0:
         raise ManifestError(
             f"{path.name}: model.params_b must be positive, got {model['params_b']}"
@@ -1166,7 +1235,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             f"{path.name}: model.context_default must be positive, got "
             f"{model['context_default']}"
         )
-    for key in _MODEL_OPTIONAL:
+    for key in ("display", "description"):
         if key in model and model[key].strip() == "":
             raise ManifestError(
                 f"{path.name}: model.{key} is empty; a display fact nobody wrote "
@@ -1177,7 +1246,9 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
         # The one rule that crosses [model] and [local]: a local form is drawn
         # on a screen, and a row with no name is a row somebody would name for
         # it. Both are required here and nowhere else.
-        unnamed = sorted(key for key in _MODEL_OPTIONAL if key not in model)
+        unnamed = sorted(
+            key for key in ("display", "description") if key not in model
+        )
         if unnamed:
             raise ManifestError(
                 f"{path.name}: [local] is present but [model] is missing {unnamed}; "
@@ -1462,6 +1533,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
         ),
         display=model.get("display"),
         description=model.get("description"),
+        weights_of=weights_of,
         local=(
             None
             if "local" not in document
@@ -1473,8 +1545,130 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
 # ------------------------------------------------------------------- loading
 
 
-def parse_manifest(text: str, path: Path, expected_id: str) -> ModelManifest:
-    """Parse and validate one manifest's text. Raises ManifestError by name."""
+#: The facts an alias and its base must state IDENTICALLY (PHASE22-DECIDE.md
+#: section 2.9). Each is a property of the WEIGHTS — which family they are,
+#: how big, how far their positions reach, how the model wants to be asked —
+#: and the alias's weights are the base's, so a difference here is two answers
+#: to one question about one set of bytes. Everything else (`modalities`,
+#: `serves`, `context_default`, `display`, `description`, `engine_args`,
+#: memory) is the alias's own: those describe how it is SERVED, which is the
+#: whole reason it exists.
+WEIGHTS_OF_SHARED_FACTS: tuple[str, ...] = (
+    "family",
+    "params_b",
+    "trained_context",
+    "defaults",
+)
+
+#: What must be the same on every backend both manifests declare: the pin. One
+#: folder holds one repo at one revision, and on llama-windows one GGUF; an
+#: alias pinning anything else would be reading a download that is not there,
+#: or overwriting the base's with its own.
+WEIGHTS_OF_PIN_FIELDS: tuple[str, ...] = ("hf_repo", "revision", "file")
+
+
+def resolve_weights_of(manifest: ModelManifest, directory: Path) -> ModelManifest:
+    """`manifest` with its base attached, or a refusal naming the rule broken.
+
+    A base (no `weights_of`) comes back unchanged. An alias is checked against
+    the base in `directory` — the same directory it was read from, because a
+    `models/` tree is one catalog and an alias of a model the catalog does not
+    ship is an alias of nothing:
+
+    * ``weights_of_unknown``   the base has no manifest here.
+    * ``weights_of_chain``     the base is itself an alias (so an alias of an
+                               alias, and a base aliased to something else, are
+                               the same refusal: one folder has one owner).
+    * ``weights_of_backend_missing`` the alias declares a backend its base does
+                               not. There is no download there to share, and an
+                               alias is by definition not a download of its own.
+    * ``weights_of_pin_mismatch`` on a backend both declare, `hf_repo`,
+                               `revision` or `file` differ.
+    * ``weights_of_fact_mismatch`` a `WEIGHTS_OF_SHARED_FACTS` entry differs.
+
+    The base is read WITHOUT resolving its own `weights_of`, so a cycle (a -> b,
+    b -> a) is refused as a chain rather than recursing.
+    """
+    if manifest.weights_of is None:
+        return manifest
+    where = manifest.path.name
+    base_id = manifest.weights_of
+    base_path = directory / f"{base_id}.toml"
+    if not base_path.is_file():
+        known = sorted(p.stem for p in directory.glob("*.toml"))
+        raise ManifestError(
+            f"{where}: weights_of_unknown — model.weights_of is {base_id!r} and "
+            f"there is no {base_path.name} beside it; this catalog ships {known}"
+        )
+    base = _load_unresolved(base_id, directory)
+    if base.weights_of is not None:
+        raise ManifestError(
+            f"{where}: weights_of_chain — model.weights_of is {base_id!r}, which "
+            f"itself shares the weights of {base.weights_of!r}. An alias names "
+            "the model that OWNS the download; a folder has one owner, so an "
+            "alias of an alias is refused, and so is aliasing a base to "
+            "something else"
+        )
+    differing = [
+        name
+        for name in WEIGHTS_OF_SHARED_FACTS
+        if getattr(manifest, name) != getattr(base, name)
+    ]
+    if differing:
+        detail = "; ".join(
+            f"{name}: {getattr(manifest, name)!r} here, "
+            f"{getattr(base, name)!r} in {base.path.name}"
+            for name in differing
+        )
+        raise ManifestError(
+            f"{where}: weights_of_fact_mismatch — this model shares the weights "
+            f"of {base_id!r} and states {differing} differently ({detail}). "
+            "These are facts about the weights, and the weights are one set of "
+            "bytes"
+        )
+    for kind, spec in sorted(manifest.backends.items()):
+        base_spec = base.backends.get(kind)
+        if base_spec is None:
+            raise ManifestError(
+                f"{where}: weights_of_backend_missing — [backends.{kind}] is "
+                f"declared here and {base.path.name} declares no {kind} block "
+                f"(it declares {sorted(base.backends)}). There is no download of "
+                f"{base_id!r} on {kind} to share"
+            )
+        pins = [
+            name
+            for name in WEIGHTS_OF_PIN_FIELDS
+            if getattr(spec, name) != getattr(base_spec, name)
+        ]
+        if pins:
+            detail = "; ".join(
+                f"{name}: {getattr(spec, name)!r} here, "
+                f"{getattr(base_spec, name)!r} in {base.path.name}"
+                for name in pins
+            )
+            raise ManifestError(
+                f"{where}: weights_of_pin_mismatch — [backends.{kind}] shares "
+                f"{base_id!r}'s download and pins it differently ({detail}). "
+                "One folder holds one pin"
+            )
+    return replace(manifest, weights_base=base)
+
+
+def parse_manifest(
+    text: str, path: Path, expected_id: str, *, directory: Path | None = None
+) -> ModelManifest:
+    """Parse and validate one manifest's text. Raises ManifestError by name.
+
+    An alias (`[model] weights_of`) is resolved against `directory`, which
+    defaults to the directory `path` names — the catalog it sits in.
+    """
+    manifest = _parse_text(text, path, expected_id)
+    return resolve_weights_of(
+        manifest, directory if directory is not None else path.parent
+    )
+
+
+def _parse_text(text: str, path: Path, expected_id: str) -> ModelManifest:
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -1482,9 +1676,7 @@ def parse_manifest(text: str, path: Path, expected_id: str) -> ModelManifest:
     return _parse(document, path, expected_id)
 
 
-def load_manifest(model_id: str, directory: Path | None = None) -> ModelManifest:
-    """Load `models/<model_id>.toml`. Raises ManifestError if it is not there."""
-    root = directory if directory is not None else manifests_dir()
+def _load_unresolved(model_id: str, root: Path) -> ModelManifest:
     path = root / f"{model_id}.toml"
     if not path.is_file():
         known = sorted(p.stem for p in root.glob("*.toml"))
@@ -1495,7 +1687,29 @@ def load_manifest(model_id: str, directory: Path | None = None) -> ModelManifest
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise ManifestError(f"could not read {path}: {exc}") from exc
-    return parse_manifest(text, path, model_id)
+    return _parse_text(text, path, model_id)
+
+
+def load_manifest(model_id: str, directory: Path | None = None) -> ModelManifest:
+    """Load `models/<model_id>.toml`. Raises ManifestError if it is not there."""
+    root = directory if directory is not None else manifests_dir()
+    return resolve_weights_of(_load_unresolved(model_id, root), root)
+
+
+def aliases_of(manifest: ModelManifest) -> tuple[ModelManifest, ...]:
+    """Every manifest beside this one whose `weights_of` names it, in id order.
+
+    Read from the directory the manifest itself came from, so the question is
+    asked of the catalog that holds it and not of whatever `manifests_dir()`
+    would say — a test's fixture tree and the shipped tree are two catalogs.
+    Empty for an alias, which nothing may alias (`weights_of_chain`).
+    """
+    if manifest.weights_of is not None:
+        return ()
+    found = load_all_manifests(manifest.path.parent)
+    return tuple(
+        other for other in found.values() if other.weights_of == manifest.id
+    )
 
 
 def load_all_manifests(directory: Path | None = None) -> dict[str, ModelManifest]:

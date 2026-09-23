@@ -71,6 +71,8 @@ def test_a_row_carries_exactly_the_contract_s_fields(
             "installed",
             "installed_bytes",
             "expected_bytes",
+            "shares_weights_of",
+            "missing_files",
             "floors",
             "license",
             "source",
@@ -144,8 +146,12 @@ def test_expected_bytes_is_declared_where_a_file_is_named_and_null_otherwise(
 ) -> None:
     rows = fetch(client, auth)
     for row in rows:
-        if row["kind"] in ("model", "voice"):
+        if row["kind"] in ("model", "voice") and row["shares_weights_of"] is None:
             assert row["expected_bytes"] is None, row["id"]
+        elif row["kind"] == "model":
+            # An alias counts only its own files (PHASE22 section 2.9): 0 on a
+            # whole-repo backend, where it adds none; this fixture is cuda-linux.
+            assert row["expected_bytes"] == 0, row["id"]
         else:
             assert isinstance(row["expected_bytes"], int) and row["expected_bytes"] > 0
 
