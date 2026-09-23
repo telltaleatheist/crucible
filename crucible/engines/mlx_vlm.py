@@ -74,6 +74,17 @@ WIDTH_FLAG = "--width"
 class MlxVlmEngine(SubprocessEngine):
     name = "mlx-vlm"
 
+    #: NO DECISION: Crucible's own page server (`engines/mlx_vlm_serve.py`)
+    #: calls `batch_generate(compute_logprobs=False)` and refuses every body
+    #: field outside its `KNOWN_FIELDS`, `logprobs` among them. Growing a
+    #: logprobs path there is Owen's ruling (PHASE22 section 7.4), not a flag.
+    decide_logprobs = False
+    decide_basis = (
+        "the Mac page server computes no logprobs "
+        "(engines/mlx_vlm_serve.py: batch_generate(compute_logprobs=False)) and "
+        "refuses a body carrying logprobs (KNOWN_FIELDS)"
+    )
+
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> list[str]:

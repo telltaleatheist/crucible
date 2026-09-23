@@ -17,6 +17,14 @@ What Crucible offers today, for reference: `llm` behind an OpenAI-compatible pro
 at a time, an accelerator guard, and `echo`. `vlm-pages`, `tts`, `align` and `rvc` are
 named but unbuilt.
 
+> **Added 2026-09-23 (PHASE22, `PHASE22-DECIDE.md`):** a second model door beside the chat
+> proxy, **`POST /v1/decide`** — a state and questions with fixed answer sets in, a probability
+> distribution per question out, from one forward pass at the resident model. The SDK's
+> `decide()` and `crucible api decide` are its client surfaces. Its first consumers are
+> Foundry's Categorize tile (which ran snap beside Crucible until then) and BookForge's block
+> kinds, transcript boundaries and TTS-cleanup gating; the closed-question door of section 6
+> (`askConstrained`) is the same shape of question and a candidate, not a ruling.
+
 Read the last section first if you only read one. Everything above it is the evidence.
 
 ---

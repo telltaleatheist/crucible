@@ -180,6 +180,8 @@ crucible api job submit --type tts --model deathstalker \
     --params @chunks.json --follow --artifacts-dir ./out
 crucible api stream open --voice sigma --language en  # serialized tts, one row at a time
 crucible api chat --model qwen3.5-9b --message "…"    # the cleanup / translation door
+crucible api decide --model qwen3.5-9b --state @ticket.txt \
+    --yesno refund "The customer asks for a refund"  # the decision door, snap's grammar
 ```
 
 One binary, two kinds of verb; the full command list, the job-type bodies and what a
@@ -307,6 +309,7 @@ request with neither is answered 401.
 | `GET /voices` | yes | every voice manifest and where it stands here |
 | `GET /openai/models` | yes | the resident model in OpenAI's list shape |
 | `POST /openai/chat/completions` | yes | proxied to the resident engine, streaming or not; **never loads one** |
+| `POST /decide` | yes | a probability distribution over each question's fixed answers, from one forward pass at the resident model; **never loads one** (`docs/PHASE22-DECIDE.md`) |
 | `GET /accelerator` | yes | what is on the card right now, who is holding it, and which of them are Crucible's. It **reports and never evicts** |
 | `POST /uploads` | yes | multipart `file=@...` → `{blob_id, bytes, sha256}` |
 | `POST /jobs` | yes | `{type, model?, params, inputs}` → 202 `{job_id}`, or **409 `server_busy`** naming who has the card — one job at a time, and the server does not queue |

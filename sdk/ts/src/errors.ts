@@ -523,17 +523,28 @@ const SERVER_SPECIFIC_REFUSALS: ReadonlySet<string> = new Set([
   'job_type_installed',
 ]);
 
-/** 5xx: the server broke. The client never retries one of these. */
+/**
+ * 5xx: the server broke. The client never retries one of these.
+ *
+ * `details` is the envelope's own `details`, or `null` when it carried none —
+ * carried since 2026-09-23 (PHASE22-DECIDE.md) because two 5xx bodies are
+ * worth reading: `chat_queue_full` (503) states `retry_after`, how long
+ * completions on that engine have recently been taking, and the decision
+ * door's `label_not_in_probs` (502) names the question and the letter. The
+ * CALLER decides whether to wait and ask again; this client still does not.
+ */
 export class CrucibleServerError extends CrucibleError {
   readonly status: number;
   readonly code: string;
   readonly serverMessage: string;
+  readonly details: unknown;
 
-  constructor(status: number, code: string, serverMessage: string) {
+  constructor(status: number, code: string, serverMessage: string, details: unknown) {
     super(`crucible failed the request (${status} ${code}): ${serverMessage}`);
     this.status = status;
     this.code = code;
     this.serverMessage = serverMessage;
+    this.details = details;
   }
 }
 

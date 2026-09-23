@@ -131,6 +131,28 @@ class SubprocessEngine:
     #: concurrency with no provenance is a number somebody typed.
     chat_concurrency_basis: str | None = None
 
+    #: CAN THIS ENGINE SERVE A DECISION (`POST /v1/decide`, PHASE22-DECIDE.md)?
+    #:
+    #: A decision is read off the engine's own `/v1/chat/completions` as
+    #: `choices[0].logprobs.content[0].top_logprobs`, so the question is whether
+    #: that route returns top logprobs at all, and how many. It is a fact READ
+    #: FROM THE ENGINE'S SOURCE at the version Crucible pins, never assumed, so
+    #: it is False until somebody has read it — and the door then refuses
+    #: `503 decide_not_served` with `decide_basis` as the reason, rather than
+    #: sending a request whose reply would have to be guessed at.
+    decide_logprobs: bool = False
+
+    #: The most top logprobs one reply carries, or None when the engine has no
+    #: small cap (llama-server's `n_probs` is bounded only by the vocabulary).
+    #: The reader asks for the labels plus a margin and never more than this; a
+    #: question with more options than this is refused before it is sent.
+    max_logprobs: int | None = None
+
+    #: Where `decide_logprobs` and `max_logprobs` came from, or why the engine
+    #: cannot serve a decision. Required either way (`engines.decide_reading`):
+    #: a refusal with no reason is as useless as a number with no provenance.
+    decide_basis: str | None = None
+
     def __init__(self, python: Path, log_path: Path) -> None:
         self._python = Path(python)
         self._log_path = Path(log_path)

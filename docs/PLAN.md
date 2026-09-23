@@ -10,6 +10,18 @@ Rule for every phase: BookForge changes little or nothing until Crucible is read
 first BookForge consumer is `bookforge-cli` (it drives the compiled pipeline, so it proves
 the seam without touching the app UI).
 
+**PLANNED 2026-09-23, BUILD STARTED: PHASE22 — the decision door.** snap's "System One"
+decision model becomes `POST /v1/decide`, a synchronous sibling of the chat door (Owen:
+*"lets work snap into crucible as another service"*): a state and questions with fixed answer
+sets in, a probability distribution per question out, from one forward pass at the resident
+model. The Categorize tile ran snap as a child beside Crucible, which put engine knowledge
+(logprob flags, prefix priming, hybrid-model checkpoints) in the app's process; the prompt is a
+fact about the weights, so it moves to `crucible/decide.py` and the apps keep only the order.
+SDK `decide()` and `crucible api decide` (snap's grammar) ship with the door. Rulings owed
+(section 7): snap's server retires for the apps; a `decide` capability class or `analysis`;
+images on `qwen3.5-9b`; the Mac refusing `decide_not_served` for now. Contract:
+`docs/PHASE22-DECIDE.md`.
+
 **PLANNED 2026-09-19, BUILD STARTED: PHASE21 — a voice's facts travel with its weights; Crucible
 ships no voices.** `crucible-voice.toml` at the HF repo root in the same commit as the weights
 (voice facts only: pace with a `basis`, band, per-arm `max_chars` with a basis, sampling, takes;

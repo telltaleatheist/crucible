@@ -684,6 +684,112 @@ def cmd_chat(connection: Connection, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+class _Question(argparse.Action):
+    """`--choice` / `--score` / `--yesno` append to ONE list, in the order typed.
+
+    One list rather than three because the request's `questions` is an ordered
+    object and the reply's `answers` follows it: `--yesno a … --choice b …`
+    should come back a-then-b, and three separate `append` lists would have
+    reordered them by flag.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):  # type: ignore[override]
+        questions = getattr(namespace, self.dest)
+        if questions is None:
+            questions = []
+            setattr(namespace, self.dest, questions)
+        questions.append((option_string, list(values)))
+
+
+def decide_questions(given: list[tuple[str, list[str]]] | None) -> dict[str, Any]:
+    """snap's question grammar (`snap/cli.py`), into the door's `questions`.
+
+    The SHAPE is this CLI's — an option is `opt=description`, levels are one
+    comma-separated word — and it is refused here by name. How many options,
+    how many levels, what a name may contain: those are the server's numbers
+    (PHASE22-DECIDE.md section 2.2) and it refuses them itself, so they are not
+    copied into this file.
+    """
+    if not given:
+        raise ClientRefusal(
+            "decide_needs_a_question: pass at least one --choice, --score or --yesno"
+        )
+    questions: dict[str, Any] = {}
+    for flag, values in given:
+        name = values[0]
+        if name in questions:
+            raise ClientRefusal(f"decide_question_repeated: question {name!r} is given twice")
+        if flag == "--yesno":
+            questions[name] = {"type": "yesno", "instructions": values[1]}
+        elif flag == "--score":
+            questions[name] = {
+                "type": "score", "instructions": values[1],
+                "levels": [level.strip() for level in values[2].split(",")],
+            }
+        elif flag == "--choice":
+            if len(values) < 2:
+                raise ClientRefusal(
+                    f"decide_choice_malformed: --choice {name} needs NAME "
+                    '"instructions" opt=description …'
+                )
+            options: dict[str, str] = {}
+            for word in values[2:]:
+                option, description = split_assignment(word, "--choice")
+                if option in options:
+                    raise ClientRefusal(
+                        f"decide_option_repeated: --choice {name}: option {option!r} "
+                        "is given twice"
+                    )
+                options[option] = description
+            questions[name] = {"type": "choice", "instructions": values[1], "options": options}
+        else:
+            raise AssertionError(flag)
+    return questions
+
+
+def cmd_decide(connection: Connection, args: argparse.Namespace) -> int:
+    """`POST /v1/decide` — a distribution over each question's fixed answers.
+
+    PHASE22-DECIDE.md (2026-09-23): snap's decision model, moved into Crucible
+    as a door beside chat. The grammar is snap's own (`snap decide`), so a
+    person moving from snap types the same thing; what differs is the address.
+    The prompt, the letters and the renormalisation are the SERVER's — this
+    verb sends the state, the questions and their options, and prints the
+    answer the server gives, unchanged.
+    """
+    images = []
+    for raw in args.image:
+        path = Path(raw)
+        if not path.is_file():
+            raise ClientRefusal(f"image_missing: {path} is not a file")
+        data = path.read_bytes()
+        if not data:
+            raise ClientRefusal(f"image_empty: {path} has no bytes")
+        images.append(base64.b64encode(data).decode("ascii"))
+    if args.state is None:
+        # snap's rule: an image-only decision has the state "". Stated rather
+        # than defaulted — without an image there is nothing to decide about.
+        if not images:
+            raise ClientRefusal(
+                "decide_needs_state: pass --state <text|@file>, or at least one --image"
+            )
+        state = ""
+    elif args.state.startswith("@"):
+        path = Path(args.state[1:])
+        if not path.is_file():
+            raise ClientRefusal(f"--state_file_missing: {path} is not a file")
+        state = path.read_text(encoding="utf-8")
+    else:
+        state = args.state
+    body: dict[str, Any] = {"model": args.model, "state": state}
+    if images:
+        body["images"] = images
+    body["questions"] = decide_questions(args.questions)
+    extra = None if args.act is None else {"X-Crucible-Act": args.act}
+    emit(call(connection, "POST", "/v1/decide", json_body=body, extra_headers=extra))
+    return EXIT_OK
+
+
 def cmd_upload(connection: Connection, args: argparse.Namespace) -> int:
     emit(upload(connection, Path(args.path)))
     return EXIT_OK
@@ -1189,6 +1295,35 @@ def add_parser(subparsers: Any) -> None:
     chat.add_argument("--stream", action="store_true", help="send stream:true and print each frame")
     chat.add_argument("--act", default=None, help="the capability class, for the bench")
     chat.set_defaults(api_func=cmd_chat)
+
+    decide = verb("decide", "a distribution over each question's fixed answers — snap's grammar")
+    decide.add_argument("--model", required=True, help="the resident model to read the decision from")
+    decide.add_argument(
+        "--state", default=None,
+        help="what the questions are about: text, or @file. May be left out "
+             "when at least one --image is given; the state is then \"\"",
+    )
+    decide.add_argument(
+        "--image", action="append", default=[], metavar="PATH",
+        help="an image file, sent base64-encoded; repeatable",
+    )
+    decide.add_argument(
+        "--choice", dest="questions", action=_Question, nargs="+",
+        metavar=("NAME", "INSTRUCTIONS OPT=DESC"),
+        help='NAME "instructions" opt=description [opt=description …]; repeatable',
+    )
+    decide.add_argument(
+        "--score", dest="questions", action=_Question, nargs=3,
+        metavar=("NAME", "INSTRUCTIONS", "LEVELS"),
+        help='NAME "instructions" "level1,level2,…" (ordered, low to high); repeatable',
+    )
+    decide.add_argument(
+        "--yesno", dest="questions", action=_Question, nargs=2,
+        metavar=("NAME", "INSTRUCTIONS"),
+        help='NAME "a statement the state may make true"; repeatable',
+    )
+    decide.add_argument("--act", default=None, help="the capability class, for the bench")
+    decide.set_defaults(api_func=cmd_decide, questions=None)
 
     upload_verb = verb("upload", "put a file on the server and get its blob_id")
     upload_verb.add_argument("path")

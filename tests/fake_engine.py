@@ -10,6 +10,7 @@ on a real loopback port — so the proxy's socket path is the real one.
 from __future__ import annotations
 
 import json
+import math
 import select
 import socket
 import struct
@@ -24,6 +25,25 @@ from crucible.engines import find_free_port
 #: What the fake completion answers with, so tests can assert on exact bytes.
 ANSWER = "Crucible is a server."
 DELTAS = ["Crucible ", "is ", "a ", "server."]
+
+#: A decision reader's probabilities: the messages a completion was sent, to
+#: `{token string: probability}` for the next token. Installed per engine with
+#: `FakeEngine(probs_for=...)`; tokens it leaves out are absent from the reply.
+ProbsFor = Callable[[list[dict[str, Any]]], dict[str, float]]
+
+#: vLLM 0.29.0's own default `--max-logprobs` (`vllm/config/model.py` L250).
+#: The fake refuses past it the way the engine does, so a reader that asks for
+#: more than the engine was started with fails here as it would on the card.
+FAKE_MAX_LOGPROBS = 20
+
+#: vLLM's prefix cache reuses whole KV blocks only, so a reported
+#: `cached_tokens` is a multiple of the block size (16 by default).
+FAKE_KV_BLOCK = 16
+
+#: The tokens that carry whatever probability the installed letters leave over.
+#: `" A"` is here on purpose (snap's fake does the same): a reader that matched
+#: labels loosely would take the filler for label `A`.
+FILLER_TOKENS: tuple[tuple[str, float], ...] = (("The", 0.6), (" A", 0.4))
 
 #: The call a `finish_reason: "tool_calls"` completion says the model wants. Its
 #: `content` is null, which is the part worth proxying correctly: a body whose
@@ -80,6 +100,21 @@ class _Handler(BaseHTTPRequestHandler):
     #: `RemoteProtocolError` when the FIN wins the race with the RST). Bound per
     #: engine in `FakeEngine.start`; a one-element list so the count can move.
     drops_left: list[int] | None = None
+    #: The decision reader's distribution (`ProbsFor`), or None: a fake that
+    #: answers no logprobs at all, which is what every chat-door test before
+    #: PHASE22 was written against. Bound per engine.
+    probs_for: ProbsFor | None = None
+    #: The engine's `--max-logprobs`; a request past it is vLLM's 400.
+    max_logprobs: int = FAKE_MAX_LOGPROBS
+    #: vLLM `--enable-prompt-tokens-details`: report `cached_tokens` or not.
+    report_cached: bool = True
+    #: Every completion's rendered prompt text, for the prefix-cache emulation.
+    prompts: list[str] | None = None
+    #: `("start"|"end", request index)` in order, and how many completions were
+    #: open at once at the most — the two things a concurrency test asks.
+    events: list[tuple[str, int]] | None = None
+    in_flight: list[int] | None = None
+    max_in_flight: list[int] | None = None
 
     def log_message(self, *args: Any) -> None:  # keep pytest output clean
         return
@@ -130,8 +165,22 @@ class _Handler(BaseHTTPRequestHandler):
         type(self).last_request_bytes = raw
         type(self).last_request = body
         with type(self).lock:
+            index = len(type(self).requests)
             type(self).requests.append(body)
             type(self).request_bytes.append(len(raw))
+            type(self).events.append(("start", index))
+            type(self).in_flight[0] += 1
+            type(self).max_in_flight[0] = max(
+                type(self).max_in_flight[0], type(self).in_flight[0]
+            )
+        try:
+            self._serve_completion(body)
+        finally:
+            with type(self).lock:
+                type(self).in_flight[0] -= 1
+                type(self).events.append(("end", index))
+
+    def _serve_completion(self, body: dict[str, Any]) -> None:
         if type(self).on_post is not None:
             type(self).on_post()
 
@@ -203,7 +252,34 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             return
 
+        wants_logprobs = body.get("logprobs") is True
+        if wants_logprobs and type(self).probs_for is not None:
+            asked = body.get("top_logprobs")
+            if isinstance(asked, int) and asked > type(self).max_logprobs:
+                # vLLM 0.29.0's refusal, word for word
+                # (`vllm/sampling_params.py` L821-827, rendered as the
+                # `ErrorResponse` of `vllm/entrypoints/serve/engine/protocol.py`
+                # L54-62).
+                self._json(
+                    400,
+                    {
+                        "error": {
+                            "message": f"Requested sample logprobs of {asked}, "
+                            "which is greater than max allowed: "
+                            f"{type(self).max_logprobs}",
+                            "type": "BadRequestError",
+                            "param": "logprobs",
+                            "code": 400,
+                        }
+                    },
+                )
+                return
+
         if type(self).answer_delay > 0.0 and self._wait_out_the_answer():
+            return
+
+        if type(self).probs_for is not None:
+            self._json(200, self._decision_reply(body, wants_logprobs))
             return
 
         reason = type(self).finish_reason
@@ -226,6 +302,71 @@ class _Handler(BaseHTTPRequestHandler):
                 },
             },
         )
+
+    def _decision_reply(self, body: dict[str, Any], wants_logprobs: bool) -> dict[str, Any]:
+        """A one-token completion in vLLM 0.29.0's exact chat shape.
+
+        `choices[0].logprobs.content[0]` is the sampled token's
+        `ChatCompletionLogProbsContent` — `{token, logprob, bytes,
+        top_logprobs}` with each top entry `{token, logprob, bytes}`
+        (`vllm/entrypoints/openai/chat_completion/protocol.py` L81-95) — and
+        `logprobs` is null when the request did not ask. `usage` carries
+        `prompt_tokens_details.cached_tokens` when the engine was started with
+        `--enable-prompt-tokens-details`, and null in its place otherwise
+        (`UsageInfo`, `vllm/entrypoints/serve/engine/protocol.py` L110-115).
+        """
+        text = _rendered(body.get("messages", []))
+        n_prompt = max(1, len(text) // 4)
+        with type(self).lock:
+            common = max(
+                (_common_prefix(text, seen) for seen in type(self).prompts), default=0
+            )
+            type(self).prompts.append(text)
+        cached = (common // 4) // FAKE_KV_BLOCK * FAKE_KV_BLOCK
+
+        letters = type(self).probs_for(body.get("messages", []))
+        entries = list(letters.items())
+        rest = max(0.0, 1.0 - sum(letters.values()))
+        entries += [(token, rest * share) for token, share in FILLER_TOKENS]
+        entries.sort(key=lambda entry: -entry[1])
+        top_n = body.get("top_logprobs") or 0
+        tops = [
+            {
+                "token": token,
+                "logprob": math.log(p) if p > 0 else -9999.0,
+                "bytes": list(token.encode("utf-8")),
+            }
+            for token, p in entries[:top_n]
+        ]
+        sampled = entries[0][0]
+        logprobs = (
+            {"content": [{**tops[0], "top_logprobs": tops}]}
+            if wants_logprobs and tops
+            else None
+        )
+        return {
+            "id": "chatcmpl-fake",
+            "object": "chat.completion",
+            "created": 0,
+            "model": type(self).served_name,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": sampled},
+                    "logprobs": logprobs,
+                    "finish_reason": "length",
+                    "stop_reason": None,
+                }
+            ],
+            "usage": {
+                "prompt_tokens": n_prompt,
+                "total_tokens": n_prompt + 1,
+                "completion_tokens": 1,
+                "prompt_tokens_details": (
+                    {"cached_tokens": cached} if type(self).report_cached else None
+                ),
+            },
+        }
 
     def _wait_out_the_answer(self) -> bool:
         """Spend `answer_delay` generating, watching for the caller to hang up.
@@ -272,6 +413,37 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
+def _rendered(messages: list[dict[str, Any]]) -> str:
+    """A stand-in for a chat template: every message, text parts in order.
+
+    An image part is rendered as its URL, so two requests with the same image
+    share the prefix and two with different images do not — which is what a
+    real prefix cache keyed on the image's tokens does.
+    """
+    out: list[str] = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            pieces = [content]
+        else:
+            pieces = [
+                part.get("text") if part.get("type") == "text"
+                else part.get("image_url", {}).get("url", "")
+                for part in content or []
+            ]
+        out.append(f"<|{message.get('role')}|>" + "\n".join(pieces))
+    return "".join(out)
+
+
+def _common_prefix(a: str, b: str) -> int:
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
 class FakeEngine:
     """Implements the Engine protocol against a threaded HTTP server."""
 
@@ -292,6 +464,9 @@ class FakeEngine:
         stream_forever: bool = False,
         on_post: Callable[[], None] | None = None,
         drop_requests: int = 0,
+        probs_for: ProbsFor | None = None,
+        max_logprobs: int = FAKE_MAX_LOGPROBS,
+        report_cached: bool = True,
     ) -> None:
         self._python = Path(python)
         self._log_path = Path(log_path)
@@ -311,6 +486,9 @@ class FakeEngine:
         self._hold = hold
         self._on_post = on_post
         self._drop_requests = drop_requests
+        self._probs_for = probs_for
+        self._max_logprobs = max_logprobs
+        self._report_cached = report_cached
         #: Set once `ready()` has been entered, so a test knows the lane has
         #: reached the engine without polling on a sleep.
         self.warming_started = threading.Event()
@@ -354,6 +532,17 @@ class FakeEngine:
                 "lock": threading.Lock(),
                 "on_post": self._on_post,
                 "drops_left": [self._drop_requests],
+                # staticmethod: a plain function stored on a class would be
+                # bound as a method and handed the handler as `messages`.
+                "probs_for": (
+                    None if self._probs_for is None else staticmethod(self._probs_for)
+                ),
+                "max_logprobs": self._max_logprobs,
+                "report_cached": self._report_cached,
+                "prompts": [],
+                "events": [],
+                "in_flight": [0],
+                "max_in_flight": [0],
             },
         )
         self._handler = handler
@@ -411,6 +600,22 @@ class FakeEngine:
         if handler is None:
             raise RuntimeError("fake engine has not been started")
         return handler.requests
+
+    @property
+    def events(self) -> list[tuple[str, int]]:
+        """`("start"|"end", request index)` for every completion, in order."""
+        handler = getattr(self, "_handler", None)
+        if handler is None:
+            raise RuntimeError("fake engine has not been started")
+        return handler.events
+
+    @property
+    def max_in_flight(self) -> int:
+        """The most completions this engine had open at one moment."""
+        handler = getattr(self, "_handler", None)
+        if handler is None:
+            raise RuntimeError("fake engine has not been started")
+        return handler.max_in_flight[0]
 
     @property
     def request_bytes(self) -> list[int]:

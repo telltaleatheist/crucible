@@ -1246,6 +1246,154 @@ export interface ChatResponse {
   readonly usage: ChatUsage;
 }
 
+// ------------------------------------------------------------------ decide
+//
+// `POST /v1/decide`, PHASE22-DECIDE.md (2026-09-23): snap's decision model
+// moved into Crucible as a door, sibling of the chat door. A state and a set of
+// questions with FIXED answer sets go in; a probability distribution over each
+// answer set comes out, read off ONE forward pass of the resident model. The
+// prompt that makes an instruct model report a distribution is Crucible's (it
+// is a fact about the weights, section 2.3) — the caller sends the ORDER: the
+// state, the questions and their options, and nothing else.
+
+/**
+ * Pick one of 2–26 named options.
+ *
+ * **Order is meaning**: the server tags the options `A`..`Z` in the order the
+ * object lists them. A JavaScript object lists integer-like keys (`"1"`,
+ * `"42"`) first and in ascending order whatever order they were written in, so
+ * give options names that are not integers when their order matters.
+ */
+export interface DecideChoiceQuestion {
+  readonly type: 'choice';
+  readonly instructions: string;
+  /** Option name → the description the model reads. */
+  readonly options: Readonly<Record<string, string>>;
+}
+
+/** Place the state on 2–10 unique, ORDERED levels; the answer's `score` is the expected 1-based level. */
+export interface DecideScoreQuestion {
+  readonly type: 'score';
+  readonly instructions: string;
+  readonly levels: readonly string[];
+}
+
+/** A statement the state does or does not make true; the answer is P(Yes). */
+export interface DecideYesNoQuestion {
+  readonly type: 'yesno';
+  readonly instructions: string;
+}
+
+export type DecideQuestion = DecideChoiceQuestion | DecideScoreQuestion | DecideYesNoQuestion;
+
+export interface DecideRequest {
+  /**
+   * The model to read the decision from. Must be the resident one, exactly as
+   * for {@link ChatOptions.model}: the server answers 409 `model_not_resident`
+   * and never loads a model to answer a decision. An upstream id
+   * (`anthropic/…`) is refused 400 `decide_needs_logprobs` — no upstream
+   * returns a distribution.
+   */
+  readonly model: string;
+  /**
+   * What the questions are about: a string, or any JSON value (the server
+   * serialises a non-string as compact JSON). May be `""` only when `images`
+   * are given.
+   */
+  readonly state: unknown;
+  /**
+   * Image FILES, base64-encoded (at most 8; more is 400 `too_many_images`).
+   * A model whose manifest does not declare `image` refuses them 400
+   * `model_text_only` naming the model (section 2.7). Omit it for none.
+   */
+  readonly images?: readonly string[];
+  /** Question name → question. A name is a single path member. */
+  readonly questions: Readonly<Record<string, DecideQuestion>>;
+}
+
+export interface DecideOptions {
+  /**
+   * What this decision IS, for `GET /v1/activity` — sent as `X-Crucible-Act`,
+   * exactly as {@link ChatOptions.act}: omitted, no header is sent and the
+   * server records `null`; an unknown name is the server's 400 `unknown_act`.
+   */
+  readonly act?: string;
+  /** Aborts the request; the abort surfaces as a DOM `AbortError`. */
+  readonly signal?: AbortSignal;
+}
+
+/**
+ * The answer to a `choice`. `probabilities` is renormalised over the option
+ * letters; `confidence` is its largest entry; `labelMass` is how much of the
+ * engine's raw next-token mass the letters held before renormalising — low
+ * means the model wanted to say something that was not an option.
+ */
+export interface DecideChoiceAnswer {
+  readonly type: 'choice';
+  readonly choice: string;
+  readonly probabilities: Readonly<Record<string, number>>;
+  readonly confidence: number;
+  readonly labelMass: number;
+}
+
+/** The answer to a `score`: `score` = Σ(1-based level index × p), `level` the likeliest. */
+export interface DecideScoreAnswer {
+  readonly type: 'score';
+  readonly score: number;
+  readonly level: string;
+  readonly probabilities: Readonly<Record<string, number>>;
+  readonly confidence: number;
+  readonly labelMass: number;
+}
+
+/** The answer to a `yesno`: `p` is the renormalised P(Yes). */
+export interface DecideYesNoAnswer {
+  readonly type: 'yesno';
+  readonly p: number;
+  readonly labelMass: number;
+}
+
+export type DecideAnswer = DecideChoiceAnswer | DecideScoreAnswer | DecideYesNoAnswer;
+
+/** One completion the door sent the engine, timed by Crucible's wall clock. */
+export interface DecideCallTiming {
+  readonly wallMs: number;
+  /** `usage.prompt_tokens`, as the engine counted it. */
+  readonly promptTokens: number;
+  /**
+   * `usage.prompt_tokens_details.cached_tokens`, or **`null` when the engine
+   * did not say — never 0**: a number nobody measured is not a measurement.
+   */
+  readonly cachedTokens: number | null;
+}
+
+export interface DecideTiming {
+  readonly total: number;
+  readonly perQuestion: Readonly<Record<string, DecideCallTiming>>;
+  /** The shared-prefix prime, sent only when there is more than one question; `null` when none was. */
+  readonly prime: DecideCallTiming | null;
+}
+
+export interface DecideResponse {
+  /** The provenance triple every artifact sidecar carries: which weights made this decision. */
+  readonly model: {
+    readonly id: string;
+    /** The revision the resident engine was started on; always stated, since a decision is read only from a resident engine. */
+    readonly revision: string;
+    /** `<id>@<revision>`. */
+    readonly fingerprint: string;
+  };
+  /** The engine kind that answered (`vllm`, `llama-server`, …). */
+  readonly engine: string;
+  /** One answer per question asked, keyed by the question's name. */
+  readonly answers: Readonly<Record<string, DecideAnswer>>;
+  readonly timingMs: DecideTiming;
+  readonly tokens: {
+    readonly perQuestion: Readonly<Record<string, number>>;
+    readonly images: number;
+  };
+}
+
 // --------------------------------------------------------------------- tts
 
 /**

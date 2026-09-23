@@ -168,6 +168,45 @@ class LlamaServerEngine(SubprocessEngine):
 
     name = ENGINE_NAME
 
+    #: ONE, because every llama-windows block in `crucible/models/*.toml`
+    #: starts it with `--parallel 1`: one slot, so one completion generates and
+    #: the rest wait in llama-server's own task queue with nothing on the wire
+    #: saying so. That is mlx-lm's shape exactly — the defect Crucible 1.0.10
+    #: fixed for the Mac (`MlxLmEngine.chat_concurrency`) — and it had been
+    #: present on Windows since llama-server joined, with this door admitting
+    #: everything. A decision's fan-out is precisely the load that would find
+    #: it (PHASE22 section 2.6), so the chat door now admits 2 here.
+    #:
+    #: The number is the manifests' flag, restated: two owners of one fact, so
+    #: `tests/test_chat_admission.py` reads every llama-windows block and fails
+    #: if one of them ever says anything but `--parallel 1`.
+    chat_concurrency = 1
+    chat_concurrency_basis = (
+        "llama-server is started with --parallel 1 (every llama-windows block's "
+        "engine_args): one slot generates and the rest queue inside the server"
+    )
+
+    #: A DECISION IS SERVED, WITH NO SMALL CAP. Read from llama.cpp's source at
+    #: tag b10970 on 2026-09-23 (PHASE22 section 1): the chat route turns
+    #: `logprobs: true` into `n_probs = top_logprobs`
+    #: (`tools/server/server-common.cpp` L1403-1412), the probabilities are
+    #: PRE-sampling unless `post_sampling_probs` is sent (`server-task.h` L76,
+    #: `server-context.cpp` L1964-2019, `get_token_probabilities` over the raw
+    #: logits in `server-common.cpp` L1524-1554), and the reply carries them at
+    #: `choices[0].logprobs.content[].top_logprobs` as `{id, token, bytes,
+    #: logprob}` (`server-task.cpp` L264-300, L434-437) with
+    #: `usage.prompt_tokens_details.cached_tokens` always present (L365-371).
+    #: `n_probs` is bounded by the vocabulary and nothing smaller.
+    decide_logprobs = True
+    max_logprobs = None
+    decide_basis = (
+        "llama-server b10970's /v1/chat/completions maps logprobs/top_logprobs to "
+        "n_probs (tools/server/server-common.cpp L1403-1412) and returns "
+        "pre-sampling choices[0].logprobs.content[].top_logprobs "
+        "(server-task.cpp L282-300, L434-437); n_probs has no cap below the "
+        "vocabulary"
+    )
+
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> list[str]:

@@ -27,6 +27,7 @@ from crucible.accelerator import GIB, ComputeApp
 from crucible.config import DEFAULT_DESKTOP_ALLOWANCE_BYTES
 from crucible import residency as residency_module
 from crucible.engines import ENGINES
+from crucible.engines.vllm import DECIDE_ARGS as VLLM_DECIDE_ARGS
 from crucible.manifests import load_manifest
 from crucible.settle import SETTLEMENT_HOLDER
 
@@ -563,7 +564,7 @@ memory_bytes_estimate = 3000000000
         )
         events = run_job(client, auth, type="load-model", model="shifty")
         assert events[-1]["event"] == "done", events[-1]
-        assert engines[0].args == ["--max-model-len", "8192"]
+        assert engines[0].args == ["--max-model-len", "8192", *VLLM_DECIDE_ARGS]
 
         write(32768)  # somebody edits the manifest with the engine still up
         row = client.get("/v1/models", headers=auth).json()[0]
@@ -843,6 +844,9 @@ def test_the_4bit_27b_actually_loads_on_a_free_24_gib_card(
         "--skip-mm-profiling",
         "--language-model-only",
         "--max-model-len", "16384",
+        # The decision door's flags (PHASE22 section 2.6), composed beside the
+        # context and before the sized pool.
+        *VLLM_DECIDE_ARGS,
         "--kv-cache-memory-bytes", str(pool),
         "--gpu-memory-utilization", f"{budget / total:.4f}",
     ]

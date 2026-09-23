@@ -13,6 +13,7 @@ module owns only "which class does this name mean".
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -126,6 +127,53 @@ def chat_admission(engine_name: str) -> ChatAdmission:
             "admit nothing"
         )
     return (concurrency + 1, basis)
+
+
+@dataclass(frozen=True)
+class DecideReading:
+    """Whether an engine serves a decision, how many top logprobs, and why.
+
+    `max_logprobs` None with `served` True is an engine with no small cap;
+    with `served` False it means nothing and `basis` is the refusal's reason.
+    """
+
+    served: bool
+    max_logprobs: int | None
+    basis: str
+
+
+def decide_reading(engine_name: str) -> DecideReading:
+    """What the decision door may ask this engine for (PHASE22 section 2.6).
+
+    Checked for the same consistency `chat_admission` checks: a basis is
+    required either way, a served engine's cap must hold at least a yes/no
+    question's two letters, and a cap on an engine that serves nothing is a
+    leftover.
+    """
+    cls = ENGINES.get(engine_name)
+    if cls is None:
+        raise EngineError(
+            f"unknown engine {engine_name!r}; this build has {sorted(ENGINES)}"
+        )
+    basis = cls.decide_basis
+    if basis is None:
+        raise EngineError(
+            f"{engine_name} states no decide_basis. Whether an engine returns top "
+            "logprobs is read from its source, and the reading says where"
+        )
+    if not cls.decide_logprobs:
+        if cls.max_logprobs is not None:
+            raise EngineError(
+                f"{engine_name} states max_logprobs {cls.max_logprobs} and serves no "
+                "decision; drop the number, or state that it serves"
+            )
+        return DecideReading(served=False, max_logprobs=None, basis=basis)
+    if cls.max_logprobs is not None and cls.max_logprobs < 2:
+        raise EngineError(
+            f"{engine_name} states max_logprobs {cls.max_logprobs}, which cannot "
+            "read even a yes/no question"
+        )
+    return DecideReading(served=True, max_logprobs=cls.max_logprobs, basis=basis)
 
 
 def build_engine(engine_name: str, python: Path, log_path: Path) -> SubprocessEngine:
@@ -243,6 +291,8 @@ def engine_model_name(engine_name: str, model_dir: Path, model_id: str) -> str:
 __all__ = [
     "ChatAdmission",
     "chat_admission",
+    "DecideReading",
+    "decide_reading",
     "ENGINES",
     "NARRATOR_ENGINES",
     "STOP_TIMEOUT_SECONDS",

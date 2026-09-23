@@ -201,3 +201,100 @@ def test_an_unmeasured_wait_omits_the_header_rather_than_guessing_one() -> None:
     )
     assert "retry-after" not in response.headers
     assert _body(response)["error"]["details"]["retry_after"] is None
+
+
+# ------------------------------------------------ llama-server (PHASE22 2.6)
+
+
+def test_llama_server_admits_its_one_slot_plus_one_waiting() -> None:
+    """`--parallel 1` is one slot: mlx-lm's shape on Windows, bounded the same
+    way. Before PHASE22 this door admitted everything on llama-server, and a
+    decision's fan-out is exactly the load that would have found it."""
+    limit, basis = chat_admission("llama-server")
+    assert limit == 2
+    assert basis is not None and "--parallel 1" in basis
+
+
+def test_every_llama_windows_block_says_the_parallel_the_class_states() -> None:
+    """ONE FACT, TWO OWNERS, AND THE CHECK THAT KEEPS THEM ONE.
+
+    The slot count is set by each manifest's `engine_args`; the admission reads
+    `LlamaServerEngine.chat_concurrency`. A manifest that ever says
+    `--parallel 4` must fail here, not quietly run a door bounded at 2 in front
+    of an engine with four slots.
+    """
+    from crucible.manifests import load_all_manifests
+
+    blocks = [
+        (model_id, manifest.backends["llama-windows"])
+        for model_id, manifest in load_all_manifests().items()
+        if "llama-windows" in manifest.backends
+    ]
+    assert blocks, "no llama-windows block to check; the test would prove nothing"
+    stated = ENGINES["llama-server"].chat_concurrency
+    for model_id, block in blocks:
+        args = list(block.engine_args)
+        assert "--parallel" in args, f"{model_id}: llama-windows states no --parallel"
+        assert args[args.index("--parallel") + 1] == str(stated), model_id
+
+
+# --------------------------------------------- what a decision may ask (2.4)
+
+
+def test_each_engine_states_whether_it_serves_a_decision() -> None:
+    """Read from each engine's source at the pinned version (PHASE22 section 1),
+    and every one says where."""
+    from crucible.engines import decide_reading
+
+    vllm = decide_reading("vllm")
+    assert vllm.served and vllm.max_logprobs == 32
+    llama = decide_reading("llama-server")
+    assert llama.served and llama.max_logprobs is None
+    assert "server-common.cpp" in llama.basis
+    mlx = decide_reading("mlx-lm")
+    assert mlx.served and mlx.max_logprobs == 11
+    pages = decide_reading("mlx-vlm")
+    assert not pages.served and "compute_logprobs=False" in pages.basis
+
+
+def test_vllm_is_started_with_the_cap_the_reader_clamps_to() -> None:
+    """The flag and the reader's number are one constant, and the flags are
+    the spellings vLLM 0.29.0 has (`vllm/engine/arg_utils.py` L934-935,
+    `vllm/entrypoints/launchers/cli_args.py` L132)."""
+    from crucible.engines.vllm import DECIDE_ARGS
+    from crucible.manifests import load_manifest
+    from crucible.residency import Residency
+
+    manifest = load_manifest("qwen3.5-9b")
+    args = Residency._engine_args(
+        manifest, manifest.backends["cuda-linux"], __import__("pathlib").Path("/w"), None
+    )
+    assert args[args.index("--max-logprobs") + 1] == str(ENGINES["vllm"].max_logprobs)
+    assert args[args.index("--logprobs-mode") + 1] == "raw_logprobs"
+    assert "--enable-prompt-tokens-details" in args
+    assert tuple(DECIDE_ARGS) == (
+        "--max-logprobs", "32", "--logprobs-mode", "raw_logprobs",
+        "--enable-prompt-tokens-details",
+    )
+
+
+def test_a_decide_reading_with_no_basis_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from crucible.engines import decide_reading
+
+    monkeypatch.setattr(ENGINES["vllm"], "decide_basis", None)
+    with pytest.raises(EngineError) as caught:
+        decide_reading("vllm")
+    assert "no decide_basis" in str(caught.value)
+
+
+def test_a_cap_on_an_engine_that_serves_nothing_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from crucible.engines import decide_reading
+
+    monkeypatch.setattr(ENGINES["mlx-vlm"], "max_logprobs", 5)
+    with pytest.raises(EngineError) as caught:
+        decide_reading("mlx-vlm")
+    assert "serves no decision" in str(caught.value)

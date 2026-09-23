@@ -17,9 +17,50 @@ from .base import SubprocessEngine
 
 MODULE = "vllm.entrypoints.openai.api_server"
 
+#: `--max-logprobs`, composed by `Residency._engine_args` (PHASE22 section 2.6).
+#: 26 letters plus `decide.LABEL_MARGIN`'s 4 is 30; 32 is that rounded to a
+#: power of two, and it is the engine's own cap on a request, not a cost — vLLM
+#: 0.29.0 defaults it to 20 (`vllm/config/model.py` L250), which would make a
+#: 17-option choice unreadable with its margin and a 21-option one a 400.
+MAX_LOGPROBS = 32
+
+#: `--logprobs-mode`, stated rather than defaulted. 0.29.0's default IS
+#: `raw_logprobs` (`vllm/config/model.py` L255), and the flag is here anyway: a
+#: build that defaulted to a `processed_*` mode would report the distribution
+#: AFTER temperature, and a decision is sent at temperature 0, so every answer
+#: would read as certain. Raw means "before any logits processor"
+#: (the same file, L256-262).
+LOGPROBS_MODE = "raw_logprobs"
+
+#: What a decision needs from the engine, in the order they are appended.
+#: `--enable-prompt-tokens-details` (a `FrontendArgs` bool, so argparse's
+#: `BooleanOptionalAction`: `vllm/entrypoints/launchers/cli_args.py` L132,
+#: `vllm/engine/arg_utils.py` L387-389) is what makes
+#: `usage.prompt_tokens_details.cached_tokens` a number; without it
+#: `_make_prompt_tokens_details` returns None
+#: (`vllm/entrypoints/openai/chat_completion/serving.py` L90-108) and a
+#: decision's `cached_tokens` is null.
+DECIDE_ARGS: tuple[str, ...] = (
+    "--max-logprobs",
+    str(MAX_LOGPROBS),
+    "--logprobs-mode",
+    LOGPROBS_MODE,
+    "--enable-prompt-tokens-details",
+)
+
 
 class VllmEngine(SubprocessEngine):
     name = "vllm"
+
+    decide_logprobs = True
+    max_logprobs = MAX_LOGPROBS
+    decide_basis = (
+        "vLLM 0.29.0's /v1/chat/completions returns "
+        "choices[0].logprobs.content[].top_logprobs as {token, logprob, bytes} "
+        "(vllm/entrypoints/openai/chat_completion/protocol.py L81-95), capped by "
+        f"--max-logprobs, which Crucible starts it with at {MAX_LOGPROBS} and "
+        f"--logprobs-mode {LOGPROBS_MODE}"
+    )
 
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]

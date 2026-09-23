@@ -91,6 +91,7 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `unloadModel(id)` | `POST /v1/jobs {type: "unload-model"}` | the job id |
 | `chat(options)` | `POST /v1/openai/chat/completions` | `ChatResponse` |
 | `chatStream(options)` | the same, streamed | `AsyncIterable<string>` of content deltas |
+| `decide(request, {act?})` | `POST /v1/decide` | `DecideResponse` |
 | `voices()` | `GET /v1/voices` | `VoiceInfo[]` |
 | `loadVoice(id)` | `POST /v1/jobs {type: "load-voice"}` | the job id |
 | `unloadVoice(id)` | `POST /v1/jobs {type: "unload-voice"}` | the job id |
@@ -341,6 +342,40 @@ try {
 thrown straight through — out of `chat()`, and out of the `for await` in `chatStream()` —
 never wrapped in `CrucibleUnreachable`: your own cancellation is not a dead server and is
 not reported as one. Deltas already yielded before the abort stay yielded.
+
+### `decide()`
+
+A probability distribution over each question's fixed answer set, read off one forward
+pass of the resident model (`docs/PHASE22-DECIDE.md`, 2026-09-23 — snap's decision model,
+moved into Crucible as a door). You send the ORDER — the state and the questions; the
+prompt that makes an instruct model report a distribution is Crucible's:
+
+```ts
+const decision = await crucible.decide(
+  {
+    model: 'qwen3.5-9b',
+    state: 'I was charged twice for March, please refund one.',
+    questions: {
+      team: { type: 'choice', instructions: 'Which team should handle this?',
+              options: { billing: 'Payment and invoice issues', technical: 'Bugs and errors' } },
+      anger: { type: 'score', instructions: 'How frustrated is the customer?',
+               levels: ['Calm', 'Frustrated but civil', 'Very angry'] },
+      urgent: { type: 'yesno', instructions: 'The message conveys urgency' },
+    },
+  },
+  { act: 'analysis' },
+);
+decision.answers.team;   // {type: 'choice', choice: 'billing', probabilities, confidence, labelMass}
+```
+
+It behaves like `chat()`: the model must be resident (409 `model_not_resident`, never a
+silent load), it takes no lane, and a caller that wants the model to stay across a book
+holds a lease. `labelMass` is how much of the engine's raw mass the option letters held;
+`timingMs.perQuestion[q].cachedTokens` is `null` when the engine did not say, never 0.
+The reply is checked against the request: an answer for every question asked, of the type
+asked, with a probability for every option — anything else is a `CrucibleProtocolError`.
+Option order is letter order on the server, and a JavaScript object lists integer-like
+keys first, so give options names that are not integers.
 
 ## tts
 
@@ -710,7 +745,7 @@ type, carrying the server's own `code` and `message` where the server sent one:
 | `CrucibleAuthError` | 401 — wrong or missing token |
 | `CrucibleVersionError` | 426 — carries `serverApiVersion` and `clientApiVersion` |
 | `CrucibleRefused` | any other 4xx — carries the named reason (`unknown_job_type`, `unknown_model`, `unknown_blob`, ...) |
-| `CrucibleServerError` | 5xx |
+| `CrucibleServerError` | 5xx — carries the envelope's `details` (`chat_queue_full`'s `retry_after`, `label_not_in_probs`'s question and letter) |
 | `CrucibleAcceleratorUnreadable` | 503 `accelerator_unreadable` — a `CrucibleServerError` with a narrower name, because "I cannot see the card" must never be read as "the card is free" |
 | `CrucibleProtocolError` | a response API v1 does not describe: a missing field, an unknown SSE event name |
 

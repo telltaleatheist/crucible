@@ -192,6 +192,30 @@ keep up with.
 > `POST /v1/chat/completions`** on this server — checked against `crucible/api.py`
 > and against the live engine on 2026-09-16.
 
+### Decide — the decision door
+
+```
+crucible api decide --model qwen3.5-9b --state "I was charged twice for March, please refund one." \
+  --choice team "Which team should handle this?" billing="Payment and invoice issues" technical="Bugs and errors" \
+  --score anger "How frustrated is the customer?" "Calm,Frustrated but civil,Very angry" \
+  --yesno urgent "The message conveys urgency" [--act analysis]
+crucible api decide --model qwen3.5-9b --state @ticket.txt --yesno refund "The customer asks for a refund"
+crucible api decide --model <image-capable id> --image page.png --choice kind "What kind of page is this?" chapter="A chapter opening" body="Running prose"
+```
+
+`POST /v1/decide` (PHASE22-DECIDE.md, 2026-09-23): a probability distribution over
+each question's fixed answers, read off one forward pass of the resident model. The
+grammar is **snap's own** (`snap decide`), so a person moving from snap types the
+same thing against a different address. `--choice`, `--score` and `--yesno` repeat
+and keep the order they were typed in; `--image` repeats and is sent base64-encoded;
+`--state` may be left out when an image is given, and the state is then `""`.
+
+The prompt, the letters and the renormalisation are the server's — this verb sends
+the order and prints the answer unchanged. Like chat it never loads a model
+(`model_not_resident`), and the counts (2–26 options, 2–10 levels, 8 images) are the
+server's to refuse (`invalid_request`, `too_many_options`, `too_many_images`), so
+they are not copied here.
+
 ### Leases
 
 ```

@@ -595,6 +595,25 @@ Orchestrator and engine talking to each other (PHASE17-ORCHESTRATOR.md). Not an 
 
 *Answers:* `200`
 
+## Everything else
+
+### `POST /v1/decide`
+
+One distribution per question, read off the resident model. PHASE22-DECIDE.md is the contract. A decision is the chat door's sibling and walks through the chat door's machinery — the act header, the resident check, `chat_admission`, the `InFlight` record, `_chat_over` — with a different body in and out. What is its own is the reading (`crucible/decide.py`): the frame, the letters, the parser. EVERY REFUSAL A CALLER CAN CAUSE IS MADE BEFORE ANYTHING IS SENT: the act, an upstream id, a model that is not resident, too many images, images on a text model, too many options, an engine that returns no top logprobs or too few of them, a full door. A decision that spent the card and then failed on a question the server could have read first would be a decision the client paid for twice.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+**Body** (`application/json`)
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `model` | string | yes | — | The Crucible model id, which must already be resident (`409 model_not_resident` otherwise). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. |
+| `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
+| `questions` | Questions | yes | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. |
+| `images` | array of string or null | no | — | Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no whitespace, no `data:` prefix), read as part of the state, before its text. At most 8 (`too_many_images`), and only on a model whose manifest declares `image` (`400 model_text_only` otherwise). `[]` is the same as none. |
+
+*Answers:* `200`, `422`
+
 ## Request models in full
 
 Every schema the routes above refer to, for a reader following a nested field.
@@ -605,6 +624,28 @@ Every schema the routes above refer to, for a reader following a nested field.
 | --- | --- | --- | --- | --- |
 | `file` | string | yes | — |  |
 
+### `ChoiceAnswer`
+
+A choice question's distribution.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `type` | `'choice'` | no | `'choice'` | `choice`. |
+| `choice` | string | yes | — | The most probable option. |
+| `probabilities` | Probabilities | yes | — | Option name to probability, renormalised over the letters so they sum to 1 (a softmax over the label logits). |
+| `confidence` | number | yes | — | The largest renormalised probability. |
+| `label_mass` | number | yes | — | The raw probability the letters held together before renormalising. Low means the model wanted to say something that is not an option. |
+
+### `ChoiceQuestion`
+
+Pick one of named options. Labelled A, B, C… in the order given.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `type` | `'choice'` | yes | — | `choice`. |
+| `instructions` | string | yes | — | The question, as a person would ask it: "Which team should handle this?". |
+| `options` | Options | yes | — | Option name to a one-line description, in the order the letters are assigned: the first option is `A`. At least 2; more than 26 is refused as `too_many_options`, because past `Z` there is no one-token label to read. |
+
 ### `DecidePairing`
 
 | field | type | required | default | what it is |
@@ -612,6 +653,58 @@ Every schema the routes above refer to, for a reader following a nested field.
 | `id` | string | yes | — |  |
 | `user_code` | string | yes | — |  |
 | `allow` | boolean | yes | — |  |
+
+### `DecideRequest`
+
+`POST /v1/decide` — PHASE22-DECIDE.md section 2.2. One forward pass per question at the RESIDENT model; nothing is decoded and nothing is loaded to answer it.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `model` | string | yes | — | The Crucible model id, which must already be resident (`409 model_not_resident` otherwise). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. |
+| `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
+| `questions` | Questions | yes | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. |
+| `images` | array of string or null | no | — | Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no whitespace, no `data:` prefix), read as part of the state, before its text. At most 8 (`too_many_images`), and only on a model whose manifest declares `image` (`400 model_text_only` otherwise). `[]` is the same as none. |
+
+### `DecideResponse`
+
+A decision: one distribution per question.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `model` | ModelProvenance | yes | — | Which weights answered (PHASE2-LLM.md section 5's triple). |
+| `engine` | string | yes | — | The engine kind that answered: `vllm`, `llama-server`, `mlx-lm`. |
+| `answers` | Answers | yes | — | Question name to answer, in the request's question order. |
+| `timing_ms` | DecideTiming | yes | — | Crucible's clock, per request. |
+| `tokens` | DecideTokens | yes | — | Prompt sizes. |
+
+### `DecideTiming`
+
+Where the time went.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `total` | number | yes | — | The whole decision, ms, Crucible's clock. |
+| `per_question` | Per Question | yes | — | Each question's own request. |
+| `prime` | ForwardTiming or null | yes | — | The shared prefix sent alone first — present when the decision had more than one question, null when it had one. |
+
+### `DecideTokens`
+
+How big the prompts were.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `per_question` | Per Question | yes | — | `usage.prompt_tokens` for each question's prompt. |
+| `images` | integer | yes | — | How many images every prompt of this decision carried. |
+
+### `ForwardTiming`
+
+One request to the engine, timed by Crucible.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `wall_ms` | number | yes | — | Crucible's wall clock around the request, queueing and the one decoded token included. The OpenAI reply carries no prefill time, so this is the only duration there is. |
+| `prompt_tokens` | integer | yes | — | `usage.prompt_tokens`: the whole prompt, cached part included. |
+| `cached_tokens` | integer or null | yes | — | `usage.prompt_tokens_details.cached_tokens`, or null when the engine did not say. Never 0 for "unknown": a number nobody measured is not a measurement. |
 
 ### `HTTPValidationError`
 
@@ -647,12 +740,45 @@ One named input: either an uploaded blob or bytes inline in the request.
 | `act` | string | yes | — |  |
 | `ttl_seconds` | integer | yes | — |  |
 
+### `ModelProvenance`
+
+The weights that made the decision, as an artifact sidecar names them.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `id` | string | yes | — | The Crucible model id. |
+| `revision` | string | yes | — | The revision the resident engine was started on. |
+| `fingerprint` | string | yes | — | `<id>@<revision>`. |
+
 ### `PollPairing`
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `id` | string | yes | — |  |
 | `device_code` | string | yes | — |  |
+
+### `ScoreAnswer`
+
+A score question's distribution and its expected level.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `type` | `'score'` | no | `'score'` | `score`. |
+| `score` | number | yes | — | Σ (1-based level index × p): 1.0 is certainly the lowest level. |
+| `level` | string | yes | — | The most probable level. |
+| `probabilities` | Probabilities | yes | — | Level to renormalised probability. |
+| `confidence` | number | yes | — | The largest renormalised probability. |
+| `label_mass` | number | yes | — | The raw probability the letters held together before renormalising. |
+
+### `ScoreQuestion`
+
+Place the state on an ordered scale. `score` is the expected level.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `type` | `'score'` | yes | — | `score`. |
+| `instructions` | string | yes | — | The question: "How frustrated is the customer?". |
+| `levels` | array of string | yes | — | The scale, lowest first, 2 to 10 unique levels. Level i (1-based) is the value the expected `score` is computed with. |
 
 ### `StartPairing`
 
@@ -701,3 +827,22 @@ One named input: either an uploaded blob or bytes inline in the request.
 | `loc` | array of string or integer | yes | — |  |
 | `msg` | string | yes | — |  |
 | `type` | string | yes | — |  |
+
+### `YesNoAnswer`
+
+A yesno question's probability.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `type` | `'yesno'` | no | `'yesno'` | `yesno`. |
+| `p` | number | yes | — | Renormalised P(Yes). |
+| `label_mass` | number | yes | — | The raw probability `A` and `B` held together before renormalising. |
+
+### `YesNoQuestion`
+
+Is a statement true of the state? `p` is P(Yes).
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `type` | `'yesno'` | yes | — | `yesno`. |
+| `instructions` | string | yes | — | The statement to judge: "The message conveys urgency". |

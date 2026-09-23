@@ -82,6 +82,32 @@ class MlxLmEngine(SubprocessEngine):
         "generation is strictly serial"
     )
 
+    #: A DECISION IS SERVED, AT MOST ELEVEN LOGPROBS WIDE. Read in mlx-lm 0.31.3's
+    #: installed `mlx_lm/server.py` in the Mac's `~/.crucible/envs/llm` on
+    #: 2026-09-23 (no model run): the chat body's `logprobs`/`top_logprobs` are
+    #: read at L1189-1190 and validated at L1245 as
+    #: `top_logprobs int, min 0, max 11, whitelist [-1]`; `_format_top_logprobs`
+    #: (L426-435) emits `{id, token, logprob}`; L1317-1321 writes
+    #: `choices[0].logprobs.content = [dict(top[0], top_logprobs=top), ...]` —
+    #: the same OpenAI path vLLM and llama-server answer on, so one reader.
+    #:
+    #: Two things differ and neither moves a letter. The token strings are RAW
+    #: pieces (`tokenizer.convert_ids_to_tokens`), not decoded text, which for a
+    #: bare capital letter is the same string. And the logprobs are taken AFTER
+    #: the logits processors (`mlx_lm/generate.py` L409-420), which is why a
+    #: decision states its own sampling and takes no manifest default
+    #: (`crucible/decide.py`, `request_body`).
+    #:
+    #: A question with more than 11 options is refused before it is sent: 11 is
+    #: the engine's own ceiling and asking for 12 is a 400.
+    decide_logprobs = True
+    max_logprobs = 11
+    decide_basis = (
+        "mlx-lm 0.31.3 returns choices[0].logprobs.content[].top_logprobs on its "
+        "chat route and validates top_logprobs to at most 11 "
+        "(mlx_lm/server.py L1245, read on the Mac Studio 2026-09-23)"
+    )
+
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> list[str]:

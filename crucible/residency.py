@@ -51,6 +51,7 @@ from .engines import (
     engine_model_name,
     find_free_port,
 )
+from .engines.vllm import DECIDE_ARGS as VLLM_DECIDE_ARGS
 from .errors import ApiError, JobError
 from .jobenv import tts_env
 from .manifests import (
@@ -1465,6 +1466,13 @@ class Residency:
         args = list(spec.engine_args)
         if spec.engine == "vllm":
             args += ["--max-model-len", str(manifest.context_for(spec.backend))]
+            # WHAT THE DECISION DOOR NEEDS FROM THE ENGINE (PHASE22 section
+            # 2.6), composed here beside `--max-model-len` and never in a
+            # manifest: they are facts about a door of this server, not about
+            # the weights, and every vLLM model serves that door. The cap the
+            # reader clamps to is the same constant (`VllmEngine.max_logprobs`),
+            # so the flag and the reader cannot disagree.
+            args += list(VLLM_DECIDE_ARGS)
         if spec.engine == "llama-server":
             if spec.file is None:  # pragma: no cover - the loader requires it
                 raise EngineError(

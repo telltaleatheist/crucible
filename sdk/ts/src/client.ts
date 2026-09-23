@@ -75,6 +75,12 @@ import {
   type ChatOptions,
   type ChatResponse,
   type ChunkData,
+  type DecideAnswer,
+  type DecideCallTiming,
+  type DecideOptions,
+  type DecideQuestion,
+  type DecideRequest,
+  type DecideResponse,
   type DoneData,
   type EngineOwner,
   type EngineRef,
@@ -1231,6 +1237,65 @@ export class CrucibleClient {
     return init;
   }
 
+  // ----------------------------------------------------------------- decide
+
+  /**
+   * `POST /v1/decide` — a probability distribution over each question's fixed
+   * answer set, read off one forward pass of the resident model
+   * (PHASE22-DECIDE.md, 2026-09-23).
+   *
+   * A sibling of {@link chat} and it behaves like one: `model` must be the
+   * resident model (409 `model_not_resident` otherwise, never a silent load),
+   * it takes no lane and makes no job, and a client that wants the model to
+   * stay across a book holds a lease ({@link lease}) exactly as it would for
+   * chats. `act` is the chat's `X-Crucible-Act`, with the chat's rule: omitted,
+   * no header is sent.
+   *
+   * Refusals arrive through the one mapping every door uses: the caller's
+   * mistakes as {@link CrucibleRefused} (`invalid_request`, `too_many_options`,
+   * `too_many_images`, `model_text_only`, `decide_needs_logprobs`,
+   * `model_not_resident`, `unknown_act`) and the server's or engine's as
+   * {@link CrucibleServerError} (`chat_queue_full` — whose `details.retry_after`
+   * and `Retry-After` say how long completions on that engine have been taking —
+   * `decide_not_served`, `engine_error`, `label_not_in_probs`).
+   *
+   * The reply is checked against the request it answers: an answer for every
+   * question asked and of the type asked, and a probability for every option
+   * or level. A decision that answered a different question than the one asked
+   * is not a decision, so that is a {@link CrucibleProtocolError}, not a result.
+   */
+  async decide(request: DecideRequest, options: DecideOptions = {}): Promise<DecideResponse> {
+    const given = request as Partial<DecideRequest> | undefined;
+    if (given === undefined || given === null) {
+      throw new CrucibleConfigError('request', 'decide(...) needs {model, state, questions}');
+    }
+    // `state` is any JSON value, so the only thing it can be wrong about here
+    // is being absent: `""` is the server's to accept (with images) or refuse.
+    if (!('state' in given) || given.state === undefined) {
+      throw new CrucibleConfigError('state', 'is required and was not given');
+    }
+    const questions = readDecideQuestions(given.questions);
+    // Key order is the wire's order, and the contract's example spells it this
+    // way; nothing reads it, but a body a person diffs against the document
+    // should look like the document.
+    const payload: Record<string, unknown> = {
+      model: requireText(given.model, 'model'),
+      state: given.state,
+    };
+    if (given.images !== undefined) payload['images'] = requireStrings(given.images, 'images');
+    payload['questions'] = questions;
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    // The chat's act, for the chat's reason (see #chatRequest): a header the
+    // server stops at the door, sent only when the caller names one.
+    if (options.act !== undefined) headers['X-Crucible-Act'] = requireText(options.act, 'act');
+    const init: RequestInit = { method: 'POST', headers, body: JSON.stringify(payload) };
+    if (options.signal !== undefined) init.signal = options.signal;
+
+    const body = await this.#json('/v1/decide', init, 'decide');
+    return readDecideResponse(body, questions);
+  }
+
   // -------------------------------------------------------------------- tts
 
   /**
@@ -1800,24 +1865,26 @@ export class CrucibleClient {
       const serverApiVersion = nullableNum(details, 'server_api_version', 'error.details');
       return new CrucibleVersionError(code, message, serverApiVersion, API_VERSION);
     }
+    // `details` is optional in the envelope (DESIGN.md section 4); absent, the
+    // server said nothing more, which is `null` and not an empty object.
+    const details = 'details' in envelope ? envelope['details'] : null;
     if (response.status >= 500) {
       // One 5xx gets its own type, and only because one conclusion must never
       // be drawn from it: an unreadable accelerator probe is not an idle card
       // (PHASE4-AUDIO.md section 5). The subclass is still a
       // CrucibleServerError, so nothing that already handles 5xx changes.
       if (code === ACCELERATOR_UNREADABLE) {
-        return new CrucibleAcceleratorUnreadable(response.status, code, message);
+        return new CrucibleAcceleratorUnreadable(response.status, code, message, details);
       }
       // The second, for the same reason: a host that has decided NOTHING is
       // not a host that can do nothing, and a client must be able to tell the
       // two apart without reading the message (PHASE9-CAPABILITY.md).
       if (code === CAPABILITY_UNDECIDED) {
-        return new CrucibleCapabilityUndecided(response.status, code, message);
+        return new CrucibleCapabilityUndecided(response.status, code, message, details);
       }
-      return new CrucibleServerError(response.status, code, message);
+      return new CrucibleServerError(response.status, code, message, details);
     }
     if (response.status >= 400) {
-      const details = 'details' in envelope ? envelope['details'] : null;
       // One 4xx gets its own type, for the reason one 5xx does: the body is not
       // decoration. `crucible/jobs/queue.py` answers server_busy with the
       // holder, the job, what it is doing and how far along — everything a bench
@@ -3215,6 +3282,191 @@ function readChatResponse(body: Json): ChatResponse {
       totalTokens: num(usage, 'total_tokens', 'chat.usage'),
     },
   };
+}
+
+const DECIDE_TYPES = ['choice', 'score', 'yesno'] as const;
+
+/**
+ * The questions, checked for the SHAPE this client types and rebuilt from
+ * exactly those fields.
+ *
+ * Only the shape: how many options, how many levels, what a name may contain —
+ * those are the server's numbers and it refuses them by name (400
+ * `invalid_request` / `too_many_options`), so a second copy here would be a
+ * second thing to drift. A key this client does not know is refused rather
+ * than dropped: the server's params models forbid extras, and silently
+ * stripping one would send a different question than the caller wrote.
+ */
+function readDecideQuestions(value: unknown): Record<string, DecideQuestion> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new CrucibleConfigError('questions', 'must be an object of question name -> question');
+  }
+  const out: Record<string, DecideQuestion> = {};
+  for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
+    const where = `questions.${name}`;
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      throw new CrucibleConfigError(where, 'must be an object {type, instructions, ...}');
+    }
+    const question = raw as Record<string, unknown>;
+    const type = question['type'];
+    if (typeof type !== 'string' || !(DECIDE_TYPES as readonly string[]).includes(type)) {
+      throw new CrucibleConfigError(
+        `${where}.type`,
+        `must be one of ${DECIDE_TYPES.join(', ')}, got ${JSON.stringify(type)}`,
+      );
+    }
+    const known =
+      type === 'choice'
+        ? ['type', 'instructions', 'options']
+        : type === 'score'
+          ? ['type', 'instructions', 'levels']
+          : ['type', 'instructions'];
+    for (const key of Object.keys(question)) {
+      if (!known.includes(key)) {
+        throw new CrucibleConfigError(
+          `${where}.${key}`,
+          `is not a field of a ${type} question (it takes ${known.join(', ')})`,
+        );
+      }
+    }
+    const instructions = requireText(question['instructions'], `${where}.instructions`);
+    if (type === 'choice') {
+      const options = question['options'];
+      if (typeof options !== 'object' || options === null || Array.isArray(options)) {
+        throw new CrucibleConfigError(`${where}.options`, 'must be an object of option name -> description');
+      }
+      const read: Record<string, string> = {};
+      for (const [option, description] of Object.entries(options as Record<string, unknown>)) {
+        read[option] = requireText(description, `${where}.options.${option}`);
+      }
+      out[name] = { type, instructions, options: read };
+    } else if (type === 'score') {
+      out[name] = { type, instructions, levels: requireStrings(question['levels'], `${where}.levels`) };
+    } else {
+      out[name] = { type: 'yesno', instructions };
+    }
+  }
+  return out;
+}
+
+/**
+ * `POST /v1/decide`'s 200, every field the contract names demanded
+ * (PHASE22-DECIDE.md section 2.2). Lockstep (Owen, 2026-09-20): an absent field
+ * is an older or a broken server, and this client does not run against one —
+ * so nothing here defaults, and `cached_tokens` and `prime` are read as the
+ * `null` the server states, never as a missing key.
+ */
+function readDecideResponse(
+  body: Json,
+  asked: Record<string, DecideQuestion>,
+): DecideResponse {
+  const where = 'decide';
+  const names = Object.keys(asked);
+  const answersBody = objectField(body, 'answers', where);
+  const timing = objectField(body, 'timing_ms', where);
+  const perQuestionTiming = objectField(timing, 'per_question', `${where}.timing_ms`);
+  const tokens = objectField(body, 'tokens', where);
+  const perQuestionTokens = objectField(tokens, 'per_question', `${where}.tokens`);
+  for (const [map, label] of [
+    [answersBody, 'answers'],
+    [perQuestionTiming, 'timing_ms.per_question'],
+    [perQuestionTokens, 'tokens.per_question'],
+  ] as const) {
+    sameKeys(Object.keys(map), names, `${where}.${label}`, 'the questions asked');
+  }
+
+  const answers: Record<string, DecideAnswer> = {};
+  const perQuestion: Record<string, DecideCallTiming> = {};
+  const tokensPerQuestion: Record<string, number> = {};
+  for (const name of names) {
+    answers[name] = readDecideAnswer(
+      objectField(answersBody, name, `${where}.answers`),
+      asked[name] as DecideQuestion,
+      `${where}.answers.${name}`,
+    );
+    perQuestion[name] = readDecideCallTiming(
+      objectField(perQuestionTiming, name, `${where}.timing_ms.per_question`),
+      `${where}.timing_ms.per_question.${name}`,
+    );
+    tokensPerQuestion[name] = num(perQuestionTokens, name, `${where}.tokens.per_question`);
+  }
+  const prime = nullableObject(timing, 'prime', `${where}.timing_ms`);
+  return {
+    // NOT `readProvenanceModel`, whose revision and fingerprint are nullable
+    // for a backend block a manifest does not carry: a decision is only ever
+    // read from a RESIDENT engine, which was started on a revision, so the
+    // server states both (crucible/decide.py `ModelProvenance`) and a null
+    // here would be a server this client does not run against.
+    model: readDecideModel(objectField(body, 'model', where), `${where}.model`),
+    engine: str(body, 'engine', where),
+    answers,
+    timingMs: {
+      total: num(timing, 'total', `${where}.timing_ms`),
+      perQuestion,
+      prime: prime === null ? null : readDecideCallTiming(prime, `${where}.timing_ms.prime`),
+    },
+    tokens: { perQuestion: tokensPerQuestion, images: num(tokens, 'images', `${where}.tokens`) },
+  };
+}
+
+function readDecideModel(model: Json, where: string): DecideResponse['model'] {
+  return {
+    id: str(model, 'id', where),
+    revision: str(model, 'revision', where),
+    fingerprint: str(model, 'fingerprint', where),
+  };
+}
+
+function readDecideAnswer(entry: Json, question: DecideQuestion, where: string): DecideAnswer {
+  const type = str(entry, 'type', where);
+  if (type !== question.type) {
+    throw new CrucibleProtocolError(
+      `${where}.type is ${JSON.stringify(type)} but the question asked was a ${question.type}`,
+    );
+  }
+  const labelMass = num(entry, 'label_mass', where);
+  if (question.type === 'yesno') return { type: 'yesno', p: num(entry, 'p', where), labelMass };
+  const labels = question.type === 'choice' ? Object.keys(question.options) : question.levels;
+  const probabilities = readProbabilities(objectField(entry, 'probabilities', where), labels, where);
+  const confidence = num(entry, 'confidence', where);
+  if (question.type === 'choice') {
+    const choice = str(entry, 'choice', where);
+    oneOf(choice, labels, `${where}.choice`);
+    return { type: 'choice', choice, probabilities, confidence, labelMass };
+  }
+  const level = str(entry, 'level', where);
+  oneOf(level, labels, `${where}.level`);
+  return { type: 'score', score: num(entry, 'score', where), level, probabilities, confidence, labelMass };
+}
+
+/** A distribution over exactly the labels asked: one number per option or level, no more, no fewer. */
+function readProbabilities(entry: Json, labels: readonly string[], where: string): Record<string, number> {
+  sameKeys(Object.keys(entry), labels, `${where}.probabilities`, 'the options or levels asked');
+  const out: Record<string, number> = {};
+  for (const label of labels) out[label] = num(entry, label, `${where}.probabilities`);
+  return out;
+}
+
+function readDecideCallTiming(entry: Json, where: string): DecideCallTiming {
+  return {
+    wallMs: num(entry, 'wall_ms', where),
+    promptTokens: num(entry, 'prompt_tokens', where),
+    // `null` is the server saying the engine did not report it (vLLM without
+    // --enable-prompt-tokens-details, section 1); an absent key is not that.
+    cachedTokens: nullableNum(entry, 'cached_tokens', where),
+  };
+}
+
+function sameKeys(got: readonly string[], want: readonly string[], where: string, what: string): void {
+  const missing = want.filter((key) => !got.includes(key));
+  const extra = got.filter((key) => !want.includes(key));
+  if (missing.length > 0 || extra.length > 0) {
+    throw new CrucibleProtocolError(
+      `${where} does not match ${what}` +
+        (missing.length > 0 ? `; missing ${JSON.stringify(missing)}` : '') +
+        (extra.length > 0 ? `; not asked ${JSON.stringify(extra)}` : ''),
+    );
+  }
 }
 
 /**

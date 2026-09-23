@@ -567,6 +567,155 @@ def test_a_params_file_is_read_and_sent(
     assert "delay_ms" in json.dumps(lines(capsys.readouterr().out)[-1])
 
 
+# ---------------------------------------------------------- the decision door
+#
+# PHASE22-DECIDE.md (2026-09-23). The grammar is snap's (`snap/cli.py`), and
+# the first two tests are about the half this module owns — the body it builds
+# from that grammar — so they record the request rather than serve it. The
+# last two need the SERVER half of the phase (the door in `crucible/api.py`,
+# and `tests/fake_engine.py` answering logprobs) and run against a real socket.
+
+#: The contract's worked example (section 2.2), as a person types it.
+DECIDE_ARGV = (
+    "decide", "--model", "qwen3.5-9b",
+    "--state", "I was charged twice for March, please refund one.",
+    "--choice", "team", "Which team should handle this?",
+    "billing=Payment and invoice issues", "technical=Bugs and errors",
+    "--score", "anger", "How frustrated is the customer?",
+    "Calm,Frustrated but civil,Very angry",
+    "--yesno", "urgent", "The message conveys urgency",
+)
+
+DECIDE_BODY = {
+    "model": "qwen3.5-9b",
+    "state": "I was charged twice for March, please refund one.",
+    "questions": {
+        "team": {"type": "choice", "instructions": "Which team should handle this?",
+                 "options": {"billing": "Payment and invoice issues",
+                             "technical": "Bugs and errors"}},
+        "anger": {"type": "score", "instructions": "How frustrated is the customer?",
+                  "levels": ["Calm", "Frustrated but civil", "Very angry"]},
+        "urgent": {"type": "yesno", "instructions": "The message conveys urgency"},
+    },
+}
+
+
+@pytest.fixture
+def recorded(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Every `call` the verb makes, answered `{}` — the body is what is asserted."""
+    calls: list[dict[str, Any]] = []
+
+    def record(connection: Any, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"method": method, "path": path, **kwargs})
+        return {}
+
+    monkeypatch.setattr(apiclient, "call", record)
+    return calls
+
+
+def test_decide_builds_the_contract_s_worked_example_from_snap_s_grammar(
+    recorded: list[dict[str, Any]], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run("http://127.0.0.1:1", *DECIDE_ARGV) == 0
+    assert recorded == [{"method": "POST", "path": "/v1/decide",
+                         "json_body": DECIDE_BODY, "extra_headers": None}]
+    # The ORDER the flags were typed in is the order of `questions`, across
+    # flag kinds — the reply's `answers` follows it.
+    assert list(recorded[0]["json_body"]["questions"]) == ["team", "anger", "urgent"]
+
+    # @file for the state, the act as a header, images base64 and state "".
+    state = tmp_path / "ticket.txt"
+    state.write_text("from a file", encoding="utf-8")
+    image = tmp_path / "page.png"
+    image.write_bytes(b"not really a png")
+    recorded.clear()
+    assert run("http://127.0.0.1:1", "decide", "--model", "m", "--state", f"@{state}",
+               "--yesno", "q", "is it", "--act", "analysis") == 0
+    assert recorded[0]["json_body"]["state"] == "from a file"
+    assert recorded[0]["extra_headers"] == {"X-Crucible-Act": "analysis"}
+    recorded.clear()
+    assert run("http://127.0.0.1:1", "decide", "--model", "m", "--image", str(image),
+               "--yesno", "q", "is it") == 0
+    assert recorded[0]["json_body"] == {
+        "model": "m", "state": "", "images": ["bm90IHJlYWxseSBhIHBuZw=="],
+        "questions": {"q": {"type": "yesno", "instructions": "is it"}},
+    }
+
+
+@pytest.mark.parametrize(("argv", "code"), [
+    (("--yesno", "q", "is it"), "decide_needs_state"),
+    (("--state", "s"), "decide_needs_a_question"),
+    (("--state", "s", "--yesno", "q", "a", "--yesno", "q", "b"), "decide_question_repeated"),
+    (("--state", "s", "--choice", "q", "pick", "a=1", "a=2"), "decide_option_repeated"),
+    (("--state", "s", "--choice", "q", "pick", "noequals"), "--choice_malformed"),
+    (("--state", "s", "--choice", "q"), "decide_choice_malformed"),
+    (("--image", "no-such-image.png", "--yesno", "q", "a"), "image_missing"),
+])
+def test_decide_refuses_a_malformed_command_line_before_any_request(
+    recorded: list[dict[str, Any]], capsys: pytest.CaptureFixture[str],
+    argv: tuple[str, ...], code: str,
+) -> None:
+    assert run("http://127.0.0.1:1", "decide", "--model", "m", *argv) == 1
+    assert code in capsys.readouterr().err
+    assert recorded == []
+
+
+@pytest.fixture
+def llm_base(
+    make_app: Callable[..., FastAPI], fake_env: Path, idle_card: None,
+) -> Iterator[str]:
+    with serve(make_app(enable_llm=True)) as url:
+        yield url
+
+
+def test_decide_reaches_the_door_and_is_refused_for_the_servers_own_reason(
+    llm_base: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """NEEDS THE SERVER HALF (`POST /v1/decide`). Nothing is resident, so the
+    door's 409 is the answer — which it can only give after the body validated;
+    a body the door could not read would be a 400 `invalid_request` instead."""
+    assert run(llm_base, *DECIDE_ARGV) == 1
+    refusal = json.loads(capsys.readouterr().err.split("\n", 1)[1])
+    assert refusal["error"]["code"] == "model_not_resident"
+
+
+def test_decide_prints_the_door_s_answer_for_the_worked_example(
+    make_app: Callable[..., FastAPI],
+    auth: dict[str, str],
+    fake_env: Path,
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engine_factory: Callable[..., Any],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """NEEDS THE SERVER HALF: the door, and `tests/fake_engine.py`'s `probs_for`
+    (PHASE22-DECIDE.md section 3). The fake answers the letters the contract's
+    example reads, and the verb prints what the door made of them, unchanged."""
+    from .live_server import run_job
+
+    def probs_for(messages: list[dict[str, Any]]) -> dict[str, float]:
+        text = json.dumps(messages)
+        if "Which team" in text:
+            return {"A": 0.91, "B": 0.09}
+        if "How frustrated" in text:
+            return {"A": 0.62, "B": 0.36, "C": 0.02}
+        return {"A": 0.83, "B": 0.17}
+
+    engine_factory(probs_for=probs_for)
+    fake_weights("qwen3.5-9b")
+    with serve(make_app(enable_llm=True)) as url:
+        run_job(url, auth, type="load-model", model="qwen3.5-9b")
+        capsys.readouterr()
+        assert run(url, *DECIDE_ARGV) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert list(printed["answers"]) == ["team", "anger", "urgent"]
+    assert printed["answers"]["team"]["choice"] == "billing"
+    assert printed["answers"]["anger"]["level"] == "Calm"
+    assert printed["answers"]["anger"]["score"] == pytest.approx(1.4, abs=1e-6)
+    assert printed["answers"]["urgent"]["p"] == pytest.approx(0.83, abs=1e-6)
+    assert printed["model"]["id"] == "qwen3.5-9b"
+
+
 # -------------------------------------------------------------- route coverage
 
 
@@ -599,6 +748,7 @@ COVERED: dict[str, str] = {
     "GET /openai/v1/models": "api openai-models (the same handler, OpenAI's path)",
     "POST /v1/openai/chat/completions": "api chat",
     "POST /openai/v1/chat/completions": "api chat (the same handler, OpenAI's path)",
+    "POST /v1/decide": "api decide",
     "POST /v1/uploads": "api upload",
     "POST /v1/jobs": "api job submit",
     "GET /v1/jobs/{job_id}": "api job get",
