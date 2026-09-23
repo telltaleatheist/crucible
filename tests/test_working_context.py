@@ -72,6 +72,8 @@ def test_every_context_shaped_class_declares_its_work_with_a_source() -> None:
         "translate",
         "simplify",
         "analysis",
+        # The decision door's (PHASE22-DECIDE.md section 2.9, 2026-09-23).
+        "decide",
         "pages",
     }
     for entry in declared:

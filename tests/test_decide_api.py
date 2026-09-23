@@ -353,8 +353,95 @@ def test_images_on_a_text_model_are_model_text_only(
     assert response.status_code == 400
     error = response.json()["error"]
     assert error["code"] == "model_text_only"
-    assert error["details"] == {"model": MODEL, "modalities": ["text"], "images": 1}
+    assert error["details"] == {
+        "model": MODEL, "backend": "cuda-linux", "serves": ["text"],
+        "modalities": ["text"], "images": 1,
+    }
     assert engine.requests == []
+
+
+def test_model_text_only_reads_what_the_backend_SERVES_not_the_weights(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    fake_env: Path,  # noqa: F811
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engine_factory: Callable[..., list[FakeEngine]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PHASE22 section 2.9. A model whose WEIGHTS accept images, on a backend
+    block that serves it text only, is `model_text_only` — the Mac's case for
+    `qwen3.5-4b`, built on the fake's cuda-linux so the door runs for real.
+    Reading `[model] modalities` here (what the door did until 2026-09-23)
+    would have passed the page to an engine that never sees it."""
+    fixture = tmp_path / "models"
+    fixture.mkdir()
+    (fixture / "sees-elsewhere.toml").write_text(
+        """
+[model]
+id = "sees-elsewhere"
+family = "demo"
+params_b = 1
+context_default = 4096
+trained_context = 262144
+modalities = ["text", "image"]
+
+[backends.cuda-linux]
+engine = "vllm"
+hf_repo = "demo/Demo-1B"
+revision = "0123456789abcdef0123456789abcdef01234567"
+memory_bytes_estimate = 3000000000
+serves = ["text"]
+engine_args = ["--language-model-only"]
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CRUCIBLE_MODELS_DIR", str(fixture))
+    with make_client(enable_llm=True) as client:
+        built = engine_factory(probs_for=yes_mostly)
+        fake_weights("sees-elsewhere")
+        events = run_job(client, auth, type="load-model", model="sees-elsewhere")
+        assert events[-1]["event"] == "done", events[-1]
+        response = _decide(
+            client, auth, {**EXAMPLE, "model": "sees-elsewhere", "images": [PNG]}
+        )
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "model_text_only"
+    assert error["details"]["serves"] == ["text"]
+    assert error["details"]["modalities"] == ["text", "image"]
+    assert built[-1].requests == []
+
+
+def test_the_models_row_says_what_this_host_serves(
+    llm_client: TestClient, auth: dict[str, str]
+) -> None:
+    """`modalities` is the weights'; `serves` is this backend's (null where the
+    model has no block here). The fake host is cuda-linux."""
+    rows = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
+    assert rows["qwen3.5-4b"]["modalities"] == ["text", "image"]
+    assert rows["qwen3.5-4b"]["serves"] == ["text", "image"]
+    assert rows[MODEL]["serves"] == ["text"]
+    assert rows[PAGE_MODEL]["serves"] == ["text", "image"]
+
+
+def test_a_small_tier_that_serves_images_here_answers_an_image_decision(
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
+) -> None:
+    """`qwen3.5-4b` serves images on cuda-linux (vLLM loads its tower), so the
+    door sends the page as a content part rather than refusing it."""
+    engine = loaded(model="qwen3.5-4b", probs_for=yes_mostly)
+    body = {
+        "model": "qwen3.5-4b",
+        "state": "",
+        "images": [PNG],
+        "questions": {"urgent": EXAMPLE["questions"]["urgent"]},
+    }
+    response = _decide(llm_client, auth, body)
+    assert response.status_code == 200, response.text
+    sent = engine.requests[-1]["messages"][-1]["content"]
+    assert any(part["type"] == "image_url" for part in sent)
 
 
 def test_an_upstream_model_is_decide_needs_logprobs(

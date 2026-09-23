@@ -28,7 +28,9 @@ SCRIPT = REPO_ROOT / "scripts" / "gen-foundry-lineup.py"
 CHECKED_IN = REPO_ROOT / lineup.FILE_NAME
 
 #: The three models Foundry runs locally today, and the one it cannot.
-WITH_LOCAL = ["dots-ocr", "qwen3.5-9b", "qwen3.8-27b-4bit"]
+WITH_LOCAL = [
+    "dots-ocr", "qwen3.5-0.8b", "qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b-4bit",
+]
 WITHOUT_LOCAL = ["qwen3.8-27b-8bit"]
 
 #: Which classes each local model lights, read off `capability.CLASSES` through
@@ -38,8 +40,12 @@ CLASSES = {
     "dots-ocr": ["pages"],
     # All four since 2026-09-16: Owen dropped the translate/simplify/analysis
     # floor from the 27B to the 9B (docs/MODEL-CHOICE.md section 1).
-    "qwen3.5-9b": ["clean", "translate", "simplify", "analysis"],
-    "qwen3.8-27b-4bit": ["translate", "simplify", "analysis"],
+    # `decide` on every qwen row since 2026-09-23 (PHASE22 section 2.9); it has
+    # no floor, so the two small tiers light it and nothing else.
+    "qwen3.5-0.8b": ["decide"],
+    "qwen3.5-4b": ["decide"],
+    "qwen3.5-9b": ["clean", "translate", "simplify", "analysis", "decide"],
+    "qwen3.8-27b-4bit": ["translate", "simplify", "analysis", "decide"],
 }
 
 #: The exact key order of one row. Foundry's reader compares by content and a
@@ -120,7 +126,7 @@ def test_the_generator_writes_a_file_its_own_check_accepts(tmp_path: Path) -> No
     wrote = _run("--verbose", "--output", str(target))
     assert wrote.returncode == 0, wrote.stderr
     assert "omitted qwen3.8-27b-8bit: no [local] table" in wrote.stdout
-    assert "3 model(s) with a local form, 1 omitted" in wrote.stdout
+    assert "5 model(s) with a local form, 1 omitted" in wrote.stdout
     assert lineup.content(json.loads(target.read_text(encoding="utf-8"))) == (
         lineup.content(_checked_in())
     )
@@ -237,7 +243,9 @@ def test_classes_come_from_the_capability_table(model_id: str) -> None:
 def test_a_model_with_no_local_form_still_has_classes() -> None:
     """Omitted from the lineup is not the same as serving nothing: the bf16 27B
     is a translate candidate on a 64 GB Mac; it just has no Ollama form."""
-    assert classes_for_model("qwen3.8-27b-8bit") == ("translate", "simplify", "analysis")
+    assert classes_for_model("qwen3.8-27b-8bit") == (
+        "translate", "simplify", "analysis", "decide",
+    )
 
 
 def test_an_unknown_model_id_is_refused_not_answered_with_no_classes() -> None:
@@ -252,7 +260,9 @@ FIXTURE = """
 [model]
 id = "{id}"
 family = "{family}"
-params_b = 1
+# 9, not 1: the text classes carry a 9B floor since 2026-09-23, and this
+# fixture stands in for a cleanup-class qwen3.5.
+params_b = 9
 context_default = 4096
 trained_context = 262144
 modalities = ["text"]
@@ -324,7 +334,7 @@ def test_a_fixture_catalog_builds_the_same_shape(
     assert rows == [
         {
             "id": "demo-1b",
-            "classes": ["clean", "translate", "simplify", "analysis"],
+            "classes": ["clean", "translate", "simplify", "analysis", "decide"],
             "label": "Demo",
             "description": "A fixture.",
             "local": {

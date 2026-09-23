@@ -353,6 +353,64 @@ what `pages` and `analysis` load.
   capability class in the AI page (a model chosen for decisions) or rides on `analysis` is
   §7.2.
 
+### 2.9 The lineup (built 2026-09-23)
+
+Owen, 2026-09-23: *"we should configure snap to work with either the 27b, the 9b, a 3b/4b, or
+a 0.8b depending on what the user passes in/requests, and depending on what system it's
+running on and how much ram is available … we should use the latest available. qwen 3.8
+ideally. if thats not available, the 3.5 models … the models should be pulled from the
+official model repository"*, and *"vision should be integrated into crucible's functionality
+as well. and batching."* Three pieces, built together:
+
+**A `decide` capability class** (§7.2, answered: its own class). `job_type = "llm"`, a
+valid `X-Crucible-Act` because `ACT_NAMES` is derived from `CLASSES`. Candidates: every
+`qwen3.8` and `qwen3.5` manifest, best-first by `memory_bytes_estimate` like every class —
+so a card that holds a 27B decides on it and a laptop still decides — with **no size
+floor**. Not routable, although the brief proposed routable: the door refuses every
+upstream id (`decide_needs_logprobs`, §2.1), so a routable class would let an operator send
+the act somewhere that refuses all of it, and its refusals would carry the "add an API key"
+offer that cannot help. Its working context is **8192 tokens × 2**, not × 16: the questions
+EXTEND one primed state (§2.5) and share its KV through the prefix cache, and the 16
+questions' tails at one 544-token vLLM block each (§8a) come to about one more state. Sized
+as sixteen independent 8192-token states it would refuse the 9B on the 3090 Ti's cuda-linux
+(24.8 GB of need against 22.5 GB of budget) — the very card and model snap measured
+decisions on. `tests/test_decide_lineup.py` pins that.
+
+**The floors became numbers.** `clean`, `translate`, `simplify` and `analysis` now carry
+`min_params_b = 9` (`capability.NINE_B_FLOOR`), compared against `[model] params_b` — which
+became a number (`params_b = 0.8` is a float) rather than an int. Before, the floor was a
+side effect of the family filter and of the 9B being the smallest thing `models/` held; the
+day a 4B arrived it would have put the 4B under cleanup and translation with nobody
+deciding it. MODEL-CHOICE.md's 2026-09-23 addendum records it. Their candidate lists did not
+move, and are asserted exactly per backend.
+
+**Two tiers, from the official repos.** `qwen3.5-4b` (Owen's "3b/4b"; Qwen publishes a 2B
+and a 4B, no 3B) and `qwen3.5-0.8b`. Qwen3.8 has no small tiers — the hub lists 27B,
+Flash-Next and 2.4T-A95B — so "3.8 ideally" is the 27B pair already here, and 3.5 is the
+latest that exists at these sizes. cuda-linux pins `Qwen/Qwen3.5-*` (Qwen's own org);
+mlx-darwin pins `mlx-community/Qwen3.5-*-bf16` (the org the 9B already pins); llama-windows
+pins `unsloth/Qwen3.5-*-GGUF` Q8_0 + `mmproj-F16.gguf`, because **Qwen publishes no GGUF for
+3.5 or 3.8**. Every `memory_bytes_estimate` is COMPUTED (`basis = "computed"`, or
+`"declared"` on llama-windows as every block there is), with each term's source written in
+the manifest: weights from the safetensors headers at the pin, the 0.8B's text half MEASURED
+in §8a's own log (1.53 GiB weights, 0.75 GiB overhead, 18,023 B/token of KV), the 4B's slope
+carried EXACTLY from the 9B's measured 40,337 (every config field KV reads is identical), and
+the image reserve carried from the 9B's measured 1.90 GiB A/B as an upper bound.
+
+**What a backend SERVES is the block's; what the weights ACCEPT is the model's.** A new
+optional `serves` on each `[backends.<kind>]` block, defaulting to `[model] modalities` and
+refused by name unless it is a non-empty subset of it (`serves_not_subset`). The engine
+choice (`engine_for`, via `class_family`), the image-pairing rules (`mmproj` required when
+the block serves images and now REFUSED when it does not; `--skip-mm-profiling` and
+`--language-model-only` refused beside a served image) and this door's `model_text_only` all
+read the block's set. `model_text_only` now names `backend` and `serves` beside the model's
+`modalities`, and `GET /v1/models` rows carry `serves` (null where the host has no block).
+The small tiers declare `modalities = ["text", "image"]` and serve images on cuda-linux (vLLM
+loads the tower; `--limit-mm-per-prompt {"image": 8, "video": 0}`, 8 being `MAX_IMAGES`) and
+llama-windows (the projector), and `["text"]` on mlx-darwin — because the Mac's image engine
+is Crucible's dots-specific page server, which computes no logprobs, and a model-wide
+`image` would have moved these weights onto it.
+
 ## 3. Tests (no GPU)
 
 - `tests/fake_engine.py` learns to answer `logprobs` on `/v1/chat/completions`: a test
@@ -413,11 +471,31 @@ here for the product door.
 2. **A `decide` capability class of its own**, so the AI page picks the model that answers
    decisions per server, or decisions ride on `analysis` (the tile used `analysis`).
    (Proposed: its own class; a 9B answering decisions while a 27B does analysis is the
-   likely lineup.)
+   likely lineup.) **Built as its own class, 2026-09-23 (§2.9)**, on Owen's lineup
+   request that day — no size floor, not routable.
 3. **Images on `qwen3.5-9b`**: declare `image` on cuda-linux and llama-windows and re-measure
    memory, or leave the 9B text-only and name a separate image-capable model. (Proposed:
    declare it, measure, since the projector costs ~1 GB and BookForge's page-kind use case
    is the reason the door exists.)
+
+   **RULED 2026-09-23 (Owen):** *"lets build in the functionality. even if it cant do it on
+   this card with this model specifically, crucible is designed to be cross-platform. it
+   should be capable of it. we can use the highest model we can for it."* Vision is served
+   for every tier. **Built:** `serves` (§2.9) and image-serving `qwen3.5-4b` / `qwen3.5-0.8b`
+   on cuda-linux and llama-windows. **Not built, and why:** the 9B and 27B rows' memory is
+   MEASURED text-only and clean/translate on the 3090 Ti depend on it, so their vision form
+   has to be its own id (`qwen3.5-9b-vl`, `qwen3.8-27b-4bit-vl`, `qwen3.8-27b-8bit-vl`, the
+   way the 27B already has two ids for two forms). But the weights store keys a download by
+   MODEL ID — `weights_dir()` is `~/.crucible/models/<id>/<backend>` and `pull()`
+   snapshot-downloads into it — so a `-vl` id pinning the same repo and revision as its text
+   id would download the same 18–31 GB a second time (Owen: *"i dont want to have 16 copies
+   of giant models"*). **Ruling owed** on how two ids share one pin (e.g. a `[model]
+   weights_of = "<id>"` whose pin must match, or a store keyed by repo@revision) before the
+   `-vl` ids are added. Their arithmetic is ready: the 27B's tower is the 9B's (depth 27,
+   hidden 1152, read from `Qwen/Qwen3.8-27B` config.json @ 1d4bf0f2), so the 9B's 1.90 GiB
+   reserve and ~0.85 GiB of tower carry across; on the 3090 Ti the 9B-vl comes to 18.18 +
+   0.85 + 1.90 = 20.93 GiB of non-KV against 21.0 GiB of budget — about 2,000 tokens of KV,
+   i.e. it does not usefully fit there, which the fit table would say by itself.
 4. **The Mac**: if mlx-lm 0.31.3 cannot return top logprobs, is `decide_not_served` on
    mlx-darwin acceptable for this phase, or does Crucible's own page server grow a logprobs
    path (as it grew batching)? (Proposed: refuse by name now; grow it when a Mac consumer

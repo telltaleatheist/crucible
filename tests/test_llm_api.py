@@ -193,8 +193,9 @@ def test_models_lists_every_manifest_with_its_standing(
     # ORDERED BY ID, so the 4-bit precedes the 8-bit ('4' < '8'). It read
     # BIG then SMALL_BIG while BIG was the bare `qwen3.8-27b`, which sorted
     # before both; the 2026-09-17 rename moved it to the end of the family.
+    # The two decision tiers (2026-09-23) sort before the 9B: '0' < '4' < '9'.
     assert [row["id"] for row in response.json()] == [
-        PAGE_MODEL, MODEL, SMALL_BIG_MODEL, BIG_MODEL,
+        PAGE_MODEL, "qwen3.5-0.8b", "qwen3.5-4b", MODEL, SMALL_BIG_MODEL, BIG_MODEL,
     ]
     row = rows[MODEL]
     assert row["family"] == "qwen3.5"
@@ -242,7 +243,7 @@ def test_info_gains_an_llm_capability(
     by_type = {entry["job_type"]: entry for entry in capabilities}
     assert "llm" in by_type
     assert [row["id"] for row in by_type["llm"]["models"]] == [
-        PAGE_MODEL, MODEL, SMALL_BIG_MODEL, BIG_MODEL,
+        PAGE_MODEL, "qwen3.5-0.8b", "qwen3.5-4b", MODEL, SMALL_BIG_MODEL, BIG_MODEL,
     ]
     # The two things you can actually POST are in `job_types`, NOT in
     # `capabilities`. They were capabilities of their own until 2026-09-13, and

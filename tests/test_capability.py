@@ -744,8 +744,8 @@ def test_the_capability_route_answers_every_class_and_its_reason(
     # about what the card can hold and a 913 MB separator and a 2.5 GiB urvc
     # stack are different arithmetic.
     assert names == {
-        "align", "analysis", "asr", "clean", "denoise", "echo", "pages", "rvc",
-        "simplify", "translate", "tts",
+        "align", "analysis", "asr", "clean", "decide", "denoise", "echo", "pages",
+        "rvc", "simplify", "translate", "tts",
     }
     picked = {row["capability"]: row["selected"] for row in record["classes"]}
     assert picked["translate"] == picked["simplify"] == picked["analysis"], picked
@@ -794,8 +794,9 @@ def test_the_route_says_which_job_type_each_class_feeds_and_what_builds_it(
     assert sorted(classed) == sorted(row["capability"] for row in record["classes"])
     assert len(classed) == len(set(classed))
 
+    # `decide` since 2026-09-23 (PHASE22-DECIDE.md section 2.9), in CLASSES order.
     assert rows["llm"]["classes"] == [
-        "clean", "translate", "simplify", "analysis", "pages"
+        "clean", "translate", "simplify", "analysis", "decide", "pages"
     ]
     # Almost always itself. `denoise` shares `rvc`'s env, so a page that offered
     # it an Install button of its own would draw a control the task door refuses

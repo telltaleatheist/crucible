@@ -3066,15 +3066,27 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # carries no modalities, and a manifest whose modalities changed
             # also changed its engine line (`--language-model-only`, an
             # `mmproj`), which is a reload either way.
-            modalities = load_manifest(resident.model_id).modalities
-            if "image" not in modalities:
+            #
+            # WHAT THIS BACKEND SERVES, not what the weights accept (PHASE22
+            # section 2.9). `qwen3.5-4b` accepts images everywhere and is
+            # served them on cuda-linux and llama-windows only: on the Mac its
+            # engine is mlx-lm, which is never handed a picture. Reading the
+            # model-wide list here would pass a page to an engine that drops it
+            # and answer from the text alone.
+            manifest = load_manifest(resident.model_id)
+            served = manifest.serves(backend.kind)
+            if "image" not in served:
                 raise ApiError(
                     400,
                     "model_text_only",
-                    f"{resident.model_id!r} is declared {list(modalities)} and this "
-                    f"decision carries {n_images} image(s). Whether a model answers "
-                    "images is its manifest's `modalities` (PHASE22 section 2.7)",
-                    {"model": resident.model_id, "modalities": list(modalities),
+                    f"{resident.model_id!r} is served {list(served)} on "
+                    f"{backend.kind} (its weights accept "
+                    f"{list(manifest.modalities)}) and this decision carries "
+                    f"{n_images} image(s). Whether a model answers images HERE is "
+                    "its manifest's backend block (`serves`, PHASE22 section 2.9)",
+                    {"model": resident.model_id, "backend": backend.kind,
+                     "serves": list(served),
+                     "modalities": list(manifest.modalities),
                      "images": n_images},
                 )
         plans = decide_core.plan_all(body)

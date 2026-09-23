@@ -46,7 +46,6 @@ from pydantic import (
 )
 
 from .errors import ApiError
-from .jobs.base import validate_member_name
 
 # ------------------------------------------------------------------- numbers
 
@@ -202,6 +201,11 @@ class DecideRequest(_Strict):
     @field_validator("questions")
     @classmethod
     def _names_are_path_members(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # Deferred: `crucible.capability` reads this module's fan-out ceiling
+        # to size the `decide` class, and importing `crucible.jobs` at module
+        # level would run `jobs/__init__`, which imports `capability` back.
+        from .jobs.base import validate_member_name
+
         for name in value:
             validate_member_name(name)
         return value

@@ -1,5 +1,5 @@
 {
-  "generated_from": "c04ef2c55da12b91f95bca2e468e5c543de34f3d",
+  "generated_from": "f38db96e2fdea588d95a11dacb57aafa66a65019",
   "schema": 2,
   "floors": {
     "simplify": "qwen3.5-9b",
@@ -29,12 +29,51 @@
       "minimumFor": []
     },
     {
+      "id": "qwen3.5-0.8b",
+      "classes": [
+        "decide"
+      ],
+      "label": "Qwen 3.5 · 0.8B",
+      "description": "The smallest decision model: fast, and able to read an image on a PC or Windows card. Decisions only — too small for cleanup, translation, simplification or analysis.",
+      "local": {
+        "kind": "ollama",
+        "tag": "qwen3.5:0.8b-bf16",
+        "downloadGB": 1.76,
+        "needsGB": {
+          "value": 3.26,
+          "basis": "declared"
+        }
+      },
+      "minimum": false,
+      "minimumFor": []
+    },
+    {
+      "id": "qwen3.5-4b",
+      "classes": [
+        "decide"
+      ],
+      "label": "Qwen 3.5 · 4B",
+      "description": "A small model for decisions, reading images as well as text on a PC or Windows card. Below the 9B floor for cleanup, translation, simplification and analysis.",
+      "local": {
+        "kind": "ollama",
+        "tag": "qwen3.5:4b-bf16",
+        "downloadGB": 9.33,
+        "needsGB": {
+          "value": 10.83,
+          "basis": "declared"
+        }
+      },
+      "minimum": false,
+      "minimumFor": []
+    },
+    {
       "id": "qwen3.5-9b",
       "classes": [
         "clean",
         "translate",
         "simplify",
-        "analysis"
+        "analysis",
+        "decide"
       ],
       "label": "Qwen 3.5 · 9B",
       "description": "The cleanup model, in bf16. Cleanup and the other 9B-class text work; wants a 24 GB card at this precision.",
@@ -58,7 +97,8 @@
       "classes": [
         "translate",
         "simplify",
-        "analysis"
+        "analysis",
+        "decide"
       ],
       "label": "Qwen 3.8 · 27B (4-bit)",
       "description": "The 27B standard for translation, simplification and analysis, quantized to fit a 24 GB card. The smallest model those three may run on.",

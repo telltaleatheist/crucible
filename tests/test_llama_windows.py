@@ -158,12 +158,17 @@ def test_the_three_published_ggufs_are_named_and_the_fourth_is_absent() -> None:
         for model_id, manifest in catalog.items()
         if manifest.supports(LLAMA_WINDOWS)
     }
-    assert served == {"dots-ocr", "qwen3.5-9b", "qwen3.8-27b-4bit"}
+    assert served == {
+        "dots-ocr", "qwen3.5-0.8b", "qwen3.5-4b", "qwen3.5-9b",
+        "qwen3.8-27b-4bit",
+    }
 
 
 def test_every_llama_windows_row_names_the_one_file_it_is() -> None:
     """A GGUF repo holds twenty quantizations; a row pulls one."""
-    for model_id in ("dots-ocr", "qwen3.5-9b", "qwen3.8-27b-4bit"):
+    for model_id in (
+        "dots-ocr", "qwen3.5-0.8b", "qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b-4bit",
+    ):
         spec = load_manifest(model_id).spec(LLAMA_WINDOWS)
         assert spec.engine == "llama-server"
         assert spec.file is not None and spec.file.endswith(".gguf"), model_id

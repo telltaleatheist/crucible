@@ -229,3 +229,18 @@ comes out with the same change.
 1 and 2 are small and unblock the apps. 3 is the one with a contract to get right
 — an override that is not recorded is worse than no override, because the run it
 produces cannot be told apart afterwards from one that fit.
+
+## Addendum, 2026-09-23: the floor is a number on the class
+
+Section 1's floor — *"they cant pick smaller than 9b"* — was, until today, a side effect:
+`clean` read the `qwen3.5` family and `translate`/`simplify`/`analysis` read `qwen3.8` and
+`qwen3.5`, and the 9B was the floor only because it was the smallest model either family
+shipped. PHASE22 added `qwen3.5-4b` and `qwen3.5-0.8b` for the decision door, and a family
+filter alone would have put both under all four classes without anybody deciding it.
+
+So the floor is now explicit: `CapabilityClass.min_params_b`, applied by the candidate
+source (`CatalogCandidates.min_params_b`) against each manifest's `[model] params_b`, and set
+to `capability.NINE_B_FLOOR` (9) on `clean`, `translate`, `simplify` and `analysis`. Their
+candidate lists did not move; `tests/test_decide_lineup.py` asserts them exactly, per
+backend. The new `decide` class has **no floor** — a decision is the one text act a 0.8B
+does well enough to offer (PHASE22-DECIDE.md sections 8a and 2.9) — so it lists every tier.

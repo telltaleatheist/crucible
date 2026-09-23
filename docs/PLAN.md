@@ -22,6 +22,23 @@ SDK `decide()` and `crucible api decide` (snap's grammar) ship with the door. Ru
 images on `qwen3.5-9b`; the Mac refusing `decide_not_served` for now. Contract:
 `docs/PHASE22-DECIDE.md`.
 
+*The lineup (2026-09-23, section 2.9, built on `feat/decide-door`, not cut):* a `decide`
+capability class (not routable — the door refuses upstreams) whose candidates are every
+qwen3.8/qwen3.5 manifest with no size floor, best-first; the four text classes now carry
+an explicit `min_params_b = 9` instead of a floor implied by what `models/` held; two new
+manifests from the official repos, `qwen3.5-4b` and `qwen3.5-0.8b` (vLLM on
+`Qwen/Qwen3.5-*`, mlx-lm on `mlx-community/*-bf16`, llama-server on unsloth Q8_0 + F16
+projector — Qwen publishes no GGUF), memory COMPUTED with every term cited; and a
+per-backend `serves` (what the ENGINE is handed, ⊆ `modalities`, what the weights accept),
+which the engine choice, the image-flag rules and the door's `model_text_only` now read — so
+the small tiers read images on cuda-linux and llama-windows and stay text on the Mac's
+mlx-lm. **Qwen3.8 exists on the hub only as 27B, Flash-Next and 2.4T-A95B (+ FP8s) — listed
+2026-09-23 — so there are no 3.8 small tiers to add; do not look again until Qwen publishes
+one.** Qwen3.5 also publishes a 2B (not added). Vision on the 9B and the 27Bs (Owen's §7.3
+ruling, 2026-09-23: "build in the functionality") is BLOCKED on one fact: the weights store
+keys a download by model id, so a `-vl` id beside a text id would download the same repo
+twice — ruling owed on how two ids share one pin (§7.3).
+
 **PLANNED 2026-09-19, BUILD STARTED: PHASE21 — a voice's facts travel with its weights; Crucible
 ships no voices.** `crucible-voice.toml` at the HF repo root in the same commit as the weights
 (voice facts only: pace with a `basis`, band, per-arm `max_chars` with a basis, sampling, takes;

@@ -93,19 +93,31 @@ BACKEND_ENGINES: dict[str, dict[str, str]] = {
 
 
 def class_family(modalities: "tuple[str, ...] | list[str]") -> str:
-    """Which family a model belongs to, from what it accepts.
+    """Which family a BACKEND BLOCK belongs to, from what it SERVES.
 
-    `image` in `modalities` makes it a page reader and nothing else does. The
-    family is DERIVED rather than declared for the reason the table above
-    gives: a `family = "pages"` key would be a second owner of a fact
-    `modalities` already states, and the two would drift the first time
-    somebody added a vision model served text-only.
+    `image` in the served modalities makes it a page reader and nothing else
+    does. The family is DERIVED rather than declared for the reason the table
+    above gives: a `family = "pages"` key would be a second owner of a fact the
+    modalities already state.
+
+    PER BLOCK SINCE 2026-09-23 (PHASE22 section 2.9). It was read off the
+    model's `[model] modalities`, model-wide, and that was one fact standing in
+    for two: what the WEIGHTS accept and what a given ENGINE serves. They came
+    apart the first time a small Qwen3.5 was offered for images: vLLM and
+    llama-server serve its tower, and on the Mac the text engine is mlx-lm,
+    which cannot — while the Mac's `pages` engine is Crucible's own dots-
+    specific server. A model-wide `image` would have sent these weights to the
+    page server on the Mac. So callers pass a block's `serves`
+    (`BackendSpec.serves`), which defaults to the model's modalities and may
+    only narrow them.
     """
     return PAGES_FAMILY if "image" in modalities else TEXT_FAMILY
 
 
 def engine_for(backend_kind: str, modalities: "tuple[str, ...] | list[str]") -> str:
-    """The engine this backend serves this family with. Refuses either unknown."""
+    """The engine this backend serves this family with. Refuses either unknown.
+
+    `modalities` is what the block SERVES (see `class_family`)."""
     engines = BACKEND_ENGINES.get(backend_kind)
     if engines is None:
         raise ManifestError(
@@ -202,10 +214,18 @@ DEFAULTS_WIRE_KEYS: tuple[str, ...] = (
     "repetition_penalty",
 )
 
-_MODEL_REQUIRED: dict[str, type] = {
+#: A count of billions of parameters, which is not always whole: Qwen publishes a
+#: `Qwen3.5-0.8B`. An int or a float; a bool is neither (`check_table`).
+NUMBER: tuple[type, ...] = (int, float)
+
+_MODEL_REQUIRED: dict[str, Any] = {
     "id": str,
     "family": str,
-    "params_b": int,
+    # The capability classes' floors are read against this
+    # (`capability.CatalogCandidates.min_params_b`, 2026-09-23), so it is a
+    # load-bearing number and not a label: the 9B floor for clean / translate /
+    # simplify / analysis is `params_b >= 9`.
+    "params_b": NUMBER,
     "context_default": int,
     # WHAT THE WEIGHTS SUPPORT, which is a different fact from either of the
     # other two contexts in this file and is the only one that belongs to the
@@ -274,6 +294,17 @@ _BACKEND_OPTIONAL: dict[str, type] = {
     # honest as it stands; where it IS present the two must agree, and the parser
     # below checks that rather than trusting it.
     "memory": dict,
+    # WHAT THIS BACKEND SERVES, when it is less than what the weights accept
+    # (PHASE22-DECIDE.md section 2.9, 2026-09-23). `[model] modalities` is the
+    # model's: what the checkpoint can be shown. This is the block's: what the
+    # ENGINE this block names will actually be handed. Absent means "everything
+    # the model accepts"; present, it must be a non-empty subset of it, and it
+    # is what the engine choice (`engine_for`), the image-pairing rules below
+    # (`mmproj`, `--skip-mm-profiling`, `--language-model-only`) and the
+    # decision door's `model_text_only` all read. The case it exists for: a
+    # small Qwen3.5 whose tower vLLM and llama-server serve, on a Mac whose text
+    # engine (mlx-lm) cannot see a picture.
+    "serves": list,
 }
 
 #: What `[backends.<kind>.memory]` must state. Every term is a count of bytes
@@ -482,6 +513,11 @@ class BackendSpec:
     #: is the weights and there is no file to choose.
     file: str | None = None
     mmproj: str | None = None
+    #: What this block's engine is handed: the block's `serves`, or the model's
+    #: `modalities` when the block does not narrow them. Always resolved by the
+    #: parser, never empty; `()` only on a spec built by hand in a test that
+    #: does not care, which the parser never produces.
+    serves: tuple[str, ...] = ()
 
     @property
     def files(self) -> tuple[str, ...]:
@@ -507,6 +543,7 @@ class BackendSpec:
             "memory": None if self.memory is None else self.memory.to_dict(),
             "file": self.file,
             "mmproj": self.mmproj,
+            "serves": list(self.serves),
         }
 
 
@@ -623,7 +660,9 @@ class GgufLocal(LocalForm):
 class ModelManifest:
     id: str
     family: str
-    params_b: int
+    #: Billions of parameters — an int where the model is whole (9, 27), a float
+    #: where it is not (0.8). Capability floors compare against it.
+    params_b: int | float
     context_default: int
     #: What `max_position_embeddings` says at the pinned revision — the wall
     #: behind every host's choice.
@@ -675,6 +714,15 @@ class ModelManifest:
         """
         found = self.backends.get(backend_kind)
         return None if found is None else fingerprint(self.id, found.revision)
+
+    def serves(self, backend_kind: str) -> tuple[str, ...]:
+        """What this model is SERVED for on `backend_kind`, or a named refusal.
+
+        Not `self.modalities`: that is what the weights accept, and a backend may
+        serve less (PHASE22-DECIDE.md section 2.9). Every question of the form
+        "may I send this model an image HERE" asks this.
+        """
+        return self.spec(backend_kind).serves
 
     def spec(self, backend_kind: str) -> BackendSpec:
         """The block for `backend_kind`, or a named refusal."""
@@ -747,6 +795,9 @@ def check_table(
     (`crucible/voices.py`) are the same kind of file held to the same strictness
     and must refuse in their own vocabulary — a reader told "manifest" about a
     voice file goes looking in `models/`.
+
+    A kind may be a tuple of types (`NUMBER`), named in a refusal as
+    "int or float".
     """
     allowed = set(required) | set(optional)
     unknown = sorted(set(table) - allowed)
@@ -762,13 +813,15 @@ def check_table(
         if key not in table:
             continue
         value = table[key]
-        wrong = not isinstance(value, kind)
+        kinds = kind if isinstance(kind, tuple) else (kind,)
+        wrong = not isinstance(value, kinds)
         # bool is a subclass of int; a bool where an int is wanted is still wrong.
-        if kind is int and isinstance(value, bool):
+        if int in kinds and isinstance(value, bool):
             wrong = True
         if wrong:
+            named = " or ".join(k.__name__ for k in kinds)
             raise error(
-                f"{where}: {key} must be {kind.__name__}, got "
+                f"{where}: {key} must be {named}, got "
                 f"{type(value).__name__}"
             )
 
@@ -1006,6 +1059,50 @@ def _parse_local(
     )
 
 
+def _parse_serves(
+    where: str, block: dict[str, Any], modalities: "list[str] | tuple[str, ...]"
+) -> tuple[str, ...]:
+    """A block's `serves`, or the model's modalities where it states none.
+
+    A subset and never a superset, refused by name otherwise: a backend cannot
+    serve a modality the weights do not accept, and a block that claimed one
+    would be a promise with no tower behind it. Empty is refused for the reason
+    an empty `[model] modalities` is — a backend that serves nothing is not a
+    backend — and a duplicate is refused because it is a typo that reads like
+    a decision.
+    """
+    if "serves" not in block:
+        return tuple(modalities)
+    served = block["serves"]
+    if not served:
+        raise ManifestError(
+            f"{where}: serves is empty; a backend that serves nothing is not a "
+            "backend. Omit the key to serve everything [model] modalities "
+            f"declares ({list(modalities)})"
+        )
+    for index, entry in enumerate(served):
+        if not isinstance(entry, str):
+            raise ManifestError(
+                f"{where}: serves[{index}] must be a string, got "
+                f"{type(entry).__name__}"
+            )
+        if entry not in MODALITIES:
+            raise ManifestError(
+                f"{where}: serves[{index}] is {entry!r}; Crucible knows "
+                f"{sorted(MODALITIES)}"
+            )
+    if len(set(served)) != len(served):
+        raise ManifestError(f"{where}: serves lists a modality twice: {served}")
+    beyond = [entry for entry in served if entry not in modalities]
+    if beyond:
+        raise ManifestError(
+            f"{where}: serves_not_subset — serves {served} names {beyond}, which "
+            f"[model] modalities {list(modalities)} does not. What the weights "
+            "accept is the model's; a backend may serve less of it, never more"
+        )
+    return tuple(served)
+
+
 def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManifest:
     unknown = sorted(set(document) - {"model", "backends", "defaults", "local"})
     if unknown:
@@ -1132,18 +1229,26 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             raise ManifestError(f"{where}: must be a table")
         check_table(where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL)
 
+        # ------------------------------------------- what this block serves
+        # (PHASE22-DECIDE.md section 2.9.) Resolved FIRST, because the engine
+        # and every image rule below read it rather than [model] modalities.
+        serves_here = _parse_serves(where, block, modalities)
+
         engine = block["engine"]
-        # PER (BACKEND, CLASS FAMILY), and the family comes off `modalities`
-        # above rather than out of this block — so a manifest cannot claim a
-        # page-reading engine for a text model by naming one.
-        expected = engine_for(kind, modalities)
+        # PER (BACKEND, CLASS FAMILY), and the family comes off what this block
+        # SERVES — `modalities` above unless the block narrows it — rather than
+        # out of the engine name, so a manifest cannot claim a page-reading
+        # engine for a text model by naming one.
+        expected = engine_for(kind, serves_here)
         if engine != expected:
-            family = class_family(modalities)
+            family = class_family(serves_here)
             raise ManifestError(
                 f"{where}: engine {engine!r} does not serve {family!r} models on "
                 f"{kind}; that pairing's engine is {expected!r}. The family is "
-                f"read off [model] modalities = {list(modalities)} and not out of "
-                "this block, so an engine cannot be chosen by naming it"
+                f"read off [model] modalities = {list(modalities)} as this block "
+                f"serves them ({list(serves_here)}; `serves` narrows, never "
+                "widens) and not out of the engine name, so an engine cannot be "
+                "chosen by naming it"
             )
         if not _HF_REPO.match(block["hf_repo"]):
             raise ManifestError(
@@ -1178,12 +1283,22 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
                     f"{block['hf_repo']!r} this row is. A GGUF repo holds every "
                     "quantization of a model and this server pulls one"
                 )
-            if "image" in modalities and "mmproj" not in block:
+            if "image" in serves_here and "mmproj" not in block:
                 raise ManifestError(
-                    f"{where}: [model] modalities declares 'image' and this "
-                    "block names no `mmproj`. Half a vision model is a model "
+                    f"{where}: [model] modalities declares 'image' and this block "
+                    f"serves it ({list(serves_here)}), and it names no `mmproj`. Half a vision model is a model "
                     "that loads and then cannot see; the projector is not "
                     "optional (PHASE15-HOST.md section 3.10, fact 2)"
+                )
+            if "image" not in serves_here and "mmproj" in block:
+                # The mirror of the rule above, and the one `[local]` has always
+                # had: a projector beside an engine that is never sent a page is
+                # a file pulled for nothing, and a reader of the block would
+                # take it as a promise the server does not keep.
+                raise ManifestError(
+                    f"{where}: mmproj {block['mmproj']!r} names a vision "
+                    f"projector, and this block serves {list(serves_here)}. Either "
+                    "serve 'image' here or take the projector out"
                 )
             for key in ("file", "mmproj"):
                 name = block.get(key)
@@ -1202,7 +1317,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
                     f"{kind} the whole repo is the weights and there is no "
                     "file to choose"
                 )
-        if "image" in modalities and SKIP_MM_PROFILING in engine_args:
+        if "image" in serves_here and SKIP_MM_PROFILING in engine_args:
             # The one rule that crosses the two tables, and it crosses them
             # because the fact and the flag live apart: what a model is offered
             # for is `[model]`, how its engine is started is `[backends.<kind>]`.
@@ -1212,20 +1327,22 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             # the middle of somebody's book rather than at load.
             raise ManifestError(
                 f"{where}: engine_args carries {SKIP_MM_PROFILING!r} while "
-                f"[model] modalities declares 'image'. That flag stops vLLM "
+                f"[model] modalities declares 'image' and this block serves it. "
+                f"That flag stops vLLM "
                 f"reserving for an image, so it belongs only to a model this "
                 f"server serves text-only; take it out and measure "
                 f"--gpu-memory-utilization again with the image profiled in "
                 f"(PHASE3-VLM.md section 3)"
             )
-        if "image" in modalities and LANGUAGE_MODEL_ONLY in engine_args:
+        if "image" in serves_here and LANGUAGE_MODEL_ONLY in engine_args:
             # The same crossing of the two tables, and the sharper of the two.
             # This flag does not shrink a budget, it deletes the vision tower:
             # the engine starts, `/v1/models` answers, a page goes in and a
             # reading comes back that the model produced without ever seeing it.
             raise ManifestError(
                 f"{where}: engine_args carries {LANGUAGE_MODEL_ONLY!r} while "
-                f"[model] modalities declares 'image'. That flag makes vLLM skip "
+                f"[model] modalities declares 'image' and this block serves it. "
+                f"That flag makes vLLM skip "
                 f"loading the vision tower, so this engine would answer every "
                 f"page from the text alone — a well-formed reading of something "
                 f"it was never shown. It belongs only to a model this server "
@@ -1326,6 +1443,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             memory=terms,
             file=block.get("file"),
             mmproj=block.get("mmproj"),
+            serves=serves_here,
         )
 
     return ModelManifest(

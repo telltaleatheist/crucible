@@ -1,0 +1,205 @@
+# Qwen3.5 0.8B — the smallest decision model, and the one a decision was
+# first measured on.
+#
+# WHY THIS MANIFEST EXISTS (2026-09-23). Owen asked for decisions on "the 27b,
+# the 9b, a 3b/4b, or a 0.8b depending on what the user passes in/requests, and
+# depending on what system it's running on and how much ram is available". This
+# is the 0.8b tier, and it is not a hypothetical one: PHASE22-DECIDE.md section
+# 8a is `Qwen/Qwen3.5-0.8B` on vLLM 0.29.0 in Crucible's own WSL llm env,
+# answering the worked example (billing 0.694, anger 2.08, urgent 0.893)
+# identically, to four places, to snap's own reader against the same engine.
+#
+# WHAT IT IS FOR. `decide` and nothing else — the four text classes carry a 9B
+# floor (`capability.NINE_B_FLOOR`) read against `params_b` below, which is why
+# `params_b` is 0.8 and not rounded to 1: a floor compared against a rounded
+# number is a floor with a rounding error in it.
+#
+# NOT QWEN3.8: there is no Qwen3.8 at this size (the Qwen org publishes 27B,
+# Flash-Next and 2.4T-A95B, listed 2026-09-23).
+
+[model]
+id = "qwen3.5-0.8b"
+family = "qwen3.5"
+params_b = 0.8
+# 8192, AND IT IS NOT THE 9B'S ARGUMENT, because the 9B's argument is about
+# cleanup and this model does no cleanup. Two records, both of decisions:
+#   * the context this checkpoint was actually served at on 2026-09-23 — vLLM's
+#     own `non-default args` line in the run PHASE22 section 8a records says
+#     `'max_model_len': 8192`, and the KV numbers below were read off that run;
+#   * a decision's state is a group of blocks or a page, not a book
+#     (`capability.DECIDE_STATE_TOKENS`, 8192) — Foundry's Categorize tile
+#     sends ~24 blocks with 12 of context each side.
+# A client that wants a longer state from this model is asking a 0.8B to hold a
+# book in view, which is the one thing this tier is not offered for.
+context_default = 8192
+
+# What the WEIGHTS support, read from the hub on 2026-09-23:
+#   Qwen/Qwen3.5-0.8B @ 2fc06364715b967f1860aea9cf38778875588b17
+#   config.json `text_config.max_position_embeddings` = 262144
+trained_context = 262144
+# What the weights ACCEPT: `Qwen3_5ForConditionalGeneration` with a
+# `vision_config` (depth 12, hidden 768, patch 16), filed `image-text-to-text`.
+# Each backend's `serves` says what that backend's engine is handed (PHASE22
+# section 2.9): images on cuda-linux and llama-windows, text on mlx-darwin.
+modalities = ["text", "image"]
+display = "Qwen 3.5 · 0.8B"
+description = "The smallest decision model: fast, and able to read an image on a PC or Windows card. Decisions only — too small for cleanup, translation, simplification or analysis."
+
+# The 9B's reason, the same family and template (models/qwen3.5-9b.toml).
+[defaults]
+thinking = false
+
+# ------------------------------------------------------------ the local form
+#
+#   tag             `qwen3.5:0.8b-bf16` — ollama.com/library/qwen3.5:0.8b-bf16
+#                   answers 200 (2026-09-23). bf16, not the default `qwen3.5:0.8b`
+#                   (which is the q8_0, 1_036_046_583 B), by the 9B's rule: the
+#                   local form is the same weights as the served form.
+#   download_bytes  1_760_116_918 — the tag's registry manifest summed
+#                   (2026-09-23): model 1_760_105_024 + license 11_354 + params 65
+#                   + config 475. The vision tower is inside the model layer.
+#   needs_bytes     3_260_116_918 — download + Foundry's 1.5 GB `OVERHEAD_GB`,
+#                   DECLARED. Generous for this size, and that is the declared
+#                   allowance's known direction.
+[local]
+kind = "ollama"
+tag = "qwen3.5:0.8b-bf16"
+download_bytes = 1_760_116_918
+needs_bytes = 3_260_116_918
+needs_basis = "declared"
+
+[backends.cuda-linux]
+engine = "vllm"
+# The official repo, and the exact checkpoint section 8a ran (`'model':
+# 'Qwen/Qwen3.5-0.8B'`). Head on 2026-09-23, public, one safetensors shard of
+# 1_746_942_600 B.
+hf_repo = "Qwen/Qwen3.5-0.8B"
+revision = "2fc06364715b967f1860aea9cf38778875588b17"
+serves = ["text", "image"]
+# 4_837_071_033 B = 4.50 GiB, COMPUTED from a MEASURED text-only load plus the
+# vision delta. The terms are below.
+memory_bytes_estimate = 4_837_071_033
+# The 9B's `--dtype bfloat16` and `--max-num-seqs 16` (the second is also the
+# run 8a measured with). No `--language-model-only` / `--skip-mm-profiling`:
+# this block serves images and the loader refuses either beside them. 8a ran
+# WITH both, text-only — which is why its numbers are the text half below.
+#
+# `--limit-mm-per-prompt {"image": 8, "video": 0}`: the 4B's line, for the 4B's
+# reason (the door's `decide.MAX_IMAGES`; no door sends video; the spelling
+# read in vLLM 0.29.0's `engine/arg_utils.py` L1371).
+#
+# `--gpu-memory-utilization 0.19` is the estimate over 23.99 GiB and is INERT
+# here, as on the 4B: `vram.plan_vllm_memory` sizes this block from its terms.
+engine_args = [
+    "--dtype", "bfloat16",
+    "--gpu-memory-utilization", "0.19",
+    "--max-num-seqs", "16",
+    "--limit-mm-per-prompt", '{"image": 8, "video": 0}',
+]
+
+# ------------------------------------------------- the same number, taken apart
+#
+# THE TEXT HALF IS MEASURED; THE IMAGE HALF IS COMPUTED. The run is PHASE22
+# section 8a's: vLLM 0.29.0, 2026-09-23, 3090 Ti (23.99 GiB), `max_model_len
+# 8192`, `gpu_memory_utilization 0.15`, `language_model_only` and
+# `skip_mm_profiling` both True, read from its own log (/tmp/vllm-decide-test.log
+# in WSL):
+#
+#   "Model loading took 1.53 GiB"
+#   "Actual usage is 1.7 GiB for consumed memory (weights + non-torch), 0.55 GiB
+#    for peak activation, and 0.03 GiB for CUDAGraph memory"
+#   "Available KV cache memory: 1.35 GiB"
+#   "GPU KV cache size: 80,430 tokens"
+#
+#   weights_bytes   1_844_010_783 = 1_642_824_991 + 201_185_792
+#     1_642_824_991  1.53 GiB, MEASURED (the language model on the card).
+#       201_185_792  the vision tower, `model.visual.*` summed out of the
+#                    safetensors header at the pinned revision (2026-09-23). It
+#                    loads here; 8a ran without it.
+#   overhead_bytes  2_845_415_834 = 805_306_368 + 2_040_109_466
+#       805_306_368  0.75 GiB, MEASURED: 1.7 + 0.55 + 0.03 = 2.28 GiB of non-KV
+#                    demand, less the 1.53 of weights.
+#     2_040_109_466  the image reserve, 1.90 GiB — the 9B's measured A/B
+#                    (models/qwen3.5-9b.toml, cuda-linux), carried as an UPPER
+#                    BOUND: this tower is 12 blocks of 768 against the 9B's 27 of
+#                    1152, so the real reserve is smaller, likely by a lot. It is
+#                    the one term here nobody has watched on this model, and it
+#                    is two fifths of the estimate. With `--kv-cache-memory-bytes`
+#                    vLLM does not profile it (`v1/worker/gpu_worker.py` L527),
+#                    so this term is what keeps its room free.
+#   kv_bytes_per_token  18_023 — MEASURED: 1.35 GiB / 80,430 tokens. The
+#                    computed figure (6 full-attention layers x 2 x 2 kv heads x
+#                    256 x 2 B) is 12_288, 32% light: vLLM set the attention
+#                    block to 544 tokens "to ensure that attention page size is
+#                    >= mamba page size" (the same log), which is the padding the
+#                    9B and 27B slopes also measured. One load, not two; the 9B's
+#                    one-load figure agreed with its two-point slope to 0.5%.
+#   measured_at_context 8192; the terms add to the estimate exactly.
+#
+# OWED: one load with the tower and the reserve, to replace 2_040_109_466.
+[backends.cuda-linux.memory]
+weights_bytes = 1_844_010_783
+overhead_bytes = 2_845_415_834
+kv_bytes_per_token = 18_023
+basis = "computed"
+measured_at_context = 8192
+
+[backends.mlx-darwin]
+engine = "mlx-lm"
+# mlx-community's bf16 conversion, the org the 9B's mlx block pins. Head on
+# 2026-09-23, `base_model: Qwen/Qwen3.5-0.8B-Base` in its card, one
+# safetensors file of 1_706_030_684 B.
+hf_repo = "mlx-community/Qwen3.5-0.8B-bf16"
+revision = "3067585164dbcc505eec73d554349de6a27571a4"
+# Text only: mlx-lm is the Mac's text engine and cannot be handed an image; the
+# Mac's image engine is Crucible's dots-specific page server. The 4B's block says
+# this at length.
+serves = ["text"]
+# 3_674_495_014 B = 3.42 GiB, COMPUTED, the 4B's method:
+#   weights_bytes   1_504_786_624 — the language model in this repo's header;
+#                   mlx-lm does not load the 201_185_792 B tower (the 9B's
+#                   measured "active 17.91 GB" equals its language model alone).
+#   overhead_bytes  2_069_045_094 — the 9B mlx block's residual, dominated by a
+#                   2048-token step's logits over the same 248320 vocabulary.
+#                   Most of this estimate, and the right shape: the vocabulary
+#                   does not shrink with the model.
+#   kv_bytes_per_token  12_288 — computed: 6 x 2 x 2 x 256 x 2 B.
+#   at 8192         100_663_296
+memory_bytes_estimate = 3_674_495_014
+engine_args = []
+
+[backends.mlx-darwin.memory]
+weights_bytes = 1_504_786_624
+overhead_bytes = 2_069_045_094
+kv_bytes_per_token = 12_288
+basis = "computed"
+measured_at_context = 8192
+
+# ---------------------------------------------------------------------------
+# llama.cpp on Windows. Qwen publishes no GGUF for Qwen3.5 or Qwen3.8 (the Qwen
+# org's listing, 2026-09-23), so unsloth, as for every llama-windows block here.
+# Read from the HuggingFace API on 2026-09-23:
+#
+#   hf_repo/revision  unsloth/Qwen3.5-0.8B-GGUF @ 6ab461498e2023f6e3c1baea90a8f0fe38ab64d0
+#                     (`base_model: Qwen/Qwen3.5-0.8B`)
+#   file              Qwen3.5-0.8B-Q8_0.gguf    811_843_840 B
+#   mmproj            mmproj-F16.gguf           204_987_232 B
+#
+# memory_bytes_estimate: the files plus Foundry's 1.5 GB, DECLARED, as every
+# llama-windows block. KV at 8192 is 100_663_296 B (12_288 B/token) of it.
+[backends.llama-windows]
+engine = "llama-server"
+hf_repo = "unsloth/Qwen3.5-0.8B-GGUF"
+revision = "6ab461498e2023f6e3c1baea90a8f0fe38ab64d0"
+file = "Qwen3.5-0.8B-Q8_0.gguf"
+mmproj = "mmproj-F16.gguf"
+serves = ["text", "image"]
+memory_bytes_estimate = 2_516_831_072
+engine_args = ["--parallel", "1"]
+
+[backends.llama-windows.memory]
+weights_bytes = 1_016_831_072
+overhead_bytes = 1_399_336_704
+kv_bytes_per_token = 12_288
+basis = "declared"
+measured_at_context = 8192

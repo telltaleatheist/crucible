@@ -86,6 +86,7 @@ from .alignmodels import load_all_align_manifests
 from .asrmodels import load_all_asr_manifests
 from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
 from .config import CapabilityRecord, CapabilityRow
+from .decide import UNSTATED_ENGINE_CONCURRENCY
 from .denoisemodels import load_all_denoise_manifests
 from .manifests import BACKEND_ENGINES, MemoryTerms, load_all_manifests
 from .pages import PAGE_CONCURRENCY
@@ -262,11 +263,23 @@ class CatalogCandidates:
 
     load: Callable[[], dict[str, Any]]
     families: tuple[str, ...] | None = None
+    #: THE SIZE FLOOR, read against each manifest's `[model] params_b`, or None
+    #: for a class with none. Explicit since 2026-09-23 (docs/MODEL-CHOICE.md,
+    #: addendum). Until then the floor was IMPLICIT in `families`: "the smallest
+    #: family a class lists" was the 9B because the 9B was the smallest model the
+    #: catalog shipped. The day `qwen3.5-4b` and `qwen3.5-0.8b` joined it for
+    #: the decision door, a family filter alone would have put a 4B under
+    #: `clean` and under `translate` — against Owen's *"they cant pick smaller
+    #: than 9b"* — without anybody deciding it. A floor that is a side effect of
+    #: what happens to be in `models/` is a floor nothing owns.
+    min_params_b: float | None = None
 
     def __call__(self, backend_kind: str) -> tuple[Candidate, ...]:
         found: list[Candidate] = []
         for manifest in self.load().values():
             if self.families is not None and manifest.family not in self.families:
+                continue
+            if self.min_params_b is not None and manifest.params_b < self.min_params_b:
                 continue
             if not manifest.supports(backend_kind):
                 continue
@@ -299,9 +312,11 @@ class CatalogCandidates:
 
 
 def _from_catalog(
-    load: Callable[[], dict[str, Any]], *families: str
+    load: Callable[[], dict[str, Any]],
+    *families: str,
+    min_params_b: float | None = None,
 ) -> CatalogCandidates:
-    return CatalogCandidates(load, families or None)
+    return CatalogCandidates(load, families or None, min_params_b)
 
 
 @dataclass(frozen=True)
@@ -353,6 +368,34 @@ class CapabilityClass:
     #: collapsed estimate IS the answer.
     work: "WorkingContext | None" = None
 
+    @property
+    def min_params_b(self) -> float | None:
+        """This class's size floor in billions of parameters, or None.
+
+        Read off the candidate source, which is the thing that applies it, so
+        the class cannot state one floor and select on another (ARCHITECTURE.md
+        R1). None for a class with no floor — `decide`, whose whole point is
+        that a 0.8B can answer it — and for every class that reads a catalog
+        other than `models/`.
+        """
+        if isinstance(self.candidates, CatalogCandidates):
+            return self.candidates.min_params_b
+        return None
+
+
+#: THE 9B FLOOR, in one place. docs/MODEL-CHOICE.md section 1, Owen 2026-09-16:
+#: *"they cant pick smaller than 9b"* — said of translate and simplify, and
+#: carried to analysis (the same acts, "/etc") and to clean (the 9B was always
+#: its model; "9B-class" is its purpose). Compared against `[model] params_b`.
+NINE_B_FLOOR = 9
+
+#: What a DECISION holds on the card while it is answered (PHASE22-DECIDE.md
+#: section 2.9). Its state is a group of blocks or a page, not a book — Foundry's
+#: Categorize tile sends about 24 blocks with 12 of context each side — and 8192
+#: is the context the 0.8B was measured serving decisions at on 2026-09-23
+#: (`max_model_len 8192`, PHASE22 section 8a).
+DECIDE_STATE_TOKENS = 8192
+
 
 #: Every capability class this build knows, in report order.
 #:
@@ -395,10 +438,11 @@ CLASSES: tuple[CapabilityClass, ...] = (
         purpose="cleanup and the other 9B-class text work",
         plainly="clean up text",
         noun="qwen3.5 variants",
-        candidates=_from_catalog(load_all_manifests, "qwen3.5"),
+        candidates=_from_catalog(load_all_manifests, "qwen3.5", min_params_b=NINE_B_FLOOR),
         binary_note=(
-            "This build ships no 4-bit 9B, so there is nothing smaller to fall "
-            "back to (PHASE9-CAPABILITY.md section 1.1)."
+            "This build ships no 4-bit 9B, and the 4B and 0.8B it does ship are "
+            "below cleanup's 9B floor, so there is nothing smaller to fall back "
+            "to (PHASE9-CAPABILITY.md section 1.1)."
         ),
     ),
     CapabilityClass(
@@ -425,7 +469,9 @@ CLASSES: tuple[CapabilityClass, ...] = (
         purpose="translation, which needs a 27B-class model",
         plainly="translate",
         noun="qwen3.8 and qwen3.5 variants",
-        candidates=_from_catalog(load_all_manifests, "qwen3.8", "qwen3.5"),
+        candidates=_from_catalog(
+            load_all_manifests, "qwen3.8", "qwen3.5", min_params_b=NINE_B_FLOOR
+        ),
         binary_note=(
             "The floor for translation is the 9B, not the 27B — so a host that "
             "cannot translate cannot hold a 9B either, and nothing smaller is "
@@ -475,7 +521,9 @@ CLASSES: tuple[CapabilityClass, ...] = (
         purpose="simplification, which runs on the same 27B translation needs",
         plainly="simplify text",
         noun="qwen3.8 and qwen3.5 variants",
-        candidates=_from_catalog(load_all_manifests, "qwen3.8", "qwen3.5"),
+        candidates=_from_catalog(
+            load_all_manifests, "qwen3.8", "qwen3.5", min_params_b=NINE_B_FLOOR
+        ),
         binary_note=(
             "The floor for simplification is the 9B, for translation's reason: "
             "a host that cannot hold a 9B cannot do this work at all."
@@ -502,11 +550,60 @@ CLASSES: tuple[CapabilityClass, ...] = (
         purpose="structured analysis answers, on the same 27B",
         plainly="analyse text",
         noun="qwen3.8 and qwen3.5 variants",
-        candidates=_from_catalog(load_all_manifests, "qwen3.8", "qwen3.5"),
+        candidates=_from_catalog(
+            load_all_manifests, "qwen3.8", "qwen3.5", min_params_b=NINE_B_FLOOR
+        ),
         binary_note=(
             "The floor for analysis is the 9B, for translation's reason: a host "
             "that cannot hold a 9B cannot do this work at all."
         ),
+    ),
+    # ONE FORWARD PASS PER QUESTION (PHASE22-DECIDE.md section 2.9). Its own
+    # class rather than a ride on `analysis` (section 7.2): the act is different
+    # — a distribution read off the next token, not a structured answer decoded
+    # to the end — and so is the model it wants. It is the one text act a 0.8B
+    # can do (measured 2026-09-23 on `Qwen/Qwen3.5-0.8B`: the worked example
+    # answered sensibly, section 8a), so it has NO size floor, and every qwen3.8
+    # and qwen3.5 manifest is a candidate — best-first, as every class walks,
+    # so a card that holds the 27B decides on the 27B and a laptop still decides.
+    CapabilityClass(
+        name="decide",
+        job_type="llm",
+        # NOT ROUTABLE, and that is the door's own contract rather than a
+        # preference: a decision reads the next-token distribution at the
+        # resident model, and `POST /v1/decide` refuses an upstream id
+        # `400 decide_needs_logprobs` because no upstream returns one (section
+        # 2.1). A routable class would let an operator send this act to
+        # Anthropic and then have every decision refused, and its refusals would
+        # carry `UPSTREAM_OFFER` — advice to add an API key that cannot help.
+        # `pages` is not routable for the same kind of reason.
+        routable=False,
+        # THE STATE PLUS THE FAN-OUT'S TAILS, NOT SIXTEEN STATES. A decision
+        # sends its state once as a prime and then up to
+        # `decide.UNSTATED_ENGINE_CONCURRENCY` questions that each EXTEND it
+        # (section 2.5), so the questions share the state's KV through the
+        # prefix cache and each adds only its own tail. On vLLM a tail costs at
+        # least one attention block, measured at 544 tokens on this hybrid
+        # family (section 8a): 16 x 544 = 8704 tokens, about one more state. So
+        # two states' worth. Sizing it as 16 independent states would refuse the
+        # 9B on the 3090 Ti's cuda-linux (24.8 GB against 22.5 GB) — the card
+        # and model snap measured decisions on.
+        work=WorkingContext(
+            tokens=DECIDE_STATE_TOKENS,
+            concurrency=2,
+            source=(
+                f"one {DECIDE_STATE_TOKENS}-token state (Foundry's Categorize "
+                "tile: ~24 blocks with 12 of context each side) shared through "
+                f"the prefix cache by up to {UNSTATED_ENGINE_CONCURRENCY} "
+                "questions (decide.UNSTATED_ENGINE_CONCURRENCY), whose tails at "
+                "one 544-token vLLM block each (PHASE22 section 8a) come to "
+                "about one more state"
+            ),
+        ),
+        purpose="one-forward-pass decisions (the decision door, PHASE22)",
+        plainly="decide",
+        noun="qwen3.8 and qwen3.5 variants",
+        candidates=_from_catalog(load_all_manifests, "qwen3.8", "qwen3.5"),
     ),
     CapabilityClass(
         name="pages",

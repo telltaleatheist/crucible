@@ -203,7 +203,7 @@ def test_a_model_with_no_backend_is_refused() -> None:
 def test_a_wrong_type_is_refused() -> None:
     with pytest.raises(ManifestError) as caught:
         parse(GOOD.replace("params_b = 1", 'params_b = "1"'))
-    assert "params_b must be int, got str" in str(caught.value)
+    assert "params_b must be int or float, got str" in str(caught.value)
 
 
 def test_a_bool_is_not_an_int() -> None:
@@ -253,7 +253,12 @@ def test_an_unknown_model_id_names_what_is_shipped(tmp_path: Path) -> None:
 # SORTED, because the assertion is against `sorted(manifests)`. The 2026-09-17
 # rename put `-8bit` where the bare `qwen3.8-27b` sat, which is BEFORE `-4bit`
 # in the old ordering and after it in the real one ('4' < '8').
-SHIPPED = ["dots-ocr", "qwen3.5-9b", "qwen3.8-27b-4bit", "qwen3.8-27b-8bit"]
+# The two small tiers joined on 2026-09-23 for the decision door
+# (PHASE22-DECIDE.md section 2.9); they sort before the 9B ('0' < '4' < '9').
+SHIPPED = [
+    "dots-ocr", "qwen3.5-0.8b", "qwen3.5-4b", "qwen3.5-9b",
+    "qwen3.8-27b-4bit", "qwen3.8-27b-8bit",
+]
 
 #: Each model's `context_default`. The two bf16 manifests carry Owen's pinned
 #: cleanup context; the 4-bit 27B carries the 98304 of his `qwen3.8:27b-24g`
@@ -270,6 +275,10 @@ CONTEXTS = {
     # GGUF that block names is 9.53 GB. So the number moved to [model] and both
     # overrides were deleted — see BACKEND_CONTEXTS, which no longer names it.
     "qwen3.5-9b": 16384,
+    # The 9B's argument for the 4B (the same `<=15B` client tier); the
+    # 0.8B's own 8192, the context it was measured serving decisions at.
+    "qwen3.5-4b": 16384,
+    "qwen3.5-0.8b": 8192,
     "qwen3.8-27b-8bit": 12288,
     "qwen3.8-27b-4bit": 98304,
 }
@@ -288,6 +297,8 @@ BACKENDS = {
     # (crucible/engines/mlx_vlm_serve.py) runs it in process.
     "dots-ocr": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-9b": ["cuda-linux", "llama-windows", "mlx-darwin"],
+    "qwen3.5-4b": ["cuda-linux", "llama-windows", "mlx-darwin"],
+    "qwen3.5-0.8b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.8-27b-8bit": ["cuda-linux", "mlx-darwin"],
     "qwen3.8-27b-4bit": ["cuda-linux", "llama-windows", "mlx-darwin"],
 }
@@ -349,7 +360,8 @@ def test_each_shipped_manifest_declares_the_backends_it_serves(model_id: str) ->
     assert sorted(manifest.backends) == BACKENDS[model_id]
     assert manifest.context_default == CONTEXTS[model_id]
     for kind, spec in manifest.backends.items():
-        assert spec.engine == engine_for(kind, manifest.modalities)
+        # From what the BLOCK serves (PHASE22 section 2.9), not the weights.
+        assert spec.engine == engine_for(kind, spec.serves)
         assert len(spec.revision) == 40
         expected = BACKEND_CONTEXTS.get((model_id, kind), CONTEXTS[model_id])
         assert manifest.context_for(kind) == expected
@@ -789,6 +801,9 @@ def test_a_local_table_that_is_not_a_table_is_refused() -> None:
 #: for a bf16 27B on a machine without Crucible).
 LOCAL_KINDS_SHIPPED = {
     "dots-ocr": "gguf",
+    # The decision tiers (2026-09-23), bf16 tags like the 9B's.
+    "qwen3.5-0.8b": "ollama",
+    "qwen3.5-4b": "ollama",
     "qwen3.5-9b": "ollama",
     "qwen3.8-27b-4bit": "ollama",
 }

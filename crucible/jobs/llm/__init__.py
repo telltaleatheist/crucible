@@ -248,8 +248,10 @@ def _in_the_ollama_store(manifest: Any, backend_kind: str) -> dict[str, Any] | N
         return None
     root = ollamastore.store_root()
     try:
+        # What THIS backend serves (PHASE22 section 2.9): the copy is only
+        # worth reporting if it is complete for the engine that would run it.
         found = ollamastore.resident(
-            root, local.tag, wants_projector="image" in manifest.modalities
+            root, local.tag, wants_projector="image" in manifest.serves(backend_kind)
         )
     except ollamastore.OllamaStoreError:
         return None
@@ -409,6 +411,15 @@ def model_rows(
             # reader picks an image-capable model from this rather than knowing
             # one by name (PHASE3-VLM.md section 2).
             "modalities": list(manifest.modalities),
+            # WHAT THIS HOST SERVES IT FOR (PHASE22 section 2.9), which may be
+            # less than `modalities`: a small Qwen3.5 accepts images and is
+            # served text-only on the Mac, whose text engine cannot see. Null
+            # where there is no block here, exactly as `revision` is. A client
+            # asking "may I send THIS server a picture for this model" reads
+            # this; `modalities` stays what the weights accept.
+            "serves": (
+                list(manifest.serves(backend_kind)) if supported else None
+            ),
             "backend_supported": supported,
             "installed": is_installed,
             # ----------------------------------- a copy this machine already has
