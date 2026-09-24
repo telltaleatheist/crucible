@@ -1,5 +1,5 @@
 {
-  "generated_from": "ce1f1c6b55fe880993cba13a00e46a387ae13d0f",
+  "generated_from": "716339d5b02b80db265bbac2dbb3b52a557107e7",
   "schema": 2,
   "floors": {
     "simplify": "qwen3.5-9b",
@@ -41,6 +41,25 @@
         "downloadGB": 1.76,
         "needsGB": {
           "value": 3.26,
+          "basis": "declared"
+        }
+      },
+      "minimum": false,
+      "minimumFor": []
+    },
+    {
+      "id": "qwen3.5-2b",
+      "classes": [
+        "decide"
+      ],
+      "label": "Qwen 3.5 · 2B",
+      "description": "A small decision model between the 4B and the 0.8B, reading images as well as text on a PC or Windows card. Decisions only — below the 9B floor for cleanup, translation, simplification and analysis.",
+      "local": {
+        "kind": "ollama",
+        "tag": "qwen3.5:2b-bf16",
+        "downloadGB": 4.56,
+        "needsGB": {
+          "value": 6.06,
           "basis": "declared"
         }
       },

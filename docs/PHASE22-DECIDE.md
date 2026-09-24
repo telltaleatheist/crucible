@@ -591,6 +591,20 @@ in §8a's own log (1.53 GiB weights, 0.75 GiB overhead, 18,023 B/token of KV), t
 carried EXACTLY from the 9B's measured 40,337 (every config field KV reads is identical), and
 the image reserve carried from the 9B's measured 1.90 GiB A/B as an upper bound.
 
+**The third small tier, `qwen3.5-2b` (added 2026-09-24).** Owen: *"decide/snap on crucible
+should let the user pick the model. 27b, 9b, 4b, all the way down to 0.8b."* The 2B was the
+one official Qwen3.5 size the ladder skipped. Same three backends and the same repos as its
+siblings — `Qwen/Qwen3.5-2B` @ `15852e8c`, `mlx-community/Qwen3.5-2B-bf16` @ `fb270110`,
+`unsloth/Qwen3.5-2B-GGUF` @ `f6d5376b` — with one departure, made toward a ruling: Owen,
+*"full quant when possible"*, so its llama-windows block pins the **BF16** GGUF (3.78 GB)
+rather than Q8_0 (the projector stays `mmproj-F16.gguf`, unquantized). Its text attention
+shape is the 0.8B's field for field (24 layers, 6 full-attention, 2 KV heads × 256, the same
+gated-delta-net), so the 0.8B's MEASURED 18,023 B/token carries to it exactly; its tower is
+the 4B's shape. Memory COMPUTED by the 4B's method: cuda-linux 7.80 GiB, mlx-darwin 5.62 GiB,
+llama-windows 5.94 GB declared, each at `context_default` 16384 (the 4B's argument);
+`max_context` 131072 on every backend. `decide` now lists `… qwen3.5-4b, qwen3.5-2b,
+qwen3.5-0.8b` on all three.
+
 **What a backend SERVES is the block's; what the weights ACCEPT is the model's.** A new
 optional `serves` on each `[backends.<kind>]` block, defaulting to `[model] modalities` and
 refused by name unless it is a non-empty subset of it (`serves_not_subset`). The engine
