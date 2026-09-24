@@ -24,10 +24,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import residency as residency_module
-from crucible.decide import LABEL_MARGIN, SYSTEM_PROMPT, UNSTATED_ENGINE_CONCURRENCY
+from crucible.decide import (
+    LABEL_MARGIN,
+    PRIME_USER_TEXT,
+    SYSTEM_PROMPT,
+    UNSTATED_ENGINE_CONCURRENCY,
+)
 from crucible.engines import ENGINES
 
-from .fake_engine import FakeEngine
+from .fake_engine import END_OF_TURN, FakeEngine, _rendered, system_segment
 from .test_llm_api import fake_env, llm_client, run_job  # noqa: F401 - fixtures
 
 MODEL = "qwen3.5-9b"
@@ -189,8 +194,9 @@ def test_the_prime_goes_first_and_every_question_extends_it(
     prime, *questions = engine.requests
 
     assert question_of(prime["messages"]) is None
-    assert prime["messages"][0] == {"role": "system", "content": SYSTEM_PROMPT}
-    assert prime["messages"][1]["content"] == f"State:\n{EXAMPLE['state']}"
+    assert prime["messages"][0] == {
+        "role": "system", "content": f"{SYSTEM_PROMPT}\n\nState:\n{EXAMPLE['state']}"}
+    assert prime["messages"][1] == {"role": "user", "content": PRIME_USER_TEXT}
     # A prime is not an answer: it asks for no logprobs.
     assert "logprobs" not in prime and "top_logprobs" not in prime
     assert prime["max_tokens"] == 1
@@ -200,9 +206,11 @@ def test_the_prime_goes_first_and_every_question_extends_it(
                   "The message conveys urgency": 2 + LABEL_MARGIN}
     assert sorted(question_of(q["messages"]) for q in questions) == sorted(expected_k)
     for sent in questions:
+        # The shared prefix is the whole system turn, byte for byte; the user
+        # turn is the question and nothing of the state.
         assert sent["messages"][0] == prime["messages"][0]
-        assert sent["messages"][1]["content"].startswith(
-            prime["messages"][1]["content"] + "\n\n")
+        assert sent["messages"][1]["content"].startswith(("Question: ", "Statement: "))
+        assert EXAMPLE["state"] not in sent["messages"][1]["content"]
         assert sent["model"] == MODEL
         assert sent["max_tokens"] == 1 and sent["temperature"] == 0
         assert sent["logprobs"] is True
@@ -212,6 +220,54 @@ def test_the_prime_goes_first_and_every_question_extends_it(
 
     # The prime FINISHED before any question left.
     assert engine.events[:2] == [("start", 0), ("end", 0)]
+
+
+LONG_STATE = " ".join(
+    f"Speaker {i % 3}: sentence number {i} of the transcript." for i in range(300)
+)
+
+
+def test_on_mlx_lm_s_exact_prefix_rule_every_question_reuses_the_primed_state(
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
+) -> None:
+    """Briefcase's 1.0.24 smoke: on mlx-lm 0.31.3 with hybrid Qwen3.5 every
+    question re-prefilled the whole transcript (4.55 s a question against
+    llama-server's 0.68). The fake follows mlx-lm's rule — reuse only a saved
+    entry that is an EXACT prefix, saved only at the system segment's end and
+    the whole prompt's — and under the door's layout the prime's system segment
+    carries the state, so every question after it reports the state cached."""
+    engine = loaded(probs_for=example_probs, prefix_cache="segments")
+    response = _decide(llm_client, auth, {**EXAMPLE, "state": LONG_STATE})
+    assert response.status_code == 200, response.text
+    timing = response.json()["timing_ms"]
+    assert timing["prime"]["cached_tokens"] == 0
+
+    segment = system_segment(engine.requests[0]["messages"])
+    assert segment is not None and LONG_STATE in segment
+    assert len(timing["per_question"]) == 3
+    for name, timed in timing["per_question"].items():
+        # Exactly the prime's system segment — the frame and the state, none
+        # of the question — so each question prefills only its own block.
+        assert timed["cached_tokens"] == len(segment) // 4, name
+        assert timed["cached_tokens"] >= len(LONG_STATE) // 4
+        assert timed["prompt_tokens"] - timed["cached_tokens"] < 100
+
+
+def test_the_old_layout_reused_only_the_frame_under_the_same_rule() -> None:
+    """Why the state moved: with it in the USER turn (`[system: frame, user:
+    State: + state + question]`, the layout through 1.0.24) the only boundary a
+    prime and a question share is the end of the frame, and the prime's
+    whole-prompt entry ends in the end-of-turn, which no question contains."""
+    frame = {"role": "system", "content": SYSTEM_PROMPT}
+    prime = [frame, {"role": "user", "content": f"State:\n{LONG_STATE}"}]
+    question = [frame, {"role": "user",
+                        "content": f"State:\n{LONG_STATE}\n\nQuestion: Which?"}]
+    frame_segment = system_segment(prime)
+    assert frame_segment is not None
+    saved = [frame_segment, _rendered(prime) + END_OF_TURN]
+    text = _rendered(question)
+    reused = max(len(key) for key in saved if text.startswith(key))
+    assert reused == len(frame_segment) < len(LONG_STATE) // 10
 
 
 def test_one_question_is_not_primed(
@@ -700,7 +756,8 @@ def test_images_travel_as_data_uri_parts_ahead_of_the_text(
     llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     """On a model whose manifest declares `image` (the page reader is the one
-    that does today), every request carries the same images first."""
+    that does today), every request's USER turn opens with the same images —
+    a system turn cannot carry one — and its system turn is the prime's."""
     engine = loaded(model=PAGE_MODEL, probs_for=example_probs)
     body = {**EXAMPLE, "model": PAGE_MODEL, "state": "", "images": [PNG]}
     response = _decide(llm_client, auth, body)
@@ -708,8 +765,12 @@ def test_images_travel_as_data_uri_parts_ahead_of_the_text(
     assert response.json()["tokens"]["images"] == 1
     prime, *questions = engine.requests
     part = {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{PNG}"}}
-    assert prime["messages"][1]["content"] == [{"type": "text", "text": "State:"}, part]
+    assert isinstance(prime["messages"][0]["content"], str)
+    assert prime["messages"][1]["content"] == [
+        part, {"type": "text", "text": PRIME_USER_TEXT}]
     for sent in questions:
+        assert sent["messages"][0] == prime["messages"][0]
         content = sent["messages"][1]["content"]
-        assert content[:2] == [{"type": "text", "text": "State:"}, part]
-        assert content[2]["type"] == "text"
+        assert content[0] == part and len(content) == 2
+        assert content[1]["type"] == "text"
+        assert content[1]["text"].startswith(("Question: ", "Statement: "))

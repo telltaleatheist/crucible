@@ -57,7 +57,7 @@ for item in plans:
     k = d.top_k(len(item.labels), max_logprobs)
     data, wall = post(d.question_messages(state_text, [], item), k)
     reading = d.read_reply(data, "vllm", want_probs=True)
-    probs, mass = d.label_distribution(reading.top, item, "vllm")
-    ans = d.answer(item, probs, mass)
+    dist = d.label_distribution(reading.top, item, "vllm")
+    ans = d.answer(item, dist, "refuse")
     print(f"{item.name:8s} wall={wall:6.1f} ms prompt_tokens={reading.prompt_tokens} cached={reading.cached_tokens} "
           f"k={k} -> {json.dumps(ans.model_dump(mode='json'))}")
