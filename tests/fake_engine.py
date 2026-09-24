@@ -86,6 +86,14 @@ class _Handler(BaseHTTPRequestHandler):
     answer_delay: float = 0.0
     #: Keep streaming frames until somebody hangs up, rather than finishing.
     stream_forever: bool = False
+    #: `answer_delay` per request, from its body, when one number will not do: a
+    #: decision's prime answered at once and its questions held, so a test can
+    #: walk away with questions genuinely in flight. Bound per engine.
+    delay_for: Callable[[dict[str, Any]], float] | None = None
+    #: How many non-streamed completions noticed their caller leave, in a
+    #: one-element list so the count can move. `aborted` says "at least one";
+    #: a decision with several requests in flight needs "every one".
+    aborts: list[int] | None = None
     #: Set when this engine notices the end of its connection go away: the
     #: request it is still working on is for nobody. Bound per engine in
     #: `FakeEngine.start`.
@@ -290,7 +298,12 @@ class _Handler(BaseHTTPRequestHandler):
                 )
                 return
 
-        if type(self).answer_delay > 0.0 and self._wait_out_the_answer():
+        delay = (
+            type(self).answer_delay
+            if type(self).delay_for is None
+            else type(self).delay_for(body)
+        )
+        if delay > 0.0 and self._wait_out_the_answer(delay):
             return
 
         if type(self).probs_for is not None:
@@ -394,16 +407,18 @@ class _Handler(BaseHTTPRequestHandler):
             },
         }
 
-    def _wait_out_the_answer(self) -> bool:
-        """Spend `answer_delay` generating, watching for the caller to hang up.
+    def _wait_out_the_answer(self, delay: float) -> bool:
+        """Spend `delay` generating, watching for the caller to hang up.
 
         Returns True if the caller went away first — a real engine would have
         spent that whole time producing tokens for nobody, which on the exclusive
         lane is time stolen from the next job.
         """
-        deadline = time.monotonic() + type(self).answer_delay
+        deadline = time.monotonic() + delay
         while time.monotonic() < deadline:
             if self._peer_gone(0.02):
+                with type(self).lock:
+                    type(self).aborts[0] += 1
                 type(self).aborted.set()
                 return True
         return False
@@ -512,6 +527,7 @@ class FakeEngine:
         reject_response_format: bool = False,
         answer_delay: float = 0.0,
         stream_forever: bool = False,
+        delay_for: Callable[[dict[str, Any]], float] | None = None,
         on_post: Callable[[], None] | None = None,
         drop_requests: int = 0,
         probs_for: ProbsFor | None = None,
@@ -525,6 +541,7 @@ class FakeEngine:
         self._reject_response_format = reject_response_format
         self._answer_delay = answer_delay
         self._stream_forever = stream_forever
+        self._delay_for = delay_for
         #: Set when a request this engine was serving lost its caller.
         self.aborted = threading.Event()
         self._server: ThreadingHTTPServer | None = None
@@ -576,6 +593,10 @@ class FakeEngine:
                 "reject_response_format": self._reject_response_format,
                 "answer_delay": self._answer_delay,
                 "stream_forever": self._stream_forever,
+                "delay_for": (
+                    None if self._delay_for is None else staticmethod(self._delay_for)
+                ),
+                "aborts": [0],
                 "aborted": self.aborted,
                 # Per engine, not per class: two engines in one test (a load that
                 # evicts another) must not share a request log.
@@ -662,6 +683,14 @@ class FakeEngine:
         if handler is None:
             raise RuntimeError("fake engine has not been started")
         return handler.events
+
+    @property
+    def aborts(self) -> int:
+        """How many non-streamed completions lost their caller mid-answer."""
+        handler = getattr(self, "_handler", None)
+        if handler is None:
+            raise RuntimeError("fake engine has not been started")
+        return handler.aborts[0]
 
     @property
     def max_in_flight(self) -> int:
