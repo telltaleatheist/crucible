@@ -737,8 +737,27 @@ flight. The arithmetic is written in each block:
 | qwen3.8-27b-4bit | 16 | 1 | 42.28 GiB | a 2nd prefill: 52.88 |
 | qwen3.8-27b-8bit | 8 | 1 | 49.66 GiB | 16 would be 54.80 |
 
-MEASUREMENT OWED: which width is fastest. The 9B could afford 32; 16 is a choice made
-without a throughput curve. The measurement is listed in §8.
+MEASURED 2026-09-24 14:10-14:27, the Mac's Crucible idle (nothing resident, leased or in
+flight since 13:57): a PRIVATE `mlx_lm server` from `~/.crucible/envs/llm` on port 50991,
+the 9B, both patches applied in a `/tmp` overlay (the env itself untouched, its
+`generate.py` still the stock digest), `--prompt-concurrency min(4, width)
+--prompt-cache-size 10`. Each width received `width` distinct ~1600-token prompts at
+temperature 0, 200 completion tokens each. Memory is vm_stat active + wired + compressed,
+relative to before the engine started:
+
+| width | wall s | req/min | tok/s out | median s/request | peak GiB over base |
+|---|---|---|---|---|---|
+| 1 | 8.9 | 6.7 | 22.5 | 8.9 | 22.96 |
+| 8 | 44.3 | 10.8 | 36.2 | 44.2 | 25.28 |
+| 16 | 66.5 | 14.4 | 48.1 | 66.0 | 26.74 |
+| 32 | 110.7 | 17.3 | 57.8 | 108.8 | 36.45 |
+
+These prompts are 8:1 prompt:completion, so prefill dominates, and cleanup's ratio (about
+1:1) should favor the batch more. Still, 16 already gives 2.1x the single-stream rate. 32
+adds 20% more throughput, but it takes 1.6x longer per request and its peak is ~10 GiB
+above 16's. That is more than the per-sequence terms account for, so the prefill transient
+at width grows faster than one `overhead_bytes` per prompt. **16 stays.** 32 is not worth
+its memory. A curve at cleanup's own ratio is still owed (§8).
 
 **The logprobs were bf16.** mlx-lm normalized `logits - mx.logsumexp(logits)` in the
 model's dtype (`mlx_lm/generate.py` L420, L549, L1352) — bf16 for every model the Mac
@@ -759,6 +778,9 @@ reads — so what is GENERATED is unchanged at every temperature — and a float
 (`logits.astype(mx.float32)` before the log-sum-exp), which is what it returns. Verified
 on the Mac's CPU: the sampler's input is bitwise the stock array, and the returned one is
 float32 with mass 1.000003.
+And MEASURED in the same private run: 50 yes/no questions on the patched 9B, the summed
+exp of the returned top-6: min 0.99973, median 0.99986, max 0.99993. None is above 1,
+whereas a quarter of the stock readings were.
 
 ## 3. Tests (no GPU)
 
