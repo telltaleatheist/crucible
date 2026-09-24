@@ -69,6 +69,11 @@ class _FakeResidency:
     def release(self, _who: str) -> None:
         return None
 
+    def claim_to_clear(self, _who: str, *, held: Any) -> bool:
+        # The real one's contract without its lock: the settlement's own reading
+        # of the four facts decides, and an empty card is nothing to clear.
+        return held() is None and self.resident is not None
+
     def unload(self, subject_id: str) -> None:
         self.unloaded.append(subject_id)
         self.resident = None

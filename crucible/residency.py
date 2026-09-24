@@ -27,13 +27,14 @@ owner, and the mutators refuse by name while somebody else has it.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, AsyncIterator, Callable, Iterator
 
 from .accelerator import probe_unified_memory
 from .alignmodels import AlignBackendSpec, AlignManifest
@@ -103,8 +104,10 @@ KIND_DENOISE = "denoise"
 #: `cuda-linux` spends it starting SGLang-Omni, measured at about 110 s.
 DEFAULT_READY_TIMEOUT_SECONDS = 900.0
 
-#: How long an unload job waits out a clearance of its own subject that is
-#: already under way (`Residency.await_clearance`).
+#: How long anything waits out a clearance that is already under way: an unload
+#: job for the very subject being cleared (`Residency.await_clearance`, T6), and
+#: since 2026-09-24 every client door that arrives while the settlement is
+#: clearing the card (`Residency.settled_for`, Briefcase).
 #:
 #: The engine's OWN SIGTERM deadline plus a margin, and derived rather than
 #: chosen: the waiter is waiting for the settlement to release the card, and the
@@ -591,8 +594,11 @@ class Residency:
     # the card would end their conversation mid-sentence"*, and none of that is
     # true of a settlement: it is doing the very thing the request asked for.
     #
-    # So the three unload doors ask this first. Everything else the claim
-    # refuses, it still refuses by name.
+    # So the unload doors ask this first. (2026-09-24, Briefcase: the rest of
+    # this reasoning turned out to be true of EVERY door, not only an unload of
+    # the same subject — see "every door waits it out too" below. What stays
+    # special about the unloaders is that they need not wait at the door: their
+    # own `run` waits, and reports the empty card as `done`.)
 
     def being_cleared(self, subject_id: str) -> bool:
         """`subject_id` is on its way off the card, or is off it because it was.
@@ -639,20 +645,187 @@ class Residency:
         with self._claim_lock:
             if not self._being_cleared(subject_id):
                 return False
-            deadline = time.monotonic() + timeout
-            while self._claim_clears:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise JobError(
-                        "engine_in_use",
-                        f"waited {timeout:.0f}s for the card to be cleared of "
-                        f"{subject_id!r} and it has not been. It is still held "
-                        f"by {self._claim!r}, which is longer than the engine's "
-                        "own SIGTERM deadline: something is wedged, and "
-                        "unloading on top of it would make it worse",
-                    )
-                self._claim_lock.wait(remaining)
+
+            def wedged(holder: str | None) -> Exception:
+                return JobError(
+                    "engine_in_use",
+                    f"waited {timeout:.0f}s for the card to be cleared of "
+                    f"{subject_id!r} and it has not been. It is still held "
+                    f"by {holder!r}, which is longer than the engine's "
+                    "own SIGTERM deadline: something is wedged, and "
+                    "unloading on top of it would make it worse",
+                )
+
+            self._wait_out_clearance(timeout, wedged)
             return self._resident is None and self._cleared == subject_id
+
+    # ------------------------------------------- every door waits it out too
+    #
+    # T6 GENERALISED (2026-09-24, Briefcase). T6 made ONE door wait a clearance
+    # out — an `unload-...` for the very subject being cleared — and left every
+    # other door refusing, on the reasoning that anything else arriving then was
+    # a second holder. It is not. A clearance is a few seconds to a few tens of
+    # seconds of `SubprocessEngine.stop()` with nobody using the card, and it
+    # ENDS; a client that arrives inside it has done nothing wrong and is owed
+    # the answer the card is about to give, not the one it is in the middle of
+    # giving. On 1.0.25 Briefcase's second run, started straight after a
+    # SIGINT'd first one, opened a lease (201, the model still published),
+    # sent a chat (`model_not_resident`, unpublished a moment later), and then
+    # submitted `load-model` — `409 engine_in_use`, held by *"the settlement
+    # clearing the card"*. Three answers from three instants of one transition,
+    # and the last was a refusal of the one request that would have repaired it.
+    #
+    # That is weather, not misconfiguration (CLAUDE.md, the 2026-09-20
+    # hardening ruling), so it gets a stated budget and a wait —
+    # `CLEARANCE_TIMEOUT_SECONDS`, derived from the engine's own SIGTERM
+    # deadline — after which it is a WEDGE and is raised by name.
+    #
+    # WAITING IS HALF OF IT; THE OTHER HALF IS ATOMICITY. A door that waited and
+    # then went about its business would only NARROW the window: a clearance
+    # could begin between the wait returning and the door recording its hold,
+    # and the settlement would then unload under a lease, a chat or a queued job
+    # it never saw — which is, exactly, how Briefcase got a lease on a model
+    # that was gone a moment later. So `settled_for` returns HOLDING
+    # `_claim_lock`, and the door's residency check and its hold (a lease, an
+    # `InFlight` entry, a job on the lane, a session's claim) are made inside
+    # it. The settlement makes its own check-and-claim under the same lock
+    # (`claim_to_clear`), so the two are ordered: either the settlement claims
+    # first and the door sees a clearance and waits, or the door records first
+    # and the settlement sees the hold and declines. There is no third
+    # interleaving.
+    #
+    # WHAT IS UNCHANGED. Every NON-clearing holder — a streaming session, a
+    # render's claim, a lease, a running job — refuses exactly what it refused
+    # before, with the same code and the same sentence: those are somebody
+    # USING the card, and waiting on them would be a hang with no end.
+    # `claim()` and `_refuse_mutation_if_claimed` still refuse a clearing claim
+    # too, and no client path reaches them in that state any more: every door
+    # that records a hold does it under the lock above, and the lane cannot
+    # hand a job over out of the settlement's sight (`JobStore._lane_lock`).
+
+    def _clearing_elsewhere(self) -> bool:
+        """A clearing claim is up and it is not this thread's own.
+
+        The thread test is what stops the settlement waiting on itself: it
+        claims with `may_mutate=True`, so `_claim_thread` is its own ident.
+        Caller holds `_claim_lock`.
+        """
+        return self._claim_clears and self._claim_thread != threading.get_ident()
+
+    def _wait_out_clearance(
+        self, timeout: float, wedged: Callable[[str | None], Exception]
+    ) -> None:
+        """Block until no other thread's clearance is under way, or raise a wedge.
+
+        The one wait loop, shared by `await_clearance` and `await_settled`, so
+        the two cannot disagree about what "the clearance is over" means. It
+        waits for the CLAIM to go, not for the card to be empty: a settlement
+        that declined, and an unload that raised (the dying slot then says so,
+        by name, to whatever the waiter does next), are both the end of the
+        clearance. Caller holds `_claim_lock`; `release` notifies it.
+        """
+        deadline = time.monotonic() + timeout
+        while self._clearing_elsewhere():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise wedged(self._claim)
+            self._claim_lock.wait(remaining)
+
+    def await_settled(self, what: str, *, timeout: float) -> None:
+        """Wait out whatever clearance is under way. **Never the event loop.**
+
+        Returns at once when none is. Raises `409 engine_in_use` when one
+        outlives `timeout` — longer than the engine's own SIGTERM deadline, so
+        that is a wedge, said as one, and never a quiet hang. `ApiError` rather
+        than `JobError` because its caller is a door (`settled_for`).
+        """
+        with self._claim_lock:
+
+            def wedged(holder: str | None) -> Exception:
+                return ApiError(
+                    409,
+                    "engine_in_use",
+                    f"{what} waited {timeout:.0f}s for the settlement to finish "
+                    f"clearing the card and it has not. The card is still held "
+                    f"by {holder!r}, which is longer than the engine's own "
+                    "SIGTERM deadline: something is wedged, and starting work on "
+                    "top of an engine that will not stop would make it worse",
+                    {"held_by": holder},
+                )
+
+            self._wait_out_clearance(timeout, wedged)
+
+    @asynccontextmanager
+    async def settled_for(
+        self,
+        what: str,
+        *,
+        same_intent: Callable[[], bool] | None = None,
+    ) -> AsyncIterator[None]:
+        """Wait out a clearance, then hold the card's lock for the body. **Loop only.**
+
+        The door's half of the atomicity argument above. The body runs with
+        `_claim_lock` held and **must not await**: it is the residency check and
+        the hold, both synchronous, and a body that yielded to the loop would
+        hold a threading lock across other coroutines' work. The wait itself
+        runs on a worker thread, never on the loop, which would otherwise stop
+        answering `/v1/activity` for as long as an engine takes to stop.
+
+        `same_intent` is T6's exception, stated by the caller and read under the
+        lock: a request that IS what the clearance is doing (an `unload-...` of
+        the subject being cleared) runs its body at once instead of waiting,
+        because its own `run` waits the clearance out and reports it `done`.
+
+        The budget is read at call time, so one `CLEARANCE_TIMEOUT_SECONDS`
+        governs every door, and the whole wait — however many clearances it
+        spans — is inside it.
+        """
+        timeout = CLEARANCE_TIMEOUT_SECONDS
+        deadline = time.monotonic() + timeout
+        while True:
+            self._claim_lock.acquire()
+            if not self._clearing_elsewhere():
+                break
+            if same_intent is not None and same_intent():
+                break
+            self._claim_lock.release()
+            # Off the loop. `remaining` may reach zero, and a clearance still
+            # under way then is reported as the wedge it is.
+            await asyncio.to_thread(
+                self.await_settled,
+                what,
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
+            # And round again, under the lock: another clearance may have begun
+            # between the wait returning and this thread taking the lock.
+        try:
+            yield
+        finally:
+            self._claim_lock.release()
+
+    def claim_to_clear(self, holder: str, *, held: Callable[[], object]) -> bool:
+        """The settlement's check-and-claim, as ONE step against every door.
+
+        `held` is the settlement's own reading of its four facts; it is asked
+        under `_claim_lock`, the lock every door records its hold under
+        (`settled_for`). So a hold recorded before this is seen here and the
+        card is not claimed, and a door arriving after this sees the clearance
+        and waits. False when something holds the card, nothing is resident, or
+        another claim is up; the claim is taken only on True, clearing, and
+        bound to this thread.
+
+        This replaces a check made BEFORE the claim and re-made under it
+        (2026-09-24). The re-read closed the gap before the claim and left the
+        one after it: a door had the interval between that second read and the
+        unload to record a hold the settlement would never look at again.
+        """
+        with self._claim_lock:
+            if held() is not None:
+                return False
+            if self._resident is None or self._claim is not None:
+                return False
+            self.claim(holder, may_mutate=True, clears=True)
+            return True
 
     def refuse_if_claimed(self, what: str) -> None:
         """The same refusal as an HTTP 409, for a preflight to make before queuing.

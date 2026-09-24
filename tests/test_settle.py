@@ -594,6 +594,34 @@ def test_the_lane_reports_a_queued_job_as_a_holder_too(
     assert store.occupied_by_anything_but(None) is None
 
 
+def test_a_job_the_lane_is_handing_over_is_never_out_of_the_settlement_s_sight(
+    resident: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Queued to running is ONE step as the settlement sees it (2026-09-24).
+
+    The lane used to pop a job off `_pending` and set `_running_id` only after
+    writing `running` to disk — a write that releases the GIL, to the one
+    reader that is on another thread. For that instant a job admitted BEFORE a
+    clearance began was on neither, `holder()` found the lane empty, and the
+    card could be cleared under a job about to run. Asked here from inside that
+    very write, which is the widest part of the old gap.
+    """
+    store = resident.app.state.store
+    persist = store._persist
+    seen: list[Any] = []
+
+    def persist_and_look(job: Any) -> None:
+        if job.status == "running" and not seen:
+            seen.append(settlement_of(resident).holder())
+        persist(job)
+
+    monkeypatch.setattr(store, "_persist", persist_and_look)
+    events = echoed(resident, auth)
+    assert events[-1]["event"] == "done"
+    assert seen and seen[0] is not None, "the handover hid the job from holder()"
+    assert seen[0].fact == "a job"
+
+
 def test_the_server_still_tears_the_residency_down_on_the_way_out(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
