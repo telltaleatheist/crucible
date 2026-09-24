@@ -75,6 +75,11 @@ every `info()` probe.
   id, a job's status, the artifacts to fetch, the audio, a chat's content, an
   answer, an error's code, anything the client branches on — is refused by name
   when missing.
+- **Load-bearing for ONE path is not load-bearing for the read.** A job's
+  `chunks_done` is what a resume differences against, but every other caller of
+  `job()` only needs the status. It reads as `null` ("unknown", never "none
+  done") and the resume decides what to do with a server that cannot say
+  (bookforge-pc-1 found it while repinning Foundry, 2026-09-24).
 - **A present field of the wrong type is still refused.** API v1 adds fields and
   never retypes them, so a wrong type is a broken server, not an old one.
 - **Unknown event kinds are carried, not refused**, and one unreadable voice or

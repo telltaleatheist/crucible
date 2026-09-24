@@ -908,9 +908,10 @@ export class CrucibleClient {
   async job(jobId: string): Promise<JobStatus> {
     const id = requireText(jobId, 'jobId');
     const body = await this.#json(`/v1/jobs/${encodeURIComponent(id)}`, { method: 'GET' }, 'job');
-    // LOAD-BEARING: the id, the status a caller branches on, the artifacts it
-    // fetches and the chunk indices a resume differences against. Everything
-    // else describes the job for a person and is null where not stated.
+    // LOAD-BEARING: the id, the status a caller branches on and the artifacts
+    // it fetches. Everything else is null where not stated — including the
+    // chunk indices, which only a RESUME needs; a server too old to state them
+    // must not cost every other caller the job's status (Owen 2026-09-24).
     return {
       jobId: str(body, 'job_id', 'job'),
       type: str(body, 'type', 'job'),
@@ -932,18 +933,10 @@ export class CrucibleClient {
       clientRef: optStr(body, 'client_ref', 'job'),
       interruptedAt: optStr(body, 'interrupted_at', 'job'),
       // The indices this job published. A resume is `asked - chunksDone`.
-      chunksDone: asArray(field(body, 'chunks_done', 'job'), 'job.chunks_done').map(
-        (entry, index) => {
-          if (typeof entry !== 'number' || !Number.isInteger(entry)) {
-            throw new CrucibleProtocolError(
-              `job.chunks_done[${index}] is not an integer chunk index; it is ` +
-                'what a resume differences against, so a rounded one would ' +
-                're-render a chunk that is already on disk',
-            );
-          }
-          return entry;
-        },
-      ),
+      // Absent or null (a server before 1.0.22) reads as null: "not stated",
+      // which a resume must not read as "none done". A PRESENT one is read
+      // strictly, because a rounded index would re-render a chunk on disk.
+      chunksDone: readChunksDone(body),
       // Stated by the server since 1.0.22. Null is "not a chunked job, none
       // landed yet, or a server that predates the field" — a pace display
       // cannot be drawn in any of the three, and none of them is a reason to
@@ -2847,6 +2840,21 @@ function readFailure(value: unknown, where: string): JobFailure {
 
 function readFailureOrNull(value: unknown, where: string): JobFailure | null {
   return value === null ? null : readFailure(value, where);
+}
+
+function readChunksDone(body: Json): number[] | null {
+  const entries = optArray(body, 'chunks_done', 'job');
+  if (entries === null) return null;
+  return entries.map((entry, index) => {
+    if (typeof entry !== 'number' || !Number.isInteger(entry)) {
+      throw new CrucibleProtocolError(
+        `job.chunks_done[${index}] is not an integer chunk index; it is ` +
+          'what a resume differences against, so a rounded one would ' +
+          're-render a chunk that is already on disk',
+      );
+    }
+    return entry;
+  });
 }
 
 /**
