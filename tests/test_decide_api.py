@@ -28,7 +28,6 @@ from crucible.decide import (
     LABEL_MARGIN,
     PRIME_USER_TEXT,
     SYSTEM_PROMPT,
-    UNSTATED_ENGINE_CONCURRENCY,
 )
 from crucible.engines import ENGINES
 
@@ -305,19 +304,20 @@ def test_the_engine_is_sent_its_own_name_for_the_model(
     assert response.json()["model"]["id"] == MODEL
 
 
-def test_questions_go_out_together_up_to_the_unstated_ceiling(
+def test_questions_go_out_together_up_to_the_engines_admission(
     llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
-    """vLLM states no admission, so a decision's own ceiling is Crucible's
-    number. Twenty questions that each take a moment: never more than sixteen
-    open at once, and genuinely more than one."""
+    """vLLM states its batch since 2026-09-24 (`--max-num-seqs 16`, read off
+    the argv), so a decision's fan-out is the door's admission, 17. Twenty
+    questions that each take a moment: never more than seventeen open at once,
+    and genuinely more than one."""
     engine = loaded(probs_for=yes_mostly, answer_delay=0.3)
     questions = {f"q{i}": {"type": "yesno", "instructions": f"statement {i}"}
                  for i in range(20)}
     response = _decide(llm_client, auth, {**EXAMPLE, "questions": questions})
     assert response.status_code == 200, response.text
     assert list(response.json()["answers"]) == list(questions)
-    assert 1 < engine.max_in_flight <= UNSTATED_ENGINE_CONCURRENCY
+    assert 1 < engine.max_in_flight <= 17
 
 
 def test_a_serial_engine_is_asked_no_more_than_its_admission(
@@ -328,6 +328,7 @@ def test_a_serial_engine_is_asked_no_more_than_its_admission(
 ) -> None:
     """llama-server behind `--parallel 1`, or mlx-lm: admission is 2, and a
     decision's fan-out is held to it rather than queueing inside the engine."""
+    monkeypatch.setattr(ENGINES["vllm"], "chat_concurrency_flag", None)
     monkeypatch.setattr(ENGINES["vllm"], "chat_concurrency", 1, raising=False)
     monkeypatch.setattr(ENGINES["vllm"], "chat_concurrency_basis", "one slot",
                         raising=False)
@@ -685,6 +686,7 @@ def test_a_full_door_is_chat_queue_full(
     loaded: Callable[..., FakeEngine],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(ENGINES["vllm"], "chat_concurrency_flag", None)
     monkeypatch.setattr(ENGINES["vllm"], "chat_concurrency", 1, raising=False)
     monkeypatch.setattr(ENGINES["vllm"], "chat_concurrency_basis", "one slot",
                         raising=False)

@@ -759,6 +759,16 @@ above 16's. That is more than the per-sequence terms account for, so the prefill
 at width grows faster than one `overhead_bytes` per prompt. **16 stays.** 32 is not worth
 its memory. A curve at cleanup's own ratio is still owed (§8).
 
+**vLLM, the same mechanism (2026-09-24).** vLLM stated no concurrency, so the PC's
+`chat.max_in_flight` was null and Foundry's placement fell back to 4 against an engine
+every one of whose cuda-linux blocks (all eight, `dots-ocr` included) runs
+`--max-num-seqs 16`. `VllmEngine` now reads `--max-num-seqs` off the resident argv
+(`chat_concurrency_flag`) and refuses `vllm_flags_unstated` at start without it, so the
+PC publishes 17. This door's fan-out on vLLM moves from `UNSTATED_ENGINE_CONCURRENCY` (16)
+to that 17: sixteen questions in vLLM's batch and one in its own queue, which is the
+batch the `decide` working context was sized for, plus one waiting request. Computed from the
+manifests; no card was used.
+
 **The logprobs were bf16.** mlx-lm normalized `logits - mx.logsumexp(logits)` in the
 model's dtype (`mlx_lm/generate.py` L420, L549, L1352) — bf16 for every model the Mac
 serves. bf16's spacing at a log-sum-exp of 16-32 is 0.125, so the rounded lse is off by up

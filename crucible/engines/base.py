@@ -140,8 +140,8 @@ class SubprocessEngine:
     #:
     #: So this is the engine's own truth and nothing more. It is NOT a policy
     #: number and NOT a tuning knob: an engine that has not been read or measured
-    #: states None and is not bounded at all, which is what every engine but
-    #: mlx-lm does today. A guessed number here would cap work that was never
+    #: states None and is not bounded at all (mlx-vlm today; vLLM and mlx-lm
+    #: read theirs off the argv through `chat_concurrency_flag` below). A guessed number here would cap work that was never
     #: shown to need capping — the same defect as a `[voice.serving]` field with
     #: no `_note`, which `crucible/voices.py` refuses outright.
     chat_concurrency: int | None = None

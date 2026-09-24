@@ -2022,7 +2022,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # client can size its own pool from the server instead of guessing
             # and discovering the answer as a starved socket. Null for an engine
             # that states no concurrency — the door then bounds nothing, which
-            # is vLLM and mlx-vlm today — and null when no model is
+            # is mlx-vlm today — and null when no model is
             # resident, because the limit belongs to the engine and there is no
             # engine to ask.
             "chat": {
@@ -3090,8 +3090,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # Until today this door admitted everything and
             # `crucible/inflight.py` said, in so many words, that the record
             # gates nothing. For a BATCHING engine that is still exactly right
-            # and still what happens: vLLM states no concurrency,
-            # `chat_admission` returns None, and nothing below refuses.
+            # (2026-09-24: vLLM now STATES its batch, `--max-num-seqs`, so it is
+            # bounded at that plus one and a client can size to it; the batch
+            # is admitted whole, so nothing it could overlap is refused.)
             #
             # It was wrong for a SERIAL one. mlx-lm accepts every connection on
             # a ThreadingHTTPServer and then generates on ONE thread draining

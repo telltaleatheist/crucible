@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import SubprocessEngine
+from .base import EngineError, SubprocessEngine, int_flag
 
 MODULE = "vllm.entrypoints.openai.api_server"
 
@@ -61,6 +61,42 @@ class VllmEngine(SubprocessEngine):
         f"--max-logprobs, which Crucible starts it with at {MAX_LOGPROBS} and "
         f"--logprobs-mode {LOGPROBS_MODE}"
     )
+
+    #: HOW MANY SEQUENCES vLLM SCHEDULES AT ONCE: `--max-num-seqs`, read off
+    #: the resident engine's argv (2026-09-24). Until today vLLM stated no
+    #: concurrency, so `chat.max_in_flight` was null on the PC and Foundry's
+    #: placement fell back to `CRUCIBLE_CHAT_CONCURRENCY = 4` against an engine
+    #: every one of whose blocks runs `--max-num-seqs 16` — a quarter of its
+    #: batch. The door now admits `--max-num-seqs + 1`: the batch, and one
+    #: request ready for the next free slot (past the batch vLLM queues
+    #: internally, which is safe, but the wait belongs on the wire). `start()`
+    #: refuses an argv without it, as mlx-lm refuses its own flags.
+    chat_concurrency_flag = "--max-num-seqs"
+    chat_concurrency_basis = (
+        "vLLM 0.29.0 schedules at most --max-num-seqs sequences per step "
+        "(vllm/engine/arg_utils.py L586, L2409-2429, read 2026-09-24; every "
+        "cuda-linux block states it, and the "
+        "number of CUDA graphs captured follows it) and queues the rest"
+    )
+
+    def start(
+        self, model_dir: Path, served_name: str, port: int, args: list[str]
+    ) -> None:
+        """Refuse an argv that does not state its batch.
+
+        vLLM picks its own default by device and usage context
+        (`vllm/engine/arg_utils.py` L2676-2760, 0.29.0, read in the WSL llm env
+        2026-09-24), and the chat door reads its admission off this flag; a block that leaves it to vLLM would be a door
+        with no stated width. Misconfiguration, refused by name.
+        """
+        if int_flag(args, "--max-num-seqs") is None:
+            raise EngineError(
+                f"vllm_flags_unstated: this cuda-linux block's engine_args state "
+                f"no --max-num-seqs ({args}). It is the batch the chat door "
+                "admits against and the CUDA graphs vLLM captures; state it in "
+                "the manifest (engines/vllm.py)"
+            )
+        super().start(model_dir, served_name, port, args)
 
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]

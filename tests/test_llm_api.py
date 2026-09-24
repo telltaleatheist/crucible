@@ -1583,6 +1583,7 @@ def test_a_serial_engine_refuses_past_its_width_instead_of_queueing(
     about.
     """
     for cls in ENGINES.values():
+        monkeypatch.setattr(cls, "chat_concurrency_flag", None, raising=False)
         monkeypatch.setattr(cls, "chat_concurrency", 1, raising=False)
         monkeypatch.setattr(
             cls, "chat_concurrency_basis", "one generation thread", raising=False
@@ -1622,21 +1623,24 @@ def test_a_serial_engine_refuses_past_its_width_instead_of_queueing(
     assert posts == []
 
 
-def test_an_engine_that_states_no_concurrency_still_admits_everything(
+def test_vllm_admits_its_whole_batch_and_says_so(
     llm_client: TestClient,
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """The batching half, unchanged. vLLM overlaps completions on purpose, and
-    `crucible/inflight.py` still gates nothing for an engine like it."""
+    """The batching half. vLLM overlaps completions on purpose; since
+    2026-09-24 it also STATES how many (`--max-num-seqs`, off the argv the load
+    composed), so `/v1/activity` publishes 17 on the 9B instead of null and
+    Foundry's pool stops falling back to 4 -- and twelve open still admit a
+    thirteenth."""
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
 
     activity = llm_client.get("/v1/activity", headers=auth).json()
-    assert activity["chat"]["max_in_flight"] is None
-    assert activity["chat"]["max_in_flight_basis"] is None
+    assert activity["chat"]["max_in_flight"] == 17
+    assert "--max-num-seqs 16" in activity["chat"]["max_in_flight_basis"]
 
     inflight = llm_client.app.state.inflight
     held = [

@@ -138,10 +138,56 @@ def test_every_mlx_lm_block_states_the_flags_its_memory_argument_uses() -> None:
 
 
 def test_an_engine_that_states_no_concurrency_is_not_bounded() -> None:
-    """vLLM BATCHES. Nothing has ever measured starvation against it, and a
-    number invented here would cap work nobody showed needed capping."""
-    assert chat_admission("vllm", ()) == (None, None)
+    """mlx-vlm states none (its page door has its own width), and a number
+    invented here would cap work nobody showed needed capping."""
     assert chat_admission("mlx-vlm", ()) == (None, None)
+
+
+def test_vllm_admits_its_max_num_seqs_plus_one() -> None:
+    """2026-09-24: vLLM's batch is `--max-num-seqs`, read off the argv the real
+    load composes, so the PC publishes 17 rather than a null that made Foundry
+    fall back to 4 against an engine running 16."""
+    from crucible.manifests import load_manifest
+    from crucible.residency import Residency
+
+    manifest = load_manifest("qwen3.5-9b")
+    args = Residency._engine_args(
+        manifest, manifest.backends["cuda-linux"], Path("/w"), None,
+        context=manifest.context_for("cuda-linux"),
+    )
+    limit, basis = chat_admission("vllm", args)
+    assert limit == 17
+    assert basis is not None and "started with --max-num-seqs 16" in basis
+    with pytest.raises(EngineError) as caught:
+        chat_admission("vllm", ())
+    assert "started without --max-num-seqs" in str(caught.value)
+
+
+def test_every_vllm_block_states_its_batch() -> None:
+    """The refusal at start is the backstop; this is the check that no shipped
+    block would ever meet it."""
+    from crucible.engines.base import int_flag
+    from crucible.manifests import load_all_manifests
+
+    blocks = [
+        (model_id, spec)
+        for model_id, manifest in load_all_manifests().items()
+        for spec in manifest.backends.values()
+        if spec.engine == "vllm"
+    ]
+    assert blocks
+    for model_id, spec in blocks:
+        assert int_flag(spec.engine_args, "--max-num-seqs") is not None, model_id
+
+
+def test_vllm_refuses_to_start_without_its_batch(tmp_path: Path) -> None:
+    from crucible.engines.vllm import VllmEngine
+
+    engine = VllmEngine(python=tmp_path / "python", log_path=tmp_path / "e.log")
+    with pytest.raises(EngineError) as caught:
+        engine.start(tmp_path / "weights", "m", 0, ["--dtype", "bfloat16"])
+    assert str(caught.value).startswith("vllm_flags_unstated:")
+    assert not (tmp_path / "e.log").exists(), "nothing was spawned"
 
 
 def test_an_unknown_engine_is_refused_by_name() -> None:
@@ -159,10 +205,10 @@ def test_a_concurrency_with_no_basis_is_refused(
     no `_note`. A concurrency nobody can trace is a number somebody typed, and a
     reader of `/v1/activity` would have no way to tell it from a measurement.
     """
-    monkeypatch.setattr(ENGINES["vllm"], "chat_concurrency", 4, raising=False)
-    monkeypatch.setattr(ENGINES["vllm"], "chat_concurrency_basis", None, raising=False)
+    monkeypatch.setattr(ENGINES["mlx-vlm"], "chat_concurrency", 4, raising=False)
+    monkeypatch.setattr(ENGINES["mlx-vlm"], "chat_concurrency_basis", None, raising=False)
     with pytest.raises(EngineError) as caught:
-        chat_admission("vllm", ())
+        chat_admission("mlx-vlm", ())
     assert "no chat_concurrency_basis" in str(caught.value)
 
 
@@ -170,12 +216,12 @@ def test_a_basis_with_no_concurrency_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The leftover half of a lever somebody removed."""
-    monkeypatch.setattr(ENGINES["vllm"], "chat_concurrency", None, raising=False)
+    monkeypatch.setattr(ENGINES["mlx-vlm"], "chat_concurrency", None, raising=False)
     monkeypatch.setattr(
-        ENGINES["vllm"], "chat_concurrency_basis", "measured somewhere", raising=False
+        ENGINES["mlx-vlm"], "chat_concurrency_basis", "measured somewhere", raising=False
     )
     with pytest.raises(EngineError) as caught:
-        chat_admission("vllm", ())
+        chat_admission("mlx-vlm", ())
     assert "no chat_concurrency" in str(caught.value)
 
 
