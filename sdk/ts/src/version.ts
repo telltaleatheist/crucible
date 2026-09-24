@@ -21,4 +21,4 @@
  * is cut at one version, not because two different versions could not
  * interoperate.
  */
-export const SDK_VERSION = '1.0.26';
+export const SDK_VERSION = '1.0.27';
