@@ -769,8 +769,14 @@ export interface JobStatus {
    * are `<index>.flac`, and parsing that filename in every client is a
    * documented contract re-implemented N times; this is the server saying it
    * once. Empty for a job whose artifacts are not indexed chunks.
+   *
+   * `null` when the server did not state it (a Crucible before 1.0.22). That
+   * is "unknown", NOT "none done": a resume that reads it as `[]` re-renders
+   * chunks already on disk, so a resume decides for itself what to do with a
+   * server that cannot say (Owen 2026-09-24: any Crucible that answers works,
+   * so this is not a reason to fail the read).
    */
-  readonly chunksDone: readonly number[];
+  readonly chunksDone: readonly number[] | null;
   /**
    * How many indexed chunks the job was asked for, stated by the job type;
    * `null` for a job whose artifacts are not chunks, and until a render has

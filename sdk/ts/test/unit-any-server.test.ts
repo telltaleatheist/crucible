@@ -230,10 +230,17 @@ test('a job record without its status is refused by name', async () => {
   });
 });
 
-test('a job record without chunks_done is refused by name: a resume differences against it', async () => {
+test('a job record without chunks_done still reads: null is "unknown", not "none done"', async () => {
   const { chunks_done: _gone, ...withoutDone } = OLD_JOB;
   routes = { '/v1/jobs/j1': { status: 200, body: withoutDone } };
-  await assert.rejects(client().job('j1'), /job has no field "chunks_done"/);
+  const job = await client().job('j1');
+  assert.equal(job.status, 'running');
+  assert.equal(job.chunksDone, null);
+});
+
+test('a present chunks_done with a non-integer index is still refused', async () => {
+  routes = { '/v1/jobs/j1': { status: 200, body: { ...OLD_JOB, chunks_done: [0, 1.5] } } };
+  await assert.rejects(client().job('j1'), /job\.chunks_done\[1\] is not an integer chunk index/);
 });
 
 test('a job status outside the lifecycle is still refused: callers branch on it', async () => {
