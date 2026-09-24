@@ -76,26 +76,23 @@ def test_bookforge_asks_for_what_its_install_door_used_to_print() -> None:
     # `clean` class's answer on a PC, and which model serves `clean` is the
     # SERVER's to say, per machine.
     #
-    # TWO TRANSCRIBERS, ONE CHOICE. The id of "large-v3" depends on the backend
-    # — CTranslate2 has no Metal backend, so `faster-whisper-*` is cuda-linux
-    # and `mlx-whisper-*` is mlx-darwin, permanently. Naming only the first is
-    # what made the Mac refuse the WHOLE module (`invalid_module`, 2026-09-15);
-    # an app sends each server the one it can hold, off the `backends` each
-    # entry carries.
+    # ONE TRANSCRIBER, ONE ID, BOTH BACKENDS (Owen's asr lineup, 2026-09-24).
+    # Until then "large-v3" was two entries — `faster-whisper-large-v3` on
+    # cuda-linux and `mlx-whisper-large-v3` on mlx-darwin — because whisper ids
+    # were backend-prefixed and the Mac refused the WHOLE module naming only
+    # the PC's (`invalid_module`, 2026-09-15). large-v3 was retired that day,
+    # and turbo is one id on both machines.
     assert {(s["kind"], s["id"]) for s in document["subjects"]} == {
-        ("model", "faster-whisper-large-v3"),
-        ("model", "mlx-whisper-large-v3"),
+        ("model", "whisper-large-v3-turbo"),
         ("model", "qwen3-aligner"),
         ("voice", "higgs-default"),
         ("rvc-base", "base"),
         ("denoise", "denoise-roformer"),
     }
     # AND EACH IS SCOPED, because an app cannot filter on a field that is not
-    # there — it would post both whispers and be refused by whichever server it
-    # reached.
+    # there. The transcriber's scope is now both machines.
     scope = {s["id"]: s.get("backends") for s in document["subjects"]}
-    assert scope["faster-whisper-large-v3"] == ["cuda-linux"]
-    assert scope["mlx-whisper-large-v3"] == ["mlx-darwin"]
+    assert scope["whisper-large-v3-turbo"] == ["cuda-linux", "mlx-darwin"]
     assert scope["qwen3-aligner"] == ["cuda-linux", "mlx-darwin"]
     assert [need["class"] for need in document["needs"]] == ["clean"]
     tts = next(e for e in document["job_types"] if e["type"] == "tts")

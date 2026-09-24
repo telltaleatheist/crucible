@@ -55,38 +55,33 @@ class = "clean"
 
 # ----------------------------------------------------------------- subjects
 #
-# The five that are NOT a class resolution, and each of them is a choice
-# BookForge made rather than something the catalog can decide. `asr` has six
-# whisper models and `tts` has seven voices; a generator picking one of those
+# The ones that are NOT a class resolution, and each of them is a choice
+# BookForge made rather than something the catalog can decide. `asr` has three
+# transcribers and `tts` has several voices; a generator picking one of those
 # would be choosing a transcriber's accuracy or a narrator's voice.
 
-# The transcriber. large-v3 rather than distil: BookForge's transcripts are
-# used for alignment, where a dropped word is a cue in the wrong place.
+# The transcriber: Whisper large-v3-turbo, ONE id on both backends.
 #
-# TWO ENTRIES FOR ONE CHOICE, because this is the one subject in the build whose
-# ID DEPENDS ON THE BACKEND. CTranslate2 has no Metal backend, so a
-# `faster-whisper-*` will never have an `[backends.mlx-darwin]` block and an
-# `mlx-whisper-*` will never have a cuda-linux one — that is stated in
-# `crucible/asr/mlx-whisper-large-v3.toml` and is not going to change.
+# 2026-09-24, Owen's asr lineup ruling: the asr job offers exactly
+# `whisper-large-v3-turbo`, `qwen3-asr-1.7b` and `whisper-tiny`, and every
+# other whisper size was removed — including large-v3, which this module named
+# until that day (`faster-whisper-large-v3` on the PC, `mlx-whisper-large-v3` on
+# the Mac: two entries for one choice, because whisper ids were backend-prefixed
+# and the Mac refused a module naming the PC's one — `invalid_module`, measured
+# 2026-09-15). The ids are one per model now, so this is one entry again.
 #
-# Naming only the first is what BookForge shipped, and the Mac refused the whole
-# module: `invalid_module ... this server has no model called
-# 'faster-whisper-large-v3' for mlx-darwin` (measured on Owen's Mac,
-# 2026-09-15). The generator scopes each of these to the backends that declare
-# it, so an app sends each machine the one it can actually hold.
+# Turbo rather than tiny, for the reason large-v3 was chosen over distil:
+# BookForge's transcripts are aligned against, and a dropped word is a cue in
+# the wrong place. It is large-v3's 32-layer encoder with a four-layer decoder.
 #
-# The CHOICE is still stated here and still BookForge's — large-v3 on both — for
-# the reason the section header gives: a generator picking among six whisper
-# models would be choosing a transcriber's accuracy.
+# NOT `qwen3-asr-1.7b`, although it is the lineup's first choice: this file
+# lists what an install PULLS, it has no notion of a user's choice, and
+# BookForge's transcription code names whisper today. Pulling 4.7 GB it will
+# not ask for would be this file choosing for BookForge. The day BookForge
+# transcribes with Qwen, it is named here beside (or instead of) this.
 [[subjects]]
 kind = "model"
-id = "faster-whisper-large-v3"
-
-# The same choice on Apple silicon. `-turbo` is faster and less accurate; these
-# transcripts are aligned against, so accuracy wins on both backends.
-[[subjects]]
-kind = "model"
-id = "mlx-whisper-large-v3"
+id = "whisper-large-v3-turbo"
 
 # The forced aligner — one candidate, but named rather than classed because
 # `align`'s candidates are not models' namespace.

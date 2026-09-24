@@ -721,30 +721,33 @@ conversations on it do not fail loudly — they read each other's replies.
 
 ### `asr`
 
-Transcription with faster-whisper (PHASE4-AUDIO.md section 3). One audio file in, one
+Transcription (PHASE4-AUDIO.md section 3, PHASE25-QWEN-ASR.md). One audio file in, one
 `transcript.json` out, on the same exclusive lane as everything else.
 
 ```bash
 crucible init --enable-asr          # or add [jobs] enable_asr = true to an existing config
 crucible install asr                # build ~/.crucible/envs/asr from envs/asr/<backend>.txt
-crucible models pull faster-whisper-base
+crucible models pull whisper-large-v3-turbo
 ```
 
 ```json
 {"type": "asr",
- "model": "faster-whisper-base",
+ "model": "whisper-large-v3-turbo",
  "params": {"language": "en", "vad_filter": true, "word_timestamps": true},
  "inputs": {"audio.m4b": {"blob_id": "…"}}}
 ```
 
 **There is no default model.** A job names one or it is refused: an ASR pass at the wrong
-size is a transcript that looks fine, is worse, and says nothing about it. Seven are shipped
-for `cuda-linux`
-— `faster-whisper-{tiny,base,small,medium,large-v3,large-v3-turbo,distil-large-v3}` — as
-manifests in `asr/<id>.toml`, pinned to a commit sha like every other model. Turbo is the
-one not from Systran, which publishes no turbo conversion: it is
-`dropbox-dash/faster-whisper-large-v3-turbo`, the repo faster-whisper's own model table
-names, and its manifest says why that source is allowed.
+size is a transcript that looks fine, is worse, and says nothing about it. **Three are
+shipped, and the caller picks** (Owen, 2026-09-24): `qwen3-asr-1.7b`,
+`whisper-large-v3-turbo` and `whisper-tiny`, each ONE id on both backends — faster-whisper
+(CTranslate2) on `cuda-linux` and mlx-whisper on `mlx-darwin` for the two whispers, vLLM and
+mlx-audio for Qwen — as manifests in `asr/<id>.toml`, every block pinned to a commit sha.
+Every other whisper size was removed that day, and the old backend-prefixed ids
+(`faster-whisper-*`, `mlx-whisper-*`) are refused `unknown_model` with the replacement
+named, never aliased. Turbo's cuda-linux conversion is the one not from Systran, which
+publishes no turbo conversion: it is `dropbox-dash/faster-whisper-large-v3-turbo`, the repo
+faster-whisper's own model table names, and its manifest says why that source is allowed.
 
 All three params are required. `language` is a faster-whisper code or the literal `"auto"`,
 which means "detect it" — a choice, not an absence. A fourth, `initial_prompt`, is
@@ -760,9 +763,11 @@ a transcript that quietly ran at `int8` on a CPU is a different transcript), 900
 windows each reaching 15 s past their own boundary, and a single decode to 16 kHz mono
 through **ffmpeg**, which is required and refused by name if it is missing.
 
-`cuda-linux` only. faster-whisper is CTranslate2 and CTranslate2 has no Metal backend, so
-there is no `mlx-darwin` recipe and no `mlx-darwin` manifest block; `envs/asr/mlx-darwin.md`
-says why, and what the Mac would need instead.
+Both backends. faster-whisper is CTranslate2, which has no Metal backend, so a whisper id's
+`mlx-darwin` block runs a second engine, mlx-whisper, on `mlx-community`'s own conversion
+(`envs/asr/mlx-darwin.md`). One id is therefore two conversions, and a transcript's
+provenance sidecar names the backend, engine, repo and revision that produced it
+(2026-09-24).
 
 #### Workers
 

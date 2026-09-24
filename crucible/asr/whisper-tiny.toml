@@ -1,0 +1,89 @@
+# Whisper tiny — the cheapest rough transcript there is.
+#
+# 39M parameters. Fast enough that the decode dominates; accurate enough for
+# "roughly where is this sentence" and nothing more. BookForge's picker calls it
+# "Rough transcript, lowest accuracy" and means it. One of the THREE asr models
+# this build offers (Owen, 2026-09-24): this one, `whisper-large-v3-turbo` and
+# `qwen3-asr-1.7b`. The caller picks; nothing picks for it.
+#
+# ONE ID, TWO ENGINES, TWO CONVERSIONS (2026-09-24)
+# -------------------------------------------------
+# Until 2026-09-24 this model was two ids, `faster-whisper-tiny` (cuda-linux)
+# and `mlx-whisper-tiny` (mlx-darwin). Owen's ruling of that day made it one id
+# with a block per backend; the old ids are GONE, not aliases, and a request
+# naming one is `unknown_model` with this id in the message
+# (`crucible/asrmodels.py`, RENAMED_ASR_IDS). The two blocks are still
+# different bytes — CTranslate2 has no Metal backend, so the Mac reads
+# `mlx-community`'s own conversion — and a transcript's provenance sidecar
+# names the backend, engine, repo and revision that produced it;
+# asr/whisper-large-v3-turbo.toml carries the long version of this note.
+#
+# ============================================================ cuda-linux
+# (was asr/faster-whisper-tiny.toml, written 2026-09-13)
+#
+# revision: the repo's `main` sha read from
+# https://huggingface.co/api/models/Systran/faster-whisper-tiny on 2026-09-13.
+# Systran has not touched these five repos since 2023-11-23.
+#
+# memory_bytes_estimate is COMPUTED, NOT MEASURED — see the note on the block.
+#
+# ============================================================ mlx-darwin
+# (was asr/mlx-whisper-tiny.toml, written 2026-09-14)
+#
+# repo/revision, read from the hub's API on 2026-09-14 and verified twice:
+#   GET /api/models/mlx-community/whisper-tiny-mlx/refs        -> main = the sha below
+#   GET /api/models/mlx-community/whisper-tiny-mlx/tree/<sha>?recursive=1
+#     -> 4 files, 74,420,620 B in total,
+#        of which weights.npz is 74,418,540 B
+
+[model]
+id = "whisper-tiny"
+family = "whisper"
+parameters_m = 39
+
+[backends.cuda-linux]
+engine = "faster-whisper"
+hf_repo = "Systran/faster-whisper-tiny"
+revision = "d90ca5fe260221311c53c58e660288d3deb8d356"
+# COMPUTED, not measured: model.bin is 75_538_270 bytes of float16 CTranslate2
+# weights (the exact size the HF tree API reports for this revision), plus a
+# declared 1.5 GiB for what surrounds them on the card — the CUDA context, the
+# cuBLAS and cuDNN workspaces CTranslate2 allocates on first use, and the
+# encoder/beam-search activation peak for one 30-second window.
+#
+# That 1.5 GiB is a DECLARED ALLOWANCE and not a measurement, and it is the same
+# on every faster-whisper block because none of it scales with model size.
+# Nobody has run faster-whisper under Crucible on a card yet: the 3090 Ti was
+# busy with a fine-tune the week this was written, and PHASE4 forbids touching
+# it. Measure the resident figure with nvidia-smi on a real book and replace
+# this line with a MEASURED one, the way models/qwen3.5-9b.toml's blocks were
+# replaced — until then the guard is working from arithmetic, and it says so
+# here rather than pretending otherwise.
+memory_bytes_estimate = 1_686_151_006
+
+[backends.mlx-darwin]
+engine = "mlx-whisper"
+hf_repo = "mlx-community/whisper-tiny-mlx"
+revision = "6caf9c55601caafbe6508a8b0d216bdf4783c4e8"
+# MEASURED, on the machine it is for, 2026-09-14. Not arithmetic and not the
+# cuda-linux block's "weights plus a declared 1.5 GiB" — that allowance was
+# written for a CUDA context and cuBLAS/cuDNN workspaces, none of which exist
+# here.
+#
+#   the host      Mac Studio, M1 Ultra, 64 GiB unified, macOS 26.3.1
+#   the env       a scratch python 3.11.16 built from `envs/asr/mlx-darwin.txt`
+#                 exactly, and deleted afterwards
+#   what was run  `mlx_whisper.transcribe(audio, path_or_hf_repo=<the snapshot
+#                 of this revision>, word_timestamps=True)` over ONE 900-second
+#                 window — WINDOW_SECONDS, the size `crucible/jobs/asr` cuts
+#                 every book into, so this is the shape of one real unit of
+#                 work and not a toy. The audio was a real 75 s narration clip
+#                 decoded to 16 kHz mono and tiled.
+#   the figure    `mx.get_peak_memory()` immediately after the call, having
+#                 called `mx.reset_peak_memory()` before the load. It is MLX's
+#                 own high-water for the process, which on unified memory is
+#                 the number the guard is comparing against.
+#   what it said  weights resident (active) 76,035,246 B
+#                 PEAK over the window       549,418,642 B
+#                 the window took            11.95 s, i.e. 75.3x realtime
+memory_bytes_estimate = 549418642

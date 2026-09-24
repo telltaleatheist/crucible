@@ -893,7 +893,19 @@ CLASSES: tuple[CapabilityClass, ...] = (
         job_type="asr",
         purpose="transcription",
         plainly="transcribe",
-        noun="whisper models",
+        noun="transcribers",
+        # THE THREE, BEST-FIRST, ON BOTH BACKENDS (Owen, 2026-09-24): the asr
+        # job offers exactly `qwen3-asr-1.7b`, `whisper-large-v3-turbo` and
+        # `whisper-tiny`, each one id across cuda-linux and mlx-darwin, and the
+        # caller picks. When it does not, this walk picks, and the order is
+        # QWEN, TURBO, TINY: Qwen first by Owen's "we're fully switching over
+        # to qwen for transcribing", turbo as the whisper that keeps large-v3's
+        # ear, tiny last as the rough pass. That is the catalog's own
+        # size-descending order on both machines (PC 11.0 / 3.2 / 1.7 GB, Mac
+        # 7.7 / 2.7 / 0.5 GB), so no second ordering is declared here to
+        # drift from it; `tests/test_asr_lineup.py` holds the order, and a
+        # measurement that ever reordered the sizes turns that test red rather
+        # than quietly promoting a whisper.
         candidates=_from_catalog(load_all_asr_manifests),
     ),
     CapabilityClass(

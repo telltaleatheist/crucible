@@ -333,11 +333,21 @@ def resolve_model(plugin: JobType, model: str | None) -> str | None:
             )
         return None
     if model not in ids:
+        # A TYPE THAT RETIRED IDS MAY SAY SO (`retired_model_note`, optional,
+        # asr's since Owen's lineup ruling of 2026-09-24). The request is
+        # refused either way — a retired id is never resolved to its
+        # replacement — and the note only lets the sentence name what replaced
+        # it. `getattr` asks whether this type has any retired ids; the others
+        # have nothing to say.
+        note_for = getattr(plugin, "retired_model_note", None)
+        note = None if note_for is None else note_for(model)
         raise ApiError(
             400,
             "unknown_model",
             f"job type {plugin.name!r} does not serve model {model!r}; it offers "
-            f"{ids if ids else 'no models (omit `model`)'}",
+            f"{ids if ids else 'no models (omit `model`)'}"
+            + ("" if note is None else f". {note}"),
+            {"model": model, "offered": ids},
         )
     return model
 

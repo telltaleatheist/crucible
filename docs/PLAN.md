@@ -255,7 +255,9 @@ Qwen3-ForcedAligner is plain torch, torch runs on Metal — so the whole change 
 per-backend device table with no default. **`asr`** is a SECOND ENGINE, because CTranslate2
 has no Metal backend: `mlx-whisper`, its own worker, and seven `mlx-whisper-*` ids the
 loader will not let anyone confuse with the card's six, since a transcript records the id
-and nothing else about the bytes. The wire is unchanged either way, so BookForge's readers
+and nothing else about the bytes. *(2026-09-24: superseded by Owen's asr lineup — three
+transcribers, `whisper-large-v3-turbo`, `qwen3-asr-1.7b` and `whisper-tiny`, each one id on
+both backends, the other whisper sizes removed; PHASE25-QWEN-ASR.md section 10.)* The wire is unchanged either way, so BookForge's readers
 change nothing; `vad_filter: true` is refused BY NAME on mlx-whisper rather than ignored.
 **Every estimate on those eight new blocks was MEASURED on the M1 Ultra** — none is a
 declared allowance and none is a copy of the cuda figure, which would have been an

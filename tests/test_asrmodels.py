@@ -1,17 +1,17 @@
-"""The `asr/<id>.toml` loader, and the fourteen manifests this build ships.
+"""The `asr/<id>.toml` loader, and the three manifests this build ships.
 
 Two halves. The first asserts that the loader refuses every way a manifest can be
 wrong, because an ASR manifest that loads with a key missing is a guard working
 from nothing. The second asserts facts about the shipped files themselves — the
-pins are full shas, the ids match the filenames, and neither engine's ids ever
-name the other engine's backend.
+pins are full shas, the ids match the filenames, and every block's engine runs
+its manifest's family.
 
-**Two engines, fourteen ids, and no id shared.** faster-whisper is CTranslate2
-and has no Metal backend; mlx-whisper is MLX and has no CUDA one. They convert
-the same original whisper checkpoints to different bytes at different
-quantisations and they will disagree about a hard passage, so the loader
-enforces the id prefix rather than trusting a reviewer to notice — a transcript
-records the id and nothing else about what produced it.
+**Three models, one id each, across both backends** (Owen, 2026-09-24):
+`qwen3-asr-1.7b`, `whisper-large-v3-turbo` and `whisper-tiny`. A whisper id is
+two conversions — CTranslate2 on cuda-linux, MLX on mlx-darwin — told apart by
+the transcript's provenance sidecar, not by the id; a Qwen id is one checkpoint
+on both, and the loader still refuses a Qwen manifest that pins two
+(`tests/test_asr_qwen.py`).
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import pytest
 
 from crucible.asrmodels import (
     ASR_BACKEND_ENGINES,
+    ASR_LINEUP,
     AsrManifestError,
     asr_manifests_dir,
     load_all_asr_manifests,
@@ -29,33 +30,16 @@ from crucible.asrmodels import (
     parse_asr_manifest,
 )
 
-CUDA_MODELS = [
-    "faster-whisper-base",
-    "faster-whisper-distil-large-v3",
-    "faster-whisper-large-v3",
-    "faster-whisper-large-v3-turbo",
-    "faster-whisper-medium",
-    "faster-whisper-small",
-    "faster-whisper-tiny",
-]
-MAC_MODELS = [
-    "mlx-whisper-base",
-    "mlx-whisper-distil-large-v3",
-    "mlx-whisper-large-v3",
-    "mlx-whisper-large-v3-turbo",
-    "mlx-whisper-medium",
-    "mlx-whisper-small",
-    "mlx-whisper-tiny",
-]
+WHISPER_MODELS = ["whisper-large-v3-turbo", "whisper-tiny"]
 #: Qwen3-ASR: ONE id with a block on each backend, both pinning the official
 #: checkpoint (crucible/asrmodels.py, "the first id on BOTH backends").
 QWEN_MODELS = ["qwen3-asr-1.7b"]
-MODELS = sorted(CUDA_MODELS + MAC_MODELS + QWEN_MODELS)
+MODELS = sorted(WHISPER_MODELS + QWEN_MODELS)
 
 GOOD = """
 [model]
-id = "faster-whisper-tiny"
-family = "faster-whisper"
+id = "whisper-tiny"
+family = "whisper"
 parameters_m = 39
 
 [backends.cuda-linux]
@@ -66,12 +50,7 @@ memory_bytes_estimate = 1686151006
 """
 
 
-MAC_GOOD = """
-[model]
-id = "mlx-whisper-tiny"
-family = "mlx-whisper"
-parameters_m = 39
-
+MAC_BLOCK = """
 [backends.mlx-darwin]
 engine = "mlx-whisper"
 hf_repo = "mlx-community/whisper-tiny-mlx"
@@ -80,16 +59,17 @@ memory_bytes_estimate = 549418642
 """
 
 
-def parse(text: str, model_id: str = "faster-whisper-tiny"):
+def parse(text: str, model_id: str = "whisper-tiny"):
     return parse_asr_manifest(text, Path(f"{model_id}.toml"), model_id)
 
 
-# ------------------------------------------------------- the shipped fourteen
+# ---------------------------------------------------------- the shipped three
 
 
-def test_this_build_ships_fifteen_asr_models_across_four_engines() -> None:
+def test_this_build_ships_exactly_the_three_owen_ruled() -> None:
+    """Owen, 2026-09-24: turbo, Qwen3-ASR-1.7B and tiny, and nothing else."""
     assert sorted(load_all_asr_manifests()) == MODELS
-    assert len(CUDA_MODELS) == 7 and len(MAC_MODELS) == 7 and len(QWEN_MODELS) == 1
+    assert set(MODELS) == ASR_LINEUP
 
 
 def test_every_shipped_pin_is_a_full_commit_sha() -> None:
@@ -101,85 +81,90 @@ def test_every_shipped_pin_is_a_full_commit_sha() -> None:
             int(spec.revision, 16)  # raises if it is not hex
 
 
-def test_each_model_serves_one_backend_with_that_backends_engine() -> None:
-    """No model spans both, because no two sets of these weights are the same."""
+def test_every_model_is_one_id_on_both_backends_with_each_backends_engine() -> None:
+    """The point of the ruling: a client names a transcriber without first
+    knowing which machine it is talking to."""
     assert ASR_BACKEND_ENGINES == {
         "cuda-linux": frozenset({"faster-whisper", "vllm"}),
         "mlx-darwin": frozenset({"mlx-whisper", "mlx-audio"}),
     }
-    for model_id in CUDA_MODELS:
+    for model_id in WHISPER_MODELS:
         manifest = load_asr_manifest(model_id)
-        assert sorted(manifest.backends) == ["cuda-linux"]
+        assert manifest.family == "whisper"
+        assert sorted(manifest.backends) == ["cuda-linux", "mlx-darwin"]
         assert manifest.spec("cuda-linux").engine == "faster-whisper"
-    for model_id in MAC_MODELS:
-        manifest = load_asr_manifest(model_id)
-        assert sorted(manifest.backends) == ["mlx-darwin"]
         assert manifest.spec("mlx-darwin").engine == "mlx-whisper"
+    qwen = load_asr_manifest("qwen3-asr-1.7b")
+    assert sorted(qwen.backends) == ["cuda-linux", "mlx-darwin"]
+    assert qwen.spec("cuda-linux").engine == "vllm"
+    assert qwen.spec("mlx-darwin").engine == "mlx-audio"
+
+
+def test_the_merged_whispers_kept_every_pin_they_had() -> None:
+    """The four old manifests' pins, verbatim: a rename moves no bytes, which is
+    also what lets `adopt_renamed_asr_weights` move a pulled copy rather than
+    download it again."""
+    expected = {
+        ("whisper-large-v3-turbo", "cuda-linux"): (
+            "dropbox-dash/faster-whisper-large-v3-turbo",
+            "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+        ),
+        ("whisper-large-v3-turbo", "mlx-darwin"): (
+            "mlx-community/whisper-large-v3-turbo",
+            "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
+        ),
+        ("whisper-tiny", "cuda-linux"): (
+            "Systran/faster-whisper-tiny",
+            "d90ca5fe260221311c53c58e660288d3deb8d356",
+        ),
+        ("whisper-tiny", "mlx-darwin"): (
+            "mlx-community/whisper-tiny-mlx",
+            "6caf9c55601caafbe6508a8b0d216bdf4783c4e8",
+        ),
+    }
+    for (model_id, backend), pin in expected.items():
+        spec = load_asr_manifest(model_id).spec(backend)
+        assert (spec.hf_repo, spec.revision) == pin
 
 
 def test_the_mac_estimates_are_measured_and_none_is_the_cuda_arithmetic() -> None:
     """Every mlx figure is `mx.get_peak_memory()` over ONE 900-second window on
     the M1 Ultra on 2026-09-14, recorded in each manifest with its method — not
     "weights plus a declared 1.5 GiB", which was written for a CUDA context and
-    cuBLAS/cuDNN workspaces that do not exist on this backend."""
+    cuBLAS/cuDNN workspaces that do not exist on this backend. The peak has to
+    cover the weights it loaded; the repo totals are the hub tree API's for
+    those exact revisions."""
     measured = {
-        "mlx-whisper-tiny": 549_418_642,
-        "mlx-whisper-base": 877_017_662,
-        "mlx-whisper-small": 1_540_273_318,
-        "mlx-whisper-medium": 2_607_243_002,
-        "mlx-whisper-large-v3": 4_153_379_610,
-        "mlx-whisper-large-v3-turbo": 2_654_916_970,
-        "mlx-whisper-distil-large-v3": 2_549_972_298,
+        "whisper-tiny": 549_418_642,
+        "whisper-large-v3-turbo": 2_654_916_970,
     }
-    assert sorted(measured) == sorted(MAC_MODELS)
+    repo_bytes = {
+        "whisper-tiny": 74_420_620,
+        "whisper-large-v3-turbo": 1_613_979_758,
+    }
     runtime = 1024 ** 3 + 512 * 1024 ** 2
     for model_id, peak in measured.items():
         manifest = load_asr_manifest(model_id)
         assert manifest.spec("mlx-darwin").memory_bytes_estimate == peak
         # A watched number, so it is not weights plus a round constant.
         assert peak % runtime != 0
+        assert peak > repo_bytes[model_id]
         text = manifest.path.read_text(encoding="utf-8")
         assert "MEASURED, on the machine it is for" in text
         assert "mx.get_peak_memory()" in text
 
 
-def test_every_mac_weight_is_smaller_than_its_estimate() -> None:
-    """The peak has to cover the weights it loaded; the repo totals are the hub
-    tree API's for those exact revisions, read on 2026-09-14."""
-    repo_bytes = {
-        "mlx-whisper-tiny": 74_420_620,
-        "mlx-whisper-base": 143_726_326,
-        "mlx-whisper-small": 481_309_720,
-        "mlx-whisper-medium": 1_524_927_044,
-        "mlx-whisper-large-v3": 3_083_522_487,
-        "mlx-whisper-large-v3-turbo": 1_613_979_758,
-        "mlx-whisper-distil-large-v3": 1_509_132_231,
-    }
-    for model_id, size in repo_bytes.items():
-        spec = load_asr_manifest(model_id).spec("mlx-darwin")
-        assert spec.memory_bytes_estimate > size
-
-
-def test_every_shipped_estimate_covers_the_weights() -> None:
-    """The estimate is weights plus runtime, so it is never below the weights.
-
-    The weights figures are the `model.bin` sizes the HuggingFace tree API
-    reported for these exact revisions on 2026-09-13 (turbo's on 2026-09-23);
-    the estimates are those
-    plus a declared 1.5 GiB. None of it is measured yet and every manifest says
-    so — this test only holds the arithmetic to being the arithmetic it claims.
-    """
+def test_every_cuda_whisper_estimate_is_the_weights_plus_the_allowance() -> None:
+    """The weights figures are the `model.bin` sizes the HuggingFace tree API
+    reported for these exact revisions (tiny's on 2026-09-13, turbo's on
+    2026-09-23); the estimates are those plus a declared 1.5 GiB. None of it is
+    measured yet and every block says so — this test only holds the arithmetic
+    to being the arithmetic it claims."""
     weights_bytes = {
-        "faster-whisper-tiny": 75_538_270,
-        "faster-whisper-base": 145_217_532,
-        "faster-whisper-small": 483_546_902,
-        "faster-whisper-medium": 1_527_906_378,
-        "faster-whisper-large-v3": 3_087_284_237,
-        "faster-whisper-distil-large-v3": 1_512_927_867,
-        "faster-whisper-large-v3-turbo": 1_617_884_929,
+        "whisper-tiny": 75_538_270,
+        "whisper-large-v3-turbo": 1_617_884_929,
     }
     runtime = 1024 ** 3 + 512 * 1024 ** 2
-    assert sorted(weights_bytes) == sorted(CUDA_MODELS)
     for model_id, size in weights_bytes.items():
         spec = load_asr_manifest(model_id).spec("cuda-linux")
         assert spec.memory_bytes_estimate == size + runtime
@@ -192,8 +177,8 @@ def test_the_manifest_directory_is_beside_the_package() -> None:
 
 def test_an_unknown_id_names_what_is_shipped() -> None:
     with pytest.raises(AsrManifestError) as caught:
-        load_asr_manifest("faster-whisper-enormous")
-    assert "faster-whisper-large-v3" in str(caught.value)
+        load_asr_manifest("whisper-enormous")
+    assert "whisper-large-v3-turbo" in str(caught.value)
 
 
 def test_the_override_must_be_a_directory(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -208,7 +193,7 @@ def test_the_override_must_be_a_directory(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_a_good_manifest_parses() -> None:
     manifest = parse(GOOD)
-    assert manifest.id == "faster-whisper-tiny"
+    assert manifest.id == "whisper-tiny"
     assert manifest.parameters_m == 39
     assert manifest.supports("cuda-linux")
     assert not manifest.supports("mlx-darwin")
@@ -224,19 +209,13 @@ def test_a_misspelled_key_is_refused_not_ignored() -> None:
 
 def test_a_missing_key_names_itself() -> None:
     with pytest.raises(AsrManifestError) as caught:
-        parse(GOOD.replace('family = "faster-whisper"\n', ""))
+        parse(GOOD.replace('family = "whisper"\n', ""))
     assert "missing required key(s) ['family']" in str(caught.value)
 
 
 def test_faster_whisper_on_the_mac_is_refused_by_name() -> None:
-    """A Mac block on a CTranslate2 model: the pairing that cannot be."""
-    text = GOOD + """
-[backends.mlx-darwin]
-engine = "faster-whisper"
-hf_repo = "Systran/faster-whisper-tiny"
-revision = "d90ca5fe260221311c53c58e660288d3deb8d356"
-memory_bytes_estimate = 1686151006
-"""
+    """A Mac block on a CTranslate2 engine: the pairing that cannot be."""
+    text = GOOD + MAC_BLOCK.replace('engine = "mlx-whisper"', 'engine = "faster-whisper"')
     with pytest.raises(AsrManifestError) as caught:
         parse(text)
     message = str(caught.value)
@@ -244,27 +223,54 @@ memory_bytes_estimate = 1686151006
     assert "no Metal backend" in message
 
 
-def test_an_id_that_does_not_name_its_engine_is_refused() -> None:
-    """THE RULE THAT KEEPS A TRANSCRIPT HONEST. mlx-whisper weights filed under
-    a `faster-whisper-` id would make two conversions one id, and
-    `transcript.json` records the id and nothing else about the bytes."""
-    text = MAC_GOOD.replace('id = "mlx-whisper-tiny"', 'id = "faster-whisper-tiny"')
-    with pytest.raises(AsrManifestError) as caught:
-        parse_asr_manifest(
-            text, Path("faster-whisper-tiny.toml"), "faster-whisper-tiny"
-        )
-    message = str(caught.value)
-    assert "requires an id beginning 'mlx-whisper-'" in message
-    assert "a transcript records the id" in message
-
-
-def test_a_good_mac_manifest_parses() -> None:
-    manifest = parse_asr_manifest(
-        MAC_GOOD, Path("mlx-whisper-tiny.toml"), "mlx-whisper-tiny"
-    )
-    assert manifest.supports("mlx-darwin")
-    assert not manifest.supports("cuda-linux")
+def test_a_whisper_id_carries_both_backends_with_different_conversions() -> None:
+    """Allowed since 2026-09-24: CTranslate2 and MLX cannot read one set of
+    bytes, so a whisper id is two conversions, told apart by provenance."""
+    manifest = parse(GOOD + MAC_BLOCK)
+    assert sorted(manifest.backends) == ["cuda-linux", "mlx-darwin"]
     assert manifest.spec("mlx-darwin").engine == "mlx-whisper"
+    assert (
+        manifest.spec("cuda-linux").hf_repo != manifest.spec("mlx-darwin").hf_repo
+    )
+
+
+def test_an_engine_of_another_family_is_refused() -> None:
+    """ONE ID IS ONE MODEL: whisper on one machine and Qwen on the other under
+    one id would be two transcribers wearing one name."""
+    qwen_mac = """
+[backends.mlx-darwin]
+engine = "mlx-audio"
+hf_repo = "Qwen/Qwen3-ASR-1.7B"
+revision = "7278e1e70fe206f11671096ffdd38061171dd6e5"
+memory_bytes_estimate = 7726809000
+dtype = "bfloat16"
+aligner = "qwen3-aligner"
+max_batch = 1
+max_new_tokens = 4096
+"""
+    with pytest.raises(AsrManifestError) as caught:
+        parse(GOOD + qwen_mac)
+    message = str(caught.value)
+    assert "runs the 'qwen3-asr' family" in message
+    assert "family is 'whisper'" in message
+
+
+def test_a_family_no_engine_runs_is_refused() -> None:
+    """The old per-engine prefixes are not families: a manifest calling itself
+    `faster-whisper` is refused at its first block."""
+    text = GOOD.replace('family = "whisper"', 'family = "faster-whisper"')
+    with pytest.raises(AsrManifestError) as caught:
+        parse(text)
+    assert "runs the 'whisper' family" in str(caught.value)
+
+
+def test_an_id_that_does_not_name_its_family_is_refused() -> None:
+    """`faster-whisper-tiny` as a `whisper` manifest is refused rather than
+    loaded: the removed id cannot come back as a file."""
+    text = GOOD.replace('id = "whisper-tiny"', 'id = "faster-whisper-tiny"')
+    with pytest.raises(AsrManifestError) as caught:
+        parse(text, "faster-whisper-tiny")
+    assert "must begin with its family ('whisper')" in str(caught.value)
 
 
 def test_a_windows_block_is_refused() -> None:

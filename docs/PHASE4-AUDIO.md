@@ -268,6 +268,21 @@ this reason; here it is the manifest's engine and there is nothing to fall back 
 > by name. Owen: *"we're fully switching over to qwen for transcribing and
 > aligning"*. The whisper models below stay until apps have switched. The contract
 > is **docs/PHASE25-QWEN-ASR.md**.
+>
+> **2026-09-24, later: THREE MODELS, ONE ID EACH.** Owen: the asr job offers
+> *exactly* `whisper-large-v3-turbo`, `qwen3-asr-1.7b` and `whisper-tiny`, and the
+> caller picks. Every other whisper size — base, small, medium, large-v3,
+> distil-large-v3 — was removed on both engines, and the two whispers that stayed
+> lost their backend prefixes: `faster-whisper-large-v3-turbo` and
+> `mlx-whisper-large-v3-turbo` are now ONE id, `whisper-large-v3-turbo`, with a
+> block per backend (faster-whisper on cuda-linux, mlx-whisper on mlx-darwin), and
+> the same for `whisper-tiny`. A client names a transcriber without knowing which
+> machine it is talking to. The old ids are NOT aliases: a request naming one is
+> `unknown_model`, with the replacement named in the sentence. The table and the
+> "no mlx-darwin block" paragraph below are this section's history — the pins in
+> the two surviving rows are unchanged, and PHASE25-QWEN-ASR.md section 10 has the
+> lineup, the new manifest rules, the capability order and what happens to weights
+> already on disk.
 
 A new job type, and a real gap rather than an oversight: `generate-sentences` is a GPU queue
 step, it is the only ASR site in the app that takes the arbiter lease, and the whole-m4b
@@ -282,6 +297,10 @@ The manifests live in **`asr/<id>.toml`** with their own loader,
 same two hundred lines; the two should be one loader parameterised by directory and
 required keys, and that merge is a follow-up. Every revision below is the repo's `main` sha
 read from the HuggingFace API on 2026-09-13:
+
+*The table as it stood until 2026-09-24. The two rows that survive are now
+`whisper-tiny` and `whisper-large-v3-turbo`'s cuda-linux blocks; the other five are
+retired.*
 
 | Crucible id | HF repo | revision | params |
 |---|---|---|---|
@@ -330,7 +349,7 @@ phase.
 ```json
 {
   "type": "asr",
-  "model": "faster-whisper-base",
+  "model": "whisper-large-v3-turbo",
   "params": { "language": "en", "vad_filter": true, "word_timestamps": true },
   "inputs": { "audio.m4b": { "blob_id": "..." } }
 }

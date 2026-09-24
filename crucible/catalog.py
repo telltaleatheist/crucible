@@ -60,11 +60,11 @@ from typing import Any, Callable
 
 from . import denoisemodels, lineup, llamacpp, rvcbase, weights
 from .alignmodels import load_all_align_manifests
-from .asrmodels import load_all_asr_manifests
+from .asrmodels import load_all_asr_manifests, retired_asr_id_note
 from .backend import Backend
 from .config import Config
 from .errors import ApiError, CrucibleError
-from .manifests import BACKEND_ENGINES, load_all_manifests
+from .manifests import BACKEND_ENGINES, ModelManifest, load_all_manifests
 from .jobs.base import utcnow
 from .residency import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_TTS, Residency
 from .rvcmodels import load_all_rvc_manifests
@@ -469,13 +469,17 @@ def backends_declaring(kind: str, subject_id: str) -> list[str]:
 
     WHY IT IS NEEDED. A module file is written once and posted to a Mac and a
     PC alike, and `modules.py` says so: "must name the same subjects on both".
-    That holds for every subject in this build except the transcribers, and for
-    a reason that will not go away — `crucible/asr/mlx-whisper-large-v3.toml`
-    states it: CTranslate2 has no Metal backend, "so there is no
-    `[backends.mlx-darwin]` on any `asr/faster-whisper-*.toml` and there never
-    will be". BookForge names `faster-whisper-large-v3`, the Mac has never
-    heard of it, and the whole module is refused `invalid_module` (measured
-    2026-09-15, on Owen's Mac).
+    That held for every subject except the transcribers, whose ids were
+    backend-prefixed — CTranslate2 has no Metal backend, so the PC's whisper
+    was `faster-whisper-*` and the Mac's `mlx-whisper-*`. BookForge named
+    `faster-whisper-large-v3`, the Mac had never heard of it, and the whole
+    module was refused `invalid_module` (measured 2026-09-15, on Owen's Mac).
+
+    2026-09-24: Owen's asr lineup ruling made every transcriber ONE id on both
+    backends (`crucible/asrmodels.py`), so no subject this build ships narrows
+    any more. The field stays, computed on every row: a subject that exists on
+    one machine only (the Mac's 8-bit 27B) is still a fact a module file has
+    to carry.
 
     A CLASS CANNOT FIX THIS ONE, which is how the same shape was fixed last
     time (`dots-ocr`, found by Foundry against the Mac): `[[needs]]` resolves
@@ -509,6 +513,31 @@ def backends_declaring(kind: str, subject_id: str) -> list[str]:
         # they are every backend by construction. Said rather than defaulted.
         return sorted(BACKEND_ENGINES)
     return sorted(found)
+
+
+def stranded_weights(config: Config) -> list[dict[str, Any]]:
+    """Weights under `~/.crucible/models/` that no manifest in this build owns.
+
+    READ, never acted on: `crucible doctor` prints each with its size and path
+    and the operator decides (`weights.stranded` says why nothing deletes).
+    What lands here is a model this build removed or no longer declares for a
+    backend — since 2026-09-24 most visibly the whisper sizes Owen's asr lineup
+    ruling retired — and any renamed id whose bytes `jobs/asr`'s
+    `adopt_renamed_asr_weights` could not prove were the new id's. `note` is
+    the retirement sentence where this build has one (`retired_asr_id_note`),
+    and null for anything else.
+    """
+    rows: list[dict[str, Any]] = []
+    for entry in weights.stranded(
+        config,
+        ModelManifest.weights_family,
+        tuple(BACKEND_ENGINES),
+        lambda subject_id: backends_declaring("model", subject_id),
+    ):
+        row = entry.to_dict()
+        row["note"] = retired_asr_id_note(entry.subject_id)
+        rows.append(row)
+    return rows
 
 
 def find(

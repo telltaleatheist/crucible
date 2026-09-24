@@ -2697,6 +2697,15 @@ model id and nothing else about the bytes; the two libraries' "large-v3" are
 different conversions at a different quantisation. `ASR_ENGINE_ID_PREFIX`
 refuses a manifest whose id does not name its engine.
 
+> **2026-09-24: superseded.** Owen's asr lineup ruling kept three transcribers —
+> `whisper-large-v3-turbo`, `qwen3-asr-1.7b`, `whisper-tiny` — each ONE id on both
+> backends, and removed the other whisper sizes. The Mac rows for turbo and tiny
+> below are now the `[backends.mlx-darwin]` blocks of `asr/whisper-large-v3-turbo.toml`
+> and `asr/whisper-tiny.toml` at the same pins and figures; the other five rows are
+> retired. `ASR_ENGINE_ID_PREFIX` is gone — engines are bound to a family, and a
+> transcript's sidecar names the engine and repo (docs/PHASE25-QWEN-ASR.md
+> section 10). The table stays as the measurement record it is.
+
 Every revision below was verified twice against the hub API on 2026-09-14 (main
 through `/refs`, then the byte total through `/tree/<sha>?recursive=1`). Every
 estimate is **MEASURED**: `mx.get_peak_memory()` over ONE 900-second window —

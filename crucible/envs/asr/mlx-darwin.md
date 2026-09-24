@@ -41,7 +41,19 @@ one by the back door.
 
 ## The two rules that keep this honest
 
-**1. The ids do not cross.** `faster-whisper-large-v3` and
+> **2026-09-24: rule 1 was replaced.** Owen's asr lineup ruling kept three
+> models — `whisper-large-v3-turbo`, `qwen3-asr-1.7b`, `whisper-tiny` — and made
+> each ONE id on both backends: the Mac's turbo and tiny are the
+> `[backends.mlx-darwin]` blocks of `asr/whisper-large-v3-turbo.toml` and
+> `asr/whisper-tiny.toml`, at the same pins as before. The other five mlx sizes
+> (base, small, medium, large-v3, distil-large-v3) were removed. A whisper id is
+> now two conversions, and a transcript's provenance sidecar says which one —
+> backend, engine, repo, revision — which is what the id used to have to say.
+> The loader binds engines to a FAMILY now (`ASR_ENGINE_FAMILY`), not to an id
+> prefix. Rule 2 stands. The measurement table below is the record of
+> 2026-09-14; its two surviving rows are the manifests' figures today.
+
+**1. The ids do not cross.** *(History — see the note above.)* `faster-whisper-large-v3` and
 `mlx-whisper-large-v3` are different conversions of the same original
 checkpoint, at a different quantisation, by a different library, and they will
 disagree about a hard passage. `transcript.json` records the model id and

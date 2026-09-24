@@ -157,14 +157,14 @@ def test_a_qwen_block_without_its_keys_names_them() -> None:
 
 def test_a_whisper_block_may_not_carry_qwen_keys() -> None:
     text = (
-        '[model]\nid = "faster-whisper-tiny"\nfamily = "faster-whisper"\n'
+        '[model]\nid = "whisper-tiny"\nfamily = "whisper"\n'
         "parameters_m = 39\n\n[backends.cuda-linux]\n"
         'engine = "faster-whisper"\nhf_repo = "Systran/faster-whisper-tiny"\n'
         'revision = "d90ca5fe260221311c53c58e660288d3deb8d356"\n'
         "memory_bytes_estimate = 1686151006\nmax_batch = 8\n"
     )
     with pytest.raises(AsrManifestError) as caught:
-        parse_asr_manifest(text, Path("faster-whisper-tiny.toml"), "faster-whisper-tiny")
+        parse_asr_manifest(text, Path("whisper-tiny.toml"), "whisper-tiny")
     assert "unknown key(s) ['max_batch']" in str(caught.value)
 
 
@@ -417,7 +417,7 @@ def test_a_context_on_a_whisper_model_is_refused_by_name(
     qwen_client: TestClient, auth: dict[str, str]
 ) -> None:
     response = submit(
-        qwen_client, auth, model="faster-whisper-base",
+        qwen_client, auth, model="whisper-tiny",
         params={"language": "en", "vad_filter": False, "word_timestamps": True, "context": "x y"},
     )
     assert response.status_code == 400

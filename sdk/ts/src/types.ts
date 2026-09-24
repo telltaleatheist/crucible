@@ -2327,12 +2327,13 @@ export interface CapabilityRecord {
  */
 export interface AsrOptions {
   /**
-   * Which whisper. **There is no default and there will not be one** — an ASR
-   * pass at the wrong size is a transcript that looks fine, is worse, and has
-   * nothing in it to say so. `faster-whisper-tiny` through
-   * `faster-whisper-large-v3`, the `mlx-whisper-*` ids on a Mac, and
-   * `qwen3-asr-1.7b` on both; {@link CrucibleClient.info}'s `asr` capability
-   * lists what this build ships.
+   * Which transcriber. **There is no default and there will not be one** — an
+   * ASR pass at the wrong size is a transcript that looks fine, is worse, and
+   * has nothing in it to say so. Since 2026-09-24 there are exactly three, each
+   * ONE id on every backend: `qwen3-asr-1.7b`, `whisper-large-v3-turbo` and
+   * `whisper-tiny`. The old backend-prefixed ids (`faster-whisper-*`,
+   * `mlx-whisper-*`) are refused `unknown_model`, not aliased.
+   * {@link CrucibleClient.info}'s `asr` capability lists what a server ships.
    */
   readonly model: string;
   /** The audio, as an uploaded blob or bytes carried inline. Exactly one file. */

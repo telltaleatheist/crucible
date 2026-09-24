@@ -275,7 +275,7 @@ test('a module is posted exactly as the app vendored it', async () => {
     // app's own choices. Posted byte for byte either way: the document is a
     // file the app vendors and this client is not a second author of it.
     needs: [{ class: 'clean' }],
-    subjects: [{ kind: 'model' as const, id: 'faster-whisper-large-v3' }],
+    subjects: [{ kind: 'model' as const, id: 'whisper-large-v3-turbo' }],
   };
   answer(202, { task_id: 't4' });
   await client().submitTask({ type: 'module', module: vendored });

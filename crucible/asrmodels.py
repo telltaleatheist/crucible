@@ -12,6 +12,9 @@ with no estimate behind it.
 
 Two backends, two ENGINES, and never two sets of weights at one id
 ------------------------------------------------------------------
+*History: the id half of this section was replaced on 2026-09-24 — see
+"Three models, one id each" below. The engine half still stands.*
+
 faster-whisper is CTranslate2, and CTranslate2 has **no Metal backend** — on
 Apple Silicon it runs on the CPU through Accelerate and nothing else
 (SYSTRAN/faster-whisper#515, #911, still true as of 2026-09). Crucible has no CPU
@@ -23,7 +26,7 @@ manifests. It gets `mlx-whisper`: a **second engine** with its own converted
 weights (`mlx-community/whisper-*`), its own recipe
 (`envs/asr/mlx-darwin.txt`), its own worker
 (`crucible/jobs/asr/mlx_worker.py`) and — the part this module enforces — its
-own SEVEN MODEL IDS, all prefixed `mlx-whisper-`.
+own SEVEN MODEL IDS, all prefixed `mlx-whisper-` (until 2026-09-24).
 
 **Different weights at one id would be a lie**, and it is this loader's job to
 make that impossible rather than a convention. `transcript.json` records the
@@ -58,8 +61,9 @@ engines, one per backend, under the one `asr` job type
 
 **This is the first asr id with a block on both backends, and that is allowed
 for exactly one reason: both blocks pin the SAME repo at the SAME revision.**
-The whisper rule above — different weights must never share an id — is not
-relaxed; it is satisfied a second way. mlx-audio reads the very safetensors
+The whisper rule above — different weights must never share an id — was not
+relaxed THAT morning; it was satisfied a second way. (It was replaced that
+afternoon: the section after this one.) mlx-audio reads the very safetensors
 vLLM reads, in bfloat16, so `qwen3-asr-1.7b` names one set of bytes whichever
 machine ran it. The loader enforces it: a manifest whose blocks pin different
 repos or revisions is refused by name, so a community conversion cannot slip
@@ -71,6 +75,45 @@ batch, output ceiling, KV pool — is a per-backend decision here, and the spec
 ContentStudio measured says a library default is what crashed a Mac (batch 32
 on MPS, 2026-09-24). A key the job needs is a key the manifest states; nothing
 reaches a worker as a library default.
+
+Three models, one id each, across both backends (2026-09-24)
+-----------------------------------------------------------
+Owen, 2026-09-24, the same day: the asr job offers EXACTLY three models and
+the caller picks — Whisper large-v3-turbo, Qwen3-ASR-1.7B and Whisper tiny.
+Every other whisper size (base, small, medium, large-v3, distil-large-v3) was
+removed, on both engines. And the whispers that stayed became ONE id each
+(`whisper-large-v3-turbo`, `whisper-tiny`) with a block per backend, because a
+client should not have to know which machine it is talking to before it can
+name a transcriber — Qwen already had that shape, and so does every
+`models/<id>.toml`.
+
+That REPLACES the rule the two sections above were written to defend, and it
+is replaced rather than bent, so here is what took its place:
+
+- **The family, not the id prefix, is what an engine is bound to.** A block's
+  engine must belong to the manifest's `[model] family` (`ASR_ENGINE_FAMILY`),
+  and the id must begin with that family. So `whisper-*` is whisper on both
+  machines and `qwen3-asr-*` is Qwen3-ASR on both, and no id can be whisper on
+  one backend and Qwen on the other.
+- **"One id, one set of bytes" still holds where it can hold.** Qwen's two
+  engines read the same official checkpoint, so a `qwen3-asr` manifest whose
+  blocks pin different weights is still refused (`ONE_CHECKPOINT_FAMILIES`).
+  Whisper's two engines CANNOT read the same bytes — CTranslate2 and MLX are
+  different formats — so a whisper id is two conversions, exactly as
+  `qwen3.5-9b` is a GGUF on one machine and an MLX conversion on the other.
+- **What produced a transcript is in its RECORD, not its name.** The
+  provenance sidecar already named the backend; it now also names the engine,
+  the repo and the revision (`jobs/asr/__init__.py`, `model_provenance`), so
+  two transcripts made on two machines are told apart the way two llm renders
+  always were.
+- **The old ids are GONE, not aliases.** A request naming one is refused
+  `unknown_model`, naming the three that exist and — for the four that were
+  renamed — the id that replaced it (`RENAMED_ASR_IDS`, `RETIRED_ASR_IDS`).
+  Weights already pulled under a renamed id are MOVED to the new id's folder
+  once, at server start, and only when their stamp matches the new block's pin
+  exactly (`jobs/asr`'s `adopt_renamed_asr_weights`); anything left under an
+  id nothing declares is reported by `crucible doctor` with its size and path
+  (`catalog.stranded_weights`), never deleted behind the operator's back.
 
 Why this is not `crucible/manifests.py`
 ---------------------------------------
@@ -113,20 +156,81 @@ ASR_BACKEND_ENGINES: dict[str, frozenset[str]] = {
     MLX_DARWIN: frozenset({"mlx-whisper", MLX_AUDIO_ENGINE}),
 }
 
-#: The id prefix each engine's manifests must carry. Not decoration: it is what
-#: stops one id ever standing for two different sets of weights, which is the
-#: thing `transcript.json` cannot recover from. Checked by the loader, so a new
-#: manifest cannot break the rule by being written carelessly.
+#: The model family each engine runs. A block's engine must belong to its
+#: manifest's `[model] family`, and the id must begin `<family>-`, so one id is
+#: one MODEL on every backend: whisper on both machines or Qwen3-ASR on both,
+#: never one on the PC and the other on the Mac.
 #:
-#: The two Qwen engines share one prefix, and that is the rule working rather
-#: than an exception to it: they read the same official checkpoint, and
-#: `_parse` refuses a manifest whose blocks pin different bytes.
-ASR_ENGINE_ID_PREFIX: dict[str, str] = {
-    "faster-whisper": "faster-whisper-",
-    "mlx-whisper": "mlx-whisper-",
-    VLLM_ENGINE: "qwen3-asr-",
-    MLX_AUDIO_ENGINE: "qwen3-asr-",
+#: Until 2026-09-24 this was a table of id PREFIXES per engine
+#: (`faster-whisper-`, `mlx-whisper-`), which made every whisper id
+#: backend-specific. Owen's ruling of that day made the whispers one id each
+#: across both backends (the module docstring); the per-engine prefix went with
+#: it, and the family is what is bound now.
+ASR_ENGINE_FAMILY: dict[str, str] = {
+    "faster-whisper": "whisper",
+    "mlx-whisper": "whisper",
+    VLLM_ENGINE: "qwen3-asr",
+    MLX_AUDIO_ENGINE: "qwen3-asr",
 }
+
+#: The families whose engines read ONE checkpoint on every backend, and whose
+#: manifests are therefore refused if their blocks pin different weights.
+#: Qwen3-ASR: vLLM and mlx-audio both load the official safetensors, and Owen's
+#: full-precision ruling says they must (a community conversion must not slip in
+#: under the official id). NOT whisper: CTranslate2 and MLX cannot read each
+#: other's format, so a whisper id is necessarily two conversions, and its
+#: transcripts are told apart by their provenance sidecar (backend, engine,
+#: repo, revision) — the way every `models/<id>.toml` has always worked.
+ONE_CHECKPOINT_FAMILIES: frozenset[str] = frozenset({"qwen3-asr"})
+
+#: THE LINEUP, Owen 2026-09-24: exactly these three, and the caller picks. Not
+#: read by the loader (the directory is the lineup); stated so a test can hold
+#: the directory to it and a reader can see the ruling in one line.
+ASR_LINEUP: frozenset[str] = frozenset(
+    {"qwen3-asr-1.7b", "whisper-large-v3-turbo", "whisper-tiny"}
+)
+
+#: Ids that were RENAMED on 2026-09-24, old -> new. NOT aliases: a request
+#: naming an old id is refused `unknown_model` exactly like any other unknown
+#: id, and this table only lets the refusal say what replaced it. It also tells
+#: `jobs/asr`'s `adopt_renamed_asr_weights` which folders under `~/.crucible/models/` hold
+#: bytes the new id pins — the same repo at the same revision, moved rather
+#: than downloaded again.
+RENAMED_ASR_IDS: dict[str, str] = {
+    "faster-whisper-large-v3-turbo": "whisper-large-v3-turbo",
+    "mlx-whisper-large-v3-turbo": "whisper-large-v3-turbo",
+    "faster-whisper-tiny": "whisper-tiny",
+    "mlx-whisper-tiny": "whisper-tiny",
+}
+
+#: Ids REMOVED on 2026-09-24 with nothing in their place (Owen: "every other
+#: whisper size is removed"). Listed so a refusal can say "retired" rather than
+#: leave a client wondering whether it misspelled one.
+RETIRED_ASR_IDS: frozenset[str] = frozenset(
+    f"{engine}-{size}"
+    for engine in ("faster-whisper", "mlx-whisper")
+    for size in ("base", "small", "medium", "large-v3", "distil-large-v3")
+)
+
+
+def retired_asr_id_note(model_id: str) -> str | None:
+    """A sentence about an id this build removed, or None for any other id.
+
+    For `unknown_model`'s message only. It never resolves anything: the
+    request is refused either way.
+    """
+    renamed = RENAMED_ASR_IDS.get(model_id)
+    if renamed is not None:
+        return (
+            f"{model_id!r} was renamed {renamed!r} on 2026-09-24, one id on "
+            "every backend; the old id is not an alias"
+        )
+    if model_id in RETIRED_ASR_IDS:
+        return (
+            f"{model_id!r} was retired on 2026-09-24: the asr job offers "
+            f"exactly {sorted(ASR_LINEUP)}"
+        )
+    return None
 
 #: FULL PRECISION, both machines. Owen, 2026-09-24: bf16, unquantised, for
 #: Qwen3-ASR-1.7B on the PC and on the Mac; "do not use the 8-bit MLX build".
@@ -450,19 +554,15 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
         if engine == VLLM_ENGINE:
             required.update(VLLM_BACKEND_REQUIRED)
         _check_table(where, block, required)
-        prefix = ASR_ENGINE_ID_PREFIX[engine]
-        if not model_id.startswith(prefix):
-            # THE RULE THAT KEEPS A TRANSCRIPT HONEST. `transcript.json` names
-            # the model id and nothing else about the bytes, and the two
-            # engines' conversions of "large-v3" are different weights at a
-            # different quantisation that will disagree about a hard passage.
-            # An id that did not say which engine made it would leave a reader
-            # comparing two transcripts with no way to tell them apart.
+        engine_family = ASR_ENGINE_FAMILY[engine]
+        if model["family"] != engine_family:
+            # ONE ID IS ONE MODEL ON EVERY BACKEND. Whisper on the PC and Qwen
+            # on the Mac under one id would be two different transcribers
+            # wearing one name, and no provenance record makes that honest.
             raise AsrManifestError(
-                f"{where}: engine {engine!r} requires an id beginning "
-                f"{prefix!r} and this manifest is {model_id!r}; two engines' "
-                "weights must never share an id, because a transcript records "
-                "the id and nothing else about what produced it"
+                f"{where}: engine {engine!r} runs the {engine_family!r} family "
+                f"and this manifest's [model] family is {model['family']!r}; "
+                "every block of one asr id runs the same model"
             )
         if not _HF_REPO.match(block["hf_repo"]):
             raise AsrManifestError(
@@ -495,18 +595,27 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
             kv_cache_memory_bytes=block.get("kv_cache_memory_bytes"),
         )
 
-    # ONE ID, ONE SET OF BYTES. The first asr id with more than one block
-    # (`qwen3-asr-1.7b`) is honest only because both blocks read the same
-    # checkpoint; a manifest whose blocks disagree about that is two models
-    # wearing one name, and `transcript.json` could not tell them apart.
+    # THE ID NAMES ITS FAMILY. `whisper-tiny`, `qwen3-asr-1.7b`: a reader of a
+    # transcript's id knows which model made it before reading anything else.
+    if not model_id.startswith(f"{model['family']}-"):
+        raise AsrManifestError(
+            f"{path.name}: model.id {model_id!r} must begin with its family "
+            f"({model['family']!r}) and a hyphen"
+        )
+
+    # ONE CHECKPOINT, WHERE THE ENGINES CAN SHARE ONE. `qwen3-asr-1.7b` is
+    # the official checkpoint on both machines by Owen's ruling, so blocks
+    # that disagree about it are a community conversion slipping in under the
+    # official id. Whisper is exempt for a reason, not by oversight:
+    # CTranslate2 and MLX cannot read each other's format
+    # (`ONE_CHECKPOINT_FAMILIES`).
     pins = sorted({(spec.hf_repo, spec.revision) for spec in backends.values()})
-    if len(pins) > 1:
+    if model["family"] in ONE_CHECKPOINT_FAMILIES and len(pins) > 1:
         raise AsrManifestError(
             f"{path.name}: its backend blocks pin different weights "
-            f"({[f'{repo}@{revision[:12]}' for repo, revision in pins]}); one asr "
-            "id is one set of bytes, because a transcript records the id and "
-            "nothing else about what produced it. Weights that differ per "
-            "backend need an id per backend, the way mlx-whisper's do"
+            f"({[f'{repo}@{revision[:12]}' for repo, revision in pins]}); a "
+            f"{model['family']!r} id is one checkpoint on every backend, because "
+            "both of its engines read the official weights"
         )
 
     return AsrManifest(

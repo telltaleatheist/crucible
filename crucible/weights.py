@@ -42,7 +42,7 @@ import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol, Sequence, runtime_checkable
+from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from .config import Config
 from .errors import CrucibleError
@@ -644,6 +644,174 @@ def remove_files(
         _remove(_safe_target(target_root, name))
     _remove(target_root / stamp_name)
     return target_root
+
+
+# --------------------------------------------------- an id renamed, and after
+#
+# 2026-09-24, Owen's asr lineup ruling: `faster-whisper-large-v3-turbo` and
+# `mlx-whisper-large-v3-turbo` became `whisper-large-v3-turbo`, and the two
+# tinies became `whisper-tiny`. The store is laid out by id
+# (`<family>/<id>/<backend>`), so a rename strands every byte already pulled
+# under the old one: 1.6 GB of turbo on a machine that has it, invisible to
+# every door, because every inventory is walked from the manifests. The two
+# functions below are the store's half of a rename — it moves what it can
+# PROVE is the new id's, and it names what nothing owns.
+
+
+def adopt_renamed(
+    config: Config,
+    old_id: str,
+    manifest: WeightsSubject,
+    specs: Mapping[str, WeightsSource],
+) -> list[str]:
+    """Move `old_id`'s pulled weights into `manifest`'s folder, per backend.
+
+    `specs` is the new manifest's blocks by backend kind.
+
+    One sentence per backend directory found, saying what happened — moved, or
+    left and why. Nothing is moved on a guess: a directory is adopted only when
+    its stamp names EXACTLY the repo and revision the new manifest pins for
+    that backend, because moving other bytes under the new id would be the
+    silent substitution `installed()` exists to refuse. Everything left is
+    what `stranded()` reports.
+
+    Weather, not misconfiguration (CLAUDE.md): a rename that fails for an
+    OSError is reported and left for the next start, never raised — the server
+    is the thing starting, and bytes that could not be moved are still on disk
+    for `crucible doctor` to name.
+    """
+    root = weights_root(config, manifest.weights_family)
+    old_root = root / old_id
+    if not old_root.is_dir():
+        return []
+    lines: list[str] = []
+    for source in sorted(p for p in old_root.iterdir() if p.is_dir()):
+        backend_kind = source.name
+        spec = specs.get(backend_kind)
+        if spec is None:
+            lines.append(
+                f"left {source}: {manifest.id!r} has no {backend_kind} block, so "
+                f"these are not its weights"
+            )
+            continue
+        stamp = source / STAMP_NAME
+        if not stamp.is_file():
+            lines.append(
+                f"left {source}: no {STAMP_NAME}, so no finished pull says what "
+                "these bytes are"
+            )
+            continue
+        try:
+            record = json.loads(stamp.read_text(encoding="utf-8"))
+            pinned = (record["hf_repo"], record["revision"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            lines.append(
+                f"left {source}: its stamp would not read "
+                f"({type(exc).__name__}: {exc})"
+            )
+            continue
+        if pinned != (spec.hf_repo, spec.revision):
+            lines.append(
+                f"left {source}: stamped {pinned[0]}@{str(pinned[1])[:12]}, and "
+                f"{manifest.id!r} pins {spec.hf_repo}@{spec.revision[:12]} on "
+                f"{backend_kind}"
+            )
+            continue
+        target = subject_dir(config, manifest, backend_kind)
+        if target.exists():
+            lines.append(
+                f"left {source}: {target} already exists, and one of the two "
+                "copies is surplus"
+            )
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # A RENAME, not a copy: one filesystem (`~/.crucible/models/`), so
+            # it is one metadata operation and never a half-copied 1.6 GB.
+            os.replace(source, target)
+        except OSError as exc:
+            lines.append(
+                f"left {source}: the move to {target} failed "
+                f"({type(exc).__name__}: {exc})"
+            )
+            continue
+        # The stamp now describes its new home. `installed()` reads only the
+        # repo and revision, so a stamp that failed to rewrite would still
+        # answer truly; the id is for a human reading the file.
+        record["id"] = manifest.id
+        record["renamed_from"] = old_id
+        try:
+            (target / STAMP_NAME).write_text(
+                json.dumps(record, indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError as exc:
+            lines.append(
+                f"moved {source} -> {target}; its stamp still says {old_id!r} "
+                f"({type(exc).__name__}: {exc})"
+            )
+            continue
+        lines.append(f"moved {source} -> {target} (renamed {old_id} -> {manifest.id})")
+    _prune_empty(old_root, root)
+    return lines
+
+
+@dataclass(frozen=True)
+class StrandedWeights:
+    """A directory under the store that no manifest in this build owns."""
+
+    family: str
+    subject_id: str
+    backend: str
+    path: Path
+    bytes: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "family": self.family,
+            "id": self.subject_id,
+            "backend": self.backend,
+            "path": str(self.path),
+            "bytes": self.bytes,
+        }
+
+
+def stranded(
+    config: Config,
+    family: str,
+    backends: Sequence[str],
+    declared_backends: Callable[[str], Sequence[str]],
+) -> list[StrandedWeights]:
+    """Every `<family>/<id>/<backend>` directory nothing in this build declares.
+
+    `backends` is every backend kind a directory may be named for, and
+    `declared_backends(id)` which of them this build has a manifest block for;
+    the caller supplies both because the store does not load manifests. A
+    directory named for anything else is not a weights directory and is not
+    this function's business.
+
+    THE RECONCILER FOR THE STORE (CLAUDE.md: every hold has an owner, and a
+    reconciler finds orphans). It REPORTS and never deletes: the bytes may be
+    an operator's only copy of something, and the operator decides.
+    """
+    root = weights_root(config, family)
+    if not root.is_dir():
+        return []
+    found: list[StrandedWeights] = []
+    for subject in sorted(p for p in root.iterdir() if p.is_dir()):
+        declared = set(declared_backends(subject.name))
+        for directory in sorted(p for p in subject.iterdir() if p.is_dir()):
+            if directory.name not in backends or directory.name in declared:
+                continue
+            found.append(
+                StrandedWeights(
+                    family=family,
+                    subject_id=subject.name,
+                    backend=directory.name,
+                    path=directory,
+                    bytes=directory_bytes(directory),
+                )
+            )
+    return found
 
 
 def hf_token(config: Config) -> str | None:

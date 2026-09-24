@@ -29,7 +29,8 @@ What this phase changes, and what it leaves alone:
   `asr`: one audio file in, `transcript.json` out. There is no new verb, because
   nothing about the request is new; Crucible is a task-agnostic GPU orchestrator.
 - **The whisper manifests stay.** Apps switch first, and whisper is retired in a
-  later cut.
+  later cut. *(Amended the same day — section 10: two whispers stay, as one id
+  each on both backends, and the other five sizes are removed.)*
 - **The aligner stays as `align` runs it.** It is the same worker and the same
   `align/qwen3-aligner.toml` (section 4).
 
@@ -435,3 +436,106 @@ thing, or the aligner moved into vLLM as a pooling model (section 4).
 
 SGLang, when its door carries a context and a forced language (section 1), is one
 row and one worker branch.
+
+## 10. The lineup: three models, one id each (Owen, 2026-09-24, later that day)
+
+**The ruling.** The transcription (`asr`) job offers EXACTLY three models, and the
+caller or the user picks: Whisper large-v3-turbo, Qwen3-ASR-1.7B and Whisper tiny.
+Every other whisper size — base, small, medium, large-v3, distil-large-v3 — is
+removed, on both engines.
+
+**One id per model across backends.** Whisper ids used to be backend-prefixed
+(`faster-whisper-*` on cuda-linux, `mlx-whisper-*` on mlx-darwin), so a client had to
+know which machine it was talking to before it could name a transcriber; Qwen already
+had one id with a block per backend. The lineup is now:
+
+| id | cuda-linux | mlx-darwin |
+|---|---|---|
+| `qwen3-asr-1.7b` | `vllm`, `Qwen/Qwen3-ASR-1.7B` @ `7278e1e70fe2…` | `mlx-audio`, `Qwen/Qwen3-ASR-1.7B` @ `7278e1e70fe2…` |
+| `whisper-large-v3-turbo` | `faster-whisper`, `dropbox-dash/faster-whisper-large-v3-turbo` @ `0a363e9161cb…` | `mlx-whisper`, `mlx-community/whisper-large-v3-turbo` @ `a4aaeec0636e…` |
+| `whisper-tiny` | `faster-whisper`, `Systran/faster-whisper-tiny` @ `d90ca5fe2602…` | `mlx-whisper`, `mlx-community/whisper-tiny-mlx` @ `6caf9c55601c…` |
+
+Every pin, revision and memory figure is the one the four old manifests carried
+(`faster-whisper-large-v3-turbo`, `mlx-whisper-large-v3-turbo`, `faster-whisper-tiny`,
+`mlx-whisper-tiny`), with both files' provenance notes merged into one file per id.
+No asr backend is Windows, so there was no `llama-windows` block to keep.
+
+**What replaced the id rule** (`crucible/asrmodels.py`, module docstring):
+
+- A block's engine is bound to the manifest's FAMILY (`ASR_ENGINE_FAMILY`:
+  faster-whisper and mlx-whisper run `whisper`, vllm and mlx-audio run `qwen3-asr`),
+  and the id must begin with its family. No id is whisper on one machine and Qwen on
+  the other.
+- "One id, one set of bytes" still holds for `qwen3-asr` (`ONE_CHECKPOINT_FAMILIES`):
+  both of its engines read the official checkpoint, and a manifest whose blocks pin
+  two is refused. It cannot hold for whisper — CTranslate2 and MLX cannot read each
+  other's format — so a whisper id is two conversions, the way `qwen3.5-9b` is a GGUF
+  on one machine and an MLX build on the other.
+- What produced a transcript is therefore in its RECORD: the provenance sidecar
+  already named the backend, and its `model` block now also carries `engine` and
+  `hf_repo` beside `revision` and `fingerprint`.
+
+**The old ids are gone, not aliases.** A request naming any of the fourteen removed
+ids is `400 unknown_model` with `details: {model, offered}`, `offered` being the
+three. For the four renamed ids the sentence names the replacement (*"'mlx-whisper-tiny'
+was renamed 'whisper-tiny' on 2026-09-24, one id on every backend; the old id is not an
+alias"*); for the ten retired ones it says they were retired and names the three
+(`RENAMED_ASR_IDS`, `RETIRED_ASR_IDS`, reaching `jobs.resolve_model` through the job
+type's `retired_model_note`).
+
+**Weights already on disk.** The store is `~/.crucible/models/<id>/<backend>/`, so a
+rename strands a pull. Two halves:
+
+- **Renamed ids are MOVED, once, at server start.** `crucible serve` calls
+  `jobs/asr.adopt_renamed_asr_weights` before the app is built; the store half is
+  `weights.adopt_renamed`. A directory is moved only when its stamp names exactly the
+  repo and revision the new id's block pins for that backend — which the four renames
+  do, since no pin changed — so a Mac that had pulled `mlx-whisper-large-v3-turbo`
+  reads `whisper-large-v3-turbo` as installed with no 1.6 GB download. It is a rename
+  on one filesystem, not a copy; the stamp's `id` is rewritten and `renamed_from`
+  added. Every directory it finds is reported on the server's stderr, moved or left
+  and why (another pin, no stamp, the new id already pulled, a move that failed). A
+  failed move is weather: reported, tried again at the next start, and never a
+  refusal to serve.
+- **Everything nothing owns is REPORTED, never deleted** (`catalog.stranded_weights`
+  over `weights.stranded`): every `models/<id>/<backend>` directory this build declares
+  no manifest block for, with its size, its path and the retirement sentence where
+  there is one. `crucible doctor` prints each as a note naming the directory to delete,
+  and `doctor --json` carries them as `stranded_weights`; they do not make a server
+  unhealthy. That covers the five retired sizes on both engines, a renamed id the move
+  had to leave, and orphans older than this ruling (the 8-bit 27B's cuda-linux folder,
+  2026-09-23).
+
+A config's `[local_models] asr = "<old id>"`, if any app ever wrote one, is not
+rewritten: capability refuses it by name (*"it is set to use …, which this machine
+cannot run. Choose another in Settings"*). Every install re-runs `capability --write`,
+so the record's selection moves to the new best-first pick.
+
+**The capability order, best-first on both backends: `qwen3-asr-1.7b`,
+`whisper-large-v3-turbo`, `whisper-tiny`.** Qwen first by Owen's *"we're fully
+switching over to qwen for transcribing"*; turbo as the whisper that keeps large-v3's
+encoder; tiny as the rough pass. It is the catalog's own size-descending walk (PC
+11.0 / 3.2 / 1.7 GB, Mac 7.7 / 2.7 / 0.5 GB), so nothing restates it;
+`tests/test_asr_lineup.py` holds it, and a measurement that ever reordered the sizes
+turns that test red rather than quietly promoting a whisper. `local_model_choices`
+walks the same candidates, so it lists the same three in the same order.
+
+**BookForge's module** (`modules/bookforge.toml`) named `faster-whisper-large-v3` and
+`mlx-whisper-large-v3`, two entries for one choice. It now names
+`whisper-large-v3-turbo` once, scoped to both backends. Not `qwen3-asr-1.7b`: the
+module is a pull list with no notion of a user's choice, and BookForge transcribes with
+whisper today; naming Qwen is BookForge's decision when it switches.
+
+**The Mac's Qwen worker and 1.0.28's mlx-lm batching.** Checked, not assumed.
+`MlxLmEngine.start`'s refusal without `--decode-concurrency`, `--prompt-concurrency`
+and `--prompt-cache-size` applies to the `models/<id>.toml` blocks the resident mlx-lm
+SERVER runs. `qwen3-asr-1.7b`'s mlx-darwin block is an `asr/` manifest whose engine is
+`mlx-audio`, run per job by `jobs/asr/qwen_worker.py` in its own process; no mlx-lm
+server is started, so the flags do not apply to it. The worker does reach mlx-lm's
+code: with `batch_size=1`, mlx-audio 0.5.5's `generate` runs `_generate_single_chunk`,
+which iterates `stream_generate`, which drives `mlx_lm.generate_step` (read in the
+Mac's llm env, `qwen3_asr.py` L1029 and L1071) — the function 1.0.28's fp32-logprob
+patch edits. That patch leaves the sampled token alone (the sampler reads the stock
+logprobs; only the RETURNED copy is float32), and mlx-audio discards what is returned
+(`for token, _ in self.stream_generate(...)`), so a transcript is unchanged. The cost
+is one extra float32 log-sum-exp over the vocabulary per generated token.

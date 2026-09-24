@@ -10,6 +10,12 @@
 # "flawless" by Owen's ear. The whisper manifests stay: apps switch first, and
 # whisper is retired in a later cut.
 #
+# THE LINEUP, 2026-09-24 (Owen's ruling, later that day): the asr job offers
+# EXACTLY three models and the caller picks — this one, `whisper-large-v3-turbo`
+# and `whisper-tiny`, each ONE id across both backends. Every other whisper size
+# (base, small, medium, large-v3, distil-large-v3) was removed, and the two
+# whispers that stayed lost their backend prefixes (`crucible/asrmodels.py`).
+#
 # ONE ID, BOTH MACHINES, ONE SET OF BYTES. Both blocks pin the official
 # checkpoint at the same revision, and the loader refuses a two-block manifest
 # that does not (crucible/asrmodels.py). vLLM reads these safetensors directly;

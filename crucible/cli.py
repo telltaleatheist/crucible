@@ -427,6 +427,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
         # connect quietly stopped working.
         print(f"crucible: pairing file NOT written: {exc}", file=sys.stderr)
 
+    # WEIGHTS PULLED UNDER A RENAMED ASR ID MOVE TO THE NEW ONE, before the
+    # first request can ask whether they are installed (Owen's asr lineup
+    # ruling, 2026-09-24; `jobs/asr.adopt_renamed_asr_weights`). Every line is
+    # printed, moved or left, so the log says what happened to the bytes.
+    from .jobs.asr import adopt_renamed_asr_weights
+
+    for line in adopt_renamed_asr_weights(config):
+        print(f"crucible: asr weights: {line}", file=sys.stderr)
+
     from .api import create_app  # imported here so `init`/`token` stay light
 
     app = create_app(config, backend)
@@ -2342,6 +2351,11 @@ def _doctor_report() -> dict[str, Any]:
         # nothing to compare — three states, not a boolean that would make "no
         # service" read as "they differ".
         "path": None,
+        # WEIGHTS NO MANIFEST OWNS (`catalog.stranded_weights`). Reported and
+        # never counted as a problem: bytes on a disk are not an unhealthy
+        # server, and deleting them is the operator's decision. Null when no
+        # config was readable, because there is then no home to look in.
+        "stranded_weights": None,
         "problems": [],
     }
 
@@ -2424,6 +2438,9 @@ def _doctor_report() -> dict[str, Any]:
                 f"backend_changed: config says {config.backend_kind}, this host is "
                 f"{backend.kind}"
             )
+
+    if config is not None:
+        report["stranded_weights"] = catalog.stranded_weights(config)
 
     if config is not None and backend is not None:
         _capability_report(report, config, backend)
@@ -2680,6 +2697,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         for entry in report["job_types"]:
             mark = "ready" if entry["ready"] else ("off" if not entry["enabled"] else "NOT READY")
             print(f"job {entry['name']}: {mark} — {entry['detail']}")
+        for entry in report["stranded_weights"] or ():
+            why = entry["note"] or (
+                f"no manifest in this build declares {entry['id']!r} on "
+                f"{entry['backend']}"
+            )
+            print(
+                f"note:    {entry['bytes'] / 1e9:.2f} GB of weights at "
+                f"{entry['path']} belong to nothing: {why}. Nothing will use "
+                "them; delete the directory to reclaim the space"
+            )
         for problem in report["problems"]:
             print(f"PROBLEM: {problem}", file=sys.stderr)
         print("healthy" if report["healthy"] else "unhealthy")

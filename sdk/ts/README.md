@@ -704,7 +704,7 @@ artifact `transcript.json`.
 ```ts
 const { blobId } = await crucible.upload(bytes, { filename: 'book.m4b' });
 const jobId = await crucible.asr({
-  model: 'faster-whisper-base',
+  model: 'whisper-large-v3-turbo',
   audio: { blobId },
   filename: 'book.m4b',
   language: 'en',
@@ -767,7 +767,7 @@ never substitutes a default. The ones clients have actually hit (Briefcase and b
 
 | Field | Who needs it | What `null` means, and what to do |
 |---|---|---|
-| `info().host.backend`, capability `backendKind` | a client choosing a per-backend module or model (mlx-whisper vs faster-whisper) | The server did not say which backend it is. Refuse the choice by name; don't guess. |
+| `info().host.backend`, capability `backendKind` | a client choosing a per-backend module or model (a model one backend alone declares, such as the Mac-only 8-bit 27B) | The server did not say which backend it is. Refuse the choice by name; don't guess. |
 | `job().chunksDone` | a resume | Unknown, **not** "none done". Treating it as `[]` re-renders chunks already on disk. Refuse the resume by name, or start over knowingly. |
 | decide `answers[q].logprobs` | a client summing evidence | Derivable. The server computes `logprobs[l] = ln(probabilities[l])` (`crucible/decide.py`), and `probabilities` is load-bearing and never null. A label whose probability is exactly 0 has a `null` logprob (`-Infinity` is not JSON). |
 | chat `usage` / `usage.promptTokens` | a client counting tokens | The engine behind the door did not report usage; some upstreams don't. It isn't 0. Count it yourself or refuse the count. |
