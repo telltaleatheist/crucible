@@ -29,7 +29,8 @@ CHECKED_IN = REPO_ROOT / lineup.FILE_NAME
 
 #: The three models Foundry runs locally today, and the one it cannot.
 WITH_LOCAL = [
-    "dots-ocr", "qwen3.5-0.8b", "qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b-4bit",
+    "dots-ocr", "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-9b",
+    "qwen3.8-27b-4bit",
 ]
 # The two `-vl` aliases (PHASE22 section 2.9) carry no [local] — the local
 # form is their base's (`weights_of_local`) — so they are omitted too. (A third,
@@ -46,9 +47,11 @@ CLASSES = {
     # All four since 2026-09-16: Owen dropped the translate/simplify/analysis
     # floor from the 27B to the 9B (docs/MODEL-CHOICE.md section 1).
     # `decide` on every qwen row since 2026-09-23 (PHASE22 section 2.9); it has
-    # no floor, so the two small tiers light it and nothing else. `generate`
+    # no floor, so the small tiers light it and nothing else (the 2B joined
+    # them 2026-09-24). `generate`
     # (2026-09-23) reads the same families on the same 9B floor as translate.
     "qwen3.5-0.8b": ["decide"],
+    "qwen3.5-2b": ["decide"],
     "qwen3.5-4b": ["decide"],
     "qwen3.5-9b": [
         "clean", "translate", "simplify", "analysis", "generate", "decide"
@@ -134,7 +137,7 @@ def test_the_generator_writes_a_file_its_own_check_accepts(tmp_path: Path) -> No
     wrote = _run("--verbose", "--output", str(target))
     assert wrote.returncode == 0, wrote.stderr
     assert "omitted qwen3.8-27b-8bit: no [local] table" in wrote.stdout
-    assert "5 model(s) with a local form, 3 omitted" in wrote.stdout
+    assert "6 model(s) with a local form, 3 omitted" in wrote.stdout
     assert lineup.content(json.loads(target.read_text(encoding="utf-8"))) == (
         lineup.content(_checked_in())
     )

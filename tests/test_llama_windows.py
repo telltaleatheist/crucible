@@ -159,7 +159,7 @@ def test_the_three_published_ggufs_are_named_and_the_fourth_is_absent() -> None:
         if manifest.supports(LLAMA_WINDOWS)
     }
     assert served == {
-        "dots-ocr", "qwen3.5-0.8b", "qwen3.5-4b", "qwen3.5-9b",
+        "dots-ocr", "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-9b",
         "qwen3.8-27b-4bit",
         # The vision forms of the two above (PHASE22 section 2.9): the same
         # GGUF plus the projector, in the base's folder.
@@ -170,7 +170,8 @@ def test_the_three_published_ggufs_are_named_and_the_fourth_is_absent() -> None:
 def test_every_llama_windows_row_names_the_one_file_it_is() -> None:
     """A GGUF repo holds twenty quantizations; a row pulls one."""
     for model_id in (
-        "dots-ocr", "qwen3.5-0.8b", "qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b-4bit",
+        "dots-ocr", "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-9b",
+        "qwen3.8-27b-4bit",
     ):
         spec = load_manifest(model_id).spec(LLAMA_WINDOWS)
         assert spec.engine == "llama-server"

@@ -332,8 +332,10 @@ def test_an_unknown_model_id_names_what_is_shipped(tmp_path: Path) -> None:
 # in the old ordering and after it in the real one ('4' < '8').
 # The two small tiers joined on 2026-09-23 for the decision door
 # (PHASE22-DECIDE.md section 2.9); they sort before the 9B ('0' < '4' < '9').
+# The 2B joined them on 2026-09-24 (Owen: "27b, 9b, 4b, all the way down to
+# 0.8b"), between the two ('0' < '2' < '4').
 SHIPPED = [
-    "dots-ocr", "qwen3.5-0.8b", "qwen3.5-4b", "qwen3.5-9b",
+    "dots-ocr", "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-9b",
     "qwen3.8-27b-4bit", "qwen3.8-27b-8bit",
 ]
 # The vision forms (PHASE22 section 2.9), aliases that share their base's
@@ -361,6 +363,9 @@ CONTEXTS = {
     # The 9B's argument for the 4B (the same `<=15B` client tier); the
     # 0.8B's own 8192, the context it was measured serving decisions at.
     "qwen3.5-4b": 16384,
+    # The 4B's argument again (2026-09-24): nobody has served the 2B, so the
+    # 0.8B's measured 8192 has no record here to carry.
+    "qwen3.5-2b": 16384,
     "qwen3.5-0.8b": 8192,
     "qwen3.8-27b-8bit": 12288,
     "qwen3.8-27b-4bit": 98304,
@@ -384,6 +389,7 @@ BACKENDS = {
     "dots-ocr": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-9b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-4b": ["cuda-linux", "llama-windows", "mlx-darwin"],
+    "qwen3.5-2b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-0.8b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.8-27b-8bit": ["mlx-darwin"],
     "qwen3.8-27b-4bit": ["cuda-linux", "llama-windows", "mlx-darwin"],
@@ -896,6 +902,7 @@ LOCAL_KINDS_SHIPPED = {
     "dots-ocr": "gguf",
     # The decision tiers (2026-09-23), bf16 tags like the 9B's.
     "qwen3.5-0.8b": "ollama",
+    "qwen3.5-2b": "ollama",
     "qwen3.5-4b": "ollama",
     "qwen3.5-9b": "ollama",
     "qwen3.8-27b-4bit": "ollama",

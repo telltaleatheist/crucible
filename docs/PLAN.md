@@ -34,7 +34,9 @@ which the engine choice, the image-flag rules and the door's `model_text_only` n
 the small tiers read images on cuda-linux and llama-windows and stay text on the Mac's
 mlx-lm. **Qwen3.8 exists on the hub only as 27B, Flash-Next and 2.4T-A95B (+ FP8s) — listed
 2026-09-23 — so there are no 3.8 small tiers to add; do not look again until Qwen publishes
-one.** Qwen3.5 also publishes a 2B (not added).
+one.** Qwen3.5 also publishes a 2B — added 2026-09-24 as `qwen3.5-2b` (PHASE22 §2.9),
+bf16 on every backend including a BF16 GGUF on llama-windows (Owen: *"full quant when
+possible"*).
 
 *Vision on the 9B and the 27Bs — one copy on disk, two fit rows (2026-09-23, §2.9, same
 branch, not cut).* Owen: *"One copy on disk, two fit rows in the catalog — i think this is a
