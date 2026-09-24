@@ -742,10 +742,11 @@ def test_the_capability_route_answers_every_class_and_its_reason(
     # Owen, 2026-09-13: a job must never be named as a different job.
     # `denoise` is its own class despite sharing the rvc ENV, because a class is
     # about what the card can hold and a 913 MB separator and a 2.5 GiB urvc
-    # stack are different arithmetic.
+    # stack are different arithmetic. `generate` (2026-09-23) is the generic
+    # chat-shaped act, separate for the same naming reason.
     assert names == {
-        "align", "analysis", "asr", "clean", "decide", "denoise", "echo", "pages",
-        "rvc", "simplify", "translate", "tts",
+        "align", "analysis", "asr", "clean", "decide", "denoise", "echo",
+        "generate", "pages", "rvc", "simplify", "translate", "tts",
     }
     picked = {row["capability"]: row["selected"] for row in record["classes"]}
     assert picked["translate"] == picked["simplify"] == picked["analysis"], picked
@@ -794,9 +795,10 @@ def test_the_route_says_which_job_type_each_class_feeds_and_what_builds_it(
     assert sorted(classed) == sorted(row["capability"] for row in record["classes"])
     assert len(classed) == len(set(classed))
 
-    # `decide` since 2026-09-23 (PHASE22-DECIDE.md section 2.9), in CLASSES order.
+    # `decide` since 2026-09-23 (PHASE22-DECIDE.md section 2.9), and
+    # `generate` the same day, in CLASSES order.
     assert rows["llm"]["classes"] == [
-        "clean", "translate", "simplify", "analysis", "decide", "pages"
+        "clean", "translate", "simplify", "analysis", "generate", "decide", "pages"
     ]
     # Almost always itself. `denoise` shares `rvc`'s env, so a page that offered
     # it an Install button of its own would draw a control the task door refuses
@@ -926,3 +928,251 @@ def test_a_routed_class_summarises_where_the_work_goes() -> None:
     assert row.enabled is True
     assert row.summary == "sends this work to anthropic"
     assert "cannot" not in row.summary
+
+
+# ------------------------------------------ `generate`, and a client-sized fit
+#
+# Owen, 2026-09-23: *"if the only difference is the context limit then make it
+# one class and give it the ability to set the context limit"*, and *"context
+# limit can be set to 8k tokens by default, and it can request higher …
+# requesting higher than that throws an error back to the app thats making the
+# call"*.
+
+
+def test_generate_is_one_routable_client_sized_class_on_the_9b_floor() -> None:
+    entry = BY_NAME["generate"]
+    assert entry.job_type == "llm"
+    assert entry.routable is True
+    assert entry.client_sized is True
+    assert entry.min_params_b == capability.NINE_B_FLOOR == 9
+    assert entry.work is not None
+    assert (entry.work.tokens, entry.work.concurrency) == (8192, 1)
+    assert entry.work.tokens == capability.GENERATE_DEFAULT_TOKENS
+    # ContentStudio, its first measured user, is quoted as an example of asking
+    # for more, never as the definition.
+    assert "40960" in entry.work.source
+    assert "ContentStudio" not in entry.purpose + entry.plainly
+    # It sits after `analysis` and before `decide`, and it is the ONLY class a
+    # client may size: every other class's context is a ruling about its act.
+    names = [c.name for c in CLASSES]
+    assert names.index("analysis") + 1 == names.index("generate")
+    assert names.index("generate") + 1 == names.index("decide")
+    assert [c.name for c in CLASSES if c.client_sized] == ["generate"]
+    assert "generate" in capability.ROUTABLE_CLASSES
+    # The 4B and 0.8B are below its floor on every backend.
+    for kind in ("cuda-linux", "mlx-darwin", "llama-windows"):
+        ids = {c.id for c in entry.candidates(kind)}
+        assert ids and not ids & {"qwen3.5-4b", "qwen3.5-0.8b"}, (kind, ids)
+
+
+def test_a_ceiling_is_the_smaller_of_what_is_served_and_what_memory_affords() -> None:
+    """Both halves are facts Crucible already owns; nothing here is typed.
+
+    On the 3090 Ti the served half binds (`context_for` is 16384 on
+    cuda-linux), while the memory half is what the card could hold — and the
+    27B's memory half shrinks as concurrency grows until it binds instead.
+    """
+    budget = available_bytes(THREE_NINETY, CUDA_RESERVE)
+    one = {
+        c.model: c
+        for c in capability.context_ceilings(
+            BY_NAME["generate"], "cuda-linux", available_bytes=budget, concurrency=1
+        )
+    }
+    nine = one["qwen3.5-9b"]
+    assert nine.served_context == 16384
+    assert nine.memory_context is not None and nine.memory_context > 16384
+    assert (nine.tokens, nine.bound_by) == (16384, "served")
+
+    two = {
+        c.model: c
+        for c in capability.context_ceilings(
+            BY_NAME["generate"], "cuda-linux", available_bytes=budget, concurrency=2
+        )
+    }
+    big = two["qwen3.8-27b-4bit"]
+    assert big.bound_by == "memory"
+    assert big.tokens == big.memory_context < big.served_context
+
+
+def _generate_record(backend_kind: str, total: int, allowance: int, vendor: str):
+    return capability.record(
+        backend_kind,
+        total_bytes=total,
+        desktop_allowance_bytes=allowance,
+        decisions=capability.decide_all(
+            backend_kind,
+            total_bytes=total,
+            desktop_allowance_bytes=allowance,
+            gpu_vendor=vendor,
+            chosen={},
+        ),
+        routes={},
+    )
+
+
+def _rows(body) -> dict[str, dict]:
+    return {row["capability"]: row for row in body.json()["classes"]}
+
+
+def test_every_row_echoes_its_work_and_generate_its_ceilings(make_client, auth) -> None:
+    decided = _generate_record("cuda-linux", THREE_NINETY, CUDA_RESERVE, "nvidia")
+    with make_client(capability=decided) as instance:
+        body = instance.get("/v1/capability", headers=auth)
+    assert body.status_code == 200, body.text
+    rows = _rows(body)
+    assert rows["generate"]["work"]["tokens"] == 8192
+    assert rows["generate"]["work"]["concurrency"] == 1
+    assert rows["generate"]["work"]["from"] == "default"
+    assert rows["translate"]["work"]["from"] == "default"
+    # Not token-shaped: no work to state, and never an invented one.
+    assert rows["tts"]["work"] is None
+    ceilings = {c["model"]: c for c in rows["generate"]["context_ceilings"]}
+    assert ceilings["qwen3.5-9b"]["tokens"] == 16384
+    assert ceilings["qwen3.5-9b"]["served_context"] == 16384
+    # Only a client-sized row has ceilings; every other row says null.
+    assert rows["translate"]["context_ceilings"] is None
+    assert rows["tts"]["context_ceilings"] is None
+
+
+def test_the_fit_follows_the_clients_stated_context(make_client, auth) -> None:
+    """A size the 27B serves picks the 27B; one only the 9B serves picks the 9B.
+
+    At 16384 tokens x 2 in flight the 27B-4bit's KV no longer fits the 3090 Ti
+    beside its weights, while the 9B's does — so the same class on the same card
+    selects a different model because the CLIENT said how it will use it.
+    """
+    decided = _generate_record("cuda-linux", THREE_NINETY, CUDA_RESERVE, "nvidia")
+    with make_client(capability=decided) as instance:
+        small = instance.get(
+            "/v1/capability?class=generate&context_tokens=4096", headers=auth
+        )
+        wide = instance.get(
+            "/v1/capability?class=generate&context_tokens=16384&concurrency=2",
+            headers=auth,
+        )
+        after = instance.get("/v1/capability", headers=auth)
+    assert small.status_code == 200, small.text
+    row = _rows(small)["generate"]
+    assert row["enabled"] is True and row["selected"] == "qwen3.8-27b-4bit"
+    assert row["work"]["from"] == "request"
+    assert (row["work"]["tokens"], row["work"]["concurrency"]) == (4096, 1)
+
+    assert wide.status_code == 200, wide.text
+    row = _rows(wide)["generate"]
+    assert row["enabled"] is True and row["selected"] == "qwen3.5-9b", row
+    assert (row["work"]["tokens"], row["work"]["concurrency"]) == (16384, 2)
+    # The ceilings are published at the concurrency asked about.
+    assert {c["concurrency"] for c in row["context_ceilings"]} == {2}
+
+    # A request re-decides for its caller alone; the record is untouched.
+    row = _rows(after)["generate"]
+    assert row["work"]["from"] == "default" and row["work"]["tokens"] == 8192
+
+
+def test_a_context_above_the_ceiling_is_refused_by_name_and_never_clamped(
+    make_client, auth
+) -> None:
+    decided = _generate_record("cuda-linux", THREE_NINETY, CUDA_RESERVE, "nvidia")
+    with make_client(capability=decided) as instance:
+        body = instance.get(
+            "/v1/capability?class=generate&context_tokens=40960", headers=auth
+        )
+    assert body.status_code == 400, body.text
+    error = body.json()["error"]
+    assert error["code"] == "context_over_limit"
+    details = error["details"]
+    assert details["requested"] == {"tokens": 40960, "concurrency": 1}
+    # The highest ceiling among the candidates, the model it belongs to, and
+    # where each half came from.
+    assert details["ceiling"]["tokens"] == 16384
+    assert details["ceiling"]["model"] in {"qwen3.8-27b-4bit", "qwen3.5-9b"}
+    assert details["ceiling"]["bound_by"] == "served"
+    assert details["ceiling"]["served_context_source"]
+    assert "40960" in error["message"] and "16384" in error["message"]
+
+
+def test_a_mac_serves_what_the_card_cannot(make_client, auth) -> None:
+    """The ceiling is PER HOST: the Studio's 27B-4bit is served at 98304."""
+    decided = _generate_record("mlx-darwin", STUDIO, MAC_RESERVE, "apple")
+    with make_client(capability=decided, backend=FAKE_MAC_BACKEND) as instance:
+        body = instance.get(
+            "/v1/capability?class=generate&context_tokens=40960", headers=auth
+        )
+    assert body.status_code == 200, body.text
+    row = _rows(body)["generate"]
+    assert row["enabled"] is True and row["selected"] == "qwen3.8-27b-4bit", row
+    ceilings = {c["model"]: c for c in row["context_ceilings"]}
+    assert ceilings["qwen3.8-27b-4bit"]["tokens"] == 98304
+
+
+def test_a_chosen_model_is_the_one_whose_ceiling_governs() -> None:
+    """An app's own choice is what will run, so its ceiling is the limit."""
+    entry = BY_NAME["generate"]
+    budget = available_bytes(STUDIO, MAC_RESERVE)
+    work = capability.WorkingContext(tokens=40960, concurrency=1, source="test")
+    capability.check_ceiling(
+        entry, "mlx-darwin", available_bytes=budget, work=work, chosen=None
+    )
+    with pytest.raises(ApiError) as caught:
+        capability.check_ceiling(
+            entry,
+            "mlx-darwin",
+            available_bytes=budget,
+            work=work,
+            chosen="qwen3.5-9b",
+        )
+    assert caught.value.code == "context_over_limit"
+    assert caught.value.details["ceiling"]["model"] == "qwen3.5-9b"
+
+
+def test_a_host_that_cannot_hold_the_weights_is_not_a_length_refusal() -> None:
+    """`MemoryTerms.max_context`: zero is its own answer, never "too long"."""
+    work = capability.WorkingContext(tokens=4096, concurrency=1, source="test")
+    capability.check_ceiling(
+        BY_NAME["generate"],
+        "cuda-linux",
+        available_bytes=available_bytes(SIX_GIG, CUDA_RESERVE),
+        work=work,
+        chosen=None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("query", "code"),
+    [
+        ("class=translate&context_tokens=4096", "capability_not_client_sized"),
+        ("class=tts&concurrency=2", "capability_not_client_sized"),
+        ("context_tokens=4096", "capability_class_required"),
+        ("class=generat&context_tokens=4096", "unknown_capability"),
+        ("class=generate&context_tokens=0", "invalid_working_context"),
+        ("class=generate&context_tokens=-5", "invalid_working_context"),
+        ("class=generate&context_tokens=8k", "invalid_working_context"),
+        ("class=generate&concurrency=0", "invalid_working_context"),
+        ("class=generate&concurrency=1.5", "invalid_working_context"),
+    ],
+)
+def test_a_bad_size_is_refused_by_name(make_client, auth, query, code) -> None:
+    decided = _generate_record("cuda-linux", THREE_NINETY, CUDA_RESERVE, "nvidia")
+    with make_client(capability=decided) as instance:
+        body = instance.get(f"/v1/capability?{query}", headers=auth)
+    assert body.status_code == 400, body.text
+    assert body.json()["error"]["code"] == code
+
+
+def test_a_record_that_predates_generate_says_so_rather_than_sizing_nothing(
+    make_client, auth
+) -> None:
+    full = _generate_record("cuda-linux", THREE_NINETY, CUDA_RESERVE, "nvidia")
+    older = CapabilityRecord(
+        backend_kind=full.backend_kind,
+        total_bytes=full.total_bytes,
+        desktop_allowance_bytes=full.desktop_allowance_bytes,
+        rows=tuple(row for row in full.rows if row.capability != "generate"),
+    )
+    with make_client(capability=older) as instance:
+        body = instance.get(
+            "/v1/capability?class=generate&context_tokens=4096", headers=auth
+        )
+    assert body.status_code == 503, body.text
+    assert body.json()["error"]["code"] == "capability_undecided"

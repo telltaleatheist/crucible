@@ -2134,6 +2134,61 @@ export interface CapabilityRow {
    * when they route back.
    */
   readonly route: 'local' | 'upstream';
+  /**
+   * The working context this row's fit was computed for, or `null` for a
+   * class that is not token-shaped (a voice, an aligner). `from` says whose
+   * numbers they are: `'default'` is the class's own, `'request'` is the
+   * `contextTokens` / `concurrency` this call stated.
+   */
+  readonly work: CapabilityWork | null;
+  /**
+   * Every candidate's context ceiling on this host, at `work.concurrency` —
+   * set on a CLIENT-SIZED class (`generate`), `null` on every other. Read it
+   * before asking for a size: a size above the highest is refused
+   * `context_over_limit`, never clamped.
+   */
+  readonly contextCeilings: readonly ContextCeiling[] | null;
+}
+
+/** One row's working context, and where it came from. */
+export interface CapabilityWork {
+  readonly tokens: number;
+  readonly concurrency: number;
+  /** Prose: whose number this is. Never empty. */
+  readonly source: string;
+  readonly from: 'default' | 'request';
+}
+
+/**
+ * The longest request one candidate can serve on this host: the smaller of
+ * what its manifest serves on this backend (the engine's `--max-model-len`,
+ * the resident row's `max_model_len`) and what this host's memory affords at
+ * `concurrency` in flight.
+ */
+export interface ContextCeiling {
+  readonly model: string;
+  readonly tokens: number;
+  readonly boundBy: 'served' | 'memory';
+  readonly servedContext: number;
+  /** `null` where the model's block is not taken apart into memory terms. */
+  readonly memoryContext: number | null;
+  readonly concurrency: number;
+}
+
+/**
+ * `capability()`'s sizing, for a CLIENT-SIZED class only (`generate`). The
+ * server refuses a size for any other class `capability_not_client_sized`, a
+ * size with no `class` `capability_class_required`, a non-positive or
+ * fractional value `invalid_working_context`, and a context above this host's
+ * ceiling `context_over_limit` — all by name, all 400.
+ */
+export interface CapabilitySizing {
+  /** The class to size, e.g. `'generate'`. */
+  readonly class: string;
+  /** Tokens per request. Omitted: the class default. */
+  readonly contextTokens?: number;
+  /** Requests in flight at once. Omitted: the class default. */
+  readonly concurrency?: number;
 }
 
 /**
@@ -2631,7 +2686,10 @@ export interface SettingsDocument {
   readonly localModels: Readonly<Record<string, string | null>>;
   /** Empty when the engine has not measured its card yet; never absent. */
   readonly localModelChoices: Readonly<Record<string, readonly LocalModelChoice[]>>;
-  /** One entry per routable class: `clean`, `translate`, `simplify`, `analysis`. */
+  /**
+   * One entry per routable class: `clean`, `translate`, `simplify`,
+   * `analysis`, `generate`. Read off the server's table, never this list.
+   */
   readonly routes: Readonly<Record<string, RouteSetting>>;
   readonly upstreams: Readonly<Record<UpstreamName, UpstreamSetting>>;
   readonly desktopAllowanceBytes: number;

@@ -877,10 +877,18 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
 
         WHY A CLASS AND NOT A JOB TYPE. `enable_llm` is one boolean and Owen
         ruled translation binary per server, so `clean` and `translate` have to be
-        able to disagree. They are separate classes here for that reason and no
-        other; `simplify` and `analysis` are NOT classes, because they select the
-        same model `translate` does and a capability axis that nothing selects on
-        is a field that will drift (Owen, 2026-09-13).
+        able to disagree. `simplify` and `analysis` became classes of their own
+        too, on the naming ruling (Owen, 2026-09-13: a job is never reported
+        as a different job), and `generate` is the generic chat-shaped act
+        whose working context the CLIENT may state (`?class=generate&
+        context_tokens=&concurrency=`, see `capability.served_rows`).
+
+        EVERY ROW STATES ITS WORK: `work` is the working context the fit was
+        computed for, with `from: "default" | "request"`, and a client-sized
+        row adds `context_ceilings` — each candidate's longest servable
+        request here, the smaller of what its manifest serves on this backend
+        (the engine's `--max-model-len`) and what this host's memory affords.
+        A size above the ceiling is `400 context_over_limit`, never clamped.
 
         `enabled: false` IS AN ANSWER, not an error. A server that cannot
         translate says so with the number that decided it, and a client should be
@@ -928,7 +936,26 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         # because `crucible/settings.py` rewrites the record from the routes on
         # every write that touches one; asking the routes is what makes them
         # unable to disagree if a record ever went stale (R1).
+        # A CLIENT MAY SIZE A CLIENT-SIZED CLASS (`?class=generate&
+        # context_tokens=40960&concurrency=1`), because the client is the one
+        # that knows its request sizes and this server is the one that knows
+        # its card (Owen, 2026-09-23: *"give it the ability to set the context
+        # limit"*). Read off the raw query rather than as typed parameters so a
+        # bad value is this server's named refusal (`invalid_working_context`)
+        # and not the framework's 422. `capability.served_rows` owns all of it:
+        # the validation, the live decision, the ceiling, and the `work` echo
+        # every row now carries.
+        query = request.query_params
         document = record.to_dict()
+        document["classes"] = capability_classes.served_rows(
+            record,
+            gpu_vendor=backend.gpu.vendor,
+            chosen={entry.capability: entry.model for entry in live.local_models},
+            routes={entry.capability: entry.model for entry in live.routes},
+            capability_class=query.get("class"),
+            context_tokens=query.get(capability_classes.CONTEXT_TOKENS_PARAM),
+            concurrency=query.get(capability_classes.CONCURRENCY_PARAM),
+        )
         for row in document["classes"]:
             row["route"] = (
                 "upstream"

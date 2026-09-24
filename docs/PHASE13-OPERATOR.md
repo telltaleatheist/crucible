@@ -210,7 +210,7 @@ So the route now answers the record **plus** one derived key:
 
 ```json
 "job_types": [
-  { "job_type": "llm", "classes": ["clean","translate","simplify","analysis","pages"],
+  { "job_type": "llm", "classes": ["clean","translate","simplify","analysis","generate","decide","pages"],
     "installer": "llm", "narrator_engines": [] },
   { "job_type": "tts", "classes": ["tts"], "installer": "tts",
     "narrator_engines": ["higgs-v3"] },

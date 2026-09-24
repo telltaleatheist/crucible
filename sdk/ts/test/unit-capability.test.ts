@@ -73,6 +73,8 @@ const RECORD = {
       reason: 'always available: the test job type; it never touches the accelerator',
       shortfall_bytes: 0,
       route: 'local',
+      work: null,
+      context_ceilings: null,
     },
     {
       capability: 'clean',
@@ -81,6 +83,8 @@ const RECORD = {
       reason: 'qwen3.5-9b fits: it needs 19.0 GiB and there is 21.0 GiB available',
       shortfall_bytes: 0,
       route: 'local',
+      work: null,
+      context_ceilings: null,
     },
     {
       capability: 'translate',
@@ -89,6 +93,8 @@ const RECORD = {
       reason: 'qwen3.8-27b-4bit fits: it needs 20.1 GiB and there is 21.0 GiB available',
       shortfall_bytes: 0,
       route: 'local',
+      work: null,
+      context_ceilings: null,
     },
     {
       capability: 'tts',
@@ -99,6 +105,8 @@ const RECORD = {
         '21.0 GiB available — short by 3.0 GiB. Higgs v3 is not quantized and will not be.',
       shortfall_bytes: 3 * GIB,
       route: 'local',
+      work: null,
+      context_ceilings: null,
     },
   ],
 };
@@ -206,4 +214,75 @@ test('a 5xx that is not the undecided refusal stays a plain server error', async
     );
     return true;
   });
+});
+
+// ------------------------------------------------------ a client-sized class
+
+const SIZED = {
+  ...RECORD,
+  classes: [
+    {
+      capability: 'generate',
+      enabled: true,
+      selected: 'qwen3.5-9b',
+      reason: 'qwen3.5-9b fits',
+      shortfall_bytes: 0,
+      route: 'local',
+      work: { tokens: 16384, concurrency: 2, source: 'stated by the client', from: 'request' },
+      context_ceilings: [
+        {
+          model: 'qwen3.8-27b-4bit',
+          tokens: 11630,
+          bound_by: 'memory',
+          served_context: 16384,
+          served_context_source: 'the manifest',
+          memory_context: 11630,
+          memory_context_source: 'this host',
+          concurrency: 2,
+        },
+      ],
+    },
+  ],
+};
+
+test('capability() sizes a client-sized class on the query and reads the echo', async () => {
+  answers(200, SIZED);
+  const record = await client().capability(
+    {},
+    { class: 'generate', contextTokens: 16384, concurrency: 2 },
+  );
+  assert.equal(lastPath, '/v1/capability?class=generate&context_tokens=16384&concurrency=2');
+  const row = record.classes[0]!;
+  assert.deepEqual(row.work, {
+    tokens: 16384,
+    concurrency: 2,
+    source: 'stated by the client',
+    from: 'request',
+  });
+  assert.deepEqual(row.contextCeilings, [
+    {
+      model: 'qwen3.8-27b-4bit',
+      tokens: 11630,
+      boundBy: 'memory',
+      servedContext: 16384,
+      memoryContext: 11630,
+      concurrency: 2,
+    },
+  ]);
+});
+
+test('without sizing no query is sent, and a fractional size never leaves the client', async () => {
+  answers(200, RECORD);
+  await client().capability();
+  assert.equal(lastPath, '/v1/capability');
+  await assert.rejects(
+    client().capability({}, { class: 'generate', contextTokens: 2.5 }),
+    /context_tokens is 2.5/,
+  );
+});
+
+test('a row with no work or ceilings key is a protocol error, not a default', async () => {
+  const { work: _work, ...bare } = SIZED.classes[0]!;
+  answers(200, { ...RECORD, classes: [bare] });
+  await assert.rejects(client().capability(), CrucibleProtocolError);
 });

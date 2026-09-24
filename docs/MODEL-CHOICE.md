@@ -127,8 +127,9 @@ the warning shows.
 > *"if nothing fits their card, it should give them the option of using api keys
 > for claude or openai"*
 
-This exists. `CapabilityClass.routable` is true for exactly the four chat-shaped
-`llm` classes — `clean`, `translate`, `simplify`, `analysis` — and a routed class
+This exists. `CapabilityClass.routable` is true for exactly the five chat-shaped
+`llm` classes — `clean`, `translate`, `simplify`, `analysis` and (since
+2026-09-23) `generate` — and a routed class
 keeps its local answer whole underneath (`LOCAL_ANSWER_PREFIX`: *"the local
 answer would be: …"*), so routing back loses nothing. Keys live IN the engine and
 apps write them through `/v1/settings` (PHASE15-HOST.md; the apps store no key).

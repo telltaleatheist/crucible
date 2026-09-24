@@ -1774,6 +1774,41 @@ def test_an_unknown_act_is_refused_BEFORE_the_work_rather_than_mislabelled(
     assert "simplify" in error["message"] and "translate" in error["message"]
 
 
+def test_generate_is_an_act_and_a_near_miss_is_still_refused(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """`generate` is a capability class, so it is an act.
+
+    The act vocabulary is read off `capability.CLASSES` (`inflight.ACT_NAMES`),
+    so adding the class is what admits the header — and a name nothing knows
+    is refused exactly as before.
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    refused = llm_client.post(
+        "/v1/openai/chat/completions",
+        headers={**auth, "X-Crucible-Act": "generat"},
+        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert refused.status_code == 400, refused.text
+    error = refused.json()["error"]
+    assert error["code"] == "unknown_act"
+    assert "'generat'" in error["message"]
+    assert "generate" in error["details"]["known"]
+
+    # Refused BEFORE the work, so the model is still resident for the real one.
+    accepted = llm_client.post(
+        "/v1/openai/chat/completions",
+        headers={**auth, "X-Crucible-Act": "generate"},
+        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert accepted.status_code == 200, accepted.text
+
+
 def test_a_chat_with_no_act_header_records_null_rather_than_a_guess(
     llm_client: TestClient,
     auth: dict[str, str],

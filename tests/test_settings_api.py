@@ -96,7 +96,9 @@ def test_the_document_names_every_class_and_every_upstream_configured_or_not(
     """
     body = settings_client.get("/v1/settings", headers=auth).json()
     assert set(body["routes"]) == set(capability.ROUTABLE_CLASSES)
-    assert set(body["routes"]) == {"clean", "translate", "simplify", "analysis"}
+    assert set(body["routes"]) == {
+        "clean", "translate", "simplify", "analysis", "generate"
+    }
     for row in body["routes"].values():
         assert row["route"] == "local"
     # The local selection is carried so a window can draw "translate: local,

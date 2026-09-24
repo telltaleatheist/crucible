@@ -73,6 +73,7 @@ import json
 import mimetypes
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import wave
@@ -529,7 +530,21 @@ def cmd_capability(connection: Connection, args: argparse.Namespace) -> int:
     The query parameter is the server's (`?accelerator_probe=true`), and it
     costs an `nvidia-smi` — which is why it is a flag and not the default.
     """
-    query = "?accelerator_probe=true" if args.accelerator_probe else ""
+    params: list[tuple[str, str]] = []
+    if args.accelerator_probe:
+        params.append(("accelerator_probe", "true"))
+    # A CLIENT-SIZED CLASS (`generate`) is decided at the size the caller
+    # states, for this call alone. Passed through as typed: the server is the
+    # one that validates and refuses by name (`capability_class_required`,
+    # `capability_not_client_sized`, `invalid_working_context`,
+    # `context_over_limit`), so this door has no second copy of the rules.
+    if args.capability_class is not None:
+        params.append(("class", args.capability_class))
+    if args.context_tokens is not None:
+        params.append(("context_tokens", args.context_tokens))
+    if args.concurrency is not None:
+        params.append(("concurrency", args.concurrency))
+    query = "" if not params else "?" + urllib.parse.urlencode(params)
     emit(call(connection, "GET", "/v1/capability" + query))
     return EXIT_OK
 
@@ -1234,6 +1249,18 @@ def add_parser(subparsers: Any) -> None:
     capability.add_argument(
         "--accelerator-probe", action="store_true",
         help="pay for a live nvidia-smi probe rather than reading the record",
+    )
+    capability.add_argument(
+        "--class", dest="capability_class", default=None,
+        help="the client-sized class to size (generate)",
+    )
+    capability.add_argument(
+        "--context-tokens", default=None,
+        help="tokens per request for --class; above this host's ceiling is refused",
+    )
+    capability.add_argument(
+        "--concurrency", default=None,
+        help="requests in flight at once for --class",
     )
     capability.set_defaults(api_func=cmd_capability)
 

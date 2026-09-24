@@ -71,6 +71,9 @@ import {
   type Capability,
   type CapabilityRecord,
   type CapabilityRow,
+  type CapabilitySizing,
+  type CapabilityWork,
+  type ContextCeiling,
   type CatalogRow,
   type ChatMessage,
   type ChatOptions,
@@ -440,9 +443,24 @@ export class CrucibleClient {
    * would read as "probed, and nothing fit". That is the operator's to fix
    * (`crucible capability --write`), and {@link info} still says what the
    * server offers meanwhile.
+   *
+   * `sizing` states the working context for a CLIENT-SIZED class
+   * (`generate`) — the app is the one that knows its request sizes. That row
+   * is then decided for THIS call alone, at that size, and says so
+   * (`work.from === 'request'`); nothing is written on the server. A size
+   * above the host's ceiling is thrown as the server's 400
+   * `context_over_limit`, which names the ceiling and the model it was
+   * computed for.
    */
-  async capability(options: ProbeOptions = {}): Promise<CapabilityRecord> {
-    const body = await this.#json('/v1/capability', probeInit(options), 'capability');
+  async capability(
+    options: ProbeOptions = {},
+    sizing?: CapabilitySizing,
+  ): Promise<CapabilityRecord> {
+    const body = await this.#json(
+      '/v1/capability' + capabilityQuery(sizing),
+      probeInit(options),
+      'capability',
+    );
     return readCapabilityRecord(body);
   }
 
@@ -2436,6 +2454,31 @@ function readCapability(
 }
 
 /**
+ * `capability()`'s query string. The server validates every value and refuses
+ * by name; this only refuses what cannot be put on a URL as a whole number, so
+ * `2.5` is not silently sent as `2`.
+ */
+function capabilityQuery(sizing: CapabilitySizing | undefined): string {
+  if (sizing === undefined) return '';
+  const params = new URLSearchParams({ class: requireText(sizing.class, 'class') });
+  for (const [name, value] of [
+    ['context_tokens', sizing.contextTokens],
+    ['concurrency', sizing.concurrency],
+  ] as const) {
+    if (value === undefined) continue;
+    if (!Number.isInteger(value)) {
+      throw new CrucibleConfigError(
+        name,
+        `${name} is ${String(value)}; it is a whole number, and the server ` +
+          'refuses anything below 1 by name.',
+      );
+    }
+    params.set(name, String(value));
+  }
+  return `?${params.toString()}`;
+}
+
+/**
  * `GET /v1/capability`'s record — `CapabilityRecord.to_dict()` in
  * `crucible/config.py`. The rows arrive under `classes`, which is the wire's
  * name for them and stays the member's: they ARE the capability classes.
@@ -2516,7 +2559,36 @@ function readCapabilityRow(
     reason: str(entry, 'reason', where),
     shortfallBytes: num(entry, 'shortfall_bytes', where),
     route,
+    work: readCapabilityWork(nullableObject(entry, 'work', where), `${where}.work`),
+    contextCeilings: readContextCeilings(entry, where),
   };
+}
+
+function readCapabilityWork(entry: Json | null, where: string): CapabilityWork | null {
+  if (entry === null) return null;
+  return {
+    tokens: num(entry, 'tokens', where),
+    concurrency: num(entry, 'concurrency', where),
+    source: str(entry, 'source', where),
+    from: oneOf(str(entry, 'from', where), ['default', 'request'] as const, `${where}.from`),
+  };
+}
+
+function readContextCeilings(entry: Json, where: string): ContextCeiling[] | null {
+  const raw = field(entry, 'context_ceilings', where);
+  if (raw === null) return null;
+  return asArray(raw, `${where}.context_ceilings`).map((item, index) => {
+    const at = `${where}.context_ceilings[${index}]`;
+    const ceiling = asObject(item, at);
+    return {
+      model: str(ceiling, 'model', at),
+      tokens: num(ceiling, 'tokens', at),
+      boundBy: oneOf(str(ceiling, 'bound_by', at), ['served', 'memory'] as const, `${at}.bound_by`),
+      servedContext: num(ceiling, 'served_context', at),
+      memoryContext: nullableNum(ceiling, 'memory_context', at),
+      concurrency: num(ceiling, 'concurrency', at),
+    };
+  });
 }
 
 // ---------------------------------------------------------------- settings

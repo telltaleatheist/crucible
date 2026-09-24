@@ -103,8 +103,8 @@ servers is per app). The pairing line. Coordinate-on-connect (PHASE14 4a).
 
 | word | meaning |
 |---|---|
-| **class** | a capability class from `crucible/capability.py`: `echo clean translate simplify analysis pages tts asr align rvc denoise`. Unchanged. |
-| **route** | where a class's work runs on THIS server: `local` (the selected local model, as today) or an **upstream**. Only the four `llm` classes (`clean translate simplify analysis`) can route upstream in this phase; every other class is `local` and refuses anything else (`route_not_routable`). |
+| **class** | a capability class from `crucible/capability.py`: `echo clean translate simplify analysis generate decide pages tts asr align rvc denoise` (`decide` and `generate` added 2026-09-23). |
+| **route** | where a class's work runs on THIS server: `local` (the selected local model, as today) or an **upstream**. Only the chat-shaped `llm` classes (`clean translate simplify analysis`, and `generate` since 2026-09-23 — `capability.ROUTABLE_CLASSES` is the list) can route upstream; every other class is `local` and refuses anything else (`route_not_routable`). |
 | **upstream** | an HTTP chat-completions service the server forwards to on the operator's account: `anthropic`, `openai`, `ollama`. Exactly these three names. An upstream is configured (has what it needs to be called) or not. |
 | **upstream model** | a model id of the form `<upstream>/<model>`, e.g. `anthropic/claude-sonnet-5`, `openai/gpt-5`, `ollama/qwen3.5:9b`. The slash is what tells a chat request apart from a local model id; a local model id never contains `/` (checked at manifest load — `manifest_model_id_slash`). |
 | **host mode** | a Crucible server running natively on Windows, `backend_kind = "llama-windows"`: the llm classes and `pages` served by `llama-server` children from GGUF weights (3.10), plus `echo`, the settings door and the upstream routes. The Python job types (`tts asr align rvc denoise`) need WSL2 and say so. |

@@ -607,3 +607,79 @@ such a class.
 Inside the owner the same rule holds: two manifests flooring one class is a `LineupError` naming
 both, never a pick. "Smallest wins" cannot tell a legitimate smaller floor from one that
 contradicts a ruling, which is precisely how this was found.
+
+## 8. `generate`: the one class a client sizes (2026-09-23)
+
+**The ruling.** ContentStudio (YouTube metadata tooling) was the first client whose work was
+none of the book acts, and it was first proposed as two classes, `write` and `rewrite`, that
+differed only in how much context they reserve. Owen:
+
+> *"if the only difference is the context limit then make it one class and give it the ability
+> to set the context limit"*
+
+and, the same day, on what that limit is:
+
+> *"context limit can be set to 8k tokens by default, and it can request higher. maybe crucible
+> should have a context limit number for each system it's on. if its running on the mac, the
+> context limit for the 27b is nearly as high as the model itself can handle. if its running on
+> the pc gpu, its context limit is around 98k. requesting higher than that throws an error back
+> to the app thats making the call"*
+
+His standing standard behind both: Crucible is task-agnostic, a GPU orchestrator. It adds a verb
+of its own only when a task needs handling of its own; everything around the call belongs to the
+app.
+
+**The class.** `generate` is open-ended text generation for any app, in `crucible/capability.py`
+between `analysis` and `decide`: `llm`, routable, the 9B floor, `qwen3.8` + `qwen3.5` candidates
+like translate, and a default working context of **8192 x 1**
+(`GENERATE_DEFAULT_TOKENS`). ContentStudio's titles, descriptions, chapters, summaries, scrub pass
+and "Soften" are examples of it, not its definition, and no app is named in its `purpose`.
+
+**Client-sized.** `CapabilityClass.client_sized` is true for `generate` alone. Every other class's
+working context is a ruling about its act, so a client cannot restate it. For `generate` the app
+is the one that knows its request sizes, so it states them:
+
+    GET /v1/capability?class=generate&context_tokens=40960&concurrency=1
+
+That row is decided **live, for this caller alone**, from the record's own card numbers; the
+stored record is not rewritten. Every row now echoes `work` (`tokens`, `concurrency`, `source`,
+`from: "default" | "request"`, or null for a class that is not token-shaped), and every row
+carries `context_ceilings` (null except on a client-sized row).
+
+**The ceiling is per host and per model, and nothing in it is typed.** For each candidate it is
+the smaller of two figures Crucible already owns:
+
+| half | owner | what it is |
+|---|---|---|
+| served | `ModelManifest.context_for(backend)` | what the engine is started with: vLLM `--max-model-len`, llama-server `-c`, the resident row's `max_model_len` |
+| memory | `MemoryTerms.max_context(available_bytes, concurrency)` | the longest context this host's memory affords beside the weights |
+
+What that comes out to today, at one in flight (3090 Ti: 21.0 GiB available; Studio: 48.0 GiB):
+
+| model | cuda-linux | mlx-darwin |
+|---|---|---|
+| `qwen3.5-9b` | **16384** (served; memory would allow ~74.9k) | **16384** (served; memory ~963k) |
+| `qwen3.8-27b-4bit` | **16384** (served; memory ~23.3k) | **98304** (served; block not taken apart) |
+| `qwen3.8-27b-8bit` | 0 (weights do not fit) | **12288** (served; memory ~64.4k) |
+
+**The PC figure is not the ~98k the ruling expected.** The manifests serve 16384 on cuda-linux for
+both the 9B and the 27B-4bit; 98304 is the 27B-4bit's `[model] context_default`, served only on
+mlx-darwin. On the 3090 Ti the memory half would allow ~75k for the 9B, so raising the served
+figure is a manifest decision (and a measurement), not a change to this rule.
+
+**Refusals, all by name.** `capability_class_required` (a size with no `class`),
+`unknown_capability`, `capability_not_client_sized`, `invalid_working_context` (not a positive
+whole number), and `context_over_limit`: a context above the ceiling of the chosen model (or, with
+no choice, the highest ceiling among the candidates) is refused with the request, the ceiling,
+the model and both halves, and is **never clamped**. A host that cannot hold the weights at all is
+not a length refusal: the row is disabled with its shortfall, as `MemoryTerms.max_context`
+requires. A routed `generate` is not checked against this card's ceiling, because its work does
+not run here.
+
+**The fit checks the served half too, for a client-sized class only.** A client may ask for more
+than an engine is started with, and a fit that said yes to a request the engine then refuses would
+be a lie. The other classes keep the memory-only fit they have always had.
+
+**What is not done here.** The load-model job still starts every engine at `context_for(backend)`.
+Until a load can take a context, a ceiling above the served half cannot be reached, which is why
+the ceiling is capped by it.

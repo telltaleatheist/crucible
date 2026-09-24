@@ -55,6 +55,38 @@ proposed change against these.
   SGLang/vLLM and the Python job types, so there is an incentive to but never a
   requirement; the Windows service is then the pass-through to that guest.
 
+### An outlet for the whole app suite (Owen, 2026-09-23)
+
+> *"crucible is supposed to operate like ollama but with my custom options. it's an
+> outlet for other apps to plug into and use basically. it provides access to all
+> actions my app suite would need. transcription, translation, etc. ollama doesnt
+> have access to sglang or vllm. crucible does. thats the idea"*
+
+> *"crucible is agnostic about the task thats being run. it has specialized tasks,
+> like translate/simplify/etc, but over anything else, it's a gpu orchestrator. if
+> tasks require special handling, it can add a unique verb for the task, but lean
+> toward managing orchestration. the apps that use it can handle everything
+> surrounding that."*
+
+BookForge and Foundry are the first clients, not the only ones: Briefcase and
+ContentStudio plug in the same way. Every new request is judged against this test.
+
+- **Express it through a door that already exists.** Chat, `/v1/decide` (options and
+  text in, a distribution out), and the job types (`asr`, `tts`, `denoise`, …).
+  Owen's own example: finding interesting sections of a book or video is options
+  plus the text to match them to, answered back to the calling app. It is not an
+  analysis feature inside the server.
+- **A unique verb only for special handling:** a different forward pass, engine or
+  model family. Prompts, chunking, digests, thresholds and workflow stay in the app.
+- **Knobs are the engine's knobs, not the app's tasks.** When two proposed acts
+  differ only in a parameter, they become one act with that parameter. Owen:
+  *"if the only difference is the context limit then make it one class and give it
+  the ability to set the context limit"*. That gave one `generate` class, an 8k
+  default, and a context the client may request up to a ceiling per host and per
+  model, refused by name above it.
+- **CPU-only work stays in the app** (2026-09-17): *"if its cpu only, that means it
+  stays local"*. Crucible orchestrates the accelerator.
+
 Idiot-proof is the acceptance bar. A step that a non-technical person would not
 think to take is a step that does not exist.
 

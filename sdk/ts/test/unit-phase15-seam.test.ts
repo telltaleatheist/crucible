@@ -139,6 +139,10 @@ function preRouteRecord(): Record<string, unknown> {
     selected: capability === 'clean' ? 'qwen3.5-9b' : '',
     reason: `${capability}: whatever this server said before phase 15`,
     shortfall_bytes: 0,
+    // Not what this fixture is about, and present so the ROUTE is the only
+    // thing each test here varies.
+    work: null,
+    context_ceilings: null,
   }));
   return {
     backend_kind: 'cuda-linux',

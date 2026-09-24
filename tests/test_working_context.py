@@ -72,6 +72,9 @@ def test_every_context_shaped_class_declares_its_work_with_a_source() -> None:
         "translate",
         "simplify",
         "analysis",
+        # The generic chat-shaped act; its default is 8192 x 1 and a client
+        # may state its own (2026-09-23).
+        "generate",
         # The decision door's (PHASE22-DECIDE.md section 2.9, 2026-09-23).
         "decide",
         "pages",

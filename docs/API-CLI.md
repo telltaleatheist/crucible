@@ -92,6 +92,7 @@ crucible api health            the lane, the queue, each job type's readiness
 crucible api info              identity, host, job types, every capability row
 crucible api setup             the pairing lines an app's connect door takes
 crucible api capability        what this host can hold and why  [--accelerator-probe]
+                               [--class generate --context-tokens N --concurrency N]
 crucible api accelerator       what is on the card right now, probed
 crucible api activity          what this server is doing, and who asked
 crucible api models            the llm models this SERVER holds

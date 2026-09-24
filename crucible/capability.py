@@ -88,6 +88,7 @@ from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
 from .config import CapabilityRecord, CapabilityRow
 from .decide import UNSTATED_ENGINE_CONCURRENCY
 from .denoisemodels import load_all_denoise_manifests
+from .errors import ApiError
 from .manifests import BACKEND_ENGINES, MemoryTerms, load_all_manifests
 from .pages import PAGE_CONCURRENCY
 from .rvcmodels import load_all_rvc_manifests
@@ -202,6 +203,50 @@ class Candidate:
     #: is the behaviour every class had before the split, kept exactly, so a
     #: block without terms decides today what it decided yesterday.
     memory: "MemoryTerms | None" = None
+    #: The context an engine serving this candidate is STARTED with on this
+    #: backend: `ModelManifest.context_for(backend)`, the one owner of vLLM's
+    #: `--max-model-len`, llama-server's `-c` and the resident row's
+    #: `max_model_len`. Read here rather than restated, so the ceiling below
+    #: and `/v1/models` cannot disagree. None for a candidate from a catalog
+    #: that is not measured in tokens (voices, aligners, RVC, ASR, denoise).
+    served_context: int | None = None
+
+    def context_ceiling(
+        self, available_bytes: int, concurrency: int
+    ) -> "ContextCeiling | None":
+        """The longest request this candidate can serve on this host, or None.
+
+        The SMALLER of two halves Crucible already owns, and nothing typed:
+
+            served   what the engine is started with here (`served_context`)
+            memory   what this host's memory affords at this concurrency
+                     (`MemoryTerms.max_context`, docs/FITS-AND-THE-CARD.md 6.3)
+
+        On a Mac the memory half is large and the served half usually binds; on
+        a 24 GB card it can go either way, and the answer says which one did.
+        None for a candidate that is not token-shaped at all.
+        """
+        if self.served_context is None:
+            return None
+        memory = (
+            None
+            if self.memory is None
+            else self.memory.max_context(
+                available_bytes=available_bytes, concurrency=concurrency
+            )
+        )
+        if memory is None or self.served_context <= memory:
+            ceiling, bound_by = self.served_context, "served"
+        else:
+            ceiling, bound_by = memory, "memory"
+        return ContextCeiling(
+            model=self.id,
+            tokens=ceiling,
+            bound_by=bound_by,
+            served_context=self.served_context,
+            memory_context=memory,
+            concurrency=concurrency,
+        )
 
     def need_bytes(self, work: "WorkingContext | None") -> int:
         """What this candidate costs doing THAT work.
@@ -236,6 +281,51 @@ class Candidate:
             "id": self.id,
             "memory_bytes_estimate": self.memory_bytes_estimate,
             "memory": None if self.memory is None else self.memory.to_dict(),
+            "served_context": self.served_context,
+        }
+
+
+@dataclass(frozen=True)
+class ContextCeiling:
+    """One candidate's context ceiling on one host, with both halves shown.
+
+    Published so an app can read the ceiling BEFORE it asks, and so the refusal
+    for asking above it (`context_over_limit`) can name where each half came
+    from. `memory_context` is None where the backend block has not been taken
+    apart into terms — the served half is then all that is known, and the row
+    says so rather than inventing a memory figure.
+    """
+
+    model: str
+    tokens: int
+    #: "served" or "memory": which half is the smaller one.
+    bound_by: str
+    served_context: int
+    memory_context: int | None
+    concurrency: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "tokens": self.tokens,
+            "bound_by": self.bound_by,
+            "served_context": self.served_context,
+            "served_context_source": (
+                "the model manifest's context for this backend "
+                "(manifest.context_for; the engine's --max-model-len and the "
+                "resident row's max_model_len)"
+            ),
+            "memory_context": self.memory_context,
+            "memory_context_source": (
+                None
+                if self.memory_context is None
+                else (
+                    "this host's available bytes less the model's weights and "
+                    f"overhead, over its KV bytes per token x {self.concurrency} "
+                    "in flight (MemoryTerms.max_context)"
+                )
+            ),
+            "concurrency": self.concurrency,
         }
 
 
@@ -315,6 +405,14 @@ class CatalogCandidates:
                     # `need_bytes` answers with the collapsed estimate and the
                     # two facts agree.
                     memory=getattr(manifest.spec(backend_kind), "memory", None),
+                    # The same question of the same catalog: only a MODEL
+                    # manifest serves a context, and it answers through
+                    # `context_for`, the one owner of the engine's context.
+                    served_context=(
+                        manifest.context_for(backend_kind)
+                        if hasattr(manifest, "context_for")
+                        else None
+                    ),
                 )
             )
         # Descending by size, then by id. The id is not decoration: every voice in
@@ -370,11 +468,12 @@ class CapabilityClass:
     #: that was never going to exist.
     binary_note: str = ""
     #: May this class's work run somewhere other than this card
-    #: (PHASE15-HOST.md section 1)? True for exactly the four chat-shaped `llm`
+    #: (PHASE15-HOST.md section 1)? True for exactly the five chat-shaped `llm`
     #: classes. **Declared here rather than derived from `job_type == "llm"`**,
     #: because `pages` is an `llm` job type and is NOT one of the four: it sends
     #: page IMAGES to a vision model, and "forward it to Anthropic" is a
-    #: different feature with a different body that nobody has asked for. A
+    #: different feature with a different body that nobody has asked for (and
+    #: `decide` is not either: no upstream returns the logprobs it reads). A
     #: derivation would have made the two indistinguishable and routed the VLM
     #: the first time somebody typed the wrong class name.
     routable: bool = False
@@ -383,6 +482,25 @@ class CapabilityClass:
     #: an aligner, an RVC model — where there is no KV term to scale and the
     #: collapsed estimate IS the answer.
     work: "WorkingContext | None" = None
+    #: MAY A CLIENT STATE THIS CLASS'S WORKING CONTEXT (`GET /v1/capability`'s
+    #: `?context_tokens=` and `?concurrency=`)? True for `generate` alone, and
+    #: declared rather than true of every class, for the reason `work` has a
+    #: `source`: every other class's context is a RULING about its act —
+    #: translate's paragraph at a time is Owen's, pages' 32768 is the page
+    #: reader's — and a client that could restate it would be overruling that
+    #: ruling for everybody who reads the same row. `generate` has no act of its
+    #: own to rule on: its request sizes are the app's, and only the app knows
+    #: them (Owen, 2026-09-23: *"make it one class and give it the ability to
+    #: set the context limit"*). A class that is not client-sized refuses the
+    #: parameters by name rather than ignoring them.
+    #:
+    #: A client-sized class is also the one whose fit checks the SERVED context
+    #: (`manifest.context_for`, the engine's `--max-model-len`) as well as the
+    #: memory: a client may ask for more than an engine is started with, and a
+    #: fit that said yes to a request the engine then refuses would be a lie.
+    #: The other classes' contexts are rulings sized under what their models
+    #: serve, and keep the memory-only fit they have always had.
+    client_sized: bool = False
 
     @property
     def min_params_b(self) -> float | None:
@@ -411,6 +529,12 @@ NINE_B_FLOOR = 9
 #: is the context the 0.8B was measured serving decisions at on 2026-09-23
 #: (`max_model_len 8192`, PHASE22 section 8a).
 DECIDE_STATE_TOKENS = 8192
+
+#: `generate`'s working context when the client states none. Owen, 2026-09-23:
+#: *"context limit can be set to 8k tokens by default, and it can request
+#: higher."* It is the DEFAULT, not a ceiling: the ceiling is per host and per
+#: model (`Candidate.context_ceiling`).
+GENERATE_DEFAULT_TOKENS = 8192
 
 
 #: Every capability class this build knows, in report order.
@@ -574,6 +698,68 @@ CLASSES: tuple[CapabilityClass, ...] = (
             "that cannot hold a 9B cannot do this work at all."
         ),
     ),
+    # THE GENERIC CHAT-SHAPED ACT. Crucible is a GPU orchestrator and knows no
+    # task: it adds a verb of its own only where a task needs HANDLING of its
+    # own, and everything around the call — the prompt, the fields, the
+    # post-processing — belongs to the app. `generate` is open-ended text
+    # generation for any app whose work is none of the acts above.
+    #
+    # ONE CLASS, NOT SEVERAL, on Owen's ruling of 2026-09-23, made when
+    # ContentStudio's work was first proposed as a `write` and a `rewrite`:
+    # *"if the only difference is the context limit then make it one class and
+    # give it the ability to set the context limit"*. Two classes selecting the
+    # same candidates on the same floor and differing only in how much context
+    # they reserve would be a context limit written down as a vocabulary. So
+    # the limit is the CLIENT'S to state (`client_sized`, and `sized_work`
+    # below), and this table keeps one default for a client that states none.
+    #
+    # Why it is not one of the acts above, which the naming ruling needs it to
+    # be able to say: `clean` is book cleanup of a passage, sized by Foundry;
+    # `simplify` changes a book's reading level; `translate` changes its
+    # language; `analysis` is a structured answer about a passage. A video
+    # description or a set of chapter titles is none of those, and reporting it
+    # under one would be "everything ran under translate" again.
+    #
+    # THE DEFAULT IS SMALL AND A CLIENT ASKS FOR MORE. Owen, the same day:
+    # *"context limit can be set to 8k tokens by default, and it can request
+    # higher … requesting higher than that throws an error back to the app
+    # thats making the call"* — "that" being the host's own ceiling for the
+    # model, which `context_ceiling` below computes and nothing here types.
+    # ContentStudio (YouTube metadata tooling), the first measured user, is an
+    # example of asking for more: it sends the whole video transcript on every
+    # call, sizes one context per run in 4096-token buckets up to its
+    # LOCAL_FIELD_CTX_MAX of 40960, and runs its calls serially. Its titles,
+    # descriptions, chapters, summaries, scrub pass and "Soften" are examples
+    # of this class, not its definition — which is why no app is named in
+    # `purpose` or `plainly`.
+    CapabilityClass(
+        name="generate",
+        job_type="llm",
+        routable=True,
+        client_sized=True,
+        work=WorkingContext(
+            tokens=GENERATE_DEFAULT_TOKENS,
+            concurrency=1,
+            source=(
+                "Owen 2026-09-23: \"context limit can be set to 8k tokens by "
+                "default, and it can request higher\"; one in flight, as its "
+                "first measured user (ContentStudio, whose calls are serial) "
+                "sends. A client states its own with ?context_tokens= and "
+                "?concurrency= (ContentStudio asks for up to its "
+                "LOCAL_FIELD_CTX_MAX, 40960)"
+            ),
+        ),
+        purpose="open-ended text generation, on the 9B-and-up text models",
+        plainly="generate text",
+        noun="qwen3.8 and qwen3.5 variants",
+        candidates=_from_catalog(
+            load_all_manifests, "qwen3.8", "qwen3.5", min_params_b=NINE_B_FLOOR
+        ),
+        binary_note=(
+            "The floor for generation is the 9B, for translation's reason: a "
+            "host that cannot hold a 9B cannot do this work at all."
+        ),
+    ),
     # ONE FORWARD PASS PER QUESTION (PHASE22-DECIDE.md section 2.9). Its own
     # class rather than a ride on `analysis` (section 7.2): the act is different
     # — a distribution read off the next token, not a structured answer decoded
@@ -716,8 +902,9 @@ BY_NAME: dict[str, CapabilityClass] = {entry.name: entry for entry in CLASSES}
 
 #: The classes a route may name, in report order. Read off the table's own
 #: `routable` field, so `[routes]`, `PUT /v1/settings` and the operator page
-#: all ask ONE thing which classes those are (ARCHITECTURE.md R1). The day a
-#: fifth becomes routable, the flag moves and every door follows.
+#: all ask ONE thing which classes those are (ARCHITECTURE.md R1). The day
+#: `generate` became routable (the fifth), the flag moved and every door
+#: followed.
 ROUTABLE_CLASSES: tuple[str, ...] = tuple(
     entry.name for entry in CLASSES if entry.routable
 )
@@ -895,6 +1082,35 @@ def spell_out(candidate: Candidate, work: "WorkingContext | None") -> str:
     )
 
 
+def _over_served(
+    entry: CapabilityClass, candidate: Candidate, work: "WorkingContext | None"
+) -> bool:
+    """Does this client-sized work ask for more than the engine is started with?
+
+    Only a `client_sized` class is checked (see the field for why), and only a
+    token-shaped candidate can be: a voice has no served context.
+    """
+    return (
+        entry.client_sized
+        and work is not None
+        and candidate.served_context is not None
+        and work.tokens > candidate.served_context
+    )
+
+
+def _fits(
+    entry: CapabilityClass,
+    candidate: Candidate,
+    work: "WorkingContext | None",
+    budget: int,
+) -> bool:
+    """Whether one candidate can do this work on this host: memory, and for a
+    client-sized class, the context its engine serves."""
+    return candidate.need_bytes(work) <= budget and not _over_served(
+        entry, candidate, work
+    )
+
+
 def decide(
     entry: CapabilityClass,
     backend_kind: str,
@@ -903,8 +1119,14 @@ def decide(
     desktop_allowance_bytes: int,
     gpu_vendor: str,
     chosen: str | None,
+    work: "WorkingContext | None" = None,
 ) -> Decision:
     """Walk one class's candidates best-first and take the first that fits.
+
+    `work` is a CLIENT-STATED working context (`sized_work`), and may only be
+    given for a `client_sized` class; omitted, the class's own `work` is the
+    work. The omission is the class's declared default, not a guess: every
+    class states one, with its source.
 
     `gpu_vendor` is REQUIRED and has no default, because on `llama-windows` it
     is the difference between two true answers and there is no safe guess: a
@@ -912,6 +1134,14 @@ def decide(
     not exist, and one with a card told it has none would say "slow" about a
     4090. Every caller has a `Backend` in hand.
     """
+    if work is None:
+        work = entry.work
+    elif not entry.client_sized:
+        raise ValueError(
+            f"{entry.name} is not client-sized; its working context is its own "
+            f"ruling ({entry.work.source if entry.work else 'none'}), and a "
+            "caller may not restate it"
+        )
     if backend_kind == LLAMA_WINDOWS and entry.job_type in WSL_ONLY_JOB_TYPES:
         # THE FIVE PYTHON JOB TYPES, and they are off for a reason that has
         # nothing to do with the card: narrator, whisper, the aligner, urvc and
@@ -988,7 +1218,7 @@ def decide(
     # class is actually asking — its own working context, its own concurrency —
     # instead of the question the model's `context_default` asks. On a block with
     # no terms it answers with the collapsed estimate, so nothing moves.
-    fitting = [c for c in found if c.need_bytes(entry.work) <= budget]
+    fitting = [c for c in found if _fits(entry, c, work, budget)]
 
     if chosen is not None:
         # AN APP'S OWN CHOICE, and the reason the best-first walk below is not
@@ -1019,14 +1249,38 @@ def decide(
                 candidates=found,
                 fit_count=len(fitting),
             )
-        if picked.need_bytes(entry.work) > budget:
+        if _over_served(entry, picked, work):
+            # A CLIENT-SIZED class asked for more than this model's engine is
+            # started with. Memory is not the question; the engine would refuse
+            # every request of this length, so the choice cannot serve it.
+            return Decision(
+                capability=entry.name,
+                job_type=entry.job_type,
+                enabled=False,
+                selected="",
+                reason=(
+                    f"disabled: {picked.id} was chosen for {entry.name} and is "
+                    f"served with a {picked.served_context}-token context on "
+                    f"{backend_kind} (its manifest), which is less than the "
+                    f"{work.tokens} tokens this work asks for"
+                ),
+                summary=(
+                    f"cannot {entry.plainly} — {picked.id} cannot take requests "
+                    f"of {work.tokens} tokens on this machine"
+                ),
+                shortfall_bytes=0,
+                available_bytes=budget,
+                candidates=found,
+                fit_count=len(fitting),
+            )
+        if picked.need_bytes(work) > budget:
             # The settings door refuses a choice that does not fit, so reaching
             # here means the MACHINE changed under a choice that did fit when it
             # was made — a config carried to a smaller card, or a desktop
             # allowance raised since. Say that, rather than silently demoting to
             # something that fits and leaving an app to wonder why its model
             # never runs.
-            shortfall = picked.need_bytes(entry.work) - budget
+            shortfall = picked.need_bytes(work) - budget
             return Decision(
                 capability=entry.name,
                 job_type=entry.job_type,
@@ -1034,7 +1288,7 @@ def decide(
                 selected="",
                 reason=(
                     f"disabled: {picked.id} was chosen for {entry.name} and needs "
-                    f"{spell_out(picked, entry.work)}, and there is only "
+                    f"{spell_out(picked, work)}, and there is only "
                     f"{arithmetic} — short by {_gib(shortfall)}. This choice fit "
                     f"the machine it was made on{cpu_note}."
                     + (UPSTREAM_OFFER if entry.routable else "")
@@ -1056,7 +1310,7 @@ def decide(
             selected=picked.id,
             reason=(
                 f"{picked.id} was chosen for {entry.name}: it needs "
-                f"{spell_out(picked, entry.work)} and there is {arithmetic}; "
+                f"{spell_out(picked, work)} and there is {arithmetic}; "
                 f"{len(fitting)} of {len(found)} {entry.noun} fit{cpu_note}"
             ),
             summary=f"can {entry.plainly}, using {picked.id}",
@@ -1074,7 +1328,7 @@ def decide(
             enabled=True,
             selected=best.id,
             reason=(
-                f"{best.id} fits: it needs {spell_out(best, entry.work)} and "
+                f"{best.id} fits: it needs {spell_out(best, work)} and "
                 f"there is {arithmetic}; {len(fitting)} of {len(found)} "
                 f"{entry.noun} fit{cpu_note}"
             ),
@@ -1086,7 +1340,7 @@ def decide(
         )
 
     smallest = found[-1]
-    shortfall = smallest.need_bytes(entry.work) - budget
+    shortfall = smallest.need_bytes(work) - budget
     note = f" {entry.binary_note}" if entry.binary_note else ""
     return Decision(
         capability=entry.name,
@@ -1095,7 +1349,7 @@ def decide(
         selected="",
         reason=(
             f"disabled: the smallest of {len(found)} {entry.noun} is {smallest.id} "
-            f"at {spell_out(smallest, entry.work)} and there is only "
+            f"at {spell_out(smallest, work)} and there is only "
             f"{arithmetic} — short by {_gib(shortfall)}.{note}"
             + (UPSTREAM_OFFER if entry.routable else "")
         ),
@@ -1136,6 +1390,194 @@ def decide_all(
             chosen=chosen.get(entry.name),
         )
         for entry in CLASSES
+    )
+
+
+#: Where a row's working context came from, as `GET /v1/capability` echoes it.
+#: Two words, so a reading is never ambiguous about whose numbers it is.
+WORK_FROM_DEFAULT = "default"
+WORK_FROM_REQUEST = "request"
+
+#: The query parameters that size a client-sized class, by the name the wire
+#: uses. One spelling, here, so the refusals and the route cannot disagree.
+CONTEXT_TOKENS_PARAM = "context_tokens"
+CONCURRENCY_PARAM = "concurrency"
+
+
+def _positive_int(name: str, raw: str) -> int:
+    """A query value as a positive integer, or a refusal naming it."""
+    text = raw.strip()
+    if not text.isdigit() or int(text) < 1:
+        unit = "tokens" if name == CONTEXT_TOKENS_PARAM else "requests in flight"
+        raise ApiError(
+            400,
+            "invalid_working_context",
+            f"{name} is {raw!r}; it must be a positive whole number of {unit}",
+            {"field": name, "value": raw},
+        )
+    return int(text)
+
+
+def sized_work(
+    entry: CapabilityClass,
+    *,
+    context_tokens: str | None,
+    concurrency: str | None,
+) -> "WorkingContext | None":
+    """A client's stated working context for one class, or None if it stated none.
+
+    Refused BY NAME, never ignored: `capability_not_client_sized` for a class
+    whose context is a ruling rather than the app's (`CapabilityClass.
+    client_sized` says why), and `invalid_working_context` for a value that is
+    not a positive whole number. There is no upper bound HERE because the upper
+    bound is a fact about the host and the model, not about the number: it is
+    `check_ceiling`'s, and it is refused there with both halves named.
+
+    Stating one half keeps the class's default for the other — the class's
+    declared default, and the `source` says which half came from where.
+    """
+    if context_tokens is None and concurrency is None:
+        return None
+    if not entry.client_sized:
+        client_sized = [c.name for c in CLASSES if c.client_sized]
+        ruling = entry.work.source if entry.work is not None else "it has none"
+        raise ApiError(
+            400,
+            "capability_not_client_sized",
+            f"{entry.name}'s working context is not the client's to state: it "
+            f"is a ruling about the act ({ruling}). Only {client_sized} take "
+            f"{CONTEXT_TOKENS_PARAM} and {CONCURRENCY_PARAM}",
+            {"capability": entry.name, "client_sized": client_sized},
+        )
+    default = entry.work
+    if default is None:  # pragma: no cover - a client-sized class declares one
+        raise ValueError(f"{entry.name} is client-sized and declares no default work")
+    tokens = (
+        default.tokens
+        if context_tokens is None
+        else _positive_int(CONTEXT_TOKENS_PARAM, context_tokens)
+    )
+    width = (
+        default.concurrency
+        if concurrency is None
+        else _positive_int(CONCURRENCY_PARAM, concurrency)
+    )
+    stated = []
+    if context_tokens is not None:
+        stated.append(f"{CONTEXT_TOKENS_PARAM}={tokens}")
+    if concurrency is not None:
+        stated.append(f"{CONCURRENCY_PARAM}={width}")
+    rest = (
+        ""
+        if context_tokens is not None and concurrency is not None
+        else f"; the rest is the class default ({default.source})"
+    )
+    return WorkingContext(
+        tokens=tokens,
+        concurrency=width,
+        source="stated by the client: " + ", ".join(stated) + rest,
+    )
+
+
+def context_ceilings(
+    entry: CapabilityClass,
+    backend_kind: str,
+    *,
+    available_bytes: int,
+    concurrency: int,
+) -> tuple[ContextCeiling, ...]:
+    """Every candidate's context ceiling for this class on this host, best-first.
+
+    Empty for a class whose candidates are not token-shaped. Published on the
+    client-sized rows of `GET /v1/capability` so an app reads the ceiling
+    BEFORE it asks rather than discovering it as a refusal.
+    """
+    if entry.candidates is None:
+        return ()
+    found = entry.candidates(backend_kind)
+    ceilings = (c.context_ceiling(available_bytes, concurrency) for c in found)
+    return tuple(ceiling for ceiling in ceilings if ceiling is not None)
+
+
+def check_ceiling(
+    entry: CapabilityClass,
+    backend_kind: str,
+    *,
+    available_bytes: int,
+    work: WorkingContext,
+    chosen: str | None,
+) -> tuple[ContextCeiling, ...]:
+    """Refuse a stated context above this host's ceiling, or return the ceilings.
+
+    Owen, 2026-09-23: *"requesting higher than that throws an error back to the
+    app thats making the call"*. `context_over_limit`, 400, naming the request,
+    the ceiling, the model it was computed for and where each half came from.
+    NEVER CLAMPED and never answered with a smaller context: an app that asked
+    for 60000 tokens and was quietly sized for 16384 would find out as a
+    truncated transcript.
+
+    WHICH MODEL'S CEILING. An app's own choice for this class, when it made
+    one, because that is the model that will run; otherwise the HIGHEST
+    ceiling among the candidates, because the best-first walk takes any
+    candidate that serves the work and a request is only unservable when none
+    of them can.
+
+    A HOST THAT CANNOT HOLD THE WEIGHTS AT ALL IS NOT THIS REFUSAL. There the
+    ceiling is 0 for every length, which is `MemoryTerms.max_context`'s own
+    warning — "a different refusal from 'your request is too long' and must not
+    be rounded into one". The class is then disabled on this host, which the
+    row says with its shortfall, and no request length is to blame.
+    """
+    ceilings = context_ceilings(
+        entry,
+        backend_kind,
+        available_bytes=available_bytes,
+        concurrency=work.concurrency,
+    )
+    if not ceilings or entry.candidates is None:
+        return ceilings
+    by_model = {ceiling.model: ceiling for ceiling in ceilings}
+    if chosen is not None:
+        if chosen not in by_model:
+            # `decide` refuses a choice this build cannot run, by name; that is
+            # its sentence, not this one.
+            return ceilings
+        governing = by_model[chosen]
+    else:
+        governing = max(ceilings, key=lambda ceiling: ceiling.tokens)
+    holds_weights = [
+        c
+        for c in entry.candidates(backend_kind)
+        if c.memory is None or c.memory.fixed_bytes < available_bytes
+    ]
+    if not holds_weights or work.tokens <= governing.tokens:
+        return ceilings
+    whose = (
+        " (the model chosen for this class)"
+        if chosen is not None
+        else " (the highest of this class's candidates on this host)"
+    )
+    memory_half = (
+        f"{governing.memory_context} that this host's memory affords at "
+        f"{work.concurrency} in flight"
+        if governing.memory_context is not None
+        else "no memory figure (this model's block is not taken apart into terms)"
+    )
+    raise ApiError(
+        400,
+        "context_over_limit",
+        f"{work.tokens} tokens x {work.concurrency} in flight is more than "
+        f"{entry.name} can serve here: the ceiling is {governing.tokens} tokens, "
+        f"computed for {governing.model}{whose} — the smaller of "
+        f"{governing.served_context} served (its manifest's context on "
+        f"{backend_kind}, the engine's --max-model-len) and {memory_half}. Ask "
+        f"for {governing.tokens} or fewer; nothing is clamped",
+        {
+            "capability": entry.name,
+            "requested": {"tokens": work.tokens, "concurrency": work.concurrency},
+            "ceiling": governing.to_dict(),
+            "ceilings": [ceiling.to_dict() for ceiling in ceilings],
+        },
     )
 
 
@@ -1200,6 +1642,135 @@ def record(
     )
 
 
+def served_rows(
+    record: CapabilityRecord,
+    *,
+    gpu_vendor: str,
+    chosen: Mapping[str, str],
+    routes: Mapping[str, str],
+    capability_class: str | None,
+    context_tokens: str | None,
+    concurrency: str | None,
+) -> list[dict[str, Any]]:
+    """`GET /v1/capability`'s rows: the record, with each row's WORK stated.
+
+    Every row carries `work` — the working context its fit was computed for,
+    and `from`, which is `"default"` (the class's own, `CLASSES`) or
+    `"request"` (the client's `?context_tokens=` / `?concurrency=`) — or null
+    for a class whose candidates are not token-shaped. A reading is then never
+    ambiguous about whose numbers decided it. Every row also carries
+    `context_ceilings`: on a client-sized row, every candidate's ceiling on
+    this host at that row's concurrency, so an app reads the limit before it
+    asks; null on every other row.
+
+    THE STORED RECORD IS UNCHANGED BY A REQUEST. A sized row is decided LIVE,
+    from the record's own card numbers (`backend_kind`, `total_bytes`,
+    `desktop_allowance_bytes` — the inputs the record was decided on, as
+    `settings.recomputed_capability` also uses them), the live selections and
+    the live routes, and is answered to this caller alone. Writing it back
+    would let one app's request size re-decide the class for every other app.
+
+    Refusals, all 400 and all by name, before anything is decided:
+    `capability_class_required` (a size with no `class` to apply it to),
+    `unknown_capability`, `capability_not_client_sized`,
+    `invalid_working_context`, and `context_over_limit` (`check_ceiling`).
+    A class this RECORD predates is 503 `capability_undecided`, the route's
+    own word for a record that has decided nothing about it.
+    """
+    sizing = context_tokens is not None or concurrency is not None
+    if sizing and capability_class is None:
+        raise ApiError(
+            400,
+            "capability_class_required",
+            f"{CONTEXT_TOKENS_PARAM} and {CONCURRENCY_PARAM} size ONE class; "
+            "name it with ?class=. Only "
+            f"{[c.name for c in CLASSES if c.client_sized]} may be sized",
+        )
+    entry: CapabilityClass | None = None
+    if capability_class is not None:
+        entry = BY_NAME.get(capability_class)
+        if entry is None:
+            raise ApiError(
+                400,
+                "unknown_capability",
+                f"{capability_class!r} is not a capability class; this build "
+                f"knows {sorted(BY_NAME)}",
+                {"capability": capability_class, "known": sorted(BY_NAME)},
+            )
+    requested = (
+        None
+        if entry is None
+        else sized_work(entry, context_tokens=context_tokens, concurrency=concurrency)
+    )
+    budget = available_bytes(record.total_bytes, record.desktop_allowance_bytes)
+    if entry is not None and requested is not None:
+        if not any(row.capability == entry.name for row in record.rows):
+            raise ApiError(
+                503,
+                "capability_undecided",
+                f"this server's capability record predates the {entry.name!r} "
+                "class and has decided nothing about it. Run `crucible "
+                "capability --write` to decide it",
+            )
+        # Routed upstream, the work does not run on this card and this card's
+        # ceiling is not the limit — the upstream's is, and it is the
+        # upstream's to refuse. The local answer is still decided (below) so
+        # the row keeps "the local answer would be" whole.
+        if routes.get(entry.name) is None:
+            check_ceiling(
+                entry,
+                record.backend_kind,
+                available_bytes=budget,
+                work=requested,
+                chosen=chosen.get(entry.name),
+            )
+
+    rows: list[dict[str, Any]] = []
+    for stored in record.rows:
+        row = stored.to_dict()
+        found = BY_NAME.get(stored.capability)
+        if found is None:
+            # A class a newer build wrote and this one does not know. The row
+            # is the record's and is served as the record says; there is no
+            # class here to state its work.
+            row["work"] = None
+            row["context_ceilings"] = None
+            rows.append(row)
+            continue
+        work = found.work
+        basis = WORK_FROM_DEFAULT
+        if entry is not None and found.name == entry.name and requested is not None:
+            work, basis = requested, WORK_FROM_REQUEST
+            decision = decide(
+                found,
+                record.backend_kind,
+                total_bytes=record.total_bytes,
+                desktop_allowance_bytes=record.desktop_allowance_bytes,
+                gpu_vendor=gpu_vendor,
+                chosen=chosen.get(found.name),
+                work=requested,
+            )
+            fresh = decision.row()
+            model = routes.get(found.name)
+            row = (fresh if model is None else routed_row(fresh, model)).to_dict()
+        row["work"] = None if work is None else {**work.to_dict(), "from": basis}
+        # On EVERY row, null where the class is not client-sized: one shape,
+        # so a reader never has to tell "absent" from "none".
+        row["context_ceilings"] = None
+        if found.client_sized and work is not None:
+            row["context_ceilings"] = [
+                ceiling.to_dict()
+                for ceiling in context_ceilings(
+                    found,
+                    record.backend_kind,
+                    available_bytes=budget,
+                    concurrency=work.concurrency,
+                )
+            ]
+        rows.append(row)
+    return rows
+
+
 def job_type_enabled(job_type: str, decisions: tuple[Decision, ...]) -> bool:
     """Can this host run ANY of the classes behind one `enable_*` flag?
 
@@ -1233,7 +1804,17 @@ __all__ = [
     "Candidate",
     "CapabilityClass",
     "CatalogCandidates",
+    "CONCURRENCY_PARAM",
+    "CONTEXT_TOKENS_PARAM",
+    "ContextCeiling",
     "Decision",
+    "GENERATE_DEFAULT_TOKENS",
+    "WORK_FROM_DEFAULT",
+    "WORK_FROM_REQUEST",
+    "check_ceiling",
+    "context_ceilings",
+    "served_rows",
+    "sized_work",
     "available_bytes",
     "classes_for_job_type",
     "classes_for_model",

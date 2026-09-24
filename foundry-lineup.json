@@ -1,5 +1,5 @@
 {
-  "generated_from": "f38db96e2fdea588d95a11dacb57aafa66a65019",
+  "generated_from": "ce1f1c6b55fe880993cba13a00e46a387ae13d0f",
   "schema": 2,
   "floors": {
     "simplify": "qwen3.5-9b",
@@ -73,6 +73,7 @@
         "translate",
         "simplify",
         "analysis",
+        "generate",
         "decide"
       ],
       "label": "Qwen 3.5 · 9B",
@@ -98,6 +99,7 @@
         "translate",
         "simplify",
         "analysis",
+        "generate",
         "decide"
       ],
       "label": "Qwen 3.8 · 27B (4-bit)",

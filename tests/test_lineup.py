@@ -46,11 +46,14 @@ CLASSES = {
     # All four since 2026-09-16: Owen dropped the translate/simplify/analysis
     # floor from the 27B to the 9B (docs/MODEL-CHOICE.md section 1).
     # `decide` on every qwen row since 2026-09-23 (PHASE22 section 2.9); it has
-    # no floor, so the two small tiers light it and nothing else.
+    # no floor, so the two small tiers light it and nothing else. `generate`
+    # (2026-09-23) reads the same families on the same 9B floor as translate.
     "qwen3.5-0.8b": ["decide"],
     "qwen3.5-4b": ["decide"],
-    "qwen3.5-9b": ["clean", "translate", "simplify", "analysis", "decide"],
-    "qwen3.8-27b-4bit": ["translate", "simplify", "analysis", "decide"],
+    "qwen3.5-9b": [
+        "clean", "translate", "simplify", "analysis", "generate", "decide"
+    ],
+    "qwen3.8-27b-4bit": ["translate", "simplify", "analysis", "generate", "decide"],
 }
 
 #: The exact key order of one row. Foundry's reader compares by content and a
@@ -249,7 +252,7 @@ def test_a_model_with_no_local_form_still_has_classes() -> None:
     """Omitted from the lineup is not the same as serving nothing: the bf16 27B
     is a translate candidate on a 64 GB Mac; it just has no Ollama form."""
     assert classes_for_model("qwen3.8-27b-8bit") == (
-        "translate", "simplify", "analysis", "decide",
+        "translate", "simplify", "analysis", "generate", "decide",
     )
 
 
@@ -339,7 +342,9 @@ def test_a_fixture_catalog_builds_the_same_shape(
     assert rows == [
         {
             "id": "demo-1b",
-            "classes": ["clean", "translate", "simplify", "analysis", "decide"],
+            "classes": [
+                "clean", "translate", "simplify", "analysis", "generate", "decide"
+            ],
             "label": "Demo",
             "description": "A fixture.",
             "local": {

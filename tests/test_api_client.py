@@ -862,3 +862,16 @@ def test_every_api_route_has_a_verb_or_a_stated_reason(
     assert stale == set(), (
         f"these are claimed but the server does not serve them: {sorted(stale)}"
     )
+
+
+def test_capability_passes_a_client_size_through_for_the_server_to_judge(
+    recorded: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`generate` is sized per call; the SERVER validates, so the CLI only carries."""
+    assert run("http://127.0.0.1:1", "capability") == 0
+    assert recorded[-1]["path"] == "/v1/capability"
+    assert run("http://127.0.0.1:1", "capability", "--class", "generate",
+               "--context-tokens", "40960", "--concurrency", "1") == 0
+    assert recorded[-1]["path"] == (
+        "/v1/capability?class=generate&context_tokens=40960&concurrency=1"
+    )
