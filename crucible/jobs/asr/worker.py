@@ -10,11 +10,12 @@ JSON object on stdin, and reads newline-delimited JSON back.
 The wire, in full
 -----------------
     stdin   one object: {model_dir, ffmpeg, audio, language, vad_filter,
-                         word_timestamps, device, compute_type, window_s,
-                         overlap_s}
-            `language` is null for auto-detect. Every other key is required and
-            an absent one is refused by name — there is no default for anything
-            here, because every one of these values changes the transcript.
+                         word_timestamps, initial_prompt, device,
+                         compute_type, window_s, overlap_s}
+            `language` is null for auto-detect, `initial_prompt` null for no
+            prompt. Every key is required and an absent one is refused by name
+            — there is no default for anything here, because every one of these
+            values changes the transcript.
 
     fd 1    {"type": "progress", "stage": "decoding"|"transcribing",
              "processed_s", "total_s", "cues"}
@@ -116,6 +117,40 @@ def require(request: dict, key: str, kind: type) -> object:
             f"{type(value).__name__}"
         )
     return value
+
+
+def require_prompt(request: dict) -> "str | None":
+    """`initial_prompt`: required as a KEY, and null means no prompt.
+
+    The server always sends it. A non-blank string or null, nothing else: the
+    server refuses a blank one before the job is queued, so one arriving here
+    is a server bug and is refused rather than encoded as `" "`.
+    """
+    if "initial_prompt" not in request:
+        raise KeyError(
+            "the asr request has no 'initial_prompt'; null means no prompt, and "
+            "the server sends the key either way"
+        )
+    value = request["initial_prompt"]
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise KeyError(
+            f"the asr request's 'initial_prompt' must be a string or null, got "
+            f"{type(value).__name__}"
+        )
+    if value.strip() == "":
+        raise KeyError("the asr request's 'initial_prompt' is blank; null means none")
+    return value
+
+
+def prompt_too_long(count: int, ceiling: int) -> str:
+    return (
+        f"initial_prompt is {count} tokens and whisper keeps only the last "
+        f"{ceiling} of its prompt history, so the first {count - ceiling} would "
+        "be dropped without a word. Send a shorter prompt: the title and the "
+        "names in it, not the text"
+    )
 
 
 # ------------------------------------------------------------------- decoding
@@ -285,6 +320,7 @@ def main() -> int:
                 f"the asr request's 'language' must be a string or null, got "
                 f"{type(language).__name__}"
             )
+        initial_prompt = require_prompt(request)
     except KeyError as exc:
         return fail(str(exc.args[0]))
 
@@ -308,6 +344,23 @@ def main() -> int:
             f"could not load {model_dir} on {device} at {compute_type}: "
             f"{type(exc).__name__}: {exc}"
         )
+
+    if initial_prompt is not None:
+        # faster-whisper's own tokenizer and its own ceiling, read off the
+        # loaded model: `Tokenizer.encode` is `hf_tokenizer.encode(text,
+        # add_special_tokens=False).ids`, `generate_segments` encodes
+        # `" " + prompt.strip()`, and `get_prompt` keeps the LAST
+        # `max_length // 2 - 1` of the history. Past that the prompt loses its
+        # beginning with no error, so it is refused here, once, before any audio
+        # is decoded.
+        ceiling = int(model.max_length) // 2 - 1
+        count = len(
+            model.hf_tokenizer.encode(
+                " " + initial_prompt.strip(), add_special_tokens=False
+            ).ids
+        )
+        if count > ceiling:
+            return fail(prompt_too_long(count, ceiling))
 
     total_container = probe_duration(ffmpeg, audio)
     last_decode = [0.0]
@@ -380,6 +433,11 @@ def main() -> int:
                 language=language,
                 word_timestamps=word_timestamps,
                 vad_filter=vad_filter,
+                # Every window, not only the first: each window is its own
+                # `transcribe()` call, and each call starts its token history
+                # empty, so a prompt given once would prime fifteen minutes of
+                # an eighteen-hour book (`crucible/jobs/asr/__init__.py`).
+                initial_prompt=initial_prompt,
             )
             rows = []
             for segment in segments:

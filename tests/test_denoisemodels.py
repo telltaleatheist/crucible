@@ -97,7 +97,49 @@ def test_the_shipped_manifest_names_both_filenames_and_a_real_pin() -> None:
 
 def test_every_shipped_manifest_loads() -> None:
     manifests = load_all_denoise_manifests()
-    assert "denoise-roformer" in manifests
+    assert sorted(manifests) == ["denoise-roformer", "vocals-roformer"]
+
+
+def test_the_vocals_manifest_keeps_the_vocals_stem_from_the_mirror() -> None:
+    """The second separator: audio-separator's own names for it, `vocals` as
+    the stem it exists to produce, and both backends pinned to the same mirror
+    snapshot as the denoiser, by digest and size.
+
+    The figures are the HuggingFace API's at `929e057b`, read on 2026-09-23:
+    the checkpoint's LFS oid (= its sha256, and the same bytes as
+    KimberleyJSN/melbandroformer's own upload) and the config's digest computed
+    from the 895 bytes the hub served.
+    """
+    manifest = load_denoise_manifest("vocals-roformer")
+    assert manifest.model_filename == "vocals_mel_band_roformer.ckpt"
+    assert manifest.config_filename == "vocals_mel_band_roformer.yaml"
+    assert manifest.primary_stem == "vocals"
+    assert manifest.sample_rate == 44100
+    denoiser = load_denoise_manifest("denoise-roformer")
+    # One flat model_file_dir holds both separators, so no name may collide.
+    assert {manifest.model_filename, manifest.config_filename}.isdisjoint(
+        {denoiser.model_filename, denoiser.config_filename}
+    )
+    for kind in ("cuda-linux", "mlx-darwin"):
+        spec = manifest.spec(kind)
+        assert spec.engine == "audio-separator"
+        assert spec.hf_repo == "Politrees/UVR_resources"
+        assert spec.revision == denoiser.spec(kind).revision
+        assert spec.model_path == "models/Roformer/MelBand/vocals_mel_band_roformer.ckpt"
+        assert spec.model_sha256 == (
+            "87201f4d31afb5bc79993230fc49446918425574db48c01c405e44f365c7559e"
+        )
+        assert spec.model_bytes == 913_106_900
+        assert spec.config_path == (
+            "models/Roformer/MelBand/config_melband_roformer_vocals_kim.yaml"
+        )
+        assert spec.config_sha256 == (
+            "146b28921f01f2debd62f58222de3c732d82a8d2db6c4fac16653b0985ea0c6e"
+        )
+        assert spec.config_bytes == 895
+        # COMPUTED the denoiser's way: the checkpoint plus the declared 1.5 GiB.
+        assert spec.memory_bytes_estimate == 913_106_900 + 1_610_612_736
+    assert "COMPUTED, NOT MEASURED" in manifest.path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -371,7 +413,7 @@ def test_denoise_list_says_what_is_here_and_what_is_not(
 ) -> None:
     assert cli_backend.main(["denoise", "list", "--json"]) == 0
     rows = json.loads(capsys.readouterr().out)
-    assert [row["id"] for row in rows] == ["denoise-roformer"]
+    assert [row["id"] for row in rows] == ["denoise-roformer", "vocals-roformer"]
     assert rows[0]["installed"] is False
     assert rows[0]["present"] is False
     assert denoisemodels.PULL_COMMAND in rows[0]["detail"]

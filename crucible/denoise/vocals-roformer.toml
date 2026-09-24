@@ -1,0 +1,102 @@
+# Mel-Band Roformer Vocals (Kimberley Jensen) — voice out of a mix.
+#
+# PHASE4-AUDIO.md section 4.2. The second separator this build ships, beside
+# denoise/denoise-roformer.toml, and the same job type: one 44.1 kHz file in,
+# ONE stem published. Where the denoiser keeps the signal minus the room hiss
+# (`dry`), this keeps the VOICE minus everything else (`vocals`) — speech lifted
+# off music, crowd or effects. Asked for by ContentStudio (2026-09-23); Crucible
+# knows nothing about why, only which stem the model exists to produce.
+#
+# THE TWO FILENAMES ARE NOT THE TWO PATHS, for denoise-roformer.toml's reason:
+# audio-separator resolves a model by filename inside its model_file_dir and
+# expects its own registry's names; the HuggingFace mirror stores the config
+# under a different name. Both halves are declared; nothing derives one from
+# the other (crucible/denoisemodels.py).
+
+[model]
+id = "vocals-roformer"
+display = "Mel-Band Roformer Vocals (Kimberley Jensen)"
+# What audio-separator must find in model_file_dir. Read from its own
+# `audio_separator/models.json` in audio-separator 0.31.1 — the version both
+# envs/rvc recipes pin — as installed in the rvc env on owens-pc (WSL) on
+# 2026-09-23 (file sha256 84a882d37434622adb2426cc76208175b70b3fb29839fb6d658fb2f28865c09b):
+#   "Roformer Model: MelBand Roformer | Vocals by Kimberley Jensen": {
+#     "vocals_mel_band_roformer.ckpt": "vocals_mel_band_roformer.yaml" }
+model_filename = "vocals_mel_band_roformer.ckpt"
+config_filename = "vocals_mel_band_roformer.yaml"
+# The stem the model exists to produce, and the only one the job publishes.
+# Three sources agree: the config's own `training.target_instrument: vocals`
+# (instruments `[vocals, other]`); audio-separator 0.31.1's
+# `models-scores.json`, `"stems": ["vocals", "other"], "target_stem":
+# "vocals"`; and its `CommonSeparator`, which names the primary stem
+# `instruments[0]` and writes it as `<base>_(vocals)_vocals_mel_band_roformer.<ext>`
+# — the `(vocals)` the job matches, case-insensitively, exactly once.
+primary_stem = "vocals"
+# 44.1 kHz native, from the config: `audio.sample_rate: 44100` and
+# `model.sample_rate: 44100` (the mel filter bank's), with `chunk_size: 352800`
+# = 8.0 s at this rate. The same rate and chunk as the denoiser, so the job's
+# "no resampling, the caller sends 44.1 kHz" rule reads the same for both.
+sample_rate = 44100
+
+[backends.cuda-linux]
+engine = "audio-separator"
+# THE SAME MIRROR AND THE SAME REVISION as denoise-roformer.toml: audio-separator
+# fetches from GitHub releases, which DESIGN.md section 5 refuses as a source of
+# weights, and `Politrees/UVR_resources` is the HuggingFace copy it allows. Read
+# from the HF API on 2026-09-23: `main` is still 929e057b, so one snapshot of
+# the mirror serves both separators.
+#
+# The checkpoint is the AUTHOR'S OWN BYTES: its LFS oid (= sha256) is exactly
+# that of `MelBandRoformer.ckpt` in Kimberley Jensen's own repo,
+# KimberleyJSN/melbandroformer at ac9b0614ab3cd7f77219e18ba494dfd93956c348, at
+# the same 913,106,900 bytes. That repo is the model's home but holds no config,
+# and a manifest block pulls both files from one repo at one revision — hence
+# the mirror, which holds both.
+#
+# The config is `config_melband_roformer_vocals_kim.yaml` on the mirror, an
+# 895-byte plain file; its digest below was computed from the bytes the hub
+# served at this revision. It is audio-separator's own
+# `vocals_mel_band_roformer.yaml` (fetched read-only from the library's
+# `model-configs` release, 944 bytes) with LF line endings instead of CRLF:
+# parsed, the two documents are equal key for key.
+hf_repo = "Politrees/UVR_resources"
+revision = "929e057b81aa49bc2e6490bef8671f47b2c120f6"
+model_path = "models/Roformer/MelBand/vocals_mel_band_roformer.ckpt"
+model_sha256 = "87201f4d31afb5bc79993230fc49446918425574db48c01c405e44f365c7559e"
+model_bytes = 913106900
+config_path = "models/Roformer/MelBand/config_melband_roformer_vocals_kim.yaml"
+config_sha256 = "146b28921f01f2debd62f58222de3c732d82a8d2db6c4fac16653b0985ea0c6e"
+config_bytes = 895
+# COMPUTED, NOT MEASURED, the way denoise-roformer.toml's is:
+#
+#     913_106_900  the checkpoint, exactly, from the HuggingFace API
+#   1_610_612_736  the declared 1.5 GiB every phase 4 manifest carries for the
+#                  CUDA context, cuBLAS/cuDNN workspaces and the activation peak
+#                  of one internal chunk (8.0 s at 44.1 kHz, stereo)
+#   -------------
+#   2_523_719_636
+#
+# The same architecture as the denoiser (dim 384, depth 6, 60 bands; the
+# checkpoints differ by 9,600 bytes), so the same allowance is the right shape
+# of guess. Nobody has run this model on a card; the first real pass replaces
+# this arithmetic with a measurement.
+memory_bytes_estimate = 2523719636
+
+[backends.mlx-darwin]
+# The same two files, fetched the same way, for denoise-roformer.toml's reason:
+# a separator checkpoint is not quantised per platform and torch has an MPS
+# backend. `use_autocast` is the one difference, and the job reads it off the
+# backend rather than off this manifest.
+engine = "audio-separator"
+hf_repo = "Politrees/UVR_resources"
+revision = "929e057b81aa49bc2e6490bef8671f47b2c120f6"
+model_path = "models/Roformer/MelBand/vocals_mel_band_roformer.ckpt"
+model_sha256 = "87201f4d31afb5bc79993230fc49446918425574db48c01c405e44f365c7559e"
+model_bytes = 913106900
+config_path = "models/Roformer/MelBand/config_melband_roformer_vocals_kim.yaml"
+config_sha256 = "146b28921f01f2debd62f58222de3c732d82a8d2db6c4fac16653b0985ea0c6e"
+config_bytes = 895
+# Unified memory rather than VRAM, COMPUTED the same way. Without autocast the
+# activations are fp32 here, which makes the declared allowance conservative
+# rather than optimistic.
+memory_bytes_estimate = 2523719636

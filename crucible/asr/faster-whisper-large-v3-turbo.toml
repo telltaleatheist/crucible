@@ -1,0 +1,98 @@
+# faster-whisper large-v3-turbo — large-v3's ear, a quarter of its decoder.
+#
+# 809M parameters: large-v3's 32-layer encoder with a FOUR-layer decoder instead
+# of thirty-two, which is where the speed comes from. Asked for by ContentStudio
+# (2026-09-23), the cuda-linux twin of asr/mlx-whisper-large-v3-turbo.toml.
+#
+# A THIRD-PARTY CONVERSION, AND WHY THAT IS ALLOWED
+# -------------------------------------------------
+# Systran publishes NO turbo conversion: its 18 repos on the hub
+# (GET /api/models?author=Systran, 2026-09-23) stop at large-v3 and
+# distil-large-v3. The upstream checkpoint, openai/whisper-large-v3-turbo, is
+# transformers safetensors and CTranslate2 cannot load it. So whatever this id
+# pins is somebody's `ct2-transformers-converter` run.
+#
+# DESIGN.md section 5's rule for weights is "stock weights from their home (HF
+# hub ...) ... Never on GitHub Releases", with every manifest pinning a source
+# and a revision. A conversion on the hub, pinned to a 40-char commit, is inside
+# that rule — the same standing asr/mlx-whisper-*.toml's `mlx-community`
+# conversions and denoise/denoise-roformer.toml's `Politrees/UVR_resources`
+# mirror already have. What the rule is FOR is that the bytes are named and
+# cannot move under the id, and a revision pin does that whoever uploaded them.
+#
+# The candidates, all read from the hub's API on 2026-09-23 at their `main`:
+#
+#   dropbox-dash/faster-whisper-large-v3-turbo      THIS ONE
+#     (was mobiuslabsgmbh/faster-whisper-large-v3-turbo; the API answers that
+#     name with a 307 to this one)
+#     downloads 1,487,714 last month / 15,248,207 all time, likes 68, MIT
+#     converted FROM openai/whisper-large-v3-turbo itself, `--quantization
+#     float16` (its README's own conversion command)
+#   deepdml/faster-whisper-large-v3-turbo-ct2
+#     downloads 119,110 / 3,660,776, likes 224, MIT
+#     converted from deepdml/whisper-large-v3-turbo, a re-upload of OpenAI's
+#     (its model.safetensors has OpenAI's LFS sha256, 542566a4…), also float16
+#   Purfview/, h2oai/, jfmdai/, pyannoteAI/, aTrain-core/, Infomaniak-AI/ ...
+#     the rest of `?search=faster-whisper-large-v3-turbo`: two orders of
+#     magnitude fewer downloads, several int8 (a different transcript), several
+#     language fine-tunes (a different model). Not candidates.
+#
+# The top two are the SAME BYTES: model.bin 1,617,884,929 B with LFS sha256
+# e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da in both, and
+# config.json, preprocessor_config.json, tokenizer.json and vocabulary.json
+# share their git blob ids. So the choice is only whose name to pin, and it is
+# this one for three reasons:
+#
+#   1. faster-whisper itself names it. faster-whisper 1.2.1 — the version
+#      envs/asr/cuda-linux.txt pins — maps both "large-v3-turbo" and "turbo" to
+#      "mobiuslabsgmbh/faster-whisper-large-v3-turbo" in faster_whisper/utils.py
+#      `_MODELS`, read in the installed env. That is the engine's own answer to
+#      "which bytes are turbo", and this id agrees with it.
+#   2. It is converted from OpenAI's repo directly, not from a copy of it
+#      (an identical copy, as it happens, which is why the bytes agree).
+#   3. It is what the ecosystem runs: twelve times the other's downloads.
+#
+# The CANONICAL name is pinned, not the redirect: a redirect is the hub's
+# courtesy and not a promise.
+#
+# IT IS TURBO, NOT SOMETHING ELSE WEARING THE NAME. Checked against
+# openai/whisper-large-v3-turbo at 41f01f3fe87f28c78e2fbf8b568835947dd65ed9:
+#   - preprocessor_config.json: git blob 931c77a7… in both, i.e. byte-identical;
+#     `feature_size: 128` (128 mel bins, large-v3's front end — a 80-mel model
+#     would be large-v2's)
+#   - tokenizer.json: git blob 17456db5… in both, byte-identical
+#   - config.json (CTranslate2's; it carries no layer count, that lives in
+#     model.bin): `alignment_heads` [[2,4],[2,11],[3,3],[3,6],[3,11],[3,14]] is
+#     OpenAI's generation_config.json exactly, and every head is on decoder
+#     layer 0-3 — i.e. the four-layer decoder OpenAI's config.json declares
+#     (`decoder_layers: 4`, `num_mel_bins: 128`). 100 `lang_ids` and 88
+#     `suppress_ids`, both OpenAI's counts.
+#   - model.bin 1,617,884,929 B beside OpenAI's float16 model.safetensors at
+#     1,617,824,864 B: float16 by size as well as by the README's word. An int8
+#     conversion would be half that.
+#
+# repo/revision, read from the hub's API on 2026-09-23:
+#   GET /api/models/dropbox-dash/faster-whisper-large-v3-turbo/refs   -> main = the sha below
+#   GET /api/models/dropbox-dash/faster-whisper-large-v3-turbo/tree/<sha>?recursive=1
+#     -> 7 files, 1,621,668,947 B in total, of which model.bin is 1,617,884,929 B
+#   The last commit (2025-11-05) touched README.md only; the weights are the
+#   2024-10-08 "Model files" commit's.
+#
+# memory_bytes_estimate is COMPUTED, NOT MEASURED — see the note at the bottom.
+
+[model]
+id = "faster-whisper-large-v3-turbo"
+family = "faster-whisper"
+parameters_m = 809
+
+[backends.cuda-linux]
+engine = "faster-whisper"
+hf_repo = "dropbox-dash/faster-whisper-large-v3-turbo"
+revision = "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
+# COMPUTED, not measured: model.bin is 1_617_884_929 bytes of float16
+# CTranslate2 weights (the exact size the HF tree API reports for this
+# revision), plus the declared 1.5 GiB runtime allowance every
+# asr/faster-whisper-*.toml carries. Nothing here has run on a card: this was
+# written with the GPU off limits. Replace with a MEASURED figure on the first
+# real run; asr/faster-whisper-tiny.toml carries the long version of this note.
+memory_bytes_estimate = 3_228_497_665

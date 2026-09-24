@@ -283,6 +283,18 @@ read from the HuggingFace API on 2026-09-13:
 | `faster-whisper-medium` | `Systran/faster-whisper-medium` | `08e178d48790…` | 769M |
 | `faster-whisper-large-v3` | `Systran/faster-whisper-large-v3` | `edaa852ec7e1…` | 1550M |
 | `faster-whisper-distil-large-v3` | `Systran/faster-distil-whisper-large-v3` | `c3058b475261…` | 756M |
+| `faster-whisper-large-v3-turbo` | `dropbox-dash/faster-whisper-large-v3-turbo` | `0a363e9161cb…` | 809M |
+
+**`faster-whisper-large-v3-turbo` joined on 2026-09-23** (for ContentStudio), and it is the
+one row not from Systran, because Systran publishes no turbo conversion. It is
+`dropbox-dash/faster-whisper-large-v3-turbo` — the repo faster-whisper 1.2.1's own
+`_MODELS` table names for `"large-v3-turbo"` under its former name
+`mobiuslabsgmbh/…`, converted from `openai/whisper-large-v3-turbo` at `float16`, and
+byte-identical in `model.bin` to the next most-downloaded conversion. A conversion on the
+hub pinned by commit is inside DESIGN.md section 5's source rule, the same standing the
+`mlx-community` conversions have; the manifest carries the survey, and the check that the
+config and front end are OpenAI's turbo (128 mels, a four-layer decoder by its alignment
+heads). Its estimate is computed the same way as the six above.
 
 Two corrections to what this section used to say. The distilled model is **not** under
 `Systran/faster-whisper-*`; Systran publishes it as `faster-distil-whisper-large-v3`, and
@@ -323,6 +335,35 @@ against the tokenizer's own list before the job is queued, or the literal `"auto
 is a *value* meaning "detect it" and not an absence. Exactly one input, of any container
 ffmpeg can read; more than one is refused.
 
+**`initial_prompt` (added 2026-09-23, for ContentStudio) is the one optional param.** A
+string whisper is primed with before it hears the audio, as if it were the transcript so far
+— the way to tell it how a title and the proper nouns in it are spelled. Both engines take
+it under that name in `transcribe()` (faster-whisper 1.2.1 and mlx-whisper 0.4.3, the
+versions the `asr` recipes pin, read in their source), and both encode `" " + prompt.strip()`
+at the head of the token history the first 30-second segment is conditioned on.
+
+- **Optional, `null` meaning none.** Every other param is required because it changes the
+  transcript, and so does this one; but BookForge's pinned `@crucible/client` 1.0.23 sends
+  exactly the three keys above, and a fourth required key would make every one of its
+  transcripts a 400 on deploy day. Absent is what that client means — no prompt — and
+  `transcript.json` records `initial_prompt: null` either way, so the document still names
+  its rule. The SDK's `asr({initialPrompt})` sends the key whenever its caller states it.
+- **A non-string is refused, and so is a blank string** (`invalid_params`, naming the
+  field): `""` beside `null` would be two spellings of none, and faster-whisper would
+  encode `""` as a lone space token.
+- **Applied to every 900-second window, not only the first.** Each window is its own
+  `transcribe()` call and each call starts its token history empty, so
+  `condition_on_previous_text` carries nothing across a window boundary; a prompt given to
+  window 0 alone would prime fifteen minutes of an eighteen-hour book. Inside a window it
+  is not permanent either — the history is cut to its last 223 tokens and reset by a
+  temperature fallback above 0.5 — so what the caller gets is the start of every window
+  primed, which is the most either engine offers.
+- **Longer than whisper keeps is a failed job, by name.** Both libraries keep only the
+  last `max_length // 2 - 1` = 223 prompt tokens, so a longer prompt would silently lose
+  its *beginning*. The count needs the model's own tokenizer, which exists only in the
+  worker's env, so each worker counts after loading and fails the run before decoding
+  any audio.
+
 **`compute_type` is not a wire parameter.** It is `float16` on an accelerator and `int8` on
 CPU — engine knowledge, decided by the server from its own backend, exactly as the division
 of knowledge says. Since there is no CPU backend it is `float16`, always. Note that the app
@@ -342,7 +383,8 @@ error. A host with no ffmpeg on PATH gets `ffmpeg_missing` at submit time.
 
 **Out:** `transcript.json` — whisper's own segments in absolute book time with the window
 overlaps removed, plus the model, the pinned revision, the language asked for and the
-language detected, the duration, and the windowing that produced it. Sentence-cue grouping
+language detected, the `initial_prompt` (or `null`), the duration, and the windowing that
+produced it. Sentence-cue grouping
 and the WebVTT stay in BookForge, for the reason section 2 gives about `align`.
 
 One deviation from the app worth knowing: BookForge groups words into sentence cues *first*
@@ -574,6 +616,24 @@ card. So:
 
 **One audio input, at the model's native rate.** Every stem the separator writes comes back
 as an artifact, and `done` names which of them is the primary one.
+
+**Two separators ship** (the second added 2026-09-23, for ContentStudio), and the model id
+is the only thing that differs on the wire:
+
+| id | checkpoint (audio-separator's name) | `primary_stem` |
+|---|---|---|
+| `denoise-roformer` | `denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt` | `dry` |
+| `vocals-roformer` | `vocals_mel_band_roformer.ckpt` (Kimberley Jensen) | `vocals` |
+
+Nothing in the job type names a stem: the one it publishes is the manifest's
+`primary_stem`, matched as `(<stem>)` in the file audio-separator writes, and the
+invariants below are checked against that one. `vocals-roformer` comes from the same
+`Politrees/UVR_resources` snapshot as the denoiser; its checkpoint's sha256 is the one
+Kimberley Jensen's own `KimberleyJSN/melbandroformer` upload carries, and its mirror config
+parses equal to audio-separator 0.31.1's own `vocals_mel_band_roformer.yaml`. Its
+`memory_bytes_estimate` is computed the same way, and says so. Both separators are the
+same resident kind, so a job for one while the other is on the card loads its own
+checkpoint in the other's place.
 
 **`params` is empty, and that is the contract.** Every knob audio-separator takes is an
 engine default BookForge measured and left alone; `use_autocast` is CUDA-only by the

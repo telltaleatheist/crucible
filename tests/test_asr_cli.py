@@ -21,6 +21,7 @@ ASR_MODELS = [
     "faster-whisper-base",
     "faster-whisper-distil-large-v3",
     "faster-whisper-large-v3",
+    "faster-whisper-large-v3-turbo",
     "faster-whisper-medium",
     "faster-whisper-small",
     "faster-whisper-tiny",

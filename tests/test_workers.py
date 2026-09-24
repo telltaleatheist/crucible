@@ -31,6 +31,7 @@ REQUEST = {
     "language": None,
     "vad_filter": True,
     "word_timestamps": True,
+    "initial_prompt": None,
     "device": "cuda",
     "compute_type": "float16",
     "window_s": 900,

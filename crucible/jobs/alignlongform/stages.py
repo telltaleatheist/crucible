@@ -124,6 +124,10 @@ def transcribe(
         "language": language,
         "vad_filter": False,
         "word_timestamps": True,
+        # The asr worker's wire has no optional keys. No prompt: the coarse
+        # pass wants whisper's plain reading, and the book text it is walked
+        # against is what fixes the spellings, not a primed transcript.
+        "initial_prompt": None,
         "device": ROUGH_DEVICE,
         "compute_type": ROUGH_COMPUTE_TYPE,
         "window_s": WINDOW_SECONDS,

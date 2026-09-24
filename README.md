@@ -738,12 +738,21 @@ crucible models pull faster-whisper-base
 ```
 
 **There is no default model.** A job names one or it is refused: an ASR pass at the wrong
-size is a transcript that looks fine, is worse, and says nothing about it. Six are shipped
-— `faster-whisper-{tiny,base,small,medium,large-v3,distil-large-v3}` — as manifests in
-`asr/<id>.toml`, pinned to a commit sha like every other model.
+size is a transcript that looks fine, is worse, and says nothing about it. Seven are shipped
+for `cuda-linux`
+— `faster-whisper-{tiny,base,small,medium,large-v3,large-v3-turbo,distil-large-v3}` — as
+manifests in `asr/<id>.toml`, pinned to a commit sha like every other model. Turbo is the
+one not from Systran, which publishes no turbo conversion: it is
+`dropbox-dash/faster-whisper-large-v3-turbo`, the repo faster-whisper's own model table
+names, and its manifest says why that source is allowed.
 
 All three params are required. `language` is a faster-whisper code or the literal `"auto"`,
-which means "detect it" — a choice, not an absence.
+which means "detect it" — a choice, not an absence. A fourth, `initial_prompt`, is
+optional (`null` or absent means none): a string whisper is primed with — a title and the
+proper nouns in it — applied to **every** 900-second window, because each window is its own
+whisper call and whisper's own conditioning does not cross one. It is recorded in
+`transcript.json`; a blank one is refused, and one longer than the 223 tokens whisper keeps
+fails the job by name (docs/PHASE4-AUDIO.md section 3).
 
 Everything about *how* it runs is the server's and is nowhere on the wire: `float16` (there
 is no CPU backend, and the app's one-shot CPU fallback deliberately does not come across —
@@ -872,15 +881,25 @@ still refused by name — the refusal names this command.
 ### `denoise`
 
 Stem separation with audio-separator (PHASE4-AUDIO.md section 4.2). One audio file in,
-every stem out, and `done` names which one is the answer. It is what strips the faint
-room hiss a fine-tuned narration voice reproduces — those voices are trained on a hiss bed,
-which is load-bearing for reliable end-of-audio.
+the model's primary stem out, and `done` names every stem it produced. Two separators
+ship, and the id is the only thing that differs on the wire:
+
+| id | checkpoint | keeps |
+|---|---|---|
+| `denoise-roformer` | Mel-Band Roformer Denoise (aufr33) | `dry` — the signal minus room hiss |
+| `vocals-roformer` | Mel-Band Roformer Vocals (Kimberley Jensen) | `vocals` — the voice minus everything else |
+
+`denoise-roformer` is what strips the faint room hiss a fine-tuned narration voice
+reproduces — those voices are trained on a hiss bed, which is load-bearing for reliable
+end-of-audio. `vocals-roformer` lifts speech off music, crowd or effects. The stem kept is
+the manifest's `primary_stem`; nothing in the job names either one.
 
 ```bash
 crucible init --enable-denoise      # or add [jobs] enable_denoise = true
 crucible install rvc                # denoise SHARES the rvc env; this builds both
 crucible denoise list               # the separators this build ships, and their standing
 crucible denoise pull denoise-roformer   # ~0.9 GB, two files, both digests verified
+crucible denoise pull vocals-roformer    # the same mirror, the same ~0.9 GB shape
 ```
 
 ```json

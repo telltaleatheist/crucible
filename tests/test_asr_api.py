@@ -37,6 +37,7 @@ ALL_MODELS = [
     "faster-whisper-base",
     "faster-whisper-distil-large-v3",
     "faster-whisper-large-v3",
+    "faster-whisper-large-v3-turbo",
     "faster-whisper-medium",
     "faster-whisper-small",
     "faster-whisper-tiny",
@@ -676,6 +677,134 @@ def test_words_are_absent_when_they_were_not_asked_for(
         ready.get(f"/v1/jobs/{job_id}/artifacts/transcript.json", headers=auth).content
     )
     assert all("words" not in segment for segment in document["segments"])
+
+
+# ---------------------------------------------------------- initial_prompt
+
+
+def _sent_and_transcript(
+    client: TestClient,
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    record: Path,
+    params: dict,
+) -> tuple[dict, dict]:
+    """What the server handed the worker, and the transcript it published."""
+    monkeypatch.setenv("CRUCIBLE_FAKE_ASR_TRANSCRIPT", str(record))
+    events = run_job(client, auth, params=params)
+    assert terminal(events)["event"] == "done", terminal(events)
+    job_id = events[-1]["job_id"]
+    document = json.loads(
+        client.get(f"/v1/jobs/{job_id}/artifacts/transcript.json", headers=auth).content
+    )
+    sent = json.loads(record.read_text(encoding="utf-8").splitlines()[-1])
+    return sent, document
+
+
+def test_no_initial_prompt_runs_exactly_as_before(
+    ready: TestClient,
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The key absent — every client in the fleet today — and the key sent as
+    null are one request and one transcript. The worker is still TOLD there is
+    no prompt, because its wire has no optional keys, and the transcript says
+    so rather than leaving the reader to infer it from a missing field."""
+    absent_sent, absent = _sent_and_transcript(
+        ready, auth, monkeypatch, tmp_path / "absent.jsonl", dict(PARAMS)
+    )
+    null_sent, null = _sent_and_transcript(
+        ready, auth, monkeypatch, tmp_path / "null.jsonl",
+        {**PARAMS, "initial_prompt": None},
+    )
+    assert "initial_prompt" not in PARAMS
+    assert absent_sent["initial_prompt"] is None
+    assert absent_sent == {**null_sent, "audio": absent_sent["audio"]}
+    assert absent["initial_prompt"] is None
+    assert absent == null
+    # The rest of the document is what it was before the key existed.
+    assert [s["start"] for s in absent["segments"]] == [0.0, 895.0, 1795.0]
+
+
+def test_an_initial_prompt_reaches_the_worker_and_the_transcript(
+    ready: TestClient,
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prompt = "The Stormlight Archive: Kaladin, Shallan, Dalinar Kholin."
+    sent, document = _sent_and_transcript(
+        ready, auth, monkeypatch, tmp_path / "sent.jsonl",
+        {**PARAMS, "initial_prompt": prompt},
+    )
+    # Verbatim: not stripped, not prefixed. The leading space whisper wants is
+    # each LIBRARY's own step (`" " + prompt.strip()`), and doing it here too
+    # would be a second owner of it.
+    assert sent["initial_prompt"] == prompt
+    assert document["initial_prompt"] == prompt
+
+
+def test_an_initial_prompt_reaches_the_mac_worker(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second engine gets the same key, from the same request builder."""
+    sent = tmp_path / "sent-to-mlx.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_MLX_ASR_TRANSCRIPT", str(sent))
+    monkeypatch.setattr(
+        accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
+    )
+    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
+    monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
+    monkeypatch.setitem(
+        asr_job.WORKER_SCRIPT_FOR_ENGINE, "mlx-whisper", FAKE_MLX_WORKER
+    )
+    _mac_env(home, monkeypatch)
+    _mac_weights(home, MAC_MODEL)
+    with make_client(enable_asr=True, backend=FAKE_MAC_BACKEND) as client:
+        events = run_job(
+            client,
+            auth,
+            model=MAC_MODEL,
+            params={
+                "language": "en",
+                "vad_filter": False,
+                "word_timestamps": True,
+                "initial_prompt": "Mistborn. Vin, Elend, Kelsier.",
+            },
+        )
+    assert terminal(events)["event"] == "done", terminal(events)
+    envelope = json.loads(sent.read_text(encoding="utf-8").splitlines()[0])
+    assert envelope["initial_prompt"] == "Mistborn. Vin, Elend, Kelsier."
+    assert envelope["device"] == "metal"
+
+
+@pytest.mark.parametrize("value", [5, 1.5, True, ["Kaladin"], {"text": "Kaladin"}])
+def test_an_initial_prompt_that_is_not_a_string_is_refused_by_name(
+    asr_client: TestClient, auth: dict[str, str], value: Any
+) -> None:
+    """No coercion: `5` is not quietly the prompt `"5"`."""
+    response = submit(asr_client, auth, params={**PARAMS, "initial_prompt": value})
+    assert response.status_code == 400, response.json()
+    assert response.json()["error"]["code"] == "invalid_params"
+    assert "initial_prompt" in response.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("value", ["", "   ", "\n\t"])
+def test_a_blank_initial_prompt_is_refused_rather_than_read_as_none(
+    asr_client: TestClient, auth: dict[str, str], value: str
+) -> None:
+    """One spelling of "no prompt": null. faster-whisper would encode `""` as a
+    lone space token, which is not the same as no prompt at all."""
+    response = submit(asr_client, auth, params={**PARAMS, "initial_prompt": value})
+    assert response.status_code == 400, response.json()
+    error = response.json()["error"]
+    assert error["code"] == "invalid_params"
+    assert "initial_prompt is blank; send null" in error["message"]
 
 
 # ------------------------------------------------------------- it fails well

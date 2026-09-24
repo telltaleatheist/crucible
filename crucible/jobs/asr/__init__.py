@@ -8,13 +8,14 @@ rough transcript before the aligner runs.
 **There is no default model.** A job names one or it is refused, because an ASR
 pass at the wrong size is a transcript that looks fine, is worse, and has nothing
 in it to say so. `jobs.resolve_model` does that refusal for free, since this type
-advertises six models and none of them is preferred.
+advertises several models and none of them is preferred.
 
 What is the client's and what is the server's
 ---------------------------------------------
 The client says *what to transcribe* and *how to read it*: the model, the
-language, and the two switches that change what whisper is asked for
-(`vad_filter`, `word_timestamps`). Both switches are required — they default to
+language, the two switches that change what whisper is asked for
+(`vad_filter`, `word_timestamps`), and optionally the text to prime it with
+(`initial_prompt`). Both switches are required — they default to
 true in BookForge, and a default here would mean a transcript silently produced
 under different rules than the caller assumed.
 
@@ -34,6 +35,31 @@ Everything about *how it is run* is the server's and appears nowhere on the wire
   float64 and OOMs, and a 900-second window keeps the peak independent of book
   length. A client sends one file and never learns any of this.
 - **Decoding.** 16 kHz mono float32 through ffmpeg, once, in the worker.
+
+The initial prompt and the windows
+----------------------------------
+`initial_prompt` (optional; see `AsrParams`) is handed to **every** window, not
+only the first. The reason is in both libraries' source, not a preference:
+
+- Each window is its own `transcribe()` call, and each call starts its token
+  history empty — faster-whisper 1.2.1 `generate_segments` sets
+  `all_tokens = []` and puts the prompt at its head; mlx-whisper 0.4.3
+  `transcribe` does the same. `condition_on_previous_text` conditions each
+  30-second segment on the segments before it *inside one call*; it carries
+  nothing from one 900-second window to the next. A prompt given to window 0
+  alone would reach the first fifteen minutes and none of the other seventeen
+  hours.
+- Inside a call the prompt is not permanent either: it is the head of a history
+  that is cut to its last 223 tokens, so it scrolls out after a few segments of
+  speech, and a temperature fallback above 0.5 resets the history outright. So
+  "every window" means the start of every fifteen minutes is primed — which is
+  what a caller sending a title and its proper nouns wants, and the most the
+  engines can give it.
+
+The overlap seconds a window shares with its neighbour are heard twice, once
+primed at the head of the later window; the server's dedup keeps whichever
+segment starts first, the same as without a prompt. `transcript.json` records
+`initial_prompt` (null when none was sent).
 
 What comes back
 ---------------
@@ -64,7 +90,13 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    StrictStr,
+    ValidationError,
+    field_validator,
+)
 
 from ... import accelerator, hosttools, weights, workerenv, workers
 from ...asrmodels import (
@@ -179,13 +211,58 @@ WHISPER_LANGUAGES = frozenset(
 AUTO_LANGUAGE = "auto"
 
 class AsrParams(BaseModel):
-    """`params` for an asr job. Unknown keys are refused, not ignored."""
+    """`params` for an asr job. Unknown keys are refused, not ignored.
+
+    `initial_prompt` — the one param with a default, and why
+    ---------------------------------------------------------
+    Text whisper reads as if it were the transcript so far, before it hears the
+    first second: the way to tell it how a title, a name or a coined word is
+    spelled. Both engines take it in `transcribe()` under this name
+    (faster-whisper 1.2.1 `WhisperModel.transcribe(initial_prompt=...)`,
+    mlx-whisper 0.4.3 `transcribe(initial_prompt=...)`), and both do the same
+    thing with it: encode `" " + prompt.strip()` and put it at the head of the
+    token history the first 30-second segment is conditioned on.
+
+    Every other param here is required because every one changes the
+    transcript, and so does this one. It is still **optional on the wire, with
+    `None` meaning no prompt**, because the asr client already in the fleet —
+    BookForge's `electron/crucible/asr.ts`, through the `@crucible/client`
+    1.0.23 it pins, whose `asr()` sends exactly the three keys above — would be
+    refused by a fourth required key: every one of its transcripts a 400 on the
+    day this server is deployed, for a feature it never asked for. The absent case is not a
+    silent substitution: no prompt is precisely what those clients were getting
+    and what they meant, and `transcript.json` records `initial_prompt: null`
+    so the document still says which rule it was made under. A client that
+    wants to be explicit sends `null`; the SDK sends the key whenever its
+    caller states it.
+
+    A non-string is refused (`StrictStr`: no `5` turned into `"5"`), and so is a
+    blank one — `""` and `None` would be two spellings of "no prompt", and
+    faster-whisper does not even treat them alike (it encodes `" "` for `""`).
+
+    Its LENGTH is checked by the worker, not here. Both libraries keep only the
+    last `max_length // 2 - 1` prompt tokens (223 on every whisper), so a longer
+    prompt would lose its beginning with no error; the count needs the model's
+    own tokenizer, which exists only in the worker's env, so each worker counts
+    with it after loading and fails the run by name before the first window.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     language: str
     vad_filter: bool
     word_timestamps: bool
+    initial_prompt: StrictStr | None = None
+
+    @field_validator("initial_prompt")
+    @classmethod
+    def prompt_is_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and value.strip() == "":
+            raise ValueError(
+                "initial_prompt is blank; send null for no prompt, or the text "
+                "whisper should be primed with (a title, the names in it)"
+            )
+        return value
 
     @field_validator("language")
     @classmethod
@@ -625,6 +702,10 @@ class AsrJobType:
             "language": params.whisper_language(),
             "vad_filter": params.vad_filter,
             "word_timestamps": params.word_timestamps,
+            # Always sent, null included: the worker's wire has no optional
+            # keys. Applied to EVERY window — see "The initial prompt and the
+            # windows" in this module's docstring.
+            "initial_prompt": params.initial_prompt,
             "device": _for_engine(DEVICE_FOR_ENGINE, engine, "device"),
             "compute_type": _for_engine(
                 COMPUTE_TYPE_FOR_ENGINE, engine, "compute_type"
@@ -752,6 +833,9 @@ class AsrJobType:
             "language_requested": params.language,
             "vad_filter": params.vad_filter,
             "word_timestamps": params.word_timestamps,
+            # null when none was sent, so the document names the rule it was
+            # made under whichever way the client spelled "no prompt".
+            "initial_prompt": params.initial_prompt,
             "duration_s": outcome.ready["duration_s"],
             "window_s": WINDOW_SECONDS,
             "overlap_s": OVERLAP_SECONDS,

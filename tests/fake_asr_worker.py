@@ -123,6 +123,22 @@ def main() -> int:
             handle.write(line)
     request = json.loads(line)
 
+    # The real worker requires the KEY and takes a string or null (null is no
+    # prompt), so the double refuses what it would refuse. A double that
+    # accepted a missing key would let the server stop sending it unnoticed.
+    if "initial_prompt" not in request:
+        send(results, "failed", message="the asr request has no 'initial_prompt'")
+        return 1
+    if request["initial_prompt"] is not None and not isinstance(
+        request["initial_prompt"], str
+    ):
+        send(
+            results,
+            "failed",
+            message="the asr request's 'initial_prompt' must be a string or null",
+        )
+        return 1
+
     if os.environ.get("CRUCIBLE_FAKE_ASR_SILENT") == "1":
         while True:
             time.sleep(0.05)

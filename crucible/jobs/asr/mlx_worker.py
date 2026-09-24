@@ -249,6 +249,63 @@ def serialise(segment: dict, want_words: bool) -> dict:
     return row
 
 
+def require_prompt(request: dict) -> "str | None":
+    """`initial_prompt`: required as a KEY, null means no prompt.
+
+    `worker.py`'s rule, verbatim in behaviour. mlx-whisper's `transcribe` calls
+    `initial_prompt.strip()`, so anything but a string or null would be an
+    AttributeError in the first window rather than a refusal before the first.
+    """
+    if "initial_prompt" not in request:
+        raise KeyError(
+            "the asr request has no 'initial_prompt'; null means no prompt, and "
+            "the server sends the key either way"
+        )
+    value = request["initial_prompt"]
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise KeyError(
+            f"the asr request's 'initial_prompt' must be a string or null, got "
+            f"{type(value).__name__}"
+        )
+    if value.strip() == "":
+        raise KeyError("the asr request's 'initial_prompt' is blank; null means none")
+    return value
+
+
+def check_prompt_length(model_dir: str, dtype, prompt: str) -> "str | None":
+    """A refusal if the prompt is longer than whisper keeps, else None.
+
+    mlx-whisper's own arithmetic: `transcribe` builds its tokenizer with
+    `get_tokenizer(model.is_multilingual, num_languages=model.num_languages,
+    ...)` and encodes `" " + initial_prompt.strip()`; `DecodingTask`'s
+    `_get_initial_tokens` then keeps `prompt_tokens[-(n_ctx // 2 - 1):]` with
+    `n_ctx = model.dims.n_text_ctx`. A longer prompt loses its BEGINNING with no
+    error. The language and task only choose special tokens, which `encode`
+    never emits, so they are left at the library's own defaults here.
+    """
+    from mlx_whisper.tokenizer import get_tokenizer
+    from mlx_whisper.transcribe import ModelHolder
+
+    # The same cached holder `transcribe()` loads through, so this is the one
+    # load of the run and not a second one.
+    model = ModelHolder.get_model(model_dir, dtype)
+    tokenizer = get_tokenizer(
+        model.is_multilingual, num_languages=model.num_languages
+    )
+    ceiling = int(model.dims.n_text_ctx) // 2 - 1
+    count = len(tokenizer.encode(" " + prompt.strip()))
+    if count <= ceiling:
+        return None
+    return (
+        f"initial_prompt is {count} tokens and whisper keeps only the last "
+        f"{ceiling} of its prompt history, so the first {count - ceiling} would "
+        "be dropped without a word. Send a shorter prompt: the title and the "
+        "names in it, not the text"
+    )
+
+
 def detect_language(model_dir: str, window, dtype) -> tuple[str, float]:
     """whisper's own language detection on the first 30 s, and its probability.
 
@@ -313,6 +370,7 @@ def main() -> int:
                 f"the asr request's 'language' must be a string or null, got "
                 f"{type(language).__name__}"
             )
+        initial_prompt = require_prompt(request)
     except KeyError as exc:
         return fail(str(exc.args[0]))
 
@@ -357,6 +415,11 @@ def main() -> int:
             f"device {device!r} is not mlx-whisper's; MLX runs on Metal and "
             "nothing else, and the server sends 'metal' on this backend"
         )
+
+    if initial_prompt is not None:
+        failure = check_prompt_length(model_dir, dtype, initial_prompt)
+        if failure is not None:
+            return fail(failure)
 
     total_container = probe_duration(ffmpeg, audio)
     last_decode = [0.0]
@@ -437,6 +500,9 @@ def main() -> int:
                 language=code,
                 word_timestamps=word_timestamps,
                 fp16=dtype is mx.float16,
+                # Every window, for `worker.py`'s reason: each window is its own
+                # `transcribe()` call and each call starts its history empty.
+                initial_prompt=initial_prompt,
                 verbose=None,
             )
             rows = []

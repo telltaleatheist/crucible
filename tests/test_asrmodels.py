@@ -1,4 +1,4 @@
-"""The `asr/<id>.toml` loader, and the thirteen manifests this build ships.
+"""The `asr/<id>.toml` loader, and the fourteen manifests this build ships.
 
 Two halves. The first asserts that the loader refuses every way a manifest can be
 wrong, because an ASR manifest that loads with a key missing is a guard working
@@ -6,7 +6,7 @@ from nothing. The second asserts facts about the shipped files themselves — th
 pins are full shas, the ids match the filenames, and neither engine's ids ever
 name the other engine's backend.
 
-**Two engines, thirteen ids, and no id shared.** faster-whisper is CTranslate2
+**Two engines, fourteen ids, and no id shared.** faster-whisper is CTranslate2
 and has no Metal backend; mlx-whisper is MLX and has no CUDA one. They convert
 the same original whisper checkpoints to different bytes at different
 quantisations and they will disagree about a hard passage, so the loader
@@ -33,6 +33,7 @@ CUDA_MODELS = [
     "faster-whisper-base",
     "faster-whisper-distil-large-v3",
     "faster-whisper-large-v3",
+    "faster-whisper-large-v3-turbo",
     "faster-whisper-medium",
     "faster-whisper-small",
     "faster-whisper-tiny",
@@ -80,12 +81,12 @@ def parse(text: str, model_id: str = "faster-whisper-tiny"):
     return parse_asr_manifest(text, Path(f"{model_id}.toml"), model_id)
 
 
-# ------------------------------------------------------------ the shipped six
+# ------------------------------------------------------- the shipped fourteen
 
 
-def test_this_build_ships_thirteen_asr_models_across_two_engines() -> None:
+def test_this_build_ships_fourteen_asr_models_across_two_engines() -> None:
     assert sorted(load_all_asr_manifests()) == MODELS
-    assert len(CUDA_MODELS) == 6 and len(MAC_MODELS) == 7
+    assert len(CUDA_MODELS) == 7 and len(MAC_MODELS) == 7
 
 
 def test_every_shipped_pin_is_a_full_commit_sha() -> None:
@@ -160,7 +161,8 @@ def test_every_shipped_estimate_covers_the_weights() -> None:
     """The estimate is weights plus runtime, so it is never below the weights.
 
     The weights figures are the `model.bin` sizes the HuggingFace tree API
-    reported for these exact revisions on 2026-09-13; the estimates are those
+    reported for these exact revisions on 2026-09-13 (turbo's on 2026-09-23);
+    the estimates are those
     plus a declared 1.5 GiB. None of it is measured yet and every manifest says
     so — this test only holds the arithmetic to being the arithmetic it claims.
     """
@@ -171,6 +173,7 @@ def test_every_shipped_estimate_covers_the_weights() -> None:
         "faster-whisper-medium": 1_527_906_378,
         "faster-whisper-large-v3": 3_087_284_237,
         "faster-whisper-distil-large-v3": 1_512_927_867,
+        "faster-whisper-large-v3-turbo": 1_617_884_929,
     }
     runtime = 1024 ** 3 + 512 * 1024 ** 2
     assert sorted(weights_bytes) == sorted(CUDA_MODELS)

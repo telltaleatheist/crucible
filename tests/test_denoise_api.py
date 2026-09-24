@@ -29,6 +29,7 @@ from .conftest import FAKE_BACKEND, holding_the_card, parse_sse
 from crucible.residency import KIND_DENOISE, Residency
 
 MODEL = "denoise-roformer"
+VOCALS_MODEL = "vocals-roformer"
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_denoise_worker.py"
 BLOCK = "block_00.wav"
 INPUTS = {
@@ -191,7 +192,7 @@ def test_info_advertises_denoise(
     assert "denoise" in info["job_types"]
     by_type = {entry["job_type"]: entry for entry in info["capabilities"]}
     rows = by_type["denoise"]["models"]
-    assert [row["id"] for row in rows] == [MODEL]
+    assert [row["id"] for row in rows] == [MODEL, VOCALS_MODEL]
     spec = load_denoise_manifest(MODEL).spec(FAKE_BACKEND.kind)
     # The repo AND the file: one repo holds every UVR model there is.
     assert rows[0]["source"] == f"{spec.hf_repo}:{spec.model_path}"
@@ -358,6 +359,113 @@ def test_a_run_publishes_every_stem_and_names_the_primary(
             "revision": spec.revision,
             "fingerprint": f"{MODEL}@{spec.revision}",
         }
+
+
+def _place_files(home: Path, model_id: str) -> None:
+    """`model_files` for another separator, into the same flat directory."""
+    manifest = load_denoise_manifest(model_id)
+    root = denoise_job.denoise_models_dir_for(home)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / manifest.model_filename).write_bytes(b"not a checkpoint")
+    (root / manifest.config_filename).write_bytes(b"not a config")
+
+
+#: What audio-separator 0.31.1 writes for this model: `CommonSeparator` names
+#: each stem `<base>_(<instrument>)_<model name>.<ext>`, and the config's
+#: instruments are `[vocals, other]`.
+VOCALS_STEMS = json.dumps(
+    [
+        {"name": "block_00_(vocals)_vocals_mel_band_roformer.wav"},
+        {"name": "block_00_(other)_vocals_mel_band_roformer.wav"},
+    ]
+)
+
+
+def test_the_vocals_separator_loads_its_own_checkpoint_and_keeps_vocals(
+    ready: TestClient,
+    auth: dict[str, str],
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stem the job keeps is the MANIFEST'S, not a `dry` anybody wrote
+    down: the same job type, a different manifest, and the `(vocals)` stem is
+    the one published while `(other)` is only reported."""
+    _place_files(home, VOCALS_MODEL)
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_TRANSCRIPT", str(transcript))
+    monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_STEMS", VOCALS_STEMS)
+    events = run_job(ready, auth, model=VOCALS_MODEL)
+    assert terminal(events)["event"] == "done", terminal(events)
+    data = terminal(events)["data"]
+    assert data["primary_stem"] == "block_00_(vocals)_vocals_mel_band_roformer.wav"
+    assert data["artifacts"] == [data["primary_stem"]]
+    assert len(data["stems"]) == 2
+    assert data["resident"] == VOCALS_MODEL
+
+    manifest = load_denoise_manifest(VOCALS_MODEL)
+    load = json.loads(transcript.read_text(encoding="utf-8").splitlines()[0])
+    assert load["op"] == "load"
+    assert load["model_filename"] == manifest.model_filename
+    assert load["model_filename"] == "vocals_mel_band_roformer.ckpt"
+
+    job_id = events[0]["job_id"]
+    sidecar = ready.get(
+        f"/v1/jobs/{job_id}/artifacts/{data['primary_stem']}.provenance.json",
+        headers=auth,
+    ).json()
+    assert sidecar["model"]["id"] == VOCALS_MODEL
+
+
+def test_the_vocals_separator_refuses_a_run_with_no_vocals_stem(
+    ready: TestClient,
+    auth: dict[str, str],
+    home: Path,
+) -> None:
+    """The fake's default stems are the DENOISER'S (`(Dry)`, `(Other)`). Under
+    the vocals manifest that is a model that produced something other than what
+    its manifest says, and the refusal names `(vocals)` — which is only true if
+    the marker came from the manifest."""
+    _place_files(home, VOCALS_MODEL)
+    events = run_job(ready, auth, model=VOCALS_MODEL)
+    assert terminal(events)["event"] == "failed"
+    error = terminal(events)["data"]["error"]
+    assert error["code"] == "denoise_primary_stem_missing"
+    assert "'(vocals)'" in error["message"]
+
+
+def test_two_separators_each_load_their_own_checkpoint(
+    ready: TestClient,
+    auth: dict[str, str],
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two separators behind one job type: a vocals job after a denoise job
+    loads the vocals checkpoint and ends with it resident, rather than
+    separating through whichever checkpoint was loaded last. (Whether the
+    denoiser was still on the card in between is `settle`'s business; the
+    assertion is on what each job asked the worker to load.)"""
+    _place_files(home, VOCALS_MODEL)
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_TRANSCRIPT", str(transcript))
+    first = run_job(ready, auth)
+    assert terminal(first)["event"] == "done", terminal(first)
+    monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_STEMS", VOCALS_STEMS)
+    second = run_job(ready, auth, model=VOCALS_MODEL)
+    assert terminal(second)["event"] == "done", terminal(second)
+    assert terminal(second)["data"]["resident"] == VOCALS_MODEL
+    assert terminal(second)["data"]["load_seconds"] > 0
+
+    loads = [
+        json.loads(line)["model_filename"]
+        for line in transcript.read_text(encoding="utf-8").splitlines()
+        if '"op": "load"' in line
+    ]
+    assert loads == [
+        load_denoise_manifest(MODEL).model_filename,
+        "vocals_mel_band_roformer.ckpt",
+    ]
 
 
 def test_the_worker_is_told_the_native_rate_and_the_backend_decides_autocast(
