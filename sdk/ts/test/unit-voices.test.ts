@@ -253,55 +253,67 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
   ]);
 });
 
-test('a voice row carries reason: null when it is loadable, and the key is always there', async () => {
-  // The one shape difference from a model row, and this client reads it as it
-  // is rather than making the two routes look alike.
+// ANY CRUCIBLE THAT ANSWERS WORKS (Owen, 2026-09-24). A voice row's id,
+// residency, loadability, sample rate, clip requirement and pace block are
+// what a caller loads and packs by; the rest describes the voice and reads as
+// null when a server does not state it.
+
+test('a 1.0.23-shaped voice row — no orphan — reads cleanly, with null there', async () => {
+  // The exact failure the ruling was made over: `voices[0] has no field
+  // "orphan"` in every BookForge fake after the 1.0.24 repin.
+  const { orphan: _orphan, ...older } = VOICE_ROW;
+  answers(200, [older]);
+  const [voice] = await client().voices();
+  assert.equal(voice!.orphan, null);
+  assert.equal(voice!.id, 'deathstalker');
+  assert.equal(voice!.sampleRate, 24000);
+});
+
+test('a voice row without reason reads null, and a refusal with no reason still reads', async () => {
   const { reason: _reason, ...withoutReason } = VOICE_ROW;
   answers(200, [withoutReason]);
-  await assert.rejects(client().voices(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /voices\[0\] has no field "reason"/);
-    return true;
-  });
-});
-
-test('a voice that is not loadable and does not say why is a protocol error', async () => {
+  assert.equal((await client().voices())[0]!.reason, null);
+  // `loadable: false` is the fact a caller acts on; the reason is for a person.
   answers(200, [{ ...VOICE_ROW, loadable: false, reason: null }]);
-  await assert.rejects(client().voices(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /not loadable and its "reason" is null/);
-    return true;
-  });
+  const [voice] = await client().voices();
+  assert.equal(voice!.loadable, false);
+  assert.equal(voice!.reason, null);
 });
 
-test('a voice kind outside the manifest vocabulary is a protocol error', async () => {
+test('a voice kind outside today\'s vocabulary is carried as the server\'s word', async () => {
+  // Whether a load needs a clip is `needs_reference`'s to say, so a fourth
+  // kind from a newer server is news for a display, never a lost row.
   answers(200, [{ ...VOICE_ROW, kind: 'improvised' }]);
-  await assert.rejects(client().voices(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /voices\[0\]\.kind is "improvised"/);
-    return true;
-  });
+  assert.equal((await client().voices())[0]!.kind, 'improvised');
 });
 
-test('an estimate_basis that is neither measured nor declared is a protocol error', async () => {
-  // The basis rides on the row so nothing downstream can mistake a reservation
-  // for a measurement. A third word would defeat that silently.
+test('an estimate_basis outside today\'s vocabulary is carried as the server\'s word', async () => {
   answers(200, [{ ...VOICE_ROW, estimate_basis: 'guessed' }]);
-  await assert.rejects(client().voices(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /voices\[0\]\.estimate_basis is "guessed"/);
-    return true;
-  });
+  assert.equal((await client().voices())[0]!.estimateBasis, 'guessed');
 });
 
-test('a pace block missing a rate is a protocol error, not a voice packed to a guess', async () => {
+test('a voice kind that is present but not a string is a protocol error', async () => {
+  answers(200, [{ ...VOICE_ROW, kind: 3 }]);
+  await assert.rejects(client().voices(), /voices\[0\]\.kind is present but is not a string/);
+});
+
+test('a pace block missing a rate is a half-stated band, refused by name', async () => {
+  // An absent rate reads as "this voice states none" — and two of three is
+  // still the wire disagreeing with itself, which is refused whatever the
+  // vintage.
   const { max_chars_per_sec: _rate, ...lamePace } = VOICE_ROW.pace;
   answers(200, [{ ...VOICE_ROW, pace: lamePace }]);
   await assert.rejects(client().voices(), (error: unknown) => {
     assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /voices\[0\]\.pace has no field "max_chars_per_sec"/);
+    assert.match(error.message, /voices\[0\]\.pace states 2 of its 3 rates/);
     return true;
   });
+});
+
+test('a voice row without its pace block is a protocol error: it is what a client packs to', async () => {
+  const { pace: _pace, ...withoutPace } = VOICE_ROW;
+  answers(200, [withoutPace]);
+  await assert.rejects(client().voices(), /voices\[0\] has no field "pace"/);
 });
 
 // ── a voice nobody measured ──────────────────────────────────────────────────
@@ -491,6 +503,53 @@ test("info() reads the tts capability's rows with the /voices reader", async () 
   assert.equal(tts.models.length, 1);
   assert.equal(tts.models[0]!.fingerprint, `deathstalker@${VOICE_REVISION}`);
   assert.equal(tts.models[0]!.pace.safeMaxChars, 800);
+  assert.deepEqual(tts.unreadableRows, []);
+});
+
+test('info() with one malformed voice row still returns, and says which row it could not read', async () => {
+  // Until 2026-09-24 one voice row this build could not read took the whole
+  // probe down — `info()` is where the voice rows ride. Now the row is
+  // carried aside with its raw data and the reason, and everything else in
+  // the document reads (Owen: "if it can make the call to the crucible server
+  // then it should work").
+  const { sample_rate: _rate, ...noRate } = { ...VOICE_ROW, id: 'broken' };
+  const wrongType = { ...VOICE_ROW, id: 'banana', max_chars: 'lots' };
+  answers(200, {
+    server: { name: 'crucible@test', version: '1.0.24', api_version: 1 },
+    host: {
+      platform: 'linux',
+      arch: 'x86_64',
+      backend: 'cuda-linux',
+      gpu: { vendor: 'nvidia', name: 'NVIDIA GeForce RTX 3090 Ti', vram_bytes: 25757220864 },
+    },
+    job_types: ['echo', 'load-voice', 'unload-voice'],
+    capabilities: [
+      { job_type: 'echo', models: [] },
+      { job_type: 'tts', models: [VOICE_ROW, noRate, wrongType] },
+    ],
+  });
+
+  const info = await client().info();
+  const tts = info.capabilities.find(isTtsCapability);
+  assert.ok(tts !== undefined);
+  assert.deepEqual(tts.models.map((voice) => voice.id), ['deathstalker']);
+  assert.deepEqual(
+    tts.unreadableRows.map((row) => [row.index, row.id]),
+    [[1, 'broken'], [2, 'banana']],
+  );
+  assert.deepEqual(tts.unreadableRows[0]!.raw, noRate);
+  assert.match(
+    tts.unreadableRows[0]!.unreadable,
+    /info\.capabilities\[1\]\.models\[1\] has no field "sample_rate"/,
+  );
+  assert.match(tts.unreadableRows[1]!.unreadable, /max_chars is present but is not a number/);
+  // The rest of the document is intact.
+  assert.equal(info.server.name, 'crucible@test');
+  assert.deepEqual(info.jobTypes, ['echo', 'load-voice', 'unload-voice']);
+
+  // The direct read stays strict about the same row, by name.
+  answers(200, [VOICE_ROW, noRate]);
+  await assert.rejects(client().voices(), /voices\[1\] has no field "sample_rate"/);
 });
 
 // -------------------------------------------------------------- health row
@@ -529,13 +588,21 @@ test('health() reports a kind this client has never heard of rather than refusin
   assert.equal(health.residentKind, 'align');
 });
 
-test('a health body without resident_kind is a protocol error, not a null kind', async () => {
+test('a health body without resident_kind reads it as null', async () => {
   answers(200, { status: 'ok', queue_depth: 0, resident_models: [] });
-  await assert.rejects(client().health(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /health has no field "resident_kind"/);
-    return true;
-  });
+  const health = await client().health();
+  assert.equal(health.residentKind, null);
+  assert.equal(health.status, 'ok');
+});
+
+test('a health status outside today\'s three words is carried, not refused', async () => {
+  answers(200, { status: 'draining', queue_depth: 0, resident_models: [], resident_kind: null, stopping: null });
+  assert.equal((await client().health()).status, 'draining');
+});
+
+test('a health body without resident_models is a protocol error: loads are decided on it', async () => {
+  answers(200, { status: 'ok', queue_depth: 0, resident_kind: null, stopping: null });
+  await assert.rejects(client().health(), /health has no field "resident_models"/);
 });
 
 // ------------------------------------------------------------- accelerator
@@ -600,23 +667,30 @@ test('a holder whose bytes the driver would not report stays null, and never bec
     ],
   });
   const state = await client().accelerator();
+  assert.ok(state.holders !== null);
   assert.equal(state.holders[0]!.bytes, null);
   assert.equal(state.holders[1]!.bytes, 19000000000);
   assert.equal(state.holders[1]!.ownedByCrucible, true);
 });
 
-test('a holder with no bytes field at all is a protocol error, not an unknown one', async () => {
-  // `null` is the driver declining to answer; an absent key is a server that did
-  // not answer, and the two are not the same news.
+test('a holder with no bytes field at all reads as null — unknown, never 0', async () => {
+  // The driver declining and a server that does not say are the same news to
+  // a caller: not known. Neither is ever zero.
   answers(200, {
     ...ACCELERATOR,
     holders: [{ pid: 6120, name: 'python.exe', owned_by_crucible: false }],
   });
-  await assert.rejects(client().accelerator(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /accelerator\.holders\[0\] has no field "bytes"/);
-    return true;
+  const state = await client().accelerator();
+  assert.equal(state.holders?.[0]?.bytes, null);
+  assert.notEqual(state.holders?.[0]?.bytes, 0);
+});
+
+test('a holder with no pid is a protocol error: it is what an operator acts on', async () => {
+  answers(200, {
+    ...ACCELERATOR,
+    holders: [{ name: 'python.exe', bytes: null, owned_by_crucible: false }],
   });
+  await assert.rejects(client().accelerator(), /accelerator\.holders\[0\] has no field "pid"/);
 });
 
 test('a negative unattributed figure is surfaced, not quietly clamped here', async () => {
@@ -967,16 +1041,31 @@ test('a progress frame with no measurements of its own carries an empty extra', 
   assert.deepEqual(first.event === 'progress' ? first.data.extra : null, {});
 });
 
-test('a progress frame without a fraction is still a protocol error', async () => {
-  // Carrying the extras must not loosen the two fields API v1 pins.
+test('a progress frame without a fraction reads it as null, and keeps its extras', async () => {
+  // The fraction is drawn, never acted on (Owen, 2026-09-24).
   handle = (_request, response) => {
     openSse(response);
     response.write('id: 1\nevent: progress\ndata: {"message": "half", "cues": 7}\n\n');
+    response.write('id: 2\nevent: done\ndata: {"artifacts": []}\n\n');
+    response.end();
+  };
+  const seen = [];
+  for await (const event of client().events('job-sparse-progress')) seen.push(event);
+  const [progress] = seen;
+  assert.ok(progress !== undefined && progress.event === 'progress');
+  assert.equal(progress.data.fraction, null);
+  assert.deepEqual(progress.data.extra, { cues: 7 });
+});
+
+test('a progress fraction that is present but not a number is a protocol error', async () => {
+  handle = (_request, response) => {
+    openSse(response);
+    response.write('id: 1\nevent: progress\ndata: {"fraction": "half", "message": "x"}\n\n');
     response.end();
   };
   await assert.rejects(async () => {
     for await (const _event of client().events('job-bad-progress')) {
       // drain
     }
-  }, CrucibleProtocolError);
+  }, /fraction is present but is not a number/);
 });

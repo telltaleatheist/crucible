@@ -31,11 +31,11 @@ export interface Ping {
  */
 export interface ModelDescriptor {
   readonly id: string;
-  readonly revision: string;
-  readonly source: string;
+  readonly revision: string | null;
+  readonly source: string | null;
   readonly installed: boolean;
   readonly resident: boolean;
-  readonly vramBytes: number;
+  readonly vramBytes: number | null;
 }
 
 /**
@@ -67,8 +67,9 @@ export interface JobCapability {
  * lost the whole call — measured on 2026-09-13 against a real server, not
  * reasoned about.
  *
- * `llm` and `tts` are the shapes this client CLAIMS, and it stays strict about
- * them: a malformed row in either is still a protocol error. Every other
+ * `llm` and `tts` are the shapes this client CLAIMS. A row in either that
+ * cannot be read is carried aside as an {@link UnreadableRow}, and the rest of
+ * the capability is returned (Owen, 2026-09-24). Every other
  * capability is tried as a descriptor and, when it does not fit, carried here
  * with its rows exactly as they arrived — because a capability this build has
  * never heard of is not a broken server, it is a newer one, and `info()` is the
@@ -82,10 +83,38 @@ export interface RawCapability {
   readonly unreadable: string;
 }
 
+/**
+ * One `llm` or `tts` row inside `info()` that this build could not read,
+ * carried aside rather than failing the whole call.
+ *
+ * {@link RawCapability}'s rule one level in. `info()` is the call an app makes
+ * to find out what it is talking to, and the voice and model rows ride inside
+ * it — so until 2026-09-24 one row this build could not read took the whole
+ * probe down (a single new informational voice field broke every `info()`
+ * after the 1.0.24 repin). Informational fields no longer cause that at all:
+ * they read as null when absent. What still lands here is a row missing a
+ * LOAD-BEARING field, or carrying a field of the wrong type — a row nothing
+ * true can be said about. `models()` and `voices()` stay strict and refuse such
+ * a row by name; this is only `info()`'s containment.
+ */
+export interface UnreadableRow {
+  /** Where the row sat in the capability's `models` array. */
+  readonly index: number;
+  /** The row's `id`, when it had a string one, for a log to name it. */
+  readonly id: string | null;
+  /** The row exactly as it arrived. Nothing has been checked. */
+  readonly raw: unknown;
+  /** Why it could not be read, for a log rather than a branch. */
+  readonly unreadable: string;
+}
+
 /** The `llm` capability: `GET /v1/models`' rows, carried inside `info()`. */
 export interface LlmCapability {
   readonly jobType: 'llm';
+  /** Every row that could be read. */
   readonly models: readonly ModelInfo[];
+  /** Every row that could not, with its raw data and the reason. Usually empty. */
+  readonly unreadableRows: readonly UnreadableRow[];
 }
 
 /**
@@ -97,7 +126,10 @@ export interface LlmCapability {
  */
 export interface TtsCapability {
   readonly jobType: 'tts';
+  /** Every row that could be read. */
   readonly models: readonly VoiceInfo[];
+  /** Every row that could not, with its raw data and the reason. Usually empty. */
+  readonly unreadableRows: readonly UnreadableRow[];
 }
 
 /** Narrow a capability to the `llm` one, whose rows are {@link ModelInfo}. */
@@ -112,9 +144,9 @@ export function isTtsCapability(capability: Capability): capability is TtsCapabi
 
 /** The accelerator the server owns. */
 export interface GpuInfo {
-  readonly vendor: string;
-  readonly name: string;
-  readonly vramBytes: number;
+  readonly vendor: string | null;
+  readonly name: string | null;
+  readonly vramBytes: number | null;
 }
 
 /**
@@ -164,7 +196,7 @@ export interface EngineRef {
   readonly name: string | null;
   readonly url: string;
   readonly backend: string | null;
-  readonly owner: EngineOwner;
+  readonly owner: EngineOwner | null;
 }
 
 /**
@@ -226,7 +258,7 @@ export interface PagesEngine {
   readonly engine: string | null;
   readonly installed: boolean;
   /** Why, in words, for an operator. Never parsed. */
-  readonly detail: string;
+  readonly detail: string | null;
   /** Published whether or not this host can answer one. */
   readonly request: PageRequest;
 }
@@ -235,15 +267,20 @@ export interface PagesEngine {
 export interface ServerInfo {
   readonly server: {
     readonly name: string;
-    readonly version: string;
+    /** The release, for a person to read; null where the server did not say. */
+    readonly version: string | null;
     readonly apiVersion: number;
   };
+  /**
+   * The machine, described for a person. Every part is null where the server
+   * did not state it: no call this client makes is shaped by it.
+   */
   readonly host: {
-    readonly platform: string;
-    readonly arch: string;
+    readonly platform: string | null;
+    readonly arch: string | null;
     /** `cuda-linux` or `mlx-darwin`. Windows is never a backend. */
-    readonly backend: string;
-    readonly gpu: GpuInfo;
+    readonly backend: string | null;
+    readonly gpu: GpuInfo | null;
   };
   /**
    * What this server will accept as a `type` in `POST /v1/jobs`.
@@ -320,19 +357,19 @@ export interface ServerInfo {
  */
 export interface Stopping {
   /** `llm`, `tts`, … — what sort of thing was on the card. */
-  readonly kind: string;
+  readonly kind: string | null;
   /** The model or voice id that was resident. */
   readonly id: string;
   /** When the stop was asked for, in {@link ActivityJob.started}'s format. */
-  readonly since: string;
+  readonly since: string | null;
   /** The pids still holding the card, ascending. Stop these by hand. */
   readonly pids: readonly number[];
 }
 
 /** `GET /v1/health`. */
 export interface Health {
-  readonly status: 'ok' | 'warming' | 'busy';
-  readonly queueDepth: number;
+  readonly status: string | null;
+  readonly queueDepth: number | null;
   /**
    * The ids of whatever is on the card. Keeps its phase-2 name and its phase-2
    * shape — a list of ids — because every phase-2 client reads it and one id is
@@ -375,9 +412,9 @@ export interface ActivityJob {
   readonly status: string;
   readonly position: number | null;
   /** 0..1. A job HAS a denominator: the client posted every chunk up front. */
-  readonly progress: number;
+  readonly progress: number | null;
   readonly message: string | null;
-  readonly created: string;
+  readonly created: string | null;
   readonly started: string | null;
   /** The submitting User-Agent. Null = it did not say; never a guessed name. */
   readonly client: string | null;
@@ -395,27 +432,27 @@ export interface ActivityJob {
  * places are independent of a queue but claim a server while they run... that
  * means crucible wont always have a percent complete to hand back."*
  *
- * The field is present rather than omitted because on this wire a present null
- * is a statement and an absent key is not. Draw a spinner and the counts.
+ * Draw a spinner and the counts. A server that sends a NUMBER here is refused
+ * by name: a session has no total to be a fraction of.
  */
 export interface ActivityStreaming {
   readonly sessionId: string;
   readonly voice: string;
-  readonly language: string;
-  readonly narratorEngine: string;
+  readonly language: string | null;
+  readonly narratorEngine: string | null;
   /** When the session opened, in {@link ActivityJob.started}'s format. */
-  readonly since: string;
+  readonly since: string | null;
   /** Who opened it. Null = it did not say. */
   readonly client: string | null;
   /** Always null. See the interface docstring — this is not an omission. */
   readonly progress: null;
   /** Rows this session has been asked to say, ever. */
-  readonly said: number;
-  readonly finished: number;
-  readonly inFlight: number;
+  readonly said: number | null;
+  readonly finished: number | null;
+  readonly inFlight: number | null;
   /** Seconds of audio delivered, measured from the bytes. */
-  readonly seconds: number;
-  readonly chars: number;
+  readonly seconds: number | null;
+  readonly chars: number | null;
 }
 
 /**
@@ -441,10 +478,10 @@ export interface ActivityChat {
    * act is refused at the door rather than recorded.
    */
   readonly act: string | null;
-  readonly model: string;
+  readonly model: string | null;
   /** The calling User-Agent. Null = it did not say. */
   readonly client: string | null;
-  readonly since: string;
+  readonly since: string | null;
 }
 
 /**
@@ -476,20 +513,23 @@ export interface Lease {
    * what makes a book rendered chapter by chapter one narrator load instead of
    * twenty.
    */
-  readonly kind: string;
+  readonly kind: string | null;
   /**
    * The id it is held on — a model, a voice or an aligner — which is always the
    * resident one.
    */
-  readonly subject: string;
+  readonly subject: string | null;
   /** The holder's User-Agent, as `/v1/activity` reports it. Null = it did not say. */
   readonly client: string | null;
-  /** What the run IS: a capability class name. Never null — a lease must say. */
-  readonly act: string;
+  /**
+   * What the run IS: a capability class name. A lease must say one, so null
+   * only where a server did not repeat it back.
+   */
+  readonly act: string | null;
   /** When it was taken, in {@link ActivityJob.started}'s format. */
-  readonly since: string;
+  readonly since: string | null;
   /** When it stops being open unless something heartbeats it. */
-  readonly expiresAt: string;
+  readonly expiresAt: string | null;
 }
 
 /**
@@ -506,17 +546,18 @@ export type ActivityLease = Omit<Lease, 'subject'>;
 
 /** `GET /v1/activity` — what is on this server and how far along. */
 export interface Activity {
+  /** The name is strict; the rest describes the server and is null where unstated. */
   readonly server: {
     readonly name: string;
-    readonly version: string;
-    readonly apiVersion: number;
-    readonly backend: string;
-    readonly uptimeS: number;
+    readonly version: string | null;
+    readonly apiVersion: number | null;
+    readonly backend: string | null;
+    readonly uptimeS: number | null;
   };
   readonly resident: {
     readonly kind: string;
     readonly id: string;
-    readonly since: string;
+    readonly since: string | null;
     readonly memoryBytesEstimate: number | null;
     /**
      * What holds this resident thing, or `null` — **which is the stranded
@@ -584,7 +625,7 @@ export interface Activity {
    * `maxInFlight` rather than discovering the ceiling as a starved socket.
    */
   readonly chat: {
-    readonly inFlight: number;
+    readonly inFlight: number | null;
     /**
      * What this engine's chat door admits at once, or `null`.
      *
@@ -596,8 +637,8 @@ export interface Activity {
     readonly maxInFlight: number | null;
     /** Where `maxInFlight` came from, in a sentence. `null` when it is null. */
     readonly maxInFlightBasis: string | null;
-    readonly rows: readonly ActivityChat[];
-  };
+    readonly rows: readonly ActivityChat[] | null;
+  } | null;
   /**
    * The open lease on whatever is resident, or null.
    *
@@ -615,9 +656,9 @@ export interface Activity {
 
 export interface ActivitySlot {
   /** THE LANE, and nothing else. A stream does not take it. */
-  readonly busy: number;
-  readonly of: number;
-  readonly queueDepth: number;
+  readonly busy: number | null;
+  readonly of: number | null;
+  readonly queueDepth: number | null;
   /**
    * The composition a caller actually wants before submitting: the lane is free
    * AND nobody holds the card. Derived by the server, once, so that three
@@ -634,8 +675,8 @@ export interface ActivitySlot {
 /** `POST /v1/uploads`. */
 export interface UploadResult {
   readonly blobId: string;
-  readonly bytes: number;
-  readonly sha256: string;
+  readonly bytes: number | null;
+  readonly sha256: string | null;
 }
 
 /** One named input on a job: either an uploaded blob or bytes carried inline. */
@@ -683,12 +724,12 @@ export interface JobStatus {
   readonly type: string;
   readonly model: string | null;
   readonly status: JobState;
-  readonly progress: number;
+  readonly progress: number | null;
   /** 0 while running, 1-based place in line while queued, `null` once terminal. */
   readonly position: number | null;
   readonly error: JobFailure | null;
   readonly artifacts: readonly string[];
-  readonly created: string;
+  readonly created: string | null;
   readonly started: string | null;
   readonly finished: string | null;
   /**
@@ -781,10 +822,11 @@ export type JobEvent =
  * intact, and is **never terminal** — the stream runs on to its real ending.
  *
  * This is not a softening of the no-fallbacks rule, and the line is worth
- * stating: the client stays strict about every kind it CLAIMS to understand — a
- * `chunk` missing `capped` is still a protocol error — and tolerant only of
- * kinds it makes no claim about at all. Refusing to parse is honest; refusing to
- * continue is not.
+ * stating: the client stays strict about the LOAD-BEARING fields of every kind
+ * it claims to understand — a `done` without its artifacts, an `artifact`
+ * without its name — and tolerant of kinds it makes no claim about at all, and
+ * (since Owen's ruling of 2026-09-24) of informational fields a server does not
+ * state. Refusing to parse is honest; refusing to continue is not.
  */
 export interface UnknownEvent {
   readonly id: number;
@@ -801,16 +843,16 @@ export interface QueuedData {
 /**
  * A model is being loaded for this job: one line of the engine's own readiness,
  * streamed as it happens. PHASE2-LLM.md section 5 pins the payload to
- * `{message}`; a `warming` frame without one is a protocol error, not an empty
- * message.
+ * `{message}`; a frame without one reads as `null` — informational, never an
+ * invented empty line.
  */
 export interface WarmingData {
-  readonly message: string;
+  readonly message: string | null;
 }
 
 export interface ProgressData {
-  readonly fraction: number;
-  readonly message: string;
+  readonly fraction: number | null;
+  readonly message: string | null;
   /**
    * Every other key the job type put on this frame, verbatim — server spelling,
    * server types, nothing invented and nothing dropped.
@@ -871,11 +913,11 @@ export interface ChunkData {
   /** The client's own chunk index, and the name of its artifact (`<index>.flac`). */
   readonly index: number;
   /** The duration of the audio that arrived, measured from its bytes. */
-  readonly seconds: number;
+  readonly seconds: number | null;
   /** How many characters were sent, counted by the server. */
-  readonly chars: number;
+  readonly chars: number | null;
   /** `chars / seconds`. The pace this chunk was actually read at. */
-  readonly charsPerSec: number;
+  readonly charsPerSec: number | null;
   /**
    * How many tokens the engine spent, or **`null` meaning "narrator did not
    * say"** — see {@link ChunkData.capped}, which is null for the same reason and
@@ -897,10 +939,9 @@ export interface ChunkData {
    * runaway as a long sentence**, which is precisely the failure this field
    * exists to prevent, and it would do it silently.
    *
-   * So the null is in the type, and the reader refuses a `chunk` frame that
-   * omits the key altogether: "narrator did not say" has to be something the
-   * server said, not something the client inferred from an absence. Narrow it
-   * explicitly — `capped === true` is a runaway, `capped === false` is a
+   * So the null is in the type — and it also covers a server that does not
+   * state the key at all (Owen, 2026-09-24), which a caller cannot act on any
+   * differently from narrator not saying. Narrow it explicitly — `capped === true` is a runaway, `capped === false` is a
    * finished sentence, `capped === null` is no measurement and must be handled
    * as one — never `if (chunk.capped)`.
    *
@@ -908,7 +949,7 @@ export interface ChunkData {
    */
   readonly capped: boolean | null;
   /** Which rung of the voice's take ladder this render asked for. */
-  readonly take: number;
+  readonly take: number | null;
   /**
    * **The verdict the engine's own retake ladder reached about this chunk**, or
    * `null` meaning narrator sent none (Owen's ruling of 2026-09-13,
@@ -930,8 +971,8 @@ export interface ChunkData {
    * sent no verdict — an engine with no guarded batch driver to offer, or a row
    * that failed before the ladder reached a decision — and it is **never to be
    * read as "the take was clean"**. `clean` is a key inside a verdict that
-   * exists; the absence of a verdict says nothing about the take. The key itself
-   * is always present, so an absent one is a protocol error and not a null.
+   * exists; the absence of a verdict says nothing about the take. A server
+   * that does not state the key at all reads the same way: null.
    *
    * It is the **conclusion, not the evidence**. `verdict` is what the engine
    * decided; `takes` is why, for analytics and for a human eye. A client that
@@ -1013,18 +1054,20 @@ export type TerminalEventName = (typeof TERMINAL_EVENTS)[number];
  * `JSON.stringify(provenance)` round-trips the document.
  */
 export interface Provenance {
-  readonly server: { readonly name: string; readonly version: string };
-  readonly backend: string;
-  readonly job_type: string;
+  // Every field is informational and null where the server did not state it:
+  // the file on disk is the server's own bytes, and this is a reading of it.
+  readonly server: { readonly name: string | null; readonly version: string | null } | null;
+  readonly backend: string | null;
+  readonly job_type: string | null;
   readonly model: {
-    readonly id: string;
+    readonly id: string | null;
     readonly revision: string | null;
     /** `<id>@<revision>`: which weights, not merely which model. */
     readonly fingerprint: string | null;
   } | null;
-  readonly params: Readonly<Record<string, unknown>>;
+  readonly params: Readonly<Record<string, unknown>> | null;
   readonly started: string | null;
-  readonly finished: string;
+  readonly finished: string | null;
 }
 
 // --------------------------------------------------------------------- llm
@@ -1044,8 +1087,8 @@ export interface Provenance {
 export interface ModelInfo {
   /** Crucible's id, stable across backends, e.g. `qwen3.5-9b`. */
   readonly id: string;
-  readonly family: string;
-  readonly paramsB: number;
+  readonly family: string | null;
+  readonly paramsB: number | null;
   /**
    * The commit the manifest pins for **this host's** backend — the same sha the
    * weights were pulled at, so a client can record what it talked to. `null`
@@ -1074,8 +1117,8 @@ export interface ModelInfo {
    * picks an image-capable model off this rather than knowing one by name.
    */
   readonly modalities: readonly string[];
-  readonly backendSupported: boolean;
-  readonly installed: boolean;
+  readonly backendSupported: boolean | null;
+  readonly installed: boolean | null;
   /**
    * The model whose download this one's weights ARE, or null for a model that
    * owns its own (PHASE22-DECIDE.md section 2.9, `[model] weights_of`). A
@@ -1087,11 +1130,11 @@ export interface ModelInfo {
   readonly resident: boolean;
   readonly loadable: boolean;
   /**
-   * Why it is not loadable, in the server's words. Always present when
-   * `loadable` is false — a refusal with no reason is a protocol error — and
-   * absent when it is true.
+   * Why it is not loadable, in the server's words, or null. A server states
+   * one with every refusal; `loadable` is the fact a caller acts on, so a
+   * server that does not say why has still answered.
    */
-  readonly reason?: string;
+  readonly reason: string | null;
   /**
    * Weights plus KV at `contextDefault`, measured on the host, not guessed.
    * `null` when `backendSupported` is false, for the same reason
@@ -1103,7 +1146,7 @@ export interface ModelInfo {
    * The manifest's intent: the context this host would serve this model at.
    * Compare {@link ModelInfo.maxModelLen}, which is what is being served.
    */
-  readonly contextDefault: number;
+  readonly contextDefault: number | null;
   /**
    * The context in force **right now** — for the resident model, the one its
    * engine was actually started with. Size a request against this one: it is
@@ -1236,9 +1279,9 @@ export interface ChatOptions {
 
 /** The tokens a completion cost, as the engine counted them. */
 export interface ChatUsage {
-  readonly promptTokens: number;
-  readonly completionTokens: number;
-  readonly totalTokens: number;
+  readonly promptTokens: number | null;
+  readonly completionTokens: number | null;
+  readonly totalTokens: number | null;
 }
 
 /**
@@ -1247,13 +1290,13 @@ export interface ChatUsage {
  * asks for `n > 1`.
  */
 export interface ChatResponse {
-  readonly id: string;
+  readonly id: string | null;
   /**
    * Crucible's model id — the one you asked for. The engine underneath may
    * answer to a different name (mlx-lm answers to the weights directory); the
    * server puts its own id back, so this is the same string on every backend.
    */
-  readonly model: string;
+  readonly model: string | null;
   readonly content: string;
   /**
    * The engine's own word for why it stopped, surfaced rather than swallowed:
@@ -1266,7 +1309,7 @@ export interface ChatResponse {
    * answer to use, which only works if it arrives.
    */
   readonly finishReason: string;
-  readonly usage: ChatUsage;
+  readonly usage: ChatUsage | null;
 }
 
 // ------------------------------------------------------------------ decide
@@ -1390,8 +1433,8 @@ export interface DecideChoiceAnswer extends DecideAnswerCommon {
   readonly type: 'choice';
   readonly choice: string;
   readonly probabilities: Readonly<Record<string, number | null>>;
-  readonly logprobs: Readonly<Record<string, number | null>>;
-  readonly confidence: number;
+  readonly logprobs: Readonly<Record<string, number | null>> | null;
+  readonly confidence: number | null;
 }
 
 /**
@@ -1404,8 +1447,8 @@ export interface DecideScoreAnswer extends DecideAnswerCommon {
   readonly score: number;
   readonly level: string;
   readonly probabilities: Readonly<Record<string, number | null>>;
-  readonly logprobs: Readonly<Record<string, number | null>>;
-  readonly confidence: number;
+  readonly logprobs: Readonly<Record<string, number | null>> | null;
+  readonly confidence: number | null;
 }
 
 /**
@@ -1424,9 +1467,9 @@ export type DecideAnswer = DecideChoiceAnswer | DecideScoreAnswer | DecideYesNoA
 
 /** One completion the door sent the engine, timed by Crucible's wall clock. */
 export interface DecideCallTiming {
-  readonly wallMs: number;
+  readonly wallMs: number | null;
   /** `usage.prompt_tokens`, as the engine counted it. */
-  readonly promptTokens: number;
+  readonly promptTokens: number | null;
   /**
    * `usage.prompt_tokens_details.cached_tokens`, or **`null` when the engine
    * did not say — never 0**: a number nobody measured is not a measurement.
@@ -1435,30 +1478,36 @@ export interface DecideCallTiming {
 }
 
 export interface DecideTiming {
-  readonly total: number;
-  readonly perQuestion: Readonly<Record<string, DecideCallTiming>>;
+  readonly total: number | null;
+  readonly perQuestion: Readonly<Record<string, DecideCallTiming>> | null;
   /** The shared-prefix prime, sent only when there is more than one question; `null` when none was. */
   readonly prime: DecideCallTiming | null;
 }
 
 export interface DecideResponse {
-  /** The provenance triple every artifact sidecar carries: which weights made this decision. */
+  /**
+   * The provenance triple every artifact sidecar carries: which weights made
+   * this decision. Informational — null, or null parts, where the server did
+   * not state it.
+   */
   readonly model: {
-    readonly id: string;
-    /** The revision the resident engine was started on; always stated, since a decision is read only from a resident engine. */
-    readonly revision: string;
+    readonly id: string | null;
+    /** The revision the resident engine was started on. */
+    readonly revision: string | null;
     /** `<id>@<revision>`. */
-    readonly fingerprint: string;
-  };
-  /** The engine kind that answered (`vllm`, `llama-server`, …). */
-  readonly engine: string;
-  /** One answer per question asked, keyed by the question's name. */
+    readonly fingerprint: string | null;
+  } | null;
+  /** The engine kind that answered (`vllm`, `llama-server`, …), or null where unstated. */
+  readonly engine: string | null;
+  /** One answer per question asked, keyed by the question's name. Load-bearing. */
   readonly answers: Readonly<Record<string, DecideAnswer>>;
-  readonly timingMs: DecideTiming;
+  /** How long it took, or null where the server did not state it. */
+  readonly timingMs: DecideTiming | null;
+  /** What it cost in tokens, or null where the server did not state it. */
   readonly tokens: {
-    readonly perQuestion: Readonly<Record<string, number>>;
-    readonly images: number;
-  };
+    readonly perQuestion: Readonly<Record<string, number | null>> | null;
+    readonly images: number | null;
+  } | null;
 }
 
 // --------------------------------------------------------------------- tts
@@ -1550,18 +1599,24 @@ export interface VoiceInfo {
   /** Crucible's voice id, stable across backends, e.g. `deathstalker`. */
   readonly id: string;
   /** The name to put in front of a person. */
-  readonly display: string;
-  readonly kind: VoiceKind;
+  readonly display: string | null;
+  /**
+   * `checkpoint`, `zeroshot` or `token` today ({@link VoiceKind}), carried as
+   * the server's own word rather than narrowed: whether a load needs a clip is
+   * {@link VoiceInfo.needsReference}'s to say, so a kind this build has not
+   * heard of is news, not a reason to lose the row. Null where not stated.
+   */
+  readonly kind: string | null;
   /** The manifest's language tag, e.g. `en`. */
-  readonly language: string;
+  readonly language: string | null;
   /**
    * Which of narrator's engines serves this voice, e.g. `higgs-v3`. On the row
    * because it decides which env a load needs, and therefore what a
    * {@link VoiceInfo.reason} about a missing env is talking about.
    */
-  readonly narratorEngine: string;
-  readonly backendSupported: boolean;
-  readonly installed: boolean;
+  readonly narratorEngine: string | null;
+  readonly backendSupported: boolean | null;
+  readonly installed: boolean | null;
   readonly resident: boolean;
   /**
    * A local (`path`) voice nothing holds: not resident, no lease naming it, no
@@ -1574,14 +1629,9 @@ export interface VoiceInfo {
   readonly orphan: boolean | null;
   readonly loadable: boolean;
   /**
-   * Why it is not loadable, in the server's words; `null` when it is loadable.
-   *
-   * Unlike {@link ModelInfo.reason} this key is always present on the row — the
-   * voice row carries `"reason": null` where the model row omits the key — and
-   * the client reads it that way rather than tidying the difference away. What
-   * does not differ is the rule: a row that is not loadable and does not say why
-   * is a protocol error, because the operator cannot tell whether to pull
-   * weights, install an env, free the card, or go to the other host.
+   * Why it is not loadable, in the server's words; `null` when it is loadable,
+   * or when a server did not say. The server states one with every refusal;
+   * `loadable` is the fact a caller acts on either way.
    */
   readonly reason: string | null;
   /**
@@ -1597,8 +1647,11 @@ export interface VoiceInfo {
   readonly fingerprint: string | null;
   /** Null when `backendSupported` is false. Never `0`. */
   readonly memoryBytesEstimate: number | null;
-  /** Null when `backendSupported` is false. */
-  readonly estimateBasis: EstimateBasis | null;
+  /**
+   * {@link EstimateBasis} today, as the server's own word. Null when
+   * `backendSupported` is false, or where not stated.
+   */
+  readonly estimateBasis: string | null;
   /**
    * **The** cap certificate for this (voice, backend): the most characters this
    * voice may be handed in one chunk. Per backend and staying per backend — that
@@ -1618,8 +1671,9 @@ export interface VoiceInfo {
    */
   readonly sampleRate: number;
   /**
-   * How many rungs this voice's take ladder has. Never null, never below 1 —
-   * take 0 exists whether or not the manifest says so.
+   * How many rungs this voice's take ladder has, never below 1 — take 0
+   * exists whether or not the manifest says so — or null where a server did
+   * not state it.
    *
    * **Read it before you spread candidates.** A `take` past the end is not
    * refused (it was `unknown_take` until 2026-09-19): it renders at the
@@ -1631,7 +1685,7 @@ export interface VoiceInfo {
    * tuning, they are the server's, and publishing them invites a client to send
    * them back.
    */
-  readonly takes: number;
+  readonly takes: number | null;
   /**
    * What the SERVER under narrator is sized by, or `null` for a voice that
    * declares no serving table (a shape the next narrator engine will have and
@@ -1676,7 +1730,10 @@ export interface VoiceInfo {
    * `voices_needs_reference_missing` rather than patched.
    */
   readonly needsReference: boolean;
-  /** Never null: the whole block, because a client that packs needs all of it. */
+  /**
+   * Never null: the block is load-bearing, because a client that packs needs
+   * it. Its values are each nullable ("this voice states none").
+   */
   readonly pace: VoicePace;
 }
 
@@ -1802,8 +1859,8 @@ export interface LoadModelOptions {
  */
 /** `[voice.serving]` — what the server under narrator is sized by. */
 export interface VoiceServing {
-  readonly maxNumSeqs: number;
-  readonly maxNumSeqsNote: string;
+  readonly maxNumSeqs: number | null;
+  readonly maxNumSeqsNote: string | null;
   readonly memFraction: number | null;
   readonly memFractionNote: string | null;
   readonly contextLength: number | null;
@@ -1947,11 +2004,11 @@ export interface RenderFailure {
  */
 export interface RenderResult {
   /** How many chunks produced audio. */
-  readonly rendered: number;
+  readonly rendered: number | null;
   /** Every chunk that did not, and why. Empty on a clean run. */
   readonly failed: readonly RenderFailure[];
   /** The rung this render actually ran at. */
-  readonly take: number;
+  readonly take: number | null;
   /**
    * THE FULL SAMPLING TRIPLE the engine actually applied — the voice's take-0
    * numbers with this take's rung laid over them, never the rung's override
@@ -1967,7 +2024,7 @@ export interface RenderResult {
    *
    * Manifest spelling (`top_p`, `top_k`), because it is a fact about the voice.
    */
-  readonly sampling: Readonly<Record<string, number>>;
+  readonly sampling: Readonly<Record<string, number>> | null;
   /**
    * WHICH WEIGHTS RAN, in the `/v1/voices` row's own three words, so a ladder's
    * record is self-describing. `identity` is the pin's 40-character sha or a
@@ -1976,10 +2033,10 @@ export interface RenderResult {
    * commit somebody fetched.
    */
   readonly voice: {
-    readonly id: string;
-    readonly identity: string;
-    readonly identityBasis: string;
-  };
+    readonly id: string | null;
+    readonly identity: string | null;
+    readonly identityBasis: string | null;
+  } | null;
   /**
    * The width the REQUEST stated — its {@link RenderOptions.width} — and
    * `null` when it stated none (2026-09-20). A throughput figure is comparable
@@ -1992,7 +2049,7 @@ export interface RenderResult {
    */
   readonly width: number | null;
   /** The rate the voice was loaded at, and the rate every FLAC was written at. */
-  readonly sampleRate: number;
+  readonly sampleRate: number | null;
   /** The artifacts the job published — one `<index>.flac` per rendered chunk. */
   readonly artifacts: readonly string[];
 }
@@ -2032,7 +2089,7 @@ export type ArtifactWrite =
 /** One process the driver says is holding accelerator memory. */
 export interface AcceleratorHolder {
   readonly pid: number;
-  readonly name: string;
+  readonly name: string | null;
   /**
    * What this process holds — **`null` where the driver will not say**, which is
    * what happens under WDDM and wherever permissions withhold per-process
@@ -2048,7 +2105,7 @@ export interface AcceleratorHolder {
    */
   readonly bytes: number | null;
   /** Whether this pid is one of Crucible's own engine processes. */
-  readonly ownedByCrucible: boolean;
+  readonly ownedByCrucible: boolean | null;
 }
 
 /** What Crucible itself has on the card, from {@link AcceleratorState}. */
@@ -2062,20 +2119,20 @@ export interface AcceleratorResident {
   readonly kind: string;
   readonly id: string;
   /** When it was loaded, ISO-8601. */
-  readonly since: string;
-  readonly memoryBytesEstimate: number;
+  readonly since: string | null;
+  readonly memoryBytesEstimate: number | null;
 }
 
 /** The accelerator, at the moment it was probed. */
 export interface AcceleratorGpu {
-  readonly vendor: string;
-  readonly name: string;
+  readonly vendor: string | null;
+  readonly name: string | null;
   /**
    * The live total from the probe, not the figure detection recorded at
    * start-up. On a real host they agree; where they would not, this is the one a
    * caller is about to make a decision on.
    */
-  readonly totalBytes: number;
+  readonly totalBytes: number | null;
 }
 
 /**
@@ -2086,12 +2143,14 @@ export interface AcceleratorGpu {
  * rule does not soften because more job types depend on the answer.
  */
 export interface AcceleratorState {
-  readonly backend: string;
-  readonly gpu: AcceleratorGpu;
-  readonly freeBytes: number;
-  readonly usedBytes: number;
+  // Every figure is null where the server did not state it, and null is
+  // never zero: "not stated how much is free" must not read as "none is".
+  readonly backend: string | null;
+  readonly gpu: AcceleratorGpu | null;
+  readonly freeBytes: number | null;
+  readonly usedBytes: number | null;
   /** What this server holds back for the desktop, from its own config. */
-  readonly desktopAllowanceBytes: number;
+  readonly desktopAllowanceBytes: number | null;
   /**
    * VRAM in use that no listed holder accounts for, past the declared desktop
    * allowance — and the number that matters most on the host BookForge runs on.
@@ -2116,13 +2175,14 @@ export interface AcceleratorState {
   /** What Crucible has loaded, or `null` when it has nothing loaded. */
   readonly resident: AcceleratorResident | null;
   /**
-   * Every compute process the driver listed. Empty means the driver listed none
-   * — which is not the same as the card being idle; see
+   * Every compute process the driver listed, or null where the server did not
+   * list them. Empty means the driver listed none — which is not the same as
+   * the card being idle, and neither is null; see
    * {@link AcceleratorState.unattributedBytes}.
    */
-  readonly holders: readonly AcceleratorHolder[];
+  readonly holders: readonly AcceleratorHolder[] | null;
   /** The probe's own one-line summary, for a log. */
-  readonly detail: string;
+  readonly detail: string | null;
 }
 
 // -------------------------------------------------------------- capability
@@ -2150,13 +2210,13 @@ export interface CapabilityRow {
   /** The candidate that won, or `''` when none did. */
   readonly selected: string;
   /** Why, in the server's words, whichever way it went. Never empty. */
-  readonly reason: string;
+  readonly reason: string | null;
   /**
    * How much more memory the SMALLEST candidate would have needed, or 0. The
    * number that turned the class off, as a number and not only inside
    * `reason` — a sentence is never load-bearing (ARCHITECTURE.md R4).
    */
-  readonly shortfallBytes: number;
+  readonly shortfallBytes: number | null;
   /**
    * Where this class's work actually runs (PHASE15-HOST.md section 3.3).
    *
@@ -2184,11 +2244,11 @@ export interface CapabilityRow {
 
 /** One row's working context, and where it came from. */
 export interface CapabilityWork {
-  readonly tokens: number;
-  readonly concurrency: number;
+  readonly tokens: number | null;
+  readonly concurrency: number | null;
   /** Prose: whose number this is. Never empty. */
-  readonly source: string;
-  readonly from: 'default' | 'request';
+  readonly source: string | null;
+  readonly from: string | null;
 }
 
 /**
@@ -2201,13 +2261,13 @@ export interface CapabilityWork {
  * the rest.
  */
 export interface ContextCeiling {
-  readonly model: string;
-  readonly tokens: number;
-  readonly boundBy: 'served' | 'memory';
-  readonly servedContext: number;
+  readonly model: string | null;
+  readonly tokens: number | null;
+  readonly boundBy: string | null;
+  readonly servedContext: number | null;
   /** `null` where the model's block is not taken apart into memory terms. */
   readonly memoryContext: number | null;
-  readonly concurrency: number;
+  readonly concurrency: number | null;
 }
 
 /**
@@ -2243,11 +2303,11 @@ export interface CapabilitySizing {
  */
 export interface CapabilityRecord {
   /** `cuda-linux` or `mlx-darwin`: the backend the decision was made for. */
-  readonly backendKind: string;
+  readonly backendKind: string | null;
   /** The pool the decision was made on — the card, or unified memory on a Mac. */
-  readonly totalBytes: number;
+  readonly totalBytes: number | null;
   /** The host's own reserve, subtracted before any candidate was measured. */
-  readonly desktopAllowanceBytes: number;
+  readonly desktopAllowanceBytes: number | null;
   /** One verdict per class, in the server's report order. */
   readonly classes: readonly CapabilityRow[];
 }
@@ -2334,11 +2394,11 @@ export interface AsrOptions {
 export interface ServerSetup {
   /** `crucible@mac-studio`. Contains an `@`, which is why pairing encodes it. */
   readonly name: string;
-  readonly version: string;
+  readonly version: string | null;
   /** `cuda-linux` or `mlx-darwin`. Windows is never a backend. */
-  readonly backend: string;
+  readonly backend: string | null;
   /** What this process bound, e.g. `http://0.0.0.0:7100`. Not dialable as-is. */
-  readonly bind: string;
+  readonly bind: string | null;
   /**
    * The bind address made reachable: a wildcard bind becomes one entry per
    * non-loopback IPv4 interface, a concrete bind becomes exactly one.
@@ -2351,8 +2411,8 @@ export interface ServerSetup {
   /** One `crucible://` line per {@link ServerSetup.urls} entry, in order. */
   readonly pairing: readonly string[];
   /** `/v1/info`'s list, repeated so a page draws from one read. */
-  readonly jobTypes: readonly string[];
-  readonly configPath: string;
+  readonly jobTypes: readonly string[] | null;
+  readonly configPath: string | null;
 }
 
 /**
@@ -2394,7 +2454,7 @@ export interface CatalogRow {
   /** The manifest's display name, or null where a manifest carries none. */
   readonly name: string | null;
   /** Which job type this subject belongs to: `llm`, `asr`, `align`, `tts`, … */
-  readonly jobType: string;
+  readonly jobType: string | null;
   readonly installed: boolean;
   /** Bytes on disk, or null when it is not installed. */
   readonly installedBytes: number | null;
@@ -2422,7 +2482,7 @@ export interface CatalogRow {
    * The capability classes this model is the FLOOR for — the smallest model
    * the class may run on at all. Only ever non-empty on a `model`.
    */
-  readonly floors: readonly string[];
+  readonly floors: readonly string[] | null;
   /**
    * Null on every row this build of the server can produce, and that is the
    * honest value: no manifest schema carries a licence key, and reading one
@@ -2430,7 +2490,7 @@ export interface CatalogRow {
    */
   readonly license: string | null;
   /** `hf:<repo>` — where the bytes come from. */
-  readonly source: string;
+  readonly source: string | null;
   /** Is this the thing on the card right now? */
   readonly resident: boolean;
 }
@@ -2587,11 +2647,11 @@ export interface TaskStatus {
   /** `pull`, `install`, `module` or `engine`. */
   readonly type: string;
   /** The request body, echoed, in the server's own spelling. */
-  readonly request: Readonly<Record<string, unknown>>;
+  readonly request: Readonly<Record<string, unknown>> | null;
   readonly state: TaskState;
   readonly error: JobFailure | null;
-  readonly created: string;
-  readonly started: string;
+  readonly created: string | null;
+  readonly started: string | null;
   readonly finished: string | null;
   /**
    * Classes a `module` named that this engine does not serve (5.3a).
@@ -2606,10 +2666,10 @@ export interface TaskStatus {
 
 /** One step of a task. For a `module`, one per entry plus the reload. */
 export interface TaskStepData {
-  readonly name: string;
+  readonly name: string | null;
   /** 1-based. */
-  readonly index: number;
-  readonly total: number;
+  readonly index: number | null;
+  readonly total: number | null;
   /**
    * What this server now offers, on the `reload` step only (section 3.4). A
    * client is told rather than having to diff two `/v1/info` reads.
@@ -2621,7 +2681,7 @@ export interface TaskStepData {
 export interface TaskBytesProgress {
   readonly bytesDone: number;
   readonly bytesTotal: number | null;
-  readonly file: string;
+  readonly file: string | null;
 }
 
 /**
@@ -2649,7 +2709,8 @@ export function isTaskBytesProgress(data: TaskProgressData): data is TaskBytesPr
 
 /** A module entry that was already true, so nothing was done for it. */
 export interface TaskSkippedData {
-  readonly reason: string;
+  /** Why, in the server's words, or null where not stated. */
+  readonly reason: string | null;
 }
 
 /**
@@ -2662,7 +2723,7 @@ export interface TaskSkippedData {
  * no claim about.
  */
 export type TaskEvent =
-  | { readonly id: number; readonly event: 'started'; readonly data: { readonly type: string } }
+  | { readonly id: number; readonly event: 'started'; readonly data: { readonly type: string | null } }
   | { readonly id: number; readonly event: 'step'; readonly data: TaskStepData }
   | { readonly id: number; readonly event: 'progress'; readonly data: TaskProgressData }
   | { readonly id: number; readonly event: 'skipped'; readonly data: TaskSkippedData }
@@ -2720,9 +2781,9 @@ export interface UpstreamSetting {
 /** An eligible local model, computed by the engine for a capability class. */
 export interface LocalModelChoice {
   readonly id: string;
-  readonly memoryBytesEstimate: number;
-  readonly fits: boolean;
-  readonly installed: boolean;
+  readonly memoryBytesEstimate: number | null;
+  readonly fits: boolean | null;
+  readonly installed: boolean | null;
 }
 
 /** `GET /v1/settings` — the whole of what an app's settings window draws. */
@@ -2736,17 +2797,22 @@ export interface SettingsDocument {
    * nothing is released, so nothing is legacy — and an optional field kept for
    * readers who do not exist is a branch every caller pays for.
    */
-  readonly localModels: Readonly<Record<string, string | null>>;
+  readonly localModels: Readonly<Record<string, string | null>> | null;
   /** Empty when the engine has not measured its card yet; never absent. */
-  readonly localModelChoices: Readonly<Record<string, readonly LocalModelChoice[]>>;
+  readonly localModelChoices: Readonly<Record<string, readonly LocalModelChoice[]>> | null;
   /**
    * One entry per routable class: `clean`, `translate`, `simplify`,
    * `analysis`, `generate`. Read off the server's table, never this list.
    */
   readonly routes: Readonly<Record<string, RouteSetting>>;
-  readonly upstreams: Readonly<Record<UpstreamName, UpstreamSetting>>;
-  readonly desktopAllowanceBytes: number;
-  readonly backendKind: string;
+  /**
+   * One card per upstream. `null` for an upstream this server does not list —
+   * one it does not offer (an engine that predates `ollama`, say) — for a
+   * settings page to leave out.
+   */
+  readonly upstreams: Readonly<Record<UpstreamName, UpstreamSetting | null>>;
+  readonly desktopAllowanceBytes: number | null;
+  readonly backendKind: string | null;
 }
 
 /**

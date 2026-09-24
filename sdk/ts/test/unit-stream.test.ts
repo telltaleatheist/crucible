@@ -468,16 +468,51 @@ test('an error naming a row is yielded; one naming none ends the session', async
   await assert.rejects(() => collect(session), CrucibleProtocolError);
 });
 
-test('an event kind this client does not know is a refusal, never a skip', async () => {
+test('an event kind this client does not know is carried as unknown, and the session runs on', async () => {
+  // `events()`' rule for a job's stream (`UnknownEvent`), applied to a
+  // session's: a newer server's frame is news, not a fault, and it used to end
+  // the listener's whole session (Owen, 2026-09-24).
   reset();
   serving((response) => {
     frame(response, 1, 'ready', READY);
-    frame(response, 2, 'phoneme', { id: 'r1' });
+    frame(response, 2, 'phoneme', { id: 'r1', ipa: 'ðə' });
+    frame(response, 3, 'audio', { id: 'r1', seq: 0, pcm_base64: 'AAABAA==', seconds: 0.0001 });
+    frame(response, 4, 'closed', { reason: 'done' });
+    response.end();
+  });
+  const session = await client().stream({ voice: 'deathstalker', language: 'en' });
+  const events = await collect(session);
+  assert.deepEqual(
+    events.map((event) => event.kind),
+    ['unknown', 'audio'],
+  );
+  const [unknown] = events;
+  assert.ok(unknown !== undefined && unknown.kind === 'unknown');
+  assert.equal(unknown.event, 'phoneme');
+  assert.deepEqual(unknown.data, { id: 'r1', ipa: 'ðə' });
+});
+
+test('an unknown frame before ready is skipped while stream() waits for ready', async () => {
+  reset();
+  serving((response) => {
+    frame(response, 1, 'hello', { from: 'the future' });
+    frame(response, 2, 'ready', READY);
     frame(response, 3, 'closed', { reason: 'done' });
     response.end();
   });
   const session = await client().stream({ voice: 'deathstalker', language: 'en' });
-  await assert.rejects(() => collect(session), CrucibleProtocolError);
+  assert.deepEqual(await collect(session), []);
+});
+
+test('a session done frame without gap_sec is still a protocol error: its null means cancelled', async () => {
+  reset();
+  serving((response) => {
+    frame(response, 1, 'ready', READY);
+    frame(response, 2, 'done', { id: 'r1', seconds: 1, chars: 10, chars_per_sec: 10, capped: null, cancelled: false });
+    response.end();
+  });
+  const session = await client().stream({ voice: 'deathstalker', language: 'en' });
+  await assert.rejects(() => collect(session), /done has no field "gap_sec"/);
 });
 
 test('a ready that disagrees with the open reply is not this session s stream', async () => {

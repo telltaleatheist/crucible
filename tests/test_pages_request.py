@@ -317,7 +317,12 @@ def sdk_keys() -> tuple[set[str], set[str]]:
     end = re.search(r"\r?\n\}\r?\n", source[start:])
     assert end is not None, "readPagesEngine has no closing brace at column 0"
     body = source[start : start + end.start()]
-    readers = r"(?:str|num|bool|nullableStr|nullableNum|nullableBool|objectField)"
+    # The `opt*` readers too: an informational key (`engine`, `detail`) is
+    # read tolerantly since 2026-09-24, and is still a key the SDK reads.
+    readers = (
+        r"(?:str|num|bool|nullableStr|nullableNum|nullableBool|objectField"
+        r"|optStr|optNum|optBool|optObject|optArray|optStrArray)"
+    )
     block = set(re.findall(readers + r"\(\s*block,\s*'([a-z_]+)'", body))
     request = set(re.findall(readers + r"\(\s*request,\s*'([a-z_]+)'", body))
     # `request` is taken off the block by `objectField(block, 'request', …)`,

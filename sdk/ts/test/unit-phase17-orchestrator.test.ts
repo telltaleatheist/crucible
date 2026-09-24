@@ -101,10 +101,15 @@ test('a claimed engine names who manages it, and not their version', async () =>
   assert.equal(engineOf(info), null);
 });
 
-test('an engine that states its role and omits managed_by is a defect', async () => {
-  // The one thing a vintage rule cannot read is a HALF-new document.
+test('an engine that states its role and omits managed_by reads as unmanaged', async () => {
+  // Who claimed an engine is informational — an engine talks to its callers
+  // the same either way — so a server that does not say reads as null (Owen,
+  // 2026-09-24). An ORCHESTRATOR's `engine` is different; see below.
   reply = { ...oldDocument(), role: 'engine' };
-  await assert.rejects(client().info(), CrucibleProtocolError);
+  const info = await client().info();
+  assert.equal(info.role, 'engine');
+  assert.equal(info.managedBy, null);
+  assert.equal(engineOf(info), null);
 });
 
 // ---------------------------------------------------------- an orchestrator

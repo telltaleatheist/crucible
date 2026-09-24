@@ -70,11 +70,14 @@ test('ping identifies the server without a token', async () => {
 test('info reports a real backend and offers echo', async () => {
   const info = await crucible.info();
   assert.equal(info.server.apiVersion, 1);
+  // Informational on the wire, and a current server states them all.
+  const backend = info.host.backend;
   assert.ok(
-    ['cuda-linux', 'mlx-darwin', 'llama-windows'].includes(info.host.backend),
-    `unexpected backend ${info.host.backend}`,
+    backend !== null && ['cuda-linux', 'mlx-darwin', 'llama-windows'].includes(backend),
+    `unexpected backend ${String(backend)}`,
   );
-  assert.ok(info.host.gpu.name.length > 0, 'the backend must name its gpu');
+  const gpuName = info.host.gpu?.name;
+  assert.ok(typeof gpuName === 'string' && gpuName.length > 0, 'the backend must name its gpu');
   const echo = info.capabilities.find((capability) => capability.jobType === 'echo');
   assert.ok(echo !== undefined, 'the e2e server must be initialised with --enable-echo');
   assert.deepEqual(echo.models, [], 'echo serves no models');
@@ -82,12 +85,11 @@ test('info reports a real backend and offers echo', async () => {
 
 test('health reports the lane, and says what kind of thing holds the card', async () => {
   const health = await crucible.health();
-  assert.ok(['ok', 'warming', 'busy'].includes(health.status));
+  assert.ok(health.status !== null && ['ok', 'warming', 'busy'].includes(health.status));
   assert.ok(Number.isInteger(health.queueDepth));
   assert.deepEqual(health.residentModels, []);
   // Nothing is loaded on an echo-only server, so the kind is the null it reports
-  // when nothing holds the card. Reading it at all is the cross-check: the
-  // client demands the field, so a server that stopped sending it fails here.
+  // when nothing holds the card.
   assert.equal(health.residentKind, null);
 });
 
@@ -107,12 +109,17 @@ test('the accelerator probe answers a state, or refuses by name — never zeroes
     assert.equal(error.code, 'accelerator_unreadable');
     return;
   }
-  assert.ok(['cuda-linux', 'mlx-darwin', 'llama-windows'].includes(state.backend));
-  assert.ok(state.gpu.totalBytes > 0, 'a readable probe names a real card');
-  assert.ok(state.freeBytes >= 0);
+  // Informational on the wire, and a current server states them all.
+  assert.ok(
+    state.backend !== null && ['cuda-linux', 'mlx-darwin', 'llama-windows'].includes(state.backend),
+  );
+  const totalBytes = state.gpu?.totalBytes;
+  assert.ok(typeof totalBytes === 'number' && totalBytes > 0, 'a readable probe names a real card');
+  assert.ok(state.freeBytes !== null && state.freeBytes >= 0);
   // Never negative and never a substitute for one: the server clamps at zero.
   assert.ok(state.unattributedBytes === null || state.unattributedBytes >= 0);
   assert.equal(state.resident, null, 'an echo-only server holds nothing');
+  assert.ok(state.holders !== null, 'a current server lists the holders');
   for (const holder of state.holders) {
     assert.ok(Number.isInteger(holder.pid));
     // Null is the driver declining to say and is a legal answer; a string or a
@@ -203,12 +210,20 @@ test('an inline echo job runs end to end, in order, with identical bytes', async
   const provenance = await crucible.provenance(jobId, 'payload.bin');
   assert.equal(provenance.job_type, 'echo');
   assert.equal(provenance.model, null);
-  assert.ok(provenance.server.name.length > 0);
-  assert.ok(provenance.server.version.length > 0);
-  assert.ok(['cuda-linux', 'mlx-darwin', 'llama-windows'].includes(provenance.backend));
+  // Informational on the wire, and a current server states them all.
+  const server = provenance.server;
+  assert.ok(server !== null && server.name !== null && server.name.length > 0);
+  assert.ok(server.version !== null && server.version.length > 0);
+  assert.ok(
+    provenance.backend !== null &&
+      ['cuda-linux', 'mlx-darwin', 'llama-windows'].includes(provenance.backend),
+  );
   assert.deepEqual(provenance.params, { delay_ms: 40 });
   assert.ok(provenance.started !== null, 'provenance records when the job started');
-  assert.ok(provenance.finished.length > 0, 'provenance records when the job finished');
+  assert.ok(
+    provenance.finished !== null && provenance.finished.length > 0,
+    'provenance records when the job finished',
+  );
 });
 
 // -------------------------------------------------------------- echo upload

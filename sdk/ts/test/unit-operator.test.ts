@@ -138,10 +138,17 @@ test('a pairing line off setup opens a client with no typing', async () => {
   assert.equal(parsed.url, setup.urls[0]);
 });
 
-test('a setup missing a field the contract promises is a protocol error', async () => {
+test('a setup missing a descriptive field reads it as null', async () => {
   const { config_path: _dropped, ...without } = SETUP;
   answer(200, without);
-  await assert.rejects(() => client().setup(), CrucibleProtocolError);
+  assert.equal((await client().setup()).configPath, null);
+});
+
+test('a setup missing what another app connects with is a protocol error', async () => {
+  // The token and the pairing lines are what a second app is handed.
+  const { token: _dropped, ...without } = SETUP;
+  answer(200, without);
+  await assert.rejects(() => client().setup(), /setup has no field "token"/);
 });
 
 // ----------------------------------------------------------------- catalog
@@ -199,10 +206,10 @@ test('an alias row says whose weights it shares and which of its own files are m
   assert.deepEqual(row!.missingFiles, ['mmproj-F16.gguf']);
 });
 
-test('a catalog row without shares_weights_of is refused, not read as null', async () => {
+test('a catalog row without shares_weights_of reads it as null: a server that predates aliases', async () => {
   const { shares_weights_of: _dropped, ...without } = ROW;
   answer(200, { rows: [without] });
-  await assert.rejects(() => client().catalog(), CrucibleProtocolError);
+  assert.equal((await client().catalog())[0]?.sharesWeightsOf, null);
 });
 
 test('a kind outside the five is a protocol error, not a passed-through string', async () => {
@@ -210,10 +217,18 @@ test('a kind outside the five is a protocol error, not a passed-through string',
   await assert.rejects(() => client().catalog(), CrucibleProtocolError);
 });
 
-test('a row whose installed_bytes is absent is refused rather than read as null', async () => {
+test('a row whose installed_bytes is absent reads as null — never as zero', async () => {
   const { installed_bytes: _dropped, ...without } = ROW;
   answer(200, { rows: [without] });
-  await assert.rejects(() => client().catalog(), CrucibleProtocolError);
+  const [row] = await client().catalog();
+  assert.equal(row?.installedBytes, null);
+  assert.equal(row?.installed, true);
+});
+
+test('a catalog row missing what a pull or a remove decides on is a protocol error', async () => {
+  const { installed: _dropped, ...without } = ROW;
+  answer(200, { rows: [without] });
+  await assert.rejects(() => client().catalog(), /has no field "installed"/);
 });
 
 // ------------------------------------------------------------ submitting
@@ -484,7 +499,7 @@ test("a module's skipped entries say why", async () => {
   const seen = await collect('t4');
   const skipped = seen[2]!;
   if (skipped.event !== 'skipped') throw new Error('unreachable');
-  assert.match(skipped.data.reason, /already installed/);
+  assert.match(String(skipped.data.reason), /already installed/);
 });
 
 test('a failed task event carries the code and stops the stream', async () => {

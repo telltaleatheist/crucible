@@ -509,24 +509,25 @@ test('guard: null stays null, and is never softened into a verdict', async () =>
   assert.notDeepEqual(chunk.data.guard, {});
 });
 
-test('a chunk frame with no guard key at all is a protocol error, not a null', async () => {
-  // `capped`'s rule, one level up and for the same reason: "narrator did not
-  // say" has to be something the server said, never something this client
-  // inferred from an absence.
+test('a chunk frame with no guard key at all reads it as null — never as "clean"', async () => {
+  // A server that predates the guard has sent no verdict, which is exactly
+  // what null already says (Owen, 2026-09-24). It is still never "clean".
   const { guard: _guard, ...withoutGuard } = CHUNK_FRAME;
-  streams(frame(1, 'chunk', withoutGuard));
-  await assert.rejects(drain('job-tts-1'), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /event 1 \(chunk\) has no field "guard"/);
-    return true;
-  });
+  streams(
+    frame(1, 'chunk', withoutGuard),
+    frame(2, 'done', { artifacts: ['41.flac'], rendered: 1, failed: [], take: 0, sample_rate: 24000 }),
+  );
+  const [chunk] = await drain('job-tts-1');
+  assert.ok(chunk !== undefined && chunk.event === 'chunk');
+  assert.equal(chunk.data.guard, null);
 });
 
 test('a chunk frame whose guard is not an object is a protocol error', async () => {
+  // Present and wrong is a broken server, not an old one.
   streams(frame(1, 'chunk', { ...CHUNK_FRAME, guard: 'clean' }));
   await assert.rejects(drain('job-tts-1'), (error: unknown) => {
     assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /guard is neither a JSON object nor null/);
+    assert.match(error.message, /guard is present but is not a JSON object/);
     return true;
   });
 });
@@ -565,36 +566,45 @@ test('capped: false and capped: true both survive, and are different news', asyn
   assert.equal(runaway.data.tokens, 900);
 });
 
-test('a chunk frame with no capped key at all is a protocol error, not a null', async () => {
-  // `null` is narrator declining to say; an absent key is a server that does not
-  // speak the field. Only the first is something the server stated, and this
-  // client will not infer the statement from an absence.
+test('a chunk frame with no capped key at all reads it as null — never as false', async () => {
+  // narrator declining to say and a server that does not state the field are
+  // the same news to a caller: no measurement (Owen, 2026-09-24). Neither
+  // is ever softened into `false`.
   const { capped: _capped, ...withoutCapped } = CHUNK_FRAME;
-  streams(frame(1, 'chunk', withoutCapped));
-  await assert.rejects(drain('job-tts-1'), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /event 1 \(chunk\) has no field "capped"/);
-    return true;
-  });
+  streams(
+    frame(1, 'chunk', withoutCapped),
+    frame(2, 'done', { artifacts: ['41.flac'], rendered: 1, failed: [], take: 0, sample_rate: 24000 }),
+  );
+  const [chunk] = await drain('job-tts-1');
+  assert.ok(chunk !== undefined && chunk.event === 'chunk');
+  assert.equal(chunk.data.capped, null);
+  assert.notEqual(chunk.data.capped, false);
 });
 
 test('a chunk frame whose capped is neither a boolean nor null is a protocol error', async () => {
   streams(frame(1, 'chunk', { ...CHUNK_FRAME, capped: 'maybe' }));
   await assert.rejects(drain('job-tts-1'), (error: unknown) => {
     assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /capped is neither a boolean nor null/);
+    assert.match(error.message, /capped is present but is not a boolean/);
     return true;
   });
 });
 
-test('a chunk frame missing a measurement is a protocol error, not a zero', async () => {
+test('a chunk frame missing a measurement reads it as null — never as a zero', async () => {
   const { chars_per_sec: _rate, ...withoutRate } = CHUNK_FRAME;
-  streams(frame(1, 'chunk', withoutRate));
-  await assert.rejects(drain('job-tts-1'), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /has no field "chars_per_sec"/);
-    return true;
-  });
+  streams(
+    frame(1, 'chunk', withoutRate),
+    frame(2, 'done', { artifacts: ['41.flac'], rendered: 1, failed: [], take: 0, sample_rate: 24000 }),
+  );
+  const [chunk] = await drain('job-tts-1');
+  assert.ok(chunk !== undefined && chunk.event === 'chunk');
+  assert.equal(chunk.data.charsPerSec, null);
+});
+
+test('a chunk frame without its index is still a protocol error: it names the artifact', async () => {
+  const { index: _index, ...withoutIndex } = CHUNK_FRAME;
+  streams(frame(1, 'chunk', withoutIndex));
+  await assert.rejects(drain('job-tts-1'), /event 1 \(chunk\) has no field "index"/);
 });
 
 // --------------------------------------------------------- done, and extras
@@ -702,23 +712,22 @@ test('the render result names the sampling that ran and the weights it ran on', 
   assert.ok(done.event === 'done');
   const result = readRenderResult(done.data);
   assert.deepEqual(result.sampling, { temperature: 0.8, top_p: 0.95, top_k: 50 });
-  assert.equal(result.voice.id, 'deathstalker');
-  assert.equal(result.voice.identityBasis, 'verified');
+  assert.equal(result.voice?.id, 'deathstalker');
+  assert.equal(result.voice?.identityBasis, 'verified');
   assert.equal(result.width, 16);
 });
 
-test('a result that cannot say what it sampled with is a protocol error', async () => {
-  const { sampling: _sampling, ...withoutSampling } = RENDER_DONE;
-  streams(frame(1, 'done', withoutSampling));
+test('a result that does not say what it sampled with still reads, with null there', async () => {
+  // The record of the run, not something a caller acts on: a server that
+  // predates the field has not stated it, and the render's result — which
+  // chunks failed — must not be lost over it (Owen, 2026-09-24).
+  const { sampling: _sampling, voice: _voice, ...withoutRecord } = RENDER_DONE;
+  streams(frame(1, 'done', withoutRecord));
   const events = await drain('job-tts-1');
-  assert.throws(
-    () => readRenderResult(events[0]!.data as never),
-    (error: unknown) => {
-      assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-      assert.match(error.message, /has no field "sampling"/);
-      return true;
-    },
-  );
+  const result = readRenderResult(events[0]!.data as never);
+  assert.equal(result.sampling, null);
+  assert.equal(result.voice, null);
+  assert.deepEqual(result.failed, [{ index: 42, message: 'No audio generated' }]);
 });
 
 test('readRenderResult refuses a done frame without a failed list, rather than reading it as clean', async () => {
@@ -951,9 +960,23 @@ test('an artifact name that is not a single path member is refused, never joined
   }
 });
 
-test('a sidecar that is not a provenance document is a protocol error, and nothing lands', async () => {
+test('a sparse sidecar is still written: the bytes on disk are the server\'s own', async () => {
+  // Every provenance field is a record, and a server that states fewer of
+  // them has not made the artifact unusable (Owen, 2026-09-24).
   artifacts.set('41.flac', flac(41));
   artifacts.set('41.flac.provenance.json', Buffer.from('{"server": {"name": "x"}}', 'utf8'));
+  streams(
+    frame(1, 'artifact', { name: '41.flac' }),
+    frame(2, 'done', { artifacts: ['41.flac'], rendered: 1, failed: [], take: 0, sample_rate: 24000 }),
+  );
+  await collect('job-tts-1', directory);
+  assert.deepEqual((await readdir(directory)).sort(), ['41.flac', '41.flac.provenance.json']);
+});
+
+test('a sidecar that is not a provenance document is a protocol error, and nothing lands', async () => {
+  // Present and wrong-typed: `server` is a string, not the block it names.
+  artifacts.set('41.flac', flac(41));
+  artifacts.set('41.flac.provenance.json', Buffer.from('{"server": "x"}', 'utf8'));
   streams(
     frame(1, 'artifact', { name: '41.flac' }),
     frame(2, 'done', { artifacts: ['41.flac'], rendered: 1, failed: [], take: 0, sample_rate: 24000 }),

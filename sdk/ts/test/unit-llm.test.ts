@@ -200,6 +200,7 @@ test('models() reads every field /v1/models promises', async () => {
       installed: true,
       resident: true,
       loadable: true,
+      reason: null,
       memoryBytesEstimate: 21000000000,
       contextDefault: 12288,
       maxModelLen: 12288,
@@ -239,7 +240,7 @@ test('models() reads every field /v1/models promises', async () => {
       maxModelLen: null,
     },
   ]);
-  assert.ok(!('reason' in models[0]!), 'a loadable model carries no reason');
+  assert.equal(models[0]!.reason, null, 'a loadable model carries no reason');
 });
 
 test('a model row carries weights_of: the base, or null, and never absent', async () => {
@@ -249,18 +250,29 @@ test('a model row carries weights_of: the base, or null, and never absent', asyn
   const models = await client().models();
   assert.equal(models[0]!.weightsOf, null);
   assert.equal(models[1]!.weightsOf, 'qwen3.5-9b');
+  // A server that predates the field (PHASE22) has no alias to report.
   const { weights_of: _dropped, ...without } = MODEL_ROW;
   handle = (_request, response) => json(response, 200, [without]);
-  await assert.rejects(client().models(), CrucibleProtocolError);
+  assert.equal((await client().models())[0]!.weightsOf, null);
 });
 
-test('a model that is not loadable and does not say why is a protocol error', async () => {
+test('a model that is not loadable and does not say why still reads: loadable is the fact', async () => {
   handle = (_request, response) => json(response, 200, [{ ...MODEL_ROW, loadable: false }]);
-  await assert.rejects(client().models(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /models\[0\] has no field "reason"/);
-    return true;
-  });
+  const [model] = await client().models();
+  assert.equal(model!.loadable, false);
+  assert.equal(model!.reason, null);
+});
+
+test('a model row missing a load-bearing field is still a protocol error, by name', async () => {
+  for (const key of ['id', 'resident', 'loadable', 'modalities'] as const) {
+    const { [key]: _gone, ...without } = MODEL_ROW;
+    handle = (_request, response) => json(response, 200, [without]);
+    await assert.rejects(client().models(), (error: unknown) => {
+      assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+      assert.match(error.message, new RegExp(`models\\[0\\] has no field "${key}"`));
+      return true;
+    });
+  }
 });
 
 test('a /v1/models body that is not an array is a protocol error, not an empty list', async () => {
@@ -268,36 +280,23 @@ test('a /v1/models body that is not an array is a protocol error, not an empty l
   await assert.rejects(client().models(), CrucibleProtocolError);
 });
 
-test('a row without a max_model_len is a protocol error, not an unclamped model', async () => {
-  // The whole reason the field exists: a client that cannot read it has no
-  // clamp at all, and an unclamped request is a 400 from the engine.
-  const { max_model_len: _len, ...withoutLen } = MODEL_ROW;
-  handle = (_request, response) => json(response, 200, [withoutLen]);
-  await assert.rejects(client().models(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /models\[0\] has no field "max_model_len"/);
-    return true;
-  });
-});
-
-test('a row without a fingerprint is a protocol error, not a model to file under its id', async () => {
-  const { fingerprint: _fingerprint, ...withoutFingerprint } = MODEL_ROW;
-  handle = (_request, response) => json(response, 200, [withoutFingerprint]);
-  await assert.rejects(client().models(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /models\[0\] has no field "fingerprint"/);
-    return true;
-  });
-});
-
-test('a model row without a revision is a protocol error, not an unpinned model', async () => {
-  const { revision: _revision, ...withoutRevision } = MODEL_ROW;
-  handle = (_request, response) => json(response, 200, [withoutRevision]);
-  await assert.rejects(client().models(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /models\[0\] has no field "revision"/);
-    return true;
-  });
+test('a row without max_model_len, fingerprint or revision reads each as null', async () => {
+  // Numbers and pins a caller may use — null already means "this host would
+  // not serve it" for all three, and a server that does not state them has
+  // said nothing a caller can act on differently (Owen, 2026-09-24). A caller
+  // sizing a request with no clamp gets the engine's own named 400.
+  const {
+    max_model_len: _len,
+    fingerprint: _fingerprint,
+    revision: _revision,
+    ...bare
+  } = MODEL_ROW;
+  handle = (_request, response) => json(response, 200, [bare]);
+  const [model] = await client().models();
+  assert.equal(model!.maxModelLen, null);
+  assert.equal(model!.fingerprint, null);
+  assert.equal(model!.revision, null);
+  assert.equal(model!.resident, true);
 });
 
 // ---------------------------------------------------- info's llm capability
@@ -356,11 +355,13 @@ test("info() reads the llm capability's rows with the /models reader", async () 
       installed: true,
       resident: true,
       loadable: true,
+      reason: null,
       memoryBytesEstimate: 21000000000,
       contextDefault: 12288,
       maxModelLen: 12288,
     },
   ]);
+  assert.deepEqual(llm.unreadableRows, []);
 
   // The other capabilities keep DESIGN.md section 4's row — `installed` and
   // `resident` both, and neither read as the other.
@@ -404,30 +405,41 @@ test('an info body without job_types is a protocol error, not an empty list', as
   });
 });
 
-test('an llm capability row shaped like the phase-1 row is a protocol error', async () => {
+test('an llm row info() cannot read is carried aside, and the rest of info() still reads', async () => {
+  // A row shaped like the phase-1 row has no `loadable`, which is load-bearing.
+  // `models()` refuses it by name; `info()` — the probe an app makes to find
+  // out what it is talking to — carries it aside as unreadable, with its raw
+  // data and the reason, rather than losing the whole document (Owen,
+  // 2026-09-24).
+  const phaseOneRow = {
+    id: 'qwen3.5-9b-old',
+    revision: REVISION,
+    source: 'Qwen/Qwen3.5-9B',
+    resident: true,
+    vram_bytes: 21000000000,
+  };
   handle = (_request, response) =>
     json(response, 200, {
       ...INFO,
-      capabilities: [
-        {
-          job_type: 'llm',
-          models: [
-            {
-              id: 'qwen3.5-9b',
-              revision: REVISION,
-              source: 'Qwen/Qwen3.5-9B',
-              resident: true,
-              vram_bytes: 21000000000,
-            },
-          ],
-        },
-      ],
+      capabilities: [{ job_type: 'llm', models: [MODEL_ROW, phaseOneRow] }],
     });
-  await assert.rejects(client().info(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /info\.capabilities\[0\]\.models\[0\] has no field "loadable"/);
-    return true;
-  });
+  const info = await client().info();
+  const [llm] = info.capabilities;
+  assert.ok(llm !== undefined && isLlmCapability(llm));
+  assert.deepEqual(llm.models.map((model) => model.id), ['qwen3.5-9b']);
+  assert.equal(llm.unreadableRows.length, 1);
+  const [unreadable] = llm.unreadableRows;
+  assert.equal(unreadable!.index, 1);
+  assert.equal(unreadable!.id, 'qwen3.5-9b-old');
+  assert.deepEqual(unreadable!.raw, phaseOneRow);
+  assert.match(
+    unreadable!.unreadable,
+    /info\.capabilities\[0\]\.models\[1\] has no field "(modalities|loadable)"/,
+  );
+
+  // The direct read is still strict about the same row.
+  handle = (_request, response) => json(response, 200, [phaseOneRow]);
+  await assert.rejects(client().models(), /models\[0\] has no field "(modalities|loadable)"/);
 });
 
 // -------------------------------------------------------- load and unload
@@ -782,7 +794,7 @@ test('a provenance sidecar names the weights, not only the model', async () => {
   assert.equal(provenance.backend, 'cuda-linux');
 });
 
-test('a provenance model block with no fingerprint is a protocol error', async () => {
+test('a provenance model block with no fingerprint reads it as null', async () => {
   handle = (_request, response) => {
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(
@@ -798,7 +810,11 @@ test('a provenance model block with no fingerprint is a protocol error', async (
       }),
     );
   };
-  await assert.rejects(client().provenance('job-1', 'payload.bin'), CrucibleProtocolError);
+  // A sidecar is a record; the bytes on disk are the server's own. A server
+  // that does not state the fingerprint has not made the artifact unusable.
+  const provenance = await client().provenance('job-1', 'payload.bin');
+  assert.equal(provenance.model?.id, 'qwen3.5-9b');
+  assert.equal(provenance.model?.fingerprint, null);
 });
 
 // ----------------------------------------------- the constrained transport
@@ -1035,12 +1051,26 @@ test('409 model_not_resident is a CrucibleRefused naming the resident model', as
   );
 });
 
-test('a completion missing usage is a protocol error, not a zero count', async () => {
+test('a completion missing usage reads it as null — never as a zero count', async () => {
   const { usage: _usage, ...withoutUsage } = COMPLETION;
   handle = (_request, response) => json(response, 200, withoutUsage);
+  const answer = await client().chat({
+    model: 'qwen3.5-9b',
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert.equal(answer.usage, null);
+  assert.equal(answer.content, 'The forge is lit.');
+});
+
+test('a completion missing its finish_reason is still a protocol error', async () => {
+  // Load-bearing beside `content`: it is how a caller tells a truncated
+  // answer from a finished one.
+  const [choice] = COMPLETION.choices;
+  const { finish_reason: _gone, ...withoutReason } = choice!;
+  handle = (_request, response) => json(response, 200, { ...COMPLETION, choices: [withoutReason] });
   await assert.rejects(
     client().chat({ model: 'qwen3.5-9b', messages: [{ role: 'user', content: 'hi' }] }),
-    CrucibleProtocolError,
+    /has no field "finish_reason"/,
   );
 });
 

@@ -209,7 +209,7 @@ const answer = await crucible.chat({
   messages: [{ role: 'system', content: 'Be terse.' }, { role: 'user', content: 'Light it.' }],
   temperature: 0.2,
 });
-console.log(answer.content, answer.finishReason, answer.usage.totalTokens);
+console.log(answer.content, answer.finishReason, answer.usage?.totalTokens);
 
 for await (const delta of crucible.chatStream({ model: 'qwen3.5-9b', messages: [...] })) {
   process.stdout.write(delta);          // ends on OpenAI's [DONE]
@@ -225,9 +225,9 @@ another: `backendSupported` (the manifest has a block for this host's backend),
 `installed` (the weights are on disk), `resident` (an engine is serving it right now), and
 `loadable` (asking for it now would succeed). The last also depends on the accelerator
 guard, so a model can be installed and supported and still not loadable because someone
-else's process holds the card. A model that is **not** loadable always carries `reason` in
-the server's own words; a row that says `loadable: false` and gives no reason is a
-`CrucibleProtocolError`, because an operator cannot act on a refusal with no cause.
+else's process holds the card. A model that is **not** loadable carries `reason` in the
+server's own words, and `null` when the server did not say — `loadable` is the fact to act
+on either way.
 
 The rest is the manifest: `id`, `family`, `paramsB`, `memoryBytesEstimate` (weights plus KV
 at the default context, measured on the host, not guessed) and two numbers about context
@@ -241,7 +241,8 @@ identify weights — the same id serves a different repo on each backend, and a 
 be re-pinned — so an id in a record cannot say afterwards what actually produced the
 output. The server assembles the string so every client files the same weights under the
 same name. `fingerprint`, `revision`, `memoryBytesEstimate` and `maxModelLen` are all
-`null` together on a model this host's backend cannot serve.
+`null` together on a model this host's backend cannot serve — and each is also `null` from
+a server that does not state it (see [Any Crucible that answers](#any-crucible-that-answers)).
 
 `modalities` is the exception to that: it is **never null, on any host**. It says what a
 client may put in a chat request's content parts (`text`, `image`) — what the model is
@@ -393,7 +394,7 @@ producer, so a voice has one description wherever you find it (narrow with
 ```ts
 for (const voice of await crucible.voices()) {
   if (!voice.loadable) {
-    console.log(`${voice.id}: ${voice.reason}`);   // always present when it cannot load
+    console.log(`${voice.id}: ${voice.reason ?? 'no reason given'}`);
     continue;
   }
   console.log(voice.id, voice.fingerprint, voice.maxChars, voice.pace);
@@ -402,22 +403,20 @@ for (const voice of await crucible.voices()) {
 
 `revision`, `fingerprint`, `memoryBytesEstimate`, `estimateBasis` and `maxChars` are `null`
 together when `backendSupported` is false: all five live in the backend block this host does
-not have, and `0` would read as "needs nothing" where `""` would read as a pin. `sampleRate`,
-`takes` and `pace` are facts about the voice and are never null.
+not have, and `0` would read as "needs nothing" where `""` would read as a pin. `sampleRate`
+and `pace` are facts about the voice and are never null: they are load-bearing, and a row
+without either is refused by name. `kind` and `estimateBasis` are the server's own words,
+not narrowed, so a fourth kind from a newer server is news rather than a lost row.
 
-Two things differ from a `ModelInfo` row and both are deliberate:
+One thing differs from a `ModelInfo` row and it is deliberate:
 
-- **`reason` is always present**, `null` when the voice is loadable — where a model row omits
-  the key. The client reads each route as it is rather than making the two look alike. The
-  rule that does not differ: a voice that cannot load and does not say why is a
-  `CrucibleProtocolError`.
 - **`maxChars` is characters, not tokens.** It is *the* cap certificate for this
   (voice, backend): the most text the voice may be handed in one chunk. Nothing in `tts`
   carries a token cap on the wire — the engine derives its frame budget per chunk from the
   text it is actually given.
 
 `pace` is the whole block, because a client that is going to pack needs all of it. The three
-rates are always there; the packing shape is one of three arrangements, told apart by which
+rates are all three or none (a voice nobody measured states none); the packing shape is one of three arrangements, told apart by which
 of the other three are null — a band (`safeMinChars`/`safeMaxChars`), a single `targetChars`,
 or neither, which means pack to `maxChars`.
 
@@ -520,8 +519,10 @@ that read that as `false` would report every runaway as a long sentence, which i
 the distinction this event exists to carry. Compare against `true` and `false` explicitly;
 never write `if (chunk.capped)`.
 
-A `chunk` frame that *omits* `capped` — or `guard` — is a `CrucibleProtocolError`, not a null:
-"narrator did not say" has to be something the server said.
+A `chunk` frame that *omits* `capped` — or `guard`, or a measurement — reads it as `null`:
+a server that does not state the field and narrator not saying are the same news to a
+caller, and neither is ever `false`. A frame that sends one with the wrong type is still a
+`CrucibleProtocolError`.
 
 No `chunk` event and no artifact is produced for a row that rendered nothing. **A failed
 chunk is reported and the run continues** — one bad sentence never sinks the other 1,399 —
@@ -732,6 +733,34 @@ real work with a real position, but none of the transcript exists yet.
 A failed window fails the job, naming every bad stretch, and publishes nothing — a
 fifteen-minute hole in the middle of a transcript looks exactly like a transcript without one.
 
+## Any Crucible that answers
+
+Owen, 2026-09-24: *"lets modify bookforge and foundry so they dont require any particular
+crucible server. if it can make the call to the crucible server then it should work."* It
+replaced the lockstep rule, under which this client demanded every field it knew and refused
+a server one release behind it by name. So every field this client reads is one of two kinds:
+
+- **Load-bearing** — what a call cannot be done right without: an id, a job's `status`, the
+  `artifacts` to fetch, a chunk's `index`, the audio and its `seq`, a chat's `content` and
+  `finishReason`, a decision's answer, a voice's `sampleRate` and `pace`, a capability row's
+  `enabled` and `selected`, an error's `code`. A missing one is a `CrucibleProtocolError`
+  naming the field.
+- **Informational** — what informs a display, or a number you may use: estimates, notes,
+  counts, timestamps, pins, measurements, a refusal's holder. Absent reads as **`null`**, and
+  every type that carries one says `T | null`. `null` is never `0` and never `false`.
+
+An informational field that is **present with the wrong type** is still a
+`CrucibleProtocolError`: API v1 adds fields and never retypes them, so a wrong type is a
+broken server, not an old one. An unknown event kind — on a job's stream or a TTS session's —
+arrives as an `unknown` event rather than ending the stream. And `info()` never fails over one
+voice or model row it cannot read: that row goes to the capability's `unreadableRows`, with its
+raw data and the reason, and the rest of the document is returned. (`models()` and `voices()`
+are the direct reads and still refuse such a row by name.)
+
+Misconfiguration is unchanged, and still refused by name: nothing listening, something that is
+not a Crucible, a wrong token (401), a different API major (426). There is no version
+comparison beyond the API major.
+
 ## Errors
 
 No call ever returns a degraded result, and nothing is retried. Each failure has its own
@@ -747,7 +776,7 @@ type, carrying the server's own `code` and `message` where the server sent one:
 | `CrucibleRefused` | any other 4xx — carries the named reason (`unknown_job_type`, `unknown_model`, `unknown_blob`, ...) |
 | `CrucibleServerError` | 5xx — carries the envelope's `details` (`chat_queue_full`'s `retry_after`, `label_not_in_probs`'s question and letter) |
 | `CrucibleAcceleratorUnreadable` | 503 `accelerator_unreadable` — a `CrucibleServerError` with a narrower name, because "I cannot see the card" must never be read as "the card is free" |
-| `CrucibleProtocolError` | a response API v1 does not describe: a missing field, an unknown SSE event name |
+| `CrucibleProtocolError` | a response API v1 does not describe: a missing load-bearing field, or a field of the wrong type |
 
 All of them extend `CrucibleError`.
 

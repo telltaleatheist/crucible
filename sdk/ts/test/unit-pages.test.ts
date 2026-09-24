@@ -99,7 +99,7 @@ test('a server that reads pages hands back the whole request contract', async ()
   assert.notEqual(info.pagesEngine, null, 'the block is on the wire and must survive the read');
   assert.equal(info.pagesEngine!.engine, 'vllm');
   assert.equal(info.pagesEngine!.installed, true);
-  assert.match(info.pagesEngine!.detail, /dots-ocr/);
+  assert.match(String(info.pagesEngine!.detail), /dots-ocr/);
   const request = info.pagesEngine!.request;
   assert.equal(request.model, 'dots-ocr');
   assert.equal(request.dpi, 200);

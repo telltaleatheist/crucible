@@ -135,14 +135,14 @@ test('denied and expired requests never manufacture a connection', async () => {
 });
 
 test('trusted apps list and approve pairing through authenticated API calls', async () => {
-  let malformed = false;
+  let shape: 'whole' | 'no-expiry' | 'no-code' = 'whole';
   const server = createServer(async (request, response) => {
     assert.equal(request.headers.authorization, 'Bearer trusted-token');
     assert.equal(request.headers['x-crucible-api'], '1');
     response.setHeader('Content-Type', 'application/json');
     if (request.url === '/v1/pairing/requests') {
       assert.equal(request.method, 'GET');
-      response.end(JSON.stringify({ requests: [{ id: 'id', user_code: 'ABCD-EFGH', client_name: 'BookForge', address: '192.0.2.1', ...(malformed ? {} : { expires_in: 42 }) }] }));
+      response.end(JSON.stringify({ requests: [{ id: 'id', ...(shape === 'no-code' ? {} : { user_code: 'ABCD-EFGH' }), client_name: 'BookForge', address: '192.0.2.1', ...(shape === 'no-expiry' ? {} : { expires_in: 42 }) }] }));
       return;
     }
     assert.equal(request.url, '/v1/pairing/decision');
@@ -159,7 +159,12 @@ test('trusted apps list and approve pairing through authenticated API calls', as
     const client = new CrucibleClient({ url: `http://127.0.0.1:${port}`, token: 'trusted-token', clientName: 'Foundry' });
     assert.deepEqual(await client.listPairingRequests(), [{ id: 'id', userCode: 'ABCD-EFGH', clientName: 'BookForge', address: '192.0.2.1', expiresIn: 42 }]);
     assert.deepEqual(await client.decidePairing('id', 'ABCD-EFGH', true), { status: 'approved' });
-    malformed = true;
-    await assert.rejects(client.listPairingRequests(), CrucibleProtocolError);
+    // How long the request has is shown to the person deciding: a server
+    // that does not say reads as null (Owen, 2026-09-24).
+    shape = 'no-expiry';
+    assert.equal((await client.listPairingRequests())[0]?.expiresIn, null);
+    // The code IS the approval's subject: a request without one is refused.
+    shape = 'no-code';
+    await assert.rejects(client.listPairingRequests(), /has no field "user_code"/);
   } finally { server.close(); server.closeAllConnections(); }
 });

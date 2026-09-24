@@ -134,18 +134,33 @@ test('settings() reads the contract document into the typed shape', async () => 
 test('the key hint arrives with its ellipsis and is rendered verbatim', async () => {
   answer(200, DOCUMENT);
   const settings = await client().settings();
-  assert.equal(settings.upstreams.anthropic.keyHint, '…k3A9');
-  assert.equal(settings.upstreams.openai.keyHint, null);
+  assert.equal(settings.upstreams.anthropic?.keyHint, '…k3A9');
+  assert.equal(settings.upstreams.openai?.keyHint, null);
   // Ollama has no secret, so it has no hint field at all — and a url instead.
+  assert.ok(settings.upstreams.ollama !== null);
   assert.equal(settings.upstreams.ollama.keyHint, undefined);
   assert.equal(settings.upstreams.ollama.url, 'http://192.168.68.20:11434');
-  assert.equal(settings.upstreams.anthropic.url, undefined);
+  assert.equal(settings.upstreams.anthropic?.url, undefined);
 });
 
-test('a document missing a promised field is a protocol error, not undefined', async () => {
+test('a document missing a descriptive field reads it as null, never undefined', async () => {
   const { backend_kind: _dropped, ...without } = DOCUMENT;
   answer(200, without);
-  await assert.rejects(client().settings(), CrucibleProtocolError);
+  assert.equal((await client().settings()).backendKind, null);
+});
+
+test('a document missing its routes is a protocol error: where work runs is never filled in', async () => {
+  const { routes: _dropped, ...without } = DOCUMENT;
+  answer(200, without);
+  await assert.rejects(client().settings(), /settings has no field "routes"/);
+});
+
+test('an upstream the server does not list reads as null, for the page to leave out', async () => {
+  const { ollama: _dropped, ...older } = DOCUMENT.upstreams;
+  answer(200, { ...DOCUMENT, upstreams: older });
+  const settings = await client().settings();
+  assert.equal(settings.upstreams.ollama, null);
+  assert.equal(settings.upstreams.anthropic?.configured, true);
 });
 
 test('putSettings sends a PARTIAL patch in the wire spelling', async () => {
@@ -318,7 +333,7 @@ test('every capability row says where its work runs', async () => {
   assert.equal(translate.route, 'upstream');
   // The upstream row's `selected` is exactly the `model` to send as a chat.
   assert.equal(translate.selected, 'anthropic/claude-sonnet-5');
-  assert.match(translate.reason, /the local answer would be: /);
+  assert.match(String(translate.reason), /the local answer would be: /);
 });
 
 test('a row with a route this build has never heard of is a protocol error', async () => {
@@ -438,26 +453,28 @@ test('local model choices and nullable automatic preferences cross the settings 
       {id:'qwen3.8-27b',memory_bytes_estimate:55e9,fits:false,installed:false}]}});
   const doc=await client().settings();
   assert.deepEqual(doc.localModels,{translate:'qwen3.8-27b-4bit',clean:null});
-  assert.deepEqual(doc.localModelChoices.translate?.[0],{id:'qwen3.8-27b-4bit',memoryBytesEstimate:16e9,fits:true,installed:true});
+  assert.deepEqual(doc.localModelChoices?.translate?.[0],{id:'qwen3.8-27b-4bit',memoryBytesEstimate:16e9,fits:true,installed:true});
   await client().putSettings({localModels:{translate:null}});
   assert.deepEqual(JSON.parse(lastBody),{local_models:{translate:null}});
 });
 
-test('a document missing either local-model field fails by name, and so does a malformed one', async () => {
-  // IT USED TO READ AN OMISSION AS AN OLD ENGINE. Owen, 2026-09-16: nothing is
-  // released, so nothing is legacy, and there is no older engine for anyone but
-  // us to point at. Absent is now a protocol error like any other missing
-  // field — named, with the field in the sentence — rather than a vintage every
-  // caller downstream had to branch on.
+test('a document missing either local-model field reads it as null; a malformed one fails by name', async () => {
+  // AN OMISSION READS AS AN OLDER ENGINE AGAIN. It was a protocol error from
+  // 2026-09-16 (nothing released, nothing legacy) until Owen's ruling of
+  // 2026-09-24: "if it can make the call to the crucible server then it should
+  // work". A page that cannot draw a model picker for an older engine can
+  // still draw its routes and keys. `null` is "this engine does not answer the
+  // question", which is not an empty object.
   const { local_models: _m, ...noModels } = DOCUMENT;
   answer(200, noModels);
-  await assert.rejects(client().settings(), CrucibleProtocolError);
+  assert.equal((await client().settings()).localModels, null);
   const { local_model_choices: _c, ...noChoices } = DOCUMENT;
   answer(200, noChoices);
-  await assert.rejects(client().settings(), CrucibleProtocolError);
+  assert.equal((await client().settings()).localModelChoices, null);
 
+  // Present and wrong is a broken server, not an old one.
   answer(200,{...DOCUMENT,local_models:{translate:123}});
   await assert.rejects(client().settings(),CrucibleProtocolError);
-  answer(200,{...DOCUMENT,local_model_choices:{translate:[{id:'model',memory_bytes_estimate:1,fits:true}]}});
-  await assert.rejects(client().settings(),CrucibleProtocolError);
+  answer(200,{...DOCUMENT,local_model_choices:{translate:[{id:'model',memory_bytes_estimate:1,fits:true,installed:'yes'}]}});
+  await assert.rejects(client().settings(),/installed is present but is not a boolean/);
 });

@@ -279,14 +279,23 @@ test('a lease taken by a client that did not name itself renders as an unnamed c
   });
 });
 
-test('a leased body missing what a bench displays is a protocol error, not a quiet downgrade', async () => {
+test('a leased body missing what a bench displays is still CrucibleLeased, with null there', async () => {
+  // The refusal is the CODE. What the body says about the holder is for a
+  // person, and a server that states less of it has still refused by name
+  // (Owen, 2026-09-24) — never a protocol error in the leased refusal's place.
   const { expires_at: _gone, ...withoutDeadline } = LEASED_BODY.error.details;
   answer(409, { error: { ...LEASED_BODY.error, details: withoutDeadline } });
   await assert.rejects(client().heartbeat('9c1f'), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /expires_at/);
+    assert.ok(error instanceof CrucibleLeased, `got ${String(error)}`);
+    assert.equal(error.expiresAt, null);
+    assert.doesNotMatch(error.leasedLine, /until/);
     return true;
   });
+});
+
+test('a leased body whose details are not an object is a protocol error', async () => {
+  answer(409, { error: { ...LEASED_BODY.error, details: 'banana' } });
+  await assert.rejects(client().heartbeat('9c1f'), CrucibleProtocolError);
 });
 
 test('leased is about THIS machine, so a walk should try the next one', async () => {
@@ -343,15 +352,13 @@ test('the bench reads the lease, and the lease does not pretend to be a busy lan
   assert.equal('model' in (seen.lease as object), false);
 });
 
-test('a server with nobody mid-run says null, and an absent key is not that statement', async () => {
+test('a server with nobody mid-run says null, and one that predates leases reads the same', async () => {
   answer(200, { ...ACTIVITY, lease: null });
   assert.equal((await client().activity()).lease, null);
 
+  // A bench draws the lease; nothing is decided on it here. A server that
+  // does not report one has none to report (Owen, 2026-09-24).
   const { lease: _gone, ...withoutLease } = ACTIVITY;
   answer(200, withoutLease);
-  await assert.rejects(client().activity(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /lease/);
-    return true;
-  });
+  assert.equal((await client().activity()).lease, null);
 });

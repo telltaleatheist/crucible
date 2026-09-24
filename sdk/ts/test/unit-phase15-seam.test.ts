@@ -113,12 +113,13 @@ const GIB = 1024 ** 3;
  * Eleven classes with NO `route` on any of them — the shape a server
  * initialised before phase 15 sent.
  *
- * It was read as "every class is local" until 2026-09-16. Owen ruled that
- * population out of existence (nothing is released, so no such server exists
- * for anyone but us), and inventing a route is inventing the one fact that
- * decides whether a run costs GPU-minutes or money — so it is a REFUSAL now,
- * whole document or half. The fixture stays, because what it produces is worth
- * asserting; only the answer changed.
+ * Read as "every class is local" — a fact the document states by its vintage,
+ * since a server that predates upstream routing had nowhere else to send work.
+ * That reading was withdrawn on 2026-09-16 (no older server would ever be
+ * pointed at) and RESTORED on 2026-09-24 by Owen's ruling that any Crucible
+ * that answers works. Half a document is still refused: a server that routes
+ * and does not say where one class runs is a defect, and a route is the one
+ * fact that decides whether a run costs GPU-minutes or money.
  */
 function preRouteRecord(): Record<string, unknown> {
   const classes = [
@@ -154,14 +155,13 @@ function preRouteRecord(): Record<string, unknown> {
 
 // ------------------------------- 1. the capability document's route, by 3.3
 
-test('a document where NO row says route is REFUSED, not read as every class local', async () => {
+test('a document where NO row says route reads every class as local', async () => {
   answers(200, preRouteRecord());
-  await assert.rejects(client().capability(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError);
-    assert.match(error.message, new RegExp(CAPABILITY_ROUTE_MISSING));
-    assert.match(error.message, /neither does any other row/);
-    return true;
-  });
+  const record = await client().capability();
+  assert.equal(record.classes.length, 11);
+  for (const row of record.classes) {
+    assert.equal(row.route, 'local', `${row.capability} predates routing, so it is local`);
+  }
 });
 
 /** The same eleven classes, each stating where it runs. What a server sends. */
@@ -708,16 +708,27 @@ test('reading a pre-field document is a STATEMENT, not a filled-in default', asy
   });
 });
 
-test('a half-stated info document is refused the same way', async () => {
+test('a half-stated info document carries the rows it cannot read aside, by the same name', async () => {
+  // `voices()` refuses the document (above). `info()` is the probe an app
+  // makes to find out what it is talking to, so the rows that cannot say
+  // whether a load needs a clip are carried aside as unreadable — with the
+  // same named reason — and the rest of the document still reads (Owen,
+  // 2026-09-24).
   const rows = preFieldVoices();
   rows[0]!['needs_reference'] = false;
   answers(200, preFieldInfo(rows));
-  await assert.rejects(client().info(), (error: unknown) => {
-    assert.ok(error instanceof CrucibleProtocolError);
-    assert.match(error.message, new RegExp(VOICES_NEEDS_REFERENCE_MISSING));
-    assert.match(error.message, /capabilities\[1\]\.models\[1\]/);
-    return true;
-  });
+  const info = await client().info();
+  const tts = info.capabilities.find(isTtsCapability);
+  assert.ok(tts !== undefined);
+  assert.deepEqual(tts.models.map((voice) => voice.id), [rows[0]!['id']]);
+  assert.deepEqual(
+    tts.unreadableRows.map((row) => row.index),
+    [1, 2],
+  );
+  for (const row of tts.unreadableRows) {
+    assert.match(row.unreadable, new RegExp(VOICES_NEEDS_REFERENCE_MISSING));
+  }
+  assert.match(tts.unreadableRows[0]!.unreadable, /capabilities\[1\]\.models\[1\]/);
 });
 
 test('a needs_reference that is not a boolean is voices_needs_reference_unknown', async () => {

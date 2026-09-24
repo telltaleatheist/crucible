@@ -131,11 +131,16 @@ test('the server offers the llm capability and lists the model', async () => {
   assert.ok(isLlmCapability(llm), 'the llm capability carries /v1/models rows');
 
   const model = await row();
-  assert.equal(model.family.length > 0, true, 'the manifest must name a family');
-  assert.ok(model.paramsB > 0, 'the manifest must give a parameter count');
+  // Informational fields are nullable on the wire (any Crucible that answers
+  // works, Owen 2026-09-24); THIS server is current and must state them all.
+  assert.ok(model.family !== null && model.family.length > 0, 'the manifest must name a family');
+  assert.ok(model.paramsB !== null && model.paramsB > 0, 'the manifest must give a parameter count');
   assert.ok(model.memoryBytesEstimate !== null && model.memoryBytesEstimate > 0,
     'the manifest must give a measured memory estimate');
-  assert.ok(model.contextDefault > 0, 'the manifest must give a default context');
+  assert.ok(
+    model.contextDefault !== null && model.contextDefault > 0,
+    'the manifest must give a default context',
+  );
   assert.equal(model.backendSupported, true, `${MODEL} has no block for this host's backend`);
   assert.equal(model.installed, true, `${MODEL} is not installed: crucible models pull ${MODEL}`);
   assert.ok(
@@ -150,16 +155,17 @@ test('the server offers the llm capability and lists the model', async () => {
     `${MODEL} must report the context it is served at, got ${String(model.maxModelLen)}`,
   );
   if (!model.loadable) {
-    // `reason` is guaranteed present when `loadable` is false; the client
-    // refuses a row that omits it, so this never prints "undefined".
-    assert.fail(`${MODEL} is not loadable: ${model.reason}`);
+    assert.fail(`${MODEL} is not loadable: ${String(model.reason)}`);
   }
-  assert.ok(!('reason' in model), 'a loadable model carries no reason');
+  assert.equal(model.reason, null, 'a loadable model carries no reason');
 
   // One model, one description: what /info says and what /models says are the
   // same rows, not two accounts a client would have to reconcile.
   assert.deepEqual(llm.models, await crucible.models());
-  console.log(`    ${MODEL} @ ${model.revision} — ${info.host.backend} on ${info.host.gpu.name}`);
+  console.log(
+    `    ${MODEL} @ ${model.revision} — ${String(info.host.backend)} on ` +
+      `${String(info.host.gpu?.name)}`,
+  );
 });
 
 // --------------------------------------------------------------------- load
@@ -178,8 +184,9 @@ test('load-model warms the engine and finishes naming the resident model', async
   );
   for (const event of events) {
     if (event.event === 'warming') {
-      assert.equal(typeof event.data.message, 'string');
-      assert.ok(event.data.message.length > 0, 'a warming event must say something');
+      const message = event.data.message;
+      assert.equal(typeof message, 'string');
+      assert.ok(message !== null && message.length > 0, 'a warming event must say something');
     }
   }
 
@@ -215,17 +222,19 @@ test('chat returns a non-empty completion from the resident engine', async () =>
   console.log(`    content: ${JSON.stringify(answer.content)}`);
   console.log(`    finish_reason: ${answer.finishReason}, usage: ${JSON.stringify(answer.usage)}`);
 
-  assert.ok(answer.id.length > 0, 'the completion must carry an id');
+  assert.ok(answer.id !== null && answer.id.length > 0, 'the completion must carry an id');
   assert.equal(answer.model, MODEL);
   assert.ok(answer.content.trim().length > 0, 'the completion must carry text');
   assert.ok(answer.finishReason.length > 0, 'the engine must say why it stopped');
-  assert.ok(answer.usage.promptTokens > 0, 'the engine must count the prompt');
-  assert.ok(answer.usage.completionTokens > 0, 'the engine must count the completion');
-  assert.equal(
-    answer.usage.totalTokens,
-    answer.usage.promptTokens + answer.usage.completionTokens,
-    'the totals must add up',
+  const usage = answer.usage;
+  assert.ok(usage !== null, 'the engine must report usage');
+  const { promptTokens, completionTokens, totalTokens } = usage;
+  assert.ok(promptTokens !== null && promptTokens > 0, 'the engine must count the prompt');
+  assert.ok(
+    completionTokens !== null && completionTokens > 0,
+    'the engine must count the completion',
   );
+  assert.equal(totalTokens, promptTokens + completionTokens, 'the totals must add up');
 });
 
 test('chatStream yields deltas that concatenate to the answer', async () => {

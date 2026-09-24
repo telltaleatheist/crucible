@@ -129,7 +129,7 @@ test('capability() reads the record, and the rows arrive under classes', async (
   assert.equal(translate.enabled, true);
   assert.equal(translate.selected, 'qwen3.8-27b-4bit');
   assert.equal(translate.shortfallBytes, 0);
-  assert.match(translate.reason, /fits/);
+  assert.match(String(translate.reason), /fits/);
 });
 
 test('a disabled class is an answer with a number, not an error', async () => {
@@ -142,7 +142,7 @@ test('a disabled class is an answer with a number, not an error', async () => {
   // inside the sentence.
   assert.equal(tts.selected, '');
   assert.equal(tts.shortfallBytes, 3 * GIB);
-  assert.match(tts.reason, /short by 3\.0 GiB/);
+  assert.match(String(tts.reason), /short by 3\.0 GiB/);
   // A class that needs no accelerator is enabled with nothing selected, and
   // that is not the same reading as a class nothing fit for.
   const echo = record.classes.find((row) => row.capability === 'echo')!;
@@ -150,12 +150,38 @@ test('a disabled class is an answer with a number, not an error', async () => {
   assert.equal(echo.selected, '');
 });
 
-test('a row missing a promised field is a protocol error, not a quiet default', async () => {
-  const { shortfall_bytes: _gone, ...withoutShortfall } = RECORD.classes[3]!;
-  answers(200, { ...RECORD, classes: [withoutShortfall] });
+// ANY CRUCIBLE THAT ANSWERS WORKS (Owen, 2026-09-24). A row's reason and
+// shortfall inform a person; whether the class is enabled and what it selected
+// are what a caller asks for work with. The first kind reads null when a
+// server does not state it; the second is still refused by name.
+
+test('a row without an informational field reads it as null, not as a refusal', async () => {
+  const { shortfall_bytes: _gone, reason: _said, ...bare } = RECORD.classes[3]!;
+  answers(200, { ...RECORD, classes: [bare] });
+  const [tts] = (await client().capability()).classes;
+  assert.ok(tts !== undefined);
+  assert.equal(tts.enabled, false);
+  assert.equal(tts.shortfallBytes, null);
+  assert.equal(tts.reason, null);
+});
+
+test('a row missing a load-bearing field is still a protocol error, by name', async () => {
+  const { enabled: _gone, ...withoutEnabled } = RECORD.classes[3]!;
+  answers(200, { ...RECORD, classes: [withoutEnabled] });
   await assert.rejects(client().capability(), (error: unknown) => {
     assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /capability\.classes\[0\] has no field "shortfall_bytes"/);
+    assert.match(error.message, /capability\.classes\[0\] has no field "enabled"/);
+    return true;
+  });
+});
+
+test('an informational field that is PRESENT with the wrong type is a protocol error', async () => {
+  // Absent is an older server; `work: "banana"` is a broken one. API v1 adds
+  // fields and never retypes them, so the two are never the same news.
+  answers(200, { ...RECORD, classes: [{ ...RECORD.classes[1]!, work: 'banana' }] });
+  await assert.rejects(client().capability(), (error: unknown) => {
+    assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
+    assert.match(error.message, /capability\.classes\[0\]\.work is present but is not a JSON object/);
     return true;
   });
 });
@@ -281,8 +307,25 @@ test('without sizing no query is sent, and a fractional size never leaves the cl
   );
 });
 
-test('a row with no work or ceilings key is a protocol error, not a default', async () => {
-  const { work: _work, ...bare } = SIZED.classes[0]!;
+test('a 1.0.23-shaped row, with no work or ceilings key, reads both as null', async () => {
+  // The exact failure the ruling was made over: after the 1.0.24 repin every
+  // BookForge fake without `work` threw `capability.classes[0] has no field
+  // "work"`. A server that predates the fields has not stated them.
+  const { work: _work, context_ceilings: _ceilings, ...bare } = SIZED.classes[0]!;
   answers(200, { ...RECORD, classes: [bare] });
-  await assert.rejects(client().capability(), CrucibleProtocolError);
+  const [row] = (await client().capability()).classes;
+  assert.ok(row !== undefined);
+  assert.equal(row.selected, SIZED.classes[0]!.selected);
+  assert.equal(row.work, null);
+  assert.equal(row.contextCeilings, null);
+});
+
+test('a record with no sizing figures at all still reads', async () => {
+  const { backend_kind: _k, total_bytes: _t, desktop_allowance_bytes: _d, ...bare } = RECORD;
+  answers(200, bare);
+  const record = await client().capability();
+  assert.equal(record.backendKind, null);
+  assert.equal(record.totalBytes, null);
+  assert.equal(record.desktopAllowanceBytes, null);
+  assert.equal(record.classes.length, 4);
 });

@@ -97,6 +97,7 @@ export type {
   StreamRowDone,
   StreamRowError,
   StreamTransport,
+  StreamUnknown,
   TtsStreamSession,
 } from './stream.js';
 
@@ -138,6 +139,7 @@ export type {
   ChatResponse,
   ChatUsage,
   ChunkData,
+  UnreadableRow,
   DecideAnswer,
   DecideAnswerCommon,
   DecideCallTiming,

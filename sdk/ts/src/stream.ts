@@ -65,7 +65,7 @@ import {
   CrucibleUnreachable,
 } from './errors.js';
 import { readSseFrames } from './sse.js';
-import { asObject, bool, nullableBool, nullableNum, num, str, type Json } from './shape.js';
+import { asObject, bool, nullableNum, num, optBool, optNum, optStr, str, type Json } from './shape.js';
 
 /** Everything `stream(...)` needs. Neither field has a default. */
 export interface StreamOptions {
@@ -91,8 +91,12 @@ export interface StreamAudio {
   readonly seq: number;
   /** Mono PCM16 at the session's `sampleRate`, ready to play or to write. */
   readonly pcm: Int16Array;
-  /** Seconds of audio in `pcm`, as the server measured it in the same bytes. */
-  readonly seconds: number;
+  /**
+   * Seconds of audio in `pcm`, as the server measured it in the same bytes —
+   * or null where a server did not state it. `pcm.length / sampleRate` says
+   * the same thing.
+   */
+  readonly seconds: number | null;
 }
 
 /** A row finishing, whether it spoke its whole text or was stopped. */
@@ -100,10 +104,13 @@ export interface StreamRowDone {
   readonly kind: 'done';
   readonly id: string;
   readonly done: true;
-  /** Seconds of audio actually delivered for this row. */
-  readonly seconds: number;
-  /** The characters the server sent to the engine — its own count, not a reply's. */
-  readonly chars: number;
+  /** Seconds of audio actually delivered for this row, or null where not stated. */
+  readonly seconds: number | null;
+  /**
+   * The characters the server sent to the engine — its own count, not a
+   * reply's — or null where not stated.
+   */
+  readonly chars: number | null;
   /** `chars / seconds`, or null for a row that delivered no audio at all. */
   readonly charsPerSec: number | null;
   /**
@@ -160,7 +167,8 @@ export interface StreamRestart {
   readonly restart: true;
   /** Discard every chunk of this row below this seq. */
   readonly fromSeq: number;
-  readonly reason: string;
+  /** Why, in the server's words, or null where not stated. */
+  readonly reason: string | null;
 }
 
 /** One row failing on its own. Its neighbours are unaffected. */
@@ -171,8 +179,29 @@ export interface StreamRowError {
   readonly message: string;
 }
 
+/**
+ * A session frame this build does not know, carried rather than refused —
+ * {@link UnknownEvent}'s rule for a job's stream, applied to a session's.
+ *
+ * The server's session vocabulary grows as its job events do, and until
+ * 2026-09-24 this client threw on a kind it had not heard of, which ended the
+ * listener's session over a frame it had no use for. It is never terminal and
+ * carries no audio: a player skips it, and a log can say what it was.
+ */
+export interface StreamUnknown {
+  readonly kind: 'unknown';
+  /** The event name the server actually sent. */
+  readonly event: string;
+  readonly data: Readonly<Record<string, unknown>>;
+}
+
 /** What iterating a session yields. */
-export type StreamEvent = StreamAudio | StreamRowDone | StreamRestart | StreamRowError;
+export type StreamEvent =
+  | StreamAudio
+  | StreamRowDone
+  | StreamRestart
+  | StreamRowError
+  | StreamUnknown;
 
 /** What `cancel` did. See {@link TtsStreamSession.cancel}. */
 export type CancelOutcome = 'dropped' | 'aborting_batch' | 'already_finished';
@@ -181,10 +210,14 @@ export type CancelOutcome = 'dropped' | 'aborting_batch' | 'already_finished';
 export interface TtsStreamSession extends AsyncIterable<StreamEvent> {
   readonly sessionId: string;
   readonly voice: string;
-  /** `<voice>@<revision>` — the merge that is speaking, not just its name. */
-  readonly fingerprint: string;
+  /**
+   * `<voice>@<revision>` — the merge that is speaking, not just its name — or
+   * null where the server did not state it.
+   */
+  readonly fingerprint: string | null;
   readonly sampleRate: number;
-  readonly backend: string;
+  /** The backend speaking, or null where the server did not state it. */
+  readonly backend: string | null;
 
   /**
    * Speak one row. Returns its id, **not its audio**: the audio comes out of
@@ -278,12 +311,14 @@ export async function openTtsStream(
     { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ voice, language }) },
     'stream',
   );
+  // LOAD-BEARING: the session id every op names, the voice, and the rate the
+  // PCM is at. The fingerprint and the backend describe the session.
   const session = new Session(transport, {
     sessionId: str(body, 'session_id', 'stream'),
     voice: str(body, 'voice', 'stream'),
-    fingerprint: str(body, 'fingerprint', 'stream'),
+    fingerprint: optStr(body, 'fingerprint', 'stream'),
     sampleRate: num(body, 'sample_rate', 'stream'),
-    backend: str(body, 'backend', 'stream'),
+    backend: optStr(body, 'backend', 'stream'),
   });
   try {
     await session.attach();
@@ -308,17 +343,17 @@ type Pumped = StreamEvent | { readonly kind: 'ready' };
 interface Identity {
   sessionId: string;
   voice: string;
-  fingerprint: string;
+  fingerprint: string | null;
   sampleRate: number;
-  backend: string;
+  backend: string | null;
 }
 
 class Session implements TtsStreamSession {
   readonly sessionId: string;
   readonly voice: string;
-  readonly fingerprint: string;
+  readonly fingerprint: string | null;
   readonly sampleRate: number;
-  readonly backend: string;
+  readonly backend: string | null;
 
   readonly #transport: StreamTransport;
   /**
@@ -359,7 +394,13 @@ class Session implements TtsStreamSession {
    * or ends without saying it — is a conversation this client does not know.
    */
   async attach(): Promise<void> {
-    const step = await this.#pump.next();
+    let step = await this.#pump.next();
+    // A frame this build does not know is skipped here as the iterator skips
+    // it — it is not "something other than ready", it is nothing this client
+    // can use — and the wait for `ready` goes on.
+    while (step.done !== true && step.value.kind === 'unknown') {
+      step = await this.#pump.next();
+    }
     if (step.done === true) {
       throw new CrucibleProtocolError(
         `session ${this.sessionId} closed before it was ready` +
@@ -507,7 +548,7 @@ class Session implements TtsStreamSession {
           const event = frame.event ?? 'message';
           if (event === 'closed') {
             this.#closed = true;
-            this.#closedReason = str(asObject(parse(frame.data, event), event), 'reason', event);
+            this.#closedReason = optStr(asObject(parse(frame.data, event), event), 'reason', event);
             return;
           }
           yield this.#read(event, frame.data);
@@ -572,11 +613,13 @@ class Session implements TtsStreamSession {
       // one fact with two copies is compared, never trusted twice
       // (ARCHITECTURE.md R1). A `ready` naming another voice, merge, rate or
       // backend would mean this stream is not the session that was opened.
+      // The fingerprint and the backend are compared as stated: a server that
+      // states neither, on either copy, has two copies that agree.
       const said = {
         voice: str(body, 'voice', 'ready'),
-        fingerprint: str(body, 'fingerprint', 'ready'),
+        fingerprint: optStr(body, 'fingerprint', 'ready'),
         sampleRate: num(body, 'sample_rate', 'ready'),
-        backend: str(body, 'backend', 'ready'),
+        backend: optStr(body, 'backend', 'ready'),
       };
       const opened = {
         voice: this.voice,
@@ -601,7 +644,7 @@ class Session implements TtsStreamSession {
         id: str(body, 'id', 'audio'),
         seq: num(body, 'seq', 'audio'),
         pcm: pcm16(decodeBase64(str(body, 'pcm_base64', 'audio'))),
-        seconds: num(body, 'seconds', 'audio'),
+        seconds: optNum(body, 'seconds', 'audio'),
       };
     }
     if (event === 'done') {
@@ -609,14 +652,18 @@ class Session implements TtsStreamSession {
         kind: 'done',
         id: str(body, 'id', 'done'),
         done: true,
-        seconds: num(body, 'seconds', 'done'),
-        chars: num(body, 'chars', 'done'),
-        charsPerSec: nullableNum(body, 'chars_per_sec', 'done'),
-        capped: nullableBool(body, 'capped', 'done'),
+        // Measurements of the row, for a record or a display.
+        seconds: optNum(body, 'seconds', 'done'),
+        chars: optNum(body, 'chars', 'done'),
+        charsPerSec: optNum(body, 'chars_per_sec', 'done'),
+        capped: optBool(body, 'capped', 'done'),
+        // Strict: whether the row finished or was stopped is what a player
+        // decides to keep its audio on.
         cancelled: bool(body, 'cancelled', 'done'),
-        // REQUIRED, and a `done` without it is a protocol error like any other
-        // missing field: the caller inserts this silence itself, so a server too
-        // old to state it would have the caller pad audio that is not bare.
+        // STRICT, and a `done` without it is a protocol error: the caller
+        // inserts this silence itself, and its `null` already MEANS "the row
+        // was cancelled, keep no gap" — so an absent key read as null would
+        // have a player run a finished row's sentences together.
         gapSec: nullableNum(body, 'gap_sec', 'done'),
       };
     }
@@ -626,7 +673,7 @@ class Session implements TtsStreamSession {
         id: str(body, 'id', 'restart'),
         restart: true,
         fromSeq: num(body, 'from_seq', 'restart'),
-        reason: str(body, 'reason', 'restart'),
+        reason: optStr(body, 'reason', 'restart'),
       };
     }
     if (event === 'error') {
@@ -642,12 +689,13 @@ class Session implements TtsStreamSession {
         `session ${this.sessionId} failed: ${code}: ${message}`,
       );
     }
-    // An event kind this client does not know. Thrown rather than skipped, for
-    // the reason `events()` gives about the same case: a frame silently dropped
-    // is a behaviour change nobody sees until a book is missing a sentence.
-    throw new CrucibleProtocolError(
-      `session ${this.sessionId} sent an event this client does not know: ${event}`,
-    );
+    // An event kind this client does not know: CARRIED, not refused, exactly
+    // as `events()` carries one on a job's stream (`UnknownEvent`). It used to
+    // throw, which ended a listener's whole session over a frame it had no use
+    // for; a newer server's vocabulary is news, not a fault. It is yielded
+    // rather than dropped, so a caller that logs frames still sees it — and it
+    // carries no audio, so a player that ignores it loses nothing.
+    return { kind: 'unknown', event, data: body };
   }
 }
 

@@ -46,11 +46,14 @@ export interface PairingRequest {
   approvalRequired: boolean;
 }
 export interface PendingPairing {
+  /** What an approval names. */
   id: string;
+  /** The code the person checks against the requesting screen. */
   userCode: string;
-  clientName: string;
-  address: string;
-  expiresIn: number;
+  /** Who is asking, from where, and for how long — or null where not stated. */
+  clientName: string | null;
+  address: string | null;
+  expiresIn: number | null;
 }
 export type PairingResult =
   | { status: 'pending' | 'denied' | 'expired' }

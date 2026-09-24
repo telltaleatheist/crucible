@@ -164,24 +164,29 @@ export const SERVER_BUSY = 'server_busy';
  * the caller's, every time.
  */
 export class CrucibleBusy extends CrucibleRefused {
+  // EVERY FIELD BELOW IS INFORMATIONAL and `null` where the server did not
+  // state it (any Crucible that answers works, Owen 2026-09-24). The refusal
+  // is the CODE; these say who is in the way, for a person. A body missing one
+  // is still this type, never a protocol error in its place.
+
   /** The busy job's `client` — its recorded User-Agent. Null = it did not say. */
   readonly holder: string | null;
-  readonly jobId: string;
+  readonly jobId: string | null;
   /** The busy job's type: `tts`, `llm`, `rvc`, ... */
-  readonly jobType: string;
+  readonly jobType: string | null;
   /** The model it holds, or null for a job type that names none. */
   readonly model: string | null;
   /** `running` or `queued`. Names which clock {@link since} is on. */
-  readonly jobStatus: string;
+  readonly jobStatus: string | null;
   /**
    * When it started (`running`) or was admitted (`queued`), as the server said
    * it. {@link jobStatus} is what makes this unambiguous: without it a caller
    * cannot tell a job that has been rendering for an hour from one admitted
    * 2 ms ago.
    */
-  readonly since: string;
+  readonly since: string | null;
   /** 0..1. */
-  readonly progress: number;
+  readonly progress: number | null;
   /** The holder's latest progress line. Null until the job has said anything. */
   readonly jobMessage: string | null;
 
@@ -192,12 +197,12 @@ export class CrucibleBusy extends CrucibleRefused {
     details: unknown,
     fields: {
       holder: string | null;
-      jobId: string;
-      jobType: string;
+      jobId: string | null;
+      jobType: string | null;
       model: string | null;
-      jobStatus: string;
-      since: string;
-      progress: number;
+      jobStatus: string | null;
+      since: string | null;
+      progress: number | null;
       jobMessage: string | null;
     },
   ) {
@@ -217,12 +222,14 @@ export class CrucibleBusy extends CrucibleRefused {
    * human. Here rather than in each client for the same reason the fields are.
    */
   get busyLine(): string {
+    // Each part the server did not state is left out, never guessed.
     const who = this.holder === null ? 'an unnamed client' : this.holder;
-    const what = this.model === null ? this.jobType : `${this.jobType} ${this.model}`;
-    const done = `${Math.round(this.progress * 100)}% done`;
-    return this.jobMessage === null
-      ? `busy: ${who}, ${what}, ${done}`
-      : `busy: ${who}, ${what}, ${done} — ${this.jobMessage}`;
+    const what = [this.jobType, this.model].filter((part) => part !== null).join(' ');
+    const parts = [who];
+    if (what !== '') parts.push(what);
+    if (this.progress !== null) parts.push(`${Math.round(this.progress * 100)}% done`);
+    const line = `busy: ${parts.join(', ')}`;
+    return this.jobMessage === null ? line : `${line} — ${this.jobMessage}`;
   }
 }
 
@@ -250,17 +257,24 @@ export class CrucibleBusy extends CrucibleRefused {
  * operator shown a dead button with no name concludes the button is broken.
  */
 export class CrucibleCardHeld extends CrucibleRefused {
-  /** `a job`, `a lease`, `the claim` or `a chat`. */
+  /**
+   * `a job`, `a lease`, `the claim` or `a chat`. Strict: its presence is what
+   * tells this type from {@link CrucibleBusy}.
+   */
   readonly fact: string;
-  /** Who, in the server's own words. Never null: a fact that holds has a holder. */
-  readonly who: string;
+  /**
+   * Who, in the server's own words — or null where the server did not state
+   * it. A fact that holds has a holder; a server that does not name it has
+   * still refused by code, which is the load-bearing part.
+   */
+  readonly who: string | null;
 
   constructor(
     status: number,
     code: string,
     serverMessage: string,
     details: unknown,
-    fields: { fact: string; who: string },
+    fields: { fact: string; who: string | null },
   ) {
     super(status, code, serverMessage, details);
     this.fact = fields.fact;
@@ -269,7 +283,7 @@ export class CrucibleCardHeld extends CrucibleRefused {
 
   /** "held by a lease: 'foundry/owens-pc' for 'translate'" — one line, for a row. */
   get heldLine(): string {
-    return `held by ${this.fact}: ${this.who}`;
+    return this.who === null ? `held by ${this.fact}` : `held by ${this.fact}: ${this.who}`;
   }
 }
 
@@ -316,7 +330,9 @@ export const LEASED = 'leased';
  * nobody chose (ARCHITECTURE.md R5).
  */
 export class CrucibleLeased extends CrucibleRefused {
-  readonly leaseId: string;
+  // Every field below is INFORMATIONAL, and null where the server did not
+  // state it — CrucibleBusy's rule. The refusal is the code.
+  readonly leaseId: string | null;
   /**
    * Which resident kind is held: `llm`, `tts` or `align`.
    *
@@ -325,7 +341,7 @@ export class CrucibleLeased extends CrucibleRefused {
    * — `leased` on a `load-voice` means something different when a 27B is held
    * than when narrator is.
    */
-  readonly kind: string;
+  readonly kind: string | null;
   /**
    * Who holds it — the lease's recorded `client`. Null = it did not say, and
    * never a guess, for the reason {@link CrucibleBusy.holder} is null.
@@ -335,12 +351,12 @@ export class CrucibleLeased extends CrucibleRefused {
    * (`Lease.client`), where the question is whose lease it is.
    */
   readonly holder: string | null;
-  /** What the run IS: a capability class name. A lease must say, so never null. */
-  readonly act: string;
+  /** What the run IS: a capability class name. */
+  readonly act: string | null;
   /** When the lease was taken. */
-  readonly since: string;
+  readonly since: string | null;
   /** When it stops being open unless its holder heartbeats it. */
-  readonly expiresAt: string;
+  readonly expiresAt: string | null;
 
   constructor(
     status: number,
@@ -348,12 +364,12 @@ export class CrucibleLeased extends CrucibleRefused {
     serverMessage: string,
     details: unknown,
     fields: {
-      leaseId: string;
-      kind: string;
+      leaseId: string | null;
+      kind: string | null;
       holder: string | null;
-      act: string;
-      since: string;
-      expiresAt: string;
+      act: string | null;
+      since: string | null;
+      expiresAt: string | null;
     },
   ) {
     super(status, code, serverMessage, details);
@@ -371,8 +387,12 @@ export class CrucibleLeased extends CrucibleRefused {
    * reason {@link CrucibleBusy.busyLine} is.
    */
   get leasedLine(): string {
+    // Each part the server did not state is left out, never guessed.
     const who = this.holder === null ? 'an unnamed client' : this.holder;
-    return `leased: ${who}, ${this.act}, until ${this.expiresAt}`;
+    const parts = [who];
+    if (this.act !== null) parts.push(this.act);
+    const line = `leased: ${parts.join(', ')}`;
+    return this.expiresAt === null ? line : `${line}, until ${this.expiresAt}`;
   }
 }
 
@@ -598,9 +618,16 @@ export class CrucibleCapabilityUndecided extends CrucibleServerError {}
 
 /**
  * The server answered with a status the client accepts, but the payload is not
- * the shape API v1 promises: unparseable JSON, a missing field, or an SSE event
- * name that is not in the v1 vocabulary. A new event kind is a breaking change
- * and would come with a new `api_version`, so this is never absorbed quietly.
+ * the shape API v1 promises: unparseable JSON, a missing LOAD-BEARING field (an
+ * id, a job's status, a done's artifacts, a chat's content), or a field present
+ * with the wrong type.
+ *
+ * What it is NOT, since Owen's ruling of 2026-09-24 (*"if it can make the call
+ * to the crucible server then it should work"*): a missing informational
+ * field — that reads as `null` — or an event kind this build has not heard of —
+ * that arrives as {@link UnknownEvent}. Both are how an older or newer server
+ * looks within API v1, and version skew is not a reason to refuse a call that
+ * worked. See `shape.ts` for the line between the two kinds of field.
  */
 export class CrucibleProtocolError extends CrucibleError {
   readonly detail: string;

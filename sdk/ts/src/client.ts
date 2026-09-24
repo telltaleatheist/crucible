@@ -40,13 +40,17 @@ import {
   bool,
   field,
   num,
-  nullableBool,
   nullableNum,
   nullableObject,
   nullableStr,
-  nullableStrArray,
   objectField,
   oneOf,
+  optArray,
+  optBool,
+  optNum,
+  optObject,
+  optStr,
+  optStrArray,
   str,
   strArray,
   type Json,
@@ -88,7 +92,6 @@ import {
   type DoneData,
   type EngineOwner,
   type EngineRef,
-  type EstimateBasis,
   type Health,
   type JobEvent,
   type JobFailure,
@@ -122,6 +125,7 @@ import {
   type TaskProgressData,
   type TaskRequest,
   type TaskState,
+  type UnreadableRow,
   type TaskStatus,
   type UnmetNeed,
   type TaskStepData,
@@ -130,7 +134,6 @@ import {
   type UpstreamSetting,
   type UpstreamTestResult,
   type VoiceInfo,
-  type VoiceKind,
   type VoicePace,
   type VoiceServing,
   type WrittenArtifact,
@@ -156,12 +159,7 @@ const CLIENT_NAME_HEADER = 'X-Crucible-Client';
 const JOB_STATES: readonly JobState[] = [
   'queued', 'running', 'done', 'failed', 'cancelled', 'interrupted',
 ];
-const HEALTH_STATES = ['ok', 'warming', 'busy'] as const;
 const CHAT_ROLES = ['system', 'user', 'assistant'] as const;
-/** PHASE3-TTS.md section 2. The voice loader refuses any other word. */
-const VOICE_KINDS: readonly VoiceKind[] = ['checkpoint', 'zeroshot', 'token'];
-/** PHASE3-TTS.md section 2, difference 4. Also closed by the voice loader. */
-const ESTIMATE_BASES: readonly EstimateBasis[] = ['measured', 'declared'];
 /** OpenAI's stream terminator, sent as a bare `data:` line with no JSON. */
 const DONE_SENTINEL = '[DONE]';
 const EVENT_NAMES = [
@@ -382,8 +380,11 @@ export class CrucibleClient {
   async info(options: ProbeOptions = {}): Promise<ServerInfo> {
     const body = await this.#json('/v1/info', probeInit(options), 'info');
     const server = objectField(body, 'server', 'info');
-    const host = objectField(body, 'host', 'info');
-    const gpu = objectField(host, 'gpu', 'info.host');
+    // `host` and everything in it is a description of the machine for a person
+    // to read — no call this client makes is shaped by it — so a server that
+    // states less of it is read as stating less, never refused.
+    const host = optObject(body, 'host', 'info');
+    const gpu = host === null ? null : optObject(host, 'gpu', 'info.host');
     const capabilities = asArray(field(body, 'capabilities', 'info'), 'info.capabilities').map(
       (entry, index) => asObject(entry, `info.capabilities[${index}]`),
     );
@@ -402,18 +403,23 @@ export class CrucibleClient {
     return {
       server: {
         name: str(server, 'name', 'info.server'),
-        version: str(server, 'version', 'info.server'),
+        version: optStr(server, 'version', 'info.server'),
+        // The contract version stays strict: it is the handshake, and a
+        // mismatch is the one kind of version skew that IS misconfiguration.
         apiVersion: num(server, 'api_version', 'info.server'),
       },
       host: {
-        platform: str(host, 'platform', 'info.host'),
-        arch: str(host, 'arch', 'info.host'),
-        backend: str(host, 'backend', 'info.host'),
-        gpu: {
-          vendor: str(gpu, 'vendor', 'info.host.gpu'),
-          name: str(gpu, 'name', 'info.host.gpu'),
-          vramBytes: num(gpu, 'vram_bytes', 'info.host.gpu'),
-        },
+        platform: host === null ? null : optStr(host, 'platform', 'info.host'),
+        arch: host === null ? null : optStr(host, 'arch', 'info.host'),
+        backend: host === null ? null : optStr(host, 'backend', 'info.host'),
+        gpu:
+          gpu === null
+            ? null
+            : {
+                vendor: optStr(gpu, 'vendor', 'info.host.gpu'),
+                name: optStr(gpu, 'name', 'info.host.gpu'),
+                vramBytes: optNum(gpu, 'vram_bytes', 'info.host.gpu'),
+              },
       },
       // What to POST, which is a different list from what the server can serve:
       // `llm` is a capability, `load-model` and `unload-model` are the job types
@@ -491,12 +497,14 @@ export class CrucibleClient {
     return asArray(field(body, 'requests', 'pairing'), 'pairing.requests').map((value, index) => {
       const where = `pairing.requests[${index}]`;
       const row = asObject(value, where);
+      // The id and the code are what an approval names; who is asking, from
+      // where and for how long are shown to the person deciding.
       return {
         id: str(row, 'id', where),
         userCode: str(row, 'user_code', where),
-        clientName: str(row, 'client_name', where),
-        address: str(row, 'address', where),
-        expiresIn: num(row, 'expires_in', where),
+        clientName: optStr(row, 'client_name', where),
+        address: optStr(row, 'address', where),
+        expiresIn: optNum(row, 'expires_in', where),
       };
     });
   }
@@ -594,14 +602,18 @@ export class CrucibleClient {
   async health(): Promise<Health> {
     const body = await this.#json('/v1/health', { method: 'GET' }, 'health');
     return {
-      status: oneOf(str(body, 'status', 'health'), HEALTH_STATES, 'health.status'),
-      queueDepth: num(body, 'queue_depth', 'health'),
+      // The server's own word, not narrowed: this client branches on none of
+      // them, and a fourth lane state from a newer server is news for a
+      // display, not a reason to lose the whole read.
+      status: optStr(body, 'status', 'health'),
+      queueDepth: optNum(body, 'queue_depth', 'health'),
+      // Strict: which ids are on the card is what a caller decides a load on.
       residentModels: strArray(body, 'resident_models', 'health'),
       // Read as a plain nullable string, not narrowed to `llm | tts`: the set of
       // kinds grows with the job types (PHASE4's aligner is next), and a client
       // that threw a protocol error on a kind it had not heard of would be
       // broken by the server that added one.
-      residentKind: nullableStr(body, 'resident_kind', 'health'),
+      residentKind: optStr(body, 'resident_kind', 'health'),
       stopping: readStopping(body, 'health'),
     };
   }
@@ -628,19 +640,23 @@ export class CrucibleClient {
     const path = probe ? '/v1/activity?accelerator_probe=true' : '/v1/activity';
     const body = await this.#json(path, { method: 'GET' }, 'activity');
     const server = objectField(body, 'server', 'activity');
+    // `resident` stays strict — present, null or an object — because it is the
+    // answer to "what is on the card", which a caller decides loads on.
+    // `claim`, `streaming` and `lease` are what a bench DRAWS; each is null
+    // when absent, which a server predating it could not have had to report.
     const resident = nullableObject(body, 'resident', 'activity');
-    const claim = nullableObject(body, 'claim', 'activity');
-    const streaming = nullableObject(body, 'streaming', 'activity');
-    const lease = nullableObject(body, 'lease', 'activity');
-    const chat = objectField(body, 'chat', 'activity');
+    const claim = optObject(body, 'claim', 'activity');
+    const streaming = optObject(body, 'streaming', 'activity');
+    const lease = optObject(body, 'lease', 'activity');
+    const chat = optObject(body, 'chat', 'activity');
     const slot = objectField(objectField(body, 'slots', 'activity'), 'accelerated', 'activity.slots');
     return {
       server: {
         name: str(server, 'name', 'activity.server'),
-        version: str(server, 'version', 'activity.server'),
-        apiVersion: num(server, 'api_version', 'activity.server'),
-        backend: str(server, 'backend', 'activity.server'),
-        uptimeS: num(server, 'uptime_s', 'activity.server'),
+        version: optStr(server, 'version', 'activity.server'),
+        apiVersion: optNum(server, 'api_version', 'activity.server'),
+        backend: optStr(server, 'backend', 'activity.server'),
+        uptimeS: optNum(server, 'uptime_s', 'activity.server'),
       },
       resident:
         resident === null
@@ -648,8 +664,8 @@ export class CrucibleClient {
           : {
               kind: str(resident, 'kind', 'activity.resident'),
               id: str(resident, 'id', 'activity.resident'),
-              since: str(resident, 'since', 'activity.resident'),
-              memoryBytesEstimate: nullableNum(
+              since: optStr(resident, 'since', 'activity.resident'),
+              memoryBytesEstimate: optNum(
                 resident,
                 'memory_bytes_estimate',
                 'activity.resident',
@@ -661,43 +677,31 @@ export class CrucibleClient {
               // the `server_busy` body a client already parses, and rebuilding
               // it would be this SDK inventing a second vocabulary for a
               // document the server already speaks.
+              //
+              // STRICT, unlike the fields around it: `null` here is "the card
+              // is stranded", and a reconciler unloads on exactly that. An
+              // absent key read as null would tell every reconciler pointed at
+              // an older server to unload a model somebody is using.
               heldBy: readHeldBy(resident),
-              unclaimedSince: nullableStr(
+              // Tolerant: null is "something holds it", the safe reading.
+              unclaimedSince: optStr(
                 resident,
                 'unclaimed_since',
                 'activity.resident',
               ),
             },
       stopping: readStopping(body, 'activity'),
-      warming: nullableStr(body, 'warming', 'activity'),
+      warming: optStr(body, 'warming', 'activity'),
       claim: claim === null ? null : { heldBy: str(claim, 'held_by', 'activity.claim') },
       streaming: streaming === null ? null : readStreaming(streaming),
       lease: lease === null ? null : readLease(lease, 'activity.lease'),
-      chat: {
-        inFlight: num(chat, 'in_flight', 'activity.chat'),
-        // What this engine admits at once. Null for an engine that states no
-        // concurrency AND for an empty card — never "unlimited".
-        maxInFlight: nullableNum(chat, 'max_in_flight', 'activity.chat'),
-        maxInFlightBasis: nullableStr(chat, 'max_in_flight_basis', 'activity.chat'),
-        rows: asArray(field(chat, 'rows', 'activity.chat'), 'activity.chat.rows').map(
-          (entry, index) => {
-            const where = `activity.chat.rows[${index}]`;
-            const row = asObject(entry, where);
-            return {
-              id: num(row, 'id', where),
-              act: nullableStr(row, 'act', where),
-              model: str(row, 'model', where),
-              client: nullableStr(row, 'client', where),
-              since: str(row, 'since', where),
-            };
-          },
-        ),
-      },
+      chat: chat === null ? null : readActivityChat(chat),
       slots: {
         accelerated: {
-          busy: num(slot, 'busy', 'activity.slots.accelerated'),
-          of: num(slot, 'of', 'activity.slots.accelerated'),
-          queueDepth: num(slot, 'queue_depth', 'activity.slots.accelerated'),
+          busy: optNum(slot, 'busy', 'activity.slots.accelerated'),
+          of: optNum(slot, 'of', 'activity.slots.accelerated'),
+          queueDepth: optNum(slot, 'queue_depth', 'activity.slots.accelerated'),
+          // Strict: the one composed answer a caller reads before submitting.
           acceptsWork: bool(slot, 'accepts_work', 'activity.slots.accelerated'),
         },
       },
@@ -785,7 +789,7 @@ export class CrucibleClient {
       },
       'lease',
     );
-    return { ...readLease(body, 'lease'), subject: str(body, 'subject', 'lease') };
+    return { ...readLease(body, 'lease'), subject: optStr(body, 'subject', 'lease') };
   }
 
   /**
@@ -839,8 +843,8 @@ export class CrucibleClient {
     const body = await this.#json('/v1/uploads', { method: 'POST', body: form }, 'upload');
     return {
       blobId: str(body, 'blob_id', 'upload'),
-      bytes: num(body, 'bytes', 'upload'),
-      sha256: str(body, 'sha256', 'upload'),
+      bytes: optNum(body, 'bytes', 'upload'),
+      sha256: optStr(body, 'sha256', 'upload'),
     };
   }
 
@@ -904,28 +908,29 @@ export class CrucibleClient {
   async job(jobId: string): Promise<JobStatus> {
     const id = requireText(jobId, 'jobId');
     const body = await this.#json(`/v1/jobs/${encodeURIComponent(id)}`, { method: 'GET' }, 'job');
+    // LOAD-BEARING: the id, the status a caller branches on, the artifacts it
+    // fetches and the chunk indices a resume differences against. Everything
+    // else describes the job for a person and is null where not stated.
     return {
       jobId: str(body, 'job_id', 'job'),
       type: str(body, 'type', 'job'),
-      model: nullableStr(body, 'model', 'job'),
+      model: optStr(body, 'model', 'job'),
       status: oneOf(str(body, 'status', 'job'), JOB_STATES, 'job.status'),
-      progress: num(body, 'progress', 'job'),
-      position: nullableNum(body, 'position', 'job'),
-      error: readFailureOrNull(field(body, 'error', 'job'), 'job.error'),
+      progress: optNum(body, 'progress', 'job'),
+      position: optNum(body, 'position', 'job'),
+      // Absent or null is "no error stated"; a present one is read strictly,
+      // because its code is what a caller decides a retry on.
+      error: readFailureOrNull(optObject(body, 'error', 'job'), 'job.error'),
       artifacts: strArray(body, 'artifacts', 'job'),
-      created: str(body, 'created', 'job'),
-      started: nullableStr(body, 'started', 'job'),
-      finished: nullableStr(body, 'finished', 'job'),
-      // ABSENT IS A FACT HERE, unlike everywhere else in this file. A loader
-      // always states `lease_id` — null when it was asked to hold nothing — so
-      // for those two job types the strict reading applies and "no lease" is
-      // distinguishable from "old server". Every OTHER job type cannot hold a
-      // lease at all and carries no such key: a `tts` render takes the lane
-      // instead. Demanding the key from them would be demanding a field about
-      // a question they are not asked.
-      leaseId: 'lease_id' in body ? nullableStr(body, 'lease_id', 'job') : null,
-      clientRef: nullableStr(body, 'client_ref', 'job'),
-      interruptedAt: nullableStr(body, 'interrupted_at', 'job'),
+      created: optStr(body, 'created', 'job'),
+      started: optStr(body, 'started', 'job'),
+      finished: optStr(body, 'finished', 'job'),
+      // Only a loader carries `lease_id`; every other job type cannot hold a
+      // lease and the record has no such key. Null covers both, and a server
+      // too old to report the lease it opened (whose `done` frame still says).
+      leaseId: optStr(body, 'lease_id', 'job'),
+      clientRef: optStr(body, 'client_ref', 'job'),
+      interruptedAt: optStr(body, 'interrupted_at', 'job'),
       // The indices this job published. A resume is `asked - chunksDone`.
       chunksDone: asArray(field(body, 'chunks_done', 'job'), 'job.chunks_done').map(
         (entry, index) => {
@@ -939,11 +944,13 @@ export class CrucibleClient {
           return entry;
         },
       ),
-      // Stated by the server since 1.0.22, demanded here for lockstep's reason:
-      // null is a statement (not a chunked job, or none landed yet); absent is
-      // an older server, and this SDK does not run against one.
-      chunksTotal: nullableNum(body, 'chunks_total', 'job'),
-      chunkAt: nullableStr(body, 'chunk_at', 'job'),
+      // Stated by the server since 1.0.22. Null is "not a chunked job, none
+      // landed yet, or a server that predates the field" — a pace display
+      // cannot be drawn in any of the three, and none of them is a reason to
+      // lose the job's status (any Crucible that answers works, Owen
+      // 2026-09-24).
+      chunksTotal: optNum(body, 'chunks_total', 'job'),
+      chunkAt: optStr(body, 'chunk_at', 'job'),
     };
   }
 
@@ -2048,16 +2055,18 @@ export class CrucibleClient {
    */
   async setup(): Promise<ServerSetup> {
     const body = await this.#json('/v1/setup', { method: 'GET' }, 'setup');
+    // LOAD-BEARING: the name, the URLs, the token and the pairing lines —
+    // what another app is connected with. The rest describes the server.
     return {
       name: str(body, 'name', 'setup'),
-      version: str(body, 'version', 'setup'),
-      backend: str(body, 'backend', 'setup'),
-      bind: str(body, 'bind', 'setup'),
+      version: optStr(body, 'version', 'setup'),
+      backend: optStr(body, 'backend', 'setup'),
+      bind: optStr(body, 'bind', 'setup'),
       urls: strArray(body, 'urls', 'setup'),
       token: str(body, 'token', 'setup'),
       pairing: strArray(body, 'pairing', 'setup'),
-      jobTypes: strArray(body, 'job_types', 'setup'),
-      configPath: str(body, 'config_path', 'setup'),
+      jobTypes: optStrArray(body, 'job_types', 'setup'),
+      configPath: optStr(body, 'config_path', 'setup'),
     };
   }
 
@@ -2155,17 +2164,7 @@ export class CrucibleClient {
       { method: 'GET' },
       'task',
     );
-    return {
-      taskId: str(body, 'task_id', 'task'),
-      type: str(body, 'type', 'task'),
-      request: asObject(field(body, 'request', 'task'), 'task.request'),
-      state: oneOf(str(body, 'state', 'task'), TASK_STATES, 'task.state'),
-      error: readFailureOrNull(field(body, 'error', 'task'), 'task.error'),
-      created: str(body, 'created', 'task'),
-      started: str(body, 'started', 'task'),
-      finished: nullableStr(body, 'finished', 'task'),
-      unmet: readUnmet(body, 'task'),
-    };
+    return readTaskStatus(body, 'task');
   }
 
   /**
@@ -2271,9 +2270,15 @@ export class CrucibleClient {
  * time and for the reason it was written the first time. A document with NO
  * `role` comes from a server that predates Phase 17, and such a server IS an
  * engine that nobody manages: a fact the document states by what it is, not a
- * default this client invents. A document that HAS `role` and is then missing
- * the field its role owes is a defect and is refused by name, because a
- * half-new document is the one thing a vintage rule cannot read.
+ * default this client invents.
+ *
+ * After `role`, the two fields differ in kind (Owen, 2026-09-24: any Crucible
+ * that answers works). An engine's `managed_by` is informational — who
+ * claimed it changes nothing about how an app talks to it — so an engine that
+ * does not say reads as unmanaged. An orchestrator's `engine` is load-bearing:
+ * its `null` means "manages no engine", which {@link engineOf} turns into a
+ * named refusal for a person, so an orchestrator that omits the key is refused
+ * by name rather than read as managing nothing.
  */
 function readRole(body: Json): Pick<ServerInfo, 'role' | 'managedBy' | 'engine'> {
   if (!('role' in body)) {
@@ -2285,7 +2290,7 @@ function readRole(body: Json): Pick<ServerInfo, 'role' | 'managedBy' | 'engine'>
     'info.role',
   );
   if (role === 'engine') {
-    const managed = nullableObject(body, 'managed_by', 'info');
+    const managed = optObject(body, 'managed_by', 'info');
     return {
       role,
       managedBy:
@@ -2298,6 +2303,9 @@ function readRole(body: Json): Pick<ServerInfo, 'role' | 'managedBy' | 'engine'>
       engine: null,
     };
   }
+  // STRICT on an orchestrator: `null` here is "manages no engine", which
+  // `engineOf` turns into `orchestrator_has_no_engine` for a person to act on.
+  // An orchestrator that does not say is not one that manages nothing.
   const engine = nullableObject(body, 'engine', 'info');
   return {
     role,
@@ -2306,14 +2314,15 @@ function readRole(body: Json): Pick<ServerInfo, 'role' | 'managedBy' | 'engine'>
       engine === null
         ? null
         : {
-            name: nullableStr(engine, 'name', 'info.engine'),
+            name: optStr(engine, 'name', 'info.engine'),
+            // STRICT: the address `engineOf` hands back, and the whole point.
             url: str(engine, 'url', 'info.engine'),
-            backend: nullableStr(engine, 'backend', 'info.engine'),
+            backend: optStr(engine, 'backend', 'info.engine'),
             // NOT `oneOf`. The owner set can grow, and a client that threw a
             // protocol error on a word it had not heard of would break on the
             // server that added one — `Health.residentKind`'s rule, for
             // `Health.residentKind`'s reason.
-            owner: str(engine, 'owner', 'info.engine') as EngineOwner,
+            owner: optStr(engine, 'owner', 'info.engine') as EngineOwner | null,
           },
   };
 }
@@ -2347,9 +2356,10 @@ function readPagesEngine(body: Json): PagesEngine | null {
     // NOT `oneOf`. The engine set grows — `vllm`, `llama-server`, `mlx-vlm`
     // and whatever reads a page next — and this field is for an operator to
     // look at, never for a client to branch on.
-    engine: nullableStr(block, 'engine', 'info.pages_engine'),
+    engine: optStr(block, 'engine', 'info.pages_engine'),
     installed: bool(block, 'installed', 'info.pages_engine'),
-    detail: str(block, 'detail', 'info.pages_engine'),
+    // Words for an operator, never parsed.
+    detail: optStr(block, 'detail', 'info.pages_engine'),
     request: {
       model: str(request, 'model', 'info.pages_engine.request'),
       dpi: num(request, 'dpi', 'info.pages_engine.request'),
@@ -2428,24 +2438,16 @@ function readCapability(
   const jobType = str(entry, 'job_type', where);
   const models = asArray(field(entry, 'models', where), `${where}.models`);
   if (jobType === 'llm') {
-    return {
-      jobType,
-      models: models.map((model, at) =>
-        readModelInfo(asObject(model, `${where}.models[${at}]`), `${where}.models[${at}]`),
-      ),
-    };
+    const { rows, unreadableRows } = readRows(models, `${where}.models`, (row, at) =>
+      readModelInfo(row, at),
+    );
+    return { jobType, models: rows, unreadableRows };
   }
   if (jobType === 'tts') {
-    return {
-      jobType,
-      models: models.map((voice, at) =>
-        readVoiceInfo(
-          asObject(voice, `${where}.models[${at}]`),
-          `${where}.models[${at}]`,
-          documentStatesNeedsReference,
-        ),
-      ),
-    };
+    const { rows, unreadableRows } = readRows(models, `${where}.models`, (row, at) =>
+      readVoiceInfo(row, at, documentStatesNeedsReference),
+    );
+    return { jobType, models: rows, unreadableRows };
   }
   // Every other capability: try the descriptor shape, and carry the rows raw if
   // they do not fit rather than losing the whole `info()` call. `llm` and `tts`
@@ -2475,6 +2477,52 @@ function readCapability(
       unreadable: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/**
+ * The `llm` and `tts` rows inside `info()`, each read on its own.
+ *
+ * `info()` is the call an app makes to find out what it is talking to, and a
+ * voice's rows ride inside it — so until 2026-09-24 one row this build could
+ * not read took the whole probe down (one new informational voice field broke
+ * every `info()` after the 1.0.24 repin). A row that still cannot be read — a
+ * load-bearing field missing, or a field present with the wrong type — is now
+ * carried aside in `unreadableRows` with its raw data and the reason, exactly
+ * as {@link RawCapability} carries a capability it cannot read, and every other
+ * row is returned read. `models()` and `voices()` stay strict: they are the
+ * direct reads, and a caller that asked for one list gets that list or the
+ * named reason it cannot.
+ *
+ * Only a {@link CrucibleProtocolError} is carried aside: that is the reader
+ * saying "this row is not what API v1 describes". Anything else is not a fact
+ * about the row and travels.
+ */
+function readRows<T>(
+  models: readonly unknown[],
+  where: string,
+  read: (row: Json, at: string) => T,
+): { rows: T[]; unreadableRows: UnreadableRow[] } {
+  const rows: T[] = [];
+  const unreadableRows: UnreadableRow[] = [];
+  models.forEach((model, index) => {
+    const at = `${where}[${index}]`;
+    try {
+      rows.push(read(asObject(model, at), at));
+    } catch (error) {
+      if (!(error instanceof CrucibleProtocolError)) throw error;
+      const id =
+        typeof model === 'object' && model !== null && !Array.isArray(model)
+          ? (model as Json)['id']
+          : undefined;
+      unreadableRows.push({
+        index,
+        id: typeof id === 'string' ? id : null,
+        raw: model,
+        unreadable: error.message,
+      });
+    }
+  });
+  return { rows, unreadableRows };
 }
 
 /**
@@ -2521,9 +2569,11 @@ function readCapabilityRecord(body: Json): CapabilityRecord {
   // which is why the question is asked of the document and never of a row.
   const anyRoute = rows.some((row) => row['route'] !== undefined);
   return {
-    backendKind: str(body, 'backend_kind', where),
-    totalBytes: num(body, 'total_bytes', where),
-    desktopAllowanceBytes: num(body, 'desktop_allowance_bytes', where),
+    // The host's sizing figures, for a settings page to draw. Nothing this
+    // client does is shaped by them.
+    backendKind: optStr(body, 'backend_kind', where),
+    totalBytes: optNum(body, 'total_bytes', where),
+    desktopAllowanceBytes: optNum(body, 'desktop_allowance_bytes', where),
     classes: rows.map((row, index) =>
       readCapabilityRow(row, `${where}.classes[${index}]`, anyRoute),
     ),
@@ -2539,35 +2589,32 @@ function readCapabilityRow(
   let route: 'local' | 'upstream';
   if (raw === undefined) {
     /*
-     * A MISSING `route` IS A REFUSAL NOW, WHOLE DOCUMENT OR HALF.
+     * A DOCUMENT WITH NO `route` ANYWHERE IS LOCAL; HALF A DOCUMENT IS REFUSED.
      *
-     * The half-routed case always refused: some rows have it and this one does
-     * not, so the document cannot say where this class runs, and reading it as
-     * `local` would invent the one thing a routed server is about.
+     * A server that states no route on any row predates upstream routing
+     * (phase 15), and on such a server every class IS local: there was nowhere
+     * else for work to go. That is a fact the server states by what it is, not
+     * a value this client picks — which is why it is asked of the whole
+     * document and never of one row. It was refused from 2026-09-16 under the
+     * reading that no older server would ever be pointed at; Owen's ruling of
+     * 2026-09-24 — *"if it can make the call to the crucible server then it
+     * should work"* — ended that, and the phase-15 reading comes back.
      *
-     * The WHOLE-document case used to answer `local` instead, on the reading
-     * that no row carrying it means a server predating phase 15, where every
-     * class really was local. That was Crucible-version tolerance, and Owen
-     * ended the population it served on 2026-09-16: nothing is released, so
-     * there is no pre-phase-15 server for anyone but us to point at. It was a
-     * SHIM by the test Foundry proposed the same evening — it made a wrong
-     * version work and said nothing — and the rule is that shims go while named
-     * refusals stay.
-     *
-     * So the one sentence covers both, and neither invents a route. What made
-     * the old arm dangerous is worth keeping in view: `local` and `upstream`
-     * decide whether a run costs GPU-minutes or money, and that is not a fact
-     * a client may fill in.
+     * The half-routed case still refuses: some rows state a route and this
+     * one does not, so the server routes and has not said where THIS class
+     * runs. `local` and `upstream` decide whether a run costs GPU-minutes or
+     * money, and inventing one for a server that routes is the thing a client
+     * may never do.
      */
-    throw new CrucibleProtocolError(
-      `${CAPABILITY_ROUTE_MISSING}: ${where} has no "route"` +
-        (documentHasRoutes
-          ? ', but other rows in the same capability document do'
-          : ', and neither does any other row in the document') +
-        '. Every server states it on every row; where a class runs decides ' +
-        'whether its work costs GPU-minutes or money, so this is not something ' +
-        `a client may fill in for ${str(entry, 'capability', where)}.`,
-    );
+    if (documentHasRoutes) {
+      throw new CrucibleProtocolError(
+        `${CAPABILITY_ROUTE_MISSING}: ${where} has no "route", but other rows in the ` +
+          'same capability document do. Where a class runs decides whether its ' +
+          'work costs GPU-minutes or money, so this is not something a client may ' +
+          `fill in for ${str(entry, 'capability', where)}.`,
+      );
+    }
+    route = 'local';
   } else if (typeof raw !== 'string' || !ROUTES.includes(raw as 'local')) {
     throw new CrucibleProtocolError(
       `${CAPABILITY_ROUTE_UNKNOWN}: ${where}.route is ${JSON.stringify(raw)}, ` +
@@ -2577,40 +2624,49 @@ function readCapabilityRow(
     route = raw as 'local' | 'upstream';
   }
   return {
+    // LOAD-BEARING: which class, whether it can run here, and the model it
+    // picked are what a caller asks for work with.
     capability: str(entry, 'capability', where),
     enabled: bool(entry, 'enabled', where),
     selected: str(entry, 'selected', where),
-    reason: str(entry, 'reason', where),
-    shortfallBytes: num(entry, 'shortfall_bytes', where),
+    // Why, and by how much, in words and bytes for a person: informational.
+    reason: optStr(entry, 'reason', where),
+    shortfallBytes: optNum(entry, 'shortfall_bytes', where),
     route,
-    work: readCapabilityWork(nullableObject(entry, 'work', where), `${where}.work`),
+    work: readCapabilityWork(optObject(entry, 'work', where), `${where}.work`),
     contextCeilings: readContextCeilings(entry, where),
   };
 }
 
+/**
+ * The working size a class was decided at. It explains the row, so every part
+ * of it is informational — and `from` is the server's own word rather than a
+ * closed union, because this client branches on none of them.
+ */
 function readCapabilityWork(entry: Json | null, where: string): CapabilityWork | null {
   if (entry === null) return null;
   return {
-    tokens: num(entry, 'tokens', where),
-    concurrency: num(entry, 'concurrency', where),
-    source: str(entry, 'source', where),
-    from: oneOf(str(entry, 'from', where), ['default', 'request'] as const, `${where}.from`),
+    tokens: optNum(entry, 'tokens', where),
+    concurrency: optNum(entry, 'concurrency', where),
+    source: optStr(entry, 'source', where),
+    from: optStr(entry, 'from', where),
   };
 }
 
+/** What bounds a model's context on this host: informational throughout. */
 function readContextCeilings(entry: Json, where: string): ContextCeiling[] | null {
-  const raw = field(entry, 'context_ceilings', where);
+  const raw = optArray(entry, 'context_ceilings', where);
   if (raw === null) return null;
-  return asArray(raw, `${where}.context_ceilings`).map((item, index) => {
+  return raw.map((item, index) => {
     const at = `${where}.context_ceilings[${index}]`;
     const ceiling = asObject(item, at);
     return {
-      model: str(ceiling, 'model', at),
-      tokens: num(ceiling, 'tokens', at),
-      boundBy: oneOf(str(ceiling, 'bound_by', at), ['served', 'memory'] as const, `${at}.bound_by`),
-      servedContext: num(ceiling, 'served_context', at),
-      memoryContext: nullableNum(ceiling, 'memory_context', at),
-      concurrency: num(ceiling, 'concurrency', at),
+      model: optStr(ceiling, 'model', at),
+      tokens: optNum(ceiling, 'tokens', at),
+      boundBy: optStr(ceiling, 'bound_by', at),
+      servedContext: optNum(ceiling, 'served_context', at),
+      memoryContext: optNum(ceiling, 'memory_context', at),
+      concurrency: optNum(ceiling, 'concurrency', at),
     };
   });
 }
@@ -2621,10 +2677,16 @@ const ROUTES = ['local', 'upstream'] as const;
 const UPSTREAM_NAMES = ['anthropic', 'openai', 'ollama'] as const;
 
 /**
- * `GET /v1/settings`, read whole. Every field the contract promises is
- * REQUIRED here: a document missing one is a protocol error rather than an
- * `undefined` handed to a settings page, which is this client's rule
- * everywhere and matters most on the page that writes a key.
+ * `GET /v1/settings`, read whole.
+ *
+ * LOAD-BEARING: `routes` (where each class's work runs — GPU-minutes or money,
+ * never a value a client may fill in) and `upstreams` with each one's
+ * `configured`, which is what the page that writes a key decides on. Those are
+ * refused by name when missing, never handed to a settings page as
+ * `undefined`. Everything else here — the local model choices, the allowance,
+ * the backend — informs the page, and a server that predates one of them reads
+ * as not stating it (`null`): any Crucible that answers works (Owen,
+ * 2026-09-24).
  */
 function readSettings(body: Json): SettingsDocument {
   const where = 'settings';
@@ -2635,14 +2697,22 @@ function readSettings(body: Json): SettingsDocument {
     const entry = objectField(routesRaw, name, `${where}.routes`);
     routes[name] = {
       route: oneOf(str(entry, 'route', at), ROUTES, `${at}.route`),
-      model: nullableStr(entry, 'model', at),
+      model: optStr(entry, 'model', at),
     };
   }
   const upstreamsRaw = objectField(body, 'upstreams', where);
-  const upstreams = {} as Record<UpstreamName, UpstreamSetting>;
+  const upstreams = {} as Record<UpstreamName, UpstreamSetting | null>;
   for (const name of UPSTREAM_NAMES) {
     const at = `${where}.upstreams.${name}`;
-    const entry = objectField(upstreamsRaw, name, `${where}.upstreams`);
+    // An upstream this server does not list is one it does not offer — an
+    // engine that predates `ollama`, say — and that is `null`, for a page to
+    // leave the card out. One it DOES list is read strictly: `configured` is
+    // what the page that writes a key decides on.
+    const entry = optObject(upstreamsRaw, name, `${where}.upstreams`);
+    if (entry === null) {
+      upstreams[name] = null;
+      continue;
+    }
     // The two shapes differ by ONE key, and which one is present is decided
     // by the upstream rather than by this client: `ollama` is reached by
     // address and has no secret, the other two are the reverse. Read what is
@@ -2658,40 +2728,56 @@ function readSettings(body: Json): SettingsDocument {
     upstreams[name] = setting;
   }
   /*
-   * BOTH KEYS ARE REQUIRED, and they were optional until 2026-09-16.
+   * `local_models` and `local_model_choices` are OPTIONAL AGAIN, and `null`
+   * when absent: "this engine does not answer the question", which is a
+   * different claim from "it answers with nothing" (an empty object).
    *
-   * They were optional to let this SDK read an engine older than the fields —
-   * absent meaning "this engine does not answer the question", which is a
-   * different claim from "it answers with nothing". Owen ended that:
-   * *"I won't be releasing any of this until it's completely done, so we don't
-   * need to worry about legacy functionality at all right now. Nothing is
-   * legacy because nothing exists publicly. There will be no person trying to
-   * access the system with an older version of crucible other than us."*
-   *
-   * So the population the optionality served has exactly zero members. Reading
-   * them as required means an engine that does not send them fails HERE, by
-   * name and with the field path, instead of every caller carrying a branch for
-   * a vintage that will never arrive.
+   * They were required from 2026-09-16 to 2026-09-24, on Owen's word that
+   * nobody would point this client at an older Crucible. His ruling of
+   * 2026-09-24 reverses the premise — *"if it can make the call to the
+   * crucible server then it should work"* — and a settings page that cannot
+   * draw a model picker for an older engine can still draw its routes and
+   * keys, which are the load-bearing half of this document.
    */
-  const localModels = Object.fromEntries(
-    Object.keys(objectField(body, 'local_models', where)).map(name =>
-      [name, nullableStr(objectField(body, 'local_models', where), name, `${where}.local_models`)]));
-  const choiceRows = objectField(body, 'local_model_choices', where);
-  const localModelChoices = Object.fromEntries(Object.keys(choiceRows).map(name => [name,
-    asArray(field(choiceRows, name, `${where}.local_model_choices`), `${where}.local_model_choices.${name}`).map((raw, index) => {
-      const at = `${where}.local_model_choices.${name}[${index}]`;
-      const choice = asObject(raw, at);
-      return { id: str(choice, 'id', at), memoryBytesEstimate: num(choice, 'memory_bytes_estimate', at),
-        fits: bool(choice, 'fits', at), installed: bool(choice, 'installed', at) };
-    }),
-  ]));
+  const localModelsRaw = optObject(body, 'local_models', where);
+  const localModels =
+    localModelsRaw === null
+      ? null
+      : Object.fromEntries(
+          Object.keys(localModelsRaw).map((name) => [
+            name,
+            nullableStr(localModelsRaw, name, `${where}.local_models`),
+          ]),
+        );
+  const choiceRows = optObject(body, 'local_model_choices', where);
+  const localModelChoices =
+    choiceRows === null
+      ? null
+      : Object.fromEntries(
+          Object.keys(choiceRows).map((name) => [
+            name,
+            asArray(
+              field(choiceRows, name, `${where}.local_model_choices`),
+              `${where}.local_model_choices.${name}`,
+            ).map((raw, index) => {
+              const at = `${where}.local_model_choices.${name}[${index}]`;
+              const choice = asObject(raw, at);
+              return {
+                id: str(choice, 'id', at),
+                memoryBytesEstimate: optNum(choice, 'memory_bytes_estimate', at),
+                fits: optBool(choice, 'fits', at),
+                installed: optBool(choice, 'installed', at),
+              };
+            }),
+          ]),
+        );
   return {
     localModels,
     localModelChoices,
     routes,
     upstreams,
-    desktopAllowanceBytes: num(body, 'desktop_allowance_bytes', where),
-    backendKind: str(body, 'backend_kind', where),
+    desktopAllowanceBytes: optNum(body, 'desktop_allowance_bytes', where),
+    backendKind: optStr(body, 'backend_kind', where),
   };
 }
 
@@ -2738,14 +2824,19 @@ function upstreamTestRefusal(
     : null;
 }
 
+/**
+ * DESIGN.md section 4's descriptor. The id and the two facts a caller acts on
+ * (is it on disk, is it on the card) are strict; where it came from and what
+ * it weighs describe it, and are null where a server did not state them.
+ */
 function readModel(entry: Json, where: string): ModelDescriptor {
   return {
     id: str(entry, 'id', where),
-    revision: str(entry, 'revision', where),
-    source: str(entry, 'source', where),
+    revision: optStr(entry, 'revision', where),
+    source: optStr(entry, 'source', where),
     installed: bool(entry, 'installed', where),
     resident: bool(entry, 'resident', where),
-    vramBytes: num(entry, 'vram_bytes', where),
+    vramBytes: optNum(entry, 'vram_bytes', where),
   };
 }
 
@@ -2758,21 +2849,32 @@ function readFailureOrNull(value: unknown, where: string): JobFailure | null {
   return value === null ? null : readFailure(value, where);
 }
 
+/**
+ * A provenance sidecar, read to prove it is a JSON object of the sidecar's
+ * shape. EVERY FIELD IS INFORMATIONAL: the bytes that go to disk are the
+ * server's own, not this reading, so a sidecar from a server that states less
+ * is still written whole — and refusing it here would fail a book's artifact
+ * write over a line of record-keeping. A field that IS present with the wrong
+ * type is still refused, for `shape.ts`'s reason.
+ */
 function readProvenance(entry: Json, member: string): Provenance {
   const where = `${member}.provenance.json`;
-  const server = objectField(entry, 'server', where);
-  const model = field(entry, 'model', where);
+  const server = optObject(entry, 'server', where);
+  const model = optObject(entry, 'model', where);
   return {
-    server: {
-      name: str(server, 'name', `${where}.server`),
-      version: str(server, 'version', `${where}.server`),
-    },
-    backend: str(entry, 'backend', where),
-    job_type: str(entry, 'job_type', where),
-    model: model === null ? null : readProvenanceModel(asObject(model, `${where}.model`), where),
-    params: asObject(field(entry, 'params', where), `${where}.params`),
-    started: nullableStr(entry, 'started', where),
-    finished: str(entry, 'finished', where),
+    server:
+      server === null
+        ? null
+        : {
+            name: optStr(server, 'name', `${where}.server`),
+            version: optStr(server, 'version', `${where}.server`),
+          },
+    backend: optStr(entry, 'backend', where),
+    job_type: optStr(entry, 'job_type', where),
+    model: model === null ? null : readProvenanceModel(model, where),
+    params: optObject(entry, 'params', where),
+    started: optStr(entry, 'started', where),
+    finished: optStr(entry, 'finished', where),
   };
 }
 
@@ -2786,9 +2888,9 @@ function readProvenanceModel(
   where: string,
 ): NonNullable<Provenance['model']> {
   return {
-    id: str(model, 'id', `${where}.model`),
-    revision: nullableStr(model, 'revision', `${where}.model`),
-    fingerprint: nullableStr(model, 'fingerprint', `${where}.model`),
+    id: optStr(model, 'id', `${where}.model`),
+    revision: optStr(model, 'revision', `${where}.model`),
+    fingerprint: optStr(model, 'fingerprint', `${where}.model`),
   };
 }
 
@@ -2821,9 +2923,11 @@ function readEvent(rawId: string | null, rawName: string | null, rawData: string
   // closed list and threw, so an 0.2.0 client watching ANY job on a newer server
   // lost the whole stream at the first `chunk`.
   //
-  // Strict about what it claims to understand, tolerant of what it makes no
-  // claim about. A `chunk` missing `capped` is still a protocol error below;
-  // this is the other case entirely.
+  // Tolerant of what it makes no claim about, and — since Owen's ruling of
+  // 2026-09-24 — of informational fields missing from the kinds it does know
+  // (a `chunk` from a server that does not state `capped` reads it as null).
+  // Strict about what a caller acts on: an artifact's name, a done's
+  // artifacts, a failure's code.
   if (!(EVENT_NAMES as readonly string[]).includes(name)) {
     return { id, event: 'unknown', kind: name, data };
   }
@@ -2835,9 +2939,9 @@ function readEvent(rawId: string | null, rawName: string | null, rawData: string
 
   switch (known) {
     case 'queued':
-      return { id, event: 'queued', data: { position: nullableNum(data, 'position', where) } };
+      return { id, event: 'queued', data: { position: optNum(data, 'position', where) } };
     case 'warming':
-      return { id, event: 'warming', data: { message: str(data, 'message', where) } };
+      return { id, event: 'warming', data: { message: optStr(data, 'message', where) } };
     case 'progress':
       return { id, event: 'progress', data: readProgress(data, where) };
     case 'chunk':
@@ -2869,8 +2973,9 @@ function readEvent(rawId: string | null, rawName: string | null, rawData: string
  * type's measurements would collide with them.
  */
 function readProgress(data: Json, where: string): ProgressData {
-  const fraction = num(data, 'fraction', where);
-  const message = str(data, 'message', where);
+  // Both drawn, neither acted on: null where a server did not state one.
+  const fraction = optNum(data, 'fraction', where);
+  const message = optStr(data, 'message', where);
   const extra: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
     if (key === 'fraction' || key === 'message') continue;
@@ -2884,32 +2989,33 @@ function readProgress(data: Json, where: string): ProgressData {
  * PHASE6-REMOTE-RENDER.md section 3): the server's measurements of one rendered
  * chunk, and the engine's verdict about it.
  *
- * `tokens`, `capped` and `guard` are read with the nullable readers and **the
- * key must be there**. That is the load-bearing part: `null` on this wire means
- * "narrator did not say", and an absent key would mean "this server does not
- * speak the field at all" — two different pieces of news, and only one of them
- * is something the server stated. A `chunk` frame that omits `capped` is
- * therefore a protocol error rather than a null, and the null that does arrive
- * travels to the caller as a null, never softened into `false`. A client that
- * read it as `false` would report every runaway as a long sentence.
+ * Everything but `index` is informational — the engine has already decided
+ * about the chunk, and these are its records — so each is `null` where not
+ * stated. `null` on this wire means "not stated": narrator did not say, or the
+ * server predates the field. Those used to be kept apart (an absent `capped`
+ * was a protocol error) under the lockstep rule; Owen's ruling of 2026-09-24
+ * ended that, and neither reading was ever one a caller could act on
+ * differently. What is kept, and matters: the null travels to the caller as a
+ * null, never softened into `false`. A client that read it as `false` would
+ * report every runaway as a long sentence.
  *
- * `guard` follows that precedent exactly rather than inventing a second one, and
- * adds nothing to it: {@link nullableObject} checks that it is an object and
- * reads nothing inside. The verdict's vocabulary is the retake ladder's, it is
+ * `guard` is read with {@link optObject}, which checks that it is an object
+ * and reads nothing inside. The verdict's vocabulary is the retake ladder's, it is
  * free to grow, and a reader here that knew the words would be a second owner of
  * them — which is the one defect `docs/ARCHITECTURE.md` section 1 says every
  * other defect in this system turned out to be.
  */
 function readChunk(data: Json, where: string): ChunkData {
   return {
+    // The chunk's identity — the name of its artifact — is strict.
     index: num(data, 'index', where),
-    seconds: num(data, 'seconds', where),
-    chars: num(data, 'chars', where),
-    charsPerSec: num(data, 'chars_per_sec', where),
-    tokens: nullableNum(data, 'tokens', where),
-    capped: nullableBool(data, 'capped', where),
-    take: num(data, 'take', where),
-    guard: nullableObject(data, 'guard', where),
+    seconds: optNum(data, 'seconds', where),
+    chars: optNum(data, 'chars', where),
+    charsPerSec: optNum(data, 'chars_per_sec', where),
+    tokens: optNum(data, 'tokens', where),
+    capped: optBool(data, 'capped', where),
+    take: optNum(data, 'take', where),
+    guard: optObject(data, 'guard', where),
   };
 }
 
@@ -2952,7 +3058,7 @@ function readDone(data: Json, where: string): DoneData {
 }
 
 /**
- * A finished `tts` job's terminal news, read strictly out of its `done` frame.
+ * A finished `tts` job's terminal news, read out of its `done` frame.
  *
  * This exists because a successful render can still have failed chunks. **A
  * failed chunk is reported and the run continues** (PHASE3-TTS.md section 6) —
@@ -2962,10 +3068,12 @@ function readDone(data: Json, where: string): DoneData {
  * thing, so a client watching live already knows; this is for the one reading
  * only the terminal event, and it is the authoritative list.
  *
- * Nothing here is optional and nothing is defaulted. A `done` frame from a `tts`
- * job carries all four keys — `crucible/jobs/tts/render.py` writes them
- * unconditionally — so a missing one is a server that changed, and a `failed: []`
- * substituted for an absent key would read as a clean render.
+ * LOAD-BEARING, and refused by name when missing: `artifacts` (what to
+ * collect) and `failed` (what to ask for again) — a `failed: []` substituted
+ * for an absent key would read as a clean render. Everything else is the
+ * record of the run (how many rendered, the take, the sampling it ran at, the
+ * weights, the width, the rate) and is `null` where a server did not state
+ * it; nothing is defaulted.
  *
  * Pass it the `done` event of a `tts` job. Handing it any other job type's
  * `done` throws, naming the field that is not there, which is the correct answer
@@ -2981,27 +3089,31 @@ export function readRenderResult(done: DoneData): RenderResult {
         'rendered chunk, so the list is how a caller knows what to collect',
     );
   }
+  // STRICT: the failed list is the authoritative answer to "which indices do
+  // I ask for again", and a `failed: []` read out of an absent key would be a
+  // clean render nobody rendered.
   const failed = asArray(field(extra, 'failed', where), `${where}.failed`);
+  const sampling = optObject(extra, 'sampling', where);
+  const voice = optObject(extra, 'voice', where);
   return {
-    rendered: num(extra, 'rendered', where),
+    rendered: optNum(extra, 'rendered', where),
     failed: failed.map((entry, index) =>
       readRenderFailure(asObject(entry, `${where}.failed[${index}]`), `${where}.failed[${index}]`),
     ),
-    take: num(extra, 'take', where),
-    // THE TRIPLE THE ENGINE APPLIED, and the weights it applied them to. Read
-    // strictly — a result that omits either is a protocol error and not a
-    // null — because the whole point of pinning them is that a record which
-    // cannot say what it ran at is comparable to nothing.
-    sampling: readSampling(asObject(field(extra, 'sampling', where), `${where}.sampling`),
-      `${where}.sampling`),
-    voice: readRenderVoice(
-      asObject(field(extra, 'voice', where), `${where}.voice`), `${where}.voice`),
-    // `null` only for a voice whose manifest declares no serving table.
-    width: nullableNum(extra, 'width', where),
+    take: optNum(extra, 'take', where),
+    // THE TRIPLE THE ENGINE APPLIED, and the weights it applied them to. The
+    // record of the run, not something the caller acts on: null where a server
+    // did not state it, which a record-keeper stores as "not stated" rather
+    // than losing the render's result over it.
+    sampling: sampling === null ? null : readSampling(sampling, `${where}.sampling`),
+    voice: voice === null ? null : readRenderVoice(voice, `${where}.voice`),
+    // `null` for a voice whose manifest declares no serving table, too.
+    width: optNum(extra, 'width', where),
     // The rate the voice was loaded at, which the load already reconciled
     // against the manifest — so it is both the engine's truth and the
-    // manifest's, and the FLAC headers on disk say the same thing.
-    sampleRate: num(extra, 'sample_rate', where),
+    // manifest's, and the FLAC headers on disk say the same thing, which is
+    // why a server that does not repeat it here costs nothing.
+    sampleRate: optNum(extra, 'sample_rate', where),
     artifacts,
   };
 }
@@ -3026,14 +3138,14 @@ function readSampling(entry: Json, where: string): Record<string, number> {
 function readRenderVoice(
   entry: Json,
   where: string,
-): { id: string; identity: string; identityBasis: string } {
+): { id: string | null; identity: string | null; identityBasis: string | null } {
   return {
-    id: str(entry, 'id', where),
-    identity: str(entry, 'identity', where),
+    id: optStr(entry, 'id', where),
+    identity: optStr(entry, 'identity', where),
     // `verified` for a pin — the sha is what was fetched — `asserted` for a
     // directory somebody pointed at. Carried as the server's own word rather
     // than narrowed to a union here, for `readSampling`'s reason.
-    identityBasis: str(entry, 'identity_basis', where),
+    identityBasis: optStr(entry, 'identity_basis', where),
   };
 }
 
@@ -3042,54 +3154,54 @@ function readRenderFailure(entry: Json, where: string): RenderFailure {
     index: num(entry, 'index', where),
     // narrator's own words for why. Surfaced, never summarised: 'No audio
     // generated' and 'cancelled' call for different responses from the caller.
+    // Strict for that reason: the index says WHICH, this says what to do.
     message: str(entry, 'message', where),
   };
 }
 
+/**
+ * One `/v1/models` row.
+ *
+ * LOAD-BEARING: `id`, `resident`, `loadable` and `modalities` — what a caller
+ * picks a model by and decides a load or a chat on. Everything else describes
+ * the model (its family, its size, its pins, its memory, its context figures,
+ * why it cannot load) and is `null` where a server did not state it: any
+ * Crucible that answers works (Owen, 2026-09-24).
+ */
 function readModelInfo(entry: Json, where: string): ModelInfo {
-  const loadable = bool(entry, 'loadable', where);
-  const common = {
+  return {
     id: str(entry, 'id', where),
-    family: str(entry, 'family', where),
-    paramsB: num(entry, 'params_b', where),
+    family: optStr(entry, 'family', where),
+    paramsB: optNum(entry, 'params_b', where),
     // Null on a model this backend cannot serve; a string everywhere else.
-    revision: nullableStr(entry, 'revision', where),
+    revision: optStr(entry, 'revision', where),
     // `<id>@<revision>`, assembled by the server so that every client records
     // one spelling of it. Null exactly where `revision` is.
-    fingerprint: nullableStr(entry, 'fingerprint', where),
+    fingerprint: optStr(entry, 'fingerprint', where),
     // Never null, on any host: unlike `revision` this is not a per-host fact but
     // a statement of what the model is offered FOR, and it is the same answer on
-    // a host whose backend cannot serve it (PHASE3-VLM.md section 2).
+    // a host whose backend cannot serve it (PHASE3-VLM.md section 2). Strict,
+    // because a caller sends an image only to a model that says it takes one.
     modalities: strArray(entry, 'modalities', where),
-    backendSupported: bool(entry, 'backend_supported', where),
-    installed: bool(entry, 'installed', where),
+    backendSupported: optBool(entry, 'backend_supported', where),
+    installed: optBool(entry, 'installed', where),
     // The base whose download this model's weights are, or null for a model
-    // that owns its own (PHASE22 section 2.9). Demanded: null is a statement.
-    weightsOf: nullableStr(entry, 'weights_of', where),
+    // that owns its own (PHASE22 section 2.9) or a server that predates it.
+    weightsOf: optStr(entry, 'weights_of', where),
     resident: bool(entry, 'resident', where),
-    loadable,
+    loadable: bool(entry, 'loadable', where),
+    // Why it cannot be loaded, in the server's words, or null. A server sends
+    // one with every refusal; one that does not has still said `loadable:
+    // false`, which is the fact a caller acts on.
+    reason: optStr(entry, 'reason', where),
     // Null on a model this backend cannot serve, exactly like `revision`: both
     // figures live in the backend block this manifest does not have.
-    memoryBytesEstimate: nullableNum(entry, 'memory_bytes_estimate', where),
-    contextDefault: num(entry, 'context_default', where),
+    memoryBytesEstimate: optNum(entry, 'memory_bytes_estimate', where),
+    contextDefault: optNum(entry, 'context_default', where),
     // What is being served right now, which is the number to size a request
     // against. Null on a model this backend cannot serve, like `revision`.
-    maxModelLen: nullableNum(entry, 'max_model_len', where),
+    maxModelLen: optNum(entry, 'max_model_len', where),
   };
-  if (!loadable) {
-    // A refusal with no reason is unusable: the operator cannot tell whether to
-    // pull weights, free the card, or go to the other host.
-    return { ...common, reason: str(entry, 'reason', where) };
-  }
-  // `reason` is optional only in this direction, and null reads as absent.
-  const reason = 'reason' in entry ? entry['reason'] : null;
-  if (reason === null) return common;
-  if (typeof reason !== 'string') {
-    throw new CrucibleProtocolError(
-      `${where}.reason is neither a string nor null on a loadable model`,
-    );
-  }
-  return { ...common, reason };
 }
 
 /**
@@ -3113,13 +3225,10 @@ function anyRowStates(rows: readonly unknown[], key: string): boolean {
 /**
  * One `/v1/voices` row.
  *
- * The nullability differs from {@link readModelInfo} in exactly one place and it
- * is deliberate on the server's side: a voice row always carries `reason`, null
- * when the voice is loadable, where a model row omits the key. So this reads it
- * as a nullable field and keeps the rule that matters — a voice that cannot be
- * loaded and does not say why is unusable, because the operator cannot tell
- * whether to pull weights, install an env, free the card, or go to the other
- * host.
+ * `reason` is read as {@link readModelInfo} reads it: the server's words for
+ * why a voice cannot be loaded, or null. A voice row always carries the key
+ * where a model row omits it on a loadable model; both read the same now,
+ * because neither absence changes what `loadable` already said.
  *
  * **`needs_reference` is read the way `route` is** — PHASE15-HOST.md section
  * 3.3's client reading rule, and `documentStatesNeedsReference` is the answer
@@ -3167,48 +3276,51 @@ function readVoiceInfo(
   } else {
     needsReference = rawNeedsReference;
   }
-  const loadable = bool(entry, 'loadable', where);
-  const reason = nullableStr(entry, 'reason', where);
-  if (!loadable && reason === null) {
-    throw new CrucibleProtocolError(
-      `${where} is not loadable and its "reason" is null; a refusal with no ` +
-        'reason does not say whether to pull weights, install an env or free the card',
-    );
-  }
-  const basis = nullableStr(entry, 'estimate_basis', where);
   return {
+    // LOAD-BEARING: the id, whether it is on the card, whether it can be
+    // loaded, the rate its PCM is at, whether a load must carry a clip (read
+    // above) and the pace block a client packs against. Everything else
+    // describes the voice and is null where a server did not state it.
     id: str(entry, 'id', where),
-    display: str(entry, 'display', where),
-    kind: oneOf(str(entry, 'kind', where), VOICE_KINDS, `${where}.kind`),
+    display: optStr(entry, 'display', where),
+    // The server's own word — `checkpoint`, `zeroshot`, `token` today — and
+    // not narrowed: whether a load needs a clip is `needsReference`'s to say,
+    // so a fourth kind from a newer server is news for a display, not a
+    // reason to lose the row.
+    kind: optStr(entry, 'kind', where),
     // A local (`path`) voice nothing holds — not resident, no lease, no job —
     // after a restart: the ladder's screening voice whose DELETE was lost. Said
     // by the server, never acted on by it; null means "not decided on this
-    // read" (a producer without the holders), false on every pinned voice.
-    orphan: nullableBool(entry, 'orphan', where),
-    language: str(entry, 'language', where),
-    narratorEngine: str(entry, 'narrator_engine', where),
-    backendSupported: bool(entry, 'backend_supported', where),
-    installed: bool(entry, 'installed', where),
+    // read" (a producer without the holders, or a server that predates the
+    // field), false on every pinned voice.
+    orphan: optBool(entry, 'orphan', where),
+    language: optStr(entry, 'language', where),
+    narratorEngine: optStr(entry, 'narrator_engine', where),
+    backendSupported: optBool(entry, 'backend_supported', where),
+    installed: optBool(entry, 'installed', where),
     resident: bool(entry, 'resident', where),
-    loadable,
-    reason,
+    loadable: bool(entry, 'loadable', where),
+    // Why it cannot be loaded, or null. A server states one with every
+    // refusal; one that does not has still said `loadable: false`.
+    reason: optStr(entry, 'reason', where),
     // These five live in the backend block this host may not have, and are null
     // together when `backend_supported` is false — never 0, which would read as
     // "needs nothing", and never "", which would read as a pin.
-    revision: nullableStr(entry, 'revision', where),
-    fingerprint: nullableStr(entry, 'fingerprint', where),
-    memoryBytesEstimate: nullableNum(entry, 'memory_bytes_estimate', where),
-    estimateBasis:
-      basis === null ? null : oneOf(basis, ESTIMATE_BASES, `${where}.estimate_basis`),
-    maxChars: nullableNum(entry, 'max_chars', where),
-    // These three are facts about the voice rather than about this host, and are
-    // never null: a client writing FLACs cannot be handed a null sample rate,
-    // and a client that packs cannot be handed half a pace block.
+    revision: optStr(entry, 'revision', where),
+    fingerprint: optStr(entry, 'fingerprint', where),
+    memoryBytesEstimate: optNum(entry, 'memory_bytes_estimate', where),
+    // The server's own word (`measured`, `declared`), not narrowed.
+    estimateBasis: optStr(entry, 'estimate_basis', where),
+    maxChars: optNum(entry, 'max_chars', where),
+    // A fact about the voice that is never null: a client writing FLACs or
+    // playing PCM cannot be handed a null sample rate.
     sampleRate: num(entry, 'sample_rate', where),
-    takes: num(entry, 'takes', where),
-    // `null` for a voice with no serving table; read strictly otherwise, for
-    // `pace`'s reason — a client picking a render width against half a
-    // serving block would pick against a ceiling nobody stated.
+    // How many rungs the voice's ladder has, for a caller spreading retakes.
+    // A take past the end is a seed lane, never an error, so a caller that
+    // does not know it loses nothing but the spread.
+    takes: optNum(entry, 'takes', where),
+    // `null` for a voice with no serving table, and for a server that does
+    // not state one: informational all the way down.
     serving: readVoiceServing(entry, where),
     needsReference,
     pace: readVoicePace(objectField(entry, 'pace', where), `${where}.pace`),
@@ -3224,16 +3336,16 @@ function readVoiceInfo(
  * `capped: null` is a different fact from `false`.
  */
 function readVoiceServing(entry: Json, where: string): VoiceServing | null {
-  const block = nullableObject(entry, 'serving', where);
+  const block = optObject(entry, 'serving', where);
   if (block === null) return null;
   const at = `${where}.serving`;
   return {
-    maxNumSeqs: num(block, 'max_num_seqs', at),
-    maxNumSeqsNote: str(block, 'max_num_seqs_note', at),
-    memFraction: nullableNum(block, 'mem_fraction', at),
-    memFractionNote: nullableStr(block, 'mem_fraction_note', at),
-    contextLength: nullableNum(block, 'context_length', at),
-    contextLengthNote: nullableStr(block, 'context_length_note', at),
+    maxNumSeqs: optNum(block, 'max_num_seqs', at),
+    maxNumSeqsNote: optStr(block, 'max_num_seqs_note', at),
+    memFraction: optNum(block, 'mem_fraction', at),
+    memFractionNote: optStr(block, 'mem_fraction_note', at),
+    contextLength: optNum(block, 'context_length', at),
+    contextLengthNote: optStr(block, 'context_length_note', at),
   };
 }
 
@@ -3260,9 +3372,13 @@ function readVoiceServing(entry: Json, where: string): VoiceServing | null {
  * copy of the server's rules to disagree with it.
  */
 function readVoicePace(entry: Json, where: string): VoicePace {
-  const paceCharsPerSec = nullableNum(entry, 'pace_chars_per_sec', where);
-  const maxCharsPerSec = nullableNum(entry, 'max_chars_per_sec', where);
-  const minCharsPerSec = nullableNum(entry, 'min_chars_per_sec', where);
+  // Each value is already nullable ("this voice states none"), and a server
+  // that does not send the key says the same thing. The block itself is
+  // strict (it is what a client packs against) and so is the triple rule
+  // below: a half-stated band is the wire disagreeing with itself.
+  const paceCharsPerSec = optNum(entry, 'pace_chars_per_sec', where);
+  const maxCharsPerSec = optNum(entry, 'max_chars_per_sec', where);
+  const minCharsPerSec = optNum(entry, 'min_chars_per_sec', where);
   const stated = [paceCharsPerSec, maxCharsPerSec, minCharsPerSec]
     .filter((rate) => rate !== null).length;
   if (stated !== 0 && stated !== 3) {
@@ -3277,42 +3393,57 @@ function readVoicePace(entry: Json, where: string): VoicePace {
     paceCharsPerSec,
     maxCharsPerSec,
     minCharsPerSec,
-    targetChars: nullableNum(entry, 'target_chars', where),
-    safeMinChars: nullableNum(entry, 'safe_min_chars', where),
-    safeMaxChars: nullableNum(entry, 'safe_max_chars', where),
+    targetChars: optNum(entry, 'target_chars', where),
+    safeMinChars: optNum(entry, 'safe_min_chars', where),
+    safeMaxChars: optNum(entry, 'safe_max_chars', where),
   };
 }
 
-/** `GET /v1/accelerator`, read strictly — see {@link CrucibleClient.accelerator}. */
+/**
+ * `GET /v1/accelerator` — see {@link CrucibleClient.accelerator}.
+ *
+ * Every figure here is a number a caller may use and none is one this client
+ * acts on, so each is `null` where a server did not state it — and `null` is
+ * NEVER zero: "the server did not say how much is free" must not read as "none
+ * is". What stays strict is what identifies: a holder's pid, the resident's
+ * id and kind. An unreadable probe is still the 503 `accelerator_unreadable`,
+ * never a document of nulls.
+ */
 function readAcceleratorState(body: Json): AcceleratorState {
   const where = 'accelerator';
-  const gpu = objectField(body, 'gpu', where);
-  const resident = field(body, 'resident', where);
-  const holders = asArray(field(body, 'holders', where), 'accelerator.holders');
+  const gpu = optObject(body, 'gpu', where);
+  const resident = optObject(body, 'resident', where);
+  const holders = optArray(body, 'holders', where);
   return {
-    backend: str(body, 'backend', where),
-    gpu: {
-      vendor: str(gpu, 'vendor', 'accelerator.gpu'),
-      name: str(gpu, 'name', 'accelerator.gpu'),
-      totalBytes: num(gpu, 'total_bytes', 'accelerator.gpu'),
-    },
-    freeBytes: num(body, 'free_bytes', where),
-    usedBytes: num(body, 'used_bytes', where),
-    desktopAllowanceBytes: num(body, 'desktop_allowance_bytes', where),
+    backend: optStr(body, 'backend', where),
+    gpu:
+      gpu === null
+        ? null
+        : {
+            vendor: optStr(gpu, 'vendor', 'accelerator.gpu'),
+            name: optStr(gpu, 'name', 'accelerator.gpu'),
+            totalBytes: optNum(gpu, 'total_bytes', 'accelerator.gpu'),
+          },
+    freeBytes: optNum(body, 'free_bytes', where),
+    usedBytes: optNum(body, 'used_bytes', where),
+    desktopAllowanceBytes: optNum(body, 'desktop_allowance_bytes', where),
     // Null on mlx-darwin, where the question cannot be asked. Not defaulted to
     // zero: "nobody unaccounted for" and "unanswerable" are different answers.
-    unattributedBytes: nullableNum(body, 'unattributed_bytes', where),
-    resident:
-      resident === null
+    unattributedBytes: optNum(body, 'unattributed_bytes', where),
+    resident: resident === null ? null : readAcceleratorResident(resident),
+    // Null is "the server did not list them", which is NOT an empty card —
+    // see {@link AcceleratorState.unattributedBytes} for why even an empty
+    // list is not one.
+    holders:
+      holders === null
         ? null
-        : readAcceleratorResident(asObject(resident, 'accelerator.resident')),
-    holders: holders.map((holder, index) =>
-      readAcceleratorHolder(
-        asObject(holder, `accelerator.holders[${index}]`),
-        `accelerator.holders[${index}]`,
-      ),
-    ),
-    detail: str(body, 'detail', where),
+        : holders.map((holder, index) =>
+            readAcceleratorHolder(
+              asObject(holder, `accelerator.holders[${index}]`),
+              `accelerator.holders[${index}]`,
+            ),
+          ),
+    detail: optStr(body, 'detail', where),
   };
 }
 
@@ -3323,21 +3454,21 @@ function readAcceleratorResident(entry: Json): AcceleratorResident {
     // client must not be the thing that breaks when one is added.
     kind: str(entry, 'kind', where),
     id: str(entry, 'id', where),
-    since: str(entry, 'since', where),
-    memoryBytesEstimate: num(entry, 'memory_bytes_estimate', where),
+    since: optStr(entry, 'since', where),
+    memoryBytesEstimate: optNum(entry, 'memory_bytes_estimate', where),
   };
 }
 
 function readAcceleratorHolder(entry: Json, where: string): AcceleratorHolder {
   return {
     pid: num(entry, 'pid', where),
-    name: str(entry, 'name', where),
+    name: optStr(entry, 'name', where),
     // `null` is the driver refusing to say, and it stays null all the way to the
     // caller. Substituting 0 here would turn "I do not know what this process
     // holds" into "this process holds nothing", which is how a queue decides a
     // busy card is free.
-    bytes: nullableNum(entry, 'bytes', where),
-    ownedByCrucible: bool(entry, 'owned_by_crucible', where),
+    bytes: optNum(entry, 'bytes', where),
+    ownedByCrucible: optBool(entry, 'owned_by_crucible', where),
   };
 }
 
@@ -3383,19 +3514,26 @@ function readChatResponse(body: Json): ChatResponse {
   }
   const choice = asObject(first, 'chat.choices[0]');
   const message = objectField(choice, 'message', 'chat.choices[0]');
-  const usage = objectField(body, 'usage', where);
+  const usage = optObject(body, 'usage', where);
+  // STRICT, beside `content`: `length` is how a caller tells a truncated answer
+  // from a finished one, and a truncated JSON document parsed as a whole one is
+  // the silent failure this field exists to prevent.
   const finishReason = str(choice, 'finish_reason', 'chat.choices[0]');
   refuseReasoningWithoutContent(message, finishReason);
   return {
-    id: str(body, 'id', where),
-    model: str(body, 'model', where),
+    id: optStr(body, 'id', where),
+    model: optStr(body, 'model', where),
     content: str(message, 'content', 'chat.choices[0].message'),
     finishReason,
-    usage: {
-      promptTokens: num(usage, 'prompt_tokens', 'chat.usage'),
-      completionTokens: num(usage, 'completion_tokens', 'chat.usage'),
-      totalTokens: num(usage, 'total_tokens', 'chat.usage'),
-    },
+    // Counts for a display or a budget; null where the engine did not report.
+    usage:
+      usage === null
+        ? null
+        : {
+            promptTokens: optNum(usage, 'prompt_tokens', 'chat.usage'),
+            completionTokens: optNum(usage, 'completion_tokens', 'chat.usage'),
+            totalTokens: optNum(usage, 'total_tokens', 'chat.usage'),
+          },
   };
 }
 
@@ -3465,11 +3603,22 @@ function readDecideQuestions(value: unknown): Record<string, DecideQuestion> {
 }
 
 /**
- * `POST /v1/decide`'s 200, every field the contract names demanded
- * (PHASE22-DECIDE.md section 2.2). Lockstep (Owen, 2026-09-20): an absent field
- * is an older or a broken server, and this client does not run against one —
- * so nothing here defaults, and `cached_tokens` and `prime` are read as the
- * `null` the server states, never as a missing key.
+ * `POST /v1/decide`'s 200 (PHASE22-DECIDE.md section 2.2).
+ *
+ * LOAD-BEARING, and refused by name when missing: an answer for every
+ * question asked, of the type asked, with its `choice` / `level` / `score` /
+ * `p`, its `probabilities` over exactly the labels asked, and its
+ * `label_mass`. A decision that answered a different question than the one
+ * asked is not a decision.
+ *
+ * INFORMATIONAL, and `null` where a server did not state it: the model's pins,
+ * the engine's name, the timings, the token counts, `confidence` and the
+ * log-probabilities. Until 2026-09-24 every one of them was demanded under the
+ * lockstep rule; Owen's ruling that day — *"if it can make the call to the
+ * crucible server then it should work"* — replaced it, and none of them
+ * changes what the answer is. Where one IS stated it is still checked: a
+ * timing block keyed by questions nobody asked is a broken server, not an old
+ * one.
  */
 function readDecideResponse(
   body: Json,
@@ -3479,21 +3628,8 @@ function readDecideResponse(
   const where = 'decide';
   const names = Object.keys(asked);
   const answersBody = objectField(body, 'answers', where);
-  const timing = objectField(body, 'timing_ms', where);
-  const perQuestionTiming = objectField(timing, 'per_question', `${where}.timing_ms`);
-  const tokens = objectField(body, 'tokens', where);
-  const perQuestionTokens = objectField(tokens, 'per_question', `${where}.tokens`);
-  for (const [map, label] of [
-    [answersBody, 'answers'],
-    [perQuestionTiming, 'timing_ms.per_question'],
-    [perQuestionTokens, 'tokens.per_question'],
-  ] as const) {
-    sameKeys(Object.keys(map), names, `${where}.${label}`, 'the questions asked');
-  }
-
+  sameKeys(Object.keys(answersBody), names, `${where}.answers`, 'the questions asked');
   const answers: Record<string, DecideAnswer> = {};
-  const perQuestion: Record<string, DecideCallTiming> = {};
-  const tokensPerQuestion: Record<string, number> = {};
   for (const name of names) {
     answers[name] = readDecideAnswer(
       objectField(answersBody, name, `${where}.answers`),
@@ -3501,45 +3637,78 @@ function readDecideResponse(
       `${where}.answers.${name}`,
       report,
     );
-    perQuestion[name] = readDecideCallTiming(
-      objectField(perQuestionTiming, name, `${where}.timing_ms.per_question`),
-      `${where}.timing_ms.per_question.${name}`,
-    );
-    tokensPerQuestion[name] = num(perQuestionTokens, name, `${where}.tokens.per_question`);
   }
-  const prime = nullableObject(timing, 'prime', `${where}.timing_ms`);
+  const model = optObject(body, 'model', where);
   return {
-    // NOT `readProvenanceModel`, whose revision and fingerprint are nullable
-    // for a backend block a manifest does not carry: a decision is only ever
-    // read from a RESIDENT engine, which was started on a revision, so the
-    // server states both (crucible/decide.py `ModelProvenance`) and a null
-    // here would be a server this client does not run against.
-    model: readDecideModel(objectField(body, 'model', where), `${where}.model`),
-    engine: str(body, 'engine', where),
+    model: model === null ? null : readDecideModel(model, `${where}.model`),
+    engine: optStr(body, 'engine', where),
     answers,
-    timingMs: {
-      total: num(timing, 'total', `${where}.timing_ms`),
-      perQuestion,
-      prime: prime === null ? null : readDecideCallTiming(prime, `${where}.timing_ms.prime`),
-    },
-    tokens: { perQuestion: tokensPerQuestion, images: num(tokens, 'images', `${where}.tokens`) },
+    timingMs: readDecideTiming(optObject(body, 'timing_ms', where), names, `${where}.timing_ms`),
+    tokens: readDecideTokens(optObject(body, 'tokens', where), names, `${where}.tokens`),
   };
 }
 
-function readDecideModel(model: Json, where: string): DecideResponse['model'] {
+function readDecideModel(model: Json, where: string): NonNullable<DecideResponse['model']> {
   return {
-    id: str(model, 'id', where),
-    revision: str(model, 'revision', where),
-    fingerprint: str(model, 'fingerprint', where),
+    id: optStr(model, 'id', where),
+    revision: optStr(model, 'revision', where),
+    fingerprint: optStr(model, 'fingerprint', where),
   };
+}
+
+/** `timing_ms`, or null where the server did not state it. */
+function readDecideTiming(
+  timing: Json | null,
+  names: readonly string[],
+  where: string,
+): DecideResponse['timingMs'] {
+  if (timing === null) return null;
+  const perQuestionRaw = optObject(timing, 'per_question', where);
+  let perQuestion: Record<string, DecideCallTiming> | null = null;
+  if (perQuestionRaw !== null) {
+    sameKeys(Object.keys(perQuestionRaw), names, `${where}.per_question`, 'the questions asked');
+    perQuestion = {};
+    for (const name of names) {
+      perQuestion[name] = readDecideCallTiming(
+        objectField(perQuestionRaw, name, `${where}.per_question`),
+        `${where}.per_question.${name}`,
+      );
+    }
+  }
+  const prime = optObject(timing, 'prime', where);
+  return {
+    total: optNum(timing, 'total', where),
+    perQuestion,
+    prime: prime === null ? null : readDecideCallTiming(prime, `${where}.prime`),
+  };
+}
+
+/** `tokens`, or null where the server did not state it. */
+function readDecideTokens(
+  tokens: Json | null,
+  names: readonly string[],
+  where: string,
+): DecideResponse['tokens'] {
+  if (tokens === null) return null;
+  const perQuestionRaw = optObject(tokens, 'per_question', where);
+  let perQuestion: Record<string, number | null> | null = null;
+  if (perQuestionRaw !== null) {
+    sameKeys(Object.keys(perQuestionRaw), names, `${where}.per_question`, 'the questions asked');
+    perQuestion = {};
+    for (const name of names) {
+      perQuestion[name] = optNum(perQuestionRaw, name, `${where}.per_question`);
+    }
+  }
+  return { perQuestion, images: optNum(tokens, 'images', where) };
 }
 
 /**
  * One answer, read against the question asked AND the mode asked for.
  *
- * `missing_labels` is demanded when the request said `missing: 'report'` and
- * refused when it did not — the server sends it in exactly one mode, so its
- * presence in the other is a server this client does not run against. In
+ * `missing_labels` is demanded when the request said `missing: 'report'` —
+ * the caller ASKED for it, so it is load-bearing — and refused when it did
+ * not: the server sends it in exactly one mode, so its presence in the other
+ * is a reply to a different request than the one made. In
  * report mode a `null` probability must be exactly a label the answer names as
  * missing (the server never invents a number, and never hides one); in refuse
  * mode no probability may be `null` at all.
@@ -3574,12 +3743,17 @@ function readDecideAnswer(
   }
   const common = missingLabels === undefined ? { labelMass } : { labelMass, missingLabels };
   if (question.type === 'yesno') {
-    return { type: 'yesno', p: num(entry, 'p', where), logprob: nullableNum(entry, 'logprob', where), ...common };
+    return { type: 'yesno', p: num(entry, 'p', where), logprob: optNum(entry, 'logprob', where), ...common };
   }
-  const missing = missingLabels ?? [];
+  const missing = missingLabels === undefined ? [] : missingLabels;
   const probabilities = readDistribution(entry, 'probabilities', labels, missing, where);
-  const logprobs = readDistribution(entry, 'logprobs', labels, missing, where);
-  const confidence = num(entry, 'confidence', where);
+  // Informational: the log of what `probabilities` already says, for a
+  // caller that wants to sum evidence. Null where a server did not state it.
+  const logprobs =
+    optObject(entry, 'logprobs', where) === null
+      ? null
+      : readDistribution(entry, 'logprobs', labels, missing, where);
+  const confidence = optNum(entry, 'confidence', where);
   if (question.type === 'choice') {
     const choice = str(entry, 'choice', where);
     oneOf(choice, labels, `${where}.choice`);
@@ -3626,11 +3800,12 @@ function readDistribution(
 
 function readDecideCallTiming(entry: Json, where: string): DecideCallTiming {
   return {
-    wallMs: num(entry, 'wall_ms', where),
-    promptTokens: num(entry, 'prompt_tokens', where),
-    // `null` is the server saying the engine did not report it (vLLM without
-    // --enable-prompt-tokens-details, section 1); an absent key is not that.
-    cachedTokens: nullableNum(entry, 'cached_tokens', where),
+    wallMs: optNum(entry, 'wall_ms', where),
+    promptTokens: optNum(entry, 'prompt_tokens', where),
+    // `null` is the engine not reporting it (vLLM without
+    // --enable-prompt-tokens-details, section 1), or a server that predates
+    // the field. Neither is zero.
+    cachedTokens: optNum(entry, 'cached_tokens', where),
   };
 }
 
@@ -4083,14 +4258,18 @@ function normaliseUrl(url: string): string {
 /**
  * Read a 409 `server_busy` body into {@link CrucibleBusy}.
  *
- * A body that is not the v1 shape comes back as a {@link CrucibleProtocolError}
- * rather than quietly degrading to a plain {@link CrucibleRefused}. That is the
- * same call `#failure` already makes two branches up for an unparseable
- * envelope, and it is the right one: these fields are API v1's promise, a change
- * to them is a breaking change that arrives with a new `api_version`, and a
- * silent downgrade here would hide a broken wire behind an error that still
- * looks normal — a caller would see "busy" and never learn that the holder,
- * progress and job id it was about to display had gone missing.
+ * THE CODE IS THE REFUSAL, and it is never downgraded: a `server_busy` is
+ * always a {@link CrucibleBusy}, which is what a `waitFor: "any"` walk and a
+ * bench both act on. Every field of the body is informational — who is in
+ * the way, doing what, how far along — and is `null` where the server did not
+ * state it (Owen, 2026-09-24: any Crucible that answers works), so a server
+ * that states less of it still produces the right type, and `busyLine` leaves
+ * out what it was not told rather than inventing it.
+ *
+ * What is still a {@link CrucibleProtocolError}: `details` that is not an
+ * object at all, or a field present with the wrong type — a broken body, not
+ * an old one. That is the call `#failure` makes two branches up for an
+ * unparseable envelope, for the same reason.
  */
 function busyRefusal(
   status: number,
@@ -4101,14 +4280,14 @@ function busyRefusal(
   try {
     const body = asObject(details, 'error.details');
     return new CrucibleBusy(status, code, message, details, {
-      holder: nullableStr(body, 'holder', 'error.details'),
-      jobId: str(body, 'job_id', 'error.details'),
-      jobType: str(body, 'type', 'error.details'),
-      model: nullableStr(body, 'model', 'error.details'),
-      jobStatus: str(body, 'status', 'error.details'),
-      since: str(body, 'since', 'error.details'),
-      progress: num(body, 'progress', 'error.details'),
-      jobMessage: nullableStr(body, 'message', 'error.details'),
+      holder: optStr(body, 'holder', 'error.details'),
+      jobId: optStr(body, 'job_id', 'error.details'),
+      jobType: optStr(body, 'type', 'error.details'),
+      model: optStr(body, 'model', 'error.details'),
+      jobStatus: optStr(body, 'status', 'error.details'),
+      since: optStr(body, 'since', 'error.details'),
+      progress: optNum(body, 'progress', 'error.details'),
+      jobMessage: optStr(body, 'message', 'error.details'),
     });
   } catch (cause) {
     if (cause instanceof CrucibleProtocolError) return cause;
@@ -4124,10 +4303,9 @@ function isHeldByAFact(details: unknown): boolean {
 /**
  * Read the operator door's 409 `server_busy` into {@link CrucibleCardHeld}.
  *
- * A body that is not the v1 shape comes back a {@link CrucibleProtocolError}
- * rather than degrading to a plain refusal, for {@link busyRefusal}'s reason:
- * a caller would otherwise be shown "busy" and never learn that the holder it
- * was about to name had gone missing from the body.
+ * {@link busyRefusal}'s rule: the code is the refusal. `fact` stays strict —
+ * its presence is what tells this shape from the lane's — and `who` is null
+ * where the server did not name the holder.
  */
 function heldRefusal(
   status: number,
@@ -4139,7 +4317,7 @@ function heldRefusal(
     const body = asObject(details, 'error.details');
     return new CrucibleCardHeld(status, code, message, details, {
       fact: str(body, 'fact', 'error.details'),
-      who: str(body, 'who', 'error.details'),
+      who: optStr(body, 'who', 'error.details'),
     });
   } catch (cause) {
     if (cause instanceof CrucibleProtocolError) return cause;
@@ -4150,11 +4328,9 @@ function heldRefusal(
 /**
  * Read a 409 `leased` body into {@link CrucibleLeased}.
  *
- * A body that is not the v1 shape comes back as a {@link CrucibleProtocolError}
- * rather than degrading to a plain {@link CrucibleRefused}, for the reason
- * {@link busyRefusal} does: a caller would otherwise see "leased" and never
- * learn that the holder and the deadline it was about to display had gone
- * missing.
+ * {@link busyRefusal}'s rule: the code is the refusal, always a
+ * {@link CrucibleLeased}, and every field of the body is informational — null
+ * where the server did not state it.
  */
 function leasedRefusal(
   status: number,
@@ -4165,12 +4341,12 @@ function leasedRefusal(
   try {
     const body = asObject(details, 'error.details');
     return new CrucibleLeased(status, code, message, details, {
-      leaseId: str(body, 'lease_id', 'error.details'),
-      kind: str(body, 'kind', 'error.details'),
-      holder: nullableStr(body, 'client', 'error.details'),
-      act: str(body, 'act', 'error.details'),
-      since: str(body, 'since', 'error.details'),
-      expiresAt: str(body, 'expires_at', 'error.details'),
+      leaseId: optStr(body, 'lease_id', 'error.details'),
+      kind: optStr(body, 'kind', 'error.details'),
+      holder: optStr(body, 'client', 'error.details'),
+      act: optStr(body, 'act', 'error.details'),
+      since: optStr(body, 'since', 'error.details'),
+      expiresAt: optStr(body, 'expires_at', 'error.details'),
     });
   } catch (cause) {
     if (cause instanceof CrucibleProtocolError) return cause;
@@ -4182,18 +4358,21 @@ function leasedRefusal(
  * `stopping`, wherever it appears — `/v1/health` and `/v1/activity` publish
  * the server's ONE `DyingResident`, so there is one reader for it here.
  *
- * The key must be present; `null` is the statement "nothing is stopping", and
- * a server that omitted it would be one whose answer about a wedged card is
- * unknown rather than negative. See {@link Stopping}.
+ * `null` is the statement "nothing is stopping" — or, from a server that
+ * predates the field, "this server does not report it", which a caller cannot
+ * act on differently: either way no load is being refused for it that the
+ * load's own refusal will not name (`engine_still_stopping`). See
+ * {@link Stopping}. When the block IS there its id and pids are strict: they
+ * are what an operator types into a kill command.
  */
 function readStopping(body: Json, where: string): Stopping | null {
-  const data = nullableObject(body, 'stopping', where);
+  const data = optObject(body, 'stopping', where);
   if (data === null) return null;
   const at = `${where}.stopping`;
   return {
-    kind: str(data, 'kind', at),
+    kind: optStr(data, 'kind', at),
     id: str(data, 'id', at),
-    since: str(data, 'since', at),
+    since: optStr(data, 'since', at),
     pids: asArray(field(data, 'pids', at), `${at}.pids`).map((entry, index) => {
       if (typeof entry !== 'number' || !Number.isInteger(entry)) {
         throw new CrucibleProtocolError(
@@ -4254,29 +4433,68 @@ function leaseParams(lease: LeaseOnLoad | undefined): Record<string, unknown> {
   };
 }
 
+/**
+ * A lease, wherever it appears. Its id is what heartbeat and release name, so
+ * it is strict; the rest describes the lease for a person and is null where a
+ * server did not state it.
+ */
 function readLease(data: Json, where: string): ActivityLease {
   return {
     leaseId: str(data, 'lease_id', where),
-    kind: str(data, 'kind', where),
-    client: nullableStr(data, 'client', where),
-    act: str(data, 'act', where),
-    since: str(data, 'since', where),
-    expiresAt: str(data, 'expires_at', where),
+    kind: optStr(data, 'kind', where),
+    client: optStr(data, 'client', where),
+    act: optStr(data, 'act', where),
+    since: optStr(data, 'since', where),
+    expiresAt: optStr(data, 'expires_at', where),
   };
 }
 
+/**
+ * A job as a bench reads it. Its id, type and status are what a caller acts
+ * on; everything else is drawn, and is null where a server did not state it.
+ */
 function readActivityJob(data: Json, where: string): ActivityJob {
   return {
     jobId: str(data, 'job_id', where),
     type: str(data, 'type', where),
-    model: nullableStr(data, 'model', where),
+    model: optStr(data, 'model', where),
     status: str(data, 'status', where),
-    position: nullableNum(data, 'position', where),
-    progress: num(data, 'progress', where),
-    message: nullableStr(data, 'message', where),
-    created: str(data, 'created', where),
-    started: nullableStr(data, 'started', where),
-    client: nullableStr(data, 'client', where),
+    position: optNum(data, 'position', where),
+    progress: optNum(data, 'progress', where),
+    message: optStr(data, 'message', where),
+    created: optStr(data, 'created', where),
+    started: optStr(data, 'started', where),
+    client: optStr(data, 'client', where),
+  };
+}
+
+/**
+ * `activity.chat` — completions in flight, and what the engine admits at once.
+ *
+ * All of it informs a bench or sizes a pool, so all of it is tolerant: a
+ * `maxInFlight` of null already means "this engine states no concurrency" and
+ * never "unlimited", and a server too old to say is the same statement.
+ */
+function readActivityChat(chat: Json): NonNullable<Activity['chat']> {
+  const rows = optArray(chat, 'rows', 'activity.chat');
+  return {
+    inFlight: optNum(chat, 'in_flight', 'activity.chat'),
+    maxInFlight: optNum(chat, 'max_in_flight', 'activity.chat'),
+    maxInFlightBasis: optStr(chat, 'max_in_flight_basis', 'activity.chat'),
+    rows:
+      rows === null
+        ? null
+        : rows.map((entry, index) => {
+            const where = `activity.chat.rows[${index}]`;
+            const row = asObject(entry, where);
+            return {
+              id: num(row, 'id', where),
+              act: optStr(row, 'act', where),
+              model: optStr(row, 'model', where),
+              client: optStr(row, 'client', where),
+              since: optStr(row, 'since', where),
+            };
+          }),
   };
 }
 
@@ -4293,7 +4511,7 @@ function readActivityJob(data: Json, where: string): ActivityJob {
  */
 function readStreaming(data: Json): ActivityStreaming {
   const where = 'activity.streaming';
-  const progress = nullableNum(data, 'progress', where);
+  const progress = optNum(data, 'progress', where);
   if (progress !== null) {
     throw new CrucibleProtocolError(
       `${where}.progress is ${progress}, but a streaming session has no total to ` +
@@ -4303,16 +4521,16 @@ function readStreaming(data: Json): ActivityStreaming {
   return {
     sessionId: str(data, 'session_id', where),
     voice: str(data, 'voice', where),
-    language: str(data, 'language', where),
-    narratorEngine: str(data, 'narrator_engine', where),
-    since: str(data, 'since', where),
-    client: nullableStr(data, 'client', where),
+    language: optStr(data, 'language', where),
+    narratorEngine: optStr(data, 'narrator_engine', where),
+    since: optStr(data, 'since', where),
+    client: optStr(data, 'client', where),
     progress: null,
-    said: num(data, 'said', where),
-    finished: num(data, 'finished', where),
-    inFlight: num(data, 'in_flight', where),
-    seconds: num(data, 'seconds', where),
-    chars: num(data, 'chars', where),
+    said: optNum(data, 'said', where),
+    finished: optNum(data, 'finished', where),
+    inFlight: optNum(data, 'in_flight', where),
+    seconds: optNum(data, 'seconds', where),
+    chars: optNum(data, 'chars', where),
   };
 }
 
@@ -4453,36 +4671,47 @@ const TASK_EVENT_NAMES = [
   'cancelled',
 ] as const;
 
+/**
+ * One catalog row. LOAD-BEARING: `kind` and `id` (the subject a pull or a
+ * remove names — and `kind` stays a closed set, because it is sent straight
+ * back to the server as the subject's kind), `installed` and `resident` (what
+ * a pull or a remove is decided on). Everything else describes the subject.
+ */
 function readCatalogRow(row: Json, where: string): CatalogRow {
   return {
     kind: oneOf(str(row, 'kind', where), SUBJECT_KINDS, `${where}.kind`),
     id: str(row, 'id', where),
-    name: nullableStr(row, 'name', where),
-    jobType: str(row, 'job_type', where),
+    name: optStr(row, 'name', where),
+    jobType: optStr(row, 'job_type', where),
     installed: bool(row, 'installed', where),
-    installedBytes: nullableNum(row, 'installed_bytes', where),
-    expectedBytes: nullableNum(row, 'expected_bytes', where),
-    // PHASE22 section 2.9: both demanded, null on every row that is not an
-    // alias — present-and-null is a statement, absent is an older server.
-    sharesWeightsOf: nullableStr(row, 'shares_weights_of', where),
-    missingFiles: nullableStrArray(row, 'missing_files', where),
-    floors: strArray(row, 'floors', where),
-    license: nullableStr(row, 'license', where),
-    source: str(row, 'source', where),
+    installedBytes: optNum(row, 'installed_bytes', where),
+    expectedBytes: optNum(row, 'expected_bytes', where),
+    // PHASE22 section 2.9: null on every row that is not an alias, and on a
+    // server that predates the field.
+    sharesWeightsOf: optStr(row, 'shares_weights_of', where),
+    missingFiles: optStrArray(row, 'missing_files', where),
+    floors: optStrArray(row, 'floors', where),
+    license: optStr(row, 'license', where),
+    source: optStr(row, 'source', where),
     resident: bool(row, 'resident', where),
   };
 }
 
+/**
+ * A task record. Its id, type and state are what a caller acts on (the state
+ * stays a closed set: a caller decides "finished" on it); a stated error is
+ * read strictly for its code. The request echo and the timestamps describe it.
+ */
 function readTaskStatus(row: Json, where: string): TaskStatus {
   return {
     taskId: str(row, 'task_id', where),
     type: str(row, 'type', where),
-    request: asObject(field(row, 'request', where), `${where}.request`),
+    request: optObject(row, 'request', where),
     state: oneOf(str(row, 'state', where), TASK_STATES, `${where}.state`),
-    error: readFailureOrNull(field(row, 'error', where), `${where}.error`),
-    created: str(row, 'created', where),
-    started: str(row, 'started', where),
-    finished: nullableStr(row, 'finished', where),
+    error: readFailureOrNull(optObject(row, 'error', where), `${where}.error`),
+    created: optStr(row, 'created', where),
+    started: optStr(row, 'started', where),
+    finished: optStr(row, 'finished', where),
     unmet: readUnmet(row, where),
   };
 }
@@ -4585,13 +4814,13 @@ function readTaskEvent(rawId: string | null, rawName: string | null, rawData: st
 
   switch (known) {
     case 'started':
-      return { id, event: 'started', data: { type: str(data, 'type', where) } };
+      return { id, event: 'started', data: { type: optStr(data, 'type', where) } };
     case 'step':
       return { id, event: 'step', data: readTaskStep(data, where) };
     case 'progress':
       return { id, event: 'progress', data: readTaskProgress(data, where) };
     case 'skipped':
-      return { id, event: 'skipped', data: { reason: str(data, 'reason', where) } };
+      return { id, event: 'skipped', data: { reason: optStr(data, 'reason', where) } };
     case 'done':
       return { id, event: 'done', data };
     case 'failed':
@@ -4602,10 +4831,16 @@ function readTaskEvent(rawId: string | null, rawName: string | null, rawData: st
 }
 
 function readTaskStep(data: Json, where: string): TaskStepData {
-  const step: { name: string; index: number; total: number; jobTypes?: readonly string[] } = {
-    name: str(data, 'name', where),
-    index: num(data, 'index', where),
-    total: num(data, 'total', where),
+  // A step is drawn, never acted on: each part is null where not stated.
+  const step: {
+    name: string | null;
+    index: number | null;
+    total: number | null;
+    jobTypes?: readonly string[];
+  } = {
+    name: optStr(data, 'name', where),
+    index: optNum(data, 'index', where),
+    total: optNum(data, 'total', where),
   };
   // Only the `reload` step carries it (section 3.4), so its absence is not a
   // missing field — it is a step that made nothing new reachable.
@@ -4627,8 +4862,8 @@ function readTaskProgress(data: Json, where: string): TaskProgressData {
   if ('bytes_done' in data) {
     return {
       bytesDone: num(data, 'bytes_done', where),
-      bytesTotal: nullableNum(data, 'bytes_total', where),
-      file: str(data, 'file', where),
+      bytesTotal: optNum(data, 'bytes_total', where),
+      file: optStr(data, 'file', where),
     };
   }
   throw new CrucibleProtocolError(
