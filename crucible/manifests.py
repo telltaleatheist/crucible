@@ -291,6 +291,21 @@ _BACKEND_OPTIONAL: dict[str, type] = {
     # once the weights are down. Absent means "the model's number"; it is never
     # a silent default.
     "context_default": int,
+    # THE LARGEST CONTEXT THIS BACKEND WILL EVER START AN ENGINE WITH
+    # (2026-09-23). Owen: *"context limit can be set to 8k tokens by default,
+    # and it can request higher. maybe crucible should have a context limit
+    # number for each system it's on … requesting higher than that throws an
+    # error back to the app thats making the call"*, and *"set the max to
+    # something that makes sense. for both. something that wont
+    # page/thrash/OOM"*. `context_default` stays what a load with no stated
+    # context starts at; this is how far a `load-model` with `params.context`
+    # may raise it, and the fixed half of the `generate` class's context
+    # ceiling (`capability.Candidate.context_ceiling`). Absent means "no
+    # higher than context_default" — the ceiling a block had before this key
+    # existed, kept exactly, and never an invented one. Held to: a positive
+    # int, at most `[model] trained_context`, at least this block's own
+    # served context (a maximum below the default would refuse the default).
+    "max_context": int,
     # THE SAME NUMBER AS `memory_bytes_estimate`, TAKEN APART — see
     # docs/FITS-AND-THE-CARD.md. The collapsed estimate answers one question
     # ("does this model fit at the context this block serves") and the class that
@@ -509,6 +524,11 @@ class BackendSpec:
     engine_args: tuple[str, ...]
     #: This backend's own context, or None to use the model's.
     context_default: int | None
+    #: The largest context an engine is ever started with on this backend
+    #: (`[backends.<kind>] max_context`), or None where the block states none —
+    #: `ModelManifest.max_context_for` then answers with the served context.
+    #: Never read directly; ask `max_context_for`.
+    max_context: int | None = None
     #: This block's estimate taken apart, or None where nobody has taken it
     #: apart yet. `memory_bytes_estimate` above stays the answer at this block's
     #: own context either way; these terms are what lets a CLASS ask a different
@@ -546,6 +566,7 @@ class BackendSpec:
             "memory_bytes_estimate": self.memory_bytes_estimate,
             "engine_args": list(self.engine_args),
             "context_default": self.context_default,
+            "max_context": self.max_context,
             "memory": None if self.memory is None else self.memory.to_dict(),
             "file": self.file,
             "mmproj": self.mmproj,
@@ -744,6 +765,23 @@ class ModelManifest:
         if found is None or found.context_default is None:
             return self.context_default
         return found.context_default
+
+    def max_context_for(self, backend_kind: str) -> int:
+        """The LARGEST context an engine may be started with on this backend.
+
+        The block's `max_context` where it states one; otherwise the served
+        context (`context_for`), because a block that states no maximum has
+        never been reasoned about at any other length and the one context it
+        HAS been reasoned about is its default. That is the ceiling every block
+        had before `max_context` existed, kept exactly — not a fallback to a
+        guess. The one owner of "how far may a load raise the context here":
+        `capability.Candidate.context_ceiling` (the `generate` class's ceiling
+        and the `load-model` context check) reads it and nothing else does.
+        """
+        found = self.backends.get(backend_kind)
+        if found is None or found.max_context is None:
+            return self.context_for(backend_kind)
+        return found.max_context
 
     def fingerprint_for(self, backend_kind: str) -> str | None:
         """`<id>@<revision>` for this backend, or None where there is no block.
@@ -1430,6 +1468,27 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
                 f"are trained at {model['trained_context']}. An accelerator with "
                 f"room to spare does not give a checkpoint a longer memory"
             )
+        # ------------------------------------------- the most it will ever serve
+        block_max = block.get("max_context")
+        if block_max is not None:
+            served_here = backend_context or model["context_default"]
+            if block_max <= 0:
+                raise ManifestError(
+                    f"{where}: max_context must be positive, got {block_max}"
+                )
+            if block_max > model["trained_context"]:
+                raise ManifestError(
+                    f"{where}: max_context is {block_max} and the weights are "
+                    f"trained at {model['trained_context']}. No load may start "
+                    "an engine past what the checkpoint's positions reach"
+                )
+            if block_max < served_here:
+                raise ManifestError(
+                    f"{where}: max_context is {block_max} and this block serves "
+                    f"{served_here} by default. The largest context a load may "
+                    "ask for cannot be smaller than the one a load that asks for "
+                    "nothing gets; lower context_default or raise max_context"
+                )
         # ------------------------------------------------- the terms, if stated
         terms: MemoryTerms | None = None
         memory_table = block.get("memory")
@@ -1511,6 +1570,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             memory_bytes_estimate=block["memory_bytes_estimate"],
             engine_args=tuple(engine_args),
             context_default=backend_context,
+            max_context=block_max,
             memory=terms,
             file=block.get("file"),
             mmproj=block.get("mmproj"),

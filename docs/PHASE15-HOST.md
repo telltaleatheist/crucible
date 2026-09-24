@@ -310,11 +310,13 @@ Now:
   `max_tokens=4096 (upstream default)` so the audit line PHASE2 section 9 requires still
   says what filled the gap); `response_format` JSON schema → Anthropic tool-use with one forced
   tool (this is how `analysis` gets guided decoding upstream); streaming SSE is re-emitted in
-  OpenAI chunk shape. OpenAI and Ollama are already OpenAI-shaped (`/v1/chat/completions`).
+  OpenAI chunk shape. OpenAI is already OpenAI-shaped (`/v1/chat/completions`). **Ollama is
+  NOT forwarded to its OpenAI shim any more — see 3.4a.** (It was until 2026-09-23, and every
+  `ollama/<id>` chat ran at 4096 tokens of context because of it.)
 - `thinking: false` (BookForge sends it) is dropped for upstreams that do not know it, never
-  forwarded blind. It travels in `chat_template_kwargs` (PHASE2-LLM.md section 9) and **none
-  of the three upstreams reads that table**, so the whole table is what is dropped, for all
-  three. The audit header says so: a fourth source value, **`dropped`**, meaning *the request
+  forwarded blind. It travels in `chat_template_kwargs` (PHASE2-LLM.md section 9) and
+  **neither Anthropic nor OpenAI reads that table**, so the whole table is what is dropped for
+  those two. (Ollama takes it, as `think` — 3.4a.) The audit header says so: a fourth source value, **`dropped`**, meaning *the request
   stated it and this server did not forward it, because the upstream does not take it*.
   Saying `request` would claim a value reached the model and saying `engine` would hide that
   the caller asked.
@@ -341,6 +343,118 @@ Now:
 - A lease on an upstream model (`POST /v1/models/{id}/lease`) is refused `lease_not_needed`
   with the sentence "an upstream model is never resident; send the chat". Same for
   `{"type": "load-model"}` naming one.
+
+### 3.4a The `ollama` upstream speaks Ollama's native API (FIXED 2026-09-23)
+
+**The bug.** The `ollama` upstream forwarded chat to Ollama's OpenAI shim,
+`POST <url>/v1/chat/completions`. The shim has no field for `num_ctx` and drops Ollama's own
+options, so **every `ollama/<id>` chat through Crucible ran at Ollama's default context** —
+4096 tokens unless the Ollama host set `OLLAMA_CONTEXT_LENGTH` — and a longer prompt was cut
+**from the front** with a 200 and no field saying so (FITS-AND-THE-CARD.md 6.1 measured the
+shape: ~5,600 tokens sent at `num_ctx: 512`, `prompt_eval_count` 1026, the instruction gone,
+a confident wrong answer). `thinking` was lost the same way. Owen's framing: Crucible will
+replace Ollama, but until it does it must use Ollama properly when asked to.
+
+**The fix.** `crucible/upstreams.py` speaks Ollama's native `POST <url>/api/chat` and
+translates both directions, the way it already did for Anthropic:
+
+| OpenAI-shaped request (the door) | Ollama `/api/chat` |
+|---|---|
+| `context_tokens` (Crucible's field, below) | `options.num_ctx` — **always sent** |
+| `max_tokens` / `max_completion_tokens` | `options.num_predict` |
+| `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `presence_penalty`, `frequency_penalty` | `options.<same name>` |
+| `repetition_penalty` (vLLM's name) | `options.repeat_penalty` |
+| `stop` (string or list) | `options.stop` (list) |
+| `chat_template_kwargs.enable_thinking` (the SDK's `thinking`) | `think` |
+| `response_format` `json_schema` / `json_object` / `text` | `format: <schema>` / `format: "json"` / nothing |
+| `messages[].content` parts: `text`, `image_url` with a `data:image/…;base64,` URL | `content` (texts joined by `\n`), `images: [<base64>]` |
+| `stream` | `stream`, **always stated** (Ollama streams by default) |
+
+| Ollama reply | OpenAI completion |
+|---|---|
+| `message.content` | `choices[0].message.content` |
+| `message.thinking` | `choices[0].message.reasoning` — the field the local engines use and `@crucible/client` reads |
+| `done_reason` `stop` / `length` | `finish_reason` `stop` / `length`; any other reason passed through as Ollama said it, never rounded to `stop` |
+| `prompt_eval_count`, `eval_count` | `usage.prompt_tokens`, `usage.completion_tokens`, `usage.total_tokens` |
+| NDJSON stream lines | SSE `chat.completion.chunk` frames: a role chunk, `reasoning` / `content` deltas, a finish chunk, a usage chunk if `stream_options.include_usage`, `[DONE]` |
+| `{"error": …}` mid-stream | one `data: {"error": {"message", "upstream": "ollama"}}` frame |
+| a stream that ends with no `done: true` line | an error frame naming the truncation and **no `[DONE]`** — a terminator there would make a cut answer read as a finished one |
+
+`keep_alive` is not sent: Ollama's residency is Ollama's (its default, 5 minutes, stands).
+
+**How a client states the context: `context_tokens`**, a top-level positive integer on the
+chat body — the tokens of prompt plus answer this request needs. Crucible's word rather than
+Ollama's, because it is the same quantity `GET /v1/capability?context_tokens=` already asks
+about, and a client sizing work should use one vocabulary for it. The SDK carries it as
+`ChatOptions.contextTokens`. On `anthropic/…` and `openai/…` it is **removed and said**
+(`X-Crucible-Context: {"num_ctx":null,"source":"dropped"}`): a hosted model's window is its
+provider's, and OpenAI would 400 an unknown argument. On a LOCAL model it is not read: the
+window is the engine's, fixed at load (`max_model_len`).
+
+**When the request does not state it**, the tag's OWN context is sent, never nothing:
+
+1. the tag's `PARAMETER num_ctx` from `POST /api/show` → `parameters` (source `modelfile`) —
+   the tag author's statement of what fits the card (Owen's `qwen3.8:27b-24g` states 98304
+   because the trained 262144 does not fit 24 GB, and sending 262144 over it would push the KV
+   cache into system RAM);
+2. else the weights' trained maximum, `model_info.<general.architecture>.context_length`
+   (source `model`).
+
+**Cache and invalidation.** `upstreams.OllamaContexts`, in memory on `app.state`, keyed by
+(Ollama address, tag) and **valid only while `GET /api/tags` reports the same digest for the
+tag**. `/api/tags` is asked on every chat that does not state `context_tokens` (one small
+local GET); `/api/show` only when the digest is new. Per digest rather than per process
+because the thing that changes a tag's context is `ollama create <same name>` with a new
+`PARAMETER num_ctx`, which keeps the name and changes the digest — a per-process cache would
+send the old number until Crucible restarted.
+
+**When the lookup fails.** `/api/tags` and `/api/show` are unbilled reads of the operator's
+own box, so a failure there is weather: **3 attempts** (`OLLAMA_LOOKUP_ATTEMPTS`), 0.5 s then
+2 s apart, 10 s timeout each, every miss logged by name. Then it is refused, and the chat is
+never sent:
+
+- nothing answered at all → **`upstream_unreachable`** (502), the same name the chat itself
+  would have met;
+- Ollama answered 5xx every time, or answered 200 without a readable context →
+  **`upstream_context_unknown`** (502), whose message tells the caller it may state
+  `context_tokens` itself;
+- a 4xx is Ollama's answer about the request (a tag that is not pulled is its 404) → passed
+  back at once as **`upstream_rejected`** with Ollama's own words, no retry.
+
+It **never falls back to 4096** — that number is the bug.
+
+**Visible on every upstream response:** `X-Crucible-Context: {"num_ctx": N, "source": S}`
+with `S` one of `request`, `modelfile`, `model` (Ollama), `dropped`, `upstream` (hosted), and
+a server log line per Ollama chat: `crucible: ollama chat '<tag>' at <url>: num_ctx N (S)`.
+`X-Crucible-Sampling`'s `thinking` is `request` for an Ollama chat that stated it (it is
+forwarded now), not `dropped`.
+
+**Fields the translation does not carry are refused, not dropped:** `upstream_field_unsupported`
+(400), naming the fields and listing what IS carried. A silently dropped field is exactly how
+`num_ctx` was lost; `num_ctx`, `options` or `num_predict` sent at the top level get a hint to
+use `context_tokens` and OpenAI's own names. `tools`, `n`, `logprobs`, message keys other than
+`role`/`content`, and `chat_template_kwargs` keys other than `enable_thinking` are refused the
+same way. OpenAI's `user` is accepted and not sent (it tags an end user for abuse monitoring
+and changes nothing about the answer). An image given by `http(s)` address is refused: Ollama
+takes bytes and this server does not fetch URLs for a caller.
+
+**Is a prompt longer than `num_ctx` still silently truncated?** Yes — by Ollama, and Crucible
+cannot see it happen. What is and is not detectable:
+
+- **Not detectable at the door:** the number of tokens SENT. That needs the model's tokenizer,
+  which this server does not have for somebody else's weights (and will not grow one).
+- **`prompt_eval_count` is not a detector.** It counts what Ollama EVALUATED after cutting, and
+  the 6.1 measurement returned 1026 at `num_ctx: 512` — above the window — so no arithmetic
+  on it against `num_ctx` separates "fit" from "cut". It may also exclude a cached prefix.
+- **Ollama's own server log** says `truncating input prompt` when it cuts. That is on the
+  Ollama host, not on the wire.
+- **What a client CAN do:** read `X-Crucible-Context.num_ctx`, compare it with its own
+  estimate of the prompt (its chars/4 or its tokenizer), and compare `usage.prompt_tokens`
+  with that estimate — a large shortfall is the signature of a front-cut. Stating
+  `context_tokens` sized to the prompt is the way to not be cut at all.
+
+Tests: `tests/test_upstream_chat.py`, the "ollama, natively" block, against the native
+endpoints of `tests/fake_upstream.py`.
 
 ### 3.5 Host mode — the `llama-windows` backend
 

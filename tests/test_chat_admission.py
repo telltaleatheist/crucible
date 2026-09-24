@@ -252,7 +252,7 @@ def test_each_engine_states_whether_it_serves_a_decision() -> None:
     assert llama.served and llama.max_logprobs is None
     assert "server-common.cpp" in llama.basis
     mlx = decide_reading("mlx-lm")
-    assert mlx.served and mlx.max_logprobs == 11
+    assert mlx.served and mlx.max_logprobs == 40  # the env patch (envpatches: 11 -> 40)
     pages = decide_reading("mlx-vlm")
     assert not pages.served and "compute_logprobs=False" in pages.basis
 
@@ -267,7 +267,8 @@ def test_vllm_is_started_with_the_cap_the_reader_clamps_to() -> None:
 
     manifest = load_manifest("qwen3.5-9b")
     args = Residency._engine_args(
-        manifest, manifest.backends["cuda-linux"], __import__("pathlib").Path("/w"), None
+        manifest, manifest.backends["cuda-linux"], __import__("pathlib").Path("/w"), None,
+        context=manifest.context_for("cuda-linux"),
     )
     assert args[args.index("--max-logprobs") + 1] == str(ENGINES["vllm"].max_logprobs)
     assert args[args.index("--logprobs-mode") + 1] == "raw_logprobs"

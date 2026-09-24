@@ -37,10 +37,13 @@ from .fake_hub import CHUNK, FakeHub
 GIB = 1024 ** 3
 BASE = "qwen3.5-9b"
 ALIAS = "qwen3.5-9b-vl"
+#: TWO since 2026-09-23. `qwen3.8-27b-8bit-vl` was served on cuda-linux alone
+#: and went with its base's cuda-linux arm (Owen: *"we shouldnt have an 8 bit
+#: 27b on here. waste of space, wont fit in the gpu"*); the test below that
+#: rebuilds it shows the loader would refuse it by name if it came back.
 ALIASES = {
     "qwen3.5-9b-vl": "qwen3.5-9b",
     "qwen3.8-27b-4bit-vl": "qwen3.8-27b-4bit",
-    "qwen3.8-27b-8bit-vl": "qwen3.8-27b-8bit",
 }
 MMPROJ = "mmproj-F16.gguf"
 
@@ -268,6 +271,47 @@ def test_a_backend_the_base_does_not_declare_is_weights_of_backend_missing(
     assert "llama-windows" in message
 
 
+def test_an_8bit_27b_vision_alias_on_cuda_linux_is_weights_of_backend_missing(
+    catalog_dir: Path,
+) -> None:
+    """The retired `qwen3.8-27b-8bit-vl`, rebuilt as it shipped until
+    2026-09-23: one cuda-linux block over the FP8 repo. Its base has no
+    cuda-linux block any more (Mac only, by Owen's ruling), so there is no
+    download for the alias to share and the loader says so by name."""
+    shipped = manifests_dir()
+    (catalog_dir / "qwen3.8-27b-8bit.toml").write_text(
+        (shipped / "qwen3.8-27b-8bit.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    _write_alias(
+        catalog_dir,
+        """
+[model]
+id = "qwen3.8-27b-8bit-vl"
+weights_of = "qwen3.8-27b-8bit"
+family = "qwen3.8"
+params_b = 27
+trained_context = 262144
+context_default = 12288
+modalities = ["text", "image"]
+display = "Qwen 3.8 · 27B (8-bit) · with vision"
+description = "retired"
+
+[backends.cuda-linux]
+engine = "vllm"
+hf_repo = "Qwen/Qwen3.8-27B-FP8"
+revision = "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
+serves = ["text", "image"]
+memory_bytes_estimate = 50_725_919_915
+engine_args = []
+""",
+        model_id="qwen3.8-27b-8bit-vl",
+    )
+    message = _refusal(catalog_dir, "qwen3.8-27b-8bit-vl")
+    assert "weights_of_backend_missing" in message
+    assert "cuda-linux" in message
+
+
 def test_an_alias_with_a_local_form_is_weights_of_local(catalog_dir: Path) -> None:
     _write_alias(
         catalog_dir,
@@ -278,11 +322,11 @@ def test_an_alias_with_a_local_form_is_weights_of_local(catalog_dir: Path) -> No
     assert "weights_of_local" in _refusal(catalog_dir)
 
 
-# ------------------------------------------------------------- the three aliases
+# ------------------------------------------------------------- the two aliases
 
 
 @pytest.mark.parametrize("alias_id, base_id", sorted(ALIASES.items()))
-def test_the_three_vision_forms_load_and_agree_with_their_bases(
+def test_the_vision_forms_load_and_agree_with_their_bases(
     alias_id: str, base_id: str
 ) -> None:
     alias = load_manifest(alias_id)
@@ -318,17 +362,19 @@ def test_the_three_vision_forms_load_and_agree_with_their_bases(
             assert alias.extra_files(kind) == ()
 
 
-def test_the_nine_b_vl_carries_the_tower_the_27bs_already_had_it() -> None:
-    """The 9B's calibrated weights are text-only, so the tower is added; the
-    27Bs' measured / blob-summed weights already hold it, so it is not."""
+def test_the_vl_aliases_carry_the_tower_their_text_bases_do_not() -> None:
+    """The 9B's calibrated weights are text-only, so the tower is added. The
+    27B-4bit's base term is text-only too since 2026-09-23 (its 17.68 GiB card
+    figure less the 921_460_192 B tower `--language-model-only` no longer
+    loads), so its alias adds that tower back. (The 8-bit's alias is gone with
+    its base's cuda-linux arm, 2026-09-23.)"""
     nine = load_manifest(ALIAS).spec(CUDA_LINUX).memory
     assert nine.weights_bytes == load_manifest(BASE).spec(CUDA_LINUX).memory.weights_bytes + 912_020_960
-    for alias_id in ("qwen3.8-27b-4bit-vl", "qwen3.8-27b-8bit-vl"):
-        alias = load_manifest(alias_id)
-        assert (
-            alias.spec(CUDA_LINUX).memory.weights_bytes
-            == alias.weights_base.spec(CUDA_LINUX).memory.weights_bytes
-        )
+    four = load_manifest("qwen3.8-27b-4bit-vl")
+    assert (
+        four.spec(CUDA_LINUX).memory.weights_bytes
+        == four.weights_base.spec(CUDA_LINUX).memory.weights_bytes + 921_460_192
+    )
 
 
 def test_the_nine_b_vl_leaves_about_1700_tokens_on_the_3090ti() -> None:
@@ -336,17 +382,16 @@ def test_the_nine_b_vl_leaves_about_1700_tokens_on_the_3090ti() -> None:
     terms = load_manifest(ALIAS).spec(CUDA_LINUX).memory
     budget = 25_757_220_864 - 3 * GIB
     assert terms.max_context(available_bytes=budget, concurrency=1) == 1_700
-    for alias_id in ("qwen3.8-27b-4bit-vl", "qwen3.8-27b-8bit-vl"):
-        terms = load_manifest(alias_id).spec(CUDA_LINUX).memory
-        assert terms.max_context(available_bytes=budget, concurrency=1) == 0
+    terms = load_manifest("qwen3.8-27b-4bit-vl").spec(CUDA_LINUX).memory
+    assert terms.max_context(available_bytes=budget, concurrency=1) == 0
 
 
 def test_decide_lists_the_aliases_and_the_text_classes_do_not() -> None:
     expected_decide = {
+        # No 8-bit 27B, text or vision: Mac only since 2026-09-23.
         CUDA_LINUX: [
-            "qwen3.8-27b-8bit-vl", "qwen3.8-27b-8bit", "qwen3.8-27b-4bit-vl",
-            "qwen3.5-9b-vl", "qwen3.8-27b-4bit", "qwen3.5-9b", "qwen3.5-4b",
-            "qwen3.5-0.8b",
+            "qwen3.8-27b-4bit-vl", "qwen3.5-9b-vl", "qwen3.8-27b-4bit",
+            "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-0.8b",
         ],
         MLX_DARWIN: [
             "qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b", "qwen3.5-4b",
@@ -360,7 +405,7 @@ def test_decide_lists_the_aliases_and_the_text_classes_do_not() -> None:
     text = {
         "clean": {k: ["qwen3.5-9b"] for k in (CUDA_LINUX, MLX_DARWIN, LLAMA_WINDOWS)},
         "translate": {
-            CUDA_LINUX: ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b"],
+            CUDA_LINUX: ["qwen3.8-27b-4bit", "qwen3.5-9b"],
             MLX_DARWIN: ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b"],
             LLAMA_WINDOWS: ["qwen3.8-27b-4bit", "qwen3.5-9b"],
         },
@@ -385,7 +430,7 @@ def test_the_small_tiers_are_untouched() -> None:
         assert classes_for_model(model_id) == ("decide",)
 
 
-def test_every_alias_the_catalog_ships_is_one_of_the_three() -> None:
+def test_every_alias_the_catalog_ships_is_one_of_the_two() -> None:
     shipped = {
         m.id: m.weights_of for m in load_all_manifests().values() if m.weights_of
     }

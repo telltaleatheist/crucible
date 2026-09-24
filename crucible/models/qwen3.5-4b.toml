@@ -122,6 +122,14 @@ engine_args = [
     "--max-num-seqs", "16",
     "--limit-mm-per-prompt", '{"image": 8, "video": 0}',
 ]
+# THE MOST A LOAD MAY ASK FOR HERE (`params.context`). COMPUTED 2026-09-23, LOAD TEST OWED, from the
+# [memory] terms below against the 3090 Ti's 21.0 GiB (24_564 MiB less the 3 GiB allowance = 22_535_995_392 B):
+#   9_216_572_511 weights + 3_516_504_474 overhead (tower and image reserve
+#   inside) = 12_733_076_985 B (11.86 GiB); the rest, 9_802_918_407 B / 40_337
+#   B/token (the 9B's measured slope; same attention shape) = 243_025 tokens.
+#   131072 is the cap, not the memory: a longer prefill is not worth its time, and it is ample. At 131072: 12_733_076_985 + 5_287_051_264 = 18_020_128_249 B
+#   = 16.78 GiB.
+max_context = 131072
 
 # ------------------------------------------------- the same number, taken apart
 #
@@ -226,6 +234,12 @@ serves = ["text"]
 #   at 16384        536_870_912
 memory_bytes_estimate = 11_017_420_134
 engine_args = []
+# THE MOST A LOAD MAY ASK FOR HERE. COMPUTED 2026-09-23, LOAD TEST OWED, from the terms below against
+# the Studio's 48.0 GiB (64 GiB less the 25% allowance = 51_539_607_552 B): 8_411_504_128 + 2_069_045_094 = 10_480_549_222 B fixed,
+# + 131072 x 32_768 (4_294_967_296) = 14_775_516_518 B = 13.76 GiB. The memory
+# would afford 1_253_023 tokens; 131072 is the cap, not the memory: a longer prefill is not worth its time, and it is ample. ADMISSION on this backend (mlx-lm
+# takes no context flag and allocates KV on demand), not an engine cap.
+max_context = 131072
 
 [backends.mlx-darwin.memory]
 weights_bytes = 8_411_504_128
@@ -265,6 +279,12 @@ mmproj = "mmproj-F16.gguf"
 serves = ["text", "image"]
 memory_bytes_estimate = 6_654_827_104
 engine_args = ["--parallel", "1"]
+# THE MOST A LOAD MAY ASK FOR HERE, composed as llama-server's `-c`. COMPUTED 2026-09-23, LOAD TEST OWED,
+# from the DECLARED terms below against the 3090 Ti's 21.0 GiB (24_564 MiB less the 3 GiB allowance = 22_535_995_392 B): 5_154_827_104 +
+# 963_129_088 = 6_117_956_192 B fixed, + 131072 x 32_768 (exact f16 KV on
+# llama.cpp) = 10_412_923_488 B = 9.70 GiB. The memory would afford 501_038
+# tokens; 131072 is the cap, not the memory: a longer prefill is not worth its time, and it is ample.
+max_context = 131072
 
 # `declared`: the files' own sizes, the computed 32_768, and what is left of the
 # 1.5 GB once that KV is taken out at 16384 (963_129_088, the same remainder as

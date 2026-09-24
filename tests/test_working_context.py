@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -247,26 +248,44 @@ def mac() -> Backend:
     )
 
 
-def test_the_ceiling_is_the_lower_of_the_card_and_the_weights(mac: Backend) -> None:
+def test_the_ceiling_is_the_lower_of_the_card_and_the_manifest_maximum(
+    mac: Backend,
+) -> None:
     """Owen, 2026-09-16: *"the max should obviously be the model's max, not the
-    technical memory max"*.
+    technical memory max"* — and 2026-09-23, *"set the max to something that
+    makes sense … something that wont page/thrash/OOM"*.
 
     His Mac affords over a million tokens of the 9B. The checkpoint stops at
-    262144. Publishing the first would be handing out a number nothing behind it
-    can honour — which is exactly what Ollama does and what this design exists
-    to refuse.
+    262144, and the manifest's `max_context` for mlx-darwin stops at 131072
+    (a longer prefill is not worth its time). The row is the SAME ceiling the
+    load door refuses against, so it publishes 131072, not the wall behind it.
     """
     ceiling = rows_for(mac)["qwen3.5-9b"]["max_context"]
-    assert ceiling["card_affords"] > ceiling["weights_allow"]
-    assert ceiling["tokens"] == ceiling["weights_allow"] == 262144
-    assert ceiling["limited_by"] == "weights"
+    assert ceiling["card_affords"] > ceiling["weights_allow"] > ceiling["max_context"]
+    assert ceiling["tokens"] == ceiling["max_context"] == 131072
+    assert ceiling["limited_by"] == "max_context"
 
 
-def test_the_same_model_is_limited_by_the_card_on_the_pc(pc: Backend) -> None:
-    """The other half of the asymmetry, and why the number has to be per server."""
-    ceiling = rows_for(pc)["qwen3.5-9b"]["max_context"]
-    assert ceiling["limited_by"] == "card"
-    assert ceiling["tokens"] == ceiling["card_affords"] < 262144
+def test_on_the_pc_the_card_binds_where_the_manifest_maximum_does_not(
+    pc: Backend,
+) -> None:
+    """The other half of the asymmetry, and why the number has to be per server.
+
+    The 9B and the 27B-4bit are held to the maxima their manifests computed
+    for this card (65536 and 32768), each just under what the card affords at
+    one in flight; the 9B-vl's intercept leaves the card room for only ~1,700
+    tokens, so there the CARD binds, below even its default.
+    """
+    rows = rows_for(pc)
+    nine = rows["qwen3.5-9b"]["max_context"]
+    assert (nine["tokens"], nine["limited_by"]) == (65536, "max_context")
+    assert nine["card_affords"] == 74_887
+    big = rows["qwen3.8-27b-4bit"]["max_context"]
+    assert (big["tokens"], big["limited_by"]) == (32768, "max_context")
+    assert big["card_affords"] == 33_945
+    vision = rows["qwen3.5-9b-vl"]["max_context"]
+    assert vision["limited_by"] == "card"
+    assert vision["tokens"] == vision["card_affords"] < 16384
 
 
 def test_both_walls_are_always_published(pc: Backend, mac: Backend) -> None:
@@ -281,22 +300,33 @@ def test_both_walls_are_always_published(pc: Backend, mac: Backend) -> None:
             if ceiling is None:
                 continue
             assert ceiling["tokens"] == min(
-                ceiling["card_affords"], ceiling["weights_allow"]
+                ceiling["card_affords"], ceiling["max_context"]
             )
-            assert ceiling["limited_by"] in {"card", "weights"}
+            assert ceiling["max_context"] <= ceiling["weights_allow"]
+            assert ceiling["limited_by"] in {"card", "max_context"}
             assert ceiling["basis"] in {"measured", "computed", "declared"}
 
 
 def test_a_model_the_card_cannot_hold_affords_no_context_at_all(pc: Backend) -> None:
     """Zero, and it stays a different answer from "your request is too long".
 
-    The bf16 27B needs 51.7 GiB of weights on a 24 GiB card. That is a refusal
-    about the MODEL; rounding it into a context refusal would send somebody off
-    to shorten a paragraph that was never the problem.
+    The 4-bit 27B's weights are 17.68 GiB; on a 12 GiB card that is a refusal
+    about the MODEL, and rounding it into a context refusal would send somebody
+    off to shorten a paragraph that was never the problem.
+
+    (This read the 8-bit 27B on the 3090 Ti until 2026-09-23, when the 8-bit
+    lost its cuda-linux block — Owen: *"we shouldnt have an 8 bit 27b on here.
+    waste of space, wont fit in the gpu"*. Every cuda-linux block now holds its
+    weights on that card, so the too-small card is a smaller one.)
     """
-    ceiling = rows_for(pc)["qwen3.8-27b-8bit"]["max_context"]
+    small = replace(pc, gpu=replace(pc.gpu, name="RTX 3060", vram_bytes=12 * 1024**3))
+    ceiling = rows_for(small)["qwen3.8-27b-4bit"]["max_context"]
     assert ceiling["tokens"] == 0
     assert ceiling["card_affords"] == 0
+    # And on the 3090 Ti the 8-bit has no row to publish a ceiling in at all.
+    eight = rows_for(pc)["qwen3.8-27b-8bit"]
+    assert eight["backend_supported"] is False
+    assert eight["max_context"] is None
 
 
 def test_a_block_with_no_terms_publishes_no_ceiling(pc: Backend) -> None:

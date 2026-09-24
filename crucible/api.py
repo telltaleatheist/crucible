@@ -672,6 +672,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.state.store = JobStore(config, backend, registry)
     app.state.streams = StreamManager(residency)
     app.state.inflight = InFlight()
+    # What each Ollama tag's own context is, remembered per digest
+    # (`upstreams.OllamaContexts`, PHASE15-HOST.md section 3.4a).
+    app.state.ollama_contexts = upstreams.OllamaContexts()
     # The last few settings writes, for `/v1/activity` (PHASE15-HOST.md section
     # 3.2). In memory and a restart forgets, like a task's record: this is a
     # display of "who changed what just now" when two apps and a page all edit
@@ -886,9 +889,13 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         EVERY ROW STATES ITS WORK: `work` is the working context the fit was
         computed for, with `from: "default" | "request"`, and a client-sized
         row adds `context_ceilings` — each candidate's longest servable
-        request here, the smaller of what its manifest serves on this backend
-        (the engine's `--max-model-len`) and what this host's memory affords.
-        A size above the ceiling is `400 context_over_limit`, never clamped.
+        request here, the smaller of the most its manifest ever starts an
+        engine with on this backend (`max_context`, or `context_default` where
+        none is stated) and what this host's memory affords. A size above the
+        ceiling is `400 context_over_limit`, never clamped. A `load-model` with
+        `params.context` is held to the same ceiling (at one in flight) and
+        refused with the same body; that is how a client reaches a ceiling
+        above the resident model's `max_model_len`.
 
         `enabled: false` IS AN ANSWER, not an error. A server that cannot
         translate says so with the number that decided it, and a client should be
@@ -4180,19 +4187,30 @@ async def _forward_to_upstream(
             {"upstream": name, "model": requested},
         )
 
-    forwarded = upstreams.forward_body(name, model_id, body)
+    # Before the work, so an unknown act is a 400 rather than a BILLED
+    # completion reported under a name nobody knows — and before Ollama's
+    # context lookup, which is a round trip a refused request should not cost.
+    act = read_act(request.headers)
+    client: httpx.AsyncClient = request.app.state.http
+    if name == "ollama":
+        # Section 3.4a: Ollama is spoken natively and its body cannot be built
+        # without the `num_ctx` it runs at, which may have to be asked for.
+        forwarded = await upstreams.forward_ollama(
+            client, record, model_id, body, request.app.state.ollama_contexts
+        )
+    else:
+        forwarded = upstreams.forward_body(name, model_id, body)
     sampling_headers = {
         SAMPLING_HEADER: json.dumps(
             forwarded.sources, separators=(",", ":"), sort_keys=True
-        )
+        ),
+        upstreams.CONTEXT_HEADER: json.dumps(
+            forwarded.context, separators=(",", ":"), sort_keys=True
+        ),
     }
     url = upstreams.chat_url(record)
     headers = upstreams.chat_headers(record)
-    client: httpx.AsyncClient = request.app.state.http
     inflight: InFlight = request.app.state.inflight
-    # Before the work, so an unknown act is a 400 rather than a BILLED
-    # completion reported under a name nobody knows.
-    act = read_act(request.headers)
     entry = inflight.open(act=act, model=requested, client=client_agent)
     try:
         if body.get("stream") is True:
@@ -4232,7 +4250,7 @@ async def _forward_to_upstream(
             return _rate_limited(name, upstream, payload)
         if upstream.status_code != 200:
             raise _upstream_rejected(name, upstream.status_code, payload)
-        if forwarded.translate_reply:
+        if forwarded.dialect != upstreams.DIALECT_OPENAI:
             try:
                 document = json.loads(payload)
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -4242,9 +4260,12 @@ async def _forward_to_upstream(
                     f"{name} answered 200 with a body that is not JSON: {exc}",
                     {"upstream": name, "upstream_status": 200},
                 ) from None
-            content = json.dumps(
+            translated = (
                 upstreams.anthropic_to_openai(document, requested)
-            ).encode("utf-8")
+                if forwarded.dialect == upstreams.DIALECT_ANTHROPIC
+                else upstreams.ollama_to_openai(document, requested)
+            )
+            content = json.dumps(translated).encode("utf-8")
         else:
             content = _set_model_in_response(payload, requested)
         return Response(
@@ -4291,9 +4312,10 @@ async def _stream_from_upstream(
     turns out to be an error — the same rule `_proxy_stream` follows for the
     local engine.
 
-    Anthropic's frames are a different protocol and are TRANSLATED
-    (`upstreams.AnthropicStreamTranslator`); OpenAI's and Ollama's are relayed
-    with one substitution, the `model` the caller asked for.
+    Anthropic's SSE and Ollama's NDJSON are different protocols and are
+    TRANSLATED (`upstreams.AnthropicStreamTranslator`,
+    `upstreams.OllamaStreamTranslator`); OpenAI's is relayed with one
+    substitution, the `model` the caller asked for.
     """
     name = record.name
     upstream_request = client.build_request(
@@ -4327,8 +4349,16 @@ async def _stream_from_upstream(
         await when_relayed()
         raise _upstream_rejected(name, upstream.status_code, payload)
 
-    if forwarded.translate_reply:
-        translator = upstreams.AnthropicStreamTranslator(requested)
+    if forwarded.dialect != upstreams.DIALECT_OPENAI:
+        translator: (
+            upstreams.AnthropicStreamTranslator | upstreams.OllamaStreamTranslator
+        ) = (
+            upstreams.AnthropicStreamTranslator(requested)
+            if forwarded.dialect == upstreams.DIALECT_ANTHROPIC
+            else upstreams.OllamaStreamTranslator(
+                requested, include_usage=forwarded.include_usage
+            )
+        )
 
         async def relay() -> AsyncIterator[bytes]:
             async for chunk in upstream.aiter_bytes():

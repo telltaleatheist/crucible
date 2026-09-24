@@ -540,10 +540,16 @@ ALIAS, whose weights are the base's download and nothing else.
 - **Classes.** `decide` lists the aliases (family match, `aliases=True`); `clean`,
   `translate`, `simplify` and `analysis` do not — an alias is its base served dearer, and a
   best-first walk would otherwise put `qwen3.5-9b-vl` ahead of `qwen3.5-9b` for text.
-- **The three aliases**: `qwen3.5-9b-vl`, `qwen3.8-27b-4bit-vl`, `qwen3.8-27b-8bit-vl`, each
-  serving `["text", "image"]` on cuda-linux (vLLM without the two text-only flags, with
-  `--limit-mm-per-prompt {"image": 8, "video": 0}`) and, where the base has one, llama-windows
-  (the base's GGUF + `mmproj-F16.gguf`); no mlx-darwin block. Memory in section 7.3.
+- **The two aliases**: `qwen3.5-9b-vl` and `qwen3.8-27b-4bit-vl`, each serving
+  `["text", "image"]` on cuda-linux (vLLM without the two text-only flags, with
+  `--limit-mm-per-prompt {"image": 8, "video": 0}`) and llama-windows (the base's GGUF +
+  `mmproj-F16.gguf`); no mlx-darwin block. Memory in section 7.3. A third,
+  `qwen3.8-27b-8bit-vl`, shipped on cuda-linux alone and was **removed 2026-09-23** with its
+  base's cuda-linux arm — Owen: *"we shouldnt have an 8 bit 27b on here. waste of space, wont
+  fit in the gpu"*. The FP8 weights alone are 28.75 GiB against a 24 GB card, so that arm
+  could only be downloaded and refused; the 8-bit 27B is mlx-darwin only, and an alias with
+  no backend is not a model (nor could it keep a cuda-linux block its base lacks:
+  `weights_of_backend_missing`).
 
 **Windows, Owen 2026-09-23 (verbatim):** *"the original intent with windows was that
 everything would go through WSL if it exists and nothing would exist on windows. no models.
@@ -646,7 +652,7 @@ here for the product door.
    i.e. it does not usefully fit there, which the fit table would say by itself.
 
    **RULED AND BUILT 2026-09-23** (Owen: *"One copy on disk, two fit rows in the catalog"*):
-   `[model] weights_of`, section 2.9. The three aliases' memory, COMPUTED as the base's number
+   `[model] weights_of`, section 2.9. The aliases' memory, COMPUTED as the base's number
    plus the tower plus the 1.90 GiB (2_040_109_466 B) reserve — the tower term turning out to
    be ZERO on both 27Bs, because their base figures already hold it:
 
@@ -656,7 +662,7 @@ here for the product door.
    | | llama-windows | 11_945_668_128 | base 11_027_502_048 + `mmproj-F16.gguf` 918_166_080 (tree API @ 3885219b), declared |
    | `qwen3.8-27b-4bit-vl` | cuda-linux | 23_673_280_922 | base 21_633_171_456 + 0 (its measured 17.68 GiB of card weights exceed the file's whole 17.29 GiB — tower resident, pre-`--language-model-only`) + reserve. Terms: 18_983_441_367 / 1_546_188_226 + reserve = 3_586_297_692 / 86_251; 23_982_875_443 at 16384 (1.3% over) |
    | | llama-windows | 18_892_047_712 | base 17_964_440_224 + `mmproj-F16.gguf` 927_607_488 (tree API @ 4ca72078), declared |
-   | `qwen3.8-27b-8bit-vl` | cuda-linux | 50_725_919_915 | base 48_685_810_449 (computed) + 0 (its weights term is the whole repo's blobs; the base never passed `--language-model-only`) + reserve. Terms: 30_866_866_928 / 17_818_943_521 + reserve = 19_859_052_987 / 65_536; 51_531_226_283 at 12288 (1.6% over) |
+   | ~~`qwen3.8-27b-8bit-vl`~~ | ~~cuda-linux~~ | — | **Removed 2026-09-23** with the 8-bit 27B's cuda-linux arm (Owen: *"we shouldnt have an 8 bit 27b on here. waste of space, wont fit in the gpu"*): its FP8 weights alone, 28.75 GiB, exceed the card. It read 50_725_919_915 (base 48_685_810_449 + 0 + reserve). The 8-bit 27B is mlx-darwin only, where mlx-lm serves text, so it has no vision form. |
 
    The towers, re-read 2026-09-23: `Qwen/Qwen3.8-27B` @ 1d4bf0f2, `avyukth/Qwen3.8-27B-AWQ-INT4`
    @ 5a2ee524 and `Qwen/Qwen3.8-27B-FP8` @ 017b9c7a all state vision_config depth 27, hidden
@@ -665,7 +671,8 @@ here for the product door.
    On the 3090 Ti's fit budget (25_757_220_864 − 3 GiB = 22_535_995_392 B) the 9B-vl's
    intercept 22_467_388_077 leaves **1,700 tokens** of KV (the "~2,000" above, to the byte);
    its `context_default` stays 16384, so the fit table refuses it there rather than a row
-   serving a context no client could use. Both 27B-vl intercepts exceed that budget outright.
+   serving a context no client could use. The 27B-4bit-vl's intercept exceeds that budget
+   outright (as the retired 8-bit-vl's did).
 4. **The Mac**: if mlx-lm 0.31.3 cannot return top logprobs, is `decide_not_served` on
    mlx-darwin acceptable for this phase, or does Crucible's own page server grow a logprobs
    path (as it grew batching)? (Proposed: refuse by name now; grow it when a Mac consumer

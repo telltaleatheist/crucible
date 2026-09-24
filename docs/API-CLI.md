@@ -316,6 +316,15 @@ crucible api chat --act translate --body @translate-request.json
 crucible api job submit --type unload-model --model qwen3.5-9b --follow
 ```
 
+A load may start the engine at a longer context than the model's default, up to
+this host's ceiling (`crucible api capability`'s `generate` row lists it per
+model); above it the submit is refused `context_over_limit` before anything is
+evicted. Loading the resident model again at a new context is a reload:
+
+```bash
+crucible api job submit --type load-model --model qwen3.5-9b --params '{"context": 65536}' --follow
+```
+
 Send `"thinking": false` in the body for a cleanup pass: Qwen3.5 otherwise
 spends a bounded budget entirely on reasoning (measured; the same rule
 BookForge's `crucible` provider follows).
@@ -328,8 +337,8 @@ BookForge's `crucible` provider follows).
 | `tts` | voice id | `{"language","take","chunks":[{"index","text"}]}` | none |
 | `load-voice` | voice id | `{"timeout_s": …}`, plus `reference` for a `zeroshot` voice | none |
 | `unload-voice` / `unload-model` / `unload-aligner` / `unload-denoiser` | id | `{}` | none |
-| `load-model` | model id | `{"timeout_s": …}` | none |
-| `asr` | whisper id | `{"language","vad_filter","word_timestamps"}` | exactly one audio file; `"auto"` is a language |
+| `load-model` | model id | `{"timeout_s": …, "context": …, "lease": {"act": …, "ttl_seconds": …}}` — every key optional; `context` is refused above this host's ceiling (`context_over_limit`) | none |
+| `asr` | whisper id | `{"language","vad_filter","word_timestamps"[, "initial_prompt"]}` | exactly one audio file; `"auto"` is a language; `initial_prompt` is a string or null |
 | `align` | aligner id | `{"language","chunks":[{"index","text"}]}` | one per chunk, named `<index>.<ext>` |
 | `align-longform` | aligner id | `{"language","sentences":[{"index","text","kind"}],"rough_model","chunk_s",…}` | exactly one audio file — the whole audiobook |
 | `rvc` | rvc voice id | `{"index_rate","protect_rate","n_semitones"[, "f0_method","hop_length"]}` | many, all the same extension |

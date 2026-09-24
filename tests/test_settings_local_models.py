@@ -5,11 +5,15 @@ capabilities. Foundry chooses its input-processing and language models."* The
 engine runs them and owns the arithmetic; this door is where the choice is
 made, so the two never have to guess at each other.
 
-The numbers here are the real ones a `cuda-linux` build ships: `qwen3.8-27b-8bit`
-at 45.3 GiB and `qwen3.8-27b-4bit` at 20.1 GiB, against the 23 GiB budget the
-shared fixture decides (26 GiB card, 3 GiB desktop allowance). That pair is not
-a convenience — it is the Mac's own configuration, where the default names a
-full-size 27B that is not installed while the 4-bit variant beside it runs.
+The numbers here are the real ones a `cuda-linux` build ships:
+`qwen3.8-27b-4bit` at 20.1 GiB against the 23 GiB budget the shared fixture
+decides (26 GiB card, 3 GiB desktop allowance), and against 13 GiB on a smaller
+card where it does not fit.
+
+`qwen3.8-27b-8bit` is NOT among a cuda-linux build's choices at all since
+2026-09-23 — Owen: *"we shouldnt have an 8 bit 27b on here. waste of space,
+wont fit in the gpu"* — so choosing it there is `local_model_unknown`, the same
+refusal as any id the build does not offer, not a does-not-fit.
 """
 
 from __future__ import annotations
@@ -57,11 +61,10 @@ def test_the_document_offers_every_selectable_class_and_null_for_automatic(setti
     # default is still the largest thing that fits, and preferring a 9B at bf16
     # over a 27B at 4-bit for speed is a trade no arithmetic here can rank.
     assert [row["id"] for row in offered] == [
-        "qwen3.8-27b-8bit",
         "qwen3.8-27b-4bit",
         "qwen3.5-9b",
     ]
-    assert [row["fits"] for row in offered] == [False, True, True]
+    assert [row["fits"] for row in offered] == [True, True]
     assert offered[0]["memory_bytes_estimate"] > offered[1]["memory_bytes_estimate"]
     # `installed` is a fact about this disk and every row carries it, so a
     # chooser never has to infer "probably not" from a missing key.
@@ -117,26 +120,42 @@ def test_a_model_that_is_not_installed_may_still_be_chosen(settings_client, auth
     assert load_config(home).local_model("translate") == fitting["id"]
 
 
-def test_a_choice_that_does_not_fit_is_refused_with_the_arithmetic(settings_client, auth, home):
+def test_a_choice_that_does_not_fit_is_refused_with_the_arithmetic(make_client, auth, home):
+    # A 16 GiB card: 13 GiB to give once the 3 GiB desktop allowance is kept,
+    # and the 4-bit 27B needs 20.1. (This read the 8-bit on the 26 GiB card
+    # until the 8-bit stopped being offered on cuda-linux, 2026-09-23.)
+    with make_client(enable_llm=True, capability=decided(total=16 * 1024 ** 3)) as client:
+        response = put(client, auth, {"local_models": {"translate": "qwen3.8-27b-4bit"}})
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "local_model_does_not_fit"
+        details = error["details"]
+        assert details["field"] == "local_models.translate"
+        assert details["capability"] == "translate"
+        assert details["model"] == "qwen3.8-27b-4bit"
+        assert details["shortfall_bytes"] == (
+            details["memory_bytes_estimate"] - details["available_bytes"]
+        )
+        assert details["shortfall_bytes"] > 0
+        # The numbers are in the sentence too, because the person who chose is
+        # the one who has to act on them.
+        assert "20.1 GiB" in error["message"] and "13.0 GiB" in error["message"]
+        # A REFUSAL APPLIES NOTHING.
+        assert load_config(home).local_model("translate") is None
+        assert document(client, auth)["local_models"]["translate"] is None
+
+
+def test_the_8bit_27b_is_not_a_choice_on_cuda_linux(settings_client, auth, home):
+    """Not offered, so not refused for its size: the build has no cuda-linux
+    block for it, and it is answered exactly as an id the build does not ship."""
     client = settings_client
     response = put(client, auth, {"local_models": {"translate": "qwen3.8-27b-8bit"}})
-    assert response.status_code == 409
+    assert response.status_code == 400
     error = response.json()["error"]
-    assert error["code"] == "local_model_does_not_fit"
-    details = error["details"]
-    assert details["field"] == "local_models.translate"
-    assert details["capability"] == "translate"
-    assert details["model"] == "qwen3.8-27b-8bit"
-    assert details["shortfall_bytes"] == (
-        details["memory_bytes_estimate"] - details["available_bytes"]
-    )
-    assert details["shortfall_bytes"] > 0
-    # The numbers are in the sentence too, because the person who chose is the
-    # one who has to act on them.
-    assert "45.3 GiB" in error["message"] and "23.0 GiB" in error["message"]
-    # A REFUSAL APPLIES NOTHING.
+    assert error["code"] == "local_model_unknown"
+    assert error["details"]["model"] == "qwen3.8-27b-8bit"
+    assert error["details"]["choices"] == ["qwen3.8-27b-4bit", "qwen3.5-9b"]
     assert load_config(home).local_model("translate") is None
-    assert document(client, auth)["local_models"]["translate"] is None
 
 
 def test_null_restores_the_automatic_decision(settings_client, auth, home):
@@ -170,7 +189,6 @@ def test_an_unknown_model_is_refused_and_names_what_there_was(settings_client, a
     error = response.json()["error"]
     assert error["code"] == "local_model_unknown"
     assert error["details"]["choices"] == [
-        "qwen3.8-27b-8bit",
         "qwen3.8-27b-4bit",
         "qwen3.5-9b",
     ]

@@ -389,7 +389,7 @@ def test_the_models_row_advertises_the_defaults(
     assert rows[MODEL]["defaults"]["temperature"] is None
     # A model that states none says so with every key null, never by omitting
     # the field.
-    assert rows["qwen3.8-27b-8bit"]["defaults"] == {key: None for key in DEFAULTS_KEYS}
+    assert rows["qwen3.8-27b-4bit"]["defaults"] == {key: None for key in DEFAULTS_KEYS}
 
 
 def test_the_openai_listing_advertises_them_too(

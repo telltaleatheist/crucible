@@ -200,7 +200,7 @@ because the variants he names do not all exist:
 | he said | exists today |
 | --- | --- |
 | 3.5:9b | `qwen3.5-9b` (bf16) — yes |
-| 3.8:27b | the bf16 is GONE (2026-09-17) — it fit nothing either of us owns, so `qwen3.8-27b-8bit` replaced it: FP8 on cuda-linux, MLX 8-bit on the Mac, where it fits |
+| 3.8:27b | the bf16 is GONE (2026-09-17) — it fit nothing either of us owns, so `qwen3.8-27b-8bit` replaced it: MLX 8-bit on the Mac, where it fits. **Mac only** since 2026-09-23 — its FP8 cuda-linux arm was removed (Owen: *"we shouldnt have an 8 bit 27b on here. waste of space, wont fit in the gpu"*; the FP8 weights alone are 28.75 GiB against a 24 GB card). The PC's 27B is `qwen3.8-27b-4bit` |
 | 9b quantized to 16 bit | that IS bf16 — `qwen3.5-9b` |
 | a 9B 4-bit | **no** — `capability.py` currently says out loud that this build ships none |
 | 27b 4-bit | `qwen3.8-27b-4bit` — yes |

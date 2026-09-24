@@ -651,21 +651,53 @@ the smaller of two figures Crucible already owns:
 
 | half | owner | what it is |
 |---|---|---|
-| served | `ModelManifest.context_for(backend)` | what the engine is started with: vLLM `--max-model-len`, llama-server `-c`, the resident row's `max_model_len` |
+| served | `ModelManifest.max_context_for(backend)` | the most this backend ever starts an engine with: the block's `max_context`, or its `context_default` where it states none — the most a `load-model`'s `params.context` may ask for |
 | memory | `MemoryTerms.max_context(available_bytes, concurrency)` | the longest context this host's memory affords beside the weights |
+
+`max_context` is a per-backend manifest key (2026-09-23), on Owen's *"set the max to something
+that makes sense. for both. something that wont page/thrash/OOM"*. Each value is **computed, not
+measured** (*"do the math, dont do the measurement right now"*), shows its arithmetic in its
+manifest, and is marked "computed 2026-09-23, load test owed". The parser holds it to a positive
+int, at most `[model] trained_context`, at least the block's own served default. A block without
+one is capped at its `context_default`, as every block was before the key. `context_default` stays
+what a load that states no context starts at.
 
 What that comes out to today, at one in flight (3090 Ti: 21.0 GiB available; Studio: 48.0 GiB):
 
-| model | cuda-linux | mlx-darwin |
-|---|---|---|
-| `qwen3.5-9b` | **16384** (served; memory would allow ~74.9k) | **16384** (served; memory ~963k) |
-| `qwen3.8-27b-4bit` | **16384** (served; memory ~23.3k) | **98304** (served; block not taken apart) |
-| `qwen3.8-27b-8bit` | 0 (weights do not fit) | **12288** (served; memory ~64.4k) |
+| model | cuda-linux | mlx-darwin | llama-windows |
+|---|---|---|---|
+| `qwen3.5-9b` | **65536** (max_context; memory 74,887) | **131072** (max_context; memory ~963k) | 131072 (max_context; memory ~368k) |
+| `qwen3.8-27b-4bit` | **32768** (max_context; memory 33,945) | **131072** (max_context; block not taken apart) | 65536 (max_context; memory 86,140) |
+| `qwen3.8-27b-8bit` | no block (Mac only, 2026-09-23) | **131072** (max_context; memory 162,603) | no block |
 
-**The PC figure is not the ~98k the ruling expected.** The manifests serve 16384 on cuda-linux for
-both the 9B and the 27B-4bit; 98304 is the 27B-4bit's `[model] context_default`, served only on
-mlx-darwin. On the 3090 Ti the memory half would allow ~75k for the 9B, so raising the served
-figure is a manifest decision (and a measurement), not a change to this rule.
+`generate`'s candidates are those three on mlx-darwin and the first two elsewhere (the 9B floor).
+The 8-bit 27B has no cuda-linux block since 2026-09-23 — Owen: *"we shouldnt have an 8 bit 27b
+on here. waste of space, wont fit in the gpu"*. Its FP8 weights alone are 28.75 GiB, more than
+the 3090 Ti holds, so the row that read "0 (weights do not fit)" was an arm that could only be
+downloaded and refused; the model is simply not offered there. The ceiling arithmetic, as each manifest
+carries it:
+
+- **27B-4bit, cuda-linux, 32768.** Non-KV 18.26 GiB (17.68 GiB measured weights less the 0.86 GiB
+  vision tower `--language-model-only` no longer loads, plus 1.44 GiB measured overhead); 21.0 −
+  18.26 = 2.73 GiB at the measured 86,251 B/token (vLLM pads attention pages to the linear layers'
+  state) = 33,945 → 32768. Owen's earlier ~98k on this PC was Ollama/llama.cpp, whose KV for this
+  hybrid is exact and unpadded (64 KiB/token f16, half with q8_0). fp8 KV on vLLM would roughly
+  double this; it is unverified on Ampere with this attention backend and not enabled — a load
+  test owed.
+- **9B, cuda-linux, 65536.** Non-KV 18.17 GiB (the calibrated intercept); 2.81 GiB / 40,337 B =
+  74,887 → 65536.
+- **8-bit 27B, mlx-darwin, 131072.** Its overhead had been inherited from the 4-bit's Mac peak at a
+  98,220-token completion, which already contained that run's KV (98,220 × 65,536 =
+  6,436,945,920 B), and the terms added KV again — the reason this row read ~64k. Corrected
+  overhead 11,381,997,601 B; 29.5 GB weights + 11.38 GB + 131072 × 65,536 (8.59 GB) = 49.5 GB =
+  46.1 GiB of 48.0.
+- **4-bit 27B and 9B, mlx-darwin, 131072.** Memory affords far more (the 4-bit: 33.55 GiB at
+  131072 with the same corrected residual, 37.1 GiB even if the residual grew with length); 131072
+  is the cap because the 262144 trained window is not worth its prefill time.
+
+On mlx-darwin every one of these is **admission, not an engine cap**: mlx-lm takes no context flag
+and allocates KV on demand, so a load's context is recorded as the resident `max_model_len` and
+nothing in the engine refuses past it.
 
 **Refusals, all by name.** `capability_class_required` (a size with no `class`),
 `unknown_capability`, `capability_not_client_sized`, `invalid_working_context` (not a positive
@@ -677,9 +709,16 @@ requires. A routed `generate` is not checked against this card's ceiling, becaus
 not run here.
 
 **The fit checks the served half too, for a client-sized class only.** A client may ask for more
-than an engine is started with, and a fit that said yes to a request the engine then refuses would
-be a lie. The other classes keep the memory-only fit they have always had.
+than any engine here is ever started with, and a fit that said yes to a request no engine can take
+would be a lie. The other classes keep the memory-only fit they have always had.
 
-**What is not done here.** The load-model job still starts every engine at `context_for(backend)`.
-Until a load can take a context, a ceiling above the served half cannot be reached, which is why
-the ceiling is capped by it.
+**Reaching the ceiling: `load-model` takes a context (2026-09-23).** `params.context` starts the
+engine at that length — vLLM's `--max-model-len`, llama-server's `-c`, and the `KvPlan` that sizes
+vLLM's pool — and the resident row and `GET /v1/models` report it as `max_model_len`. It is checked
+against **the same function** (`Candidate.context_ceiling`, via `check_load_context`, at one in
+flight) and refused with the same `400 context_over_limit` body, before anything is evicted.
+Absent, the load starts at `context_default` as before. So a `generate` client that reads a
+ceiling above the resident model's `max_model_len` reloads it with `params.context`; the contract
+is in PHASE2-LLM.md section 5. `GET /v1/models`' `max_context` row is the same ceiling at one in
+flight (`{tokens, card_affords, max_context, weights_allow, limited_by: "card" | "max_context",
+concurrency, basis}`), so no door publishes a limit another door refuses.

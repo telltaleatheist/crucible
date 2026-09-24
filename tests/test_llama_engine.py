@@ -474,7 +474,9 @@ def test_the_spawn_line_is_facts_3_and_the_alias_decision(tmp_path: Path) -> Non
     weights_dir = tmp_path / "dots"
     # `None`: llama-server is not vLLM and has no KV pool to size
     # (crucible/vram.py returns None for every engine but vllm).
-    args = Residency._engine_args(manifest, spec, weights_dir, None)
+    args = Residency._engine_args(
+        manifest, spec, weights_dir, None, context=manifest.context_for(LLAMA_WINDOWS)
+    )
     assert args[:2] == ["-m", str(weights_dir / "dots.ocr-Q8_0.gguf")]
     assert "--mmproj" in args
     assert args[args.index("--mmproj") + 1] == str(
@@ -498,7 +500,9 @@ def test_the_spawn_line_is_facts_3_and_the_alias_decision(tmp_path: Path) -> Non
 def test_a_text_model_gets_no_mmproj(tmp_path: Path) -> None:
     manifest = load_manifest("qwen3.5-9b")
     spec = manifest.spec(LLAMA_WINDOWS)
-    args = Residency._engine_args(manifest, spec, tmp_path, None)
+    args = Residency._engine_args(
+        manifest, spec, tmp_path, None, context=manifest.context_for(LLAMA_WINDOWS)
+    )
     assert "--mmproj" not in args
     assert args[args.index("-c") + 1] == str(manifest.context_for(LLAMA_WINDOWS))
 
@@ -774,3 +778,25 @@ def test_a_load_preflight_passes_on_a_fake_llama_windows_accelerator(
     job_type = LoadModelJobType(config, backend, Residency(config))
     assert job_type.check(backend).ready
     job_type.preflight("dots-ocr", {})
+
+
+def test_a_loads_context_is_llama_servers_c(tmp_path: Path) -> None:
+    """`-c` is composed in `Residency._engine_args` from the load's context, so
+    `params.context` reaches llama-server by the same path as vLLM's
+    `--max-model-len`."""
+    manifest = load_manifest("qwen3.8-27b-4bit")
+    spec = manifest.spec(LLAMA_WINDOWS)
+    args = Residency._engine_args(manifest, spec, tmp_path, None, context=65536)
+    assert args.count("-c") == 1
+    assert args[args.index("-c") + 1] == "65536"
+
+
+def test_mlx_lm_is_handed_no_context_flag(tmp_path: Path) -> None:
+    """mlx-lm takes no context flag and allocates KV on demand: a load's context
+    is recorded as the resident row's `max_model_len` (admission), and nothing
+    reaches the engine's argv."""
+    manifest = load_manifest("qwen3.8-27b-8bit")
+    spec = manifest.spec("mlx-darwin")
+    args = Residency._engine_args(manifest, spec, tmp_path, None, context=131072)
+    assert "131072" not in args
+    assert "--max-model-len" not in args and "-c" not in args

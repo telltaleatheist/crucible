@@ -290,6 +290,9 @@ engine_args = [
     "--gpu-memory-utilization", "0.5",
     "--max-num-seqs", "16",
 ]
+# NO `max_context`: the estimate here is a budget (0.5 x the card), not a sum of
+# terms, so there is nothing to compute a maximum from (below). The ceiling is
+# this block's 32768.
 
 # ---------------------------------------- NO [memory] TABLE HERE, DELIBERATELY
 #
@@ -370,6 +373,8 @@ revision = "98b9cda3930eb69d2b887781685f3f393d6f141e"
 memory_bytes_estimate = 13_963_861_086
 context_default = 32768
 engine_args = ["--width", "12"]
+# NO `max_context`: this block has no [memory] terms to compute one from, and
+# the `pages` class's context is its own ruling (32768), not a client's.
 
 # ---------------------------------------- NO [memory] TABLE HERE, DELIBERATELY
 #
@@ -413,6 +418,8 @@ mmproj = "mmproj-dots.ocr-Q8_0.gguf"
 memory_bytes_estimate = 4_738_598_784
 context_default = 16384
 engine_args = ["--parallel", "1"]
+# NO `max_context`: no [memory] terms here to compute one from; the ceiling is
+# this block's own 16384.
 
 # ---------------------------------------- NO [memory] TABLE HERE, DELIBERATELY
 #

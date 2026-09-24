@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from crucible import capability, upstreams
 from crucible.sampling import SAMPLING_HEADER
 
+from . import fake_upstream
 from .fake_upstream import ANSWER, FakeUpstream
 from .test_settings_api import ANTHROPIC_KEY, OPENAI_KEY, decided
 
@@ -23,6 +24,16 @@ from .test_settings_api import ANTHROPIC_KEY, OPENAI_KEY, decided
 def upstream():
     with FakeUpstream() as running:
         yield running
+
+
+@pytest.fixture(autouse=True)
+def no_lookup_waits(monkeypatch):
+    """The Ollama context lookup's budget, without its sleeps.
+
+    The ATTEMPTS are the budget under test; the waits between them are
+    seconds that would only make the suite slower.
+    """
+    monkeypatch.setattr(upstreams, "OLLAMA_LOOKUP_BACKOFF_SECONDS", (0.0, 0.0))
 
 
 @pytest.fixture
@@ -137,11 +148,12 @@ def test_thinking_is_dropped_and_the_audit_says_dropped(
 ) -> None:
     """BookForge sends `thinking: false` on every cleanup call.
 
-    None of the three upstreams reads `chat_template_kwargs`, so the table is
+    Neither hosted upstream reads `chat_template_kwargs`, so the table is
     dropped rather than forwarded blind — and the header says `dropped`, which
-    is neither "the model got it" nor "nobody asked".
+    is neither "the model got it" nor "nobody asked". Ollama DOES take it, as
+    `think` (section 3.4a; `test_thinking_reaches_ollama_as_think`).
     """
-    for model in ("anthropic/claude-sonnet-5", "openai/gpt-5", "ollama/qwen3.5:9b"):
+    for model in ("anthropic/claude-sonnet-5", "openai/gpt-5"):
         body = chat(
             routed,
             auth,
@@ -556,3 +568,480 @@ def test_a_forwarded_chat_takes_no_lane_and_settles_nothing(routed, auth) -> Non
     assert settled == []
     assert after["slots"] == before["slots"]
     assert after["lease"] is None
+
+
+# ------------------------------------------------ ollama, natively (3.4a)
+#
+# The bug these pin: the `ollama` upstream used to go through Ollama's OpenAI
+# shim, which has no `num_ctx`, so every chat ran at Ollama's default 4096 and a
+# longer prompt was silently cut from the front. Now it is Ollama's own
+# `/api/chat`, and `options.num_ctx` is on every body.
+
+
+def _chats(upstream: FakeUpstream) -> list[dict[str, Any]]:
+    """The `/api/chat` bodies the fake received (`/api/show`'s carry no messages)."""
+    return [body for body in upstream.requests if "messages" in body]
+
+
+def _context(response) -> dict[str, Any]:
+    return json.loads(response.headers[upstreams.CONTEXT_HEADER])
+
+
+def test_ollama_gets_its_native_body_with_the_requests_context(
+    routed, auth, upstream
+) -> None:
+    """Every OpenAI knob lands where `/api/chat` reads it, `num_ctx` first.
+
+    A stated `context_tokens` is sent as it stands, and nothing is looked up:
+    the caller knows its prompt and this server has no tokenizer for it.
+    """
+    body = chat(
+        routed,
+        auth,
+        {
+            "model": "ollama/qwen3.5:9b",
+            "messages": [
+                {"role": "system", "content": "You are terse."},
+                {"role": "user", "content": "hi"},
+            ],
+            "context_tokens": 16384,
+            "max_tokens": 256,
+            "temperature": 0,
+            "top_p": 0.9,
+            "top_k": 20,
+            "seed": 7,
+            "stop": "END",
+            "repetition_penalty": 1.05,
+        },
+    )
+    assert body.status_code == 200, body.text
+    assert _chats(upstream)[-1] == {
+        "model": "qwen3.5:9b",
+        "messages": [
+            {"role": "system", "content": "You are terse."},
+            {"role": "user", "content": "hi"},
+        ],
+        # Stated even when false: Ollama's own default is to stream.
+        "stream": False,
+        "options": {
+            "num_ctx": 16384,
+            "temperature": 0,
+            "top_p": 0.9,
+            "top_k": 20,
+            "seed": 7,
+            "repeat_penalty": 1.05,
+            "num_predict": 256,
+            "stop": ["END"],
+        },
+    }
+    assert list(_chats(upstream)[-1]["options"])[0] == "num_ctx"
+    assert upstream.show_calls == 0
+    assert upstream.tags_calls == 0
+    assert _context(body) == {"num_ctx": 16384, "source": "request"}
+    sources = json.loads(body.headers[SAMPLING_HEADER])
+    assert sources["max_tokens"] == "request"
+    assert sources["top_p"] == "request"
+
+
+def test_ollama_with_no_stated_context_is_sent_the_trained_maximum(
+    routed, auth, upstream
+) -> None:
+    """A tag that states no `num_ctx` runs at `model_info.<arch>.context_length`.
+
+    NEVER nothing: nothing is Ollama's 4096, which is the bug.
+    """
+    body = chat(
+        routed,
+        auth,
+        {"model": "ollama/qwen3.5:9b", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert body.status_code == 200, body.text
+    assert _chats(upstream)[-1]["options"] == {
+        "num_ctx": fake_upstream.OLLAMA_TRAINED_CONTEXT
+    }
+    assert _context(body) == {
+        "num_ctx": fake_upstream.OLLAMA_TRAINED_CONTEXT,
+        "source": "model",
+    }
+
+
+def test_a_tags_own_modelfile_num_ctx_wins_over_the_trained_maximum(
+    routed, auth, upstream
+) -> None:
+    """`PARAMETER num_ctx` is the tag author's statement of what fits the card.
+
+    Owen's `qwen3.8:27b-24g` carries 98304 because 262144 does not fit 24 GB;
+    overriding it with the trained maximum would push the KV cache off the card.
+    """
+    body = chat(
+        routed,
+        auth,
+        {"model": "ollama/llama3:8b", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert body.status_code == 200, body.text
+    assert (
+        _chats(upstream)[-1]["options"]["num_ctx"]
+        == fake_upstream.OLLAMA_MODELFILE_CONTEXT
+    )
+    assert _context(body) == {
+        "num_ctx": fake_upstream.OLLAMA_MODELFILE_CONTEXT,
+        "source": "modelfile",
+    }
+
+
+def test_the_looked_up_context_is_remembered_per_digest(
+    routed, auth, upstream
+) -> None:
+    """`/api/show` once per digest; `ollama create` over the same name asks again."""
+    request = {
+        "model": "ollama/qwen3.5:9b",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    for _ in range(3):
+        assert chat(routed, auth, request).status_code == 200
+    assert upstream.show_calls == 1
+    assert upstream.tags_calls == 3
+    upstream.digests["qwen3.5:9b"] = "sha256:" + "f" * 64
+    assert chat(routed, auth, request).status_code == 200
+    assert upstream.show_calls == 2
+
+
+@pytest.mark.parametrize("thinking", [True, False])
+def test_thinking_reaches_ollama_as_think(routed, auth, upstream, thinking) -> None:
+    body = chat(
+        routed,
+        auth,
+        {
+            "model": "ollama/qwen3.5:9b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "context_tokens": 4096,
+            "chat_template_kwargs": {"enable_thinking": thinking},
+        },
+    )
+    assert body.status_code == 200, body.text
+    sent = _chats(upstream)[-1]
+    assert sent["think"] is thinking
+    assert "chat_template_kwargs" not in sent
+    assert json.loads(body.headers[SAMPLING_HEADER])["thinking"] == "request"
+    message = body.json()["choices"][0]["message"]
+    # Ollama's `message.thinking` is the door's `reasoning`, the field the
+    # local engines answer in and the SDK reads.
+    if thinking:
+        assert message["reasoning"] == fake_upstream.THINKING
+    else:
+        assert "reasoning" not in message
+    assert message["content"] == ANSWER
+
+
+def test_a_request_silent_on_thinking_sends_no_think(routed, auth, upstream) -> None:
+    body = chat(
+        routed,
+        auth,
+        {
+            "model": "ollama/qwen3.5:9b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "context_tokens": 4096,
+        },
+    )
+    assert "think" not in _chats(upstream)[-1]
+    assert json.loads(body.headers[SAMPLING_HEADER])["thinking"] == "engine"
+
+
+def test_a_json_schema_becomes_ollamas_format(routed, auth, upstream) -> None:
+    schema = {
+        "type": "object",
+        "properties": {"verdict": {"type": "string"}},
+        "required": ["verdict"],
+    }
+    chat(
+        routed,
+        auth,
+        {
+            "model": "ollama/qwen3.5:9b",
+            "messages": [{"role": "user", "content": "judge"}],
+            "context_tokens": 4096,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "verdict", "schema": schema, "strict": True},
+            },
+        },
+    )
+    assert _chats(upstream)[-1]["format"] == schema
+    chat(
+        routed,
+        auth,
+        {
+            "model": "ollama/qwen3.5:9b",
+            "messages": [{"role": "user", "content": "judge"}],
+            "context_tokens": 4096,
+            "response_format": {"type": "json_object"},
+        },
+    )
+    assert _chats(upstream)[-1]["format"] == "json"
+
+
+def test_an_ollama_answer_is_an_openai_completion_with_usage(
+    routed, auth, upstream
+) -> None:
+    request = {
+        "model": "ollama/qwen3.5:9b",
+        "messages": [{"role": "user", "content": "hi"}],
+        "context_tokens": 4096,
+    }
+    document = chat(routed, auth, request).json()
+    assert document["object"] == "chat.completion"
+    assert document["model"] == "ollama/qwen3.5:9b"
+    assert document["choices"][0]["finish_reason"] == "stop"
+    assert document["usage"] == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+    }
+    upstream.done_reason = "length"
+    document = chat(routed, auth, request).json()
+    assert document["choices"][0]["finish_reason"] == "length"
+
+
+def _stream(client: TestClient, auth: dict[str, str], body: dict[str, Any]):
+    with client.stream(
+        "POST", "/v1/openai/chat/completions", headers=auth, json=body
+    ) as response:
+        assert response.status_code == 200
+        context = _context(response)
+        frames = [line for line in response.iter_lines() if line]
+    return frames, context
+
+
+def _payloads(frames: list[str]) -> list[dict[str, Any]]:
+    return [
+        json.loads(line[len("data: "):])
+        for line in frames
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+
+
+def test_ollamas_ndjson_stream_becomes_openai_sse(routed, auth, upstream) -> None:
+    """Thinking as `reasoning` deltas, content as `content`, a finish, usage, `[DONE]`."""
+    frames, context = _stream(
+        routed,
+        auth,
+        {
+            "model": "ollama/qwen3.5:9b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "chat_template_kwargs": {"enable_thinking": True},
+        },
+    )
+    assert _chats(upstream)[-1]["stream"] is True
+    assert context["source"] == "model"
+    assert frames[-1] == "data: [DONE]"
+    payloads = _payloads(frames)
+    assert payloads[0]["choices"][0]["delta"] == {"role": "assistant"}
+    with_choices = [p for p in payloads if p["choices"]]
+    deltas = [p["choices"][0]["delta"] for p in with_choices]
+    assert "".join(d.get("reasoning", "") for d in deltas) == fake_upstream.THINKING
+    assert "".join(d.get("content", "") for d in deltas) == ANSWER
+    assert with_choices[-1]["choices"][0]["finish_reason"] == "stop"
+    usage = [p for p in payloads if not p["choices"]]
+    assert len(usage) == 1
+    assert usage[0]["usage"] == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+    }
+    assert {p["model"] for p in payloads} == {"ollama/qwen3.5:9b"}
+
+
+def test_an_ollama_stream_cut_before_done_gets_no_done_terminator(
+    routed, auth, upstream
+) -> None:
+    """A `[DONE]` here would make a truncated answer read as a finished one."""
+    upstream.truncate_stream = True
+    frames, _ = _stream(
+        routed,
+        auth,
+        {
+            "model": "ollama/qwen3.5:9b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "context_tokens": 4096,
+            "stream": True,
+        },
+    )
+    assert "data: [DONE]" not in frames
+    error = json.loads(frames[-1][len("data: "):])["error"]
+    assert "truncated" in error["message"]
+
+
+def test_a_show_that_keeps_failing_is_refused_by_name_after_the_budget(
+    routed, auth, upstream
+) -> None:
+    """Weather gets `OLLAMA_LOOKUP_ATTEMPTS`, then a name — never a guessed 4096."""
+    upstream.show_failures = upstreams.OLLAMA_LOOKUP_ATTEMPTS
+    body = chat(
+        routed,
+        auth,
+        {"model": "ollama/qwen3.5:9b", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert body.status_code == 502
+    error = body.json()["error"]
+    assert error["code"] == "upstream_context_unknown"
+    assert "context_tokens" in error["message"]
+    assert upstream.show_calls == upstreams.OLLAMA_LOOKUP_ATTEMPTS
+    assert _chats(upstream) == []
+
+
+def test_a_show_that_recovers_inside_the_budget_is_answered(
+    routed, auth, upstream
+) -> None:
+    upstream.show_failures = upstreams.OLLAMA_LOOKUP_ATTEMPTS - 1
+    body = chat(
+        routed,
+        auth,
+        {"model": "ollama/qwen3.5:9b", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert body.status_code == 200, body.text
+    assert upstream.show_calls == upstreams.OLLAMA_LOOKUP_ATTEMPTS
+    assert (
+        _chats(upstream)[-1]["options"]["num_ctx"]
+        == fake_upstream.OLLAMA_TRAINED_CONTEXT
+    )
+
+
+def test_a_tag_ollama_does_not_have_is_its_own_404_asked_once(
+    routed, auth, upstream
+) -> None:
+    """Misconfiguration, not weather: Ollama's own words, and no retry."""
+    body = chat(
+        routed,
+        auth,
+        {"model": "ollama/nope:1b", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert body.status_code == 502
+    error = body.json()["error"]
+    assert error["code"] == "upstream_rejected"
+    assert error["details"]["upstream_status"] == 404
+    assert "model 'nope:1b' not found" in error["message"]
+    assert upstream.show_calls == 1
+    assert _chats(upstream) == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"num_ctx": 8192}, {"options": {"num_ctx": 8192}}, {"tools": []}, {"n": 2}],
+)
+def test_a_field_the_ollama_translation_would_drop_is_refused_by_name(
+    routed, auth, upstream, extra
+) -> None:
+    """A field left behind silently is how `num_ctx` was lost; now it is a 400.
+
+    Refused before the context lookup: a request this translation cannot carry
+    costs no round trip.
+    """
+    body = chat(
+        routed,
+        auth,
+        {
+            "model": "ollama/qwen3.5:9b",
+            "messages": [{"role": "user", "content": "hi"}],
+            **extra,
+        },
+    )
+    assert body.status_code == 400
+    error = body.json()["error"]
+    assert error["code"] == "upstream_field_unsupported"
+    assert error["details"]["fields"] == list(extra)
+    assert upstream.tags_calls == 0
+    assert upstream.show_calls == 0
+
+
+@pytest.mark.parametrize("value", [0, -1, "8k", 8192.0, True])
+def test_a_malformed_context_tokens_is_refused(routed, auth, upstream, value) -> None:
+    body = chat(
+        routed,
+        auth,
+        {
+            "model": "ollama/qwen3.5:9b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "context_tokens": value,
+        },
+    )
+    assert body.status_code == 400
+    assert body.json()["error"]["details"]["field"] == "context_tokens"
+    assert _chats(upstream) == []
+
+
+def test_an_inline_image_becomes_ollamas_images(routed, auth, upstream) -> None:
+    body = chat(
+        routed,
+        auth,
+        {
+            "model": "ollama/qwen3.5:9b",
+            "context_tokens": 4096,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is this?"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+    assert body.status_code == 200, body.text
+    assert _chats(upstream)[-1]["messages"] == [
+        {"role": "user", "content": "What is this?", "images": ["iVBORw0KGgo="]}
+    ]
+
+
+def test_an_image_by_address_is_refused(routed, auth, upstream) -> None:
+    body = chat(
+        routed,
+        auth,
+        {
+            "model": "ollama/qwen3.5:9b",
+            "context_tokens": 4096,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "https://x/y.png"}}
+                    ],
+                }
+            ],
+        },
+    )
+    assert body.status_code == 400
+    assert body.json()["error"]["details"]["field"] == "messages[0].content[0]"
+
+
+def test_the_hosted_upstreams_drop_context_tokens_and_say_so(
+    routed, auth, upstream
+) -> None:
+    """A hosted model's window is its provider's; OpenAI would refuse the field."""
+    body = chat(
+        routed,
+        auth,
+        {
+            "model": "openai/gpt-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "context_tokens": 8192,
+        },
+    )
+    assert body.status_code == 200, body.text
+    assert "context_tokens" not in upstream.requests[-1]
+    assert _context(body) == {"num_ctx": None, "source": "dropped"}
+    body = chat(
+        routed,
+        auth,
+        {
+            "model": "anthropic/claude-sonnet-5",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert "context_tokens" not in upstream.requests[-1]
+    assert _context(body) == {"num_ctx": None, "source": "upstream"}

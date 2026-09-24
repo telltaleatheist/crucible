@@ -14,27 +14,36 @@
 # refused is a row that costs a person a scroll and a decision every time they
 # open a model picker.
 #
-# TWO ARMS, AND THE SPLIT OWEN ASKED FOR IS WHAT THE NUMBERS DO, NOT WHAT THIS
-# FILE DECIDES
-# ---------------------------------------------------------------------------
-# *"put 8 bit on the Mac. 4 bit for pc."* This manifest does not encode that by
-# withholding a block — it declares both arms honestly and lets each machine's
-# capability walk reach his answer on its own:
+# ONE ARM, mlx-darwin, AND THAT IS OWEN'S RULING, NOT AN OMISSION
+# ---------------------------------------------------------------
+# *"put 8 bit on the Mac. 4 bit for pc."* — and, 2026-09-23, reading a
+# cuda-linux row for this model: *"we shouldnt have an 8 bit 27b on here. waste
+# of space, wont fit in the gpu"*.
 #
 #   Mac Studio, 64 GiB, 25% desktop reserve -> 48.0 GiB to give.
-#     this row estimates 44.07 GiB  -> FITS, and beats the 4-bit on quality.
-#   PC, RTX 3090 Ti, 24 GiB.
-#     the FP8 weights ALONE are 28.75 GiB -> cannot fit, and the walk falls to
-#     `qwen3.8-27b-4bit` at 20.15 GiB.
+#     this row estimates 38.83 GiB  -> FITS, and beats the 4-bit on quality.
+#     (It read 44.07 GiB until 2026-09-23, when a double-counted KV term came
+#     out of the mlx block's overhead — see that block.)
+#   PC, RTX 3090 Ti, 24 GiB — cuda-linux.
+#     Qwen's FP8 weights ALONE are 28.75 GiB (30_866_866_928 B, the hub's blob
+#     sum at `Qwen/Qwen3.8-27B-FP8` @ 017b9c7a), larger than the whole card.
 #
-# That is the difference between a catalog that describes the world and one
-# that has had a person's conclusion baked into it. If Owen puts a 48 GB card
-# in the PC, the second line changes by itself.
+# This file used to carry a `cuda-linux` block anyway, on the argument that a
+# catalog should declare every arm honestly and let a bigger card change the
+# answer by itself. That argument cost more than it bought: on the only card
+# the cuda-linux backend runs on, such an arm can only ever be DOWNLOADED —
+# 30.9 GB of disk — and then REFUSED at load. It was a row whose only job was
+# to lose, which is exactly why the bf16 was deleted. So there is no cuda-linux
+# block, and none for llama-windows (no 8-bit 27B a Windows card holds either):
+# the PC's 27B is `qwen3.8-27b-4bit`. If a card that could hold the FP8 ever
+# arrives, the arm comes back WITH a measurement, not before.
 #
-# The FP8 arm is Qwen's OWN quantization and vLLM reads it natively; the MLX
-# arm is the community 8-bit build, which is a different file format for the
-# same precision. A `cuda-linux` block pointing at the MLX repo would be a
-# block vLLM cannot load.
+# The MLX arm is the community 8-bit build (`mlx-community/Qwen3.8-27B-8bit`).
+# The FP8 figures above are kept only as the reason; nothing here pins that repo.
+#
+# The vision alias `qwen3.8-27b-8bit-vl` went with the cuda-linux arm: it was
+# served only there (mlx-lm serves text), and an alias with no backend is not a
+# model.
 
 [model]
 id = "qwen3.8-27b-8bit"
@@ -59,47 +68,7 @@ modalities = ["text"]
 # it was bf16, and only one of the two names said a precision, which is what
 # invited the question.
 display = "Qwen 3.8 · 27B (8-bit)"
-description = "The 27B at 8 bits — the best translation a 64 GB Mac can hold. A 24 GB card cannot: its weights alone are 28.75 GiB, and such a machine falls to the 4-bit."
-
-[backends.cuda-linux]
-engine = "vllm"
-# QWEN'S OWN FP8, not a community requantization: `Qwen/Qwen3.8-27B-FP8` is
-# published by the same org as the original checkpoint and vLLM reads FP8
-# natively. FP8 is eight bits, which is why it belongs in this manifest and not
-# in one of its own — the pair this catalog offers is 8-bit and 4-bit, and which
-# FILE FORMAT carries the eight bits is a per-backend fact like every other
-# `hf_repo` here.
-hf_repo = "Qwen/Qwen3.8-27B-FP8"
-# The repo's head on 2026-09-17, read from the HuggingFace API rather than typed.
-revision = "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
-#
-# 48_685_810_449 = 30_866_866_928 (weights) + 17_818_943_521 (everything else).
-#
-# THE WEIGHTS HALF IS MEASURED the same way the mlx arm's is: the sum of the
-# repo's 66 safetensors blobs as the hub reports them, at the revision pinned
-# above.
-#
-# THE OTHER HALF IS THE MLX SIBLING'S MEASURED NON-WEIGHT TERM, carried across,
-# and on THIS arm that is a rougher claim than it is over there: vLLM's KV and
-# CUDA-graph footprint are not mlx-lm's prefill footprint, and nobody has run
-# this file on the 3090 Ti. It is a ceiling with a real basis rather than a
-# measurement, and the number it produces is far past the card either way — the
-# weights alone are larger than the whole 24 GiB — so no decision on this
-# machine turns on its precision.
-#
-# OWED: if a card that could hold this ever arrives, measure it before anybody
-# relies on the figure.
-memory_bytes_estimate = 48_685_810_449
-engine_args = []
-
-# The same number, taken apart. `basis` is "computed" and not "measured" for the
-# reason above: the weights term is read, the rest is inherited.
-[backends.cuda-linux.memory]
-weights_bytes = 30_866_866_928
-overhead_bytes = 17_818_943_521
-kv_bytes_per_token = 65_536
-basis = "computed"
-measured_at_context = 12288
+description = "The 27B at 8 bits — the best translation a 64 GB Mac can hold. Mac only: its weights alone are 28.75 GiB, more than a 24 GB card, which serves the 4-bit."
 
 [backends.mlx-darwin]
 engine = "mlx-lm"
@@ -108,7 +77,21 @@ hf_repo = "mlx-community/Qwen3.8-27B-8bit"
 #   GET /api/models/mlx-community/Qwen3.8-27B-8bit -> sha
 revision = "815b83c0df8ffd1d1b5244cf75fd6ef14fca9ef9"
 #
-# 47_320_162_000 = 29_501_218_479 (weights) + 17_818_943_521 (everything else).
+# 41_688_522_448 = 29_501_218_479 (weights) + 11_381_997_601 (everything but
+#                  weights and KV) + 805_306_368 (12288 x 65_536 of KV).
+#
+# CORRECTED 2026-09-23: A DOUBLE COUNT CAME OUT. It read
+# 47_320_162_000 = 29_501_218_479 + 17_818_943_521, and the [memory] table
+# below carried the same 17_818_943_521 as `overhead_bytes` and then added
+# kv_bytes_per_token x context on top of it. But that figure is the 4-bit's
+# non-weight term measured under a 98_220-token completion (the next paragraph)
+# — it already CONTAINS that run's KV, 98_220 x 65_536 = 6_436_945_920 B. So
+# every context was charged its KV twice, and the ceiling the capability walk
+# derived from these terms came out near 64k where the machine holds 131072.
+# The non-weight, non-KV residual is
+#   17_818_943_521 - 6_436_945_920 = 11_381_997_601 B (10.60 GiB)
+# and the estimate is the terms at this block's own 12288. What follows is the
+# original reasoning, still true of where the 17.8 GB came from.
 #
 # THE WEIGHTS HALF IS MEASURED, and not by loading anything: it is the sum of
 # the repo's six safetensors blobs as the hub itself reports their sizes
@@ -131,15 +114,28 @@ revision = "815b83c0df8ffd1d1b5244cf75fd6ef14fca9ef9"
 #
 # It is also the CONSERVATIVE direction: the 4-bit's figure was taken under a
 # 98220-token completion, and `context_default` above is 12288. A real run at
-# the default context will hold less than this says.
+# the default context will hold less than this says. (It was more than
+# conservative: it was a double count, and the correction at the top of this
+# block takes the 98220-token run's KV out, so the estimate is now the terms at
+# 12288 rather than a 98220-token peak.)
 #
 # OWED: load this on the Studio, run a full-context completion, and write what
 # mlx's allocator reports. Then the memory table's `basis` below becomes
 # "measured" — and note it is THERE and not here: a model's backend block takes
 # no `estimate_basis` (that is a voice manifest's field), which the validator
 # said by name the first time this file was written with one.
-memory_bytes_estimate = 47_320_162_000
+memory_bytes_estimate = 41_688_522_448
 engine_args = []
+# THE MOST A LOAD MAY ASK FOR HERE. COMPUTED 2026-09-23, LOAD TEST OWED, from
+# the corrected terms below against the Studio's 48.0 GiB (51_539_607_552 B):
+#   29_501_218_479 weights + 11_381_997_601 residual  = 40_883_216_080 (38.08 GiB)
+#   + 131072 x 65_536 of KV (8_589_934_592)           = 49_473_150_672 B
+#                                                     = 49.5 GB = 46.08 GiB of 48.0
+# The memory alone would afford 162_603 tokens at one in flight; 131072 is the
+# cap because a longer prefill is not worth its time, and it is ample. mlx-lm
+# takes no context flag and allocates KV on demand, so on this backend this is
+# ADMISSION — the resident row's `max_model_len` — not an engine-enforced cap.
+max_context = 131072
 
 # ------------------------------------------------- the same number, taken apart
 #
@@ -149,9 +145,12 @@ engine_args = []
 # bf16 row's comment is explicit that its own zero meant "none was measured".
 # Here something WAS measured — on the sibling — and pretending otherwise would
 # lose the only evidence this estimate has.
+#
+# `overhead_bytes` is the residual with the sibling's KV taken OUT (the
+# correction above): 17_818_943_521 - 98_220 x 65_536 = 11_381_997_601.
 [backends.mlx-darwin.memory]
 weights_bytes = 29_501_218_479
-overhead_bytes = 17_818_943_521
+overhead_bytes = 11_381_997_601
 kv_bytes_per_token = 65_536
 basis = "computed"
 measured_at_context = 12288

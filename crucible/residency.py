@@ -126,10 +126,17 @@ class ResidentModel:
     port: int
     revision: str
     #: The context this engine was actually started with — vLLM's
-    #: `--max-model-len`, mlx-lm's own config. It comes from
-    #: `ModelManifest.context_for(backend)` at load time, which is why it is not
-    #: simply read back off the manifest: a manifest edited while this engine is
-    #: up would then describe a context nothing is serving.
+    #: `--max-model-len`, llama-server's `-c`. It is the load's `params.context`
+    #: when the load stated one, `ModelManifest.context_for(backend)` when it
+    #: did not, which is why it is not simply read back off the manifest: a
+    #: load may start the engine above its default, and a manifest edited
+    #: while this engine is up would describe a context nothing is serving.
+    #:
+    #: ON MLX-DARWIN THIS IS ADMISSION, NOT AN ENGINE CAP. mlx-lm takes no
+    #: context flag and allocates KV on demand, so nothing in the engine
+    #: refuses a longer request; this number is what Crucible admitted the load
+    #: at (checked against `capability.check_load_context`) and what it tells
+    #: clients to size against. On vLLM and llama-server the engine enforces it.
     max_model_len: int
     memory_bytes_estimate: int
     log_path: Path
@@ -899,10 +906,12 @@ class Residency:
     def reclaimable_bytes(self, excluding: str | None = None) -> int:
         """What unloading the current resident would give back.
 
-        Zero when the resident *is* `excluding` — reloading a model does not free
-        its own memory before it needs it again. Across kinds it is never zero:
-        a voice's bytes are as reclaimable as a model's, which is the whole point
-        of one holder for both.
+        Zero when the resident *is* `excluding` — for a door that REUSES what
+        it names (`tts`, `align`, `denoise`), the resident is not evicted and
+        gives nothing back. `load-model` passes no exclusion: `load` below
+        evicts unconditionally, so even the same id is given back first.
+        Across kinds it is never zero: a voice's bytes are as reclaimable as a
+        model's, which is the whole point of one holder for both.
         """
         if self._resident is None or self._resident.id == excluding:
             return 0
@@ -929,10 +938,24 @@ class Residency:
         python: Path,
         *,
         plan: "KvPlan | None",
+        context: int,
         timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
         on_progress: Callable[[str], None] | None = None,
     ) -> ResidentModel:
         """Make this model the resident one, unloading whatever was there.
+
+        `context` is the context the engine is started with, resolved and
+        checked by the caller (the `load-model` job: `params.context`, or
+        `context_for` when the load stated none, against
+        `capability.check_load_context`). REQUIRED, like `plan`, so no caller
+        can start an engine at a context it did not decide — and so `plan`,
+        which was sized at that same context, and the engine's argv cannot
+        disagree.
+
+        LOADING THE RESIDENT MODEL AGAIN IS A RELOAD, at whatever `context` it
+        names: `_evict` below unloads unconditionally, so the same id at a new
+        context is a full engine restart, exactly as it always was at the old
+        one.
 
         `plan` has NO default, deliberately. It is the KV pool sized against the
         card a moment ago, and the one thing a caller must not be able to do by
@@ -960,7 +983,6 @@ class Residency:
         served = engine_model_name(spec.engine, weights_dir, manifest.id)
         port = find_free_port()
 
-        context = manifest.context_for(spec.backend)
         self.begin_warming(manifest.id)
         say(
             f"starting {spec.engine} for {manifest.id} on 127.0.0.1:{port} "
@@ -972,7 +994,7 @@ class Residency:
                 weights_dir,
                 served,
                 port,
-                self._engine_args(manifest, spec, weights_dir, plan),
+                self._engine_args(manifest, spec, weights_dir, plan, context=context),
                 say,
                 timeout,
             )
@@ -1442,8 +1464,15 @@ class Residency:
         spec: BackendSpec,
         weights_dir: Path,
         plan: "KvPlan | None",
+        *,
+        context: int,
     ) -> list[str]:
         """The manifest's args plus what Crucible always sets.
+
+        `context` is the one the load decided (`Residency.load`): vLLM's
+        `--max-model-len` and llama-server's `-c` are both composed HERE from
+        it, never from the manifest directly, so a load's `params.context`
+        reaches either engine by one path.
 
         `plan` is the KV pool sized against the card THIS SECOND (crucible/
         vram.py), and it goes on last so its `--gpu-memory-utilization`
@@ -1453,7 +1482,9 @@ class Residency:
         manifest states.
 
         `--max-model-len` only goes to vLLM; mlx-lm takes the context from the
-        model's own config and has no such flag (see engines/mlx_lm.py).
+        model's own config and has no such flag (see engines/mlx_lm.py), so on
+        mlx-darwin the loaded context is recorded as `max_model_len` and is
+        admission, not an engine-enforced cap.
 
         `llama-server` is the one engine that has to be told WHERE THE FILES
         ARE, because its weights are named files inside a directory rather
@@ -1465,7 +1496,7 @@ class Residency:
         """
         args = list(spec.engine_args)
         if spec.engine == "vllm":
-            args += ["--max-model-len", str(manifest.context_for(spec.backend))]
+            args += ["--max-model-len", str(context)]
             # WHAT THE DECISION DOOR NEEDS FROM THE ENGINE (PHASE22 section
             # 2.6), composed here beside `--max-model-len` and never in a
             # manifest: they are facts about a door of this server, not about
@@ -1483,7 +1514,7 @@ class Residency:
             args = ["-m", str(weights_dir / spec.file)] + args
             if spec.mmproj is not None:
                 args += ["--mmproj", str(weights_dir / spec.mmproj)]
-            args += ["-c", str(manifest.context_for(spec.backend))]
+            args += ["-c", str(context)]
         if plan is not None:
             args += plan.flags()
         return args

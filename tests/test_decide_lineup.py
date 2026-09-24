@@ -80,11 +80,14 @@ def test_the_nine_b_floor_is_explicit_on_the_four_text_classes() -> None:
 
 BEFORE = {
     # What each text class offered on 2026-09-23 before the 4B and 0.8B landed.
-    # They must not move.
+    # They must not move — with ONE deliberate exception the same day: the
+    # 8-bit 27B left cuda-linux (Owen: *"we shouldnt have an 8 bit 27b on here.
+    # waste of space, wont fit in the gpu"*), so the PC's translate list lost a
+    # row it could never select. The small tiers moved nothing.
     ("clean", CUDA_LINUX): ["qwen3.5-9b"],
     ("clean", MLX_DARWIN): ["qwen3.5-9b"],
     ("clean", LLAMA_WINDOWS): ["qwen3.5-9b"],
-    ("translate", CUDA_LINUX): ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b"],
+    ("translate", CUDA_LINUX): ["qwen3.8-27b-4bit", "qwen3.5-9b"],
     ("translate", MLX_DARWIN): ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b"],
     ("translate", LLAMA_WINDOWS): ["qwen3.8-27b-4bit", "qwen3.5-9b"],
 }
@@ -102,8 +105,8 @@ def test_decide_offers_every_tier_best_first(backend: str) -> None:
     # The `-vl` aliases (tests/test_weights_of.py) are in this list and in no
     # text class's: same weights, served with the tower, dearer than the base.
     expected = {
-        CUDA_LINUX: ["qwen3.8-27b-8bit-vl", "qwen3.8-27b-8bit",
-                     "qwen3.8-27b-4bit-vl", "qwen3.5-9b-vl", "qwen3.8-27b-4bit",
+        # No 8-bit 27B in either form: Mac only since 2026-09-23.
+        CUDA_LINUX: ["qwen3.8-27b-4bit-vl", "qwen3.5-9b-vl", "qwen3.8-27b-4bit",
                      "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-0.8b"],
         MLX_DARWIN: ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b",
                      "qwen3.5-4b", "qwen3.5-0.8b"],

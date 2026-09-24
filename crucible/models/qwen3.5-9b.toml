@@ -263,6 +263,17 @@ engine_args = [
     "--skip-mm-profiling",
     "--language-model-only",
 ]
+# THE MOST A LOAD MAY ASK FOR HERE (`params.context`, vLLM's `--max-model-len`).
+# COMPUTED 2026-09-23, LOAD TEST OWED, from the MEASURED terms below against the 3090 Ti's 21.0 GiB (24_564 MiB less the 3 GiB allowance = 22_535_995_392 B):
+#   non-KV       18_038_862_643 + 1_476_395_008 = 19_515_257_651 B (18.17 GiB,
+#                the calibrated intercept, tower already out)
+#   left for KV  22_535_995_392 - 19_515_257_651 = 3_020_737_741 B (2.81 GiB)
+#   / 40_337 B/token (measured) = 74_887 tokens -> 65536
+#   at 65536     19_515_257_651 + 2_643_525_632 = 22_158_783_283 B = 20.64 GiB
+# The 0.84 above is inert at any context for the reason the 27B-4bit's
+# manifest gives: the [memory] terms plan every load (`crucible/vram.py`), and
+# the plan's `--kv-cache-memory-bytes` follows the loaded context.
+max_context = 65536
 
 # ------------------------------------------------- the same number, taken apart
 #
@@ -382,6 +393,13 @@ memory_bytes_estimate = 20_515_916_006
 # on 64 GB the machine was never the constraint. So it enables nothing the Mac
 # could not already do — it stops the server UNDER-REPORTING what it serves.
 engine_args = []
+# THE MOST A LOAD MAY ASK FOR HERE. COMPUTED 2026-09-23, LOAD TEST OWED, from the terms below against
+# the Studio's 48.0 GiB (64 GiB less the 25% allowance = 51_539_607_552 B): 17_910_000_000 + 2_069_045_094 = 19_979_045_094 B fixed, + 131072
+# x 32_768 (4_294_967_296) = 24_274_012_390 B = 22.61 GiB. The memory would
+# afford 963_151 tokens; 131072 is the cap, not the memory: a longer prefill is not worth its time, and it is ample. ADMISSION on this backend, as the note above
+# says of context_default: mlx-lm is handed no context and allocates KV on
+# demand, so this is the resident row's `max_model_len`, not an engine cap.
+max_context = 131072
 
 # ------------------------------------------------- the same number, taken apart
 #
@@ -440,6 +458,12 @@ revision = "3885219b6810b007914f3a7950a8d1b469d598a5"
 file = "Qwen3.5-9B-Q8_0.gguf"
 memory_bytes_estimate = 11_027_502_048
 engine_args = ["--parallel", "1"]
+# THE MOST A LOAD MAY ASK FOR HERE, composed as llama-server's `-c`. COMPUTED 2026-09-23, LOAD TEST OWED,
+# from the DECLARED terms below against the 3090 Ti's 21.0 GiB (24_564 MiB less the 3 GiB allowance = 22_535_995_392 B): 9_527_502_048 + 963_129_088
+# = 10_490_631_136 B fixed, + 131072 x 32_768 (exact f16 KV on llama.cpp) =
+# 14_785_598_432 B = 13.77 GiB. The memory would afford 367_595 tokens;
+# 131072 is the cap, not the memory: a longer prefill is not worth its time, and it is ample.
+max_context = 131072
 
 # ------------------------------------------------- the same number, taken apart
 #

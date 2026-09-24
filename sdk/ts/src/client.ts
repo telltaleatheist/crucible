@@ -1095,7 +1095,12 @@ export class CrucibleClient {
     return this.submit({
       type: 'load-model',
       model: requireText(model, 'model'),
-      params: leaseParams(options?.lease),
+      params: {
+        ...leaseParams(options?.lease),
+        // Sent as given and validated by the server alone: the floor and the
+        // ceiling are the server's, and a second copy here would drift.
+        ...(options?.context === undefined ? {} : { context: options.context }),
+      },
       inputs: {},
     });
   }
@@ -1230,6 +1235,19 @@ export class CrucibleClient {
       // honours the same field. Crucible proxies the body verbatim, so it
       // reaches the engine as written.
       payload['chat_template_kwargs'] = { enable_thinking: given.thinking };
+    }
+    if (given.contextTokens !== undefined) {
+      // Crucible's field, read by the `ollama` upstream as `options.num_ctx`
+      // (PHASE15-HOST.md section 3.4a). Sent only when stated: an absent one
+      // is the server's cue to send the tag's own context.
+      const contextTokens = requireFinite(given.contextTokens, 'contextTokens');
+      if (!Number.isInteger(contextTokens) || contextTokens < 1) {
+        throw new CrucibleConfigError(
+          'contextTokens',
+          `must be a positive integer, got ${contextTokens}`,
+        );
+      }
+      payload['context_tokens'] = contextTokens;
     }
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -1764,7 +1782,8 @@ export class CrucibleClient {
    * `transcript.json`, which you fetch with {@link artifact}.
    *
    * Every one of `model`, `language`, `vadFilter` and `wordTimestamps` is
-   * required, and this client supplies none of them. The server refuses a
+   * required, and this client supplies none of them. `initialPrompt` is the one
+   * optional field (see {@link AsrOptions.initialPrompt}). The server refuses a
    * missing one, and papering over that would be worse than the refusal: a
    * transcript produced under rules the caller did not choose looks exactly like
    * one produced under the rules they did. **There is no default model** for the
@@ -1803,6 +1822,11 @@ export class CrucibleClient {
         language: requireText(given.language, 'language'),
         vad_filter: requireBool(given.vadFilter, 'vadFilter'),
         word_timestamps: requireBool(given.wordTimestamps, 'wordTimestamps'),
+        // Only when the caller stated it, so a caller that never heard of the
+        // prompt sends the same three keys it always did.
+        ...(given.initialPrompt !== undefined
+          ? { initial_prompt: readInitialPrompt(given.initialPrompt) }
+          : {}),
       },
       // The input's NAME becomes the file's name on the server's disk, and
       // ffmpeg reads the container off the extension — so the caller names the
@@ -3933,6 +3957,25 @@ function requireText(value: unknown, option: string): string {
   }
   if (value.trim() === '') {
     throw new CrucibleConfigError(option, 'is required and was empty');
+  }
+  return value;
+}
+
+/**
+ * `asr`'s `initialPrompt`, once the caller has stated it: a non-blank string,
+ * or `null` for no prompt. Blank is refused rather than sent — the server
+ * refuses it too, and `""` beside `null` would be two spellings of "none".
+ */
+function readInitialPrompt(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== 'string') {
+    throw new CrucibleConfigError(
+      'initialPrompt',
+      `must be a string or null, got ${typeof value}`,
+    );
+  }
+  if (value.trim() === '') {
+    throw new CrucibleConfigError('initialPrompt', 'is blank; send null for no prompt');
   }
   return value;
 }

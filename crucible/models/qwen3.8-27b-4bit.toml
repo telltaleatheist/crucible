@@ -195,6 +195,34 @@ hf_repo = "avyukth/Qwen3.8-27B-AWQ-INT4"
 revision = "5a2ee524cbc9f3ac5df12729ecf0c4b57f311192"
 memory_bytes_estimate = 21_633_171_456
 context_default = 16384
+# THE MOST A LOAD MAY ASK FOR HERE (`params.context` on `load-model`, and the
+# fixed half of the `generate` ceiling). COMPUTED 2026-09-23, LOAD TEST OWED —
+# Owen: "do the math, dont do the measurement right now". Against the 3090 Ti's
+# 24_564 MiB less the 3 GiB desktop allowance = 22_535_995_392 B (21.0 GiB):
+#
+#   non-KV, tower out  18_061_981_175 weights (17.68 GiB measured on the card
+#                      less the 921_460_192 B vision tower `--language-model-only`
+#                      no longer loads; see the [memory] note below)
+#                    + 1_546_188_226 overhead (1.44 GiB, measured)
+#                    = 19_608_169_401 B = 18.26 GiB
+#   left for KV        22_535_995_392 - 19_608_169_401 = 2_927_825_991 B (2.73 GiB)
+#   at 86_251 B/token  (measured: vLLM pads the attention page up to the linear
+#                      layers' recurrent state)  = 33_945 tokens -> 32768
+#   engine at 32768    19_608_169_401 + 32768 x 86_251 = 22_434_442_169 B
+#                      = 20.89 GiB of the 21.0
+#
+# The 32768 row in the header's table ("needs util 0.91 … not taken") was
+# arithmetic with the tower still resident (19.12 GiB non-KV); with it gone the
+# same context is 0.86 GiB lighter, and the load sizes its own pool anyway (the
+# utilisation note below).
+#
+# Owen measured ~98k with BookForge on this PC earlier. That was
+# Ollama/llama.cpp, whose KV for this hybrid is exact and unpadded — 65_536
+# B/token at f16, half that with q8_0 KV — not vLLM's padded 86_251. On vLLM,
+# fp8 KV (`--kv-cache-dtype fp8`) would roughly halve the slope and double this
+# to ~64k, but fp8 KV on Ampere with this hybrid's attention backend is
+# unverified, so it is NOT enabled; that is a load test owed, not a setting.
+max_context = 32768
 # No `--dtype`: compressed-tensors W4A16 carries its own weight dtype and the
 # activation dtype comes from the config, so `dtype auto` is what this wants;
 # forcing bfloat16 the way the bf16 manifests do would be overriding a decision
@@ -207,6 +235,18 @@ context_default = 16384
 # a 1.51 GiB pool and 0.85 would buy 1.27 GiB, which is under the 1.32 GiB one
 # 16384-token sequence needs; vLLM would refuse with `No available memory for the
 # cache blocks`. Lower is not safer here, it is a refusal.
+#
+# IT IS NOT WHAT A LOAD RUNS WITH, AND SO IT IS NOT A FUNCTION OF THE CONTEXT
+# ANYWHERE (checked 2026-09-23 for `max_context`). This block has [memory]
+# terms, so every load is planned by `crucible/vram.py`: `KvPlan.flags()` puts
+# `--kv-cache-memory-bytes` (the pool, which IS sized to the loaded context —
+# `min(room, kv_bytes_per_token x context x max_num_seqs)`) and a
+# `--gpu-memory-utilization` of budget / total (a startup gate derived from the
+# card, not from the context) AFTER these args, and argparse keeps the last
+# spelling. So a load at 32768 is sized from the same terms as one at 16384 and
+# nothing here has to be restated per context. The 0.86 is kept as the record of
+# what was measured and would be wrong at 32768 (it buys a pool smaller than one
+# 32768-token request) — which is exactly why nothing reads it any more.
 #
 # `--max-num-seqs 16` and `--skip-mm-profiling` are the 9B's, for the 9B's
 # measured reasons: the first decides how many CUDA graphs get captured (at the
@@ -259,8 +299,27 @@ engine_args = [
 # 21_633_171_456 -- 1.4% apart, which is parts against a whole measured at a peak
 # during a 15,380-token completion rather than a full 16,384. The terms are the
 # conservative side of that, which is the side a guard should err on.
+#
+# THE WEIGHTS TERM IS THE CARD'S 17.68 GiB LESS THE VISION TOWER (2026-09-23).
+# It read 18_983_441_367 — the 2026-09-12 figure, taken three days BEFORE
+# `--language-model-only` (2026-09-15) stopped the tower being read onto the
+# card — so it has overstated this model by the tower ever since, exactly the
+# defect the 9B's calibration found and fixed in its own terms (its intercept
+# "fell by exactly the vision tower"). The tower is 921_460_192 B, summed out of
+# this pin's own safetensors header (the engine_args note above):
+#
+#   18_983_441_367 - 921_460_192 = 18_061_981_175
+#
+# COMPUTED, not re-measured: the subtraction is read from the file, and the 9B
+# is the evidence that the card drops by the same amount. `basis` stays
+# "measured" because the slope and the overhead are, and the tower is a byte
+# count rather than an estimate. The terms now add to 21_021_305_785 at 16384
+# against the estimate's 21_633_171_456 — 2.8% under, inside the parser's 5%,
+# and the estimate (the guard's number) deliberately not lowered in the same
+# change. The alias `qwen3.8-27b-4bit-vl` keeps the tower-resident figure,
+# because it serves images and loads the tower.
 [backends.cuda-linux.memory]
-weights_bytes = 18_983_441_367
+weights_bytes = 18_061_981_175
 overhead_bytes = 1_546_188_226
 kv_bytes_per_token = 86_251
 basis = "measured"
@@ -295,6 +354,35 @@ revision = "3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
 # it is 2.2x low. That script now reports the unified-memory delta instead.)
 memory_bytes_estimate = 33_873_484_870
 engine_args = []
+# THE MOST A LOAD MAY ASK FOR HERE. COMPUTED 2026-09-23, LOAD TEST OWED. Against
+# the Studio's 48.0 GiB to give (64 GiB less the 25% allowance =
+# 51_539_607_552 B), with the measured peak above taken apart — the one place
+# this block's numbers can be taken apart, because the KV it held IS known:
+#
+#   the measured non-weight term   33_873_484_870 - 16_054_541_349
+#                                = 17_818_943_521 B, and it was taken under a
+#                                  98_220-token completion, so it CONTAINS that
+#                                  run's KV: 98_220 x 65_536 = 6_436_945_920 B
+#   the prefill residual           17_818_943_521 - 6_436_945_920
+#                                = 11_381_997_601 B (10.60 GiB)
+#   at 131072                      16_054_541_349 weights + 11_381_997_601
+#                                  + 131072 x 65_536 (8_589_934_592)
+#                                = 36_026_473_542 B = 33.55 GiB of 48.0
+#
+# And if the residual is NOT flat — the note below says one point cannot tell —
+# and it grew in proportion to length (x 131072 / 98220), it would be 15.19 GB
+# and the total 39.83 GB = 37.1 GiB: still inside 48.0. The 262144 the weights
+# are trained at would afford the memory too; 131072 is the cap because a
+# prefill that long is not worth its time, and 131072 is ample.
+#
+# ADMISSION, NOT AN ENGINE CAP: mlx-lm takes no context flag and allocates KV
+# on demand, so what a load at this context records is the resident row's
+# `max_model_len` and nothing mlx-lm itself enforces. And with no [memory]
+# table here the ceiling has no memory half at all — it is this number at every
+# concurrency — so a client running several requests this long at once is
+# trusting 48.0 GiB to hold four 8.59 GB KV caches beside the rest (it holds
+# three).
+max_context = 131072
 
 # ---------------------------------------- NO [memory] TABLE HERE, DELIBERATELY
 #
@@ -384,6 +472,15 @@ memory_bytes_estimate = 17_964_440_224
 # discover.
 context_default = 16384
 engine_args = ["--parallel", "1"]
+# THE MOST A LOAD MAY ASK FOR HERE, composed as llama-server's `-c`
+# (`Residency._engine_args`). COMPUTED 2026-09-23, LOAD TEST OWED, from the
+# DECLARED terms below against the 3090 Ti's 21.0 GiB (22_535_995_392 B):
+#   16_464_440_224 GGUF + 426_258_176 overhead = 16_890_698_400 B (15.73 GiB)
+#   left for KV  5_645_296_992 B / 65_536 B/token (f16, exact on llama.cpp —
+#                it does not pad this hybrid's pages the way vLLM does)
+#              = 86_140 tokens -> 65536
+#   at 65536     16_890_698_400 + 4_294_967_296 = 21_185_665_696 B = 19.73 GiB
+max_context = 65536
 
 # ------------------------------------------------- the same number, taken apart
 #

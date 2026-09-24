@@ -94,6 +94,10 @@ def test_the_3090ti_translates_which_is_what_owen_already_does() -> None:
     assert verdict.enabled is True
     assert verdict.selected == "qwen3.8-27b-4bit"
     assert verdict.shortfall_bytes == 0
+    # And the 4-bit is chosen because the 8-bit is not OFFERED here, not
+    # because it was walked and refused: Owen, 2026-09-23, *"we shouldnt have
+    # an 8 bit 27b on here. waste of space, wont fit in the gpu"*.
+    assert "qwen3.8-27b-8bit" not in [c.id for c in verdict.candidates]
 
 
 def test_the_mac_selects_the_8bit_27b_over_the_4bit() -> None:
@@ -110,6 +114,8 @@ def test_the_mac_selects_the_8bit_27b_over_the_4bit() -> None:
 
     That number is the whole difference: 44.07 GiB against the 48.0 GiB this
     reserve leaves, so the largest candidate now FITS and best-first takes it.
+    (It is 41_688_522_448 = 38.83 GiB since 2026-09-23, when the KV it counted
+    twice came out of its overhead; it fits by more, for the same reason.)
     The Mac stops running a 4-bit translation it never had to.
 
     ── What is still being asserted ──────────────────────────────────────────
@@ -144,7 +150,12 @@ def test_best_precision_first_not_smallest_that_fits() -> None:
     field saying the same thing in other units is a second owner of one fact
     (ARCHITECTURE.md R1).
     """
-    verdict = _decide("translate", "cuda-linux", 200 * GIB, CUDA_RESERVE)
+    # ON THE MAC since 2026-09-23: the 8-bit 27B has no cuda-linux block any
+    # more (Owen: *"we shouldnt have an 8 bit 27b on here"*), so the one
+    # backend where an 8-bit and a 4-bit of the same model are both offered is
+    # mlx-darwin. A machine far larger than the Studio, so every candidate fits
+    # and only the ORDER can decide.
+    verdict = _decide("translate", "mlx-darwin", 200 * GIB, MAC_RESERVE)
     assert verdict.selected == "qwen3.8-27b-8bit", (
         "with room for both, the rule must take the better one, not the smaller"
     )
@@ -153,6 +164,12 @@ def test_best_precision_first_not_smallest_that_fits() -> None:
     # three models fitting, a walk that took the smallest would land on the 9B
     # rather than merely on the 4-bit.
     assert verdict.fit_count == 3
+    # And on cuda-linux, however large the card, best-first reaches the 4-bit
+    # — the best 27B that backend is offered — never the 9B.
+    pc = _decide("translate", "cuda-linux", 200 * GIB, CUDA_RESERVE)
+    assert pc.selected == "qwen3.8-27b-4bit"
+    assert pc.fit_count == 2
+    assert "qwen3.8-27b-8bit" not in [c.id for c in pc.candidates]
 
 
 def test_the_selected_id_does_not_depend_on_catalog_order() -> None:
@@ -968,9 +985,11 @@ def test_generate_is_one_routable_client_sized_class_on_the_9b_floor() -> None:
 def test_a_ceiling_is_the_smaller_of_what_is_served_and_what_memory_affords() -> None:
     """Both halves are facts Crucible already owns; nothing here is typed.
 
-    On the 3090 Ti the served half binds (`context_for` is 16384 on
-    cuda-linux), while the memory half is what the card could hold — and the
-    27B's memory half shrinks as concurrency grows until it binds instead.
+    On the 3090 Ti the served half binds at one in flight — each block's
+    `max_context` (65536 for the 9B, 32768 for the 27B-4bit, computed to sit
+    just under what the card affords) — while the memory half is what the card
+    could hold; the 27B's memory half shrinks as concurrency grows until it
+    binds instead.
     """
     budget = available_bytes(THREE_NINETY, CUDA_RESERVE)
     one = {
@@ -980,9 +999,11 @@ def test_a_ceiling_is_the_smaller_of_what_is_served_and_what_memory_affords() ->
         )
     }
     nine = one["qwen3.5-9b"]
-    assert nine.served_context == 16384
-    assert nine.memory_context is not None and nine.memory_context > 16384
-    assert (nine.tokens, nine.bound_by) == (16384, "served")
+    assert nine.served_context == 65536
+    assert nine.memory_context == 74_887
+    assert (nine.tokens, nine.bound_by) == (65536, "served")
+    big = one["qwen3.8-27b-4bit"]
+    assert (big.tokens, big.bound_by, big.memory_context) == (32768, "served", 33_945)
 
     two = {
         c.model: c
@@ -1028,8 +1049,9 @@ def test_every_row_echoes_its_work_and_generate_its_ceilings(make_client, auth) 
     # Not token-shaped: no work to state, and never an invented one.
     assert rows["tts"]["work"] is None
     ceilings = {c["model"]: c for c in rows["generate"]["context_ceilings"]}
-    assert ceilings["qwen3.5-9b"]["tokens"] == 16384
-    assert ceilings["qwen3.5-9b"]["served_context"] == 16384
+    assert ceilings["qwen3.5-9b"]["tokens"] == 65536
+    assert ceilings["qwen3.5-9b"]["served_context"] == 65536
+    assert ceilings["qwen3.8-27b-4bit"]["tokens"] == 32768
     # Only a client-sized row has ceilings; every other row says null.
     assert rows["translate"]["context_ceilings"] is None
     assert rows["tts"]["context_ceilings"] is None
@@ -1038,7 +1060,7 @@ def test_every_row_echoes_its_work_and_generate_its_ceilings(make_client, auth) 
 def test_the_fit_follows_the_clients_stated_context(make_client, auth) -> None:
     """A size the 27B serves picks the 27B; one only the 9B serves picks the 9B.
 
-    At 16384 tokens x 2 in flight the 27B-4bit's KV no longer fits the 3090 Ti
+    At 32768 tokens x 2 in flight the 27B-4bit's KV no longer fits the 3090 Ti
     beside its weights, while the 9B's does — so the same class on the same card
     selects a different model because the CLIENT said how it will use it.
     """
@@ -1048,7 +1070,7 @@ def test_the_fit_follows_the_clients_stated_context(make_client, auth) -> None:
             "/v1/capability?class=generate&context_tokens=4096", headers=auth
         )
         wide = instance.get(
-            "/v1/capability?class=generate&context_tokens=16384&concurrency=2",
+            "/v1/capability?class=generate&context_tokens=32768&concurrency=2",
             headers=auth,
         )
         after = instance.get("/v1/capability", headers=auth)
@@ -1061,7 +1083,7 @@ def test_the_fit_follows_the_clients_stated_context(make_client, auth) -> None:
     assert wide.status_code == 200, wide.text
     row = _rows(wide)["generate"]
     assert row["enabled"] is True and row["selected"] == "qwen3.5-9b", row
-    assert (row["work"]["tokens"], row["work"]["concurrency"]) == (16384, 2)
+    assert (row["work"]["tokens"], row["work"]["concurrency"]) == (32768, 2)
     # The ceilings are published at the concurrency asked about.
     assert {c["concurrency"] for c in row["context_ceilings"]} == {2}
 
@@ -1076,24 +1098,25 @@ def test_a_context_above_the_ceiling_is_refused_by_name_and_never_clamped(
     decided = _generate_record("cuda-linux", THREE_NINETY, CUDA_RESERVE, "nvidia")
     with make_client(capability=decided) as instance:
         body = instance.get(
-            "/v1/capability?class=generate&context_tokens=40960", headers=auth
+            "/v1/capability?class=generate&context_tokens=70000", headers=auth
         )
     assert body.status_code == 400, body.text
     error = body.json()["error"]
     assert error["code"] == "context_over_limit"
     details = error["details"]
-    assert details["requested"] == {"tokens": 40960, "concurrency": 1}
+    assert details["requested"] == {"tokens": 70000, "concurrency": 1}
     # The highest ceiling among the candidates, the model it belongs to, and
-    # where each half came from.
-    assert details["ceiling"]["tokens"] == 16384
-    assert details["ceiling"]["model"] in {"qwen3.8-27b-4bit", "qwen3.5-9b"}
+    # where each half came from: the 9B's cuda-linux max_context.
+    assert details["ceiling"]["tokens"] == 65536
+    assert details["ceiling"]["model"] == "qwen3.5-9b"
     assert details["ceiling"]["bound_by"] == "served"
     assert details["ceiling"]["served_context_source"]
-    assert "40960" in error["message"] and "16384" in error["message"]
+    assert "70000" in error["message"] and "65536" in error["message"]
 
 
 def test_a_mac_serves_what_the_card_cannot(make_client, auth) -> None:
-    """The ceiling is PER HOST: the Studio's 27B-4bit is served at 98304."""
+    """The ceiling is PER HOST: the Studio takes 40960 on the 8-bit 27B, which
+    the 3090 Ti is not offered at all, and both 27Bs there are capped at 131072."""
     decided = _generate_record("mlx-darwin", STUDIO, MAC_RESERVE, "apple")
     with make_client(capability=decided, backend=FAKE_MAC_BACKEND) as instance:
         body = instance.get(
@@ -1101,29 +1124,36 @@ def test_a_mac_serves_what_the_card_cannot(make_client, auth) -> None:
         )
     assert body.status_code == 200, body.text
     row = _rows(body)["generate"]
-    assert row["enabled"] is True and row["selected"] == "qwen3.8-27b-4bit", row
+    assert row["enabled"] is True and row["selected"] == "qwen3.8-27b-8bit", row
     ceilings = {c["model"]: c for c in row["context_ceilings"]}
-    assert ceilings["qwen3.8-27b-4bit"]["tokens"] == 98304
+    assert ceilings["qwen3.8-27b-4bit"]["tokens"] == 131072
+    assert ceilings["qwen3.8-27b-8bit"]["tokens"] == 131072
 
 
 def test_a_chosen_model_is_the_one_whose_ceiling_governs() -> None:
-    """An app's own choice is what will run, so its ceiling is the limit."""
+    """An app's own choice is what will run, so its ceiling is the limit.
+
+    On the 3090 Ti 40960 is inside the 9B's 65536 and past the 27B-4bit's
+    32768: unchosen, the 9B's ceiling governs and it passes; with the 27B
+    chosen, the 27B's does and it is refused.
+    """
     entry = BY_NAME["generate"]
-    budget = available_bytes(STUDIO, MAC_RESERVE)
+    budget = available_bytes(THREE_NINETY, CUDA_RESERVE)
     work = capability.WorkingContext(tokens=40960, concurrency=1, source="test")
     capability.check_ceiling(
-        entry, "mlx-darwin", available_bytes=budget, work=work, chosen=None
+        entry, "cuda-linux", available_bytes=budget, work=work, chosen=None
     )
     with pytest.raises(ApiError) as caught:
         capability.check_ceiling(
             entry,
-            "mlx-darwin",
+            "cuda-linux",
             available_bytes=budget,
             work=work,
-            chosen="qwen3.5-9b",
+            chosen="qwen3.8-27b-4bit",
         )
     assert caught.value.code == "context_over_limit"
-    assert caught.value.details["ceiling"]["model"] == "qwen3.5-9b"
+    assert caught.value.details["ceiling"]["model"] == "qwen3.8-27b-4bit"
+    assert caught.value.details["ceiling"]["tokens"] == 32768
 
 
 def test_a_host_that_cannot_hold_the_weights_is_not_a_length_refusal() -> None:
@@ -1176,3 +1206,69 @@ def test_a_record_that_predates_generate_says_so_rather_than_sizing_nothing(
         )
     assert body.status_code == 503, body.text
     assert body.json()["error"]["code"] == "capability_undecided"
+
+
+def test_the_8bit_mac_ceiling_is_131072_now_that_kv_is_counted_once() -> None:
+    """It came out near 64k while the 8-bit's overhead still held the 4-bit
+    run's 98_220 tokens of KV and the terms added KV on top. Counted once, the
+    Studio's memory affords 162_603 tokens at one in flight and the manifest's
+    max_context (131072) binds."""
+    budget = available_bytes(STUDIO, MAC_RESERVE)
+    ceilings = {
+        c.model: c
+        for c in capability.context_ceilings(
+            BY_NAME["generate"], "mlx-darwin", available_bytes=budget, concurrency=1
+        )
+    }
+    eight = ceilings["qwen3.8-27b-8bit"]
+    assert (eight.tokens, eight.bound_by) == (131072, "served")
+    assert eight.memory_context == 162_603
+    # The 4-bit has no memory terms on this backend: its max_context is all
+    # there is, and the row says so with a null memory half.
+    four = ceilings["qwen3.8-27b-4bit"]
+    assert (four.tokens, four.memory_context) == (131072, None)
+
+
+def test_the_pc_ceilings_are_the_computed_maxima() -> None:
+    budget = available_bytes(THREE_NINETY, CUDA_RESERVE)
+    ceilings = {
+        c.model: c.tokens
+        for c in capability.context_ceilings(
+            BY_NAME["generate"], "cuda-linux", available_bytes=budget, concurrency=1
+        )
+    }
+    assert ceilings["qwen3.8-27b-4bit"] == 32768
+    assert ceilings["qwen3.5-9b"] == 65536
+    # No row for the 8-bit 27B: it has no cuda-linux block (Owen, 2026-09-23).
+    assert "qwen3.8-27b-8bit" not in ceilings
+
+
+def test_a_load_is_held_to_the_same_ceiling_capability_publishes() -> None:
+    """`check_load_context` is `Candidate.context_ceiling` at one in flight:
+    the load door and `GET /v1/capability` cannot disagree."""
+    from crucible.manifests import load_manifest
+
+    budget = available_bytes(THREE_NINETY, CUDA_RESERVE)
+    big = load_manifest("qwen3.8-27b-4bit")
+    published = {
+        c.model: c
+        for c in capability.context_ceilings(
+            BY_NAME["generate"], "cuda-linux", available_bytes=budget, concurrency=1
+        )
+    }["qwen3.8-27b-4bit"]
+    held = capability.check_load_context(
+        big, "cuda-linux", available_bytes=budget, context=32768
+    )
+    assert held == published
+    with pytest.raises(ApiError) as caught:
+        capability.check_load_context(
+            big, "cuda-linux", available_bytes=budget, context=32769
+        )
+    assert caught.value.code == "context_over_limit"
+    assert caught.value.details["ceiling"] == published.to_dict()
+    # A host that cannot hold the weights is not a length refusal: the guard
+    # refuses it by its bytes instead.
+    capability.check_load_context(
+        big, "cuda-linux", available_bytes=available_bytes(SIX_GIG, CUDA_RESERVE),
+        context=32769,
+    )

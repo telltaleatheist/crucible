@@ -9,7 +9,8 @@ the disconnect, the header the provider actually received — is never exercised
 It speaks all three dialects because the three differ in exactly the places
 this phase translates: Anthropic's `/v1/messages` with `x-api-key` and a
 message envelope, OpenAI's `/v1/chat/completions` with a bearer, Ollama's
-`/api/tags`. A test points `crucible.upstreams.ANTHROPIC_BASE` (or `OPENAI_BASE`,
+native `/api/tags` (with digests), `/api/show` and `/api/chat` (NDJSON when
+streamed) — section 3.4a. A test points `crucible.upstreams.ANTHROPIC_BASE` (or `OPENAI_BASE`,
 or an ollama `url`) at this server's address and the rest of the server is
 untouched.
 """
@@ -31,6 +32,35 @@ DELTAS = ["Routed, ", "and ", "answered."]
 ANTHROPIC_MODELS = ["claude-sonnet-5", "claude-haiku-5"]
 OPENAI_MODELS = ["gpt-5", "gpt-5-mini"]
 OLLAMA_MODELS = ["qwen3.5:9b", "llama3:8b"]
+
+#: What `/api/show` says about each fake Ollama tag. `qwen3.5:9b` states no
+#: `num_ctx`, so its context is the trained maximum in `model_info`;
+#: `llama3:8b` states one in its Modelfile, which is what a tag like Owen's
+#: `qwen3.8:27b-24g` (98304) looks like.
+OLLAMA_TRAINED_CONTEXT = 262144
+OLLAMA_MODELFILE_CONTEXT = 98304
+OLLAMA_SHOW: dict[str, dict[str, Any]] = {
+    "qwen3.5:9b": {
+        "parameters": 'stop                           "<|im_end|>"',
+        "model_info": {
+            "general.architecture": "qwen35",
+            "qwen35.context_length": OLLAMA_TRAINED_CONTEXT,
+        },
+    },
+    "llama3:8b": {
+        "parameters": (
+            f"num_ctx                        {OLLAMA_MODELFILE_CONTEXT}\n"
+            'stop                           "<|eot_id|>"'
+        ),
+        "model_info": {
+            "general.architecture": "llama",
+            "llama.context_length": 8192,
+        },
+    },
+}
+
+#: What the fake Ollama "thinks" when a chat asks it to.
+THINKING = "Pondering the question."
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -91,7 +121,18 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, {"data": [{"id": name} for name in ids]})
             return
         if self.path == "/api/tags":
-            self._json(200, {"models": [{"name": n} for n in OLLAMA_MODELS]})
+            with owner.lock:
+                owner.tags_calls += 1
+                digests = dict(owner.digests)
+            self._json(
+                200,
+                {
+                    "models": [
+                        {"name": n, "model": n, "digest": digests[n]}
+                        for n in OLLAMA_MODELS
+                    ]
+                },
+            )
             return
         self._json(404, {"error": {"message": "not found"}})
 
@@ -109,7 +150,77 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/v1/chat/completions":
             self._openai(body)
             return
+        if self.path == "/api/show":
+            self._ollama_show(body)
+            return
+        if self.path == "/api/chat":
+            self._ollama_chat(body)
+            return
         self._json(404, {"error": {"message": "not found"}})
+
+    def _ollama_show(self, body: dict[str, Any]) -> None:
+        owner = type(self).owner
+        with owner.lock:
+            owner.show_calls += 1
+            failing = owner.show_failures > 0
+            if failing:
+                owner.show_failures -= 1
+        if failing:
+            self._json(owner.show_status, {"error": "model runner is loading"})
+            return
+        name = body.get("model")
+        shown = OLLAMA_SHOW.get(name) or OLLAMA_SHOW.get(f"{name}:latest")
+        if shown is None:
+            # Ollama's own words for a tag that is not pulled.
+            self._json(404, {"error": f"model '{name}' not found"})
+            return
+        self._json(200, {"modelfile": "", "template": "", **shown})
+
+    def _ollama_line(self, payload: dict[str, Any]) -> None:
+        self.wfile.write(json.dumps(payload).encode("utf-8") + b"\n")
+        self.wfile.flush()
+
+    def _ollama_chat(self, body: dict[str, Any]) -> None:
+        owner = type(self).owner
+        thinks = body.get("think") is True
+        if body.get("stream") is True:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+            if thinks:
+                self._ollama_line(
+                    {"model": body.get("model"), "done": False,
+                     "message": {"role": "assistant", "content": "",
+                                 "thinking": THINKING}}
+                )
+            for delta in DELTAS:
+                self._ollama_line(
+                    {"model": body.get("model"), "done": False,
+                     "message": {"role": "assistant", "content": delta}}
+                )
+            if owner.truncate_stream:
+                return
+            self._ollama_line(
+                {"model": body.get("model"), "done": True, "done_reason": "stop",
+                 "message": {"role": "assistant", "content": ""},
+                 "prompt_eval_count": 11, "eval_count": 7}
+            )
+            return
+        message: dict[str, Any] = {"role": "assistant", "content": ANSWER}
+        if thinks:
+            message["thinking"] = THINKING
+        self._json(
+            200,
+            {
+                "model": body.get("model"),
+                "created_at": "2026-09-23T00:00:00Z",
+                "message": message,
+                "done": True,
+                "done_reason": owner.done_reason,
+                "prompt_eval_count": 11,
+                "eval_count": 7,
+            },
+        )
 
     # ------------------------------------------------------------- dialects
 
@@ -225,6 +336,19 @@ class FakeUpstream:
         self.status = 200
         self.error_body: Any = {"error": {"message": "nope"}}
         self.extra_headers: dict[str, str] = {}
+        #: Ollama's per-tag digests, as `/api/tags` reports them. A test that
+        #: changes one is `ollama create` over the same name.
+        self.digests: dict[str, str] = {n: f"sha256:{i:064x}" for i, n in enumerate(OLLAMA_MODELS)}
+        self.tags_calls = 0
+        #: `/api/show`: how many calls, and how many of the next ones fail with
+        #: `show_status` before it answers.
+        self.show_calls = 0
+        self.show_failures = 0
+        self.show_status = 500
+        #: The non-streamed `/api/chat`'s `done_reason`.
+        self.done_reason = "stop"
+        #: A streamed `/api/chat` that stops before its `done` line.
+        self.truncate_stream = False
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 

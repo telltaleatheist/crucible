@@ -96,6 +96,11 @@ engine_args = [
     "--max-num-seqs", "16",
     "--limit-mm-per-prompt", '{"image": 8, "video": 0}',
 ]
+# THE MOST A LOAD MAY ASK FOR HERE (`params.context`). COMPUTED 2026-09-23, LOAD TEST OWED, from the
+# COMPUTED terms below against the 3090 Ti's 21.0 GiB (24_564 MiB less the 3 GiB allowance = 22_535_995_392 B): 1_844_010_783 + 2_845_415_834 =
+# 4_689_426_617 B fixed, + 131072 x 18_023 (2_362_310_656) = 7_051_737_273 B
+# = 6.57 GiB. The memory would afford 990_210 tokens; 131072 is the cap, not the memory: a longer prefill is not worth its time, and it is ample.
+max_context = 131072
 
 # ------------------------------------------------- the same number, taken apart
 #
@@ -167,6 +172,11 @@ serves = ["text"]
 #   at 8192         100_663_296
 memory_bytes_estimate = 3_674_495_014
 engine_args = []
+# THE MOST A LOAD MAY ASK FOR HERE. COMPUTED 2026-09-23, LOAD TEST OWED, against the Studio's 48.0 GiB (64 GiB less the 25% allowance = 51_539_607_552 B):
+# 1_504_786_624 + 2_069_045_094 = 3_573_831_718 B fixed, + 131072 x 12_288
+# (1_610_612_736) = 5_184_444_454 B = 4.83 GiB. The memory would afford
+# 3_903_464 tokens; 131072 is the cap, not the memory: a longer prefill is not worth its time, and it is ample. ADMISSION on mlx-darwin, not an engine cap.
+max_context = 131072
 
 [backends.mlx-darwin.memory]
 weights_bytes = 1_504_786_624
@@ -196,6 +206,11 @@ mmproj = "mmproj-F16.gguf"
 serves = ["text", "image"]
 memory_bytes_estimate = 2_516_831_072
 engine_args = ["--parallel", "1"]
+# THE MOST A LOAD MAY ASK FOR HERE, composed as llama-server's `-c`. COMPUTED 2026-09-23, LOAD TEST OWED,
+# from the DECLARED terms below against the 3090 Ti's 21.0 GiB (24_564 MiB less the 3 GiB allowance = 22_535_995_392 B): 1_016_831_072 +
+# 1_399_336_704 = 2_416_167_776 B fixed, + 131072 x 12_288 = 4_026_780_512 B
+# = 3.75 GiB. The memory would afford 1_637_355 tokens; 131072 is the cap, not the memory: a longer prefill is not worth its time, and it is ample.
+max_context = 131072
 
 [backends.llama-windows.memory]
 weights_bytes = 1_016_831_072

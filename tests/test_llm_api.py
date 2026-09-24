@@ -42,7 +42,10 @@ from .fake_engine import ANSWER, DELTAS, TOOL_CALL, FakeEngine
 MODEL = "qwen3.5-9b"
 #: The page reader, which sorts first by id and so leads every listing.
 PAGE_MODEL = "dots-ocr"
-BIG_MODEL = "qwen3.8-27b-8bit"
+#: The 27B at 8 bits, which has NO cuda-linux block (Owen, 2026-09-23: *"we
+#: shouldnt have an 8 bit 27b on here. waste of space, wont fit in the gpu"*).
+#: It is still listed here, as every manifest is, and never offered.
+MAC_ONLY_MODEL = "qwen3.8-27b-8bit"
 #: The same 27B at 4 bits: the one that does fit Owen's card.
 SMALL_BIG_MODEL = "qwen3.8-27b-4bit"
 
@@ -112,6 +115,29 @@ ROOMY_BACKEND = replace(
     FAKE_BACKEND,
     gpu=replace(FAKE_BACKEND.gpu, name="NVIDIA H100 80GB HBM3", vram_bytes=80 * GIB),
 )
+
+#: A card the 4-bit 27B does NOT fit: 12 GiB against its 20.1 GiB estimate.
+#: Every cuda-linux block this build ships fits the 3090 Ti now that the 8-bit
+#: has none, so "a model too big for the card" is tested on a smaller card
+#: rather than on a model that is never offered.
+SMALL_CARD_BACKEND = replace(
+    FAKE_BACKEND,
+    gpu=replace(FAKE_BACKEND.gpu, name="NVIDIA GeForce RTX 3060", vram_bytes=12 * GIB),
+)
+
+
+@pytest.fixture
+def small_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
+    monkeypatch.setattr(accelerator, "probe_vram", lambda: (11 * GIB, 12 * GIB))
+
+
+@pytest.fixture
+def small_card_client(
+    make_client: Callable[..., TestClient], fake_env: Path
+) -> Iterator[TestClient]:
+    with make_client(enable_llm=True, backend=SMALL_CARD_BACKEND) as client:
+        yield client
 
 
 @pytest.fixture
@@ -196,7 +222,7 @@ def test_models_lists_every_manifest_with_its_standing(
     # The two decision tiers (2026-09-23) sort before the 9B: '0' < '4' < '9'.
     assert [row["id"] for row in response.json()] == [
         PAGE_MODEL, "qwen3.5-0.8b", "qwen3.5-4b", MODEL, "qwen3.5-9b-vl",
-        SMALL_BIG_MODEL, "qwen3.8-27b-4bit-vl", BIG_MODEL, "qwen3.8-27b-8bit-vl",
+        SMALL_BIG_MODEL, "qwen3.8-27b-4bit-vl", MAC_ONLY_MODEL,
     ]
     row = rows[MODEL]
     assert row["family"] == "qwen3.5"
@@ -225,7 +251,7 @@ def test_models_says_loadable_once_the_weights_are_there(
     assert rows[MODEL]["loadable"] is True
     assert "reason" not in rows[MODEL]
     # The 27B has a manifest and is supported here; it is simply not pulled.
-    assert rows[BIG_MODEL]["installed"] is False
+    assert rows[SMALL_BIG_MODEL]["installed"] is False
 
 
 def test_models_is_refused_when_llm_is_off(
@@ -245,7 +271,7 @@ def test_info_gains_an_llm_capability(
     assert "llm" in by_type
     assert [row["id"] for row in by_type["llm"]["models"]] == [
         PAGE_MODEL, "qwen3.5-0.8b", "qwen3.5-4b", MODEL, "qwen3.5-9b-vl",
-        SMALL_BIG_MODEL, "qwen3.8-27b-4bit-vl", BIG_MODEL, "qwen3.8-27b-8bit-vl",
+        SMALL_BIG_MODEL, "qwen3.8-27b-4bit-vl", MAC_ONLY_MODEL,
     ]
     # The two things you can actually POST are in `job_types`, NOT in
     # `capabilities`. They were capabilities of their own until 2026-09-13, and
@@ -274,13 +300,13 @@ def test_the_lifecycle_types_describe_installed_as_the_models_route_does(
     for name in ("load-model", "unload-model"):
         rows = {d.id: d.to_dict() for d in store.registry[name].describe_models()}
         assert rows[MODEL]["installed"] is False
-        assert rows[BIG_MODEL]["installed"] is False
+        assert rows[SMALL_BIG_MODEL]["installed"] is False
     fake_weights(MODEL)
     served = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
     for name in ("load-model", "unload-model"):
         rows = {d.id: d.to_dict() for d in store.registry[name].describe_models()}
         assert rows[MODEL]["installed"] is True
-        assert rows[BIG_MODEL]["installed"] is False
+        assert rows[SMALL_BIG_MODEL]["installed"] is False
         for model_id, row in rows.items():
             assert row["installed"] is served[model_id]["installed"], model_id
             assert row["resident"] is served[model_id]["resident"], model_id
@@ -296,9 +322,14 @@ def test_the_llm_capability_rows_are_the_models_rows(
     by_type = {entry["job_type"]: entry for entry in capabilities}
     assert by_type["llm"]["models"] == models
     for row in models:
-        assert row["revision"] == load_manifest(row["id"]).spec(
-            FAKE_BACKEND.kind
-        ).revision
+        manifest = load_manifest(row["id"])
+        if not manifest.supports(FAKE_BACKEND.kind):
+            # The 8-bit 27B is Mac-only (Owen, 2026-09-23): listed, never
+            # given another backend's pin.
+            assert row["backend_supported"] is False, row["id"]
+            assert row["revision"] is None, row["id"]
+            continue
+        assert row["revision"] == manifest.spec(FAKE_BACKEND.kind).revision
 
 
 def test_a_model_this_backend_cannot_serve_has_no_revision(
@@ -363,7 +394,12 @@ def test_every_row_carries_the_fingerprint_a_client_records(
     """
     rows = llm_client.get("/v1/models", headers=auth).json()
     for row in rows:
+        if not row["backend_supported"]:
+            # No block here, so no pin and no bytes to name (the Mac-only 8-bit).
+            assert row["revision"] is None and row["fingerprint"] is None, row
+            continue
         assert row["fingerprint"] == f"{row['id']}@{row['revision']}"
+    assert any(not row["backend_supported"] for row in rows)
     # By id, not by position: the rows are sorted by manifest stem, so which one
     # is first changes the moment a manifest is added — `dots-ocr` took the slot
     # from `qwen3.5-9b` the day page reading landed.
@@ -698,69 +734,119 @@ def test_a_busy_card_is_refused_before_the_job_exists(
     assert llm_client.get("/v1/health", headers=auth).json()["queue_depth"] == 0
 
 
-def test_the_27b_on_this_card_is_insufficient_memory(
+def _stamp_without_a_block(home: Path, model_id: str) -> Path:
+    """A pull stamp in `<home>/models/<id>/cuda-linux` for a model whose
+    manifest has NO cuda-linux block — what an install that pulled the 8-bit's
+    FP8 arm before 2026-09-23 would still hold. `fake_weights` cannot write it:
+    it reads the block, and there is none."""
+    directory = home / "models" / model_id / FAKE_BACKEND.kind
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "crucible-pull.json").write_text(
+        json.dumps(
+            {
+                "model": model_id,
+                "backend": FAKE_BACKEND.kind,
+                "hf_repo": "Qwen/Qwen3.8-27B-FP8",
+                "revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+                "bytes": 30_866_866_928,
+                "seconds": 300.0,
+                "pulled": "2026-09-17T19:00:00+0000",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return directory
+
+
+def test_the_8bit_27b_is_not_offered_on_cuda_linux_even_with_weights_on_disk(
     llm_client: TestClient,
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
+    home: Path,
     idle_card: None,
 ) -> None:
-    fake_weights(BIG_MODEL)
-    response = submit(llm_client, auth, type="load-model", model=BIG_MODEL)
-    assert response.status_code == 409
+    """Owen, 2026-09-23: *"we shouldnt have an 8 bit 27b on here. waste of
+    space, wont fit in the gpu"*. The 8-bit has no cuda-linux block, so it is
+    refused for having none — `backend_unsupported`, by name — and not for its
+    size, which is a question this host no longer asks about it.
+
+    Stamped weights on disk change nothing and break nothing: every inventory
+    is walked from the manifests, and a manifest with no block for this backend
+    is reported as such without its folder being read."""
+    _stamp_without_a_block(home, MAC_ONLY_MODEL)
+    response = submit(llm_client, auth, type="load-model", model=MAC_ONLY_MODEL)
+    assert response.status_code == 400
     error = response.json()["error"]
-    assert error["code"] == "insufficient_memory"
-    assert error["details"]["needed_bytes"] == 48_685_810_449
-    assert error["details"]["total_bytes"] == FAKE_BACKEND.gpu.vram_bytes
+    assert error["code"] == "backend_unsupported"
+    assert error["details"] == {
+        "model": MAC_ONLY_MODEL,
+        "backend": FAKE_BACKEND.kind,
+        "declared": ["mlx-darwin"],
+    }
+    rows = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
+    row = rows[MAC_ONLY_MODEL]
+    assert row["backend_supported"] is False
+    assert row["installed"] is False
+    assert row["loadable"] is False
+    assert "has no cuda-linux block" in row["reason"]
+    assert "mlx-darwin" in row["reason"]
 
 
 def test_a_model_too_big_for_the_card_is_refused_before_the_download(
-    llm_client: TestClient, auth: dict[str, str], idle_card: None
+    small_card_client: TestClient, auth: dict[str, str], small_card: None
 ) -> None:
-    """45.3 GiB on a 24 GiB card is not a "pull 29 GB first" problem.
+    """20.1 GiB on a 12 GiB card is not a "pull 22 GB first" problem.
 
     The weights are deliberately NOT stamped here: a refusal that says
-    `model_not_installed` would send somebody off to download 55 GB for a model
-    that can never load on this host.
+    `model_not_installed` would send somebody off to download a model that can
+    never load on this host.
     """
-    response = submit(llm_client, auth, type="load-model", model=BIG_MODEL)
+    response = submit(
+        small_card_client, auth, type="load-model", model=SMALL_BIG_MODEL
+    )
     assert response.status_code == 409
     error = response.json()["error"]
     assert error["code"] == "insufficient_memory"
     assert "ever" in error["message"]
-    assert "45.3 GiB" in error["message"]
-    assert "24.0 GiB in total" in error["message"]
-    assert "NVIDIA GeForce RTX 3090 Ti" in error["message"]
+    assert "20.1 GiB" in error["message"]
+    assert "12.0 GiB in total" in error["message"]
+    assert "NVIDIA GeForce RTX 3060" in error["message"]
+    assert error["details"]["needed_bytes"] == 21_633_171_456
+    assert error["details"]["total_bytes"] == SMALL_CARD_BACKEND.gpu.vram_bytes
 
 
-def test_models_says_why_the_27b_is_not_loadable_here(
-    llm_client: TestClient, auth: dict[str, str]
+def test_models_says_why_a_model_is_not_loadable_on_a_small_card(
+    small_card_client: TestClient, auth: dict[str, str]
 ) -> None:
-    rows = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
-    assert rows[BIG_MODEL]["loadable"] is False
-    assert "45.3 GiB" in rows[BIG_MODEL]["reason"]
-    assert "24.0 GiB in total" in rows[BIG_MODEL]["reason"]
+    rows = {
+        row["id"]: row
+        for row in small_card_client.get("/v1/models", headers=auth).json()
+    }
+    assert rows[SMALL_BIG_MODEL]["loadable"] is False
+    assert "20.1 GiB" in rows[SMALL_BIG_MODEL]["reason"]
+    assert "12.0 GiB in total" in rows[SMALL_BIG_MODEL]["reason"]
 
 
-def test_the_4bit_27b_is_loadable_on_this_card_where_the_bf16_27b_is_not(
+def test_the_4bit_27b_is_loadable_on_this_card_and_the_8bit_is_not_offered(
     llm_client: TestClient,
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
+    home: Path,
     idle_card: None,
 ) -> None:
-    """The whole point of the third manifest, on Owen's own card.
+    """The 27B this card runs, on Owen's own card.
 
     `llm_client` is the RTX 3090 Ti: 24 GiB in total. Two manifests for the same
     27B — same family, same params_b — and the host answers differently about
-    each, because the answer is arithmetic about the weights each one points at
-    and not about the model's name.
+    each: the 4-bit fits and is offered; the 8-bit, whose FP8 weights alone
+    (28.75 GiB) exceed the card, has no block here at all (Owen, 2026-09-23).
     """
     fake_weights(SMALL_BIG_MODEL)
-    fake_weights(BIG_MODEL)
+    _stamp_without_a_block(home, MAC_ONLY_MODEL)
     rows = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
 
     small = rows[SMALL_BIG_MODEL]
-    assert small["family"] == rows[BIG_MODEL]["family"] == "qwen3.8"
-    assert small["params_b"] == rows[BIG_MODEL]["params_b"] == 27
+    assert small["family"] == rows[MAC_ONLY_MODEL]["family"] == "qwen3.8"
+    assert small["params_b"] == rows[MAC_ONLY_MODEL]["params_b"] == 27
     assert small["backend_supported"] is True
     assert small["installed"] is True
     assert small["loadable"] is True
@@ -779,13 +865,13 @@ def test_the_4bit_27b_is_loadable_on_this_card_where_the_bf16_27b_is_not(
         load_manifest(SMALL_BIG_MODEL).spec(FAKE_BACKEND.kind).revision
     )
 
-    assert rows[BIG_MODEL]["loadable"] is False
-    assert "45.3 GiB" in rows[BIG_MODEL]["reason"]
+    assert rows[MAC_ONLY_MODEL]["backend_supported"] is False
+    assert rows[MAC_ONLY_MODEL]["loadable"] is False
 
     # And the refusal the listing predicts is the refusal the load makes.
-    response = submit(llm_client, auth, type="load-model", model=BIG_MODEL)
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "insufficient_memory"
+    response = submit(llm_client, auth, type="load-model", model=MAC_ONLY_MODEL)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "backend_unsupported"
 
 
 def test_the_4bit_27b_actually_loads_on_a_free_24_gib_card(
@@ -920,7 +1006,7 @@ def test_health_and_models_see_the_resident_model(
 
     rows = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
     assert rows[MODEL]["resident"] is True
-    assert rows[BIG_MODEL]["resident"] is False
+    assert rows[SMALL_BIG_MODEL]["resident"] is False
 
     listed = llm_client.get("/v1/openai/models", headers=auth).json()
     assert listed["object"] == "list"
@@ -937,18 +1023,18 @@ def test_loading_a_second_model_unloads_the_first(
     """Phase 2 residency rule: one resident model at a time (section 3)."""
     llm_client = roomy_client
     fake_weights(MODEL)
-    fake_weights(BIG_MODEL)
+    fake_weights(SMALL_BIG_MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
-    events = run_job(llm_client, auth, type="load-model", model=BIG_MODEL)
+    events = run_job(llm_client, auth, type="load-model", model=SMALL_BIG_MODEL)
 
     messages = [e["data"]["message"] for e in events if e["event"] == "warming"]
     assert any("unloading qwen3.5-9b" in m for m in messages)
-    assert events[-1]["data"]["resident"] == BIG_MODEL
+    assert events[-1]["data"]["resident"] == SMALL_BIG_MODEL
     assert len(engines) == 2
     assert engines[0].stopped is True
     assert engines[1].stopped is False
     assert llm_client.get("/v1/health", headers=auth).json()["resident_models"] == [
-        BIG_MODEL
+        SMALL_BIG_MODEL
     ]
 
 
@@ -985,7 +1071,7 @@ def test_unloading_a_model_that_is_not_resident_is_refused(
     assert "no model is" in error["message"]
 
     run_job(llm_client, auth, type="load-model", model=MODEL)
-    response = submit(llm_client, auth, type="unload-model", model=BIG_MODEL)
+    response = submit(llm_client, auth, type="unload-model", model=SMALL_BIG_MODEL)
     assert response.status_code == 409
     assert response.json()["error"]["details"]["resident"] == MODEL
 
@@ -1919,3 +2005,169 @@ def test_the_openai_surface_is_also_mounted_where_openai_clients_look(
     # And the same lock: no token, no door.
     assert llm_client.get("/openai/v1/models").status_code == 401
 
+
+
+# ------------------------------------------------- load-time context (2026-09-23)
+#
+# `params.context` on `load-model`: absent is the block's default, present is
+# checked against the SAME ceiling `GET /v1/capability` publishes
+# (`capability.check_load_context`) and reaches the engine's argv, the KV plan
+# and the resident row. The card here is the 3090 Ti, entirely free, so every
+# number below is the manifest's own arithmetic against 21.0 GiB.
+
+
+@pytest.fixture
+def free_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole 3090 Ti free — the budget is `total - allowance` exactly."""
+    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
+    monkeypatch.setattr(
+        accelerator,
+        "probe_vram",
+        lambda: (FAKE_BACKEND.gpu.vram_bytes, FAKE_BACKEND.gpu.vram_bytes),
+    )
+
+
+def _flag(args: list[str], name: str) -> str:
+    return args[args.index(name) + 1]
+
+
+def test_a_load_that_states_no_context_starts_at_the_default(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    free_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    fake_weights(MODEL)
+    events = run_job(llm_client, auth, type="load-model", model=MODEL)
+    assert events[-1]["event"] == "done", events[-1]
+    assert _flag(engines[0].args, "--max-model-len") == "16384"
+    row = {r["id"]: r for r in llm_client.get("/v1/models", headers=auth).json()}[MODEL]
+    assert row["max_model_len"] == row["context_default"] == 16384
+
+
+def test_a_stated_context_reaches_the_engine_the_plan_and_the_resident_row(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    free_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    fake_weights(MODEL)
+    events = run_job(
+        llm_client, auth, type="load-model", model=MODEL, params={"context": 65536}
+    )
+    assert events[-1]["event"] == "done", events[-1]
+    args = engines[0].args
+    # The LAST spelling is the one argparse keeps, and there is only one.
+    assert args.count("--max-model-len") == 1
+    assert _flag(args, "--max-model-len") == "65536"
+    # The KV pool follows the loaded context: `fits` is one 65536-token request,
+    # and the pool is capped at context x max_num_seqs, never at the default's.
+    terms = load_manifest(MODEL).spec(FAKE_BACKEND.kind).memory
+    budget = FAKE_BACKEND.gpu.vram_bytes - DEFAULT_DESKTOP_ALLOWANCE_BYTES
+    pool = int(_flag(args, "--kv-cache-memory-bytes"))
+    assert pool == min(budget - terms.fixed_bytes, terms.kv_bytes_per_token * 65536 * 16)
+    assert pool >= terms.kv_bytes_per_token * 65536
+    # The resident row and both listings report what was loaded, not the file.
+    row = {r["id"]: r for r in llm_client.get("/v1/models", headers=auth).json()}[MODEL]
+    assert row["max_model_len"] == 65536
+    assert row["context_default"] == 16384
+    assert row["max_context"]["tokens"] == 65536
+    entry = llm_client.get("/v1/openai/models", headers=auth).json()["data"][0]
+    assert entry["max_model_len"] == 65536
+
+
+def test_a_context_over_the_ceiling_is_refused_before_anything_moves(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    free_card: None,
+    engines: list[FakeEngine],
+) -> None:
+    """The same `400 context_over_limit` body `GET /v1/capability` answers,
+    at submit, with the resident model untouched and no job created."""
+    fake_weights(MODEL)
+    fake_weights(SMALL_BIG_MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    assert len(engines) == 1
+
+    refused = submit(
+        llm_client, auth, type="load-model", model=SMALL_BIG_MODEL,
+        params={"context": 40960},
+    )
+    assert refused.status_code == 400, refused.text
+    error = refused.json()["error"]
+    assert error["code"] == "context_over_limit"
+    details = error["details"]
+    assert details["model"] == SMALL_BIG_MODEL
+    assert details["requested"] == {"tokens": 40960, "concurrency": 1}
+    assert details["ceiling"]["tokens"] == 32768
+    assert details["ceiling"]["bound_by"] == "served"
+    assert details["ceiling"]["memory_context"] == 33_945
+    assert [c["model"] for c in details["ceilings"]] == [SMALL_BIG_MODEL]
+    assert "40960" in error["message"] and "32768" in error["message"]
+
+    # Nothing was evicted and nothing was started.
+    assert len(engines) == 1 and engines[0].stopped is False
+    assert llm_client.get("/v1/health", headers=auth).json()["resident_models"] == [MODEL]
+
+    # The 9B's own ceiling on this card is its max_context, 65536.
+    over = submit(
+        llm_client, auth, type="load-model", model=MODEL, params={"context": 65537}
+    )
+    assert over.status_code == 400
+    assert over.json()["error"]["details"]["ceiling"]["tokens"] == 65536
+    assert len(engines) == 1 and engines[0].stopped is False
+
+
+@pytest.mark.parametrize("context", [2047, 0, -1, "32768", 32768.0, True])
+def test_a_context_below_the_floor_or_not_an_int_is_invalid_params(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    free_card: None,
+    context: Any,
+) -> None:
+    fake_weights(MODEL)
+    response = submit(
+        llm_client, auth, type="load-model", model=MODEL, params={"context": context}
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_params"
+    assert "context" in response.json()["error"]["message"]
+
+
+def test_loading_the_resident_model_at_a_new_context_is_a_reload(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    engines: list[FakeEngine],
+) -> None:
+    """`Residency.load` evicts unconditionally, so the same id at a new context
+    is a restart — and the guard and the KV plan now credit the resident's own
+    bytes, which the eviction gives back. Before, both read the card with the
+    9B still on it and refused a same-model reload on a 24 GB card."""
+    monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
+    total = FAKE_BACKEND.gpu.vram_bytes
+    resident_estimate = load_manifest(MODEL).spec(FAKE_BACKEND.kind).memory_bytes_estimate
+    # The card as nvidia-smi reads it WITH the 9B resident: its estimate is gone.
+    free = {"bytes": total}
+    monkeypatch.setattr(accelerator, "probe_vram", lambda: (free["bytes"], total))
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    free["bytes"] = total - resident_estimate
+
+    events = run_job(
+        llm_client, auth, type="load-model", model=MODEL, params={"context": 32768}
+    )
+    assert events[-1]["event"] == "done", events[-1]
+    messages = [e["data"]["message"] for e in events if e["event"] == "warming"]
+    assert any(f"unloading {MODEL}" in m for m in messages)
+    assert len(engines) == 2
+    assert engines[0].stopped is True and engines[1].stopped is False
+    assert _flag(engines[0].args, "--max-model-len") == "16384"
+    assert _flag(engines[1].args, "--max-model-len") == "32768"
+    row = {r["id"]: r for r in llm_client.get("/v1/models", headers=auth).json()}[MODEL]
+    assert row["max_model_len"] == 32768

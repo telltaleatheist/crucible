@@ -27,7 +27,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ... import accelerator, jobenv, llamacpp, vram, weights
 from ...backend import LLAMA_WINDOWS
-from ...capability import available_bytes
+from ...capability import (
+    MIN_LOAD_CONTEXT,
+    Candidate,
+    available_bytes,
+    check_load_context,
+)
 from ... import ollamastore
 from ...config import Config
 from ...engines import EngineError
@@ -151,6 +156,16 @@ class LoadParams(BaseModel):
     timeout_s: float = Field(default=DEFAULT_READY_TIMEOUT_SECONDS, ge=30, le=7200)
     #: Absent means today's behaviour exactly: loaded, and held by nothing.
     lease: LeaseOnLoad | None = None
+    #: THE CONTEXT TO START THE ENGINE WITH (2026-09-23). Absent means the
+    #: manifest's `context_default` for this backend, exactly as before. Present,
+    #: it must be at least `MIN_LOAD_CONTEXT` (refused here, `invalid_params`)
+    #: and at most this host's ceiling for the model — the SAME ceiling
+    #: `GET /v1/capability` publishes (`capability.check_load_context`),
+    #: refused `400 context_over_limit` before anything is evicted or started.
+    #: It becomes vLLM's `--max-model-len` / llama-server's `-c`, sizes the KV
+    #: plan, and is the resident row's `max_model_len`. Strict: a string, a
+    #: float or a bool is refused rather than coerced.
+    context: int | None = Field(default=None, ge=MIN_LOAD_CONTEXT, strict=True)
 
 
 class UnloadParams(BaseModel):
@@ -327,31 +342,40 @@ def model_rows(
                 # `--gpu-memory-utilization` is a fraction of the total and the
                 # Windows desktop is spent on top of it, which is the measured
                 # defect this whole design started from (section 0a).
-                afforded = terms.max_context(
-                    available_bytes=available_bytes(
+                # THE SAME CEILING THE LOAD DOOR AND `GET /v1/capability` USE
+                # (2026-09-23): `Candidate.context_ceiling`, at one in flight,
+                # because this row answers "how long can ONE request be" and
+                # a load's `params.context` is refused above exactly this.
+                # Before `max_context` existed this row computed its own
+                # min(card, weights) — a second owner that would now advertise
+                # 262144 on a Mac whose load door refuses anything past
+                # 131072.
+                ceiling_here = Candidate.of(manifest, backend_kind).context_ceiling(
+                    available_bytes(
                         backend.gpu.vram_bytes, config.desktop_allowance_bytes
                     ),
-                    concurrency=1,
+                    1,
                 )
+                if ceiling_here is None:  # pragma: no cover - models are token-shaped
+                    raise ValueError(f"{manifest.id} has no context ceiling")
                 # BOTH WALLS, AND THE LOWER OF THEM, rather than one number with
-                # the reasoning swallowed. The card and the weights each impose a
-                # limit and they are limits of different kinds: more VRAM raises
-                # the first and nothing raises the second. A client reads
-                # `tokens`; a person reading a refusal wants to know WHICH wall
-                # they hit, because one of them is worth buying a bigger card for
-                # and the other is not.
+                # the reasoning swallowed. The card and the manifest's maximum
+                # each impose a limit and they are limits of different kinds:
+                # more VRAM raises the first and nothing a client does raises
+                # the second. A client reads `tokens`; a person reading a
+                # refusal wants to know WHICH wall they hit.
                 #
-                # This is also the field that caught itself: before
-                # `trained_context` existed, a 64 GB Mac afforded 1_389_135
-                # tokens of a checkpoint trained at 262_144, and publishing that
-                # would have been Crucible doing precisely what section 6.1
-                # refuses Ollama for.
+                # `weights_allow` stays published: it is the wall behind
+                # `max_context` (the parser holds max_context <= it), and the
+                # field that caught a 64 GB Mac affording 1_389_135 tokens of a
+                # checkpoint trained at 262_144.
                 ceiling = {
-                    "tokens": min(afforded, manifest.trained_context),
-                    "card_affords": afforded,
+                    "tokens": ceiling_here.tokens,
+                    "card_affords": ceiling_here.memory_context,
+                    "max_context": ceiling_here.served_context,
                     "weights_allow": manifest.trained_context,
                     "limited_by": (
-                        "card" if afforded <= manifest.trained_context else "weights"
+                        "card" if ceiling_here.bound_by == "memory" else "max_context"
                     ),
                     "concurrency": 1,
                     "basis": terms.basis,
@@ -494,7 +518,9 @@ def model_rows(
             # where the wall IS. A request longer than `max_model_len` is refused
             # right now; a request longer than `max_context.tokens` cannot be
             # served by this machine at all, whatever it is restarted with. The
-            # gap between the two is exactly what a settings door may offer.
+            # gap between the two is exactly what a `load-model` may ask for as
+            # `params.context`, and the load door refuses past `tokens` with
+            # the same function (`capability.check_load_context`).
             #
             # Owen's Mac-versus-PC case is this field: same model, same act, two
             # numbers, and an app that reads it never has to discover the
@@ -629,6 +655,31 @@ def _require_loadable(
     return manifest, spec, (python, installed)
 
 
+def _load_context(
+    config: Config, backend: Any, manifest: ModelManifest, params: "LoadParams"
+) -> int:
+    """The context this load starts the engine with, or `context_over_limit`.
+
+    Absent: `context_for` — the block's default, unchanged, and not checked
+    against the ceiling because it is the number the ceiling starts from.
+    Present: checked by `capability.check_load_context` against this host's
+    budget (the card's total less the desktop allowance, the budget every
+    capability fit uses), which is one function shared with
+    `GET /v1/capability`.
+    """
+    if params.context is None:
+        return manifest.context_for(backend.kind)
+    check_load_context(
+        manifest,
+        backend.kind,
+        available_bytes=available_bytes(
+            backend.gpu.vram_bytes, config.desktop_allowance_bytes
+        ),
+        context=params.context,
+    )
+    return params.context
+
+
 # ----------------------------------------------------------------- load job
 
 
@@ -661,6 +712,22 @@ class LoadModelJobType:
     def describe_models(self) -> list[ModelDescriptor]:
         return _descriptors(self._config, self._config.backend_kind, self._residency)
 
+    def _reclaimable(self) -> int:
+        """What the eviction this load always makes gives back.
+
+        `Residency.load` evicts WHATEVER is resident before it starts —
+        including the very model it is loading, so loading the resident model
+        again (at a new `params.context`, or the same one) is a full restart.
+        This used to pass `reclaimable_bytes(excluding=model)`, which answered
+        0 for that case: the guard then demanded the model's whole estimate
+        free while the model itself still held it, and a same-model reload on a
+        24 GB card was refused `insufficient_memory` for memory the load was
+        about to free. The exclusion is right for the doors that REUSE what
+        they name (`tts`, `align`, `denoise`); this one never does
+        (`leases.CARD_EFFECTS["load-model"]`).
+        """
+        return self._residency.reclaimable_bytes()
+
     def vram_estimate(self, model: str | None) -> int:
         if model is None:
             raise JobError("model_required", f"{self.name} needs a model")
@@ -691,20 +758,23 @@ class LoadModelJobType:
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs a model")
-        _params(LoadParams, params, self.name)
+        loading = _params(LoadParams, params, self.name)
         # One card, one resident engine, and now one more thing that can hold it:
         # a `tts` streaming session is not a job and does not queue behind this
         # lane, so loading a model over it would end somebody's sentence
         # (PHASE3-TTS.md section 7).
         self._residency.refuse_if_claimed(f"loading {model!r}")
         manifest, spec, _ = _require_loadable(self._config, self._backend, model)
+        # The stated context, refused above this host's ceiling BEFORE the guard
+        # reads the card and long before anything is evicted.
+        context = _load_context(self._config, self._backend, manifest, loading)
         state = accelerator.guard(
             self._config.backend_kind,
             model_id=model,
             need_bytes=spec.memory_bytes_estimate,
             owned_pids=self._residency.owned_pids(),
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-            reclaimable_bytes=self._residency.reclaimable_bytes(excluding=model),
+            reclaimable_bytes=self._reclaimable(),
         )
         # AND THEN THE SECOND QUESTION, which the guard above does not ask.
         # The guard asks whether the model FITS — estimate against free. This
@@ -716,9 +786,10 @@ class LoadModelJobType:
         plan = vram.plan_vllm_memory(
             model_id=model,
             spec=spec,
-            context=manifest.context_for(spec.backend),
+            context=context,
             card=state,
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
+            reclaimable_bytes=self._reclaimable(),
         )
         if plan is not None and not plan.fits:
             raise ApiError(409, "insufficient_kv_cache", plan.sentence())
@@ -754,6 +825,10 @@ class LoadModelJobType:
             )
         except ApiError as exc:
             raise JobError(exc.code, exc.message) from None
+        try:
+            context = _load_context(self._config, self._backend, manifest, params)
+        except ApiError as exc:
+            raise JobError(exc.code, exc.message) from None
 
         ctx.warming(f"checking the accelerator for {model}")
         try:
@@ -765,7 +840,7 @@ class LoadModelJobType:
                 need_bytes=spec.memory_bytes_estimate,
                 owned_pids=self._residency.owned_pids(),
                 desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-                reclaimable_bytes=self._residency.reclaimable_bytes(excluding=model),
+                reclaimable_bytes=self._reclaimable(),
             )
         except ApiError as exc:
             raise JobError(exc.code, exc.message) from None
@@ -777,9 +852,10 @@ class LoadModelJobType:
         plan = vram.plan_vllm_memory(
             model_id=model,
             spec=spec,
-            context=manifest.context_for(spec.backend),
+            context=context,
             card=state,
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
+            reclaimable_bytes=self._reclaimable(),
         )
         if plan is not None:
             if not plan.fits:
@@ -802,6 +878,7 @@ class LoadModelJobType:
                 installed.path,
                 python,
                 plan=plan,
+                context=context,
                 timeout=params.timeout_s,
                 on_progress=ctx.warming,
             )

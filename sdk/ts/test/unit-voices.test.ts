@@ -759,6 +759,63 @@ test('asr() carries inline bytes as base64 under the caller\'s filename', async 
   });
 });
 
+test('asr() sends initial_prompt only when the caller states it', async () => {
+  const base = {
+    model: 'faster-whisper-large-v3-turbo',
+    audio: { blobId: 'b7c6d5e4f3a2b1c0' },
+    filename: 'episode.m4a',
+    language: 'en',
+    vadFilter: true,
+    wordTimestamps: true,
+  };
+  // Left out: the three keys every existing caller sends, and nothing else.
+  answers(200, { job_id: 'job-asr-3' });
+  await client().asr(base);
+  assert.deepEqual((JSON.parse(lastBody) as { params: unknown }).params, {
+    language: 'en',
+    vad_filter: true,
+    word_timestamps: true,
+  });
+  // Stated as a string: sent verbatim under the server's name.
+  answers(200, { job_id: 'job-asr-4' });
+  await client().asr({ ...base, initialPrompt: 'Episode 12: Kaladin and Syl.' });
+  assert.deepEqual((JSON.parse(lastBody) as { params: unknown }).params, {
+    language: 'en',
+    vad_filter: true,
+    word_timestamps: true,
+    initial_prompt: 'Episode 12: Kaladin and Syl.',
+  });
+  // Stated as null: sent as null, which is "no prompt" said out loud.
+  answers(200, { job_id: 'job-asr-5' });
+  await client().asr({ ...base, initialPrompt: null });
+  assert.equal(
+    (JSON.parse(lastBody) as { params: Record<string, unknown> }).params['initial_prompt'],
+    null,
+  );
+});
+
+test('asr() refuses an initialPrompt that is not a non-blank string, by name', async () => {
+  for (const bad of [5, ['Kaladin'], '', '   ']) {
+    await assert.rejects(
+      client().asr({
+        model: 'faster-whisper-base',
+        audio: { blobId: 'b7c6d5e4f3a2b1c0' },
+        filename: 'audiobook.m4b',
+        language: 'en',
+        vadFilter: true,
+        wordTimestamps: true,
+        initialPrompt: bad as never,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof CrucibleConfigError, `got ${String(error)}`);
+        assert.equal(error.option, 'initialPrompt');
+        return true;
+      },
+      `expected ${JSON.stringify(bad)} to be refused`,
+    );
+  }
+});
+
 test('every asr option is required and is refused by name', async () => {
   const complete = {
     model: 'faster-whisper-base',

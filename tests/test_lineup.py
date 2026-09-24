@@ -31,11 +31,11 @@ CHECKED_IN = REPO_ROOT / lineup.FILE_NAME
 WITH_LOCAL = [
     "dots-ocr", "qwen3.5-0.8b", "qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b-4bit",
 ]
-# The three `-vl` aliases (PHASE22 section 2.9) carry no [local] — the local
-# form is their base's (`weights_of_local`) — so they are omitted too.
+# The two `-vl` aliases (PHASE22 section 2.9) carry no [local] — the local
+# form is their base's (`weights_of_local`) — so they are omitted too. (A third,
+# `qwen3.8-27b-8bit-vl`, went with the 8-bit's cuda-linux arm on 2026-09-23.)
 WITHOUT_LOCAL = [
     "qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl", "qwen3.8-27b-8bit",
-    "qwen3.8-27b-8bit-vl",
 ]
 
 #: Which classes each local model lights, read off `capability.CLASSES` through
@@ -134,7 +134,7 @@ def test_the_generator_writes_a_file_its_own_check_accepts(tmp_path: Path) -> No
     wrote = _run("--verbose", "--output", str(target))
     assert wrote.returncode == 0, wrote.stderr
     assert "omitted qwen3.8-27b-8bit: no [local] table" in wrote.stdout
-    assert "5 model(s) with a local form, 4 omitted" in wrote.stdout
+    assert "5 model(s) with a local form, 3 omitted" in wrote.stdout
     assert lineup.content(json.loads(target.read_text(encoding="utf-8"))) == (
         lineup.content(_checked_in())
     )
@@ -249,7 +249,7 @@ def test_classes_come_from_the_capability_table(model_id: str) -> None:
 
 
 def test_a_model_with_no_local_form_still_has_classes() -> None:
-    """Omitted from the lineup is not the same as serving nothing: the bf16 27B
+    """Omitted from the lineup is not the same as serving nothing: the 8-bit 27B
     is a translate candidate on a 64 GB Mac; it just has no Ollama form."""
     assert classes_for_model("qwen3.8-27b-8bit") == (
         "translate", "simplify", "analysis", "generate", "decide",

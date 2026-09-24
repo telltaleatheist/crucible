@@ -34,7 +34,8 @@ from .conftest import parse_sse
 from .fake_engine import FakeEngine
 
 MODEL = "qwen3.5-9b"
-OTHER_MODEL = "qwen3.8-27b-8bit"
+#: A second model this backend offers (cuda-linux), and not the resident one.
+OTHER_MODEL = "qwen3.8-27b-4bit"
 TTL = 60
 
 

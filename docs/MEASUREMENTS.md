@@ -400,5 +400,5 @@ engine is a number the engine stayed inside.
 | `qwen3.5-9b` KV slope, mlx-darwin | same constant | same, plus the MLX prefill residual the 27B block warns about |
 | `dots-ocr`, cuda-linux | `memory_bytes_estimate` **is a budget, not a sum** | 0.5 x the card is a deliberate choice so pages can share the machine; it has no terms and cannot be split until measured |
 | `qwen3.8-27b-4bit`, mlx-darwin | no `[memory]` table at all | one point cannot separate an intercept from a slope, and the 2.03 GB/step prefill residual may be either |
-| `qwen3.8-27b-8bit`, both arms | whole manifest | written 2026-09-17, never loaded |
+| `qwen3.8-27b-8bit`, mlx-darwin (its only arm since its cuda-linux arm was removed 2026-09-23) | whole manifest | written 2026-09-17, never loaded |
 | the Mac's 9B peak | `basis = "computed"` | the block asks for its own re-take; wants an idle Mac |

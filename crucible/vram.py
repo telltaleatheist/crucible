@@ -138,6 +138,8 @@ class KvPlan:
 
     model_id: str
     total_bytes: int
+    #: Free on the card once Crucible's own resident engine is evicted: the
+    #: reading plus what that engine gives back (`plan_vllm_memory`).
     free_bytes: int
     desktop_allowance_bytes: int
     budget_bytes: int
@@ -218,8 +220,23 @@ def plan_vllm_memory(
     context: int,
     card: AcceleratorState,
     desktop_allowance_bytes: int,
+    reclaimable_bytes: int,
 ) -> KvPlan | None:
     """Size this engine's KV pool against the card, or None to leave it alone.
+
+    `context` is the context the engine will be STARTED with — a load's
+    `params.context` when it stated one — so the pool's cap
+    (`kv_bytes_per_token x context x max_num_seqs`) and `fits` (one request of
+    that length) follow it. `--gpu-memory-utilization` does not: it is
+    budget / total, a startup gate derived from the card.
+
+    `reclaimable_bytes` is what Crucible's own resident engine gives back when
+    `Residency.load` evicts it before this one starts — the same figure the
+    accelerator guard is handed, and for the same reason: the card is read
+    while that engine still holds it, and a plan that ignored it would refuse
+    every swap on a 24 GB card for memory the load is about to free. Zero when
+    nothing is resident. It is REQUIRED, like the allowance: a caller that
+    forgot it would size a pool against a card that is about to change.
 
     **None is a real answer, not a failure.** Two blocks in this catalog cannot
     be planned and each says why in its own manifest:
@@ -239,8 +256,9 @@ def plan_vllm_memory(
     if terms is None:
         return None
 
+    free_after_eviction = card.free_bytes + reclaimable_bytes
     budget = engine_budget_bytes(
-        card.total_bytes, desktop_allowance_bytes, card.free_bytes
+        card.total_bytes, desktop_allowance_bytes, free_after_eviction
     )
     room = max(0, budget - terms.fixed_bytes)
     concurrency = max_num_seqs(spec)
@@ -253,7 +271,7 @@ def plan_vllm_memory(
     return KvPlan(
         model_id=model_id,
         total_bytes=card.total_bytes,
-        free_bytes=card.free_bytes,
+        free_bytes=free_after_eviction,
         desktop_allowance_bytes=desktop_allowance_bytes,
         budget_bytes=budget,
         fixed_bytes=terms.fixed_bytes,

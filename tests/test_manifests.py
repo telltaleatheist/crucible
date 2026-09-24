@@ -95,6 +95,83 @@ def test_a_backend_context_must_be_an_int() -> None:
     assert "context_default must be int, got str" in str(caught.value)
 
 
+# ---------------------------------------------------------- max_context
+
+
+def test_a_block_without_max_context_is_capped_at_its_own_default() -> None:
+    """No `max_context` means the ceiling every block had before the key:
+    its served context. Never an invented larger one."""
+    manifest = parse(GOOD)
+    assert manifest.spec("cuda-linux").max_context is None
+    assert manifest.max_context_for("cuda-linux") == 4096
+    over = parse(GOOD + "context_default = 1024\n")
+    assert over.max_context_for("cuda-linux") == 1024
+
+
+def test_a_block_may_state_its_max_context() -> None:
+    manifest = parse(GOOD + "max_context = 32768\n")
+    assert manifest.spec("cuda-linux").max_context == 32768
+    assert manifest.max_context_for("cuda-linux") == 32768
+    # The default a load that states nothing gets does not move.
+    assert manifest.context_for("cuda-linux") == 4096
+    assert manifest.spec("cuda-linux").to_dict()["max_context"] == 32768
+
+
+@pytest.mark.parametrize(
+    ("line", "said"),
+    [
+        ("max_context = 0\n", "max_context must be positive, got 0"),
+        ("max_context = -8192\n", "max_context must be positive, got -8192"),
+        ("max_context = 524288\n", "max_context is 524288 and the weights are trained at 262144"),
+        ("max_context = 2048\n", "max_context is 2048 and this block serves 4096"),
+        ('max_context = "big"\n', "max_context must be int, got str"),
+        ("max_context = true\n", "max_context must be int, got bool"),
+        ("max_context = 32768.0\n", "max_context must be int, got float"),
+    ],
+)
+def test_an_invalid_max_context_is_refused_by_name(line: str, said: str) -> None:
+    with pytest.raises(ManifestError) as caught:
+        parse(GOOD + line)
+    assert said in str(caught.value)
+
+
+def test_max_context_is_held_to_the_blocks_own_default_not_the_models() -> None:
+    """A block that serves 1024 may state a maximum below the MODEL's 4096."""
+    manifest = parse(GOOD + "context_default = 1024\nmax_context = 2048\n")
+    assert manifest.max_context_for("cuda-linux") == 2048
+
+
+def test_the_shipped_maxima_are_the_computed_ones() -> None:
+    """Each number is COMPUTED in its manifest (2026-09-23, load test owed);
+    this pins them so a change to one is a change somebody meant."""
+    found = {
+        (m.id, kind): m.max_context_for(kind)
+        for m in load_all_manifests().values()
+        for kind in m.backends
+    }
+    assert found[("qwen3.8-27b-4bit", "cuda-linux")] == 32768
+    assert found[("qwen3.5-9b", "cuda-linux")] == 65536
+    assert found[("qwen3.8-27b-8bit", "mlx-darwin")] == 131072
+    assert found[("qwen3.8-27b-4bit", "mlx-darwin")] == 131072
+    assert found[("qwen3.5-9b", "mlx-darwin")] == 131072
+    assert found[("qwen3.8-27b-4bit", "llama-windows")] == 65536
+    # No maximum above the default where there are no terms to compute from.
+    assert found[("qwen3.5-9b-vl", "cuda-linux")] == 16384
+    assert found[("qwen3.8-27b-4bit-vl", "cuda-linux")] == 16384
+    assert found[("dots-ocr", "cuda-linux")] == 32768
+
+
+def test_the_8bit_mac_terms_count_kv_once() -> None:
+    """The overhead inherited from the 4-bit's Mac run contained that run's KV
+    (98_220 x 65_536); the terms now carry the residual alone, and add back up
+    to the estimate at the block's own 12288."""
+    terms = load_manifest("qwen3.8-27b-8bit").spec("mlx-darwin").memory
+    assert terms.overhead_bytes == 17_818_943_521 - 98_220 * 65_536 == 11_381_997_601
+    assert terms.bytes_for(context=12288, concurrency=1) == (
+        load_manifest("qwen3.8-27b-8bit").spec("mlx-darwin").memory_bytes_estimate
+    )
+
+
 def test_engine_args_is_optional() -> None:
     manifest = parse(GOOD.replace('engine_args = ["--dtype", "bfloat16"]\n', ""))
     assert manifest.spec("cuda-linux").engine_args == ()
@@ -261,7 +338,10 @@ SHIPPED = [
 ]
 # The vision forms (PHASE22 section 2.9), aliases that share their base's
 # download. Kept apart so every list above still says what it always said.
-ALIASES = ["qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl", "qwen3.8-27b-8bit-vl"]
+# TWO since 2026-09-23: `qwen3.8-27b-8bit-vl` was served on cuda-linux alone,
+# and went with the 8-bit's cuda-linux arm (Owen: *"we shouldnt have an 8 bit
+# 27b on here. waste of space, wont fit in the gpu"*).
+ALIASES = ["qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl"]
 
 #: Each model's `context_default`. The two bf16 manifests carry Owen's pinned
 #: cleanup context; the 4-bit 27B carries the 98304 of his `qwen3.8:27b-24g`
@@ -296,13 +376,16 @@ BACKENDS = {
     # published. `qwen3.8-27b-8bit` has none and gets no row: its FP8 weights
     # are 28.75 GiB before any cache, which is not a thing a 24 GB Windows box
     # runs, and a row with nothing truthful in it is worse than no row.
+    # The same reason took its cuda-linux block on 2026-09-23 — Owen: *"we
+    # shouldnt have an 8 bit 27b on here. waste of space, wont fit in the
+    # gpu"* — so it is the Mac's alone ("put 8 bit on the Mac. 4 bit for pc").
     # `mlx-darwin` on dots-ocr since 2026-09-21: Crucible's own page server
     # (crucible/engines/mlx_vlm_serve.py) runs it in process.
     "dots-ocr": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-9b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-4b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-0.8b": ["cuda-linux", "llama-windows", "mlx-darwin"],
-    "qwen3.8-27b-8bit": ["cuda-linux", "mlx-darwin"],
+    "qwen3.8-27b-8bit": ["mlx-darwin"],
     "qwen3.8-27b-4bit": ["cuda-linux", "llama-windows", "mlx-darwin"],
 }
 
@@ -424,10 +507,18 @@ def test_a_page_engine_named_by_a_text_model_is_refused_too() -> None:
     assert "that pairing's engine is 'mlx-lm'" in str(caught.value)
 
 
-def test_the_27b_does_not_fit_a_24_gib_card() -> None:
-    """The refusal the PC must make is arithmetic in the manifest, not a mood."""
-    spec = load_manifest("qwen3.8-27b-8bit").spec("cuda-linux")
-    assert spec.memory_bytes_estimate > 24 * 1024 ** 3
+def test_the_8bit_27b_is_not_offered_on_cuda_linux_or_windows() -> None:
+    """Owen, 2026-09-23: *"we shouldnt have an 8 bit 27b on here. waste of
+    space, wont fit in the gpu"*. Its FP8 weights alone are 28.75 GiB, more
+    than the whole 24 GiB card, so a cuda-linux block could only ever be
+    downloaded and then refused. It is not refused on the PC; it is absent."""
+    manifest = load_manifest("qwen3.8-27b-8bit")
+    assert sorted(manifest.backends) == ["mlx-darwin"]
+    assert not manifest.supports("cuda-linux")
+    assert not manifest.supports("llama-windows")
+    with pytest.raises(ManifestError) as caught:
+        manifest.spec("cuda-linux")
+    assert "has no cuda-linux block" in str(caught.value)
 
 
 def test_the_9b_does_fit_a_24_gib_card() -> None:
@@ -435,19 +526,21 @@ def test_the_9b_does_fit_a_24_gib_card() -> None:
     assert spec.memory_bytes_estimate < 24 * 1024 ** 3
 
 
-def test_the_4bit_27b_fits_a_24_gib_card_and_the_8bit_one_does_not() -> None:
+def test_the_4bit_27b_fits_a_24_gib_card_and_the_8bit_one_is_mac_only() -> None:
     """The whole reason the 4-bit manifest exists, as arithmetic.
 
     Same model, same family, same params_b; the only difference is the weights
-    each backend block points at. One is refused on Owen's card by name and the
-    other is not.
+    each backend block points at. The 4-bit fits Owen's card and is offered
+    there; the 8-bit is offered on the Mac alone — *"put 8 bit on the Mac. 4
+    bit for pc."*
     """
     small = load_manifest("qwen3.8-27b-4bit")
     big = load_manifest("qwen3.8-27b-8bit")
     assert small.family == big.family == "qwen3.8"
     assert small.params_b == big.params_b == 27
     assert small.spec("cuda-linux").memory_bytes_estimate < 24 * 1024 ** 3
-    assert big.spec("cuda-linux").memory_bytes_estimate > 24 * 1024 ** 3
+    assert not big.supports("cuda-linux")
+    assert big.supports("mlx-darwin")
 
 
 def test_the_4bit_27b_does_not_force_a_dtype() -> None:
@@ -485,12 +578,9 @@ def test_the_4bit_27b_does_not_force_a_dtype() -> None:
 def test_the_text_models_are_served_language_model_only() -> None:
     """A lane that sends only text does not pay for a vision tower.
 
-    Pinned per model rather than looped over every manifest, because the third
-    27B — `qwen3.8-27b-8bit` in bf16 — deliberately does NOT carry these flags, and a
-    loop would either fail on it or need an exception list that hides it. Its own
-    block records the choice: nothing there has been measured with an image
-    profiled in, and it cannot load on either of Owen's machines, so it is left
-    as written and named here instead of silently swept in.
+    Pinned per model rather than looped over every manifest. (The 8-bit 27B
+    once had a cuda-linux block that carried neither flag; it has no
+    cuda-linux block at all since 2026-09-23, Mac only by Owen's ruling.)
     """
     for model_id in ("qwen3.5-9b", "qwen3.8-27b-4bit"):
         args = load_manifest(model_id).spec("cuda-linux").engine_args

@@ -1195,6 +1195,21 @@ export interface ChatOptions {
    */
   readonly thinking?: boolean;
   /**
+   * The context window an `ollama/<tag>` chat runs at — the tokens of prompt
+   * plus answer this request needs — sent as `context_tokens` and reaching
+   * Ollama as `options.num_ctx` (PHASE15-HOST.md section 3.4a).
+   *
+   * Omit it and the server sends the tag's own context (its Modelfile
+   * `num_ctx`, else the trained maximum) — never Ollama's 4096 default. A
+   * prompt longer than the window is cut from the FRONT by Ollama with no
+   * error, so size it to the prompt when you know the prompt is long. The
+   * number actually sent is in the response's `X-Crucible-Context` header.
+   *
+   * On `anthropic/…` and `openai/…` it is dropped (their window is the
+   * provider's); on a local model it is not read (the window is fixed at load).
+   */
+  readonly contextTokens?: number;
+  /**
    * What this chat IS, for `GET /v1/activity` — a capability class name, sent
    * as the `X-Crucible-Act` header.
    *
@@ -1749,6 +1764,23 @@ export interface LeaseOnLoad {
 export interface LoadModelOptions {
   /** Hold the model from the instant it is resident. See {@link LeaseOnLoad}. */
   readonly lease?: LeaseOnLoad;
+  /**
+   * Tokens: the context to start the engine with (`params.context`). Omitted:
+   * the model's `contextDefault` on this server, exactly as before.
+   *
+   * The server holds it to this host's ceiling for the model — the same
+   * number `capability({class: 'generate'})` publishes as a
+   * {@link ContextCeiling} — and refuses above it `context_over_limit`
+   * (400, naming the ceiling and both halves) BEFORE anything is evicted;
+   * below 2048, or not a whole number, it is `invalid_params`. Nothing is
+   * clamped. Loading the resident model at a different context is a full
+   * reload. Once loaded, {@link ModelInfo.maxModelLen} reports it.
+   *
+   * On an mlx-darwin server this is admission, not an engine cap: mlx-lm
+   * allocates its KV on demand and is handed no context, so size your
+   * requests to it yourself.
+   */
+  readonly context?: number;
 }
 
 /**
@@ -2161,9 +2193,12 @@ export interface CapabilityWork {
 
 /**
  * The longest request one candidate can serve on this host: the smaller of
- * what its manifest serves on this backend (the engine's `--max-model-len`,
- * the resident row's `max_model_len`) and what this host's memory affords at
- * `concurrency` in flight.
+ * the most its manifest ever starts an engine with on this backend (its
+ * `max_context`, or its `context_default` where it states none — the most a
+ * {@link LoadModelOptions.context} may ask for) and what this host's memory
+ * affords at `concurrency` in flight. A model loaded without a context serves
+ * its `contextDefault`, which may be less: reload it with `context` to use
+ * the rest.
  */
 export interface ContextCeiling {
   readonly model: string;
@@ -2258,6 +2293,24 @@ export interface AsrOptions {
   readonly vadFilter: boolean;
   /** Whether whisper emits per-word timestamps. Required, for the same reason. */
   readonly wordTimestamps: boolean;
+  /**
+   * Text whisper is primed with before it hears the audio, as if it were the
+   * transcript so far — how to tell it the spelling of a title, a name, a
+   * coined word. `null` means no prompt. Sent as the server's
+   * `initial_prompt`, verbatim.
+   *
+   * **The one optional field**, and the server's reason is this client's: the
+   * key did not exist when the fleet's clients were written, and every one of
+   * them means "no prompt" by leaving it out. Left out here, the key is not
+   * sent at all and the server records `initial_prompt: null` in
+   * `transcript.json`; given (a string or `null`), it is sent.
+   *
+   * The server applies it to EVERY 900-second window, because each window is
+   * its own whisper call and whisper's own conditioning does not cross one. A
+   * blank string is refused (send `null`), and a prompt longer than whisper
+   * keeps — 223 tokens — fails the job by name rather than losing its start.
+   */
+  readonly initialPrompt?: string | null;
 }
 
 // ---------------------------------------------------------------------------

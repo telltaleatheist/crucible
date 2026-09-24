@@ -446,6 +446,26 @@ test('loadModel submits a load-model job with the model and no inputs', async ()
   });
 });
 
+test('loadModel sends a stated context as params.context, beside a lease', async () => {
+  handle = (_request, response) => json(response, 200, { job_id: 'job-load-2' });
+  await client().loadModel('qwen3.5-9b', {
+    context: 65536,
+    lease: { act: 'generate', ttlSeconds: 600 },
+  });
+  assert.deepEqual(JSON.parse(lastBody), {
+    type: 'load-model',
+    params: { lease: { act: 'generate', ttl_seconds: 600 }, context: 65536 },
+    inputs: {},
+    model: 'qwen3.5-9b',
+  });
+});
+
+test('loadModel sends no context key when none is stated', async () => {
+  handle = (_request, response) => json(response, 200, { job_id: 'job-load-3' });
+  await client().loadModel('qwen3.5-9b', {});
+  assert.deepEqual(JSON.parse(lastBody).params, {});
+});
+
 test('unloadModel submits an unload-model job the same way', async () => {
   handle = (_request, response) => json(response, 200, { job_id: 'job-unload-1' });
   const jobId = await client().unloadModel('qwen3.5-9b');

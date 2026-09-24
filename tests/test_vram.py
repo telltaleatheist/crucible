@@ -127,6 +127,7 @@ def test_a_block_with_no_terms_is_left_exactly_as_its_manifest_states():
         context=32768,
         card=card(21_300),
         desktop_allowance_bytes=ALLOWANCE,
+        reclaimable_bytes=0,
     )
     assert plan is None
 
@@ -139,6 +140,7 @@ def test_a_backend_that_is_not_vllm_is_left_alone_even_with_terms():
         context=16384,
         card=card(21_300),
         desktop_allowance_bytes=ALLOWANCE,
+        reclaimable_bytes=0,
     )
     assert plan is None
 
@@ -174,6 +176,7 @@ def test_the_pool_never_exceeds_what_the_engine_could_reach():
             detail="fixture",
         ),
         desktop_allowance_bytes=ALLOWANCE,
+        reclaimable_bytes=0,
     )
     assert plan is not None
     assert plan.pool_bytes == NINE_B.kv_bytes_per_token * 4096 * 16
@@ -186,6 +189,7 @@ def test_a_block_that_states_no_concurrency_may_have_the_whole_budget():
         context=16384,
         card=card(21_300),
         desktop_allowance_bytes=ALLOWANCE,
+        reclaimable_bytes=0,
     )
     assert plan is not None
     assert plan.concurrency is None
@@ -218,6 +222,7 @@ def test_the_card_that_refused_on_2026_09_17_is_sized_and_not_refused():
         context=16384,
         card=card(21_234),
         desktop_allowance_bytes=ALLOWANCE,
+        reclaimable_bytes=0,
     )
     assert plan is not None
     assert plan.fits, plan.sentence()
@@ -235,6 +240,7 @@ def test_the_pool_is_the_budget_less_weights_and_overhead():
         context=16384,
         card=card(free_mib),
         desktop_allowance_bytes=ALLOWANCE,
+        reclaimable_bytes=0,
     )
     assert plan is not None
     assert plan.budget_bytes == free_mib * MIB
@@ -248,6 +254,7 @@ def test_a_card_too_full_refuses_by_name_with_every_term_in_the_sentence():
         context=16384,
         card=card(19_000),
         desktop_allowance_bytes=ALLOWANCE,
+        reclaimable_bytes=0,
     )
     assert plan is not None
     assert not plan.fits
@@ -266,6 +273,7 @@ def test_both_flags_go_on_and_the_pool_is_stated_in_bytes():
         context=16384,
         card=card(21_234),
         desktop_allowance_bytes=ALLOWANCE,
+        reclaimable_bytes=0,
     )
     assert plan is not None
     flags = plan.flags()
@@ -294,9 +302,12 @@ def test_the_plan_flags_come_after_the_manifest_so_they_win():
         context=16384,
         card=card(21_234),
         desktop_allowance_bytes=ALLOWANCE,
+        reclaimable_bytes=0,
     )
     assert plan is not None
-    args = Residency._engine_args(manifest, block, __import__("pathlib").Path("/w"), plan)
+    args = Residency._engine_args(
+        manifest, block, __import__("pathlib").Path("/w"), plan, context=16384
+    )
     assert "--kv-cache-memory-bytes" in args
     last = len(args) - 1 - args[::-1].index("--gpu-memory-utilization")
     assert args[last + 1] == f"{plan.budget_bytes / plan.total_bytes:.4f}"
@@ -313,7 +324,9 @@ def test_none_leaves_the_manifest_line_untouched():
 
     manifest = load_manifest("qwen3.5-9b")
     block = manifest.backends["cuda-linux"]
-    args = Residency._engine_args(manifest, block, Path("/w"), None)
+    args = Residency._engine_args(
+        manifest, block, Path("/w"), None, context=manifest.context_for("cuda-linux")
+    )
     assert "--kv-cache-memory-bytes" not in args
     assert args.count("--gpu-memory-utilization") == 1
 

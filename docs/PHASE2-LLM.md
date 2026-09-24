@@ -87,10 +87,36 @@ eviction of other people's processes, ever.
 | Route | Auth | Returns |
 |---|---|---|
 | `GET /v1/models` | yes | `[{id, family, params_b, revision, fingerprint, backend_supported, installed, resident, loadable, reason (when not loadable), memory_bytes_estimate, context_default, max_model_len, defaults}]` |
-| `POST /v1/jobs {type: "load-model", model}` | yes | a normal job. Events: `queued`, `warming {message}` streamed from the engine's readiness (several), `done {resident: id}`. Refusals by name before queuing: `unknown_model`, `model_not_installed`, `backend_unsupported`, `accelerator_busy`, `insufficient_memory`, `env_missing`. |
+| `POST /v1/jobs {type: "load-model", model, params?: {context?, lease?, timeout_s?}}` | yes | a normal job. Events: `queued`, `warming {message}` streamed from the engine's readiness (several), `done {resident: id, lease_id}`. Refusals by name before queuing: `unknown_model`, `model_not_installed`, `backend_unsupported`, `accelerator_busy`, `insufficient_memory`, `insufficient_kv_cache`, `env_missing`, `invalid_params`, `context_over_limit`. |
 | `POST /v1/jobs {type: "unload-model", model}` | yes | a normal job; `done {resident: null}` — the same field the load reports, saying what is resident *now*, which after an unload is nothing. `model_not_resident` if it isn't. |
 | `POST /v1/openai/chat/completions` | yes | proxied to the resident engine, streaming or not, verbatim but for `model` (see below). `model` in the body must equal the resident id, else **409 `model_not_resident`** naming the resident model (or none). Never loads implicitly. |
 | `GET /v1/openai/models` | yes | the resident model in OpenAI's list shape (`{id, object, created, owned_by, engine_model_name, revision, fingerprint, max_model_len, defaults}`), or an empty list. |
+
+**`params.context` — the context a load starts the engine with (2026-09-23).** Absent, the
+engine starts at the block's `context_default` (`context_for`), exactly as before. Present, it is
+a whole number of tokens (strict: a string, float or bool is `invalid_params`), at least
+`MIN_LOAD_CONTEXT` = 2048 (below it, `invalid_params`: no engine here states a real minimum, so
+the floor is a stated one — a chat template, a system prompt and an answer at once), and at most
+this host's ceiling for the model — **the same function `GET /v1/capability` publishes**
+(`capability.check_load_context` → `Candidate.context_ceiling` at one in flight: the smaller of the
+block's `max_context` and what this host's memory affords). Above it: `400 context_over_limit`
+with `{model, requested, ceiling, ceilings}`, refused at submit, before the guard reads the card
+and before anything is evicted or started. Nothing is clamped.
+
+What it reaches: vLLM's `--max-model-len` and llama-server's `-c` (both composed in
+`Residency._engine_args`), the vLLM `KvPlan` (`--kv-cache-memory-bytes` is capped at
+`kv_bytes_per_token × context × max_num_seqs` and must hold one request of that length;
+`--gpu-memory-utilization` is budget / total and does not depend on the context), and the resident
+row's `max_model_len`, which `GET /v1/models` and `GET /v1/openai/models` report. **On mlx-darwin
+it is admission, not an engine cap**: mlx-lm takes no context flag and allocates KV on demand, so
+the number is recorded and reported, and nothing in the engine refuses a longer request. The chat
+door does not count tokens either; on vLLM and llama-server the engine itself refuses
+`prompt + max_tokens` past its length and the proxy passes that 400 through.
+
+**Loading the resident model again is a reload**, at whatever context it names: `Residency.load`
+evicts unconditionally. Since 2026-09-23 the guard and the KV plan credit the resident's own
+estimate as what that eviction gives back (they used to exclude the same id, so a same-model
+reload on a 24 GB card was refused `insufficient_memory` for memory the load was about to free).
 
 `revision` is the pin in **this host's** backend block, so a client records the same sha
 the puller used; it is `null` — not `""` — when `backend_supported` is false, because a

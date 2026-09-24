@@ -56,8 +56,12 @@ What landed:
   they actually use, each with a `source`.
 * `decide()` asks `candidate.need_bytes(entry.work)` instead of reading a stored
   estimate, and every refusal names all four terms.
-* `max_context` on the `llm` rows: `{tokens, card_affords, weights_allow,
-  limited_by, concurrency, basis}`.
+* `max_context` on the `llm` rows: `{tokens, card_affords, max_context,
+  weights_allow, limited_by, concurrency, basis}` — since 2026-09-23 the same
+  ceiling `GET /v1/capability` and a `load-model`'s `params.context` are held
+  to (`Candidate.context_ceiling` at one in flight), so `limited_by` is `card`
+  or `max_context` (the manifest's per-backend maximum, which the parser keeps
+  at or under `weights_allow`).
 
 The four blocks WITHOUT terms are not an oversight and each says why in place:
 `dots-ocr`'s cuda-linux estimate is a budget rather than a sum, its
@@ -225,7 +229,9 @@ already carry it twice for two different reasons (`crucible/jobs/llm/__init__.py
   absent, which is how an unclamped request becomes a 400.
 
 Measured on the PC today: `qwen3.5-9b` 16384, `qwen3.8-27b-4bit` 16384,
-`qwen3.8-27b-8bit` 12288, `dots-ocr` 32768. So an app never has to guess a chunk
+`dots-ocr` 32768. (`qwen3.8-27b-8bit` read 12288 here until 2026-09-23, when its
+cuda-linux block was removed — it is Mac only, by Owen's ruling, because its
+weights alone exceed the card.) So an app never has to guess a chunk
 size — it reads the ceiling off the server it is about to talk to. Owen's
 Mac-vs-PC example is already visible in that field.
 

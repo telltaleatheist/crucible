@@ -375,25 +375,28 @@ def test_the_desktop_allowance_is_not_treated_as_a_job(
 # --------------------------------------------------------- insufficient_memory
 
 
-def test_the_27b_on_a_24_gib_card_is_insufficient_memory(
+def test_the_27b_on_a_card_without_room_is_insufficient_memory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_cuda(monkeypatch, apps=[], free_bytes=22 * GIB)
+    # The 4-bit 27B's cuda-linux estimate against an idle 16 GiB card. (It was
+    # the 8-bit's 48.7 GB against the 24 GiB card until the 8-bit lost its
+    # cuda-linux block on 2026-09-23; the guard is the same guard.)
+    fake_cuda(monkeypatch, apps=[], free_bytes=16 * GIB, total_bytes=16 * GIB)
     with pytest.raises(ApiError) as caught:
         guard(
             "cuda-linux",
-            model_id="qwen3.8-27b-8bit",
-            need_bytes=48_685_810_449,
+            model_id="qwen3.8-27b-4bit",
+            need_bytes=21_633_171_456,
             desktop_allowance_bytes=3 * GIB,
         )
     error = caught.value
     assert error.status_code == 409
     assert error.code == "insufficient_memory"
     # It names both numbers, as section 4 requires.
-    assert "needs 45.3 GiB" in error.message
-    assert "22.0 GiB free" in error.message
-    assert error.details["needed_bytes"] == 48_685_810_449
-    assert error.details["free_bytes"] == 22 * GIB
+    assert "needs 20.1 GiB" in error.message
+    assert "16.0 GiB free" in error.message
+    assert error.details["needed_bytes"] == 21_633_171_456
+    assert error.details["free_bytes"] == 16 * GIB
 
 
 def test_unified_memory_is_sized_not_sampled(
@@ -765,7 +768,7 @@ def test_the_mac_reserve_is_a_share_and_leaves_macos_a_quarter() -> None:
     available = total - reserve
     assert reserve == total // 4, "the reserve stopped being a quarter"
 
-    eightbit_27b = 47_320_162_000   # qwen3.8-27b-8bit, mlx arm
+    eightbit_27b = 41_688_522_448   # qwen3.8-27b-8bit, mlx arm (double count out, 2026-09-23)
     fourbit_27b = 33_873_484_870    # qwen3.8-27b-4bit, mlx arm, MEASURED
     assert eightbit_27b < available, (
         "the 8-bit must fit — it is what the Mac is meant to translate on, and "

@@ -203,13 +203,49 @@ class Candidate:
     #: is the behaviour every class had before the split, kept exactly, so a
     #: block without terms decides today what it decided yesterday.
     memory: "MemoryTerms | None" = None
-    #: The context an engine serving this candidate is STARTED with on this
-    #: backend: `ModelManifest.context_for(backend)`, the one owner of vLLM's
-    #: `--max-model-len`, llama-server's `-c` and the resident row's
-    #: `max_model_len`. Read here rather than restated, so the ceiling below
-    #: and `/v1/models` cannot disagree. None for a candidate from a catalog
-    #: that is not measured in tokens (voices, aligners, RVC, ASR, denoise).
+    #: The LARGEST context an engine serving this candidate may be started
+    #: with on this backend: `ModelManifest.max_context_for(backend)` — the
+    #: block's `max_context` (2026-09-23), or its `context_default` where it
+    #: states none. A `load-model` with `params.context` may start the engine
+    #: anywhere up to it (vLLM's `--max-model-len`, llama-server's `-c`, the
+    #: resident row's `max_model_len`); a load that states none starts at
+    #: `context_for`. Read here rather than restated, so the ceiling below, the
+    #: load check and `/v1/models` cannot disagree. None for a candidate from a
+    #: catalog that is not measured in tokens (voices, aligners, RVC, ASR,
+    #: denoise).
     served_context: int | None = None
+
+    @classmethod
+    def of(cls, manifest: Any, backend_kind: str) -> "Candidate":
+        """One manifest's candidate on one backend — the ONE construction.
+
+        Used by every class's walk (`CatalogCandidates`) and by the
+        `load-model` context check (`check_load_context`), so the ceiling a
+        client reads on `GET /v1/capability` and the ceiling a load is refused
+        against are computed from the same object by the same method.
+        """
+        return cls(
+            id=manifest.id,
+            memory_bytes_estimate=manifest.spec(backend_kind).memory_bytes_estimate,
+            # ONLY THE MODEL CATALOG HAS TERMS, and that is not a gap to be
+            # filled later: the classes also read the voice, RVC, aligner, ASR
+            # and denoise catalogs, whose specs have no KV term because their
+            # work is not measured in tokens. A voice is one engine holding one
+            # reservation whatever the sentence is. `getattr` here is asking
+            # WHICH CATALOG this is, not papering over a missing attribute — the
+            # classes that read those catalogs declare no `work` either, so
+            # `need_bytes` answers with the collapsed estimate and the two facts
+            # agree.
+            memory=getattr(manifest.spec(backend_kind), "memory", None),
+            # The same question of the same catalog: only a MODEL manifest
+            # serves a context, and it answers through `max_context_for`, the
+            # one owner of how far a load may raise it.
+            served_context=(
+                manifest.max_context_for(backend_kind)
+                if hasattr(manifest, "max_context_for")
+                else None
+            ),
+        )
 
     def context_ceiling(
         self, available_bytes: int, concurrency: int
@@ -218,13 +254,29 @@ class Candidate:
 
         The SMALLER of two halves Crucible already owns, and nothing typed:
 
-            served   what the engine is started with here (`served_context`)
+            served   the most an engine is ever started with here
+                     (`served_context`: the block's `max_context`, a number
+                     computed so it will not page, thrash or OOM on the
+                     reference host; its `context_default` where it states
+                     none)
             memory   what this host's memory affords at this concurrency
                      (`MemoryTerms.max_context`, docs/FITS-AND-THE-CARD.md 6.3)
 
         On a Mac the memory half is large and the served half usually binds; on
         a 24 GB card it can go either way, and the answer says which one did.
         None for a candidate that is not token-shaped at all.
+
+        THE ONE CEILING FUNCTION. `GET /v1/capability`'s `context_ceilings`,
+        its `context_over_limit`, and the `load-model` job's check of
+        `params.context` (`check_load_context`, at one in flight) all call this
+        and nothing else computes a ceiling. The budget is `available_bytes`
+        (the pool less the desktop allowance), the same one every fit in this
+        module uses. The memory half counts KV once only if `overhead_bytes`
+        holds none, and the parser CANNOT tell: `qwen3.8-27b-8bit`'s Mac
+        overhead was a measured peak that already contained a 98_220-token
+        run's KV, its estimate carried the same double count, so the two agreed
+        and the ceiling read ~64k until 2026-09-23. An overhead taken from a
+        peak must have that peak's KV subtracted where it is written.
         """
         if self.served_context is None:
             return None
@@ -311,9 +363,11 @@ class ContextCeiling:
             "bound_by": self.bound_by,
             "served_context": self.served_context,
             "served_context_source": (
-                "the model manifest's context for this backend "
-                "(manifest.context_for; the engine's --max-model-len and the "
-                "resident row's max_model_len)"
+                "the most this backend ever starts an engine with: the model "
+                "manifest's max_context for this backend, or its "
+                "context_default where it states none "
+                "(manifest.max_context_for; a load-model's params.context may "
+                "raise --max-model-len / -c / max_model_len up to it)"
             ),
             "memory_context": self.memory_context,
             "memory_context_source": (
@@ -388,33 +442,7 @@ class CatalogCandidates:
                 continue
             if not manifest.supports(backend_kind):
                 continue
-            found.append(
-                Candidate(
-                    id=manifest.id,
-                    memory_bytes_estimate=manifest.spec(
-                        backend_kind
-                    ).memory_bytes_estimate,
-                    # ONLY THE MODEL CATALOG HAS TERMS, and that is not a gap to
-                    # be filled later: this same class reads the voice, RVC,
-                    # aligner, ASR and denoise catalogs, whose specs have no KV
-                    # term because their work is not measured in tokens. A voice
-                    # is one engine holding one reservation whatever the
-                    # sentence is. `getattr` here is asking WHICH CATALOG this
-                    # is, not papering over a missing attribute — the classes
-                    # that read those catalogs declare no `work` either, so
-                    # `need_bytes` answers with the collapsed estimate and the
-                    # two facts agree.
-                    memory=getattr(manifest.spec(backend_kind), "memory", None),
-                    # The same question of the same catalog: only a MODEL
-                    # manifest serves a context, and it answers through
-                    # `context_for`, the one owner of the engine's context.
-                    served_context=(
-                        manifest.context_for(backend_kind)
-                        if hasattr(manifest, "context_for")
-                        else None
-                    ),
-                )
-            )
+            found.append(Candidate.of(manifest, backend_kind))
         # Descending by size, then by id. The id is not decoration: every voice in
         # the catalog declares the SAME estimate (Higgs is one engine holding one
         # reservation whatever weights it was started on), and every RVC model
@@ -495,9 +523,10 @@ class CapabilityClass:
     #: parameters by name rather than ignoring them.
     #:
     #: A client-sized class is also the one whose fit checks the SERVED context
-    #: (`manifest.context_for`, the engine's `--max-model-len`) as well as the
-    #: memory: a client may ask for more than an engine is started with, and a
-    #: fit that said yes to a request the engine then refuses would be a lie.
+    #: (`manifest.max_context_for`: the most a load may start the engine's
+    #: `--max-model-len` / `-c` at) as well as the memory: a client may ask for
+    #: more than any engine here is ever started with, and a fit that said yes
+    #: to a request no engine can take would be a lie.
     #: The other classes' contexts are rulings sized under what their models
     #: serve, and keep the memory-only fit they have always had.
     client_sized: bool = False
@@ -1085,7 +1114,12 @@ def spell_out(candidate: Candidate, work: "WorkingContext | None") -> str:
 def _over_served(
     entry: CapabilityClass, candidate: Candidate, work: "WorkingContext | None"
 ) -> bool:
-    """Does this client-sized work ask for more than the engine is started with?
+    """Does this client-sized work ask for more than this backend ever serves?
+
+    `served_context` is the block's `max_context` (`max_context_for`): the most
+    a `load-model` may start the engine with here. A resident engine started
+    lower is the app's to reload with `params.context`; that is not a reason
+    this host cannot do the work.
 
     Only a `client_sized` class is checked (see the field for why), and only a
     token-shaped candidate can be: a voice has no served context.
@@ -1260,9 +1294,9 @@ def decide(
                 selected="",
                 reason=(
                     f"disabled: {picked.id} was chosen for {entry.name} and is "
-                    f"served with a {picked.served_context}-token context on "
-                    f"{backend_kind} (its manifest), which is less than the "
-                    f"{work.tokens} tokens this work asks for"
+                    f"never served past {picked.served_context} tokens on "
+                    f"{backend_kind} (its manifest's max_context), which is "
+                    f"less than the {work.tokens} tokens this work asks for"
                 ),
                 summary=(
                     f"cannot {entry.plainly} — {picked.id} cannot take requests "
@@ -1557,27 +1591,116 @@ def check_ceiling(
         if chosen is not None
         else " (the highest of this class's candidates on this host)"
     )
+    raise _over_limit(
+        f"{work.tokens} tokens x {work.concurrency} in flight is more than "
+        f"{entry.name} can serve here",
+        backend_kind,
+        work=work,
+        governing=governing,
+        whose=whose,
+        details={"capability": entry.name},
+        ceilings=ceilings,
+    )
+
+
+def _over_limit(
+    opening: str,
+    backend_kind: str,
+    *,
+    work: WorkingContext,
+    governing: ContextCeiling,
+    whose: str,
+    details: dict[str, Any],
+    ceilings: tuple[ContextCeiling, ...],
+) -> ApiError:
+    """`400 context_over_limit`, the ONE body for a context above a ceiling.
+
+    Built here for both doors that refuse one — `GET /v1/capability?class=`
+    (`check_ceiling`) and `load-model`'s `params.context`
+    (`check_load_context`) — so a client handles one shape: the request, the
+    governing ceiling with both halves and their sources, and every ceiling
+    that was considered. `details` adds what names the subject (`capability`,
+    or `model` for a load).
+    """
     memory_half = (
         f"{governing.memory_context} that this host's memory affords at "
         f"{work.concurrency} in flight"
         if governing.memory_context is not None
         else "no memory figure (this model's block is not taken apart into terms)"
     )
-    raise ApiError(
+    return ApiError(
         400,
         "context_over_limit",
-        f"{work.tokens} tokens x {work.concurrency} in flight is more than "
-        f"{entry.name} can serve here: the ceiling is {governing.tokens} tokens, "
-        f"computed for {governing.model}{whose} — the smaller of "
-        f"{governing.served_context} served (its manifest's context on "
-        f"{backend_kind}, the engine's --max-model-len) and {memory_half}. Ask "
-        f"for {governing.tokens} or fewer; nothing is clamped",
+        f"{opening}: the ceiling is {governing.tokens} tokens, computed for "
+        f"{governing.model}{whose} — the smaller of {governing.served_context} "
+        f"served (the most its manifest ever starts an engine with on "
+        f"{backend_kind}: max_context, or context_default where none is "
+        f"stated) and {memory_half}. Ask for {governing.tokens} or fewer; "
+        "nothing is clamped",
         {
-            "capability": entry.name,
+            **details,
             "requested": {"tokens": work.tokens, "concurrency": work.concurrency},
             "ceiling": governing.to_dict(),
             "ceilings": [ceiling.to_dict() for ceiling in ceilings],
         },
+    )
+
+
+#: The smallest context a `load-model` may ask for. No engine this build runs
+#: states a real minimum of its own (vLLM's `--max-model-len` and llama-server's
+#: `-c` take any positive length), so this is a stated floor rather than a
+#: measured one: below it a model cannot hold a chat template, a system prompt
+#: and an answer at once, and a load there is a mistake to refuse rather than an
+#: engine to start.
+MIN_LOAD_CONTEXT = 2048
+
+
+def check_load_context(
+    manifest: Any,
+    backend_kind: str,
+    *,
+    available_bytes: int,
+    context: int,
+) -> ContextCeiling:
+    """Refuse a `load-model` context above this host's ceiling for that model.
+
+    THE SAME CEILING `GET /v1/capability` publishes — `Candidate.of(...)
+    .context_ceiling(...)`, one construction and one function — at ONE in
+    flight, because a load's context is the longest single request the engine
+    will take (vLLM's `--max-model-len`), and the `KvPlan` the load sizes
+    checks exactly that: one full-context request must fit the pool. The
+    refusal is the same `400 context_over_limit` body, naming the model.
+
+    A HOST THAT CANNOT HOLD THE WEIGHTS AT ALL is not this refusal, for
+    `check_ceiling`'s reason: the memory half is then 0 for every length, and
+    the load is refused by the accelerator guard with the bytes instead
+    (`insufficient_memory`), not blamed on the length asked for. The ceiling is
+    returned either way so the caller can say what it checked.
+
+    The FLOOR (`MIN_LOAD_CONTEXT`) is not checked here: `LoadParams.context`
+    carries it as its own bound and refuses below it as `invalid_params`
+    before this runs — one owner of each refusal.
+    """
+    candidate = Candidate.of(manifest, backend_kind)
+    ceiling = candidate.context_ceiling(available_bytes, 1)
+    if ceiling is None:  # pragma: no cover - every model manifest is token-shaped
+        raise ValueError(f"{manifest.id} is not token-shaped")
+    holds_weights = (
+        candidate.memory is None or candidate.memory.fixed_bytes < available_bytes
+    )
+    if not holds_weights or context <= ceiling.tokens:
+        return ceiling
+    raise _over_limit(
+        f"a context of {context} tokens is more than {manifest.id} can be "
+        "loaded at here",
+        backend_kind,
+        work=WorkingContext(
+            tokens=context, concurrency=1, source="load-model params.context"
+        ),
+        governing=ceiling,
+        whose="",
+        details={"model": manifest.id},
+        ceilings=(ceiling,),
     )
 
 
@@ -1812,6 +1935,8 @@ __all__ = [
     "WORK_FROM_DEFAULT",
     "WORK_FROM_REQUEST",
     "check_ceiling",
+    "check_load_context",
+    "MIN_LOAD_CONTEXT",
     "context_ceilings",
     "served_rows",
     "sized_work",
