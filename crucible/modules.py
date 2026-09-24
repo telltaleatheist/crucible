@@ -260,10 +260,13 @@ def build(declaration: dict[str, Any], where: str) -> dict[str, Any]:
         #
         # The assumption this replaces is a few lines up — "a module is posted
         # to a Mac and a PC alike and must name the same subjects on both" —
-        # and it stops being true at the transcribers: CTranslate2 has no Metal
-        # backend, so `faster-whisper-*` is cuda-linux and `mlx-whisper-*` is
-        # mlx-darwin, permanently, and a module naming only the first is one
-        # the Mac refuses WHOLE (`invalid_module`, measured 2026-09-15).
+        # and it stopped being true at the transcribers: CTranslate2 has no
+        # Metal backend, so `faster-whisper-*` was cuda-linux and
+        # `mlx-whisper-*` mlx-darwin, and a module naming only the first was
+        # one the Mac refused WHOLE (`invalid_module`, measured 2026-09-15).
+        # Since Owen's asr lineup ruling of 2026-09-24 every transcriber is one
+        # id on both backends, but a subject can still exist on one machine
+        # only (the Mac's 8-bit 27B), so the field is still owed.
         #
         # Written uniformly because the alternative is a rule about when it
         # appears, and every such rule needs a judgment about which backends

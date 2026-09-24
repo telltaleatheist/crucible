@@ -27,28 +27,17 @@ from crucible.jobs import asr as asr_job
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
 
-MODEL = "faster-whisper-base"
-BIG_MODEL = "faster-whisper-large-v3"
+MODEL = "whisper-tiny"
+BIG_MODEL = "whisper-large-v3-turbo"
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_asr_worker.py"
 FAKE_MLX_WORKER = Path(__file__).resolve().parent / "fake_mlx_asr_worker.py"
-MAC_MODEL = "mlx-whisper-base"
+#: THE SAME ID as `MODEL` since 2026-09-24 (Owen's asr lineup ruling): one id
+#: per transcriber across both backends. Kept as its own name so a Mac test
+#: still reads as one.
+MAC_MODEL = "whisper-tiny"
 
-ALL_MODELS = [
-    "faster-whisper-base",
-    "faster-whisper-distil-large-v3",
-    "faster-whisper-large-v3",
-    "faster-whisper-large-v3-turbo",
-    "faster-whisper-medium",
-    "faster-whisper-small",
-    "faster-whisper-tiny",
-    "mlx-whisper-base",
-    "mlx-whisper-distil-large-v3",
-    "mlx-whisper-large-v3",
-    "mlx-whisper-large-v3-turbo",
-    "mlx-whisper-medium",
-    "mlx-whisper-small",
-    "mlx-whisper-tiny",
-]
+#: The three, and nothing else (Owen, 2026-09-24).
+ALL_MODELS = ["qwen3-asr-1.7b", "whisper-large-v3-turbo", "whisper-tiny"]
 
 PARAMS = {"language": "en", "vad_filter": True, "word_timestamps": True}
 
@@ -241,7 +230,7 @@ def test_info_advertises_every_asr_model(
     assert [row["id"] for row in by_type["asr"]["models"]] == ALL_MODELS
     row = next(r for r in by_type["asr"]["models"] if r["id"] == MODEL)
     assert row["revision"] == load_asr_manifest(MODEL).spec(FAKE_BACKEND.kind).revision
-    assert row["source"] == "Systran/faster-whisper-base"
+    assert row["source"] == "Systran/faster-whisper-tiny"
     assert row["installed"] is False
     # Nothing is ever resident for asr: the worker loads, transcribes, exits.
     assert row["resident"] is False
@@ -286,13 +275,16 @@ def test_a_job_that_names_no_model_is_refused(
     assert response.json()["error"]["code"] == "model_required"
 
 
-def test_an_unknown_model_names_the_six(
+def test_an_unknown_model_names_the_three(
     asr_client: TestClient, auth: dict[str, str]
 ) -> None:
     response = submit(asr_client, auth, model="whisper-huge")
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "unknown_model"
-    assert "faster-whisper-tiny" in response.json()["error"]["message"]
+    error = response.json()["error"]
+    assert error["code"] == "unknown_model"
+    assert error["details"]["offered"] == ALL_MODELS
+    for model_id in ALL_MODELS:
+        assert model_id in error["message"]
 
 
 @pytest.mark.parametrize(
@@ -358,7 +350,7 @@ def test_missing_weights_are_named_with_the_pull_command(
     response = submit(asr_client, auth)
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "model_not_installed"
-    assert "crucible models pull faster-whisper-base" in (
+    assert "crucible models pull whisper-tiny" in (
         response.json()["error"]["message"]
     )
 
@@ -398,47 +390,102 @@ def test_somebody_else_on_the_card_refuses_by_name(
     assert "never evicts" in response.json()["error"]["message"]
 
 
-def test_a_faster_whisper_id_is_refused_on_the_mac_and_says_why(
+@pytest.mark.parametrize("backend", [FAKE_BACKEND, FAKE_MAC_BACKEND], ids=lambda b: b.kind)
+@pytest.mark.parametrize(
+    "old_id, new_id",
+    [
+        ("faster-whisper-large-v3-turbo", "whisper-large-v3-turbo"),
+        ("mlx-whisper-large-v3-turbo", "whisper-large-v3-turbo"),
+        ("faster-whisper-tiny", "whisper-tiny"),
+        ("mlx-whisper-tiny", "whisper-tiny"),
+    ],
+)
+def test_a_renamed_whisper_id_is_unknown_and_names_its_replacement(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
-    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: Any,
+    old_id: str,
+    new_id: str,
+) -> None:
+    """Owen, 2026-09-24: the old backend-prefixed ids are GONE, not aliases.
+    Refused `unknown_model` on BOTH machines — never quietly run as the new id —
+    and the sentence names the id that replaced it, so a client fixes its call
+    in one edit."""
+    monkeypatch.setattr(
+        accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
+    )
+    with make_client(enable_asr=True, backend=backend) as client:
+        response = submit(client, auth, model=old_id)
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unknown_model"
+    assert error["details"] == {"model": old_id, "offered": ALL_MODELS}
+    assert f"renamed {new_id!r} on 2026-09-24" in error["message"]
+    assert "not an alias" in error["message"]
+
+
+@pytest.mark.parametrize(
+    "old_id",
+    [
+        "faster-whisper-base",
+        "faster-whisper-small",
+        "faster-whisper-medium",
+        "faster-whisper-large-v3",
+        "faster-whisper-distil-large-v3",
+        "mlx-whisper-base",
+        "mlx-whisper-small",
+        "mlx-whisper-medium",
+        "mlx-whisper-large-v3",
+        "mlx-whisper-distil-large-v3",
+    ],
+)
+def test_a_retired_whisper_size_is_unknown_and_says_it_was_retired(
+    asr_client: TestClient, auth: dict[str, str], old_id: str
+) -> None:
+    """The five sizes Owen removed, on both engines: no replacement is named,
+    because none was chosen for them; the three that exist are."""
+    response = submit(asr_client, auth, model=old_id)
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unknown_model"
+    assert f"{old_id!r} was retired on 2026-09-24" in error["message"]
+    assert error["details"]["offered"] == ALL_MODELS
+
+
+def test_a_model_with_no_block_for_this_backend_is_refused_by_name(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ids do not cross, and the refusal says that rather than "no Metal".
-
-    CTranslate2 still has no Metal backend; what changed on 2026-09-14 is that
-    the Mac has its own whisper under its own ids. So asking a Mac for
-    `faster-whisper-base` is not "this host cannot transcribe", it is "you
-    named the other engine's weights".
-    """
+    """`backend_unsupported` outlives the ruling that made every SHIPPED asr id
+    span both backends: a manifest may still declare one, and the refusal is
+    the manifest's own statement of which it declares."""
+    catalog = tmp_path / "asr"
+    catalog.mkdir()
+    shipped = load_asr_manifest(MODEL).path.read_text(encoding="utf-8")
+    pc_only = shipped[: shipped.index("[backends.mlx-darwin]")]
+    (catalog / f"{MODEL}.toml").write_text(pc_only, encoding="utf-8")
+    monkeypatch.setenv("CRUCIBLE_ASR_DIR", str(catalog))
     monkeypatch.setattr(
         accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
     )
     monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
     with make_client(enable_asr=True, backend=FAKE_MAC_BACKEND) as client:
-        # `vad_filter: false`, because the VAD refusal is deliberately EARLIER
-        # than this one and would answer first — see
-        # `test_vad_on_the_mac_is_refused_by_name_rather_than_ignored`.
         response = submit(
             client,
             auth,
             params={"language": "en", "vad_filter": False, "word_timestamps": True},
         )
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "backend_unsupported"
-    message = response.json()["error"]["message"]
-    assert "Each backend has its OWN whisper" in message
-    assert "names this host's engine" in message
-
-
-def test_an_mlx_id_is_refused_on_the_card_for_the_mirror_reason(
-    asr_client: TestClient, auth: dict[str, str], ffmpeg: str, idle_card: None
-) -> None:
-    """The rule has two directions and only one of them was ever tested."""
-    response = submit(asr_client, auth, model=MAC_MODEL)
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "backend_unsupported"
-    assert "mlx-whisper-base" in response.json()["error"]["message"]
+    error = response.json()["error"]
+    assert error["code"] == "backend_unsupported"
+    assert error["details"] == {
+        "model": MODEL,
+        "backend": "mlx-darwin",
+        "declared": ["cuda-linux"],
+    }
 
 
 def test_the_mac_runs_its_own_worker_with_its_own_device(

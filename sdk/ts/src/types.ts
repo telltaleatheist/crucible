@@ -2327,11 +2327,13 @@ export interface CapabilityRecord {
  */
 export interface AsrOptions {
   /**
-   * Which whisper. **There is no default and there will not be one** — an ASR
-   * pass at the wrong size is a transcript that looks fine, is worse, and has
-   * nothing in it to say so. `faster-whisper-tiny` through
-   * `faster-whisper-large-v3`; {@link CrucibleClient.info}'s `asr` capability
-   * lists what this build ships.
+   * Which transcriber. **There is no default and there will not be one** — an
+   * ASR pass at the wrong size is a transcript that looks fine, is worse, and
+   * has nothing in it to say so. Since 2026-09-24 there are exactly three, each
+   * ONE id on every backend: `qwen3-asr-1.7b`, `whisper-large-v3-turbo` and
+   * `whisper-tiny`. The old backend-prefixed ids (`faster-whisper-*`,
+   * `mlx-whisper-*`) are refused `unknown_model`, not aliased.
+   * {@link CrucibleClient.info}'s `asr` capability lists what a server ships.
    */
   readonly model: string;
   /** The audio, as an uploaded blob or bytes carried inline. Exactly one file. */
@@ -2375,8 +2377,33 @@ export interface AsrOptions {
    * its own whisper call and whisper's own conditioning does not cross one. A
    * blank string is refused (send `null`), and a prompt longer than whisper
    * keeps — 223 tokens — fails the job by name rather than losing its start.
+   *
+   * Whisper models only. A Qwen3-ASR model refuses it by name
+   * (`initial_prompt_unsupported_by_engine`); send {@link context} there.
    */
   readonly initialPrompt?: string | null;
+  /**
+   * Qwen3-ASR's context (`qwen3-asr-1.7b`): the instruction and vocabulary the
+   * model reads in its system turn before every piece of audio, e.g.
+   * `"Verbatim transcript of a livestream. Transcribe every disfluency exactly
+   * as spoken, including filler sounds: um, uh, ah, er, hmm, and false starts
+   * and repeated words."`. Sent as the server's `context`, verbatim; `null`
+   * means none, and left out the key is not sent.
+   *
+   * Not `initialPrompt` under another name: whisper reads its prompt as the
+   * transcript so far and keeps 223 tokens of it; Qwen reads this as an
+   * instruction, whole, up to 1,024 tokens (the worker counts them and fails
+   * the job by name past that). A whisper model refuses it by name
+   * (`context_unsupported_by_engine`). A blank string is refused, and so is a
+   * context carrying the chat template's own control tokens (`<|im_end|>`).
+   *
+   * A Qwen3-ASR job must also name its `language` (one of the aligner's
+   * eleven: en de fr es it pt ru ja ko zh yue; never `auto`) and send
+   * `vadFilter: false`. With `wordTimestamps: true` each word comes back with
+   * the Qwen3 aligner's times and `probability: null`; see
+   * docs/PHASE25-QWEN-ASR.md for the transcript's shape.
+   */
+  readonly context?: string | null;
 }
 
 // ---------------------------------------------------------------------------

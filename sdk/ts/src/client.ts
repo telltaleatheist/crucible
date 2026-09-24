@@ -1827,6 +1827,13 @@ export class CrucibleClient {
         ...(given.initialPrompt !== undefined
           ? { initial_prompt: readInitialPrompt(given.initialPrompt) }
           : {}),
+        // Qwen3-ASR's system-turn context, on the same rule: sent only when
+        // stated. The server refuses it on a whisper model and refuses
+        // `initial_prompt` on a Qwen one, by name; this client does not guess
+        // which engine a model id is.
+        ...(given.context !== undefined
+          ? { context: readContext(given.context) }
+          : {}),
       },
       // The input's NAME becomes the file's name on the server's disk, and
       // ffmpeg reads the container off the extension — so the caller names the
@@ -4159,6 +4166,21 @@ function readInitialPrompt(value: unknown): string | null {
   }
   if (value.trim() === '') {
     throw new CrucibleConfigError('initialPrompt', 'is blank; send null for no prompt');
+  }
+  return value;
+}
+
+/**
+ * `asr`'s `context`, once the caller has stated it: a non-blank string, or
+ * `null` for none. `readInitialPrompt`'s rule, for the same reason.
+ */
+function readContext(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== 'string') {
+    throw new CrucibleConfigError('context', `must be a string or null, got ${typeof value}`);
+  }
+  if (value.trim() === '') {
+    throw new CrucibleConfigError('context', 'is blank; send null for no context');
   }
   return value;
 }

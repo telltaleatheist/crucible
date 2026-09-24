@@ -82,11 +82,30 @@ instead of one per re-run. But the job then fails, naming the windows, and
 publishes no artifact. A hole in the middle of a transcript is invisible in the
 output — which is the same argument as the one against a default model, and it
 gets the same answer.
+
+Qwen3-ASR: the same job type, a different run (2026-09-24)
+----------------------------------------------------------
+`qwen3-asr-1.7b` is a model under this job type, not a new verb: one audio file
+in, `transcript.json` out, the same `language` / `vad_filter` /
+`word_timestamps` params. Its engines (`vllm` on cuda-linux, `mlx-audio` on
+mlx-darwin) are run by `qwen.py` rather than by the whisper window loop,
+because a word-timestamped transcript there is two models (the ASR model and
+the Qwen3 aligner) and a loop guard between them (`loopguard.py`). What
+differs on the wire, all of it refused by name rather than ignored:
+
+- `context` (optional) is Qwen's system-turn context; `initial_prompt` is
+  whisper's primed transcript. Each engine refuses the other's field — they
+  are two mechanisms with two limits, not two spellings of one.
+- `language` must be a language the aligner supports, and never `auto`.
+- `vad_filter: true` is refused: neither Qwen engine has a VAD.
+
+docs/PHASE25-QWEN-ASR.md is the contract.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -98,19 +117,24 @@ from pydantic import (
     field_validator,
 )
 
-from ... import accelerator, hosttools, weights, workerenv, workers
+from ... import accelerator, hosttools, jobenv, weights, workerenv, workers
 from ...asrmodels import (
-    ASR_BACKEND_ENGINES,
+    QWEN_ASR_ENGINES,
+    QWEN_CONTEXT_MAX_TOKENS,
     AsrManifest,
     AsrManifestError,
+    RENAMED_ASR_IDS,
     load_all_asr_manifests,
+    retired_asr_id_note,
 )
 from ...config import Config
 from ...errors import ApiError, JobError
 # The one place `<id>@<revision>` is spelled. Two spellings of a fingerprint
 # is two names for one set of weights, which is the thing it exists to stop.
 from ...manifests import fingerprint
+from ..align import QWEN3_LANGUAGES
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
+from . import qwen
 
 __all__ = ["AsrJobType", "AsrParams"]
 
@@ -178,7 +202,38 @@ WORKER_SCRIPT_FOR_ENGINE: dict[str, Path] = {
 #: reason the module docstring gives about the CPU fallback: the run would
 #: produce a transcript under different rules and nothing in the file would say
 #: so.
-ENGINES_WITHOUT_VAD: frozenset[str] = frozenset({"mlx-whisper"})
+#:
+#: Both Qwen engines are in it too: Qwen3-ASR is handed a piece of audio and
+#: transcribes it, and neither vLLM nor mlx-audio has a detector in front.
+ENGINES_WITHOUT_VAD: frozenset[str] = frozenset({"mlx-whisper", *QWEN_ASR_ENGINES})
+
+#: Which env's python runs each engine's worker. Whisper's two engines are the
+#: `asr` env's (`envs/asr/*.txt`); the Qwen engines run in the LLM env, which
+#: already pins vLLM 0.29.0 on cuda-linux and mlx-audio 0.5.5 on mlx-darwin, so
+#: Qwen3-ASR costs no new env on either machine (docs/PHASE25 section 6). The
+#: aligner a Qwen job also runs is the `align` env's, resolved in `qwen.py`.
+ENV_FOR_ENGINE: dict[str, str] = {
+    "faster-whisper": "asr",
+    "mlx-whisper": "asr",
+    "vllm": "llm",
+    "mlx-audio": "llm",
+}
+
+#: THE LONGEST CONTEXT ANY QWEN JOB MAY SEND, IN CHARACTERS: a cheap refusal
+#: before the job is queued. The real limit is `QWEN_CONTEXT_MAX_TOKENS` (1,024
+#: of the model's own tokens), counted by the worker with the model's tokenizer
+#: after it loads; English runs about four characters a token, so 8,192
+#: characters is twice what could ever fit and only stops a client that sent
+#: a document where a sentence belongs.
+CONTEXT_MAX_CHARS = 8192
+
+#: What a context may not contain: the chat template's own control tokens. The
+#: context is placed verbatim inside the system turn, so `<|im_end|>` in it
+#: would end that turn and start whatever followed. vLLM's own transcription
+#: door STRIPS these silently (`_sanitize_transcription_user_text`); this
+#: server refuses instead, because a context that was quietly edited is a
+#: transcript made under a prompt nobody wrote.
+_CHAT_CONTROL = re.compile(r"<\|[^|]*\|>|<asr_text>")
 
 
 def _for_engine(table: dict[str, Any], engine: str, what: str) -> Any:
@@ -245,6 +300,27 @@ class AsrParams(BaseModel):
     prompt would lose its beginning with no error; the count needs the model's
     own tokenizer, which exists only in the worker's env, so each worker counts
     with it after loading and fails the run by name before the first window.
+
+
+    `context` — Qwen3-ASR's, and optional for the same reason
+    ---------------------------------------------------------
+    The text Qwen3-ASR reads in its SYSTEM turn before it hears the audio: an
+    instruction and a vocabulary, e.g. ContentStudio's "Verbatim transcript of
+    a livestream. Transcribe every disfluency exactly as spoken, including
+    filler sounds: um, uh, ah, er, hmm, and false starts and repeated words."
+    (which took a 10-minute window from 9 fillers to 19). It is NOT
+    `initial_prompt` under another name, and the two are not interchangeable:
+    whisper reads its prompt as the transcript so far, keeps its last 223
+    tokens and lets it scroll out after a few segments; Qwen reads the context
+    as an instruction, whole, for every piece, up to 1,024 tokens here
+    (`asrmodels.QWEN_CONTEXT_MAX_TOKENS`). One field for both would carry two
+    limits and two meanings under one name, so each engine refuses the other's
+    field by name (`_refuse_what_this_engine_has_not_got`).
+
+    Optional with `None` meaning no context, for `initial_prompt`'s reason: the
+    asr clients already in the fleet send three keys. Blank is refused, a
+    non-string is refused, and so is a context carrying the chat template's
+    own control tokens (`_CHAT_CONTROL`).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -253,6 +329,7 @@ class AsrParams(BaseModel):
     vad_filter: bool
     word_timestamps: bool
     initial_prompt: StrictStr | None = None
+    context: StrictStr | None = None
 
     @field_validator("initial_prompt")
     @classmethod
@@ -261,6 +338,32 @@ class AsrParams(BaseModel):
             raise ValueError(
                 "initial_prompt is blank; send null for no prompt, or the text "
                 "whisper should be primed with (a title, the names in it)"
+            )
+        return value
+
+    @field_validator("context")
+    @classmethod
+    def context_is_plain_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value.strip() == "":
+            raise ValueError(
+                "context is blank; send null for no context, or the instruction "
+                "and vocabulary Qwen3-ASR should read before the audio"
+            )
+        if len(value) > CONTEXT_MAX_CHARS:
+            raise ValueError(
+                f"context is {len(value)} characters; Qwen3-ASR is given at most "
+                f"{QWEN_CONTEXT_MAX_TOKENS} tokens of it, which is well under "
+                f"{CONTEXT_MAX_CHARS} characters. Send the instruction and the "
+                "names, not the document"
+            )
+        found = _CHAT_CONTROL.search(value)
+        if found is not None:
+            raise ValueError(
+                f"context contains {found.group(0)!r}, one of the chat "
+                "template's own control tokens; the context is placed verbatim "
+                "inside the system turn, where that would end the turn"
             )
         return value
 
@@ -282,6 +385,36 @@ class AsrParams(BaseModel):
 # ------------------------------------------------------------------ helpers
 
 
+def adopt_renamed_asr_weights(config: Config) -> list[str]:
+    """Move weights pulled under a RENAMED asr id into the new id's folder.
+
+    Run once per server start, before anything is served (`crucible serve`).
+    Owen's lineup ruling of 2026-09-24 renamed four ids (`RENAMED_ASR_IDS`) and
+    the store is laid out by id, so without this a Mac that had pulled
+    `mlx-whisper-large-v3-turbo` would read `whisper-large-v3-turbo` as not
+    installed and download the same 1.6 GB again beside the old copy. The
+    store moves a directory only when its stamp names the new block's exact
+    pin (`weights.adopt_renamed`), so this never puts different bytes under an
+    id. Idempotent: once moved there is nothing under the old id to find.
+
+    A rename whose target this build does not ship is a defect in THIS build,
+    not weather, and is refused by name.
+    """
+    manifests = load_all_asr_manifests()
+    lines: list[str] = []
+    for old_id, new_id in sorted(RENAMED_ASR_IDS.items()):
+        manifest = manifests.get(new_id)
+        if manifest is None:
+            raise AsrManifestError(
+                f"RENAMED_ASR_IDS maps {old_id!r} to {new_id!r}, and this build "
+                f"ships no such asr manifest (it ships {sorted(manifests)})"
+            )
+        lines.extend(
+            weights.adopt_renamed(config, old_id, manifest, manifest.backends)
+        )
+    return lines
+
+
 def _manifests() -> dict[str, AsrManifest]:
     try:
         return load_all_asr_manifests()
@@ -297,11 +430,16 @@ def _known(model_id: str) -> AsrManifest:
     manifests = _manifests()
     manifest = manifests.get(model_id)
     if manifest is None:
+        # A removed id is refused like any other unknown id — it is NOT an
+        # alias (Owen, 2026-09-24) — and the sentence says what replaced it,
+        # so a client reading the refusal can fix its call in one edit.
+        note = retired_asr_id_note(model_id)
         raise ApiError(
             400,
             "unknown_model",
             f"no ASR manifest for model {model_id!r}; this build ships "
-            f"{sorted(manifests)}",
+            f"{sorted(manifests)}" + ("" if note is None else f". {note}"),
+            {"model": model_id, "offered": sorted(manifests)},
         )
     return manifest
 
@@ -319,6 +457,56 @@ def _params(params: dict[str, Any]) -> AsrParams:
                 f"{problem['msg']}"
                 for problem in exc.errors()
             ),
+        ) from None
+
+
+def _most_a_job_needs(spec: Any, backend_kind: str) -> int:
+    """What the card must hold for the largest job this model can run.
+
+    A whisper model's own estimate. A Qwen model's estimate PLUS its aligner's,
+    because a word-timestamped job holds both for its whole run
+    (`qwen.need_bytes`); the figure a listing shows is the figure the guard
+    will ask for.
+    """
+    if spec.engine in QWEN_ASR_ENGINES:
+        return qwen.need_bytes(spec, backend_kind, with_aligner=True)
+    return spec.memory_bytes_estimate
+
+
+def _env_ready(config: Config, env: str, backend_kind: str) -> tuple[bool, str]:
+    """Is one env installed here, and what does its status say."""
+    try:
+        if env == "llm":
+            status = jobenv.env_status(
+                config.home, jobenv.llm_env(backend_kind), backend_kind
+            )
+        else:
+            status = workerenv.env_status(config.home, env, backend_kind)
+    except (workerenv.WorkerEnvError, jobenv.EnvError) as exc:
+        return False, str(exc)
+    return status.installed, status.detail
+
+
+def _python_for(config: Config, engine: str, backend_kind: str, model_id: str) -> Path:
+    """The interpreter an engine's worker runs in, or `env_missing` by name."""
+    env = _for_engine(ENV_FOR_ENGINE, engine, "env")
+    try:
+        if env == "llm":
+            spec = jobenv.llm_env(backend_kind)
+            return jobenv.require_env(config.home, spec, backend_kind)
+        return workerenv.require_env(config.home, env, backend_kind)
+    except (workerenv.WorkerEnvError, jobenv.EnvError) as exc:
+        directory = (
+            jobenv.env_dir(config.home, jobenv.llm_env(backend_kind))
+            if env == "llm"
+            else workerenv.worker_env_dir(config.home, env)
+        )
+        raise ApiError(
+            409,
+            "env_missing",
+            f"cannot run {model_id!r}: its engine {engine!r} runs in the {env} "
+            f"env, and {exc}",
+            {"model": model_id, "env": str(directory)},
         ) from None
 
 
@@ -390,7 +578,7 @@ class AsrJobType:
                 revision, source, estimate = (
                     spec.revision,
                     spec.hf_repo,
-                    spec.memory_bytes_estimate,
+                    _most_a_job_needs(spec, backend_kind),
                 )
                 # The same predicate `check` and `_require_loadable` read: the
                 # puller's stamp, at the revision this host's block pins.
@@ -416,15 +604,32 @@ class AsrJobType:
             )
         return rows
 
+    def retired_model_note(self, model: str) -> str | None:
+        """What replaced an asr id this build removed, for `unknown_model`.
+
+        Read by `jobs.resolve_model` when a request names an id this type does
+        not serve. Never resolves anything: the old ids are not aliases (Owen,
+        2026-09-24), and a request naming one is refused either way.
+        """
+        return retired_asr_id_note(model)
+
     def model_provenance(self, model: str | None) -> dict[str, Any] | None:
         """The `model` block of a transcript's provenance sidecar.
 
         A transcript is an artifact like any other and has to say which weights
-        produced it: `faster-whisper-base` and `faster-whisper-large-v3` disagree
-        about a hard passage, and a cue list that does not name its model is a
-        cue list nobody can re-derive. The revision is this host's backend pin,
+        produced it: `whisper-tiny` and `whisper-large-v3-turbo` disagree about
+        a hard passage, and a cue list that does not name its model is a cue
+        list nobody can re-derive. The revision is this host's backend pin,
         which is a statement about bytes — `weights.require_installed` refuses
         weights pulled at any other one.
+
+        `engine` AND `hf_repo` SINCE 2026-09-24. Until then an asr id named one
+        engine's conversion and the id alone said which bytes; Owen's ruling of
+        that day made `whisper-large-v3-turbo` and `whisper-tiny` one id across
+        both backends, so the id is a CTranslate2 conversion on the PC and an
+        MLX one on the Mac. The sidecar already names the backend beside this
+        block; these two keys make the block say which conversion by itself,
+        so a transcript read without its manifest still names its bytes.
         """
         if model is None:
             raise JobError("model_required", f"{self.name} needs a model")
@@ -435,11 +640,19 @@ class AsrJobType:
             # `backend_unsupported` before a job exists. A sidecar still has to
             # say something true if it is reached another way, and inventing a
             # revision is not it.
-            return {"id": model, "revision": None, "fingerprint": None}
+            return {
+                "id": model,
+                "revision": None,
+                "fingerprint": None,
+                "engine": None,
+                "hf_repo": None,
+            }
         return {
             "id": model,
             "revision": spec.revision,
             "fingerprint": fingerprint(model, spec.revision),
+            "engine": spec.engine,
+            "hf_repo": spec.hf_repo,
         }
 
     def vram_estimate(self, model: str | None) -> int:
@@ -448,54 +661,58 @@ class AsrJobType:
         manifest = _known(model)
         if not manifest.supports(self._config.backend_kind):
             return 0
-        return manifest.spec(self._config.backend_kind).memory_bytes_estimate
+        return _most_a_job_needs(
+            manifest.spec(self._config.backend_kind), self._config.backend_kind
+        )
 
     def check(self, backend: Any) -> JobTypeStatus:
-        try:
-            env = workerenv.env_status(self._config.home, JOB_TYPE, backend.kind)
-        except workerenv.WorkerEnvError as exc:
-            return JobTypeStatus(ready=False, detail=str(exc))
-        if not env.installed:
-            return JobTypeStatus(ready=False, detail=env.detail)
+        """Ready when some installed model has its engine's env installed.
+
+        Per ENGINE since 2026-09-24: whisper runs in the `asr` env and Qwen3-ASR
+        in the `llm` env (`ENV_FOR_ENGINE`), so "the asr env is missing" no
+        longer means this type cannot run — a host with only the llm and align
+        envs transcribes with `qwen3-asr-1.7b`. Each env's own detail is kept,
+        so a reader learns which one is missing.
+        """
         if ffmpeg_path() is None:
             return JobTypeStatus(
                 ready=False,
-                detail=f"{env.detail}; but there is no ffmpeg on PATH, and asr "
-                "decodes every input through it",
+                detail="there is no ffmpeg on PATH, and asr decodes every input "
+                "through it",
             )
         try:
             manifests = _manifests()
         except ApiError as exc:
             return JobTypeStatus(ready=False, detail=exc.message)
-        installed = [
-            manifest.id
-            for manifest in manifests.values()
-            if manifest.supports(backend.kind)
-            and weights.installed(
-                self._config, manifest, manifest.spec(backend.kind)
+        envs: dict[str, tuple[bool, str]] = {}
+        for env in sorted(set(ENV_FOR_ENGINE.values())):
+            envs[env] = _env_ready(self._config, env, backend.kind)
+        runnable: list[str] = []
+        pulled_without_env: list[str] = []
+        for manifest in manifests.values():
+            if not manifest.supports(backend.kind):
+                continue
+            spec = manifest.spec(backend.kind)
+            if weights.installed(self._config, manifest, spec) is None:
+                continue
+            if envs[_for_engine(ENV_FOR_ENGINE, spec.engine, "env")][0]:
+                runnable.append(manifest.id)
+            else:
+                pulled_without_env.append(manifest.id)
+        detail = "; ".join(f"{env}: {text}" for env, (_, text) in envs.items())
+        if not runnable:
+            missing = (
+                f"; installed but their env is not: {pulled_without_env}"
+                if pulled_without_env
+                else "; no ASR model is installed — `crucible models pull <id>`"
             )
-            is not None
-        ]
-        if not installed:
-            return JobTypeStatus(
-                ready=False,
-                detail=(
-                    f"{env.detail}; no ASR model is installed — "
-                    "`crucible models pull <id>`"
-                ),
-            )
-        return JobTypeStatus(ready=True, detail=f"{env.detail}; installed: {installed}")
+            return JobTypeStatus(ready=False, detail=detail + missing)
+        return JobTypeStatus(ready=True, detail=f"{detail}; runnable: {runnable}")
 
     # ------------------------------------------------------------ preflight
 
-    def _require_runnable(self, model_id: str) -> tuple[AsrManifest, Any, Path, Path]:
-        """Manifest, spec, env python and weights dir, or the named refusal.
-
-        The order is `llm`'s and for `llm`'s reason: what no amount of installing
-        can fix first, then what an install or a pull would fix, then the live
-        accelerator. Nobody is told to download 3 GB of weights for a model that
-        will never fit.
-        """
+    def _spec_for(self, model_id: str) -> tuple[AsrManifest, Any]:
+        """The manifest and this host's block, or `backend_unsupported` by name."""
         backend_kind = self._backend.kind
         manifest = _known(model_id)
         if not manifest.supports(backend_kind):
@@ -503,35 +720,35 @@ class AsrJobType:
                 400,
                 "backend_unsupported",
                 f"ASR model {model_id!r} has no {backend_kind} block; "
-                f"{manifest.path.name} declares {sorted(manifest.backends)}. "
-                "Each backend has its OWN whisper — faster-whisper on "
-                "cuda-linux, mlx-whisper on mlx-darwin — so the model ids do "
-                "not cross: ask for one whose id names this host's engine",
+                f"{manifest.path.name} declares {sorted(manifest.backends)}",
                 {
                     "model": model_id,
                     "backend": backend_kind,
                     "declared": sorted(manifest.backends),
                 },
             )
-        spec = manifest.spec(backend_kind)
+        return manifest, manifest.spec(backend_kind)
+
+    def _require_runnable(
+        self, model_id: str, params: AsrParams
+    ) -> tuple[AsrManifest, Any, Path, Path, "qwen.AlignerPlan | None"]:
+        """Manifest, spec, env python, weights dir and the aligner (Qwen with
+        word timestamps only), or the named refusal.
+
+        The order is `llm`'s and for `llm`'s reason: what no amount of installing
+        can fix first, then what an install or a pull would fix, then the live
+        accelerator. Nobody is told to download 3 GB of weights for a model that
+        will never fit.
+        """
+        backend_kind = self._backend.kind
+        manifest, spec = self._spec_for(model_id)
         accelerator.refuse_if_larger_than_host(
             model_id=model_id,
-            need_bytes=spec.memory_bytes_estimate,
+            need_bytes=self._need_bytes(spec, params),
             host_total_bytes=self._backend.gpu.vram_bytes,
             host_name=self._backend.gpu.name,
         )
-        try:
-            python = workerenv.require_env(self._config.home, JOB_TYPE, backend_kind)
-        except workerenv.WorkerEnvError as exc:
-            raise ApiError(
-                409,
-                "env_missing",
-                f"cannot run {model_id!r}: {exc}",
-                {
-                    "model": model_id,
-                    "env": str(workerenv.worker_env_dir(self._config.home, JOB_TYPE)),
-                },
-            ) from None
+        python = _python_for(self._config, spec.engine, backend_kind, model_id)
         try:
             installed = weights.require_installed(self._config, manifest, spec)
         except weights.WeightsError as exc:
@@ -541,52 +758,111 @@ class AsrJobType:
                 str(exc),
                 {"model": model_id, "hf_repo": spec.hf_repo, "revision": spec.revision},
             ) from None
-        return manifest, spec, python, installed.path
+        aligner = None
+        if spec.engine in QWEN_ASR_ENGINES and params.word_timestamps:
+            aligner = qwen.plan_aligner(self._config, spec, backend_kind)
+        return manifest, spec, python, installed.path, aligner
 
-    def _refuse_vad_this_engine_has_not_got(self, params: AsrParams) -> None:
-        """`vad_filter: true` on mlx-whisper is a 400, never a quiet no-op.
+    def _need_bytes(self, spec: Any, params: AsrParams) -> int:
+        """What THIS job needs: the aligner is on the card only with timestamps."""
+        if spec.engine in QWEN_ASR_ENGINES:
+            return qwen.need_bytes(
+                spec, self._backend.kind, with_aligner=params.word_timestamps
+            )
+        return spec.memory_bytes_estimate
 
-        THE ONE PLACE THE TWO ENGINES DIFFER ON THE WIRE, and it is a refusal
-        rather than a difference. faster-whisper ships Silero VAD;
+    def _refuse_what_this_engine_has_not_got(
+        self, model_id: str, params: AsrParams
+    ) -> None:
+        """A param this model's engine cannot honour is a 400, never a no-op.
+
+        Asked BEFORE the env and weights checks: a caller who cannot have what
+        they asked for should not first be told to install 2 GB. The engine is
+        the MODEL's (its manifest block on this host) since 2026-09-24, because
+        a host now has two — whisper and Qwen3-ASR — and they differ.
+
+        `vad_filter: true` where there is no VAD. faster-whisper ships Silero;
         `mlx-whisper` has no voice-activity detector at all — its
-        `no_speech_threshold` is the model's own per-segment judgement, which
-        is a different mechanism on different evidence and not a substitute.
+        `no_speech_threshold` is the model's own per-segment judgement, which is
+        a different mechanism on different evidence and not a substitute — and
+        neither Qwen engine has one either. Running the job anyway would produce
+        a transcript under rules the caller did not ask for, with nothing in
+        `transcript.json` to say which rules those were: the same failure
+        PHASE4-AUDIO.md section 3 refuses the CPU fallback for. `vad_filter:
+        false` runs perfectly well, so the refusal names the value.
 
-        Running the job anyway would produce a transcript under rules the
-        caller did not ask for, with nothing in `transcript.json` to say which
-        rules those were: the same failure PHASE4-AUDIO.md section 3 refuses
-        the CPU fallback for. `vad_filter: false` runs perfectly well, so the
-        refusal names the value and not the field.
+        The prompt fields cross neither way (`AsrParams`): `initial_prompt` on a
+        Qwen engine and `context` on a whisper one.
+
+        A Qwen engine is always TOLD the language, and it must be one the
+        aligner places words in: ContentStudio's measurement is that
+        auto-detection costs the 1.7B time, and the aligner has no detection
+        at all — it takes a language name. Eleven languages, the aligner's own
+        list (`crucible/jobs/align`); `auto` and the nineteen languages that
+        Qwen3-ASR transcribes but the aligner cannot place are refused by name.
         """
-        # THE ENGINE IS THE BACKEND'S, not the model's, which is why this asks
-        # `ASR_BACKEND_ENGINES` rather than a manifest: the answer is the same
-        # for every id this host can serve, and asking it here means the
-        # refusal lands BEFORE the env and weights checks. A caller who cannot
-        # have what they asked for should not first be told to install 2 GB.
-        engine = ASR_BACKEND_ENGINES.get(self._backend.kind)
+        _, spec = self._spec_for(model_id)
+        engine = spec.engine
         if engine in ENGINES_WITHOUT_VAD and params.vad_filter:
             raise ApiError(
                 400,
                 "vad_unsupported_by_engine",
-                f"this host transcribes with {engine!r}, and that engine has no "
+                f"{model_id!r} transcribes with {engine!r}, and that engine has no "
                 "voice-activity detector at all — faster-whisper's is Silero, "
-                "and mlx-whisper ships nothing of the kind. Send "
-                "vad_filter: false and get a transcript this server can "
-                "describe, rather than one produced under rules nothing in the "
-                "file records",
+                "and mlx-whisper and the Qwen3-ASR engines ship nothing of the "
+                "kind. Send vad_filter: false and get a transcript this server "
+                "can describe, rather than one produced under rules nothing in "
+                "the file records",
                 {"backend": self._backend.kind, "engine": engine, "vad_filter": True},
+            )
+        qwen_engine = engine in QWEN_ASR_ENGINES
+        if qwen_engine and params.initial_prompt is not None:
+            raise ApiError(
+                400,
+                "initial_prompt_unsupported_by_engine",
+                f"{model_id!r} is Qwen3-ASR, which has no initial_prompt: that is "
+                "whisper's primed transcript, 223 tokens that scroll out. Send "
+                "`context`, the instruction and vocabulary Qwen reads in its "
+                "system turn before every piece",
+                {"engine": engine, "field": "initial_prompt"},
+            )
+        if not qwen_engine and params.context is not None:
+            raise ApiError(
+                400,
+                "context_unsupported_by_engine",
+                f"{model_id!r} is whisper ({engine!r}), which has no context: "
+                "that is Qwen3-ASR's system-turn instruction. Send "
+                "`initial_prompt`, the text whisper is primed with as if it "
+                "were the transcript so far",
+                {"engine": engine, "field": "context"},
+            )
+        if qwen_engine and params.language not in QWEN3_LANGUAGES:
+            auto = (
+                "; `auto` is refused because detection costs the 1.7B time and "
+                "the aligner has none"
+                if params.language == AUTO_LANGUAGE
+                else ""
+            )
+            raise ApiError(
+                400,
+                "language_unsupported_by_engine",
+                f"{model_id!r} is always told its language, and it must be one "
+                f"the aligner places words in: {sorted(QWEN3_LANGUAGES)}. "
+                f"{params.language!r} is not{auto}",
+                {"engine": engine, "language": params.language},
             )
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         if model is None:  # unreachable: resolve_model requires one
             raise ApiError(400, "model_required", f"{self.name} needs a model")
-        self._refuse_vad_this_engine_has_not_got(_params(params))
+        checked = _params(params)
+        self._refuse_what_this_engine_has_not_got(model, checked)
         _require_ffmpeg()
-        _, spec, _, _ = self._require_runnable(model)
+        _, spec, _, _, _ = self._require_runnable(model, checked)
         accelerator.guard(
             self._config.backend_kind,
             model_id=model,
-            need_bytes=spec.memory_bytes_estimate,
+            need_bytes=self._need_bytes(spec, checked),
             owned_pids=self._owned_pids(),
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
             # Deliberately no `reclaimable_bytes`. An `llm` load may unload the
@@ -605,14 +881,17 @@ class AsrJobType:
         audio = self._one_input(ctx)
 
         try:
+            self._refuse_what_this_engine_has_not_got(model, params)
             ffmpeg = _require_ffmpeg()
-            manifest, spec, python, weights_dir = self._require_runnable(model)
+            _, spec, python, weights_dir, aligner = self._require_runnable(
+                model, params
+            )
             # The card can change between the queue and the lane, so the guard
             # runs again here against the same rules.
             state = accelerator.guard(
                 self._config.backend_kind,
                 model_id=model,
-                need_bytes=spec.memory_bytes_estimate,
+                need_bytes=self._need_bytes(spec, params),
                 owned_pids=self._owned_pids(),
                 desktop_allowance_bytes=self._config.desktop_allowance_bytes,
             )
@@ -633,6 +912,55 @@ class AsrJobType:
             total_s=0.0,
             cues=0,
         )
+
+        if spec.engine in QWEN_ASR_ENGINES:
+            document = qwen.QwenAsrRun(
+                config=self._config,
+                backend=self._backend,
+                ctx=ctx,
+                job=job,
+                model=model,
+                spec=spec,
+                python=python,
+                weights_dir=weights_dir,
+                aligner=aligner,
+                ffmpeg=ffmpeg,
+                audio=audio,
+                language=params.language,
+                context=params.context,
+                word_timestamps=params.word_timestamps,
+            ).run()
+        else:
+            document = self._whisper(
+                ctx, job, model, spec, python, weights_dir, ffmpeg, audio, params
+            )
+
+        path = ctx.scratch / "transcript.json"
+        path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        ctx.artifact("transcript.json", path)
+        ctx.progress(
+            1.0,
+            f"{len(document['segments'])} segments over "
+            f"{document['duration_s']:.0f}s of audio",
+            stage="transcribing",
+            processed_s=document["duration_s"],
+            total_s=document["duration_s"],
+            cues=len(document["segments"]),
+        )
+
+    def _whisper(
+        self,
+        ctx: JobContext,
+        job: Job,
+        model: str,
+        spec: Any,
+        python: Path,
+        weights_dir: Path,
+        ffmpeg: str,
+        audio: Path,
+        params: AsrParams,
+    ) -> dict[str, Any]:
+        """The whisper engines' run: one worker, 900-second windows, one exit."""
         outcome = self._transcribe(
             ctx, job, spec.engine, python, weights_dir, ffmpeg, audio, params
         )
@@ -658,19 +986,7 @@ class AsrJobType:
                 + "; ".join(failures),
             )
 
-        document = self._transcript(model, spec, params, outcome, results)
-        path = ctx.scratch / "transcript.json"
-        path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-        ctx.artifact("transcript.json", path)
-        ctx.progress(
-            1.0,
-            f"{len(document['segments'])} segments over "
-            f"{document['duration_s']:.0f}s of audio",
-            stage="transcribing",
-            processed_s=document["duration_s"],
-            total_s=document["duration_s"],
-            cues=len(document["segments"]),
-        )
+        return self._transcript(model, spec, params, outcome, results)
 
     @staticmethod
     def _one_input(ctx: JobContext) -> Path:

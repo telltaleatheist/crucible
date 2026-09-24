@@ -269,9 +269,10 @@ def test_a_disabled_class_records_the_number_that_disabled_it() -> None:
 
     And it is the shortfall of the SMALLEST candidate, because that is the one
     that says how much bigger a card would have to be. `asr` on a 4 GiB card is
-    the case that can tell: six whisper models, none of them fitting, and
-    `large-v3` is 2.8 GiB further out of reach than `tiny`. Reporting the largest
-    would tell an operator to buy three times the card they need.
+    the case that can tell: three transcribers (Owen's lineup, 2026-09-24),
+    none of them fitting, and `qwen3-asr-1.7b` is 8.7 GiB further out of reach
+    than `whisper-tiny`. Reporting the largest would tell an operator to buy
+    several times the card they need.
     """
     tiny_card = 4 * GIB
     verdict = _decide("asr", "cuda-linux", tiny_card, CUDA_RESERVE)
@@ -286,10 +287,13 @@ def test_a_disabled_class_records_the_number_that_disabled_it() -> None:
 def test_asr_and_align_are_both_enabled_on_the_studio() -> None:
     """Both stopped being the Mac's missing manifests on 2026-09-14.
 
-    They got there differently and the selections say so: `align` runs the SAME
-    engine on `mps`, so the Mac's candidate is the id the card already used;
-    `asr` runs a SECOND engine, so its candidates are ids the card has never
-    heard of and best-first picks the largest mlx conversion.
+    `align` runs the SAME engine on `mps`, so the Mac's candidate is the id
+    the card already used. `asr` runs its own engines on the Mac, and since
+    Owen's lineup ruling of 2026-09-24 its candidates are the SAME THREE IDS
+    the card has — `qwen3-asr-1.7b`, `whisper-large-v3-turbo`, `whisper-tiny`
+    — with best-first picking Qwen: *"we're fully switching over to qwen for
+    transcribing"*. `tests/test_asr_lineup.py` holds the order on both
+    backends.
     """
     align = _decide("align", "mlx-darwin", STUDIO, MAC_RESERVE)
     assert align.enabled is True
@@ -297,11 +301,12 @@ def test_asr_and_align_are_both_enabled_on_the_studio() -> None:
 
     asr = _decide("asr", "mlx-darwin", STUDIO, MAC_RESERVE)
     assert asr.enabled is True
-    assert asr.selected == "mlx-whisper-large-v3"
-    assert all(c.id.startswith("mlx-whisper-") for c in asr.candidates)
-    # And the card's six are not among them, which is the id rule showing up
-    # where a client would notice it.
-    assert not any(c.id.startswith("faster-whisper-") for c in asr.candidates)
+    assert asr.selected == "qwen3-asr-1.7b"
+    assert [c.id for c in asr.candidates] == [
+        "qwen3-asr-1.7b",
+        "whisper-large-v3-turbo",
+        "whisper-tiny",
+    ]
 
 
 def _pages_with_no_block_on_any_backend() -> Any:

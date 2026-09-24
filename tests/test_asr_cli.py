@@ -17,15 +17,9 @@ from crucible.config import load_config
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 
-ASR_MODELS = [
-    "faster-whisper-base",
-    "faster-whisper-distil-large-v3",
-    "faster-whisper-large-v3",
-    "faster-whisper-large-v3-turbo",
-    "faster-whisper-medium",
-    "faster-whisper-small",
-    "faster-whisper-tiny",
-]
+#: The whispers of Owen's three (2026-09-24); `qwen3-asr-1.7b` is the third,
+#: and has a context, so it is not in the "no context" loop below.
+ASR_MODELS = ["whisper-large-v3-turbo", "whisper-tiny"]
 
 
 @pytest.fixture
@@ -116,7 +110,7 @@ def test_pulling_an_unknown_model_names_every_manifest(
     capsys.readouterr()
     assert cli.main(["models", "pull", "whisper-enormous"]) == 1
     error = capsys.readouterr().err
-    assert "faster-whisper-tiny" in error
+    assert "whisper-tiny" in error
     assert "qwen3.5-9b" in error
 
 
@@ -129,15 +123,15 @@ def test_one_id_declared_twice_is_refused_rather_than_resolved(
 ) -> None:
     """`crucible models pull <id>` is one question; two answers is not an answer."""
     # The clash is made on the `models/` side, because an `asr/` manifest can
-    # no longer take an arbitrary id: the loader requires it to name its engine
-    # (`faster-whisper-` or `mlx-whisper-`), so the collision has to come from
-    # the other directory.
+    # no longer take an arbitrary id: the loader requires it to name its family
+    # (`whisper-` or `qwen3-asr-`), so the collision has to come from the other
+    # directory.
     clashing = tmp_path / "models-fixture"
     clashing.mkdir()
-    (clashing / "faster-whisper-base.toml").write_text(
+    (clashing / "whisper-tiny.toml").write_text(
         """
 [model]
-id = "faster-whisper-base"
+id = "whisper-tiny"
 family = "qwen3.5"
 params_b = 9
 context_default = 4096
@@ -155,5 +149,5 @@ memory_bytes_estimate = 1755830268
     monkeypatch.setenv("CRUCIBLE_MODELS_DIR", str(clashing))
     assert cli.main(["init"]) == 0
     capsys.readouterr()
-    assert cli.main(["models", "pull", "faster-whisper-base"]) == 1
+    assert cli.main(["models", "pull", "whisper-tiny"]) == 1
     assert "a model id names one model" in capsys.readouterr().err

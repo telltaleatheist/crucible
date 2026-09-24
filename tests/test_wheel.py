@@ -49,7 +49,7 @@ REQUIRED_TREES: tuple[tuple[str, str], ...] = (
     ("crucible/rvc", "sigma.toml"),
     ("crucible/rvcbase", "ultimate-rvc.toml"),
     ("crucible/align", "qwen3-aligner.toml"),
-    ("crucible/asr", "faster-whisper-large-v3.toml"),
+    ("crucible/asr", "whisper-large-v3-turbo.toml"),
     ("crucible/envs", "llm/cuda-linux.txt"),
     ("crucible/ui", "index.html"),
 )

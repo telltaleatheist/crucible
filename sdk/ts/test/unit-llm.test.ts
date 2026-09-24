@@ -320,9 +320,9 @@ const INFO = {
       // still uses.
       models: [
         {
-          id: 'faster-whisper-base',
+          id: 'whisper-tiny',
           revision: 'ebe41f70d5b6a1f3c2e9d8a7b6c5d4e3f2a1b0c9',
-          source: 'Systran/faster-whisper-base',
+          source: 'Systran/faster-whisper-tiny',
           installed: true,
           resident: false,
           vram_bytes: 1685651456,
@@ -369,9 +369,9 @@ test("info() reads the llm capability's rows with the /models reader", async () 
   assert.ok(asr !== undefined && !isLlmCapability(asr));
   assert.deepEqual(asr.models, [
     {
-      id: 'faster-whisper-base',
+      id: 'whisper-tiny',
       revision: 'ebe41f70d5b6a1f3c2e9d8a7b6c5d4e3f2a1b0c9',
-      source: 'Systran/faster-whisper-base',
+      source: 'Systran/faster-whisper-tiny',
       installed: true,
       resident: false,
       vramBytes: 1685651456,

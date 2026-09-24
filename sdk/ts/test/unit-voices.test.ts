@@ -789,7 +789,7 @@ test('a 5xx that is not the probe refusal stays a plain server error', async () 
 test('asr() posts the job the contract describes, with the params spelled the server way', async () => {
   answers(200, { job_id: 'job-asr-1' });
   const jobId = await client().asr({
-    model: 'faster-whisper-base',
+    model: 'whisper-tiny',
     audio: { blobId: 'b7c6d5e4f3a2b1c0' },
     filename: 'audiobook.m4b',
     language: 'en',
@@ -802,7 +802,7 @@ test('asr() posts the job the contract describes, with the params spelled the se
   assert.equal(lastPath, '/v1/jobs');
   assert.deepEqual(JSON.parse(lastBody), {
     type: 'asr',
-    model: 'faster-whisper-base',
+    model: 'whisper-tiny',
     params: { language: 'en', vad_filter: true, word_timestamps: true },
     // Keyed by the caller's filename: the input's name becomes the file's name
     // on disk and ffmpeg reads the container off the extension.
@@ -813,7 +813,7 @@ test('asr() posts the job the contract describes, with the params spelled the se
 test('asr() carries inline bytes as base64 under the caller\'s filename', async () => {
   answers(200, { job_id: 'job-asr-2' });
   await client().asr({
-    model: 'faster-whisper-tiny',
+    model: 'whisper-tiny',
     audio: { inline: new Uint8Array([0x52, 0x49, 0x46, 0x46]) },
     filename: 'clip.wav',
     language: 'auto',
@@ -835,7 +835,7 @@ test('asr() carries inline bytes as base64 under the caller\'s filename', async 
 
 test('asr() sends initial_prompt only when the caller states it', async () => {
   const base = {
-    model: 'faster-whisper-large-v3-turbo',
+    model: 'whisper-large-v3-turbo',
     audio: { blobId: 'b7c6d5e4f3a2b1c0' },
     filename: 'episode.m4a',
     language: 'en',
@@ -872,7 +872,7 @@ test('asr() refuses an initialPrompt that is not a non-blank string, by name', a
   for (const bad of [5, ['Kaladin'], '', '   ']) {
     await assert.rejects(
       client().asr({
-        model: 'faster-whisper-base',
+        model: 'whisper-tiny',
         audio: { blobId: 'b7c6d5e4f3a2b1c0' },
         filename: 'audiobook.m4b',
         language: 'en',
@@ -890,9 +890,44 @@ test('asr() refuses an initialPrompt that is not a non-blank string, by name', a
   }
 });
 
+test('asr() sends a stated context under the server name, and only then', async () => {
+  const base = {
+    model: 'qwen3-asr-1.7b',
+    audio: { blobId: 'b7c6d5e4f3a2b1c0' },
+    filename: 'stream.m4a',
+    language: 'en',
+    vadFilter: false,
+    wordTimestamps: true,
+  };
+  answers(200, { job_id: 'job-asr-q1' });
+  await client().asr(base);
+  assert.equal(
+    'context' in (JSON.parse(lastBody) as { params: Record<string, unknown> }).params,
+    false,
+  );
+  answers(200, { job_id: 'job-asr-q2' });
+  await client().asr({ ...base, context: 'Verbatim transcript. um, uh.' });
+  assert.deepEqual((JSON.parse(lastBody) as { params: unknown }).params, {
+    language: 'en',
+    vad_filter: false,
+    word_timestamps: true,
+    context: 'Verbatim transcript. um, uh.',
+  });
+  for (const bad of [5, '', '   ']) {
+    await assert.rejects(
+      client().asr({ ...base, context: bad as never }),
+      (error: unknown) => {
+        assert.ok(error instanceof CrucibleConfigError, `got ${String(error)}`);
+        assert.equal(error.option, 'context');
+        return true;
+      },
+    );
+  }
+});
+
 test('every asr option is required and is refused by name', async () => {
   const complete = {
-    model: 'faster-whisper-base',
+    model: 'whisper-tiny',
     audio: { blobId: 'b7c6d5e4f3a2b1c0' },
     filename: 'audiobook.m4b',
     language: 'en',
@@ -927,7 +962,7 @@ test('asr() does not coerce a switch that is not a boolean', async () => {
   // did.
   await assert.rejects(
     client().asr({
-      model: 'faster-whisper-base',
+      model: 'whisper-tiny',
       audio: { blobId: 'b7c6d5e4f3a2b1c0' },
       filename: 'audiobook.m4b',
       language: 'en',
@@ -955,7 +990,7 @@ test('asr() sends no language list of its own; the server is the authority', asy
   });
   await assert.rejects(
     client().asr({
-      model: 'faster-whisper-base',
+      model: 'whisper-tiny',
       audio: { blobId: 'b7c6d5e4f3a2b1c0' },
       filename: 'audiobook.m4b',
       language: 'kw',
