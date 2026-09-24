@@ -247,8 +247,8 @@ engine's top-K is `502 label_not_in_probs`, exactly as before. With `"report"` t
 over the levels returned, at their own 1-based indices) and `label_mass` all run over the
 letters the engine actually returned; `choice`/`level` is the argmax over those. In report
 mode `missing_labels` is on EVERY answer, `[]` when nothing was missing; **in refuse mode
-the key is absent**, not empty (the SDK demands it when it asked for `report` and refuses
-it as a protocol error otherwise). A question whose EVERY label is missing is still
+the key is absent**, not empty (the SDK demands it when it asked for `report` — the caller
+asked for it, so it is load-bearing — and refuses it as a protocol error otherwise). A question whose EVERY label is missing is still
 `502 label_not_in_probs` in both modes — there is no answer to report
 (`details.letter` is then `null`). The prime is unchanged, and no engine body carries the
 mode: it is Crucible's reading, never the engine's.
@@ -427,8 +427,14 @@ what `pages` and `analysis` load.
 ### 2.8 Client surfaces
 
 - **SDK** (`sdk/ts/src/client.ts`): `decide(request, {act?}) → DecideResponse`, typed
-  request and answer unions, `label_mass` and `cached_tokens: number | null` demanded, the
-  same `CrucibleRefused` codes. Lockstep: the SDK demands every field it knows.
+  request and answer unions, the same `CrucibleRefused` codes. The ANSWER is demanded — an
+  answer per question of the type asked, its `choice`/`level`/`score`/`p`, its
+  `probabilities` and `label_mass`. Everything that describes it — `confidence`,
+  `logprobs`/`logprob`, the timings (`cached_tokens` included), the token counts, the
+  model's pins and the engine — reads as `null` when a server does not state it. *Amended
+  2026-09-24:* this line said "Lockstep: the SDK demands every field it knows" until Owen
+  ruled that any Crucible that answers works (INTENT.md); a field present with the wrong
+  type is still refused.
 - **CLI** (`crucible/apiclient.py`): `crucible api decide --model <id> --state <text|@file>
   [--image <file>]… --choice name "instructions" opt=desc… --yesno name "…" --score name "…"
   l1,l2,… [--act <name>]`, printing the response JSON — snap's own CLI grammar, so a person
@@ -590,7 +596,8 @@ which one this card can hold.
   `DECIDE_ARGS`.
 - `tests/test_api_client.py`: `crucible api decide` against `live_server` with the fake
   engine (echo never touches the card and neither does this).
-- SDK: `sdk/ts` unit test for `decide()`'s request body and the demanded reply fields.
+- SDK: `sdk/ts` unit test for `decide()`'s request body, the demanded answer fields, and
+  the informational ones reading as `null` when absent (2026-09-24).
 
 ## 4. What does NOT change
 

@@ -55,6 +55,37 @@ proposed change against these.
   SGLang/vLLM and the Python job types, so there is an incentive to but never a
   requirement; the Windows service is then the pass-through to that guest.
 
+### Any Crucible that answers works (Owen, 2026-09-24)
+
+> *"lets modify bookforge and foundry so they dont require any particular crucible
+> server. if it can make the call to the crucible server then it should work."*
+
+Part of the Ollama standard: nobody checks which Ollama they have before they use
+it. This supersedes the lockstep ruling of 2026-09-20, under which the SDK demanded
+every field it knew and an app one release ahead of its server refused it by name —
+which, after the 1.0.24 repin, failed ten BookForge keepers over fields their fake
+servers simply did not have yet, and let one new informational voice field break
+every `info()` probe.
+
+- **Informational fields are tolerant.** A field that informs a display, or a
+  number a caller may use — an estimate, a note, a count, a timestamp, a pin, a
+  measurement — reads as `null` when a server does not state it. Version skew is
+  weather, not misconfiguration.
+- **Load-bearing fields are not.** What a call cannot be done right without — an
+  id, a job's status, the artifacts to fetch, the audio, a chat's content, an
+  answer, an error's code, anything the client branches on — is refused by name
+  when missing.
+- **A present field of the wrong type is still refused.** API v1 adds fields and
+  never retypes them, so a wrong type is a broken server, not an old one.
+- **Unknown event kinds are carried, not refused**, and one unreadable voice or
+  model row in `info()` is set aside with its reason rather than failing the probe.
+- **Misconfiguration is still refused by name**: nothing answering, something that
+  is not a Crucible, a wrong token, a different API major, a pairing version the
+  app does not speak. There is no minimum-version check beyond the API major.
+
+`sdk/ts/src/shape.ts` states the rule where the readers are; `sdk/ts/README.md`
+("Any Crucible that answers") states it for an app.
+
 ### An outlet for the whole app suite (Owen, 2026-09-23)
 
 > *"crucible is supposed to operate like ollama but with my custom options. it's an
