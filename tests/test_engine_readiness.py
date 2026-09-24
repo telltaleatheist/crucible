@@ -18,6 +18,7 @@ seam in `start()`, and it is deliberately not invented here.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -45,27 +46,40 @@ class ReadyLineEngine(SubprocessEngine):
 
     name = "fake-narrator"
 
-    #: Whether to keep the process's stdin open — see `command()`. A test that is
-    #: about the engine DYING turns it off, so that what exits is the script and
-    #: not a shell wrapper still waiting on a pipe.
+    #: Whether to keep the process's stdin open — see `stdio()`. A test that is
+    #: about the engine DYING turns it off, so that nothing is holding it up.
     hold_stdin = True
 
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> list[str]:
-        run = f"{sys.executable} {FAKE_NARRATOR} --engine higgs-v3"
-        if not self.hold_stdin:
-            # `exec`, so the shell is REPLACED and `poll()` reads the script's own
-            # exit code rather than the wrapper's.
-            return ["sh", "-c", f"exec {run}"]
-        # `sleep 60 |` holds stdin open. `start()` gives an engine
-        # `stdin=DEVNULL`, on which this script's `for line in sys.stdin` reaches
-        # EOF and the process exits cleanly the instant it is ready — and
-        # `ready()` checks `poll()` before it checks the announcement, so a
-        # process that has already exited is an exit and not a readiness. The real
-        # narrator engine holds a live pipe there and has no such problem, which
-        # is the second seam `start()` will need.
-        return ["sh", "-c", f"sleep 60 | {run}"]
+        # The script itself, with no shell in front of it. This used to be
+        # `sh -c "sleep 60 | <python> <script>"`, which on win32 handed a
+        # backslashed interpreter path to Git Bash (it arrived as
+        # `C:UserstelltApp...python.exe: command not found`) and, where it did
+        # run, left `sleep` and the script behind a shell that was the only pid
+        # a stop could see.
+        return [sys.executable, str(FAKE_NARRATOR), "--engine", "higgs-v3"]
+
+    def stdio(self, log_handle):  # type: ignore[no-untyped-def]
+        """stdin held open as a PIPE, output to the log.
+
+        `start()` gives an engine `stdin=DEVNULL`, on which this script's
+        `for line in sys.stdin` reaches EOF and the process exits cleanly the
+        instant it is ready — and `ready()` checks `poll()` before it checks
+        the announcement, so a process that has already exited is an exit and
+        not a readiness. A pipe nobody writes to holds it open, which is the
+        `stdio()` seam narrator's own engine uses for the same reason.
+        """
+        wiring = dict(super().stdio(log_handle))
+        if self.hold_stdin:
+            wiring["stdin"] = subprocess.PIPE
+        return wiring
+
+    def detach(self) -> None:
+        process = self._process
+        if process is not None and process.stdin is not None:
+            process.stdin.close()
 
     def announced_ready(self) -> str | None:
         for line in self.log_tail(200).splitlines():

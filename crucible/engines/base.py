@@ -11,10 +11,8 @@ header delimits them. See `start()` for why truncating was a defect.
 
 from __future__ import annotations
 
-import errno
 import json
 import os
-import signal
 import socket
 import subprocess
 import time
@@ -23,6 +21,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Protocol, runtime_checkable
 
+from .. import procgroup
 from ..errors import CrucibleError
 from ..logtail import tail_of_last_run
 
@@ -322,10 +321,18 @@ class SubprocessEngine:
         environment = dict(os.environ)
         environment.update(self.environment())
         try:
+            # Its own process group on every platform (`crucible/procgroup.py`):
+            # `start_new_session` on POSIX, `CREATE_NEW_PROCESS_GROUP` on win32,
+            # where `start_new_session` is silently ignored.
+            group = procgroup.own_group()
+        except procgroup.ProcessGroupError as exc:
+            self._close_log()
+            raise EngineError(str(exc)) from exc
+        try:
             self._process = subprocess.Popen(
                 command,
-                start_new_session=True,
                 env=environment,
+                **group,
                 **self.stdio(self._log_handle),
             )
         except OSError as exc:
@@ -408,31 +415,48 @@ class SubprocessEngine:
         return [entry.get("id") for entry in data if isinstance(entry, dict)]
 
     def stop(self) -> None:
-        """SIGTERM the engine's process group, then wait. Never SIGKILL."""
+        """Ask the engine's process group to stop, then wait.
+
+        POSIX: SIGTERM and never SIGKILL (a killed CUDA process in WSL2 wedges
+        the distro). win32: CTRL_BREAK_EVENT, then the tree is terminated if it
+        does not go — that reason does not exist for a native Windows process.
+        Both halves live in `crucible/procgroup.py`; until 2026-09-23 this
+        called `os.killpg` directly, which raised `AttributeError` on win32 and
+        left every engine it was asked to stop running.
+        """
         process = self._process
         if process is None:
             return
         if process.poll() is None:
             try:
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            except OSError as exc:
-                if exc.errno != errno.ESRCH:
-                    raise EngineError(
-                        f"could not signal {self.name} (pid {process.pid}): {exc}"
-                    ) from exc
+                delivered = procgroup.ask_to_stop(process)
+                if not delivered and procgroup.platform_kind() == procgroup.WIN32:
+                    # No console to route the break through: the polite door
+                    # does not exist, so waiting on it would only be a delay.
+                    procgroup.terminate_tree(process, self.name)
+            except procgroup.ProcessGroupError as exc:
+                raise EngineError(
+                    f"could not stop {self.name} (pid {process.pid}): {exc}"
+                ) from exc
             try:
                 process.wait(timeout=STOP_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
-                self.detach()
-                self._close_log()
-                raise EngineError(
-                    f"{self.name} (pid {process.pid}) did not exit within "
-                    f"{STOP_TIMEOUT_SECONDS:.0f}s of SIGTERM. Crucible does not "
-                    "SIGKILL a process holding CUDA — that wedges WSL2 until "
-                    f"Windows reboots. Kill it by hand if you must: {self._log_path}"
-                ) from None
+                if procgroup.platform_kind() == procgroup.WIN32:
+                    try:
+                        procgroup.terminate_tree(process, self.name)
+                    except procgroup.ProcessGroupError as exc:
+                        self.detach()
+                        self._close_log()
+                        raise EngineError(str(exc)) from exc
+                else:
+                    self.detach()
+                    self._close_log()
+                    raise EngineError(
+                        f"{self.name} (pid {process.pid}) did not exit within "
+                        f"{STOP_TIMEOUT_SECONDS:.0f}s of SIGTERM. Crucible does not "
+                        "SIGKILL a process holding CUDA — that wedges WSL2 until "
+                        f"Windows reboots. Kill it by hand if you must: {self._log_path}"
+                    ) from None
         self.detach()
         self._close_log()
         self._process = None

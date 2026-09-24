@@ -198,9 +198,13 @@ class PatchError(RuntimeError):
     """A patch could not be applied, or was not there after applying it."""
 
 
-def script_path(patch: NarratorPatch) -> Path:
-    """The applier for this patch, or `PatchError` naming the missing file."""
-    path = SCRIPTS_DIR / patch.script
+def script_path(patch: NarratorPatch, scripts_dir: Path | None = None) -> Path:
+    """The applier for this patch, or `PatchError` naming the missing file.
+
+    `scripts_dir` is the env type's own `envs/<job type>/patches/`, passed by
+    `crucible/envpatches.py`; None is the tts directory this module owns.
+    """
+    path = (SCRIPTS_DIR if scripts_dir is None else scripts_dir) / patch.script
     if not path.is_file():
         raise PatchError(
             f"the applier for {patch.id} is not installed: {path} is not there. "
@@ -217,6 +221,8 @@ def apply(
     *,
     on_line: Any = None,
     runner: Any = None,
+    patches: tuple[NarratorPatch, ...] | None = None,
+    scripts_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Re-apply every patch this env's recipe makes applicable, then prove it.
 
@@ -238,12 +244,17 @@ def apply(
 
     `runner` is for tests: a callable taking the argv and returning an object
     with `returncode` and `stdout`. The default runs it.
+
+    `patches` and `scripts_dir` are another env type's table and appliers
+    (`crucible/envpatches.py`, which is how the `llm` env's mlx-lm patch runs
+    through this same machinery); None is the tts table this module owns.
     """
     run = runner if runner is not None else _run_script
-    for patch in NARRATOR_PATCHES:
+    table = NARRATOR_PATCHES if patches is None else patches
+    for patch in table:
         if patch.distribution not in recipe_pins:
             continue
-        argv = [str(python), str(script_path(patch)), str(env_dir)]
+        argv = [str(python), str(script_path(patch, scripts_dir)), str(env_dir)]
         result = run(argv)
         for line in (result.stdout or "").splitlines():
             if on_line is not None:
@@ -255,7 +266,7 @@ def apply(
                 + (result.stdout or "").strip()
             )
 
-    rows = check(env_dir, recipe_pins)
+    rows = check(env_dir, recipe_pins, patches=table)
     unsound = [row for row in rows if row["status"] not in SOUND_STATUSES]
     if unsound:
         raise PatchError(
@@ -295,7 +306,12 @@ def site_packages(env_dir: Path) -> Path | None:
     return None
 
 
-def check(env_dir: Path, recipe_pins: dict[str, str]) -> list[dict[str, Any]]:
+def check(
+    env_dir: Path,
+    recipe_pins: dict[str, str],
+    *,
+    patches: tuple[NarratorPatch, ...] | None = None,
+) -> list[dict[str, Any]]:
     """One row per patch: what it is, whether it is in, and what breaks if not.
 
     `recipe_pins` is `jobenv.recipe_pins(jobenv.recipe_for(spec))` for the env
@@ -307,7 +323,7 @@ def check(env_dir: Path, recipe_pins: dict[str, str]) -> list[dict[str, Any]]:
     """
     packages = site_packages(env_dir)
     rows: list[dict[str, Any]] = []
-    for patch in NARRATOR_PATCHES:
+    for patch in NARRATOR_PATCHES if patches is None else patches:
         if patch.distribution not in recipe_pins:
             rows.append(
                 _row(

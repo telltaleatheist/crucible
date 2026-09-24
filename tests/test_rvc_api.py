@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
-import signal
 import sys
 import time
 from pathlib import Path
@@ -24,12 +22,12 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, rvcbase, workerenv
+from crucible import accelerator, procgroup, rvcbase, workerenv
 from crucible.accelerator import GIB, ComputeApp
 from crucible.jobs import rvc as rvc_job
 from crucible.rvcmodels import load_rvc_manifest
 
-from .conftest import FAKE_BACKEND, parse_sse
+from .conftest import FAKE_BACKEND, end_process_tree, parse_sse
 
 MODEL = "deathstalker-rvc-v1"
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_rvc_worker.py"
@@ -611,15 +609,20 @@ def test_a_cancel_stops_the_worker_and_does_not_sigkill_it(
 
     with ready.stream("GET", f"/v1/jobs/{job_id}/events", headers=auth) as stream:
         events = parse_sse(line for line in stream.iter_lines())
-    assert terminal(events)["event"] in ("cancelled", "failed")
-    if terminal(events)["event"] == "failed":
-        assert "does not SIGKILL" in terminal(events)["data"]["error"]["message"]
+    if procgroup.platform_kind() == procgroup.WIN32:
+        # win32 has no WSL2 wedge to protect: the worker deaf to CTRL_BREAK has
+        # its tree terminated, so the cancel is simply a cancel
+        # (`crucible/procgroup.py`).
+        assert terminal(events)["event"] == "cancelled", terminal(events)
+    else:
+        assert terminal(events)["event"] in ("cancelled", "failed")
+        if terminal(events)["event"] == "failed":
+            assert "does not SIGKILL" in terminal(events)["data"]["error"]["message"]
 
-    for pid in pids:
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+    # A SNAPSHOT: every `taskkill` below is itself a Popen, and the recorder
+    # this test installed would otherwise append it to the list being walked.
+    for pid in list(pids):
+        end_process_tree(pid)
 
 
 # ------------------------------------------------------------------- doctor

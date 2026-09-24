@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-from . import interpreter, narratorpatches
+from . import envpatches, interpreter, narratorpatches
 from .errors import CrucibleError
 
 RECIPES_DIR_ENV = "CRUCIBLE_RECIPES_DIR"
@@ -1111,24 +1111,26 @@ def install_env(
         # installs narrator alone with `--no-deps`, so the stack these patch is
         # exactly as it was and re-applying them would be work for nothing.
         #
-        # ONLY FOR `tts`. Both patches edit the vLLM stack, and the `llm` env
-        # pins `vllm` too — patching an LLM server's input processor to admit
-        # token -100 is not a thing anyone asked for. `narratorpatches` then
-        # selects again by the recipe's own pins, so `mlx-darwin`'s tts env (no
-        # vllm, no vllm-omni) runs neither and is not called broken for it.
+        # EACH ENV TYPE ITS OWN TABLE (`crucible/envpatches.py`). The tts
+        # patches edit the vLLM stack, and the `llm` env pins `vllm` too —
+        # patching an LLM server's input processor to admit token -100 is not a
+        # thing anyone asked for — so they stay tts's. The `llm` table holds
+        # mlx-lm's `top_logprobs` 11 -> 40 (PHASE22-DECIDE.md section 2.6).
+        # Each table then selects again by the recipe's own pins, so
+        # `mlx-darwin`'s tts env (no vllm, no vllm-omni) runs neither tts patch
+        # and `cuda-linux`'s llm env (no mlx-lm) does not run the llm one.
         #
         # BEFORE THE STAMP, and it raises: an env that is stamped installed is
         # an env whose patches are in, or there is no stamp.
-        if spec.job_type == "tts":
-            try:
-                narratorpatches.apply(
-                    directory, python, recipe_pins(recipe), on_line=on_line
-                )
-            except narratorpatches.PatchError as exc:
-                # Re-raised as this module's error so the CLI refuses by name
-                # rather than showing a traceback. No stamp has been written, so
-                # the env this leaves behind is one nothing downstream trusts.
-                raise EnvError(str(exc)) from exc
+        try:
+            envpatches.apply(
+                spec.job_type, directory, python, recipe_pins(recipe), on_line=on_line
+            )
+        except narratorpatches.PatchError as exc:
+            # Re-raised as this module's error so the CLI refuses by name
+            # rather than showing a traceback. No stamp has been written, so
+            # the env this leaves behind is one nothing downstream trusts.
+            raise EnvError(str(exc)) from exc
 
         # AND THE TWO SYMLINKS pip CANNOT EXPRESS EITHER — cuda-linux only.
         #

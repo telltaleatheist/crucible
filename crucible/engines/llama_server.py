@@ -53,10 +53,10 @@ DLL, and a GGUF the loader will not read.
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
+from .. import procgroup
 from .base import SubprocessEngine, EngineError
 
 #: The engine's name, as a manifest's `[backends.llama-windows] engine` spells
@@ -229,17 +229,12 @@ class LlamaServerEngine(SubprocessEngine):
             str(port),
         ]
 
-    def stdio(self, log_handle: Any) -> dict[str, Any]:
-        """Both streams to the log, and — on win32 — its OWN process group.
-
-        `CREATE_NEW_PROCESS_GROUP` is what makes `CTRL_BREAK_EVENT` reach the
-        child and only the child. Without it a break would go to this server's
-        whole group, which includes this server.
-        """
-        wiring = dict(super().stdio(log_handle))
-        if sys.platform == "win32":
-            wiring["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        return wiring
+    # ITS OWN PROCESS GROUP is no longer set here. `CREATE_NEW_PROCESS_GROUP`
+    # is what makes `CTRL_BREAK_EVENT` reach the child and only the child, and
+    # every engine and worker needs exactly that on win32 — so since 2026-09-23
+    # `SubprocessEngine.start()` asks `crucible/procgroup.py` for it, for all of
+    # them. This class was the one place that had it right; the others called
+    # `os.killpg` on win32 and raised.
 
     def readiness_description(self) -> str:
         return f"answer {self.base_url}/v1/models with {self._served_name!r}"
@@ -305,17 +300,13 @@ class LlamaServerEngine(SubprocessEngine):
 
     def _ask_it_to_stop(self, process: "subprocess.Popen[bytes]") -> None:
         """The polite half, in the platform's own vocabulary."""
-        import os
-        import signal
-
+        # `crucible/procgroup.py` owns the vocabulary for every engine now; this
+        # method's win32 half is where it came from.
         try:
-            if sys.platform == "win32":
-                process.send_signal(signal.CTRL_BREAK_EVENT)
-            else:
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            # It is already gone, or the group is. `wait` below is what
-            # decides; a signal that did not land is not itself news.
+            procgroup.ask_to_stop(process)
+        except procgroup.ProcessGroupError:
+            # The group is in a state no signal reaches. `wait` below is what
+            # decides, and the kill after it is this engine's own second step.
             pass
 
     def confirm(

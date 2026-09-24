@@ -67,11 +67,9 @@ Two things, and neither of them is a change to the envelope:
 
 from __future__ import annotations
 
-import errno
 import json
 import os
 import queue
-import signal
 import subprocess
 import threading
 import time
@@ -79,6 +77,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from . import procgroup
 from .errors import CrucibleError, JobCancelled
 from .logtail import tail_of_last_run
 
@@ -243,14 +242,17 @@ def _spawn(
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=log_handle,
-            # Its own session, so a SIGTERM reaches anything the worker forked —
+            # Its own group, so a stop reaches anything the worker forked —
             # ffmpeg in the `asr` case, a urvc batch in `rvc`'s — and not only
-            # the worker itself.
-            start_new_session=True,
+            # the worker itself. `start_new_session` on POSIX and
+            # `CREATE_NEW_PROCESS_GROUP` on win32 (`crucible/procgroup.py`).
+            **procgroup.own_group(),
             env=merged,
             text=True,
             bufsize=1,
         )
+    except procgroup.ProcessGroupError as exc:
+        raise WorkerError(str(exc)) from exc
     except OSError as exc:
         raise WorkerError(f"could not spawn {python} {script}: {exc}") from exc
 
@@ -727,22 +729,42 @@ class WorkerSession:
 
 
 def _terminate(process: subprocess.Popen[str], script: Path, log_path: Path) -> None:
-    """SIGTERM the worker's process group and wait. Never SIGKILL."""
+    """Stop the worker's process group and wait.
+
+    POSIX: SIGTERM, wait, and never SIGKILL — a worker may hold CUDA inside
+    WSL2, where a kill wedges the distro. win32: CTRL_BREAK_EVENT, wait, and
+    then terminate the tree (`crucible/procgroup.py` says why that reason does
+    not exist for a native Windows process). Until 2026-09-23 this called
+    `os.killpg` on every platform, so on win32 a cancel raised `AttributeError`
+    and the worker it was cancelling went on running.
+    """
     if process.poll() is not None:
         return
+    win32 = procgroup.platform_kind() == procgroup.WIN32
     try:
-        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except OSError as exc:
-        if exc.errno != errno.ESRCH:
-            raise WorkerError(
-                f"could not signal {script.name} (pid {process.pid}): {exc}"
-            ) from exc
-        return
+        delivered = procgroup.ask_to_stop(process)
+        if not delivered:
+            if not win32:
+                # POSIX: the process or its group is already gone.
+                return
+            # win32 with no console to route the break through: the polite
+            # door does not exist, so the tree is ended now rather than after
+            # a clock nothing was going to stop.
+            procgroup.terminate_tree(process, script.name)
+            return
+    except procgroup.ProcessGroupError as exc:
+        raise WorkerError(
+            f"could not stop {script.name} (pid {process.pid}): {exc}"
+        ) from exc
     try:
         process.wait(timeout=STOP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
+        if win32:
+            try:
+                procgroup.terminate_tree(process, script.name)
+            except procgroup.ProcessGroupError as exc:
+                raise WorkerError(f"{exc}. Its log is {log_path}") from exc
+            return
         raise WorkerError(
             f"{script.name} (pid {process.pid}) did not exit within "
             f"{STOP_TIMEOUT_SECONDS:.0f}s of SIGTERM. Crucible does not SIGKILL a "

@@ -350,6 +350,7 @@ __all__ = [
     "FAKE_BACKEND",
     "FAKE_MAC_BACKEND",
     "TOKEN",
+    "end_process_tree",
     "holding_the_card",
     "parse_sse",
     "mint_token",
@@ -386,3 +387,100 @@ def _state_the_systemd_scope(
     # that had never been touched began to fail. Same defect the docstring
     # above describes; it was only half fixed.
     monkeypatch.setattr(service, "SYSTEM_UNIT_DIR", tmp_path / "etc-systemd-system")
+
+
+# ------------------------------------------------- no child outlives its test
+#
+# MEASURED 2026-09-23 on owens-pc: after Windows runs of this suite, 114
+# `mlx_vlm_serve.py` servers and a trail of `fake_align_worker.py`,
+# `fake_asr_worker.py` and `fake_narrator.py` processes were still alive, some
+# since 2026-09-20. The OWNER was production code — every stop path called
+# `os.killpg`, which does not exist on win32, so a stop raised and nothing was
+# signalled (fixed in `crucible/procgroup.py`). What made it invisible for three
+# days was the other half: nothing in the suite noticed a child that outlived
+# the test that started it. This is that noticing.
+#
+# Every `subprocess.Popen` made during a test — by the test, a fixture, or the
+# code under test — is recorded. At teardown (this fixture is set up first, so it
+# is torn down LAST, after every client's lifespan has stopped what it owns) a
+# child that is still running after a short grace is ended — tree and all — and
+# the test FAILS naming it. Reaping without failing would be the band-aid: the
+# leak would stop costing processes and go on existing.
+
+#: How long a child is given to finish exiting after its test. Covers a stop
+#: that a background job thread is still waiting out; it is not a clock on
+#: anything a test asserts.
+_CHILD_GRACE_SECONDS = 5.0
+
+
+def end_process_tree(pid: int) -> None:
+    """End `pid` and everything it started, whatever the platform. For tests.
+
+    win32: `taskkill /T /F`. POSIX: SIGKILL to its group when it LEADS one —
+    and only then, because a child left in pytest's own group would take
+    pytest with it — otherwise to the pid alone. Tests may SIGKILL; Crucible
+    never does (`crucible/procgroup.py`).
+    """
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=30,
+        )
+        return
+    try:
+        if os.getpgid(pid) == pid:
+            os.killpg(pid, signal.SIGKILL)
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _no_child_outlives_its_test(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    import subprocess
+    import time
+
+    spawned: list[subprocess.Popen[Any]] = []
+    real = subprocess.Popen
+
+    class _Recorded(real):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            spawned.append(self)
+
+    monkeypatch.setattr(subprocess, "Popen", _Recorded)
+    yield
+    # Restore before reaping, so the reaper's own `taskkill` is not recorded.
+    monkeypatch.setattr(subprocess, "Popen", real)
+
+    deadline = time.monotonic() + _CHILD_GRACE_SECONDS
+    survivors: list[subprocess.Popen[Any]] = []
+    for process in spawned:
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            survivors.append(process)
+    if not survivors:
+        return
+    named = []
+    for process in survivors:
+        end_process_tree(process.pid)
+        argv = process.args if isinstance(process.args, (list, tuple)) else [process.args]
+        named.append(f"pid {process.pid}: {' '.join(str(part) for part in argv)[:300]}")
+    pytest.fail(
+        f"{len(survivors)} child process(es) outlived this test and were ended by "
+        "the reaper. Whatever started them owns stopping them:\n  "
+        + "\n  ".join(named),
+        pytrace=False,
+    )

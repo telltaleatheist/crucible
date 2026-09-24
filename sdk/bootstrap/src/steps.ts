@@ -413,6 +413,7 @@ export function uninstallSh(): string {
  *     server           the pinned interpreter (once) + this release's wheel, into <CRUCIBLE_HOME>/server
  *     init             <server>/bin/crucible init --token …   (skipped when a config exists)
  *     install-<type>   <server>/bin/crucible install <type>   (none in the standalone installer)
+ *     env-patch-llm    <server>/bin/crucible env patch llm
  *     service-install  <server>/bin/crucible service install
  *     linger           systemd hosts
  *     capability-write <server>/bin/crucible capability --write
@@ -469,6 +470,22 @@ export function installSteps(plan: StepPlan): StepDef[] {
       timeout: 'envMs',
     });
   }
+  // THE llm ENV's SITE-PACKAGES PATCHES, BEFORE THE SERVICE STARTS (PHASE22
+  // section 2.6.1). An upgrade installs a new wheel and never rebuilds an env
+  // whose recipe did not move, so `install_env`'s own patch step does not run
+  // for it; this is that step without the pip. It runs while the server is
+  // down (the `server` step shut it), so no engine starts on an unpatched env.
+  // Exit 0 with no env installed, and on backends whose llm engine carries no
+  // patch (vLLM, llama.cpp): the command reports `not_applicable` and moves on.
+  const patchWords: Word[] = [crucible, 'env', 'patch', 'llm'];
+  steps.push({
+    name: 'env-patch-llm',
+    what: "apply the llm environment's site-packages patches before the service starts",
+    words: patchWords,
+    sh: `${renderSh(patchWords)} || die "step_failed: env-patch-llm"\n`,
+    skip: null,
+    timeout: 'quickMs',
+  });
   const serviceWords: Word[] = [crucible, 'service', 'install'];
   steps.push({
     name: 'service-install',

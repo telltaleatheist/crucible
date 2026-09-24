@@ -95,6 +95,14 @@ Two things the contract did not say and that the first build had to decide:
 Stopping a worker is SIGTERM, a wait, and a named refusal if it will not go. Crucible does
 not SIGKILL a process that may hold CUDA; that wedges WSL2 until Windows reboots.
 
+**On win32 (a Windows host running a job natively), since 2026-09-23:** the polite signal
+is `CTRL_BREAK_EVENT` to the worker's own process group (`CREATE_NEW_PROCESS_GROUP` at
+spawn), the same wait, and then the tree is terminated (`taskkill /T /F`) — the WSL2 reason
+does not exist for a native Windows process, which is the deviation `llama_server.py` already
+made. All three halves live in `crucible/procgroup.py`, which refuses an unknown platform by
+name. Until then every stop path called `os.killpg`, which win32 does not have: a cancelled
+`align` job on Windows failed with `AttributeError` and left its worker running.
+
 ### 0.2 The worker that outlives a job, as built
 
 `workers.py`'s docstring promised the split to make was `start`/`send`/`stop` with

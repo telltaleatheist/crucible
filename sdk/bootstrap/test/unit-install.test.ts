@@ -172,6 +172,7 @@ test('linux: the whole PHASE14 sequence, each step by name, the token redacted e
     },
     { argv: N(CRUCIBLE_BIN, 'install', 'llm', '--verbose'), lines: [['  Collecting vllm==0.29.0', 'stdout'], ['installed in 400s', 'stdout']] },
     { argv: N(CRUCIBLE_BIN, 'install', 'tts', '--narrator-engine', 'higgs-v3', '--verbose'), lines: [['installed in 300s', 'stdout']] },
+    { argv: N(CRUCIBLE_BIN, 'env', 'patch', 'llm') },
     { argv: N(CRUCIBLE_BIN, 'service', 'install'), lines: [['enabled and started crucible.service', 'stdout']] },
     { argv: N(CRUCIBLE_BIN, 'local', 'register') },
     { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
@@ -195,7 +196,7 @@ test('linux: the whole PHASE14 sequence, each step by name, the token redacted e
   runner.assertDrained();
 
   assert.deepEqual(result.steps.map((s) => `${s.name}:${s.status}`), [
-    'host-facts:ok', 'server:ok', 'init:ok', 'install-llm:ok', 'install-tts:ok', 'service-install:ok', 'local-register:ok', 'local-install-cli:ok', 'local-install-desktop:ok', 'capability-write:ok', 'local-start:ok',
+    'host-facts:ok', 'server:ok', 'init:ok', 'install-llm:ok', 'install-tts:ok', 'env-patch-llm:ok', 'service-install:ok', 'local-register:ok', 'local-install-cli:ok', 'local-install-desktop:ok', 'capability-write:ok', 'local-start:ok',
   ]);
   assert.deepEqual(result.server, { name: 'crucible@owens-pc-wsl', url: 'http://127.0.0.1:7100', configPath: CONFIG_PATH });
   assert.equal(result.release, '0.6.0');
@@ -227,6 +228,7 @@ test('the download happens with the machine\'s own tools: curl, sha256sum, tar, 
   const runner = linuxRunner([
     { argv: PROBE(), stdout: GUEST_BARE },
     ...SERVER,
+    { argv: N(CRUCIBLE_BIN, 'env', 'patch', 'llm') },
     { argv: N(CRUCIBLE_BIN, 'service', 'install') },
     { argv: N(CRUCIBLE_BIN, 'local', 'register') },
     { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
@@ -254,6 +256,7 @@ test('an interpreter whose digest is already stamped is not re-fetched; the whee
   const runner = linuxRunner([
     { argv: PROBE(), stdout: GUEST_INSTALLED },
     ...WHEEL_FETCH,
+    { argv: N(CRUCIBLE_BIN, 'env', 'patch', 'llm') },
     { argv: N(CRUCIBLE_BIN, 'service', 'install') },
     { argv: N(CRUCIBLE_BIN, 'local', 'register') },
     { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
@@ -301,6 +304,7 @@ test('init is skipped when a config already exists, and its token is kept', asyn
     { argv: PROBE(), stdout: GUEST_INSTALLED },
     ...WHEEL_FETCH,
     { argv: N(CRUCIBLE_BIN, 'install', 'asr', '--verbose') },
+    { argv: N(CRUCIBLE_BIN, 'env', 'patch', 'llm') },
     { argv: N(CRUCIBLE_BIN, 'service', 'install') },
     { argv: N(CRUCIBLE_BIN, 'local', 'register') },
     { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
@@ -341,6 +345,7 @@ for (const detail of ['local_start_failed: engine did not answer', 'unauthorized
   test(`install refuses readiness failure after service installation: ${detail}`, async () => {
     const runner = linuxRunner([
       { argv: PROBE(), stdout: GUEST_INSTALLED }, ...WHEEL_FETCH,
+      { argv: N(CRUCIBLE_BIN, 'env', 'patch', 'llm') },
       { argv: N(CRUCIBLE_BIN, 'service', 'install') },
       { argv: N(CRUCIBLE_BIN, 'local', 'register') },
       { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
@@ -360,6 +365,7 @@ for (const detail of ['local_start_failed: engine did not answer', 'unauthorized
 test('install does not return while local authenticated readiness is pending', async () => {
   const runner = linuxRunner([
     { argv: PROBE(), stdout: GUEST_INSTALLED }, ...WHEEL_FETCH,
+    { argv: N(CRUCIBLE_BIN, 'env', 'patch', 'llm') },
     { argv: N(CRUCIBLE_BIN, 'service', 'install') },
     { argv: N(CRUCIBLE_BIN, 'local', 'register') },
     { argv: N(CRUCIBLE_BIN, 'local', 'install-cli') },
@@ -426,6 +432,7 @@ test('{home} travels as CRUCIBLE_HOME into every crucible verb, and {bind} into 
     { argv: PROBE('/srv/crucible'), stdout: `home=/srv/crucible\nuser=owen\nfree_kib=400000000\ncrucible=${CRUCIBLE}\nversion=crucible 0.6.0\npython_sha256=${PY_SHA}\nrelease=0.6.0\n` },
     ...wheelFetch('/srv/crucible'),
     { argv: (argv) => argv.slice(0, 2).join(' ') === `${CRUCIBLE} init` && argv[2] === '--token' && argv.slice(4).join(' ') === '--host 0.0.0.0 --port 7200 --enable-echo', env: ENV },
+    { argv: N(CRUCIBLE, 'env', 'patch', 'llm'), env: ENV },
     { argv: N(CRUCIBLE, 'service', 'install'), env: ENV },
     { argv: N(CRUCIBLE, 'local', 'register'), env: ENV },
     { argv: N(CRUCIBLE, 'local', 'install-cli'), env: ENV },
@@ -461,6 +468,7 @@ test('darwin: the same steps run natively, shasum instead of sha256sum, no linge
     ...wheelFetch('/Users/owen/.crucible', ['shasum', '-a', '256']),
     { argv: (argv) => argv[1] === 'init' },
     { argv: ['/Users/owen/.crucible/server/bin/crucible', 'install', 'llm', '--verbose'] },
+    { argv: ['/Users/owen/.crucible/server/bin/crucible', 'env', 'patch', 'llm'] },
     { argv: ['/Users/owen/.crucible/server/bin/crucible', 'service', 'install'] },
     { argv: ['/Users/owen/.crucible/server/bin/crucible', 'local', 'register'] },
     { argv: ['/Users/owen/.crucible/server/bin/crucible', 'local', 'install-cli'] },

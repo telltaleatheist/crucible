@@ -12,8 +12,6 @@ that will run on the PC.
 from __future__ import annotations
 
 import json
-import os
-import signal
 import sys
 import time
 from pathlib import Path
@@ -21,6 +19,7 @@ from typing import Iterator
 
 import pytest
 
+from crucible import procgroup
 from crucible.engines import (
     NARRATOR_ENGINES,
     EngineError,
@@ -60,6 +59,7 @@ from crucible.narratorvoices import (
 )
 from crucible.voices import NARRATOR_ENGINE_SAMPLING, parse_voice
 
+from .conftest import end_process_tree
 from .fake_narrator_engine import FAKE_NARRATOR, FakeNarratorEngine
 from .test_voices import GOOD
 
@@ -1263,6 +1263,9 @@ def test_a_worker_that_will_not_go_is_reported_and_never_sigkilled(
                 "-c",
                 "import signal, time\n"
                 "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                # win32's polite signal is CTRL_BREAK_EVENT, arriving as SIGBREAK.
+                "if hasattr(signal, 'SIGBREAK'):\n"
+                "    signal.signal(signal.SIGBREAK, signal.SIG_IGN)\n"
                 'print(\'{"type": "ready", "device": "fake"}\', flush=True)\n'
                 "time.sleep(120)\n",
             ]
@@ -1284,6 +1287,13 @@ def test_a_worker_that_will_not_go_is_reported_and_never_sigkilled(
     built.ready(30.0)
     pid = next(iter(built.pids))
     try:
+        if procgroup.platform_kind() == procgroup.WIN32:
+            # win32 has no WSL2 wedge to protect: the deaf worker's tree is
+            # terminated after the wait and `stop()` returns
+            # (`crucible/procgroup.py`).
+            built.stop()
+            assert built.pids == frozenset()
+            return
         with pytest.raises(EngineError) as caught:
             built.stop()
         message = str(caught.value)
@@ -1293,7 +1303,7 @@ def test_a_worker_that_will_not_go_is_reported_and_never_sigkilled(
         # This test made the mess, so this test cleans it up. Nothing on this
         # process is holding CUDA, which is the only reason a SIGKILL is allowed
         # anywhere in this repository.
-        os.kill(pid, signal.SIGKILL)
+        end_process_tree(pid)
 
 
 def test_stopping_a_worker_that_ignores_sigterm_does_not_wedge_the_server(
@@ -1318,6 +1328,9 @@ def test_stopping_a_worker_that_ignores_sigterm_does_not_wedge_the_server(
                 "-c",
                 "import signal, time\n"
                 "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                # win32's polite signal is CTRL_BREAK_EVENT, arriving as SIGBREAK.
+                "if hasattr(signal, 'SIGBREAK'):\n"
+                "    signal.signal(signal.SIGBREAK, signal.SIG_IGN)\n"
                 'print(\'{"type": "ready", "device": "fake"}\', flush=True)\n'
                 "time.sleep(120)\n",
             ]
@@ -1340,12 +1353,18 @@ def test_stopping_a_worker_that_ignores_sigterm_does_not_wedge_the_server(
     pid = next(iter(built.pids))
     started = time.monotonic()
     try:
-        with pytest.raises(EngineError):
+        if procgroup.platform_kind() == procgroup.WIN32:
+            # The tree is terminated on win32. What is asserted is the same:
+            # the stop RETURNS, promptly, rather than wedging on the reader.
             built.stop()
-        # quit grace (1s) + SIGTERM wait (1s) + the reader join, and nothing else.
-        assert time.monotonic() - started < 10.0
+        else:
+            with pytest.raises(EngineError):
+                built.stop()
+        # quit grace (1s) + SIGTERM wait (1s) + the reader join, and nothing
+        # else (plus, on win32, the tree-kill's own bounded wait).
+        assert time.monotonic() - started < 10.0 + procgroup.KILL_WAIT_SECONDS
     finally:
-        os.kill(pid, signal.SIGKILL)
+        end_process_tree(pid)
 
 
 def test_the_reader_thread_is_gone_once_the_engine_is_stopped(

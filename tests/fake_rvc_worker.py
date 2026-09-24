@@ -93,6 +93,10 @@ def main() -> int:
 
     if os.environ.get("CRUCIBLE_FAKE_RVC_IGNORE_SIGTERM") == "1":
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        # win32's polite signal is CTRL_BREAK_EVENT, which arrives as SIGBREAK
+        # (`crucible/procgroup.py`); ignoring the POLITE signal means that one.
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, signal.SIG_IGN)
 
     line = sys.stdin.readline()
     transcript = os.environ.get("CRUCIBLE_FAKE_RVC_TRANSCRIPT")

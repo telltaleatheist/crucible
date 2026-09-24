@@ -41,7 +41,7 @@ function installHalf(sh: string): string {
 test('install.sh walks the same step list, in the same order, with the same names', () => {
   const sh = installHalf(generateInstallSh());
   const names = installSteps(STANDALONE).map((step) => step.name);
-  assert.deepEqual(names, ['host-facts', 'server', 'init', 'service-install', 'local-register', 'local-install-cli', 'local-install-desktop', 'linger', 'capability-write', 'local-start']);
+  assert.deepEqual(names, ['host-facts', 'server', 'init', 'env-patch-llm', 'service-install', 'local-register', 'local-install-cli', 'local-install-desktop', 'linger', 'capability-write', 'local-start']);
   let at = -1;
   for (const name of names) {
     const found = sh.indexOf(`say "${name}"`);

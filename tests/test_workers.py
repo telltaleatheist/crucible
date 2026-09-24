@@ -10,15 +10,15 @@ relationship that does not exist at runtime.
 from __future__ import annotations
 
 import json
-import os
-import signal
 import time
 from pathlib import Path
 
 import pytest
 
-from crucible import workers
+from crucible import procgroup, workers
 from crucible.errors import JobCancelled
+
+from .conftest import end_process_tree
 
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_asr_worker.py"
 
@@ -217,23 +217,29 @@ def test_a_worker_that_ignores_sigterm_is_reported_never_killed(
         polls["n"] += 1
         return polls["n"] > 3
 
+    environment = {
+        "CRUCIBLE_FAKE_ASR_IGNORE_SIGTERM": "1",
+        "CRUCIBLE_FAKE_ASR_SLOW_S": "30",
+    }
+    if procgroup.platform_kind() == procgroup.WIN32:
+        # win32 has no WSL2 wedge to protect, so a worker that ignores the
+        # polite signal has its tree TERMINATED (`crucible/procgroup.py`) and
+        # the cancel is a cancel.
+        with pytest.raises(JobCancelled):
+            run(tmp_path, cancelled=cancelled, environment=environment)
+        # A snapshot: `_alive` spawns `tasklist`, which the recorder above appends.
+        spawned = list(pids)
+        assert spawned and all(not _alive(pid) for pid in spawned)
+        return
     with pytest.raises(workers.WorkerError) as caught:
-        run(
-            tmp_path,
-            cancelled=cancelled,
-            environment={
-                "CRUCIBLE_FAKE_ASR_IGNORE_SIGTERM": "1",
-                "CRUCIBLE_FAKE_ASR_SLOW_S": "30",
-            },
-        )
+        run(tmp_path, cancelled=cancelled, environment=environment)
     assert "does not SIGKILL" in str(caught.value)
     # This test made the process; this test cleans it up. Nothing in Crucible
     # will, by design.
-    for pid in pids:
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+    # A SNAPSHOT: every `taskkill` below is itself a Popen, and the recorder
+    # this test installed would otherwise append it to the list being walked.
+    for pid in list(pids):
+        end_process_tree(pid)
 
 
 # ------------------------------------------------------------- it validates
@@ -249,3 +255,13 @@ def test_a_missing_worker_script_is_named(tmp_path: Path) -> None:
     with pytest.raises(workers.WorkerError) as caught:
         run(tmp_path, script=tmp_path / "no-such-worker.py")
     assert "no worker script at" in str(caught.value)
+
+
+def _alive(pid: int) -> bool:
+    """Is `pid` still running? Portable, for the win32 arm above."""
+    import subprocess
+
+    listed = subprocess.run(
+        ["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True
+    ).stdout
+    return str(pid) in listed

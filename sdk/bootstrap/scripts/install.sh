@@ -354,6 +354,11 @@ if [ -n "$JOB_TYPES" ]; then
   done
 fi
 
+# --- env-patch-llm -------------------------------------------------------
+# apply the llm environment's site-packages patches before the service starts
+say "env-patch-llm"
+"$CRUCIBLE" 'env' 'patch' 'llm' || die "step_failed: env-patch-llm"
+
 # --- service-install -----------------------------------------------------
 # write the systemd unit (or the launchd plist) and start it
 say "service-install"

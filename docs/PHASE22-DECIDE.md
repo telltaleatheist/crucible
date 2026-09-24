@@ -375,6 +375,43 @@ the DOOR needs from the engine, not about the model, so they do not belong in a 
   own (§1), `MlxLmEngine.max_logprobs = 11`, and its `chat_concurrency = 1` already bounds
   the fan-out at 2.
 
+#### 2.6.1 The Mac's cap is raised to 40 by a patch (Owen: "go ahead", 2026-09-23)
+
+**Supersedes the mlx-lm bullet above.** No flag exists, so the ceiling is edited where it
+lives: mlx-lm 0.31.3's `mlx_lm/server.py` validates `top_logprobs` with
+`self._validate("top_logprobs", int, min_val=0, max_val=11, whitelist=[-1])` (L1245 on the
+Mac Studio, read 2026-09-23), and that validator is the only ceiling — `_format_top_logprobs`
+takes any `top_n`, and both generation paths pass `args.top_logprobs` through. At 11, K =
+labels + 4 meant no question with more than 7 options could be read on the Mac; Briefcase
+needs 11 and 26. 40 covers 26 letters plus the margin, with room.
+
+- **The patch.** `crucible/envs/llm/patches/patch_mlx_lm_top_logprobs.py` replaces that one
+  line with `max_val=40` (plus a comment naming itself). Anchor = the stock line, byte-exact
+  and required exactly once; marker = the patched `_validate(... max_val=40 ...)` line;
+  absent marker = the stock line. Idempotent (`ALREADY_PATCHED` by the marker), patched from
+  the LIVE file with a `.orig` snapshot, and `ANCHOR_NOT_FOUND` (exit 2) when a newer mlx-lm
+  moved or reworded it — re-derived by a person, never skipped.
+- **One registry, per env type.** `crucible/envpatches.py` maps a job type to its patch table
+  and appliers: `tts` is `narratorpatches.NARRATOR_PATCHES` unchanged, `llm` is this patch.
+  Selection is still by the recipe's pins: it runs on `mlx-darwin` (pins `mlx-lm`), is
+  `not_applicable` on `cuda-linux` (vLLM) and on `llama-windows` (no llm recipe at all).
+- **Installed before the stamp.** `jobenv.install_env` applies each env type's table after
+  pip and before the stamp, then checks it; an env whose patch is not in has no stamp.
+- **The cap is tied to the check at ENGINE START.** `MlxLmEngine.max_logprobs = 40`, and
+  `MlxLmEngine.start()` runs the patch's own check against the env its interpreter lives in
+  and refuses `llm_env_unpatched` by name unless it is `applied`. The door's reading
+  (`engines.decide_reading`) is class-level, so the guarantee is that no mlx-lm is ever
+  RESIDENT unpatched: the door can never be told 40 by an engine that would answer 400.
+- **Doctor.** `crucible doctor` reports `llm_patches` rows (`llm patch (...)`); `missing` or
+  `stale` is a problem naming `crucible env patch llm`, `no_env` is left to the env row.
+- **Every install and upgrade applies it, before the service starts.** An upgrade never runs
+  `crucible install`, so the install step list (`sdk/bootstrap/src/steps.ts`, generated into
+  `install.sh`/`install.ps1`) carries `env-patch-llm`: the NEW wheel's `crucible env patch llm`,
+  run after the wheel is in and before `service-install`, while the server is down. It
+  applies, checks, and fails the install by name; no llm env is "nothing to patch" (exit 0),
+  and vLLM / llama.cpp hosts read `not_applicable`. A deploy runs the release's own
+  `install.sh`, so it gets the step with no deploy-side copy.
+
 ### 2.7 Images: a manifest ruling, not a door feature
 
 The door carries `images` from day one and the reader sends them as content parts. Whether a

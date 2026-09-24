@@ -13,8 +13,6 @@ goes when it is asked — without ever being SIGKILLed.
 from __future__ import annotations
 
 import json
-import os
-import signal
 import sys
 from pathlib import Path
 
@@ -22,6 +20,8 @@ import pytest
 
 from crucible import workers
 from crucible.errors import JobCancelled
+
+from .conftest import end_process_tree
 
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_align_worker.py"
 
@@ -99,12 +99,14 @@ def test_stopping_closes_stdin_first_and_the_worker_exits_zero(
 ) -> None:
     """The polite door: EOF on stdin ends the worker's own loop, so CUDA is
     released the way its own code expects. SIGTERM is only the backstop."""
+    # Watched at `procgroup.ask_to_stop`, the one place the polite signal is
+    # sent on every platform — `os.killpg` does not exist on win32.
     signalled: list[int] = []
-    real_killpg = workers.os.killpg
+    real_ask = workers.procgroup.ask_to_stop
     monkeypatch.setattr(
-        workers.os,
-        "killpg",
-        lambda pgid, sig: (signalled.append(sig), real_killpg(pgid, sig))[1],
+        workers.procgroup,
+        "ask_to_stop",
+        lambda process: (signalled.append(process.pid), real_ask(process))[1],
     )
     held = session(tmp_path)
     held.start(LOAD, ready_silence_timeout=30.0)
@@ -247,17 +249,22 @@ def test_a_worker_that_ignores_sigterm_is_reported_never_killed(
     )
     held.start(LOAD, ready_silence_timeout=30.0)
     pids = set(held.pids)
+    if workers.procgroup.platform_kind() == workers.procgroup.WIN32:
+        # win32 has no WSL2 wedge to protect: a worker deaf to both doors has
+        # its tree terminated and `stop()` returns (`crucible/procgroup.py`).
+        held.stop()
+        assert not held.alive
+        return
     with pytest.raises(workers.WorkerError) as caught:
         held.stop()
     assert "does not SIGKILL" in str(caught.value)
 
     # This test made the process; this test cleans it up. Nothing in Crucible
     # will, by design.
-    for pid in pids:
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+    # A SNAPSHOT: every `taskkill` below is itself a Popen, and the recorder
+    # this test installed would otherwise append it to the list being walked.
+    for pid in list(pids):
+        end_process_tree(pid)
 
 
 def test_a_missing_interpreter_is_named(tmp_path: Path) -> None:

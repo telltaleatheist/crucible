@@ -47,6 +47,8 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
+from .. import envpatches
+from ..narratorpatches import PatchError
 from .base import SubprocessEngine, EngineError
 
 #: `python -m mlx_lm.server` still runs in 0.31.3 but prints a deprecation
@@ -82,31 +84,69 @@ class MlxLmEngine(SubprocessEngine):
         "generation is strictly serial"
     )
 
-    #: A DECISION IS SERVED, AT MOST ELEVEN LOGPROBS WIDE. Read in mlx-lm 0.31.3's
-    #: installed `mlx_lm/server.py` in the Mac's `~/.crucible/envs/llm` on
-    #: 2026-09-23 (no model run): the chat body's `logprobs`/`top_logprobs` are
-    #: read at L1189-1190 and validated at L1245 as
-    #: `top_logprobs int, min 0, max 11, whitelist [-1]`; `_format_top_logprobs`
-    #: (L426-435) emits `{id, token, logprob}`; L1317-1321 writes
-    #: `choices[0].logprobs.content = [dict(top[0], top_logprobs=top), ...]` —
-    #: the same OpenAI path vLLM and llama-server answer on, so one reader.
+    #: A DECISION IS SERVED, AT MOST FORTY LOGPROBS WIDE — BECAUSE OF A PATCH.
     #:
-    #: Two things differ and neither moves a letter. The token strings are RAW
-    #: pieces (`tokenizer.convert_ids_to_tokens`), not decoded text, which for a
-    #: bare capital letter is the same string. And the logprobs are taken AFTER
-    #: the logits processors (`mlx_lm/generate.py` L409-420), which is why a
-    #: decision states its own sampling and takes no manifest default
+    #: Read in mlx-lm 0.31.3's installed `mlx_lm/server.py` in the Mac's
+    #: `~/.crucible/envs/llm` on 2026-09-23 (no model run): the chat body's
+    #: `logprobs`/`top_logprobs` are read at L1189-1190 and validated at L1245;
+    #: `_format_top_logprobs` (L426-435) emits `{id, token, logprob}`;
+    #: L1317-1321 writes `choices[0].logprobs.content = [dict(top[0],
+    #: top_logprobs=top), ...]` — the same OpenAI path vLLM and llama-server
+    #: answer on, so one reader.
+    #:
+    #: UNPATCHED, THE VALIDATOR SAYS 11: `top_logprobs int, min 0, max 11,
+    #: whitelist [-1]`, and 12 is a 400 — a question with more than 7 options
+    #: (K = labels + 4, PHASE22-DECIDE.md section 2.4) could not be read on the
+    #: Mac at all. `envs/llm/patches/patch_mlx_lm_top_logprobs.py` raises it to
+    #: 40 (26 letters + the margin of 4, with room); that validator is the only
+    #: ceiling (`_format_top_logprobs` takes any `top_n`). `crucible install llm`
+    #: applies it before the env's stamp, and every install/upgrade re-applies it
+    #: through the installer's `env-patch-llm` step (`crucible env patch llm`)
+    #: before the service starts.
+    #:
+    #: THE NUMBER IS TIED TO THE CHECK AT ENGINE START, not merely asserted:
+    #: `start()` below runs the patch's own check against the env this engine is
+    #: spawned from and refuses by name (`llm_env_unpatched`) unless it says
+    #: `applied`. So a resident mlx-lm is always a patched one, and the door
+    #: (`engines.decide_reading`, a class-level reading) can never be told 40 by
+    #: an engine that would answer 400.
+    #:
+    #: Two things differ from vLLM and neither moves a letter. The token strings
+    #: are RAW pieces (`tokenizer.convert_ids_to_tokens`), not decoded text,
+    #: which for a bare capital letter is the same string. And the logprobs are
+    #: taken AFTER the logits processors (`mlx_lm/generate.py` L409-420), which
+    #: is why a decision states its own sampling and takes no manifest default
     #: (`crucible/decide.py`, `request_body`).
-    #:
-    #: A question with more than 11 options is refused before it is sent: 11 is
-    #: the engine's own ceiling and asking for 12 is a 400.
     decide_logprobs = True
-    max_logprobs = 11
+    max_logprobs = 40
     decide_basis = (
         "mlx-lm 0.31.3 returns choices[0].logprobs.content[].top_logprobs on its "
-        "chat route and validates top_logprobs to at most 11 "
-        "(mlx_lm/server.py L1245, read on the Mac Studio 2026-09-23)"
+        "chat route; its validator caps top_logprobs at 11 (mlx_lm/server.py "
+        "L1245, read on the Mac Studio 2026-09-23) and Crucible's "
+        "mlx-lm-top-logprobs-40 patch raises it to 40, checked at engine start"
     )
+
+    def start(
+        self, model_dir: Path, served_name: str, port: int, args: list[str]
+    ) -> None:
+        """Refuse to start on an env without the `top_logprobs` patch.
+
+        The env is the one this engine's interpreter lives in
+        (`<env>/bin/python`, `jobenv.env_python`). A missing interpreter is left
+        to the base class, which already names it.
+        """
+        if self._python.is_file():
+            env_dir = self._python.parent.parent
+            try:
+                envpatches.require_applied(envpatches.MLX_LM_TOP_LOGPROBS, env_dir)
+            except PatchError as exc:
+                raise EngineError(
+                    f"llm_env_unpatched: {exc}. This engine states "
+                    f"max_logprobs {self.max_logprobs} because of that patch and "
+                    "will not start without it; run `crucible env patch llm` "
+                    "(or `crucible install llm --force`) and load again"
+                ) from exc
+        super().start(model_dir, served_name, port, args)
 
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]

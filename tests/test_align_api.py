@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
-import signal
 import sys
 import time
 from pathlib import Path
@@ -23,14 +21,20 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, workerenv, workers
+from crucible import accelerator, procgroup, workerenv, workers
 from crucible.accelerator import GIB, ComputeApp
 from crucible.alignmodels import load_align_manifest
 from crucible.errors import JobError
 from crucible.jobs import align as align_job
 from crucible.residency import KIND_ALIGN, Residency
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, holding_the_card, parse_sse
+from .conftest import (
+    FAKE_BACKEND,
+    FAKE_MAC_BACKEND,
+    end_process_tree,
+    holding_the_card,
+    parse_sse,
+)
 
 MODEL = "qwen3-aligner"
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_align_worker.py"
@@ -977,20 +981,25 @@ def test_a_cancel_stops_the_worker_and_does_not_sigkill_it(
     # The worker ignores SIGTERM, so the stop times out and says so by name
     # rather than escalating. Either terminal state proves the point; what must
     # never appear is a SIGKILL.
-    assert terminal(events)["event"] in ("cancelled", "failed")
-    if terminal(events)["event"] == "failed":
-        assert "does not SIGKILL" in terminal(events)["data"]["error"]["message"]
+    if procgroup.platform_kind() == procgroup.WIN32:
+        # win32 has no WSL2 wedge to protect: the worker deaf to CTRL_BREAK has
+        # its tree terminated, so the cancel is simply a cancel
+        # (`crucible/procgroup.py`).
+        assert terminal(events)["event"] == "cancelled", terminal(events)
+    else:
+        assert terminal(events)["event"] in ("cancelled", "failed")
+        if terminal(events)["event"] == "failed":
+            assert "does not SIGKILL" in terminal(events)["data"]["error"]["message"]
     # And a cancelled run leaves nothing advertised as resident — whichever way
     # it ended, the session is gone and the row must go with it.
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
 
     # This test made the process; this test cleans it up. Nothing in Crucible
     # will, by design.
-    for pid in pids:
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+    # A SNAPSHOT: every `taskkill` below is itself a Popen, and the recorder
+    # this test installed would otherwise append it to the list being walked.
+    for pid in list(pids):
+        end_process_tree(pid)
 
 
 # ------------------------------------------------------------------- doctor

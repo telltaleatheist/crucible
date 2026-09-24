@@ -42,6 +42,7 @@ from . import (
     capability,
     catalog,
     denoisemodels,
+    envpatches,
     hosttools,
     interpreter,
     jobenv,
@@ -2324,6 +2325,7 @@ def _doctor_report() -> dict[str, Any]:
         "worker_envs": [],
         "tts_envs": {},
         "narrator_patches": [],
+        "llm_patches": [],
         "capability": None,
         # THE TWO PATHS, because the Mac audit of 2026-09-14 found the same
         # message twice and only one of the two readings was a defect. A
@@ -2530,6 +2532,31 @@ def _doctor_report() -> dict[str, Any]:
                         f"narrator_patch[{entry['id']}]: {entry['status']} — "
                         f"{entry['detail']}. {entry['why']}"
                     )
+        if config.enable_llm:
+            # THE `llm` ENV's PATCHES (`crucible/envpatches.py`): mlx-lm's
+            # `top_logprobs` 11 -> 40, which `MlxLmEngine` states as its cap
+            # and refuses to start without. Selected by the recipe's pins, so
+            # cuda-linux (vLLM) reads `not_applicable`; llama-windows has no
+            # llm recipe at all and is asked with none, which answers the same.
+            if backend.kind == LLAMA_WINDOWS:
+                llm_env_dir, llm_pins = config.home / "envs" / "none", {}
+            else:
+                llm_spec = jobenv.llm_env(backend.kind)
+                llm_env_dir = jobenv.env_dir(config.home, llm_spec)
+                llm_pins = jobenv.recipe_pins(jobenv.recipe_for(llm_spec))
+            report["llm_patches"] = envpatches.check("llm", llm_env_dir, llm_pins)
+            for entry in report["llm_patches"]:
+                # `no_env` is the llm env row's fact, stated there in full with
+                # the command that fixes it; a second problem for the same
+                # cause is how a reader ends up chasing the wrong sentence.
+                if entry["status"] not in narratorpatches.SOUND_STATUSES and (
+                    entry["status"] != narratorpatches.NO_ENV
+                ):
+                    report["problems"].append(
+                        f"llm_patch[{entry['id']}]: {entry['status']} — "
+                        f"{entry['detail']}. {entry['why']}. Run `crucible env "
+                        "patch llm`"
+                    )
         report["job_types"] = _job_type_reports(config, backend)
         for entry in report["job_types"]:
             if entry["enabled"] and not entry["ready"]:
@@ -2628,6 +2655,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             else:
                 mark = "applied" if entry["applied"] else entry["status"].upper()
             print(f"narrator patch ({entry['id']}): {mark} — {entry['detail']}")
+        for entry in report["llm_patches"]:
+            if entry["status"] == narratorpatches.NOT_APPLICABLE:
+                mark = "n/a"
+            else:
+                mark = "applied" if entry["applied"] else entry["status"].upper()
+            print(f"llm patch ({entry['id']}): {mark} — {entry['detail']}")
         capability_entry = report["capability"]
         if capability_entry is None:
             print(
@@ -2651,6 +2684,74 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"PROBLEM: {problem}", file=sys.stderr)
         print("healthy" if report["healthy"] else "unhealthy")
     return EXIT_OK if report["healthy"] else EXIT_REFUSED
+
+
+# ---------------------------------------------------------------- env patch
+
+
+def cmd_env_patch(args: argparse.Namespace) -> int:
+    """Apply and CHECK one env type's site-packages patches, in place.
+
+    The installer's `env-patch-llm` step (`sdk/bootstrap/src/steps.ts`, PHASE22-DECIDE.md
+    section 2.6.1): an upgrade installs a new wheel and restarts, and never runs
+    `crucible install`, so `install_env`'s patch step never runs on an env whose
+    recipe has not moved. This is that step without the pip. Exit 0 only when
+    every row is `applied` or `not_applicable`; anything else is refused by name.
+
+    No env installed is NOT a failure: there is nothing to patch, and
+    `crucible install <type>` applies the patches before it stamps the env.
+    """
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        return _fail(str(exc))
+    try:
+        backend = detect_backend()
+    except NoViableBackend as exc:
+        return _fail(f"no viable backend: {exc.reason}")
+    if backend.kind != config.backend_kind:
+        return _fail(
+            _backend_mismatch(config.backend_kind, backend)
+            + f" ({config.path}); re-run `crucible init --force`"
+        )
+    if envpatches.patches_for(args.job_type) is None:
+        return _fail(
+            f"job type {args.job_type!r} carries no site-packages patches; the "
+            f"types that do are {list(envpatches.patched_job_types())}"
+        )
+    if args.job_type == "llm" and backend.kind == LLAMA_WINDOWS:
+        # No Python env at all: the engine is llama.cpp's own release.
+        rows = envpatches.check("llm", config.home / "envs" / "none", {})
+    else:
+        try:
+            spec = _env_spec(args.job_type, args.narrator_engine, backend.kind)
+            recipe = jobenv.recipe_for(spec)
+            pins = jobenv.recipe_pins(recipe)
+        except jobenv.EnvError as exc:
+            return _fail(str(exc))
+        directory = jobenv.env_dir(config.home, spec)
+        python = jobenv.env_python(config.home, spec)
+        if not python.is_file():
+            print(
+                f"{args.job_type} env: not installed at {directory}; nothing to "
+                f"patch (`crucible install {args.job_type}` applies them)"
+            )
+            return EXIT_OK
+        try:
+            rows = envpatches.apply(
+                args.job_type, directory, python, pins, on_line=print
+            )
+        except narratorpatches.PatchError as exc:
+            return _fail(f"env_patch_failed: {exc}")
+    for row in rows:
+        print(f"{args.job_type} patch ({row['id']}): {row['status']} — {row['detail']}")
+    unsound = [r for r in rows if r["status"] not in narratorpatches.SOUND_STATUSES]
+    if unsound:
+        return _fail(
+            "env_patch_failed: "
+            + "; ".join(f"{r['id']} is {r['status']}" for r in unsound)
+        )
+    return EXIT_OK
 
 
 # ---------------------------------------------------------------- uninstall
@@ -3359,6 +3460,26 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = subparsers.add_parser("doctor", help="probe the host and the job types")
     doctor.add_argument("--json", action="store_true", help="machine-readable report")
     doctor.set_defaults(func=cmd_doctor)
+
+    env_parser = subparsers.add_parser(
+        "env", help="operate on an installed job-type env without rebuilding it"
+    )
+    env_commands = env_parser.add_subparsers(dest="env_command", required=True)
+    env_patch = env_commands.add_parser(
+        "patch",
+        help=(
+            "apply and check this env type's site-packages patches in place; "
+            "exits non-zero by name unless every one is in (a deploy runs it)"
+        ),
+    )
+    env_patch.add_argument("job_type", choices=sorted(envpatches.patched_job_types()))
+    env_patch.add_argument(
+        "--narrator-engine",
+        default=None,
+        choices=sorted(NARRATOR_ENGINE_SAMPLING),
+        help="which tts env; required for 'tts', refused for 'llm'",
+    )
+    env_patch.set_defaults(func=cmd_env_patch)
 
     token = subparsers.add_parser(
         "token", help="print the bearer token, or the pairing line an app takes"
