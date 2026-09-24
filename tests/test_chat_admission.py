@@ -21,6 +21,7 @@ nothing.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -31,11 +32,28 @@ from crucible.inflight import RECENT_DURATIONS, InFlight
 
 
 class _FakeResident:
-    """Only the two fields the refusal names."""
+    """Only the fields the refusal and the admission read."""
 
-    def __init__(self, model_id: str, engine: str) -> None:
+    def __init__(
+        self, model_id: str, engine: str, engine_args: tuple[str, ...] = ()
+    ) -> None:
         self.model_id = model_id
         self.engine = engine
+        self.engine_args = engine_args
+
+#: The argv the Mac's 9B is started with, composed by the real code path from
+#: the real manifest: what a resident mlx-lm engine's record carries.
+def _mlx_args(model_id: str = "qwen3.5-9b") -> tuple[str, ...]:
+    from crucible.manifests import load_manifest
+    from crucible.residency import Residency
+
+    manifest = load_manifest(model_id)
+    return tuple(
+        Residency._engine_args(
+            manifest, manifest.backends["mlx-darwin"], Path("/w"), None,
+            context=manifest.context_for("mlx-darwin"),
+        )
+    )
 
 
 class _FakeResidency:
@@ -46,27 +64,89 @@ class _FakeResidency:
 # --------------------------------------------------------------- the limit
 
 
-def test_mlx_lm_admits_its_one_generation_thread_plus_one_waiting() -> None:
-    """The plus one is the request that starts the instant the running one ends.
+def test_mlx_lm_admits_its_batch_width_plus_one_waiting() -> None:
+    """CORRECTED 2026-09-24: mlx-lm BATCHES, `--decode-concurrency` wide.
 
-    Bounding AT the concurrency would leave the single generation thread idle
-    between every pair of completions - a slower version of the same defect.
+    It said 1 (+1 = 2) on a reading that one generation thread meant serial
+    generation; that thread runs a `BatchGenerator`, and the Mac cleanup ran
+    two-wide against an engine that could run thirty-two. The width is now the
+    flag on the argv the engine was started with, and the plus one is the
+    request ready to join the batch the moment a slot frees.
     """
-    limit, basis = chat_admission("mlx-lm")
-    assert limit == 2
-    assert basis is not None and "one thread" in basis
+    limit, basis = chat_admission("mlx-lm", _mlx_args("qwen3.5-9b"))
+    assert limit == 17
+    assert basis is not None
+    assert "BatchGenerator" in basis
+    assert "started with --decode-concurrency 16" in basis
+
+
+def test_the_27b_is_admitted_at_its_own_narrower_batch() -> None:
+    """PER MODEL, because the KV each sequence holds is per model: the 8-bit
+    27B affords 8 in flight inside the Mac's working set, the 9B 16
+    (the arithmetic is in each manifest's mlx-darwin block)."""
+    limit, basis = chat_admission("mlx-lm", _mlx_args("qwen3.8-27b-8bit"))
+    assert limit == 9
+    assert basis is not None and "--decode-concurrency 8" in basis
+
+
+def test_the_equals_spelling_is_read_and_the_last_one_wins() -> None:
+    """argparse's rules, so the door and the engine read the same number."""
+    args = ("--decode-concurrency", "4", "--decode-concurrency=6")
+    assert chat_admission("mlx-lm", args)[0] == 7
+
+
+def test_an_mlx_lm_record_without_the_flag_is_refused_by_name() -> None:
+    """Misconfiguration, not weather: `start()` refuses such an argv, so a
+    record that lacks it does not describe what is running."""
+    with pytest.raises(EngineError) as caught:
+        chat_admission("mlx-lm", ("--prompt-concurrency", "4"))
+    assert "started without --decode-concurrency" in str(caught.value)
+
+
+def test_a_flag_engine_that_also_states_a_constant_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One number, one owner: the argv."""
+    monkeypatch.setattr(ENGINES["mlx-lm"], "chat_concurrency", 1)
+    with pytest.raises(EngineError) as caught:
+        chat_admission("mlx-lm", _mlx_args())
+    assert "One number, one owner" in str(caught.value)
+
+
+def test_every_mlx_lm_block_states_the_flags_its_memory_argument_uses() -> None:
+    """House rule: no library defaults. Each block states the batch width, the
+    prefill width and the prompt-cache size, and the prefill width is never
+    wider than the batch (mlx-lm holds `max(decode, prompt)` sequences)."""
+    from crucible.engines.base import int_flag
+    from crucible.engines.mlx_lm import REQUIRED_FLAGS
+    from crucible.manifests import load_all_manifests
+
+    blocks = [
+        (model_id, manifest.backends["mlx-darwin"])
+        for model_id, manifest in load_all_manifests().items()
+        if "mlx-darwin" in manifest.backends
+        and manifest.backends["mlx-darwin"].engine == "mlx-lm"
+    ]
+    assert blocks, "no mlx-lm block to check; the test would prove nothing"
+    for model_id, block in blocks:
+        args = block.engine_args
+        for flag in REQUIRED_FLAGS:
+            assert int_flag(args, flag) is not None, f"{model_id}: no {flag}"
+        assert int_flag(args, "--prompt-concurrency") <= int_flag(
+            args, "--decode-concurrency"
+        ), model_id
 
 
 def test_an_engine_that_states_no_concurrency_is_not_bounded() -> None:
     """vLLM BATCHES. Nothing has ever measured starvation against it, and a
     number invented here would cap work nobody showed needed capping."""
-    assert chat_admission("vllm") == (None, None)
-    assert chat_admission("mlx-vlm") == (None, None)
+    assert chat_admission("vllm", ()) == (None, None)
+    assert chat_admission("mlx-vlm", ()) == (None, None)
 
 
 def test_an_unknown_engine_is_refused_by_name() -> None:
     with pytest.raises(EngineError) as caught:
-        chat_admission("not-an-engine")
+        chat_admission("not-an-engine", ())
     assert "unknown engine" in str(caught.value)
 
 
@@ -82,7 +162,7 @@ def test_a_concurrency_with_no_basis_is_refused(
     monkeypatch.setattr(ENGINES["vllm"], "chat_concurrency", 4, raising=False)
     monkeypatch.setattr(ENGINES["vllm"], "chat_concurrency_basis", None, raising=False)
     with pytest.raises(EngineError) as caught:
-        chat_admission("vllm")
+        chat_admission("vllm", ())
     assert "no chat_concurrency_basis" in str(caught.value)
 
 
@@ -95,7 +175,7 @@ def test_a_basis_with_no_concurrency_is_refused(
         ENGINES["vllm"], "chat_concurrency_basis", "measured somewhere", raising=False
     )
     with pytest.raises(EngineError) as caught:
-        chat_admission("vllm")
+        chat_admission("vllm", ())
     assert "no chat_concurrency" in str(caught.value)
 
 
@@ -103,10 +183,42 @@ def test_an_empty_card_reports_no_limit_rather_than_an_unlimited_one() -> None:
     """Null is not "unlimited": the limit belongs to the ENGINE, and with
     nothing loaded there is no engine to ask."""
     assert _chat_limit_of(_FakeResidency(None)) == (None, None)
-    assert _chat_limit_of(_FakeResidency(_FakeResident("q", "mlx-lm"))) == (
-        2,
-        ENGINES["mlx-lm"].chat_concurrency_basis,
+    limit, basis = _chat_limit_of(
+        _FakeResidency(_FakeResident("q", "mlx-lm", _mlx_args()))
     )
+    assert limit == 17
+    assert basis is not None
+    assert basis.startswith(ENGINES["mlx-lm"].chat_concurrency_basis)
+
+
+def test_activity_publishes_the_resident_engines_own_width(
+    make_client: Any, auth: dict[str, str]
+) -> None:
+    """THE WIRE A CLIENT SIZES ITS POOL FROM. Foundry's placement reads
+    `chat.max_in_flight` after its load and uses it as the pool, so the number
+    on `/v1/activity` is what raising the batch actually reaches. A resident
+    record exactly as `Residency.load` writes it for the Mac's 9B, read through
+    the real route."""
+    from crucible.residency import ResidentModel
+
+    with make_client() as client:
+        client.app.state.residency._resident = ResidentModel(  # noqa: SLF001
+            model_id="qwen3.5-9b",
+            backend="mlx-darwin",
+            engine="mlx-lm",
+            engine_model_name="/w",
+            base_url="http://127.0.0.1:1",
+            port=1,
+            revision="0" * 40,
+            max_model_len=16384,
+            memory_bytes_estimate=1,
+            log_path=Path("x.log"),
+            loaded_at="2026-09-24T12:00:00+00:00",
+            engine_args=_mlx_args("qwen3.5-9b"),
+        )
+        chat = client.get("/v1/activity", headers=auth).json()["chat"]
+    assert chat["max_in_flight"] == 17
+    assert "--decode-concurrency 16" in chat["max_in_flight_basis"]
 
 
 # ----------------------------------------------------------------- the wait
@@ -210,7 +322,7 @@ def test_llama_server_admits_its_one_slot_plus_one_waiting() -> None:
     """`--parallel 1` is one slot: mlx-lm's shape on Windows, bounded the same
     way. Before PHASE22 this door admitted everything on llama-server, and a
     decision's fan-out is exactly the load that would have found it."""
-    limit, basis = chat_admission("llama-server")
+    limit, basis = chat_admission("llama-server", ("--parallel", "1"))
     assert limit == 2
     assert basis is not None and "--parallel 1" in basis
 

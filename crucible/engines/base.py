@@ -75,6 +75,28 @@ class Engine(Protocol):
         """Every pid this engine owns, for the accelerator guard."""
 
 
+def int_flag(args: "list[str] | tuple[str, ...]", flag: str) -> int | None:
+    """`flag`'s integer value in an engine argv, or None if the argv omits it.
+
+    Both spellings argparse accepts, `--flag N` and `--flag=N`; the LAST one
+    wins, as it does in argparse, so a reader here and the engine agree on
+    which number is running. A value that is not an integer is refused by
+    name rather than read as absent.
+    """
+    found: str | None = None
+    for index, arg in enumerate(args):
+        if arg == flag and index + 1 < len(args):
+            found = args[index + 1]
+        elif arg.startswith(flag + "="):
+            found = arg.split("=", 1)[1]
+    if found is None:
+        return None
+    try:
+        return int(found)
+    except ValueError as exc:
+        raise EngineError(f"{flag} {found!r} is not an integer") from exc
+
+
 def find_free_port() -> int:
     """A port nothing is listening on right now.
 
@@ -129,6 +151,17 @@ class SubprocessEngine:
     #: by `engines.chat_admission()`, for `_check_serving_extra`'s reason: a
     #: concurrency with no provenance is a number somebody typed.
     chat_concurrency_basis: str | None = None
+
+    #: THE FLAG THIS ENGINE'S CONCURRENCY IS STARTED WITH, when it is one —
+    #: in which case `chat_concurrency` stays None and the number is READ OFF
+    #: THE ARGV THE RESIDENT ENGINE WAS STARTED WITH (`ResidentModel.engine_args`,
+    #: `engines.chat_admission`). Added 2026-09-24 for mlx-lm, whose batch width
+    #: is `--decode-concurrency` and differs per model because the KV each
+    #: in-flight sequence holds does (`engines/mlx_lm.py`). A number that is an
+    #: engine flag has one owner, the argv; a class constant beside it would be
+    #: a second. `chat_concurrency_basis` still says where the flag's meaning
+    #: was read.
+    chat_concurrency_flag: str | None = None
 
     #: CAN THIS ENGINE SERVE A DECISION (`POST /v1/decide`, PHASE22-DECIDE.md)?
     #:
