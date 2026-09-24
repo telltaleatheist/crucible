@@ -235,7 +235,13 @@ runs Viterbi over the answers). Every `choice` and `score` answer carries
 `"logprobs": {<option>: ln p, …}` in OPTION ORDER — the natural log of the renormalised
 probability beside it — and a `yesno` carries `"logprob": ln p`. Multiply by `label_mass`
 (add `ln label_mass`) for the un-renormalised mass. **The values are NOT calibrated**: they
-are one forward pass's reading, not measured frequencies. `-Infinity` is not JSON, so a
+are one forward pass's reading, not measured frequencies.
+
+> *`label_mass` above 1 on the Mac (2026-09-24).* A live `qwen3.5-2b` triage on mlx-lm
+> over 1,362 yes/no questions MEASURED `label_mass` quantiles 5% 0.940, median 0.997,
+> 75% 1.023, 95% 1.055 — which no probability mass can be. mlx-lm 0.31.3 returned its
+> logprobs in bf16; §2.10 has the cause and the patch. With the patch the mass is a mass
+> again; on vLLM (fp32 `log_softmax`) and llama-server (fp32 logits) it always was. `-Infinity` is not JSON, so a
 probability of exactly 0 has a `null` log-probability; the only way the door produces one
 is the report-mode `yesno` below (a double underflowing on a letter the engine did return
 would too, and is not a case anyone has seen).
@@ -411,7 +417,12 @@ before its token is generated — so every question fetches it, deep-copies it
 (`copy.deepcopy`, L1678/L1692), and prefills only `user` + block + tail. The door's fan-out
 on the Mac is `chat_admission`'s 2 (`chat_concurrency = 1`); the two in flight each copy
 the same entry and neither can spoil it. Serialising to 1 buys nothing. The entry also
-survives the stock `--prompt-cache-size 10`: `CacheOrder.pop` (L1649) evicts `assistant`
+survives the stock `--prompt-cache-size 10`:
+*(Corrected 2026-09-24: the fan-out is now `--decode-concurrency + 1` of the resident
+model — 17 on the 2B and the 9B, 9 on the 8-bit 27B — because mlx-lm batches (§2.10);
+each of those questions still deep-copies the one system entry, which is 17 copies of the
+state's cache, 2.0 GB at 8192 tokens on the 2B. `--prompt-cache-size 10` is now stated in
+every mlx-darwin block rather than inherited.)* `CacheOrder.pop` (L1649) evicts `assistant`
 then `user` entries before the single `system` one, and each question adds one of each.
 
 **vLLM 0.29.0.** Token-level prefix caching in whole blocks — 544 tokens on this hybrid
@@ -591,6 +602,20 @@ in §8a's own log (1.53 GiB weights, 0.75 GiB overhead, 18,023 B/token of KV), t
 carried EXACTLY from the 9B's measured 40,337 (every config field KV reads is identical), and
 the image reserve carried from the 9B's measured 1.90 GiB A/B as an upper bound.
 
+**The third small tier, `qwen3.5-2b` (added 2026-09-24).** Owen: *"decide/snap on crucible
+should let the user pick the model. 27b, 9b, 4b, all the way down to 0.8b."* The 2B was the
+one official Qwen3.5 size the ladder skipped. Same three backends and the same repos as its
+siblings — `Qwen/Qwen3.5-2B` @ `15852e8c`, `mlx-community/Qwen3.5-2B-bf16` @ `fb270110`,
+`unsloth/Qwen3.5-2B-GGUF` @ `f6d5376b` — with one departure, made toward a ruling: Owen,
+*"full quant when possible"*, so its llama-windows block pins the **BF16** GGUF (3.78 GB)
+rather than Q8_0 (the projector stays `mmproj-F16.gguf`, unquantized). Its text attention
+shape is the 0.8B's field for field (24 layers, 6 full-attention, 2 KV heads × 256, the same
+gated-delta-net), so the 0.8B's MEASURED 18,023 B/token carries to it exactly; its tower is
+the 4B's shape. Memory COMPUTED by the 4B's method: cuda-linux 7.80 GiB, mlx-darwin 5.62 GiB,
+llama-windows 5.94 GB declared, each at `context_default` 16384 (the 4B's argument);
+`max_context` 131072 on every backend. `decide` now lists `… qwen3.5-4b, qwen3.5-2b,
+qwen3.5-0.8b` on all three.
+
 **What a backend SERVES is the block's; what the weights ACCEPT is the model's.** A new
 optional `serves` on each `[backends.<kind>]` block, defaulting to `[model] modalities` and
 refused by name unless it is a non-empty subset of it (`serves_not_subset`). The engine
@@ -670,6 +695,102 @@ on the 9B). An app therefore picks ONE form per server session: **the vision for
 fits; otherwise the base for text and `qwen3.5-4b` for image decisions.** That rule is the
 app's, stated here for the picker's author; Crucible offers both rows and the fit table says
 which one this card can hold.
+
+### 2.10 mlx-lm: it batches, and it returned bf16 logprobs (2026-09-24)
+
+Two defects on the Mac's text engine, found in one afternoon, both read in mlx-lm
+0.31.3's installed source in `~/.crucible/envs/llm` on the Mac Studio.
+
+**It batches, and Crucible held it to two.** `MlxLmEngine.chat_concurrency = 1` had a
+basis dated 2026-09-20: one generation thread, one queue, "strictly serial". READ: that
+thread runs a `BatchGenerator` (`mlx_lm/server.py` L813-830,
+`completion_batch_size = --decode-concurrency`, `prefill_batch_size =
+--prompt-concurrency`), taken whenever `_is_batchable(args)` (L685-686: no draft model,
+every layer cache has `merge`, and no `seed` in the request). Qwen3.5/3.8's caches are
+`ArraysCache` + `KVCache`, both with `merge`; nothing Crucible or either app sends carries
+a `seed`. The CLI defaults are 32 and 8 (L1857-1868). SEEN in the logs: four 27B prompts
+prefilling in one step at 11:40 that day, and the 9B cleanup two-at-a-time all afternoon at
+5.2 chunks/min — the door's 1 + 1, not the engine's width.
+
+The fix is at the owner. Every mlx-darwin block states `--decode-concurrency`,
+`--prompt-concurrency` and `--prompt-cache-size` (house rule: no library defaults), and
+`MlxLmEngine.start` refuses `mlx_lm_flags_unstated` without them. The door reads the width
+off the resident engine's own argv (`ResidentModel.engine_args`,
+`chat_concurrency_flag = "--decode-concurrency"`), so `/v1/activity`'s
+`chat.max_in_flight` — the number Foundry's placement takes as its pool after the load —
+is `--decode-concurrency + 1` of the engine actually running, and this door's fan-out is
+the same number.
+
+The widths are COMPUTED, per model, against Metal's `max_recommended_working_set_size`
+(55_662_788_608 B = 51.84 GiB on the M1 Ultra, `mx.device_info()`; mlx-lm wires to it),
+which is tighter than Crucible's 61 GiB budget. Per sequence at 8192 tokens: KV plus the
+gated-delta recurrent state (float32, flat in length) plus the conv state, held by each
+sequence in flight AND each of the 10 cached; prefill at one `overhead_bytes` per prompt in
+flight. The arithmetic is written in each block:
+
+| model | decode | prompt | total at 8192 | of 51.84 GiB |
+|---|---|---|---|---|
+| qwen3.5-0.8b | 16 | 4 | 12.02 GiB | |
+| qwen3.5-2b | 16 | 4 | 14.12 GiB | |
+| qwen3.5-4b | 16 | 4 | 23.29 GiB | |
+| qwen3.5-9b | 16 | 4 | 32.14 GiB | 32 would be 36.90 |
+| qwen3.8-27b-4bit | 16 | 1 | 42.28 GiB | a 2nd prefill: 52.88 |
+| qwen3.8-27b-8bit | 8 | 1 | 49.66 GiB | 16 would be 54.80 |
+
+MEASURED 2026-09-24 14:10-14:27, the Mac's Crucible idle (nothing resident, leased or in
+flight since 13:57): a PRIVATE `mlx_lm server` from `~/.crucible/envs/llm` on port 50991,
+the 9B, both patches applied in a `/tmp` overlay (the env itself untouched, its
+`generate.py` still the stock digest), `--prompt-concurrency min(4, width)
+--prompt-cache-size 10`. Each width received `width` distinct ~1600-token prompts at
+temperature 0, 200 completion tokens each. Memory is vm_stat active + wired + compressed,
+relative to before the engine started:
+
+| width | wall s | req/min | tok/s out | median s/request | peak GiB over base |
+|---|---|---|---|---|---|
+| 1 | 8.9 | 6.7 | 22.5 | 8.9 | 22.96 |
+| 8 | 44.3 | 10.8 | 36.2 | 44.2 | 25.28 |
+| 16 | 66.5 | 14.4 | 48.1 | 66.0 | 26.74 |
+| 32 | 110.7 | 17.3 | 57.8 | 108.8 | 36.45 |
+
+These prompts are 8:1 prompt:completion, so prefill dominates, and cleanup's ratio (about
+1:1) should favor the batch more. Still, 16 already gives 2.1x the single-stream rate. 32
+adds 20% more throughput, but it takes 1.6x longer per request and its peak is ~10 GiB
+above 16's. That is more than the per-sequence terms account for, so the prefill transient
+at width grows faster than one `overhead_bytes` per prompt. **16 stays.** 32 is not worth
+its memory. A curve at cleanup's own ratio is still owed (§8).
+
+**vLLM, the same mechanism (2026-09-24).** vLLM stated no concurrency, so the PC's
+`chat.max_in_flight` was null and Foundry's placement fell back to 4 against an engine
+every one of whose cuda-linux blocks (all eight, `dots-ocr` included) runs
+`--max-num-seqs 16`. `VllmEngine` now reads `--max-num-seqs` off the resident argv
+(`chat_concurrency_flag`) and refuses `vllm_flags_unstated` at start without it, so the
+PC publishes 17. This door's fan-out on vLLM moves from `UNSTATED_ENGINE_CONCURRENCY` (16)
+to that 17: sixteen questions in vLLM's batch and one in its own queue, which is the
+batch the `decide` working context was sized for, plus one waiting request. Computed from the
+manifests; no card was used.
+
+**The logprobs were bf16.** mlx-lm normalized `logits - mx.logsumexp(logits)` in the
+model's dtype (`mlx_lm/generate.py` L420, L549, L1352) — bf16 for every model the Mac
+serves. bf16's spacing at a log-sum-exp of 16-32 is 0.125, so the rounded lse is off by up
+to 0.0625 and every returned logprob carries that one common error: a distribution's mass
+read back is off by a factor of up to exp(±0.0625) = 0.939-1.065, which is the measured
+0.940-1.055 band above. REPRODUCED on the Mac's CPU with mlx itself (400 synthetic
+distributions peaked at logit ~25 over the 248320 vocabulary): bf16 mass 0.946 / 1.008 /
+1.056 at 5% / median / 95%, float32 0.998 / 1.000 / 1.000.
+
+The fix is a second `llm` env patch, `mlx-lm-fp32-logprobs`
+(`envs/llm/patches/patch_mlx_lm_fp32_logprobs.py`), through the same machinery as the
+top-logprobs one: applied by `crucible env patch llm` and the installer's `env-patch-llm`
+step, checked by the doctor's `llm_patches`, pinned to 0.31.3 (`VERSION_MISMATCH`
+otherwise), all-or-nothing on its anchors, and required by `MlxLmEngine.start`
+(`llm_env_unpatched`). Each site computes the stock logprobs, which the sampler still
+reads — so what is GENERATED is unchanged at every temperature — and a float32 copy
+(`logits.astype(mx.float32)` before the log-sum-exp), which is what it returns. Verified
+on the Mac's CPU: the sampler's input is bitwise the stock array, and the returned one is
+float32 with mass 1.000003.
+And MEASURED in the same private run: 50 yes/no questions on the patched 9B, the summed
+exp of the returned top-6: min 0.99973, median 0.99986, max 0.99993. None is above 1,
+whereas a quarter of the stock readings were.
 
 ## 3. Tests (no GPU)
 
@@ -838,3 +959,14 @@ Still owed: the door itself on a card (needs a cut or a branch install), host mo
   option choice on the Mac stays `decide_not_served` or is served another way. Owed: one
   run, and the check that the raw-piece token strings match the bare letters there.
 - Foundry's tile on the door, ~1,170 questions into a book, timed.
+- **mlx-lm's batch width and the fp32 logprobs (§2.10), on the Mac when it is idle** — a
+  separate `python -m mlx_lm server` from `~/.crucible/envs/llm` on its own port, never
+  through the Mac's Crucible: (1) the 9B at `--decode-concurrency` 1, 8, 16 and 32
+  (`--prompt-concurrency 4 --prompt-cache-size 10`), each kept full with DISTINCT real
+  cleanup chunks (copies would share a prefix and skip their prefill) at temperature 0,
+  recording completed chunks per minute, per-request wall time, and mlx's peak memory —
+  the curve that keeps 16 or changes it; (2) the 8-bit 27B at 8 with 8192-token prompts,
+  peak memory against the 51.84 GiB working set, the check that 8 does not page; (3) on
+  the patched env, 50 yes/no questions on the 2B read raw off `/v1/chat/completions`
+  (`logprobs`, `top_logprobs` 6): the top-6's summed exp must never exceed 1.0001 (it is
+  part of a mass), where the stock env reads above 1 on a quarter of them.

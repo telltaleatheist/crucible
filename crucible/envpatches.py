@@ -28,6 +28,18 @@ binary release), which is asked with empty pins and answers the same.
 `MlxLmEngine` states `max_logprobs = 40` BECAUSE of this patch, and refuses to
 START on an env where `check` does not say `applied` (`engines/mlx_lm.py`), so
 the door can never be told 40 by an engine that would answer 400.
+
+THE SECOND `llm` PATCH (2026-09-24): the logprobs mlx-lm returns, in float32
+------------------------------------------------------------------------
+PHASE22-DECIDE.md, the label-mass note. Stock mlx-lm 0.31.3 normalizes
+`logits - mx.logsumexp(logits)` in the model's dtype, bf16 for every model
+Crucible serves on the Mac, so every returned logprob carries one common
+rounding error of up to 0.0625 and a decision's `label_mass` came back 0.94-1.06
+(a live qwen3.5-2b triage: 95th percentile 1.055). The applier is
+`envs/llm/patches/patch_mlx_lm_fp32_logprobs.py`; it returns float32 logprobs
+from all three sites that feed returned logprobs and leaves the sampler reading
+the stock ones, so generation is unchanged. `MlxLmEngine.start` refuses
+`llm_env_unpatched` unless EVERY patch in `LLM_PATCHES` is `applied`.
 """
 
 from __future__ import annotations
@@ -61,7 +73,22 @@ MLX_LM_TOP_LOGPROBS = NarratorPatch(
     ),
 )
 
-LLM_PATCHES: tuple[NarratorPatch, ...] = (MLX_LM_TOP_LOGPROBS,)
+MLX_LM_FP32_LOGPROBS = NarratorPatch(
+    id="mlx-lm-fp32-logprobs",
+    distribution="mlx-lm",
+    rel_path="mlx_lm/generate.py",
+    marker="wide = x.astype(mx.float32)",
+    absent_marker="logits - mx.logsumexp(logits",
+    stale_marker=None,
+    script="patch_mlx_lm_fp32_logprobs.py",
+    why=(
+        "stock mlx-lm 0.31.3 normalizes the logprobs it returns in bf16, so a "
+        "distribution read back sums to 0.94-1.06 and the decide door reports "
+        "label_mass above 1; MlxLmEngine refuses to start without it"
+    ),
+)
+
+LLM_PATCHES: tuple[NarratorPatch, ...] = (MLX_LM_TOP_LOGPROBS, MLX_LM_FP32_LOGPROBS)
 
 
 @dataclass(frozen=True)
@@ -144,6 +171,7 @@ def require_applied(patch: NarratorPatch, env_dir: Path) -> None:
 __all__ = [
     "LLM_PATCHES",
     "LLM_SCRIPTS_DIR",
+    "MLX_LM_FP32_LOGPROBS",
     "MLX_LM_TOP_LOGPROBS",
     "PatchSet",
     "REGISTRY",

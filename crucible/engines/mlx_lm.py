@@ -49,7 +49,7 @@ from typing import Callable
 
 from .. import envpatches
 from ..narratorpatches import PatchError
-from .base import SubprocessEngine, EngineError
+from .base import SubprocessEngine, EngineError, int_flag
 
 #: `python -m mlx_lm.server` still runs in 0.31.3 but prints a deprecation
 #: notice; `python -m mlx_lm server` is the form it asks for, and needs nothing
@@ -59,29 +59,94 @@ SUBCOMMAND = "server"
 
 CONFIRM_POLL_SECONDS = 5.0
 
+#: What every mlx-darwin block must state rather than inherit (house rule: no
+#: library defaults). `--decode-concurrency` is the batch width and so the chat
+#: door's admission; `--prompt-concurrency` is how many prompts prefill in one
+#: forward, which multiplies prefill's transient; `--prompt-cache-size` is how
+#: many finished sequences' caches mlx-lm keeps for prefix reuse (its LRU,
+#: `server.py` L1746), each one a whole sequence's KV and recurrent state. All
+#: three are terms in the memory argument each block writes out.
+REQUIRED_FLAGS: tuple[str, ...] = (
+    "--decode-concurrency",
+    "--prompt-concurrency",
+    "--prompt-cache-size",
+)
+
 
 class MlxLmEngine(SubprocessEngine):
     name = "mlx-lm"
 
-    #: ONE. mlx-lm serves HTTP on a `ThreadingHTTPServer`, so it ACCEPTS any
-    #: number of chat requests at once and looks concurrent from outside — but
-    #: `ResponseGenerator` has a single `self.requests = Queue()` drained by a
-    #: single `self._generation_thread = Thread(target=self._generate)`
-    #: (`mlx_lm/server.py:444,451`, mlx-lm 0.31.3, read in
-    #: `~/.crucible/envs/llm` on the Mac Studio on 2026-09-20). Generation is
-    #: strictly FIFO through that one thread, so the Nth request waits for all
-    #: N-1 before it and nothing about the socket says so.
+    #: A BATCH, AS WIDE AS `--decode-concurrency` -- READ OFF THE ARGV, PER MODEL.
     #:
-    #: That is what starved Foundry's clean pass: 12 in flight, a 300 s client
-    #: deadline, and a request that had not started when the deadline passed.
-    #: The accepting is what makes it dangerous — a serial engine that refused
-    #: the connection would have told the client the truth immediately.
-    chat_concurrency = 1
+    #: CORRECTED 2026-09-24. This said ONE, on a reading of 2026-09-20 that
+    #: `ResponseGenerator` drains one queue on one thread and so "generation is
+    #: strictly serial". The thread and the queue are real; the conclusion was
+    #: not. Read in mlx-lm 0.31.3's installed `mlx_lm/server.py` in the Mac's
+    #: `~/.crucible/envs/llm` on 2026-09-24 (`__version__` 0.31.3):
+    #:
+    #:   * that one thread runs a `BatchGenerator` (L813-830):
+    #:     `completion_batch_size=cli_args.decode_concurrency`,
+    #:     `prefill_batch_size=cli_args.prompt_concurrency` -- continuous
+    #:     batching; a request arriving mid-batch is inserted (L733-800);
+    #:   * it takes that path whenever `_is_batchable(args)` (L685-686):
+    #:     `model_provider.is_batchable and args.seed is None`, where
+    #:     `is_batchable` is "no draft model, and every layer cache has
+    #:     `merge`" (L371-381). Qwen3.5/3.8's `make_cache` is `ArraysCache` for
+    #:     the gated-delta layers and `KVCache` for the attention ones
+    #:     (`models/qwen3_5.py` L304-305), and both define `merge`
+    #:     (`models/cache.py` L397, L702). Crucible sends no `seed` and neither
+    #:     app's chat bodies carry one;
+    #:   * the CLI defaults are `--decode-concurrency 32` and
+    #:     `--prompt-concurrency 8` (L1857-1868), and `BatchGenerator` never
+    #:     holds more than `max(decode, prompt)` sequences (`generate.py`
+    #:     L1520, L1782-1790).
+    #:
+    #: SEEN IN THE LOGS, not only read: the 27B's engine log shows four prompts
+    #: prefilling in the same step at 2026-09-24 11:40:06-09
+    #: (`~/.crucible/logs/engine-qwen3.8-27b-8bit.log` L6152-6185), and the 9B's
+    #: shows exactly two at a time all afternoon -- the width this door allowed
+    #: (1 + 1), not the width the engine had. The Mac cleanup ran at 5.2
+    #: chunks/min against an engine able to batch 32, throttled by this constant.
+    #:
+    #: SO THE NUMBER IS THE ENGINE'S OWN FLAG, AND CRUCIBLE STATES IT. House rule:
+    #: no library defaults. Every mlx-darwin block's `engine_args` states
+    #: `--decode-concurrency`, `--prompt-concurrency` and `--prompt-cache-size`
+    #: (`REQUIRED_FLAGS`), each chosen against THAT model's KV and recurrent
+    #: state so the Mac never pages -- the arithmetic is written in the block.
+    #: `start()` refuses an argv without them, and the door reads the width off
+    #: the resident engine's own argv (`chat_concurrency_flag`,
+    #: `engines.chat_admission`), so `/v1/activity`'s `chat.max_in_flight` is
+    #: `--decode-concurrency + 1` of the engine actually running. The plus one
+    #: is a request ready to join the batch the moment a slot frees. Beyond the
+    #: flag mlx-lm still ACCEPTS and queues in silence (its HTTP server is a
+    #: `ThreadingHTTPServer`), which is the starvation of 2026-09-20 and the
+    #: reason the door still bounds at all.
+    #:
+    #: A CLOSED SOCKET DOES NOT STOP A NON-STREAMED REQUEST HERE. Read in
+    #: mlx-lm 0.31.3's `mlx_lm/server.py` (the PyPI wheel, 2026-09-24): the
+    #: only thing that stops generation is `GenerationContext._should_stop`,
+    #: set by `ctx.stop()` in `handle_completion`'s `finally` (L1552-1553) --
+    #: i.e. when the HANDLER thread leaves, which for a non-streamed request is
+    #: after its one `wfile.write` of the whole answer (L1549). Until then that
+    #: thread sits in `response_queue.get()` (L1037, L1048) and never touches
+    #: the socket; the prefill keepalive writes only `if self.stream` (L1413).
+    #: So when Crucible cancels its request (`api._unless_the_caller_leaves`)
+    #: and closes the socket, mlx-lm still prefills and answers every request it
+    #: has already ACCEPTED, running or queued -- and even a stop that did land
+    #: is read only between tokens (`_serve_single`, L1008) or between prefill
+    #: chunks (the batched path, L861). What Crucible's cancel buys on this
+    #: engine is the rest: nothing more is SENT (a decision's waiting questions
+    #: are taken back at its gate), the `InFlight` row closes, and the
+    #: settlement's SIGTERM -- which does stop a prefill -- is free to come as
+    #: soon as nothing else holds the card. At most `chat_admission`'s limit of
+    #: requests per door is ever at the engine, so that is the whole overrun.
+    chat_concurrency = None
+    chat_concurrency_flag = "--decode-concurrency"
     chat_concurrency_basis = (
-        "mlx-lm 0.31.3 generates on one thread draining one queue "
-        "(mlx_lm/server.py ResponseGenerator, read on the Mac Studio "
-        "2026-09-20); its ThreadingHTTPServer accepts concurrently but "
-        "generation is strictly serial"
+        "mlx-lm 0.31.3 batches on its one generation thread: BatchGenerator with "
+        "completion_batch_size = --decode-concurrency (mlx_lm/server.py "
+        "L813-830, taken whenever is_batchable and no seed, L685-686; read on "
+        "the Mac Studio 2026-09-24)"
     )
 
     #: A DECISION IS SERVED, AT MOST FORTY LOGPROBS WIDE — BECAUSE OF A PATCH.
@@ -135,17 +200,30 @@ class MlxLmEngine(SubprocessEngine):
         (`<env>/bin/python`, `jobenv.env_python`). A missing interpreter is left
         to the base class, which already names it.
         """
+        missing = [flag for flag in REQUIRED_FLAGS if int_flag(args, flag) is None]
+        if missing:
+            raise EngineError(
+                "mlx_lm_flags_unstated: this mlx-darwin block's engine_args "
+                f"state no {', '.join(missing)} ({args}). Each is a memory "
+                "decision for THIS model -- every in-flight sequence holds its "
+                "own KV and recurrent state -- so Crucible states it in the "
+                "manifest rather than inherit mlx-lm's default "
+                "(engines/mlx_lm.py, REQUIRED_FLAGS)"
+            )
         if self._python.is_file():
             env_dir = self._python.parent.parent
-            try:
-                envpatches.require_applied(envpatches.MLX_LM_TOP_LOGPROBS, env_dir)
-            except PatchError as exc:
-                raise EngineError(
-                    f"llm_env_unpatched: {exc}. This engine states "
-                    f"max_logprobs {self.max_logprobs} because of that patch and "
-                    "will not start without it; run `crucible env patch llm` "
-                    "(or `crucible install llm --force`) and load again"
-                ) from exc
+            for patch in envpatches.LLM_PATCHES:
+                try:
+                    envpatches.require_applied(patch, env_dir)
+                except PatchError as exc:
+                    raise EngineError(
+                        f"llm_env_unpatched: {exc}. This engine states what it "
+                        f"serves (max_logprobs {self.max_logprobs}, logprobs "
+                        "computed in float32) because of the llm env's patches "
+                        "and will not start without every one; run `crucible "
+                        "env patch llm` (or `crucible install llm --force`) and "
+                        "load again"
+                    ) from exc
         super().start(model_dir, served_name, port, args)
 
     def command(

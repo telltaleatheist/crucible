@@ -68,6 +68,7 @@ def serial_engines(monkeypatch: pytest.MonkeyPatch) -> None:
     names is not what any of this is about.
     """
     for cls in ENGINES.values():
+        monkeypatch.setattr(cls, "chat_concurrency_flag", None, raising=False)
         monkeypatch.setattr(cls, "chat_concurrency", 1, raising=False)
         monkeypatch.setattr(
             cls, "chat_concurrency_basis", "one generation thread", raising=False

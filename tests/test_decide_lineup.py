@@ -5,7 +5,8 @@ Three things were built together and are held here:
 1. A `decide` capability class, with every qwen3.8 / qwen3.5 manifest as a
    candidate and no size floor, and an EXPLICIT 9B floor on the four text classes
    that used to get theirs by accident of what was in `models/`.
-2. `qwen3.5-4b` and `qwen3.5-0.8b`, pinned to the official repos.
+2. `qwen3.5-4b` and `qwen3.5-0.8b`, pinned to the official repos — and
+   `qwen3.5-2b` between them since 2026-09-24.
 3. `serves`: what a BACKEND serves, separate from what the weights accept.
 
 The candidate lists of the four existing text classes are asserted EXACTLY, per
@@ -32,7 +33,7 @@ from .conftest import FAKE_BACKEND
 GIB = 1024 ** 3
 
 TEXT_CLASSES = ("clean", "translate", "simplify", "analysis")
-SMALL_TIERS = ("qwen3.5-4b", "qwen3.5-0.8b")
+SMALL_TIERS = ("qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b")
 
 
 def ids(name: str, backend: str) -> list[str]:
@@ -107,12 +108,12 @@ def test_decide_offers_every_tier_best_first(backend: str) -> None:
     expected = {
         # No 8-bit 27B in either form: Mac only since 2026-09-23.
         CUDA_LINUX: ["qwen3.8-27b-4bit-vl", "qwen3.5-9b-vl", "qwen3.8-27b-4bit",
-                     "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-0.8b"],
+                     "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"],
         MLX_DARWIN: ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b",
-                     "qwen3.5-4b", "qwen3.5-0.8b"],
+                     "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"],
         LLAMA_WINDOWS: ["qwen3.8-27b-4bit-vl", "qwen3.8-27b-4bit",
                         "qwen3.5-9b-vl", "qwen3.5-9b", "qwen3.5-4b",
-                        "qwen3.5-0.8b"],
+                        "qwen3.5-2b", "qwen3.5-0.8b"],
     }[backend]
     assert ids("decide", backend) == expected
 
@@ -180,6 +181,11 @@ PINS = {
         MLX_DARWIN: ("mlx-community/Qwen3.5-4B-bf16", "491fdc7c087ba7fb48adcb1253f8e76d011db783"),
         LLAMA_WINDOWS: ("unsloth/Qwen3.5-4B-GGUF", "e87f176479d0855a907a41277aca2f8ee7a09523"),
     },
+    "qwen3.5-2b": {
+        CUDA_LINUX: ("Qwen/Qwen3.5-2B", "15852e8c16360a2fea060d615a32b45270f8a8fc"),
+        MLX_DARWIN: ("mlx-community/Qwen3.5-2B-bf16", "fb270110eb5a9af244937040c9c3e57addab8ee9"),
+        LLAMA_WINDOWS: ("unsloth/Qwen3.5-2B-GGUF", "f6d5376be1edb4d416d56da11e5397a961aca8ae"),
+    },
     "qwen3.5-0.8b": {
         CUDA_LINUX: ("Qwen/Qwen3.5-0.8B", "2fc06364715b967f1860aea9cf38778875588b17"),
         MLX_DARWIN: ("mlx-community/Qwen3.5-0.8B-bf16", "3067585164dbcc505eec73d554349de6a27571a4"),
@@ -210,6 +216,18 @@ def test_the_small_tiers_are_pinned_to_the_official_repos(model_id: str) -> None
 
 def test_the_0_8b_is_point_eight_and_not_rounded() -> None:
     assert load_manifest("qwen3.5-0.8b").params_b == 0.8
+
+
+def test_the_2b_is_full_precision_on_every_backend() -> None:
+    """Owen, 2026-09-24: *"full quant when possible"*. A 2B fits every machine
+    the catalog serves, so no block of it names a quantization — including
+    llama-windows, where the 4B and 0.8B pin Q8_0."""
+    manifest = load_manifest("qwen3.5-2b")
+    assert manifest.params_b == 2
+    assert "--dtype" in (args := manifest.spec(CUDA_LINUX).engine_args)
+    assert args[args.index("--dtype") + 1] == "bfloat16"
+    assert manifest.spec(MLX_DARWIN).hf_repo.endswith("-bf16")
+    assert manifest.spec(LLAMA_WINDOWS).file == "Qwen3.5-2B-BF16.gguf"
 
 
 def test_the_9b_and_27bs_are_untouched_text_everywhere() -> None:

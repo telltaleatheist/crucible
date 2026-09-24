@@ -36,6 +36,7 @@ from fastapi.responses import (
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.background import BackgroundTask
 from starlette.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import (
@@ -164,12 +165,26 @@ WIRE_ATTEMPTS = 2
 #: than letting httpx serialise a document and label it.
 JSON_HEADERS = {"Content-Type": "application/json"}
 
-#: How often a non-streamed completion checks whether its caller is still there.
-#: `Request.is_disconnected()` is a poll and not a wait — it reads `receive`
-#: inside an already-cancelled scope and answers at once — so something has to
-#: hold the clock. A quarter of a second is far below the seconds a completion
-#: takes and far above what asking costs.
-DISCONNECT_POLL_SECONDS = 0.25
+
+class BeforeEveryRequest:
+    """A synchronous step run before every HTTP request, and nothing else.
+
+    Pure ASGI on purpose: `receive` and `send` go to the app exactly as the
+    server made them. A middleware that wraps them decides what a route can
+    learn about its own caller, and the one this replaced (starlette's
+    `BaseHTTPMiddleware`) made every caller look present forever —
+    `_watch_for_disconnect` says how that was found.
+    """
+
+    def __init__(self, app: ASGIApp, *, step: Callable[[], None]) -> None:
+        self.app = app
+        self.step = step
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            self.step()
+        await self.app(scope, receive, send)
+
 
 
 # --------------------------------------------------------------------- schemas
@@ -623,8 +638,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.state.backend = backend
     app.state.residency = residency
 
-    @app.middleware("http")
-    async def follow_the_config_file(request: Request, call_next: Any) -> Response:
+    def follow_the_config_file() -> None:
         """Every request sees the config.toml that is on disk NOW.
 
         `Config.follow_file()` — one stat per request, a re-read only when
@@ -646,20 +660,32 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         a broken one is misconfiguration the operator can repair, and refusing
         every request over it would take `/v1/ping` down with the record.
         """
-        live: Config = request.app.state.config
+        live: Config = app.state.config
         try:
             if live.follow_file():
                 print("crucible: config.toml moved on disk; the server adopted it", file=sys.stderr)
         except ConfigError as exc:
-            failed = getattr(request.app.state, "config_follow_failed", None)
+            failed = getattr(app.state, "config_follow_failed", None)
             if failed != str(exc):
-                request.app.state.config_follow_failed = str(exc)
+                app.state.config_follow_failed = str(exc)
                 print(
                     f"crucible: config.toml could not be re-read; serving the last "
                     f"good document: {exc}",
                     file=sys.stderr,
                 )
-        return await call_next(request)
+
+    # A PLAIN ASGI STEP, NEVER `@app.middleware("http")` (2026-09-24). That
+    # decorator is starlette's `BaseHTTPMiddleware`, and it hands every route a
+    # `receive` of its own making: a task group around the server's `receive`.
+    # `Request.is_disconnected()` asks `receive` inside an already-cancelled
+    # scope, and through that task group the answer is always lost to the
+    # cancellation — measured: 116 polls over thirty seconds after the caller
+    # had gone, every one `False`. From 1.0.18 (7babb40, which added this step
+    # as that decorator) until this fix, no non-streamed chat and no decision
+    # ever noticed its caller leave, and the Mac went on answering a stopped
+    # Foundry run for 45 s on 2026-09-24. This step reads a file; it has no
+    # business wrapping the request's channel, so it does not.
+    app.add_middleware(BeforeEveryRequest, step=follow_the_config_file)
     # WHERE THIS SERVER IS REALLY LISTENING, which the config alone cannot say:
     # `crucible serve --host 0.0.0.0` overrides `[server] host` for that run, and
     # `GET /v1/setup` would otherwise hand out pairing lines for the address the
@@ -1996,7 +2022,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # client can size its own pool from the server instead of guessing
             # and discovering the answer as a starved socket. Null for an engine
             # that states no concurrency — the door then bounds nothing, which
-            # is every engine but mlx-lm today — and null when no model is
+            # is mlx-vlm today — and null when no model is
             # resident, because the limit belongs to the engine and there is no
             # engine to ask.
             "chat": {
@@ -3064,8 +3090,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # Until today this door admitted everything and
             # `crucible/inflight.py` said, in so many words, that the record
             # gates nothing. For a BATCHING engine that is still exactly right
-            # and still what happens: vLLM states no concurrency,
-            # `chat_admission` returns None, and nothing below refuses.
+            # (2026-09-24: vLLM now STATES its batch, `--max-num-seqs`, so it is
+            # bounded at that plus one and a client can size to it; the batch
+            # is admitted whole, so nothing it could overlap is refused.)
             #
             # It was wrong for a SERIAL one. mlx-lm accepts every connection on
             # a ThreadingHTTPServer and then generates on ONE thread draining
@@ -3075,6 +3102,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # request that had not started when it passed, the pass dead at
             # block 352 of 940.
             #
+            # (CORRECTED 2026-09-24: mlx-lm is not serial — that one thread runs
+            # a `BatchGenerator` `--decode-concurrency` wide. The door was right
+            # to bound it and wrong about the width; the width is now read off
+            # the resident engine's argv, `engines/mlx_lm.py`.)
+            #
             # A refusal a client can act on beats a socket that goes quiet. The
             # limit is the engine's own measured concurrency plus one (see
             # `engines.chat_admission`), the wait is the median of what
@@ -3082,7 +3114,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # that has finished none states no `Retry-After` rather than
             # inventing one — `_rate_limited`'s rule, applied to a number of
             # our own.
-            limit, limit_basis = chat_admission(resident.engine)
+            limit, limit_basis = chat_admission(resident.engine, resident.engine_args)
             if limit is not None and len(inflight) >= limit:
                 wait = inflight.retry_after()
                 return _chat_queue_full(
@@ -3241,7 +3273,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 )
 
             inflight: InFlight = request.app.state.inflight
-            limit, limit_basis = chat_admission(resident.engine)
+            limit, limit_basis = chat_admission(resident.engine, resident.engine_args)
             if limit is not None and len(inflight) >= limit:
                 wait = inflight.retry_after()
                 return _chat_queue_full(
@@ -3401,9 +3433,35 @@ def _forward_body(raw: bytes, applied: Applied, resident: Any) -> bytes:
 
 
 async def _watch_for_disconnect(request: Request) -> None:
-    """Return once the caller's connection has gone away."""
-    while not await request.is_disconnected():
-        await asyncio.sleep(DISCONNECT_POLL_SECONDS)
+    """Return the moment the caller's connection has gone away.
+
+    A WAIT ON `receive`, NOT A POLL OF `is_disconnected()` (2026-09-24). The
+    poll asks `receive` inside an already-cancelled scope and takes whatever is
+    there; how that answer survives the trip depends on every layer between the
+    server and the route, and one layer (`BaseHTTPMiddleware`, from 1.0.18) lost
+    it every time — a caller that had hung up read as present until the engine
+    answered. A blocked `receive` is the server's own statement: uvicorn wakes
+    it on `connection_lost` and it returns `http.disconnect`. That is the
+    earliest anyone on this side can know, with no clock to choose.
+
+    Only for a route that has read its whole body — both callers have (the
+    chat door reads `request.body()`, the decision door's body is a parsed
+    parameter) — so what `receive` has left to say is the disconnect. An
+    `http.request` that arrives anyway is an empty tail and is passed over;
+    anything else is a fault in the server and is raised, not waited past.
+    Cancelling this while it waits consumes nothing: the next reader of
+    `receive` finds the channel as it was.
+    """
+    while True:
+        message = await request.receive()
+        kind = message.get("type")
+        if kind == "http.disconnect":
+            return
+        if kind != "http.request":
+            raise RuntimeError(
+                f"the caller's channel said {kind!r} while its request was being "
+                "answered; only `http.request` or `http.disconnect` can come there"
+            )
 
 
 async def _post_unless_the_caller_leaves(
@@ -3429,25 +3487,9 @@ async def _post_unless_the_caller_leaves(
     what closes the socket the engine is writing to — which is how the engine
     learns to stop.
     """
-    post = asyncio.create_task(client.post(url, content=body, headers=headers))
-    watch = asyncio.create_task(_watch_for_disconnect(request))
-    try:
-        done, _ = await asyncio.wait({post, watch}, return_when=asyncio.FIRST_COMPLETED)
-    finally:
-        watch.cancel()
-    if post in done:
-        return post.result()
-
-    post.cancel()
-    try:
-        await post
-    except asyncio.CancelledError:
-        # Ours, not this handler's: the task was cancelled two lines above, and
-        # awaiting it is how the cancellation is given time to reach httpx and
-        # close the connection. Letting it propagate would report the caller's
-        # own departure as this request being cancelled.
-        pass
-    return None
+    return await _unless_the_caller_leaves(
+        client.post(url, content=body, headers=headers), request
+    )
 
 
 async def _sent_across_the_wire(
@@ -3573,12 +3615,20 @@ async def _unless_the_caller_leaves(
 ) -> Any:
     """`work`, raced against the caller hanging up; None if the caller went first.
 
-    `_post_unless_the_caller_leaves`' rule, held at the level of the whole
-    decision rather than per request: a decision is a prime and up to sixteen
-    questions in flight, and ONE watcher cancelling the whole of it is what
-    closes every one of their sockets — which is how the engine learns to stop.
-    Sixteen watchers polling one ASGI `receive` would be sixteen readers of one
-    channel.
+    THE ONE OWNER of "the caller left, so the engine stops" for every door that
+    answers once rather than streaming: the chat door's POST
+    (`_post_unless_the_caller_leaves`) and the whole of a decision. A decision
+    is a prime and up to sixteen questions, and ONE watcher cancelling the
+    whole of it is what closes every in-flight socket AND takes back every
+    question still waiting at its gate — so nothing more is sent to an engine
+    nobody is listening to. Sixteen watchers on one ASGI `receive` would be
+    sixteen readers of one channel.
+
+    When the caller goes first, `work` is cancelled and AWAITED before this
+    returns, so the cancellation has reached httpx and closed the sockets by
+    the time the door closes its `InFlight` row and asks the settlement about
+    the card. The door is cancelled itself (the server shutting down): the work
+    goes with it.
     """
     task = asyncio.ensure_future(work)
     watch = asyncio.create_task(_watch_for_disconnect(request))
@@ -3595,19 +3645,22 @@ async def _unless_the_caller_leaves(
     try:
         await task
     except asyncio.CancelledError:
-        # Ours: cancelled two lines above, awaited so the cancellation reaches
-        # httpx and closes the sockets. `_post_unless_the_caller_leaves` says
-        # why it must not propagate.
+        # Ours: cancelled two lines above, and awaited so the cancellation
+        # reaches httpx and closes the sockets. Letting it propagate would
+        # report the caller's own departure as this request being cancelled.
         pass
     except Exception as exc:
         # The work failed in the same instant the caller left. There is nobody
         # to answer, so it is said where a person can find it and the caller's
         # departure is what this returns.
         print(
-            f"crucible: a decision failed as its caller left: "
+            f"crucible: work for a caller who left failed as it went: "
             f"{type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
+    # The watcher finished, which is the caller leaving — or the watcher's own
+    # fault, raised here now that the work is down rather than lost with it.
+    watch.result()
     return None
 
 
@@ -4097,7 +4150,7 @@ def _chat_limit_of(residency: Residency) -> tuple[int | None, str | None]:
     resident = residency.resident_model
     if resident is None:
         return (None, None)
-    return chat_admission(resident.engine)
+    return chat_admission(resident.engine, resident.engine_args)
 
 
 def _chat_queue_full(

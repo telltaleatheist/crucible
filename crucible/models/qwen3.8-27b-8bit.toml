@@ -125,7 +125,49 @@ revision = "815b83c0df8ffd1d1b5244cf75fd6ef14fca9ef9"
 # no `estimate_basis` (that is a voice manifest's field), which the validator
 # said by name the first time this file was written with one.
 memory_bytes_estimate = 41_688_522_448
-engine_args = []
+# THE BATCH, STATED -- AND WHY THESE NUMBERS. COMPUTED 2026-09-24, MEASUREMENT OWED.
+# mlx-lm 0.31.3 batches (engines/mlx_lm.py, `chat_concurrency_flag`): one
+# `BatchGenerator` decodes up to `--decode-concurrency` sequences at once and
+# prefills up to `--prompt-concurrency` prompts per forward. The chat door admits
+# `--decode-concurrency + 1`, read off this argv, and that is the pool a client
+# sizes from `/v1/activity`. Crucible states all three flags (house rule: no
+# library defaults; `MlxLmEngine.start` refuses an argv without them).
+#
+# The bound is NOT Crucible's 61 GiB budget but the tighter one mlx-lm wires to:
+# Metal's `max_recommended_working_set_size`, 55_662_788_608 B (51.84 GiB) on the
+# M1 Ultra, read with `mx.device_info()` 2026-09-24 (`server.py` L1893-1895 sets
+# the wired limit to it). Past it the Mac pages. Every term, per sequence at the
+# 8192 tokens that is the widest class default this model serves (clean,
+# generate, decide; translate is 4096):
+#   KV            8192 x kv_bytes_per_token (the [memory] table below)
+#   recurrent     gated-delta state, float32 (`models/gated_delta.py` L279:
+#                 `mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)`), per sequence
+#                 and flat in length: linear layers x v heads x 128 x 128 x 4 B
+#   conv          linear layers x 3 x (2 x 16 x 128 + v heads x 128) x 2 B
+# held by the decode batch AND by each of the `--prompt-cache-size` finished
+# sequences mlx-lm keeps for prefix reuse (worst case: every one a full 8192).
+# Prefill is taken at the measured `overhead_bytes` per prompt in flight, i.e.
+# `--prompt-concurrency - 1` extra copies of it -- the worst case, since only
+# part of that residual is a per-step transient.
+# THIS MODEL, AND WHY IT GETS HALF THE 9B'S WIDTH: 48 gated-delta layers x
+# 48 v heads and 65_536 B of KV per token (config.json read 2026-09-24).
+#   per sequence  536_870_912 KV + 150_994_944 recurrent + 2_949_120 conv
+#               = 690_814_976 B
+#   weights + overhead                        40_883_216_080
+#   + 8 in flight                              5_526_519_808
+#   + 10 cached                                6_908_149_760
+#                                          = 53_317_885_648 B = 49.66 GiB of 51.84
+# 2.18 GiB spare. 16 in flight would be 54.80 GiB -- past the working set, so
+# the Mac would page -- and so would a second prompt prefilling beside the
+# first if the 11.38 GB residual is per prompt (60.26 GiB): hence ONE prompt at
+# a time, which is exactly how that residual was measured (on the 4-bit, one
+# stream). Prefill is compute-bound, so a serial prefill costs little; decode is
+# where the batch pays. At translate's 4096 tokens the same 8 come to 45.2 GiB.
+engine_args = [
+    "--decode-concurrency", "8",
+    "--prompt-concurrency", "1",
+    "--prompt-cache-size", "10",
+]
 # THE MOST A LOAD MAY ASK FOR HERE. COMPUTED 2026-09-23, LOAD TEST OWED, from
 # the corrected terms below against the Studio's 48.0 GiB (51_539_607_552 B):
 #   29_501_218_479 weights + 11_381_997_601 residual  = 40_883_216_080 (38.08 GiB)

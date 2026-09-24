@@ -391,15 +391,15 @@ def test_decide_lists_the_aliases_and_the_text_classes_do_not() -> None:
         # No 8-bit 27B, text or vision: Mac only since 2026-09-23.
         CUDA_LINUX: [
             "qwen3.8-27b-4bit-vl", "qwen3.5-9b-vl", "qwen3.8-27b-4bit",
-            "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-0.8b",
+            "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b",
         ],
         MLX_DARWIN: [
             "qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b", "qwen3.5-4b",
-            "qwen3.5-0.8b",
+            "qwen3.5-2b", "qwen3.5-0.8b",
         ],
         LLAMA_WINDOWS: [
             "qwen3.8-27b-4bit-vl", "qwen3.8-27b-4bit", "qwen3.5-9b-vl",
-            "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-0.8b",
+            "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b",
         ],
     }
     text = {
@@ -423,7 +423,7 @@ def test_decide_lists_the_aliases_and_the_text_classes_do_not() -> None:
 
 
 def test_the_small_tiers_are_untouched() -> None:
-    for model_id in ("qwen3.5-4b", "qwen3.5-0.8b"):
+    for model_id in ("qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"):
         manifest = load_manifest(model_id)
         assert manifest.weights_of is None
         assert aliases_of(manifest) == ()

@@ -985,10 +985,10 @@ def test_generate_is_one_routable_client_sized_class_on_the_9b_floor() -> None:
     assert names.index("generate") + 1 == names.index("decide")
     assert [c.name for c in CLASSES if c.client_sized] == ["generate"]
     assert "generate" in capability.ROUTABLE_CLASSES
-    # The 4B and 0.8B are below its floor on every backend.
+    # The 4B, 2B and 0.8B are below its floor on every backend.
     for kind in ("cuda-linux", "mlx-darwin", "llama-windows"):
         ids = {c.id for c in entry.candidates(kind)}
-        assert ids and not ids & {"qwen3.5-4b", "qwen3.5-0.8b"}, (kind, ids)
+        assert ids and not ids & {"qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"}, (kind, ids)
 
 
 def test_a_ceiling_is_the_smaller_of_what_is_served_and_what_memory_affords() -> None:

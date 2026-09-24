@@ -144,6 +144,13 @@ class ResidentModel:
     memory_bytes_estimate: int
     log_path: Path
     loaded_at: str
+    #: THE ARGV THE ENGINE WAS STARTED WITH, after the model directory, host and
+    #: port — exactly what `Residency._engine_args` composed and `start()` was
+    #: handed. Recorded for `max_model_len`'s reason: the chat door reads its
+    #: admission off it for an engine whose concurrency is a flag (mlx-lm's
+    #: `--decode-concurrency`, `engines.chat_admission`), and a manifest edited
+    #: while this engine is up must not change what the door thinks is running.
+    engine_args: tuple[str, ...]
     #: `[defaults]` as the manifest read at LOAD time, for `max_model_len`'s
     #: reason one field up: a manifest edited while this engine is up must not
     #: change what a request in flight is answered with, and the record is what
@@ -1161,13 +1168,14 @@ class Residency:
             f"starting {spec.engine} for {manifest.id} on 127.0.0.1:{port} "
             f"(context {context}); log {log_path}"
         )
+        args = self._engine_args(manifest, spec, weights_dir, plan, context=context)
         try:
             self._start(
                 engine,
                 weights_dir,
                 served,
                 port,
-                self._engine_args(manifest, spec, weights_dir, plan, context=context),
+                args,
                 say,
                 timeout,
             )
@@ -1188,6 +1196,7 @@ class Residency:
             memory_bytes_estimate=spec.memory_bytes_estimate,
             log_path=log_path,
             loaded_at=_now(),
+            engine_args=tuple(args),
         )
         say(f"{manifest.id} is resident at {engine.base_url}")
         return self._resident

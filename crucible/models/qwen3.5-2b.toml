@@ -1,0 +1,292 @@
+# Qwen3.5 2B — the decision tier between the 4B and the 0.8B.
+#
+# WHY THIS MANIFEST EXISTS (2026-09-24). Owen: *"decide/snap on crucible should
+# let the user pick the model. 27b, 9b, 4b, all the way down to 0.8b."* The
+# catalog had every tier on that ladder but one: Qwen3.5 publishes a 2B
+# (`GET /api/models?author=Qwen&search=Qwen3.5`, 2026-09-23, the listing the 4B
+# cites), and it was the only official size the decision door could not offer.
+#
+# WHAT IT IS FOR. `decide` and nothing else, as the 4B and 0.8B: the four text
+# classes carry a 9B floor (`capability.NINE_B_FLOOR`) read against `params_b`.
+#
+# PRECISION: FULL, ON EVERY BLOCK. Owen, 2026-09-24: *"full quant when
+# possible"* — unquantized weights wherever the model fits the machine, and a
+# 2B fits every machine this catalog serves. So bf16 on cuda-linux and
+# mlx-darwin (as the 4B and 0.8B), and on llama-windows the BF16 GGUF rather
+# than the Q8_0 the 4B and 0.8B pin there — the one place this manifest departs
+# from its siblings, and it departs toward the ruling, not away from it.
+#
+# NOT QWEN3.8: there is no Qwen3.8 at this size (the Qwen org publishes 27B,
+# Flash-Next and 2.4T-A95B, listed 2026-09-23).
+#
+# memory_bytes_estimate on every block is COMPUTED — nobody has loaded this
+# model on any backend. It is built exactly as the 4B's is, and it is closer to
+# measured than the 4B's in one respect: its TEXT attention shape is the 0.8B's,
+# field for field, so the 0.8B's MEASURED KV slope carries to it exactly.
+
+[model]
+id = "qwen3.5-2b"
+family = "qwen3.5"
+# "Number of Parameters: 2B" — the model card at the pinned revision. Ollama's
+# config blob calls it "2.3B" (the tower and the MTP head counted in); the card
+# is the publisher's number, and it is the one the 0.8B's 0.8 was read from.
+params_b = 2
+# 16384, THE 4B'S ARGUMENT, which is the 9B's: the records for 16384 are all
+# records of what the CLIENTS size against (BookForge's `numCtxMaxForModel`
+# `<=15B` tier, Foundry's `CTX_MAX = 16384`), and a 2B is inside that tier. The
+# 0.8B's 8192 is not carried: its first record is the context THAT checkpoint
+# was served at in PHASE22 section 8a, and nobody has served this one. KV at
+# 16384 is 0.27 GiB on cuda-linux (the slope below).
+context_default = 16384
+
+# What the WEIGHTS support, read from the hub on 2026-09-24:
+#   Qwen/Qwen3.5-2B @ 15852e8c16360a2fea060d615a32b45270f8a8fc
+#   config.json `text_config.max_position_embeddings` = 262144
+trained_context = 262144
+# WHAT THE WEIGHTS ACCEPT. `Qwen3_5ForConditionalGeneration` with a
+# `vision_config` (depth 24, hidden 1024, patch 16 — the 4B's tower shape, its
+# `out_hidden_size` 2048 to this model's hidden), filed `image-text-to-text`.
+# The text config is the family's: `model_type` `qwen3_5_text`, hidden 2048,
+# intermediate 6144, 24 layers, `full_attention_interval` 4, 8 query / 2 kv
+# heads x 256, linear attention 16 key / 16 value heads x 128, conv kernel 4,
+# vocabulary 248320 — which places it between the 0.8B (hidden 1024) and the
+# 4B (hidden 2560, 32 layers) and makes it the real 2B, not a relabelled
+# sibling. Each backend's `serves` says what that backend's engine is handed
+# (PHASE22 section 2.9): images on cuda-linux and llama-windows, text on
+# mlx-darwin.
+modalities = ["text", "image"]
+display = "Qwen 3.5 · 2B"
+description = "A small decision model between the 4B and the 0.8B, reading images as well as text on a PC or Windows card. Decisions only — below the 9B floor for cleanup, translation, simplification and analysis."
+
+# The 9B's reason, the same family and template (models/qwen3.5-9b.toml). The
+# model card adds one of its own at this size: "Qwen3.5-2B is more prone to
+# entering thinking loops compared to other Qwen3.5 models" (2026-09-24).
+[defaults]
+thinking = false
+
+# ------------------------------------------------------------ the local form
+#
+#   tag             `qwen3.5:2b-bf16` — ollama.com/library/qwen3.5:2b-bf16
+#                   answers 200 (2026-09-24). Not the default `qwen3.5:2b`
+#                   (Q8_0 by its config blob, model layer 2_741_180_928 B), by
+#                   the 9B's rule: the local form is the same weights as the
+#                   served form. (Ollama's own config blob for this tag says
+#                   `file_type` F16: a 16-bit float, unquantized.)
+#   download_bytes  4_561_905_715 — the tag's registry manifest summed
+#                   (`registry.ollama.ai/v2/library/qwen3.5/manifests/2b-bf16`,
+#                   2026-09-24): model 4_561_893_824 + license 11_354 + params
+#                   65 + config 472. The vision tower is inside the model layer.
+#   needs_bytes     6_061_905_715 — download + Foundry's 1.5 GB `OVERHEAD_GB`,
+#                   DECLARED, as the 4B and 0.8B. Not watched.
+[local]
+kind = "ollama"
+tag = "qwen3.5:2b-bf16"
+download_bytes = 4_561_905_715
+needs_bytes = 6_061_905_715
+needs_basis = "declared"
+
+[backends.cuda-linux]
+engine = "vllm"
+# THE OFFICIAL REPO, Qwen's own org, as the 4B and 0.8B. Head on 2026-09-24
+# (`GET /api/models/Qwen/Qwen3.5-2B`), public, not gated, `base_model:
+# Qwen/Qwen3.5-2B-Base`, one safetensors shard of 4_548_221_488 B (bf16, with
+# the family's f32 norms and SSM parameters).
+hf_repo = "Qwen/Qwen3.5-2B"
+revision = "15852e8c16360a2fea060d615a32b45270f8a8fc"
+serves = ["text", "image"]
+# 8_376_315_577 B = 7.80 GiB, COMPUTED, and every term is in the table below.
+memory_bytes_estimate = 8_376_315_577
+# The 4B's line, for the 4B's reasons: `--dtype bfloat16` and `--max-num-seqs
+# 16` are the 9B's measured choices; no `--language-model-only` or
+# `--skip-mm-profiling`, because this block serves images and the loader refuses
+# either beside them; `--limit-mm-per-prompt {"image": 8, "video": 0}` is the
+# door's `decide.MAX_IMAGES` and no video.
+#
+# `--gpu-memory-utilization 0.33` is the estimate over 23.99 GiB (0.325, taken
+# up) and is INERT here, as on the 4B: `vram.plan_vllm_memory` sizes this block
+# from its terms.
+engine_args = [
+    "--dtype", "bfloat16",
+    "--gpu-memory-utilization", "0.33",
+    "--max-num-seqs", "16",
+    "--limit-mm-per-prompt", '{"image": 8, "video": 0}',
+]
+# THE MOST A LOAD MAY ASK FOR HERE (`params.context`). COMPUTED 2026-09-24, LOAD TEST OWED, from the
+# COMPUTED terms below against the 3090 Ti's 21.0 GiB (24_564 MiB less the 3 GiB allowance = 22_535_995_392 B): 4_564_522_271 + 3_516_504_474 =
+# 8_081_026_745 B fixed, + 131072 x 18_023 (2_362_310_656) = 10_443_337_401 B
+# = 9.73 GiB. The memory would afford 802_028 tokens; 131072 is the cap, not the memory: a longer prefill is not worth its time, and it is ample.
+max_context = 131072
+
+# ------------------------------------------------- the same number, taken apart
+#
+# COMPUTED 2026-09-24, by the 4B's method. Every input, and where it came from:
+#
+#   weights_bytes   4_564_522_271 = 3_763_655_360 + 662_833_152 + 138_033_759
+#     3_763_655_360  the language model: every tensor that is neither
+#                    `model.visual.*` nor `mtp.*`, summed out of the safetensors
+#                    header at the pinned revision (HTTP range read,
+#                    2026-09-24). `mtp.*` (121_656_320 B) is left out: vLLM does
+#                    not load it without speculative decoding (the 4B's
+#                    reasoning, from the 9B's calibration). The same script
+#                    reproduces the 0.8B's 1_504_791_232 to the byte.
+#       662_833_152  the vision tower, `model.visual.*`, same method. It LOADS
+#                    here — this block serves images.
+#       138_033_759  what vLLM holds beyond the file's language model, the
+#                    0.8B's MEASURED constant (the larger of the 0.8B's and the
+#                    9B's, which agree to 0.006 GiB), carried as the 4B carries
+#                    it: a constant, not a ratio.
+#
+#   overhead_bytes  3_516_504_474 = 1_476_395_008 + 2_040_109_466
+#     1_476_395_008  the 9B's MEASURED non-KV overhead, carried as an UPPER
+#                    BOUND exactly as the 4B carries it: the 0.8B measured 0.75
+#                    GiB for the same term, and this model's hidden (2048) and
+#                    intermediate (6144) sit between the 0.8B's and the 9B's.
+#     2_040_109_466  the IMAGE RESERVE, 1.90 GiB, the 9B's MEASURED A/B, an
+#                    UPPER BOUND: this tower is the 4B's shape (24 blocks of
+#                    1024 against the 9B's 27 of 1152). It is the only thing
+#                    reserving an image's room once `--kv-cache-memory-bytes` is
+#                    set (vLLM skips its profiling, `v1/worker/gpu_worker.py`
+#                    L527).
+#
+#   kv_bytes_per_token  18_023 — the 0.8B's MEASURED slope (PHASE22 section 8a,
+#                    1.35 GiB / 80,430 tokens), and it carries EXACTLY, not
+#                    approximately: every input to it is the same number in
+#                    both config.json files — 24 layers with
+#                    `full_attention_interval` 4 (6 full-attention layers), 2 kv
+#                    heads x 256 head_dim, and the gated-delta-net shape (16 key
+#                    heads, 16 value heads, 128 x 128, conv kernel 4) that vLLM
+#                    pads the attention page up to (the 544-token block). Hidden
+#                    size is the one field that differs, and KV does not read
+#                    it. The computed figure would be 12_288, 32% light.
+#
+#   measured_at_context 16384, this block's context; the terms add to the
+#                    estimate above exactly.
+#
+# OWED: the first load on a card. Replace the two carried overhead terms with
+# this model's own, and the basis with `measured`.
+[backends.cuda-linux.memory]
+weights_bytes = 4_564_522_271
+overhead_bytes = 3_516_504_474
+kv_bytes_per_token = 18_023
+basis = "computed"
+measured_at_context = 16384
+
+[backends.mlx-darwin]
+engine = "mlx-lm"
+# mlx-community's bf16 conversion, the org and the precision every mlx-darwin
+# block of the family pins (`mlx-community/Qwen3.5-4B-bf16`,
+# `mlx-community/Qwen3.5-0.8B-bf16`). Head on 2026-09-24, public; its card says
+# "converted to MLX format from `Qwen/Qwen3.5-2B`" (mlx-vlm 0.3.12) and lists
+# `base_model: Qwen/Qwen3.5-2B-Base`, as the 0.8B's does. Its config.json is
+# the official one field for field. One safetensors file of 4_426_559_145 B.
+hf_repo = "mlx-community/Qwen3.5-2B-bf16"
+revision = "fb270110eb5a9af244937040c9c3e57addab8ee9"
+# Text only: mlx-lm is the Mac's text engine and cannot be handed an image; the
+# Mac's image engine is Crucible's dots-specific page server. The 4B's block says
+# this at length.
+serves = ["text"]
+# 6_034_022_438 B = 5.62 GiB, COMPUTED, the 4B's method:
+#   weights_bytes   3_763_650_752 — the language model in this repo's header
+#                   (2026-09-24); mlx-lm does not load the 662_833_152 B tower
+#                   (the 9B's measured "active 17.91 GB" equals its language
+#                   model alone). This repo carries no `mtp.*`.
+#   overhead_bytes  2_069_045_094 — the 9B mlx block's residual, dominated by a
+#                   2048-token step's logits over the same 248320 vocabulary.
+#   kv_bytes_per_token  12_288 — computed: 6 x 2 x 2 x 256 x 2 B, the 0.8B's
+#                   figure, for the same shape.
+#   at 16384        201_326_592
+memory_bytes_estimate = 6_034_022_438
+# THE BATCH, STATED -- AND WHY THESE NUMBERS. COMPUTED 2026-09-24, MEASUREMENT OWED.
+# mlx-lm 0.31.3 batches (engines/mlx_lm.py, `chat_concurrency_flag`): one
+# `BatchGenerator` decodes up to `--decode-concurrency` sequences at once and
+# prefills up to `--prompt-concurrency` prompts per forward. The chat door admits
+# `--decode-concurrency + 1`, read off this argv, and that is the pool a client
+# sizes from `/v1/activity`. Crucible states all three flags (house rule: no
+# library defaults; `MlxLmEngine.start` refuses an argv without them).
+#
+# The bound is NOT Crucible's 61 GiB budget but the tighter one mlx-lm wires to:
+# Metal's `max_recommended_working_set_size`, 55_662_788_608 B (51.84 GiB) on the
+# M1 Ultra, read with `mx.device_info()` 2026-09-24 (`server.py` L1893-1895 sets
+# the wired limit to it). Past it the Mac pages. Every term, per sequence at the
+# 8192 tokens that is the widest class default this model serves (clean,
+# generate, decide; translate is 4096):
+#   KV            8192 x kv_bytes_per_token (the [memory] table below)
+#   recurrent     gated-delta state, float32 (`models/gated_delta.py` L279:
+#                 `mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)`), per sequence
+#                 and flat in length: linear layers x v heads x 128 x 128 x 4 B
+#   conv          linear layers x 3 x (2 x 16 x 128 + v heads x 128) x 2 B
+# held by the decode batch AND by each of the `--prompt-cache-size` finished
+# sequences mlx-lm keeps for prefix reuse (worst case: every one a full 8192).
+# Prefill is taken at the measured `overhead_bytes` per prompt in flight, i.e.
+# `--prompt-concurrency - 1` extra copies of it -- the worst case, since only
+# part of that residual is a per-step transient.
+# THIS MODEL: 18 gated-delta layers x 16 v heads (config.json read 2026-09-24).
+#   per sequence  100_663_296 KV + 18_874_368 recurrent + 663_552 conv
+#               = 120_201_216 B
+#   weights + overhead                         5_832_695_846
+#   + 3 extra prefills (x 2_069_045_094)       6_207_135_282
+#   + 16 in flight                             1_923_219_456
+#   + 10 cached                                1_202_012_160
+#                                          = 15_165_062_744 B = 14.12 GiB of 51.84
+# The decide door fans a decision out at the admission (17 here), and on this
+# engine each question deep-copies the state's cache from the prompt cache
+# (`LRUPromptCache.fetch_nearest_cache`), so a decision on this model holds
+# about 17 states: 2.0 GB at 8192 tokens. Well inside.
+engine_args = [
+    "--decode-concurrency", "16",
+    "--prompt-concurrency", "4",
+    "--prompt-cache-size", "10",
+]
+# THE MOST A LOAD MAY ASK FOR HERE. COMPUTED 2026-09-24, LOAD TEST OWED, against the Studio's 48.0 GiB (64 GiB less the 25% allowance = 51_539_607_552 B):
+# 3_763_650_752 + 2_069_045_094 = 5_832_695_846 B fixed, + 131072 x 12_288
+# (1_610_612_736) = 7_443_308_582 B = 6.93 GiB. The memory would afford
+# 3_719_637 tokens; 131072 is the cap, not the memory: a longer prefill is not worth its time, and it is ample. ADMISSION on mlx-darwin, not an engine cap.
+max_context = 131072
+
+[backends.mlx-darwin.memory]
+weights_bytes = 3_763_650_752
+overhead_bytes = 2_069_045_094
+kv_bytes_per_token = 12_288
+basis = "computed"
+measured_at_context = 16384
+
+# ---------------------------------------------------------------------------
+# llama.cpp on Windows. Qwen publishes no GGUF for Qwen3.5 or Qwen3.8 (the Qwen
+# org's listing, 2026-09-23), so unsloth, as for every llama-windows block here.
+# Read from the HuggingFace API on 2026-09-24:
+#
+#   hf_repo/revision  unsloth/Qwen3.5-2B-GGUF @ f6d5376be1edb4d416d56da11e5397a961aca8ae
+#                     (`base_model: Qwen/Qwen3.5-2B` — the weights the
+#                     cuda-linux block pins)
+#   file              Qwen3.5-2B-BF16.gguf    3_775_709_216 B (tree API, LFS size)
+#   mmproj            mmproj-F16.gguf           668_227_264 B
+#
+# BF16, NOT THE Q8_0 THE 4B AND 0.8B PIN HERE (Qwen3.5-2B-Q8_0.gguf,
+# 2_012_012_800 B): Owen's "full quant when possible" (2026-09-24), and 3.78 GB
+# is nothing to a 24 GB card. The projector is F16, as on every sibling: a
+# 16-bit float, unquantized, and the one snap measured on the 9B (PHASE22
+# section 2.7).
+#
+# memory_bytes_estimate: the two files plus Foundry's 1.5 GB, DECLARED, as every
+# llama-windows block. KV at 16384 is 201_326_592 B (12_288 B/token) of it.
+[backends.llama-windows]
+engine = "llama-server"
+hf_repo = "unsloth/Qwen3.5-2B-GGUF"
+revision = "f6d5376be1edb4d416d56da11e5397a961aca8ae"
+file = "Qwen3.5-2B-BF16.gguf"
+mmproj = "mmproj-F16.gguf"
+serves = ["text", "image"]
+memory_bytes_estimate = 5_943_936_480
+engine_args = ["--parallel", "1"]
+# THE MOST A LOAD MAY ASK FOR HERE, composed as llama-server's `-c`. COMPUTED 2026-09-24, LOAD TEST OWED,
+# from the DECLARED terms below against the 3090 Ti's 21.0 GiB (24_564 MiB less the 3 GiB allowance = 22_535_995_392 B): 4_443_936_480 +
+# 1_298_673_408 = 5_742_609_888 B fixed, + 131072 x 12_288 = 7_353_222_624 B
+# = 6.85 GiB. The memory would afford 1_366_649 tokens; 131072 is the cap, not the memory: a longer prefill is not worth its time, and it is ample.
+max_context = 131072
+
+[backends.llama-windows.memory]
+weights_bytes = 4_443_936_480
+overhead_bytes = 1_298_673_408
+kv_bytes_per_token = 12_288
+basis = "declared"
+measured_at_context = 16384
