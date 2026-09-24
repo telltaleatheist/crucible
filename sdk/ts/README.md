@@ -757,6 +757,26 @@ voice or model row it cannot read: that row goes to the capability's `unreadable
 raw data and the reason, and the rest of the document is returned. (`models()` and `voices()`
 are the direct reads and still refuse such a row by name.)
 
+### Informational to the read, load-bearing to YOUR path
+
+A field can be informational for the call that reads it and still be something one of *your*
+code paths cannot proceed without. The read stays tolerant, so every other caller keeps working
+against an older server. **The path that needs the field refuses by name when it is `null`.** It
+never substitutes a default. The ones clients have actually hit (Briefcase and bookforge-pc-1,
+2026-09-24):
+
+| Field | Who needs it | What `null` means, and what to do |
+|---|---|---|
+| `info().host.backend`, capability `backendKind` | a client choosing a per-backend module or model (mlx-whisper vs faster-whisper) | The server did not say which backend it is. Refuse the choice by name; don't guess. |
+| `job().chunksDone` | a resume | Unknown, **not** "none done". Treating it as `[]` re-renders chunks already on disk. Refuse the resume by name, or start over knowingly. |
+| decide `answers[q].logprobs` | a client summing evidence | Derivable. The server computes `logprobs[l] = ln(probabilities[l])` (`crucible/decide.py`), and `probabilities` is load-bearing and never null. A label whose probability is exactly 0 has a `null` logprob (`-Infinity` is not JSON). |
+| chat `usage` / `usage.promptTokens` | a client counting tokens | The engine behind the door did not report usage; some upstreams don't. It isn't 0. Count it yourself or refuse the count. |
+| `activity().chat.inFlight` | a client deciding whether the card is free (for example, before an unload) | The server did not count. It isn't 0. **Treat it as busy.** |
+
+On a model row, `installed`, `backendSupported` and `family` describe the model. **`loadable`
+and `resident` are the facts to act on**: whether a `load-model` would be accepted, and whether
+it is on the card now.
+
 Misconfiguration is unchanged, and still refused by name: nothing listening, something that is
 not a Crucible, a wrong token (401), a different API major (426). There is no version
 comparison beyond the API major.
