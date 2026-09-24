@@ -18,7 +18,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from crucible.engines import find_free_port
 
@@ -39,6 +39,17 @@ FAKE_MAX_LOGPROBS = 20
 #: vLLM's prefix cache reuses whole KV blocks only, so a reported
 #: `cached_tokens` is a multiple of the block size (16 by default).
 FAKE_KV_BLOCK = 16
+
+#: How the fake's prefix cache decides what a prompt reuses.
+#: `blocks` is vLLM's: any common token prefix, in whole blocks.
+#: `segments` is mlx-lm 0.31.3's on a HYBRID model (Qwen3.5), whose recurrent
+#: state cannot be trimmed (`models/cache.py` `can_trim_prompt_cache`): only an
+#: entry that is an EXACT prefix of the new prompt is reused
+#: (`LRUPromptCache.fetch_nearest_cache`, `result.shorter`), and entries are
+#: saved only at segment ends — the system segment (through the opening of the
+#: user turn, `server.py` `_tokenize`) and the whole prompt, which ends in the
+#: template's end-of-turn and so is never a prefix of a different prompt.
+PrefixCache = Literal["blocks", "segments"]
 
 #: The tokens that carry whatever probability the installed letters leave over.
 #: `" A"` is here on purpose (snap's fake does the same): a reader that matched
@@ -110,6 +121,10 @@ class _Handler(BaseHTTPRequestHandler):
     report_cached: bool = True
     #: Every completion's rendered prompt text, for the prefix-cache emulation.
     prompts: list[str] | None = None
+    #: Which engine's prefix-cache rule the fake follows (`PrefixCache`).
+    prefix_cache: str = "blocks"
+    #: `segments` mode's saved entries (rendered text), mlx-lm's trie in small.
+    saved: list[str] | None = None
     #: `("start"|"end", request index)` in order, and how many completions were
     #: open at once at the most — the two things a concurrency test asks.
     events: list[tuple[str, int]] | None = None
@@ -315,14 +330,25 @@ class _Handler(BaseHTTPRequestHandler):
         `--enable-prompt-tokens-details`, and null in its place otherwise
         (`UsageInfo`, `vllm/entrypoints/serve/engine/protocol.py` L110-115).
         """
-        text = _rendered(body.get("messages", []))
+        msgs = body.get("messages", [])
+        text = _rendered(msgs)
         n_prompt = max(1, len(text) // 4)
         with type(self).lock:
-            common = max(
-                (_common_prefix(text, seen) for seen in type(self).prompts), default=0
-            )
+            if type(self).prefix_cache == "segments":
+                saved = type(self).saved
+                hit = max((len(k) for k in saved if text.startswith(k)), default=0)
+                cached = hit // 4
+                key = system_segment(msgs)
+                if key is not None and key not in saved:
+                    saved.append(key)
+                saved.append(text + END_OF_TURN)
+            else:
+                common = max(
+                    (_common_prefix(text, seen) for seen in type(self).prompts),
+                    default=0,
+                )
+                cached = (common // 4) // FAKE_KV_BLOCK * FAKE_KV_BLOCK
             type(self).prompts.append(text)
-        cached = (common // 4) // FAKE_KV_BLOCK * FAKE_KV_BLOCK
 
         letters = type(self).probs_for(body.get("messages", []))
         entries = list(letters.items())
@@ -435,6 +461,30 @@ def _rendered(messages: list[dict[str, Any]]) -> str:
     return "".join(out)
 
 
+#: What the fake's template closes a turn with. A saved whole-prompt entry ends
+#: in it, as a real one ends in `<|im_end|>…<|im_start|>assistant…`, so it is a
+#: prefix of no prompt but its own.
+END_OF_TURN = "<|end|>"
+
+
+def system_segment(messages: list[dict[str, Any]]) -> str | None:
+    """mlx-lm's system segment in the fake's rendering: the system messages and
+    the opening of the user turn (`<|user|>`), which is where `_tokenize`'s
+    `system + [user ""]` render first differs from the prompt. None when there
+    is no system message, or when the last message is not the user's (mlx-lm
+    does not segment such a prompt at all)."""
+    if not messages or messages[-1].get("role") != "user":
+        return None
+    leading = []
+    for message in messages:
+        if message.get("role") != "system":
+            break
+        leading.append(message)
+    if not leading:
+        return None
+    return _rendered(leading) + "<|user|>"
+
+
 def _common_prefix(a: str, b: str) -> int:
     n = 0
     for x, y in zip(a, b):
@@ -467,6 +517,7 @@ class FakeEngine:
         probs_for: ProbsFor | None = None,
         max_logprobs: int = FAKE_MAX_LOGPROBS,
         report_cached: bool = True,
+        prefix_cache: PrefixCache = "blocks",
     ) -> None:
         self._python = Path(python)
         self._log_path = Path(log_path)
@@ -489,6 +540,7 @@ class FakeEngine:
         self._probs_for = probs_for
         self._max_logprobs = max_logprobs
         self._report_cached = report_cached
+        self._prefix_cache = prefix_cache
         #: Set once `ready()` has been entered, so a test knows the lane has
         #: reached the engine without polling on a sleep.
         self.warming_started = threading.Event()
@@ -540,6 +592,8 @@ class FakeEngine:
                 "max_logprobs": self._max_logprobs,
                 "report_cached": self._report_cached,
                 "prompts": [],
+                "prefix_cache": self._prefix_cache,
+                "saved": [],
                 "events": [],
                 "in_flight": [0],
                 "max_in_flight": [0],

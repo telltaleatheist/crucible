@@ -102,7 +102,8 @@ the model, and snap's process goes away for the apps.
 - **Qwen3.5 is hybrid** (DeltaNet + full attention every 4th block). On llama-server a prompt
   prefix is reused only from a *context checkpoint* (~50 MiB, ~80 ms each), created at batch
   boundaries; a state sent ALONE first ("priming") leaves the checkpoint at its end and every
-  question then prefills only its own ~48 tokens. Crucible's llama-windows launch does not
+  question then prefills only its own ~48 tokens (snap's `/completion` reader; through the
+  chat route that holds only for the layout of §2.5.1). Crucible's llama-windows launch does not
   set `--ctx-checkpoints` (engine default 32). vLLM's prefix cache is block-granular and
   needs no priming to share a prefix, but a prime still keeps N concurrent questions from
   each prefilling the same state at once.
@@ -271,9 +272,11 @@ named in `missing_labels`. That is honest and useless — the whole signal is in
 ### 2.3 The reading is Crucible's, the order is the client's
 
 `crucible/decide.py` owns everything snap's `prompt.py`, `labels.py` and the pure half of
-`decide.py` own today, ported with their unit tests: the system prompt, the user message
-(`State:` … images first as content parts, then text, then the question block with the
-lettered legend and "Answer with the letter only."), the letter assignment (A.. in option
+`decide.py` own today, ported with their unit tests: the system prompt, the messages (since
+the release after 1.0.24 the system message is snap's frame, `\n\nState:\n` and the state text; the user
+message is the images as content parts, then the question block with the lettered legend
+and "Answer with the letter only." — §2.5.1 says why the state moved out of the user
+message), the letter assignment (A.. in option
 order; `yesno` is A = Yes, B = No), the renormalisation over the letters and `label_mass`,
 the expected-value score. The client sends none of that; it sends the state, the questions
 and the options, which is the ORDER. "Prompts stay in the app" (DESIGN.md §3) is not
@@ -325,8 +328,11 @@ reader does not know or care which it is talking to, and reads only `token` and 
 of each entry (vLLM adds `bytes`, llama-server `id` and `bytes`, mlx-lm `id`).
 
 Images travel as `{"type": "image_url", "image_url": {"url": "data:image/<fmt>;base64,…"}}`
-content parts ahead of the text part, the encoding `pages.py` already uses, on an engine
-whose manifest declares `image` (§2.7).
+content parts at the start of the USER message, ahead of the question's text part, the
+encoding `pages.py` already uses, on an engine whose manifest declares `image` (§2.7). They
+cannot go in the system message with the state text (Qwen3.5's template raises "System
+message cannot contain images."), so the system message says where they are
+(`decide.IMAGES_NOTE`) — §2.5.1.
 
 **Where an engine cannot do this, the door refuses by name, `503 decide_not_served`,
 saying which engine and why** (today: the `mlx-vlm` page server, which computes no
@@ -352,6 +358,100 @@ llama-server the prime is what leaves the hybrid model's checkpoint at the end o
 state; on vLLM it fills the prefix cache before N questions ask for the same blocks. Either
 way a prime's reply is never read for letters, and a prime that returns no logprobs is not
 refused (snap `3509bc5`'s rule: a prime is not an answer).
+
+*Corrected by §2.5.1:* the sentence above about llama-server was not true of the layout
+it was written for — the old prime did not leave a checkpoint at the end of the state.
+
+#### 2.5.1 The state lives in the SYSTEM message (fixed after 1.0.24, Briefcase's Mac smoke)
+
+**The finding.** Briefcase's live smoke on 1.0.24 (Mac Studio, `qwen3.5-9b` on mlx-lm
+0.31.3; one transcript state of ~3,000 tokens, 100–700 choice questions of 26 options, 64
+per `/v1/decide` call): accuracy identical to direct llama-server, but **4.55 s per
+question against 0.68 s — 6.7× slower**, and the engine log showed mlx-lm re-prefilling the
+whole state for EVERY question. The prime was never reused.
+
+**The cause, read in mlx-lm 0.31.3's installed source on the Mac Studio
+(`~/.crucible/envs/llm/lib/python3.11/site-packages/mlx_lm/`), 2026-09-23:**
+
+- Qwen3.5 is hybrid: `models/qwen3_5.py` L304-305 makes an `ArraysCache` (recurrent state)
+  for every linear layer. `can_trim_prompt_cache` (`models/cache.py` L88-92) is therefore
+  False, so `LRUPromptCache.fetch_nearest_cache` (L1674-1693) can reuse an entry only when
+  its token key is the EXACT prompt or an exact PREFIX of it (`result.shorter`, L1690); the
+  branch that trims a longer entry back (L1683) is closed to it.
+- Entries are saved only at SEGMENT ends. `server.py` `_tokenize` (L516-624) cuts a chat
+  prompt whose last message is the user's (L577: otherwise no segments at all) into at most
+  three: the system segment, ending where `apply_chat_template(system + [user ""])` first
+  differs from the prompt (L583-603) — i.e. just after `<|im_start|>user\n` — then the user
+  segment, then the thinking tail. The batch path (both KV and Arrays caches have `merge`,
+  so Qwen3.5 is batchable) fetches at L753, saves a cache at each `end_of_segment and not
+  end_of_prompt` (L864-880, typed `system`/`user`), and at the end one more under prompt +
+  generated tokens (L902-908, `cache_type="assistant"`).
+- The door's layout through 1.0.24 was `[system: frame, user: "State:\n" + state (+
+  "\n\n" + question)]`. The prime's user-segment entry ended in `<|im_end|>\n<|im_start|>
+  assistant\n` and its final entry in the generated token — neither a prefix of any
+  question. The one boundary prime and question shared was the end of the FRAME, ~43
+  tokens. Measured with the Mac's own tokenizer and mlx-lm's own `_tokenize` (no model
+  load): old layout, a 535-token prime and three questions — every question's reusable
+  prefix 43 tokens.
+
+**The fix: one layout, every engine.** `[system: SYSTEM_PROMPT + "\n\nState:\n" + state
+(+ "\n\n" + IMAGES_NOTE when there are images), user: (images +) question block]`; the
+prime is the same system message and a fixed user turn, `decide.PRIME_USER_TEXT` ("The
+questions follow."). The shared prefix is now the WHOLE system turn, and it ends exactly at
+mlx-lm's system-segment boundary. Same probe, new layout: the system segment ends at token
+527 for the prime and for every question (a question whose block begins with the prime's
+first word included — the boundary is found against the `user ""` render, not between two
+prompts), and the prime's saved system entry is a prefix of every question. The prime's
+user turn must never be EMPTY: `system + [user ""]` would then be a prefix of the prompt,
+no index would differ, and no system segment would be saved.
+
+**mlx-lm, and whether to serialise.** The door awaits the prime's reply before any question
+leaves (`_decide_on_engine`), and the system entry is inserted during the prime's PREFILL,
+before its token is generated — so every question fetches it, deep-copies it
+(`copy.deepcopy`, L1678/L1692), and prefills only `user` + block + tail. The door's fan-out
+on the Mac is `chat_admission`'s 2 (`chat_concurrency = 1`); the two in flight each copy
+the same entry and neither can spoil it. Serialising to 1 buys nothing. The entry also
+survives the stock `--prompt-cache-size 10`: `CacheOrder.pop` (L1649) evicts `assistant`
+then `user` entries before the single `system` one, and each question adds one of each.
+
+**vLLM 0.29.0.** Token-level prefix caching in whole blocks — 544 tokens on this hybrid
+(§8a). The old layout already shared frame + state up to the question's `\n\n`; the new one
+shares frame + state + `<|im_end|>\n<|im_start|>user\n`. Same blocks, give or take one
+boundary: nothing gained and nothing lost. Images sit at the start of the user turn in
+every request, identical, so they remain part of the shared prefix.
+
+**llama-server b10970** (read at tag `b10970`, 2026-09-23). The chat route renders Qwen3.5
+through the specialised Qwen3-Coder handler (`common/chat.cpp` L1204-1210), which declares
+message delimiters including USER `<|im_start|>user` (`common/parsers/qwen3-coder.cpp`
+L31-37). `tools/server/server-context.cpp` breaks a prompt batch at the start of the LAST
+user message (L3550-3556) and lays a context checkpoint before decoding the batch that
+starts there (L3588-3634, `is_last_user_message` exempt from `--checkpoint-min-step`), plus
+two near the end, at 4 + n_ubatch and 4 tokens before it (L3559-3579; n_ubatch 512 by
+default, `common/common.h` L452, and Crucible does not set it). A later request restores the
+newest checkpoint at or before its common prefix (L3350-3377). **Honestly: the old layout
+was not aligned here either.** Its last user message began after the frame, BEFORE the
+state; its checkpoint 4 tokens from the end sat in the template tail after the state
+(`<|im_end|>…`), past where a question diverges; the one that could serve was
+~516 tokens from the end, so every question re-prefilled roughly the last 500 tokens of
+the state plus its own block (and a state under ~516 tokens reused only the frame). snap's
+"~48 tokens a question" was its `/completion` reader, whose prime ended exactly at the
+state. §2.5's sentence was carried over from snap without that difference. **With the new
+layout the last user message starts exactly where the shared prefix ends**, in the prime
+and in every question, so the prime's user-start checkpoint IS the shared prefix and each
+question prefills only its own user turn — and question N leaves the same checkpoint for
+question N+1. Images get no reuse on llama-server in either layout: the checkpoint is laid
+before the user turn, and no checkpoint follows an image chunk (L3621-3622). `qwen3.5-9b`
+on llama-windows is text-only today, so this is a note, not a loss.
+
+**The prompt text changed, so the answers may move.** SYSTEM_PROMPT's words and the
+question block are unchanged; only where the state sits moved (and Qwen's template `|trim`s
+system content, so a state's trailing whitespace no longer reaches the model). **Owed
+before the layout is trusted:** Briefcase's YTSeg smoke re-run against it — F1@±1 1.000,
+Pk 0.058 on `u25JYe8E3RA`, 16/16 sanity on 1.0.24 — for accuracy AND speed, with the mlx-lm
+log showing questions 2..N prefilling only their own tokens (`cached_tokens` = the system
+segment on every question after the prime). The same check on llama-server (a restored
+checkpoint at the user start) and on vLLM (cached tokens unchanged from 1.0.24) belongs to
+the §8 live pass.
 
 ### 2.6 Engine flags the door needs, composed by Crucible, never on the wire
 
@@ -580,7 +680,9 @@ which one this card can hold.
 - `tests/test_decide_api.py`: the contract's worked example end to end (exact answers,
   `score` = 1.4, `label_mass`, `null` cached_tokens); `model_not_resident`; the act header;
   `chat_queue_full` at the bound; a prime sent first for two questions and not for one, the
-  questions' prompts each extending the prime's messages verbatim; `label_not_in_probs` when a
+  questions' system message byte-identical to the prime's (the state in it and only in it,
+  the question block only in the user message; §2.5.1), and the fake's `segments` prefix rule
+  (mlx-lm 0.31.3's exact-prefix reuse) reporting the state cached on every question; `label_not_in_probs` when a
   letter is outside the top-K; `too_many_options` / `too_many_images` / `model_text_only` /
   `decide_needs_logprobs` refused before any request reaches the fake (assert zero
   requests); `decide_not_served` on an engine class that states no logprobs; provenance's
@@ -727,6 +829,9 @@ Still owed: the door itself on a card (needs a cut or a branch install), host mo
   VERIFIED FROM SOURCE (§1), not yet from a run: the live check is that the letters come
   back pre-sampling (a real distribution at temperature 0, not one-hot) and that a prime
   followed by questions shows the checkpoint reuse snap measured.
+- **The layout of §2.5.1**: Briefcase's YTSeg smoke re-run (accuracy and speed; the mlx-lm
+  log showing questions 2..N prefilling only their own tokens), and on the card and llama-server
+  the same `cached_tokens` check.
 - The Mac: mlx-lm 0.31.3 returns `top_logprobs` capped at 11, read from its installed
   source (§1), not yet from a run. That makes §7.4 moot for every question of 11 labels or
   fewer (yes/no, scores, choices up to K); what is left of it is only whether a 12-to-26

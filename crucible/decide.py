@@ -96,6 +96,30 @@ SYSTEM_PROMPT = (
     "lettered options. Reply with the single letter of the best option and nothing else."
 )
 
+#: Where the state begins, inside the SYSTEM message. The state is shared by
+#: every question of a decision, and it is placed in the system message so the
+#: shared prefix ends exactly where the question begins: at the start of the
+#: user turn. mlx-lm 0.31.3 can reuse a hybrid model's (Qwen3.5) prompt cache
+#: only from an entry that is an EXACT prefix of the new prompt, and it saves
+#: entries only at the end of the system segment and the end of the user
+#: segment (`server.py` `_tokenize`, the batch path's `end_of_segment` save);
+#: with the state in the user turn nothing the prime saved was a prefix of any
+#: question, and every question re-prefilled the whole state (PHASE22 section
+#: 2.5.1). The words `State:` are snap's; only where they sit moved.
+STATE_HEADER = "\n\nState:\n"
+
+#: Said in the system message when the state has images: the chat templates
+#: refuse an image in a system message (Qwen3.5: "System message cannot contain
+#: images."), so they open the user turn instead, and the model is told where.
+IMAGES_NOTE = "The state's images open the user message."
+
+#: The prime's whole user turn. Fixed, short and NEVER empty: mlx-lm finds the
+#: system segment's end by rendering `system + [user ""]` and taking the first
+#: token where that differs from the prompt, and a prime whose user content
+#: was empty would not differ before the render ran out — no system segment,
+#: nothing cached. Its reply is never read.
+PRIME_USER_TEXT = "The questions follow."
+
 #: What a request's image bytes are recognised as, by their own magic numbers.
 #: The data URI names a media type and the engine decodes by it, so a type
 #: guessed wrong is an image read wrong; one that matches nothing is refused.
@@ -188,7 +212,7 @@ class DecideRequest(_Strict):
     leading dot) and key the answers. Answers come back in this order."""
     images: list[str] | None = None
     """Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no
-    whitespace, no `data:` prefix), read as part of the state, before its text.
+    whitespace, no `data:` prefix), read as part of the state, after its text.
     At most 8 (`too_many_images`), and only on a model whose manifest declares
     `image` (`400 model_text_only` otherwise). `[]` is the same as none."""
     missing: Literal["refuse", "report"] = "refuse"
@@ -519,7 +543,7 @@ def render_state(state: Any) -> str:
 
 
 def question_block(kind: str, instructions: str, legend: tuple[tuple[str, str], ...]) -> str:
-    """The question-specific tail of the user message. snap's words, unchanged."""
+    """The question: the whole text of the user turn. snap's words, unchanged."""
     if kind == "yesno":
         head = f"Statement: {instructions}\nIs this statement true of the state above?"
     else:
@@ -546,36 +570,48 @@ def image_part(encoded: str) -> dict[str, Any]:
     return {"type": "image_url", "image_url": {"url": f"data:image/{kind};base64,{encoded}"}}
 
 
-def _user_content(
-    state_text: str, images: list[str], block: str | None
-) -> str | list[dict[str, Any]]:
-    """The user turn: `State:`, the images, the state text, then the question.
+def system_content(state_text: str, has_images: bool) -> str:
+    """The system turn: snap's frame, then `State:` and the state text.
 
-    Text only, it is ONE string — `State:\\n<state>` and, for a question,
-    `\\n\\n<block>` — exactly snap's layout, so a prime's content is a string
-    prefix of every question's. With images it is a list of OpenAI content
-    parts in the same order: a `State:` text part, the images, then one text
-    part carrying the state text and the question block. The prime's parts are
-    then the question's parts with the last text part cut back to the state
-    text (or absent, when the state is empty), which is the prefix property
-    in the only form content parts can have it.
+    Byte-identical for the prime and every question of one decision, which is
+    the whole of the prefix property: the shared prefix is the system turn and
+    ends where the user turn begins. An empty state (images carry it) leaves
+    `State:` with the note alone.
     """
-    tail_parts = [part for part in (state_text, block) if part]
-    tail = "\n\n".join(tail_parts)
+    content = SYSTEM_PROMPT + STATE_HEADER + state_text
+    if has_images:
+        content += ("\n\n" if state_text else "") + IMAGES_NOTE
+    return content
+
+
+def _user_content(images: list[str], text: str) -> str | list[dict[str, Any]]:
+    """The user turn: the images (if any) as content parts, then `text`.
+
+    Text only, it is the one string. With images it is the OpenAI content
+    parts `pages.py` sends — every image, then one text part — so a prime's
+    parts and a question's differ only in that last text part.
+    """
     if not images:
-        return "State:\n" + tail if tail else "State:"
-    parts: list[dict[str, Any]] = [{"type": "text", "text": "State:"}]
-    parts.extend(image_part(encoded) for encoded in images)
-    if tail:
-        parts.append({"type": "text", "text": tail})
+        return text
+    parts: list[dict[str, Any]] = [image_part(encoded) for encoded in images]
+    parts.append({"type": "text", "text": text})
     return parts
 
 
 def messages(state_text: str, images: list[str], block: str | None) -> list[dict[str, Any]]:
-    """System + user. `block` None is the prime: the shared prefix alone."""
+    """System (frame + state) + user (images + the question). `block` None is
+    the prime, whose user turn is `PRIME_USER_TEXT`.
+
+    ONE LAYOUT FOR EVERY ENGINE, reasoned per engine in PHASE22 section 2.5.1:
+    the state ends at the system/user boundary, which is where mlx-lm saves a
+    reusable cache entry, where llama-server b10970 lays down a context
+    checkpoint (the start of the last user message), and a plain token prefix
+    for vLLM's block cache.
+    """
+    user_text = PRIME_USER_TEXT if block is None else block
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": _user_content(state_text, images, block)},
+        {"role": "system", "content": system_content(state_text, bool(images))},
+        {"role": "user", "content": _user_content(images, user_text)},
     ]
 
 
@@ -877,14 +913,17 @@ __all__ = [
     "DecideTokens",
     "Distribution",
     "ForwardTiming",
+    "IMAGES_NOTE",
     "LABEL_MARGIN",
     "LETTERS",
     "MAX_IMAGES",
     "MAX_LEVELS",
     "MAX_OPTIONS",
     "ModelProvenance",
+    "PRIME_USER_TEXT",
     "Plan",
     "Reading",
+    "STATE_HEADER",
     "SYSTEM_PROMPT",
     "ScoreAnswer",
     "ScoreQuestion",
@@ -907,5 +946,6 @@ __all__ = [
     "read_reply",
     "render_state",
     "request_body",
+    "system_content",
     "top_k",
 ]

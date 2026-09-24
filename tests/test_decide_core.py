@@ -84,14 +84,12 @@ def test_choice_letters_follow_the_options_insertion_order() -> None:
 # ------------------------------------------------------------------ prompt
 
 
-def test_state_first_question_last_and_the_words_are_snaps() -> None:
+def test_the_state_is_in_the_system_turn_and_the_question_is_the_user_turn() -> None:
     plan = _plans()["team"]
     messages = decide.question_messages("the STATE text", [], plan)
     assert [m["role"] for m in messages] == ["system", "user"]
-    assert messages[0]["content"] == decide.SYSTEM_PROMPT
-    user = messages[1]["content"]
-    assert user == (
-        "State:\nthe STATE text\n\n"
+    assert messages[0]["content"] == decide.SYSTEM_PROMPT + "\n\nState:\nthe STATE text"
+    assert messages[1]["content"] == (
         "Question: Which team should handle this?\nOptions:\n"
         "A. billing: Payment and invoice issues\nB. technical: Bugs and errors\n"
         "C. other: Anything else\nAnswer with the letter only."
@@ -106,13 +104,52 @@ def test_a_yesno_block_is_a_statement() -> None:
     )
 
 
-def test_every_question_extends_the_prime_verbatim() -> None:
-    prime = decide.prime_messages("a long shared state", [])
-    assert prime[1]["content"] == "State:\na long shared state"
+@pytest.mark.parametrize("images", [[], [PNG, JPEG]])
+def test_the_prime_s_system_turn_is_every_question_s_byte_for_byte(images) -> None:
+    """The prefix property, in the one form every engine's cache can use: the
+    shared prefix is the WHOLE system turn, and it ends where the user turn
+    begins (mlx-lm's system segment, llama-server's last-user checkpoint)."""
+    state = "a long shared state " * 50
+    prime = decide.prime_messages(state, images)
+    assert [m["role"] for m in prime] == ["system", "user"]
     for plan in _plans().values():
-        question = decide.question_messages("a long shared state", [], plan)
+        question = decide.question_messages(state, images, plan)
         assert question[0] == prime[0]
-        assert question[1]["content"].startswith(prime[1]["content"] + "\n\n")
+        assert question[0]["content"].encode("utf-8") == prime[0]["content"].encode("utf-8")
+        assert question[1] != prime[1]
+
+
+def _texts(content) -> list[str]:
+    if isinstance(content, str):
+        return [content]
+    return [part["text"] for part in content if part["type"] == "text"]
+
+
+@pytest.mark.parametrize("images", [[], [PNG]])
+def test_the_state_is_only_in_the_system_turn_and_the_block_only_in_the_user_turn(
+    images,
+) -> None:
+    state = "THE-STATE-MARKER and what it says"
+    for plan in _plans().values():
+        block = decide.question_block(
+            plan.question.type, plan.question.instructions, plan.legend
+        )
+        system, user = decide.question_messages(state, images, plan)
+        assert state in system["content"] and block not in system["content"]
+        assert all(state not in text for text in _texts(user["content"]))
+        assert _texts(user["content"])[-1] == block
+    system, user = decide.prime_messages(state, images)
+    assert state in system["content"]
+    assert all(state not in text for text in _texts(user["content"]))
+
+
+def test_the_prime_s_user_turn_is_fixed_and_never_empty() -> None:
+    """mlx-lm finds the system segment by rendering `system + [user ""]`; a
+    prime whose user turn WERE empty would never differ from that render, and
+    it would save no system segment at all."""
+    assert decide.PRIME_USER_TEXT.strip()
+    assert decide.prime_messages("x", [])[1]["content"] == decide.PRIME_USER_TEXT
+    assert decide.prime_messages("y", [])[1] == decide.prime_messages("x", [])[1]
 
 
 def test_render_state_non_string_is_compact_json() -> None:
@@ -121,30 +158,37 @@ def test_render_state_non_string_is_compact_json() -> None:
     assert decide.render_state({"é": "ü"}) == '{"é":"ü"}'
 
 
-def test_images_come_first_as_content_parts_then_the_text() -> None:
+def test_images_open_the_user_turn_as_content_parts_then_the_question() -> None:
+    """Images cannot go in the system turn (Qwen3.5's template raises "System
+    message cannot contain images."), so they open the user turn, before the
+    question, and the system turn says where they are."""
     plan = _plans()["urgent"]
-    user = decide.question_messages("the STATE text", [PNG, JPEG], plan)[1]["content"]
-    assert user[0] == {"type": "text", "text": "State:"}
-    assert user[1] == {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{PNG}"}}
-    assert user[2] == {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{JPEG}"}}
-    assert user[3]["type"] == "text"
-    assert user[3]["text"].startswith("the STATE text\n\nStatement: The message conveys urgency")
-    assert len(user) == 4
+    system, user = decide.question_messages("the STATE text", [PNG, JPEG], plan)
+    assert isinstance(system["content"], str)
+    assert system["content"] == (
+        decide.SYSTEM_PROMPT + "\n\nState:\nthe STATE text\n\n" + decide.IMAGES_NOTE
+    )
+    user = user["content"]
+    assert user[0] == {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{PNG}"}}
+    assert user[1] == {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{JPEG}"}}
+    assert user[2]["type"] == "text"
+    assert user[2]["text"].startswith("Statement: The message conveys urgency")
+    assert len(user) == 3
 
 
-def test_the_prime_with_images_is_the_question_cut_back_to_the_state() -> None:
+def test_the_prime_with_images_differs_from_a_question_only_in_its_text() -> None:
     plan = _plans()["urgent"]
     for state in ("some text", ""):
-        prime = decide.prime_messages(state, [PNG])[1]["content"]
-        question = decide.question_messages(state, [PNG], plan)[1]["content"]
-        if state:
-            assert question[:-1] == prime[:-1]
-            assert question[-1]["text"].startswith(prime[-1]["text"] + "\n\n")
-        else:
-            # An empty state adds no part of its own: the question's block is
-            # the one part the prime does not have.
-            assert question[:-1] == prime
-            assert question[-1]["text"].startswith("Statement:")
+        prime = decide.prime_messages(state, [PNG])
+        question = decide.question_messages(state, [PNG], plan)
+        assert question[0] == prime[0]
+        assert question[1]["content"][:-1] == prime[1]["content"][:-1]
+        assert prime[1]["content"][-1] == {"type": "text", "text": decide.PRIME_USER_TEXT}
+        assert question[1]["content"][-1]["text"].startswith("Statement:")
+    # An empty state (the images carry it) leaves `State:` and the note alone.
+    assert decide.prime_messages("", [PNG])[0]["content"] == (
+        decide.SYSTEM_PROMPT + "\n\nState:\n" + decide.IMAGES_NOTE
+    )
 
 
 def test_the_image_media_type_is_read_off_the_bytes() -> None:
