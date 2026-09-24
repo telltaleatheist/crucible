@@ -76,6 +76,25 @@ class MlxLmEngine(SubprocessEngine):
     #: deadline, and a request that had not started when the deadline passed.
     #: The accepting is what makes it dangerous — a serial engine that refused
     #: the connection would have told the client the truth immediately.
+    #:
+    #: AND A CLOSED SOCKET DOES NOT STOP A NON-STREAMED REQUEST HERE. Read in
+    #: mlx-lm 0.31.3's `mlx_lm/server.py` (the PyPI wheel, 2026-09-24): the
+    #: only thing that stops generation is `GenerationContext._should_stop`,
+    #: set by `ctx.stop()` in `handle_completion`'s `finally` (L1552-1553) —
+    #: i.e. when the HANDLER thread leaves, which for a non-streamed request is
+    #: after its one `wfile.write` of the whole answer (L1549). Until then that
+    #: thread sits in `response_queue.get()` (L1037, L1048) and never touches
+    #: the socket; the prefill keepalive writes only `if self.stream` (L1413).
+    #: So when Crucible cancels its request (`api._unless_the_caller_leaves`)
+    #: and closes the socket, mlx-lm still prefills and answers every request it
+    #: has already ACCEPTED, running or queued — and even a stop that did land
+    #: is read only between tokens (`_serve_single`, L1008) or between prefill
+    #: chunks (the batched path, L861). What Crucible's cancel buys on this
+    #: engine is the rest: nothing more is SENT (a decision's waiting questions
+    #: are taken back at its gate), the `InFlight` row closes, and the
+    #: settlement's SIGTERM — which does stop a prefill — is free to come as
+    #: soon as nothing else holds the card. At most `chat_admission`'s limit of
+    #: requests per door is ever at the engine, so that is the whole overrun.
     chat_concurrency = 1
     chat_concurrency_basis = (
         "mlx-lm 0.31.3 generates on one thread draining one queue "
