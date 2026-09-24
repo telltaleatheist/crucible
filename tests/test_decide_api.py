@@ -14,6 +14,7 @@ spent the card on a decision the client is about to make again.
 from __future__ import annotations
 
 import base64
+import math
 import re
 import threading
 from pathlib import Path
@@ -123,8 +124,17 @@ def test_the_worked_example_end_to_end(
     assert anger["type"] == "score" and anger["score"] == pytest.approx(1.4)
     assert anger["level"] == "Calm" and anger["label_mass"] == pytest.approx(0.997)
     assert urgent == {"type": "yesno", "p": pytest.approx(0.83),
+                      "logprob": pytest.approx(math.log(0.83)),
                       "label_mass": pytest.approx(0.99)}
     assert list(body["answers"]) == ["team", "anger", "urgent"]
+    # The log-probabilities, in option order, ln of what is returned beside
+    # them; and the default mode names nothing missing because it refuses.
+    assert list(team["logprobs"]) == ["billing", "technical", "other"]
+    assert team["logprobs"] == pytest.approx(
+        {k: math.log(v) for k, v in team["probabilities"].items()})
+    assert list(anger["logprobs"]) == ["Calm", "Frustrated but civil", "Very angry"]
+    for answer in (team, anger, urgent):
+        assert "missing_labels" not in answer
 
     assert body["engine"] == "vllm"
     # A prime and three questions, and nothing else.
@@ -291,6 +301,91 @@ def test_a_letter_outside_the_top_k_is_label_not_in_probs(
     assert error["code"] == "label_not_in_probs"
     assert "'anger'" in error["message"] and "'C'" in error["message"]
     assert error["details"]["question"] == "anger" and error["details"]["letter"] == "C"
+
+
+def _c_below_the_top_k(messages: list[dict[str, Any]]) -> dict[str, float]:
+    """anger's `C` IS in the engine's distribution, but six tokens outrank it,
+    so the fake — which honours `top_logprobs` as a cap, as vLLM does — cuts it
+    off at K = 3 + 4 = 7. The case report mode exists for."""
+    if question_of(messages) == "How frustrated is the customer?":
+        return {"A": 0.30, "B": 0.20, "so": 0.09, "I": 0.08, "Um": 0.07,
+                "Well": 0.06, "It": 0.05, "C": 0.001}
+    return example_probs(messages)
+
+
+@pytest.mark.parametrize("mode", [{}, {"missing": "refuse"}], ids=["default", "stated"])
+def test_refuse_mode_is_unchanged_for_a_letter_ranked_below_k(
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine],  # noqa: F811
+    mode: dict[str, str],
+) -> None:
+    # One decision per test: a refused decision settles the card behind it,
+    # and nothing here holds a lease.
+    engine = loaded(probs_for=_c_below_the_top_k)
+    response = _decide(llm_client, auth, {**EXAMPLE, **mode})
+    assert response.status_code == 502, response.text
+    error = response.json()["error"]
+    assert error["code"] == "label_not_in_probs"
+    assert error["details"]["question"] == "anger" and error["details"]["letter"] == "C"
+    # The mode is Crucible's reading, never the engine's: no body carries it.
+    assert all("missing" not in sent for sent in engine.requests)
+
+
+def test_report_mode_end_to_end_with_a_letter_ranked_below_k(
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
+) -> None:
+    engine = loaded(probs_for=_c_below_the_top_k)
+    response = _decide(llm_client, auth, {**EXAMPLE, "missing": "report"})
+    assert response.status_code == 200, response.text
+    answers = response.json()["answers"]
+    # The engine really did cut C off: K tokens came back and C was not one.
+    anger_sent = next(sent for sent in engine.requests
+                      if question_of(sent["messages"]) == "How frustrated is the customer?")
+    assert anger_sent["top_logprobs"] == 3 + LABEL_MARGIN
+
+    anger = answers["anger"]
+    assert anger["missing_labels"] == ["Very angry"]
+    assert anger["probabilities"] == pytest.approx(
+        {"Calm": 0.6, "Frustrated but civil": 0.4, "Very angry": None})
+    assert anger["logprobs"]["Very angry"] is None
+    assert anger["logprobs"]["Calm"] == pytest.approx(math.log(0.6))
+    assert anger["label_mass"] == pytest.approx(0.5)  # A + B, the returned ones
+    assert anger["score"] == pytest.approx(1 * 0.6 + 2 * 0.4)
+    assert anger["level"] == "Calm" and anger["confidence"] == pytest.approx(0.6)
+    # Every answer carries the field in report mode; none missing is [].
+    assert answers["team"]["missing_labels"] == []
+    assert answers["urgent"]["missing_labels"] == []
+    assert answers["team"]["choice"] == "billing"
+
+
+def test_report_mode_still_refuses_a_question_with_no_label_returned(
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
+) -> None:
+    def probs(messages: list[dict[str, Any]]) -> dict[str, float]:
+        if question_of(messages) == "The message conveys urgency":
+            return {"So": 0.4, "I": 0.3, "Um": 0.1, "It": 0.05, "Well": 0.04,
+                    "Hmm": 0.009, "A": 0.0005, "B": 0.0005}
+        return example_probs(messages)
+
+    loaded(probs_for=probs)
+    response = _decide(llm_client, auth, {**EXAMPLE, "missing": "report"})
+    assert response.status_code == 502, response.text
+    error = response.json()["error"]
+    assert error["code"] == "label_not_in_probs"
+    assert error["details"]["question"] == "urgent" and error["details"]["letter"] is None
+
+
+@pytest.mark.parametrize("bad", ["ignore", "REPORT", None, 1])
+def test_an_unknown_missing_mode_is_invalid_request(
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine],  # noqa: F811
+    bad: Any,
+) -> None:
+    engine = loaded(probs_for=example_probs)
+    response = _decide(llm_client, auth, {**EXAMPLE, "missing": bad})
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["code"] == "invalid_request"
+    assert ["body", "missing"] in [p["location"] for p in error["details"]["problems"]]
+    assert engine.requests == []
 
 
 def test_an_engine_refusal_is_engine_error_quoting_the_engine(

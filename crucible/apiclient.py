@@ -785,6 +785,10 @@ def cmd_decide(connection: Connection, args: argparse.Namespace) -> int:
     if images:
         body["images"] = images
     body["questions"] = decide_questions(args.questions)
+    if args.missing is not None:
+        # Passed through unchecked: the two words are the server's, and it
+        # refuses any other by name (`400 invalid_request` naming `missing`).
+        body["missing"] = args.missing
     extra = None if args.act is None else {"X-Crucible-Act": args.act}
     emit(call(connection, "POST", "/v1/decide", json_body=body, extra_headers=extra))
     return EXIT_OK
@@ -1321,6 +1325,13 @@ def add_parser(subparsers: Any) -> None:
         "--yesno", dest="questions", action=_Question, nargs=2,
         metavar=("NAME", "INSTRUCTIONS"),
         help='NAME "a statement the state may make true"; repeatable',
+    )
+    decide.add_argument(
+        "--missing", default=None, metavar="refuse|report",
+        help="a label outside the engine's top-K: refuse the decision "
+             "(label_not_in_probs, the server's default) or report it — null "
+             "probability, named in missing_labels, the rest renormalised over "
+             "the letters returned",
     )
     decide.add_argument("--act", default=None, help="the capability class, for the bench")
     decide.set_defaults(api_func=cmd_decide, questions=None)

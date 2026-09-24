@@ -3589,9 +3589,11 @@ async def _decide_on_engine(
                 decide_core.question_messages(state_text, images, item), k
             )
         assert reading.top is not None  # want_probs=True always reads them
-        probabilities, mass = decide_core.label_distribution(reading.top, item, engine)
+        dist = decide_core.label_distribution(
+            reading.top, item, engine, missing=body.missing
+        )
         return (
-            decide_core.answer(item, probabilities, mass),
+            decide_core.answer(item, dist, body.missing),
             timing(reading, wall_ms),
             reading.prompt_tokens,
         )

@@ -1317,7 +1317,21 @@ export interface DecideRequest {
   readonly images?: readonly string[];
   /** Question name → question. A name is a single path member. */
   readonly questions: Readonly<Record<string, DecideQuestion>>;
+  /**
+   * What to do when a label is not among the top tokens the engine returned.
+   * `'refuse'` (the server's default when omitted): the decision is 502
+   * `label_not_in_probs` naming the question and the letter. `'report'`: that
+   * option's probability and log-probability are `null`, it is named in the
+   * answer's `missingLabels`, and the renormalisation, `confidence`, `score`
+   * and `labelMass` run over the letters actually returned — the server never
+   * invents a number. A question with EVERY label missing is refused in both
+   * modes. Omitted, the field is not sent.
+   */
+  readonly missing?: DecideMissing;
 }
+
+/** `DecideRequest.missing`: refuse a decision with a label outside the top-K, or report it. */
+export type DecideMissing = 'refuse' | 'report';
 
 export interface DecideOptions {
   /**
@@ -1331,34 +1345,64 @@ export interface DecideOptions {
 }
 
 /**
- * The answer to a `choice`. `probabilities` is renormalised over the option
- * letters; `confidence` is its largest entry; `labelMass` is how much of the
- * engine's raw next-token mass the letters held before renormalising — low
- * means the model wanted to say something that was not an option.
+ * What every answer carries past its distribution.
+ *
+ * `labelMass` is how much of the engine's raw next-token mass the (returned)
+ * letters held before renormalising — low means the model wanted to say
+ * something that was not an option. A renormalised probability times
+ * `labelMass` is the un-renormalised mass.
+ *
+ * `missingLabels` is present exactly when the request said
+ * `missing: 'report'`: the options or levels (`Yes`/`No` for a yesno) whose
+ * letter was not among the engine's top tokens, in option order, `[]` when
+ * none was. In refuse mode the key is absent — the reader demands it in one
+ * mode and refuses it in the other.
  */
-export interface DecideChoiceAnswer {
-  readonly type: 'choice';
-  readonly choice: string;
-  readonly probabilities: Readonly<Record<string, number>>;
-  readonly confidence: number;
+export interface DecideAnswerCommon {
   readonly labelMass: number;
+  readonly missingLabels?: readonly string[];
 }
 
-/** The answer to a `score`: `score` = Σ(1-based level index × p), `level` the likeliest. */
-export interface DecideScoreAnswer {
+/**
+ * The answer to a `choice`. `probabilities` is renormalised over the option
+ * letters, in option order; `confidence` is its largest entry. `logprobs` is
+ * ln of each probability, same order — **not calibrated**, a reading of one
+ * forward pass. A probability is `null` only for a label reported missing; a
+ * log-probability is `null` there and where the probability is exactly 0
+ * (`-Infinity` is not JSON).
+ */
+export interface DecideChoiceAnswer extends DecideAnswerCommon {
+  readonly type: 'choice';
+  readonly choice: string;
+  readonly probabilities: Readonly<Record<string, number | null>>;
+  readonly logprobs: Readonly<Record<string, number | null>>;
+  readonly confidence: number;
+}
+
+/**
+ * The answer to a `score`: `score` = Σ(1-based level index × p) over the
+ * levels returned, `level` the likeliest. `probabilities` and `logprobs` as
+ * for a choice, lowest level first.
+ */
+export interface DecideScoreAnswer extends DecideAnswerCommon {
   readonly type: 'score';
   readonly score: number;
   readonly level: string;
-  readonly probabilities: Readonly<Record<string, number>>;
+  readonly probabilities: Readonly<Record<string, number | null>>;
+  readonly logprobs: Readonly<Record<string, number | null>>;
   readonly confidence: number;
-  readonly labelMass: number;
 }
 
-/** The answer to a `yesno`: `p` is the renormalised P(Yes). */
-export interface DecideYesNoAnswer {
+/**
+ * The answer to a `yesno`: `p` is the renormalised P(Yes), `logprob` ln of it
+ * (not calibrated; `null` when `p` is exactly 0). In report mode with `Yes` or
+ * `No` missing, `p` is the returned one renormalised alone — 1 or 0, honest
+ * and useless: gate on `labelMass`.
+ */
+export interface DecideYesNoAnswer extends DecideAnswerCommon {
   readonly type: 'yesno';
   readonly p: number;
-  readonly labelMass: number;
+  readonly logprob: number | null;
 }
 
 export type DecideAnswer = DecideChoiceAnswer | DecideScoreAnswer | DecideYesNoAnswer;

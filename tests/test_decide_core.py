@@ -210,32 +210,157 @@ def test_k_is_the_labels_plus_the_margin_clamped_to_the_engine() -> None:
 
 def test_the_example_math() -> None:
     plans = _plans()
-    team, mass = decide.label_distribution(
+    team = decide.label_distribution(
         _top({"A": 0.91 * 0.998, "B": 0.07 * 0.998, "C": 0.02 * 0.998, "The": 0.002}),
         plans["team"], "vllm")
-    assert team == pytest.approx({"billing": 0.91, "technical": 0.07, "other": 0.02})
-    assert mass == pytest.approx(0.998)
-    answer = decide.answer(plans["team"], team, mass)
+    assert team.probabilities == pytest.approx(
+        {"billing": 0.91, "technical": 0.07, "other": 0.02})
+    assert team.mass == pytest.approx(0.998) and team.missing == ()
+    answer = decide.answer(plans["team"], team, "refuse")
     assert answer.choice == "billing" and answer.confidence == pytest.approx(0.91)
 
-    anger, mass = decide.label_distribution(
+    anger = decide.label_distribution(
         _top({"A": 0.62 * 0.997, "B": 0.36 * 0.997, "C": 0.02 * 0.997}), plans["anger"], "vllm")
-    answer = decide.answer(plans["anger"], anger, mass)
+    answer = decide.answer(plans["anger"], anger, "refuse")
     assert answer.score == pytest.approx(1.4)
     assert answer.level == "Calm" and answer.label_mass == pytest.approx(0.997)
 
-    urgent, mass = decide.label_distribution(
+    urgent = decide.label_distribution(
         _top({"A": 0.83 * 0.99, "B": 0.17 * 0.99}), plans["urgent"], "vllm")
-    answer = decide.answer(plans["urgent"], urgent, mass)
+    answer = decide.answer(plans["urgent"], urgent, "refuse")
     assert answer.p == pytest.approx(0.83) and answer.label_mass == pytest.approx(0.99)
 
 
 def test_labels_are_matched_by_the_exact_letter_string() -> None:
     """The filler " A" must never be read as label A."""
-    probabilities, mass = decide.label_distribution(
+    dist = decide.label_distribution(
         _top({" A": 0.5, "A": 0.1, "B": 0.1}), _plans()["urgent"], "vllm")
-    assert probabilities["Yes"] == pytest.approx(0.5)
-    assert mass == pytest.approx(0.2)
+    assert dist.probabilities["Yes"] == pytest.approx(0.5)
+    assert dist.mass == pytest.approx(0.2)
+
+
+# -------------------------------------------------------- the log-probabilities
+
+
+def test_logprobs_are_ln_of_the_probabilities_in_option_order() -> None:
+    plans = _plans()
+    # Returned out of option order on purpose: the answer is in OPTION order.
+    team = decide.label_distribution(
+        _top({"C": 0.05, "A": 0.6, "The": 0.1, "B": 0.25}), plans["team"], "vllm")
+    answer = decide.answer(plans["team"], team, "refuse")
+    assert list(answer.probabilities) == ["billing", "technical", "other"]
+    assert list(answer.logprobs) == ["billing", "technical", "other"]
+    for option, p in answer.probabilities.items():
+        assert answer.logprobs[option] == pytest.approx(math.log(p))
+    # The un-renormalised mass is recoverable, as the contract says.
+    assert math.exp(answer.logprobs["billing"]) * answer.label_mass == pytest.approx(0.6)
+
+    anger = decide.label_distribution(
+        _top({"B": 0.5, "A": 0.3, "C": 0.1}), plans["anger"], "vllm")
+    answer = decide.answer(plans["anger"], anger, "refuse")
+    assert list(answer.logprobs) == ["Calm", "Frustrated but civil", "Very angry"]
+    assert answer.logprobs["Calm"] == pytest.approx(math.log(0.3 / 0.9))
+
+    urgent = decide.label_distribution(_top({"A": 0.8, "B": 0.1}), plans["urgent"], "vllm")
+    answer = decide.answer(plans["urgent"], urgent, "refuse")
+    assert answer.logprob == pytest.approx(math.log(0.8 / 0.9))
+
+
+def test_a_refuse_mode_answer_carries_no_missing_labels_key() -> None:
+    plans = _plans()
+    for name, top in (("team", {"A": 0.5, "B": 0.3, "C": 0.2}),
+                      ("anger", {"A": 0.5, "B": 0.3, "C": 0.2}),
+                      ("urgent", {"A": 0.5, "B": 0.5})):
+        answer = decide.answer(
+            plans[name], decide.label_distribution(_top(top), plans[name], "vllm"), "refuse")
+        assert "missing_labels" not in answer.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------- report mode
+
+
+def test_report_mode_with_one_label_missing_never_invents_a_number() -> None:
+    plans = _plans()
+    # anger: B ("Frustrated but civil") is outside the top-K.
+    dist = decide.label_distribution(
+        _top({"A": 0.3, "The": 0.4, "C": 0.1}), plans["anger"], "vllm", missing="report")
+    assert dist.missing == ("Frustrated but civil",)
+    assert dist.mass == pytest.approx(0.4)  # the RETURNED letters' raw mass
+    answer = decide.answer(plans["anger"], dist, "report")
+    wire = answer.model_dump(mode="json")
+    assert wire["missing_labels"] == ["Frustrated but civil"]
+    assert wire["probabilities"] == pytest.approx(
+        {"Calm": 0.75, "Frustrated but civil": None, "Very angry": 0.25})
+    assert list(wire["probabilities"]) == ["Calm", "Frustrated but civil", "Very angry"]
+    assert wire["logprobs"]["Frustrated but civil"] is None
+    assert wire["logprobs"]["Calm"] == pytest.approx(math.log(0.75))
+    assert wire["label_mass"] == pytest.approx(0.4)
+    # The expected value over the RETURNED levels: 1 x 0.75 + 3 x 0.25.
+    assert wire["score"] == pytest.approx(1.5)
+    assert wire["level"] == "Calm" and wire["confidence"] == pytest.approx(0.75)
+
+
+def test_report_mode_with_several_labels_missing() -> None:
+    body = {**EXAMPLE, "questions": {"pick": {
+        "type": "choice", "instructions": "x",
+        "options": {"one": "d", "two": "d", "three": "d", "four": "d", "five": "d"}}}}
+    item = _plans(body)["pick"]
+    dist = decide.label_distribution(
+        _top({"D": 0.2, "B": 0.1, "Hmm": 0.5, "Well": 0.1}), item, "vllm", missing="report")
+    answer = decide.answer(item, dist, "report")
+    assert answer.missing_labels == ["one", "three", "five"]  # option order
+    assert answer.label_mass == pytest.approx(0.3)
+    assert answer.probabilities == pytest.approx(
+        {"one": None, "two": 1 / 3, "three": None, "four": 2 / 3, "five": None})
+    assert [k for k, v in answer.logprobs.items() if v is None] == ["one", "three", "five"]
+    assert answer.choice == "four" and answer.confidence == pytest.approx(2 / 3)
+    returned = [p for p in answer.probabilities.values() if p is not None]
+    assert sum(returned) == pytest.approx(1.0)
+
+
+def test_report_mode_with_nothing_missing_says_an_empty_list() -> None:
+    item = _plans()["team"]
+    dist = decide.label_distribution(
+        _top({"A": 0.5, "B": 0.3, "C": 0.2}), item, "vllm", missing="report")
+    wire = decide.answer(item, dist, "report").model_dump(mode="json")
+    assert wire["missing_labels"] == []
+
+
+@pytest.mark.parametrize("missing", ["refuse", "report"])
+def test_every_label_missing_is_refused_in_both_modes(missing) -> None:
+    with pytest.raises(ApiError) as caught:
+        decide.label_distribution(
+            _top({"The": 0.6, "I": 0.3}), _plans()["anger"], "vllm", missing=missing)
+    assert caught.value.status_code == 502 and caught.value.code == "label_not_in_probs"
+    assert "'anger'" in caught.value.message
+
+
+@pytest.mark.parametrize(
+    "top, p, logprob, missing_labels",
+    [({"B": 0.4, "The": 0.5}, 0.0, None, ["Yes"]),
+     ({"A": 0.4, "The": 0.5}, 1.0, 0.0, ["No"]),
+     ({"A": 0.3, "B": 0.1}, 0.75, math.log(0.75), [])],
+    ids=["yes-missing", "no-missing", "none-missing"],
+)
+def test_yesno_report_mode_is_the_returned_one_renormalised_alone(
+    top, p, logprob, missing_labels
+) -> None:
+    item = _plans()["urgent"]
+    dist = decide.label_distribution(_top(top), item, "vllm", missing="report")
+    wire = decide.answer(item, dist, "report").model_dump(mode="json")
+    assert wire["p"] == pytest.approx(p)
+    assert wire["logprob"] == (None if logprob is None else pytest.approx(logprob))
+    assert wire["missing_labels"] == missing_labels
+    assert wire["label_mass"] == pytest.approx(sum(v for k, v in top.items() if k in "AB"))
+
+
+def test_missing_must_be_one_of_the_two_words() -> None:
+    assert DecideRequest.model_validate(EXAMPLE).missing == "refuse"
+    assert DecideRequest.model_validate({**EXAMPLE, "missing": "report"}).missing == "report"
+    for bad in ("ignore", None, True, ""):
+        with pytest.raises(ValidationError) as caught:
+            DecideRequest.model_validate({**EXAMPLE, "missing": bad})
+        assert "missing" in str(caught.value)
 
 
 def test_a_missing_letter_is_label_not_in_probs_naming_question_and_letter() -> None:

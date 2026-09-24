@@ -198,7 +198,7 @@ keep up with.
 crucible api decide --model qwen3.5-9b --state "I was charged twice for March, please refund one." \
   --choice team "Which team should handle this?" billing="Payment and invoice issues" technical="Bugs and errors" \
   --score anger "How frustrated is the customer?" "Calm,Frustrated but civil,Very angry" \
-  --yesno urgent "The message conveys urgency" [--act analysis]
+  --yesno urgent "The message conveys urgency" [--act analysis] [--missing report]
 crucible api decide --model qwen3.5-9b --state @ticket.txt --yesno refund "The customer asks for a refund"
 crucible api decide --model <image-capable id> --image page.png --choice kind "What kind of page is this?" chapter="A chapter opening" body="Running prose"
 ```
@@ -215,6 +215,13 @@ the order and prints the answer unchanged. Like chat it never loads a model
 (`model_not_resident`), and the counts (2–26 options, 2–10 levels, 8 images) are the
 server's to refuse (`invalid_request`, `too_many_options`, `too_many_images`), so
 they are not copied here.
+
+`--missing report` sends `"missing": "report"`: a label outside the engine's top-K is
+then `null` in `probabilities`/`logprobs` and named in the answer's `missing_labels`,
+and the rest renormalise over the letters returned, where the default (`refuse`, the
+server's, so the flag is not sent when left out) makes the decision
+`502 label_not_in_probs`. The word travels unchecked; any other is the server's
+`400 invalid_request` naming `missing`.
 
 ### Leases
 

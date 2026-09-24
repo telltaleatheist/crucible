@@ -1285,6 +1285,21 @@ export class CrucibleClient {
     };
     if (given.images !== undefined) payload['images'] = requireStrings(given.images, 'images');
     payload['questions'] = questions;
+    // Sent only when given, so an omitted mode is the server's default
+    // (refuse) and not a second copy of it here. Checked for the two words
+    // because the reader below reads the reply AGAINST it: a word the server
+    // would refuse is one this client could not read a reply for either.
+    let report = false;
+    if (given.missing !== undefined) {
+      if (given.missing !== 'refuse' && given.missing !== 'report') {
+        throw new CrucibleConfigError(
+          'missing',
+          `must be 'refuse' or 'report', got ${JSON.stringify(given.missing)}`,
+        );
+      }
+      payload['missing'] = given.missing;
+      report = given.missing === 'report';
+    }
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     // The chat's act, for the chat's reason (see #chatRequest): a header the
@@ -1294,7 +1309,7 @@ export class CrucibleClient {
     if (options.signal !== undefined) init.signal = options.signal;
 
     const body = await this.#json('/v1/decide', init, 'decide');
-    return readDecideResponse(body, questions);
+    return readDecideResponse(body, questions, report);
   }
 
   // -------------------------------------------------------------------- tts
@@ -3363,6 +3378,7 @@ function readDecideQuestions(value: unknown): Record<string, DecideQuestion> {
 function readDecideResponse(
   body: Json,
   asked: Record<string, DecideQuestion>,
+  report: boolean,
 ): DecideResponse {
   const where = 'decide';
   const names = Object.keys(asked);
@@ -3387,6 +3403,7 @@ function readDecideResponse(
       objectField(answersBody, name, `${where}.answers`),
       asked[name] as DecideQuestion,
       `${where}.answers.${name}`,
+      report,
     );
     perQuestion[name] = readDecideCallTiming(
       objectField(perQuestionTiming, name, `${where}.timing_ms.per_question`),
@@ -3421,7 +3438,22 @@ function readDecideModel(model: Json, where: string): DecideResponse['model'] {
   };
 }
 
-function readDecideAnswer(entry: Json, question: DecideQuestion, where: string): DecideAnswer {
+/**
+ * One answer, read against the question asked AND the mode asked for.
+ *
+ * `missing_labels` is demanded when the request said `missing: 'report'` and
+ * refused when it did not — the server sends it in exactly one mode, so its
+ * presence in the other is a server this client does not run against. In
+ * report mode a `null` probability must be exactly a label the answer names as
+ * missing (the server never invents a number, and never hides one); in refuse
+ * mode no probability may be `null` at all.
+ */
+function readDecideAnswer(
+  entry: Json,
+  question: DecideQuestion,
+  where: string,
+  report: boolean,
+): DecideAnswer {
   const type = str(entry, 'type', where);
   if (type !== question.type) {
     throw new CrucibleProtocolError(
@@ -3429,25 +3461,70 @@ function readDecideAnswer(entry: Json, question: DecideQuestion, where: string):
     );
   }
   const labelMass = num(entry, 'label_mass', where);
-  if (question.type === 'yesno') return { type: 'yesno', p: num(entry, 'p', where), labelMass };
-  const labels = question.type === 'choice' ? Object.keys(question.options) : question.levels;
-  const probabilities = readProbabilities(objectField(entry, 'probabilities', where), labels, where);
+  const labels =
+    question.type === 'choice'
+      ? Object.keys(question.options)
+      : question.type === 'score'
+        ? question.levels
+        : ['Yes', 'No'];
+  let missingLabels: string[] | undefined;
+  if (report) {
+    missingLabels = strArray(entry, 'missing_labels', where);
+    for (const label of missingLabels) oneOf(label, labels, `${where}.missing_labels`);
+  } else if ('missing_labels' in entry) {
+    throw new CrucibleProtocolError(
+      `${where}.missing_labels is present but the request did not ask for missing: 'report'`,
+    );
+  }
+  const common = missingLabels === undefined ? { labelMass } : { labelMass, missingLabels };
+  if (question.type === 'yesno') {
+    return { type: 'yesno', p: num(entry, 'p', where), logprob: nullableNum(entry, 'logprob', where), ...common };
+  }
+  const missing = missingLabels ?? [];
+  const probabilities = readDistribution(entry, 'probabilities', labels, missing, where);
+  const logprobs = readDistribution(entry, 'logprobs', labels, missing, where);
   const confidence = num(entry, 'confidence', where);
   if (question.type === 'choice') {
     const choice = str(entry, 'choice', where);
     oneOf(choice, labels, `${where}.choice`);
-    return { type: 'choice', choice, probabilities, confidence, labelMass };
+    return { type: 'choice', choice, probabilities, logprobs, confidence, ...common };
   }
   const level = str(entry, 'level', where);
   oneOf(level, labels, `${where}.level`);
-  return { type: 'score', score: num(entry, 'score', where), level, probabilities, confidence, labelMass };
+  return { type: 'score', score: num(entry, 'score', where), level, probabilities, logprobs, confidence, ...common };
 }
 
-/** A distribution over exactly the labels asked: one number per option or level, no more, no fewer. */
-function readProbabilities(entry: Json, labels: readonly string[], where: string): Record<string, number> {
-  sameKeys(Object.keys(entry), labels, `${where}.probabilities`, 'the options or levels asked');
-  const out: Record<string, number> = {};
-  for (const label of labels) out[label] = num(entry, label, `${where}.probabilities`);
+/**
+ * A distribution (`probabilities` or `logprobs`) over exactly the labels asked:
+ * one entry per option or level, no more, no fewer. A label named missing must
+ * be `null`. Otherwise a probability must be a number; a log-probability may
+ * also be `null`, for a probability of exactly 0 (`-Infinity` is not JSON).
+ */
+function readDistribution(
+  answer: Json,
+  key: 'probabilities' | 'logprobs',
+  labels: readonly string[],
+  missing: readonly string[],
+  where: string,
+): Record<string, number | null> {
+  const entry = objectField(answer, key, where);
+  sameKeys(Object.keys(entry), labels, `${where}.${key}`, 'the options or levels asked');
+  const out: Record<string, number | null> = {};
+  for (const label of labels) {
+    if (missing.includes(label)) {
+      if (entry[label] !== null) {
+        throw new CrucibleProtocolError(
+          `${where}.${key}.${label} is ${JSON.stringify(entry[label])} but the answer names ` +
+            `${JSON.stringify(label)} missing; a missing label's value is null`,
+        );
+      }
+      out[label] = null;
+    } else if (key === 'logprobs') {
+      out[label] = nullableNum(entry, label, `${where}.${key}`);
+    } else {
+      out[label] = num(entry, label, `${where}.${key}`);
+    }
+  }
   return out;
 }
 

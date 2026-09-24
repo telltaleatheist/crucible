@@ -642,6 +642,56 @@ def test_decide_builds_the_contract_s_worked_example_from_snap_s_grammar(
     }
 
 
+def test_decide_missing_travels_only_when_given(recorded: list[dict[str, Any]]) -> None:
+    """Left out, the body has no `missing` and the server's default (refuse)
+    stands — the worked example above already asserts that exact body. Given,
+    it travels verbatim, including a word the server will refuse: the two words
+    are the server's to check, not a second copy here."""
+    for word in ("report", "refuse", "sometimes"):
+        recorded.clear()
+        assert run("http://127.0.0.1:1", *DECIDE_ARGV, "--missing", word) == 0
+        assert recorded[0]["json_body"] == {**DECIDE_BODY, "missing": word}
+
+
+def test_decide_missing_report_reaches_the_door_and_an_unknown_word_is_its_400(
+    make_app: Callable[..., FastAPI],
+    auth: dict[str, str],
+    fake_env: Path,
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engine_factory: Callable[..., Any],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """NEEDS THE SERVER HALF: `--missing report` through the door, the fake
+    engine cutting anger's `C` below the top-K; then an unknown word refused
+    by the server, naming the field."""
+    from .live_server import run_job
+
+    def probs_for(messages: list[dict[str, Any]]) -> dict[str, float]:
+        text = json.dumps(messages)
+        if "How frustrated" in text:  # K = 7; seven tokens outrank C
+            return {"A": 0.3, "B": 0.2, "so": 0.09, "I": 0.08, "Um": 0.07,
+                    "Well": 0.06, "It": 0.05, "C": 0.001}
+        return {"A": 0.83, "B": 0.17}
+
+    engine_factory(probs_for=probs_for)
+    fake_weights("qwen3.5-9b")
+    with serve(make_app(enable_llm=True)) as url:
+        run_job(url, auth, type="load-model", model="qwen3.5-9b")
+        capsys.readouterr()
+        assert run(url, *DECIDE_ARGV, "--missing", "report") == 0
+        printed = json.loads(capsys.readouterr().out)
+        assert printed["answers"]["anger"]["missing_labels"] == ["Very angry"]
+        assert printed["answers"]["anger"]["probabilities"]["Very angry"] is None
+        assert printed["answers"]["team"]["missing_labels"] == []
+        assert run(url, *DECIDE_ARGV, "--missing", "sometimes") == 1
+    # raw_decode: the in-process server's own stderr lines (the settlement
+    # unloading the model behind the decision) follow the printed refusal.
+    refusal, _ = json.JSONDecoder().raw_decode(capsys.readouterr().err.split("\n", 1)[1])
+    assert refusal["error"]["code"] == "invalid_request"
+    assert ["body", "missing"] in [p["location"] for p in refusal["error"]["details"]["problems"]]
+
+
 @pytest.mark.parametrize(("argv", "code"), [
     (("--yesno", "q", "is it"), "decide_needs_state"),
     (("--state", "s"), "decide_needs_a_question"),

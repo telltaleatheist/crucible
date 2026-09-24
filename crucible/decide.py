@@ -42,6 +42,7 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -190,6 +191,15 @@ class DecideRequest(_Strict):
     whitespace, no `data:` prefix), read as part of the state, before its text.
     At most 8 (`too_many_images`), and only on a model whose manifest declares
     `image` (`400 model_text_only` otherwise). `[]` is the same as none."""
+    missing: Literal["refuse", "report"] = "refuse"
+    """What to do when a label is not among the top tokens the engine returned.
+    `refuse` (the default): the decision is `502 label_not_in_probs` naming the
+    question and the letter. `report`: the door never invents a number — that
+    option's probability and log-probability are null, it is named in the
+    answer's `missing_labels`, and the renormalisation, `confidence`, `score`
+    and `label_mass` run over the letters actually returned. A question whose
+    EVERY label is missing is refused in both modes: there is no answer to
+    report."""
 
     @field_validator("state")
     @classmethod
@@ -247,49 +257,112 @@ class DecideRequest(_Strict):
 # ------------------------------------------------------------------- answer
 
 
-class ChoiceAnswer(_Strict):
+class _Answer(_Strict):
+    """What every answer shares: `missing_labels` is on the wire only in report
+    mode. Each answer declares `label_mass` and `missing_labels` itself, last,
+    so they print after the distribution they qualify."""
+
+    @model_serializer(mode="wrap")
+    def _missing_only_when_reported(self, handler):  # type: ignore[no-untyped-def]
+        # Refuse-mode answers carry NO `missing_labels` key: in that mode a
+        # missing label is a refusal, so the field could only ever say `[]`,
+        # and the SDK reads the key's presence against the mode it asked for.
+        #
+        # NO RETURN ANNOTATION, on purpose: pydantic takes a wrap serializer's
+        # annotation as the serialised schema, and `-> Any` (or a dict) turned
+        # every answer in the OpenAPI document — and so `docs/API.md` — into
+        # `{}`. Unannotated, the model's own field schema stands.
+        data = handler(self)
+        if getattr(self, "missing_labels") is None:
+            data.pop("missing_labels", None)
+        return data
+
+
+class ChoiceAnswer(_Answer):
     """A choice question's distribution."""
 
     type: Literal["choice"] = "choice"
     """`choice`."""
     choice: str
-    """The most probable option."""
-    probabilities: dict[str, float]
-    """Option name to probability, renormalised over the letters so they sum
-    to 1 (a softmax over the label logits)."""
+    """The most probable option (of those returned, in report mode)."""
+    probabilities: dict[str, float | None]
+    """Option name to probability, in option order, renormalised over the
+    letters so they sum to 1 (a softmax over the label logits). Null only for
+    an option reported missing."""
+    logprobs: dict[str, float | None]
+    """Option name to ln of its `probabilities` entry, in option order; add
+    ln `label_mass` (multiply the probability by `label_mass`) for the
+    un-renormalised mass. NOT calibrated: one forward pass's reading, not a
+    measured frequency. Null where the probability is null, or exactly 0
+    (`-Infinity` is not JSON)."""
     confidence: float
     """The largest renormalised probability."""
     label_mass: float
-    """The raw probability the letters held together before renormalising. Low
-    means the model wanted to say something that is not an option."""
+    """The raw probability the option letters held together before renormalising
+    (over the letters RETURNED, in report mode). Low means the model wanted to
+    say something that is not an option. A renormalised probability times it
+    is the un-renormalised mass."""
+    missing_labels: list[str] | None = None
+    """Present only when the request said `missing: "report"` — absent, not
+    null, otherwise: the options whose letter was not among the top tokens the
+    engine returned, in option order, `[]` when none was. Nothing is invented for
+    them; their `probabilities` and `logprobs` are null."""
 
 
-class ScoreAnswer(_Strict):
+class ScoreAnswer(_Answer):
     """A score question's distribution and its expected level."""
 
     type: Literal["score"] = "score"
     """`score`."""
     score: float
-    """Σ (1-based level index × p): 1.0 is certainly the lowest level."""
+    """Σ (1-based level index × p) over the levels returned: 1.0 is certainly
+    the lowest level."""
     level: str
-    """The most probable level."""
-    probabilities: dict[str, float]
-    """Level to renormalised probability."""
+    """The most probable level (of those returned, in report mode)."""
+    probabilities: dict[str, float | None]
+    """Level to renormalised probability, lowest level first. Null only for a
+    level reported missing."""
+    logprobs: dict[str, float | None]
+    """Level to ln of its `probabilities` entry, lowest first; add ln
+    `label_mass` for the un-renormalised mass. NOT calibrated. Null where the
+    probability is null, or exactly 0 (`-Infinity` is not JSON)."""
     confidence: float
     """The largest renormalised probability."""
     label_mass: float
-    """The raw probability the letters held together before renormalising."""
+    """The raw probability the level letters held together before renormalising
+    (over the letters RETURNED, in report mode). Low means the model wanted to
+    say something that is not an option. A renormalised probability times it
+    is the un-renormalised mass."""
+    missing_labels: list[str] | None = None
+    """Present only when the request said `missing: "report"` — absent, not
+    null, otherwise: the levels whose letter was not among the top tokens the
+    engine returned, in level order, `[]` when none was. Nothing is invented for
+    them; their `probabilities` and `logprobs` are null."""
 
 
-class YesNoAnswer(_Strict):
+class YesNoAnswer(_Answer):
     """A yesno question's probability."""
 
     type: Literal["yesno"] = "yesno"
     """`yesno`."""
     p: float
-    """Renormalised P(Yes)."""
+    """Renormalised P(Yes). In report mode with `A` or `B` missing it is the
+    returned one renormalised alone — 1.0 or 0.0, which is honest and useless:
+    gate on `label_mass`."""
+    logprob: float | None
+    """ln `p`; add ln `label_mass` for the un-renormalised mass. NOT
+    calibrated. Null when `p` is exactly 0 (`-Infinity` is not JSON) — a
+    report-mode answer with `Yes` missing."""
     label_mass: float
-    """The raw probability `A` and `B` held together before renormalising."""
+    """The raw probability the letters `A` and `B` held together before renormalising
+    (over the letters RETURNED, in report mode). Low means the model wanted to
+    say something that is not an option. A renormalised probability times it
+    is the un-renormalised mass."""
+    missing_labels: list[str] | None = None
+    """Present only when the request said `missing: "report"` — absent, not
+    null, otherwise: `["Yes"]` or `["No"]` when that letter was not among the
+    top tokens the engine returned, `[]` when both were (both missing is
+    refused)."""
 
 
 Answer = Annotated[
@@ -642,16 +715,38 @@ def read_reply(data: Any, engine: str, *, want_probs: bool) -> Reading:
     return Reading(prompt_tokens=prompt_tokens, cached_tokens=cached, top=tuple(top))
 
 
+@dataclass(frozen=True)
+class Distribution:
+    """One question's letters, read and renormalised."""
+
+    #: Option name to renormalised p, in option order. None only for a label
+    #: outside the engine's top-K under `missing: "report"`.
+    probabilities: dict[str, float | None]
+    #: The raw probability the RETURNED letters held together.
+    mass: float
+    #: The option names that were missing, in option order (always empty in
+    #: refuse mode, where a missing label is a refusal).
+    missing: tuple[str, ...]
+
+
 def label_distribution(
-    top: tuple[tuple[str, float], ...], item: Plan, engine: str
-) -> tuple[dict[str, float], float]:
-    """`({option: renormalised p}, label_mass)`, labels matched BY TOKEN STRING.
+    top: tuple[tuple[str, float], ...],
+    item: Plan,
+    engine: str,
+    missing: Literal["refuse", "report"] = "refuse",
+) -> Distribution:
+    """The renormalised distribution and `label_mass`, labels matched BY TOKEN
+    STRING.
 
     A label is the entry whose token string IS the letter — `"A"`, never `" A"`.
     Two entries with one string are possible in general (byte-level pieces
     decode alike), so only a LABEL's string appearing twice is refused: that
     one would make the answer ambiguous. Renormalising p_i / Σp over the labels
     is a softmax over the label logits.
+
+    A label outside the top-K is `label_not_in_probs` in refuse mode; in
+    report mode it is None and the renormalisation runs over the letters that
+    came back. A question with NO label returned is refused in both modes.
     """
     letters = set(item.letters)
     by_token: dict[str, float] = {}
@@ -661,57 +756,114 @@ def label_distribution(
                 engine, f"label token {token!r} appears twice in top_logprobs"
             )
         by_token.setdefault(token, probability)
-    raw: dict[str, float] = {}
+    raw: dict[str, float | None] = {}
+    absent: list[str] = []
     for letter, option in item.labels:
-        if letter not in by_token:
+        if letter in by_token:
+            raw[option] = by_token[letter]
+            continue
+        if missing == "refuse":
             raise ApiError(
                 502,
                 "label_not_in_probs",
                 f"question {item.name!r}: label {letter!r} (option {option!r}) is not "
                 f"among the top {len(top)} tokens the {engine} engine returned. The "
                 "model wanted to say something else strongly enough to push a "
-                "letter out; fewer options, or plainer ones, is the repair",
+                "letter out; fewer options, or plainer ones, is the repair (or "
+                "`missing: \"report\"`, which answers over the letters returned)",
                 {"question": item.name, "letter": letter, "option": option,
                  "engine": engine, "top_k": len(top)},
             )
-        raw[option] = by_token[letter]
-    mass = sum(raw.values())
+        # REPORT MODE NEVER INVENTS A NUMBER: the label is named, its value is
+        # null, and the arithmetic below runs over the letters returned.
+        raw[option] = None
+        absent.append(option)
+    if len(absent) == len(item.labels):
+        raise ApiError(
+            502,
+            "label_not_in_probs",
+            f"question {item.name!r}: none of its labels "
+            f"{'/'.join(item.letters)} is among the top {len(top)} tokens the "
+            f"{engine} engine returned, so there is no answer to report. Fewer "
+            "options, or plainer ones, is the repair",
+            {"question": item.name, "letter": None, "option": None,
+             "engine": engine, "top_k": len(top)},
+        )
+    mass = sum(p for p in raw.values() if p is not None)
     if mass <= 0.0:
         raise ApiError(
             502,
             "label_not_in_probs",
-            f"question {item.name!r}: every label has probability 0 on the {engine} "
-            "engine",
+            f"question {item.name!r}: every label the {engine} engine returned has "
+            "probability 0",
             {"question": item.name, "letter": None, "option": None,
              "engine": engine, "top_k": len(top)},
         )
-    return {option: p / mass for option, p in raw.items()}, mass
+    return Distribution(
+        probabilities={
+            option: None if p is None else p / mass for option, p in raw.items()
+        },
+        mass=mass,
+        missing=tuple(absent),
+    )
+
+
+def _ln(p: float | None) -> float | None:
+    """ln p, or None where there is no finite one: `-Infinity` is not JSON."""
+    return None if p is None or p <= 0.0 else math.log(p)
 
 
 def answer(
-    item: Plan, probabilities: dict[str, float], mass: float
+    item: Plan, dist: Distribution, missing: Literal["refuse", "report"]
 ) -> ChoiceAnswer | ScoreAnswer | YesNoAnswer:
-    """snap's answer shapes and arithmetic, unchanged (`snap/decide.py _answer`)."""
+    """snap's answer shapes and arithmetic (`snap/decide.py _answer`), plus the
+    log-probabilities and, in report mode, `missing_labels`.
+
+    Every aggregate — the argmax, `confidence`, the expected-value `score` —
+    runs over the labels the engine RETURNED; a missing one is null in the
+    distribution and takes no part. In refuse mode nothing is ever missing (the
+    reading refused first), so these are snap's numbers unchanged.
+    """
     question = item.question
+    probabilities = dist.probabilities
+    missing_labels = list(dist.missing) if missing == "report" else None
     if isinstance(question, YesNoQuestion):
-        return YesNoAnswer(p=probabilities["Yes"], label_mass=mass)
-    best = max(probabilities, key=probabilities.__getitem__)
+        # With `No` missing, `Yes` renormalised alone is 1.0; with `Yes`
+        # missing, P(Yes) is the complement of `No` alone: 0.0.
+        p_yes, p_no = probabilities["Yes"], probabilities["No"]
+        if p_yes is not None:
+            p = p_yes
+        else:
+            assert p_no is not None  # label_distribution refused an all-missing one
+            p = 1.0 - p_no
+        return YesNoAnswer(
+            p=p, logprob=_ln(p), label_mass=dist.mass, missing_labels=missing_labels
+        )
+    returned = {option: p for option, p in probabilities.items() if p is not None}
+    best = max(returned, key=returned.__getitem__)
+    logprobs = {option: _ln(p) for option, p in probabilities.items()}
     if isinstance(question, ChoiceQuestion):
         return ChoiceAnswer(
             choice=best,
             probabilities=probabilities,
-            confidence=probabilities[best],
-            label_mass=mass,
+            logprobs=logprobs,
+            confidence=returned[best],
+            label_mass=dist.mass,
+            missing_labels=missing_labels,
         )
     score = sum(
-        (index + 1) * probabilities[level] for index, (_, level) in enumerate(item.labels)
+        (index + 1) * returned[level]
+        for index, (_, level) in enumerate(item.labels)
+        if level in returned
     )
     return ScoreAnswer(
         score=score,
         level=best,
         probabilities=probabilities,
-        confidence=probabilities[best],
-        label_mass=mass,
+        logprobs=logprobs,
+        confidence=returned[best],
+        label_mass=dist.mass,
+        missing_labels=missing_labels,
     )
 
 
@@ -723,6 +875,7 @@ __all__ = [
     "DecideResponse",
     "DecideTiming",
     "DecideTokens",
+    "Distribution",
     "ForwardTiming",
     "LABEL_MARGIN",
     "LETTERS",

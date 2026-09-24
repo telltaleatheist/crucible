@@ -611,6 +611,7 @@ One distribution per question, read off the resident model. PHASE22-DECIDE.md is
 | `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
 | `questions` | Questions | yes | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. |
 | `images` | array of string or null | no | — | Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no whitespace, no `data:` prefix), read as part of the state, before its text. At most 8 (`too_many_images`), and only on a model whose manifest declares `image` (`400 model_text_only` otherwise). `[]` is the same as none. |
+| `missing` | `'refuse'` or `'report'` | no | `'refuse'` | What to do when a label is not among the top tokens the engine returned. `refuse` (the default): the decision is `502 label_not_in_probs` naming the question and the letter. `report`: the door never invents a number — that option's probability and log-probability are null, it is named in the answer's `missing_labels`, and the renormalisation, `confidence`, `score` and `label_mass` run over the letters actually returned. A question whose EVERY label is missing is refused in both modes: there is no answer to report. |
 
 *Answers:* `200`, `422`
 
@@ -631,10 +632,12 @@ A choice question's distribution.
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `type` | `'choice'` | no | `'choice'` | `choice`. |
-| `choice` | string | yes | — | The most probable option. |
-| `probabilities` | Probabilities | yes | — | Option name to probability, renormalised over the letters so they sum to 1 (a softmax over the label logits). |
+| `choice` | string | yes | — | The most probable option (of those returned, in report mode). |
+| `probabilities` | Probabilities | yes | — | Option name to probability, in option order, renormalised over the letters so they sum to 1 (a softmax over the label logits). Null only for an option reported missing. |
+| `logprobs` | Logprobs | yes | — | Option name to ln of its `probabilities` entry, in option order; add ln `label_mass` (multiply the probability by `label_mass`) for the un-renormalised mass. NOT calibrated: one forward pass's reading, not a measured frequency. Null where the probability is null, or exactly 0 (`-Infinity` is not JSON). |
 | `confidence` | number | yes | — | The largest renormalised probability. |
-| `label_mass` | number | yes | — | The raw probability the letters held together before renormalising. Low means the model wanted to say something that is not an option. |
+| `label_mass` | number | yes | — | The raw probability the option letters held together before renormalising (over the letters RETURNED, in report mode). Low means the model wanted to say something that is not an option. A renormalised probability times it is the un-renormalised mass. |
+| `missing_labels` | array of string or null | no | — | Present only when the request said `missing: "report"` — absent, not null, otherwise: the options whose letter was not among the top tokens the engine returned, in option order, `[]` when none was. Nothing is invented for them; their `probabilities` and `logprobs` are null. |
 
 ### `ChoiceQuestion`
 
@@ -664,6 +667,7 @@ Pick one of named options. Labelled A, B, C… in the order given.
 | `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
 | `questions` | Questions | yes | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. |
 | `images` | array of string or null | no | — | Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no whitespace, no `data:` prefix), read as part of the state, before its text. At most 8 (`too_many_images`), and only on a model whose manifest declares `image` (`400 model_text_only` otherwise). `[]` is the same as none. |
+| `missing` | `'refuse'` or `'report'` | no | `'refuse'` | What to do when a label is not among the top tokens the engine returned. `refuse` (the default): the decision is `502 label_not_in_probs` naming the question and the letter. `report`: the door never invents a number — that option's probability and log-probability are null, it is named in the answer's `missing_labels`, and the renormalisation, `confidence`, `score` and `label_mass` run over the letters actually returned. A question whose EVERY label is missing is refused in both modes: there is no answer to report. |
 
 ### `DecideResponse`
 
@@ -764,11 +768,13 @@ A score question's distribution and its expected level.
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `type` | `'score'` | no | `'score'` | `score`. |
-| `score` | number | yes | — | Σ (1-based level index × p): 1.0 is certainly the lowest level. |
-| `level` | string | yes | — | The most probable level. |
-| `probabilities` | Probabilities | yes | — | Level to renormalised probability. |
+| `score` | number | yes | — | Σ (1-based level index × p) over the levels returned: 1.0 is certainly the lowest level. |
+| `level` | string | yes | — | The most probable level (of those returned, in report mode). |
+| `probabilities` | Probabilities | yes | — | Level to renormalised probability, lowest level first. Null only for a level reported missing. |
+| `logprobs` | Logprobs | yes | — | Level to ln of its `probabilities` entry, lowest first; add ln `label_mass` for the un-renormalised mass. NOT calibrated. Null where the probability is null, or exactly 0 (`-Infinity` is not JSON). |
 | `confidence` | number | yes | — | The largest renormalised probability. |
-| `label_mass` | number | yes | — | The raw probability the letters held together before renormalising. |
+| `label_mass` | number | yes | — | The raw probability the level letters held together before renormalising (over the letters RETURNED, in report mode). Low means the model wanted to say something that is not an option. A renormalised probability times it is the un-renormalised mass. |
+| `missing_labels` | array of string or null | no | — | Present only when the request said `missing: "report"` — absent, not null, otherwise: the levels whose letter was not among the top tokens the engine returned, in level order, `[]` when none was. Nothing is invented for them; their `probabilities` and `logprobs` are null. |
 
 ### `ScoreQuestion`
 
@@ -835,8 +841,10 @@ A yesno question's probability.
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `type` | `'yesno'` | no | `'yesno'` | `yesno`. |
-| `p` | number | yes | — | Renormalised P(Yes). |
-| `label_mass` | number | yes | — | The raw probability `A` and `B` held together before renormalising. |
+| `p` | number | yes | — | Renormalised P(Yes). In report mode with `A` or `B` missing it is the returned one renormalised alone — 1.0 or 0.0, which is honest and useless: gate on `label_mass`. |
+| `logprob` | number or null | yes | — | ln `p`; add ln `label_mass` for the un-renormalised mass. NOT calibrated. Null when `p` is exactly 0 (`-Infinity` is not JSON) — a report-mode answer with `Yes` missing. |
+| `label_mass` | number | yes | — | The raw probability the letters `A` and `B` held together before renormalising (over the letters RETURNED, in report mode). Low means the model wanted to say something that is not an option. A renormalised probability times it is the un-renormalised mass. |
+| `missing_labels` | array of string or null | no | — | Present only when the request said `missing: "report"` — absent, not null, otherwise: `["Yes"]` or `["No"]` when that letter was not among the top tokens the engine returned, `[]` when both were (both missing is refused). |
 
 ### `YesNoQuestion`
 

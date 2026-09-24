@@ -162,12 +162,14 @@ Request:
     "anger":  {"type": "score",  "instructions": "How frustrated is the customer?",
                "levels": ["Calm", "Frustrated but civil", "Very angry"]},
     "urgent": {"type": "yesno",  "instructions": "The message conveys urgency"}
-  }
+  },
+  "missing": "refuse"
 }
 ```
 
 `images` is optional (at most 8, `400 too_many_images`); `state` may be `""` only when
-images are given. Unknown keys are refused (`extra="forbid"`, as every Crucible params model).
+images are given. `missing` is optional, `"refuse"` (the default) or `"report"`, anything
+else `400 invalid_request` naming it — see *Missing labels* below. Unknown keys are refused (`extra="forbid"`, as every Crucible params model).
 `choice` takes 2–26 options in insertion order; `score` 2–10 unique ordered levels; a
 question name is a single path member. Validation refusals are **`400 invalid_request`**
 naming the field, Crucible's own code for the caller's mistake; `too_many_options` and
@@ -181,11 +183,13 @@ Response `200`:
   "engine": "vllm",
   "answers": {
     "team":   {"type": "choice", "choice": "billing", "probabilities": {"billing": 0.91, "technical": 0.09},
+               "logprobs": {"billing": -0.0943, "technical": -2.4079},
                "confidence": 0.91, "label_mass": 0.998},
     "anger":  {"type": "score", "score": 1.4, "level": "Calm",
                "probabilities": {"Calm": 0.62, "Frustrated but civil": 0.36, "Very angry": 0.02},
+               "logprobs": {"Calm": -0.478, "Frustrated but civil": -1.0217, "Very angry": -3.912},
                "confidence": 0.62, "label_mass": 0.997},
-    "urgent": {"type": "yesno", "p": 0.83, "label_mass": 0.99}
+    "urgent": {"type": "yesno", "p": 0.83, "logprob": -0.1863, "label_mass": 0.99}
   },
   "timing_ms": {"total": 84.0,
                 "per_question": {"team": {"wall_ms": 21.3, "prompt_tokens": 136, "cached_tokens": 64}},
@@ -222,7 +226,47 @@ Engine-side faults: **`502 engine_error`** naming the engine and its status/body
 non-200, a body that is not JSON, a reply missing `usage` or `logprobs` or naming a letter
 twice — and **`502 label_not_in_probs`** naming the question and
 the letter when the engine's top-K did not contain a label — that one keeps its own name
-because it is the one a caller repairs by shortening the option list.
+because it is the one a caller repairs by shortening the option list (or by asking for
+`missing: "report"`, below).
+
+**Log-probabilities** (ruled by Owen 2026-09-23, asked for by the Briefcase session that
+runs Viterbi over the answers). Every `choice` and `score` answer carries
+`"logprobs": {<option>: ln p, …}` in OPTION ORDER — the natural log of the renormalised
+probability beside it — and a `yesno` carries `"logprob": ln p`. Multiply by `label_mass`
+(add `ln label_mass`) for the un-renormalised mass. **The values are NOT calibrated**: they
+are one forward pass's reading, not measured frequencies. `-Infinity` is not JSON, so a
+probability of exactly 0 has a `null` log-probability; the only way the door produces one
+is the report-mode `yesno` below (a double underflowing on a letter the engine did return
+would too, and is not a case anyone has seen).
+
+**Missing labels** (same ruling). `missing` is `"refuse"` by default — a label outside the
+engine's top-K is `502 label_not_in_probs`, exactly as before. With `"report"` the door
+**never invents a number**: a label outside the top-K gets `null` in `probabilities` and in
+`logprobs`, is named in the answer's `"missing_labels": ["<option>", …]` (option order;
+`Yes`/`No` for a yesno), and the renormalisation, `confidence`, `score` (the expected value
+over the levels returned, at their own 1-based indices) and `label_mass` all run over the
+letters the engine actually returned; `choice`/`level` is the argmax over those. In report
+mode `missing_labels` is on EVERY answer, `[]` when nothing was missing; **in refuse mode
+the key is absent**, not empty (the SDK demands it when it asked for `report` and refuses
+it as a protocol error otherwise). A question whose EVERY label is missing is still
+`502 label_not_in_probs` in both modes — there is no answer to report
+(`details.letter` is then `null`). The prime is unchanged, and no engine body carries the
+mode: it is Crucible's reading, never the engine's.
+
+```json
+"anger":  {"type": "score", "score": 1.4, "level": "Calm",
+           "probabilities": {"Calm": 0.6, "Frustrated but civil": 0.4, "Very angry": null},
+           "logprobs": {"Calm": -0.5108, "Frustrated but civil": -0.9163, "Very angry": null},
+           "confidence": 0.6, "label_mass": 0.5, "missing_labels": ["Very angry"]},
+"urgent": {"type": "yesno", "p": 0.0, "logprob": null, "label_mass": 0.2,
+           "missing_labels": ["Yes"]}
+```
+
+A `yesno` in report mode with `A` or `B` missing has `p` = the returned one renormalised
+alone: `1.0` with `No` missing, `0.0` (and `logprob: null`) with `Yes` missing, the other
+named in `missing_labels`. That is honest and useless — the whole signal is in
+`label_mass`, which is exactly the one letter's raw probability — so a caller gates on
+`label_mass` (or on `missing_labels` being non-empty) before it believes `p`.
 
 ### 2.3 The reading is Crucible's, the order is the client's
 
@@ -255,6 +299,13 @@ outrank a letter when the model wanted to say something else — which `label_ma
 reports) and never more than the engine's stated maximum (§2.6). A question with MORE
 labels than that maximum is refused before anything is sent (`503 decide_not_served`
 naming the engine, its cap and the question) — on mlx-lm's 11 that is any choice past K.
+
+A label that is not among the K entries that came back is the request's `missing` mode's
+to handle (§2.2): refused as `label_not_in_probs`, or reported as `null` and named in
+`missing_labels`. The reader never widens K or asks the engine again to find it, and in
+neither mode does it put a number where the engine gave none. The log-probabilities it
+returns are ln of the renormalised probabilities it computed, not the engine's raw
+`logprob` field — the engine's is for the whole vocabulary, the answer's for the labels.
 
 *Corrected by the build:* this paragraph said `enable_thinking: false` "goes through the
 same `chat_template_kwargs` merge the chat door's `apply_defaults` does". It does not go

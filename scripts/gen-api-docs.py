@@ -270,7 +270,10 @@ def type_words(schema: dict[str, Any], components: dict[str, Any]) -> str:
     if "const" in schema:
         return "`" + repr(schema["const"]) + "`"
     if "enum" in schema:
-        return " | ".join("`" + repr(value) + "`" for value in schema["enum"])
+        # " or ", as the unions above say it: a bare `|` inside a table cell
+        # ends the cell, and `DecideRequest.missing` was the first enum field
+        # to reach a table (it split its row into six columns).
+        return " or ".join("`" + repr(value) + "`" for value in schema["enum"])
     kind = schema.get("type")
     if kind == "array":
         return "array of " + type_words(schema.get("items", {}), components)

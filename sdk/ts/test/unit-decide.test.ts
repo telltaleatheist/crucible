@@ -99,6 +99,7 @@ function reply(): Record<string, any> {
         type: 'choice',
         choice: 'billing',
         probabilities: { billing: 0.91, technical: 0.09 },
+        logprobs: { billing: -0.0943, technical: -2.4079 },
         confidence: 0.91,
         label_mass: 0.998,
       },
@@ -107,10 +108,11 @@ function reply(): Record<string, any> {
         score: 1.4,
         level: 'Calm',
         probabilities: { Calm: 0.62, 'Frustrated but civil': 0.36, 'Very angry': 0.02 },
+        logprobs: { Calm: -0.478, 'Frustrated but civil': -1.0217, 'Very angry': -3.912 },
         confidence: 0.62,
         label_mass: 0.997,
       },
-      urgent: { type: 'yesno', p: 0.83, label_mass: 0.99 },
+      urgent: { type: 'yesno', p: 0.83, logprob: -0.1863, label_mass: 0.99 },
     },
     timing_ms: {
       total: 84.0,
@@ -176,6 +178,7 @@ test('decide() reads every field the contract names', async () => {
         type: 'choice',
         choice: 'billing',
         probabilities: { billing: 0.91, technical: 0.09 },
+        logprobs: { billing: -0.0943, technical: -2.4079 },
         confidence: 0.91,
         labelMass: 0.998,
       },
@@ -184,10 +187,11 @@ test('decide() reads every field the contract names', async () => {
         score: 1.4,
         level: 'Calm',
         probabilities: { Calm: 0.62, 'Frustrated but civil': 0.36, 'Very angry': 0.02 },
+        logprobs: { Calm: -0.478, 'Frustrated but civil': -1.0217, 'Very angry': -3.912 },
         confidence: 0.62,
         labelMass: 0.997,
       },
-      urgent: { type: 'yesno', p: 0.83, labelMass: 0.99 },
+      urgent: { type: 'yesno', p: 0.83, logprob: -0.1863, labelMass: 0.99 },
     },
     timingMs: {
       total: 84.0,
@@ -222,6 +226,9 @@ const DEMANDED: Array<[string, string, (body: Record<string, any>) => void]> = [
   ['answers.anger', 'confidence', (b) => delete b.answers.anger.confidence],
   ['answers.anger', 'score', (b) => delete b.answers.anger.score],
   ['answers.urgent', 'p', (b) => delete b.answers.urgent.p],
+  ['answers.team', 'logprobs', (b) => delete b.answers.team.logprobs],
+  ['answers.anger', 'logprobs', (b) => delete b.answers.anger.logprobs],
+  ['answers.urgent', 'logprob', (b) => delete b.answers.urgent.logprob],
 ];
 
 for (const [path, name, strip] of DEMANDED) {
@@ -336,6 +343,131 @@ test('a question with a field this client does not know is refused before any re
   await assert.rejects(
     client().decide({ model: 'qwen3.5-9b', questions: EXAMPLE.questions } as unknown as DecideRequest),
     (error: unknown) => error instanceof CrucibleConfigError && error.option === 'state',
+  );
+  assert.equal(requests, before, 'nothing reached the server');
+});
+
+// ------------------------------------------------------- missing: 'report'
+
+/** The worked example's reply as report mode sends it: anger's top level fell outside the top-K. */
+function reportReply(): Record<string, any> {
+  const body = reply();
+  body.answers.team.missing_labels = [];
+  body.answers.urgent.missing_labels = [];
+  body.answers.anger = {
+    type: 'score',
+    score: 1.4,
+    level: 'Calm',
+    probabilities: { Calm: 0.6, 'Frustrated but civil': 0.4, 'Very angry': null },
+    logprobs: { Calm: -0.5108, 'Frustrated but civil': -0.9163, 'Very angry': null },
+    confidence: 0.6,
+    label_mass: 0.5,
+    missing_labels: ['Very angry'],
+  };
+  return body;
+}
+
+test("missing: 'report' travels in the body, and an omitted mode is not sent", async () => {
+  handle = (_request, response) => json(response, 200, reportReply());
+  await client().decide({ ...EXAMPLE, missing: 'report' });
+  const body = JSON.parse(lastBody);
+  assert.equal(body.missing, 'report');
+  assert.deepEqual(Object.keys(body), ['model', 'state', 'questions', 'missing']);
+
+  handle = (_request, response) => json(response, 200, reply());
+  await client().decide(EXAMPLE);
+  assert.equal('missing' in JSON.parse(lastBody), false, 'the server default stands; no copy of it here');
+  await client().decide({ ...EXAMPLE, missing: 'refuse' });
+  assert.equal(JSON.parse(lastBody).missing, 'refuse');
+});
+
+test('report mode reads missingLabels on every answer and null for exactly the missing labels', async () => {
+  handle = (_request, response) => json(response, 200, reportReply());
+  const result = await client().decide({ ...EXAMPLE, missing: 'report' });
+  assert.deepEqual(result.answers['anger'], {
+    type: 'score',
+    score: 1.4,
+    level: 'Calm',
+    probabilities: { Calm: 0.6, 'Frustrated but civil': 0.4, 'Very angry': null },
+    logprobs: { Calm: -0.5108, 'Frustrated but civil': -0.9163, 'Very angry': null },
+    confidence: 0.6,
+    labelMass: 0.5,
+    missingLabels: ['Very angry'],
+  });
+  assert.deepEqual(result.answers['team']?.missingLabels, []);
+  assert.deepEqual(result.answers['urgent']?.missingLabels, []);
+});
+
+test('refuse mode reads no missingLabels key at all', async () => {
+  handle = (_request, response) => json(response, 200, reply());
+  const result = await client().decide(EXAMPLE);
+  for (const answer of Object.values(result.answers)) assert.equal('missingLabels' in answer, false);
+});
+
+test('a report-mode answer without missing_labels is a protocol error, never a default', async () => {
+  const body = reportReply();
+  delete body.answers.urgent.missing_labels;
+  handle = (_request, response) => json(response, 200, body);
+  await assert.rejects(
+    client().decide({ ...EXAMPLE, missing: 'report' }),
+    (error: unknown) => error instanceof CrucibleProtocolError && error.detail.includes('"missing_labels"'),
+  );
+});
+
+test('missing_labels on an answer the request did not ask to report is a protocol error', async () => {
+  const body = reply();
+  body.answers.team.missing_labels = [];
+  handle = (_request, response) => json(response, 200, body);
+  await assert.rejects(client().decide(EXAMPLE), /decide\.answers\.team\.missing_labels is present but the request did not ask/);
+  await assert.rejects(
+    client().decide({ ...EXAMPLE, missing: 'refuse' }),
+    /missing_labels is present but the request did not ask/,
+  );
+});
+
+test('a null the answer does not name missing, or a named label with a number, is a protocol error', async () => {
+  const hidden = reportReply();
+  hidden.answers.anger.missing_labels = [];
+  handle = (_request, response) => json(response, 200, hidden);
+  await assert.rejects(
+    client().decide({ ...EXAMPLE, missing: 'report' }),
+    /decide\.answers\.anger\.probabilities\.Very angry is not a number/,
+  );
+
+  const invented = reportReply();
+  invented.answers.anger.probabilities['Very angry'] = 0.0;
+  handle = (_request, response) => json(response, 200, invented);
+  await assert.rejects(
+    client().decide({ ...EXAMPLE, missing: 'report' }),
+    /probabilities\.Very angry is 0 but the answer names "Very angry" missing/,
+  );
+
+  const stranger = reportReply();
+  stranger.answers.anger.missing_labels = ['Furious'];
+  handle = (_request, response) => json(response, 200, stranger);
+  await assert.rejects(client().decide({ ...EXAMPLE, missing: 'report' }), /missing_labels is "Furious"/);
+
+  const refuseNull = reply();
+  refuseNull.answers.team.probabilities.technical = null;
+  handle = (_request, response) => json(response, 200, refuseNull);
+  await assert.rejects(client().decide(EXAMPLE), /probabilities\.technical is not a number/);
+});
+
+test('a yesno logprob of null (p exactly 0) reads as null; a yesno report names Yes or No', async () => {
+  const body = reportReply();
+  body.answers.urgent = { type: 'yesno', p: 0, logprob: null, label_mass: 0.2, missing_labels: ['Yes'] };
+  handle = (_request, response) => json(response, 200, body);
+  const result = await client().decide({ ...EXAMPLE, missing: 'report' });
+  assert.deepEqual(result.answers['urgent'], {
+    type: 'yesno', p: 0, logprob: null, labelMass: 0.2, missingLabels: ['Yes'],
+  });
+});
+
+test('a missing mode other than the two words is refused before any request', async () => {
+  const before = requests;
+  await assert.rejects(
+    client().decide({ ...EXAMPLE, missing: 'sometimes' as never }),
+    (error: unknown) => error instanceof CrucibleConfigError && error.option === 'missing',
   );
   assert.equal(requests, before, 'nothing reached the server');
 });
