@@ -707,6 +707,7 @@ def test_unload_voice_will_not_take_a_model_off_the_card(
         memory_bytes_estimate=1,
         log_path=Path("/tmp/x.log"),
         loaded_at="2026-09-13T02:00:00+00:00",
+        engine_args=(),
     )
     response = submit(tts_client, auth, type="unload-voice", model=VOICE)
     assert response.status_code == 409

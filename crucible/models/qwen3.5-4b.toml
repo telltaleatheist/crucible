@@ -233,7 +233,43 @@ serves = ["text"]
 #                   same shape as the 9B, so the same number.
 #   at 16384        536_870_912
 memory_bytes_estimate = 11_017_420_134
-engine_args = []
+# THE BATCH, STATED -- AND WHY THESE NUMBERS. COMPUTED 2026-09-24, MEASUREMENT OWED.
+# mlx-lm 0.31.3 batches (engines/mlx_lm.py, `chat_concurrency_flag`): one
+# `BatchGenerator` decodes up to `--decode-concurrency` sequences at once and
+# prefills up to `--prompt-concurrency` prompts per forward. The chat door admits
+# `--decode-concurrency + 1`, read off this argv, and that is the pool a client
+# sizes from `/v1/activity`. Crucible states all three flags (house rule: no
+# library defaults; `MlxLmEngine.start` refuses an argv without them).
+#
+# The bound is NOT Crucible's 61 GiB budget but the tighter one mlx-lm wires to:
+# Metal's `max_recommended_working_set_size`, 55_662_788_608 B (51.84 GiB) on the
+# M1 Ultra, read with `mx.device_info()` 2026-09-24 (`server.py` L1893-1895 sets
+# the wired limit to it). Past it the Mac pages. Every term, per sequence at the
+# 8192 tokens that is the widest class default this model serves (clean,
+# generate, decide; translate is 4096):
+#   KV            8192 x kv_bytes_per_token (the [memory] table below)
+#   recurrent     gated-delta state, float32 (`models/gated_delta.py` L279:
+#                 `mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)`), per sequence
+#                 and flat in length: linear layers x v heads x 128 x 128 x 4 B
+#   conv          linear layers x 3 x (2 x 16 x 128 + v heads x 128) x 2 B
+# held by the decode batch AND by each of the `--prompt-cache-size` finished
+# sequences mlx-lm keeps for prefix reuse (worst case: every one a full 8192).
+# Prefill is taken at the measured `overhead_bytes` per prompt in flight, i.e.
+# `--prompt-concurrency - 1` extra copies of it -- the worst case, since only
+# part of that residual is a per-step transient.
+# THIS MODEL: 24 gated-delta layers x 32 v heads, the 9B's shape.
+#   per sequence  268_435_456 KV + 50_331_648 recurrent + 1_179_648 conv
+#               = 319_946_752 B
+#   weights + overhead                        10_480_549_222
+#   + 3 extra prefills (x 2_069_045_094)       6_207_135_282
+#   + 16 in flight                             5_119_148_032
+#   + 10 cached                                3_199_467_520
+#                                          = 25_006_300_056 B = 23.29 GiB of 51.84
+engine_args = [
+    "--decode-concurrency", "16",
+    "--prompt-concurrency", "4",
+    "--prompt-cache-size", "10",
+]
 # THE MOST A LOAD MAY ASK FOR HERE. COMPUTED 2026-09-23, LOAD TEST OWED, from the terms below against
 # the Studio's 48.0 GiB (64 GiB less the 25% allowance = 51_539_607_552 B): 8_411_504_128 + 2_069_045_094 = 10_480_549_222 B fixed,
 # + 131072 x 32_768 (4_294_967_296) = 14_775_516_518 B = 13.76 GiB. The memory

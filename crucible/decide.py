@@ -82,7 +82,10 @@ MAX_IMAGES = 8
 LABEL_MARGIN = 4
 
 #: How many questions of one decision are in flight at once when the engine
-#: states no admission of its own (vLLM, which batches). snap's
+#: states no admission of its own. That was vLLM until 2026-09-24; vLLM now
+#: states `--max-num-seqs` (read off its argv, `engines/vllm.py`), so every
+#: engine that serves a decision states one and this is the fallback for an
+#: engine that might serve one later without doing so. snap's
 #: `DEFAULT_CONCURRENCY` for its openai-chat engine; a number of Crucible's and
 #: never the wire's. An engine that DOES state one is held to that instead
 #: (`crucible.engines.chat_admission`), because a serial engine given sixteen

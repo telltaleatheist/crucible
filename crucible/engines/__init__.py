@@ -23,6 +23,7 @@ from .base import (
     EngineError,
     SubprocessEngine,
     find_free_port,
+    int_flag,
     logs_dir,
 )
 from .llama_server import LlamaServerEngine
@@ -83,8 +84,16 @@ def engine_log_path(home: Path, model_id: str) -> Path:
 ChatAdmission = tuple[int | None, str | None]
 
 
-def chat_admission(engine_name: str) -> ChatAdmission:
+def chat_admission(
+    engine_name: str, engine_args: "list[str] | tuple[str, ...]"
+) -> ChatAdmission:
     """How many chat completions this engine's door admits at once, and why.
+
+    `engine_args` is the argv the RESIDENT engine was started with
+    (`ResidentModel.engine_args`). It is read only for an engine whose
+    concurrency is a flag (`SubprocessEngine.chat_concurrency_flag`, mlx-lm's
+    `--decode-concurrency` since 2026-09-24), so the number the door admits is
+    the number the running engine was given and cannot be a second copy of it.
 
     **The engine's own concurrency, PLUS ONE.** The plus one is not a margin and
     not a guess: it is the request that is ready to begin the moment the running
@@ -107,6 +116,29 @@ def chat_admission(engine_name: str) -> ChatAdmission:
         )
     concurrency = cls.chat_concurrency
     basis = cls.chat_concurrency_basis
+    flag = cls.chat_concurrency_flag
+    if flag is not None:
+        if concurrency is not None:
+            raise EngineError(
+                f"{engine_name} states chat_concurrency {concurrency} AND reads "
+                f"its concurrency from {flag}. One number, one owner: drop the "
+                "constant, the argv is what the engine runs"
+            )
+        if basis is None:
+            raise EngineError(
+                f"{engine_name} reads its concurrency from {flag} and states no "
+                "chat_concurrency_basis; say where that flag's meaning was read"
+            )
+        concurrency = int_flag(engine_args, flag)
+        if concurrency is None:
+            # MISCONFIGURATION, NOT WEATHER: the engine refuses to START without
+            # the flag (`MlxLmEngine.start`), so a resident engine missing it is
+            # a record that does not describe what is running.
+            raise EngineError(
+                f"{engine_name} was started without {flag} ({list(engine_args)}); "
+                "its batch width is that flag and nothing else states it"
+            )
+        basis = f"{basis}; this engine was started with {flag} {concurrency}"
     if concurrency is None:
         if basis is not None:
             raise EngineError(

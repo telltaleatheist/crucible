@@ -1,4 +1,5 @@
-"""The `llm` env's one patch: mlx-lm's `top_logprobs` ceiling, 11 -> 40.
+"""The `llm` env's patches: mlx-lm's `top_logprobs` ceiling, 11 -> 40, and
+(2026-09-24) the logprobs it returns computed in float32.
 
 PHASE22-DECIDE.md section 2.6. The applier runs here against a VERBATIM excerpt
 of the installed mlx-lm 0.31.3 `mlx_lm/server.py` from the Mac Studio
@@ -7,10 +8,17 @@ of the installed mlx-lm 0.31.3 `mlx_lm/server.py` from the Mac Studio
 cdfcb4ac848636f9927851a0ec7a951584526530cb7832ba58049e4a9144db8b, read over
 `ssh mac` on 2026-09-23), so the anchor is proven against the real bytes and not
 a paraphrase of them.
+
+The float32 patch runs against the WHOLE installed `mlx_lm/generate.py`
+(`tests/fixtures/mlx_lm_0.31.3_generate.py.txt`, sha256
+270778ad53eaca55a8533d82e6752660fe5d2605c4aa0879b48a50a91f69345f — the same
+digest the wheel's own RECORD states, so it is the stock file — read over
+`ssh mac` on 2026-09-24): its anchors are proven unique in the real file.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -20,13 +28,22 @@ import pytest
 
 from crucible import cli, envpatches, jobenv, narratorpatches
 from crucible.engines import EngineError, decide_reading
-from crucible.engines.mlx_lm import MlxLmEngine
+from crucible.engines.mlx_lm import MlxLmEngine, REQUIRED_FLAGS
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "mlx_lm_0.31.3_server_validate.py.txt"
 SCRIPT = envpatches.LLM_SCRIPTS_DIR / envpatches.MLX_LM_TOP_LOGPROBS.script
 PATCH = envpatches.MLX_LM_TOP_LOGPROBS
+GEN_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "mlx_lm_0.31.3_generate.py.txt"
+GEN_SHA256 = "270778ad53eaca55a8533d82e6752660fe5d2605c4aa0879b48a50a91f69345f"
+FP32 = envpatches.MLX_LM_FP32_LOGPROBS
+FP32_SCRIPT = envpatches.LLM_SCRIPTS_DIR / FP32.script
+#: An argv that states every flag `MlxLmEngine.start` requires, so the tests of
+#: the PATCH gate are not stopped by the flags gate in front of it.
+MLX_ARGS = [
+    "--decode-concurrency", "16", "--prompt-concurrency", "4", "--prompt-cache-size", "10",
+]
 MAC_PINS = jobenv.recipe_pins(jobenv.recipe_for(jobenv.llm_env("mlx-darwin")))
 CUDA_PINS = jobenv.recipe_pins(jobenv.recipe_for(jobenv.llm_env("cuda-linux")))
 
@@ -37,13 +54,42 @@ def pristine() -> str:
     return FIXTURE.read_text(encoding="utf-8").replace("\r\n", "\n")
 
 
-def make_env(root: Path, server_text: str | None = None) -> Path:
-    """A venv-shaped directory holding `mlx_lm/server.py` and `bin/python`."""
+def pristine_generate() -> str:
+    return GEN_FIXTURE.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
+def write_mlx_lm(
+    package: Path,
+    server_text: str,
+    generate_text: str | None = None,
+    version: str = "0.31.3",
+) -> None:
+    """`mlx_lm/server.py`, `generate.py` and `_version.py`, LF bytes as shipped."""
+    package.mkdir(parents=True)
+    files = {
+        "server.py": server_text,
+        "generate.py": pristine_generate() if generate_text is None else generate_text,
+        "_version.py": f'# Copyright\n\n__version__ = "{version}"\n',
+    }
+    for name, body in files.items():
+        with open(package / name, "w", encoding="utf-8", newline="") as handle:
+            handle.write(body)
+
+
+def make_env(
+    root: Path,
+    server_text: str | None = None,
+    generate_text: str | None = None,
+    version: str = "0.31.3",
+) -> Path:
+    """A venv-shaped directory holding the patched package and `bin/python`."""
     env = root / "llm-env"
-    target = env / "lib" / "python3.11" / "site-packages" / "mlx_lm" / "server.py"
-    target.parent.mkdir(parents=True)
-    with open(target, "w", encoding="utf-8", newline="") as handle:
-        handle.write(pristine() if server_text is None else server_text)
+    write_mlx_lm(
+        env / "lib" / "python3.11" / "site-packages" / "mlx_lm",
+        pristine() if server_text is None else server_text,
+        generate_text,
+        version,
+    )
     (env / "bin").mkdir()
     (env / "bin" / "python").write_text("", encoding="utf-8")
     return env
@@ -53,19 +99,29 @@ def server_of(env: Path) -> Path:
     return env / "lib" / "python3.11" / "site-packages" / "mlx_lm" / "server.py"
 
 
-def run_script(env: Path) -> subprocess.CompletedProcess:
+def generate_of(env: Path) -> Path:
+    return env / "lib" / "python3.11" / "site-packages" / "mlx_lm" / "generate.py"
+
+
+def run_script(env: Path, script: Path = SCRIPT) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, str(SCRIPT), str(env)],
+        [sys.executable, str(script), str(env)],
         capture_output=True,
         text=True,
         timeout=60,
     )
 
 
-def _script_namespace() -> dict:
+def patch_both(env: Path) -> None:
+    for script in (SCRIPT, FP32_SCRIPT):
+        done = run_script(env, script)
+        assert done.returncode == 0, done.stderr
+
+
+def _script_namespace(script: Path = SCRIPT) -> dict:
     """The applier's module globals, without running `main()`."""
-    namespace: dict = {"__name__": "patch_mlx_lm_top_logprobs"}
-    exec(compile(SCRIPT.read_text(encoding="utf-8"), str(SCRIPT), "exec"), namespace)
+    namespace: dict = {"__name__": script.stem}
+    exec(compile(script.read_text(encoding="utf-8"), str(script), "exec"), namespace)
     return namespace
 
 
@@ -92,7 +148,7 @@ def test_the_applier_raises_the_cap_to_40_and_keeps_a_snapshot(tmp_path: Path) -
     assert text.replace(script["NEW"], script["OLD"]) == pristine()
     # `.orig` is the live file as it was, kept for reference.
     assert Path(str(server_of(env)) + ".orig").read_text(encoding="utf-8") == pristine()
-    [row] = narratorpatches.check(env, MAC_PINS, patches=envpatches.LLM_PATCHES)
+    [row] = narratorpatches.check(env, MAC_PINS, patches=(PATCH,))
     assert row["status"] == narratorpatches.APPLIED
 
 
@@ -115,7 +171,7 @@ def test_a_moved_anchor_is_refused_by_name_and_touches_nothing(tmp_path: Path) -
     assert "ANCHOR_NOT_FOUND" in done.stderr
     assert server_of(env).read_text(encoding="utf-8") == moved
     assert not Path(str(server_of(env)) + ".orig").exists()
-    [row] = narratorpatches.check(env, MAC_PINS, patches=envpatches.LLM_PATCHES)
+    [row] = narratorpatches.check(env, MAC_PINS, patches=(PATCH,))
     assert row["status"] == narratorpatches.MISSING
 
 
@@ -152,22 +208,25 @@ def test_the_patch_is_selected_by_the_recipe_not_by_a_backend_name(tmp_path: Pat
     assert PATCH.distribution in MAC_PINS
     assert PATCH.distribution not in CUDA_PINS
     env = make_env(tmp_path)
+    assert FP32.distribution in MAC_PINS and FP32.distribution not in CUDA_PINS
     for pins in (CUDA_PINS, {}):
-        [row] = envpatches.check("llm", env, pins)
-        assert row["status"] == narratorpatches.NOT_APPLICABLE
-        # And apply runs nothing there: the file is still stock.
-        assert envpatches.apply("llm", env, Path(sys.executable), pins)[0]["status"] == (
-            narratorpatches.NOT_APPLICABLE
-        )
+        rows = envpatches.check("llm", env, pins)
+        assert [row["status"] for row in rows] == [narratorpatches.NOT_APPLICABLE] * 2
+        # And apply runs nothing there: the files are still stock.
+        assert [
+            row["status"] for row in envpatches.apply("llm", env, Path(sys.executable), pins)
+        ] == [narratorpatches.NOT_APPLICABLE] * 2
         assert server_of(env).read_text(encoding="utf-8") == pristine()
+        assert generate_of(env).read_text(encoding="utf-8") == pristine_generate()
 
 
 def test_apply_through_the_registry_patches_and_proves_it(tmp_path: Path) -> None:
     env = make_env(tmp_path)
     said: list[str] = []
     rows = envpatches.apply("llm", env, Path(sys.executable), MAC_PINS, on_line=said.append)
-    assert [row["status"] for row in rows] == [narratorpatches.APPLIED]
-    assert any(line.startswith("PATCHED") for line in said)
+    assert [row["id"] for row in rows] == ["mlx-lm-top-logprobs-40", "mlx-lm-fp32-logprobs"]
+    assert [row["status"] for row in rows] == [narratorpatches.APPLIED] * 2
+    assert sum(line.startswith("PATCHED") for line in said) == 2
 
 
 def _llm_install_ready(home: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[jobenv.EnvSpec, Path]:
@@ -239,7 +298,7 @@ def test_an_unpatched_env_is_refused_at_engine_start(tmp_path: Path) -> None:
     env = make_env(tmp_path)
     engine = MlxLmEngine(python=env / "bin" / "python", log_path=tmp_path / "e.log")
     with pytest.raises(EngineError) as caught:
-        engine.start(tmp_path / "weights", "m", 0, [])
+        engine.start(tmp_path / "weights", "m", 0, MLX_ARGS)
     message = str(caught.value)
     assert message.startswith("llm_env_unpatched:")
     assert "mlx-lm-top-logprobs-40 is missing" in message
@@ -247,14 +306,157 @@ def test_an_unpatched_env_is_refused_at_engine_start(tmp_path: Path) -> None:
     assert not (tmp_path / "e.log").exists(), "nothing was spawned"
 
 
+def test_an_env_without_the_fp32_patch_is_refused_at_engine_start(tmp_path: Path) -> None:
+    """The top-logprobs patch alone is not enough: an engine whose label mass
+    can read 1.055 does not start."""
+    env = make_env(tmp_path)
+    assert run_script(env).returncode == 0  # top_logprobs only
+    engine = MlxLmEngine(python=env / "bin" / "python", log_path=tmp_path / "e.log")
+    with pytest.raises(EngineError) as caught:
+        engine.start(tmp_path / "weights", "m", 0, MLX_ARGS)
+    message = str(caught.value)
+    assert message.startswith("llm_env_unpatched:")
+    assert "mlx-lm-fp32-logprobs is missing" in message
+    assert not (tmp_path / "e.log").exists(), "nothing was spawned"
+
+
 def test_a_patched_env_passes_the_gate(tmp_path: Path) -> None:
     """Past the patch check, the base class's own refusals take over."""
     env = make_env(tmp_path)
-    assert run_script(env).returncode == 0
+    patch_both(env)
     engine = MlxLmEngine(python=env / "bin" / "python", log_path=tmp_path / "e.log")
     with pytest.raises(EngineError) as caught:
-        engine.start(tmp_path / "no-weights", "m", 0, [])
+        engine.start(tmp_path / "no-weights", "m", 0, MLX_ARGS)
     assert "no model directory" in str(caught.value)
+
+
+@pytest.mark.parametrize("missing", REQUIRED_FLAGS)
+def test_an_argv_that_does_not_state_its_batch_is_refused_at_engine_start(
+    tmp_path: Path, missing: str
+) -> None:
+    """House rule: no library defaults. Each flag is a memory decision for the
+    model, so a block that leaves one to mlx-lm is refused by name before
+    anything is spawned."""
+    env = make_env(tmp_path)
+    patch_both(env)
+    args = list(MLX_ARGS)
+    at = args.index(missing)
+    del args[at : at + 2]
+    engine = MlxLmEngine(python=env / "bin" / "python", log_path=tmp_path / "e.log")
+    with pytest.raises(EngineError) as caught:
+        engine.start(tmp_path / "weights", "m", 0, args)
+    message = str(caught.value)
+    assert message.startswith("mlx_lm_flags_unstated:")
+    assert missing in message
+    assert not (tmp_path / "e.log").exists(), "nothing was spawned"
+
+
+# ------------------------------------------------------- the float32 patch
+
+
+def test_the_generate_fixture_is_the_stock_file() -> None:
+    """The wheel's own RECORD digest, and every stock site once."""
+    raw = GEN_FIXTURE.read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(raw).hexdigest() == GEN_SHA256
+    text = pristine_generate()
+    assert text.count(FP32.absent_marker) == 3
+    assert FP32.marker not in text
+
+
+def test_the_fp32_applier_patches_every_returned_site_and_keeps_a_snapshot(
+    tmp_path: Path,
+) -> None:
+    env = make_env(tmp_path)
+    done = run_script(env, FP32_SCRIPT)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith("PATCHED ")
+    text = generate_of(env).read_text(encoding="utf-8")
+    assert text.count(FP32.marker) == 1
+    assert FP32.absent_marker not in text
+    # The three returning sites now return the float32 half ...
+    assert text.count("logprobs, returned = _crucible_logprobs(logits, None)") == 1
+    assert text.count("logprobs, returned = _crucible_logprobs(logits, -1)") == 2
+    assert "return sampled, returned.squeeze(0)" in text
+    assert "return y, returned" in text
+    assert "self._next_logprobs = list(returned)" in text
+    # ... while every sampler still reads the stock-dtype `logprobs`, untouched.
+    assert "sampled = sampler(logprobs)" in text
+    assert "y = sampler(logprobs)" in text
+    assert "sampled = sample_sampler(logprobs[e : e + 1])" in text
+    assert "sampled = self.fallback_sampler(logprobs)" in text
+    # Only the anchors moved: undoing each edit gives the stock file back.
+    script = _script_namespace(FP32_SCRIPT)
+    undone = text
+    for old, new in [(script["HELPER_ANCHOR"], script["HELPER"])] + list(script["EDITS"]):
+        undone = undone.replace(new, old)
+    assert undone == pristine_generate()
+    assert Path(str(generate_of(env)) + ".orig").read_text(encoding="utf-8") == (
+        pristine_generate()
+    )
+    [row] = narratorpatches.check(env, MAC_PINS, patches=(FP32,))
+    assert row["status"] == narratorpatches.APPLIED
+    # And it is still Python.
+    compile(text, "generate.py", "exec")
+
+
+def test_the_fp32_applier_is_idempotent(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    assert run_script(env, FP32_SCRIPT).returncode == 0
+    once = generate_of(env).read_bytes()
+    again = run_script(env, FP32_SCRIPT)
+    assert again.returncode == 0, again.stderr
+    assert again.stdout.startswith("ALREADY_PATCHED ")
+    assert generate_of(env).read_bytes() == once
+
+
+def test_the_fp32_applier_refuses_another_mlx_lm_version(tmp_path: Path) -> None:
+    """Version-pinned: derived against 0.31.3 byte for byte."""
+    env = make_env(tmp_path, version="0.31.4")
+    done = run_script(env, FP32_SCRIPT)
+    assert done.returncode == 2
+    assert "VERSION_MISMATCH" in done.stderr
+    assert generate_of(env).read_text(encoding="utf-8") == pristine_generate()
+    assert not Path(str(generate_of(env)) + ".orig").exists()
+
+
+def test_the_fp32_applier_writes_nothing_when_one_site_moved(tmp_path: Path) -> None:
+    """All or nothing: a file with some sites float32 and some not would be an
+    engine returning two precisions."""
+    moved = pristine_generate().replace(
+        "        self._next_logprobs = list(logprobs)\n",
+        "        self._next_logprobs = [lp for lp in logprobs]\n",
+    )
+    env = make_env(tmp_path, generate_text=moved)
+    done = run_script(env, FP32_SCRIPT)
+    assert done.returncode == 2
+    assert "ANCHOR_NOT_FOUND" in done.stderr
+    assert generate_of(env).read_text(encoding="utf-8") == moved
+    assert not Path(str(generate_of(env)) + ".orig").exists()
+    [row] = narratorpatches.check(env, MAC_PINS, patches=(FP32,))
+    assert row["status"] == narratorpatches.MISSING
+
+
+def test_a_surviving_stock_site_reads_stale_not_applied(tmp_path: Path) -> None:
+    """The check proves the stock normalization is GONE, not merely that the
+    helper arrived."""
+    env = make_env(tmp_path)
+    assert run_script(env, FP32_SCRIPT).returncode == 0
+    text = generate_of(env).read_text(encoding="utf-8")
+    text += "\nlogprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)\n"
+    generate_of(env).write_text(text, encoding="utf-8")
+    [row] = narratorpatches.check(env, MAC_PINS, patches=(FP32,))
+    assert row["status"] == narratorpatches.STALE
+
+
+def test_the_fp32_script_and_the_table_name_the_same_strings() -> None:
+    namespace = _script_namespace(FP32_SCRIPT)
+    assert namespace["REL"] == FP32.rel_path
+    assert namespace["MARKER"] == FP32.marker
+    assert namespace["ABSENT_MARKER"] == FP32.absent_marker
+    assert FP32.marker in namespace["HELPER"]
+    assert FP32.absent_marker not in namespace["HELPER"]
+    assert all(FP32.absent_marker not in new for _, new in namespace["EDITS"])
+    assert namespace["EXPECTED_VERSION"] == MAC_PINS["mlx-lm"]
 
 
 # ------------------------------------------------------------------ doctor
@@ -266,10 +468,7 @@ def _mac(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _mac_llm_env(home: Path, server_text: str) -> Path:
     env = jobenv.env_dir(home, jobenv.llm_env("mlx-darwin"))
-    target = env / "lib" / "python3.11" / "site-packages" / "mlx_lm" / "server.py"
-    target.parent.mkdir(parents=True)
-    with open(target, "w", encoding="utf-8", newline="") as handle:
-        handle.write(server_text)
+    write_mlx_lm(env / "lib" / "python3.11" / "site-packages" / "mlx_lm", server_text)
     return env
 
 
@@ -286,10 +485,11 @@ def test_doctor_reports_an_unpatched_mac_llm_env_as_a_problem(
     capsys.readouterr()
     _mac_llm_env(home, pristine())
     report = _doctor(capsys)
-    [row] = report["llm_patches"]
-    assert row["id"] == "mlx-lm-top-logprobs-40"
-    assert row["status"] == "missing"
+    rows = {row["id"]: row for row in report["llm_patches"]}
+    assert set(rows) == {"mlx-lm-top-logprobs-40", "mlx-lm-fp32-logprobs"}
+    assert all(row["status"] == "missing" for row in rows.values())
     assert any(p.startswith("llm_patch[mlx-lm-top-logprobs-40]: missing") for p in report["problems"])
+    assert any(p.startswith("llm_patch[mlx-lm-fp32-logprobs]: missing") for p in report["problems"])
 
 
 def test_doctor_reports_a_patched_mac_llm_env_as_sound(
@@ -301,10 +501,9 @@ def test_doctor_reports_a_patched_mac_llm_env_as_sound(
     env = _mac_llm_env(home, pristine())
     (env / "bin").mkdir()
     (env / "bin" / "python").write_text("", encoding="utf-8")
-    assert run_script(env).returncode == 0
+    patch_both(env)
     report = _doctor(capsys)
-    [row] = report["llm_patches"]
-    assert row["status"] == "applied"
+    assert [row["status"] for row in report["llm_patches"]] == ["applied", "applied"]
     assert not any("llm_patch" in p for p in report["problems"])
 
 
@@ -315,8 +514,7 @@ def test_doctor_says_not_applicable_on_cuda_linux(
     assert cli.main(["init", "--enable-llm"]) == 0
     capsys.readouterr()
     report = _doctor(capsys)
-    [row] = report["llm_patches"]
-    assert row["status"] == "not_applicable"
+    assert [row["status"] for row in report["llm_patches"]] == ["not_applicable"] * 2
     assert not any("llm_patch" in p for p in report["problems"])
 
 
@@ -327,8 +525,7 @@ def test_doctor_does_not_repeat_a_missing_env_as_a_patch_problem(
     assert cli.main(["init", "--enable-llm"]) == 0
     capsys.readouterr()
     report = _doctor(capsys)
-    [row] = report["llm_patches"]
-    assert row["status"] == "no_env"
+    assert [row["status"] for row in report["llm_patches"]] == ["no_env"] * 2
     assert not any("llm_patch" in p for p in report["problems"])
 
 
@@ -354,7 +551,9 @@ def test_env_patch_llm_applies_and_exits_zero(
     assert cli.main(["env", "patch", "llm"]) == 0
     out = capsys.readouterr().out
     assert "llm patch (mlx-lm-top-logprobs-40): applied" in out
+    assert "llm patch (mlx-lm-fp32-logprobs): applied" in out
     assert PATCH.marker in server_of(env).read_text(encoding="utf-8")
+    assert FP32.marker in generate_of(env).read_text(encoding="utf-8")
 
 
 def test_env_patch_llm_refuses_by_name_when_the_anchor_moved(

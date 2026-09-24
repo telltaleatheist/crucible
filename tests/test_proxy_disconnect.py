@@ -242,7 +242,9 @@ def deciding_server(
     the door's own input (`chat_admission`); the fake's `vllm` name states none,
     and sixteen at once would leave nothing waiting to be held back.
     """
-    monkeypatch.setattr(api_module, "chat_admission", lambda engine: (GATE, "the test's"))
+    monkeypatch.setattr(
+        api_module, "chat_admission", lambda engine, args: (GATE, "the test's")
+    )
     engines = engine_factory(
         probs_for=_yes_mostly,
         delay_for=lambda body: 30.0 if _is_question(body) else 0.0,

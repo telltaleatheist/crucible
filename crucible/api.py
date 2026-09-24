@@ -2022,7 +2022,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # client can size its own pool from the server instead of guessing
             # and discovering the answer as a starved socket. Null for an engine
             # that states no concurrency — the door then bounds nothing, which
-            # is every engine but mlx-lm today — and null when no model is
+            # is mlx-vlm today — and null when no model is
             # resident, because the limit belongs to the engine and there is no
             # engine to ask.
             "chat": {
@@ -3090,8 +3090,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # Until today this door admitted everything and
             # `crucible/inflight.py` said, in so many words, that the record
             # gates nothing. For a BATCHING engine that is still exactly right
-            # and still what happens: vLLM states no concurrency,
-            # `chat_admission` returns None, and nothing below refuses.
+            # (2026-09-24: vLLM now STATES its batch, `--max-num-seqs`, so it is
+            # bounded at that plus one and a client can size to it; the batch
+            # is admitted whole, so nothing it could overlap is refused.)
             #
             # It was wrong for a SERIAL one. mlx-lm accepts every connection on
             # a ThreadingHTTPServer and then generates on ONE thread draining
@@ -3101,6 +3102,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # request that had not started when it passed, the pass dead at
             # block 352 of 940.
             #
+            # (CORRECTED 2026-09-24: mlx-lm is not serial — that one thread runs
+            # a `BatchGenerator` `--decode-concurrency` wide. The door was right
+            # to bound it and wrong about the width; the width is now read off
+            # the resident engine's argv, `engines/mlx_lm.py`.)
+            #
             # A refusal a client can act on beats a socket that goes quiet. The
             # limit is the engine's own measured concurrency plus one (see
             # `engines.chat_admission`), the wait is the median of what
@@ -3108,7 +3114,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # that has finished none states no `Retry-After` rather than
             # inventing one — `_rate_limited`'s rule, applied to a number of
             # our own.
-            limit, limit_basis = chat_admission(resident.engine)
+            limit, limit_basis = chat_admission(resident.engine, resident.engine_args)
             if limit is not None and len(inflight) >= limit:
                 wait = inflight.retry_after()
                 return _chat_queue_full(
@@ -3267,7 +3273,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 )
 
             inflight: InFlight = request.app.state.inflight
-            limit, limit_basis = chat_admission(resident.engine)
+            limit, limit_basis = chat_admission(resident.engine, resident.engine_args)
             if limit is not None and len(inflight) >= limit:
                 wait = inflight.retry_after()
                 return _chat_queue_full(
@@ -4144,7 +4150,7 @@ def _chat_limit_of(residency: Residency) -> tuple[int | None, str | None]:
     resident = residency.resident_model
     if resident is None:
         return (None, None)
-    return chat_admission(resident.engine)
+    return chat_admission(resident.engine, resident.engine_args)
 
 
 def _chat_queue_full(
