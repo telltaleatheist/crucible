@@ -47,7 +47,10 @@ MAC_MODELS = [
     "mlx-whisper-small",
     "mlx-whisper-tiny",
 ]
-MODELS = sorted(CUDA_MODELS + MAC_MODELS)
+#: Qwen3-ASR: ONE id with a block on each backend, both pinning the official
+#: checkpoint (crucible/asrmodels.py, "the first id on BOTH backends").
+QWEN_MODELS = ["qwen3-asr-1.7b"]
+MODELS = sorted(CUDA_MODELS + MAC_MODELS + QWEN_MODELS)
 
 GOOD = """
 [model]
@@ -84,9 +87,9 @@ def parse(text: str, model_id: str = "faster-whisper-tiny"):
 # ------------------------------------------------------- the shipped fourteen
 
 
-def test_this_build_ships_fourteen_asr_models_across_two_engines() -> None:
+def test_this_build_ships_fifteen_asr_models_across_four_engines() -> None:
     assert sorted(load_all_asr_manifests()) == MODELS
-    assert len(CUDA_MODELS) == 7 and len(MAC_MODELS) == 7
+    assert len(CUDA_MODELS) == 7 and len(MAC_MODELS) == 7 and len(QWEN_MODELS) == 1
 
 
 def test_every_shipped_pin_is_a_full_commit_sha() -> None:
@@ -101,8 +104,8 @@ def test_every_shipped_pin_is_a_full_commit_sha() -> None:
 def test_each_model_serves_one_backend_with_that_backends_engine() -> None:
     """No model spans both, because no two sets of these weights are the same."""
     assert ASR_BACKEND_ENGINES == {
-        "cuda-linux": "faster-whisper",
-        "mlx-darwin": "mlx-whisper",
+        "cuda-linux": frozenset({"faster-whisper", "vllm"}),
+        "mlx-darwin": frozenset({"mlx-whisper", "mlx-audio"}),
     }
     for model_id in CUDA_MODELS:
         manifest = load_asr_manifest(model_id)
@@ -285,7 +288,7 @@ def test_the_id_and_the_filename_are_the_same_thing() -> None:
 
 def test_the_wrong_engine_for_the_backend_is_refused() -> None:
     with pytest.raises(AsrManifestError) as caught:
-        parse(GOOD.replace('engine = "faster-whisper"', 'engine = "vllm"'))
+        parse(GOOD.replace('engine = "faster-whisper"', 'engine = "mlx-whisper"'))
     assert "does not run asr on cuda-linux" in str(caught.value)
     assert "not two recipes for one thing" in str(caught.value)
 

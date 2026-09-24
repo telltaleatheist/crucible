@@ -290,6 +290,12 @@ def test_asr_and_align_are_both_enabled_on_the_studio() -> None:
     engine on `mps`, so the Mac's candidate is the id the card already used;
     `asr` runs a SECOND engine, so its candidates are ids the card has never
     heard of and best-first picks the largest mlx conversion.
+
+    Since 2026-09-24 the largest candidate is `qwen3-asr-1.7b` (1,700M against
+    large-v3's 1,550M), which is Owen's ruling showing up where a client would
+    notice it: *"we're fully switching over to qwen for transcribing"*. It is
+    the one id on both backends (docs/PHASE25-QWEN-ASR.md), so it is the one
+    candidate that is not an mlx conversion.
     """
     align = _decide("align", "mlx-darwin", STUDIO, MAC_RESERVE)
     assert align.enabled is True
@@ -297,8 +303,11 @@ def test_asr_and_align_are_both_enabled_on_the_studio() -> None:
 
     asr = _decide("asr", "mlx-darwin", STUDIO, MAC_RESERVE)
     assert asr.enabled is True
-    assert asr.selected == "mlx-whisper-large-v3"
-    assert all(c.id.startswith("mlx-whisper-") for c in asr.candidates)
+    assert asr.selected == "qwen3-asr-1.7b"
+    assert all(
+        c.id.startswith("mlx-whisper-") or c.id == "qwen3-asr-1.7b"
+        for c in asr.candidates
+    )
     # And the card's six are not among them, which is the id rule showing up
     # where a client would notice it.
     assert not any(c.id.startswith("faster-whisper-") for c in asr.candidates)

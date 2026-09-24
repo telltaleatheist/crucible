@@ -261,6 +261,14 @@ this reason; here it is the manifest's engine and there is nothing to fall back 
 
 ## 3. `asr` — faster-whisper
 
+> **2026-09-24: Qwen3-ASR-1.7B joins this job type** as `qwen3-asr-1.7b`, on both
+> backends (vLLM on cuda-linux, mlx-audio on mlx-darwin), with word times from the
+> Qwen3 aligner and a repetition-loop guard. Its wire adds one optional param,
+> `context`, and refuses `initial_prompt`, `vad_filter: true` and `language: auto`
+> by name. Owen: *"we're fully switching over to qwen for transcribing and
+> aligning"*. The whisper models below stay until apps have switched. The contract
+> is **docs/PHASE25-QWEN-ASR.md**.
+
 A new job type, and a real gap rather than an oversight: `generate-sentences` is a GPU queue
 step, it is the only ASR site in the app that takes the arbiter lease, and the whole-m4b
 align door needs a rough transcript before the aligner runs.

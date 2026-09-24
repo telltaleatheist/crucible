@@ -53,6 +53,13 @@ passing test fixtures through it.
                                        to SIGKILL can be tested. A test that sets
                                        this MUST kill the process itself
                                        afterwards.
+    CRUCIBLE_FAKE_ALIGN_COLLAPSE_MARKER
+                                       a word. A chunk whose text contains it
+                                       comes back with EVERY item stamped at one
+                                       instant (zero-length spans) — what the real
+                                       aligner does with text that is not in the
+                                       audio, and the signature of the Qwen3-ASR
+                                       repetition loop `asr`'s guard exists for.
     CRUCIBLE_FAKE_ALIGN_TRANSCRIPT     a path. Every request line is appended to
                                        it verbatim, so a test can assert on what
                                        Crucible actually sent — the dtype, the
@@ -156,6 +163,14 @@ def handle_align(results, request: dict) -> None:
         # Items derived from the TEXT, so a result can be traced back to the
         # chunk it answers without the worker having reported an index.
         words = chunks[position]["text"].split()
+        marker = os.environ.get("CRUCIBLE_FAKE_ALIGN_COLLAPSE_MARKER")
+        if marker and marker in words:
+            send(
+                results,
+                "result",
+                items=[{"text": word, "start": 1.2, "end": 1.2} for word in words],
+            )
+            continue
         send(
             results,
             "result",

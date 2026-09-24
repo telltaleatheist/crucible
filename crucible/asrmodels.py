@@ -39,6 +39,39 @@ mlx-whisper has none at all, so `crucible/jobs/asr` refuses `vad_filter: true`
 on this engine BY NAME rather than transcribing without it — the same argument
 as the CPU one, one layer up.
 
+A third and fourth engine, and the first id on BOTH backends (2026-09-24)
+------------------------------------------------------------------------
+Owen, 2026-09-24: *"we're fully switching over to qwen for transcribing and
+aligning. it seems flawless. 1.7b - the biggest one"*, then *"the 41 gb memory
+use wont be a problem since we'll be using vllm or sglang instead"*, and full
+precision on both machines. So `Qwen/Qwen3-ASR-1.7B` arrives as two more
+engines, one per backend, under the one `asr` job type
+(docs/PHASE25-QWEN-ASR.md):
+
+- `vllm` on cuda-linux: vLLM 0.29.0, the llm env's own pin, which registers
+  `Qwen3ASRForConditionalGeneration` natively
+  (`vllm/model_executor/models/registry.py` L565 at tag v0.29.0).
+- `mlx-audio` on mlx-darwin: mlx-audio 0.5.5, already pinned in the Mac's llm
+  env as mlx-vlm's dependency, whose `stt/models/qwen3_asr` loads the OFFICIAL
+  checkpoint and converts it on load (`Qwen3ASRModel.sanitize`: strips
+  `thinker.`, drops the tied `lm_head.weight`, transposes the conv kernels).
+
+**This is the first asr id with a block on both backends, and that is allowed
+for exactly one reason: both blocks pin the SAME repo at the SAME revision.**
+The whisper rule above — different weights must never share an id — is not
+relaxed; it is satisfied a second way. mlx-audio reads the very safetensors
+vLLM reads, in bfloat16, so `qwen3-asr-1.7b` names one set of bytes whichever
+machine ran it. The loader enforces it: a manifest whose blocks pin different
+repos or revisions is refused by name, so a community conversion cannot slip
+in under the official id.
+
+The Qwen engines carry more keys than whisper's (`QWEN_BACKEND_REQUIRED`,
+`VLLM_BACKEND_REQUIRED`), because what whisper decides inside its library —
+batch, output ceiling, KV pool — is a per-backend decision here, and the spec
+ContentStudio measured says a library default is what crashed a Mac (batch 32
+on MPS, 2026-09-24). A key the job needs is a key the manifest states; nothing
+reaches a worker as a library default.
+
 Why this is not `crucible/manifests.py`
 ---------------------------------------
 It should be. This loader and that one are the same TOML shape with a different
@@ -64,21 +97,109 @@ from .errors import CrucibleError
 
 ASR_DIR_ENV = "CRUCIBLE_ASR_DIR"
 
-#: Which engine each backend is allowed to name. TWO ENGINES, one per backend,
-#: because CTranslate2 has no Metal backend — see the module docstring.
-ASR_BACKEND_ENGINES: dict[str, str] = {
-    CUDA_LINUX: "faster-whisper",
-    MLX_DARWIN: "mlx-whisper",
+#: The Qwen3-ASR engines, one per backend. Named once because three modules ask
+#: "is this a Qwen engine": the job type dispatches on it, this loader requires
+#: the Qwen keys on it, and the worker table is keyed by it.
+VLLM_ENGINE = "vllm"
+MLX_AUDIO_ENGINE = "mlx-audio"
+QWEN_ASR_ENGINES: frozenset[str] = frozenset({VLLM_ENGINE, MLX_AUDIO_ENGINE})
+
+#: Which engines each backend is allowed to name. Whisper is one engine per
+#: backend because CTranslate2 has no Metal backend (the module docstring);
+#: Qwen3-ASR is one engine per backend because vLLM has no Metal backend and
+#: mlx-audio has no CUDA one. Two per backend, and never each other's.
+ASR_BACKEND_ENGINES: dict[str, frozenset[str]] = {
+    CUDA_LINUX: frozenset({"faster-whisper", VLLM_ENGINE}),
+    MLX_DARWIN: frozenset({"mlx-whisper", MLX_AUDIO_ENGINE}),
 }
 
 #: The id prefix each engine's manifests must carry. Not decoration: it is what
 #: stops one id ever standing for two different sets of weights, which is the
 #: thing `transcript.json` cannot recover from. Checked by the loader, so a new
 #: manifest cannot break the rule by being written carelessly.
+#:
+#: The two Qwen engines share one prefix, and that is the rule working rather
+#: than an exception to it: they read the same official checkpoint, and
+#: `_parse` refuses a manifest whose blocks pin different bytes.
 ASR_ENGINE_ID_PREFIX: dict[str, str] = {
     "faster-whisper": "faster-whisper-",
     "mlx-whisper": "mlx-whisper-",
+    VLLM_ENGINE: "qwen3-asr-",
+    MLX_AUDIO_ENGINE: "qwen3-asr-",
 }
+
+#: FULL PRECISION, both machines. Owen, 2026-09-24: bf16, unquantised, for
+#: Qwen3-ASR-1.7B on the PC and on the Mac; "do not use the 8-bit MLX build".
+#: A table of one so a manifest that says `float16` or `int8` is refused by
+#: name rather than handed to a worker that would honour it.
+QWEN_ASR_DTYPES: frozenset[str] = frozenset({"bfloat16"})
+
+#: What every Qwen block states beyond whisper's four keys.
+#:
+#:   dtype           the precision the engine loads in (`QWEN_ASR_DTYPES`).
+#:   aligner         the `align/<id>.toml` whose model stamps the word times. A
+#:                   transcript with word timestamps is TWO models' output, so
+#:                   it names both, and the job's memory is both.
+#:   max_batch       how many pieces decode at once: vLLM's `max_num_seqs`, and
+#:                   1 on mlx-audio, which is given one piece per call
+#:                   (`_check_qwen_block` says why). NEVER the library default:
+#:                   `qwen_asr`'s is 32, and 32 is what aborted ContentStudio's
+#:                   MPS process ("too large for kernel", 2026-09-24).
+#:   max_new_tokens  the most one 180-second piece may generate. 4096 is what
+#:                   ContentStudio ran; `jobs/asr/loopguard.py` derives the
+#:                   per-piece budget under it.
+QWEN_BACKEND_REQUIRED: dict[str, type] = {
+    "dtype": str,
+    "aligner": str,
+    "max_batch": int,
+    "max_new_tokens": int,
+}
+
+#: What vLLM needs on top: the context it is started with and the KV pool it is
+#: given. `kv_cache_memory_bytes` is stated so vLLM does not size its own pool
+#: from its 0.92-of-the-card default (`vllm/entrypoints/llm.py` L198 at
+#: v0.29.0) inside a job that shares the card with the aligner.
+VLLM_BACKEND_REQUIRED: dict[str, type] = {
+    "max_model_len": int,
+    "kv_cache_memory_bytes": int,
+}
+
+#: The longest piece of audio one decode is given. 180 s is `qwen_asr` 0.0.6's
+#: `MAX_FORCE_ALIGN_INPUT_SECONDS` (`qwen_asr/inference/utils.py` L35): with
+#: timestamps on, the official SDK cuts audio into pieces no longer than this at
+#: quiet points because the aligner is not trusted past it, and Crucible cuts at
+#: the same length for the same reason (`jobs/asr/qwen.py`).
+QWEN_PIECE_MAX_SECONDS = 180
+
+#: Audio tokens per second of audio, COMPUTED from vLLM 0.29.0's
+#: `_get_feat_extract_output_lengths` (`models/qwen3_asr.py` L175-182): every
+#: whole 100 mel frames (one second, at a 160-sample hop at 16 kHz) becomes 13
+#: tokens. So a 180-second piece is 2,340 audio tokens, which agrees with
+#: ContentStudio's crash report: logits 151936 x 78720 is batch 32 x 2,460, i.e.
+#: 2,340 audio tokens plus their prompt.
+QWEN_AUDIO_TOKENS_PER_SECOND = 13
+
+#: The longest `context` a job may send, in the model's own tokens. COMPUTED:
+#: `max_model_len` less the longest piece's 2,340 audio tokens, less
+#: `max_new_tokens`, less the chat scaffolding; at 8192 and 4096 that leaves
+#: about 1,700, and 1,024 is the round figure under it. A context is a sentence
+#: of instruction and a list of names, not a document.
+QWEN_CONTEXT_MAX_TOKENS = 1024
+
+#: The chat scaffolding around the context and the audio, in tokens, rounded UP.
+#: `<|im_start|>system` ... `<|im_start|>assistant` + `language English<asr_text>`
+#: is about two dozen tokens; 64 covers the longest language name with room.
+QWEN_PROMPT_SCAFFOLD_TOKENS = 64
+
+
+def qwen_prompt_ceiling_tokens(max_new_tokens: int) -> int:
+    """The most context one piece can need. What `max_model_len` must hold."""
+    return (
+        QWEN_PIECE_MAX_SECONDS * QWEN_AUDIO_TOKENS_PER_SECOND
+        + QWEN_CONTEXT_MAX_TOKENS
+        + QWEN_PROMPT_SCAFFOLD_TOKENS
+        + max_new_tokens
+    )
 
 _MODEL_REQUIRED: dict[str, type] = {
     "id": str,
@@ -118,6 +239,16 @@ class AsrBackendSpec:
     hf_repo: str
     revision: str
     memory_bytes_estimate: int
+    #: The Qwen engines' keys (`QWEN_BACKEND_REQUIRED`, `VLLM_BACKEND_REQUIRED`).
+    #: None on a whisper block, where the loader refuses them as unknown keys,
+    #: and never None on a block whose engine requires them: `_parse` refuses
+    #: the absence by name.
+    dtype: str | None = None
+    aligner: str | None = None
+    max_batch: int | None = None
+    max_new_tokens: int | None = None
+    max_model_len: int | None = None
+    kv_cache_memory_bytes: int | None = None
 
     @property
     def files(self) -> tuple[str, ...]:
@@ -133,13 +264,30 @@ class AsrBackendSpec:
         return ()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        row: dict[str, Any] = {
             "backend": self.backend,
             "engine": self.engine,
             "hf_repo": self.hf_repo,
             "revision": self.revision,
             "memory_bytes_estimate": self.memory_bytes_estimate,
         }
+        # Only the keys this engine states. A whisper row carrying six nulls
+        # would say "unknown" about things that do not exist for it.
+        for key in (*QWEN_BACKEND_REQUIRED, *VLLM_BACKEND_REQUIRED):
+            value = getattr(self, key)
+            if value is not None:
+                row[key] = value
+        return row
+
+    def require(self, key: str) -> Any:
+        """A Qwen key the job needs, or a refusal naming it. Never a default."""
+        value = getattr(self, key)
+        if value is None:
+            raise AsrManifestError(
+                f"the {self.backend} block has no {key!r}, and the "
+                f"{self.engine!r} engine requires it"
+            )
+        return value
 
 
 @dataclass(frozen=True)
@@ -282,17 +430,26 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
             )
         if not isinstance(block, dict):
             raise AsrManifestError(f"{where}: must be a table")
-        _check_table(where, block, _BACKEND_REQUIRED)
-
-        engine = block["engine"]
-        if engine != ASR_BACKEND_ENGINES[kind]:
+        engine = block.get("engine")
+        if not isinstance(engine, str):
+            # The engine decides which other keys are required, so it is read
+            # first; a block without one is refused in the loader's own words.
+            _check_table(where, block, _BACKEND_REQUIRED)
+            raise AsrManifestError(f"{where}: engine must be str")
+        if engine not in ASR_BACKEND_ENGINES[kind]:
             raise AsrManifestError(
                 f"{where}: engine {engine!r} does not run asr on {kind}; that "
-                f"backend's asr engine is {ASR_BACKEND_ENGINES[kind]!r}. "
-                "faster-whisper is CTranslate2, which has no Metal backend; "
-                "mlx-whisper is MLX, which has no CUDA one. They are not two "
-                "recipes for one thing"
+                f"backend's asr engines are {sorted(ASR_BACKEND_ENGINES[kind])}. "
+                "faster-whisper (CTranslate2) and vllm have no Metal backend; "
+                "mlx-whisper and mlx-audio are MLX, which has no CUDA one. They "
+                "are not two recipes for one thing"
             )
+        required = dict(_BACKEND_REQUIRED)
+        if engine in QWEN_ASR_ENGINES:
+            required.update(QWEN_BACKEND_REQUIRED)
+        if engine == VLLM_ENGINE:
+            required.update(VLLM_BACKEND_REQUIRED)
+        _check_table(where, block, required)
         prefix = ASR_ENGINE_ID_PREFIX[engine]
         if not model_id.startswith(prefix):
             # THE RULE THAT KEEPS A TRANSCRIPT HONEST. `transcript.json` names
@@ -322,12 +479,34 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
                 f"{where}: memory_bytes_estimate must be positive, got "
                 f"{block['memory_bytes_estimate']}"
             )
+        if engine in QWEN_ASR_ENGINES:
+            _check_qwen_block(where, engine, block)
         backends[kind] = AsrBackendSpec(
             backend=kind,
             engine=engine,
             hf_repo=block["hf_repo"],
             revision=block["revision"],
             memory_bytes_estimate=block["memory_bytes_estimate"],
+            dtype=block.get("dtype"),
+            aligner=block.get("aligner"),
+            max_batch=block.get("max_batch"),
+            max_new_tokens=block.get("max_new_tokens"),
+            max_model_len=block.get("max_model_len"),
+            kv_cache_memory_bytes=block.get("kv_cache_memory_bytes"),
+        )
+
+    # ONE ID, ONE SET OF BYTES. The first asr id with more than one block
+    # (`qwen3-asr-1.7b`) is honest only because both blocks read the same
+    # checkpoint; a manifest whose blocks disagree about that is two models
+    # wearing one name, and `transcript.json` could not tell them apart.
+    pins = sorted({(spec.hf_repo, spec.revision) for spec in backends.values()})
+    if len(pins) > 1:
+        raise AsrManifestError(
+            f"{path.name}: its backend blocks pin different weights "
+            f"({[f'{repo}@{revision[:12]}' for repo, revision in pins]}); one asr "
+            "id is one set of bytes, because a transcript records the id and "
+            "nothing else about what produced it. Weights that differ per "
+            "backend need an id per backend, the way mlx-whisper's do"
         )
 
     return AsrManifest(
@@ -337,6 +516,48 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
         backends=backends,
         path=path,
     )
+
+
+def _check_qwen_block(where: str, engine: str, block: dict[str, Any]) -> None:
+    """The Qwen keys' VALUES, once `_check_table` has proved they are present."""
+    if block["dtype"] not in QWEN_ASR_DTYPES:
+        raise AsrManifestError(
+            f"{where}: dtype {block['dtype']!r} is not one this engine runs; "
+            f"Qwen3-ASR runs in {sorted(QWEN_ASR_DTYPES)} on both machines "
+            "(Owen, 2026-09-24: full precision, never the 8-bit build)"
+        )
+    if not _MODEL_ID.match(block["aligner"]):
+        raise AsrManifestError(
+            f"{where}: aligner {block['aligner']!r} is not an align model id"
+        )
+    positive = ["max_batch", "max_new_tokens"]
+    if engine == VLLM_ENGINE:
+        positive += list(VLLM_BACKEND_REQUIRED)
+    for key in positive:
+        if block[key] <= 0:
+            raise AsrManifestError(f"{where}: {key} must be positive, got {block[key]}")
+    if engine == MLX_AUDIO_ENGINE and block["max_batch"] != 1:
+        # mlx-audio 0.5.5 batches only the chunks it cut out of ONE input
+        # (`Qwen3ASRModel._generate_chunks_batched`, padded to equal length); a
+        # list of inputs is decoded one after another. Crucible hands it one
+        # piece per call because the loop guard reads each piece's own token
+        # count, so any batch above 1 is a number nothing would honour.
+        raise AsrManifestError(
+            f"{where}: max_batch is {block['max_batch']}, and mlx-audio decodes "
+            "one piece per call here (the loop guard reads each piece's own "
+            "token count), so the only true value is 1"
+        )
+    if engine == VLLM_ENGINE:
+        ceiling = qwen_prompt_ceiling_tokens(block["max_new_tokens"])
+        if block["max_model_len"] < ceiling:
+            raise AsrManifestError(
+                f"{where}: max_model_len {block['max_model_len']} cannot hold the "
+                f"longest piece: {QWEN_PIECE_MAX_SECONDS} s of audio is "
+                f"{QWEN_PIECE_MAX_SECONDS * QWEN_AUDIO_TOKENS_PER_SECOND} tokens, "
+                f"and with a {QWEN_CONTEXT_MAX_TOKENS}-token context, the "
+                f"scaffolding and {block['max_new_tokens']} new tokens that is "
+                f"{ceiling}"
+            )
 
 
 # ------------------------------------------------------------------- loading

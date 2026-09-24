@@ -890,6 +890,41 @@ test('asr() refuses an initialPrompt that is not a non-blank string, by name', a
   }
 });
 
+test('asr() sends a stated context under the server name, and only then', async () => {
+  const base = {
+    model: 'qwen3-asr-1.7b',
+    audio: { blobId: 'b7c6d5e4f3a2b1c0' },
+    filename: 'stream.m4a',
+    language: 'en',
+    vadFilter: false,
+    wordTimestamps: true,
+  };
+  answers(200, { job_id: 'job-asr-q1' });
+  await client().asr(base);
+  assert.equal(
+    'context' in (JSON.parse(lastBody) as { params: Record<string, unknown> }).params,
+    false,
+  );
+  answers(200, { job_id: 'job-asr-q2' });
+  await client().asr({ ...base, context: 'Verbatim transcript. um, uh.' });
+  assert.deepEqual((JSON.parse(lastBody) as { params: unknown }).params, {
+    language: 'en',
+    vad_filter: false,
+    word_timestamps: true,
+    context: 'Verbatim transcript. um, uh.',
+  });
+  for (const bad of [5, '', '   ']) {
+    await assert.rejects(
+      client().asr({ ...base, context: bad as never }),
+      (error: unknown) => {
+        assert.ok(error instanceof CrucibleConfigError, `got ${String(error)}`);
+        assert.equal(error.option, 'context');
+        return true;
+      },
+    );
+  }
+});
+
 test('every asr option is required and is refused by name', async () => {
   const complete = {
     model: 'faster-whisper-base',

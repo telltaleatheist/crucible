@@ -48,6 +48,7 @@ ALL_MODELS = [
     "mlx-whisper-medium",
     "mlx-whisper-small",
     "mlx-whisper-tiny",
+    "qwen3-asr-1.7b",
 ]
 
 PARAMS = {"language": "en", "vad_filter": True, "word_timestamps": True}
