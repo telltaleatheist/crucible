@@ -1218,7 +1218,7 @@ every settlement says so in the two places a reader looks:
 thing went away* is history rather than state, and putting it on the same read would give
 residency a second owner (R1).
 
-#### Where it runs, and the one window that remains
+#### Where it runs, and why a client arriving mid-clearance waits
 
 **Never on the event loop.** `SubprocessEngine.stop()` SIGTERMs and waits up to 180 s, and a
 server that stops answering `/v1/activity` for three minutes is indistinguishable from a
@@ -1228,12 +1228,47 @@ settlement rides on the response's background task, so the completion is written
 the card is cleared behind it.
 
 Running off the loop means admission can move underneath it, so the settlement **claims the
-card** for the duration, exactly as a render does, and re-reads the four facts under that
-claim. A job that reaches the lane while the claim is up is refused `engine_in_use` rather
-than racing a dying engine. The window that remains — a job whose `preflight` passed before
-the claim went up and whose `enqueue` landed after the re-read — fails loudly at the
-mutation instead of quietly, which is R3-shaped and is not new: the same window has always
-existed between `preflight` and a streaming session opening.
+card** for the duration, exactly as a render does — and it reads the four facts and takes
+that claim as **one step** (`Residency.claim_to_clear`), under the lock every client door
+records its hold under.
+
+**A client that arrives during a clearance waits it out (2026-09-24, Briefcase).** This
+section used to say such a job was *refused* `engine_in_use`, and T6 (2026-09-15) carved out
+one exception — an `unload-...` of the very subject being cleared. On 1.0.25 Briefcase's
+second run, started straight after a SIGINT'd first one, landed in the clearance that run's
+release began: its lease was granted (the model still published), its chat was
+`model_not_resident` (unpublished a moment later), and its `load-model` was refused
+`engine_in_use`, held by *"the settlement clearing the card"* — nobody was using the card,
+and the one request that would have repaired it was the one refused. A clearance is a
+SIGTERM and a wait; it ends. That is weather, so it gets a stated budget and a wait rather
+than a refusal:
+
+- **every door that can arrive in a clearance waits it out** — the job door, the lease door,
+  the chat and decide doors, the streaming door — within `CLEARANCE_TIMEOUT_SECONDS` (the
+  engine's own SIGTERM deadline plus 30 s), off the event loop (`Residency.settled_for`);
+- **then answers from the settled card**: a `load-model` is `202` and ends `done`, a lease is
+  `not_resident`, a chat is `model_not_resident`, a session opens or is `voice_not_resident`
+  — each true, where before each was an answer from one instant of the transition;
+- **a clearance that outlives the budget is a wedge**, `409 engine_in_use` saying so, never a
+  hang;
+- **T6 is unchanged**: an unloader of the subject being cleared is admitted at once and its
+  `run` waits.
+
+Waiting alone would only narrow the window, so each door's residency check and its hold (a
+lease, an `InFlight` row, a job on the lane, a session's claim) are made under the same lock
+as the settlement's check-and-claim. Either the settlement claims first and the door waits,
+or the door's hold is recorded first and the settlement sees it and declines. And the lane
+hands a queued job to `running` in one step under its own lock, so a job admitted before a
+clearance could begin is never invisible to `holder()` — it stops that clearance beginning,
+and nothing on the lane ever waits for one.
+
+**The window that used to remain is closed.** It was a job whose `preflight` passed before the
+claim went up and whose `enqueue` landed after the settlement's re-read; the job door's
+preflight and enqueue now run under the lock, never inside a clearance. Every holder that is
+USING the card — a session, a render's claim, a lease, a running job — is still refused
+exactly as before, by the same code and sentence: waiting on one of those would be a hang
+with no end. What remains is only the window between a job's `preflight` and a streaming
+session opening, which is two users of the card and not a clearance.
 
 #### Expiry: the fifth moment, which has no edge
 

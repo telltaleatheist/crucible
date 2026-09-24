@@ -33,6 +33,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import uuid
 from collections import deque
 from dataclasses import dataclass
@@ -163,6 +164,18 @@ class JobStore:
         self._wake = asyncio.Event()
         self._worker: asyncio.Task[None] | None = None
         self._running_id: str | None = None
+        #: Guards `_pending` and `_running_id` TOGETHER against the one reader
+        #: that is not on the event loop: the settlement, which asks
+        #: `occupied_by_anything_but` from a worker thread (2026-09-24,
+        #: Briefcase). The lane used to pop a job off `_pending` and only set
+        #: `_running_id` after persisting it to disk — a write that releases
+        #: the GIL — so for that instant a job admitted BEFORE a clearance was
+        #: on neither, `holder()` found the lane empty, and the card could be
+        #: cleared under a job about to run. Under this lock the handoff is one
+        #: step and the read sees one side of it or the other. (Iterating the
+        #: deque from that thread while the loop appended was a second hazard
+        #: of the same shape: `deque mutated during iteration`.)
+        self._lane_lock = threading.Lock()
         self._subscribers: dict[str, list[asyncio.Event]] = {}
         #: Owen's ruling, 2026-09-14 (`crucible/settle.py`). Injected rather than
         #: constructed here, because the settlement has to read three things this
@@ -246,13 +259,14 @@ class JobStore:
         already running, and clearing the card out from under it would cost it a
         reload it never asked for.
         """
-        running = self.running
-        if running is not None and running.id != job_id:
-            return running
-        for pending_id in self._pending:
-            if pending_id != job_id:
-                return self._jobs[pending_id]
-        return None
+        with self._lane_lock:
+            running = self.running
+            if running is not None and running.id != job_id:
+                return running
+            for pending_id in self._pending:
+                if pending_id != job_id:
+                    return self._jobs[pending_id]
+            return None
 
     def queued(self) -> list[Job]:
         """Everything waiting, in the order it will run.
@@ -400,7 +414,8 @@ class JobStore:
         somebody may later add an `await` to.
         """
         self.refuse_if_busy()
-        self._pending.append(job.id)
+        with self._lane_lock:
+            self._pending.append(job.id)
         self.append_event(job, "queued", {"position": self.position(job)})
         self._wake.set()
 
@@ -917,7 +932,8 @@ class JobStore:
             )
         job.cancel_requested = True
         if job.status == QUEUED:
-            self._pending.remove(job.id)
+            with self._lane_lock:
+                self._pending.remove(job.id)
             self._finish(job, CANCELLED)
             return CANCELLED
         # Running: cooperative. The job ends as cancelled when it next checks.
@@ -970,10 +986,18 @@ class JobStore:
                     # server nobody is using still cleans up after itself.
                     pass
                 continue
-            job_id = self._pending.popleft()
-            job = self._jobs[job_id]
+            # QUEUED TO RUNNING IN ONE STEP, under the lock the settlement reads
+            # the lane through (`_lane_lock`). A job admitted before a clearance
+            # could begin is therefore always visible to it — on `_pending`, or
+            # as `_running_id` — and a clearance never begins under it.
+            with self._lane_lock:
+                job_id = self._pending.popleft()
+                job = self._jobs[job_id]
+                cancelled = job.cancel_requested
+                if not cancelled:
+                    self._running_id = job_id
             try:
-                if job.cancel_requested:
+                if cancelled:
                     self._finish(job, CANCELLED)
                     continue
                 await self._execute(job)
@@ -1004,7 +1028,8 @@ class JobStore:
         # going away can leave `running` written on a disk.
         self._persist(job)
         job.started = utcnow()
-        self._running_id = job.id
+        # `_running_id` is already this job's: the lane set it in the same step
+        # that took the job off `_pending` (`_run_lane`, `_lane_lock`).
         self.append_event(job, "progress", {"fraction": 0.0, "message": "started"})
         loop = asyncio.get_running_loop()
         ctx = JobContext(self, job, loop)

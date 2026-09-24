@@ -83,7 +83,7 @@ from . import decide as decide_core
 from .decide import DecideRequest, DecideResponse
 from .engines import chat_admission, decide_reading
 from .inflight import Entry, InFlight, read_act, require_act_name
-from .leases import Leases, require_ttl
+from .leases import CARD_EFFECTS, Leases, require_ttl
 from .residency import KIND_NOUNS, Residency
 from .settle import Settlement
 from .sampling import SAMPLING_HEADER, Applied, apply_defaults
@@ -2152,39 +2152,51 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         _refuse_lease_on_an_upstream(subject_id)
         ttl_seconds = require_ttl(body.ttl_seconds)
         act = require_act_name(body.act.strip(), "a lease's `act`")
-        # Whatever is on the card, of any kind. A lease NEVER loads anything — it
-        # is the promise not to move what is already there — so the honest answer
-        # to an id that is not resident is the same one an empty card gets, and
-        # it names what IS there so the client is not left guessing which of the
-        # two mistakes it made.
-        resident = residency.resident
-        if resident is None or resident.id != subject_id:
-            raise ApiError(
-                409,
-                "not_resident",
-                f"{subject_id!r} is not resident on this server; "
-                + (
-                    f"the resident {KIND_NOUNS[resident.kind]} is "
-                    f"{resident.id!r}. "
-                    if resident is not None
-                    else "nothing is. "
+        # A CLEARANCE IS WAITED OUT, AND THE LEASE IS TAKEN ATOMICALLY AGAINST
+        # ONE BEGINNING (2026-09-24, Briefcase). Briefcase's second run got a
+        # 201 here on a model the settlement was already clearing, and its
+        # first chat under that lease was `model_not_resident`. Now the door
+        # waits the clearance out and answers from the settled card, and the
+        # residency check and `leases.open` are made under the lock the
+        # settlement's check-and-claim takes — so a lease granted here is one
+        # the settlement will see, and never one on a thing already leaving.
+        async with residency.settled_for(f"a lease on {subject_id!r}"):
+            # Whatever is on the card, of any kind. A lease NEVER loads anything
+            # — it is the promise not to move what is already there — so the
+            # honest answer to an id that is not resident is the same one an
+            # empty card gets, and it names what IS there so the client is not
+            # left guessing which of the two mistakes it made.
+            resident = residency.resident
+            if resident is None or resident.id != subject_id:
+                raise ApiError(
+                    409,
+                    "not_resident",
+                    f"{subject_id!r} is not resident on this server; "
+                    + (
+                        f"the resident {KIND_NOUNS[resident.kind]} is "
+                        f"{resident.id!r}. "
+                        if resident is not None
+                        else "nothing is. "
+                    )
+                    + "A lease promises not to move what is on the card; it "
+                    "never loads anything — load it first (load-model, "
+                    "load-voice, or an align job for an aligner), then lease "
+                    "what that left resident.",
+                    {
+                        "requested": subject_id,
+                        "resident": None if resident is None else resident.id,
+                        "resident_kind": (
+                            None if resident is None else resident.kind
+                        ),
+                    },
                 )
-                + "A lease promises not to move what is on the card; it never "
-                "loads anything — load it first (load-model, load-voice, or an "
-                "align job for an aligner), then lease what that left resident.",
-                {
-                    "requested": subject_id,
-                    "resident": None if resident is None else resident.id,
-                    "resident_kind": None if resident is None else resident.kind,
-                },
+            lease = leases.open(
+                kind=resident.kind,
+                subject=subject_id,
+                act=act,
+                client=_client_agent(request),
+                ttl_seconds=ttl_seconds,
             )
-        lease = leases.open(
-            kind=resident.kind,
-            subject=subject_id,
-            act=act,
-            client=_client_agent(request),
-            ttl_seconds=ttl_seconds,
-        )
         # The lease is now the thing holding the card, and its deadline is the
         # one moment a holder lets go that this server would otherwise never
         # see. Armed at the client's own `expires_at` (crucible/settle.py).
@@ -2568,13 +2580,21 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         """Open the one streaming session this server will hold at a time."""
         streams: StreamManager = request.app.state.streams
         manifest = _streaming_voice(body.voice)
-        session = streams.open(
-            voice=body.voice,
-            language=body.language,
-            manifest=manifest,
-            client=_client_agent(request),
-            loop=asyncio.get_running_loop(),
-        )
+        # WAITED OUT, NOT REFUSED (2026-09-24, Briefcase). A session opening
+        # while the settlement clears the card used to be refused
+        # `engine_in_use` by `claim()`, naming the settlement. It now waits and
+        # opens against the settled card — or says `voice_not_resident`, which
+        # is then true. `streams.open` is synchronous and takes its claim
+        # inside, under the lock the settlement's check-and-claim takes, so the
+        # two cannot interleave.
+        async with residency.settled_for(f"streaming {body.voice!r}"):
+            session = streams.open(
+                voice=body.voice,
+                language=body.language,
+                manifest=manifest,
+                client=_client_agent(request),
+                loop=asyncio.get_running_loop(),
+            )
         return {
             "session_id": session.id,
             "voice": session.voice,
@@ -2724,44 +2744,74 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # the caller actually did.
             _refuse_lease_on_an_upstream(body.model)
         model = resolve_model(plugin, body.model)
-        # Would this take the leased thing off the card while somebody has said
-        # they are mid-run on it? Asked BEFORE the lane, and before
-        # `server_busy`, because the two refusals have different lifetimes: the
-        # lane frees in minutes and a client told "busy" will rightly come back,
-        # while a lease will still be there when it does. Telling it the
-        # transient reason first would send it away to be refused again for the
-        # durable one (PHASE7-LANES.md section 5.2).
-        #
-        # The resolved `model` goes with the type because the answer is not a
-        # property of the type alone: `tts` of the leased voice reuses what is
-        # resident and is admitted, `tts` of any other voice evicts it and is
-        # not (`Lease.evicted_by`).
-        leases.refuse_if_leased(body.type, model)
-        # Is there room right now? The one question the server answers about
-        # scheduling; the queue is the client's (ARCHITECTURE.md section 3).
-        store.refuse_if_busy()
-        # Every refusal a job type can make about host state happens here, before
-        # the job exists, so the client is told by name instead of watching a job
-        # fail (PHASE2-LLM.md section 5). The lane being free is not the only way
-        # to be busy: a streaming session holds the resident engine without
-        # occupying the lane, and the job types that would talk to it or move it
-        # refuse `engine_in_use` from here (crucible/residency.py).
-        plugin.preflight(model, body.params)
 
-        job = store.create(
-            body.type, model, body.params,
-            client=_client_agent(request), client_ref=body.client_ref,
-        )
-        try:
-            _materialise_inputs(config, store, job, body.inputs)
-            # `enqueue` asks admission again and is the authority on it; nothing
-            # awaits between here and the check above, so the two are one atomic
-            # stretch on the event loop. Inside the same `try` so that a refusal
-            # from either leaves no half-built job behind.
-            store.enqueue(job)
-        except ApiError:
-            store.discard(job)
-            raise
+        def unloads_what_is_being_cleared() -> bool:
+            # T6 (2026-09-15): an `unload-...` of the very subject the
+            # settlement is clearing is the same intent, admitted at once; its
+            # `run` waits the clearance out and ends `done`. Everything else
+            # waits at this door instead.
+            return (
+                model is not None
+                and residency.being_cleared(model)
+                and CARD_EFFECTS[body.type].takes_off is not None
+            )
+
+        # A CLEARANCE IS WAITED OUT, NOT REFUSED (2026-09-24, Briefcase). A
+        # `load-model` that arrives while the settlement is SIGTERMing the last
+        # engine used to be `409 engine_in_use` "held by the settlement
+        # clearing the card" — refusing the very request that would have put
+        # the card right. It now waits (off the loop, within
+        # `CLEARANCE_TIMEOUT_SECONDS`) and is admitted against the SETTLED
+        # card, so its preflight's accelerator guard counts no VRAM of an
+        # engine that is leaving. Everything from the first refusal to
+        # `enqueue` runs under the card's lock, which is the lock the
+        # settlement's check-and-claim takes: a clearance cannot begin between
+        # this preflight and this job reaching the lane, and a job on the lane
+        # is a holder it will see (crucible/residency.py, `settled_for`).
+        async with residency.settled_for(
+            f"a {body.type} job", same_intent=unloads_what_is_being_cleared
+        ):
+            # Would this take the leased thing off the card while somebody has
+            # said they are mid-run on it? Asked BEFORE the lane, and before
+            # `server_busy`, because the two refusals have different lifetimes:
+            # the lane frees in minutes and a client told "busy" will rightly
+            # come back, while a lease will still be there when it does. Telling
+            # it the transient reason first would send it away to be refused
+            # again for the durable one (PHASE7-LANES.md section 5.2).
+            #
+            # The resolved `model` goes with the type because the answer is not
+            # a property of the type alone: `tts` of the leased voice reuses
+            # what is resident and is admitted, `tts` of any other voice evicts
+            # it and is not (`Lease.evicted_by`).
+            leases.refuse_if_leased(body.type, model)
+            # Is there room right now? The one question the server answers
+            # about scheduling; the queue is the client's (ARCHITECTURE.md
+            # section 3).
+            store.refuse_if_busy()
+            # Every refusal a job type can make about host state happens here,
+            # before the job exists, so the client is told by name instead of
+            # watching a job fail (PHASE2-LLM.md section 5). The lane being free
+            # is not the only way to be busy: a streaming session holds the
+            # resident engine without occupying the lane, and the job types that
+            # would talk to it or move it refuse `engine_in_use` from here
+            # (crucible/residency.py).
+            plugin.preflight(model, body.params)
+
+            job = store.create(
+                body.type, model, body.params,
+                client=_client_agent(request), client_ref=body.client_ref,
+            )
+            try:
+                _materialise_inputs(config, store, job, body.inputs)
+                # `enqueue` asks admission again and is the authority on it;
+                # nothing awaits between here and the check above — the body of
+                # `settled_for` must not — so the two are one atomic stretch on
+                # the event loop. Inside the same `try` so that a refusal from
+                # either leaves no half-built job behind.
+                store.enqueue(job)
+            except ApiError:
+                store.discard(job)
+                raise
         return {"job_id": job.id}
 
     @private.get("/jobs/{job_id}")
@@ -2971,64 +3021,77 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             return await _forward_to_upstream(
                 request, requested, body, client_agent=_client_agent(request)
             )
-        # The resident MODEL: a voice on the card is not something a chat
-        # request can be proxied to, so this door's honest answer is the same
-        # `model_not_resident` it gives for an empty card.
-        resident = residency.resident_model
-        if resident is None or resident.model_id != requested:
-            raise _model_not_resident(requested, resident, "a chat request")
+        # A CLEARANCE IS WAITED OUT, AND THE CHAT'S RECORD IS OPENED ATOMICALLY
+        # AGAINST ONE BEGINNING (2026-09-24, Briefcase). A chat that arrives
+        # while the settlement is SIGTERMing the engine waits for it to finish
+        # and is then answered from the settled card — `model_not_resident`,
+        # which is true — instead of being proxied to an engine on its way
+        # out. The resident check and `inflight.open` are made under the lock
+        # the settlement's check-and-claim takes, so a chat that IS admitted
+        # is an `InFlight` row the settlement will see and not clear under.
+        async with residency.settled_for("a chat request"):
+            # The resident MODEL: a voice on the card is not something a chat
+            # request can be proxied to, so this door's honest answer is the
+            # same `model_not_resident` it gives for an empty card.
+            resident = residency.resident_model
+            if resident is None or resident.model_id != requested:
+                raise _model_not_resident(requested, resident, "a chat request")
 
-        # The manifest's gaps, filled — and the audit of what filled them
-        # (PHASE2-LLM.md section 9). `resident.defaults` is what the manifest
-        # said at LOAD time, not what it says now, for the same reason
-        # `max_model_len` comes off the engine's record.
-        applied = apply_defaults(body, resident.defaults)
-        sampling_headers = {SAMPLING_HEADER: applied.header()}
-        forwarded = _forward_body(raw, applied, resident)
-        url = f"{resident.base_url}/v1/chat/completions"
-        client: httpx.AsyncClient = request.app.state.http
-        inflight: InFlight = request.app.state.inflight
-        # Read BEFORE the work starts, so an unknown act is a 400 instead of a
-        # completion that ran and was then reported under a name nobody knows.
-        act = read_act(request.headers)
+            # The manifest's gaps, filled — and the audit of what filled them
+            # (PHASE2-LLM.md section 9). `resident.defaults` is what the
+            # manifest said at LOAD time, not what it says now, for the same
+            # reason `max_model_len` comes off the engine's record.
+            applied = apply_defaults(body, resident.defaults)
+            sampling_headers = {SAMPLING_HEADER: applied.header()}
+            forwarded = _forward_body(raw, applied, resident)
+            url = f"{resident.base_url}/v1/chat/completions"
+            client: httpx.AsyncClient = request.app.state.http
+            inflight: InFlight = request.app.state.inflight
+            # Read BEFORE the work starts, so an unknown act is a 400 instead of
+            # a completion that ran and was then reported under a name nobody
+            # knows.
+            act = read_act(request.headers)
 
-        settlement: Settlement = request.app.state.settlement
-        chat_over = _chat_over(settlement)
+            settlement: Settlement = request.app.state.settlement
+            chat_over = _chat_over(settlement)
 
-        # A chat is the one piece of accelerator work that took no lane, made no
-        # job row and left a record NOWHERE. Tracked so `/v1/activity` can say
-        # what this machine is doing; it still gates nothing — see
-        # crucible/inflight.py for why taking the lane would have been the wrong
-        # fix for the right bug.
-        # WHAT THIS ENGINE CAN ACTUALLY HAVE OPEN AT ONCE (2026-09-20). Until
-        # today this door admitted everything and `crucible/inflight.py` said, in
-        # so many words, that the record gates nothing. For a BATCHING engine
-        # that is still exactly right and still what happens: vLLM states no
-        # concurrency, `chat_admission` returns None, and nothing below refuses.
-        #
-        # It was wrong for a SERIAL one. mlx-lm accepts every connection on a
-        # ThreadingHTTPServer and then generates on ONE thread draining ONE
-        # queue, so twelve accepted requests are one running and eleven waiting
-        # with nothing on the wire saying so. Foundry's clean pass died there on
-        # 2026-09-20: 12 in flight, a 300 s client deadline, a request that had
-        # not started when it passed, the pass dead at block 352 of 940.
-        #
-        # A refusal a client can act on beats a socket that goes quiet. The
-        # limit is the engine's own measured concurrency plus one (see
-        # `engines.chat_admission`), the wait is the median of what completions
-        # on this engine have actually been taking, and a server that has
-        # finished none states no `Retry-After` rather than inventing one —
-        # `_rate_limited`'s rule, applied to a number of our own.
-        limit, limit_basis = chat_admission(resident.engine)
-        if limit is not None and len(inflight) >= limit:
-            wait = inflight.retry_after()
-            return _chat_queue_full(
-                resident=resident, limit=limit, basis=limit_basis, wait=wait
+            # A chat is the one piece of accelerator work that took no lane,
+            # made no job row and left a record NOWHERE. Tracked so
+            # `/v1/activity` can say what this machine is doing; it still gates
+            # nothing — see crucible/inflight.py for why taking the lane would
+            # have been the wrong fix for the right bug.
+            # WHAT THIS ENGINE CAN ACTUALLY HAVE OPEN AT ONCE (2026-09-20).
+            # Until today this door admitted everything and
+            # `crucible/inflight.py` said, in so many words, that the record
+            # gates nothing. For a BATCHING engine that is still exactly right
+            # and still what happens: vLLM states no concurrency,
+            # `chat_admission` returns None, and nothing below refuses.
+            #
+            # It was wrong for a SERIAL one. mlx-lm accepts every connection on
+            # a ThreadingHTTPServer and then generates on ONE thread draining
+            # ONE queue, so twelve accepted requests are one running and eleven
+            # waiting with nothing on the wire saying so. Foundry's clean pass
+            # died there on 2026-09-20: 12 in flight, a 300 s client deadline, a
+            # request that had not started when it passed, the pass dead at
+            # block 352 of 940.
+            #
+            # A refusal a client can act on beats a socket that goes quiet. The
+            # limit is the engine's own measured concurrency plus one (see
+            # `engines.chat_admission`), the wait is the median of what
+            # completions on this engine have actually been taking, and a server
+            # that has finished none states no `Retry-After` rather than
+            # inventing one — `_rate_limited`'s rule, applied to a number of
+            # our own.
+            limit, limit_basis = chat_admission(resident.engine)
+            if limit is not None and len(inflight) >= limit:
+                wait = inflight.retry_after()
+                return _chat_queue_full(
+                    resident=resident, limit=limit, basis=limit_basis, wait=wait
+                )
+
+            entry = inflight.open(
+                act=act, model=resident.model_id, client=_client_agent(request)
             )
-
-        entry = inflight.open(
-            act=act, model=resident.model_id, client=_client_agent(request)
-        )
         try:
             if body.get("stream") is True:
                 # THE RELAY OUTLIVES THIS HANDLER, so the record and the
@@ -3122,72 +3185,78 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 "Name the resident Crucible model id",
                 {"requested": body.model},
             )
-        resident = residency.resident_model
-        if resident is None or resident.model_id != body.model:
-            raise _model_not_resident(body.model, resident, "a decision")
+        # WAITED OUT AND ATOMIC, exactly as on the chat door (2026-09-24,
+        # Briefcase): a decision arriving mid-clearance is answered from the
+        # settled card, and the one it proxies is an `InFlight` row the
+        # settlement sees. Everything in this block is synchronous, which is
+        # what `settled_for` requires of it.
+        async with residency.settled_for("a decision"):
+            resident = residency.resident_model
+            if resident is None or resident.model_id != body.model:
+                raise _model_not_resident(body.model, resident, "a decision")
 
-        n_images = decide_core.check_image_count(body.images)
-        if n_images:
-            # Read at decision time and only with images in hand: the record
-            # carries no modalities, and a manifest whose modalities changed
-            # also changed its engine line (`--language-model-only`, an
-            # `mmproj`), which is a reload either way.
-            #
-            # WHAT THIS BACKEND SERVES, not what the weights accept (PHASE22
-            # section 2.9). `qwen3.5-4b` accepts images everywhere and is
-            # served them on cuda-linux and llama-windows only: on the Mac its
-            # engine is mlx-lm, which is never handed a picture. Reading the
-            # model-wide list here would pass a page to an engine that drops it
-            # and answer from the text alone.
-            manifest = load_manifest(resident.model_id)
-            served = manifest.serves(backend.kind)
-            if "image" not in served:
-                raise ApiError(
-                    400,
-                    "model_text_only",
-                    f"{resident.model_id!r} is served {list(served)} on "
-                    f"{backend.kind} (its weights accept "
-                    f"{list(manifest.modalities)}) and this decision carries "
-                    f"{n_images} image(s). Whether a model answers images HERE is "
-                    "its manifest's backend block (`serves`, PHASE22 section 2.9)",
-                    {"model": resident.model_id, "backend": backend.kind,
-                     "serves": list(served),
-                     "modalities": list(manifest.modalities),
-                     "images": n_images},
+            n_images = decide_core.check_image_count(body.images)
+            if n_images:
+                # Read at decision time and only with images in hand: the record
+                # carries no modalities, and a manifest whose modalities changed
+                # also changed its engine line (`--language-model-only`, an
+                # `mmproj`), which is a reload either way.
+                #
+                # WHAT THIS BACKEND SERVES, not what the weights accept (PHASE22
+                # section 2.9). `qwen3.5-4b` accepts images everywhere and is
+                # served them on cuda-linux and llama-windows only: on the Mac its
+                # engine is mlx-lm, which is never handed a picture. Reading the
+                # model-wide list here would pass a page to an engine that drops it
+                # and answer from the text alone.
+                manifest = load_manifest(resident.model_id)
+                served = manifest.serves(backend.kind)
+                if "image" not in served:
+                    raise ApiError(
+                        400,
+                        "model_text_only",
+                        f"{resident.model_id!r} is served {list(served)} on "
+                        f"{backend.kind} (its weights accept "
+                        f"{list(manifest.modalities)}) and this decision carries "
+                        f"{n_images} image(s). Whether a model answers images HERE is "
+                        "its manifest's backend block (`serves`, PHASE22 section 2.9)",
+                        {"model": resident.model_id, "backend": backend.kind,
+                         "serves": list(served),
+                         "modalities": list(manifest.modalities),
+                         "images": n_images},
+                    )
+            plans = decide_core.plan_all(body)
+
+            reading = decide_reading(resident.engine)
+            if not reading.served:
+                raise _decide_not_served(resident, reading.basis, None)
+            widest = max(plans, key=lambda item: len(item.labels))
+            if reading.max_logprobs is not None and len(widest.labels) > reading.max_logprobs:
+                raise _decide_not_served(
+                    resident,
+                    f"{resident.engine} returns at most {reading.max_logprobs} top "
+                    f"logprobs and question {widest.name!r} has {len(widest.labels)} "
+                    f"options ({reading.basis})",
+                    {"question": widest.name, "options": len(widest.labels),
+                     "max_logprobs": reading.max_logprobs},
                 )
-        plans = decide_core.plan_all(body)
 
-        reading = decide_reading(resident.engine)
-        if not reading.served:
-            raise _decide_not_served(resident, reading.basis, None)
-        widest = max(plans, key=lambda item: len(item.labels))
-        if reading.max_logprobs is not None and len(widest.labels) > reading.max_logprobs:
-            raise _decide_not_served(
-                resident,
-                f"{resident.engine} returns at most {reading.max_logprobs} top "
-                f"logprobs and question {widest.name!r} has {len(widest.labels)} "
-                f"options ({reading.basis})",
-                {"question": widest.name, "options": len(widest.labels),
-                 "max_logprobs": reading.max_logprobs},
+            inflight: InFlight = request.app.state.inflight
+            limit, limit_basis = chat_admission(resident.engine)
+            if limit is not None and len(inflight) >= limit:
+                wait = inflight.retry_after()
+                return _chat_queue_full(
+                    resident=resident, limit=limit, basis=limit_basis, wait=wait
+                )
+            concurrency = (
+                limit if limit is not None else decide_core.UNSTATED_ENGINE_CONCURRENCY
             )
 
-        inflight: InFlight = request.app.state.inflight
-        limit, limit_basis = chat_admission(resident.engine)
-        if limit is not None and len(inflight) >= limit:
-            wait = inflight.retry_after()
-            return _chat_queue_full(
-                resident=resident, limit=limit, basis=limit_basis, wait=wait
+            settlement: Settlement = request.app.state.settlement
+            chat_over = _chat_over(settlement)
+            client: httpx.AsyncClient = request.app.state.http
+            entry = inflight.open(
+                act=act, model=resident.model_id, client=_client_agent(request)
             )
-        concurrency = (
-            limit if limit is not None else decide_core.UNSTATED_ENGINE_CONCURRENCY
-        )
-
-        settlement: Settlement = request.app.state.settlement
-        chat_over = _chat_over(settlement)
-        client: httpx.AsyncClient = request.app.state.http
-        entry = inflight.open(
-            act=act, model=resident.model_id, client=_client_agent(request)
-        )
         try:
             answered = await _unless_the_caller_leaves(
                 _decide_on_engine(

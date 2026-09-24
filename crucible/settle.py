@@ -142,10 +142,10 @@ from a worker thread — `asyncio.to_thread` at the loop-side triggers, directly
 the one trigger that is already a thread (a streaming session closing).
 
 Running off the loop means admission can move underneath it, so the settlement
-**claims the card** for the duration, exactly as a render does, and re-reads the
-four facts under that claim. A job that reaches the lane while the claim is up is
-refused `engine_in_use` by `Residency._refuse_mutation_if_claimed` rather than
-racing a dying engine.
+**claims the card** for the duration, exactly as a render does — and since
+2026-09-24 it reads the four facts and takes the claim as ONE step
+(`Residency.claim_to_clear`), under the lock every client door records its hold
+under. See "EVERY DOOR WAITS IT OUT" below.
 
 WITH ONE EXCEPTION, AND IT IS NOT A LOOSENING (T6, 2026-09-15). An
 `unload-model` / `unload-voice` / `unload-aligner` for **the very subject this
@@ -161,12 +161,42 @@ admitted and waits the clearance out (`Residency.await_clearance`), ending
 a render's claim, a running job — refuses exactly what it refused before, under
 exactly the name it used.
 
-The window that remains is the one this server already
-has everywhere: a job whose `preflight` passed before the claim went up and whose
-`enqueue` landed after the re-read fails loudly at the mutation instead of being
-refused at the door. That is R3-shaped (a loud wrong answer, never a quiet one)
-and it is not new — the same window exists between `preflight` and a streaming
-session opening.
+EVERY DOOR WAITS IT OUT (2026-09-24, Briefcase). The exception above turned out
+to be the rule read too narrowly. On 1.0.25 Briefcase started a run straight
+after a SIGINT'd one, and the first run's release set a clearance going. Inside
+it the second run opened a lease (201, the model still published), sent a chat
+(`model_not_resident`, unpublished a moment later) and submitted `load-model` —
+`409 engine_in_use`, held by *"the settlement clearing the card"*. Nobody was
+using the card. The clearance is a SIGTERM and a wait, it ends, and the answer
+a client is owed is the one the card gives when it has: that is WEATHER, with a
+stated budget, not a refusal (CLAUDE.md's hardening ruling, 2026-09-20).
+
+So every client door that can arrive in a clearance waits it out, within
+`CLEARANCE_TIMEOUT_SECONDS` (the engine's own SIGTERM deadline plus a margin),
+and then answers from the settled card: the job door preflights and admits
+against it (a `load-model` is `202` and ends `done`), the lease door says
+`not_resident` because that is now true, the chat and decide doors say
+`model_not_resident` instead of proxying to an engine being SIGTERMed, and the
+streaming door opens or says `voice_not_resident`. A clearance that outlives
+the budget is a wedge and is raised as one, `engine_in_use`, by name.
+
+Waiting alone would only narrow the window, so the door's check and its hold are
+made atomically against this module's check and claim (`Residency.settled_for`
+and `Residency.claim_to_clear`, one lock). Either the settlement claims first
+and the door waits, or the door's hold is recorded first and the settlement sees
+it and declines.
+
+AND THE WINDOW THAT USED TO REMAIN IS CLOSED. This paragraph used to say that a
+job whose `preflight` passed before the claim went up and whose `enqueue` landed
+after the re-read fails loudly at the mutation, and called it R3-shaped and not
+new. Both halves are gone: the job door's preflight and enqueue now happen under
+the lock and never inside a clearance, and the lane hands a queued job to
+`running` in one step under its own lock (`JobStore._lane_lock`), so there is no
+instant at which a job admitted before the clearance is invisible to `holder()`.
+A job that is on the lane when a clearance would begin stops that clearance
+from beginning; nothing on the lane has to wait for one. What is unchanged is
+the window between a job's `preflight` and a streaming session opening — that is
+two USERS of the card, not a clearance, and it is still answered by name.
 """
 
 from __future__ import annotations
@@ -420,36 +450,40 @@ class Settlement:
         resident, or another thread got there first.
         """
         with self._lock:
-            if self.holder(excluding_job=excluding_job) is not None:
-                return None
-            if self._residency.resident is None:
-                return None
             try:
-                # `may_mutate=True` binds the claim to THIS thread, which is what
-                # lets the unload below through `_refuse_mutation_if_claimed`
-                # while every other thread is refused by name.
+                # THE FOUR FACTS AND THE CLAIM IN ONE STEP (2026-09-24,
+                # Briefcase). `claim_to_clear` reads `holder()` under the lock
+                # every client door records its hold under
+                # (`Residency.settled_for`), so either a door's lease, chat or
+                # job is seen here and nothing is claimed, or the door arrives
+                # after the claim, sees the clearance and waits it out. This
+                # used to be a read, a claim, and a re-read under the claim —
+                # which left a door the gap between the re-read and the unload,
+                # and Briefcase's lease landed in it.
                 #
-                # `clears=True` says what this claim is FOR, and it is the fix
-                # T6 found (`crucible/residency.py`, `being_cleared`): an
-                # `unload-...` for the very thing this is taking off the card is
-                # the same intent as this settlement, not a second holder, and
-                # must be answered rather than refused `engine_in_use`.
-                self._residency.claim(
-                    SETTLEMENT_HOLDER, may_mutate=True, clears=True
+                # `may_mutate=True` (inside) binds the claim to THIS thread,
+                # which is what lets the unload below through
+                # `_refuse_mutation_if_claimed`. `clears=True` says what the
+                # claim is FOR: an `unload-...` of the very thing this is taking
+                # off the card is the same intent (T6), and every door arriving
+                # meanwhile waits rather than being refused `engine_in_use`.
+                claimed = self._residency.claim_to_clear(
+                    SETTLEMENT_HOLDER,
+                    held=lambda: self.holder(excluding_job=excluding_job),
                 )
             except JobError:
-                # Somebody claimed the card between the read above and here. They
-                # are using it, which is the answer this was asking for.
+                # `engine_still_stopping`: a process an earlier unload asked to
+                # go is still on the card. There is nothing this can clear, and
+                # the dying slot is already saying so to every load.
+                return None
+            if not claimed:
+                # Something holds it, nothing is resident, or a session has the
+                # claim. Each is the answer this was asking for.
                 return None
             try:
-                if self.holder(excluding_job=excluding_job) is not None:
-                    # Admitted while the claim was going up. The card is spoken
-                    # for again and the next release will ask again.
-                    return None
-                # Re-read UNDER the claim, and unload what is there rather than
-                # what was there: an id read before the claim could name an
-                # engine something else has since replaced, and `unload` answers
-                # a stale id with `KeyError` rather than with the wrong engine.
+                # Unload what is there rather than what was there: `unload`
+                # answers a stale id with `KeyError` rather than with the wrong
+                # engine, so the id is read under the claim.
                 resident = self._residency.resident
                 if resident is None:
                     return None

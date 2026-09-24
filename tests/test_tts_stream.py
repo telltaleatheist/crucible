@@ -37,8 +37,10 @@ import httpx
 import pytest
 
 from crucible import ttsstream
+from crucible.settle import SETTLEMENT_HOLDER
 
 from . import fake_narrator_engine
+from .conftest import a_clearance_to_hold
 from .live_server import run_job, serve
 from .test_residency import STUBBORN_PID, a_process_that_will_not_stop
 from .test_tts_api import (  # noqa: F401 — imported to be used as fixtures
@@ -731,6 +733,64 @@ def test_a_session_holds_the_card_against_every_job_that_wants_it(
             error = response.json()["error"]
             assert error["code"] == "engine_in_use", body["type"]
             assert "tts stream" in error["details"]["held_by"]
+
+
+def test_a_session_opened_during_a_clearance_waits_it_out(
+    make_app: Callable[..., Any],
+    auth: dict[str, str],
+    fake_env: Path,  # noqa: F811
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-09-24, Briefcase: the settlement is not a second USER of the card.
+
+    A session opened while the settlement clears the voice used to be refused
+    `engine_in_use` by `claim()`, naming the settlement. It now waits the
+    clearance out and is answered from the settled card: `voice_not_resident`,
+    because by then it is true — and the card is left unclaimed, not held by a
+    session on a narrator that is gone.
+    """
+    fake_narrator_engine.install(monkeypatch)
+    fake_weights(VOICE)
+    app = make_app(enable_tts=True, enable_echo=False)
+    residency = app.state.residency
+    with serve(app) as base:
+        run_job(base, auth, type="load-voice", model=VOICE)
+        reached, release = a_clearance_to_hold(residency.voice_engine)
+        waiting = threading.Event()
+        wait = residency.await_settled
+
+        def instrumented(what: str, *, timeout: float) -> None:
+            waiting.set()
+            wait(what, timeout=timeout)
+
+        monkeypatch.setattr(residency, "await_settled", instrumented)
+        clearing = threading.Thread(
+            target=app.state.settlement.settle_quietly,
+            args=("the render job finished",),
+            daemon=True,
+        )
+        clearing.start()
+        try:
+            assert reached.wait(timeout=WAIT), "the settlement never reached narrator"
+            assert residency.claimed_by == SETTLEMENT_HOLDER
+            answers: list[httpx.Response] = []
+            opener = threading.Thread(
+                target=lambda: answers.append(open_session(base, auth)), daemon=True
+            )
+            opener.start()
+            assert waiting.wait(timeout=WAIT), "the door never waited"
+            assert not answers, "the door answered before the clearance finished"
+        finally:
+            release.set()
+            clearing.join(timeout=WAIT)
+        opener.join(timeout=WAIT)
+        assert answers, "the door is still waiting after the clearance"
+        response = answers[0]
+        assert response.status_code == 409, response.text
+        assert response.json()["error"]["code"] == "voice_not_resident"
+        assert residency.claimed_by is None
 
 
 def test_the_card_is_free_again_once_the_session_closes(

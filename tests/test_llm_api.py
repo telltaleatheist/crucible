@@ -1200,6 +1200,227 @@ def test_unloading_under_another_client_s_lease_is_still_leased(
     assert engines[0].stopped is False
 
 
+# ------------------------------------- every door waits the clearance out
+#
+# T6 GENERALISED, 2026-09-24, live on 1.0.25. Briefcase's second run followed a
+# SIGINT'd first one straight into the clearance that run's release began: its
+# lease was granted (the model still published), its chat was
+# `model_not_resident` (unpublished a moment later), and its `load-model` was
+# `409 engine_in_use`, held by "the settlement clearing the card". A clearance
+# is weather — it ends — so each door now waits it out and answers from the
+# settled card. The tests below hold the clearance inside the engine's stop, the
+# state Briefcase arrived in, and send each door into it.
+
+
+def _a_clearance_under_way(
+    client: TestClient, engine: FakeEngine
+) -> tuple[threading.Event, threading.Thread, list[Any]]:
+    """Start the settlement and hold it inside `engine.stop()`.
+
+    Returns `(release, thread, settled)`. The card is claimed by the
+    settlement when this returns — asserted, because every test below is only
+    about something if that is so.
+    """
+    reached, release = a_clearance_to_hold(engine)
+    settled: list[Any] = []
+    clearing = threading.Thread(
+        target=lambda: settled.append(
+            client.app.state.settlement.settle_quietly("the lease was released")
+        ),
+        name="the-settlement",
+        daemon=True,
+    )
+    clearing.start()
+    assert reached.wait(timeout=10), "the settlement never reached the engine"
+    assert client.app.state.residency.claimed_by == SETTLEMENT_HOLDER
+    return release, clearing, settled
+
+
+def _a_door_waiting(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> threading.Event:
+    """Set once a door has started waiting a clearance out.
+
+    The wait is the observable: a door that answered from the dying card would
+    never call this, and a test that released the clearance on a timer would be
+    testing a duration rather than a state.
+    """
+    residency = client.app.state.residency
+    waiting = threading.Event()
+    wait = residency.await_settled
+
+    def instrumented(what: str, *, timeout: float) -> None:
+        waiting.set()
+        wait(what, timeout=timeout)
+
+    monkeypatch.setattr(residency, "await_settled", instrumented)
+    return waiting
+
+
+def _sent_during(
+    request: Callable[[], Any],
+    waiting: threading.Event,
+    release: threading.Event,
+    clearing: threading.Thread,
+) -> Any:
+    """Send `request` into the held clearance, let it finish, return the answer.
+
+    Asserts the request was still unanswered when the door began to wait —
+    that is, that it WAITED rather than answering from the card mid-clearance.
+    """
+    answers: list[Any] = []
+    sender = threading.Thread(target=lambda: answers.append(request()), daemon=True)
+    sender.start()
+    assert waiting.wait(timeout=10), "the door never waited for the clearance"
+    assert not answers, "the door answered before the clearance finished"
+    release.set()
+    clearing.join(timeout=30)
+    assert not clearing.is_alive()
+    sender.join(timeout=30)
+    assert not sender.is_alive(), "the door is still waiting after the clearance"
+    return answers[0]
+
+
+def test_a_load_submitted_during_a_clearance_waits_it_out_and_ends_done(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Briefcase's `load-model`: the request that would repair the card.
+
+    It was refused `engine_in_use` naming the settlement. Now it is `202`,
+    admitted against the SETTLED card, and ends `done` with the model resident
+    on a fresh engine — the first one really stopped, not merely unpublished.
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    release, clearing, settled = _a_clearance_under_way(llm_client, engines[0])
+    waiting = _a_door_waiting(llm_client, monkeypatch)
+
+    response = _sent_during(
+        lambda: submit(llm_client, auth, type="load-model", model=MODEL),
+        waiting,
+        release,
+        clearing,
+    )
+    assert response.status_code == 202, response.json()
+    assert settled[0] is not None and settled[0].subject_id == MODEL
+
+    with llm_client.stream(
+        "GET", f"/v1/jobs/{response.json()['job_id']}/events", headers=auth
+    ) as stream:
+        events = parse_sse(line for line in stream.iter_lines())
+    assert events[-1]["event"] == "done", events[-1]
+    assert engines[0].stopped is True
+    assert len(engines) == 2 and engines[1].stopped is False
+    assert llm_client.get("/v1/health", headers=auth).json()["resident_models"] == [
+        MODEL
+    ]
+
+
+def test_a_lease_opened_during_a_clearance_waits_and_is_not_resident(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Briefcase's lease: granted on a model that was already leaving.
+
+    The true answer is the one the settled card gives — nothing is resident —
+    and no lease is left open on a thing that is gone.
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    release, clearing, _ = _a_clearance_under_way(llm_client, engines[0])
+    waiting = _a_door_waiting(llm_client, monkeypatch)
+
+    response = _sent_during(
+        lambda: llm_client.post(
+            f"/v1/models/{MODEL}/lease",
+            headers=auth,
+            json={"act": "clean", "ttl_seconds": 60},
+        ),
+        waiting,
+        release,
+        clearing,
+    )
+    assert response.status_code == 409, response.json()
+    error = response.json()["error"]
+    assert error["code"] == "not_resident"
+    assert error["details"]["resident"] is None
+    assert llm_client.app.state.leases.current() is None
+
+
+def test_a_chat_sent_during_a_clearance_waits_and_is_not_resident(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Briefcase's chat: never proxied to an engine that is being SIGTERMed.
+
+    `model_not_resident` after the wait, with no `InFlight` row left behind —
+    a row would be a holder the next settlement reads as somebody chatting.
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    release, clearing, _ = _a_clearance_under_way(llm_client, engines[0])
+    waiting = _a_door_waiting(llm_client, monkeypatch)
+
+    response = _sent_during(
+        lambda: llm_client.post(
+            "/v1/openai/chat/completions",
+            headers=auth,
+            json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+        ),
+        waiting,
+        release,
+        clearing,
+    )
+    assert response.status_code == 409, response.json()
+    assert response.json()["error"]["code"] == "model_not_resident"
+    assert len(llm_client.app.state.inflight) == 0
+
+
+def test_a_clearance_that_never_finishes_is_a_wedge_not_a_hang(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
+    engines: list[FakeEngine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The budget is real. Past it the door says the card is wedged, by name.
+
+    The budget is the engine's own SIGTERM deadline plus a margin, so reaching
+    it means the stop is stuck — and starting work on top of that would make it
+    worse. Shortened here; the shape of the answer is what is under test.
+    """
+    fake_weights(MODEL)
+    run_job(llm_client, auth, type="load-model", model=MODEL)
+    release, clearing, _ = _a_clearance_under_way(llm_client, engines[0])
+    monkeypatch.setattr(residency_module, "CLEARANCE_TIMEOUT_SECONDS", 0.3)
+    try:
+        response = submit(llm_client, auth, type="load-model", model=MODEL)
+    finally:
+        release.set()
+        clearing.join(timeout=30)
+    assert response.status_code == 409, response.json()
+    error = response.json()["error"]
+    assert error["code"] == "engine_in_use"
+    assert "wedged" in error["message"]
+    assert error["details"]["held_by"] == SETTLEMENT_HOLDER
+    # Refused, not queued: nothing was left on the lane behind the wedge.
+    assert llm_client.app.state.store.queue_depth == 0
+
+
 def test_health_says_warming_while_a_load_is_in_flight(
     llm_client: TestClient,
     auth: dict[str, str],
