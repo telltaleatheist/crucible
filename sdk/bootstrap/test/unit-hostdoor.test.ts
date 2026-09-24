@@ -287,11 +287,30 @@ test('a mid-stream line that is not JSON is host_install_failed naming the line'
   assert.match(r.message, /sent a line that is not JSON/);
 });
 
-test('an event the door does not define is refused rather than ignored', async () => {
+test('an event the door does not define is carried to onEvent, and the install still finishes', async () => {
+  // A host one release ahead may add an event kind (Owen, 2026-09-24: "if it
+  // can make the call to the crucible server then it should work"). It is
+  // handed to onEvent verbatim and nothing acts on it.
   const door = fakeHostDoor({ events: [['started', { type: 'engine' }], HOST_DONE] });
+  const seen: string[] = [];
+  const result = await requestHostInstall(
+    {
+      release: '0.6.0',
+      jobTypes: ['echo'],
+      fetchImpl: door.fetchImpl,
+      onEvent: (event) => seen.push(event.event === 'unknown' ? `unknown:${event.kind}` : event.event),
+    },
+    hostMachine(),
+  );
+  assert.deepEqual(seen, ['unknown:started', 'done']);
+  assert.equal(result.server.name, HOST_DONE_DATA.server.name);
+});
+
+test('an event whose name is not a string is still refused: that is a broken stream', async () => {
+  const door = fakeHostDoor({ chunks: [`${JSON.stringify({ id: 1, event: 7, data: {} })}\n`] });
   const r = await refusal(requestHostInstall({ release: '0.6.0', jobTypes: ['echo'], fetchImpl: door.fetchImpl }, hostMachine()));
   assert.equal(r.code, 'host_install_failed');
-  assert.match(r.message, /an event named "started"/);
+  assert.match(r.message, /an event named 7, which is not a name at all/);
 });
 
 test('an envelope with no data object is refused: the shape is tasks.py\'s, not a flat blob', async () => {

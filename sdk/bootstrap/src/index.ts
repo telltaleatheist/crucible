@@ -100,6 +100,7 @@ export type {
   HostDoneData,
   HostDoneStep,
   HostEvent,
+  HostUnknownEvent,
   HostEventKind,
   HostEventSinks,
   HostFailedData,

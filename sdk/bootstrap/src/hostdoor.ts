@@ -212,9 +212,31 @@ export type HostEvent =
   | { id: number; event: 'state'; data: HostStateData }
   | { id: number; event: 'line'; data: HostLineData }
   | { id: number; event: 'done'; data: HostDoneData }
-  | { id: number; event: 'failed'; data: HostFailedData };
+  | { id: number; event: 'failed'; data: HostFailedData }
+  | HostUnknownEvent;
 
-/** Every kind the door defines. A line naming anything else is refused, never skipped. */
+/**
+ * An event this build does not know, CARRIED rather than refused — the same
+ * rule `@crucible/client` applies to a job's stream (`UnknownEvent`) and a TTS
+ * session's.
+ *
+ * Owen, 2026-09-24: *"if it can make the call to the crucible server then it
+ * should work."* A host one release ahead of this package may add an event
+ * kind; until that day this door refused the whole install over a line it had
+ * no use for, which is a working install reported as a failure. It reaches
+ * `onEvent` verbatim, and nothing else acts on it. Still refused: a line that
+ * is not JSON, an event name that is not a string, and an envelope with no
+ * `data` object — a broken stream, not a newer one.
+ */
+export interface HostUnknownEvent {
+  id: number;
+  event: 'unknown';
+  /** The event name the host actually sent. */
+  kind: string;
+  data: Record<string, unknown>;
+}
+
+/** Every kind the door defines. A line naming anything else is carried as {@link HostUnknownEvent}. */
 export const HOST_EVENT_KINDS = ['step', 'progress', 'state', 'line', 'done', 'failed'] as const;
 export type HostEventKind = (typeof HOST_EVENT_KINDS)[number];
 
@@ -513,10 +535,10 @@ function parseEventLine(line: string, url: string, final: boolean): HostEvent {
   }
   const envelope = raw as Record<string, unknown>;
   const kind = envelope['event'];
-  if (typeof kind !== 'string' || !(HOST_EVENT_KINDS as readonly string[]).includes(kind)) {
+  if (typeof kind !== 'string') {
     throw new BootstrapRefusal(
       'host_install_failed',
-      `${url} sent an event named ${JSON.stringify(kind)}; the door defines ${HOST_EVENT_KINDS.join(', ')}.`,
+      `${url} sent an event named ${JSON.stringify(kind)}, which is not a name at all.`,
       { detail: clip(line) },
     );
   }
@@ -527,6 +549,15 @@ function parseEventLine(line: string, url: string, final: boolean): HostEvent {
       `${url} sent a "${kind}" event with no data object. The envelope is tasks.py's: {"id", "event", "data"}.`,
       { detail: clip(line) },
     );
+  }
+  if (!(HOST_EVENT_KINDS as readonly string[]).includes(kind)) {
+    // A kind from a newer host: carried to `onEvent`, acted on by nothing.
+    return {
+      id: envelope['id'] as number,
+      event: 'unknown',
+      kind,
+      data: data as Record<string, unknown>,
+    };
   }
   return raw as HostEvent;
 }
@@ -571,6 +602,9 @@ function handleEvent(event: HostEvent, currentStep: string | null, url: string, 
       throw hostRefusal(event.data, url);
     case 'done':
       return doneResult(event.data, url);
+    case 'unknown':
+      // Already handed to `onEvent` above; there is nothing here to act on.
+      return null;
   }
 }
 
