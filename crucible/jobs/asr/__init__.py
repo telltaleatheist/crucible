@@ -212,11 +212,18 @@ ENGINES_WITHOUT_VAD: frozenset[str] = frozenset({"mlx-whisper", *QWEN_ASR_ENGINE
 #: already pins vLLM 0.29.0 on cuda-linux and mlx-audio 0.5.5 on mlx-darwin, so
 #: Qwen3-ASR costs no new env on either machine (docs/PHASE25 section 6). The
 #: aligner a Qwen job also runs is the `align` env's, resolved in `qwen.py`.
+#:
+#: `qwen-asr` (Qwen's own package on torch MPS, the Mac's official engine since
+#: 2026-09-24) runs in the ALIGN env, which already pins exactly the versions
+#: ContentStudio measured it with: qwen-asr 0.0.6, transformers 4.57.6,
+#: torch 2.14.0 (`envs/align/mlx-darwin.txt`). The aligner already imports that
+#: package from there, so this is the same env, not a new one.
 ENV_FOR_ENGINE: dict[str, str] = {
     "faster-whisper": "asr",
     "mlx-whisper": "asr",
     "vllm": "llm",
     "mlx-audio": "llm",
+    "qwen-asr": "align",
 }
 
 #: THE LONGEST CONTEXT ANY QWEN JOB MAY SEND, IN CHARACTERS: a cheap refusal

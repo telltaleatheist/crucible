@@ -7,21 +7,19 @@
 # it: whisper-large-v3-turbo transcribed a 3.9-hour stream with 76 fillers in
 # it; Qwen3-ASR-1.7B with a context prompt found about 70 ums and 34 uhs, kept
 # repeats verbatim, and cuts made at the aligner's word boundaries were
-# "flawless" by Owen's ear. The whisper manifests stay: apps switch first, and
-# whisper is retired in a later cut.
+# "flawless" by Owen's ear.
 #
-# THE LINEUP, 2026-09-24 (Owen's ruling, later that day): the asr job offers
-# EXACTLY three models and the caller picks — this one, `whisper-large-v3-turbo`
-# and `whisper-tiny`, each ONE id across both backends. Every other whisper size
+# THE LINEUP, 2026-09-24 (Owen's ruling, later that day): the caller picks from
+# this one, `whisper-large-v3-turbo` and `whisper-tiny`, each ONE id across both
+# backends, plus the Mac-only fast port `qwen3-asr-1.7b-mlx` (added the same
+# evening after the first live run; see this file's mlx-darwin block). Every other whisper size
 # (base, small, medium, large-v3, distil-large-v3) was removed, and the two
 # whispers that stayed lost their backend prefixes (`crucible/asrmodels.py`).
 #
 # ONE ID, BOTH MACHINES, ONE SET OF BYTES. Both blocks pin the official
 # checkpoint at the same revision, and the loader refuses a two-block manifest
-# that does not (crucible/asrmodels.py). vLLM reads these safetensors directly;
-# mlx-audio 0.5.5 reads the same files and converts them on load
-# (`Qwen3ASRModel.sanitize`: strips `thinker.`, drops the tied
-# `lm_head.weight`, transposes the conv kernels). FULL PRECISION on both, by
+# that does not (crucible/asrmodels.py). vLLM reads these safetensors directly,
+# and so does Qwen's own package on the Mac. FULL PRECISION on both, by
 # Owen's ruling of 2026-09-24: bfloat16, and never the 8-bit MLX build.
 #
 # repo/revision, read from the hub's API on 2026-09-24:
@@ -116,37 +114,48 @@ kv_cache_memory_bytes = 3758096384
 memory_bytes_estimate = 11006754728
 
 [backends.mlx-darwin]
-# mlx-audio 0.5.5, already in the Mac's llm env (`envs/llm/mlx-darwin.txt`, as
-# mlx-vlm's dependency). Its `stt/models/qwen3_asr` has had the model since
-# 0.3.1 and `system_prompt` since 0.4.0. It loads THE OFFICIAL REPO below: the
-# weights on this Mac are the weights on the PC. The mlx-community bf16
-# conversion (Qwen3-ASR-1.7B-bf16 @ e1f6c266, 4,076,186,653 B) is the same
-# tensors less the tied lm_head, and is NOT used, so that the id keeps naming
-# one set of bytes.
-engine = "mlx-audio"
+# QWEN'S OWN PACKAGE ON TORCH MPS, not the MLX port. Changed 2026-09-24 after
+# the first live runs on this Mac. The same 10 minutes of ContentStudio's stream
+# (1:00:00-1:10:00, its filler prompt), same weights, greedy, fillers counted
+# with one regex (`\bum\b`, `\buh\b`) on the transcript text, and, what makes
+# it an ENGINE comparison, the SAME PIECES fed to both engines through this
+# worker:
+#
+#   pieces cut by qwen_asr's own splitter       qwen-asr 8+5 = 13   55 s
+#                                              mlx-audio 8+1 =  9   22 s
+#   pieces cut by this worker's splitter        qwen-asr 6+5 = 11   53 s
+#                                              mlx-audio 7+3 = 10   22 s
+#
+# The official package hears a few more fillers than the port and is 2.5x
+# slower. Fillers are fragile: the same engine on the same cuts moved between
+# runs of the reference (ContentStudio's `transcribe()` counted 19; the same
+# engine, same cuts, through this worker 13), because a sample rounded
+# differently tips a borderline "um". And NOT cutting (one 600 s decode, the
+# package without timestamps) found ZERO, which is why every Qwen job here is
+# cut at <= 180 s. Owen chose the official engine as the default and kept the
+# port as its own id for when speed matters more: `qwen3-asr-1.7b-mlx`.
+#
+# The package is the one the align env already runs for the aligner
+# (`envs/align/mlx-darwin.txt`: qwen-asr 0.0.6, transformers 4.57.6,
+# torch 2.14.0, exactly ContentStudio's versions), so the worker runs in that
+# env and nothing new is installed.
+engine = "qwen-asr"
 hf_repo = "Qwen/Qwen3-ASR-1.7B"
 revision = "7278e1e70fe206f11671096ffdd38061171dd6e5"
 dtype = "bfloat16"
 aligner = "qwen3-aligner"
-# ONE, and the loader refuses anything else. mlx-audio batches only the chunks
-# it cut out of a single input; Crucible gives it one piece per call so the
-# loop guard can read that piece's own token count. ContentStudio's batch-4
-# figure was transformers on MPS and does not carry to MLX.
+# ONE, and the loader refuses anything else: one piece per `generate`, so the
+# loop guard reads that piece's own token count. It is also the memory fix.
+# ContentStudio's 41 GB was this package batching 4 pieces (full-prompt logits
+# of 151,936 x ~2,460 x 4 in bfloat16, held by torch's MPS caching allocator),
+# and its default batch of 32 aborted the process outright.
 max_batch = 1
 max_new_tokens = 4096
-# 7,726,809,000 B = 7.20 GiB, COMPUTED:
-#   4,698,521,512  the two safetensors, exactly. An UPPER bound: `sanitize`
-#                  drops the 622,329,856 B tied lm_head, so about 4.08 GB is
-#                  resident.
-# +   880,803,840  the KV cache of the longest single piece: 7,524 tokens
-#                  (2,340 audio + 1,024 context + 64 scaffolding + 4,096 new)
-#                  rounded up to mlx's 256-token cache step, 7,680 x 114,688 B.
-# + 2,147,483,648  activations (a 2,048-token prefill step, the audio tower
-#                  over one 180 s piece) and MLX's buffer cache between
-#                  `mx.clear_cache()` calls, DECLARED at 2 GiB.
-# NOT ContentStudio's 41 GB. That figure was transformers on MPS: full-prompt
-# logits for a batch of 4 (151,936 x 2,460 x 4 in bfloat16) and torch's MPS
-# caching allocator, which never returns memory. Neither exists here.
-# The guard adds the aligner's MEASURED 5,885,296,640 on this backend
-# (align/qwen3-aligner.toml), so a word-timestamped job needs 13,612,105,640 B.
-memory_bytes_estimate = 7726809000
+# 9,126,805,504 B = 8.5 GiB, MEASURED, and an UPPER bound for the ASR alone.
+# `torch.mps.driver_allocated_memory()` sampled at 20 Hz through the run above,
+# with `max_inference_batch_size=1`, peaked at 8.5 GiB. That process also held
+# the 0.6B forced aligner (the package loads it beside the model), so the ASR
+# engine alone is less. The guard adds the aligner's own measured
+# 5,885,296,640 on this backend (align/qwen3-aligner.toml), which counts the
+# aligner twice rather than risk counting it not at all.
+memory_bytes_estimate = 9126805504

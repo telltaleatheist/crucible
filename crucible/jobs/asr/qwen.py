@@ -72,6 +72,7 @@ from ...alignmodels import AlignBackendSpec, AlignManifest, AlignManifestError
 from ...alignmodels import load_align_manifest
 from ...asrmodels import (
     MLX_AUDIO_ENGINE,
+    QWEN_ASR_TORCH_ENGINE,
     QWEN_CONTEXT_MAX_TOKENS,
     QWEN_PIECE_MAX_SECONDS,
     VLLM_ENGINE,
@@ -100,6 +101,9 @@ READY_SILENCE_TIMEOUT_SECONDS = 900.0
 WORKER_ENVIRONMENT_FOR_ENGINE: dict[str, dict[str, str]] = {
     VLLM_ENGINE: {**VLLM_ENVIRONMENT, "VLLM_ENABLE_V1_MULTIPROCESSING": "0"},
     MLX_AUDIO_ENGINE: {},
+    # Qwen's own package on torch: the same environment the aligner worker,
+    # which imports the same package from the same env, has always run with.
+    QWEN_ASR_TORCH_ENGINE: {},
 }
 
 
@@ -396,6 +400,14 @@ class QwenAsrRun:
             "language": QWEN3_LANGUAGES[self._language],
             "context": self._context,
             "context_max_tokens": QWEN_CONTEXT_MAX_TOKENS,
+            # The torch device for Qwen's own package: the aligner's own answer
+            # for this backend (`mps` on the Mac), one owner. Null on the two
+            # engines that choose their device themselves.
+            "device": (
+                align_device_for(self._config.backend_kind)
+                if engine == QWEN_ASR_TORCH_ENGINE
+                else None
+            ),
         }
         environment = WORKER_ENVIRONMENT_FOR_ENGINE.get(engine)
         if environment is None:

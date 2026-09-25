@@ -1,0 +1,61 @@
+# Qwen3-ASR 1.7B on the MLX port: the FAST transcriber, Mac only, by choice.
+#
+# WHY THERE ARE TWO QWEN IDS. Owen, 2026-09-24, after the first live runs on
+# the Mac: *"maybe we should make both an option to the program calling
+# crucible. if i want speed i can get it via mlx"*. So the caller picks the
+# ENGINE by picking the id, which is how every other choice in Crucible is made:
+#
+#   qwen3-asr-1.7b       the official engine on both machines. The default
+#                        (capability walks it first).
+#   qwen3-asr-1.7b-mlx   this one. mlx-audio on the Mac: 2.5x faster (22 s
+#                        against 55 s for 10 minutes on identical pieces) and a
+#                        few fillers fewer (9-10 against 11-13 on that window;
+#                        asr/qwen3-asr-1.7b.toml's mlx-darwin block has the
+#                        table). For work where speed matters more than the
+#                        last few ums.
+#
+# MAC ONLY. There is no port to be fast on the PC: vLLM already is.
+#
+# THE SAME BYTES as qwen3-asr-1.7b: the official checkpoint at the same
+# revision, which mlx-audio 0.5.5 reads and converts on load
+# (`Qwen3ASRModel.sanitize`: strips `thinker.`, drops the tied
+# `lm_head.weight`, transposes the conv kernels). FULL PRECISION (Owen,
+# 2026-09-24): bfloat16, never the 8-bit MLX build. The worker checks the
+# loaded dtype rather than trusting it.
+
+[model]
+id = "qwen3-asr-1.7b-mlx"
+family = "qwen3-asr"
+parameters_m = 1700
+
+[backends.mlx-darwin]
+# mlx-audio 0.5.5, already in the Mac's llm env (`envs/llm/mlx-darwin.txt`, as
+# mlx-vlm's dependency). Its `stt/models/qwen3_asr` has had the model since
+# 0.3.1 and `system_prompt` since 0.4.0. Its prompt writes `{context}\n` before
+# `<|im_end|>`, one character the official template does not; measured on
+# 2026-09-24 as making no difference to the fillers (8 without it, 9 with).
+engine = "mlx-audio"
+hf_repo = "Qwen/Qwen3-ASR-1.7B"
+revision = "7278e1e70fe206f11671096ffdd38061171dd6e5"
+dtype = "bfloat16"
+aligner = "qwen3-aligner"
+# ONE, and the loader refuses anything else. mlx-audio batches only the chunks
+# it cut out of a single input; Crucible gives it one piece per call so the
+# loop guard can read that piece's own token count.
+max_batch = 1
+max_new_tokens = 4096
+# 7,726,809,000 B = 7.20 GiB, COMPUTED, and CONSISTENT WITH the live run of
+# 2026-09-24 (worker processes peaked at ~6.0 GB resident over 10 minutes of
+# audio, aligner included):
+#   4,698,521,512  the two safetensors, exactly. An UPPER bound: `sanitize`
+#                  drops the 622,329,856 B tied lm_head, so about 4.08 GB is
+#                  resident.
+# +   880,803,840  the KV cache of the longest single piece: 7,524 tokens
+#                  (2,340 audio + 1,024 context + 64 scaffolding + 4,096 new)
+#                  rounded up to mlx's 256-token cache step, 7,680 x 114,688 B.
+# + 2,147,483,648  activations (a 2,048-token prefill step, the audio tower
+#                  over one 180 s piece) and MLX's buffer cache between
+#                  `mx.clear_cache()` calls, DECLARED at 2 GiB.
+# The guard adds the aligner's MEASURED 5,885,296,640 on this backend
+# (align/qwen3-aligner.toml), so a word-timestamped job needs 13,612,105,640 B.
+memory_bytes_estimate = 7726809000

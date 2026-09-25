@@ -1,4 +1,15 @@
-"""The Qwen3-ASR worker: vLLM on cuda-linux, mlx-audio on mlx-darwin, one wire.
+"""The Qwen3-ASR worker: vLLM on cuda-linux; on mlx-darwin Qwen's own `qwen_asr`
+on torch MPS (`qwen3-asr-1.7b`) or the mlx-audio port (`qwen3-asr-1.7b-mlx`,
+the fast one). One wire for all three.
+
+THE THIRD ENGINE, 2026-09-24: on identical pieces, Qwen's own package heard a
+few more fillers than the MLX port (11-13 against 9-10 on a 10-minute window)
+at 2.5x the time, so the Mac's official id runs the package (in the align env,
+which has it) and the port kept an id of its own for speed. `load` takes a `device` key, the torch
+device for `qwen-asr` and null for the other two.
+
+(The paragraphs below were written for the two-engine worker and still hold
+for vLLM and mlx-audio.)
 
 docs/PHASE25-QWEN-ASR.md section 4. Run as `<llm env python> qwen_worker.py`,
 held open for ONE JOB by `crucible/jobs/asr/qwen.py` (a `WorkerSession` the job
@@ -119,7 +130,7 @@ ENERGY_WINDOW_MS = 100.0
 
 DECODE_REPORT_SECONDS = 1.0
 
-ENGINES = ("vllm", "mlx-audio")
+ENGINES = ("vllm", "mlx-audio", "qwen-asr")
 
 _STATE: dict = {
     "engine": None,
@@ -374,6 +385,54 @@ def load_mlx(request: dict) -> tuple:
     return model, tokenizer, str(mx.default_device())
 
 
+def load_qwen_asr(request: dict) -> tuple:
+    """Qwen's own `qwen_asr` package on torch, as ContentStudio ran it.
+
+    The Mac's official engine since 2026-09-24: on identical pieces it heard a
+    few more fillers than the MLX port (asr/qwen3-asr-1.7b.toml has the table).
+    It runs in the ALIGN env, which pins exactly ContentStudio's versions.
+
+    NO FORCED ALIGNER HERE. The package can load one beside the model; Crucible
+    runs the aligner as its own session (`qwen.py`), so this loads the ASR
+    model alone. `max_inference_batch_size=1` is stated rather than left at the
+    package's 32, which aborted an MPS process outright.
+    """
+    try:
+        import torch
+        from qwen_asr import Qwen3ASRModel
+    except ImportError as exc:
+        raise RuntimeError(
+            f"the env in {sys.executable} cannot import qwen_asr/torch ({exc}); "
+            "it is the align env's (`crucible install align`)"
+        ) from None
+    dtype = require(request, "dtype", str)
+    device = require(request, "device", str)
+    if require(request, "max_batch", int) != 1:
+        raise RuntimeError(
+            "qwen-asr is given one piece per call here; a max_batch other than "
+            "1 is a server that thinks this is a different engine"
+        )
+    wanted = getattr(torch, dtype, None)
+    if not isinstance(wanted, torch.dtype):
+        raise RuntimeError(f"torch has no dtype {dtype!r}")
+    model = Qwen3ASRModel.from_pretrained(
+        require(request, "model_dir", str),
+        dtype=wanted,
+        device_map=device,
+        max_new_tokens=require(request, "max_new_tokens", int),
+        max_inference_batch_size=1,
+    )
+    # FULL PRECISION IS CHECKED, NOT ASSUMED (Owen, 2026-09-24).
+    found = {
+        str(p.dtype) for p in model.model.parameters() if p.dtype.is_floating_point
+    }
+    if found != {str(wanted)}:
+        raise RuntimeError(
+            f"the model loaded in {sorted(found)}, and this job runs it in {dtype} only"
+        )
+    return model, model.processor.tokenizer, str(model.model.device)
+
+
 def load(request: dict) -> None:
     engine = require(request, "engine", str)
     if engine not in ENGINES:
@@ -392,6 +451,8 @@ def load(request: dict) -> None:
     started = time.time()
     if engine == "vllm":
         model, tokenizer, device = load_vllm(request)
+    elif engine == "qwen-asr":
+        model, tokenizer, device = load_qwen_asr(request)
     else:
         model, tokenizer, device = load_mlx(request)
     seconds = time.time() - started
@@ -545,6 +606,48 @@ def transcribe_mlx(batch: list) -> list:
     return rows
 
 
+def transcribe_qwen_asr(batch: list) -> list:
+    """One piece per `generate`, the way `qwen_asr` 0.0.6 runs its transformers
+    backend (`Qwen3ASRModel._infer_asr_transformers`), minus two things.
+
+    The prompt is the package's own `_build_text_prompt` (the repo's chat
+    template plus `language {Name}<asr_text>`), and the inputs go through its
+    own processor, so the model hears exactly what it heard in ContentStudio's
+    run. What is NOT the package's: the token count, which its public
+    `transcribe` does not return and the loop guard needs, and its
+    `parse_asr_output`, whose `detect_and_fix_repetitions` silently collapses
+    repeats (the module docstring).
+    """
+    import torch
+
+    asr = _STATE["model"]
+    prompt = asr._build_text_prompt(
+        context=_STATE["context"] or "", force_language=_STATE["language"]
+    )
+    rows = []
+    for piece in batch:
+        budget = int(piece["max_tokens"])
+        inputs = asr.processor(
+            text=[prompt], audio=[read_wav(piece["wav"])], return_tensors="pt", padding=True
+        )
+        inputs = inputs.to(asr.model.device).to(asr.model.dtype)
+        with torch.inference_mode():
+            out = asr.model.generate(**inputs, max_new_tokens=budget)
+        new = out.sequences[0, inputs["input_ids"].shape[1]:]
+        text = asr.processor.batch_decode(
+            new.unsqueeze(0), skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )[0]
+        tokens = int(new.shape[0])
+        rows.append(
+            {"text": text.strip(), "tokens": tokens, "hit_token_limit": tokens >= budget}
+        )
+        # torch's MPS caching allocator keeps every freed block; between pieces
+        # they are memory nothing will ask for again.
+        if asr.model.device.type == "mps":
+            torch.mps.empty_cache()
+    return rows
+
+
 def transcribe(request: dict) -> None:
     if _STATE["model"] is None:
         raise RuntimeError("a transcribe request arrived before a load request")
@@ -559,7 +662,11 @@ def transcribe(request: dict) -> None:
     send("ready", pieces=len(pieces))
 
     size = int(_STATE["max_batch"])
-    run = transcribe_vllm if _STATE["engine"] == "vllm" else transcribe_mlx
+    run = {
+        "vllm": transcribe_vllm,
+        "mlx-audio": transcribe_mlx,
+        "qwen-asr": transcribe_qwen_asr,
+    }[_STATE["engine"]]
     done = 0
     for first in range(0, len(pieces), size):
         batch = pieces[first : first + size]

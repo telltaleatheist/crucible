@@ -145,15 +145,23 @@ ASR_DIR_ENV = "CRUCIBLE_ASR_DIR"
 #: the Qwen keys on it, and the worker table is keyed by it.
 VLLM_ENGINE = "vllm"
 MLX_AUDIO_ENGINE = "mlx-audio"
-QWEN_ASR_ENGINES: frozenset[str] = frozenset({VLLM_ENGINE, MLX_AUDIO_ENGINE})
+#: Qwen's own `qwen_asr` package on torch, which the Mac runs on MPS. Added
+#: 2026-09-24 after the first live runs: on identical pieces it hears a few more
+#: fillers than the MLX port and is 2.5x slower (asr/qwen3-asr-1.7b.toml, its
+#: mlx-darwin block). Owen kept both, the port under its own id.
+QWEN_ASR_TORCH_ENGINE = "qwen-asr"
+QWEN_ASR_ENGINES: frozenset[str] = frozenset(
+    {VLLM_ENGINE, MLX_AUDIO_ENGINE, QWEN_ASR_TORCH_ENGINE}
+)
 
 #: Which engines each backend is allowed to name. Whisper is one engine per
-#: backend because CTranslate2 has no Metal backend (the module docstring);
-#: Qwen3-ASR is one engine per backend because vLLM has no Metal backend and
-#: mlx-audio has no CUDA one. Two per backend, and never each other's.
+#: backend because CTranslate2 has no Metal backend (the module docstring).
+#: vLLM has no Metal backend and mlx-audio has no CUDA one. The Mac has TWO
+#: Qwen engines by Owen's choice of 2026-09-24: the official package (fidelity)
+#: under `qwen3-asr-1.7b` and the MLX port (speed) under `qwen3-asr-1.7b-mlx`.
 ASR_BACKEND_ENGINES: dict[str, frozenset[str]] = {
     CUDA_LINUX: frozenset({"faster-whisper", VLLM_ENGINE}),
-    MLX_DARWIN: frozenset({"mlx-whisper", MLX_AUDIO_ENGINE}),
+    MLX_DARWIN: frozenset({"mlx-whisper", MLX_AUDIO_ENGINE, QWEN_ASR_TORCH_ENGINE}),
 }
 
 #: The model family each engine runs. A block's engine must belong to its
@@ -171,6 +179,7 @@ ASR_ENGINE_FAMILY: dict[str, str] = {
     "mlx-whisper": "whisper",
     VLLM_ENGINE: "qwen3-asr",
     MLX_AUDIO_ENGINE: "qwen3-asr",
+    QWEN_ASR_TORCH_ENGINE: "qwen3-asr",
 }
 
 #: The families whose engines read ONE checkpoint on every backend, and whose
@@ -183,11 +192,13 @@ ASR_ENGINE_FAMILY: dict[str, str] = {
 #: repo, revision) — the way every `models/<id>.toml` has always worked.
 ONE_CHECKPOINT_FAMILIES: frozenset[str] = frozenset({"qwen3-asr"})
 
-#: THE LINEUP, Owen 2026-09-24: exactly these three, and the caller picks. Not
-#: read by the loader (the directory is the lineup); stated so a test can hold
-#: the directory to it and a reader can see the ruling in one line.
+#: THE LINEUP, Owen 2026-09-24: these three, and the caller picks, plus the
+#: Mac-only fast port of the first (`qwen3-asr-1.7b-mlx`, added that evening:
+#: *"if i want speed i can get it via mlx"*). Not read by the loader (the
+#: directory is the lineup); stated so a test can hold the directory to it and a
+#: reader can see the ruling in one line.
 ASR_LINEUP: frozenset[str] = frozenset(
-    {"qwen3-asr-1.7b", "whisper-large-v3-turbo", "whisper-tiny"}
+    {"qwen3-asr-1.7b", "qwen3-asr-1.7b-mlx", "whisper-large-v3-turbo", "whisper-tiny"}
 )
 
 #: Ids that were RENAMED on 2026-09-24, old -> new. NOT aliases: a request
@@ -545,8 +556,9 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
                 f"{where}: engine {engine!r} does not run asr on {kind}; that "
                 f"backend's asr engines are {sorted(ASR_BACKEND_ENGINES[kind])}. "
                 "faster-whisper (CTranslate2) and vllm have no Metal backend; "
-                "mlx-whisper and mlx-audio are MLX, which has no CUDA one. They "
-                "are not two recipes for one thing"
+                "mlx-whisper and mlx-audio are MLX, which has no CUDA one, and "
+                "qwen-asr is offered only where the MLX port needed an "
+                "alternative (the Mac)"
             )
         required = dict(_BACKEND_REQUIRED)
         if engine in QWEN_ASR_ENGINES:
@@ -645,14 +657,14 @@ def _check_qwen_block(where: str, engine: str, block: dict[str, Any]) -> None:
     for key in positive:
         if block[key] <= 0:
             raise AsrManifestError(f"{where}: {key} must be positive, got {block[key]}")
-    if engine == MLX_AUDIO_ENGINE and block["max_batch"] != 1:
-        # mlx-audio 0.5.5 batches only the chunks it cut out of ONE input
-        # (`Qwen3ASRModel._generate_chunks_batched`, padded to equal length); a
-        # list of inputs is decoded one after another. Crucible hands it one
-        # piece per call because the loop guard reads each piece's own token
-        # count, so any batch above 1 is a number nothing would honour.
+    if engine in (MLX_AUDIO_ENGINE, QWEN_ASR_TORCH_ENGINE) and block["max_batch"] != 1:
+        # Both are handed one piece per call because the loop guard reads each
+        # piece's own token count. mlx-audio 0.5.5 batches only the chunks it
+        # cut out of ONE input anyway; `qwen_asr` on MPS at a batch of 4 used
+        # 41 GB and at its default of 32 aborted the process (ContentStudio,
+        # 2026-09-24). Any batch above 1 is a number nothing here would honour.
         raise AsrManifestError(
-            f"{where}: max_batch is {block['max_batch']}, and mlx-audio decodes "
+            f"{where}: max_batch is {block['max_batch']}, and {engine} decodes "
             "one piece per call here (the loop guard reads each piece's own "
             "token count), so the only true value is 1"
         )

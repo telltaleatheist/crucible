@@ -41,6 +41,14 @@ from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 
 BEST_FIRST = ["qwen3-asr-1.7b", "whisper-large-v3-turbo", "whisper-tiny"]
 
+#: The Mac also offers the MLX port of Qwen, second: the official engine first
+#: because it keeps the fillers (Owen, 2026-09-24: *"if i want speed i can get
+#: it via mlx"*).
+BEST_FIRST_FOR = {
+    "cuda-linux": BEST_FIRST,
+    "mlx-darwin": ["qwen3-asr-1.7b", "qwen3-asr-1.7b-mlx", "whisper-large-v3-turbo", "whisper-tiny"],
+}
+
 
 @pytest.fixture
 def config(make_app: Callable[..., Any], home: Path) -> Config:
@@ -84,11 +92,22 @@ def _pinned(home: Path, old_id: str, backend: str) -> Path:
 
 
 @pytest.mark.parametrize("backend", ["cuda-linux", "mlx-darwin"])
-def test_the_asr_class_offers_exactly_the_three_best_first(backend: str) -> None:
-    """Qwen, turbo, tiny, on BOTH machines, as the same three ids."""
+def test_the_asr_class_offers_exactly_the_lineup_best_first(backend: str) -> None:
+    """Qwen, turbo, tiny on both machines as the same ids; the Mac adds the
+    MLX port second."""
     candidates = capability.BY_NAME["asr"].candidates(backend)
-    assert [c.id for c in candidates] == BEST_FIRST
-    assert set(BEST_FIRST) == ASR_LINEUP
+    assert [c.id for c in candidates] == BEST_FIRST_FOR[backend]
+    assert set(BEST_FIRST_FOR["mlx-darwin"]) == ASR_LINEUP
+
+
+def test_the_mac_runs_the_official_qwen_package_and_the_port_under_its_own_id() -> None:
+    """The first live runs (2026-09-24): the official package is the default
+    on the Mac, and the faster MLX port is its own id, `-mlx`."""
+    assert load_asr_manifest("qwen3-asr-1.7b").spec("mlx-darwin").engine == "qwen-asr"
+    port = load_asr_manifest("qwen3-asr-1.7b-mlx")
+    assert port.spec("mlx-darwin").engine == "mlx-audio"
+    assert not port.supports("cuda-linux")
+    assert asr_job.ENV_FOR_ENGINE["qwen-asr"] == "align"
 
 
 def test_no_removed_id_is_declared_anywhere_in_the_build() -> None:
