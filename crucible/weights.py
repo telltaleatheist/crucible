@@ -222,9 +222,9 @@ def stamp_path(
 def _store_id(subject: Any) -> str:
     """The id whose folder holds this subject's weights.
 
-    `getattr` because only a MODEL manifest can be an alias: a voice, an RVC
-    model and an ASR model have no `weights_of` in their schemas, and this is
-    asking which schema the subject is, exactly as `local_source` does.
+    `getattr` because only a MODEL or an ASR manifest can be an alias: a voice
+    and an RVC model have no `weights_of` in their schemas, and this is asking
+    which schema the subject is, exactly as `local_source` does.
     """
     weights_of = getattr(subject, "weights_of", None)
     return subject.id if weights_of is None else weights_of
@@ -288,12 +288,21 @@ def aliases_holding(
     deleted by hand names an alias that is not there any more, and refusing the
     base for it would leave nothing any door could remove to lift the refusal.
     """
+    from .asrmodels import AsrManifest, asr_aliases_of
     from .manifests import ModelManifest, aliases_of
 
-    if not isinstance(manifest, ModelManifest) or manifest.weights_of is not None:
+    if getattr(manifest, "weights_of", None) is not None:
+        return ()
+    # Two catalogs can alias (models/ and, since 2026-09-24, asr/); each asks
+    # its own directory who shares its folder.
+    if isinstance(manifest, ModelManifest):
+        aliases = aliases_of(manifest)
+    elif isinstance(manifest, AsrManifest):
+        aliases = asr_aliases_of(manifest)
+    else:
         return ()
     holding: list[str] = []
-    for alias in aliases_of(manifest):
+    for alias in aliases:
         if not alias.supports(backend_kind):
             continue
         if not alias_record_path(config, alias, backend_kind).is_file():

@@ -131,7 +131,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -427,6 +427,20 @@ class AsrManifest:
     parameters_m: int
     backends: dict[str, AsrBackendSpec]
     path: Path
+    #: `[model] weights_of`: the id whose download these weights ARE, or None
+    #: for a model that owns its own. The `models/` rule (PHASE22-DECIDE.md
+    #: section 2.9, "one copy on disk"), brought to asr on 2026-09-24 when the
+    #: `-mlx` ids pulled a second copy of their official sibling's checkpoint
+    #: (Owen: "go ahead"). `crucible/weights.py` reads it through `_store_id`.
+    weights_of: str | None = None
+    #: The base manifest, resolved by `load_asr_manifest`. None exactly where
+    #: `weights_of` is.
+    weights_base: "AsrManifest | None" = field(default=None, compare=False, repr=False)
+
+    def extra_files(self, backend_kind: str) -> tuple[str, ...]:
+        """What an alias owns on disk beyond its base's: nothing. Every asr block
+        is a whole-repo download, so an alias shares the base's folder whole."""
+        return ()
 
     def supports(self, backend_kind: str) -> bool:
         return backend_kind in self.backends
@@ -510,6 +524,10 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
     model = document["model"]
     if not isinstance(model, dict):
         raise AsrManifestError(f"{path.name}: [model] must be a table")
+    model = dict(model)
+    weights_of = model.pop("weights_of", None)
+    if weights_of is not None and not (isinstance(weights_of, str) and _MODEL_ID.match(weights_of)):
+        raise AsrManifestError(f"{path.name}: model.weights_of {weights_of!r} is not a model id")
     _check_table(f"{path.name} [model]", model, _MODEL_REQUIRED)
 
     model_id = model["id"]
@@ -636,12 +654,15 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
             "both of its engines read the official weights"
         )
 
+    if weights_of == model_id:
+        raise AsrManifestError(f"{path.name}: model.weights_of names this model itself")
     return AsrManifest(
         id=model_id,
         family=model["family"],
         parameters_m=model["parameters_m"],
         backends=backends,
         path=path,
+        weights_of=weights_of,
     )
 
 
@@ -713,7 +734,55 @@ def load_asr_manifest(model_id: str, directory: Path | None = None) -> AsrManife
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise AsrManifestError(f"could not read {path}: {exc}") from exc
-    return parse_asr_manifest(text, path, model_id)
+    return _resolve_weights_of(parse_asr_manifest(text, path, model_id), root)
+
+
+def _resolve_weights_of(manifest: AsrManifest, root: Path) -> AsrManifest:
+    """An alias with its base attached, or a refusal naming the broken rule.
+
+    `crucible/manifests.py`'s `resolve_weights_of` rules for asr: the base must
+    be a manifest here, must not itself be an alias (a folder has one owner),
+    must be the same family, and must pin the SAME repo and revision on every
+    backend the alias declares. Otherwise two ids would share a folder holding
+    bytes one of them never pinned.
+    """
+    if manifest.weights_of is None:
+        return manifest
+    where = manifest.path.name
+    base_path = root / f"{manifest.weights_of}.toml"
+    if not base_path.is_file():
+        raise AsrManifestError(
+            f"{where}: weights_of_unknown: {manifest.weights_of!r} has no manifest beside it"
+        )
+    base = parse_asr_manifest(base_path.read_text(encoding="utf-8"), base_path, manifest.weights_of)
+    if base.weights_of is not None:
+        raise AsrManifestError(
+            f"{where}: weights_of_chain: {base.id!r} itself shares {base.weights_of!r}"
+        )
+    if base.family != manifest.family:
+        raise AsrManifestError(
+            f"{where}: weights_of family {manifest.family!r} differs from {base.id!r}'s {base.family!r}"
+        )
+    for kind, spec in sorted(manifest.backends.items()):
+        base_spec = base.backends.get(kind)
+        if base_spec is None:
+            raise AsrManifestError(
+                f"{where}: weights_of_backend_missing: {base.id!r} has no {kind} block to share"
+            )
+        if (spec.hf_repo, spec.revision) != (base_spec.hf_repo, base_spec.revision):
+            raise AsrManifestError(
+                f"{where}: weights_of_pin_mismatch on {kind}: {spec.hf_repo}@{spec.revision[:12]} "
+                f"here, {base_spec.hf_repo}@{base_spec.revision[:12]} in {base.path.name}"
+            )
+    return replace(manifest, weights_base=base)
+
+
+def asr_aliases_of(manifest: AsrManifest) -> tuple[AsrManifest, ...]:
+    """Every asr manifest beside this one whose `weights_of` names it."""
+    if manifest.weights_of is not None:
+        return ()
+    found = load_all_asr_manifests(manifest.path.parent)
+    return tuple(other for other in found.values() if other.weights_of == manifest.id)
 
 
 def load_all_asr_manifests(directory: Path | None = None) -> dict[str, AsrManifest]:

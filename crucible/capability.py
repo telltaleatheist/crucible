@@ -906,7 +906,11 @@ CLASSES: tuple[CapabilityClass, ...] = (
         # drift from it; `tests/test_asr_lineup.py` holds the order, and a
         # measurement that ever reordered the sizes turns that test red rather
         # than quietly promoting a whisper.
-        candidates=_from_catalog(load_all_asr_manifests),
+        # ALIASES INCLUDED: an asr alias (`qwen3-asr-*-mlx`, 2026-09-24) is not
+        # a dearer served form of its base but a different ENGINE on the same
+        # weights, the caller's speed choice (Owen: "if i want speed i can get
+        # it via mlx"), so it is a candidate in its own right.
+        candidates=_from_catalog(load_all_asr_manifests, aliases=True),
     ),
     CapabilityClass(
         name="align",

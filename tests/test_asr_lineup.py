@@ -264,3 +264,36 @@ def test_the_provenance_names_the_conversion_that_made_the_transcript(
         "engine": engine,
         "hf_repo": hf_repo,
     }
+
+
+# ------------------------------------------------------- one copy on disk
+
+
+def test_an_mlx_id_stores_in_its_official_siblings_folder(config: Config) -> None:
+    """2026-09-24: `qwen3-asr-0.6b-mlx` had pulled a second 1.88 GB copy of
+    `qwen3-asr-0.6b`'s checkpoint. An alias's folder IS its base's."""
+    for alias_id, base_id in (
+        ("qwen3-asr-1.7b-mlx", "qwen3-asr-1.7b"),
+        ("qwen3-asr-0.6b-mlx", "qwen3-asr-0.6b"),
+    ):
+        alias = load_asr_manifest(alias_id)
+        base = load_asr_manifest(base_id)
+        assert alias.weights_of == base_id and alias.weights_base == base
+        assert weights.subject_dir(config, alias, "mlx-darwin") == weights.subject_dir(
+            config, base, "mlx-darwin"
+        )
+
+
+def test_an_asr_alias_pinned_to_other_bytes_is_refused(tmp_path: Path) -> None:
+    from crucible.asrmodels import AsrManifestError
+
+    source = Path(load_asr_manifest("qwen3-asr-0.6b").path).parent
+    (tmp_path / "qwen3-asr-0.6b.toml").write_text(
+        (source / "qwen3-asr-0.6b.toml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    alias = (source / "qwen3-asr-0.6b-mlx.toml").read_text(encoding="utf-8")
+    (tmp_path / "qwen3-asr-0.6b-mlx.toml").write_text(
+        alias.replace("5eb144179a02acc5e5ba31e748d22b0cf3e303b0", "0" * 40), encoding="utf-8"
+    )
+    with pytest.raises(AsrManifestError, match="weights_of_pin_mismatch"):
+        load_asr_manifest("qwen3-asr-0.6b-mlx", tmp_path)

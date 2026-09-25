@@ -26,6 +26,10 @@
 [model]
 id = "qwen3-asr-1.7b-mlx"
 family = "qwen3-asr"
+# ONE COPY ON DISK (Owen, 2026-09-24: "go ahead"). These are qwen3-asr-1.7b's
+# bytes at the same pin, so the download is its folder; pulling this id pulls
+# qwen3-asr-1.7b once and records this id beside it (crucible/weights.py).
+weights_of = "qwen3-asr-1.7b"
 parameters_m = 1700
 
 [backends.mlx-darwin]
