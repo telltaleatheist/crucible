@@ -335,9 +335,8 @@ def voice_rows(
                     "this server, which Crucible does not fetch and cannot replace"
                 )
             elif not is_installed:
-                directory = weights.weights_dir(
-                    config, manifest.weights_family, manifest.id, backend_kind
-                )
+                # The folder the weights ARE in: an alias's is its base's.
+                directory = weights.subject_dir(config, manifest, backend_kind)
                 reason = (
                     f"no weights at {directory} — run "
                     f"`crucible voices pull {manifest.id}`"

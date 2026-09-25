@@ -81,7 +81,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -725,11 +725,25 @@ class VoiceManifest:
     #: guard from the first chunk. The word alone cannot separate them; the
     #: sentence can, so the sentence is required and rides on the row.
     inherited_from: str | None = None
+    #: `[voice] weights_of`: the voice whose download these weights ARE, or None
+    #: for a voice that owns its own. Added 2026-09-24 (Owen: "lets reduce it to
+    #: a single copy of everything"): `zeroshot` and `higgs-default` both sit on
+    #: the Higgs base checkpoint at one pin and had each pulled 9.3 GB of it.
+    #: `crucible/weights.py` stores an alias in its base's folder (`_store_id`).
+    weights_of: str | None = None
+    #: The base voice, attached by `load_all_voices`. None exactly where
+    #: `weights_of` is.
+    weights_base: "VoiceManifest | None" = field(default=None, compare=False, repr=False)
 
     #: Which subtree of `~/.crucible/` this thing's weights live under. A voice id
     #: and a model id are separate namespaces and must not be able to collide on
     #: disk — see `crucible/weights.py`.
     weights_family = "voices"
+
+    def extra_files(self, backend_kind: str) -> tuple[str, ...]:
+        """What an alias owns beyond its base's folder: nothing. A voice's block
+        is a whole-repo download, so an alias shares the base's folder whole."""
+        return ()
 
     def supports(self, backend_kind: str) -> bool:
         return backend_kind in self.backends
@@ -1515,8 +1529,13 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
 
     scalars = {
         key: value for key, value in voice.items()
-        if key not in ("pace", "serving", "backends", "takes")
+        if key not in ("pace", "serving", "backends", "takes", "weights_of")
     }
+    weights_of = voice.get("weights_of")
+    if weights_of is not None and not (
+        isinstance(weights_of, str) and _VOICE_ID.match(weights_of)
+    ):
+        raise VoiceError(f"{path.name}: voice.weights_of {weights_of!r} is not a voice id")
     check_table(f"{path.name} [voice]", scalars, _VOICE_REQUIRED, {}, error=VoiceError)
 
     voice_id = voice["id"]
@@ -1676,10 +1695,58 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
         backends=backends,
         takes=takes,
         path=path,
+        weights_of=weights_of,
     )
 
 
 # ------------------------------------------------------------------- loading
+
+
+def _resolve_weights_of(voices: dict[str, VoiceManifest]) -> dict[str, VoiceManifest]:
+    """Every alias with its base attached, or a refusal naming the broken rule.
+
+    AFTER the merge of every source, because a voice's base may come from another
+    source than the voice itself. The rules are `crucible/manifests.py`'s
+    `resolve_weights_of`: the base is served here, is not itself an alias, and
+    pins the same repo and revision on every backend the alias declares.
+    """
+    resolved: dict[str, VoiceManifest] = {}
+    for voice_id, voice in voices.items():
+        if voice.weights_of is None:
+            resolved[voice_id] = voice
+            continue
+        where = voice.path.name
+        base = voices.get(voice.weights_of)
+        if base is None:
+            raise VoiceError(
+                f"{where}: weights_of_unknown: voice {voice_id!r} shares "
+                f"{voice.weights_of!r}, which this host does not serve"
+            )
+        if base.weights_of is not None:
+            raise VoiceError(
+                f"{where}: weights_of_chain: {base.id!r} itself shares {base.weights_of!r}"
+            )
+        for kind, spec in sorted(voice.backends.items()):
+            base_spec = base.backends.get(kind)
+            if base_spec is None:
+                raise VoiceError(
+                    f"{where}: weights_of_backend_missing: {base.id!r} has no {kind} block"
+                )
+            if (spec.hf_repo, spec.revision) != (base_spec.hf_repo, base_spec.revision):
+                raise VoiceError(
+                    f"{where}: weights_of_pin_mismatch on {kind}: "
+                    f"{spec.hf_repo}@{spec.revision} here, "
+                    f"{base_spec.hf_repo}@{base_spec.revision} in {base.id!r}"
+                )
+        resolved[voice_id] = replace(voice, weights_base=base)
+    return resolved
+
+
+def voice_aliases_of(base: VoiceManifest) -> tuple[VoiceManifest, ...]:
+    """Every served voice whose `weights_of` names this one."""
+    if base.weights_of is not None:
+        return ()
+    return tuple(v for v in load_all_voices().values() if v.weights_of == base.id)
 
 
 def parse_voice(text: str, path: Path, expected_id: str) -> VoiceManifest:
@@ -1706,7 +1773,10 @@ def load_voice(voice_id: str, directory: Path | None = None) -> VoiceManifest:
     that is what `_voices_in` and `--voices-dir` mean.
     """
     if directory is not None:
-        return _load_voice_file(directory / f"{voice_id}.toml", voice_id)
+        found = _load_voice_file(directory / f"{voice_id}.toml", voice_id)
+        if found.weights_of is None:
+            return found
+        return load_all_voices(directory)[voice_id]
     served = load_all_voices()
     found = served.get(voice_id)
     if found is None:
@@ -1767,7 +1837,7 @@ def load_all_voices(directory: Path | None = None) -> dict[str, VoiceManifest]:
     which is what the tests and `--voices-dir` mean by it.
     """
     if directory is not None:
-        return dict(sorted(_voices_in(directory).items()))
+        return _resolve_weights_of(dict(sorted(_voices_in(directory).items())))
     from . import voicerepo
 
     voices: dict[str, VoiceManifest] = {}
@@ -1783,7 +1853,7 @@ def load_all_voices(directory: Path | None = None) -> dict[str, VoiceManifest]:
     # Re-sorted because the merge is by SOURCE and the ORDER is by id: a home
     # voice inserted in the middle of the shipped set must list in the middle,
     # not at the end. `/v1/voices` lists in this order and it is documented.
-    return {vid: voices[vid] for vid in sorted(voices)}
+    return _resolve_weights_of({vid: voices[vid] for vid in sorted(voices)})
 
 
 def _engine_voices() -> dict[str, VoiceManifest]:

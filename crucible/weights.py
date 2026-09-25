@@ -290,6 +290,7 @@ def aliases_holding(
     """
     from .asrmodels import AsrManifest, asr_aliases_of
     from .manifests import ModelManifest, aliases_of
+    from .voices import VoiceManifest, voice_aliases_of
 
     if getattr(manifest, "weights_of", None) is not None:
         return ()
@@ -299,6 +300,8 @@ def aliases_holding(
         aliases = aliases_of(manifest)
     elif isinstance(manifest, AsrManifest):
         aliases = asr_aliases_of(manifest)
+    elif isinstance(manifest, VoiceManifest):
+        aliases = voice_aliases_of(manifest)
     else:
         return ()
     holding: list[str] = []

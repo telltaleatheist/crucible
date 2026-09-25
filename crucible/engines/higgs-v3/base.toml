@@ -170,6 +170,10 @@ sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
 
 [voices."zeroshot"]
 id = "zeroshot"
+# ONE COPY ON DISK (Owen, 2026-09-24: "lets reduce it to a single copy of
+# everything"). The base checkpoint at higgs-default's pin, so its download is
+# higgs-default's folder; this voice had been pulling its own 9.3 GB.
+weights_of = "higgs-default"
 display = "Zero-shot (clip from the request)"
 kind = "zeroshot"
 narrator_engine = "higgs-v3"
