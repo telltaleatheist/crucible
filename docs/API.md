@@ -212,6 +212,7 @@ Admit one job, or refuse with the facts about the one already here. **This door 
 | `params` | Params | no | — |  |
 | `inputs` | Inputs | no | — |  |
 | `client_ref` | string or null | no | — |  |
+| `hold` | boolean | no | `False` |  |
 
 *Answers:* `202`, `422`
 
@@ -758,6 +759,7 @@ One request to the engine, timed by Crucible.
 | `params` | Params | no | — |  |
 | `inputs` | Inputs | no | — |  |
 | `client_ref` | string or null | no | — |  |
+| `hold` | boolean | no | `False` |  |
 
 ### `JobInput`
 
