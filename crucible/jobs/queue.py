@@ -377,6 +377,7 @@ class JobStore:
         params: dict[str, Any],
         client: str | None = None,
         client_ref: str | None = None,
+        hold: bool = False,
     ) -> Job:
         job_id = uuid.uuid4().hex
         directory = Path(self._config.jobs_dir) / job_id
@@ -391,6 +392,10 @@ class JobStore:
             created=utcnow(),
             client=client,
             client_ref=client_ref,
+            # Held from birth when the submit asked (`JobCreate.hold`): in the
+            # first record, so there is no moment a fetch could reap it.
+            held_by=client if hold else None,
+            held_since=utcnow() if hold else None,
         )
         self._jobs[job_id] = job
         # RECORDED BEFORE IT IS ANSWERED. A job the client has an id for must be
@@ -486,21 +491,18 @@ class JobStore:
         promise about files that do not exist. Holding a held job again answers
         the same record (idempotent), with the newest client named.
         """
-        if job.status != DONE:
-            raise ApiError(
-                409,
-                "job_not_done",
-                f"job {job.id} is {job.status}; only a done job's artifacts can "
-                "be held for a later job to use",
-                {"job_id": job.id, "status": job.status},
-            )
-        if not job.artifacts:
+        # ANY STATUS (2026-09-25): a queued or running job is held for what it
+        # will publish (a render's client fetches each chunk as it lands, so a
+        # hold at `done` would race the fetch-reap), and an interrupted or
+        # cancelled one for what it did publish (a resume's chunks). Only a job
+        # that has ENDED with nothing published has nothing to hold.
+        if job.status in TERMINAL_STATES and not job.artifacts:
             raise ApiError(
                 409,
                 "nothing_to_hold",
-                f"job {job.id} published no artifacts, so there is nothing a "
-                "later job could take from it",
-                {"job_id": job.id},
+                f"job {job.id} ended {job.status} and published no artifacts, so "
+                "there is nothing a later job could take from it",
+                {"job_id": job.id, "status": job.status},
             )
         if job.held_since is None:
             job.held_since = utcnow()
@@ -511,14 +513,20 @@ class JobStore:
     def hold_record(self, job: Job) -> dict[str, Any]:
         """What a hold says: whose, since when, and when the collector takes it."""
         horizon = float(self._config.retention_days) * 86_400.0
-        finished = datetime.fromisoformat(str(job.finished))
-        gc_at = datetime.fromtimestamp(finished.timestamp() + horizon, tz=timezone.utc)
+        # Null until the job ends: the collector counts from `finished`.
+        gc_at: str | None = None
+        if job.finished is not None:
+            finished = datetime.fromisoformat(str(job.finished))
+            gc_at = datetime.fromtimestamp(
+                finished.timestamp() + horizon, tz=timezone.utc
+            ).isoformat()
         return {
             "job_id": job.id,
+            "status": job.status,
             "held": job.held,
             "held_by": job.held_by,
             "held_since": job.held_since,
-            "gc_at": gc_at.isoformat(),
+            "gc_at": gc_at,
             "artifacts": list(job.artifacts),
         }
 

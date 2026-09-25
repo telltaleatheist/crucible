@@ -780,7 +780,7 @@ then remove them."* A render's chunk FLACs are already on the server that made t
 align that follows need not upload them again.
 
 ```ts
-await crucible.holdArtifacts(renderJobId);           // keep them past the download
+// render with hold: true, or: await crucible.holdArtifacts(renderJobId);
 const jobId = await crucible.align({
   model: 'qwen3-aligner', language: 'en',
   windows: chunks.map((c) => ({
@@ -794,9 +794,14 @@ await crucible.releaseArtifacts(renderJobId);         // removes the render job'
 
 - **A hold lasts until released**, survives a server restart or deploy, and is collected
   anyway at `gcAt`: `retention_days` (seven by default) after the job finished.
-- **Only a `done` job with artifacts can be held** (`job_not_done`, `nothing_to_hold`).
-  `holdArtifacts()` is idempotent, so calling it again is the check that the files are still
-  there before a submit.
+- **Hold from birth** with `render({..., hold: true})` or `submit({..., hold: true})`. A client
+  that downloads each chunk as it lands has fetched everything by `done`, and a later hold would
+  race the server's fetch-reap. `holdArtifacts()` also works at any status. Only a job that
+  ENDED with nothing published is refused (`nothing_to_hold`). It is idempotent, so calling it
+  again is the check that the files are still there before a submit. `gcAt` is null until the
+  job ends.
+- **One align may cite several render jobs.** Every input names its own job, e.g. after a
+  resume rendered only the missing chunks.
 - **A reference to files the server no longer has is `409 artifact_expired`**, refused before
   the job exists. That covers a reaped job, a different server and a name the job never
   published. The answer is to upload the bytes.

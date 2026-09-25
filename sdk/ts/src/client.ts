@@ -907,6 +907,7 @@ export class CrucibleClient {
     // OMITTED WHEN ABSENT rather than sent as null: the submit door forbids
     // unknown keys and validates this one's shape, and `null` is not a name.
     if (request.clientRef !== undefined) payload['client_ref'] = request.clientRef;
+    if (request.hold !== undefined) payload['hold'] = requireBool(request.hold, 'hold');
 
     const init: RequestInit = {
       method: 'POST',
@@ -1559,6 +1560,7 @@ export class CrucibleClient {
           ...(given.width === undefined ? {} : { width: given.width }),
         },
         inputs: {},
+        ...(given.hold === undefined ? {} : { hold: requireBool(given.hold, 'hold') }),
       },
       submission,
     );
@@ -1884,10 +1886,11 @@ export class CrucibleClient {
     const body = await this.#json(`/v1/jobs/${encodeURIComponent(id)}/hold`, { method: 'POST' }, 'hold');
     return {
       jobId: str(body, 'job_id', 'hold'),
+      status: str(body, 'status', 'hold'),
       held: bool(body, 'held', 'hold'),
       heldBy: optStr(body, 'held_by', 'hold'),
       heldSince: optStr(body, 'held_since', 'hold'),
-      gcAt: str(body, 'gc_at', 'hold'),
+      gcAt: optStr(body, 'gc_at', 'hold'),
       artifacts: strArray(body, 'artifacts', 'hold'),
     };
   }

@@ -512,3 +512,29 @@ def test_a_hold_survives_a_restart_and_the_seven_day_collector_still_takes_it(
     monkeypatch.setattr(queue_module, "_now", lambda: later)
     (reaped,) = store.reap()
     assert reaped.job_id == job_id and not directory.exists()
+
+
+def test_a_job_held_from_birth_survives_the_fetch_that_races_its_end(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    """A render's client downloads each chunk as it lands, so by `done` it has
+    fetched everything; a hold taken then races the fetch-reap. `hold: true` on
+    the submit holds the job before it runs (bookforge-pc-1, 2026-09-25)."""
+    response = client.post(
+        "/v1/jobs",
+        json={
+            "type": "echo", "params": {"delay_ms": 0}, "hold": True,
+            "inputs": {"alpha.bin": {"inline_base64": base64.b64encode(PAYLOAD).decode("ascii")}},
+        },
+        headers=auth,
+    )
+    assert response.status_code == 202, response.text
+    job_id = response.json()["job_id"]
+    record = wait_for(client, auth, job_id, ("done",))
+    assert record["held_since"] is not None
+    collect(client, auth, job_id, "alpha.bin")
+    store = client.app.state.store
+    assert store.reap() == [] and store.get(job_id).dir.is_dir()
+    # Asking again is the idempotent liveness check, and it now has a gc date.
+    again = client.post(f"/v1/jobs/{job_id}/hold", headers=auth).json()
+    assert again["held"] is True and again["gc_at"] is not None and again["status"] == "done"

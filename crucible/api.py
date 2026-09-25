@@ -251,6 +251,11 @@ class JobCreate(BaseModel):
     client_ref: str | None = Field(
         default=None, max_length=200, pattern=r"^[^\x00-\x1f\x7f]+$"
     )
+    #: HELD FROM BIRTH (2026-09-25). A render's client downloads each chunk as
+    #: it lands, so by `done` every artifact has been fetched and a hold taken
+    #: afterwards races the fetch-reap. `true` holds the job before it runs,
+    #: exactly as `POST /v1/jobs/{id}/hold` would, so there is no window.
+    hold: bool = False
 
 
 class StreamOpen(BaseModel):
@@ -2845,6 +2850,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             job = store.create(
                 body.type, model, body.params,
                 client=_client_agent(request), client_ref=body.client_ref,
+                hold=body.hold,
             )
             try:
                 _materialise_inputs(config, store, job, body.inputs)

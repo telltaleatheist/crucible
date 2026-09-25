@@ -699,11 +699,14 @@ export type JobInput =
  */
 export interface ArtifactHold {
   readonly jobId: string;
+  /** The job's status now: a hold may be taken at any status. */
+  readonly status: string;
   readonly held: boolean;
   readonly heldBy: string | null;
   readonly heldSince: string | null;
-  /** When the collector takes this job whatever holds it (ISO-8601). */
-  readonly gcAt: string;
+  /** When the collector takes this job whatever holds it (ISO-8601); null
+   * until the job ends, because the window counts from `finished`. */
+  readonly gcAt: string | null;
   /** Every artifact a later job may name with {@link CrucibleClient.artifactRef}. */
   readonly artifacts: readonly string[];
 }
@@ -724,6 +727,15 @@ export interface JobRequest {
    * as yours after YOUR process has restarted too.
    */
   readonly clientRef?: string;
+  /**
+   * Hold this job's artifacts from birth, for a later job to take by
+   * {@link CrucibleClient.artifactRef} (2026-09-25). A client that downloads
+   * each artifact as it lands has fetched them all by `done`, and a hold taken
+   * then would race the server's fetch-reap; held from the submit, there is no
+   * window. Released by {@link CrucibleClient.releaseArtifacts}; collected at
+   * `retention_days` if never released. Sent only when stated.
+   */
+  readonly hold?: boolean;
 }
 
 /**
@@ -1923,6 +1935,15 @@ export interface RenderChunk {
  * picking.
  */
 export interface RenderOptions {
+  /**
+   * Hold this job's artifacts from birth, for a later job to take by
+   * {@link CrucibleClient.artifactRef} (2026-09-25). A client that downloads
+   * each artifact as it lands has fetched them all by `done`, and a hold taken
+   * then would race the server's fetch-reap; held from the submit, there is no
+   * window. Released by {@link CrucibleClient.releaseArtifacts}; collected at
+   * `retention_days` if never released. Sent only when stated.
+   */
+  readonly hold?: boolean;
   /**
    * The voice id, which is what `model` means for `tts`: a Higgs v3 voice *is*
    * the merged checkpoint the engine was started on, so the wire's word for "the
