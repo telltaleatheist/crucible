@@ -285,6 +285,29 @@ caller uses, from the first (and only) choice.
 a value this client did not anticipate still reaches you. `length` means the answer is
 truncated; check it before you use `content`.
 
+### Thinking on or off, per call
+
+`thinking: true | false` (sent as `chat_template_kwargs.enable_thinking`) and `maxTokens`
+are passed to the engine exactly as stated on both backends. A model's manifest default fills
+only what a request omits, and every reply's `X-Crucible-Sampling` header says whether each
+value came from the `request`, the `manifest` or the `engine`. `maxTokens` is the ONLY think
+budget today. vLLM's `thinking_token_budget` acts only with a reasoning parser, which
+Crucible does not start vLLM with, and mlx-lm has no such knob.
+
+**A thinking-on answer that runs out of `maxTokens` looks different on the two backends**,
+so fail on `finishReason === 'length'` alone, never on "content is empty":
+
+| backend | finished (`stop`) | ran out (`length`) |
+|---|---|---|
+| mlx-darwin (mlx-lm 0.31.3) | the answer only; no `<think>` in `content` | `content` is empty |
+| cuda-linux (vLLM 0.29, no reasoning parser) | expected: `<think>…</think>` then the answer, in `content` | expected: the PARTIAL thinking in `content` |
+
+The mlx-darwin row was MEASURED (ContentStudio, 2026-09-25: qwen3.8-27b-4bit, `maxTokens`
+8192, 4 of 9 chapter titles ran out after 405–412 s with 0 chars of content, and the 5 that
+finished had 325–351 chars with no think text). The cuda-linux row is read from vLLM's source
+and not yet measured; strip `<think>…</think>` (and an unclosed `<think>` to the end) before
+using `content` there.
+
 ### Structured output
 
 `responseFormat` is OpenAI's `response_format`, forwarded to the engine exactly as given:
