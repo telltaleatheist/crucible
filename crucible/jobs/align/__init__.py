@@ -537,6 +537,23 @@ class AlignJobType:
         total = len(params.chunks)
         landed: list[dict[str, Any]] = []
 
+        def on_result(result: dict[str, Any]) -> None:
+            # THE CUE GOES OUT AS THE CHUNK LANDS. Until 2026-09-25 every cue was
+            # emitted after the last chunk, so a client watching for them saw
+            # nothing for the whole run and then all of them at once (BookForge's
+            # align step, Owen's run). Position is identity, as below: the n-th
+            # result is the n-th chunk the params listed.
+            position = len(landed)
+            if position >= total:
+                return  # a surplus result; `require_positional_results` names it
+            row: dict[str, Any] = {"index": params.chunks[position].index}
+            if "error" in result:
+                row["error"] = result["error"]
+            else:
+                row["items"] = result["items"]
+            landed.append(row)
+            ctx.cue(row)
+
         def on_progress(message: dict[str, Any]) -> None:
             processed = int(message["processed"])
             ctx.progress(
@@ -553,6 +570,7 @@ class AlignJobType:
                 ready_silence_timeout=READY_SILENCE_TIMEOUT_SECONDS,
                 on_progress=on_progress,
                 cancelled=lambda: ctx.cancelled,
+                on_result=on_result,
             )
         except workers.WorkerError as exc:
             # The session is dead or the worker broke the protocol. Take the
@@ -570,27 +588,16 @@ class AlignJobType:
             raise
 
         try:
-            results = workers.require_positional_results(outcome, total, "chunk")
+            # The count is still checked, after the cues have gone out: a worker
+            # that sent too few or too many results is a broken worker.
+            workers.require_positional_results(outcome, total, "chunk")
         except workers.WorkerError as exc:
             self._forget(ctx, model)
             raise JobError("worker_failed", str(exc)) from None
-
-        # A result is matched to its chunk by POSITION — the worker reported no
-        # index at all — so the client's index comes back out of the params, in
-        # the order the params listed them.
-        for chunk, result in zip(params.chunks, results):
-            row: dict[str, Any] = {"index": chunk.index}
-            if "error" in result:
-                row["error"] = result["error"]
-            else:
-                row["items"] = result["items"]
-            landed.append(row)
-            # The cue goes out as the chunk lands, so a run killed at chunk 900
-            # of 1,400 has cost the client the 500 it had not reached and not the
-            # 900 it had. A failed chunk gets a cue too, carrying `error` instead
-            # of `items`, because a client watching this stream should learn
-            # about the failure at the same moment as the successes around it.
-            ctx.cue(row)
+        # Every chunk's row was built and cued by `on_result` as it landed, so a
+        # run killed at chunk 900 of 1,400 has cost the client the 500 it had not
+        # reached and not the 900 it had. A failed chunk gets a cue too, carrying
+        # `error` instead of `items`.
 
         document = {
             "model": model,

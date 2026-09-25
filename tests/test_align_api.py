@@ -568,6 +568,14 @@ def test_a_cue_lands_per_chunk_before_the_artifact(
     assert all("items" in cue for cue in cues)
     # Every cue is out before the artifact event, which is the whole point.
     assert max(i for i, k in enumerate(kinds) if k == "cue") < kinds.index("artifact")
+    # AND EACH AS ITS CHUNK LANDS, not all at the end (2026-09-25: BookForge's
+    # align step saw nothing for five minutes, then everything). The first
+    # chunk's cue precedes the progress that says the last chunk is done.
+    last_progress = max(
+        i for i, e in enumerate(events)
+        if e["event"] == "progress" and "aligned 2 of 2" in str(e["data"])
+    )
+    assert kinds.index("cue") < last_progress
 
 
 def test_the_server_and_not_the_client_chooses_how_it_runs(

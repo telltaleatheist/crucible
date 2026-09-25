@@ -413,6 +413,7 @@ class _Conversation:
         on_progress: Callable[[dict[str, Any]], None] | None,
         cancelled: Callable[[], bool] | None,
         keep_open: bool,
+        on_result: Callable[[dict[str, Any]], None] | None = None,
     ) -> WorkerOutcome:
         self._write(request, keep_open)
 
@@ -467,6 +468,11 @@ class _Conversation:
                             "many results to expect"
                         )
                     results.append(message)
+                    # AS IT LANDS, for a caller that reports per result (align's
+                    # `cue`, 2026-09-25). Collected either way: the outcome is
+                    # still the whole list, checked by position at the end.
+                    if on_result is not None:
+                        on_result(message)
                     continue
 
                 if kind == FAILED:
@@ -646,6 +652,7 @@ class WorkerSession:
         on_ready: Callable[[dict[str, Any]], None] | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        on_result: Callable[[dict[str, Any]], None] | None = None,
     ) -> WorkerOutcome:
         """One more request down the same stdin. Raises if the worker is gone."""
         if self._conversation is None:
@@ -666,6 +673,7 @@ class WorkerSession:
                 on_ready=on_ready,
                 on_progress=on_progress,
                 cancelled=cancelled,
+                on_result=on_result,
             )
         except JobCancelled:
             # `_terminate` has already stopped the worker — a cancel mid-exchange
@@ -683,6 +691,7 @@ class WorkerSession:
         on_ready: Callable[[dict[str, Any]], None] | None,
         on_progress: Callable[[dict[str, Any]], None] | None,
         cancelled: Callable[[], bool] | None,
+        on_result: Callable[[dict[str, Any]], None] | None = None,
     ) -> WorkerOutcome:
         assert self._conversation is not None
         return self._conversation.exchange(
@@ -692,6 +701,7 @@ class WorkerSession:
             on_progress=on_progress,
             cancelled=cancelled,
             keep_open=True,
+            on_result=on_result,
         )
 
     def stop(self) -> None:
