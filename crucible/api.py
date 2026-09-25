@@ -190,23 +190,42 @@ class BeforeEveryRequest:
 # --------------------------------------------------------------------- schemas
 
 
+class ArtifactRef(BaseModel):
+    """A previous job's artifact on THIS server, taken as an input.
+
+    Owen, 2026-09-25: a render's 2,510 chunk FLACs were downloaded, then read
+    back off a share and uploaded again (2.5 minutes, 1.25 GB) to the server
+    that made them, for the align. A reference takes them where they already
+    are. Usually of a HELD job (`POST /v1/jobs/{id}/hold`); an unheld one works
+    while its directory still exists.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    name: str
+
+
 class JobInput(BaseModel):
-    """One named input: either an uploaded blob or bytes inline in the request."""
+    """One named input: an uploaded blob, bytes inline in the request, or an
+    artifact of a previous job on this server."""
 
     model_config = ConfigDict(extra="forbid")
 
     blob_id: str | None = None
     inline_base64: str | None = None
+    artifact: ArtifactRef | None = None
 
     @model_validator(mode="after")
     def exactly_one_source(self) -> "JobInput":
         given = [name for name, value in
-                 (("blob_id", self.blob_id), ("inline_base64", self.inline_base64))
+                 (("blob_id", self.blob_id), ("inline_base64", self.inline_base64),
+                  ("artifact", self.artifact))
                  if value is not None]
         if len(given) != 1:
             raise ValueError(
-                "each input needs exactly one of blob_id or inline_base64, got "
-                f"{given if given else 'neither'}"
+                "each input needs exactly one of blob_id, inline_base64 or "
+                f"artifact, got {given if given else 'neither'}"
             )
         return self
 
@@ -2864,6 +2883,27 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
 
+    @private.post("/jobs/{job_id}/hold")
+    async def hold_job(request: Request, job_id: str) -> dict[str, Any]:
+        """Keep this done job's artifacts for a later job (Owen, 2026-09-25).
+
+        *"keep all working files on the crucible side until the chain is
+        complete. then remove them"*. Held, the job is not reaped for having
+        been fetched: it stays until `DELETE` on this route releases it (and
+        removes it at once), or until the `retention_days` collector takes it
+        (`gc_at`). A later job names its files as `{"artifact": {job_id,
+        name}}` inputs. Survives a restart. Idempotent.
+        """
+        store: JobStore = request.app.state.store
+        return store.hold(store.get(job_id), _client_agent(request))
+
+    @private.delete("/jobs/{job_id}/hold", status_code=204)
+    async def release_job(request: Request, job_id: str) -> Response:
+        """The chain is complete: release the hold and remove the job now."""
+        store: JobStore = request.app.state.store
+        store.release(store.get(job_id))
+        return Response(status_code=204)
+
     @private.get("/jobs/{job_id}/artifacts/{name}")
     async def job_artifact(request: Request, job_id: str, name: str) -> FileResponse:
         store: JobStore = request.app.state.store
@@ -4565,6 +4605,10 @@ def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
         # difference rather than every client parsing `<index>.flac` for itself.
         "client_ref": job.client_ref,
         "interrupted_at": job.interrupted_at,
+        # HELD FOR A CHAIN (2026-09-25): the client that holds this job's
+        # artifacts, and since when; both null when nothing does.
+        "held_by": job.held_by,
+        "held_since": job.held_since,
         "chunks_done": sorted(job.chunks_done),
         # DONE/TOTAL AND A PACE, FROM THE RECORD ALONE (2026-09-21, the ladder's
         # ask): the denominator the job type stated, and when the last chunk
@@ -4583,6 +4627,43 @@ def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
         # `error` by accident; a collision keeps this function's answer.
         **{k: v for k, v in job.done_extra.items() if k not in _JOB_STATE_KEYS},
     }
+
+
+def _referenced_artifact(store: JobStore, name: str, ref: ArtifactRef) -> Path:
+    """The file an artifact input names, or `409 artifact_expired` by name.
+
+    EXPIRED IS THE ONE ANSWER for every way the bytes are not here: the job was
+    reaped (released, fetched, or past the seven-day collector), this server
+    never ran it (a different server, or ids from before a wipe), or the job
+    exists and published no such file. In every case the client's correct next
+    move is the same: upload the bytes. It is refused before the job exists.
+    """
+    try:
+        validate_member_name(ref.name)
+    except ValueError as exc:
+        raise ApiError(400, "invalid_artifact_name", str(exc)) from None
+    try:
+        source_job = store.get(ref.job_id)
+    except ApiError as exc:
+        raise ApiError(
+            409,
+            "artifact_expired",
+            f"input {name!r} names artifact {ref.name!r} of job {ref.job_id!r}, and "
+            f"this server no longer holds that job ({exc.code}: {exc.message}). "
+            "Upload the bytes instead",
+            {"input": name, "job_id": ref.job_id, "artifact": ref.name, "why": exc.code},
+        ) from None
+    source = source_job.artifacts_dir / ref.name
+    if ref.name not in source_job.artifacts or not source.is_file():
+        raise ApiError(
+            409,
+            "artifact_expired",
+            f"input {name!r} names artifact {ref.name!r} of job {ref.job_id!r}, "
+            f"which that job does not hold (it holds {len(source_job.artifacts)} "
+            "artifact(s)). Upload the bytes instead",
+            {"input": name, "job_id": ref.job_id, "artifact": ref.name, "why": "no_such_artifact"},
+        )
+    return source
 
 
 def _materialise_inputs(
@@ -4605,6 +4686,7 @@ def _materialise_inputs(
     inline payload has been read and accepted.
     """
     planned: list[tuple[str, Path, str | None, bytes | None]] = []
+    linked: list[tuple[Path, Path]] = []
     for name, declared in inputs.items():
         try:
             validate_member_name(name)
@@ -4641,6 +4723,8 @@ def _materialise_inputs(
                     f"input {name!r} is not valid base64: {exc}",
                 ) from None
             planned.append((name, target, None, payload))
+        elif declared.artifact is not None:
+            linked.append((target, _referenced_artifact(store, name, declared.artifact)))
         else:  # unreachable: JobInput's validator requires exactly one source
             raise ApiError(
                 400,
@@ -4648,6 +4732,19 @@ def _materialise_inputs(
                 f"input {name!r} names neither a blob nor inline bytes",
             )
 
+    # A REFERENCE IS A HARD LINK, not a copy: the same bytes under the new
+    # job's name, on the one filesystem both directories live in. Reaping the
+    # referenced job afterwards unlinks its name and leaves this one intact.
+    for target, source in linked:
+        try:
+            os.link(source, target)
+        except OSError as exc:
+            raise ApiError(
+                500,
+                "artifact_link_failed",
+                f"could not link {source} as input {target.name}: "
+                f"{type(exc).__name__}: {exc}",
+            ) from None
     for name, target, blob_id, payload in planned:
         if blob_id is None:
             assert payload is not None  # one of the two, by the loop above

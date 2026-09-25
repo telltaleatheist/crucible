@@ -124,6 +124,7 @@ export type {
   ArtifactData,
   ArtifactWrite,
   AlignItem,
+  ArtifactHold,
   Alignment,
   AlignOptions,
   AlignWindow,

@@ -773,6 +773,36 @@ for (const w of alignment.windows) {
 - `language` is one of the aligner's eleven ISO codes (en de fr es it pt ru ja ko zh yue),
   refused before queuing otherwise.
 
+### Reusing a previous job's files: holds and `artifactRef()`
+
+Owen, 2026-09-25: *"keep all working files on the crucible side until the chain is complete.
+then remove them."* A render's chunk FLACs are already on the server that made them, so the
+align that follows need not upload them again.
+
+```ts
+await crucible.holdArtifacts(renderJobId);           // keep them past the download
+const jobId = await crucible.align({
+  model: 'qwen3-aligner', language: 'en',
+  windows: chunks.map((c) => ({
+    index: c.index, text: c.text, extension: 'flac',
+    audio: crucible.artifactRef(renderJobId, `${c.index}.flac`),
+  })),
+});
+// ...when the whole chain is done:
+await crucible.releaseArtifacts(renderJobId);         // removes the render job's directory now
+```
+
+- **A hold lasts until released**, survives a server restart or deploy, and is collected
+  anyway at `gcAt`: `retention_days` (seven by default) after the job finished.
+- **Only a `done` job with artifacts can be held** (`job_not_done`, `nothing_to_hold`).
+  `holdArtifacts()` is idempotent, so calling it again is the check that the files are still
+  there before a submit.
+- **A reference to files the server no longer has is `409 artifact_expired`**, refused before
+  the job exists. That covers a reaped job, a different server and a name the job never
+  published. The answer is to upload the bytes.
+- A referenced file is hard-linked into the new job, so releasing the held job never takes a
+  running job's inputs with it.
+
 ## Any Crucible that answers
 
 Owen, 2026-09-24: *"lets modify bookforge and foundry so they dont require any particular

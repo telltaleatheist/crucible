@@ -159,6 +159,19 @@ class Job:
     #: something the client now holds, and `JobStore.reap` deletes it. Nothing
     #: else reads this — it is not on the wire and it is not provenance.
     fetched: set[str] = field(default_factory=set)
+    #: HELD FOR A CHAIN (Owen, 2026-09-25): *"keep all working files on the
+    #: crucible side until the chain is complete. then remove them"*. The client
+    #: that asked, while held; None when not. A held job is not reaped for being
+    #: fetched, only released (`POST`/`DELETE /v1/jobs/{id}/hold`) or aged past
+    #: `retention_days` (*"a garbage collector clean up files older than 7
+    #: days"*). Persisted in the record, so a hold survives a restart.
+    held_by: str | None = None
+    #: When the hold was taken (ISO-8601 UTC), None when not held.
+    held_since: str | None = None
+
+    @property
+    def held(self) -> bool:
+        return self.held_since is not None
 
     @property
     def inputs_dir(self) -> Path:

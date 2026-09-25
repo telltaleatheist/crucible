@@ -679,8 +679,34 @@ export interface UploadResult {
   readonly sha256: string | null;
 }
 
-/** One named input on a job: either an uploaded blob or bytes carried inline. */
-export type JobInput = { readonly blobId: string } | { readonly inline: Uint8Array };
+/**
+ * One named input on a job: an uploaded blob, bytes carried inline, or an
+ * artifact of a previous job on the SAME server ({@link CrucibleClient.artifactRef}).
+ */
+export type JobInput =
+  | { readonly blobId: string }
+  | { readonly inline: Uint8Array }
+  | { readonly artifact: { readonly jobId: string; readonly name: string } };
+
+/**
+ * `POST /v1/jobs/{id}/hold`'s answer: a done job's artifacts kept for a chain.
+ *
+ * Owen, 2026-09-25: *"keep all working files on the crucible side until the
+ * chain is complete. then remove them"*. Held, the job survives being fetched
+ * and survives a restart; {@link CrucibleClient.releaseArtifacts} removes it at
+ * once, and the server's collector takes it at `gcAt` (retention_days after it
+ * finished, seven by default) if nobody releases it.
+ */
+export interface ArtifactHold {
+  readonly jobId: string;
+  readonly held: boolean;
+  readonly heldBy: string | null;
+  readonly heldSince: string | null;
+  /** When the collector takes this job whatever holds it (ISO-8601). */
+  readonly gcAt: string;
+  /** Every artifact a later job may name with {@link CrucibleClient.artifactRef}. */
+  readonly artifacts: readonly string[];
+}
 
 /** The body of `POST /v1/jobs`. */
 export interface JobRequest {
@@ -762,6 +788,10 @@ export interface JobStatus {
    * `interrupted` job from one that ended some other way.
    */
   readonly interruptedAt: string | null;
+  /** The client holding this job's artifacts for a chain, or null. */
+  readonly heldBy: string | null;
+  /** When the hold was taken (ISO-8601), or null when nothing holds it. */
+  readonly heldSince: string | null;
   /**
    * The chunk index of every artifact this job published, ascending.
    *

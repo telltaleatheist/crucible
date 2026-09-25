@@ -813,6 +813,33 @@ test('align() posts ONE align job: chunks by index, each audio named <index>.<ex
   });
 });
 
+test('an align window may name a held render artifact instead of sending bytes', async () => {
+  answers(200, { job_id: 'job-align-ref' });
+  const c = client();
+  await c.align({
+    model: 'qwen3-aligner',
+    language: 'en',
+    windows: [{ index: 5, text: 'x', audio: c.artifactRef('render-1', '5.flac'), extension: 'flac' }],
+  });
+  assert.deepEqual(JSON.parse(lastBody).inputs, {
+    '5.flac': { artifact: { job_id: 'render-1', name: '5.flac' } },
+  });
+});
+
+test('holdArtifacts() posts the hold and reads what the server keeps, and until when', async () => {
+  answers(200, {
+    job_id: 'render-1', held: true, held_by: 'bookforge', held_since: '2026-09-25T17:00:00+00:00',
+    gc_at: '2026-10-02T16:59:00+00:00', artifacts: ['0.flac', '1.flac'],
+  });
+  const hold = await client().holdArtifacts('render-1');
+  assert.equal(lastMethod, 'POST');
+  assert.equal(lastPath, '/v1/jobs/render-1/hold');
+  assert.deepEqual(hold, {
+    jobId: 'render-1', held: true, heldBy: 'bookforge', heldSince: '2026-09-25T17:00:00+00:00',
+    gcAt: '2026-10-02T16:59:00+00:00', artifacts: ['0.flac', '1.flac'],
+  });
+});
+
 test('align() refuses a repeated index and an empty run by name', async () => {
   const window = { index: 3, text: 'x', audio: { blobId: 'a' }, extension: 'flac' };
   await assert.rejects(

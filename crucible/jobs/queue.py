@@ -476,6 +476,73 @@ class JobStore:
 
     # ----------------------------------------------------------------- reaping
 
+    def hold(self, job: Job, client: str | None) -> dict[str, Any]:
+        """Keep this job's artifacts until released or `retention_days` old.
+
+        Owen, 2026-09-25: keep a chain's working files on this server until the
+        chain is complete, then remove them; the seven-day collector is the
+        backstop. ONLY A `done` JOB WITH ARTIFACTS can be held: anything else has
+        nothing a later job could take as input, and holding it would be a
+        promise about files that do not exist. Holding a held job again answers
+        the same record (idempotent), with the newest client named.
+        """
+        if job.status != DONE:
+            raise ApiError(
+                409,
+                "job_not_done",
+                f"job {job.id} is {job.status}; only a done job's artifacts can "
+                "be held for a later job to use",
+                {"job_id": job.id, "status": job.status},
+            )
+        if not job.artifacts:
+            raise ApiError(
+                409,
+                "nothing_to_hold",
+                f"job {job.id} published no artifacts, so there is nothing a "
+                "later job could take from it",
+                {"job_id": job.id},
+            )
+        if job.held_since is None:
+            job.held_since = utcnow()
+        job.held_by = client
+        self._persist(job)
+        return self.hold_record(job)
+
+    def hold_record(self, job: Job) -> dict[str, Any]:
+        """What a hold says: whose, since when, and when the collector takes it."""
+        horizon = float(self._config.retention_days) * 86_400.0
+        finished = datetime.fromisoformat(str(job.finished))
+        gc_at = datetime.fromtimestamp(finished.timestamp() + horizon, tz=timezone.utc)
+        return {
+            "job_id": job.id,
+            "held": job.held,
+            "held_by": job.held_by,
+            "held_since": job.held_since,
+            "gc_at": gc_at.isoformat(),
+            "artifacts": list(job.artifacts),
+        }
+
+    def release(self, job: Job) -> bool:
+        """End a hold, and take the job's directory now: its chain is complete.
+
+        Returns whether it was held. Releasing is the chain saying its working
+        files are finished with, so the directory goes at once rather than at
+        the next tick or the seven-day mark. Idempotent: an unheld job answers
+        False and is reaped the same way.
+        """
+        was = job.held
+        job.held_by = None
+        job.held_since = None
+        self._persist(job)
+        if job.status in TERMINAL_STATES:
+            self._reap_one(
+                job,
+                "released",
+                _now(),
+                "its hold was released: the chain that held it is complete",
+            )
+        return was
+
     def mark_fetched(self, job: Job, name: str) -> None:
         """Record that a client has asked for this member of `artifacts/`.
 
@@ -524,6 +591,11 @@ class JobStore:
         taken: list[Reaped] = []
         for job in list(self._jobs.values()):
             if job.status not in TERMINAL_STATES:
+                continue
+            # A HELD JOB IS KEPT for its chain even once fetched, up to the
+            # retention window, which still applies below: a hold nobody
+            # releases is collected at seven days like anything else.
+            if job.held and self._age_seconds(job, now) <= horizon:
                 continue
             if job.collected:
                 record = self._reap_one(
@@ -816,6 +888,10 @@ class JobStore:
             ),
             chunk_at=document.get("chunk_at"),
             done_extra=dict(document.get("done_extra") or {}),
+            # A HOLD SURVIVES A RESTART (Owen, 2026-09-25): a book can sit
+            # between steps, and a deploy must not take a chain's files.
+            held_by=document.get("held_by"),
+            held_since=document.get("held_since"),
         )
         return job
 
@@ -892,6 +968,8 @@ class JobStore:
             "client": job.client,
             "client_ref": job.client_ref,
             "done_extra": job.done_extra,
+            "held_by": job.held_by,
+            "held_since": job.held_since,
         }
 
     def provenance(self, job: Job, finished: str | None = None) -> dict[str, Any]:

@@ -426,3 +426,89 @@ def test_a_config_written_before_the_key_existed_still_loads(home: Path) -> None
         encoding="utf-8",
     )
     assert load_config(home).retention_days == 7
+
+
+# ------------------------------------------------------- held for a chain
+#
+# Owen, 2026-09-25: *"keep all working files on the crucible side until the
+# chain is complete. then remove them"*, *"survive restarts"*, and *"a garbage
+# collector clean up files older than 7 days"*. A render's FLACs were
+# downloaded, then uploaded again (2.5 minutes, 1.25 GB) for the align.
+
+
+def test_a_held_job_outlives_its_fetch_and_feeds_a_later_job_by_reference(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    job_id = submit(client, auth, delay_ms=0)
+    wait_for(client, auth, job_id, ("done",))
+    held = client.post(f"/v1/jobs/{job_id}/hold", headers=auth)
+    assert held.status_code == 200, held.text
+    assert held.json()["held"] is True and held.json()["artifacts"] == ["alpha.bin"]
+
+    # Fetched in full, which reaps an unheld job; a held one stays.
+    collect(client, auth, job_id, "alpha.bin")
+    store = client.app.state.store
+    assert store.reap() == []
+    assert store.get(job_id).dir.is_dir()
+
+    # A later job takes the artifact where it is: no bytes sent.
+    response = client.post(
+        "/v1/jobs",
+        json={
+            "type": "echo",
+            "params": {"delay_ms": 0},
+            "inputs": {"again.bin": {"artifact": {"job_id": job_id, "name": "alpha.bin"}}},
+        },
+        headers=auth,
+    )
+    assert response.status_code == 202, response.text
+    second = response.json()["job_id"]
+    assert store.get(second).inputs_dir.joinpath("again.bin").read_bytes() == PAYLOAD
+    wait_for(client, auth, second, ("done",))
+
+    # The chain is complete: release removes the held job at once...
+    directory = store.get(job_id).dir
+    assert client.delete(f"/v1/jobs/{job_id}/hold", headers=auth).status_code == 204
+    assert not directory.exists()
+    # ...and the later job's input, a hard link, is untouched by that.
+    assert store.get(second).inputs_dir.joinpath("again.bin").read_bytes() == PAYLOAD
+
+
+def test_a_reference_to_a_job_that_is_gone_is_artifact_expired_before_the_job_exists(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    job_id = submit(client, auth, delay_ms=0)
+    wait_for(client, auth, job_id, ("done",))
+    collect(client, auth, job_id, "alpha.bin")
+    client.app.state.store.reap()  # unheld and fetched: reaped
+    for ref in ({"job_id": job_id, "name": "alpha.bin"}, {"job_id": "0" * 32, "name": "x.bin"}):
+        response = client.post(
+            "/v1/jobs",
+            json={"type": "echo", "params": {"delay_ms": 0}, "inputs": {"a.bin": {"artifact": ref}}},
+            headers=auth,
+        )
+        assert response.status_code == 409, response.text
+        assert response.json()["error"]["code"] == "artifact_expired"
+
+
+def test_a_hold_survives_a_restart_and_the_seven_day_collector_still_takes_it(
+    client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = submit(client, auth, delay_ms=0)
+    wait_for(client, auth, job_id, ("done",))
+    assert client.post(f"/v1/jobs/{job_id}/hold", headers=auth).status_code == 200
+    store = client.app.state.store
+    directory = store.get(job_id).dir
+
+    # A restart: the record is all that is left, and it carries the hold.
+    del store._jobs[job_id]
+    assert job_id in store.restore()
+    assert store.get(job_id).held
+    collect(client, auth, job_id, "alpha.bin")
+    assert store.reap() == [] and directory.is_dir()
+
+    # Nobody released it. Eight days on, the collector takes it anyway.
+    later = datetime.now(timezone.utc) + timedelta(days=8)
+    monkeypatch.setattr(queue_module, "_now", lambda: later)
+    (reaped,) = store.reap()
+    assert reaped.job_id == job_id and not directory.exists()

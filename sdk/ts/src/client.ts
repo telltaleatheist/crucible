@@ -74,6 +74,7 @@ import {
   type AlignOptions,
   type AlignWindowResult,
   type JobInput,
+  type ArtifactHold,
   type ArtifactWrite,
   type AsrOptions,
   type CancelResult,
@@ -867,9 +868,19 @@ export class CrucibleClient {
    */
   async submit(request: JobRequest, options: { signal?: AbortSignal } = {}): Promise<string> {
     const type = requireText(request?.type, 'type');
-    const inputs: Record<string, { blob_id: string } | { inline_base64: string }> = {};
+    const inputs: Record<
+      string,
+      { blob_id: string } | { inline_base64: string } | { artifact: { job_id: string; name: string } }
+    > = {};
     for (const [name, input] of Object.entries(request.inputs)) {
-      if ('blobId' in input) {
+      if ('artifact' in input) {
+        inputs[name] = {
+          artifact: {
+            job_id: requireText(input.artifact?.jobId, `inputs[${name}].artifact.jobId`),
+            name: requireText(input.artifact?.name, `inputs[${name}].artifact.name`),
+          },
+        };
+      } else if ('blobId' in input) {
         inputs[name] = { blob_id: requireText(input.blobId, `inputs[${name}].blobId`) };
       } else if ('inline' in input) {
         if (!(input.inline instanceof Uint8Array)) {
@@ -882,7 +893,7 @@ export class CrucibleClient {
       } else {
         throw new CrucibleConfigError(
           `inputs[${name}]`,
-          'must be either {blobId} or {inline}; it is neither',
+          'must be one of {blobId}, {inline} or {artifact}; it is none of them',
         );
       }
     }
@@ -937,6 +948,9 @@ export class CrucibleClient {
       leaseId: optStr(body, 'lease_id', 'job'),
       clientRef: optStr(body, 'client_ref', 'job'),
       interruptedAt: optStr(body, 'interrupted_at', 'job'),
+      // Informational (null on a server before 1.0.36, and when nothing holds it).
+      heldBy: optStr(body, 'held_by', 'job'),
+      heldSince: optStr(body, 'held_since', 'job'),
       // The indices this job published. A resume is `asked - chunksDone`.
       // Absent or null (a server before 1.0.22) reads as null: "not stated",
       // which a resume must not read as "none done". A PRESENT one is read
@@ -1845,6 +1859,47 @@ export class CrucibleClient {
       // file and this client does not invent one.
       inputs: { [requireText(given.filename, 'filename')]: audio },
     });
+  }
+
+  // ------------------------------------------------------------- held artifacts
+
+  /**
+   * A previous job's artifact on THIS server as an input, e.g. an align
+   * window's `audio`: the bytes stay where they are and are not sent again.
+   * The submit is refused `artifact_expired` (409) if the server no longer holds
+   * them — reaped, a different server, or no such file — and the correct answer
+   * to that is to upload the bytes.
+   */
+  artifactRef(jobId: string, name: string): JobInput {
+    return { artifact: { jobId: requireText(jobId, 'jobId'), name: requireText(name, 'name') } };
+  }
+
+  /**
+   * `POST /v1/jobs/{id}/hold` — keep a done job's artifacts for the rest of a
+   * chain. Idempotent, so it is also the check that the refs are live before a
+   * submit: it answers, or throws `job_reaped` / `unknown_job` / `job_not_done`.
+   */
+  async holdArtifacts(jobId: string): Promise<ArtifactHold> {
+    const id = requireText(jobId, 'jobId');
+    const body = await this.#json(`/v1/jobs/${encodeURIComponent(id)}/hold`, { method: 'POST' }, 'hold');
+    return {
+      jobId: str(body, 'job_id', 'hold'),
+      held: bool(body, 'held', 'hold'),
+      heldBy: optStr(body, 'held_by', 'hold'),
+      heldSince: optStr(body, 'held_since', 'hold'),
+      gcAt: str(body, 'gc_at', 'hold'),
+      artifacts: strArray(body, 'artifacts', 'hold'),
+    };
+  }
+
+  /**
+   * `DELETE /v1/jobs/{id}/hold` — the chain is complete: the server releases
+   * the hold and removes the job's directory at once.
+   */
+  async releaseArtifacts(jobId: string): Promise<void> {
+    const id = requireText(jobId, 'jobId');
+    const response = await this.#fetch(`/v1/jobs/${encodeURIComponent(id)}/hold`, { method: 'DELETE' }, true);
+    if (!response.ok) throw await this.#failure(response);
   }
 
   // ------------------------------------------------------------------ align
