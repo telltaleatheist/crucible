@@ -29,6 +29,7 @@ right idea.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -65,6 +66,38 @@ from .base import (
 #: jobs directory, so a shorter one would buy nothing and spin a loop that is
 #: otherwise asleep on an event.
 REAP_INTERVAL_SECONDS = 60.0
+
+
+def _params_for_artifact(params: dict[str, Any], index: int | None) -> dict[str, Any]:
+    """The params as they concern ONE artifact.
+
+    2026-09-25 (bookforge-pc-1, Shift): every render chunk's sidecar carried the
+    whole job's params, every chunk's text, so `12.flac` was 50 KB and its
+    sidecar 992 KB: 2.4 GB of sidecars against 1.2 GB of audio per book,
+    O(chunks^2). For an INDEXED artifact, each list of `{index, ...}` items is
+    cut to the item with this artifact's index; every other key (language, take,
+    band, ...) is job-wide and kept. An artifact that is not a chunk (a
+    transcript, an alignment) is the whole job's answer and keeps the params
+    whole. `params_sha256` beside it names the full request either way.
+    """
+    if index is None:
+        return params
+    trimmed: dict[str, Any] = {}
+    for key, value in params.items():
+        if (
+            isinstance(value, list)
+            and value
+            and all(isinstance(item, dict) and "index" in item for item in value)
+        ):
+            trimmed[key] = [item for item in value if item.get("index") == index]
+        else:
+            trimmed[key] = value
+    return trimmed
+
+
+def _params_sha256(params: dict[str, Any]) -> str:
+    canonical = json.dumps(params, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _now() -> datetime:
@@ -767,6 +800,7 @@ class JobStore:
         if name not in job.artifacts:
             job.artifacts.append(name)
         if index is not None:
+            job.artifact_index[name] = index
             if index not in job.chunks_done:
                 job.chunks_done.append(index)
             # The moment THIS chunk landed, not the event's own stamp: two
@@ -980,7 +1014,9 @@ class JobStore:
             "held_since": job.held_since,
         }
 
-    def provenance(self, job: Job, finished: str | None = None) -> dict[str, Any]:
+    def provenance(
+        self, job: Job, finished: str | None = None, index: int | None = None
+    ) -> dict[str, Any]:
         """DESIGN.md section 7. Written beside every artifact.
 
         The `model` block comes from the job type, because the job type is what
@@ -994,18 +1030,26 @@ class JobStore:
             "server": {"name": self._config.name, "version": VERSION},
             "backend": self._backend.kind,
             "job_type": job.type,
+            # So an artifact can be cited from its own sidecar as
+            # `{"artifact": {job_id, name}}` (2026-09-25).
+            "job_id": job.id,
             "model": self._registry[job.type].model_provenance(job.model),
-            "params": job.params,
+            "params": _params_for_artifact(job.params, index),
+            # The WHOLE job's params, by hash: a sidecar that states only its
+            # own chunk still says which job-wide request it belonged to.
+            "params_sha256": _params_sha256(job.params),
             "started": job.started,
             "finished": finished if finished is not None else utcnow(),
         }
 
     def _restamp_provenance(self, job: Job) -> None:
         """Rewrite each sidecar with the job's real finish time."""
-        document = json.dumps(self.provenance(job, job.finished), indent=2) + "\n"
         for name in job.artifacts:
             sidecar = job.artifacts_dir / f"{name}.provenance.json"
-            sidecar.write_text(document, encoding="utf-8")
+            document = self.provenance(
+                job, job.finished, index=job.artifact_index.get(name)
+            )
+            sidecar.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
 
     # ------------------------------------------------------------------ cancel
 

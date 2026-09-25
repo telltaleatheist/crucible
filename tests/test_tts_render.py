@@ -1557,6 +1557,12 @@ def test_the_provenance_sidecar_names_the_merge_that_rendered_it(
     assert sidecar["model"]["id"] == VOICE
     assert sidecar["model"]["fingerprint"].startswith(f"{VOICE}@")
     assert len(sidecar["model"]["revision"]) == 40
+    # ONLY ITS OWN CHUNK (2026-09-25): a sidecar carrying every chunk's text was
+    # 992 KB beside a 50 KB FLAC on Shift, 2.4 GB per book. The job id and a
+    # hash of the full params say which request it belonged to.
+    assert [chunk["index"] for chunk in sidecar["params"]["chunks"]] == [41]
+    assert sidecar["job_id"] == rendered.job_id
+    assert len(sidecar["params_sha256"]) == 64
 
 
 def test_the_residency_is_torn_down_when_the_server_stops(

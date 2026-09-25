@@ -165,6 +165,12 @@ class Job:
     #: fetched, only released (`POST`/`DELETE /v1/jobs/{id}/hold`) or aged past
     #: `retention_days` (*"a garbage collector clean up files older than 7
     #: days"*). Persisted in the record, so a hold survives a restart.
+    #: Each indexed artifact's chunk index, by artifact name, as the job type
+    #: published it (`JobContext.artifact(..., index=)`). What lets a sidecar
+    #: state only its own chunk (`JobStore.provenance`). In memory: it is read
+    #: when a sidecar is written, which only happens in the process running the
+    #: job.
+    artifact_index: dict[str, int] = field(default_factory=dict)
     held_by: str | None = None
     #: When the hold was taken (ISO-8601 UTC), None when not held.
     held_since: str | None = None
@@ -459,7 +465,7 @@ class JobContext:
             shutil.copyfile(source, destination)
         sidecar = self._job.artifacts_dir / f"{name}.provenance.json"
         sidecar.write_text(
-            json.dumps(self._store.provenance(self._job), indent=2) + "\n",
+            json.dumps(self._store.provenance(self._job, index=index), indent=2) + "\n",
             encoding="utf-8",
         )
         # `index` is the CHUNK this artifact is, for a job whose artifacts are
