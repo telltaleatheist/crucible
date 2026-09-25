@@ -361,6 +361,14 @@ BookForge's `crucible` provider follows).
 | `rvc` | rvc voice id | `{"index_rate","protect_rate","n_semitones"[, "f0_method","hop_length"]}` | many, all the same extension |
 | `denoise` | separator id | `{}` — and that is the contract | exactly one audio file |
 
+**`denoise` returns WAV, always.** Every stem is a `.wav`, fixed by this server for every separator
+and not chosen per manifest, because a client slices the stem at sample offsets and a lossy
+container would put an encode in the middle of that (`crucible/jobs/denoise`, `OUTPUT_FORMAT`).
+The worker checks every stem's extension and fails by name on anything else. (Through 1.0.38 a
+freshly loaded separator could write FLAC despite the request, because audio-separator's model
+instance kept its load-time format; fixed 2026-09-25.) The stem keeps the input's sample rate
+and frame count.
+
 `protect_rate`'s scale is **inverted**: lower protects more and 0.5 turns
 protection off. The tuned deathstalker→Sigma recipe is `index_rate 0.3`,
 `protect_rate 0.1`, `n_semitones -2`, `f0_method rmvpe`.

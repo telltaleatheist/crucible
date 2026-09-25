@@ -267,7 +267,14 @@ def separate(request: dict) -> None:
     # own is what its logging and its file-path bookkeeping read.
     separator.output_dir = output_dir
     model_instance.output_dir = output_dir
+    # THE FORMAT ON BOTH OBJECTS TOO, for the output directory's reason
+    # (2026-09-25). audio-separator's model instance copies `output_format` at
+    # load (`CommonSeparator.__init__`, common_separator.py L74) and names and
+    # writes each stem with ITS copy (L384-386), so setting only the separator's
+    # left every stem in the load's format: FLAC, where the server asks for WAV.
+    # ContentStudio found a vocals stem arriving as .flac on 1.0.38.
     separator.output_format = output_format
+    model_instance.output_format = output_format
 
     send("progress", stage="separating", processed=0, total=1)
     began = time.perf_counter()
@@ -309,6 +316,15 @@ def separate(request: dict) -> None:
     if not stems:
         raise RuntimeError(
             f"audio-separator finished and wrote nothing into {output_dir}"
+        )
+    # THE CONTAINER ASKED FOR IS THE CONTAINER RETURNED, checked rather than
+    # trusted: a future audio-separator that moved the attribute again would
+    # otherwise change what every client receives, silently.
+    wrong = [s["name"] for s in stems if not s["name"].lower().endswith("." + output_format.lower())]
+    if wrong:
+        raise RuntimeError(
+            f"the separator was asked for {output_format} and wrote {wrong}; the "
+            "stem container is part of the contract and is not substituted"
         )
 
     send("result", stems=stems, separate_seconds=round(separate_seconds, 2))
