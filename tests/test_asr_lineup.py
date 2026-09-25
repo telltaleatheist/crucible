@@ -39,14 +39,17 @@ from crucible.jobs import asr as asr_job
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 
-BEST_FIRST = ["qwen3-asr-1.7b", "whisper-large-v3-turbo", "whisper-tiny"]
+BEST_FIRST = ["qwen3-asr-1.7b", "qwen3-asr-0.6b", "whisper-large-v3-turbo", "whisper-tiny"]
 
-#: The Mac also offers the MLX port of Qwen, second: the official engine first
-#: because it keeps the fillers (Owen, 2026-09-24: *"if i want speed i can get
-#: it via mlx"*).
+#: The Mac also offers each Qwen's MLX port, right after it: the official engine
+#: first (Owen, 2026-09-24: *"if i want speed i can get it via mlx"*).
 BEST_FIRST_FOR = {
     "cuda-linux": BEST_FIRST,
-    "mlx-darwin": ["qwen3-asr-1.7b", "qwen3-asr-1.7b-mlx", "whisper-large-v3-turbo", "whisper-tiny"],
+    "mlx-darwin": [
+        "qwen3-asr-1.7b", "qwen3-asr-1.7b-mlx",
+        "qwen3-asr-0.6b", "qwen3-asr-0.6b-mlx",
+        "whisper-large-v3-turbo", "whisper-tiny",
+    ],
 }
 
 

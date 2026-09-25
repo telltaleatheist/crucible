@@ -1,0 +1,70 @@
+# Qwen3-ASR 0.6B: the smaller sibling of qwen3-asr-1.7b, same engines, same shape.
+#
+# Owen, 2026-09-24: *"lets add the smaller qwen asr model too. not just the
+# 1.7b"*. Everything asr/qwen3-asr-1.7b.toml says about the engines, the
+# aligner, the piece limit and full precision holds here unchanged; only the
+# weights and the numbers differ, and each number below says whether it was
+# read, measured or computed.
+#
+# repo/revision, read from the hub's API on 2026-09-24:
+#   GET /api/models/Qwen/Qwen3-ASR-0.6B/refs  -> main = the sha below
+#   GET /api/models/Qwen/Qwen3-ASR-0.6B/tree/<sha>?recursive=1
+#     -> model.safetensors  1,876,091,704 B of bfloat16 (one shard), and the
+#        tokenizer, chat template, preprocessor and generation configs
+#   config.json at that sha: thinker text model 28 layers, 8 KV heads,
+#   head_dim 128, hidden 1024, vocab 151,936, tied embeddings; audio tower 18
+#   layers at d_model 896. So the KV per token is the 1.7B's exactly:
+#   2 x 28 x 8 x 128 x 2 B = 114,688 B.
+#
+# MEASURED on the Mac Studio, 2026-09-24, ContentStudio's stream 1:00:00-1:10:00
+# with its filler prompt, one piece at a time, pieces cut by qwen_asr's own
+# splitter, fillers counted with `\bum\b` / `\buh\b` on the text:
+#   qwen_asr on torch MPS   17 um + 7 uh = 24   97.8 s (one cold run)   peak 6,232,440,832 B
+#   mlx-audio 0.5.5          7 um + 2 uh =  9   21.0 s                  peak 3,966,967,600 B
+# For scale, the 1.7B on identical pieces heard 11-13 (package) and 9-10 (port).
+# Filler counts on one window move by several between runs, so read that as
+# "no worse", not "better".
+
+[model]
+id = "qwen3-asr-0.6b"
+family = "qwen3-asr"
+parameters_m = 600
+
+[backends.cuda-linux]
+# vLLM 0.29.0's `Qwen3ASRForConditionalGeneration` loads this checkpoint as it
+# loads the 1.7B's (same architecture, smaller dims). Every tuning number is the
+# 1.7B's, for the 1.7B's reasons.
+engine = "vllm"
+hf_repo = "Qwen/Qwen3-ASR-0.6B"
+revision = "5eb144179a02acc5e5ba31e748d22b0cf3e303b0"
+dtype = "bfloat16"
+aligner = "qwen3-aligner"
+max_batch = 8
+max_new_tokens = 4096
+# The 1.7B's arithmetic unchanged: 2,340 audio tokens + 1,024 context + 64
+# scaffolding + 4,096 new = 7,524, so 8192.
+max_model_len = 8192
+# 114,688 B/token (identical to the 1.7B) x 4,096 tokens x 8 pieces.
+kv_cache_memory_bytes = 3758096384
+# 8,184,324,920 B = 7.62 GiB, COMPUTED (never run on the card; it was busy):
+#   1,876,091,704  model.safetensors, exactly
+# + 1,476,395,008  non-KV overhead: the 9B's measured figure, carried as an
+#                  UPPER bound exactly as the 1.7B carries it
+# + 1,073,741,824  the audio tower's activations for 8 pieces, DECLARED at
+#                  1 GiB as for the 1.7B (this tower is smaller)
+# + 3,758,096,384  the KV pool above
+memory_bytes_estimate = 8184324920
+
+[backends.mlx-darwin]
+# Qwen's own package on torch MPS, as for qwen3-asr-1.7b (the official engine,
+# the default), run in the align env.
+engine = "qwen-asr"
+hf_repo = "Qwen/Qwen3-ASR-0.6B"
+revision = "5eb144179a02acc5e5ba31e748d22b0cf3e303b0"
+dtype = "bfloat16"
+aligner = "qwen3-aligner"
+max_batch = 1
+max_new_tokens = 4096
+# 6,232,440,832 B = 5.80 GiB, MEASURED: `torch.mps.driver_allocated_memory()`
+# peak over the run above, ASR model only (no aligner in that process).
+memory_bytes_estimate = 6232440832

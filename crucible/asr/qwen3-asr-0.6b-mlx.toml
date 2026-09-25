@@ -1,0 +1,27 @@
+# Qwen3-ASR 0.6B on the MLX port: the fastest Qwen transcriber, Mac only.
+#
+# The 0.6B's counterpart of asr/qwen3-asr-1.7b-mlx.toml, for the same ruling
+# (Owen, 2026-09-24: *"if i want speed i can get it via mlx"*) and added with
+# the 0.6B the same evening (*"lets add the smaller qwen asr model too"*). The
+# same bytes as qwen3-asr-0.6b: the official checkpoint at the same revision,
+# which mlx-audio 0.5.5 converts on load, in bfloat16.
+#
+# MEASURED on the Mac Studio, 2026-09-24 (asr/qwen3-asr-0.6b.toml has the run):
+# 10 minutes in 21.0 s, 9 fillers against the official package's 24 on the
+# same window, peak `mx.get_peak_memory()` 3,966,967,600 B.
+
+[model]
+id = "qwen3-asr-0.6b-mlx"
+family = "qwen3-asr"
+parameters_m = 600
+
+[backends.mlx-darwin]
+engine = "mlx-audio"
+hf_repo = "Qwen/Qwen3-ASR-0.6B"
+revision = "5eb144179a02acc5e5ba31e748d22b0cf3e303b0"
+dtype = "bfloat16"
+aligner = "qwen3-aligner"
+max_batch = 1
+max_new_tokens = 4096
+# 3,966,967,600 B = 3.69 GiB, MEASURED (above), ASR model only.
+memory_bytes_estimate = 3966967600

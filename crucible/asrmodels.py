@@ -198,7 +198,13 @@ ONE_CHECKPOINT_FAMILIES: frozenset[str] = frozenset({"qwen3-asr"})
 #: directory is the lineup); stated so a test can hold the directory to it and a
 #: reader can see the ruling in one line.
 ASR_LINEUP: frozenset[str] = frozenset(
-    {"qwen3-asr-1.7b", "qwen3-asr-1.7b-mlx", "whisper-large-v3-turbo", "whisper-tiny"}
+    {
+        "qwen3-asr-1.7b", "qwen3-asr-1.7b-mlx",
+        # The 0.6B and its port (Owen, 2026-09-24: "lets add the smaller qwen
+        # asr model too. not just the 1.7b").
+        "qwen3-asr-0.6b", "qwen3-asr-0.6b-mlx",
+        "whisper-large-v3-turbo", "whisper-tiny",
+    }
 )
 
 #: Ids that were RENAMED on 2026-09-24, old -> new. NOT aliases: a request
