@@ -434,6 +434,17 @@ def report_http_error(exc: urllib.error.HTTPError) -> int:
 # ------------------------------------------------------------ argument helpers
 
 
+def read_text_argument(raw: str, flag: str) -> str:
+    """Text, or `@path/to.txt` for a file's contents. `read_json_argument`'s rule
+    for flags that take prose: a window's text or a decision's state."""
+    if raw.startswith("@"):
+        path = Path(raw[1:])
+        if not path.is_file():
+            raise ClientRefusal(f"{flag}_file_missing: {path} is not a file")
+        return path.read_text(encoding="utf-8")
+    return raw
+
+
 def read_json_argument(raw: str, flag: str) -> Any:
     """`{"a": 1}` or `@path/to.json`. One spelling for every JSON-taking flag.
 
@@ -789,13 +800,8 @@ def cmd_decide(connection: Connection, args: argparse.Namespace) -> int:
                 "decide_needs_state: pass --state <text|@file>, or at least one --image"
             )
         state = ""
-    elif args.state.startswith("@"):
-        path = Path(args.state[1:])
-        if not path.is_file():
-            raise ClientRefusal(f"--state_file_missing: {path} is not a file")
-        state = path.read_text(encoding="utf-8")
     else:
-        state = args.state
+        state = read_text_argument(args.state, "--state")
     body: dict[str, Any] = {"model": args.model, "state": state}
     if images:
         body["images"] = images
@@ -807,6 +813,66 @@ def cmd_decide(connection: Connection, args: argparse.Namespace) -> int:
     extra = None if args.act is None else {"X-Crucible-Act": args.act}
     emit(call(connection, "POST", "/v1/decide", json_body=body, extra_headers=extra))
     return EXIT_OK
+
+
+def cmd_align(connection: Connection, args: argparse.Namespace) -> int:
+    """`align` — windows of audio with the words spoken in them, placed in time.
+
+    Owen, 2026-09-24: an align verb beside transcription, the model a pick.
+    Every window goes in ONE job, so the aligner loads once for the run and a
+    window that fails is reported alone. Each audio is uploaded and named
+    `<index>.<ext>`, which is how the server pairs it with its text. The
+    windows are the caller's to cut (at most 300 s each): which words belong to
+    which stretch of a long recording is the application's logic.
+    """
+    if not args.window:
+        raise ClientRefusal("windows_required: give at least one --window INDEX TEXT AUDIO")
+    chunks: list[dict[str, Any]] = []
+    inputs: dict[str, dict[str, str]] = {}
+    for raw_index, raw_text, raw_audio in args.window:
+        try:
+            index = int(raw_index)
+        except ValueError:
+            raise ClientRefusal(
+                f"window_index_invalid: --window index {raw_index!r} is not an integer"
+            ) from None
+        audio = Path(raw_audio)
+        name = f"{index}{audio.suffix}"
+        if not audio.suffix:
+            raise ClientRefusal(
+                f"window_audio_unnamed: {raw_audio!r} has no extension; ffmpeg reads "
+                "the container from it"
+            )
+        if name in inputs:
+            raise ClientRefusal(f"window_index_repeated: index {index} appears more than once")
+        text = read_text_argument(raw_text, "--window TEXT")
+        chunks.append({"index": index, "text": text})
+        inputs[name] = {"blob_id": upload(connection, audio)["blob_id"]}
+    if args.out is not None and not args.follow:
+        raise ClientRefusal(
+            "out_needs_follow: --out waits for the job to finish, so it must be "
+            "asked for with --follow"
+        )
+    body = {
+        "type": "align",
+        "model": args.model,
+        "params": {"language": args.language, "chunks": chunks},
+        "inputs": inputs,
+    }
+    accepted = call(connection, "POST", "/v1/jobs", json_body=body)
+    if not args.follow:
+        emit(accepted)
+        return EXIT_OK
+    emit_line(accepted)
+    job_id = accepted["job_id"]
+    code, _ = follow_to_the_end(
+        connection, f"/v1/jobs/{job_id}/events", f"/v1/jobs/{job_id}", since=0
+    )
+    if args.out is not None and code == EXIT_OK:
+        target = Path(args.out)
+        written = download(connection, f"/v1/jobs/{job_id}/artifacts/alignment.json", target)
+        emit_line({"alignment": str(target), "bytes": written})
+    return code
 
 
 def cmd_upload(connection: Connection, args: argparse.Namespace) -> int:
@@ -1362,6 +1428,25 @@ def add_parser(subparsers: Any) -> None:
     )
     decide.add_argument("--act", default=None, help="the capability class, for the bench")
     decide.set_defaults(api_func=cmd_decide, questions=None)
+
+    align = verb("align", "place known words in time: windows of audio + their text, one job")
+    align.add_argument("--model", required=True, help="the aligner, e.g. qwen3-aligner")
+    align.add_argument(
+        "--language", required=True,
+        help="ISO code, one of the aligner's eleven: en de fr es it pt ru ja ko zh yue",
+    )
+    align.add_argument(
+        "--window", action="append", nargs=3, default=[],
+        metavar=("INDEX", "TEXT", "AUDIO"),
+        help="one window: its index, the words spoken in it (text or @file), and "
+             "its audio file (at most 300 s); repeatable, all in one job",
+    )
+    align.add_argument("--follow", action="store_true", help="watch the job until it ends")
+    align.add_argument(
+        "--out", default=None,
+        help="save alignment.json here once the job is done. Requires --follow",
+    )
+    align.set_defaults(api_func=cmd_align)
 
     upload_verb = verb("upload", "put a file on the server and get its blob_id")
     upload_verb.add_argument("path")

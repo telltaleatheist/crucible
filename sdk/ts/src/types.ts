@@ -2329,9 +2329,10 @@ export interface AsrOptions {
   /**
    * Which transcriber. **There is no default and there will not be one** — an
    * ASR pass at the wrong size is a transcript that looks fine, is worse, and
-   * has nothing in it to say so. Since 2026-09-24 there are exactly three, each
-   * ONE id on every backend: `qwen3-asr-1.7b`, `whisper-large-v3-turbo` and
-   * `whisper-tiny`. The old backend-prefixed ids (`faster-whisper-*`,
+   * has nothing in it to say so. Since 2026-09-24: `qwen3-asr-1.7b`,
+   * `whisper-large-v3-turbo` and `whisper-tiny`, each ONE id on every backend,
+   * and on the Mac also `qwen3-asr-1.7b-mlx` (the faster MLX port of the
+   * first). The old backend-prefixed ids (`faster-whisper-*`,
    * `mlx-whisper-*`) are refused `unknown_model`, not aliased.
    * {@link CrucibleClient.info}'s `asr` capability lists what a server ships.
    */
@@ -2404,6 +2405,102 @@ export interface AsrOptions {
    * docs/PHASE25-QWEN-ASR.md for the transcript's shape.
    */
   readonly context?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// align — audio you already have the words for, placed in time
+// ---------------------------------------------------------------------------
+//
+// Owen, 2026-09-24: *"we should probably have an align verb right? ... it's just
+// a model pick, and it gives the user input/output to it"*. The `align` job
+// type has existed since phase 4; this is its door, beside `asr()`.
+//
+// NOT PART OF `asr()`, deliberately. Transcription is audio in, words and times
+// out, and the MODEL decides the words. Alignment is audio AND words in, times
+// out, and the CALLER'S words win. One verb that switched meaning on an
+// optional `text` field would hide which of the two a job was.
+//
+// THE CALLER CUTS THE WINDOWS. Each window is at most 300 s (the aligner's own
+// limit) with the text spoken in it. Deciding which words belong to which
+// stretch of a long recording is the coarse alignment, which is the
+// application's logic (Owen, 2026-09-24: BookForge owns generate-sentences,
+// Crucible runs models). A typical caller takes those windows from an `asr()`
+// transcript's word times.
+
+/** One window to align: its audio and exactly the text spoken in it. */
+export interface AlignWindow {
+  /**
+   * The window's key. Unique within the job; results come back under it, and
+   * the audio is sent as `<index>.<extension>` because the server matches the
+   * two by that name.
+   */
+  readonly index: number;
+  /**
+   * The words spoken in this window, as the caller holds them (an ebook's text,
+   * not a transcript's). Placed as given; the model does not rewrite them.
+   */
+  readonly text: string;
+  /** The window's audio, uploaded or inline. At most 300 s. */
+  readonly audio: JobInput;
+  /**
+   * The audio's container extension, without the dot: `flac`, `wav`, `m4a`.
+   * **Load-bearing**: ffmpeg reads the container from the filename.
+   */
+  readonly extension: string;
+}
+
+export interface AlignOptions {
+  /**
+   * Which aligner. No default, for `asr()`'s reason. Today there is one,
+   * `qwen3-aligner` (Qwen3-ForcedAligner-0.6B), and naming it per request is
+   * what lets a second one be a choice rather than a migration.
+   */
+  readonly model: string;
+  /**
+   * One of the aligner's eleven languages as an ISO code: en de fr es it pt ru
+   * ja ko zh yue. Refused before queuing otherwise: it does not fall back to
+   * English, it places words badly.
+   */
+  readonly language: string;
+  /**
+   * Every window of the run, in ONE job. The aligner loads once and stays loaded
+   * for the whole job, so a book's worth of windows needs no lease between
+   * them. A lease (`POST /v1/models/<aligner>/lease`) matters only when a
+   * caller splits the work across several jobs.
+   */
+  readonly windows: readonly AlignWindow[];
+}
+
+/** One placed item, in seconds FROM THE START OF ITS WINDOW'S AUDIO. */
+export interface AlignItem {
+  /**
+   * A token of the aligner's OWN tokenization of the window's text. Close to
+   * the caller's words but not guaranteed one-to-one (665 items for a 668-word
+   * English window, measured 2026-09-08); mapping items back to words is the
+   * caller's.
+   */
+  readonly text: string;
+  readonly start: number;
+  readonly end: number;
+}
+
+/**
+ * One window's outcome. A window fails ALONE: its `error` says why (a window
+ * past 300 s, a model that returned nothing) and every other window is still
+ * aligned. Exactly one of `items` and `error` is non-null.
+ */
+export interface AlignWindowResult {
+  readonly index: number;
+  readonly items: readonly AlignItem[] | null;
+  readonly error: string | null;
+}
+
+/** `alignment.json`, read by {@link readAlignment}. */
+export interface Alignment {
+  /** The aligner id that placed these items. */
+  readonly model: string;
+  /** In the order the job listed its windows. */
+  readonly windows: readonly AlignWindowResult[];
 }
 
 // ---------------------------------------------------------------------------

@@ -100,6 +100,7 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `stream(options)` | `POST /v1/tts/stream` and its three companions | a `TtsStreamSession` |
 | `accelerator()` | `GET /v1/accelerator` | `AcceleratorState` |
 | `asr(options)` | `POST /v1/jobs {type: "asr"}` | the job id |
+| `align(options)` | `POST /v1/jobs {type: "align"}` | the job id; `readAlignment(bytes)` reads its `alignment.json` |
 | `setup()` | `GET /v1/setup` | `ServerSetup` — urls, token, one pairing line per url |
 | `catalog()` | `GET /v1/catalog` | `CatalogRow[]` — every subject this backend can hold |
 | `submitTask(request)` | `POST /v1/tasks` | the task id |
@@ -732,6 +733,45 @@ real work with a real position, but none of the transcript exists yet.
 
 A failed window fails the job, naming every bad stretch, and publishes nothing — a
 fifteen-minute hole in the middle of a transcript looks exactly like a transcript without one.
+
+## `align()`
+
+Transcription's sibling: you supply the words, the aligner places them in time (Owen,
+2026-09-24). Not an `asr()` option on purpose — transcription lets the model decide the
+words, alignment keeps yours, and one verb switching on an optional field would hide which
+a job was.
+
+```ts
+const jobId = await crucible.align({
+  model: 'qwen3-aligner',
+  language: 'en',
+  windows: [
+    { index: 0, text: epubWordsForWindow0, audio: { blobId: flac0 }, extension: 'flac' },
+    { index: 1, text: epubWordsForWindow1, audio: { blobId: flac1 }, extension: 'flac' },
+  ],
+});
+// ...follow events(jobId); each window also arrives as a `cue` as it lands.
+const alignment = readAlignment(await crucible.artifact(jobId, 'alignment.json'));
+for (const w of alignment.windows) {
+  if (w.error !== null) retry(w.index, w.error);      // this window only
+  else use(w.index, w.items);                         // [{text, start, end}]
+}
+```
+
+- **One job for the whole run.** The aligner loads once and stays for the job, so a book's
+  windows need no lease between them. A lease (`POST /v1/models/qwen3-aligner/lease`) only
+  matters if you split the run across several jobs.
+- **A window fails alone.** Past 300 s, or nothing returned: its `error` names why, and the
+  rest are aligned.
+- **Times are seconds from the start of that window's audio.** Add the window's own offset
+  in the source.
+- **Items are the aligner's tokens, not your words.** Close, not one-to-one (665 items for a
+  668-word window, measured); mapping them back to your words is yours.
+- **You cut the windows**, at most 300 s each. Deciding which words belong to which stretch
+  of a long recording is the application's logic, typically from an `asr()` transcript's
+  word times.
+- `language` is one of the aligner's eleven ISO codes (en de fr es it pt ru ja ko zh yue),
+  refused before queuing otherwise.
 
 ## Any Crucible that answers
 

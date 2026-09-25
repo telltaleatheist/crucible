@@ -31,6 +31,7 @@ import {
   CrucibleProtocolError,
   CrucibleServerError,
   isTtsCapability,
+  readAlignment,
   type JobEvent,
 } from '../src/index.js';
 
@@ -782,6 +783,68 @@ test('a 5xx that is not the probe refusal stays a plain server error', async () 
     );
     return true;
   });
+});
+
+// ------------------------------------------------------------------- align
+
+test('align() posts ONE align job: chunks by index, each audio named <index>.<ext>', async () => {
+  answers(200, { job_id: 'job-align-1' });
+  const jobId = await client().align({
+    model: 'qwen3-aligner',
+    language: 'en',
+    windows: [
+      { index: 0, text: 'Call me Ishmael.', audio: { blobId: 'aa' }, extension: 'flac' },
+      { index: 7, text: 'Some years ago.', audio: { blobId: 'bb' }, extension: '.wav' },
+    ],
+  });
+  assert.equal(jobId, 'job-align-1');
+  assert.deepEqual(JSON.parse(lastBody), {
+    type: 'align',
+    model: 'qwen3-aligner',
+    params: {
+      language: 'en',
+      chunks: [
+        { index: 0, text: 'Call me Ishmael.' },
+        { index: 7, text: 'Some years ago.' },
+      ],
+    },
+    // The server matches audio to text by the index in the filename.
+    inputs: { '0.flac': { blob_id: 'aa' }, '7.wav': { blob_id: 'bb' } },
+  });
+});
+
+test('align() refuses a repeated index and an empty run by name', async () => {
+  const window = { index: 3, text: 'x', audio: { blobId: 'a' }, extension: 'flac' };
+  await assert.rejects(
+    client().align({ model: 'qwen3-aligner', language: 'en', windows: [window, window] }),
+    (err: unknown) => err instanceof CrucibleConfigError && /appears more than once/.test(err.message),
+  );
+  await assert.rejects(
+    client().align({ model: 'qwen3-aligner', language: 'en', windows: [] }),
+    (err: unknown) => err instanceof CrucibleConfigError,
+  );
+});
+
+test('readAlignment reads a placed window and a failed one, each under its index', () => {
+  const bytes = new TextEncoder().encode(JSON.stringify({
+    model: 'qwen3-aligner',
+    chunks: [
+      { index: 0, items: [{ text: 'Call', start: 0.08, end: 0.32 }] },
+      { index: 7, error: 'chunk audio is 312.4 s; the aligner places at most 300 s' },
+    ],
+  }));
+  const alignment = readAlignment(bytes);
+  assert.equal(alignment.model, 'qwen3-aligner');
+  assert.deepEqual(alignment.windows[0], {
+    index: 0, items: [{ text: 'Call', start: 0.08, end: 0.32 }], error: null,
+  });
+  assert.equal(alignment.windows[1]?.items, null);
+  assert.match(alignment.windows[1]?.error ?? '', /300 s/);
+  // A window with neither is a broken server, not an empty success.
+  assert.throws(
+    () => readAlignment(new TextEncoder().encode(JSON.stringify({ model: 'm', chunks: [{ index: 1 }] }))),
+    CrucibleProtocolError,
+  );
 });
 
 // --------------------------------------------------------------------- asr

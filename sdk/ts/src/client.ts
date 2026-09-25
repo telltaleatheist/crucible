@@ -69,6 +69,11 @@ import {
   type ActivityJob,
   type ActivityLease,
   type ActivityStreaming,
+  type AlignItem,
+  type Alignment,
+  type AlignOptions,
+  type AlignWindowResult,
+  type JobInput,
   type ArtifactWrite,
   type AsrOptions,
   type CancelResult,
@@ -1842,6 +1847,60 @@ export class CrucibleClient {
     });
   }
 
+  // ------------------------------------------------------------------ align
+
+  /**
+   * Queue an `align` job — windows of audio, each with the text spoken in it,
+   * placed in time — and return its id. Watch it with {@link events}: each
+   * window arrives as a `cue` event the moment it lands, and the whole run as
+   * the artifact `alignment.json`, which {@link readAlignment} reads.
+   *
+   * ONE JOB FOR THE WHOLE RUN. Send every window of a book here at once: the
+   * aligner loads once and stays loaded for the job, and a window that fails
+   * (past 300 s, nothing returned) fails ALONE, reported under its index, while
+   * the rest are aligned. Items are in seconds from the start of their own
+   * window's audio.
+   *
+   * `model`, `language` and every window's four fields are required, and this
+   * client supplies none of them. The server refuses, before queuing, an
+   * unknown language, a blank text and a repeated index.
+   */
+  async align(options: AlignOptions): Promise<string> {
+    const given = options as Partial<AlignOptions> | undefined;
+    if (given === undefined || given === null) {
+      throw new CrucibleConfigError('options', 'align(...) needs {model, language, windows}');
+    }
+    const windows = given.windows;
+    if (!Array.isArray(windows) || windows.length === 0) {
+      throw new CrucibleConfigError('windows', 'needs at least one {index, text, audio, extension}');
+    }
+    const chunks: { index: number; text: string }[] = [];
+    const inputs: Record<string, JobInput> = {};
+    windows.forEach((window, position) => {
+      const where = `windows[${position}]`;
+      const index = window?.index;
+      if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) {
+        throw new CrucibleConfigError(`${where}.index`, 'must be a non-negative integer');
+      }
+      if (window.audio === undefined || window.audio === null) {
+        throw new CrucibleConfigError(`${where}.audio`, 'is required and was not given');
+      }
+      const extension = requireText(window.extension, `${where}.extension`).replace(/^\./, '');
+      const name = `${index}.${extension}`;
+      if (name in inputs) {
+        throw new CrucibleConfigError(`${where}.index`, `${index} appears more than once`);
+      }
+      chunks.push({ index, text: requireText(window.text, `${where}.text`) });
+      inputs[name] = window.audio;
+    });
+    return this.submit({
+      type: 'align',
+      model: requireText(given.model, 'model'),
+      params: { language: requireText(given.language, 'language'), chunks },
+      inputs,
+    });
+  }
+
   // ---------------------------------------------------------------- plumbing
 
   async #json(path: string, init: RequestInit, where: string): Promise<Json> {
@@ -3070,6 +3129,53 @@ function readDone(data: Json, where: string): DoneData {
   // `null` is the answer an unload gives: nothing is resident now.
   if (hasResident) done.resident = nullableStr(data, 'resident', where);
   return done;
+}
+
+/**
+ * An `align` job's `alignment.json`, read: one result per window, in the order
+ * the job listed them.
+ *
+ * LOAD-BEARING and strict: every window's `index`, and exactly one of `items`
+ * and `error`, because those are what a caller acts on (use the times, or
+ * re-cut and retry that window). A window with both, or neither, is a broken
+ * server and throws naming it. Pass it the bytes of `alignment.json`, as
+ * {@link CrucibleClient.artifact} returns them.
+ */
+export function readAlignment(bytes: Uint8Array): Alignment {
+  const where = 'alignment.json';
+  let raw: unknown;
+  try {
+    raw = JSON.parse(new TextDecoder().decode(bytes));
+  } catch (err) {
+    throw new CrucibleProtocolError(`${where} is not JSON: ${(err as Error).message}`);
+  }
+  const body = asObject(raw, where);
+  const windows: AlignWindowResult[] = asArray(field(body, 'chunks', where), `${where}.chunks`).map(
+    (entry, position) => {
+      const at = `${where}.chunks[${position}]`;
+      const row = asObject(entry, at);
+      const index = num(row, 'index', at);
+      const hasItems = 'items' in row;
+      const hasError = 'error' in row;
+      if (hasItems === hasError) {
+        throw new CrucibleProtocolError(
+          `${at} (window ${index}) must carry exactly one of "items" and "error"; ` +
+            'it is how a caller tells a placed window from a failed one',
+        );
+      }
+      if (hasError) return { index, items: null, error: str(row, 'error', at) };
+      const items: AlignItem[] = asArray(row['items'], `${at}.items`).map((item, i) => {
+        const it = asObject(item, `${at}.items[${i}]`);
+        return {
+          text: str(it, 'text', `${at}.items[${i}]`),
+          start: num(it, 'start', `${at}.items[${i}]`),
+          end: num(it, 'end', `${at}.items[${i}]`),
+        };
+      });
+      return { index, items, error: null };
+    },
+  );
+  return { model: str(body, 'model', where), windows };
 }
 
 /**

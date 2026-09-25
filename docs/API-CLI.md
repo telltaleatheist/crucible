@@ -224,6 +224,23 @@ server's, so the flag is not sent when left out) makes the decision
 `502 label_not_in_probs`. The word travels unchecked; any other is the server's
 `400 invalid_request` naming `missing`.
 
+### Align — known words, placed in time
+
+```
+crucible api align --model qwen3-aligner --language en \
+  --window 0 @window-000.txt window-000.flac \
+  --window 1 @window-001.txt window-001.flac --follow --out alignment.json
+```
+
+The `align` job (PHASE4-AUDIO.md section 2) behind a verb of its own (Owen,
+2026-09-24): transcription's sibling, where the caller supplies the words. Every
+`--window` is uploaded and named `<index>.<ext>` and they all go in ONE job, so the
+aligner loads once and a window that fails is reported alone. A window is at most
+300 s; cutting a long recording into windows is the caller's logic (typically from an
+`asr` transcript's word times). `--out` saves `alignment.json` (per window, `items`
+of `{text, start, end}` in seconds from that window's start, or `error`) and needs
+`--follow`.
+
 ### Leases
 
 ```
