@@ -297,3 +297,14 @@ def test_an_asr_alias_pinned_to_other_bytes_is_refused(tmp_path: Path) -> None:
     )
     with pytest.raises(AsrManifestError, match="weights_of_pin_mismatch"):
         load_asr_manifest("qwen3-asr-0.6b-mlx", tmp_path)
+
+
+def test_a_folder_left_under_an_alias_id_is_reported_stranded(
+    config: Config, home: Path
+) -> None:
+    """Before 2026-09-24 `qwen3-asr-0.6b-mlx` pulled its own copy. As an alias
+    it reads its base's folder, so that old copy is nobody's and doctor says so."""
+    spec = load_asr_manifest("qwen3-asr-0.6b").spec("mlx-darwin")
+    left = _stamp(home, "qwen3-asr-0.6b-mlx", "mlx-darwin", spec.hf_repo, spec.revision)
+    rows = catalog.stranded_weights(config)
+    assert [(r["id"], r["path"]) for r in rows] == [("qwen3-asr-0.6b-mlx", str(left))]

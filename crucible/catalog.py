@@ -527,12 +527,23 @@ def stranded_weights(config: Config) -> list[dict[str, Any]]:
     the retirement sentence where this build has one (`retired_asr_id_note`),
     and null for anything else.
     """
+    # AN ALIAS OWNS NO FOLDER OF ITS OWN (2026-09-24). Its weights are its
+    # base's folder (`weights._store_id`), so a folder under an ALIAS's id is a
+    # copy nothing reads: what `qwen3-asr-0.6b-mlx` left behind when it became
+    # an alias. Declared, but not owned, so it is stranded like any other.
+    aliases = {
+        manifest.id
+        for manifest in (*load_all_manifests().values(), *load_all_asr_manifests().values())
+        if getattr(manifest, "weights_of", None) is not None
+    }
     rows: list[dict[str, Any]] = []
     for entry in weights.stranded(
         config,
         ModelManifest.weights_family,
         tuple(BACKEND_ENGINES),
-        lambda subject_id: backends_declaring("model", subject_id),
+        lambda subject_id: (
+            () if subject_id in aliases else backends_declaring("model", subject_id)
+        ),
     ):
         row = entry.to_dict()
         row["note"] = retired_asr_id_note(entry.subject_id)
