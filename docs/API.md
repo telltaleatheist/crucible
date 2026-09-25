@@ -264,6 +264,30 @@ Job Events
 
 *Answers:* `200`, `422`
 
+### `POST /v1/jobs/{job_id}/hold`
+
+Keep this done job's artifacts for a later job (Owen, 2026-09-25). *"keep all working files on the crucible side until the chain is complete. then remove them"*. Held, the job is not reaped for having been fetched: it stays until `DELETE` on this route releases it (and removes it at once), or until the `retention_days` collector takes it (`gc_at`). A later job names its files as `{"artifact": {job_id, name}}` inputs. Survives a restart. Idempotent.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `job_id` | path | yes | string |  |
+
+*Answers:* `200`, `422`
+
+### `DELETE /v1/jobs/{job_id}/hold`
+
+The chain is complete: release the hold and remove the job now.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `job_id` | path | yes | string |  |
+
+*Answers:* `204`, `422`
+
 ## Tasks
 
 Long host-side work — installs, pulls, env packs — that is not a job because no model runs.
@@ -619,6 +643,15 @@ One distribution per question, read off the resident model. PHASE22-DECIDE.md is
 
 Every schema the routes above refer to, for a reader following a nested field.
 
+### `ArtifactRef`
+
+A previous job's artifact on THIS server, taken as an input. Owen, 2026-09-25: a render's 2,510 chunk FLACs were downloaded, then read back off a share and uploaded again (2.5 minutes, 1.25 GB) to the server that made them, for the align. A reference takes them where they already are. Usually of a HELD job (`POST /v1/jobs/{id}/hold`); an unheld one works while its directory still exists.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `job_id` | string | yes | — |  |
+| `name` | string | yes | — |  |
+
 ### `Body_upload_v1_uploads_post`
 
 | field | type | required | default | what it is |
@@ -728,12 +761,13 @@ One request to the engine, timed by Crucible.
 
 ### `JobInput`
 
-One named input: either an uploaded blob or bytes inline in the request.
+One named input: an uploaded blob, bytes inline in the request, or an artifact of a previous job on this server.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `blob_id` | string or null | no | — |  |
 | `inline_base64` | string or null | no | — |  |
+| `artifact` | ArtifactRef or null | no | — |  |
 
 ### `LeaseOpen`
 
