@@ -948,6 +948,21 @@ class Residency:
         return None if self._resident is None else self._resident.kind
 
     @property
+    def engine_exit_code(self) -> int | None:
+        """The exit code of the resident model's engine if it has EXITED, else None.
+
+        The resident record stays: nothing asked for it to go, and a caller
+        holding a lease on it is owed the reason rather than a card that
+        quietly emptied. The doors refuse it by name (`engine_exited`), and
+        `/v1/activity` reports it, until an unload or the next load's eviction
+        takes it off (stopping an engine that has already exited is a no-op).
+        """
+        engine = self._engine
+        if engine is None or not isinstance(self._resident, ResidentModel):
+            return None
+        return engine.exit_code
+
+    @property
     def resident_model(self) -> ResidentModel | None:
         """The resident, if it is a model. None when a voice holds the card.
 

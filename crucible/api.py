@@ -1926,6 +1926,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     "id": resident.id,
                     "since": resident.loaded_at,
                     "memory_bytes_estimate": resident.memory_bytes_estimate,
+                    # NOT SERVING, said here rather than discovered by a chat
+                    # that hangs: the code the resident model's engine exited
+                    # with, null while it runs (2026-09-26, ContentStudio's
+                    # dead 27B read as healthy for 17-20 minutes).
+                    "engine_exit_code": residency.engine_exit_code,
                     # WHICH CLIP, for a zero-shot voice. `zeroshot` is ONE
                     # voice id and any number of recordings — BookForge keeps
                     # its clips in a userData directory and the extension
@@ -3108,6 +3113,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             resident = residency.resident_model
             if resident is None or resident.model_id != requested:
                 raise _model_not_resident(requested, resident, "a chat request")
+            _refuse_an_exited_engine(residency, resident)
 
             # The manifest's gaps, filled — and the audit of what filled them
             # (PHASE2-LLM.md section 9). `resident.defaults` is what the
@@ -3272,6 +3278,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             resident = residency.resident_model
             if resident is None or resident.model_id != body.model:
                 raise _model_not_resident(body.model, resident, "a decision")
+            _refuse_an_exited_engine(residency, resident)
 
             n_images = decide_core.check_image_count(body.images)
             if n_images:
@@ -3602,6 +3609,29 @@ def _caller_gone(resident: Any) -> JSONResponse:
             f"{resident.model_id!r} answered; the engine's request was cancelled "
             "with it",
         ).body(),
+    )
+
+
+def _refuse_an_exited_engine(residency: Residency, resident: Any) -> None:
+    """502 `engine_exited`: the resident model's engine is no longer running.
+
+    Asked before anything is sent, so a request to a dead engine is answered at
+    once and by name instead of by a connect retry that ends in
+    `engine_unreachable`. A chat already in flight when the engine exits is
+    failed by the dropped connection itself. ContentStudio's 2026-09-25 hangs
+    were an engine that did NOT exit (mlx-lm's generation thread died and the
+    process stayed up), which the `mlx-lm-fatal-generation-thread` env patch
+    turns into this.
+    """
+    code = residency.engine_exit_code
+    if code is None:
+        return
+    raise ApiError(
+        502,
+        "engine_exited",
+        f"the engine serving {resident.model_id!r} exited with code {code} and is "
+        f"not serving. Its log is {resident.log_path}. Unload the model and load "
+        "it again",
     )
 
 

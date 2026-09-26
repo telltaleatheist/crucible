@@ -305,6 +305,21 @@ class SubprocessEngine:
             return frozenset()
         return frozenset({self._process.pid})
 
+    @property
+    def exit_code(self) -> int | None:
+        """The code this engine EXITED with, or None while it runs (or never ran).
+
+        An engine that exits on its own is not stopped by anything Crucible
+        did, so this is the one place it shows. mlx-lm is patched to make that
+        happen when its generation thread dies
+        (`envs/llm/patches/patch_mlx_lm_fatal_generation_thread.py`). Before the
+        patch, the dead engine kept its pid and its socket and answered nothing,
+        so there was nothing here to read.
+        """
+        if self._process is None:
+            return None
+        return self._process.poll()
+
     def start(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> None:

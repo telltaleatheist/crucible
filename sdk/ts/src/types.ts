@@ -593,6 +593,17 @@ export interface Activity {
      * not check both.
      */
     readonly unclaimedSince: string | null;
+    /**
+     * The code the resident model's engine EXITED with, or `null` while it
+     * runs (and from a server older than 1.0.40, which does not say).
+     *
+     * Non-null is a model that is still listed but is not serving: every chat
+     * and decision to it is refused `engine_exited` before anything is sent,
+     * until it is unloaded and loaded again. On the Mac this is what a dead
+     * mlx-lm generation thread now looks like (it used to leave calls in
+     * flight forever).
+     */
+    readonly engineExitCode: number | null;
   } | null;
   /**
    * What was told to go and has not, or `null`. See {@link Stopping}.

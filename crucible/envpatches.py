@@ -40,6 +40,17 @@ rounding error of up to 0.0625 and a decision's `label_mass` came back 0.94-1.06
 from all three sites that feed returned logprobs and leaves the sampler reading
 the stock ones, so generation is unchanged. `MlxLmEngine.start` refuses
 `llm_env_unpatched` unless EVERY patch in `LLM_PATCHES` is `applied`.
+
+THE THIRD `llm` PATCH (2026-09-26): a dead generation thread exits the engine
+----------------------------------------------------------------------------
+mlx-lm 0.31.3 generates on one thread and lets an exception end only that
+thread, so the server stays up answering nothing (upstream ml-explore/mlx-lm
+#1672). ContentStudio's 27B died that way twice on 2026-09-25 (`metal::malloc
+Resource limit (499000) exceeded`) and its chat sat in flight for 17-20 minutes.
+The applier is `envs/llm/patches/patch_mlx_lm_fatal_generation_thread.py`: the
+thread's target is wrapped so an exception prints its traceback and calls
+`os._exit(70)`. From then on it is an engine that EXITED, which the chat door
+and the residency already name.
 """
 
 from __future__ import annotations
@@ -88,7 +99,28 @@ MLX_LM_FP32_LOGPROBS = NarratorPatch(
     ),
 )
 
-LLM_PATCHES: tuple[NarratorPatch, ...] = (MLX_LM_TOP_LOGPROBS, MLX_LM_FP32_LOGPROBS)
+MLX_LM_FATAL_GENERATION_THREAD = NarratorPatch(
+    id="mlx-lm-fatal-generation-thread",
+    distribution="mlx-lm",
+    rel_path="mlx_lm/server.py",
+    marker="target=_crucible_fatal_thread(self._generate)",
+    absent_marker="Thread(target=self._generate)",
+    stale_marker=None,
+    script="patch_mlx_lm_fatal_generation_thread.py",
+    why=(
+        "stock mlx-lm 0.31.3 lets an exception end its one generation thread "
+        "and keeps the process up, so every accepted chat waits forever while "
+        "the engine still looks alive (ContentStudio, 2026-09-25: 17-20 minutes "
+        "in flight on a dead 27B); patched, the engine exits and the chat door "
+        "fails the call by name. MlxLmEngine refuses to start without it"
+    ),
+)
+
+LLM_PATCHES: tuple[NarratorPatch, ...] = (
+    MLX_LM_TOP_LOGPROBS,
+    MLX_LM_FP32_LOGPROBS,
+    MLX_LM_FATAL_GENERATION_THREAD,
+)
 
 
 @dataclass(frozen=True)
@@ -171,6 +203,7 @@ def require_applied(patch: NarratorPatch, env_dir: Path) -> None:
 __all__ = [
     "LLM_PATCHES",
     "LLM_SCRIPTS_DIR",
+    "MLX_LM_FATAL_GENERATION_THREAD",
     "MLX_LM_FP32_LOGPROBS",
     "MLX_LM_TOP_LOGPROBS",
     "PatchSet",

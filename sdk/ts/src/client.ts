@@ -695,6 +695,12 @@ export class CrucibleClient {
                 'unclaimed_since',
                 'activity.resident',
               ),
+              // Tolerant: an older server does not say, and null is "running".
+              engineExitCode: optNum(
+                resident,
+                'engine_exit_code',
+                'activity.resident',
+              ),
             },
       stopping: readStopping(body, 'activity'),
       warming: optStr(body, 'warming', 'activity'),
