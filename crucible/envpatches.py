@@ -51,6 +51,18 @@ The applier is `envs/llm/patches/patch_mlx_lm_fatal_generation_thread.py`: the
 thread's target is wrapped so an exception prints its traceback and calls
 `os._exit(70)`. From then on it is an engine that EXITED, which the chat door
 and the residency already name.
+
+THE FOURTH `llm` PATCH (2026-09-26): the cache counters are evaluated every step
+-------------------------------------------------------------------------------
+What killed that thread. mlx-lm 0.31.3's batched caches move `left_padding`,
+`lengths`, `offset` and `_idx` with lazy arithmetic nothing forces, so each
+decode step extends an unevaluated graph, and the prompt cache stores it with
+every finished reply. On a Qwen3.5/3.8 model (ArraysCache layers) the next
+request's first step evaluates it and passes Metal's buffer count limit, 499000.
+Reproduced on the Mac 27B with ContentStudio's real request bytes: title 2 died
+after title 1 with the prompt cache on, and survived alone or with the cache off.
+The applier is `envs/llm/patches/patch_mlx_lm_cache_counters.py`: the counters
+join the decode step's existing `mx.async_eval`, which stays asynchronous.
 """
 
 from __future__ import annotations
@@ -116,10 +128,28 @@ MLX_LM_FATAL_GENERATION_THREAD = NarratorPatch(
     ),
 )
 
+MLX_LM_CACHE_COUNTERS = NarratorPatch(
+    id="mlx-lm-cache-counters",
+    distribution="mlx-lm",
+    rel_path="mlx_lm/generate.py",
+    marker="_crucible_cache_counters(self.prompt_cache),",
+    absent_marker="mx.async_eval(self._next_tokens, self._next_logprobs, token_context)",
+    stale_marker=None,
+    script="patch_mlx_lm_cache_counters.py",
+    why=(
+        "stock mlx-lm 0.31.3 updates its caches' counters lazily and never "
+        "forces them, so a Qwen3.5/3.8 engine's graph grows until Metal's buffer "
+        "count limit (499000) kills the generation thread; reproduced on the Mac "
+        "27B with ContentStudio's real bodies on 2026-09-26 and gone with this "
+        "patch. MlxLmEngine refuses to start without it"
+    ),
+)
+
 LLM_PATCHES: tuple[NarratorPatch, ...] = (
     MLX_LM_TOP_LOGPROBS,
     MLX_LM_FP32_LOGPROBS,
     MLX_LM_FATAL_GENERATION_THREAD,
+    MLX_LM_CACHE_COUNTERS,
 )
 
 
@@ -203,6 +233,7 @@ def require_applied(patch: NarratorPatch, env_dir: Path) -> None:
 __all__ = [
     "LLM_PATCHES",
     "LLM_SCRIPTS_DIR",
+    "MLX_LM_CACHE_COUNTERS",
     "MLX_LM_FATAL_GENERATION_THREAD",
     "MLX_LM_FP32_LOGPROBS",
     "MLX_LM_TOP_LOGPROBS",
