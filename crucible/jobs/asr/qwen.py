@@ -310,25 +310,56 @@ def own_words(piece: Piece, *, is_last: bool) -> None:
     piece.text = text[first:last]
 
 
+def _fold(character: str) -> str:
+    """One character, lower-cased when that keeps it one character."""
+    lowered = character.lower()
+    return lowered if len(lowered) == 1 else character
+
+
+def _letters(text: str) -> tuple[str, list[int]]:
+    """`text`'s letters and digits, folded, and each one's index in `text`."""
+    kept: list[str] = []
+    where: list[int] = []
+    for index, character in enumerate(text):
+        if character.isalnum():
+            kept.append(_fold(character))
+            where.append(index)
+    return "".join(kept), where
+
+
 def _word_spans(
     text: str, items: list[dict[str, Any]], where: str
 ) -> list[tuple[int, int]]:
-    """Each aligner item's [start, end) character span in `text`, in order."""
-    lowered = text.lower()
+    """Each aligner item's [start, end) character span in `text`, in order.
+
+    MATCHED ON LETTERS AND DIGITS ONLY, both sides (2026-09-26). The aligner
+    returns its own normalisation of the text it was given, not the text: 
+    "life-changing" comes back as `lifechanging`, and punctuation and case go.
+    1.0.41 searched for each item verbatim and failed two whole jobs on the
+    first hyphen (training-pc-1's tc.wav runs). Reduced to letters and digits,
+    an item IS a run of the text's own letters, in order, whatever the aligner
+    did to the spelling around them. An item with no letter or digit at all
+    gets an empty span where the search stands.
+    """
+    letters, positions = _letters(text)
     cursor = 0
     spans: list[tuple[int, int]] = []
     for item in items:
-        word = str(item["text"]).lower()
-        found = lowered.find(word, cursor)
-        if not word or found < 0:
+        word, _ = _letters(str(item["text"]))
+        here = positions[cursor] if cursor < len(positions) else len(text)
+        if not word:
+            spans.append((here, here))
+            continue
+        found = letters.find(word, cursor)
+        if found < 0:
             raise JobError(
                 "asr_overlap_unmapped",
                 f"the piece at {where}: the aligner's word {item['text']!r} is not "
-                f"in the decoded text after character {cursor}, so the overlap "
-                "cannot be trimmed to this piece's own words. Send overlap_s: 0 "
-                "to run without overlap",
+                "a run of the decoded text's letters after character "
+                f"{here}, so the overlap cannot be trimmed to this piece's own "
+                "words. Send overlap_s: 0 to run without overlap",
             )
-        spans.append((found, found + len(word)))
+        spans.append((positions[found], positions[found + len(word) - 1] + 1))
         cursor = found + len(word)
     return spans
 
