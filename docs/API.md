@@ -446,6 +446,18 @@ Delete this machine's own manifest for a voice. The packaged set stands. A voice
 
 *Answers:* `204`, `422`
 
+### `GET /v1/voices/{voice_id}/manifest`
+
+One voice's settings as a whole LOCAL manifest document, for editing. What `PUT /v1/voices/{id}` with a `voice` body takes, whatever the voice's settings came out of: a repo's `crucible-voice.toml` at its pin, this machine's override, a packaged file, or the engine's own row. The operator console edits this and sends it back as an override (Owen, 2026-09-26: a person must be able to configure a voice by hand). `manifest` says which kind of file that was. `not_carried` names what the local schema cannot hold (a repo's `pace_basis`, for one), so an override made from a pinned voice is not silently poorer than it.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `voice_id` | path | yes | string |  |
+
+*Answers:* `200`, `422`
+
 ## Streaming narration
 
 A long-lived session that takes text and gives audio back over SSE, instead of one render per request (PHASE3-TTS.md section 7).
