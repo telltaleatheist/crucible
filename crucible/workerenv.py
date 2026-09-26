@@ -613,6 +613,8 @@ def _run(command: list[str], failure: str, on_line: Callable[[str], None] | None
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        # Source packages build with THIS host's compiler (`jobenv.build_environment`).
+        env=jobenv.build_environment(),
     )
     tail: list[str] = []
     assert process.stdout is not None

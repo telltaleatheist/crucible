@@ -1378,6 +1378,45 @@ def _names_in(text: str) -> set[str]:
     return found
 
 
+#: A C compiler and its C++ partner, in the order a host is asked for one.
+_HOST_COMPILERS: tuple[tuple[str, str], ...] = (("gcc", "g++"), ("cc", "c++"), ("clang", "clang++"))
+
+
+def build_environment(base: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment pip builds source packages in: this host's own compiler.
+
+    MEASURED 2026-09-26 on owens-pc. `crucible install rvc --force` deleted the
+    env and then failed on `diffq`, which has no wheel and builds from source:
+    `error: [Errno 2] No such file or directory: 'clang'`. The env is a venv of
+    the SERVER's interpreter, a standalone CPython whose sysconfig records the
+    compiler it was built with (`CC = clang -pthread`), and setuptools compiles
+    extensions with that recorded name. WSL's Ubuntu has gcc and no clang. The
+    same recipe built on 2026-09-13 because that env came from a different
+    interpreter. With `CC=gcc` the same package built at once.
+
+    So when the recorded compiler is not on this host's PATH, the build is told
+    which one is: gcc, else cc, else clang, with its C++ partner and the shared
+    linker line. When the recorded one IS there, or the operator already set
+    `CC`, nothing changes. When the host has no compiler at all nothing is set,
+    and pip's own error names what is missing.
+    """
+    import sysconfig
+
+    environment = dict(os.environ if base is None else base)
+    if "CC" in environment:
+        return environment
+    recorded = (sysconfig.get_config_var("CC") or "").split()
+    if recorded and shutil.which(recorded[0]) is not None:
+        return environment
+    for c_compiler, cpp_compiler in _HOST_COMPILERS:
+        if shutil.which(c_compiler) is not None:
+            environment["CC"] = c_compiler
+            environment["CXX"] = cpp_compiler if shutil.which(cpp_compiler) else c_compiler
+            environment["LDSHARED"] = f"{c_compiler} -pthread -shared"
+            return environment
+    return environment
+
+
 def _run(command: list[str], failure: str, on_line: Any) -> None:
     process = subprocess.Popen(
         command,
@@ -1385,6 +1424,7 @@ def _run(command: list[str], failure: str, on_line: Any) -> None:
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=build_environment(),
     )
     tail: list[str] = []
     assert process.stdout is not None
