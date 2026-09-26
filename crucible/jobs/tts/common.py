@@ -441,6 +441,26 @@ def voice_rows(
                 "pace": manifest.pace.to_dict(),
             }
         )
+    # A PINNED VOICE THIS HOST CANNOT READ is a row that says so, with the pin's
+    # own refusal, rather than a 500 for every voice (`voicerepo.load_pinned`).
+    # Every key a served row has, null where nothing is known.
+    from ...voices import unserved_pins
+
+    for voice_id, (revision, why) in sorted(unserved_pins().items()):
+        rows.append(
+            {
+                "id": voice_id, "display": voice_id, "kind": None, "language": None,
+                "narrator_engine": None, "backend_supported": False,
+                "installed": False, "resident": False, "orphan": False,
+                "loadable": False, "reason": why, "revision": revision,
+                "fingerprint": None, "source": "pinned", "identity_basis": None,
+                "memory_bytes_estimate": None, "estimate_basis": None,
+                "serving": None, "max_chars": None, "max_chars_basis": None,
+                "pace_basis": None, "inherited_from": None, "manifest": "repo",
+                "sample_rate": None, "takes": 0, "needs_reference": False,
+                "pace": None,
+            }
+        )
     return rows
 
 

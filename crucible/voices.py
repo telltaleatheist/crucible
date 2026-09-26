@@ -1845,6 +1845,24 @@ def parse_voice(text: str, path: Path, expected_id: str) -> VoiceManifest:
     return _parse(document, path, expected_id)
 
 
+def unserved_pins() -> dict[str, tuple[str, str]]:
+    """Pinned voices this host cannot serve and nothing else describes.
+
+    `{id: (revision, why)}`: the pin's own refusal, by name, for a voice whose id
+    no other source (engine, packaged, this machine's override) serves either.
+    A refused pin shadowed by an override is not listed: that voice serves.
+    """
+    from . import voicerepo
+
+    _, refused = voicerepo.load_pinned()
+    served = load_all_voices()
+    return {
+        voice_id: (pin.revision, why)
+        for voice_id, (pin, why) in refused.items()
+        if voice_id not in served
+    }
+
+
 def load_voice(voice_id: str, directory: Path | None = None) -> VoiceManifest:
     """The manifest for `voice_id`, from whichever source this host has for it.
 
@@ -1867,6 +1885,11 @@ def load_voice(voice_id: str, directory: Path | None = None) -> VoiceManifest:
     served = load_all_voices()
     found = served.get(voice_id)
     if found is None:
+        unserved = unserved_pins().get(voice_id)
+        if unserved is not None:
+            # Its own refusal, not "no manifest": the voice IS pinned here and
+            # the reason it cannot be served is the one a person must act on.
+            raise VoiceError(unserved[1])
         where = ", ".join(str(r) for r in voice_dirs())
         raise VoiceError(
             f"no manifest for voice {voice_id!r} in {where}; this host serves "

@@ -913,11 +913,34 @@ def voice_for_pin(pin: Pin) -> Any:
     return merge(repo, pin, footprint)
 
 
-def pinned_voices() -> dict[str, Any]:
-    """Every pinned voice this host offers, by id, as a `VoiceManifest`.
+def load_pinned() -> tuple[dict[str, Any], dict[str, tuple[Pin, str]]]:
+    """Every pin this host has: the ones that load, and the ones refused, by name.
 
-    `crucible/voices.py::load_all_voices` calls this FIRST — the lowest
-    precedence — so a packaged manifest still wins on a shared id while section
-    8.1 is true, and adding a pin regresses nothing.
+    ONE UNREADABLE PIN IS ONE UNSERVED VOICE, NEVER NO VOICES (2026-09-26).
+    This was a single comprehension, so the first pin `voice_for_pin` refused
+    (a private repo on a machine with no token, no network on the first fetch,
+    a machine with no `[tts.*]` footprint) raised out of `load_all_voices` and
+    `GET /v1/voices` answered `500 voices_unreadable` for every voice, the
+    engine's own included. A pin's refusal is about that voice, so it is kept
+    beside that voice's id with its own message, and every other voice serves.
+    Only `VoiceError`, the refusal by name, is kept; anything else is a defect
+    and is let out.
     """
-    return {voice_id: voice_for_pin(pin) for voice_id, pin in load_pins().items()}
+    voices: dict[str, Any] = {}
+    refused: dict[str, tuple[Pin, str]] = {}
+    for voice_id, pin in load_pins().items():
+        try:
+            voices[voice_id] = voice_for_pin(pin)
+        except VoiceError as exc:
+            refused[voice_id] = (pin, str(exc))
+    return voices, refused
+
+
+def pinned_voices() -> dict[str, Any]:
+    """Every pinned voice this host can serve, by id, as a `VoiceManifest`.
+
+    `crucible/voices.py::load_all_voices` calls this FIRST, the lowest
+    precedence. A pin that cannot be read is absent here and present in
+    `load_pinned()`'s refusals, which `voices.unserved_pins` reports.
+    """
+    return load_pinned()[0]
