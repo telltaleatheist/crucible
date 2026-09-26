@@ -84,6 +84,12 @@
     // an element would be thrown away under the operator's hands.
     upstreamDraft: {},
     routeDraft: {},
+    // THE VOICES PANEL: the list as the server last gave it, the one voice
+    // being edited (its draft document and that document's JSON text), and a
+    // half-typed pin. Kept here, not in the DOM, for `engineChoice`'s reason.
+    voices: null,
+    voiceEdit: null,
+    voiceAdd: { id: '', repo: '', revision: '' },
     allowanceDraft: null,
     // What each upstream answered `test` with, so the route pickers can offer
     // real model ids. Not cached across a reload and never written to disk:
@@ -1768,6 +1774,406 @@
 
   // ----------------------------------------------------------- 5. catalog
 
+  // ------------------------------------------------------------------ voices
+  //
+  // PHASE21, and Owen, 2026-09-26: *"it should be possible to do directly by
+  // the user"*. A voice's settings travel with its weights: the repo's
+  // `crucible-voice.toml` at the revision this machine PINS. What a person does
+  // by hand is the API's two bodies and its one undo:
+  //
+  //   Add      `PUT /v1/voices/{id}` {pin: {hf_repo, revision}}. This machine
+  //            serves that repo at that commit; its file is the settings.
+  //   Edit     `PUT /v1/voices/{id}` {voice: {...}}. An OVERRIDE, a whole
+  //            manifest written on this machine, which wins over the pin.
+  //   Revert   `DELETE /v1/voices/{id}`, the override or this machine's pin.
+  //
+  // The weights are pulled in the Catalog, which already lists every voice.
+  // Nothing typed here is a setting until the PUT that sends it comes back.
+
+  function voicePath(id) {
+    var safe = encodeURIComponent(id);
+    return `/v1/voices/${safe}`;
+  }
+
+  function voiceManifestPath(id) {
+    var safe = encodeURIComponent(id);
+    return `/v1/voices/${safe}/manifest`;
+  }
+
+  async function loadVoices() {
+    try {
+      state.voices = await call('/v1/voices');
+      setRefusal('voices', null);
+    } catch (refusal) {
+      state.voices = null;
+      setRefusal('voices', refusal);
+    }
+  }
+
+  /** The words for where a voice's settings came from, by the row's `manifest`. */
+  var VOICE_SOURCE = {
+    repo: ['from its repo', 'ok'],
+    override: ['set on this machine', 'warn'],
+    packaged: ['built into this release', 'floor'],
+    engine: ["the engine's own", 'floor']
+  };
+
+  async function beginVoiceEdit(id) {
+    try {
+      var found = await call(voiceManifestPath(id));
+      state.voiceEdit = {
+        id: id,
+        source: found.manifest,
+        notCarried: found.not_carried,
+        document: found.document,
+        text: JSON.stringify(found.document, null, 2),
+        textError: null
+      };
+      setRefusal('voices', null);
+    } catch (refusal) {
+      setRefusal('voices', refusal);
+    }
+    render();
+  }
+
+  async function saveVoiceEdit() {
+    var edit = state.voiceEdit;
+    try {
+      await call(voicePath(edit.id), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(edit.document)
+      });
+      state.voiceEdit = null;
+      setRefusal('voices', null);
+    } catch (refusal) {
+      // KEPT OPEN on a refusal: the server names what it will not take (a band
+      // past the cap, a declared estimate with no note), and the person fixes
+      // that field rather than typing everything again.
+      setRefusal('voices', refusal);
+    }
+    await loadVoices();
+    render();
+  }
+
+  async function revertVoice(row) {
+    var what =
+      row.manifest === 'override'
+        ? 'the override set on this machine'
+        : "this machine's pin";
+    var question =
+      'Remove ' + what + ' for ' + row.id + '?\n\nThe weights stay. The voice ' +
+      'goes back to what its pin or this release says, or leaves the list if ' +
+      'nothing else describes it.';
+    if (!window.confirm(question)) {
+      return;
+    }
+    try {
+      await call(voicePath(row.id), { method: 'DELETE' });
+      setRefusal('voices', null);
+    } catch (refusal) {
+      setRefusal('voices', refusal);
+    }
+    await loadVoices();
+    render();
+  }
+
+  async function addVoicePin() {
+    var add = state.voiceAdd;
+    var pin = { hf_repo: add.repo.trim(), revision: add.revision.trim() || null };
+    try {
+      await call(voicePath(add.id.trim()), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: pin })
+      });
+      state.voiceAdd = { id: '', repo: '', revision: '' };
+      setRefusal('voices', null);
+    } catch (refusal) {
+      setRefusal('voices', refusal);
+    }
+    await Promise.all([loadVoices(), loadCatalog()]);
+    render();
+  }
+
+  /** A number field bound to one key of a table in the draft document. */
+  function draftNumber(label, table, key, id, integer) {
+    var value = table[key];
+    return el('label', { class: 'field' }, [
+      el('span', { class: 'field-label', text: label }),
+      el('input', {
+        id: id,
+        type: 'number',
+        step: integer ? '1' : '0.01',
+        value: value === undefined || value === null ? '' : String(value),
+        oninput: function (event) {
+          var typed = event.target.value;
+          if (typed === '') {
+            delete table[key];
+          } else {
+            table[key] = integer ? parseInt(typed, 10) : parseFloat(typed);
+          }
+          state.voiceEdit.text = JSON.stringify(state.voiceEdit.document, null, 2);
+        }
+      })
+    ]);
+  }
+
+  function renderVoiceEdit() {
+    var edit = state.voiceEdit;
+    var voice = edit.document.voice;
+    if (voice.pace === undefined) {
+      voice.pace = {};
+    }
+    var pace = voice.pace;
+    var box = el('div', { class: 'block' }, [
+      el('p', { class: 'subhead', text: 'Editing ' + edit.id }),
+      el('p', {
+        class: 'lead',
+        text:
+          'Saved as an override on this machine, which wins over ' +
+          (edit.source === 'repo' ? "the repo's own file at its pin" : 'what it says now') +
+          '. Revert takes it back off. The server checks every field and ' +
+          'refuses by name what it will not take.'
+      })
+    ]);
+    if (edit.notCarried.length > 0) {
+      box.appendChild(
+        el('p', {
+          class: 'lead',
+          text: 'An override cannot say these, so it will not: ' + edit.notCarried.join('; ')
+        })
+      );
+    }
+
+    box.appendChild(el('p', { class: 'subhead', text: 'Pace and safety band' }));
+    box.appendChild(
+      el('div', { class: 'fields' }, [
+        draftNumber('pace (chars/s)', pace, 'pace_chars_per_sec', 've-pace', false),
+        draftNumber('min chars/s', pace, 'min_chars_per_sec', 've-pace-min', false),
+        draftNumber('max chars/s', pace, 'max_chars_per_sec', 've-pace-max', false),
+        draftNumber('band from (chars)', pace, 'safe_min_chars', 've-band-min', true),
+        draftNumber('band to (chars)', pace, 'safe_max_chars', 've-band-max', true)
+      ])
+    );
+    box.appendChild(
+      el('button', {
+        class: 'button quiet',
+        type: 'button',
+        title: 'the house rule: pace x 1.3 and pace / 1.3, to two places',
+        onclick: function () {
+          var p = pace.pace_chars_per_sec;
+          if (typeof p !== 'number' || !(p > 0)) {
+            return;
+          }
+          pace.max_chars_per_sec = Math.round(p * 1.3 * 100) / 100;
+          pace.min_chars_per_sec = Math.round((p / 1.3) * 100) / 100;
+          edit.text = JSON.stringify(edit.document, null, 2);
+          render();
+        }
+      }, ['Edges from pace (x1.3, /1.3)'])
+    );
+
+    var kinds = Object.keys(voice.backends).sort();
+    for (var index = 0; index < kinds.length; index += 1) {
+      var kind = kinds[index];
+      var block = voice.backends[kind];
+      box.appendChild(el('p', { class: 'subhead', text: kind }));
+      box.appendChild(
+        el('div', { class: 'fields' }, [
+          draftNumber('chunk cap (chars)', block, 'max_chars', 've-cap-' + kind, true),
+          draftNumber('temperature', block.sampling, 'temperature', 've-temp-' + kind, false),
+          draftNumber('top_p', block.sampling, 'top_p', 've-topp-' + kind, false),
+          draftNumber('top_k', block.sampling, 'top_k', 've-topk-' + kind, true)
+        ])
+      );
+    }
+
+    box.appendChild(el('p', { class: 'subhead', text: 'The whole document' }));
+    box.appendChild(
+      el('textarea', {
+        id: 've-json',
+        class: 'mono',
+        rows: '16',
+        spellcheck: 'false',
+        'aria-label': 'the whole voice manifest, as JSON',
+        text: edit.text,
+        oninput: function (event) {
+          edit.text = event.target.value;
+          try {
+            edit.document = JSON.parse(edit.text);
+            edit.textError = null;
+          } catch (bad) {
+            edit.textError = 'not JSON yet: ' + bad.message;
+          }
+        }
+      })
+    );
+    if (edit.textError !== null) {
+      box.appendChild(el('p', { class: 'lead', text: edit.textError }));
+    }
+    box.appendChild(
+      el('div', { class: 'row-action' }, [
+        el('button', {
+          id: 've-save',
+          class: 'button primary',
+          type: 'button',
+          disabled: edit.textError !== null,
+          onclick: saveVoiceEdit
+        }, ['Save override']),
+        el('button', {
+          class: 'button quiet',
+          type: 'button',
+          onclick: function () {
+            state.voiceEdit = null;
+            render();
+          }
+        }, ['Cancel'])
+      ])
+    );
+    return box;
+  }
+
+  function voiceRow(row) {
+    var block = el('div', { class: 'row' });
+    block.appendChild(
+      el('span', null, [
+        el('span', { class: 'row-title', text: row.display }),
+        el('span', { class: 'row-id', text: row.id })
+      ])
+    );
+
+    var chips = el('span', { class: 'chips' });
+    var source = VOICE_SOURCE[row.manifest] || [row.manifest, 'floor'];
+    chips.appendChild(chip(source[0], source[1]));
+    if (row.revision) {
+      chips.appendChild(chip('@' + row.revision.slice(0, 7), 'floor'));
+    }
+    var pace = row.pace || {};
+    if (pace.safe_min_chars !== null && pace.safe_min_chars !== undefined) {
+      chips.appendChild(chip('band ' + pace.safe_min_chars + '-' + pace.safe_max_chars, 'floor'));
+    }
+    if (pace.pace_chars_per_sec !== null && pace.pace_chars_per_sec !== undefined) {
+      chips.appendChild(chip(pace.pace_chars_per_sec + ' chars/s', 'floor'));
+    }
+    if (row.max_chars !== null && row.max_chars !== undefined) {
+      chips.appendChild(chip('cap ' + row.max_chars, 'floor'));
+    }
+    if (!row.installed) {
+      chips.appendChild(chip('weights not pulled', 'warn'));
+    }
+    if (row.resident) {
+      chips.appendChild(chip('resident', 'ok'));
+    }
+    block.appendChild(chips);
+
+    var action = el('span', { class: 'row-action' });
+    action.appendChild(
+      el('button', {
+        id: 'voice-edit-' + row.id,
+        class: 'button',
+        type: 'button',
+        // The server refuses to rewrite a voice that is on the card; the button
+        // says so first rather than let the refusal teach it.
+        disabled: row.resident || state.voiceEdit !== null,
+        title: row.resident
+          ? 'it is on the card right now; unload it first'
+          : 'change its settings on this machine',
+        onclick: function () {
+          beginVoiceEdit(row.id);
+        }
+      }, ['Edit'])
+    );
+    if (row.manifest === 'override' || row.manifest === 'repo') {
+      action.appendChild(
+        el('button', {
+          id: 'voice-revert-' + row.id,
+          class: 'button',
+          type: 'button',
+          disabled: row.resident,
+          onclick: function () {
+            revertVoice(row);
+          }
+        }, ['Revert'])
+      );
+    }
+    block.appendChild(action);
+    return block;
+  }
+
+  function renderVoices() {
+    var body = document.getElementById('voices-body');
+    body.textContent = '';
+    document.getElementById('voices-stamp').textContent = '';
+
+    var refusal = refusalBox(state.refusals.voices);
+    if (refusal) {
+      body.appendChild(refusal);
+    }
+    if (state.voices === null) {
+      if (!refusal) {
+        body.appendChild(el('p', { class: 'empty', text: 'reading…' }));
+      }
+      return;
+    }
+    document.getElementById('voices-stamp').textContent =
+      state.voices.length + ' voice' + (state.voices.length === 1 ? '' : 's');
+
+    body.appendChild(
+      el('p', {
+        class: 'lead',
+        text:
+          "A voice's settings (pace, safety band, chunk cap, sampling) travel " +
+          "with its weights, in the repo's crucible-voice.toml at the revision " +
+          'this machine pins. Add a voice by its repo, or edit one to set an ' +
+          'override on this machine. Pull the weights in the Catalog.'
+      })
+    );
+
+    var rows = el('div', { class: 'rows' });
+    for (var index = 0; index < state.voices.length; index += 1) {
+      rows.appendChild(voiceRow(state.voices[index]));
+    }
+    body.appendChild(el('div', { class: 'block' }, [rows]));
+
+    if (state.voiceEdit !== null) {
+      body.appendChild(renderVoiceEdit());
+    }
+
+    var add = state.voiceAdd;
+    function addField(label, key, id, placeholder) {
+      return el('label', { class: 'field' }, [
+        el('span', { class: 'field-label', text: label }),
+        el('input', {
+          id: id,
+          type: 'text',
+          spellcheck: 'false',
+          placeholder: placeholder,
+          value: add[key],
+          oninput: function (event) {
+            add[key] = event.target.value;
+          }
+        })
+      ]);
+    }
+    body.appendChild(
+      el('div', { class: 'block' }, [
+        el('p', { class: 'subhead', text: 'Add a voice from its repo' }),
+        el('div', { class: 'fields' }, [
+          addField('voice id', 'id', 'voice-add-id', 'mistborn'),
+          addField('HuggingFace repo', 'repo', 'voice-add-repo', 'owenmorgan/mistborn-higgs-v3'),
+          addField('revision (blank for the head)', 'revision', 'voice-add-revision', '40-character commit sha')
+        ]),
+        el('button', {
+          id: 'voice-add',
+          class: 'button primary',
+          type: 'button',
+          onclick: addVoicePin
+        }, ['Pin'])
+      ])
+    );
+  }
+
   function renderCatalog() {
     var body = document.getElementById('catalog-body');
     body.textContent = '';
@@ -2339,6 +2745,7 @@
     renderTasks();
     renderJobTypes();
     renderSettings();
+    renderVoices();
     renderCatalog();
     renderConnect();
     renderService();
@@ -2386,6 +2793,7 @@
       loadActivity(),
       loadCapability(),
       loadSettings(),
+      loadVoices(),
       loadCatalog(),
       loadPairingRequests()
     ]);

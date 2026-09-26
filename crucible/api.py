@@ -106,6 +106,7 @@ from .voices import (
     VoiceError,
     load_all_voices,
     remove_home_voice,
+    voice_document,
     write_home_voice,
 )
 from .weights import WeightsError, resolve_revision
@@ -2308,6 +2309,39 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             config, backend, residency,
             leases=request.app.state.leases, store=request.app.state.store,
         )
+
+    @private.get("/voices/{voice_id}/manifest")
+    async def voice_manifest(voice_id: str) -> dict[str, Any]:
+        """One voice's settings as a whole LOCAL manifest document, for editing.
+
+        What `PUT /v1/voices/{id}` with a `voice` body takes, whatever the voice's
+        settings came out of: a repo's `crucible-voice.toml` at its pin, this
+        machine's override, a packaged file, or the engine's own row. The
+        operator console edits this and sends it back as an override (Owen,
+        2026-09-26: a person must be able to configure a voice by hand).
+
+        `manifest` says which kind of file that was. `not_carried` names what
+        the local schema cannot hold (a repo's `pace_basis`, for one), so an
+        override made from a pinned voice is not silently poorer than it.
+        """
+        if not config.enable_tts:
+            raise disabled_error("tts", config)
+        found = load_all_voices().get(voice_id)
+        if found is None:
+            raise ApiError(
+                404,
+                "unknown_voice",
+                f"there is no voice {voice_id!r} on this server",
+                {"id": voice_id},
+            )
+        document, not_carried = voice_document(found)
+        return {
+            "id": found.id,
+            "manifest": found.manifest_source,
+            "path": str(found.path),
+            "document": document,
+            "not_carried": not_carried,
+        }
 
     def _pinned_backends(live: Config, block: dict[str, Any]) -> dict[str, Any]:
         """Fill in a missing `revision` per backend from the repo's head sha.

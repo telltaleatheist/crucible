@@ -652,3 +652,49 @@ def test_a_lease_or_a_queued_job_on_a_local_voice_is_not_an_orphan(
         store._pending.remove(job.id)
         store._jobs.pop(job.id, None)
     assert orphan() is True
+
+
+# ------------------------------------------------ the editor's read: GET manifest
+
+
+@pytest.mark.parametrize("voice_id", [SHIPPED, "zeroshot", "higgs-default"])
+def test_a_voices_settings_read_back_as_a_document_that_saves_as_the_same_voice(
+    tts_client: TestClient,
+    auth: dict[str, str],
+    no_hub: list[str],
+    voice_id: str,
+) -> None:
+    """GET manifest, PUT it back unchanged: the override IS the voice it came from.
+
+    The Voices panel's whole edit path (Owen, 2026-09-26). A document that
+    parsed to a different voice would make every hand edit a silent second
+    change, so the check is on the loaded voice, field for field, not on the
+    bytes. The two engine rows are included because they are the ones a person
+    is least likely to have a file for.
+    """
+    before = load_voice(voice_id)
+    read = tts_client.get(f"/v1/voices/{voice_id}/manifest", headers=auth)
+    assert read.status_code == 200, read.text
+    body = read.json()
+    assert body["id"] == voice_id
+    assert body["manifest"] == before.manifest_source
+    assert body["not_carried"] == []
+
+    saved = tts_client.put(f"/v1/voices/{voice_id}", json=body["document"], headers=auth)
+    assert saved.status_code == 200, saved.text
+    assert no_hub == [], "every revision was in the document; nothing to resolve"
+
+    after = load_voice(voice_id)
+    assert after.manifest_source == "override"
+    for field in ("display", "kind", "narrator_engine", "language", "sample_rate",
+                  "pace", "serving", "takes", "weights_of"):
+        assert getattr(after, field) == getattr(before, field), field
+    assert after.backends == before.backends
+
+
+def test_an_unknown_voice_has_no_manifest_to_read(
+    tts_client: TestClient, auth: dict[str, str]
+) -> None:
+    answer = tts_client.get("/v1/voices/no-such-voice/manifest", headers=auth)
+    assert answer.status_code == 404
+    assert answer.json()["error"]["code"] == "unknown_voice"

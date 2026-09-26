@@ -1699,6 +1699,93 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
     )
 
 
+def voice_document(manifest: VoiceManifest) -> tuple[dict[str, Any], list[str]]:
+    """The LOCAL manifest document that parses back to `manifest`, and what it cannot say.
+
+    `_parse`'s exact inverse, so whatever a voice's settings came out of (a
+    repo's `crucible-voice.toml` at a pin, this machine's override, a packaged
+    file) they can be read, edited and written back as an override through
+    `PUT /v1/voices/{id}` with a `voice` body. The operator console's Voices
+    panel is its reason (Owen, 2026-09-26: *"it should be possible to do
+    directly by the user"*).
+
+    THE SECOND VALUE IS NEVER DROPPED SILENTLY: the facts a repo manifest
+    carries that the local schema has no key for (`pace_basis`,
+    `inherited_from`, per-arm `max_chars_basis`), each named with its value, so
+    a person turning a pinned voice into an override is told what the override
+    will no longer say. `voicecard.export_manifest`'s rule, the other way round.
+    """
+    voice: dict[str, Any] = {
+        "id": manifest.id,
+        "display": manifest.display,
+        "kind": manifest.kind,
+        "narrator_engine": manifest.narrator_engine,
+        "language": manifest.language,
+        "sample_rate": manifest.sample_rate,
+    }
+    if manifest.weights_of is not None:
+        voice["weights_of"] = manifest.weights_of
+
+    pace = {key: value for key, value in manifest.pace.to_dict().items() if value is not None}
+    if pace:
+        voice["pace"] = pace
+
+    if manifest.serving is not None:
+        voice["serving"] = {
+            key: value
+            for key, value in manifest.serving.to_dict().items()
+            if value is not None
+        }
+
+    backends: dict[str, Any] = {}
+    for kind, spec in manifest.backends.items():
+        block: dict[str, Any] = {}
+        if spec.hf_repo is not None:
+            block["hf_repo"] = spec.hf_repo
+            block["revision"] = spec.revision
+        else:
+            block["path"] = spec.path
+            block["identity"] = spec.identity
+        block["memory_bytes_estimate"] = spec.memory_bytes_estimate
+        block["estimate_basis"] = spec.estimate_basis
+        if spec.estimate_note is not None:
+            block["estimate_note"] = spec.estimate_note
+        if spec.max_chars is not None:
+            block["max_chars"] = spec.max_chars
+        block["sampling"] = dict(spec.sampling)
+        if spec.sampling_reason is not None:
+            block["sampling_reason"] = spec.sampling_reason
+        if spec.clips is not None:
+            block["clips"] = (
+                spec.clips
+                if isinstance(spec.clips, str)
+                else [clip.to_dict() for clip in spec.clips]
+            )
+        backends[kind] = block
+    voice["backends"] = backends
+
+    # Take 0 alone is what an absent ladder means (`_check_takes`), so it is
+    # written as absent: a file that states it would parse the same and say more.
+    if manifest.takes != (Take(index=0, overrides={}, reason=None),):
+        rungs = []
+        for take in manifest.takes:
+            rung: dict[str, Any] = dict(take.overrides)
+            if take.reason is not None:
+                rung["reason"] = take.reason
+            rungs.append(rung)
+        voice["takes"] = rungs
+
+    not_carried: list[str] = []
+    if manifest.pace_basis is not None:
+        not_carried.append(f"pace_basis = {manifest.pace_basis!r}")
+    if manifest.inherited_from is not None:
+        not_carried.append(f"inherited_from = {manifest.inherited_from!r}")
+    for kind, spec in manifest.backends.items():
+        if spec.max_chars_basis is not None:
+            not_carried.append(f"backends.{kind}.max_chars_basis = {spec.max_chars_basis!r}")
+    return {"voice": voice}, not_carried
+
+
 # ------------------------------------------------------------------- loading
 
 

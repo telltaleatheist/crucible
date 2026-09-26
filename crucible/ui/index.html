@@ -101,6 +101,21 @@
           <div class="panel-body" id="settings-body"></div>
         </section>
 
+        <!-- PHASE21, and Owen 2026-09-26: a voice's settings travel with its
+             weights (the repo's crucible-voice.toml at the pinned revision),
+             and a person can still set them by hand on this machine. Add pins a
+             repo; Edit writes an override; Revert takes the override or the
+             pin back off. The weights themselves are pulled in the Catalog. -->
+        <section class="panel" id="panel-voices" aria-labelledby="h-voices">
+          <div class="panel-head">
+            <h2 id="h-voices">Voices</h2>
+            <div class="panel-tools">
+              <span class="stamp" id="voices-stamp"></span>
+            </div>
+          </div>
+          <div class="panel-body" id="voices-body"></div>
+        </section>
+
         <section class="panel" id="panel-catalog" aria-labelledby="h-catalog">
           <div class="panel-head">
             <h2 id="h-catalog">Catalog</h2>
