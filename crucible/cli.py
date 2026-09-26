@@ -3110,7 +3110,9 @@ def build_parser() -> argparse.ArgumentParser:
             "VRAM this host's own desktop holds, which the accelerator guard does "
             "not count as somebody's job. Defaults PER BACKEND once the card is "
             f"detected: cuda-linux {DEFAULT_DESKTOP_ALLOWANCE_BYTES} = 3 GiB flat, "
-            f"mlx-darwin {MLX_DESKTOP_ALLOWANCE_FRACTION:.0%} of unified memory "
+            # `%%`: argparse formats help with `%`, and a bare "25% of" is
+            # read as a `% o` directive and crashes `init --help`.
+            f"mlx-darwin {MLX_DESKTOP_ALLOWANCE_FRACTION * 100:.0f}%% of unified memory "
             "because the model and the whole OS share one pool. Use 0 on a "
             "headless box"
         ),
