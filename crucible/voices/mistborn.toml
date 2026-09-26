@@ -3,6 +3,12 @@
 # pace derivation, the character cap and the declared memory estimate is written
 # once, in voices/deathstalker.toml, and not repeated here.
 #
+# MISTBORN v16, 2026-09-26 (Owen's word, deployed by training-pc-1): both arms pin
+# owenmorgan/mistborn-higgs-v3 @ fadb104, pace 13.56 chars/s, safe band 300-800.
+# It went live first as a `PUT /v1/voices/mistborn` overlay on the PC and the Mac;
+# this file now says the same, so a server without the overlay serves v16 too.
+# The history below is the previous pin's (mb_ha_rvcbed1 ckpt-5368, e5bf801).
+#
 # THE PIN AND THE MEASUREMENTS ARE THE SAME WEIGHTS, as of 2026-09-16. This file
 # carried the widest gap of the five until then: the repo held the mb_h2lm merge
 # of 2026-09-08 while the arms moved on twice, to mb_full_rvc1_5947_prod and then
@@ -39,17 +45,21 @@ sample_rate = 24000
 # chars/s long edge had been mislabelling healthy Mistborn takes as run-ons
 # (13.4% -> 8.2%). Edges = median x 1.3 and median / 1.3, rounded to two places.
 [voice.pace]
-pace_chars_per_sec = 13.33
-max_chars_per_sec = 17.33
-min_chars_per_sec = 10.25
+# v16 (2026-09-26): 13.56, measured by training-pc-1 on the v16 weights; the
+# edges keep the rule, x 1.3 and / 1.3. The note above is ckpt-5368's 13.33.
+pace_chars_per_sec = 13.56
+max_chars_per_sec = 17.63
+min_chars_per_sec = 10.43
 # RULED 2026-09-15 from ckpt-5368's own ladder, pooled by ACTUAL character count
 # in 100-character bins and ranked by the Wilson 95% upper bound on failure rate.
 # 400-700 wins. This REPLACES the 200-800 that stood here, which was measured on
 # mb_full_rvc1_5947 and whose 200 floor does not survive on these weights — the
 # floor moved because the corpus did (HoA + RVC + ownbed), not because the rule
 # changed. The cap stays under Owen's 800 ruling either way.
-safe_min_chars = 400
-safe_max_chars = 700
+# v16 (2026-09-26): 300-800, from v16's own ladder (training-pc-1). The note
+# above rules ckpt-5368's 400-700. 800 is still Owen's cap.
+safe_min_chars = 300
+safe_max_chars = 800
 # WHAT THE SERVER narrator STARTS IS SIZED BY, and the one number it refuses to
 # render without: `HIGGS_MAX_NUM_SEQS` is stage 0's admission width on the
 # vllm-omni stack AND the width of narrator's own batch
@@ -65,9 +75,8 @@ max_num_seqs_note = """16 is vllm-omni's OWN stage-0 value in higgs_multimodal_q
 
 [voice.backends.cuda-linux]
 hf_repo = "owenmorgan/mistborn-higgs-v3"
-# The repo's head after the upload of 2026-09-16, verified against the HF API:
-# mb_ha_rvcbed1 checkpoint 5368, the same merge both arms serve. See the header.
-revision = "e5bf8017b2be5f0cfe0074f44c26554aa6d5e94f"
+# Mistborn v16, the revision both arms serve since 2026-09-26. See the header.
+revision = "fadb104ddb46dd659f52f0a70a1f74cc1fddfc37"
 memory_bytes_estimate = 19_000_000_000
 estimate_basis = "declared"
 estimate_note = """SGLang-Omni's configured reservation on this arm, not a watched \
@@ -79,14 +88,14 @@ arm carries it. Owed: a real reading on the 3090 Ti."""
 # empirical ceiling under it: mb_h2lm's longest training row is 2268 characters,
 # but the checkpoint ENDS ITSELF at ~1,980 frames (~79-82 s) whatever the server
 # allows — a 2,173-character render on the Mac came back at 79 s with the middle
-# skipped, coverage 0.306 (measured 2026-09-05). At 13.33 chars/s, 82 s is about
-# 1,090 characters, so 800 is well inside it. Characters, not tokens.
+# skipped, coverage 0.306 (measured 2026-09-05). At 13.56 chars/s (v16), 82 s is
+# about 1,110 characters, so 800 is well inside it. Characters, not tokens.
 max_chars = 800
 sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
 
 [voice.backends.mlx-darwin]
 hf_repo = "owenmorgan/mistborn-higgs-v3"
-revision = "e5bf8017b2be5f0cfe0074f44c26554aa6d5e94f"
+revision = "fadb104ddb46dd659f52f0a70a1f74cc1fddfc37"
 memory_bytes_estimate = 12_133_000_000
 estimate_basis = "declared"
 estimate_note = """The one recorded MLX figure for a Higgs v3 merged checkpoint — \
