@@ -210,6 +210,8 @@ def align_chunks(
     chunk_texts: list[str],
     max_audio_s: float,
     log_path: Path,
+    backend_kind: str,
+    memory_bytes_estimate: int,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
@@ -223,9 +225,10 @@ def align_chunks(
         python=python,
         script=Path(__file__).resolve().parents[1] / "align" / "worker.py",
         log_path=log_path,
-        environment=workerenv.worker_environment(
-            workerenv.worker_env_dir(home, "align")
-        ),
+        environment={
+            **workerenv.worker_environment(workerenv.worker_env_dir(home, "align")),
+            **workerenv.torch_allocator_environment(backend_kind),
+        },
     )
     try:
         # LOAD AND ALIGN ON ONE PROCESS. The aligner is 1.7 GB of weights and a
@@ -238,7 +241,10 @@ def align_chunks(
         # interrupted is a process holding VRAM nothing is tracking.
         session.start(
             {"op": "load", "model_dir": str(weights_dir),
-             "device": "cuda", "dtype": "bfloat16"},
+             "device": "cuda", "dtype": "bfloat16",
+             "memory_cap_bytes": workerenv.torch_memory_cap(
+                 backend_kind, memory_bytes_estimate
+             )},
             ready_silence_timeout=900.0,
         )
         outcome = session.send(

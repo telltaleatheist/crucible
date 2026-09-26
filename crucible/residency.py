@@ -67,6 +67,7 @@ from .voicereference import VoiceReference
 from .voices import VoiceBackendSpec, VoiceManifest
 from .vram import KvPlan
 from .workers import WorkerError, WorkerSession
+from .workerenv import torch_allocator_environment, torch_memory_cap
 
 #: The kinds of thing that can hold the card, and what `/v1/health` reports as
 #: `resident_kind` so a client can tell which door to knock on.
@@ -1400,7 +1401,14 @@ class Residency:
         self._evict(say, manifest.id)
 
         log_path = engine_log_path(self._config.home, manifest.id)
-        session = WorkerSession(python=python, script=script, log_path=log_path)
+        # A plain-torch worker held across windows of different lengths: the
+        # allocator setting and its admitted share (`workerenv`'s note says why).
+        session = WorkerSession(
+            python=python,
+            script=script,
+            log_path=log_path,
+            environment=torch_allocator_environment(spec.backend),
+        )
 
         self.begin_warming(manifest.id)
         say(
@@ -1414,6 +1422,9 @@ class Residency:
                     "model_dir": str(weights_dir),
                     "device": device,
                     "dtype": dtype,
+                    "memory_cap_bytes": torch_memory_cap(
+                        spec.backend, spec.memory_bytes_estimate
+                    ),
                 },
                 ready_silence_timeout=timeout,
                 on_ready=lambda message: say(
@@ -1497,7 +1508,9 @@ class Residency:
             python=python,
             script=script,
             log_path=log_path,
-            environment=dict(environment),
+            # Plus the torch allocator setting on CUDA: a separator held across
+            # inputs of different lengths is `workerenv`'s case exactly.
+            environment={**environment, **torch_allocator_environment(spec.backend)},
         )
 
         self.begin_warming(manifest.id)
@@ -1512,6 +1525,9 @@ class Residency:
                     "model_file_dir": str(model_file_dir),
                     "model_filename": manifest.model_filename,
                     "use_autocast": use_autocast,
+                    "memory_cap_bytes": torch_memory_cap(
+                        spec.backend, spec.memory_bytes_estimate
+                    ),
                 },
                 ready_silence_timeout=timeout,
                 on_ready=lambda message: say(

@@ -138,6 +138,51 @@ def require(request: dict, key: str, kind):
     return value
 
 
+# --------------------------------------------------------- the torch allocator
+#
+# Crucible's `workerenv` note has the measurement. On CUDA the server spawns this
+# worker with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` and sends its
+# admitted share as `memory_cap_bytes`. This worker is held across inputs of
+# different lengths, which is how a caching allocator strands blocks until the
+# card spills into system memory.
+
+
+def cap_memory(torch, memory_cap_bytes):
+    """Cap this process's CUDA reservation at its admitted share, before any weights.
+
+    `None` is not CUDA (the server sends a cap only there), so nothing is set.
+    Past the cap the allocator frees its cache and retries; a true overrun is an
+    OOM naming the fraction, in this job's report, not a card paging the host.
+    """
+    if memory_cap_bytes is None:
+        return None
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            f"a CUDA memory cap of {memory_cap_bytes} bytes was sent and this "
+            "process sees no CUDA device"
+        )
+    total = torch.cuda.get_device_properties(0).total_memory
+    fraction = min(1.0, memory_cap_bytes / total)
+    torch.cuda.set_per_process_memory_fraction(fraction, 0)
+    return fraction
+
+
+def memory_line(torch, label):
+    """allocated / peak / reserved on CUDA to the engine log, then a fresh peak."""
+    if not torch.cuda.is_available():
+        return
+    gib = 1024 ** 3
+    print(
+        f"crucible memory {label}: allocated "
+        f"{torch.cuda.memory_allocated(0) / gib:.2f} GiB, peak "
+        f"{torch.cuda.max_memory_allocated(0) / gib:.2f} GiB, reserved "
+        f"{torch.cuda.memory_reserved(0) / gib:.2f} GiB",
+        file=sys.stderr,
+        flush=True,
+    )
+    torch.cuda.reset_peak_memory_stats(0)
+
+
 # -------------------------------------------------------------------- loading
 
 
@@ -146,6 +191,16 @@ def load(request: dict) -> None:
     model_file_dir = require(request, "model_file_dir", str)
     model_filename = require(request, "model_filename", str)
     use_autocast = require(request, "use_autocast", bool)
+    # REQUIRED, AND NULL OFF CUDA, as `require` says of every key.
+    if "memory_cap_bytes" not in request:
+        raise KeyError(
+            "the denoise request has no 'memory_cap_bytes'; it is required, and "
+            "null where there is no CUDA cap"
+        )
+    memory_cap_bytes = request["memory_cap_bytes"]
+    import torch
+
+    fraction = cap_memory(torch, memory_cap_bytes)
 
     started = time.perf_counter()
     try:
@@ -191,12 +246,19 @@ def load(request: dict) -> None:
         )
 
     seconds = time.perf_counter() - started
+    memory_line(torch, "after load")
     _STATE.update(
         separator=separator,
         model_instance=model_instance,
         model_filename=model_filename,
     )
-    send("ready", seconds=seconds)
+    send(
+        "ready",
+        seconds=seconds,
+        memory_cap_bytes=memory_cap_bytes,
+        memory_fraction=fraction,
+        alloc_conf=os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+    )
     send("done")
 
 
@@ -327,6 +389,9 @@ def separate(request: dict) -> None:
             "stem container is part of the contract and is not substituted"
         )
 
+    import torch
+
+    memory_line(torch, os.path.basename(source))
     send("result", stems=stems, separate_seconds=round(separate_seconds, 2))
     send("done")
 

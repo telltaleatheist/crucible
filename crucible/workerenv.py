@@ -693,6 +693,61 @@ def cuda_library_path(env_dir: Path) -> str | None:
     return os.pathsep.join(directories) if directories else None
 
 
+#: PLAIN-TORCH WORKERS ON CUDA: THE ALLOCATOR (2026-09-26, Owen via training-pc-1).
+#:
+#: A resident torch worker fed inputs of VARYING length strands blocks in the
+#: CUDA caching allocator. Measured that night on this PC's 3090 Ti by
+#: training-pc-1, on a plain-transformers Qwen3-ASR-1.7B worker outside
+#: Crucible: allocated peaked at 7.4 GB while RESERVED climbed 7.7 -> 10.2 ->
+#: 12.8 GB within 110 clips and past 21 GB by 1,400. The card filled, 3.3 GB
+#: spilled into Windows shared GPU memory, and host commit hit 69.6 of 69.9 GB.
+#: With `expandable_segments:True` and a per-process cap, reserved tracked the
+#: peak and held flat at 5.6-5.9 GB.
+#:
+#: Crucible has two such workers on CUDA: the Qwen3 forced aligner
+#: (`jobs/align/worker.py`: the resident aligner, the one beside vLLM for asr
+#: word times, and align-longform's) and audio-separator (`jobs/denoise/worker.py`),
+#: both held across inputs of different lengths. NOT vLLM, whose own pool
+#: rejects expandable segments; not faster-whisper (CTranslate2, not torch); not
+#: rvc, which spawns a fresh urvc process per render.
+TORCH_ALLOC_CONF_VAR = "PYTORCH_CUDA_ALLOC_CONF"
+TORCH_ALLOC_CONF = "expandable_segments:True"
+
+
+def torch_allocator_environment(
+    backend_kind: str, inherited: dict[str, str] | None = None
+) -> dict[str, str]:
+    """`PYTORCH_CUDA_ALLOC_CONF` for a plain-torch worker on CUDA, or `{}`.
+
+    Set in the worker's ENVIRONMENT at spawn, so it is there before the worker
+    imports torch, which is the only moment the allocator reads it. `{}` on any
+    other backend (the variable is CUDA's) and when the operator has set the
+    variable for their own reasons: theirs is kept, not overwritten.
+    """
+    if backend_kind != CUDA_LINUX:
+        return {}
+    base = os.environ if inherited is None else inherited
+    if TORCH_ALLOC_CONF_VAR in base:
+        return {}
+    return {TORCH_ALLOC_CONF_VAR: TORCH_ALLOC_CONF}
+
+
+def torch_memory_cap(backend_kind: str, memory_bytes_estimate: int) -> int | None:
+    """The bytes a plain-torch worker may reserve on CUDA, or None elsewhere.
+
+    ITS ADMITTED SHARE: the manifest's `memory_bytes_estimate` for this backend,
+    the number the card's guard admitted it on. The worker hands it to
+    `torch.cuda.set_per_process_memory_fraction`, so past it the allocator frees
+    its cache and retries, and a true overrun is a clean OOM in the job report
+    rather than a card spilling into system memory. It is the share and not the
+    whole card because the aligner can sit beside vLLM (asr word times), whose
+    own share was admitted on its own estimate.
+    """
+    if backend_kind != CUDA_LINUX:
+        return None
+    return memory_bytes_estimate
+
+
 def worker_environment(env_dir: Path, inherited: dict[str, str] | None = None) -> dict[str, str]:
     """The environment a worker in `env_dir` needs, over what it inherits.
 

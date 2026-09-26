@@ -448,6 +448,11 @@ class QwenAsrRun:
             python=plan.python,
             script=ALIGN_WORKER_SCRIPT,
             log_path=self._config.logs_dir / f"asr-{self._job.id}-aligner.log",
+            # Beside vLLM on the PC, so capped at its OWN admitted share, not the
+            # card (`workerenv.torch_memory_cap`).
+            environment=workerenv.torch_allocator_environment(
+                self._config.backend_kind
+            ),
         )
         self._ctx.warming(
             f"loading {plan.manifest.id} on {device} at {plan.spec.dtype} for the "
@@ -460,6 +465,9 @@ class QwenAsrRun:
                     "model_dir": str(plan.weights_dir),
                     "device": device,
                     "dtype": plan.spec.dtype,
+                    "memory_cap_bytes": workerenv.torch_memory_cap(
+                        self._config.backend_kind, plan.spec.memory_bytes_estimate
+                    ),
                 },
                 ready_silence_timeout=READY_SILENCE_TIMEOUT_SECONDS,
             )

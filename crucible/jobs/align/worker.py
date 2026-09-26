@@ -193,6 +193,51 @@ def decode(ffmpeg: str, audio_path: str):
     return numpy.frombuffer(buffer, dtype=numpy.float32)
 
 
+
+# --------------------------------------------------------- the torch allocator
+#
+# Crucible's `workerenv` note has the measurement. On CUDA the server spawns this
+# worker with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` and sends its
+# admitted share as `memory_cap_bytes`. This worker is held across windows of
+# different lengths, which is how a caching allocator strands blocks until the
+# card spills into system memory.
+
+
+def cap_memory(torch, memory_cap_bytes):
+    """Cap this process's CUDA reservation at its admitted share, before any weights.
+
+    `None` is not CUDA (the server sends a cap only there), so nothing is set.
+    Past the cap the allocator frees its cache and retries; a true overrun is an
+    OOM naming the fraction, in this job's report, not a card paging the host.
+    """
+    if memory_cap_bytes is None:
+        return None
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            f"a CUDA memory cap of {memory_cap_bytes} bytes was sent and this "
+            "process sees no CUDA device"
+        )
+    total = torch.cuda.get_device_properties(0).total_memory
+    fraction = min(1.0, memory_cap_bytes / total)
+    torch.cuda.set_per_process_memory_fraction(fraction, 0)
+    return fraction
+
+
+def memory_line(torch, label):
+    """allocated / peak / reserved on CUDA to the engine log, then a fresh peak."""
+    if not torch.cuda.is_available():
+        return
+    gib = 1024 ** 3
+    print(
+        f"crucible memory {label}: allocated "
+        f"{torch.cuda.memory_allocated(0) / gib:.2f} GiB, peak "
+        f"{torch.cuda.max_memory_allocated(0) / gib:.2f} GiB, reserved "
+        f"{torch.cuda.memory_reserved(0) / gib:.2f} GiB",
+        file=sys.stderr,
+        flush=True,
+    )
+    torch.cuda.reset_peak_memory_stats(0)
+
 # -------------------------------------------------------------------- loading
 
 
@@ -201,6 +246,14 @@ def load(request: dict) -> None:
     model_dir = require(request, "model_dir", str)
     device = require(request, "device", str)
     dtype_name = require(request, "dtype", str)
+    # REQUIRED, AND NULL OFF CUDA: a producer that stopped sending it would run
+    # uncapped while everyone believed otherwise, `require`'s own reason.
+    if "memory_cap_bytes" not in request:
+        raise KeyError(
+            "the align request has no 'memory_cap_bytes'; it is required, and "
+            "null where there is no CUDA cap"
+        )
+    memory_cap_bytes = request["memory_cap_bytes"]
 
     try:
         import torch
@@ -218,16 +271,26 @@ def load(request: dict) -> None:
             "line verbatim"
         )
 
+    fraction = cap_memory(torch, memory_cap_bytes)
     started = time.time()
     model = Qwen3ForcedAligner.from_pretrained(
         model_dir, dtype=dtype, device_map=device
     )
     seconds = time.time() - started
+    memory_line(torch, "after load")
 
     _STATE.update(
         model=model, model_dir=model_dir, device=device, dtype=dtype_name
     )
-    send("ready", seconds=seconds, device=device, dtype=dtype_name)
+    send(
+        "ready",
+        seconds=seconds,
+        device=device,
+        dtype=dtype_name,
+        memory_cap_bytes=memory_cap_bytes,
+        memory_fraction=fraction,
+        alloc_conf=os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+    )
     send("done")
 
 
@@ -289,6 +352,12 @@ def align_one(model, audio, text: str, language: str, max_audio_s: float) -> lis
     ]
 
 
+def _torch():
+    import torch
+
+    return torch
+
+
 def align(request: dict) -> None:
     """The `align` op: one result per chunk, in the order the chunks arrived."""
     model = _STATE["model"]
@@ -332,6 +401,7 @@ def align(request: dict) -> None:
             send("result", error=f"{type(exc).__name__}: {exc}")
         else:
             send("result", items=items)
+        memory_line(_torch(), f"chunk {position}")
         report(position + 1)
 
     send("done")
