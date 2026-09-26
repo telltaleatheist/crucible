@@ -450,7 +450,7 @@ def declared_ids() -> dict[str, list[str]]:
                 *load_all_align_manifests(),
             }
         ),
-        "voice": sorted(load_all_voices()),
+        "voice": sorted(_declared_voice_ids()),
         "rvc": sorted(load_all_rvc_manifests()),
         "rvc-base": [RVC_BASE_ID],
         "denoise": sorted(denoisemodels.load_all_denoise_manifests()),
@@ -459,6 +459,54 @@ def declared_ids() -> dict[str, list[str]]:
         # on a PC). Whether THIS backend has the row is `subjects()`' answer.
         llamacpp.ENGINE_KIND: [llamacpp.LLAMA_CPP_ID],
     }
+
+
+def _declared_voice_ids() -> set[str]:
+    """Every voice id this BUILD declares, with the host taken out.
+
+    PHASE21 step 3 (2026-09-26) moved the fine-tunes into `voices/pins.toml`, and
+    `load_all_voices` serves a pinned voice only after reading its repo's
+    `crucible-voice.toml` (a download, and a private repo needs a token) and
+    applying THIS machine's `[tts.*]` footprint. Neither belongs in a question
+    about what the build declares: the release build on a machine with no token
+    and no footprint could not cut a release at all. So the ids come from what
+    the build ships: the packaged pins (not a home's), the engine's own rows,
+    and any packaged manifest.
+    """
+    from .voicerepo import _parse_pins, packaged_pins_path
+    from .voices import _engine_voices, _voices_in, voices_dir
+
+    pins_path = packaged_pins_path()
+    pinned = _parse_pins(pins_path.read_text(encoding="utf-8"), pins_path) if pins_path.is_file() else {}
+    return {*pinned, *_engine_voices(), *_voices_in(voices_dir())}
+
+
+def _declared_voice_backends(voice_id: str) -> dict[str, Any]:
+    """`{voice_id: <something with .backends>}` for `backends_declaring`, or `{}`.
+
+    An engine row or a packaged manifest answers from the build. A PINNED voice's
+    arms are in its repo's `crucible-voice.toml`, so only a voice a module names
+    by id is fetched, into a scratch cache rather than any machine's home, and
+    parsed without a machine's footprint.
+    """
+    import tempfile
+    from types import SimpleNamespace
+
+    from .voicerepo import _parse_pins, fetch_repo_manifest, packaged_pins_path, parse_repo_manifest
+    from .voices import _engine_voices, _voices_in, voices_dir
+
+    shipped = {**_engine_voices(), **_voices_in(voices_dir())}
+    if voice_id in shipped:
+        return {voice_id: shipped[voice_id]}
+    pins_path = packaged_pins_path()
+    pins = _parse_pins(pins_path.read_text(encoding="utf-8"), pins_path) if pins_path.is_file() else {}
+    pin = pins.get(voice_id)
+    if pin is None:
+        return {}
+    scratch = Path(tempfile.gettempdir()) / "crucible-declared-voices"
+    text, where = fetch_repo_manifest(scratch, pin)
+    repo = parse_repo_manifest(text, where)
+    return {voice_id: SimpleNamespace(backends=dict(repo.arms))}
 
 
 def backends_declaring(kind: str, subject_id: str) -> list[str]:
@@ -498,7 +546,7 @@ def backends_declaring(kind: str, subject_id: str) -> list[str]:
             load_all_asr_manifests,
             load_all_align_manifests,
         ),
-        "voice": (load_all_voices,),
+        "voice": (lambda: _declared_voice_backends(subject_id),),
         "rvc": (load_all_rvc_manifests,),
         "denoise": (denoisemodels.load_all_denoise_manifests,),
     }
