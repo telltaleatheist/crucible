@@ -18,22 +18,39 @@
 # or `PUT /v1/voices/{id}` with a `pin` body). Deleting a home row puts the
 # packaged pin back.
 #
-# ── EMPTY, AND ON PURPOSE (section 8, step 1) ────────────────────────────────
+# ── THE FIVE, SINCE 2026-09-26 (section 8, step 3) ──────────────────────────
 #
-# The five fine-tunes — deathstalker, mistborn, owen, sigma, thirdreich — are
-# still described by `crucible/voices/*.toml` in this build, and a packaged
-# manifest BEATS a pin for the same id (`voices.load_all_voices`). They move
-# here at step 8.3, in the same commit that deletes those five files, and NOT
-# before: their HF repos do not carry a `crucible-voice.toml` yet (step 8.2 is
-# the training side's), and a pin to a revision with no manifest is refused by
-# name and not served. That refusal is what makes this order safe.
-#
-# deathstalker and owen are about to be retrained, so those two are the first
-# deploys through the new door end to end and their manifests are written
-# `measured` by the retrain's own ladder. No migration of their old numbers is
-# worth doing first.
+# Each repo got its `crucible-voice.toml` in one commit on top of its weights
+# (training-pc-1, on Owen's go: "i dont want to re-measure. we should have
+# trustworthy settings"), exported from the PC's live settings and cross-checked
+# against the campaign records; the weights are unchanged. Those shas are pinned
+# below, and the five packaged `voices/*.toml` were deleted in the same commit.
+# Checked before pinning: `crucible voices check` accepts all five, and against
+# what each voice served that day none changes pace, band, cap, sampling,
+# takes or serving width. The repos' history was squashed, so the old revisions
+# (fadb104d, cd34dd1a, 8be4fd07, 379150a9, 36b9c6cd) no longer exist on the Hub.
 #
 # `higgs-default` and `zeroshot` are never listed here. They sit on Boson's
 # repo, which is not ours and cannot carry a manifest, and they are the ENGINE's
 # own base behaviour rather than voices anybody trains — see
 # `crucible/engines/higgs-v3/base.toml` and section 2.6.
+
+[deathstalker]
+hf_repo = "owenmorgan/deathstalker-higgs-v3"
+revision = "c111af710109031316ae7111e099f17b4522fd28"
+
+[mistborn]
+hf_repo = "owenmorgan/mistborn-higgs-v3"
+revision = "6635748299385ed00383bae761ff2acf14146f13"
+
+[owen]
+hf_repo = "owenmorgan/owen-morgan-higgs-v3"
+revision = "5885e74691be8c39d137dd8dd5b03813f822d1c4"
+
+[sigma]
+hf_repo = "owenmorgan/sigma-higgs-v3"
+revision = "f331ac7ec7919e8539a86c1b6663b2aba68d0271"
+
+[thirdreich]
+hf_repo = "owenmorgan/thirdreich-higgs-v3"
+revision = "f83ce206e82ca639fa8a16cddd7ace713f9027c6"
