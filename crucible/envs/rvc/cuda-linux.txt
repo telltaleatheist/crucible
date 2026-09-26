@@ -156,7 +156,14 @@ nvidia-nvjitlink-cu12==12.8.61
 nvidia-nvtx-cu12==12.8.55
 onnx-weekly==1.24.0.dev20260914
 onnx2torch-py313==1.6.0
-onnxruntime-gpu==1.27.0
+# 1.26.0, NOT the 1.27.0 the 2026-09-13 freeze resolved (2026-09-26). 1.27.0 is
+# a CUDA 13 build: its libonnxruntime_providers_cuda.so needs libcudart.so.13 and
+# libcublas.so.13, and this env's torch and nvidia-* wheels are CUDA 12.8, so
+# `import audio_separator` failed on the PC with "libcudart.so.13: cannot open
+# shared object file" and denoise never ran there. Read off each wheel's NEEDED
+# entries: 1.22.0 through 1.26.0 link libcudart.so.12, and 1.27.0 is the first
+# on 13. 1.26.0 is the newest that matches.
+onnxruntime-gpu==1.26.0
 packaging==26.3
 pedalboard==0.9.16
 pillow==12.3.0
