@@ -36,16 +36,23 @@ The wire, in full
             model's English NAME ("English"), mapped by the server. The context
             is fixed for the session because the session is one job.
 
-            {"op": "split", "ffmpeg", "source", "max_piece_s", "out_dir"}
+            {"op": "split", "ffmpeg", "source", "max_piece_s", "out_dir",
+             "region_s", "overlap_s"}
                 -> ready {duration_s, pieces}
-                   result {offset_s, duration_s, wav}     one per piece
+                   result {offset_s, duration_s, audio_offset_s,
+                           audio_duration_s, wav}          one per piece
                    done
-            Decode `source` with ffmpeg to 16 kHz mono, cut it into pieces of
-            at most `max_piece_s` at the quietest point near each boundary, and
-            write each piece to `out_dir` as a 16-bit PCM wav. `offset_s` is
-            relative to `source`. The server calls this on the job's input,
-            and again on one piece's own wav when that piece is re-decoded at a
-            smaller window (`loopguard.WINDOW_LADDER_SECONDS`).
+            Decode `source` with ffmpeg to 16 kHz mono (once per session: the
+            samples are kept), cut it, or the `region_s` [start, end] stretch
+            of it, into pieces of at most `max_piece_s` at the middle of the
+            quietest point near each boundary, and write each piece to
+            `out_dir` as a 16-bit PCM wav WITH `overlap_s` of real neighbouring
+            audio on both sides. `offset_s`/`duration_s` are the piece's CORE,
+            the stretch it owns; `audio_*` are what the wav holds. All seconds
+            are of `source`. The server calls this on the job's input with
+            `region_s` null, and again with a piece's core as `region_s` when
+            that piece is re-decoded at a smaller window
+            (`loopguard.window_ladder`).
 
             {"op": "transcribe", "pieces": [{"wav", "max_tokens"}]}
                 -> ready {pieces}
@@ -118,9 +125,11 @@ SAMPLE_RATE = 16_000
 #: the real one, so no timestamp moves.
 MIN_PIECE_SECONDS = 0.5
 
-#: The quiet-point search: the last 10 s before each nominal boundary is
-#: searched for the 100 ms window with the least energy, and the cut is made at
-#: its quietest sample. `qwen_asr` 0.0.6's `split_audio_into_chunks` searches
+#: The quiet-point search: the last 10 s before each nominal boundary (or half
+#: the piece, whichever is less) is searched for the 100 ms window with the
+#: least energy, and the cut is made at that window's CENTRE (2026-09-26; it was
+#: the window's quietest sample, which in a short pause is often the sample
+#: right against the next word). `qwen_asr` 0.0.6's `split_audio_into_chunks` searches
 #: 5 s EITHER side, so its pieces run up to 5 s past the limit it names; this
 #: searches the same 10 s entirely on the near side, so a piece is never longer
 #: than `max_piece_s` — the figure the aligner's trust, the token budget and
@@ -140,6 +149,11 @@ _STATE: dict = {
     "context": None,
     "max_batch": None,
     "max_new_tokens": None,
+    # The last source this session decoded, so a loop-guard re-cut of one stretch
+    # reads the same samples (and real neighbours for its overlap) without
+    # decoding a whole book again.
+    "decoded_source": None,
+    "decoded": None,
 }
 
 
@@ -224,8 +238,9 @@ def split_points(wav, max_piece_s: float) -> list:
     After `qwen_asr` 0.0.6's `split_audio_into_chunks` (Apache-2.0, Alibaba
     Qwen team), ported rather than imported because the llm env this runs in
     does not have `qwen_asr`, with the search moved to the near side of each
-    cut (`SEARCH_SECONDS`): every boundary is the quietest sample of the
-    quietest 100 ms window in the 10 s before the nominal cut.
+    cut (`SEARCH_SECONDS`): every boundary is the CENTRE of the quietest
+    100 ms window in the search span before the nominal cut, so a cut lands in
+    the middle of a pause rather than against its edge.
     """
     import numpy
 
@@ -249,8 +264,7 @@ def split_points(wav, max_piece_s: float) -> list:
                 magnitude, numpy.ones(window, dtype=numpy.float32), mode="valid"
             )
             quietest = int(numpy.argmin(sums))
-            inner = int(numpy.argmin(magnitude[quietest : quietest + window]))
-            boundary = left + quietest + inner
+            boundary = left + quietest + window // 2
         boundary = min(max(boundary, start + 1), total)
         spans.append((start, boundary))
         start = boundary
@@ -491,10 +505,25 @@ def load(request: dict) -> None:
 
 
 def split(request: dict) -> None:
+    """Cut `source` (or one stretch of it) into pieces, each written with overlap.
+
+    `region_s` is `[start, end]` in seconds of the source, or null for all of it;
+    a loop-guard re-cut names the stretch that looped. `overlap_s` is the real
+    audio written on BOTH sides of each piece's core, clamped at the source's
+    ends (Owen, 2026-09-26: the caller sets the piece length and the overlap).
+    A result's `offset_s`/`duration_s` are the CORE, the stretch the piece owns;
+    `audio_offset_s`/`audio_duration_s` are what was written, overlap included.
+    """
     ffmpeg = require(request, "ffmpeg", str)
     source = require(request, "source", str)
     max_piece_s = float(require(request, "max_piece_s", (int, float)))
     out_dir = require(request, "out_dir", str)
+    if "region_s" not in request:
+        raise KeyError("the qwen asr request has no 'region_s'; null means the whole source")
+    region = request["region_s"]
+    overlap_s = float(require(request, "overlap_s", (int, float)))
+    if overlap_s < 0:
+        raise ValueError(f"overlap_s is {overlap_s}; it is seconds of real audio, at least 0")
     os.makedirs(out_dir, exist_ok=True)
 
     last = [0.0]
@@ -506,27 +535,47 @@ def split(request: dict) -> None:
         last[0] = now
         send("progress", stage="decoding", processed_s=round(decoded_s, 1))
 
-    wav = decode(ffmpeg, source, progress)
-    total = wav.shape[0] / float(SAMPLE_RATE)
+    if _STATE["decoded_source"] == source:
+        wav = _STATE["decoded"]
+    else:
+        wav = decode(ffmpeg, source, progress)
+        _STATE["decoded_source"], _STATE["decoded"] = source, wav
+    total_samples = int(wav.shape[0])
+    total = total_samples / float(SAMPLE_RATE)
     if total <= 0:
         raise RuntimeError(f"{source} decoded to zero length")
-    spans = split_points(wav, max_piece_s)
+    if region is None:
+        region_first, region_last = 0, total_samples
+    else:
+        region_first = max(0, int(round(float(region[0]) * SAMPLE_RATE)))
+        region_last = min(total_samples, int(round(float(region[1]) * SAMPLE_RATE)))
+        if region_last <= region_first:
+            raise ValueError(f"region_s {region} holds no audio in {total:.1f}s of {source}")
+    spans = split_points(wav[region_first:region_last], max_piece_s)
     send("ready", duration_s=total, pieces=len(spans))
 
     import numpy
 
     minimum = int(MIN_PIECE_SECONDS * SAMPLE_RATE)
+    pad = int(round(overlap_s * SAMPLE_RATE))
     stem = os.path.splitext(os.path.basename(source))[0]
+    tag = "" if region is None else f".r{region_first}"
     for position, (first, last_sample) in enumerate(spans):
-        samples = wav[first:last_sample]
+        core_first = region_first + first
+        core_last = region_first + last_sample
+        audio_first = max(0, core_first - pad)
+        audio_last = min(total_samples, core_last + pad)
+        samples = wav[audio_first:audio_last]
         if samples.shape[0] < minimum:
             samples = numpy.pad(samples, (0, minimum - samples.shape[0]))
-        path = os.path.join(out_dir, f"{stem}.{position:05d}.wav")
+        path = os.path.join(out_dir, f"{stem}{tag}.{position:05d}.wav")
         write_wav(path, samples)
         send(
             "result",
-            offset_s=first / float(SAMPLE_RATE),
-            duration_s=(last_sample - first) / float(SAMPLE_RATE),
+            offset_s=core_first / float(SAMPLE_RATE),
+            duration_s=(core_last - core_first) / float(SAMPLE_RATE),
+            audio_offset_s=audio_first / float(SAMPLE_RATE),
+            audio_duration_s=(audio_last - audio_first) / float(SAMPLE_RATE),
             wav=path,
         )
     send("done")

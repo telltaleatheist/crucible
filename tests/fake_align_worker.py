@@ -171,11 +171,19 @@ def handle_align(results, request: dict) -> None:
                 items=[{"text": word, "start": 1.2, "end": 1.2} for word in words],
             )
             continue
+        # Speech starts `lead` seconds into a piece whose file says so (the qwen
+        # fake's overlapped pieces), as real speech starts after real overlap.
+        lead = 0.0
+        try:
+            with open(chunks[position]["audio"], encoding="utf-8") as handle:
+                lead = float(json.load(handle).get("lead", 0.0))
+        except (OSError, ValueError, AttributeError):
+            lead = 0.0
         send(
             results,
             "result",
             items=[
-                {"text": word, "start": at / 10.0, "end": (at + 1) / 10.0}
+                {"text": word, "start": lead + at / 10.0, "end": lead + (at + 1) / 10.0}
                 for at, word in enumerate(words)
             ],
         )

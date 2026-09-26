@@ -5,10 +5,10 @@ as the server runs the real one, looping over requests until stdin closes, and
 steered entirely by environment variables. No vLLM, no MLX, no audio.
 
 A "wav" this fake writes is a small JSON file, not audio: `{"start", "duration",
-"window"}` in ABSOLUTE seconds of the job's input. That is what lets a re-split
-of one piece (the loop guard's next rung) know where in the stream it is, so a
-test can say "the loop is at 200 s" and have it follow the audio through every
-re-cut, the way a real loop follows the real audio.
+"window", "lead"}` in ABSOLUTE seconds of the job's input, the piece's core and
+how far into its overlapped audio that core begins. A re-cut names its stretch
+in `region_s`, so a test can say "the loop is at 200 s" and have it follow the
+audio through every re-cut, the way a real loop follows the real audio.
 
     CRUCIBLE_FAKE_QWEN_DURATION_S   the input's duration (default 400).
     CRUCIBLE_FAKE_QWEN_LOOP_AT      an absolute second. The piece covering it
@@ -70,30 +70,36 @@ def handle_load(results, request: dict) -> None:
 
 
 def handle_split(results, request: dict) -> None:
-    source = request["source"]
+    """The real wire since 2026-09-26: `region_s` names the stretch to cut (null for
+    the whole input), `overlap_s` is written each side, and every offset is
+    ABSOLUTE seconds of the input. A piece's file records its core, the window it
+    was cut at, and `lead`, how far into its audio the core begins."""
     window = float(request["max_piece_s"])
-    try:
-        with open(source, encoding="utf-8") as handle:
-            piece = json.load(handle)
-        base, total = float(piece["start"]), float(piece["duration"])
-    except (OSError, ValueError, KeyError):
-        # The job's own input: not one of this fake's pieces.
-        base, total = 0.0, _float("CRUCIBLE_FAKE_QWEN_DURATION_S", 400.0)
+    overlap = float(request["overlap_s"])
+    total = _float("CRUCIBLE_FAKE_QWEN_DURATION_S", 400.0)
+    region = request["region_s"]
+    base, end = (0.0, total) if region is None else (float(region[0]), float(region[1]))
     os.makedirs(request["out_dir"], exist_ok=True)
-    count = max(1, math.ceil(total / window))
+    count = max(1, math.ceil((end - base) / window - 1e-9))
     send(results, "progress", stage="decoding", processed_s=total)
     send(results, "ready", duration_s=total, pieces=count)
-    stem = os.path.splitext(os.path.basename(source))[0]
+    stem = os.path.splitext(os.path.basename(request["source"]))[0]
+    tag = "" if region is None else f".r{base:g}"
     for position in range(count):
-        offset = position * window
-        duration = min(window, total - offset)
-        path = os.path.join(request["out_dir"], f"{stem}.{position:05d}.wav")
+        start = base + position * window
+        duration = min(window, end - start)
+        audio_start = max(0.0, start - overlap)
+        audio_end = min(total, start + duration + overlap)
+        path = os.path.join(request["out_dir"], f"{stem}{tag}.{position:05d}.wav")
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(
-                {"start": base + offset, "duration": duration, "window": window},
+                {"start": start, "duration": duration, "window": window,
+                 "lead": start - audio_start},
                 handle,
             )
-        send(results, "result", offset_s=offset, duration_s=duration, wav=path)
+        send(results, "result", offset_s=start, duration_s=duration,
+             audio_offset_s=audio_start, audio_duration_s=audio_end - audio_start,
+             wav=path)
     send(results, "done")
 
 

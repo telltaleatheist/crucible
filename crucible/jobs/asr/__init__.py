@@ -115,12 +115,14 @@ from pydantic import (
     StrictStr,
     ValidationError,
     field_validator,
+    model_validator,
 )
 
 from ... import accelerator, hosttools, jobenv, weights, workerenv, workers
 from ...asrmodels import (
     QWEN_ASR_ENGINES,
     QWEN_CONTEXT_MAX_TOKENS,
+    QWEN_PIECE_MAX_SECONDS,
     AsrManifest,
     AsrManifestError,
     RENAMED_ASR_IDS,
@@ -328,6 +330,24 @@ class AsrParams(BaseModel):
     asr clients already in the fleet send three keys. Blank is refused, a
     non-string is refused, and so is a context carrying the chat template's
     own control tokens (`_CHAT_CONTROL`).
+
+
+    `piece_s` and `overlap_s` — Qwen3-ASR's, the caller's to choose
+    ----------------------------------------------------------------
+    Owen, 2026-09-26: *"make it so the caller can determine how big the chunks
+    are and whether they overlap. and by how much"*. A Qwen job cuts its input
+    at quiet points into pieces of at most `piece_s` seconds, and writes each
+    with `overlap_s` of the real audio on both sides; a word heard twice is kept
+    by the piece whose own stretch holds its middle (`qwen.own_words`).
+
+    Both optional, with `None` meaning this server's defaults, which the
+    transcript records as the values it ran under (`qwen.DEFAULT_PIECE_S` 30,
+    `qwen.DEFAULT_OVERLAP_S` 0.4 with word timestamps and 0 without): the
+    clients in the fleet send neither. `piece_s` is 5 to 180 (the length every
+    Qwen engine was sized for, `asrmodels.QWEN_PIECE_MAX_SECONDS`); `overlap_s`
+    is 0 to 5 and less than half a piece. Whisper has neither and refuses both
+    by name; overlap on a job without word timestamps is refused too, because
+    only word times can say which piece a doubled word belongs to.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -337,6 +357,55 @@ class AsrParams(BaseModel):
     word_timestamps: bool
     initial_prompt: StrictStr | None = None
     context: StrictStr | None = None
+    piece_s: float | None = None
+    overlap_s: float | None = None
+
+    @field_validator("piece_s")
+    @classmethod
+    def piece_in_range(cls, value: float | None) -> float | None:
+        if value is not None and not (
+            qwen.MIN_PIECE_S <= value <= QWEN_PIECE_MAX_SECONDS
+        ):
+            raise ValueError(
+                f"piece_s is {value}; a piece is {qwen.MIN_PIECE_S:g} to "
+                f"{QWEN_PIECE_MAX_SECONDS} seconds, the longest the Qwen engines "
+                "were sized for. Send null for this server's default "
+                f"({qwen.DEFAULT_PIECE_S:g})"
+            )
+        return value
+
+    @field_validator("overlap_s")
+    @classmethod
+    def overlap_in_range(cls, value: float | None) -> float | None:
+        if value is not None and not (0.0 <= value <= qwen.MAX_OVERLAP_S):
+            raise ValueError(
+                f"overlap_s is {value}; it is 0 to {qwen.MAX_OVERLAP_S:g} seconds of "
+                "real audio on each side of a piece. Send null for this server's "
+                "default"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def overlap_under_half_a_piece(self) -> "AsrParams":
+        piece = self.piece_s if self.piece_s is not None else qwen.DEFAULT_PIECE_S
+        overlap = self.overlap_s if self.overlap_s is not None else 0.0
+        if overlap * 2 >= piece:
+            raise ValueError(
+                f"overlap_s {overlap:g} on both sides of a {piece:g} s piece hears "
+                "more of its neighbours than of itself; keep the overlap under half "
+                "the piece"
+            )
+        return self
+
+    def piece_seconds(self) -> float:
+        """The piece length this job runs under: the caller's, or the default."""
+        return self.piece_s if self.piece_s is not None else qwen.DEFAULT_PIECE_S
+
+    def overlap_seconds(self) -> float:
+        """The overlap this job runs under: the caller's, or the default for its mode."""
+        if self.overlap_s is not None:
+            return self.overlap_s
+        return qwen.DEFAULT_OVERLAP_S if self.word_timestamps else 0.0
 
     @field_validator("initial_prompt")
     @classmethod
@@ -833,6 +902,24 @@ class AsrJobType:
                 "system turn before every piece",
                 {"engine": engine, "field": "initial_prompt"},
             )
+        if not qwen_engine and (params.piece_s is not None or params.overlap_s is not None):
+            raise ApiError(
+                400,
+                "pieces_unsupported_by_engine",
+                f"{model_id!r} is whisper ({engine!r}), which decodes in its own "
+                "30-second windows; piece_s and overlap_s are how a Qwen3-ASR job "
+                "cuts its input. Send neither",
+                {"engine": engine, "piece_s": params.piece_s, "overlap_s": params.overlap_s},
+            )
+        if qwen_engine and not params.word_timestamps and (params.overlap_s or 0.0) > 0:
+            raise ApiError(
+                400,
+                "overlap_needs_word_timestamps",
+                f"overlap_s {params.overlap_s:g} makes neighbouring pieces hear the "
+                "same words, and only word times can say which piece keeps each "
+                "one. Send word_timestamps: true, or overlap_s: 0",
+                {"engine": engine, "overlap_s": params.overlap_s},
+            )
         if not qwen_engine and params.context is not None:
             raise ApiError(
                 400,
@@ -936,6 +1023,8 @@ class AsrJobType:
                 language=params.language,
                 context=params.context,
                 word_timestamps=params.word_timestamps,
+                piece_s=params.piece_seconds(),
+                overlap_s=params.overlap_seconds(),
             ).run()
         else:
             document = self._whisper(

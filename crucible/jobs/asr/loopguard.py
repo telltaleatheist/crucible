@@ -16,12 +16,15 @@ answer here: never accept a collapsed span silently.
 A LOOP IS WEATHER, SO IT GETS A BUDGET AND THEN A NAME. Greedy decoding is
 deterministic, so re-decoding the same audio the same way reproduces the loop;
 what changes the outcome is different INPUT. So the budget is a ladder of
-smaller windows over the same audio (`WINDOW_LADDER_SECONDS`): a piece that
-loops at 180 s is re-cut at quiet points into pieces of at most 60 s and
-decoded again, and a 60 s piece that still loops is re-cut to 20 s. A piece
-that loops at 20 s fails the job by name — `asr_decode_loop`, with its time
-range — because at that length there is nothing smaller to try that is still a
-transcript.
+smaller windows over the same audio (`window_ladder`): a piece that loops is
+re-cut at quiet points into pieces half its length and decoded again, and one
+that still loops is re-cut to a quarter. A piece that loops at the last rung
+fails the job by name — `asr_decode_loop`, with its time range — because at
+that length there is nothing smaller to try that is still a transcript.
+
+THE LADDER STARTS AT THE CALLER'S PIECE LENGTH since 2026-09-26 (Owen: the
+caller chooses how big the pieces are). It was a fixed 180 / 60 / 20 when every
+job cut at 180 s.
 
 WHY NOT A REPETITION PENALTY. It was considered and refused. vLLM's
 `repetition_penalty` and mlx-audio's both scale down EVERY token already in the
@@ -75,11 +78,16 @@ import re
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-#: The window each rung of the budget decodes at, largest first. The first rung
-#: is `QWEN_PIECE_MAX_SECONDS` (the aligner's own 180 s limit, asrmodels.py);
-#: each later one is a third of the one before, which is small enough to change
-#: what the decoder hears and large enough to still hold whole sentences.
-WINDOW_LADDER_SECONDS: tuple[int, ...] = (180, 60, 20)
+#: Each rung after the first is this fraction of the one before: small enough
+#: to change what the decoder hears, large enough to still hold a sentence at
+#: the default 30 s piece (30 -> 15 -> 7.5).
+WINDOW_LADDER_RATIO = 0.5
+WINDOW_LADDER_RUNGS = 3
+
+
+def window_ladder(piece_s: float) -> tuple[float, ...]:
+    """The windows a job decodes at, largest first: the piece length, then halves."""
+    return tuple(piece_s * WINDOW_LADDER_RATIO**rung for rung in range(WINDOW_LADDER_RUNGS))
 
 WORDS_PER_SECOND_CEILING = 8.0
 RATE_MIN_WORDS = 24
@@ -203,11 +211,11 @@ def alignment_signal(items: Sequence[dict[str, Any]]) -> LoopSignal | None:
     return None
 
 
-def next_window(level: int) -> int | None:
+def next_window(ladder: Sequence[float], level: int) -> float | None:
     """The window the next rung decodes at, or None when the budget is spent."""
     following = level + 1
-    if following < len(WINDOW_LADDER_SECONDS):
-        return WINDOW_LADDER_SECONDS[following]
+    if following < len(ladder):
+        return ladder[following]
     return None
 
 

@@ -250,11 +250,13 @@ def test_twelve_words_at_one_instant_is_a_collapse_eleven_is_not() -> None:
     assert "12 consecutive words" in signal.detail
 
 
-def test_the_ladder_is_180_then_60_then_20_then_nothing() -> None:
-    assert loopguard.WINDOW_LADDER_SECONDS == (180, 60, 20)
-    assert loopguard.next_window(0) == 60
-    assert loopguard.next_window(1) == 20
-    assert loopguard.next_window(2) is None
+def test_the_ladder_starts_at_the_piece_and_halves_twice_then_nothing() -> None:
+    ladder = loopguard.window_ladder(30.0)
+    assert ladder == (30.0, 15.0, 7.5)
+    assert loopguard.next_window(ladder, 0) == 15.0
+    assert loopguard.next_window(ladder, 1) == 7.5
+    assert loopguard.next_window(ladder, 2) is None
+    assert loopguard.window_ladder(180.0) == (180.0, 90.0, 45.0)
 
 
 def test_the_clock_names_a_place_a_person_can_find() -> None:

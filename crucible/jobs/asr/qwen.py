@@ -74,7 +74,6 @@ from ...asrmodels import (
     MLX_AUDIO_ENGINE,
     QWEN_ASR_TORCH_ENGINE,
     QWEN_CONTEXT_MAX_TOKENS,
-    QWEN_PIECE_MAX_SECONDS,
     VLLM_ENGINE,
     AsrBackendSpec,
 )
@@ -88,6 +87,28 @@ from ..base import Job, JobContext
 from . import loopguard
 
 QWEN_WORKER_SCRIPT = Path(__file__).resolve().parent / "qwen_worker.py"
+
+#: HOW BIG THE PIECES ARE AND HOW MUCH REAL AUDIO EACH CARRIES PAST ITS EDGES,
+#: the caller's to set (`piece_s`, `overlap_s`; Owen, 2026-09-26) and these when
+#: it does not.
+#:
+#: 30 s, not 180. training-pc-1 measured the 180 s cut dropping sentence
+#: openings: a cut at a pause lands a piece's first word at sample zero, and the
+#: model skips it (327 of 6,532 cues on The Coming of the Third Reich started
+#: with a dropped word; the same audio with 1.5 s of lead-in heard it). 30 s is
+#: the length WhisperX and faster-whisper settle on, and antirez's Qwen3-ASR port
+#: measured 120 s pieces repeating ~20% of their text and 180 s ones looping.
+#:
+#: 0.4 s of real audio each side is faster-whisper's `speech_pad_ms` default;
+#: Silero's own 30 ms is what Qwen's toolkit cuts with, and it has our problem.
+#: Overlap needs word timestamps: a word heard twice is kept only by the piece
+#: whose core holds its midpoint (`own_words`), and without word times nothing
+#: can say where a word is. So a plain-text job's default overlap is 0, and a
+#: plain-text job ASKING for overlap is refused (`asr/__init__.py`).
+DEFAULT_PIECE_S = 30.0
+DEFAULT_OVERLAP_S = 0.4
+MIN_PIECE_S = 5.0
+MAX_OVERLAP_S = 5.0
 
 #: How long either session may say nothing at all before it becomes ready.
 #: `asr`'s own figure, and the longest quiet stretch is the ASR load: 4.7 GB of
@@ -215,10 +236,18 @@ def gpu_memory_utilization(estimate: int, card_bytes: int) -> float:
 
 @dataclass
 class Piece:
-    """One stretch of the input, in absolute seconds, and what became of it."""
+    """One stretch of the input, in absolute seconds, and what became of it.
+
+    `start_s`/`duration_s` are the CORE, the stretch this piece owns and
+    reports; `audio_start_s`/`audio_duration_s` are what its wav holds, the core
+    plus the overlap on each side. The aligner's times are relative to the
+    audio start.
+    """
 
     start_s: float
     duration_s: float
+    audio_start_s: float
+    audio_duration_s: float
     wav: str
     level: int
     budget: int = 0
@@ -236,6 +265,72 @@ class Piece:
             f"{self.start_s:.1f}-{self.end_s:.1f}s "
             f"({loopguard.clock(self.start_s)}-{loopguard.clock(self.end_s)})"
         )
+
+
+def own_words(piece: Piece, *, is_last: bool) -> None:
+    """Keep the words whose midpoint lies in this piece's core, and their text.
+
+    THE RULE THAT MAKES OVERLAP SAFE. With `overlap_s` of real audio on both
+    sides, a word near a cut is heard by two pieces. Each keeps only the words
+    whose midpoint falls in its own core, [start, end), so every word is kept
+    exactly once and none is lost: the cores tile the source with no gap. The
+    last piece's core is closed at its end so the final word has an owner.
+
+    The TEXT is sliced to the kept words: from the first kept word's place in
+    the decoded text to the last one's, widened over punctuation and quotes
+    attached to them. The aligner's items are the text's own words in order,
+    so each is found by a forward search; one that is not found is a defect in
+    that assumption, and it fails the job by name rather than guessing a slice.
+    """
+    items = piece.items
+    if not items:
+        return
+    core_start = piece.start_s
+    core_end = piece.end_s
+    keep: list[int] = []
+    for position, item in enumerate(items):
+        middle = piece.audio_start_s + (float(item["start"]) + float(item["end"])) / 2
+        if middle >= core_start and (middle < core_end or (is_last and middle <= core_end)):
+            keep.append(position)
+    if len(keep) == len(items):
+        return
+    if not keep:
+        piece.items = []
+        piece.text = ""
+        return
+    spans = _word_spans(piece.text, items, piece.where())
+    first = spans[keep[0]][0]
+    last = spans[keep[-1]][1]
+    text = piece.text
+    while first > 0 and not text[first - 1].isspace():
+        first -= 1
+    while last < len(text) and not text[last].isspace():
+        last += 1
+    piece.items = [items[position] for position in keep]
+    piece.text = text[first:last]
+
+
+def _word_spans(
+    text: str, items: list[dict[str, Any]], where: str
+) -> list[tuple[int, int]]:
+    """Each aligner item's [start, end) character span in `text`, in order."""
+    lowered = text.lower()
+    cursor = 0
+    spans: list[tuple[int, int]] = []
+    for item in items:
+        word = str(item["text"]).lower()
+        found = lowered.find(word, cursor)
+        if not word or found < 0:
+            raise JobError(
+                "asr_overlap_unmapped",
+                f"the piece at {where}: the aligner's word {item['text']!r} is not "
+                f"in the decoded text after character {cursor}, so the overlap "
+                "cannot be trimmed to this piece's own words. Send overlap_s: 0 "
+                "to run without overlap",
+            )
+        spans.append((found, found + len(word)))
+        cursor = found + len(word)
+    return spans
 
 
 # ----------------------------------------------------------------------- run
@@ -261,6 +356,8 @@ class QwenAsrRun:
         language: str,
         context: str | None,
         word_timestamps: bool,
+        piece_s: float,
+        overlap_s: float,
     ) -> None:
         self._config = config
         self._backend = backend
@@ -276,6 +373,9 @@ class QwenAsrRun:
         self._language = language
         self._context = context
         self._word_timestamps = word_timestamps
+        self._piece_s = piece_s
+        self._overlap_s = overlap_s
+        self._ladder = loopguard.window_ladder(piece_s)
         self._asr: workers.WorkerSession | None = None
         self._align: workers.WorkerSession | None = None
         self._duration_s = 0.0
@@ -288,7 +388,7 @@ class QwenAsrRun:
     def run(self) -> dict[str, Any]:
         try:
             self._start_asr()
-            pending = self._split(str(self._audio), level=0, base_s=0.0)
+            pending = self._split(level=0, region=None)
             if self._word_timestamps:
                 self._start_aligner()
             while pending:
@@ -303,8 +403,10 @@ class QwenAsrRun:
         self._transcribe(pending)
         to_align: list[Piece] = []
         for piece in pending:
+            # Over the audio the model HEARD, overlap included, since that is
+            # what its text covers.
             signal = loopguard.text_signal(
-                piece.text, piece.duration_s, piece.hit_token_limit, piece.budget
+                piece.text, piece.audio_duration_s, piece.hit_token_limit, piece.budget
             )
             if signal is not None:
                 again += self._redecode(piece, signal)
@@ -325,14 +427,20 @@ class QwenAsrRun:
                 signal = loopguard.alignment_signal(piece.items)
                 if signal is not None:
                     again += self._redecode(piece, signal)
-                else:
+                    continue
+                own_words(piece, is_last=piece.end_s >= self._duration_s)
+                if piece.items:
                     self._land(piece)
+                else:
+                    # Every word it heard was in its overlap, owned by a
+                    # neighbour: this piece's own stretch was silence.
+                    self._silent += 1
         return again
 
     def _redecode(self, piece: Piece, signal: loopguard.LoopSignal) -> list[Piece]:
         """The next rung of the budget for one piece, or `asr_decode_loop`."""
-        window = loopguard.next_window(piece.level)
-        rungs = ", ".join(f"{s} s" for s in loopguard.WINDOW_LADDER_SECONDS)
+        window = loopguard.next_window(self._ladder, piece.level)
+        rungs = ", ".join(f"{s:g} s" for s in self._ladder)
         if window is None:
             raise JobError(
                 "asr_decode_loop",
@@ -345,17 +453,19 @@ class QwenAsrRun:
             {
                 "start": piece.start_s,
                 "end": piece.end_s,
-                "window_s": loopguard.WINDOW_LADDER_SECONDS[piece.level],
+                "window_s": self._ladder[piece.level],
                 "next_window_s": window,
                 "signal": signal.kind,
                 "detail": signal.detail,
             }
         )
         self._ctx.note(
-            f"re-decoding {piece.where()} in pieces of at most {window} s: "
+            f"re-decoding {piece.where()} in pieces of at most {window:g} s: "
             f"{signal.detail}"
         )
-        return self._split(piece.wav, level=piece.level + 1, base_s=piece.start_s)
+        # The CORE is re-cut, out of the original source, so the smaller pieces'
+        # overlap is the real audio either side and not the looping piece's own.
+        return self._split(level=piece.level + 1, region=(piece.start_s, piece.end_s))
 
     def _land(self, piece: Piece) -> None:
         self._finished.append(piece)
@@ -516,9 +626,11 @@ class QwenAsrRun:
 
     # ------------------------------------------------------------------ ops
 
-    def _split(self, source: str, *, level: int, base_s: float) -> list[Piece]:
-        window = loopguard.WINDOW_LADDER_SECONDS[level]
-        out_dir = self._ctx.scratch / "pieces" / f"w{window}"
+    def _split(
+        self, *, level: int, region: tuple[float, float] | None
+    ) -> list[Piece]:
+        window = self._ladder[level]
+        out_dir = self._ctx.scratch / "pieces" / f"level{level}"
 
         def on_progress(message: dict[str, Any]) -> None:
             if level == 0:
@@ -538,9 +650,11 @@ class QwenAsrRun:
             {
                 "op": "split",
                 "ffmpeg": self._ffmpeg,
-                "source": source,
+                "source": str(self._audio),
                 "max_piece_s": window,
                 "out_dir": str(out_dir),
+                "region_s": None if region is None else list(region),
+                "overlap_s": self._overlap_s,
             },
             on_progress,
         )
@@ -553,16 +667,20 @@ class QwenAsrRun:
             self._duration_s = float(outcome.ready["duration_s"])
             self._ctx.warming(
                 f"{self._duration_s:.0f}s of audio in {count} piece(s) of at most "
-                f"{window}s"
+                f"{window:g}s, {self._overlap_s:g}s of overlap each side"
             )
         max_new = int(self._spec.require("max_new_tokens"))
         return [
             Piece(
-                start_s=base_s + float(result["offset_s"]),
+                start_s=float(result["offset_s"]),
                 duration_s=float(result["duration_s"]),
+                audio_start_s=float(result["audio_offset_s"]),
+                audio_duration_s=float(result["audio_duration_s"]),
                 wav=str(result["wav"]),
                 level=level,
-                budget=loopguard.token_budget(float(result["duration_s"]), max_new),
+                budget=loopguard.token_budget(
+                    float(result["audio_duration_s"]), max_new
+                ),
             )
             for result in results
         ]
@@ -642,8 +760,8 @@ class QwenAsrRun:
             if self._word_timestamps:
                 row["words"] = [
                     {
-                        "start": piece.start_s + float(item["start"]),
-                        "end": piece.start_s + float(item["end"]),
+                        "start": piece.audio_start_s + float(item["start"]),
+                        "end": piece.audio_start_s + float(item["end"]),
                         "word": str(item["text"]),
                         # whisper's four keys, and the fourth is null on purpose:
                         # the aligner places words, it does not score them, and
@@ -680,7 +798,8 @@ class QwenAsrRun:
             "initial_prompt": None,
             "context": self._context,
             "duration_s": self._duration_s,
-            "piece_max_s": QWEN_PIECE_MAX_SECONDS,
+            "piece_max_s": self._piece_s,
+            "overlap_s": self._overlap_s,
             "pieces": len(self._finished) + self._silent,
             "silent_pieces": self._silent,
             "redecoded": self._redecoded,
