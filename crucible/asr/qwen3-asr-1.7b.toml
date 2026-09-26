@@ -107,9 +107,9 @@ kv_cache_memory_bytes = 3758096384
 #                  d_model 1024 over windowed attention, which is hundreds of
 #                  megabytes; 1 GiB is the round number above it.
 # + 3,758,096,384  the KV pool above.
-# The job's guard adds the aligner's 3,446,157,280 (align/qwen3-aligner.toml),
-# so a word-timestamped job needs 14,452,912,008 B (13.46 GiB) of the 3090 Ti's
-# 24 GiB. It does not fit beside a resident 9B, and it is refused by name there
+# The job's guard adds the aligner's 5,905,580,032 (align/qwen3-aligner.toml,
+# measured 2026-09-26), so a word-timestamped job needs 16,912,334,760 B
+# (15.75 GiB) of the 3090 Ti's 24 GiB. It does not fit beside a resident 9B, and it is refused by name there
 # rather than unloading somebody's model.
 memory_bytes_estimate = 11006754728
 

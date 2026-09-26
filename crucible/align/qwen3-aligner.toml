@@ -32,20 +32,21 @@ revision = "c7cbfc2048c462b0d63a45797104fc9db3ad62b7"
 # is bfloat16 and there is no branch.
 dtype = "bfloat16"
 
-# COMPUTED, NOT MEASURED, and this line is what says so.
+# MEASURED on the 3090 Ti, 2026-09-26, and it REPLACES a computed 3,446,157,280
+# that was 1.4 GiB short. Measured because 1.0.41 caps a plain-torch worker at
+# this number (`workerenv.torch_memory_cap`), and the computed figure turned a
+# legitimate 300 s window into an OOM at "3.21 GiB allowed". The window was 300 s
+# of The Coming of the Third Reich with 742 words, the longest this job accepts
+# (QWEN3_MAX_AUDIO_S), aligned by the worker directly, uncapped, with
+# `expandable_segments:True`:
 #
-#   1,835,544,544  model.safetensors, exactly, from the HuggingFace API
-# + 1,610,612,736  a declared 1.5 GiB for the CUDA context, cuBLAS/cuDNN
-#                  workspaces, and the activations of one 300-second window —
-#                  the longest input this job type accepts (QWEN3_MAX_AUDIO_S)
-# ---------------
-#   3,446,157,280
+#   after load      allocated 1.72 GiB
+#   300 s window    peak allocated 3.89 GiB, reserved 4.55 GiB
 #
-# The same basis every `asr/*.toml` uses, and the same caveat: nobody has run
-# this aligner under Crucible on a card (the 3090 Ti was on an overnight
-# fine-tune when this was written), and the first real book is what replaces this
-# arithmetic with a measurement.
-memory_bytes_estimate = 3446157280
+# 5.5 GiB = the measured reservation plus 0.95 GiB for the CUDA context and
+# cuBLAS workspaces, which torch does not count. The Mac measured 5,885,296,640
+# for the same model from outside (mlx-darwin block), which agrees.
+memory_bytes_estimate = 5905580032
 
 [backends.mlx-darwin]
 # THE MAC IS A REAL ALIGN BACKEND, and unlike `asr` it needs no second engine.
