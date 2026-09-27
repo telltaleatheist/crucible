@@ -59,7 +59,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from . import capability, catalog, interpreter, jobenv, workerenv
+from . import capability, catalog, interpreter, jobenv
 from .backend import LLAMA_WINDOWS, Backend
 from .config import Config
 from .errors import ApiError, CrucibleError
@@ -379,11 +379,12 @@ def env_installed(config: Config, backend: Backend, job_type: str, engine: str |
             # Native Windows owns a llama.cpp executable, not a Python venv.
             # Use the same installed predicate as model loading and /v1/models.
             return llm_engine_status(config, backend).installed
-        if job_type in workerenv.WORKER_JOB_TYPES:
-            return workerenv.env_status(config.home, job_type, backend.kind).installed
-        spec = jobenv.tts_env(engine or "", backend.kind)
+        if job_type in jobenv.WORKER_JOB_TYPES:
+            spec = jobenv.worker_env(job_type, backend.kind)
+        else:
+            spec = jobenv.tts_env(engine or "", backend.kind)
         return jobenv.env_status(config.home, spec, backend.kind).installed
-    except (jobenv.EnvError, workerenv.WorkerEnvError):
+    except jobenv.EnvError:
         # An env whose recipe or directory cannot be read is not an env that is
         # installed. Reported as "not installed" rather than raised, because the
         # install about to run is exactly what would fix it — and it will raise

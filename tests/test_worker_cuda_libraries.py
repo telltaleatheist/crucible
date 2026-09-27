@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from crucible import workerenv
+from crucible import workers
 
 
 def make_env(root: Path, nvidia: list[str] = (), bundled: list[str] = ()) -> Path:
@@ -45,7 +45,7 @@ def make_env(root: Path, nvidia: list[str] = (), bundled: list[str] = ()) -> Pat
 
 def test_every_nvidia_lib_dir_in_the_env_is_found(tmp_path: Path) -> None:
     env = make_env(tmp_path / "asr", nvidia=["cublas", "cudnn", "cuda_nvrtc"])
-    found = workerenv.cuda_library_path(env)
+    found = workers.cuda_library_path(env)
     assert found is not None
     parts = found.split(os.pathsep)
     assert any(p.endswith(os.path.join("nvidia", "cublas", "lib")) for p in parts)
@@ -56,7 +56,7 @@ def test_every_nvidia_lib_dir_in_the_env_is_found(tmp_path: Path) -> None:
 def test_auditwheel_bundled_libs_are_found_too(tmp_path: Path) -> None:
     """`ctranslate2.libs` is where the linker looks for the package's own .so."""
     env = make_env(tmp_path / "asr", nvidia=["cublas"], bundled=["ctranslate2.libs", "numpy.libs"])
-    parts = (workerenv.cuda_library_path(env) or "").split(os.pathsep)
+    parts = (workers.cuda_library_path(env) or "").split(os.pathsep)
     assert any(p.endswith("ctranslate2.libs") for p in parts)
     assert any(p.endswith("numpy.libs") for p in parts)
 
@@ -66,7 +66,7 @@ def test_the_list_is_DERIVED_so_a_different_package_set_still_works(tmp_path: Pa
     cu13, with nothing here edited — which is what stops this fix going stale in
     the one way that would look identical to the bug it fixes."""
     env = make_env(tmp_path / "align", nvidia=["cu13", "cusparselt", "nccl"])
-    parts = (workerenv.cuda_library_path(env) or "").split(os.pathsep)
+    parts = (workers.cuda_library_path(env) or "").split(os.pathsep)
     assert any(p.endswith(os.path.join("nvidia", "cu13", "lib")) for p in parts)
     assert any(p.endswith(os.path.join("nvidia", "nccl", "lib")) for p in parts)
     assert not any("cublas" in p for p in parts), "invented a directory this env does not have"
@@ -77,19 +77,19 @@ def test_an_env_with_no_cuda_packages_answers_None_not_an_empty_string(tmp_path:
     tell that from "an empty path" — passing LD_LIBRARY_PATH='' would SHADOW the
     inherited one rather than leave it alone."""
     env = make_env(tmp_path / "cpu")
-    assert workerenv.cuda_library_path(env) is None
-    assert workerenv.worker_environment(env) == {}
+    assert workers.cuda_library_path(env) is None
+    assert workers.worker_environment(env) == {}
 
 
 def test_no_venv_at_all_is_None(tmp_path: Path) -> None:
-    assert workerenv.cuda_library_path(tmp_path / "missing") is None
+    assert workers.cuda_library_path(tmp_path / "missing") is None
 
 
 def test_an_operators_own_LD_LIBRARY_PATH_survives(tmp_path: Path) -> None:
     """PREPENDED, never replaced: the env's libraries win the search ORDER, not
     the variable. Somebody who set this for their own reasons keeps it."""
     env = make_env(tmp_path / "asr", nvidia=["cublas"])
-    out = workerenv.worker_environment(env, inherited={"LD_LIBRARY_PATH": "/opt/mine"})
+    out = workers.worker_environment(env, inherited={"LD_LIBRARY_PATH": "/opt/mine"})
     value = out["LD_LIBRARY_PATH"]
     assert value.endswith(os.pathsep + "/opt/mine"), value
     assert value.split(os.pathsep)[0].endswith(os.path.join("nvidia", "cublas", "lib"))
@@ -97,6 +97,6 @@ def test_an_operators_own_LD_LIBRARY_PATH_survives(tmp_path: Path) -> None:
 
 def test_with_nothing_inherited_the_variable_is_just_the_env_s_own(tmp_path: Path) -> None:
     env = make_env(tmp_path / "asr", nvidia=["cublas"])
-    out = workerenv.worker_environment(env, inherited={})
+    out = workers.worker_environment(env, inherited={})
     assert os.pathsep not in out["LD_LIBRARY_PATH"].rstrip(os.pathsep) or True
     assert not out["LD_LIBRARY_PATH"].endswith(os.pathsep)

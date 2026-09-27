@@ -67,7 +67,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import capability as capability_classes
-from . import catalog, jobenv, ladder, workerenv
+from . import catalog, jobenv, ladder
 from .backend import Backend
 from .config import Config
 from .errors import ApiError
@@ -637,8 +637,8 @@ def _pull_of(subject: catalog.Subject) -> Pull:
 def _env_bytes(installer: str, engine: str | None, backend_kind: str) -> int | None:
     """The recipe's own `# archive-bytes:` floor, or None when it has none."""
     try:
-        if installer in workerenv.WORKER_JOB_TYPES:
-            recipe = workerenv.recipe_for(installer, backend_kind)
+        if installer in jobenv.WORKER_JOB_TYPES:
+            recipe = jobenv.recipe_for(jobenv.worker_env(installer, backend_kind))
         elif installer == "tts":
             recipe = jobenv.recipe_for(jobenv.tts_env(engine or "", backend_kind))
         else:

@@ -74,11 +74,11 @@ def test_the_mac_asr_recipe_installs_mlx_whisper_and_not_faster_whisper() -> Non
     before the table was keyed by backend it would have looked in the mlx
     recipe for faster-whisper and refused an env that was perfectly good.
     """
-    from crucible import workerenv
+    from crucible import jobenv
 
-    assert workerenv.headline_package("asr", "mlx-darwin") == "mlx-whisper"
-    recipe = workerenv.recipe_for("asr", "mlx-darwin")
-    pins = workerenv.recipe_pins(recipe)
+    assert jobenv.worker_env("asr", "mlx-darwin").headline == "mlx-whisper"
+    recipe = jobenv.recipe_for(jobenv.worker_env("asr", "mlx-darwin"))
+    pins = jobenv.recipe_pins(recipe)
     assert pins["mlx-whisper"] == "0.4.3"
     assert "faster-whisper" not in pins
     assert "ctranslate2" not in pins

@@ -15,7 +15,7 @@ and BookForge runs the two out of one env for that reason today
 `crucible install rvc` builds the env for both and decides both capability
 flags. This is the first job type whose env belongs to another type, and the one
 place that is written down as a fact rather than as a coincidence is
-`workerenv.JOB_TYPES_SERVED_BY_ENV`.
+`jobenv.JOB_TYPES_SERVED_BY_ENV`.
 
 What is the client's and what is the server's
 ---------------------------------------------
@@ -79,7 +79,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from ... import accelerator, workerenv, workers
+from ... import accelerator, jobenv, workers
 from ...backend import CUDA_LINUX
 from ...config import Config
 from ...denoisemodels import (
@@ -391,8 +391,10 @@ class DenoiseJobType:
 
     def check(self, backend: Any) -> JobTypeStatus:
         try:
-            env = workerenv.env_status(self._config.home, ENV_JOB_TYPE, backend.kind)
-        except workerenv.WorkerEnvError as exc:
+            env = jobenv.env_status(
+                self._config.home, jobenv.worker_env(ENV_JOB_TYPE, backend.kind), backend.kind
+            )
+        except jobenv.EnvError as exc:
             return JobTypeStatus(ready=False, detail=str(exc))
         if not env.installed:
             return JobTypeStatus(
@@ -468,19 +470,17 @@ class DenoiseJobType:
             host_name=self._backend.gpu.name,
         )
         try:
-            python = workerenv.require_env(
-                self._config.home, ENV_JOB_TYPE, backend_kind
+            python = jobenv.require_env(
+                self._config.home, jobenv.worker_env(ENV_JOB_TYPE, backend_kind), backend_kind
             )
-        except workerenv.WorkerEnvError as exc:
+        except jobenv.EnvError as exc:
             raise ApiError(
                 409,
                 "env_missing",
                 f"cannot run {model_id!r}: {exc} (denoise shares the rvc env)",
                 {
                     "model": model_id,
-                    "env": str(
-                        workerenv.worker_env_dir(self._config.home, ENV_JOB_TYPE)
-                    ),
+                    "env": str(self._config.home / "envs" / ENV_JOB_TYPE),
                 },
             ) from None
         root = _require_model_files(self._config, manifest)

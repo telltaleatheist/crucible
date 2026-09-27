@@ -78,6 +78,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from . import hosttools, procgroup
+from .backend import CUDA_LINUX
 from .errors import CrucibleError, JobCancelled
 from .logtail import tail_of_last_run
 
@@ -812,3 +813,139 @@ def _log_tail(log_path: Path, lines: int = LOG_TAIL_LINES) -> str:
         # about something else.
         return f"Its log is {log_path} (empty or unreadable)."
     return f"Last {lines} lines of the latest run in {log_path}:\n{tail}"
+
+
+# ---------------------------------------------------------------------------
+# THE LIBRARIES A WORKER FINDS AT COMPUTE TIME, WHICH ARE NOT THE ONES IT
+# FINDS AT IMPORT TIME
+# ---------------------------------------------------------------------------
+#
+# MEASURED 2026-09-15 on owens-pc, against a `crucible doctor` that reported
+# `asr` as `ready: True` with the weights installed and 0 problems. The first
+# real transcribe answered:
+#
+#     asr_window_failed — window 0 (0s):
+#     RuntimeError: Library libcublas.so.12 is not found or cannot be loaded
+#
+# The library was never missing. `nvidia-cublas-cu12` ships it inside the env at
+# `site-packages/nvidia/cublas/lib/libcublas.so.12`, and it was there the whole
+# time. What was missing is the loader path: pip puts CUDA libraries in
+# per-package directories that the dynamic linker has no reason to search, and
+# ctranslate2 links them with no RPATH pointing at that layout.
+#
+# WHY IT LOOKS LIKE HEALTH, and why the doctor could not have caught it. The
+# model LOADS without these — `WhisperModel(..., device="cuda")` constructs
+# fine, which is what any readiness probe would check. ctranslate2 resolves
+# cuBLAS LAZILY, at the first matrix multiply, so the failure is not at import,
+# not at load, and not at the first request either: it is at the first COMPUTE.
+# Every check short of actually transcribing a second of audio passes.
+#
+# It cost a wrong diagnosis on the way in, which is worth recording: the first
+# A/B ran `WhisperModel(...)` with and without the path, both succeeded, and the
+# hypothesis was discarded as disproved. The experiment was measuring the wrong
+# moment. Reproducing the real failure — transcribe, not load — showed the
+# control failing with the job's exact message and the treatment returning three
+# segments.
+#
+# DERIVED FROM THE ENV, never hardcoded: whatever `nvidia/*/lib` directories that
+# env actually contains, plus the package's own bundled `.libs`. A list written
+# here would go stale the day a recipe pins a different CUDA package set, and the
+# staleness would look exactly like this defect does.
+
+
+def cuda_library_path(env_dir: Path) -> str | None:
+    """`LD_LIBRARY_PATH` additions for an env whose CUDA libs came from pip.
+
+    `None` when there is nothing to add, so a caller can tell "no CUDA packages
+    here" (a CPU env, a Mac) from "an empty path", and pass nothing rather than
+    an empty variable that would shadow the inherited one.
+    """
+    site = sorted(env_dir.glob("lib/python*/site-packages"))
+    if not site:
+        return None
+    packages = site[0]
+    directories: list[str] = []
+    # Every `nvidia/<package>/lib` this env actually has.
+    nvidia = packages / "nvidia"
+    if nvidia.is_dir():
+        for child in sorted(nvidia.iterdir()):
+            lib = child / "lib"
+            if lib.is_dir():
+                directories.append(str(lib))
+    # auditwheel-style bundled libraries (`ctranslate2.libs`, and friends).
+    for bundled in sorted(packages.glob("*.libs")):
+        if bundled.is_dir():
+            directories.append(str(bundled))
+    return os.pathsep.join(directories) if directories else None
+
+
+#: PLAIN-TORCH WORKERS ON CUDA: THE ALLOCATOR (2026-09-26, Owen via training-pc-1).
+#:
+#: A resident torch worker fed inputs of VARYING length strands blocks in the
+#: CUDA caching allocator. Measured that night on this PC's 3090 Ti by
+#: training-pc-1, on a plain-transformers Qwen3-ASR-1.7B worker outside
+#: Crucible: allocated peaked at 7.4 GB while RESERVED climbed 7.7 -> 10.2 ->
+#: 12.8 GB within 110 clips and past 21 GB by 1,400. The card filled, 3.3 GB
+#: spilled into Windows shared GPU memory, and host commit hit 69.6 of 69.9 GB.
+#: With `expandable_segments:True` and a per-process cap, reserved tracked the
+#: peak and held flat at 5.6-5.9 GB.
+#:
+#: Crucible has two such workers on CUDA: the Qwen3 forced aligner
+#: (`jobs/align/worker.py`: the resident aligner, the one beside vLLM for asr
+#: word times, and align-longform's) and audio-separator (`jobs/denoise/worker.py`),
+#: both held across inputs of different lengths. NOT vLLM, whose own pool
+#: rejects expandable segments; not faster-whisper (CTranslate2, not torch); not
+#: rvc, which spawns a fresh urvc process per render.
+TORCH_ALLOC_CONF_VAR = "PYTORCH_CUDA_ALLOC_CONF"
+TORCH_ALLOC_CONF = "expandable_segments:True"
+
+
+def torch_allocator_environment(
+    backend_kind: str, inherited: dict[str, str] | None = None
+) -> dict[str, str]:
+    """`PYTORCH_CUDA_ALLOC_CONF` for a plain-torch worker on CUDA, or `{}`.
+
+    Set in the worker's ENVIRONMENT at spawn, so it is there before the worker
+    imports torch, which is the only moment the allocator reads it. `{}` on any
+    other backend (the variable is CUDA's) and when the operator has set the
+    variable for their own reasons: theirs is kept, not overwritten.
+    """
+    if backend_kind != CUDA_LINUX:
+        return {}
+    base = os.environ if inherited is None else inherited
+    if TORCH_ALLOC_CONF_VAR in base:
+        return {}
+    return {TORCH_ALLOC_CONF_VAR: TORCH_ALLOC_CONF}
+
+
+def torch_memory_cap(backend_kind: str, memory_bytes_estimate: int) -> int | None:
+    """The bytes a plain-torch worker may reserve on CUDA, or None elsewhere.
+
+    ITS ADMITTED SHARE: the manifest's `memory_bytes_estimate` for this backend,
+    the number the card's guard admitted it on. The worker hands it to
+    `torch.cuda.set_per_process_memory_fraction`, so past it the allocator frees
+    its cache and retries, and a true overrun is a clean OOM in the job report
+    rather than a card spilling into system memory. It is the share and not the
+    whole card because the aligner can sit beside vLLM (asr word times), whose
+    own share was admitted on its own estimate.
+    """
+    if backend_kind != CUDA_LINUX:
+        return None
+    return memory_bytes_estimate
+
+
+def worker_environment(env_dir: Path, inherited: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment a worker in `env_dir` needs, over what it inherits.
+
+    PREPENDED rather than replacing: an operator who has set `LD_LIBRARY_PATH`
+    for their own reasons keeps it, and the env's own libraries win only over
+    the search order, never over the variable.
+    """
+    base = dict(os.environ if inherited is None else inherited)
+    addition = cuda_library_path(env_dir)
+    if addition is None:
+        return {}
+    existing = base.get("LD_LIBRARY_PATH", "")
+    return {
+        "LD_LIBRARY_PATH": addition + (os.pathsep + existing if existing else "")
+    }

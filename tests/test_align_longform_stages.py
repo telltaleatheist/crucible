@@ -34,10 +34,10 @@ def window(words):
 def run(monkeypatch, results):
     monkeypatch.setattr(stages.workers, "run_worker", lambda **_: FakeOutcome(results))
     monkeypatch.setattr(
-        stages.workerenv, "worker_environment", lambda *_args, **_kw: {}
+        stages.workers, "worker_environment", lambda *_args, **_kw: {}
     )
     return stages.transcribe(
-        home=stages.Path("/nowhere"), python=stages.Path("/nowhere/python"),
+        python=stages.Path("/nowhere/python"),
         weights_dir=stages.Path("/nowhere/weights"), ffmpeg="ffmpeg",
         audio=stages.Path("/nowhere/book.m4b"), language="en",
         log_path=stages.Path("/nowhere/log"),

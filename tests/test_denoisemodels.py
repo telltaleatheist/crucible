@@ -530,9 +530,9 @@ def rvc_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     import sys
 
-    from crucible import workerenv
+    from crucible import jobenv
 
-    directory = workerenv.worker_env_dir(home, "rvc")
+    directory = home / "envs" / "rvc"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
     (directory / "crucible-env.json").write_text(
@@ -547,14 +547,14 @@ def rvc_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ),
         encoding="utf-8",
     )
-    recipe = workerenv.recipe_for("rvc", FAKE_BACKEND.kind)
-    pins = workerenv.recipe_pins(recipe)
-    refs = workerenv.recipe_direct_refs(recipe)
+    recipe = jobenv.recipe_for(jobenv.worker_env("rvc", FAKE_BACKEND.kind))
+    pins = jobenv.recipe_pins(recipe)
+    refs = jobenv.recipe_direct_references(recipe)
     monkeypatch.setattr(
-        workerenv, "installed_packages", lambda _home, _type: dict(pins)
+        jobenv, "installed_packages", lambda _home, _type: dict(pins)
     )
     monkeypatch.setattr(
-        workerenv, "installed_direct_refs", lambda _home, _type: dict(refs)
+        jobenv, "installed_direct_references", lambda _home, _type: dict(refs)
     )
     return directory
 
