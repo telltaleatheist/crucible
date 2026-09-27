@@ -260,31 +260,13 @@ def _params(model: type[BaseModel], params: dict[str, Any], job_type: str) -> An
         ) from None
 
 
-def ffmpeg_path() -> str | None:
-    """Where ffmpeg is on this host, or None.
-
-    A module-level probe, for the reason `crucible/accelerator.py` gives about
-    its own: a test replaces it and asserts on the refusal, instead of asserting
-    on whatever happens to be installed on the machine running the suite. The
-    search goes through `crucible/hosttools.py`, the one owner of *which PATH
-    was searched* — which is what the refusals below have to name.
-    """
-    return hosttools.which("ffmpeg")
-
-
 def _require_ffmpeg() -> str:
-    found = ffmpeg_path()
-    if found is None:
-        raise ApiError(
-            409,
-            "ffmpeg_missing",
-            "there is no ffmpeg on this server's PATH, and align decodes every "
-            "chunk through it to 16 kHz mono float32 — the rate the model's "
-            "feature extractor was trained at, which is why it is not something a "
-            "client is asked to do. " + hosttools.searched_note(),
-            {"path": hosttools.search_path()},
-        )
-    return found
+    return hosttools.require_ffmpeg(
+        "align",
+        "decodes every chunk through it to 16 kHz mono float32 — the rate the "
+        "model's feature extractor was trained at, which is why it is not "
+        "something a client is asked to do.",
+    )
 
 
 def _align_provenance(backend_kind: str, model: str | None) -> dict[str, Any] | None:
@@ -386,7 +368,7 @@ class AlignJobType:
             return JobTypeStatus(ready=False, detail=str(exc))
         if not env.installed:
             return JobTypeStatus(ready=False, detail=env.detail)
-        if ffmpeg_path() is None:
+        if hosttools.ffmpeg_path() is None:
             return JobTypeStatus(
                 ready=False,
                 detail=f"{env.detail}; but there is no ffmpeg on PATH, and align "

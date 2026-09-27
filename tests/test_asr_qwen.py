@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, jobenv
+from crucible import accelerator, hosttools, jobenv
 from crucible.accelerator import GIB
 from crucible.alignmodels import load_align_manifest
 from crucible.asrmodels import (
@@ -334,7 +334,7 @@ def _stage(home: Path, monkeypatch: pytest.MonkeyPatch, backend_kind: str, *, al
     _stamp_weights(home, ALIGNER, load_align_manifest(ALIGNER).spec(backend_kind), backend_kind)
     monkeypatch.setattr(qwen, "QWEN_WORKER_SCRIPT", FAKE_QWEN)
     monkeypatch.setattr(qwen, "ALIGN_WORKER_SCRIPT", FAKE_ALIGN)
-    monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: "/usr/bin/ffmpeg")
     monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
 
 

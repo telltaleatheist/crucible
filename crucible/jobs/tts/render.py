@@ -181,7 +181,6 @@ from ...errors import ApiError, JobCancelled, JobError
 from ...narratorvoices import take_sampling
 from ...residency import KIND_TTS, Residency, describe_resident
 from ...voices import VoiceManifest
-from .. import asr
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from .common import (
     voice_load_plan,
@@ -363,25 +362,18 @@ class TtsParams(BaseModel):
 def _require_ffmpeg() -> str:
     """ffmpeg's path, or `ffmpeg_missing` by name before the job is queued.
 
-    The same probe `asr` uses, deliberately: one question about this host asked
-    in one place, so a test that replaces it covers both types and a host without
-    ffmpeg refuses both by the same name. The reason differs — `asr` decodes
-    through it, `tts` encodes through it — and so the message does.
+    The same probe every type uses (`hosttools.require_ffmpeg`); the reason
+    differs — `asr` decodes through it, `tts` encodes through it — and so the
+    message does.
     """
-    found = asr.ffmpeg_path()
-    if found is None:
-        raise ApiError(
-            409,
-            "ffmpeg_missing",
-            "there is no ffmpeg on this server's PATH, and tts encodes every "
-            "chunk through it: narrator returns base64 PCM16 and the artifact "
-            "BookForge's assembly expects is a mono FLAC. The alternative is "
-            "linking libsndfile into the server's own interpreter, which is a "
-            "compiled audio dependency in a process that deliberately imports "
-            "no engine at all. " + hosttools.searched_note(),
-            {"path": hosttools.search_path()},
-        )
-    return found
+    return hosttools.require_ffmpeg(
+        "tts",
+        "encodes every chunk through it: narrator returns base64 PCM16 and the "
+        "artifact BookForge's assembly expects is a mono FLAC. The alternative is "
+        "linking libsndfile into the server's own interpreter, which is a "
+        "compiled audio dependency in a process that deliberately imports no "
+        "engine at all.",
+    )
 
 
 #: The three rates in narrator's spelling, in the order a message prints them.
@@ -870,7 +862,7 @@ class TtsJobType:
         return manifest.spec(self._config.backend_kind).memory_bytes_estimate
 
     def check(self, backend: Any) -> JobTypeStatus:
-        if asr.ffmpeg_path() is None:
+        if hosttools.ffmpeg_path() is None:
             return JobTypeStatus(
                 ready=False,
                 detail=(

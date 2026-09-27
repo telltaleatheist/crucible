@@ -688,18 +688,6 @@ def _python_for(config: Config, engine: str, backend_kind: str, model_id: str) -
         ) from None
 
 
-def ffmpeg_path() -> str | None:
-    """Where ffmpeg is on this host, or None.
-
-    A module-level probe, for the reason `crucible/accelerator.py` gives about
-    its own: a test replaces it and asserts on the refusal, instead of asserting
-    on whatever happens to be installed on the machine running the suite. The
-    search itself goes through `crucible/hosttools.py`, which is the one owner of
-    *which PATH was searched* — the fact every refusal below has to name.
-    """
-    return hosttools.which("ffmpeg")
-
-
 def _require_ffmpeg() -> str:
     """ffmpeg's path, or a refusal by name before the job is queued.
 
@@ -709,18 +697,12 @@ def _require_ffmpeg() -> str:
     host that should be a 409 at submit time rather than a job that dies a minute
     in.
     """
-    found = ffmpeg_path()
-    if found is None:
-        raise ApiError(
-            409,
-            "ffmpeg_missing",
-            "there is no ffmpeg on this server's PATH, and asr decodes every input "
-            "through it — faster-whisper's own PyAV decoder silently truncates some "
-            "m4b files, which ends a transcript hours early with no error. "
-            + hosttools.searched_note(),
-            {"path": hosttools.search_path()},
-        )
-    return found
+    return hosttools.require_ffmpeg(
+        "asr",
+        "decodes every input through it — faster-whisper's own PyAV decoder "
+        "silently truncates some m4b files, which ends a transcript hours early "
+        "with no error.",
+    )
 
 
 # ------------------------------------------------------------------ job type
@@ -843,7 +825,7 @@ class AsrJobType:
         envs transcribes with `qwen3-asr-1.7b`. Each env's own detail is kept,
         so a reader learns which one is missing.
         """
-        if ffmpeg_path() is None:
+        if hosttools.ffmpeg_path() is None:
             return JobTypeStatus(
                 ready=False,
                 detail="there is no ffmpeg on PATH, and asr decodes every input "

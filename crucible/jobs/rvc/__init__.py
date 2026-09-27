@@ -209,20 +209,14 @@ def rvc_base_dir(config: Config) -> Path:
     return rvcbase.base_root(config)
 
 
-#: The two programs urvc calls by itself: `_add_ffmpeg_paths` in its
-#: `core/generate/common.py` wants BOTH on PATH, and without them reaches for
-#: `static_ffmpeg`, which the recipe no longer carries (#25, 2026-09-26).
-FFMPEG_TOOLS: tuple[str, ...] = ("ffmpeg", "ffprobe")
-
-
 def ffmpeg_paths() -> dict[str, str | None]:
     """Where ffmpeg and ffprobe are on this host, each or None.
 
-    A module-level probe, for the reason `jobs/asr/__init__.py` gives about its
-    own: a test replaces it. The search is `hosttools`', which looks in
-    Crucible's own `tools/bin` first and is the one owner of what was searched.
+    The two programs urvc calls by itself: `_add_ffmpeg_paths` in its
+    `core/generate/common.py` wants BOTH on PATH, and without them reaches for
+    `static_ffmpeg`, which the recipe no longer carries (#25, 2026-09-26).
     """
-    return {tool: hosttools.which(tool) for tool in FFMPEG_TOOLS}
+    return {"ffmpeg": hosttools.ffmpeg_path(), "ffprobe": hosttools.ffprobe_path()}
 
 
 def _require_ffmpeg() -> dict[str, str]:

@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, jobenv
+from crucible import accelerator, hosttools, jobenv
 from crucible.accelerator import GIB, ComputeApp
 from crucible.asrmodels import load_asr_manifest
 from crucible.jobs import asr as asr_job
@@ -114,7 +114,7 @@ def idle_card(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def ffmpeg(monkeypatch: pytest.MonkeyPatch) -> str:
-    monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: "/usr/bin/ffmpeg")
     return "/usr/bin/ffmpeg"
 
 
@@ -363,7 +363,7 @@ def test_no_ffmpeg_is_refused_before_the_job_is_queued(
     idle_card: None,
 ) -> None:
     asr_weights(MODEL)
-    monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: None)
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: None)
     response = submit(asr_client, auth)
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "ffmpeg_missing"
@@ -465,7 +465,7 @@ def test_a_model_with_no_block_for_this_backend_is_refused_by_name(
     monkeypatch.setattr(
         accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
     )
-    monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
     with make_client(enable_asr=True, backend=FAKE_MAC_BACKEND) as client:
         response = submit(
             client,
@@ -501,7 +501,7 @@ def test_the_mac_runs_its_own_worker_with_its_own_device(
         accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
     )
     monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
-    monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
     monkeypatch.setitem(
         asr_job.WORKER_SCRIPT_FOR_ENGINE, "mlx-whisper", FAKE_MLX_WORKER
     )
@@ -535,7 +535,7 @@ def test_vad_on_the_mac_is_refused_by_name_rather_than_ignored(
         accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
     )
     monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
-    monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
     _mac_env(home, monkeypatch)
     _mac_weights(home, MAC_MODEL)
     with make_client(enable_asr=True, backend=FAKE_MAC_BACKEND) as client:
@@ -800,7 +800,7 @@ def test_an_initial_prompt_reaches_the_mac_worker(
         accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
     )
     monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
-    monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
     monkeypatch.setitem(
         asr_job.WORKER_SCRIPT_FOR_ENGINE, "mlx-whisper", FAKE_MLX_WORKER
     )
@@ -929,12 +929,12 @@ def test_check_reports_what_is_missing_in_order(
     config = load_config(home)
     job_type = asr_job.AsrJobType(config, FAKE_BACKEND, frozenset)
 
-    monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: None)
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: None)
     status = job_type.check(FAKE_BACKEND)
     assert status.ready is False
     assert "no ffmpeg on PATH" in status.detail
 
-    monkeypatch.setattr(asr_job, "ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: "/usr/bin/ffmpeg")
     status = job_type.check(FAKE_BACKEND)
     assert status.ready is False
     assert "no ASR model is installed" in status.detail
