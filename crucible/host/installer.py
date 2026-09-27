@@ -177,53 +177,81 @@ MIGRATE_IN_USE_ROUNDS = 60
 #: Measured on kylies-pc: WSL is committed by Windows' servicing step, and the
 #: first plain Restart after the enable was deferred behind a staged update and
 #: committed nothing. So every sentence that asks for a restart names the
-#: option, says why, says it can take more than one, and says to sign in
-#: afterwards (#8: the tray resumes at an interactive login).
+#: option, says why, says it can take more than one, and says someone must sign
+#: in afterwards (`SIGN_IN_SENTENCE`).
+#:
+#: The three restart sentences, by code:
+#:   wsl_reboot_required    REBOOT_SENTENCE             the first restart
+#:   wsl_reboot_still_owed  REBOOT_STILL_OWED_SENTENCE  one more, within RESTART_BUDGET
+#:   wsl_reboot_again       REBOOT_AGAIN_SENTENCE       the budget is spent
+
+#: How to restart so that WSL is installed, in one spelling for all three.
+UPDATE_AND_RESTART_HOW = (
+    'Save your work, open Start, click the power button and choose "Update and '
+    'restart" (if there is no such option, choose "Restart"). Do not choose '
+    '"Shut down".'
+)
+
+#: #8 IS NOT BUILT (2026-09-26): the tray resumes from the Startup folder, which
+#: runs only when somebody signs in at the PC. So every restart sentence says
+#: so, plainly, until a resume that needs no sign-in exists.
+SIGN_IN_SENTENCE = (
+    "After the restart, someone has to sign in to Windows on this PC: Crucible "
+    "carries on by itself once somebody is signed in, and not before."
+)
+
 REBOOT_SENTENCE = (
     "Windows needs to restart to finish installing its Linux support (WSL). "
-    'Save your work, open Start, click the power button and choose "Update and '
-    'restart" (if there is no such option, choose "Restart"). Choose Update even '
-    "if you usually put updates off: Windows installs WSL in the same step as "
-    "its waiting updates, so a restart that skips or postpones them does not "
-    'install it. Do not choose "Shut down". It can take two restarts. Nothing '
-    "downloaded so far is lost: after the restart, sign in to Windows and "
-    "Crucible carries on by itself."
+    + UPDATE_AND_RESTART_HOW
+    + " Choose Update even if you usually put updates off: Windows installs WSL "
+    "in the same step as its waiting updates, so a restart that skips or "
+    "postpones them does not install it. It can take more than one restart. "
+    "Nothing downloaded so far is lost. "
+    + SIGN_IN_SENTENCE
 )
 
 #: Where a person asks for the move again, in the words the console and the
-#: sentences use. ONE spelling, so the label A1 gives the tray item and every
-#: sentence that sends a person to it can be changed together (#16).
-TRY_AGAIN_HINT = 'right-click the Crucible icon by the clock and choose "Try again"'
+#: sentences use. ONE spelling, so the tray item (`menu.TRY_AGAIN_LABEL`, which
+#: begins "Try again") and every sentence that sends a person to it change
+#: together (#16). The icon is often in the overflow behind the ^ arrow.
+TRY_AGAIN_HINT = (
+    "right-click the Crucible icon by the clock (it may be behind the ^ arrow "
+    'there) and choose "Try again"'
+)
 
-#: 2.4's second demand. `wsl --install` ran, the machine restarted, and
-#: `wsl --status` asks for a restart again. It used to end "this is a machine
+#: 2.4's demand, AMENDED by #19: it now fires only once `RESTART_BUDGET`
+#: restarts are spent, and the tray still re-checks at every start
+#: (`outcome.TRANSIENT_CANNOT_CODES`). It used to end "this is a machine
 #: somebody has to look at", which sent the person on kylies-pc looking for
 #: help when the fix was one more restart that ran the updates (#14, #16). It
 #: names that fix now.
 REBOOT_AGAIN_SENTENCE = (
-    "Windows has restarted, and its Linux support (WSL) is still not "
-    "installed, after several restarts. The usual reason is that the restart skipped or postponed "
-    "waiting Windows updates: Windows installs WSL in the same step as those "
-    "updates. Open Start, then Settings, then Windows Update, and let it "
-    'install everything it offers. Then click the power button and choose '
-    '"Update and restart" (not plain "Restart", and not "Shut down"). It can '
-    "take one more restart. After you sign back in, Crucible carries on by "
-    "itself; if nothing has changed a few minutes later, "
+    "Windows has restarted several times and has still not finished installing "
+    "its Linux support (WSL). The usual reason is that the restarts skipped or "
+    "postponed waiting Windows updates: Windows installs WSL in the same step "
+    "as those updates. Open Start, then Settings, then Windows Update, and let "
+    "it install everything it offers. Then restart once more. "
+    + UPDATE_AND_RESTART_HOW
+    + " "
+    + SIGN_IN_SENTENCE
+    + " If nothing "
+    "has changed a few minutes after that, "
     + TRY_AGAIN_HINT
     + ". The Windows engine keeps working meanwhile."
 )
 
-#: `wsl_reboot_still_owed` (A1's #19, worded by A2's rules, 2026-09-26): a
-#: restart Crucible asked for happened, Windows really booted, and the live
-#: probe says servicing still owes one. On kylies-pc this was the normal case:
-#: the first restart after the enable was deferred behind a staged update, and
-#: the SECOND committed WSL. So it is said as an expected step, not a failure.
+#: `wsl_reboot_still_owed` (#19): a restart Crucible asked for happened, and
+#: Windows still has not finished installing WSL. On kylies-pc this was the
+#: normal case: the first restart after the enable was deferred behind an
+#: update staged minutes earlier, and the second committed both.
 REBOOT_STILL_OWED_SENTENCE = (
     "Windows restarted, but it has not finished installing its Linux support "
-    "(WSL) yet. This is normal when Windows had updates waiting: it needs one "
-    'more restart. Open Start, click the power button and choose "Update and '
-    'restart" again (not "Shut down"). Afterwards, sign in to Windows and '
-    "Crucible carries on by itself."
+    "(WSL) yet. That is normal when Windows had updates waiting: it installs "
+    "WSL in the same step as those updates, and sometimes that takes another "
+    "restart. Restart once more. "
+    + UPDATE_AND_RESTART_HOW
+    + " "
+    + SIGN_IN_SENTENCE
 )
 
 #: FRESH-INSTALL #19 (kylies-pc, 2026-09-26): how many restarts the move asks
@@ -256,8 +284,6 @@ def _feature_report(before: wslstate.LiveWsl, after: wslstate.LiveWsl) -> str:
             said = f"still {wslstate.FEATURE_STATES.get(now, 'unknown')}"
         words.append(f"{name} {said}")
     return "; ".join(words) + f"; then: {after.answer.line()}"
-#: The same instruction in a line short enough for the tray's title (#14).
-REBOOT_TITLE = "Crucible — Update and restart Windows to install WSL"
 
 
 #: How long the move waits for the restarted guest to answer. A first boot of

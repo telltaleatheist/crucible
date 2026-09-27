@@ -38,6 +38,9 @@ CONTROLLER_START_SECONDS = 90.0
 
 Say = Callable[[str], None]
 
+#: What to do when the tray's door answers but refuses, in words (#16).
+_SIGN_OUT = "Sign out of Windows and sign back in, then try again."
+
 
 def bearer(home: Path) -> str | None:
     """The engine's token, as the door checks it, from this machine's own files.
@@ -83,8 +86,9 @@ def _ensure_controller(home: Path, say: Say) -> None:
         if time.monotonic() >= deadline:
             raise HostError(
                 "host_door_unavailable",
-                "Crucible's controller did not start, so nothing could be tried "
-                "again. Restart Windows, sign in, and Crucible starts by itself.",
+                "Crucible's background app did not start, so nothing could be "
+                "tried again. Sign out of Windows and sign back in: it starts at "
+                "sign-in, and then Try again works.",
             )
         time.sleep(0.5)
 
@@ -95,13 +99,18 @@ def _describe(envelope: dict[str, object], say: Say) -> None:
     if not isinstance(data, dict):
         return
     if event == "step":
-        say(f"Step {data.get('index')} of {data.get('total')}: {data.get('name')}")
+        from .installer import STEP_WORDS
+
+        name = str(data.get("name"))
+        say(f"Step {data.get('index')} of {data.get('total')}: {STEP_WORDS.get(name, name)}")
     elif event == "line":
         text = data.get("text")
         if isinstance(text, str) and text.startswith("wsl: "):
             say(text[len("wsl: "):])
     elif event == "failed":
-        say(f"Stopped: {data.get('code')}")
+        # The outcome's own sentence follows this (cli.py prints it); the code
+        # is here only so an app log can be searched for it.
+        say(f"Setting up the Linux engine stopped ({data.get('code')}).")
 
 
 def _follow(response: object, say: Say) -> None:
@@ -152,7 +161,7 @@ def try_again(home: Path, say: Say = print) -> outcome.Outcome | None:
             _follow(response, say)
     except urllib.error.HTTPError as exc:
         if exc.code != 409:
-            raise HostError("host_door_unavailable", f"the controller refused: HTTP {exc.code}") from exc
+            raise HostError("host_door_unavailable", f"Crucible's background app refused the request (HTTP {exc.code}). {_SIGN_OUT}") from exc
         say("Crucible was already setting it up; following that.")
         attach = urllib.request.Request(EVENTS_URL, headers=headers)
         try:
@@ -160,5 +169,5 @@ def try_again(home: Path, say: Say = print) -> outcome.Outcome | None:
                 _follow(response, say)
         except urllib.error.HTTPError as again:
             if again.code != 404:  # 404: it ended between the two calls
-                raise HostError("host_door_unavailable", f"the controller refused: HTTP {again.code}") from again
+                raise HostError("host_door_unavailable", f"Crucible's background app refused the request (HTTP {again.code}). {_SIGN_OUT}") from again
     return outcome.read(home)

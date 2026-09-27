@@ -347,7 +347,9 @@ def _verdict(networks: list[dict[str, Any]], forward: bool) -> tuple[str, str, s
         return "degraded", "forward_not_answering", (
             f"The port forward is in place but did not reach the engine from "
             f"{first} on this PC itself. Windows' IP Helper service carries that "
-            "forward; restarting this PC normally brings it back. Then run "
+            "forward, and a restart normally brings it back: open Start, click "
+            'the power button and choose "Update and restart" (or "Restart" if '
+            "that is all there is), and sign in again afterwards. Then run "
             "`crucible lan status`."
         )
     if not blocked:
@@ -424,9 +426,10 @@ def _prompt_failed(result: RunResult | None, runner: Runner) -> LanError | None:
 def _not_applied(result: RunResult | None, runner: Runner, detail: str) -> LanError:
     """Why `enable`'s rows are not there."""
     return _prompt_failed(result, runner) or LanError(
-        "lan_verification_failed: the rows are not both there after asking "
-        f"for them ({detail}). If the administrator prompt was "
-        "dismissed, nothing was changed; run this again and accept it"
+        "lan_verification_failed: Windows does not have both the port forward "
+        f"and the firewall rule Crucible asked for ({detail}). If the "
+        "administrator prompt was closed, nothing was changed; run this again "
+        "and click Yes on it"
     )
 
 

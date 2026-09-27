@@ -78,29 +78,31 @@ HOST_ERROR_CODES: dict[str, str] = {
         "watching, claiming and the unit restart; it never widens this "
         "(PHASE15-HOST.md 4.1a, PHASE17 2.5)."
     ),
-    # The sentences a PERSON reads for these two are `installer.REBOOT_SENTENCE`
-    # and `installer.REBOOT_AGAIN_SENTENCE`; both name "Update and restart",
-    # because WSL is installed by Windows' servicing step and a restart that
-    # skips or postpones waiting updates installs nothing (#14, Owen's ruling,
-    # 2026-09-26).
+    # The sentences a PERSON reads for the three restart codes are
+    # `installer.REBOOT_SENTENCE`, `REBOOT_STILL_OWED_SENTENCE` and
+    # `REBOOT_AGAIN_SENTENCE`. All three name "Update and restart", because WSL
+    # is installed by Windows' servicing step and a restart that skips or
+    # postpones waiting updates installs nothing (#14, Owen's ruling,
+    # 2026-09-26), and all three say someone must sign in afterwards (#8).
     "wsl_reboot_required": (
         "WSL was enabled and Windows must restart to install it. The person is "
         'told to choose "Update and restart", because Windows installs WSL in '
         "the same servicing step as its waiting updates. The move stops here "
-        "and the tray resumes it after the restart and sign-in (PHASE19 2.3)."
+        "and the tray resumes it once somebody signs in after the restart "
+        "(PHASE19 2.3)."
+    ),
+    "wsl_reboot_still_owed": (
+        "Windows restarted and servicing has still not installed WSL, which is "
+        "normal when updates were waiting. Within the restart budget "
+        '(`installer.RESTART_BUDGET`) this is reboot-pending: one more "Update '
+        'and restart", a sign-in, and the tray goes on (#19).'
     ),
     "wsl_reboot_again": (
-        "Windows was restarted and WSL is still not installed, usually because "
-        "the restart skipped or postponed waiting updates. The person is told "
-        'to install the updates and choose "Update and restart"; it can take '
-        "more than one restart (PHASE19 2.4, #14)."
-    ),
-    # A restart inside the budget that servicing still owes (FRESH-INSTALL #19);
-    # the person reads `installer.REBOOT_STILL_OWED_SENTENCE`.
-    "wsl_reboot_still_owed": (
-        "Windows restarted and has still not finished turning WSL on; it needs "
-        "another Update and restart. Within the restart budget this is "
-        "reboot-pending, and the tray goes on after the restart."
+        "the restart budget is spent and WSL is still not installed, usually "
+        "because the restarts skipped or postponed waiting updates. The person "
+        'is told to install the updates and choose "Update and restart"; the '
+        "tray re-checks at every start and goes on when WSL is live (PHASE19 "
+        "2.4, #14, #19)."
     ),
     "wsl_outcome_invalid": (
         "`wsl-outcome.json` is present and is not the document PHASE19 2.2 "

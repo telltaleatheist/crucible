@@ -133,7 +133,7 @@ TRAY_GONE_SENTENCE = (
 RESTART_BANNER = 'ACTION NEEDED: restart Windows with "Update and restart".'
 
 #: The codes whose ending is a restart the person performs (#14).
-RESTART_CODES = frozenset({outcome.REBOOT_CODE, "wsl_reboot_again"})
+RESTART_CODES = outcome.REBOOT_CODES | {"wsl_reboot_again"}
 
 
 def one_line(text: object, limit: int = LINE_LIMIT) -> str:
@@ -197,7 +197,8 @@ def ending(record: outcome.Outcome) -> list[str]:
     # `failed`: retried by the tray at its next start, once (PHASE19 2.2).
     if record.attempts < outcome.FAILED_ATTEMPT_CEILING:
         after = (
-            "Crucible tries once more by itself the next time this PC starts. "
+            "Crucible tries once more by itself the next time someone signs in to "
+            "this PC. "
             "To try now instead, " + TRY_AGAIN_HINT + "."
         )
     else:

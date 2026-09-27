@@ -107,12 +107,13 @@ ITEM_IDS = (
 #: The outcome states Try again is offered for (2.5).
 TRY_AGAIN_STATES = frozenset({"cannot", "failed"})
 
-#: Labels. PLACEHOLDER WORDS (A1, 2026-09-26): the wording is A2's to settle
-#: with the rest of the restart and failure messages.
+#: Labels (A2's words, 2026-09-26). TRY_AGAIN_LABEL begins "Try again" because
+#: `installer.TRY_AGAIN_HINT` sends people to an item by that name.
 TRY_AGAIN_LABEL = "Try again: set up the Linux engine"
 #: A disabled line while the move waits for a restart, so the tray itself says
-#: what is owed ("Update and restart", the 2026-09-26 ruling).
-RESTART_OWED_LABEL = "Restart Windows with Update and restart to finish setting up"
+#: what is owed, and why, in a menu's width: "Update and restart" by name (the
+#: 2026-09-26 ruling), WSL as the reason, and the sign-in #8 still needs.
+RESTART_OWED_LABEL = "Needs Update and restart (to install WSL), then sign in"
 
 #: 4.2's label, after section 0's amendment. It is an UPGRADE and says so: the
 #: `llama-windows` server already works, and what WSL adds is vLLM/SGLang
