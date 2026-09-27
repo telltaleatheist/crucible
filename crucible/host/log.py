@@ -16,6 +16,14 @@ directory may not exist yet, and a handler that opens its file at construction
 turns "the host could not write its log" into an exception from an import. Here
 the file is opened per write, which costs nothing at one line per fifteen
 seconds and cannot fail at a moment nobody is ready for.
+
+ASCII, AND ONLY ASCII (#12, fresh install on kylies-pc, 2026-09-26). The file
+used to be UTF-8, and Windows PowerShell 5.1's `Get-Content` reads a BOM-less
+file as the ANSI code page, so every em dash came back as mojibake to the one
+person who had found the log. "Read it with `-Encoding utf8`" is an instruction
+nobody follows, so each line is made ASCII before it is written: the
+punctuation this code base writes has an ASCII spelling, and anything else
+becomes `?` rather than bytes a reader cannot see.
 """
 
 from __future__ import annotations
@@ -25,6 +33,35 @@ from pathlib import Path
 from typing import Callable
 
 from .paths import LOG_ROLL_BYTES
+
+
+#: The non-ASCII punctuation this code base writes, spelled in ASCII. Anything
+#: not in here becomes `?` in `plain`.
+_ASCII_SPELLING = str.maketrans(
+    {
+        "—": "-",  # em dash
+        "–": "-",  # en dash
+        "…": "...",
+        "‘": "'",
+        "’": "'",
+        "“": '"',
+        "”": '"',
+        "→": "->",
+        "←": "<-",
+        "×": "x",
+        "≥": ">=",
+        "≤": "<=",
+        " ": " ",
+        # wsl.exe answers in UTF-16, and text read from it as bytes carries a
+        # NUL between every character.
+        "\x00": "",
+    }
+)
+
+
+def plain(text: str) -> str:
+    """`text` in ASCII: what `host.log` and the installer's console print (#12)."""
+    return text.translate(_ASCII_SPELLING).encode("ascii", "replace").decode("ascii")
 
 
 def timestamp(now: float | None = None) -> str:
@@ -59,10 +96,10 @@ class HostLog:
 
     def write(self, message: str) -> str:
         """One line, timestamped. Returns the line, which is what tests read."""
-        line = f"{timestamp(self._clock())} {message}"
+        line = plain(f"{timestamp(self._clock())} {message}")
         self._roll_if_needed()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+        with self.path.open("a", encoding="ascii", newline="\n") as handle:
             handle.write(line + "\n")
         if self._echo is not None:
             self._echo(line)

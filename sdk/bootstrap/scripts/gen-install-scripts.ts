@@ -258,7 +258,14 @@ function prerequisitesSh(): string {
     '  have_gib=$(( free_kib / 1048576 ))',
     '  [ "$have_gib" -ge "$MIN_FREE_GIB" ] || die "disk_too_small: $CRUCIBLE_HOME has ${have_gib} GiB free and --min-free-gib asked for $MIN_FREE_GIB"',
     'fi',
-    'say "prerequisites: $(( free_kib / 1048576 )) GiB free at $CRUCIBLE_HOME. Weights are pulled later and priced then — a 9B model is ~18 GiB, a Higgs voice ~8.5 GiB"',
+    // #26 (kylies-pc, 2026-09-26): inside WSL, `df` measures the ext4.vhdx,
+    // whose size is a virtual ceiling (954 GiB on a C: with 283 GB free). The
+    // Windows half prints the drive's real free space before this runs.
+    'if [ -n "${WSL_DISTRO_NAME:-}" ]; then',
+    '  say "prerequisites: WSL\'s virtual disk can grow to $(( free_kib / 1048576 )) GiB; the real limit is the free space on the Windows drive it lives on"',
+    'else',
+    '  say "prerequisites: $(( free_kib / 1048576 )) GiB free at $CRUCIBLE_HOME. Weights are pulled later and priced then — a 9B model is ~18 GiB, a Higgs voice ~8.5 GiB"',
+    'fi',
   ].join('\n');
 }
 
@@ -463,19 +470,17 @@ function psQuote(value: string): string {
 }
 
 /**
- * How long `install.ps1` waits for the tray's outcome before saying the
- * general sentence (PHASE19 2.7: "reads the outcome the tray writes within a
- * few seconds").
- *
- * TEN, and the number is the tray's own first tick: `crucible/host/app.py`
- * starts its decision thread behind `presence.WATCH_SECONDS` (15 s) at worst
- * and behind nothing at best, and a machine that CANNOT run WSL learns so from
- * `wsl --status`, which answers immediately. So this is long enough for the
- * verdict that matters and short enough that a working machine is not left
- * looking at a console. A file that has not appeared is not an error: the
- * general sentence is true of that machine too.
+ * pip, as `install.ps1` runs it: its errors and nothing else (#12).
  */
-const OUTCOME_WAIT_SECONDS = 10;
+const PIP_QUIET = '--quiet --disable-pip-version-check --no-warn-script-location';
+
+/**
+ * The name `@crucible/bootstrap`'s `install()` saves this script under in
+ * `%TEMP%` before running it with its output piped into the app
+ * (`runInstallPs1` in `src/install.ts`). It is how the script tells an app
+ * reader from a person at a console (#7); the two spellings must agree.
+ */
+const APP_SCRIPT_NAME = 'crucible-install.ps1';
 
 /**
  * `/etc/wsl.conf` as ONE bash command, from {@link WSL_CONF_TEXT}. `printf`
@@ -562,6 +567,19 @@ export function generateInstallPs1(): string {
     '',
     'function Say($m) { Write-Host "crucible: $m" }',
     'function Die($m) { Write-Host "crucible: $m" -ForegroundColor Red; exit 1 }',
+    '# A native program, with its stderr as plain text (#34, fresh install on',
+    "# kylies-pc, 2026-09-26). Under Windows PowerShell 5.1 a native program's",
+    '# stderr, once redirected (ssh, an app reading the output), arrives as',
+    '# ErrorRecords, and a blank one prints as a bare',
+    '# "System.Management.Automation.RemoteException". Every native call a person',
+    '# may see goes through here: records become their text, blank lines go, and',
+    "# $LASTEXITCODE is still the program's.",
+    'function Native([scriptblock]$Command) {',
+    '  & $Command 2>&1 | ForEach-Object {',
+    '    if ($_ -is [System.Management.Automation.ErrorRecord]) { "$($_.Exception.Message)" } else { "$_" }',
+    "  } | Where-Object { $_.Trim() -ne '' }",
+    '}',
+    'function Show { process { Write-Host "  $_" } }',
     '$Previous = "$HostDir.previous"',
     'foreach ($target in @($HostDir, $Partial, $Previous, $DownloadDir)) {',
     '  $absolute = [System.IO.Path]::GetFullPath($target)',
@@ -690,7 +708,9 @@ export function generateInstallPs1(): string {
     '  $archive = Join-Path $DownloadDir $PyAsset',
     '  if (Test-Path $archive) { Remove-Item $archive -Force }',
     '  Say "host: python $PyVersion from python-build-standalone"',
-    '  & curl.exe ' + CURL_ARGS.join(' ') + ' -o $archive "$PyUrl"',
+    // `-sS`: curl's meter redraws one line with carriage returns, which
+    // `Native` could only print as one burst at the end (#34).
+    '  Native { & curl.exe ' + CURL_ARGS.join(' ') + ' -sS -o $archive "$PyUrl" } | Show',
     '  if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: $PyUrl" }',
     '  $got = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLower()',
     '  if ($got -ne $PySha) {',
@@ -740,7 +760,7 @@ export function generateInstallPs1(): string {
     '$WheelPath = Join-Path $DownloadDir $Wheel',
     'if (Test-Path $WheelPath) { Remove-Item $WheelPath -Force }',
     'Say "host: $Wheel"',
-    `& curl.exe ${CURL_ARGS.join(' ')} -o $WheelPath "${base}/$Wheel"`,
+    `Native { & curl.exe ${CURL_ARGS.join(' ')} -sS -o $WheelPath "${base}/$Wheel" } | Show`,
     `if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: ${base}/$Wheel" }`,
     `$wantRaw = & curl.exe -fsSL --retry 3 "${base}/${wheelShaAssetName('$Release')}"`,
     `if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: ${base}/${wheelShaAssetName('$Release')}" }`,
@@ -752,12 +772,17 @@ export function generateInstallPs1(): string {
     '  Die "runtime_sha_mismatch: $Wheel hashes $gotWheel, the release says $want. The download was deleted"',
     '}',
     'if (Test-Path -LiteralPath $Cmd) { & $Cmd local shutdown | Out-Null }',
-    '& $PythonExe -m pip install --upgrade --no-input $WheelPath',
+    // #12: `--no-warn-script-location`, because pip's eleven "is not on PATH"
+    // warnings about host\Scripts were the loudest thing an install printed,
+    // and none of them is true of how Crucible is started. `--quiet` keeps
+    // pip to its errors, which `Native` shows.
+    'Say "host: installing Crucible into $HostDir (about a minute)"',
+    `Native { & $PythonExe -m pip install ${PIP_QUIET} --upgrade --no-input $WheelPath } | Show`,
     'if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: pip would not install $Wheel into $HostDir" }',
     '# The tray, which is not a dependency of the wheel: pyproject.toml is what',
     '# every Crucible installs from, and a headless Linux server must not carry',
     '# a GUI toolkit. See DESKTOP_PACKAGES in sdk/bootstrap/src/interpreter.ts.',
-    `& $PythonExe -m pip install ${DESKTOP_PACKAGES.join(' ')}`,
+    `Native { & $PythonExe -m pip install ${PIP_QUIET} ${DESKTOP_PACKAGES.join(' ')} } | Show`,
     'if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: the tray packages would not install" }',
     'Remove-Item $WheelPath -Force',
     '',
@@ -786,45 +811,47 @@ export function generateInstallPs1(): string {
     '# The host OWNS that shortcut (4.1). This script asks for it by verb rather',
     '# than writing a .lnk of its own, so there is one spelling of what it points',
     '# at and one place that changes when it moves.',
+    // The verbs answer JSON for a program; a person is shown only a failure.
     'foreach ($action in @("register", "install-cli", "install-desktop")) {',
-    '  & $Cmd local $action',
-    '  if ($LASTEXITCODE -ne 0) { Die "local setup failed: $action (exit $LASTEXITCODE)" }',
+    '  $said = @(Native { & $Cmd local $action })',
+    '  if ($LASTEXITCODE -ne 0) { $said | Show; Die "local setup failed: $action (exit $LASTEXITCODE). Run this installer again; it carries on from where it stopped." }',
     '}',
     '',
     '# --- 7. start the host, and stop ------------------------------------------',
     '# pythonw, not the .cmd: a tray program has no console window (4.1).',
     'Say "starting the tray"',
+    // #28: the moment this install began its move. An outcome written before
+    // it is an EARLIER run's, and is said as history, never as this one's.
+    "$Began = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')",
     'Start-Process -WindowStyle Hidden -FilePath $Pythonw -ArgumentList "-m","crucible.cli","host"',
-    '& $Cmd local start',
-    'if ($LASTEXITCODE -ne 0) { Die "Crucible installed but did not become ready. Run crucible local status for the named failure." }',
+    '$said = @(Native { & $Cmd local start })',
+    'if ($LASTEXITCODE -ne 0) { $said | Show; Die "Crucible is installed, but its engine did not start. Run this installer again; it carries on from where it stopped." }',
     '',
     '# --- 8. what happens next, read rather than asserted ----------------------',
     '# PHASE19-AUTOMATIC-WSL.md 2.7. This script used to end by saying the Linux',
     '# engine was "available from its console", which stopped being true the',
     '# moment the tray began starting the move by itself at every start (2.3).',
     '#',
-    '# It has no logic of its own and does not decide anything: the tray writes',
-    '# wsl-outcome.json within seconds of coming up, and this READS it. A machine',
-    "# that cannot run the Linux engine has that file's own sentence, verbatim, and",
-    '# every other machine is told the move is under way. Waiting a few seconds is',
-    '# the whole of the mechanism - the tray has to settle a presence first - and a',
-    '# file that never appears means the move has not been decided yet, which is',
-    '# what the general sentence already says.',
-    `$Outcome = Join-Path $Root ${psQuote(WSL_OUTCOME_NAME)}`,
-    `$Deadline = (Get-Date).AddSeconds(${OUTCOME_WAIT_SECONDS})`,
-    '$Verdict = $null',
-    'while ((Get-Date) -lt $Deadline) {',
-    '  if (Test-Path -LiteralPath $Outcome) {',
-    '    try { $Verdict = Get-Content -Raw $Outcome | ConvertFrom-Json } catch { $Verdict = $null }',
-    '    if ($Verdict) { break }',
-    '  }',
-    '  Start-Sleep -Milliseconds 500',
-    '}',
+    '# It has no logic of its own and decides nothing about the move: the tray',
+    '# runs the move and publishes it, and `crucible.host.installwatch` READS that',
+    '# (the door of 2.6, and wsl-outcome.json) and says it in plain words.',
+    '#',
+    '# THE CONSOLE IS THE APP (#6, #7, fresh install on kylies-pc, 2026-09-26).',
+    '# This used to wait ten seconds, say "the app you installed from will show',
+    '# its progress" and exit - and twelve seconds later the move stopped for a',
+    '# restart that only host.log mentioned. A person at a console now watches',
+    '# every step here until the move ends: done, a restart owed (and how to do',
+    '# it), cannot, or failed. An APP that ran this script watches the move',
+    '# itself through the same door, so it still gets the short ending.',
+    `# It is an app when it runs a saved ${APP_SCRIPT_NAME} with its output piped.`,
     'Say "Crucible is ready in your notification area."',
-    'if ($Verdict -and $Verdict.sentence) {',
-    '  Say $Verdict.sentence',
-    '} else {',
-    '  Say "It is setting up its Linux engine now; the app you installed from will show its progress."',
+    '$FromApp = [bool]($PSCommandPath -and ([System.IO.Path]::GetFileName($PSCommandPath) -eq '
+      + `${psQuote(APP_SCRIPT_NAME)}) -and [Console]::IsOutputRedirected)`,
+    "$Watch = @('-m', 'crucible.host.installwatch', '--home', $Root, '--since', $Began)",
+    "if ($FromApp) { $Watch += '--brief' }",
+    'Native { & $PythonExe @Watch } | ForEach-Object { Write-Host $_ }',
+    'if ($LASTEXITCODE -ne 0) {',
+    '  Say "The Linux engine sets itself up in the background; the Crucible icon by the clock shows how it is going."',
     '}',
     '',
   ];

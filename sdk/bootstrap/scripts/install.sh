@@ -234,7 +234,11 @@ if [ -n "$MIN_FREE_GIB" ]; then
   have_gib=$(( free_kib / 1048576 ))
   [ "$have_gib" -ge "$MIN_FREE_GIB" ] || die "disk_too_small: $CRUCIBLE_HOME has ${have_gib} GiB free and --min-free-gib asked for $MIN_FREE_GIB"
 fi
-say "prerequisites: $(( free_kib / 1048576 )) GiB free at $CRUCIBLE_HOME. Weights are pulled later and priced then — a 9B model is ~18 GiB, a Higgs voice ~8.5 GiB"
+if [ -n "${WSL_DISTRO_NAME:-}" ]; then
+  say "prerequisites: WSL's virtual disk can grow to $(( free_kib / 1048576 )) GiB; the real limit is the free space on the Windows drive it lives on"
+else
+  say "prerequisites: $(( free_kib / 1048576 )) GiB free at $CRUCIBLE_HOME. Weights are pulled later and priced then — a 9B model is ~18 GiB, a Higgs voice ~8.5 GiB"
+fi
 
 # --- server --------------------------------------------------------------
 # download the pinned interpreter (once) and pip-install this release's wheel into it

@@ -763,11 +763,12 @@ def test_install_ps1_ends_by_READING_the_outcome_and_never_by_asserting_one() ->
     """PHASE19 2.7. The script stopped being able to say what happens next the
     moment the tray began starting the move itself (2.3), so it reads."""
     script = _install_ps1()
-    # It names the SAME file `outcome.py` writes, because both spellings are
-    # generated from `sdk/bootstrap/src/distro.ts`.
-    assert f"Join-Path $Root '{outcome.OUTCOME_NAME}'" in script
-    assert "It is setting up its Linux engine now" in script
-    assert "Say $Verdict.sentence" in script, "a machine that cannot gets the outcome's OWN words"
+    # #6/#7/#28 (2026-09-26): the reading is `crucible.host.installwatch`'s,
+    # which follows the move on a console and hands over to an app, and is
+    # told when this install began so an older outcome is never said as its.
+    assert "'-m', 'crucible.host.installwatch'" in script
+    assert "'--since', $Began" in script
+    assert "$Watch += '--brief'" in script
     # And the sentence the phase deletes is no longer SAID. It survives in the
     # comment that records why, which is the one place a deleted sentence
     # belongs.

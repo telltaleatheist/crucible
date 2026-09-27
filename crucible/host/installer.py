@@ -45,6 +45,7 @@ import base64
 import json
 import re
 import shlex
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -114,6 +115,23 @@ STEPS: tuple[str, ...] = (
     "migrate-weights",
 )
 
+#: Each step in the words a person at the installer's console reads (#6, #7:
+#: from a console, the console is the app). Keyed by `STEPS`, and every step
+#: has one.
+STEP_WORDS: dict[str, str] = {
+    "wsl-state": "checking Windows' Linux support (WSL)",
+    "import-distro": "setting up the Linux system (Ubuntu)",
+    "guest-ready": "checking the Linux system",
+    "guest-install": "installing Crucible inside Linux (a few minutes)",
+    "migrate-config": "carrying this PC's settings and pairing across",
+    "install-job-types": "job types",
+    "prepare-weights": "copying models to the Linux engine",
+    "stop-windows-server": "stopping the Windows engine",
+    "switch-pairing": "switching apps over to the Linux engine",
+    "lan-door": "network sharing",
+    "migrate-weights": "removing the Windows copies of moved models",
+}
+
 #: Long enough for a `wsl --import` of a multi-gigabyte ext4 file, and for a
 #: guest-side install that pips a job type's recipe over somebody's home line.
 IMPORT_TIMEOUT_SECONDS = 30 * 60.0
@@ -151,29 +169,61 @@ MIGRATE_IN_USE_ROUNDS = 60
 #: came back at login and the APP had to ask again. The tray now decides at
 #: every start (2.3) and resumes a `reboot-pending` on its own, so the sentence
 #: no longer asks for a press that nothing is waiting for.
+#:
+#: "UPDATE AND RESTART", BY NAME (#14, Owen's ruling, 2026-09-26): *"we should
+#: also make it clear that the user has to reboot and update, not just reboot.
+#: a lot of people avoid hitting update because its a pain in the ass, but the
+#: update logic is the route through which wsl installs and is necessary."*
+#: Measured on kylies-pc: WSL is committed by Windows' servicing step, and the
+#: first plain Restart after the enable was deferred behind a staged update and
+#: committed nothing. So every sentence that asks for a restart names the
+#: option, says why, says it can take more than one, and says to sign in
+#: afterwards (#8: the tray resumes at an interactive login).
 REBOOT_SENTENCE = (
-    "this machine has to restart before Windows can start a Linux virtual "
-    "machine. Nothing downloaded so far is lost: Crucible comes back by itself "
-    "when you log in and goes on from here."
+    "Windows needs to restart to finish installing its Linux support (WSL). "
+    'Save your work, open Start, click the power button and choose "Update and '
+    'restart" (if there is no such option, choose "Restart"). Choose Update even '
+    "if you usually put updates off: Windows installs WSL in the same step as "
+    "its waiting updates, so a restart that skips or postpones them does not "
+    'install it. Do not choose "Shut down". It can take two restarts. Nothing '
+    "downloaded so far is lost: after the restart, sign in to Windows and "
+    "Crucible carries on by itself."
 )
+
+#: Where a person asks for the move again, in the words the console and the
+#: sentences use. ONE spelling, so the label A1 gives the tray item and every
+#: sentence that sends a person to it can be changed together (#16).
+TRY_AGAIN_HINT = 'right-click the Crucible icon by the clock and choose "Try again"'
 
 #: 2.4's second demand. `wsl --install` ran, the machine restarted, and
-#: `wsl --status` asks for a restart again — which is not a state anything can
-#: repair and not one to loop on.
+#: `wsl --status` asks for a restart again. It used to end "this is a machine
+#: somebody has to look at", which sent the person on kylies-pc looking for
+#: help when the fix was one more restart that ran the updates (#14, #16). It
+#: names that fix now.
 REBOOT_AGAIN_SENTENCE = (
-    "Windows asked for a restart twice. `wsl --install` has already run and "
-    "this machine has already been restarted, and Windows still says it needs "
-    "another one before it can start a Linux virtual machine — so Crucible has "
-    "stopped rather than asking again. The Windows engine keeps working; this "
-    "is a machine somebody has to look at."
+    "Windows has restarted, and its Linux support (WSL) is still not "
+    "installed, after several restarts. The usual reason is that the restart skipped or postponed "
+    "waiting Windows updates: Windows installs WSL in the same step as those "
+    "updates. Open Start, then Settings, then Windows Update, and let it "
+    'install everything it offers. Then click the power button and choose '
+    '"Update and restart" (not plain "Restart", and not "Shut down"). It can '
+    "take one more restart. After you sign back in, Crucible carries on by "
+    "itself; if nothing has changed a few minutes later, "
+    + TRY_AGAIN_HINT
+    + ". The Windows engine keeps working meanwhile."
 )
 
-#: PLACEHOLDER (A1, 2026-09-26): the words are A2's (the host message table and
-#: the installer's console lines). `wsl_reboot_still_owed`: a restart Crucible
-#: asked for happened, and Windows still has not finished turning WSL on.
+#: `wsl_reboot_still_owed` (A1's #19, worded by A2's rules, 2026-09-26): a
+#: restart Crucible asked for happened, Windows really booted, and the live
+#: probe says servicing still owes one. On kylies-pc this was the normal case:
+#: the first restart after the enable was deferred behind a staged update, and
+#: the SECOND committed WSL. So it is said as an expected step, not a failure.
 REBOOT_STILL_OWED_SENTENCE = (
-    "Windows restarted but has not finished turning on WSL yet. Use Update and "
-    "restart once more; Crucible goes on by itself after it."
+    "Windows restarted, but it has not finished installing its Linux support "
+    "(WSL) yet. This is normal when Windows had updates waiting: it needs one "
+    'more restart. Open Start, click the power button and choose "Update and '
+    'restart" again (not "Shut down"). Afterwards, sign in to Windows and '
+    "Crucible carries on by itself."
 )
 
 #: FRESH-INSTALL #19 (kylies-pc, 2026-09-26): how many restarts the move asks
@@ -206,6 +256,8 @@ def _feature_report(before: wslstate.LiveWsl, after: wslstate.LiveWsl) -> str:
             said = f"still {wslstate.FEATURE_STATES.get(now, 'unknown')}"
         words.append(f"{name} {said}")
     return "; ".join(words) + f"; then: {after.answer.line()}"
+#: The same instruction in a line short enough for the tray's title (#14).
+REBOOT_TITLE = "Crucible — Update and restart Windows to install WSL"
 
 
 #: How long the move waits for the restarted guest to answer. A first boot of
@@ -711,7 +763,13 @@ class EngineInstall:
                         + " This needs administrator and elevation is off for this run: "
                         + " ".join(state.action_argv),
                     )
-                self._line(f"asking for administrator: {' '.join(state.action_argv)}")
+                # In words first: this line is what the installer's console
+                # shows while a UAC prompt waits, possibly behind the window.
+                self._line(
+                    "Windows is asking for administrator permission to change "
+                    "this: click Yes on the prompt (if you cannot see it, look "
+                    f"for it flashing on the taskbar). [{' '.join(state.action_argv)}]"
+                )
                 result = self._runner.run(
                     wslstate.elevated_argv(state), timeout_s=IMPORT_TIMEOUT_SECONDS
                 )
@@ -846,6 +904,22 @@ class EngineInstall:
             raise self._fail("rootfs_sha_mismatch", f"{UBUNTU_WSL_SUMS_URL} names no sha256 for {asset}; no distro was imported")
         if not hashed.ok or want not in candidates:
             raise self._fail("rootfs_sha_mismatch", "The downloaded image does not match Ubuntu's own checksum; no distro was imported")
+        # #26: the import is about half a minute with nothing to report, and a
+        # console that goes quiet for that long reads as a hang.
+        self._line(f"Unpacking Ubuntu into {destination}; this takes about half a minute")
+        # THE REAL VOLUME (#26). Inside the guest, `df` measures the ext4.vhdx,
+        # whose size is a virtual maximum (954 GiB on a C: with 283 GB free,
+        # kylies-pc, 2026-09-26). The Windows drive under `destination` is
+        # where that file grows, so it is the number worth a line.
+        try:
+            free = shutil.disk_usage(destination).free
+            self._line(
+                f"This PC's drive {destination.anchor or destination} has "
+                f"{free / 1024 ** 3:.0f} GiB free. The Linux engine's disk lives "
+                "there and grows into it, so that is the real limit on what it can hold."
+            )
+        except OSError:
+            pass
         imported = self._runner.run(["wsl.exe", "--import", self._distro, str(destination), str(archive), "--version", "2"], timeout_s=IMPORT_TIMEOUT_SECONDS)
         if not imported.ok:
             raise self._fail("distro_import_failed", imported.said())
@@ -854,6 +928,7 @@ class EngineInstall:
         # the marker every later check looks for. Canonical's image has none of
         # them, and it is ours — just imported under our name into our
         # directory — so writing them is finishing the import.
+        self._line("Preparing the Linux system for Crucible (its user and settings)")
         finished = self._runner.run(
             ["wsl.exe", "-d", self._distro, "-u", "root", "--exec", "bash", "-c", FINISH_IMPORT_SCRIPT],
             timeout_s=QUICK_TIMEOUT_SECONDS,
