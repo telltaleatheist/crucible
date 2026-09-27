@@ -98,7 +98,8 @@ implementation rules are repeated here.
 - The lane is one coroutine. Nothing the queue's own bookkeeping raises may escape it: an escape
   kills the lane, and every later job would sit at `queued` while the server kept answering 202.
   `_fail_out_of_band` marks the job failed without going back through `_finish`, and survives
-  even failing to append the event.
+  even failing to append the event. It still persists the record, so a restart reads it back as
+  `failed` and not `interrupted`.
 - `_execute` settles the card (section 6) BEFORE the terminal event, while the job still holds
   the lane. That way the settlement's `note` lands on a stream the client is still reading, and
   `refuse_if_busy` still refuses anyone who would race the unload.
@@ -123,6 +124,9 @@ implementation rules are repeated here.
   work. `interrupted` is weather: the client should collect what landed and re-ask for the rest.
   A recovered job is never re-queued or resumed. Continuing it is a NEW job from the client
   (`chunks_done`, or `params.resume` for journaled types). Events are not restored.
+- An interrupted job's `finished` is its `interrupted_at` (when the restart noticed it), and the
+  coerced record is written back at once. Without a `finished` stamp the reaper cannot age the
+  job, and without the write-back every restart would restart its retention clock.
 - `client_ref` is the client's own name for the work, echoed back and never read. BookForge puts
   its queue step id there so it can match interrupted jobs after both sides restart.
 
@@ -160,6 +164,9 @@ implementation rules are repeated here.
   streamed), the record is kept and the next tick retries.
 - `_age_seconds` raises for a terminal job with no `finished`. Guessing either way would keep the
   directory forever or delete it at once.
+- Each job is reaped in isolation: a record the reaper cannot judge is logged ("the reaper
+  skipped job ...") and left, and the tick goes on to the other jobs, the orphan directories and
+  the journals. One bad record once stopped all reaping for good.
 - `rvc` stages its pieces inside the job directory, so a killed worker's scratch is the reaper's
   to collect and never lands in the system temp.
 
@@ -223,8 +230,12 @@ intention, and the fix is a lease on the client side, never an exception here.
   claim with `claim_to_clear`, which reads the four facts and claims in ONE step under the lock
   every client door records its hold under. Either a door's hold is seen and nothing is
   claimed, or the door sees the clearance and waits for it.
-- **Every door waits out a clearance** within `CLEARANCE_TIMEOUT_SECONDS`, then answers from
-  the settled card. A clearance past that budget is a wedge and is refused as `engine_in_use`.
+- **Every door waits out a clearance** within the resident engine's own stop budget plus
+  `CLEARANCE_MARGIN_SECONDS` (`Residency.clearance_timeout`: `stop_budget_seconds` when the
+  engine states one, else `CLEARANCE_TIMEOUT_SECONDS`), then answers from the settled card. A
+  narrator stop can legitimately take far longer than a plain SIGTERM, so one fixed budget
+  called a normal narrator stop a wedge. A clearance past the budget is a wedge and is refused
+  as `engine_in_use`.
   An `unload-*` of the very subject being cleared is admitted and ends `done` (`clears=True`,
   `being_cleared`).
 - The id to unload is read under the claim. `Residency.unload` raises `KeyError` for a stale id
@@ -282,6 +293,30 @@ intention, and the fix is a lease on the client side, never an exception here.
   false act on a bench. An absent header records `null`.
 - `retry_after()` is the median of the last 20 completions, rounded up, with a floor of 1 s. It
   is `None` (header absent) until one completion has finished. A Retry-After is never invented.
+
+### A stop that did not finish, and engines a crash left behind (`crucible/residency.py`)
+
+- `unload` records the stopping engine as `DyingResident` before it asks it to stop. If the stop
+  raises (SIGTERM deadline passed), the record stays and every load or claim goes through
+  `refuse_if_stopping`. That check first asks the process table whether any of the dying pids
+  are still alive: if none are, the card is let go and the load proceeds with no restart. If
+  some are, the stop is asked once more (never SIGKILL), and only then is the load refused as
+  `engine_still_stopping`, naming the live pids, `kill <pids>` (never -9) and the engine's log.
+- Every time the card gains or loses a resident, `Residency` writes the pids it owns (engine,
+  worker session, anything still dying) with each one's command and start time to
+  `<home>/run/resident.json`, whole-file-and-replace. It is deleted when nothing is owned.
+- Engine children run in their own session so a Crucible crash does not take them down, which
+  also means a restarted Crucible does not know them. At startup (app lifespan,
+  `Residency.start_reclaiming`, on a daemon thread so the API answers at once) the record is
+  read. A pid whose command and start time still match is sent SIGTERM (its own process group
+  when it leads one) and waited for up to the engine's stop budget. A pid now belonging to
+  another process is never signalled. A record written by a Crucible that is still running is
+  left alone. A record that will not parse is moved to `resident.json.bad-<timestamp>`.
+- A survivor is logged and kept as a leftover (`accelerator.note_leftover`). While it lives,
+  `accelerator.guard`'s `accelerator_busy` message says which pid and command a previous Crucible
+  left, when it was asked to stop, and to run `kill <pid>` (never -9), with the rows under
+  `details.left_by_previous_run`. The survivor stays in `resident.json`, so the next start asks
+  again.
 
 ## 7. Worker processes (`crucible/workers.py`, `crucible/jobs/workerio.py`)
 

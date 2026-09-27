@@ -216,7 +216,9 @@ def test_input_with_both_sources_is_refused(
         headers=auth,
     )
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "invalid_request"
+    error = response.json()["error"]
+    assert error["code"] == "invalid_request"
+    assert error["message"].startswith("the request to POST /v1/jobs is not valid: body.inputs.x.bin")
 
 
 def test_unknown_job_type_is_refused(client: TestClient, auth: dict[str, str]) -> None:

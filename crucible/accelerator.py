@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
 import shutil
+import signal
 import subprocess
+import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -140,6 +144,228 @@ def probe_process_table() -> dict[int, tuple[int, int]]:
         except (ValueError, IndexError):
             raise ProbeError(f"could not parse {entry / 'stat'}: {stat!r}") from None
     return table
+
+
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_ERROR_ACCESS_DENIED = 5
+_STILL_ACTIVE = 259
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    pid: int
+    command: str
+    started: str
+
+    def same_process_as(self, other: "ProcessIdentity") -> bool:
+        return (
+            self.pid == other.pid
+            and bool(self.command)
+            and bool(self.started)
+            and self.command == other.command
+            and self.started == other.started
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"pid": self.pid, "command": self.command, "started": self.started}
+
+
+def _kernel32() -> Any:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [
+        ctypes.POINTER(wintypes.FILETIME)
+    ] * 4
+    kernel.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    return kernel
+
+
+def _windows_process(pid: int) -> tuple[bool, ProcessIdentity | None]:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = _kernel32()
+    handle = kernel.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ctypes.get_last_error() == _ERROR_ACCESS_DENIED, None
+    try:
+        code = wintypes.DWORD()
+        if kernel.GetExitCodeProcess(handle, ctypes.byref(code)) and (
+            code.value != _STILL_ACTIVE
+        ):
+            return False, None
+        created, exited, kernel_time, user_time = (
+            wintypes.FILETIME() for _ in range(4)
+        )
+        started = ""
+        if kernel.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        ):
+            started = str((created.dwHighDateTime << 32) | created.dwLowDateTime)
+        size = wintypes.DWORD(32_768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        command = (
+            buffer.value
+            if kernel.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size))
+            else ""
+        )
+        return True, ProcessIdentity(pid=pid, command=command, started=started)
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _proc_identity(pid: int) -> ProcessIdentity | None:
+    entry = Path("/proc") / str(pid)
+    try:
+        stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+        raw = (entry / "cmdline").read_bytes()
+    except OSError:
+        return None
+    try:
+        fields = stat[stat.rindex(")") + 2 :].split()
+        state, started = fields[0], fields[19]
+    except (ValueError, IndexError):
+        return None
+    if state == "Z":
+        return None
+    command = " ".join(
+        part.decode("utf-8", "replace") for part in raw.split(bytes(1)) if part
+    )
+    return ProcessIdentity(pid=pid, command=command, started=started)
+
+
+def _ps_field(pid: int, field: str) -> str:
+    try:
+        completed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", f"{field}="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def _posix_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def process_identity(pid: int) -> ProcessIdentity | None:
+    if pid <= 0:
+        return None
+    if sys.platform == "win32":
+        return _windows_process(pid)[1]
+    if Path("/proc").is_dir():
+        return _proc_identity(pid)
+    if not _posix_alive(pid):
+        return None
+    return ProcessIdentity(
+        pid=pid, command=_ps_field(pid, "command"), started=_ps_field(pid, "lstart")
+    )
+
+
+def process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        return _windows_process(pid)[0]
+    if Path("/proc").is_dir():
+        return _proc_identity(pid) is not None
+    return _posix_alive(pid)
+
+
+def ask_pid_to_stop(pid: int) -> bool:
+    if sys.platform == "win32":
+        try:
+            os.kill(pid, signal.CTRL_BREAK_EVENT)
+        except OSError:
+            return False
+        return True
+    try:
+        group = os.getpgid(pid)
+        if group == pid and group != os.getpgrp():
+            os.killpg(group, signal.SIGTERM)
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class Leftover:
+    identity: ProcessIdentity
+    asked_at: str
+
+    def sentence(self) -> str:
+        pid = self.identity.pid
+        command = self.identity.command or "(command unknown)"
+        return (
+            f"a previous Crucible left {pid} {command} running; it was asked to "
+            f"stop at {self.asked_at}; stop it with `kill {pid}` (never -9)"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**self.identity.to_dict(), "asked_at": self.asked_at}
+
+
+_leftovers: dict[int, Leftover] = {}
+_leftovers_lock = threading.Lock()
+
+
+def note_leftover(identity: ProcessIdentity, asked_at: str) -> None:
+    with _leftovers_lock:
+        _leftovers[identity.pid] = Leftover(identity=identity, asked_at=asked_at)
+
+
+def forget_leftover(pid: int) -> None:
+    with _leftovers_lock:
+        _leftovers.pop(pid, None)
+
+
+def leftovers() -> list[Leftover]:
+    with _leftovers_lock:
+        noted = list(_leftovers.values())
+    alive = [left for left in noted if process_alive(left.identity.pid)]
+    for gone in noted:
+        if gone not in alive:
+            forget_leftover(gone.identity.pid)
+    return alive
+
+
+def _left_behind(
+    message: str, details: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    alive = leftovers()
+    if not alive:
+        return message, details
+    said = "; ".join(left.sentence() for left in alive)
+    return (
+        f"{message} {said[0].upper()}{said[1:]}.",
+        {**details, "left_by_previous_run": [left.to_dict() for left in alive]},
+    )
 
 
 def expand_owned_pids(
@@ -408,14 +634,16 @@ def guard(
         raise ApiError(
             409,
             "accelerator_busy",
-            opening + "; ".join(app.describe() for app in holders) + closing,
-            {
-                "model": model_id,
-                "processes": [
-                    {"pid": app.pid, "name": app.name, "used_bytes": app.used_bytes}
-                    for app in holders
-                ],
-            },
+            *_left_behind(
+                opening + "; ".join(app.describe() for app in holders) + closing,
+                {
+                    "model": model_id,
+                    "processes": [
+                        {"pid": app.pid, "name": app.name, "used_bytes": app.used_bytes}
+                        for app in holders
+                    ],
+                },
+            ),
         )
 
     stray = (
@@ -427,17 +655,19 @@ def guard(
         raise ApiError(
             409,
             "accelerator_busy",
-            f"cannot load {model_id!r}: {stray / GIB:.1f} GiB of the "
-            f"{state.total_bytes / GIB:.1f} GiB card is in use by a process this "
-            "host's driver will not name (under WSL2 the compute-app list is "
-            "empty even for processes inside the same VM). Crucible never evicts "
-            "another process.",
-            {
-                "model": model_id,
-                "unattributed_bytes": stray,
-                "used_bytes": state.used_bytes,
-                "desktop_allowance_bytes": desktop_allowance_bytes,
-            },
+            *_left_behind(
+                f"cannot load {model_id!r}: {stray / GIB:.1f} GiB of the "
+                f"{state.total_bytes / GIB:.1f} GiB card is in use by a process "
+                "this host's driver will not name (under WSL2 the compute-app "
+                "list is empty even for processes inside the same VM). Crucible "
+                "never evicts another process.",
+                {
+                    "model": model_id,
+                    "unattributed_bytes": stray,
+                    "used_bytes": state.used_bytes,
+                    "desktop_allowance_bytes": desktop_allowance_bytes,
+                },
+            ),
         )
 
     if backend_kind == MLX_DARWIN:

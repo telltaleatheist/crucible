@@ -630,6 +630,8 @@ def test_a_malformed_body_is_invalid_request_naming_the_field(
     error = response.json()["error"]
     assert error["code"] == "invalid_request"
     assert ["body", "state"] in [p["location"] for p in error["details"]["problems"]]
+    assert "POST /v1/decide" in error["message"]
+    assert "job request" not in error["message"]
 
 
 def test_a_decision_in_flight_is_on_the_activity_bench_and_then_gone(
