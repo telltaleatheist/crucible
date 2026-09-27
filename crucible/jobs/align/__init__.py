@@ -76,7 +76,7 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from ... import accelerator, hosttools, jobenv, weights, workers
+from ... import accelerator, hosttools, weights, workers
 from ...alignmodels import (
     AlignBackendSpec,
     AlignManifest,
@@ -93,6 +93,7 @@ from ...residency import (
     Residency,
     describe_resident,
 )
+from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 
 __all__ = ["AlignJobType", "AlignParams", "UnloadAlignerJobType"]
@@ -411,14 +412,9 @@ class AlignJobType:
         return manifest.spec(self._config.backend_kind).memory_bytes_estimate
 
     def check(self, backend: Any) -> JobTypeStatus:
-        try:
-            env = jobenv.env_status(
-                self._config.home, jobenv.worker_env(JOB_TYPE, backend.kind), backend.kind
-            )
-        except jobenv.EnvError as exc:
-            return JobTypeStatus(ready=False, detail=str(exc))
-        if not env.installed:
-            return JobTypeStatus(ready=False, detail=env.detail)
+        env = worker_type.env_or_status(self._config, JOB_TYPE, backend.kind)
+        if isinstance(env, JobTypeStatus):
+            return env
         if hosttools.ffmpeg_path() is None:
             return JobTypeStatus(
                 ready=False,
@@ -429,13 +425,9 @@ class AlignJobType:
             manifests = _manifests()
         except ApiError as exc:
             return JobTypeStatus(ready=False, detail=exc.message)
-        installed = [
-            manifest.id
-            for manifest in manifests.values()
-            if manifest.supports(backend.kind)
-            and weights.installed(self._config, manifest, manifest.spec(backend.kind))
-            is not None
-        ]
+        installed = worker_type.installed_ids(
+            self._config, manifests.values(), backend.kind
+        )
         if not installed:
             return JobTypeStatus(
                 ready=False,
@@ -459,49 +451,16 @@ class AlignJobType:
         """
         backend_kind = self._backend.kind
         manifest = _known(model_id)
-        if not manifest.supports(backend_kind):
-            raise ApiError(
-                400,
-                "backend_unsupported",
-                f"aligner {model_id!r} has no {backend_kind} block; "
-                f"{manifest.path.name} declares {sorted(manifest.backends)}",
-                {
-                    "model": model_id,
-                    "backend": backend_kind,
-                    "declared": sorted(manifest.backends),
-                },
-            )
-        spec = manifest.spec(backend_kind)
-        accelerator.refuse_if_larger_than_host(
-            model_id=model_id,
-            need_bytes=spec.memory_bytes_estimate,
-            host_total_bytes=self._backend.gpu.vram_bytes,
-            host_name=self._backend.gpu.name,
+        spec = worker_type.require_block(manifest, model_id, backend_kind, "aligner")
+        worker_type.refuse_if_larger_than_host(
+            self._backend, model_id, spec.memory_bytes_estimate
         )
-        try:
-            python = jobenv.require_env(
-                self._config.home, jobenv.worker_env(JOB_TYPE, backend_kind), backend_kind
-            )
-        except jobenv.EnvError as exc:
-            raise ApiError(
-                409,
-                "env_missing",
-                f"cannot run {model_id!r}: {exc}",
-                {
-                    "model": model_id,
-                    "env": str(self._config.home / "envs" / JOB_TYPE),
-                },
-            ) from None
-        try:
-            installed = weights.require_installed(self._config, manifest, spec)
-        except weights.WeightsError as exc:
-            raise ApiError(
-                409,
-                "model_not_installed",
-                str(exc),
-                {"model": model_id, "hf_repo": spec.hf_repo, "revision": spec.revision},
-            ) from None
-        return manifest, spec, python, installed.path
+        python = worker_type.require_worker_python(
+            self._config, JOB_TYPE, backend_kind, model_id
+        )
+        return manifest, spec, python, worker_type.require_weights(
+            self._config, manifest, spec, model_id
+        )
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         if model is None:  # unreachable: resolve_model requires one

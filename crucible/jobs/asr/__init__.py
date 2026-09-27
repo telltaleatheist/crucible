@@ -146,6 +146,7 @@ from ...errors import ApiError, JobError
 from ...manifests import fingerprint
 from ..align import QWEN3_LANGUAGES
 from ...journal import Identity
+from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from . import qwen, speechonly
 
@@ -864,21 +865,10 @@ class AsrJobType:
 
     def _spec_for(self, model_id: str) -> tuple[AsrManifest, Any]:
         """The manifest and this host's block, or `backend_unsupported` by name."""
-        backend_kind = self._backend.kind
         manifest = _known(model_id)
-        if not manifest.supports(backend_kind):
-            raise ApiError(
-                400,
-                "backend_unsupported",
-                f"ASR model {model_id!r} has no {backend_kind} block; "
-                f"{manifest.path.name} declares {sorted(manifest.backends)}",
-                {
-                    "model": model_id,
-                    "backend": backend_kind,
-                    "declared": sorted(manifest.backends),
-                },
-            )
-        return manifest, manifest.spec(backend_kind)
+        return manifest, worker_type.require_block(
+            manifest, model_id, self._backend.kind, "ASR model"
+        )
 
     def _require_runnable(
         self, model_id: str, params: AsrParams
@@ -893,21 +883,20 @@ class AsrJobType:
         """
         backend_kind = self._backend.kind
         manifest, spec = self._spec_for(model_id)
-        accelerator.refuse_if_larger_than_host(
-            model_id=model_id,
+        worker_type.refuse_if_larger_than_host(
+            self._backend,
+            model_id,
             # The LEAST it can run in: one piece at a time for a Qwen3-ASR
             # model with a width ladder (Owen, 2026-09-26: "yes, fewer at once
             # before quantizing for asr too"), so "never on this host" is not
             # said about a card that fewer pieces at once would fit.
-            need_bytes=(
+            (
                 qwen.floor_bytes(
                     manifest, spec, backend_kind, with_aligner=params.word_timestamps
                 )
                 if spec.engine in QWEN_ASR_ENGINES
                 else spec.memory_bytes_estimate
             ),
-            host_total_bytes=self._backend.gpu.vram_bytes,
-            host_name=self._backend.gpu.name,
         )
         # What no precision works around: vLLM measured not starting on this
         # card (fresh-install #48). A card merely without bf16 runs Qwen3-ASR
@@ -918,19 +907,11 @@ class AsrJobType:
             card=ladder.card_for(self._config.home, self._backend.gpu),
         )
         python = _python_for(self._config, spec.engine, backend_kind, model_id)
-        try:
-            installed = weights.require_installed(self._config, manifest, spec)
-        except weights.WeightsError as exc:
-            raise ApiError(
-                409,
-                "model_not_installed",
-                str(exc),
-                {"model": model_id, "hf_repo": spec.hf_repo, "revision": spec.revision},
-            ) from None
+        weights_dir = worker_type.require_weights(self._config, manifest, spec, model_id)
         aligner = None
         if spec.engine in QWEN_ASR_ENGINES and params.word_timestamps:
             aligner = qwen.plan_aligner(self._config, spec, backend_kind)
-        return manifest, spec, python, installed.path, aligner
+        return manifest, spec, python, weights_dir, aligner
 
     def _need_bytes(self, manifest: Any, spec: Any, params: AsrParams) -> int:
         """What THIS job needs: the aligner is on the card only with timestamps,

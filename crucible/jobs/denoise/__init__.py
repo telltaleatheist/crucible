@@ -79,7 +79,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from ... import accelerator, jobenv, workers
+from ... import accelerator, workers
 from ...backend import CUDA_LINUX
 from ...config import Config
 from ...denoisemodels import (
@@ -100,6 +100,7 @@ from ...residency import (
     Residency,
     describe_resident,
 )
+from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 
 __all__ = [
@@ -390,20 +391,14 @@ class DenoiseJobType:
         return manifest.spec(self._config.backend_kind).memory_bytes_estimate
 
     def check(self, backend: Any) -> JobTypeStatus:
-        try:
-            env = jobenv.env_status(
-                self._config.home, jobenv.worker_env(ENV_JOB_TYPE, backend.kind), backend.kind
-            )
-        except jobenv.EnvError as exc:
-            return JobTypeStatus(ready=False, detail=str(exc))
-        if not env.installed:
-            return JobTypeStatus(
-                ready=False,
-                detail=(
-                    f"{env.detail} (denoise shares the rvc env — "
-                    "`crucible install rvc`)"
-                ),
-            )
+        env = worker_type.env_or_status(
+            self._config,
+            ENV_JOB_TYPE,
+            backend.kind,
+            missing_note=" (denoise shares the rvc env — `crucible install rvc`)",
+        )
+        if isinstance(env, JobTypeStatus):
+            return env
         try:
             manifests = _manifests()
         except ApiError as exc:
@@ -450,39 +445,13 @@ class DenoiseJobType:
         """
         backend_kind = self._backend.kind
         manifest = _known(model_id)
-        if not manifest.supports(backend_kind):
-            raise ApiError(
-                400,
-                "backend_unsupported",
-                f"denoise model {model_id!r} has no {backend_kind} block; "
-                f"{manifest.path.name} declares {sorted(manifest.backends)}",
-                {
-                    "model": model_id,
-                    "backend": backend_kind,
-                    "declared": sorted(manifest.backends),
-                },
-            )
-        spec = manifest.spec(backend_kind)
-        accelerator.refuse_if_larger_than_host(
-            model_id=model_id,
-            need_bytes=spec.memory_bytes_estimate,
-            host_total_bytes=self._backend.gpu.vram_bytes,
-            host_name=self._backend.gpu.name,
+        spec = worker_type.require_block(manifest, model_id, backend_kind, "denoise model")
+        worker_type.refuse_if_larger_than_host(
+            self._backend, model_id, spec.memory_bytes_estimate
         )
-        try:
-            python = jobenv.require_env(
-                self._config.home, jobenv.worker_env(ENV_JOB_TYPE, backend_kind), backend_kind
-            )
-        except jobenv.EnvError as exc:
-            raise ApiError(
-                409,
-                "env_missing",
-                f"cannot run {model_id!r}: {exc} (denoise shares the rvc env)",
-                {
-                    "model": model_id,
-                    "env": str(self._config.home / "envs" / ENV_JOB_TYPE),
-                },
-            ) from None
+        python = worker_type.require_worker_python(
+            self._config, ENV_JOB_TYPE, backend_kind, model_id, note=" (denoise shares the rvc env)"
+        )
         root = _require_model_files(self._config, manifest)
         return manifest, spec, python, root
 

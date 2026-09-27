@@ -52,6 +52,7 @@ from ...residency import (
     Residency,
     describe_resident,
 )
+from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 
 __all__ = [
@@ -595,22 +596,8 @@ def _require_loadable(
     """
     backend_kind = backend.kind
     manifest = _known(model_id)
-    if not manifest.supports(backend_kind):
-        raise ApiError(
-            400,
-            "backend_unsupported",
-            f"model {model_id!r} has no {backend_kind} block; {manifest.path.name} "
-            f"declares {sorted(manifest.backends)}",
-            {"model": model_id, "backend": backend_kind,
-             "declared": sorted(manifest.backends)},
-        )
-    spec = manifest.spec(backend_kind)
-    accelerator.refuse_if_larger_than_host(
-        model_id=model_id,
-        need_bytes=spec.memory_bytes_estimate,
-        host_total_bytes=backend.gpu.vram_bytes,
-        host_name=backend.gpu.name,
-    )
+    spec = worker_type.require_block(manifest, model_id, backend_kind, "model")
+    worker_type.refuse_if_larger_than_host(backend, model_id, spec.memory_bytes_estimate)
     # And what no amount of room fixes either: an engine the ladder measured
     # not starting on this card (fresh-install #48). A card merely without
     # bf16 is not refused: the load runs it in fp16 (`engines.vllm.card_args`).
