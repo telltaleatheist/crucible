@@ -322,3 +322,28 @@ Timeline, local time:
 - **What:** "`pip install -r cuda-linux.txt` exited 1"; the actual cause ("diffq ... No such file or
   directory: 'clang'") was 40 lines up.
 - **Should be:** name the package that failed to build and why, in one line.
+
+## The 1.0.47 upgrade fails: #27 turns into a blocker (root cause fixed in 1.0.48)
+
+### 32. After the relocation, every host upgrade fails with 401, and a person cannot recover
+- **What:** 1.0.47's installer (22:16:00, 9 s, exit 1) authenticated to the orchestrator door with
+  the Windows config.toml token; the door wanted the guest's rotated token and answered 401
+  (`host_unauthorized`). So the old 1.0.46 orchestrator was never stopped (it kept running old code
+  over 1.0.47 files), and the guest was never carried. "Crucible installed but did not become ready.
+  Run crucible local status" led only to `"state": "unauthorized"`, with no hint that the token had
+  rotated or what to do.
+- **The root cause of #24, #27 and #32 together:** `finishImportScript` writes
+  `[user] default=crucible` into wsl.conf, which WSL applies only at the distro's NEXT start. The move
+  ran its first guest commands straight after the import, so they ran as ROOT and the engine landed
+  in /root/.crucible. After the restart the default was `crucible`; the next carry found no
+  ~/.crucible there, and install.sh built a new home with a new token.
+- **Fixed (1.0.48):** every guest command in Crucible's own distro names its user
+  (`presence.guest_argv`: `wsl.exe -d crucible -u crucible --exec ...`), so the user never depends on
+  whether the distro has restarted. A foreign distro (an app's `Ubuntu`) keeps its own default user.
+  Also fixed: the recovery recipe hard-coded `systemctl restart user@1000`, but Canonical's image
+  gave `crucible` uid 1001; it now reads `id -u crucible`.
+- **Recovering kylies-pc** (its guest home had already moved): `crucible init --force --config-from`,
+  the move's own token-carrying step, run again in the guest with the Windows config.toml, carried
+  the Windows token back in. No config was edited by hand.
+- **Still owed:** a door or installer that finds the engine token rotated should say so and name
+  the recovery; and the abandoned /root/.crucible should be reported or removed.

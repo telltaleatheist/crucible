@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from . import landoor, wslstate
+from .presence import guest_argv
 from .catalog import CatalogPort, CatalogRefusal, Subject
 from .errors import HostError
 from ..errors import CrucibleError
@@ -425,7 +426,7 @@ class EngineInstall:
         the guest can be asked.
         """
         home = self._runner.run(
-            ["wsl.exe", "-d", self._distro, "--exec", "bash", "-lc", 'printf %s "${CRUCIBLE_HOME:-$HOME/.crucible}"'],
+            guest_argv(self._distro, ["bash", "-lc", 'printf %s "${CRUCIBLE_HOME:-$HOME/.crucible}"']),
             timeout_s=QUICK_TIMEOUT_SECONDS,
         )
         if not home.ok or home.stdout.strip() == "":
@@ -436,7 +437,7 @@ class EngineInstall:
         guest_home = home.stdout.strip()
         crucible = f"{guest_home}/server/bin/crucible"
         named = self._runner.run(
-            ["wsl.exe", "-d", self._distro, "--exec", "bash", "-lc", f'"{crucible}" token --url'],
+            guest_argv(self._distro, ["bash", "-lc", f'"{crucible}" token --url']),
             timeout_s=QUICK_TIMEOUT_SECONDS,
         )
         name = ""
@@ -646,7 +647,7 @@ class EngineInstall:
             raise self._fail("wsl_read_failed", listed.said())
         if self._distro in distros:
             marked = self._runner.run(
-                ["wsl.exe", "-d", self._distro, "--exec", "cat", "/etc/wsl.conf"],
+                guest_argv(self._distro, ["cat", "/etc/wsl.conf"]),
                 timeout_s=QUICK_TIMEOUT_SECONDS,
             )
             if not marked.ok or "# crucible-rootfs" not in marked.stdout:
@@ -721,7 +722,7 @@ class EngineInstall:
         )
         if not finished.ok:
             raise self._fail("distro_import_failed", f"The imported image could not be prepared: {finished.said()}")
-        marked = self._runner.run(["wsl.exe", "-d", self._distro, "--exec", "cat", "/etc/wsl.conf"], timeout_s=300)
+        marked = self._runner.run(guest_argv(self._distro, ["cat", "/etc/wsl.conf"]), timeout_s=300)
         if not marked.ok or WSL_CONF_MARKER not in marked.stdout:
             raise self._fail("distro_import_invalid", "The imported image did not contain its ownership marker; it was preserved for inspection")
         self._finish("import-distro", f'Imported {asset} as "{self._distro}"')
@@ -738,10 +739,10 @@ class EngineInstall:
         a version nobody can name.
         """
         read = self._runner.run(
-            [
-                "wsl.exe", "-d", self._distro, "--exec", "bash", "-lc",
-                'cat "${CRUCIBLE_HOME:-$HOME/.crucible}/installation.json"',
-            ],
+            guest_argv(
+                self._distro,
+                ["bash", "-lc", 'cat "${CRUCIBLE_HOME:-$HOME/.crucible}/installation.json"'],
+            ),
             timeout_s=QUICK_TIMEOUT_SECONDS,
         )
         if not read.ok or read.stdout.strip() == "":
@@ -1229,7 +1230,7 @@ class EngineInstall:
         own rule about progress bars broken one layer down. `_line` lifts the
         `crucible-progress` lines out on the way past.
         """
-        full = ["wsl.exe", "-d", self._distro, "--exec", *argv]
+        full = guest_argv(self._distro, argv)
         return self._runner.stream(
             full,
             timeout_s=timeout_s,

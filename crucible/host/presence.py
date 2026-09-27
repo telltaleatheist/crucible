@@ -96,7 +96,7 @@ def wsl_boot_argv(distro: str = CRUCIBLE_DISTRO) -> list[str]:
     shell form, and `--exec` is the spelling every other wsl call in this
     system uses for that reason.
     """
-    return ["wsl.exe", "-d", distro, "--exec", "true"]
+    return guest_argv(distro, ["true"])
 
 
 def wsl_list_argv() -> list[str]:
@@ -150,7 +150,7 @@ def keepalive_argv(distro: str) -> list[str]:
     on ITS side, and the guest-side sleep is only what gives that something to
     wait for.
     """
-    return ["wsl.exe", "-d", distro, "--exec", "sleep", "infinity"]
+    return guest_argv(distro, ["sleep", "infinity"])
 
 
 def pairing_line_authority(line: str) -> str | None:
@@ -178,7 +178,7 @@ def guest_uid_argv(distro: str) -> list[str]:
     `systemctl --user` call does not, which is what makes it the right thing
     to ask first.
     """
-    return ["wsl.exe", "-d", distro, "--exec", "id", "-u"]
+    return guest_argv(distro, ["id", "-u"])
 
 
 def runtime_dir(uid: str) -> str:
@@ -209,11 +209,10 @@ def user_systemctl_argv(distro: str, uid: str, verb: str) -> list[str]:
     (BookForge's `wsl-exe-implicit-shell-trap`), and `env` is how a value
     reaches a process without a shell to set it.
     """
-    return [
-        "wsl.exe", "-d", distro, "--exec",
-        "env", f"XDG_RUNTIME_DIR={runtime_dir(uid)}",
-        "systemctl", "--user", verb, UNIT_NAME,
-    ]
+    return guest_argv(
+        distro,
+        ["env", f"XDG_RUNTIME_DIR={runtime_dir(uid)}", "systemctl", "--user", verb, UNIT_NAME],
+    )
 
 
 #: The recipes that talk to the USER manager, and so cannot be built at all
@@ -253,7 +252,13 @@ def recipe_argv(
         # rootfs 4b builds with exactly one non-root user, so 1000 here is a
         # fact about a rootfs this project makes and not an assumption about
         # somebody's machine. 4.1 names the command literally for that reason.
-        return ["wsl.exe", "-d", distro, "-u", "root", "--exec", "systemctl", "restart", "user@1000"]
+        # NOT `user@1000` (2026-09-26): on kylies-pc Canonical's image gave the
+        # `crucible` user uid 1001, so the literal restarted nobody's manager.
+        # The uid is read, as it is everywhere else.
+        return [
+            "wsl.exe", "-d", distro, "-u", "root", "--exec", "bash", "-c",
+            f'systemctl restart "user@$(id -u {GUEST_USER})"',
+        ]
     raise ValueError(
         f"no recipe called {name!r}; the recovery recipes are {RECIPES} and the "
         f"restart is {RECIPE_USER_UNIT_RESTART!r}"
@@ -439,6 +444,34 @@ def read_wsl_distros(result: object) -> list[str] | None:
     if registered_wsl_distros() == []:
         return []
     return None
+
+
+#: The user Crucible's OWN distro runs its engine as: `finishImportScript` creates
+#: it and writes it into wsl.conf as the default.
+GUEST_USER = "crucible"
+
+
+def guest_argv(distro: str, argv: list[str] | tuple[str, ...]) -> list[str]:
+    """`wsl.exe -d <distro> [-u crucible] --exec <argv>`: the one spelling.
+
+    THE USER IS NAMED, NOT DEFAULTED, IN CRUCIBLE'S DISTRO (2026-09-26,
+    kylies-pc). `[user] default=crucible` in wsl.conf takes effect only at the
+    distro's NEXT start, and the move ran its first guest commands straight after
+    the import, so they ran as root: the engine landed in /root/.crucible. After a
+    restart the default was `crucible`, the next carry found no ~/.crucible, and
+    install.sh minted a new home WITH A NEW TOKEN. The door then refused the
+    Windows token, and every later host upgrade failed with 401. A distro somebody
+    else made (an app's `Ubuntu`) keeps its own default user: that's the user
+    whose engine it is.
+    """
+    user = ["-u", GUEST_USER] if distro == _crucible_distro() else []
+    return ["wsl.exe", "-d", distro, *user, "--exec", *argv]
+
+
+def _crucible_distro() -> str:
+    from .wsl_states import CRUCIBLE_DISTRO
+
+    return CRUCIBLE_DISTRO
 
 
 def parse_wsl_list(text: str) -> list[str]:
