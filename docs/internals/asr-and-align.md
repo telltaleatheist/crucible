@@ -389,6 +389,13 @@ the rough whisper size is the `rough_model` param.
   dragged chapter 1 85 s late); interior-trigram matches rescue misheard openings. The word
   test is skipped next to a failed transcribe slice. `direct` marks a sentence whose own
   opening was found, and it is trusted over the aligner when they disagree.
+  In code: `_trigram_index`, `_anchor_candidates`, `_anchor_chain` (pass 1),
+  `_walk_around_anchors` (pass 2, recording through `_Placement.place`), `_fill_interior_runs`
+  (each gap a `_Run`: `_rescue_run` when it is overfull, else `_spread_run`), then
+  `_never_backwards`. `_enough` is the one "got >= max(3, need - 1)" test.
+- **jobtype.py**: `run` resolves ffmpeg and the weights into a `_Book`, then `_run_stages` runs
+  transcribe, place sentences, plan windows, align windows and write the transcript in order;
+  `StageFailed` and `NoCues` become `JobError` in `run` alone.
 - **plan.py**: chunk pads `PAD_HEAD, PAD_TAIL = 4.0, 20.0` are the original's, not tunables
   (the tail covers the last sentence up to the next rough start). Spans are capped at
   `2 * chunk_s` (aligner memory is quadratic in span), and capped ranges are reported by

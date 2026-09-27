@@ -487,6 +487,9 @@ around it).
   cleans up from the record. Rows persist until `lan disable` (no per-stop removal).
   `disable` withdraws the engine projection first and keeps the record if that fails.
 - `reconcile` republishes addresses after a DHCP change and adds no row that exists.
+- `enable` is `_door_to_enable` (every refusal, returning the detected door), the
+  record written pending (`_pending_record`), then `_publish_admitted` (authorities,
+  then the advertisement).
 
 ## Elevation (UAC)
 
@@ -590,6 +593,8 @@ raises (`503 interfaces_unreadable`), never an empty list.
   files use a unique `/tmp` name.
 - Linger is reported, never enabled (it is the operator's decision); it says nothing about a
   system unit. Status fields are tri-state: `None` means nobody could be asked.
+- `status` asks the mechanism's own reader (`_systemd_state`, `_launchd_state`) for
+  running, pid, detail and linger, and builds `Status` once.
 - launchd: create the `StandardOutPath` directory first (launchd fails opaquely otherwise);
   check load state before `bootstrap`; stop is `bootout` (SIGTERM would be restarted by
   KeepAlive). Read the plist with `plistlib`. Parse `systemctl show`, not `status`.

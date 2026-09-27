@@ -414,6 +414,22 @@ _DEFAULT_BOUNDS: dict[str, tuple[Any, str]] = {
 }
 
 
+def _default_value(where: str, key: str, kind: type, value: Any) -> Any:
+    if kind is bool:
+        if not isinstance(value, bool):
+            raise ManifestError(f"{where}: {key} must be bool, got {type(value).__name__}")
+        return value
+    if kind is int:
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ManifestError(f"{where}: {key} must be int, got {type(value).__name__}")
+        return value
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ManifestError(
+            f"{where}: {key} must be a number, got {type(value).__name__}"
+        )
+    return float(value)
+
+
 def _parse_defaults(table: Any, path: Path) -> ModelDefaults:
     where = f"{path.name} [defaults]"
     if not isinstance(table, dict):
@@ -436,23 +452,7 @@ def _parse_defaults(table: Any, path: Path) -> ModelDefaults:
     for key, kind in DEFAULTS_KEYS.items():
         if key not in table:
             continue
-        value = table[key]
-        if kind is bool:
-            if not isinstance(value, bool):
-                raise ManifestError(
-                    f"{where}: {key} must be bool, got {type(value).__name__}"
-                )
-        elif kind is int:
-            if not isinstance(value, int) or isinstance(value, bool):
-                raise ManifestError(
-                    f"{where}: {key} must be int, got {type(value).__name__}"
-                )
-        else:
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ManifestError(
-                    f"{where}: {key} must be a number, got {type(value).__name__}"
-                )
-            value = float(value)
+        value = _default_value(where, key, kind, table[key])
         test, why = _DEFAULT_BOUNDS[key]
         if not test(value):
             raise ManifestError(f"{where}: {key} is {value!r} and {why}")
@@ -482,10 +482,20 @@ def _gguf_name(where: str, key: str, value: str) -> str:
     return value
 
 
-def _parse_local(
-    table: Any, path: Path, modalities: tuple[str, ...]
-) -> LocalForm:
-    where = f"{path.name} [local]"
+def _check_hf_pin(where: str, table: dict[str, Any]) -> None:
+    if not HF_REPO_PATTERN.match(table["hf_repo"]):
+        raise ManifestError(
+            f"{where}: hf_repo {table['hf_repo']!r} is not an <owner>/<name> "
+            "HuggingFace repo id"
+        )
+    if not REVISION_PATTERN.match(table["revision"]):
+        raise ManifestError(
+            f"{where}: revision {table['revision']!r} must be a full 40-character "
+            "commit sha, so a pull is reproducible; branch names are not pins"
+        )
+
+
+def _local_kind(where: str, table: Any) -> str:
     if not isinstance(table, dict):
         raise ManifestError(f"{where}: must be a table")
     if "kind" not in table:
@@ -499,14 +509,10 @@ def _parse_local(
             f"{where}: kind {kind!r} is not a local form Crucible knows; the "
             f"kinds are {sorted(LOCAL_KINDS)}"
         )
-    check_table(
-        where,
-        table,
-        {**_LOCAL_COMMON_REQUIRED, **_LOCAL_KIND_REQUIRED[kind]},
-        {**_LOCAL_COMMON_OPTIONAL, **_LOCAL_KIND_OPTIONAL[kind]},
-        error=ManifestError,
-    )
+    return kind
 
+
+def _check_local_sizes(where: str, table: dict[str, Any]) -> None:
     download = table["download_bytes"]
     needs = table["needs_bytes"]
     if download <= 0:
@@ -525,6 +531,8 @@ def _parse_local(
             f"{where}: needs_basis {basis!r} must be one of {sorted(NEEDS_BASES)}"
         )
 
+
+def _local_minimum_for(where: str, table: dict[str, Any]) -> tuple[str, ...]:
     minimum_for = table.get("minimum_for", [])
     if "minimum_for" in table and not minimum_for:
         raise ManifestError(
@@ -532,53 +540,40 @@ def _parse_local(
             "class says so by omitting the key; an empty list reads as a "
             "decision somebody made and then forgot to write down"
         )
-    if minimum_for:
-        for index, entry in enumerate(minimum_for):
-            if not isinstance(entry, str):
-                raise ManifestError(
-                    f"{where}: minimum_for[{index}] must be a string, got "
-                    f"{type(entry).__name__}"
-                )
-            if entry not in CLASS_NAMES:
-                raise ManifestError(
-                    f"{where}: minimum_for[{index}] is {entry!r}, which is not a "
-                    f"capability class; this build knows {sorted(CLASS_NAMES)}"
-                )
-        if len(set(minimum_for)) != len(minimum_for):
+    for index, entry in enumerate(minimum_for):
+        if not isinstance(entry, str):
             raise ManifestError(
-                f"{where}: minimum_for lists a class twice: {minimum_for}"
+                f"{where}: minimum_for[{index}] must be a string, got "
+                f"{type(entry).__name__}"
             )
-
-    common = {
-        "kind": kind,
-        "download_bytes": download,
-        "needs_bytes": needs,
-        "needs_basis": basis,
-        "minimum_for": tuple(minimum_for),
-    }
-
-    if kind == "ollama":
-        tag = table["tag"]
-        name, colon, version = tag.partition(":")
-        if colon == "" or name == "" or version == "" or tag.split() != [tag]:
+        if entry not in CLASS_NAMES:
             raise ManifestError(
-                f"{where}: tag {tag!r} must be <name>:<tag>; a bare name is "
-                "`:latest`, which is a floating pointer and not a pin"
+                f"{where}: minimum_for[{index}] is {entry!r}, which is not a "
+                f"capability class; this build knows {sorted(CLASS_NAMES)}"
             )
-        return OllamaLocal(**common, tag=tag)
+    if len(set(minimum_for)) != len(minimum_for):
+        raise ManifestError(
+            f"{where}: minimum_for lists a class twice: {minimum_for}"
+        )
+    return tuple(minimum_for)
 
-    if not HF_REPO_PATTERN.match(table["hf_repo"]):
+
+def _ollama_local(
+    where: str, table: dict[str, Any], common: dict[str, Any], modalities: tuple[str, ...]
+) -> OllamaLocal:
+    tag = table["tag"]
+    name, colon, version = tag.partition(":")
+    if colon == "" or name == "" or version == "" or tag.split() != [tag]:
         raise ManifestError(
-            f"{where}: hf_repo {table['hf_repo']!r} is not an <owner>/<name> "
-            "HuggingFace repo id"
+            f"{where}: tag {tag!r} must be <name>:<tag>; a bare name is "
+            "`:latest`, which is a floating pointer and not a pin"
         )
-    if not REVISION_PATTERN.match(table["revision"]):
-        raise ManifestError(
-            f"{where}: revision {table['revision']!r} must be a full 40-character "
-            "commit sha, so a pull is reproducible; branch names are not pins"
-        )
-    file = _gguf_name(where, "file", table["file"])
-    mmproj = table.get("mmproj")
+    return OllamaLocal(**common, tag=tag)
+
+
+def _local_mmproj(
+    where: str, mmproj: str | None, file: str, modalities: tuple[str, ...]
+) -> str | None:
     reads_images = "image" in modalities
     if reads_images and mmproj is None:
         raise ManifestError(
@@ -589,18 +584,27 @@ def _parse_local(
         )
     if mmproj is not None:
         mmproj = _gguf_name(where, "mmproj", mmproj)
-        if not reads_images:
-            raise ManifestError(
-                f"{where}: mmproj {mmproj!r} names a vision projector, but [model] "
-                f"modalities is {list(modalities)}. A projector nothing here sends a "
-                "page to is a file nobody would load; either offer 'image' or take "
-                "it out"
-            )
+    if mmproj is not None and not reads_images:
+        raise ManifestError(
+            f"{where}: mmproj {mmproj!r} names a vision projector, but [model] "
+            f"modalities is {list(modalities)}. A projector nothing here sends a "
+            "page to is a file nobody would load; either offer 'image' or take "
+            "it out"
+        )
     if mmproj == file:
         raise ManifestError(
             f"{where}: mmproj and file are the same name {file!r}; the projector "
             "is a second file"
         )
+    return mmproj
+
+
+def _gguf_local(
+    where: str, table: dict[str, Any], common: dict[str, Any], modalities: tuple[str, ...]
+) -> GgufLocal:
+    _check_hf_pin(where, table)
+    file = _gguf_name(where, "file", table["file"])
+    mmproj = _local_mmproj(where, table.get("mmproj"), file, modalities)
     return GgufLocal(
         **common,
         hf_repo=table["hf_repo"],
@@ -608,6 +612,32 @@ def _parse_local(
         file=file,
         mmproj=mmproj,
     )
+
+
+_LOCAL_BUILDERS = {"ollama": _ollama_local, "gguf": _gguf_local}
+
+
+def _parse_local(
+    table: Any, path: Path, modalities: tuple[str, ...]
+) -> LocalForm:
+    where = f"{path.name} [local]"
+    kind = _local_kind(where, table)
+    check_table(
+        where,
+        table,
+        {**_LOCAL_COMMON_REQUIRED, **_LOCAL_KIND_REQUIRED[kind]},
+        {**_LOCAL_COMMON_OPTIONAL, **_LOCAL_KIND_OPTIONAL[kind]},
+        error=ManifestError,
+    )
+    _check_local_sizes(where, table)
+    common = {
+        "kind": kind,
+        "download_bytes": table["download_bytes"],
+        "needs_bytes": table["needs_bytes"],
+        "needs_basis": table["needs_basis"],
+        "minimum_for": _local_minimum_for(where, table),
+    }
+    return _LOCAL_BUILDERS[kind](where, table, common, modalities)
 
 
 def _parse_serves(
@@ -645,8 +675,11 @@ def _parse_serves(
     return tuple(served)
 
 
-def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManifest:
-    unknown = sorted(set(document) - {"model", "backends", "defaults", "local"})
+_TOP_LEVEL_TABLES = frozenset({"model", "backends", "defaults", "local"})
+
+
+def _check_document(document: dict[str, Any], path: Path) -> None:
+    unknown = sorted(set(document) - _TOP_LEVEL_TABLES)
     if unknown:
         raise ManifestError(
             f"{path.name}: unknown top-level table(s) {unknown}; a manifest has "
@@ -658,15 +691,8 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
     if "backends" not in document:
         raise ManifestError(f"{path.name}: missing every [backends.<kind>] table")
 
-    model = document["model"]
-    if not isinstance(model, dict):
-        raise ManifestError(f"{path.name}: [model] must be a table")
-    check_table(
-        f"{path.name} [model]", model, _MODEL_REQUIRED, _MODEL_OPTIONAL,
-        error=ManifestError,
-    )
 
-    model_id = model["id"]
+def _check_model_id(path: Path, model_id: str, expected_id: str) -> None:
     if "/" in model_id:
         raise ManifestError(
             f"{path.name}: manifest_model_id_slash — model.id {model_id!r} "
@@ -684,26 +710,33 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             f"{path.name}: model.id is {model_id!r} but the file is named "
             f"{expected_id!r}; the id and the filename are the same thing"
         )
+
+
+def _check_weights_of(path: Path, model: dict[str, Any], has_local: bool) -> None:
     weights_of = model.get("weights_of")
-    if weights_of is not None:
-        if not MODEL_ID_PATTERN.match(weights_of):
-            raise ManifestError(
-                f"{path.name}: weights_of_unknown — model.weights_of "
-                f"{weights_of!r} is not a model id ([a-z0-9][a-z0-9._-]*)"
-            )
-        if weights_of == model_id:
-            raise ManifestError(
-                f"{path.name}: weights_of_chain — model.weights_of names this "
-                "model itself. A model that shares its own weights shares "
-                "nothing; omit the key"
-            )
-        if "local" in document:
-            raise ManifestError(
-                f"{path.name}: weights_of_local — this model shares the weights "
-                f"of {weights_of!r} and carries a [local] table. The local form "
-                f"belongs to the model that owns the download; take [local] out "
-                f"of this file"
-            )
+    if weights_of is None:
+        return
+    if not MODEL_ID_PATTERN.match(weights_of):
+        raise ManifestError(
+            f"{path.name}: weights_of_unknown — model.weights_of "
+            f"{weights_of!r} is not a model id ([a-z0-9][a-z0-9._-]*)"
+        )
+    if weights_of == model["id"]:
+        raise ManifestError(
+            f"{path.name}: weights_of_chain — model.weights_of names this "
+            "model itself. A model that shares its own weights shares "
+            "nothing; omit the key"
+        )
+    if has_local:
+        raise ManifestError(
+            f"{path.name}: weights_of_local — this model shares the weights "
+            f"of {weights_of!r} and carries a [local] table. The local form "
+            f"belongs to the model that owns the download; take [local] out "
+            f"of this file"
+        )
+
+
+def _check_model_sizes(path: Path, model: dict[str, Any]) -> None:
     if model["params_b"] <= 0:
         raise ManifestError(
             f"{path.name}: model.params_b must be positive, got {model['params_b']}"
@@ -724,6 +757,9 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             f"{path.name}: model.context_default must be positive, got "
             f"{model['context_default']}"
         )
+
+
+def _check_model_labels(path: Path, model: dict[str, Any], has_local: bool) -> None:
     for key in ("display", "description"):
         if key in model and model[key].strip() == "":
             raise ManifestError(
@@ -731,19 +767,17 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
                 "is said by omitting the key, not by an empty string a screen "
                 "would print as nothing"
             )
-    if "local" in document:
-        unnamed = sorted(
-            key for key in ("display", "description") if key not in model
+    unnamed = sorted(key for key in ("display", "description") if key not in model)
+    if has_local and unnamed:
+        raise ManifestError(
+            f"{path.name}: [local] is present but [model] is missing {unnamed}; "
+            "the lineup that table feeds is drawn as a tile, and a tile "
+            "needs its label and its sentence from the same file as its "
+            "numbers"
         )
-        if unnamed:
-            raise ManifestError(
-                f"{path.name}: [local] is present but [model] is missing {unnamed}; "
-                "the lineup that table feeds is drawn as a tile, and a tile "
-                "needs its label and its sentence from the same file as its "
-                "numbers"
-            )
 
-    modalities = model["modalities"]
+
+def _check_modalities(path: Path, modalities: list[Any]) -> None:
     if not modalities:
         raise ManifestError(
             f"{path.name}: model.modalities is empty; a model that accepts no "
@@ -766,249 +800,303 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             f"{path.name}: model.modalities lists a modality twice: {modalities}"
         )
 
-    backends_table = document["backends"]
-    if not isinstance(backends_table, dict):
+
+def _parse_model(document: dict[str, Any], path: Path, expected_id: str) -> dict[str, Any]:
+    model = document["model"]
+    if not isinstance(model, dict):
+        raise ManifestError(f"{path.name}: [model] must be a table")
+    check_table(
+        f"{path.name} [model]", model, _MODEL_REQUIRED, _MODEL_OPTIONAL,
+        error=ManifestError,
+    )
+    has_local = "local" in document
+    _check_model_id(path, model["id"], expected_id)
+    _check_weights_of(path, model, has_local)
+    _check_model_sizes(path, model)
+    _check_model_labels(path, model, has_local)
+    _check_modalities(path, model["modalities"])
+    return model
+
+
+def _check_engine(
+    where: str, kind: str, engine: str, serves_here: tuple[str, ...], modalities: list[str]
+) -> None:
+    expected = engine_for(kind, serves_here)
+    if engine == expected:
+        return
+    family = class_family(serves_here)
+    raise ManifestError(
+        f"{where}: engine {engine!r} does not serve {family!r} models on "
+        f"{kind}; that pairing's engine is {expected!r}. The family is "
+        f"read off [model] modalities = {list(modalities)} as this block "
+        f"serves them ({list(serves_here)}; `serves` narrows, never "
+        "widens) and not out of the engine name, so an engine cannot be "
+        "chosen by naming it"
+    )
+
+
+def _backend_engine_args(where: str, block: dict[str, Any]) -> tuple[str, ...]:
+    engine_args = block.get("engine_args", [])
+    for index, argument in enumerate(engine_args):
+        if not isinstance(argument, str):
+            raise ManifestError(
+                f"{where}: engine_args[{index}] must be a string, got "
+                f"{type(argument).__name__}"
+            )
+    return tuple(engine_args)
+
+
+def _check_llama_files(where: str, block: dict[str, Any], serves_here: tuple[str, ...]) -> None:
+    if "file" not in block:
+        raise ManifestError(
+            f"{where}: llama-windows needs `file`, the one GGUF in "
+            f"{block['hf_repo']!r} this row is. A GGUF repo holds every "
+            "quantization of a model and this server pulls one"
+        )
+    if "image" in serves_here and "mmproj" not in block:
+        raise ManifestError(
+            f"{where}: [model] modalities declares 'image' and this block "
+            f"serves it ({list(serves_here)}), and it names no `mmproj`. Half a vision model is a model "
+            "that loads and then cannot see; the projector is not "
+            "optional (docs/internals/config-envs-weights.md, \"Model manifests\")"
+        )
+    if "image" not in serves_here and "mmproj" in block:
+        raise ManifestError(
+            f"{where}: mmproj {block['mmproj']!r} names a vision "
+            f"projector, and this block serves {list(serves_here)}. Either "
+            "serve 'image' here or take the projector out"
+        )
+    for key in ("file", "mmproj"):
+        name = block.get(key)
+        if name is not None and (name != Path(name).name or name.startswith(".")):
+            raise ManifestError(
+                f"{where}: {key} {name!r} must be a plain file name "
+                "inside the repo, not a path"
+            )
+
+
+def _check_backend_files(
+    where: str, kind: str, block: dict[str, Any], serves_here: tuple[str, ...]
+) -> None:
+    if kind == LLAMA_WINDOWS:
+        _check_llama_files(where, block, serves_here)
+        return
+    extra = sorted({"file", "mmproj"} & set(block))
+    if extra:
+        raise ManifestError(
+            f"{where}: {extra} belong to a llama-windows block. On "
+            f"{kind} the whole repo is the weights and there is no "
+            "file to choose"
+        )
+
+
+def _check_vision_flags(
+    where: str, serves_here: tuple[str, ...], engine_args: tuple[str, ...]
+) -> None:
+    if "image" in serves_here and SKIP_MM_PROFILING in engine_args:
+        raise ManifestError(
+            f"{where}: engine_args carries {SKIP_MM_PROFILING!r} while "
+            f"[model] modalities declares 'image' and this block serves it. "
+            f"That flag stops vLLM "
+            f"reserving for an image, so it belongs only to a model this "
+            f"server serves text-only; take it out and measure "
+            f"--gpu-memory-utilization again with the image profiled in "
+            f"(docs/internals/config-envs-weights.md, \"Model manifests\")"
+        )
+    if "image" in serves_here and LANGUAGE_MODEL_ONLY in engine_args:
+        raise ManifestError(
+            f"{where}: engine_args carries {LANGUAGE_MODEL_ONLY!r} while "
+            f"[model] modalities declares 'image' and this block serves it. "
+            f"That flag makes vLLM skip "
+            f"loading the vision tower, so this engine would answer every "
+            f"page from the text alone — a well-formed reading of something "
+            f"it was never shown. It belongs only to a model this server "
+            f"serves text-only"
+        )
+
+
+def _backend_context(where: str, block: dict[str, Any], trained: int) -> int | None:
+    backend_context = block.get("context_default")
+    if backend_context is not None and backend_context <= 0:
+        raise ManifestError(
+            f"{where}: context_default must be positive, got {backend_context}"
+        )
+    if backend_context is not None and backend_context > trained:
+        raise ManifestError(
+            f"{where}: context_default is {backend_context} and the weights "
+            f"are trained at {trained}. An accelerator with "
+            f"room to spare does not give a checkpoint a longer memory"
+        )
+    return backend_context
+
+
+def _backend_max_context(
+    where: str, block: dict[str, Any], trained: int, served_here: int
+) -> int | None:
+    block_max = block.get("max_context")
+    if block_max is None:
+        return None
+    if block_max <= 0:
+        raise ManifestError(f"{where}: max_context must be positive, got {block_max}")
+    if block_max > trained:
+        raise ManifestError(
+            f"{where}: max_context is {block_max} and the weights are "
+            f"trained at {trained}. No load may start "
+            "an engine past what the checkpoint's positions reach"
+        )
+    if block_max < served_here:
+        raise ManifestError(
+            f"{where}: max_context is {block_max} and this block serves "
+            f"{served_here} by default. The largest context a load may "
+            "ask for cannot be smaller than the one a load that asks for "
+            "nothing gets; lower context_default or raise max_context"
+        )
+    return block_max
+
+
+def _check_memory_values(where: str, table: dict[str, Any]) -> None:
+    for key in ("weights_bytes", "kv_bytes_per_token"):
+        if table[key] <= 0:
+            raise ManifestError(f"{where}: {key} must be positive, got {table[key]}")
+    if table["overhead_bytes"] < 0:
+        raise ManifestError(
+            f"{where}: overhead_bytes cannot be negative, got "
+            f"{table['overhead_bytes']}"
+        )
+    if table["basis"] not in MEMORY_BASES:
+        raise ManifestError(
+            f"{where}: basis {table['basis']!r} is not one "
+            f"of {sorted(MEMORY_BASES)}"
+        )
+    if table["measured_at_context"] <= 0:
+        raise ManifestError(
+            f"{where}: measured_at_context must be positive, got "
+            f"{table['measured_at_context']}"
+        )
+
+
+def _check_memory_agrees(where: str, terms: MemoryTerms, served: int, stated: int) -> None:
+    if terms.measured_at_context != served:
+        raise ManifestError(
+            f"{where}: measured_at_context is "
+            f"{terms.measured_at_context} and this block serves "
+            f"{served}. An estimate is only true at the context it was "
+            f"taken at; state the terms at the context this block runs, "
+            f"or move the block's context_default to match what was "
+            f"measured (docs/FITS-AND-THE-CARD.md section 0b)"
+        )
+    from_terms = terms.bytes_for(context=served, concurrency=1)
+    drift = abs(from_terms - stated) / stated
+    if drift > MEMORY_TERMS_TOLERANCE:
+        raise ManifestError(
+            f"{where}: the terms come to {from_terms} bytes at "
+            f"{served} tokens and memory_bytes_estimate says {stated} — "
+            f"{drift:.1%} apart, past the {MEMORY_TERMS_TOLERANCE:.0%} a "
+            f"parts-against-whole reading is allowed. One of the two is "
+            f"wrong and the manifest does not say which; check for GB "
+            f"where GiB was meant, and for a kv_bytes_per_token computed "
+            f"from config.json on a backend whose card says otherwise"
+        )
+
+
+def _parse_memory(where: str, block: dict[str, Any], served: int) -> MemoryTerms | None:
+    table = block.get("memory")
+    if table is None:
+        return None
+    memory_where = f"{where}.memory"
+    if not isinstance(table, dict):
+        raise ManifestError(f"{memory_where}: must be a table")
+    check_table(memory_where, table, _MEMORY_REQUIRED, error=ManifestError)
+    _check_memory_values(memory_where, table)
+    terms = MemoryTerms(
+        weights_bytes=table["weights_bytes"],
+        overhead_bytes=table["overhead_bytes"],
+        kv_bytes_per_token=table["kv_bytes_per_token"],
+        basis=table["basis"],
+        measured_at_context=table["measured_at_context"],
+    )
+    _check_memory_agrees(memory_where, terms, served, block["memory_bytes_estimate"])
+    return terms
+
+
+def _backend_block(where: str, kind: str, block: Any) -> dict[str, Any]:
+    if kind not in BACKEND_ENGINES:
+        raise ManifestError(
+            f"{where}: {kind!r} is not a Crucible backend; the backends are "
+            f"{sorted(BACKEND_ENGINES)}"
+        )
+    if not isinstance(block, dict):
+        raise ManifestError(f"{where}: must be a table")
+    check_table(where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL, error=ManifestError)
+    return block
+
+
+def _parse_backend(kind: str, block: Any, path: Path, model: dict[str, Any]) -> BackendSpec:
+    where = f"{path.name} [backends.{kind}]"
+    block = _backend_block(where, kind, block)
+    modalities = model["modalities"]
+    serves_here = _parse_serves(where, block, modalities)
+    _check_engine(where, kind, block["engine"], serves_here, modalities)
+    _check_hf_pin(where, block)
+    if block["memory_bytes_estimate"] <= 0:
+        raise ManifestError(
+            f"{where}: memory_bytes_estimate must be positive, got "
+            f"{block['memory_bytes_estimate']}"
+        )
+    engine_args = _backend_engine_args(where, block)
+    _check_backend_files(where, kind, block, serves_here)
+    _check_vision_flags(where, serves_here, engine_args)
+    trained = model["trained_context"]
+    backend_context = _backend_context(where, block, trained)
+    served = backend_context or model["context_default"]
+    block_max = _backend_max_context(where, block, trained, served)
+    return BackendSpec(
+        backend=kind,
+        engine=block["engine"],
+        hf_repo=block["hf_repo"],
+        revision=block["revision"],
+        memory_bytes_estimate=block["memory_bytes_estimate"],
+        engine_args=engine_args,
+        context_default=backend_context,
+        max_context=block_max,
+        memory=_parse_memory(where, block, served),
+        file=block.get("file"),
+        mmproj=block.get("mmproj"),
+        serves=serves_here,
+    )
+
+
+def _parse_backends(table: Any, path: Path, model: dict[str, Any]) -> dict[str, BackendSpec]:
+    if not isinstance(table, dict):
         raise ManifestError(f"{path.name}: [backends] must hold one table per backend")
-    if not backends_table:
+    if not table:
         raise ManifestError(
             f"{path.name}: no backend blocks; a model nothing can serve is not a model"
         )
+    return {kind: _parse_backend(kind, block, path, model) for kind, block in table.items()}
 
-    backends: dict[str, BackendSpec] = {}
-    for kind, block in backends_table.items():
-        where = f"{path.name} [backends.{kind}]"
-        if kind not in BACKEND_ENGINES:
-            raise ManifestError(
-                f"{where}: {kind!r} is not a Crucible backend; the backends are "
-                f"{sorted(BACKEND_ENGINES)}"
-            )
-        if not isinstance(block, dict):
-            raise ManifestError(f"{where}: must be a table")
-        check_table(
-            where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL, error=ManifestError
-        )
 
-        serves_here = _parse_serves(where, block, modalities)
-
-        engine = block["engine"]
-        expected = engine_for(kind, serves_here)
-        if engine != expected:
-            family = class_family(serves_here)
-            raise ManifestError(
-                f"{where}: engine {engine!r} does not serve {family!r} models on "
-                f"{kind}; that pairing's engine is {expected!r}. The family is "
-                f"read off [model] modalities = {list(modalities)} as this block "
-                f"serves them ({list(serves_here)}; `serves` narrows, never "
-                "widens) and not out of the engine name, so an engine cannot be "
-                "chosen by naming it"
-            )
-        if not HF_REPO_PATTERN.match(block["hf_repo"]):
-            raise ManifestError(
-                f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
-                "HuggingFace repo id"
-            )
-        if not REVISION_PATTERN.match(block["revision"]):
-            raise ManifestError(
-                f"{where}: revision {block['revision']!r} must be a full 40-character "
-                "commit sha, so a pull is reproducible; branch names are not pins"
-            )
-        if block["memory_bytes_estimate"] <= 0:
-            raise ManifestError(
-                f"{where}: memory_bytes_estimate must be positive, got "
-                f"{block['memory_bytes_estimate']}"
-            )
-        engine_args = block.get("engine_args", [])
-        for index, argument in enumerate(engine_args):
-            if not isinstance(argument, str):
-                raise ManifestError(
-                    f"{where}: engine_args[{index}] must be a string, got "
-                    f"{type(argument).__name__}"
-                )
-        if kind == LLAMA_WINDOWS:
-            if "file" not in block:
-                raise ManifestError(
-                    f"{where}: llama-windows needs `file`, the one GGUF in "
-                    f"{block['hf_repo']!r} this row is. A GGUF repo holds every "
-                    "quantization of a model and this server pulls one"
-                )
-            if "image" in serves_here and "mmproj" not in block:
-                raise ManifestError(
-                    f"{where}: [model] modalities declares 'image' and this block "
-                    f"serves it ({list(serves_here)}), and it names no `mmproj`. Half a vision model is a model "
-                    "that loads and then cannot see; the projector is not "
-                    "optional (docs/internals/config-envs-weights.md, \"Model manifests\")"
-                )
-            if "image" not in serves_here and "mmproj" in block:
-                raise ManifestError(
-                    f"{where}: mmproj {block['mmproj']!r} names a vision "
-                    f"projector, and this block serves {list(serves_here)}. Either "
-                    "serve 'image' here or take the projector out"
-                )
-            for key in ("file", "mmproj"):
-                name = block.get(key)
-                if name is None:
-                    continue
-                if name != Path(name).name or name.startswith("."):
-                    raise ManifestError(
-                        f"{where}: {key} {name!r} must be a plain file name "
-                        "inside the repo, not a path"
-                    )
-        else:
-            extra = sorted({"file", "mmproj"} & set(block))
-            if extra:
-                raise ManifestError(
-                    f"{where}: {extra} belong to a llama-windows block. On "
-                    f"{kind} the whole repo is the weights and there is no "
-                    "file to choose"
-                )
-        if "image" in serves_here and SKIP_MM_PROFILING in engine_args:
-            raise ManifestError(
-                f"{where}: engine_args carries {SKIP_MM_PROFILING!r} while "
-                f"[model] modalities declares 'image' and this block serves it. "
-                f"That flag stops vLLM "
-                f"reserving for an image, so it belongs only to a model this "
-                f"server serves text-only; take it out and measure "
-                f"--gpu-memory-utilization again with the image profiled in "
-                f"(docs/internals/config-envs-weights.md, \"Model manifests\")"
-            )
-        if "image" in serves_here and LANGUAGE_MODEL_ONLY in engine_args:
-            raise ManifestError(
-                f"{where}: engine_args carries {LANGUAGE_MODEL_ONLY!r} while "
-                f"[model] modalities declares 'image' and this block serves it. "
-                f"That flag makes vLLM skip "
-                f"loading the vision tower, so this engine would answer every "
-                f"page from the text alone — a well-formed reading of something "
-                f"it was never shown. It belongs only to a model this server "
-                f"serves text-only"
-            )
-        backend_context = block.get("context_default")
-        if backend_context is not None and backend_context <= 0:
-            raise ManifestError(
-                f"{where}: context_default must be positive, got {backend_context}"
-            )
-        if backend_context is not None and backend_context > model["trained_context"]:
-            raise ManifestError(
-                f"{where}: context_default is {backend_context} and the weights "
-                f"are trained at {model['trained_context']}. An accelerator with "
-                f"room to spare does not give a checkpoint a longer memory"
-            )
-        block_max = block.get("max_context")
-        if block_max is not None:
-            served_here = backend_context or model["context_default"]
-            if block_max <= 0:
-                raise ManifestError(
-                    f"{where}: max_context must be positive, got {block_max}"
-                )
-            if block_max > model["trained_context"]:
-                raise ManifestError(
-                    f"{where}: max_context is {block_max} and the weights are "
-                    f"trained at {model['trained_context']}. No load may start "
-                    "an engine past what the checkpoint's positions reach"
-                )
-            if block_max < served_here:
-                raise ManifestError(
-                    f"{where}: max_context is {block_max} and this block serves "
-                    f"{served_here} by default. The largest context a load may "
-                    "ask for cannot be smaller than the one a load that asks for "
-                    "nothing gets; lower context_default or raise max_context"
-                )
-        terms: MemoryTerms | None = None
-        memory_table = block.get("memory")
-        if memory_table is not None:
-            memory_where = f"{where}.memory"
-            if not isinstance(memory_table, dict):
-                raise ManifestError(f"{memory_where}: must be a table")
-            check_table(
-                memory_where, memory_table, _MEMORY_REQUIRED, error=ManifestError
-            )
-            for key in ("weights_bytes", "kv_bytes_per_token"):
-                if memory_table[key] <= 0:
-                    raise ManifestError(
-                        f"{memory_where}: {key} must be positive, got "
-                        f"{memory_table[key]}"
-                    )
-            if memory_table["overhead_bytes"] < 0:
-                raise ManifestError(
-                    f"{memory_where}: overhead_bytes cannot be negative, got "
-                    f"{memory_table['overhead_bytes']}"
-                )
-            if memory_table["basis"] not in MEMORY_BASES:
-                raise ManifestError(
-                    f"{memory_where}: basis {memory_table['basis']!r} is not one "
-                    f"of {sorted(MEMORY_BASES)}"
-                )
-            if memory_table["measured_at_context"] <= 0:
-                raise ManifestError(
-                    f"{memory_where}: measured_at_context must be positive, got "
-                    f"{memory_table['measured_at_context']}"
-                )
-            terms = MemoryTerms(
-                weights_bytes=memory_table["weights_bytes"],
-                overhead_bytes=memory_table["overhead_bytes"],
-                kv_bytes_per_token=memory_table["kv_bytes_per_token"],
-                basis=memory_table["basis"],
-                measured_at_context=memory_table["measured_at_context"],
-            )
-            served = backend_context or model["context_default"]
-            if terms.measured_at_context != served:
-                raise ManifestError(
-                    f"{memory_where}: measured_at_context is "
-                    f"{terms.measured_at_context} and this block serves "
-                    f"{served}. An estimate is only true at the context it was "
-                    f"taken at; state the terms at the context this block runs, "
-                    f"or move the block's context_default to match what was "
-                    f"measured (docs/FITS-AND-THE-CARD.md section 0b)"
-                )
-            from_terms = terms.bytes_for(context=served, concurrency=1)
-            stated = block["memory_bytes_estimate"]
-            drift = abs(from_terms - stated) / stated
-            if drift > MEMORY_TERMS_TOLERANCE:
-                raise ManifestError(
-                    f"{memory_where}: the terms come to {from_terms} bytes at "
-                    f"{served} tokens and memory_bytes_estimate says {stated} — "
-                    f"{drift:.1%} apart, past the {MEMORY_TERMS_TOLERANCE:.0%} a "
-                    f"parts-against-whole reading is allowed. One of the two is "
-                    f"wrong and the manifest does not say which; check for GB "
-                    f"where GiB was meant, and for a kv_bytes_per_token computed "
-                    f"from config.json on a backend whose card says otherwise"
-                )
-        backends[kind] = BackendSpec(
-            backend=kind,
-            engine=engine,
-            hf_repo=block["hf_repo"],
-            revision=block["revision"],
-            memory_bytes_estimate=block["memory_bytes_estimate"],
-            engine_args=tuple(engine_args),
-            context_default=backend_context,
-            max_context=block_max,
-            memory=terms,
-            file=block.get("file"),
-            mmproj=block.get("mmproj"),
-            serves=serves_here,
-        )
-
+def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManifest:
+    _check_document(document, path)
+    model = _parse_model(document, path, expected_id)
+    backends = _parse_backends(document["backends"], path, model)
+    modalities = tuple(model["modalities"])
+    defaults = document.get("defaults")
+    local = document.get("local")
     return ModelManifest(
-        id=model_id,
+        id=model["id"],
         family=model["family"],
         params_b=model["params_b"],
         context_default=model["context_default"],
         trained_context=model["trained_context"],
-        modalities=tuple(modalities),
+        modalities=modalities,
         backends=backends,
         path=path,
-        defaults=(
-            NO_DEFAULTS
-            if "defaults" not in document
-            else _parse_defaults(document["defaults"], path)
-        ),
+        defaults=NO_DEFAULTS if "defaults" not in document else _parse_defaults(defaults, path),
         display=model.get("display"),
         description=model.get("description"),
-        weights_of=weights_of,
-        local=(
-            None
-            if "local" not in document
-            else _parse_local(document["local"], path, tuple(modalities))
-        ),
+        weights_of=model.get("weights_of"),
+        local=None if "local" not in document else _parse_local(local, path, modalities),
     )
 
 
@@ -1022,9 +1110,7 @@ WEIGHTS_OF_SHARED_FACTS: tuple[str, ...] = (
 WEIGHTS_OF_PIN_FIELDS: tuple[str, ...] = ("hf_repo", "revision", "file")
 
 
-def resolve_weights_of(manifest: ModelManifest, directory: Path) -> ModelManifest:
-    if manifest.weights_of is None:
-        return manifest
+def _weights_base(manifest: ModelManifest, directory: Path) -> ModelManifest:
     where = manifest.path.name
     base_id = manifest.weights_of
     base_path = directory / f"{base_id}.toml"
@@ -1043,23 +1129,31 @@ def resolve_weights_of(manifest: ModelManifest, directory: Path) -> ModelManifes
             "alias of an alias is refused, and so is aliasing a base to "
             "something else"
         )
-    differing = [
-        name
-        for name in WEIGHTS_OF_SHARED_FACTS
-        if getattr(manifest, name) != getattr(base, name)
-    ]
+    return base
+
+
+def _differing(here: Any, there: Any, names: tuple[str, ...], there_name: str) -> tuple[list[str], str]:
+    differing = [name for name in names if getattr(here, name) != getattr(there, name)]
+    detail = "; ".join(
+        f"{name}: {getattr(here, name)!r} here, {getattr(there, name)!r} in {there_name}"
+        for name in differing
+    )
+    return differing, detail
+
+
+def _check_shared_facts(manifest: ModelManifest, base: ModelManifest) -> None:
+    differing, detail = _differing(manifest, base, WEIGHTS_OF_SHARED_FACTS, base.path.name)
     if differing:
-        detail = "; ".join(
-            f"{name}: {getattr(manifest, name)!r} here, "
-            f"{getattr(base, name)!r} in {base.path.name}"
-            for name in differing
-        )
         raise ManifestError(
-            f"{where}: weights_of_fact_mismatch — this model shares the weights "
-            f"of {base_id!r} and states {differing} differently ({detail}). "
+            f"{manifest.path.name}: weights_of_fact_mismatch — this model shares the weights "
+            f"of {manifest.weights_of!r} and states {differing} differently ({detail}). "
             "These are facts about the weights, and the weights are one set of "
             "bytes"
         )
+
+
+def _check_shared_pins(manifest: ModelManifest, base: ModelManifest) -> None:
+    where = manifest.path.name
     for kind, spec in sorted(manifest.backends.items()):
         base_spec = base.backends.get(kind)
         if base_spec is None:
@@ -1067,24 +1161,23 @@ def resolve_weights_of(manifest: ModelManifest, directory: Path) -> ModelManifes
                 f"{where}: weights_of_backend_missing — [backends.{kind}] is "
                 f"declared here and {base.path.name} declares no {kind} block "
                 f"(it declares {sorted(base.backends)}). There is no download of "
-                f"{base_id!r} on {kind} to share"
+                f"{manifest.weights_of!r} on {kind} to share"
             )
-        pins = [
-            name
-            for name in WEIGHTS_OF_PIN_FIELDS
-            if getattr(spec, name) != getattr(base_spec, name)
-        ]
+        pins, detail = _differing(spec, base_spec, WEIGHTS_OF_PIN_FIELDS, base.path.name)
         if pins:
-            detail = "; ".join(
-                f"{name}: {getattr(spec, name)!r} here, "
-                f"{getattr(base_spec, name)!r} in {base.path.name}"
-                for name in pins
-            )
             raise ManifestError(
                 f"{where}: weights_of_pin_mismatch — [backends.{kind}] shares "
-                f"{base_id!r}'s download and pins it differently ({detail}). "
+                f"{manifest.weights_of!r}'s download and pins it differently ({detail}). "
                 "One folder holds one pin"
             )
+
+
+def resolve_weights_of(manifest: ModelManifest, directory: Path) -> ModelManifest:
+    if manifest.weights_of is None:
+        return manifest
+    base = _weights_base(manifest, directory)
+    _check_shared_facts(manifest, base)
+    _check_shared_pins(manifest, base)
     return replace(manifest, weights_base=base)
 
 

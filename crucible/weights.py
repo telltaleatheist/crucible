@@ -235,65 +235,78 @@ def require_installed(
     found = installed(config, manifest, spec)
     if found is not None:
         return found
-
     local = local_source(spec)
     if local is not None:
-        absent = missing_files(local, spec)
-        if local.is_dir() and absent:
-            raise WeightsError(
-                f"voice {manifest.id!r} names {local} for {spec.backend} and the "
-                f"directory is there, but {len(absent)} of the file(s) it needs are "
-                f"not: {', '.join(absent)}"
-            )
-        raise WeightsError(
-            f"voice {manifest.id!r} names {local} for {spec.backend} and there is no "
-            "such directory on this server. Crucible does not fetch a local voice's "
-            "weights and cannot replace them — whatever put them there has to put "
-            "them back, or the voice's manifest should be removed"
-        )
-
-    noun = FAMILY_NOUNS[manifest.weights_family]
-    command = manifest.pull_command
+        _refuse_missing_local(manifest, spec, local)
     directory = subject_dir(config, manifest, spec.backend)
+    if getattr(manifest, "weights_base", None) is not None:
+        _refuse_missing_alias(config, manifest, spec, directory)
     stamp = directory / STAMP_NAME
-    base = getattr(manifest, "weights_base", None)
-    if base is not None:
-        extras = _extra_files(manifest, spec)
-        if installed(config, base, base.spec(spec.backend)) is None:
-            raise WeightsError(
-                f"{noun} {manifest.id!r} shares the weights of {base.id!r}, and "
-                f"{base.id!r} is not installed for {spec.backend} — run "
-                f"`{command}`, which pulls {base.id!r}'s download"
-                + (f" plus {', '.join(extras)}" if extras else "")
-                + " into one folder"
-            )
-        absent = missing_files(directory, spec)
-        raise WeightsError(
-            f"{noun} {manifest.id!r} shares the weights of {base.id!r}, which is "
-            f"installed at {directory}, and {len(absent)} of its own file(s) are "
-            f"not there: {', '.join(absent)} — run `{command}`"
-        )
     if stamp.is_file():
-        record = json.loads(stamp.read_text(encoding="utf-8"))
-        if (
-            record["revision"] == spec.revision
-            and record["hf_repo"] == spec.hf_repo
-        ):
-            absent = missing_files(directory, spec)
-            raise WeightsError(
-                f"{directory} is stamped for {spec.hf_repo}@{spec.revision[:12]} "
-                f"but {len(absent)} of the {len(spec.files)} file(s) it names "
-                f"are not there: {', '.join(absent)} — run `{command} "
-                "--force`"
-            )
+        _refuse_stamped(manifest, spec, directory, stamp)
+    raise WeightsError(
+        f"{FAMILY_NOUNS[manifest.weights_family]} {manifest.id!r} is not installed "
+        f"for {spec.backend}; there are no weights at {directory} — run "
+        f"`{manifest.pull_command}`"
+    )
+
+
+def _refuse_missing_local(manifest: WeightsSubject, spec: WeightsSource, local: Path) -> None:
+    absent = missing_files(local, spec)
+    if local.is_dir() and absent:
         raise WeightsError(
-            f"{directory} holds {record['hf_repo']}@{record['revision'][:12]}, but "
-            f"{manifest.path.name} now pins {spec.hf_repo}@{spec.revision[:12]} — "
-            f"run `{command}`"
+            f"voice {manifest.id!r} names {local} for {spec.backend} and the "
+            f"directory is there, but {len(absent)} of the file(s) it needs are "
+            f"not: {', '.join(absent)}"
         )
     raise WeightsError(
-        f"{noun} {manifest.id!r} is not installed for {spec.backend}; there are no "
-        f"weights at {directory} — run `{command}`"
+        f"voice {manifest.id!r} names {local} for {spec.backend} and there is no "
+        "such directory on this server. Crucible does not fetch a local voice's "
+        "weights and cannot replace them — whatever put them there has to put "
+        "them back, or the voice's manifest should be removed"
+    )
+
+
+def _refuse_missing_alias(
+    config: Config, manifest: Any, spec: WeightsSource, directory: Path
+) -> None:
+    noun = FAMILY_NOUNS[manifest.weights_family]
+    command = manifest.pull_command
+    base = manifest.weights_base
+    extras = _extra_files(manifest, spec)
+    if installed(config, base, base.spec(spec.backend)) is None:
+        raise WeightsError(
+            f"{noun} {manifest.id!r} shares the weights of {base.id!r}, and "
+            f"{base.id!r} is not installed for {spec.backend} — run "
+            f"`{command}`, which pulls {base.id!r}'s download"
+            + (f" plus {', '.join(extras)}" if extras else "")
+            + " into one folder"
+        )
+    absent = missing_files(directory, spec)
+    raise WeightsError(
+        f"{noun} {manifest.id!r} shares the weights of {base.id!r}, which is "
+        f"installed at {directory}, and {len(absent)} of its own file(s) are "
+        f"not there: {', '.join(absent)} — run `{command}`"
+    )
+
+
+def _refuse_stamped(
+    manifest: WeightsSubject, spec: WeightsSource, directory: Path, stamp: Path
+) -> None:
+    command = manifest.pull_command
+    record = json.loads(stamp.read_text(encoding="utf-8"))
+    if record["revision"] == spec.revision and record["hf_repo"] == spec.hf_repo:
+        absent = missing_files(directory, spec)
+        raise WeightsError(
+            f"{directory} is stamped for {spec.hf_repo}@{spec.revision[:12]} "
+            f"but {len(absent)} of the {len(spec.files)} file(s) it names "
+            f"are not there: {', '.join(absent)} — run `{command} "
+            "--force`"
+        )
+    raise WeightsError(
+        f"{directory} holds {record['hf_repo']}@{record['revision'][:12]}, but "
+        f"{manifest.path.name} now pins {spec.hf_repo}@{spec.revision[:12]} — "
+        f"run `{command}`"
     )
 
 
@@ -507,6 +520,44 @@ def directory_bytes(path: Path) -> int:
     return total
 
 
+def _say(on_line: Callable[[str], None] | None, text: str) -> None:
+    if on_line is not None:
+        on_line(text)
+
+
+def _clear_stamp(directory: Path, stamp_name: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = directory / stamp_name
+    if stamp.exists():
+        stamp.unlink()
+    return stamp
+
+
+def _fresh_dir(path: Path) -> Path:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+    return path
+
+
+def _write_record(path: Path, record: dict[str, Any]) -> None:
+    path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+
+
+def _read_back(result: InstalledWeights | None, stamp: Path) -> InstalledWeights:
+    if result is None:
+        raise WeightsError(f"wrote {stamp} but it does not read back as installed")
+    return result
+
+
+def _pulled_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _token_phrase(token: Any) -> str:
+    return "with" if token else "without"
+
+
 def pull(
     config: Config,
     manifest: WeightsSubject,
@@ -529,7 +580,6 @@ def pull(
             config, manifest, spec, force=force, on_line=on_line,
             on_progress=on_progress,
         )
-
     target = subject_dir(config, manifest, spec.backend)
     existing = installed(config, manifest, spec)
     if existing is not None and not force:
@@ -537,20 +587,37 @@ def pull(
     if force and target.exists():
         refuse_if_shared(config, manifest, spec.backend)
         shutil.rmtree(target)
-    target.mkdir(parents=True, exist_ok=True)
-    stamp = target / STAMP_NAME
-    if stamp.exists():
-        stamp.unlink()
+    stamp = _clear_stamp(target, STAMP_NAME)
+    started = _fetch_snapshot(config, manifest, spec, target, on_line, on_progress)
+    elapsed = time.monotonic() - started
+    _require_snapshot_complete(manifest, spec, target)
+    size = directory_bytes(target)
+    _write_record(stamp, _snapshot_record(manifest, spec, size, elapsed))
+    _say(
+        on_line,
+        f"pulled {size / 1e9:.2f} GB in {elapsed:.0f}s "
+        f"({size / 1e6 / max(elapsed, 1e-6):.0f} MB/s)",
+    )
+    return _read_back(installed(config, manifest, spec), stamp)
 
+
+def _fetch_snapshot(
+    config: Config,
+    manifest: WeightsSubject,
+    spec: WeightsSource,
+    target: Path,
+    on_line: Callable[[str], None] | None,
+    on_progress: ProgressHook | None,
+) -> float:
     token = hf_token(config)
-    if on_line is not None:
-        on_line(
-            f"pulling {spec.hf_repo}@{spec.revision[:12]} -> {target} "
-            f"({'with' if token else 'without'} an HF token)"
-        )
+    _say(
+        on_line,
+        f"pulling {spec.hf_repo}@{spec.revision[:12]} -> {target} "
+        f"({_token_phrase(token)} an HF token)",
+    )
     started = time.monotonic()
-    if spec.files and on_line is not None:
-        on_line(f"only {len(spec.files)} file(s) of that repo: " + ", ".join(spec.files))
+    if spec.files:
+        _say(on_line, f"only {len(spec.files)} file(s) of that repo: " + ", ".join(spec.files))
     try:
         _snapshot(
             config, manifest.path.name, spec, target,
@@ -559,8 +626,12 @@ def pull(
     except PullCancelled:
         shutil.rmtree(target, ignore_errors=True)
         raise
+    return started
 
-    elapsed = time.monotonic() - started
+
+def _require_snapshot_complete(
+    manifest: WeightsSubject, spec: WeightsSource, target: Path
+) -> None:
     absent = missing_files(target, spec)
     if absent:
         raise WeightsError(
@@ -570,8 +641,12 @@ def pull(
             "the manifest names a file this revision does not have, or the "
             "download was incomplete; nothing is stamped either way"
         )
-    size = directory_bytes(target)
-    record = {
+
+
+def _snapshot_record(
+    manifest: WeightsSubject, spec: WeightsSource, size: int, elapsed: float
+) -> dict[str, Any]:
+    return {
         "family": manifest.weights_family,
         "id": manifest.id,
         "backend": spec.backend,
@@ -580,18 +655,8 @@ def pull(
         "files": list(spec.files),
         "bytes": size,
         "seconds": round(elapsed, 1),
-        "pulled": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "pulled": _pulled_now(),
     }
-    stamp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    if on_line is not None:
-        on_line(
-            f"pulled {size / 1e9:.2f} GB in {elapsed:.0f}s "
-            f"({size / 1e6 / max(elapsed, 1e-6):.0f} MB/s)"
-        )
-    result = installed(config, manifest, spec)
-    if result is None:
-        raise WeightsError(f"wrote {stamp} but it does not read back as installed")
-    return result
 
 
 def _snapshot(
@@ -662,52 +727,20 @@ def _pull_alias(
     on_progress: ProgressHook | None,
 ) -> InstalledWeights:
     base = alias.weights_base
-    base_spec = base.spec(spec.backend)
     target = subject_dir(config, alias, spec.backend)
     record_path = alias_record_path(config, alias, spec.backend)
     existing = installed(config, alias, spec)
     if existing is not None and record_path.is_file() and not force:
         return existing
-
-    if installed(config, base, base_spec) is None:
-        if on_line is not None:
-            on_line(
-                f"{alias.id} shares the weights of {base.id}; pulling {base.id} "
-                "first, once, into its own folder"
-            )
-        pull(config, base, base_spec, on_line=on_line, on_progress=on_progress)
-
+    _ensure_base_pulled(config, alias, spec, on_line, on_progress)
     extras = alias.extra_files(spec.backend)
     if force:
         for name in extras:
             _remove(target / name)
     wanted = [name for name in extras if not (target / name).is_file()]
     started = time.monotonic()
-    if wanted:
-        if on_line is not None:
-            on_line(
-                f"pulling {alias.id}'s own file(s) from "
-                f"{spec.hf_repo}@{spec.revision[:12]} into {target}: "
-                + ", ".join(wanted)
-            )
-        try:
-            _snapshot(
-                config, alias.path.name, spec, target,
-                patterns=wanted, on_progress=on_progress,
-            )
-        except PullCancelled:
-            for name in wanted:
-                (target / name).unlink(missing_ok=True)
-            raise
-    absent = missing_files(target, spec)
-    if absent:
-        raise WeightsError(
-            f"{spec.hf_repo}@{spec.revision[:12]} was fetched but {len(absent)} of "
-            f"the file(s) {alias.path.name} names for {spec.backend} are not in "
-            f"{target}: {', '.join(absent)}. Either the manifest names a file this "
-            "revision does not have, or the download was incomplete; no alias "
-            "record is written either way"
-        )
+    _fetch_alias_files(config, alias, spec, target, wanted, on_line, on_progress)
+    _require_alias_complete(alias, spec, target)
     own = sum((target / name).stat().st_size for name in extras)
     record = {
         "family": alias.weights_family,
@@ -719,18 +752,77 @@ def _pull_alias(
         "files": list(extras),
         "bytes": own,
         "seconds": round(time.monotonic() - started, 1),
-        "pulled": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "pulled": _pulled_now(),
     }
-    record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    if on_line is not None:
-        on_line(
-            f"{alias.id}: {own / 1e9:.2f} GB of its own beside {base.id}'s weights "
-            f"at {target}"
-        )
+    _write_record(record_path, record)
+    _say(
+        on_line,
+        f"{alias.id}: {own / 1e9:.2f} GB of its own beside {base.id}'s weights "
+        f"at {target}",
+    )
     result = installed(config, alias, spec)
     if result is None:
         raise WeightsError(f"wrote {record_path} but {alias.id} does not read as installed")
     return result
+
+
+def _ensure_base_pulled(
+    config: Config,
+    alias: Any,
+    spec: WeightsSource,
+    on_line: Callable[[str], None] | None,
+    on_progress: ProgressHook | None,
+) -> None:
+    base = alias.weights_base
+    base_spec = base.spec(spec.backend)
+    if installed(config, base, base_spec) is not None:
+        return
+    _say(
+        on_line,
+        f"{alias.id} shares the weights of {base.id}; pulling {base.id} "
+        "first, once, into its own folder",
+    )
+    pull(config, base, base_spec, on_line=on_line, on_progress=on_progress)
+
+
+def _fetch_alias_files(
+    config: Config,
+    alias: Any,
+    spec: WeightsSource,
+    target: Path,
+    wanted: list[str],
+    on_line: Callable[[str], None] | None,
+    on_progress: ProgressHook | None,
+) -> None:
+    if not wanted:
+        return
+    _say(
+        on_line,
+        f"pulling {alias.id}'s own file(s) from "
+        f"{spec.hf_repo}@{spec.revision[:12]} into {target}: "
+        + ", ".join(wanted),
+    )
+    try:
+        _snapshot(
+            config, alias.path.name, spec, target,
+            patterns=wanted, on_progress=on_progress,
+        )
+    except PullCancelled:
+        for name in wanted:
+            (target / name).unlink(missing_ok=True)
+        raise
+
+
+def _require_alias_complete(alias: Any, spec: WeightsSource, target: Path) -> None:
+    absent = missing_files(target, spec)
+    if absent:
+        raise WeightsError(
+            f"{spec.hf_repo}@{spec.revision[:12]} was fetched but {len(absent)} of "
+            f"the file(s) {alias.path.name} names for {spec.backend} are not in "
+            f"{target}: {', '.join(absent)}. Either the manifest names a file this "
+            "revision does not have, or the download was incomplete; no alias "
+            "record is written either way"
+        )
 
 
 @runtime_checkable
@@ -743,6 +835,86 @@ class ArchiveSource(Protocol):
     archive_sha256: str
 
 
+def _import_hub(config: Config) -> Any:
+    try:
+        import huggingface_hub
+        import huggingface_hub.errors
+    except ImportError as exc:
+        raise WeightsError(
+            f"huggingface_hub is not importable in {config.name}'s interpreter: {exc}"
+        ) from exc
+    return huggingface_hub
+
+
+def _progress_extra(on_progress: ProgressHook | None) -> dict[str, Any]:
+    if on_progress is None:
+        return {}
+    return {"tqdm_class": reporting_tqdm(on_progress)}
+
+
+@dataclass(frozen=True)
+class HubFile:
+
+    repo: str
+    revision: str
+    filename: str
+    pinned_by: str
+    names: str
+
+
+def download_error(exc: Exception, errors: Any, config: Config, wanted: HubFile) -> WeightsError:
+    repo, revision = wanted.repo, wanted.revision
+    messages = (
+        (errors.GatedRepoError, lambda: (
+            f"{repo} is gated and this server has no HF token that opens it "
+            f"(set ${HF_TOKEN_ENV} or [hf] token in {config.path}): {exc}"
+        )),
+        (errors.RepositoryNotFoundError, lambda: (
+            f"{repo} is private or does not exist; if it is private set "
+            f"${HF_TOKEN_ENV} or [hf] token in {config.path}: {exc}"
+        )),
+        (errors.RevisionNotFoundError, lambda: (
+            f"{repo} has no revision {revision}; "
+            f"{wanted.pinned_by} pins a commit that repo does not have: {exc}"
+        )),
+        (errors.EntryNotFoundError, lambda: (
+            f"{repo}@{revision[:12]} has no file {wanted.filename!r}; "
+            f"{wanted.pinned_by} names {wanted.names} that revision does not hold: "
+            f"{exc}"
+        )),
+    )
+    for kind, message in messages:
+        if isinstance(exc, kind):
+            return WeightsError(message())
+    return WeightsError(
+        f"pulling {repo}:{wanted.filename} failed: {type(exc).__name__}: {exc}"
+    )
+
+
+def _hub_download(
+    hub: Any,
+    config: Config,
+    wanted: HubFile,
+    *,
+    local_dir: Path,
+    token: Any,
+    extra: dict[str, Any],
+) -> str:
+    try:
+        return hub.hf_hub_download(
+            repo_id=wanted.repo,
+            filename=wanted.filename,
+            revision=wanted.revision,
+            local_dir=str(local_dir),
+            token=token,
+            **extra,
+        )
+    except PullCancelled:
+        raise
+    except Exception as exc:
+        raise download_error(exc, hub.errors, config, wanted) from exc
+
+
 def pull_archive(
     config: Config,
     manifest: WeightsSubject,
@@ -752,84 +924,68 @@ def pull_archive(
     on_line: Callable[[str], None] | None = None,
     on_progress: ProgressHook | None = None,
 ) -> InstalledWeights:
-    try:
-        from huggingface_hub import hf_hub_download
-        from huggingface_hub.errors import (
-            EntryNotFoundError,
-            GatedRepoError,
-            RepositoryNotFoundError,
-            RevisionNotFoundError,
-        )
-    except ImportError as exc:
-        raise WeightsError(
-            f"huggingface_hub is not importable in {config.name}'s interpreter: {exc}"
-        ) from exc
-
+    hub = _import_hub(config)
     target = weights_dir(config, manifest.weights_family, manifest.id, spec.backend)
     existing = installed(config, manifest, spec)
     if existing is not None and not force:
         return existing
     if force and target.exists():
         shutil.rmtree(target)
-    target.mkdir(parents=True, exist_ok=True)
-    stamp = target / STAMP_NAME
-    if stamp.exists():
-        stamp.unlink()
-
+    stamp = _clear_stamp(target, STAMP_NAME)
     token = hf_token(config)
-    if on_line is not None:
-        on_line(
-            f"pulling {spec.hf_repo}@{spec.revision[:12]}:{spec.archive} -> {target} "
-            f"({'with' if token else 'without'} an HF token)"
-        )
+    _say(
+        on_line,
+        f"pulling {spec.hf_repo}@{spec.revision[:12]}:{spec.archive} -> {target} "
+        f"({_token_phrase(token)} an HF token)",
+    )
     started = time.monotonic()
-    staging = target / ".crucible-archive"
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-    extra: dict[str, Any] = {}
-    if on_progress is not None:
-        extra["tqdm_class"] = reporting_tqdm(on_progress)
+    staging = _fresh_dir(target / ".crucible-archive")
+    downloaded = Path(
+        _download_archive(hub, config, manifest, spec, target, staging, token, on_progress)
+    )
+    digest = _verify_archive(manifest, spec, downloaded, staging)
     try:
-        downloaded = hf_hub_download(
-            repo_id=spec.hf_repo,
-            filename=spec.archive,
-            revision=spec.revision,
-            local_dir=str(staging),
-            token=token,
-            **extra,
+        _unpack(downloaded, target)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    elapsed = time.monotonic() - started
+    size = directory_bytes(target)
+    _write_record(stamp, _archive_record(manifest, spec, digest, size, elapsed))
+    _say(on_line, f"unpacked {size / 1e9:.2f} GB in {elapsed:.0f}s at {target}")
+    return _read_back(installed(config, manifest, spec), stamp)
+
+
+def _download_archive(
+    hub: Any,
+    config: Config,
+    manifest: WeightsSubject,
+    spec: ArchiveSource,
+    target: Path,
+    staging: Path,
+    token: Any,
+    on_progress: ProgressHook | None,
+) -> str:
+    wanted = HubFile(
+        repo=spec.hf_repo,
+        revision=spec.revision,
+        filename=spec.archive,
+        pinned_by=manifest.path.name,
+        names="an archive",
+    )
+    extra = _progress_extra(on_progress)
+    try:
+        return _hub_download(
+            hub, config, wanted, local_dir=staging, token=token, extra=extra
         )
     except PullCancelled:
         shutil.rmtree(target, ignore_errors=True)
         raise
-    except GatedRepoError as exc:
-        raise WeightsError(
-            f"{spec.hf_repo} is gated and this server has no HF token that opens it "
-            f"(set ${HF_TOKEN_ENV} or [hf] token in {config.path}): {exc}"
-        ) from exc
-    except RepositoryNotFoundError as exc:
-        raise WeightsError(
-            f"{spec.hf_repo} is private or does not exist; if it is private set "
-            f"${HF_TOKEN_ENV} or [hf] token in {config.path}: {exc}"
-        ) from exc
-    except RevisionNotFoundError as exc:
-        raise WeightsError(
-            f"{spec.hf_repo} has no revision {spec.revision}; "
-            f"{manifest.path.name} pins a commit that repo does not have: {exc}"
-        ) from exc
-    except EntryNotFoundError as exc:
-        raise WeightsError(
-            f"{spec.hf_repo}@{spec.revision[:12]} has no file {spec.archive!r}; "
-            f"{manifest.path.name} names an archive that revision does not hold: "
-            f"{exc}"
-        ) from exc
-    except Exception as exc:
-        raise WeightsError(
-            f"pulling {spec.hf_repo}:{spec.archive} failed: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
 
-    digest = sha256_of(Path(downloaded))
+
+def _verify_archive(
+    manifest: WeightsSubject, spec: ArchiveSource, downloaded: Path, staging: Path
+) -> str:
+    digest = sha256_of(downloaded)
     if digest != spec.archive_sha256:
         shutil.rmtree(staging, ignore_errors=True)
         raise WeightsError(
@@ -838,15 +994,13 @@ def pull_archive(
             "was unpacked. Either the manifest is wrong or these are not the bytes "
             "it names, and both are worse than no weights at all."
         )
+    return digest
 
-    try:
-        _unpack(Path(downloaded), target)
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
 
-    elapsed = time.monotonic() - started
-    size = directory_bytes(target)
-    record = {
+def _archive_record(
+    manifest: WeightsSubject, spec: ArchiveSource, digest: str, size: int, elapsed: float
+) -> dict[str, Any]:
+    return {
         "family": manifest.weights_family,
         "id": manifest.id,
         "backend": spec.backend,
@@ -856,15 +1010,8 @@ def pull_archive(
         "archive_sha256": digest,
         "bytes": size,
         "seconds": round(elapsed, 1),
-        "pulled": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "pulled": _pulled_now(),
     }
-    stamp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    if on_line is not None:
-        on_line(f"unpacked {size / 1e9:.2f} GB in {elapsed:.0f}s at {target}")
-    result = installed(config, manifest, spec)
-    if result is None:
-        raise WeightsError(f"wrote {stamp} but it does not read back as installed")
-    return result
 
 
 @runtime_checkable
@@ -927,116 +1074,99 @@ def pull_files(
     on_line: Callable[[str], None] | None = None,
     on_progress: ProgressHook | None = None,
 ) -> InstalledWeights:
-    try:
-        from huggingface_hub import hf_hub_download
-        from huggingface_hub.errors import (
-            EntryNotFoundError,
-            GatedRepoError,
-            RepositoryNotFoundError,
-            RevisionNotFoundError,
-        )
-    except ImportError as exc:
-        raise WeightsError(
-            f"huggingface_hub is not importable in {config.name}'s interpreter: {exc}"
-        ) from exc
-
+    hub = _import_hub(config)
     if not files:
         raise WeightsError(
             f"{label} declares no files; a set with nothing in it is not a set"
         )
-
-    existing = files_installed(
-        target_root, hf_repo, revision, stamp_name=stamp_name
-    )
+    existing = files_installed(target_root, hf_repo, revision, stamp_name=stamp_name)
     if existing is not None and not force:
         return existing
-
-    target_root.mkdir(parents=True, exist_ok=True)
-    stamp = target_root / stamp_name
-    if stamp.exists():
-        stamp.unlink()
-    staging = target_root / ".crucible-files"
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-
+    stamp = _clear_stamp(target_root, stamp_name)
+    staging = _fresh_dir(target_root / ".crucible-files")
     token = hf_token(config)
-    if on_line is not None:
-        on_line(
-            f"pulling {len(files)} file(s) of {label} from "
-            f"{hf_repo}@{revision[:12]} -> {target_root} "
-            f"({'with' if token else 'without'} an HF token)"
-        )
+    _say(
+        on_line,
+        f"pulling {len(files)} file(s) of {label} from "
+        f"{hf_repo}@{revision[:12]} -> {target_root} "
+        f"({_token_phrase(token)} an HF token)",
+    )
     started = time.monotonic()
-    fetched: list[tuple[FileSource, Path, Path]] = []
-    extra: dict[str, Any] = {}
-    if on_progress is not None:
-        extra["tqdm_class"] = reporting_tqdm(on_progress)
+    extra = _progress_extra(on_progress)
     try:
-        for entry in files:
-            destination = _safe_target(target_root, entry.target)
-            try:
-                downloaded = hf_hub_download(
-                    repo_id=hf_repo,
-                    filename=entry.source,
-                    revision=revision,
-                    local_dir=str(staging),
-                    token=token,
-                    **extra,
-                )
-            except PullCancelled:
-                raise
-            except GatedRepoError as exc:
-                raise WeightsError(
-                    f"{hf_repo} is gated and this server has no HF token that "
-                    f"opens it (set ${HF_TOKEN_ENV} or [hf] token in "
-                    f"{config.path}): {exc}"
-                ) from exc
-            except RepositoryNotFoundError as exc:
-                raise WeightsError(
-                    f"{hf_repo} is private or does not exist; if it is private "
-                    f"set ${HF_TOKEN_ENV} or [hf] token in {config.path}: {exc}"
-                ) from exc
-            except RevisionNotFoundError as exc:
-                raise WeightsError(
-                    f"{hf_repo} has no revision {revision}; {label} pins a commit "
-                    f"that repo does not have: {exc}"
-                ) from exc
-            except EntryNotFoundError as exc:
-                raise WeightsError(
-                    f"{hf_repo}@{revision[:12]} has no file {entry.source!r}; "
-                    f"{label} names a path that revision does not hold: {exc}"
-                ) from exc
-            except Exception as exc:
-                raise WeightsError(
-                    f"pulling {hf_repo}:{entry.source} failed: "
-                    f"{type(exc).__name__}: {exc}"
-                ) from exc
-
-            digest = sha256_of(Path(downloaded))
-            if digest != entry.sha256:
-                raise WeightsError(
-                    f"{entry.source} from {hf_repo}@{revision[:12]} hashes to "
-                    f"{digest}, but {label} pins {entry.sha256}. NOTHING was "
-                    "placed. Either the declaration is wrong or these are not "
-                    "the bytes it names, and both are worse than no weights"
-                )
-            if on_line is not None:
-                on_line(f"  verified {entry.target} ({digest[:12]})")
-            fetched.append((entry, Path(downloaded), destination))
-
-        total = 0
-        for entry, downloaded, destination in fetched:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if destination.exists():
-                destination.unlink()
-            shutil.move(str(downloaded), str(destination))
-            total += destination.stat().st_size
+        fetched = [
+            _fetch_verified(
+                hub, config, entry, hf_repo=hf_repo, revision=revision, label=label,
+                target_root=target_root, staging=staging, token=token, extra=extra,
+                on_line=on_line,
+            )
+            for entry in files
+        ]
+        total = _place_fetched(fetched)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-
     elapsed = time.monotonic() - started
-    record = {
+    _write_record(stamp, _files_record(label, hf_repo, revision, files, total, elapsed))
+    _say(on_line, f"placed {total / 1e9:.2f} GB in {elapsed:.0f}s at {target_root}")
+    return _read_back(
+        files_installed(target_root, hf_repo, revision, stamp_name=stamp_name), stamp
+    )
+
+
+def _fetch_verified(
+    hub: Any,
+    config: Config,
+    entry: FileSource,
+    *,
+    hf_repo: str,
+    revision: str,
+    label: str,
+    target_root: Path,
+    staging: Path,
+    token: Any,
+    extra: dict[str, Any],
+    on_line: Callable[[str], None] | None,
+) -> tuple[FileSource, Path, Path]:
+    destination = _safe_target(target_root, entry.target)
+    wanted = HubFile(
+        repo=hf_repo, revision=revision, filename=entry.source,
+        pinned_by=label, names="a path",
+    )
+    downloaded = _hub_download(
+        hub, config, wanted, local_dir=staging, token=token, extra=extra
+    )
+    digest = sha256_of(Path(downloaded))
+    if digest != entry.sha256:
+        raise WeightsError(
+            f"{entry.source} from {hf_repo}@{revision[:12]} hashes to "
+            f"{digest}, but {label} pins {entry.sha256}. NOTHING was "
+            "placed. Either the declaration is wrong or these are not "
+            "the bytes it names, and both are worse than no weights"
+        )
+    _say(on_line, f"  verified {entry.target} ({digest[:12]})")
+    return entry, Path(downloaded), destination
+
+
+def _place_fetched(fetched: Sequence[tuple[FileSource, Path, Path]]) -> int:
+    total = 0
+    for _entry, downloaded, destination in fetched:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            destination.unlink()
+        shutil.move(str(downloaded), str(destination))
+        total += destination.stat().st_size
+    return total
+
+
+def _files_record(
+    label: str,
+    hf_repo: str,
+    revision: str,
+    files: Sequence[FileSource],
+    total: int,
+    elapsed: float,
+) -> dict[str, Any]:
+    return {
         "label": label,
         "hf_repo": hf_repo,
         "revision": revision,
@@ -1046,17 +1176,8 @@ def pull_files(
         ],
         "bytes": total,
         "seconds": round(elapsed, 1),
-        "pulled": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "pulled": _pulled_now(),
     }
-    stamp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    if on_line is not None:
-        on_line(f"placed {total / 1e9:.2f} GB in {elapsed:.0f}s at {target_root}")
-    result = files_installed(
-        target_root, hf_repo, revision, stamp_name=stamp_name
-    )
-    if result is None:
-        raise WeightsError(f"wrote {stamp} but it does not read back as installed")
-    return result
 
 
 def sha256_of(path: Path, chunk: int = 1 << 20) -> str:
@@ -1067,23 +1188,27 @@ def sha256_of(path: Path, chunk: int = 1 << 20) -> str:
     return digest.hexdigest()
 
 
+def _check_member(archive: Path, target: Path, root: Path, member: tarfile.TarInfo) -> None:
+    destination = (root / member.name).resolve()
+    if destination != root and root not in destination.parents:
+        raise WeightsError(
+            f"{archive.name} contains {member.name!r}, which would be "
+            f"written outside {target}. Refusing to unpack any of it."
+        )
+    if member.issym() or member.islnk():
+        raise WeightsError(
+            f"{archive.name} contains a link, {member.name!r}. A weights "
+            "archive is files; a link is a way to write somewhere else."
+        )
+
+
 def _unpack(archive: Path, target: Path) -> None:
     try:
         with tarfile.open(archive, "r:gz") as handle:
             members = handle.getmembers()
             root = target.resolve()
             for member in members:
-                destination = (root / member.name).resolve()
-                if destination != root and root not in destination.parents:
-                    raise WeightsError(
-                        f"{archive.name} contains {member.name!r}, which would be "
-                        f"written outside {target}. Refusing to unpack any of it."
-                    )
-                if member.issym() or member.islnk():
-                    raise WeightsError(
-                        f"{archive.name} contains a link, {member.name!r}. A weights "
-                        "archive is files; a link is a way to write somewhere else."
-                    )
+                _check_member(archive, target, root, member)
             handle.extractall(path=target, members=members)
     except tarfile.TarError as exc:
         raise WeightsError(f"could not unpack {archive.name}: {exc}") from exc

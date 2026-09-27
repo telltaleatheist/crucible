@@ -178,6 +178,10 @@ page is a window onto the server's settings, not a copy of them.
   and only then written. Resolution order: upstreams, then routes, then the
   allowance, then local-model choices. Removing an upstream is checked against the
   final routes, so one PUT can re-route and remove together.
+- `resolve` is a loop over `SECTION_RESOLVERS`, (patch key, resolver) pairs in that
+  order, then `tailscale_advertise` and `lan_advertise`. Each `_resolve_<section>`
+  refuses and records only its own section; `_validate` checks the whole result. A new
+  settings section is one resolver and one row in that tuple.
 - **Keys are write-only.** A key is returned only as `key_hint`: `…` (U+2026) plus
   the last four characters. Foundry renders the hint verbatim. Keys never appear in
   a response, log line or activity row.
@@ -300,6 +304,11 @@ A recipe measured on its own replaces its row here and its header line together.
   returned 0 and the patches were applied. It records two halves: the environment
   hash (all lines except direct references) and the commit of each `name @ url`
   line, plus the recipe text.
+- **Status.** `env_status` builds `EnvStatus` in one place. `_env_findings` walks venv,
+  stamp, stamp readable, backend, then `_contents_findings` compares pins
+  (`_pin_drift`) and direct references (`_reference_drift`); the first finding that is
+  not installed is the reason. `install_env` is `_build_venv` (fresh build),
+  `_install_recipe` or `_reinstall_references` (the plan), the patches, then the stamp.
 - **Hashing.** The only normalisation is CRLF to LF. It is not the git blob hash,
   because recipes ship inside the wheel, where there is no git. A worktree with
   `core.autocrlf=true` once hashed differently from main. The environment hash
@@ -457,6 +466,9 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
     rvc-base and the separators. All digests are verified before any file is
     placed. `stamp_name` gives one stamp per set, for flat directories such as
     `denoise-models`. `force` replaces only this set's files.
+  - `pull_archive` and `pull_files` fetch through one `_hub_download` of a `HubFile`
+    and map hub exceptions through one `download_error` table: gated first, then a
+    missing repo, revision or entry, then anything else.
 - **Pinned vs local.** A local voice path is never fetched, stamped or deleted. It
   is reported with `pulled = None` and may disappear between jobs.
 - **Aliases** (`[model] weights_of`, Owen 2026-09-23: *"One
@@ -483,6 +495,12 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
 
 ## Model manifests (`manifests.py`)
 
+- **One validator per table.** `_parse` runs `_check_document` (top-level tables),
+  `_parse_model`, `_parse_backends` (each `[backends.<kind>]` by `_parse_backend`, its
+  `memory` by `_parse_memory`), `_parse_defaults` and `_parse_local` (the builder per
+  kind is `_LOCAL_BUILDERS`). Each starts with `tomltable.check_table`, so a new key
+  goes in that table's validator and its allowed set together. `resolve_weights_of` is
+  `_weights_base`, then `_check_shared_facts` and `_check_shared_pins`.
 - Validation is strict: an unknown key is refused, because a typo such as
   `memory_bytes_estimat` must not load with no estimate. `bool` is not accepted
   where `int` is expected.

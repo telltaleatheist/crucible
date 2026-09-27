@@ -414,87 +414,75 @@ def read_linger(runner: Runner, user: str) -> bool | None:
     return value.lower() == "yes"
 
 
+ServiceState = tuple[bool | None, int | None, str, bool | None]
+
+
+def _not_asked(tool: str, ran: Ran) -> str:
+    return (
+        f"{tool} could not be asked: `{' '.join(ran.argv)}` exited "
+        f"{ran.returncode}: {ran.text()}"
+    )
+
+
+def _systemd_state(runner: Runner, user: str | None) -> ServiceState:
+    ran = runner(
+        systemctl_argv(
+            systemd_scope(),
+            "show",
+            UNIT_NAME,
+            "--property=ActiveState",
+            "--property=SubState",
+            "--property=MainPID",
+            "--property=UnitFileState",
+        )
+    )
+    linger = read_linger(runner, user if user is not None else getpass.getuser())
+    if not ran.ok:
+        return None, None, _not_asked("systemctl", ran), linger
+    properties = parse_systemctl_show(ran.stdout)
+    active = properties.get("ActiveState", "unknown")
+    raw_pid = properties.get("MainPID", "0")
+    pid = int(raw_pid) if raw_pid.isdigit() and raw_pid != "0" else None
+    detail = (
+        f"{active}/{properties.get('SubState', 'unknown')}, unit file "
+        f"{properties.get('UnitFileState', 'unknown')}"
+    )
+    return active == "active", pid, detail, linger
+
+
+def _launchd_state(runner: Runner) -> ServiceState:
+    ran = runner(["launchctl", "list"])
+    if not ran.ok:
+        return None, None, _not_asked("launchctl", ran), None
+    loaded, pid = parse_launchctl_list(ran.stdout, LAUNCHD_LABEL)
+    detail = (
+        f"agent {LAUNCHD_LABEL} is "
+        + ("loaded" if loaded else "not loaded")
+        + (f" and running as pid {pid}" if pid is not None else "")
+    )
+    return pid is not None, pid, detail, None
+
+
 def status(
     mechanism: str, home: Path, *, runner: Runner, user: str | None = None
 ) -> Status:
     definition = definition_path(mechanism, home)
     installed = definition.is_file()
     if mechanism == SYSTEMD:
-        scope = systemd_scope()
-        ran = runner(
-            systemctl_argv(
-                scope,
-                "show",
-                UNIT_NAME,
-                "--property=ActiveState",
-                "--property=SubState",
-                "--property=MainPID",
-                "--property=UnitFileState",
-            )
-        )
-        linger = read_linger(runner, user if user is not None else getpass.getuser())
-        if not ran.ok:
-            return Status(
-                mechanism=mechanism,
-                definition=definition,
-                installed=installed,
-                running=None,
-                pid=None,
-                detail=(
-                    f"systemctl could not be asked: `{' '.join(ran.argv)}` exited "
-                    f"{ran.returncode}: {ran.text()}"
-                ),
-                linger=linger,
-            )
-        properties = parse_systemctl_show(ran.stdout)
-        active = properties.get("ActiveState", "unknown")
-        raw_pid = properties.get("MainPID", "0")
-        pid = int(raw_pid) if raw_pid.isdigit() and raw_pid != "0" else None
-        running = active == "active"
-        return Status(
-            mechanism=mechanism,
-            definition=definition,
-            installed=installed,
-            running=running,
-            pid=pid,
-            detail=(
-                f"{active}/{properties.get('SubState', 'unknown')}, unit file "
-                f"{properties.get('UnitFileState', 'unknown')}"
-            ),
-            linger=linger,
-        )
-
-    if mechanism == LAUNCHD:
-        ran = runner(["launchctl", "list"])
-        if not ran.ok:
-            return Status(
-                mechanism=mechanism,
-                definition=definition,
-                installed=installed,
-                running=None,
-                pid=None,
-                detail=(
-                    f"launchctl could not be asked: `{' '.join(ran.argv)}` exited "
-                    f"{ran.returncode}: {ran.text()}"
-                ),
-                linger=None,
-            )
-        loaded, pid = parse_launchctl_list(ran.stdout, LAUNCHD_LABEL)
-        return Status(
-            mechanism=mechanism,
-            definition=definition,
-            installed=installed,
-            running=pid is not None,
-            pid=pid,
-            detail=(
-                f"agent {LAUNCHD_LABEL} is "
-                + ("loaded" if loaded else "not loaded")
-                + (f" and running as pid {pid}" if pid is not None else "")
-            ),
-            linger=None,
-        )
-
-    raise ServiceError(f"there is no service mechanism called {mechanism!r}")
+        running, pid, detail, linger = _systemd_state(runner, user)
+    elif mechanism == LAUNCHD:
+        running, pid, detail, linger = _launchd_state(runner)
+    else:
+        raise ServiceError(f"there is no service mechanism called {mechanism!r}")
+    return Status(
+        mechanism=mechanism,
+        definition=definition,
+        installed=installed,
+        running=running,
+        pid=pid,
+        detail=detail,
+        linger=linger,
+    )
 
 
 def _domain() -> str:

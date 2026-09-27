@@ -109,20 +109,30 @@ def _require_band(params: TtsParams) -> dict[str, float] | None:
     band = params.band
     if band is None:
         if params.retake:
-            raise ApiError(
-                400,
-                "retake_without_band",
-                "retake is true and this request states no band. The guarded "
-                "arm re-rolls a chunk against a pace band, and the band is the "
-                "caller's to state: Crucible does not read one off the voice, "
-                "because an inherited band is indistinguishable from a measured "
-                "one at the point of use (deathstalker carried pace 16.64 onto "
-                "weights that measured 15.91). Send `band` "
-                f"{{{', '.join(_BAND_ON_THE_WIRE)}}}, or render bare",
-                {"retake": True},
-            )
+            raise _retake_without_band()
         return None
+    _require_band_keys(band)
+    rates = {key: _band_rate(band, key) for key in _BAND_ON_THE_WIRE}
+    _require_band_order(band, rates)
+    return {wire: rates[key] for key, wire in _BAND_ON_THE_WIRE.items()}
 
+
+def _retake_without_band() -> ApiError:
+    return ApiError(
+        400,
+        "retake_without_band",
+        "retake is true and this request states no band. The guarded "
+        "arm re-rolls a chunk against a pace band, and the band is the "
+        "caller's to state: Crucible does not read one off the voice, "
+        "because an inherited band is indistinguishable from a measured "
+        "one at the point of use (deathstalker carried pace 16.64 onto "
+        "weights that measured 15.91). Send `band` "
+        f"{{{', '.join(_BAND_ON_THE_WIRE)}}}, or render bare",
+        {"retake": True},
+    )
+
+
+def _require_band_keys(band: dict[str, Any]) -> None:
     missing = sorted(set(_BAND_ON_THE_WIRE) - set(band))
     unknown = sorted(set(band) - set(_BAND_ON_THE_WIRE))
     if missing or unknown:
@@ -136,27 +146,31 @@ def _require_band(params: TtsParams) -> dict[str, float] | None:
             + (f". Unknown {unknown}" if unknown else ""),
             {"band": band},
         )
-    rates: dict[str, float] = {}
-    for key in _BAND_ON_THE_WIRE:
-        value = band[key]
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ApiError(
-                400,
-                "band_malformed",
-                f"band.{key} is {value!r}, which is not a rate in characters "
-                "per second",
-                {"band": band, "field": key},
-            )
-        if value <= 0:
-            raise ApiError(
-                400,
-                "band_malformed",
-                f"band.{key} is {value}. Every rate is characters per second "
-                "and positive; a zero or a negative is a band nobody finished "
-                "writing, not a band with no floor",
-                {"band": band, "field": key},
-            )
-        rates[key] = float(value)
+
+
+def _band_rate(band: dict[str, Any], key: str) -> float:
+    value = band[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ApiError(
+            400,
+            "band_malformed",
+            f"band.{key} is {value!r}, which is not a rate in characters "
+            "per second",
+            {"band": band, "field": key},
+        )
+    if value <= 0:
+        raise ApiError(
+            400,
+            "band_malformed",
+            f"band.{key} is {value}. Every rate is characters per second "
+            "and positive; a zero or a negative is a band nobody finished "
+            "writing, not a band with no floor",
+            {"band": band, "field": key},
+        )
+    return float(value)
+
+
+def _require_band_order(band: dict[str, Any], rates: dict[str, float]) -> None:
     if not (
         rates["min_chars_per_sec"]
         < rates["pace_chars_per_sec"]
@@ -172,7 +186,6 @@ def _require_band(params: TtsParams) -> dict[str, float] | None:
             "book's running median",
             {"band": band},
         )
-    return {wire: rates[key] for key, wire in _BAND_ON_THE_WIRE.items()}
 
 
 def _require_width(
@@ -225,6 +238,112 @@ def _require_renderable(
         manifest, spec, interpreter,
         _require_band(params), _require_width(manifest, spec, params),
     )
+
+
+def _require_item_take(engine: NarratorEngine, take: int, sampling: Any) -> None:
+    if take > 0 and not engine.announces_item_take():
+        raise JobError(
+            "sampling_not_wired",
+            f"take {take} resolves to sampling {sampling}, and the "
+            f"narrator serving this voice did not announce `itemTake` "
+            f"on its ready line — it has no per-item rung channel, so it "
+            f"would render take 0, in take 0's seed lane, and this job "
+            f"would report take {take}. Re-resolve the tts env's "
+            f"narrator pin (envs/tts/*.txt) to a bookforge commit that "
+            f"carries narrator/engine/item_sampling.py, reinstall the env, "
+            f"and reload the voice. Take 0 renders on this narrator as it "
+            f"is.",
+        )
+
+
+def _batch_request(
+    params: TtsParams,
+    sampling: Any,
+    band: dict[str, float] | None,
+    width: int | None,
+) -> dict[str, Any]:
+    return {
+        "action": "generate_batch",
+        "language": params.language,
+        "retake": params.retake,
+        **({} if band is None else {"band": band}),
+        **({} if width is None else {"width": width}),
+        "items": [
+            {"i": chunk.index, "text": chunk.text, "take": params.take}
+            | ({} if sampling is None else {"sampling": sampling})
+            for chunk in params.chunks
+        ],
+    }
+
+
+_QUIET_BATCH_MESSAGES = frozenset({"batch_done", "stopped"})
+
+
+class _BatchTally:
+
+    def __init__(self, expected: set[int], total: int) -> None:
+        self.expected = expected
+        self.total = total
+        self.answered: set[int] = set()
+        self.failures: list[dict[str, Any]] = []
+        self.rendered = 0
+
+    def counts(self) -> dict[str, int]:
+        return {"rendered": self.rendered, "failed": len(self.failures), "total": self.total}
+
+    def claim(self, message: dict[str, Any]) -> int | None:
+        kind = message["type"]
+        if kind in _QUIET_BATCH_MESSAGES:
+            return None
+        if kind != "batch_item":
+            raise JobError(
+                "narrator_protocol",
+                f"narrator sent a {kind!r} message during a non-streamed "
+                "generate_batch; this door asked for whole rows and knows "
+                "only batch_item and batch_done",
+            )
+        try:
+            index = _row_index(message, self.expected)
+        except EngineError as exc:
+            raise JobError("narrator_protocol", str(exc)) from None
+        if index in self.answered:
+            raise JobError(
+                "narrator_protocol",
+                f"narrator answered row {index} twice. One answer per row is "
+                "narrator's own guarantee, and two would mean one FLAC "
+                "overwriting another",
+            )
+        self.answered.add(index)
+        return index
+
+    def record(self, index: int, failed: str | None) -> None:
+        if failed is None:
+            self.rendered += 1
+        else:
+            self.failures.append({"index": index, "message": failed})
+
+    def row_line(self, index: int, failed: str | None) -> str:
+        head = (
+            f"chunk {index} failed: {failed}"
+            if failed is not None
+            else f"{self.rendered} of {self.total} chunk(s) rendered"
+        )
+        return head + (f"; {len(self.failures)} failed so far" if self.failures else "")
+
+    def require_complete(self) -> None:
+        missing = sorted(self.expected - self.answered)
+        if missing:
+            raise JobError(
+                "narrator_protocol",
+                f"narrator said batch_done with {len(missing)} row(s) unanswered: "
+                f"{missing[:20]}. One answer per row is its own guarantee, so a "
+                "short batch is not a short answer",
+            )
+
+    def final_line(self) -> str:
+        return f"{self.rendered} of {self.total} chunk(s) rendered" + (
+            f"; {len(self.failures)} failed" if self.failures else ""
+        )
 
 
 def encode_flac(ffmpeg: str, pcm: bytes, sample_rate: int, destination: Path) -> None:
@@ -523,122 +642,41 @@ class TtsJobType:
         width: int | None,
     ) -> None:
         sampling = take_sampling(manifest, params.take)
-        if params.take > 0 and not engine.announces_item_take():
-            raise JobError(
-                "sampling_not_wired",
-                f"take {params.take} resolves to sampling {sampling}, and the "
-                f"narrator serving this voice did not announce `itemTake` "
-                f"on its ready line — it has no per-item rung channel, so it "
-                f"would render take 0, in take 0's seed lane, and this job "
-                f"would report take {params.take}. Re-resolve the tts env's "
-                f"narrator pin (envs/tts/*.txt) to a bookforge commit that "
-                f"carries narrator/engine/item_sampling.py, reinstall the env, "
-                f"and reload the voice. Take 0 renders on this narrator as it "
-                f"is.",
-            )
-
+        _require_item_take(engine, params.take, sampling)
         by_index = {chunk.index: chunk for chunk in params.chunks}
+        tally = _BatchTally(expected=set(by_index), total=len(params.chunks))
+        request = _batch_request(params, sampling, band, width)
 
-        expected = set(by_index)
-        answered: set[int] = set()
-        failures: list[dict[str, Any]] = []
-        rendered = 0
-        total = len(params.chunks)
-
-        request = {
-            "action": "generate_batch",
-            "language": params.language,
-            "retake": params.retake,
-            **({} if band is None else {"band": band}),
-            **({} if width is None else {"width": width}),
-            "items": [
-                {"i": chunk.index, "text": chunk.text, "take": params.take}
-                | ({} if sampling is None else {"sampling": sampling})
-                for chunk in params.chunks
-            ],
-        }
-
-        ctx.expect_chunks(total)
+        ctx.expect_chunks(tally.total)
         ctx.progress(
             0.0,
-            f"rendering {total} chunk(s) at take {params.take}",
-            rendered=0,
-            failed=0,
-            total=total,
+            f"rendering {tally.total} chunk(s) at take {params.take}",
+            **tally.counts(),
         )
-
         for message in engine.converse(
             request,
             terminal=frozenset({"batch_done"}),
             silence_timeout=RENDER_SILENCE_TIMEOUT_SECONDS,
             cancelled=lambda: ctx.cancelled,
         ):
-            kind = message["type"]
-            if kind == "batch_done":
+            index = tally.claim(message)
+            if index is None:
                 continue
-            if kind == "stopped":
-                continue
-            if kind != "batch_item":
-                raise JobError(
-                    "narrator_protocol",
-                    f"narrator sent a {kind!r} message during a non-streamed "
-                    "generate_batch; this door asked for whole rows and knows "
-                    "only batch_item and batch_done",
-                )
-
-            try:
-                index = _row_index(message, expected)
-            except EngineError as exc:
-                raise JobError("narrator_protocol", str(exc)) from None
-            if index in answered:
-                raise JobError(
-                    "narrator_protocol",
-                    f"narrator answered row {index} twice. One answer per row is "
-                    "narrator's own guarantee, and two would mean one FLAC "
-                    "overwriting another",
-                )
-            answered.add(index)
-
             failed = self._one_row(
                 ctx, by_index[index], message, sample_rate, ffmpeg, params.take
             )
-            if failed is None:
-                rendered += 1
-            else:
-                failures.append({"index": index, "message": failed})
+            tally.record(index, failed)
             ctx.progress(
-                len(answered) / total,
-                (
-                    f"chunk {index} failed: {failed}"
-                    if failed is not None
-                    else f"{rendered} of {total} chunk(s) rendered"
-                )
-                + (f"; {len(failures)} failed so far" if failures else ""),
-                rendered=rendered,
-                failed=len(failures),
-                total=total,
+                len(tally.answered) / tally.total,
+                tally.row_line(index, failed),
+                **tally.counts(),
             )
 
-        missing = sorted(expected - answered)
-        if missing:
-            raise JobError(
-                "narrator_protocol",
-                f"narrator said batch_done with {len(missing)} row(s) unanswered: "
-                f"{missing[:20]}. One answer per row is its own guarantee, so a "
-                "short batch is not a short answer",
-            )
-
-        ctx.progress(
-            1.0,
-            f"{rendered} of {total} chunk(s) rendered"
-            + (f"; {len(failures)} failed" if failures else ""),
-            rendered=rendered,
-            failed=len(failures),
-            total=total,
-        )
+        tally.require_complete()
+        ctx.progress(1.0, tally.final_line(), **tally.counts())
         ctx.done_extra(
-            rendered=rendered,
-            failed=failures,
+            rendered=tally.rendered,
+            failed=tally.failures,
             take=params.take,
             sample_rate=sample_rate,
             sampling=manifest.applied_sampling(spec.backend, params.take),

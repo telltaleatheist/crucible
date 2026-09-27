@@ -4,6 +4,8 @@ import bisect
 import re
 import unicodedata
 from dataclasses import dataclass
+from functools import partial
+from typing import Callable
 
 BACK, FWD, SPAN = 8, 60, 14
 
@@ -41,42 +43,87 @@ def coarse_align(
 ) -> CoarseResult:
     word_time = [t for _, t in words]
     word_norm = [w for w, _ in words]
-    total_words = len(word_norm)
-    n = len(sents)
     tk_all = [toks(s) for s in sents]
+    n = len(sents)
+    state = _Placement(
+        tk_all, word_norm, word_time, partial(_count_hits, word_norm),
+        [None] * n, [None] * n, [False] * n,
+    )
+    tri = _trigram_index(word_norm)
+    anchors = _anchor_chain(_anchor_candidates(tk_all, tri, state.hits))
+    for si, j in anchors:
+        state.place(si, j)
+    _walk_around_anchors(state, anchors)
 
-    rough: list[float | None] = [None] * n
-    roughj: list[int | None] = [None] * n
-    direct = [False] * n
+    rough = state.rough
+    matched = [i for i in range(n) if rough[i] is not None]
+    if not matched:
+        return CoarseResult(rough, 0, n, 0, DEFAULT_RATE, state.direct)
+    first_index, last_index = matched[0], matched[-1] + 1
+    measured = _rate(matched, rough, tk_all)
+    dropped = _fill_interior_runs(
+        matched, rough, state.roughj, tk_all, tri, word_time, word_norm,
+        state.hits, measured, failed_ranges, state.direct,
+    )
+    _never_backwards(rough)
+    return CoarseResult(rough, first_index, last_index, dropped, measured, state.direct)
 
-    def hits(j: int, tk: list[str], need: int) -> int:
-        k = j
-        m = 0
-        while k < min(total_words, j + SPAN) and m < need:
-            if word_norm[k] == tk[m]:
-                m += 1
-            k += 1
-        return m
 
+@dataclass
+class _Placement:
+
+    tk_all: list[list[str]]
+    word_norm: list[str]
+    word_time: list[float]
+    hits: Callable[[int, list[str], int], int]
+    rough: list[float | None]
+    roughj: list[int | None]
+    direct: list[bool]
+
+    def place(self, si: int, j: int) -> None:
+        self.rough[si] = self.word_time[j]
+        self.roughj[si] = j
+        self.direct[si] = True
+
+
+def _count_hits(word_norm: list[str], j: int, tk: list[str], need: int) -> int:
+    end = min(len(word_norm), j + SPAN)
+    k = j
+    m = 0
+    while k < end and m < need:
+        if word_norm[k] == tk[m]:
+            m += 1
+        k += 1
+    return m
+
+
+def _enough(got: int, need: int) -> bool:
+    return got >= max(3, need - 1)
+
+
+def _trigram_index(word_norm: list[str]) -> dict[tuple[str, str, str], list[int]]:
     tri: dict[tuple[str, str, str], list[int]] = {}
-    for j in range(total_words - 2):
+    for j in range(len(word_norm) - 2):
         tri.setdefault(
             (word_norm[j], word_norm[j + 1], word_norm[j + 2]), []
         ).append(j)
+    return tri
 
+
+def _anchor_candidates(tk_all, tri, hits) -> list[tuple[int, int]]:
     cands: list[tuple[int, int]] = []
-    for si in range(n):
-        tk = tk_all[si]
+    for si, tk in enumerate(tk_all):
         if len(tk) < 4:
             continue
         pos = tri.get((tk[0], tk[1], tk[2]))
         if not pos or len(pos) > MAX_ANCHOR_OCCURRENCES:
             continue
         need = min(len(tk), 6)
-        for j in pos:
-            if hits(j, tk, need) >= max(3, need - 1):
-                cands.append((si, j))
+        cands.extend((si, j) for j in pos if _enough(hits(j, tk, need), need))
+    return cands
 
+
+def _anchor_chain(cands: list[tuple[int, int]]) -> list[tuple[int, int]]:
     cands.sort(key=lambda c: (c[0], -c[1]))
     tails: list[int] = []
     tidx: list[int] = []
@@ -90,75 +137,61 @@ def coarse_align(
             tails[p] = j
             tidx[p] = i
         parent[i] = tidx[p - 1] if p > 0 else -1
-
     anchors: list[tuple[int, int]] = []
     i = tidx[-1] if tidx else -1
     while i != -1:
         anchors.append(cands[i])
         i = parent[i]
     anchors.reverse()
-    for si, j in anchors:
-        rough[si] = word_time[j]
-        roughj[si] = j
-        direct[si] = True
+    return anchors
 
-    def walk(s_lo: int, s_hi: int, j_lo: int, j_hi: int, wi: int) -> None:
-        for si in range(s_lo, s_hi):
-            tk = tk_all[si]
-            if len(tk) < 2:
-                wi += 1
-                continue
-            need = min(len(tk), 5)
-            best = None
-            lo = max(j_lo, wi - BACK)
-            hi = min(j_hi, wi + FWD)
-            for j in range(lo, hi):
-                if word_norm[j] != tk[0]:
-                    continue
-                if hits(j, tk, need) >= max(3, need - 1):
-                    best = j
-                    break
-            if best is not None:
-                rough[si] = word_time[best]
-                roughj[si] = best
-                direct[si] = True
-                wi = best + len(tk)
-            else:
-                wi += len(tk)
 
-    if anchors:
-        for (sa, ja), (sb, jb) in zip(anchors, anchors[1:]):
-            if sb > sa + 1:
-                walk(sa + 1, sb, ja, jb, ja + len(tk_all[sa]))
-        s0, j0 = anchors[0]
-        walk(0, s0, 0, j0, max(0, j0 - sum(len(t) for t in tk_all[:s0])))
-        sl, jl = anchors[-1]
-        walk(sl + 1, n, jl, total_words, jl + len(tk_all[sl]))
-    else:
-        walk(0, n, 0, total_words, 0)
+def _walk_around_anchors(state: _Placement, anchors: list[tuple[int, int]]) -> None:
+    tk_all = state.tk_all
+    n = len(tk_all)
+    total_words = len(state.word_norm)
+    if not anchors:
+        _walk(state, 0, n, 0, total_words, 0)
+        return
+    for (sa, ja), (sb, jb) in zip(anchors, anchors[1:]):
+        if sb > sa + 1:
+            _walk(state, sa + 1, sb, ja, jb, ja + len(tk_all[sa]))
+    s0, j0 = anchors[0]
+    _walk(state, 0, s0, 0, j0, max(0, j0 - sum(len(t) for t in tk_all[:s0])))
+    sl, jl = anchors[-1]
+    _walk(state, sl + 1, n, jl, total_words, jl + len(tk_all[sl]))
 
-    matched = [i for i in range(n) if rough[i] is not None]
-    if not matched:
-        return CoarseResult(rough, 0, n, 0, DEFAULT_RATE, direct)
-    first_index, last_index = matched[0], matched[-1] + 1
 
-    measured = _rate(matched, rough, tk_all)
+def _walk(state: _Placement, s_lo: int, s_hi: int, j_lo: int, j_hi: int, wi: int) -> None:
+    for si in range(s_lo, s_hi):
+        tk = state.tk_all[si]
+        if len(tk) < 2:
+            wi += 1
+            continue
+        best = _first_match(state, tk, max(j_lo, wi - BACK), min(j_hi, wi + FWD))
+        if best is not None:
+            state.place(si, best)
+            wi = best + len(tk)
+        else:
+            wi += len(tk)
 
-    dropped = _fill_interior_runs(
-        matched, rough, roughj, tk_all, tri, word_time, word_norm,
-        hits, measured, failed_ranges, direct,
-    )
 
+def _first_match(state: _Placement, tk: list[str], lo: int, hi: int) -> int | None:
+    need = min(len(tk), 5)
+    for j in range(lo, hi):
+        if state.word_norm[j] == tk[0] and _enough(state.hits(j, tk, need), need):
+            return j
+    return None
+
+
+def _never_backwards(rough: list[float | None]) -> None:
     prev: float | None = None
-    for idx in range(n):
-        value = rough[idx]
+    for idx, value in enumerate(rough):
         if value is None:
             continue
         if prev is not None and value < prev:
             rough[idx] = prev
         prev = rough[idx]
-
-    return CoarseResult(rough, first_index, last_index, dropped, measured, direct)
 
 
 def _rate(
@@ -181,58 +214,81 @@ def _fill_interior_runs(
     matched, rough, roughj, tk_all, tri, word_time, word_norm,
     hits, rate, failed_ranges, direct,
 ) -> int:
-    total_words = len(word_norm)
     dropped = 0
-    rescued = 0
     for a_i, b_i in zip(matched, matched[1:]):
         if b_i == a_i + 1:
             continue
-        gap = rough[b_i] - rough[a_i]
-        gap_words = max(0, roughj[b_i] - (roughj[a_i] + len(tk_all[a_i])))
-        run_tok = sum(len(tk_all[k]) for k in range(a_i + 1, b_i))
-        words_trusted = not any(
+        run = _Run(a_i, b_i, rough, roughj, tk_all, failed_ranges)
+        if run.overfull(rate):
+            dropped += _rescue_run(run, rough, tk_all, tri, word_time, hits, rate, direct)
+        else:
+            _spread_run(run, rough, word_time, len(word_norm))
+    return dropped
+
+
+class _Run:
+
+    def __init__(self, a_i, b_i, rough, roughj, tk_all, failed_ranges) -> None:
+        self.a_i = a_i
+        self.b_i = b_i
+        self.gap = rough[b_i] - rough[a_i]
+        self.lead = len(tk_all[a_i])
+        self.j_a = roughj[a_i] + self.lead
+        self.j_b = roughj[b_i]
+        self.lengths = [(k, len(tk_all[k])) for k in range(a_i + 1, b_i)]
+        self.run_tok = sum(length for _, length in self.lengths)
+        self.words_trusted = not any(
             lo < rough[b_i] and rough[a_i] < hi for lo, hi in failed_ranges
         )
-        if run_tok >= 12 and (
-            (run_tok / rate > 2.0 * gap + 10.0)
-            or (words_trusted and run_tok > 2.0 * gap_words + 25)
-        ):
-            last_t = rough[a_i]
-            for k in range(a_i + 1, b_i):
-                tk = tk_all[k]
-                for o in range(0, len(tk) - 2):
-                    need = min(len(tk) - o, 6)
-                    hit = None
-                    for j in tri.get((tk[o], tk[o + 1], tk[o + 2])) or []:
-                        if not (last_t < word_time[j] < rough[b_i]):
-                            continue
-                        if hits(j, tk[o:], need) >= max(3, need - 1):
-                            hit = j
-                            break
-                    if hit is not None:
-                        rough[k] = max(last_t, word_time[hit] - o / rate)
-                        last_t = word_time[hit]
-                        rescued += 1
-                        direct[k] = True
-                        break
-                if rough[k] is None:
-                    dropped += 1
-            continue
-        j_a = roughj[a_i] + len(tk_all[a_i])
-        j_b = roughj[b_i]
-        n_words = j_b - j_a
-        use_words = (
-            words_trusted and run_tok > 0 and n_words >= max(10, 0.2 * run_tok)
+
+    def overfull(self, rate: float) -> bool:
+        gap_words = max(0, self.j_b - self.j_a)
+        return self.run_tok >= 12 and (
+            (self.run_tok / rate > 2.0 * self.gap + 10.0)
+            or (self.words_trusted and self.run_tok > 2.0 * gap_words + 25)
         )
-        total = (run_tok + len(tk_all[a_i])) or 1
-        cum = len(tk_all[a_i])
-        cum_run = 0
-        for k in range(a_i + 1, b_i):
-            if use_words:
-                jk = j_a + int(n_words * (cum_run / run_tok))
-                rough[k] = word_time[min(max(jk, 0), total_words - 1)]
-            else:
-                rough[k] = rough[a_i] + gap * (cum / total)
-            cum += len(tk_all[k])
-            cum_run += len(tk_all[k])
+
+
+def _rescue_run(run: _Run, rough, tk_all, tri, word_time, hits, rate, direct) -> int:
+    dropped = 0
+    last_t = rough[run.a_i]
+    upper = rough[run.b_i]
+    for k in range(run.a_i + 1, run.b_i):
+        tk = tk_all[k]
+        for o in range(0, len(tk) - 2):
+            hit = _trigram_hit(tk[o:], tri, word_time, hits, last_t, upper)
+            if hit is not None:
+                rough[k] = max(last_t, word_time[hit] - o / rate)
+                last_t = word_time[hit]
+                direct[k] = True
+                break
+        if rough[k] is None:
+            dropped += 1
     return dropped
+
+
+def _trigram_hit(tail, tri, word_time, hits, after: float, before: float) -> int | None:
+    need = min(len(tail), 6)
+    for j in tri.get((tail[0], tail[1], tail[2])) or []:
+        if after < word_time[j] < before and _enough(hits(j, tail, need), need):
+            return j
+    return None
+
+
+def _spread_run(run: _Run, rough, word_time, total_words: int) -> None:
+    n_words = run.j_b - run.j_a
+    run_tok = run.run_tok
+    use_words = (
+        run.words_trusted and run_tok > 0 and n_words >= max(10, 0.2 * run_tok)
+    )
+    total = (run_tok + run.lead) or 1
+    cum = run.lead
+    cum_run = 0
+    for k, length in run.lengths:
+        if use_words:
+            jk = run.j_a + int(n_words * (cum_run / run_tok))
+            rough[k] = word_time[min(max(jk, 0), total_words - 1)]
+        else:
+            rough[k] = rough[run.a_i] + run.gap * (cum / total)
+        cum += length
+        cum_run += length
