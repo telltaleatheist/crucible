@@ -81,6 +81,10 @@ class JobTypeStatus:
 
     ready: bool
     detail: str
+    #: Not ready ONLY because no weights are pulled yet: the env is installed
+    #: and nothing is broken (2026-09-26, fresh-install #40). `crucible doctor`
+    #: reports such a type as a note, not a problem.
+    awaiting_weights: bool = False
 
 
 @dataclass

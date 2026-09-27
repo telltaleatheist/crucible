@@ -538,7 +538,10 @@ def test_the_refusal_offers_install_when_the_card_can_hold_it(home: Path) -> Non
     assert verdict.enabled is True
     config = _config_with(home, (verdict.row(),))
     error = disabled_error("tts", config)
-    assert "crucible install tts" in error.message
+    # The action is the install REQUEST, not a shell command (2026-09-26, #2).
+    assert "POST /v1/tasks" in error.message
+    assert error.details["install"] == {"type": "install", "job_type": "tts"}
+    assert error.details["reason"] == "not_installed"
     assert error.details["fits"] == ["tts"]
 
 

@@ -167,6 +167,10 @@ soundfile==0.13.1
 sox==1.5.0
 soxr==0.5.0.post1
 static-sox==1.0.2
+# KEPT HERE, dropped from cuda-linux.txt (2026-09-26, fresh-install #25). The
+# Mac has no pinned ffmpeg in `crucible/hosttools.py` yet and uses Homebrew's
+# on PATH; with none there, this is urvc's only fallback. It goes when a
+# darwin-arm64 build is pinned.
 static_ffmpeg==3.0
 sympy==1.14.0
 threadpoolctl==3.6.0
