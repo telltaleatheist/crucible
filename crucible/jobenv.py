@@ -1417,6 +1417,125 @@ def build_environment(base: dict[str, str] | None = None) -> dict[str, str]:
     return environment
 
 
+class PipFailure:
+    """Reads pip's output as it streams and says, in one line, what failed.
+
+    2026-09-26, fresh-install #31. `crucible install rvc` on kylies-pc failed
+    with "`pip install -r cuda-linux.txt` exited 1", and the cause ("diffq ...
+    No such file or directory: 'clang'") was 40 lines up, outside the tail the
+    error carried. The refusal's first line now names the package and the
+    reason: "diffq 0.2.4 did not build: there is no C compiler on this host (it
+    asked for clang)". The tail still follows it, for whoever wants the rest.
+
+    Only what the summary needs is kept, so a 3,000-line install costs nothing.
+    """
+
+    _COLLECTING = re.compile(r"^\s*Collecting (?P<name>[A-Za-z0-9._-]+)==(?P<version>[^\s;]+)")
+    _BUILDING = re.compile(r"Building wheel for (?P<name>[A-Za-z0-9._-]+) \(")
+    _FAILED_BUILD = re.compile(
+        r"(?:Failed building wheel for|Failed to build) (?!installable )'?(?P<name>[A-Za-z0-9._-]+)'?"
+    )
+    _NO_COMPILER = re.compile(
+        r"No such file or directory: '(?P<cc>clang\+\+|clang|gcc|g\+\+|cc|c\+\+)'"
+        r"|(?:unable to execute|command) '(?P<cc2>[^']+)'(?: failed)?: No such file"
+    )
+    _NO_HEADER = re.compile(r"fatal error: (?P<header>[\w./-]+\.h): No such file")
+    _NO_MATCH = re.compile(r"No matching distribution found for (?P<req>\S+)")
+    _CONFLICT = re.compile(r"Cannot install (?P<what>.+?) because these package versions")
+    _NETWORK = re.compile(
+        r"Temporary failure in name resolution|Name or service not known|"
+        r"Network is unreachable|Max retries exceeded|Could not fetch URL|ConnectTimeout"
+    )
+    _NO_GIT = re.compile(r"Cannot find command 'git'|No such file or directory: 'git'")
+
+    def __init__(self) -> None:
+        self.versions: dict[str, str] = {}
+        self.building: str | None = None
+        self.failed_build: str | None = None
+        self.build_reason: str | None = None
+        self.no_match: str | None = None
+        self.conflict: str | None = None
+        self.hash_mismatch = False
+        self.network = False
+        self.disk_full = False
+        self.no_git = False
+        self.last_error: str | None = None
+
+    def feed(self, line: str) -> None:
+        text = line.strip()
+        if not text:
+            return
+        found = self._COLLECTING.search(text)
+        if found:
+            self.versions[found["name"].lower()] = found["version"]
+        found = self._BUILDING.search(text)
+        if found and self.failed_build is None:
+            self.building = found["name"]
+        found = self._FAILED_BUILD.search(text)
+        if found and self.failed_build is None:
+            self.failed_build = found["name"]
+        found = self._NO_COMPILER.search(text)
+        if found and self.build_reason is None:
+            self.build_reason = (
+                "there is no C compiler on this host (it asked for "
+                f"{found['cc'] or found['cc2']})"
+            )
+        found = self._NO_HEADER.search(text)
+        if found and self.build_reason is None:
+            self.build_reason = f"a C header it needs is missing ({found['header']})"
+        found = self._NO_MATCH.search(text)
+        if found and self.no_match is None:
+            self.no_match = found["req"]
+        found = self._CONFLICT.search(text)
+        if found and self.conflict is None:
+            self.conflict = found["what"]
+        if "DO NOT MATCH THE HASHES" in text:
+            self.hash_mismatch = True
+        if self._NETWORK.search(text):
+            self.network = True
+        if "No space left on device" in text:
+            self.disk_full = True
+        if self._NO_GIT.search(text):
+            self.no_git = True
+        if (text.startswith("ERROR:") or text.startswith("error:")) and not (
+            "subprocess-exited-with-error" in text or "Failed" in text
+        ):
+            self.last_error = text
+
+    def _named(self, name: str) -> str:
+        version = self.versions.get(name.lower())
+        return f"{name} {version}" if version else name
+
+    def summary(self) -> str | None:
+        """The one line, or None when nothing pip said was recognisable."""
+        if self.disk_full:
+            return "the disk filled up while pip was installing (No space left on device)"
+        if self.no_git:
+            return (
+                "git is not installed on this host, and the recipe installs a "
+                "package from a git commit"
+            )
+        if self.failed_build is not None or (self.build_reason and self.building):
+            name = self._named(self.failed_build or self.building or "a package")
+            return f"{name} did not build: " + (
+                self.build_reason or (self.last_error or "its build step failed")
+            )
+        if self.no_match is not None:
+            if self.network:
+                return (
+                    f"{self.no_match} could not be downloaded: the package index "
+                    "could not be reached (a network failure)"
+                )
+            return f"{self.no_match} is not on the package index (no matching distribution)"
+        if self.conflict is not None:
+            return f"the recipe's pins conflict: {self.conflict} cannot be installed together"
+        if self.hash_mismatch:
+            return "a downloaded package did not match the hash pip expected"
+        if self.network:
+            return "the package index could not be reached (a network failure)"
+        return self.last_error
+
+
 def _run(command: list[str], failure: str, on_line: Any) -> None:
     process = subprocess.Popen(
         command,
@@ -1427,13 +1546,24 @@ def _run(command: list[str], failure: str, on_line: Any) -> None:
         env=build_environment(),
     )
     tail: list[str] = []
+    watch = PipFailure()
     assert process.stdout is not None
     for line in process.stdout:
         line = line.rstrip("\n")
         tail.append(line)
         del tail[:-40]
+        watch.feed(line)
         if on_line is not None:
             on_line(line)
     code = process.wait()
     if code != 0:
-        raise EnvError(f"{failure}: `{' '.join(command)}` exited {code}\n" + "\n".join(tail))
+        raise EnvError(failure_message(failure, command, code, watch, tail))
+
+
+def failure_message(
+    failure: str, command: list[str], code: int, watch: PipFailure, tail: list[str]
+) -> str:
+    """The install refusal: the one line first (#31), then the command and the tail."""
+    said = watch.summary()
+    head = f"{failure}: {said}" if said else failure
+    return f"{head}\n`{' '.join(command)}` exited {code}\n" + "\n".join(tail)

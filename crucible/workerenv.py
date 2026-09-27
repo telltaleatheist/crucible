@@ -617,18 +617,20 @@ def _run(command: list[str], failure: str, on_line: Callable[[str], None] | None
         env=jobenv.build_environment(),
     )
     tail: list[str] = []
+    # The one-line cause (2026-09-26, fresh-install #31), read by `jobenv`'s
+    # watcher so the two env modules say it the same way.
+    watch = jobenv.PipFailure()
     assert process.stdout is not None
     for line in process.stdout:
         line = line.rstrip("\n")
         tail.append(line)
         del tail[:-40]
+        watch.feed(line)
         if on_line is not None:
             on_line(line)
     code = process.wait()
     if code != 0:
-        raise WorkerEnvError(
-            f"{failure}: `{' '.join(command)}` exited {code}\n" + "\n".join(tail)
-        )
+        raise WorkerEnvError(jobenv.failure_message(failure, command, code, watch, tail))
 
 
 # ---------------------------------------------------------------------------

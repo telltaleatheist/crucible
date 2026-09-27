@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import tarfile
@@ -49,6 +50,27 @@ from .errors import CrucibleError
 
 HF_TOKEN_ENV = "HF_TOKEN"
 STAMP_NAME = "crucible-pull.json"
+
+
+class _QuietUnauthenticated(logging.Filter):
+    """Drops the Hub's "unauthenticated requests" warning, and nothing else.
+
+    2026-09-26, fresh-install #41. Every pull on kylies-pc printed "Warning:
+    You are sending unauthenticated requests to the HF Hub. Please set a
+    HF_TOKEN ...". It is harmless and it reads like a failure: every repo
+    Crucible pulls is public, and a token is only ever asked for by name when a
+    repo is gated (`HF_TOKEN_ENV`). The Hub sends it as an `X-HF-Warning:
+    unauthenticated; ...` header on the resolve, and huggingface_hub logs it
+    through `huggingface_hub.utils._http` (checked against the live Hub and
+    huggingface_hub 2.0.0's `_warn_on_warning_headers`). Filtered by its text,
+    so any other warning from that logger still shows.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "unauthenticated requests to the HF Hub" not in record.getMessage()
+
+
+logging.getLogger("huggingface_hub.utils._http").addFilter(_QuietUnauthenticated())
 
 #: WHERE A BACKEND BLOCK'S BYTES COME FROM (PHASE18-UNCERTIFIED.md section 3).
 #:

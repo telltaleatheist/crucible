@@ -77,7 +77,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from . import procgroup
+from . import hosttools, procgroup
 from .errors import CrucibleError, JobCancelled
 from .logtail import tail_of_last_run
 
@@ -235,6 +235,10 @@ def _spawn(
     merged = dict(os.environ)
     if environment is not None:
         merged.update(environment)
+    # CRUCIBLE'S OWN TOOLS FIRST ON THE WORKER'S PATH (2026-09-26, #25). A
+    # worker's libraries look for ffmpeg by themselves (urvc, audio-separator),
+    # and the pinned build `crucible install` placed is the one they must find.
+    merged["PATH"] = hosttools.worker_path(merged.get("PATH", ""))
 
     try:
         return subprocess.Popen(

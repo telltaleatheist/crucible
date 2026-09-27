@@ -97,6 +97,18 @@
 # child's PATH for exactly that reason. These are ultimate-rvc's own declared
 # dependencies; they are pinned here so `crucible doctor` checks the two tools
 # that decision depends on rather than trusting them to be there.
+#
+# static_ffmpeg IS GONE (2026-09-26, fresh-install #25). It downloaded ffmpeg
+# from its author's GitHub the first time urvc asked, and nothing else in
+# this env imports it. Owen's fork only reaches for it when there is no ffmpeg
+# and ffprobe on PATH (`core/generate/common.py`, `_add_ffmpeg_paths`), and
+# every worker now gets Crucible's pinned build first on PATH: `crucible
+# install` places it in ~/.crucible/tools/bin (`crucible/hosttools.py`,
+# `ensure_ffmpeg`), and `crucible/workers.py` prepends that directory. Its own
+# dependencies (twine and its tree, `progress`) are still pinned below: they
+# are harmless, and trimming them is its own piece of work with its own install
+# to prove it, as `mlx-darwin.txt` says. static-sox stays: urvc's convert path
+# never calls it, and removing it is not what this change is about.
 
 absl-py==2.5.0
 annotated-types==0.8.0
@@ -206,7 +218,6 @@ soundfile==0.13.1
 sox==1.5.0
 soxr==0.5.0.post1
 static-sox==1.0.2
-static_ffmpeg==3.0
 sympy==1.14.0
 threadpoolctl==3.6.0
 tokenizers==0.21.4

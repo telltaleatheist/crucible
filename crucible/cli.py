@@ -1034,7 +1034,35 @@ def cmd_install(args: argparse.Namespace) -> int:
     for name in sorted(status.packages):
         if name in (spec.headline, "torch", "numpy", "transformers", "mlx"):
             print(f"  {name}=={status.packages[name]}")
+    refusal = _ensure_tools(config, args)
+    if refusal is not None:
+        return _fail(refusal)
     return _capability_step(config, backend, args.job_type)
+
+
+def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
+    """Place Crucible's pinned ffmpeg (`hosttools.ensure_ffmpeg`). The refusal, or None.
+
+    2026-09-26, Owen's ruling on fresh-install #25: ffmpeg comes from
+    Crucible's own `tools` release, pinned by sha256, and `crucible install`
+    is what places it, for every job type. It runs after the env is proved and
+    before the capability step, so a flag is never turned on for a type whose
+    ffmpeg failed to arrive. Re-running the install finds the env already
+    there and retries only this.
+    """
+    try:
+        print(
+            hosttools.ensure_ffmpeg(
+                config.home,
+                on_line=(lambda line: print(f"  {line}")) if args.verbose else None,
+            )
+        )
+    except hosttools.HostToolError as exc:
+        return (
+            f"the env is installed, but Crucible's ffmpeg is not: {exc}. "
+            "Installing again retries only the ffmpeg"
+        )
+    return None
 
 
 def _install_llama_windows(
@@ -1134,6 +1162,9 @@ def _install_worker_env(
         # mlx that resolved differently is a different numerical path.
         if name in (headline, "ctranslate2", "mlx", "numpy", "onnxruntime"):
             print(f"  {name}=={status.packages[name]}")
+    refusal = _ensure_tools(config, args)
+    if refusal is not None:
+        return _fail(refusal)
     # One env can serve more than one job type — `rvc`'s also carries
     # audio-separator, which is `denoise` — and the flag for each of them is
     # decided here, because this is the door that has just built the thing they
@@ -2106,6 +2137,7 @@ def _job_type_reports(config: Config, backend: Backend) -> list[dict[str, Any]]:
                     "enabled": False,
                     "ready": False,
                     "detail": "not enabled in config.toml",
+                    "awaiting_weights": False,
                     "models": [],
                 }
             )
@@ -2117,6 +2149,7 @@ def _job_type_reports(config: Config, backend: Backend) -> list[dict[str, Any]]:
                 "enabled": True,
                 "ready": status.ready,
                 "detail": status.detail,
+                "awaiting_weights": status.awaiting_weights,
                 "models": [m.to_dict() for m in plugin.describe_models()],
             }
         )
@@ -2356,6 +2389,12 @@ def _doctor_report() -> dict[str, Any]:
         # server, and deleting them is the operator's decision. Null when no
         # config was readable, because there is then no home to look in.
         "stranded_weights": None,
+        # WHICH ffmpeg the job types will run (2026-09-26, fresh-install #25):
+        # Crucible's pinned build in `<home>/tools/bin`, one off PATH, or none.
+        "ffmpeg": None,
+        # Enabled job types that are waiting only for weights to be pulled
+        # (#40). Notes, not problems: see where they are filled.
+        "notes": [],
         "problems": [],
     }
 
@@ -2441,6 +2480,7 @@ def _doctor_report() -> dict[str, Any]:
 
     if config is not None:
         report["stranded_weights"] = catalog.stranded_weights(config)
+        report["ffmpeg"] = hosttools.ffmpeg_report(config.home)
 
     if config is not None and backend is not None:
         _capability_report(report, config, backend)
@@ -2577,6 +2617,18 @@ def _doctor_report() -> dict[str, Any]:
         report["job_types"] = _job_type_reports(config, backend)
         for entry in report["job_types"]:
             if entry["enabled"] and not entry["ready"]:
+                # A TYPE WAITING ONLY FOR WEIGHTS IS A NOTE (2026-09-26,
+                # fresh-install #40). `install rvc` turns on `denoise` too,
+                # because the rvc env serves both, and pulls no separator. The
+                # doctor then called a correct rvc install unhealthy. The env is
+                # there and nothing is broken; a job type that says it is
+                # waiting for a pull (`JobTypeStatus.awaiting_weights`) is
+                # reported as such and does not make the host unhealthy.
+                if entry.get("awaiting_weights"):
+                    report["notes"].append(
+                        f"job_type_awaiting_weights: {entry['name']}: {entry['detail']}"
+                    )
+                    continue
                 report["problems"].append(
                     f"job_type_not_ready: {entry['name']}: {entry['detail']}"
                 )
@@ -2694,8 +2746,40 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     f"is off — `crucible install {INSTALLER_FOR[name]}` builds its "
                     "env and turns it on"
                 )
+        tool = report["ffmpeg"]
+        if tool is not None:
+            if tool["source"] == "crucible":
+                print(f"ffmpeg:  {tool['path']} (Crucible's pinned {tool['pinned_version']})")
+            elif tool["source"] == "path" and tool["pinned_version"] is None:
+                print(
+                    f"ffmpeg:  {tool['path']} (from PATH; there is no pinned "
+                    f"build for {tool['platform']})"
+                )
+            elif tool["source"] == "path":
+                print(
+                    f"ffmpeg:  {tool['path']} (from PATH). note: Crucible's pinned "
+                    f"{tool['pinned_version']} is not in {tool['tools_bin']}; "
+                    "installing any job type puts it there"
+                )
+            else:
+                print(
+                    "ffmpeg:  NONE — "
+                    + (
+                        f"Crucible's pinned {tool['pinned_version']} is not in "
+                        f"{tool['tools_bin']}; installing any job type puts it there"
+                        if tool["pinned_version"] is not None
+                        else f"no pinned build for {tool['platform']}, and none on PATH"
+                    )
+                )
         for entry in report["job_types"]:
-            mark = "ready" if entry["ready"] else ("off" if not entry["enabled"] else "NOT READY")
+            if entry["ready"]:
+                mark = "ready"
+            elif not entry["enabled"]:
+                mark = "off"
+            elif entry.get("awaiting_weights"):
+                mark = "waiting for weights"
+            else:
+                mark = "NOT READY"
             print(f"job {entry['name']}: {mark} — {entry['detail']}")
         for entry in report["stranded_weights"] or ():
             why = entry["note"] or (
@@ -2707,6 +2791,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 f"{entry['path']} belong to nothing: {why}. Nothing will use "
                 "them; delete the directory to reclaim the space"
             )
+        for note in report["notes"]:
+            print(f"note:    {note}")
         for problem in report["problems"]:
             print(f"PROBLEM: {problem}", file=sys.stderr)
         print("healthy" if report["healthy"] else "unhealthy")

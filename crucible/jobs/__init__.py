@@ -13,6 +13,7 @@ that say it.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ..capability import CLASSES, classes_for_job_type
@@ -235,6 +236,23 @@ def disabled_error(name: str, config: Any) -> ApiError:
     This lives here rather than at each raise site because the same sentence was
     being written in four places (`resolve`, `/v1/models`, `/v1/voices` and the
     streaming door) and three of them would have been left behind.
+
+    A FOURTH REASON, AND A `reason` ON EVERY ONE (2026-09-26, fresh-install
+    #42). On kylies-pc `crucible install rvc` wrote `enable_rvc = true`, and the
+    running server went on refusing with case 3's sentence, "Install it with
+    `crucible install rvc`", which had just been done. The server now takes up
+    a type turned on in config.toml by itself (`crucible/api.py`,
+    `take_up_enabled_types`), so a flag that is ON here means that did not
+    happen, and the refusal says so instead of sending anyone to install again.
+    `details.reason` names the case for a program: `undecided`,
+    `cannot_hold`, `not_installed` or `not_taken_up`.
+
+    AND NO COMMAND IN CASE 3 (#2). PHASE19: nobody is ever shown a command.
+    The install is one request, `POST /v1/tasks {"type": "install", ...}`, which
+    the operator page's Install button sends. `details.install` is that body,
+    so a client can send it itself. It names the INSTALLER, which is not always
+    the type: `denoise` is built by installing `rvc`, and the old sentence
+    offered `crucible install denoise`, which does not exist.
     """
     if name in ALL_JOB_TYPES:
         job_type, capability = name, ALL_JOB_TYPES[name]
@@ -246,6 +264,16 @@ def disabled_error(name: str, config: Any) -> ApiError:
             f"{sorted(ALL_JOB_TYPES)} and the capabilities {sorted(CAPABILITIES)}"
         )
     flag = f"enable_{capability}"
+    if getattr(config, flag, False):
+        return ApiError(
+            400,
+            "job_type_disabled",
+            f"job type {job_type!r} is installed and turned on in config.toml "
+            f"([jobs] {flag} = true), but this running server has not taken it "
+            "up. It does that by itself on the first request after config.toml "
+            "changes, so this means that failed; the server's log says why.",
+            {"job_type": job_type, "reason": "not_taken_up", "flag_on": True},
+        )
     record = getattr(config, "capability", None)
     if record is None:
         return ApiError(
@@ -256,7 +284,7 @@ def disabled_error(name: str, config: Any) -> ApiError:
             f"this host can hold the models it needs. Run `crucible capability` to "
             f"find out before turning [jobs] {flag} on; on a card that is too "
             f"small, turning it on buys an OOM instead of a server.",
-            {"job_type": job_type, "capability_recorded": False},
+            {"job_type": job_type, "capability_recorded": False, "reason": "undecided"},
         )
 
     rows = [record.row(entry.name) for entry in classes_for_job_type(capability)]
@@ -268,22 +296,38 @@ def disabled_error(name: str, config: Any) -> ApiError:
             f"job type {job_type!r} is not enabled on this server, and the "
             f"capability record in config.toml has no row for it — it was written "
             f"by an older build. Re-run `crucible capability --write`.",
-            {"job_type": job_type, "capability_recorded": False},
+            {"job_type": job_type, "capability_recorded": False, "reason": "undecided"},
         )
 
     fitting = [row for row in known if row.enabled]
     if fitting:
+        # One owner of "which install builds this" (`crucible/tasks.py` asks
+        # the same table for the same reason). Imported here: cli imports us.
+        from ..cli import INSTALLER_FOR
+
+        installer = INSTALLER_FOR.get(capability, capability)
+        install = {"type": "install", "job_type": installer}
+        needs_engine = (
+            " (with a narrator_engine: the tts env is built per engine)"
+            if installer == "tts"
+            else ""
+        )
         return ApiError(
             400,
             "job_type_disabled",
-            f"job type {job_type!r} is not enabled on this server, but this host "
-            f"can hold it: "
+            f"job type {job_type!r} is not installed on this server, but this "
+            f"host can hold it: "
             + "; ".join(f"{row.capability} — {row.reason}" for row in fitting)
-            + f". Install it with `crucible install {capability}`.",
+            + f". Installing {installer!r} is one request, POST /v1/tasks "
+            f"{json.dumps(install)}{needs_engine}, which the Install button on "
+            "this server's operator page sends; the server takes the type up "
+            "when it finishes.",
             {
                 "job_type": job_type,
                 "capability_recorded": True,
                 "fits": [row.capability for row in fitting],
+                "reason": "not_installed",
+                "install": install,
             },
         )
 
@@ -298,6 +342,7 @@ def disabled_error(name: str, config: Any) -> ApiError:
             "job_type": job_type,
             "capability_recorded": True,
             "fits": [],
+            "reason": "cannot_hold",
             "shortfall_bytes": {
                 row.capability: row.shortfall_bytes for row in known
             },

@@ -663,6 +663,28 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.state.backend = backend
     app.state.residency = residency
 
+    def take_up_enabled_types(live: Config) -> None:
+        """Add the plugin of every type the config now enables and the registry lacks.
+
+        2026-09-26, #42; `follow_the_config_file` says why. A build that fails
+        is logged, not raised: the request goes on, and the refusal a client
+        then gets (`disabled_error`) says the type is on but not taken up.
+        """
+        try:
+            wanted = build_registry(live, backend, residency, leases)
+        except Exception as exc:  # noqa: BLE001 - reported; the request proceeds
+            print(
+                f"crucible: config.toml turned a job type on, but its plugin could "
+                f"not be built: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return
+        added = sorted(name for name in wanted if name not in registry)
+        for name in added:
+            registry[name] = wanted[name]
+        if added:
+            print(f"crucible: took up newly enabled job type(s) {added}", file=sys.stderr)
+
     def follow_the_config_file() -> None:
         """Every request sees the config.toml that is on disk NOW.
 
@@ -672,11 +694,18 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         because `adopt()` replaces the one Config object's fields in place
         and every route, the residency and the store close over that object.
 
-        THE ONE THING THAT DOES NOT FOLLOW is a job type turned ON: the
-        registry is built from the flags at start (`crucible/jobs/__init__.py`
-        `build_registry`), so a flag that goes from off to on needs a start —
-        which `crucible install` performs anyway, since a new job type is a new
-        env. A flag turned OFF is honoured at once, by the doors.
+        A JOB TYPE TURNED ON IS TAKEN UP HERE TOO (2026-09-26, fresh-install
+        #42). The registry is built from the flags at start, and this used to
+        say a flag going on "needs a start, which `crucible install` performs
+        anyway". It does not: on kylies-pc `crucible install rvc` wrote
+        `enable_rvc = true` and the running server answered
+        `job_type_disabled` until somebody restarted it by hand. So when the
+        adopted file turns a type on, its plugin is built from the same
+        config, backend, residency and leases and ADDED to the registry. Only
+        added: an instance already there is never replaced, so a job running
+        on it is untouched, which is `reload_registry`'s concern and the
+        reason that one refuses while the card is held. A flag turned OFF is
+        honoured at once, by the doors.
 
         A file that will not read is REPORTED AND NOT SERVED: the last good
         document stays, the failure is logged once per stamp rather than per
@@ -689,6 +718,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         try:
             if live.follow_file():
                 print("crucible: config.toml moved on disk; the server adopted it", file=sys.stderr)
+                take_up_enabled_types(live)
         except ConfigError as exc:
             failed = getattr(app.state, "config_follow_failed", None)
             if failed != str(exc):

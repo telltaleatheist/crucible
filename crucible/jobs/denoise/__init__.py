@@ -420,6 +420,9 @@ class DenoiseJobType:
                 for manifest in manifests.values()
                 if manifest.supports(backend.kind)
             )
+            # A NOTE IN `crucible doctor`, NOT A PROBLEM (2026-09-26, #40):
+            # `install rvc` turns denoise on with the env it shares, and pulls
+            # no separator. Nothing is broken until somebody asks for one.
             return JobTypeStatus(
                 ready=False,
                 detail=(
@@ -427,6 +430,7 @@ class DenoiseJobType:
                     f"`{PULL_COMMAND} <id>` fetches one, and this build ships "
                     f"{pullable}"
                 ),
+                awaiting_weights=True,
             )
         return JobTypeStatus(
             ready=True, detail=f"{env.detail}; installed: {installed}"
