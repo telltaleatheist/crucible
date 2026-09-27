@@ -3885,6 +3885,45 @@ def test_installwatch_names_the_log_when_the_controller_cannot_be_started(tmp_pa
     assert str(tmp_path / "host.log") in out.getvalue()
 
 
+def _watch_with_no_door(home: Path, monkeypatch) -> str:
+    import io
+    from datetime import datetime, timezone
+    from crucible.host import installwatch
+
+    monkeypatch.setattr(installwatch, "door_status", lambda token: None)
+    out = io.StringIO()
+    installwatch.watch(
+        home, datetime.now(timezone.utc), brief=False, out=out,
+        clock=_stepping_clock(30.0), sleep=lambda seconds: None,
+        alive=lambda: False, start=lambda home: False,
+    )
+    return " ".join(out.getvalue().split())
+
+
+def test_installwatch_names_an_unreadable_config_and_the_command_that_rewrites_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "config.toml").write_text("[auth\ntoken = ", encoding="utf-8")
+    text = _watch_with_no_door(tmp_path, monkeypatch)
+    assert str(tmp_path / "config.toml") in text
+    assert "`crucible init --force`" in text
+    assert text.count("crucible init --force") == 1, "said once, not on every poll"
+
+
+def test_installwatch_does_not_let_a_config_error_escape(tmp_path: Path, monkeypatch) -> None:
+    from crucible import controller_client
+    from crucible.errors import ConfigError
+
+    def unreadable(home: Path) -> str:
+        raise ConfigError("the [auth] table is not a table")
+
+    monkeypatch.setattr(controller_client, "bearer", unreadable)
+    text = _watch_with_no_door(tmp_path, monkeypatch)
+    assert "the [auth] table is not a table" in text
+    assert str(tmp_path / "config.toml") in text
+    assert "`crucible init --force`" in text
+
+
 def test_try_again_names_the_log_when_the_controller_will_not_start(tmp_path: Path, monkeypatch) -> None:
     from crucible import local
     from crucible.host import retry

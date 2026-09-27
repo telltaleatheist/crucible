@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ... import asrplan, jobenv, weights, workers
+from ...atomicjson import write_json
 from ...alignmodels import AlignBackendSpec, AlignManifest, AlignManifestError
 from ...alignmodels import load_align_manifest
 from ...asrmodels import (
@@ -37,6 +38,8 @@ MIN_PIECE_S = 5.0
 MAX_OVERLAP_S = 5.0
 
 READY_SILENCE_TIMEOUT_SECONDS = 900.0
+
+TEXT_ARTIFACT = "transcript.text.json"
 
 ALIGN_BATCH = 16
 
@@ -355,7 +358,7 @@ class QwenAsrRun:
         self._finished: list[Piece] = []
         self._redecoded: list[dict[str, Any]] = []
         self._silent = 0
-        self._text_published = False
+        self._text_pieces: dict[str, Piece] = {}
         self._journal = journal
         self._resumed = resumed and journal is not None
         self._total = 0
@@ -395,8 +398,7 @@ class QwenAsrRun:
             else:
                 self._land(piece)
         if to_align:
-            if not self._text_published:
-                self._publish_text(to_align)
+            self._publish_text(to_align)
             self._align_pieces(to_align)
             for piece in to_align:
                 signal = loopguard.alignment_signal(piece.items)
@@ -431,6 +433,7 @@ class QwenAsrRun:
             "detail": signal.detail,
         }
         self._redecoded.append(entry)
+        self._text_pieces.pop(piece_key(piece), None)
         self._verdict(piece, {"outcome": "redecode", **entry})
         self._ctx.note(
             f"re-decoding {piece.where()} in pieces of at most {window:g} s: "
@@ -842,8 +845,10 @@ class QwenAsrRun:
         self._save_progress()
 
     def _publish_text(self, pieces: list[Piece]) -> None:
+        for piece in pieces:
+            self._text_pieces[piece_key(piece)] = piece
         rows = []
-        for piece in sorted(pieces, key=lambda p: p.start_s):
+        for piece in sorted(self._text_pieces.values(), key=lambda p: p.start_s):
             start, end = speechonly.span(self._timeline, piece.start_s, piece.end_s)
             audio_start, audio_end = speechonly.span(self._timeline, 
                 piece.audio_start_s, piece.audio_start_s + piece.audio_duration_s
@@ -872,10 +877,8 @@ class QwenAsrRun:
             ),
             "pieces": rows,
         }
-        path = self._ctx.scratch / "transcript.text.json"
-        path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-        self._ctx.artifact("transcript.text.json", path)
-        self._text_published = True
+        path = write_json(self._ctx.job.artifacts_dir / TEXT_ARTIFACT, document)
+        self._ctx.artifact(TEXT_ARTIFACT, path)
         self._ctx.note(
             f"published transcript.text.json ({len(rows)} piece(s)) before aligning"
         )

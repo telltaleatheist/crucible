@@ -19,6 +19,7 @@ from ..clock import now as _now
 from ..clock import utcnow
 from ..errors import ApiError, JobCancelled, JobError
 from ..journal import Journals
+from ..procgroup import STOP_TIMEOUT_SECONDS, stop_budget_seconds
 from .base import (
     CANCELLED,
     DONE,
@@ -162,6 +163,10 @@ class JobStore:
         self._lane_lock = threading.Lock()
         self._subscribers: dict[str, list[asyncio.Event]] = {}
         self._settlement: Any | None = None
+        self._stopping = False
+        self._interrupted_by_stop: set[str] = set()
+        self._lane_idle = asyncio.Event()
+        self._lane_idle.set()
         home = getattr(config, "home", None)
         self._journals = Journals(
             None if home is None else Path(home) / "journals",
@@ -178,6 +183,9 @@ class JobStore:
     async def stop(self) -> None:
         if self._worker is None:
             return
+        with self._lane_lock:
+            self._stopping = True
+        await self._stop_the_running_job()
         self._worker.cancel()
         try:
             await self._worker
@@ -191,6 +199,30 @@ class JobStore:
             )
         self._worker = None
 
+
+    async def _stop_the_running_job(self) -> None:
+        job = self.running
+        if job is None or self._worker is None or self._worker.done():
+            return
+        self._interrupted_by_stop.add(job.id)
+        job.cancel_requested = True
+        budget = stop_budget_seconds(STOP_TIMEOUT_SECONDS)
+        idle = asyncio.ensure_future(self._lane_idle.wait())
+        try:
+            await asyncio.wait(
+                {idle, self._worker}, timeout=budget,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            idle.cancel()
+        if not self._lane_idle.is_set() and not self._worker.done():
+            print(
+                f"crucible: job {job.id} ({job.type}) did not stop within "
+                f"{budget:.0f}s of the server asking it to; the server stops its "
+                "engines next, and any engine that will not stop is named there "
+                f"with its pid and log. The job's files are in {job.dir}",
+                file=sys.stderr,
+            )
 
     def attach_settlement(self, settlement: Any) -> None:
         self._settlement = settlement
@@ -768,6 +800,8 @@ class JobStore:
                     pass
                 continue
             with self._lane_lock:
+                if self._stopping:
+                    return
                 job_id = self._admitted.take()
                 if job_id is None:
                     continue
@@ -775,6 +809,7 @@ class JobStore:
                 cancelled = job.cancel_requested
                 if not cancelled:
                     self._running_id = job_id
+                    self._lane_idle.clear()
             try:
                 if cancelled:
                     self._finish(job, CANCELLED)
@@ -809,11 +844,14 @@ class JobStore:
         else:
             if job.cancel_requested:
                 status = CANCELLED
+        if status == CANCELLED and job.id in self._interrupted_by_stop:
+            status = INTERRUPTED
         try:
             await self._settle(job, status)
         finally:
             self._finish(job, status, error)
             self._running_id = None
+            self._lane_idle.set()
 
     def _journal_started(self, job: Job) -> None:
         assert job.resume_id is not None
@@ -891,11 +929,14 @@ class JobStore:
         if job.resume_id is not None:
             self._journals.ended(job.resume_id, job.id, FAILED)
         self._running_id = None
+        self._lane_idle.set()
 
     def _finish(self, job: Job, status: str, error: JobFailure | None = None) -> None:
         job.status = status
         job.finished = utcnow()
         job.failure = error
+        if status == INTERRUPTED:
+            job.interrupted_at = job.finished
         self._persist(job)
         if job.resume_id is not None:
             self._journals.ended(job.resume_id, job.id, status)
@@ -908,6 +949,16 @@ class JobStore:
         elif status == FAILED:
             self._restamp_provenance(job)
             self.append_event(job, "failed", {"error": job.error})
+        elif status == INTERRUPTED:
+            self._restamp_provenance(job)
+            self.append_event(
+                job,
+                "note",
+                {"message": f"the server stopped while job {job.id} ran, so it "
+                            "ended interrupted. Collect what landed from "
+                            f"GET /v1/jobs/{job.id} and submit the rest again "
+                            "once `crucible serve` is back."},
+            )
         else:
             self._restamp_provenance(job)
             self.append_event(job, "cancelled", {"status": CANCELLED})

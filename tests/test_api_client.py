@@ -250,6 +250,24 @@ def test_cancel_reports_what_the_server_answered_not_what_it_will_become(
     assert json.loads(capsys.readouterr().out)["status"] in ("cancelling", "cancelled")
 
 
+def test_a_hold_keeps_the_job_and_a_release_removes_it(
+    base: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "in.txt"
+    source.write_text("x", encoding="utf-8")
+    assert run(base, "job", "submit", "--type", "echo", "--params", '{"delay_ms": 0}',
+               "--input", f"page.txt={source}", "--follow") == 0
+    job_id = json.loads(capsys.readouterr().out.strip().splitlines()[0])["job_id"]
+    assert run(base, "job", "hold", job_id) == 0
+    held = json.loads(capsys.readouterr().out)
+    assert (held["job_id"], held["held"]) == (job_id, True)
+    assert run(base, "job", "release", job_id) == 0
+    assert json.loads(capsys.readouterr().out) == {"released": job_id}
+    assert run(base, "job", "get", job_id) == 1
+    refusal = capsys.readouterr().err
+    assert "job_reaped" in refusal and "released" in refusal
+
+
 def test_an_artifact_can_be_written_to_a_named_file(
     base: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -703,6 +721,8 @@ COVERED: dict[str, str] = {
     "POST /v1/jobs": "api job submit",
     "GET /v1/jobs/{job_id}": "api job get",
     "DELETE /v1/jobs/{job_id}": "api job cancel",
+    "POST /v1/jobs/{job_id}/hold": "api job hold",
+    "DELETE /v1/jobs/{job_id}/hold": "api job release",
     "GET /v1/jobs/{job_id}/events": "api job events",
     "GET /v1/jobs/{job_id}/artifacts/{name}": "api job artifact",
     "GET /v1/resumable": "api resumable list",

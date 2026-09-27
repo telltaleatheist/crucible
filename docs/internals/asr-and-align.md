@@ -254,6 +254,11 @@ in its overlap is also silence.
   span (`audio_start`/`audio_end`); the text covers the heard span, since ownership needs
   word times. A client can send each row to `align` as-is. `transcript.json` remains the
   finished artifact.
+- It is published again before every later round of alignment, so a stretch that was
+  re-decoded is covered by its re-decoded pieces and never by the looping piece they replace
+  (`_text_pieces`, keyed by `piece_key`; a re-decode drops its piece). Each publish replaces
+  the artifact atomically (`atomicjson.write_json` into the artifacts directory), so a client
+  reading it mid-job gets the old document or the new one, never half of either.
 - `_align_pieces` sends `ALIGN_BATCH = 16` pieces per request (8 minutes of audio at 30 s)
   with a progress event after each. One request for 3,015 pieces left the stream silent for
   over ten minutes and the client's went-quiet guard cancelled the job. Batches also let a

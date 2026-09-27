@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Callable, Iterator, TextIO
 
 from .. import controller_client, local
+from ..errors import ConfigError
+from ..platform import hostconfig
 from ..platform.paths import LOG_NAME, door_url
 from . import outcome
 from .errors import HostError
@@ -214,8 +216,32 @@ class Console:
         self.say(f"  {Path(home) / LOG_NAME}")
 
 
+REINIT_COMMAND = "crucible init --force"
+
+
+class TokenUnreadable(Exception):
+    def __init__(self, home: Path, reason: BaseException) -> None:
+        self.path = hostconfig.config_path(home)
+        super().__init__(
+            f"Crucible could not read the key this window needs to follow the setup "
+            f"from its settings file ({reason}). Run `{REINIT_COMMAND}` in a new "
+            "terminal to write it again; the setup itself carries on in the "
+            "background either way. The file is:"
+        )
+
+
 def _token(home: Path) -> str | None:
-    return controller_client.bearer(home)
+    try:
+        token = controller_client.bearer(home)
+    except ConfigError as exc:
+        raise TokenUnreadable(home, exc) from exc
+    if token is not None:
+        return token
+    try:
+        hostconfig.document(home)
+    except hostconfig.ConfigUnreadable as exc:
+        raise TokenUnreadable(home, exc.reason) from exc
+    return None
 
 
 def _open(path: str, token: str | None, timeout: float):
@@ -300,13 +326,24 @@ class _Watch:
         self._started = clock()
         self._heartbeat = self._started
         self._started_controller_at: float | None = None
-        self._token = _token(home)
+        self._told_unreadable = False
+        self._token = self._read_token()
         self._seen = 0
+
+    def _read_token(self) -> str | None:
+        try:
+            return _token(self._home)
+        except TokenUnreadable as exc:
+            if not self._told_unreadable:
+                self._told_unreadable = True
+                self._console.paragraph(str(exc))
+                self._console.say(f"  {exc.path}")
+            return None
 
     def tick(self) -> int | None:
         status = door_status(self._token)
         if self._token is None or status is None:
-            self._token = _token(self._home)
+            self._token = self._read_token()
         if status is not None and status.get("running") is True and self._token is not None:
             self._seen = follow(self._token, self._console, self._seen)
             return None

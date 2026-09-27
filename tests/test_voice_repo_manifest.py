@@ -20,6 +20,7 @@ from crucible.voices import (
     VoiceError,
     load_all_voices,
     load_voice,
+    voice_document,
 )
 
 SHA = "a" * 40
@@ -266,6 +267,19 @@ def test_a_measured_pace_reports_a_null_inherited_from(host: Path) -> None:
     voice = load_all_voices()[PINNED_ID]
     assert voice.pace_basis == "measured"
     assert voice.inherited_from is None
+
+
+def test_a_measured_pace_keeps_where_it_was_measured_and_saving_it_home_says_so(
+    host: Path,
+) -> None:
+    a_pin(host)
+    a_cached_manifest(host)
+    voice = load_all_voices()[PINNED_ID]
+    measured = "mb_hp_rvcbed1 ckpt-4257, n=51 in the 500-800 band"
+    assert voice.measured_from == measured
+    assert voice.to_dict()["measured_from"] == measured
+    _, not_carried = voice_document(voice)
+    assert f"measured_from = {measured!r}" in not_carried
 
 
 def test_a_voice_may_omit_its_pace_table_in_whole(host: Path) -> None:

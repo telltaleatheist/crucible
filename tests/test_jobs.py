@@ -157,6 +157,29 @@ def test_cancel_a_running_job(client: TestClient, auth: dict[str, str]) -> None:
     assert events[-1]["event"] == "cancelled"
 
 
+def test_a_server_stopping_mid_job_stops_the_job_first_and_calls_it_interrupted(
+    make_client: Callable[..., TestClient], auth: dict[str, str]
+) -> None:
+    inputs = {f"chunk{index}.bin": ALPHA for index in range(8)}
+    with make_client() as instance:
+        job_id = submit(instance, auth, inputs, delay_ms=400)
+        deadline = time.monotonic() + 10.0
+        while instance.get(f"/v1/jobs/{job_id}", headers=auth).json()["status"] != (
+            "running"
+        ):
+            assert time.monotonic() < deadline, "the job never started running"
+            time.sleep(0.01)
+        store = instance.app.state.store
+
+    job = store.get(job_id)
+    assert job.status == "interrupted"
+    assert job.interrupted_at == job.finished
+    assert len(job.artifacts) < len(inputs)
+    record = json.loads((job.dir / "job.json").read_text(encoding="utf-8"))
+    assert record["status"] == "interrupted"
+    assert "the server stopped" in job.events[-1]["data"]["message"]
+
+
 def test_cancel_a_finished_job_is_refused(
     client: TestClient, auth: dict[str, str]
 ) -> None:
