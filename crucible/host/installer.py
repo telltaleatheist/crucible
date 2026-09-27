@@ -633,11 +633,12 @@ class EngineInstall:
         """The rootfs, verified, imported. Idempotent: present is a no-op."""
         self._step("import-distro")
         listed = self._runner.run(["wsl.exe", "-l", "-v"], timeout_s=QUICK_TIMEOUT_SECONDS)
-        from .presence import parse_wsl_list
+        from .presence import read_wsl_distros
 
-        if not listed.ok:
+        distros = read_wsl_distros(listed)
+        if distros is None:
             raise self._fail("wsl_read_failed", listed.said())
-        if self._distro in parse_wsl_list(listed.stdout):
+        if self._distro in distros:
             marked = self._runner.run(
                 ["wsl.exe", "-d", self._distro, "--exec", "cat", "/etc/wsl.conf"],
                 timeout_s=QUICK_TIMEOUT_SECONDS,

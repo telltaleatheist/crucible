@@ -384,6 +384,63 @@ class UnitProbe:
     scope: str = ""
 
 
+#: Where WSL registers each distribution for the signed-in user: one subkey per
+#: distro, its name in `DistributionName`. The authority `wsl -l` itself reads.
+LXSS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Lxss"
+
+
+def registered_wsl_distros() -> list[str] | None:
+    """Distribution names WSL has registered for this user, or None off Windows.
+
+    `[]` when the Lxss key is absent or has no distro under it. That's a fresh
+    machine, and it's a FACT here rather than a reading of wsl.exe's prose,
+    which is localised.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return None
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, LXSS_KEY)
+    except FileNotFoundError:
+        return []
+    names: list[str] = []
+    with key:
+        index = 0
+        while True:
+            try:
+                sub = winreg.EnumKey(key, index)
+            except OSError:
+                break
+            index += 1
+            try:
+                with winreg.OpenKey(key, sub) as distro:
+                    names.append(str(winreg.QueryValueEx(distro, "DistributionName")[0]))
+            except OSError:
+                continue
+    return names
+
+
+def read_wsl_distros(result: object) -> list[str] | None:
+    """The distros `wsl -l -v` reported, `[]` for none, or None when unreadable.
+
+    ONE READER, for the state probe and the installer both (kylies-pc,
+    2026-09-26). On a machine with WSL live and NO distribution, `wsl -l -v`
+    prints "has no installed distributions" and exits non-zero. The state probe
+    read that as an empty list only because it ignored every failure (which
+    would also hide a real one), and the installer's import step read it as
+    `wsl_read_failed` and stopped. So every first install on a fresh machine
+    died at step 2 of 11. A failure is an empty list exactly when WSL has
+    nothing registered (`registered_wsl_distros`); any other failure is
+    unreadable and says so.
+    """
+    if getattr(result, "ok"):
+        return parse_wsl_list(getattr(result, "stdout"))
+    if registered_wsl_distros() == []:
+        return []
+    return None
+
+
 def parse_wsl_list(text: str) -> list[str]:
     """The distro names out of `wsl -l -v`.
 

@@ -254,8 +254,12 @@ def detect(
         argv = [substitute(word) for word in state.probe_argv]
         result = runner.run(argv, timeout_s=timeout_s)
         seen.results[state.probe] = result
-        if state.probe == "wsl-list" and result.ok:
-            seen.distros = parse_distro_names(result.stdout)
+        if state.probe == "wsl-list":
+            # The one reader (`presence.read_wsl_distros`): no distros is [],
+            # and an unreadable list is not silently taken as empty.
+            from .presence import read_wsl_distros
+
+            seen.distros = read_wsl_distros(result) or []
         return result
 
     for state in WSL_STATES:
