@@ -23,7 +23,13 @@ from crucible.jobs import align as align_job
 from crucible.jobs import asr as asr_job
 from crucible.jobs.asr import loopguard, qwen
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
+from .conftest import (
+    FAKE_BACKEND,
+    FAKE_MAC_BACKEND,
+    installed_as_the_recipe_says,
+    parse_sse,
+    write_env_stamp,
+)
 
 MODEL = "qwen3-asr-1.7b"
 ALIGNER = "qwen3-aligner"
@@ -41,6 +47,8 @@ PARAMS = {
     "vad_filter": False,
     "word_timestamps": True,
     "context": CONTEXT,
+    "piece_s": 180,
+    "overlap_s": 0,
 }
 AUDIO = base64.b64encode(b"not really a stream").decode("ascii")
 
@@ -59,7 +67,7 @@ def test_one_id_on_both_backends_pinning_one_set_of_bytes() -> None:
     manifest = load_asr_manifest(MODEL)
     assert sorted(manifest.backends) == ["cuda-linux", "mlx-darwin"]
     cuda, mac = manifest.spec("cuda-linux"), manifest.spec("mlx-darwin")
-    assert (cuda.engine, mac.engine) == ("vllm", "mlx-audio")
+    assert (cuda.engine, mac.engine) == ("vllm", "qwen-asr")
     assert cuda.hf_repo == mac.hf_repo == "Qwen/Qwen3-ASR-1.7B"
     assert cuda.revision == mac.revision == "7278e1e70fe206f11671096ffdd38061171dd6e5"
     assert cuda.dtype == mac.dtype == "bfloat16"
@@ -85,9 +93,7 @@ def test_the_estimates_are_the_computed_sums_they_claim() -> None:
         weights + 1_476_395_008 + 1024**3 + cuda.kv_cache_memory_bytes
     )
     assert cuda.max_model_len == 8192
-    mac = manifest.spec("mlx-darwin")
-    assert mac.memory_bytes_estimate == weights + 7680 * kv_per_token + 2 * 1024**3
-    assert "COMPUTED, NOT MEASURED" in _qwen_text()
+    assert manifest.spec("mlx-darwin").memory_bytes_estimate == 9_126_805_504
 
 
 def test_the_aligner_it_names_exists_on_every_backend_it_serves() -> None:
@@ -243,39 +249,16 @@ def _stamp_llm_env(home: Path, monkeypatch: pytest.MonkeyPatch, backend_kind: st
     directory = jobenv.env_dir(home, spec)
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "backend": backend_kind,
-                "recipe": f"{backend_kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
-    pins = jobenv.recipe_pins(jobenv.recipe_for(spec))
-    monkeypatch.setattr(jobenv, "installed_packages", lambda _home, _spec: dict(pins))
+    write_env_stamp(home, jobenv.llm_env(backend_kind), backend_kind)
+    installed_as_the_recipe_says(monkeypatch)
 
 
 def _stamp_align_env(home: Path, monkeypatch: pytest.MonkeyPatch, backend_kind: str) -> None:
     directory = home / "envs" / "align"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "job_type": "align",
-                "backend": backend_kind,
-                "recipe": f"{backend_kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
-    pins = jobenv.recipe_pins(jobenv.recipe_for(jobenv.worker_env("align", backend_kind)))
-    monkeypatch.setattr(jobenv, "installed_packages", lambda _home, _type: dict(pins))
+    write_env_stamp(home, jobenv.worker_env("align", backend_kind), backend_kind)
+    installed_as_the_recipe_says(monkeypatch)
 
 
 def _stamp_weights(home: Path, model_id: str, spec: Any, backend_kind: str) -> None:
@@ -483,6 +466,9 @@ def test_a_clean_run_is_word_timestamped_in_absolute_time(
         "model_dir": align_load["model_dir"],
         "device": "cuda",
         "dtype": "bfloat16",
+        "memory_cap_bytes": load_align_manifest(ALIGNER)
+        .spec(FAKE_BACKEND.kind)
+        .memory_bytes_estimate,
     }
     assert align["language"] == "English" and len(align["chunks"]) == 3
 
@@ -516,13 +502,16 @@ def test_a_loop_that_clears_at_a_smaller_window_is_redecoded_and_noted(
 ) -> None:
     monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_AT", "200")
     monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_KIND", kind)
-    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_ABOVE_S", "60")
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_ABOVE_S", "90")
     job_id, events = run_job(qwen_client, auth)
     assert events[-1]["event"] == "done", events[-1]
 
-    notes = [e["data"]["message"] for e in events if e["event"] == "note"]
+    notes = [
+        e["data"]["message"] for e in events
+        if e["event"] == "note" and "re-decoding" in e["data"]["message"]
+    ]
     assert len(notes) == 1
-    assert "re-decoding 180.0-360.0s (0:03:00.0-0:06:00.0) in pieces of at most 60 s" in notes[0]
+    assert "re-decoding 180.0-360.0s (0:03:00.0-0:06:00.0) in pieces of at most 90 s" in notes[0]
 
     document = transcript(qwen_client, auth, job_id)
     expected_signal = {
@@ -531,12 +520,28 @@ def test_a_loop_that_clears_at_a_smaller_window_is_redecoded_and_noted(
         "collapse": "aligner_collapse",
     }[kind]
     assert [(r["start"], r["end"], r["signal"], r["window_s"], r["next_window_s"])
-            for r in document["redecoded"]] == [(180.0, 360.0, expected_signal, 180, 60)]
-    assert [s["start"] for s in document["segments"]] == [0.0, 180.0, 240.0, 300.0, 360.0]
+            for r in document["redecoded"]] == [(180.0, 360.0, expected_signal, 180, 90)]
+    assert [s["start"] for s in document["segments"]] == [0.0, 180.0, 270.0, 360.0]
     assert all("went back to the start" not in s["text"] for s in document["segments"])
     assert all("zzcollapse" not in s["text"] for s in document["segments"])
     splits = [line for line in lines(sent["asr"]) if line["op"] == "split"]
-    assert [s["max_piece_s"] for s in splits] == [180, 60]
+    assert [s["max_piece_s"] for s in splits] == [180, 90]
+
+
+def test_the_text_published_before_aligning_covers_the_re_decoded_stretch_too(
+    qwen_client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_AT", "200")
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_KIND", "token_limit")
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_ABOVE_S", "90")
+    job_id, events = run_job(qwen_client, auth)
+    assert events[-1]["event"] == "done", events[-1]
+    response = qwen_client.get(
+        f"/v1/jobs/{job_id}/artifacts/transcript.text.json", headers=auth
+    )
+    assert response.status_code == 200, response.text
+    starts = [row["start"] for row in response.json()["pieces"]]
+    assert starts == [0.0, 180.0, 270.0, 360.0]
 
 
 def test_a_loop_that_never_clears_fails_the_job_by_name_with_its_place(
@@ -550,16 +555,19 @@ def test_a_loop_that_never_clears_fails_the_job_by_name_with_its_place(
     assert final["event"] == "failed", final
     assert final["data"]["error"]["code"] == "asr_decode_loop"
     message = final["data"]["error"]["message"]
-    assert "200.0-220.0s (0:03:20.0-0:03:40.0)" in message
-    assert "180 s, 60 s, 20 s" in message
-    notes = [e["data"]["message"] for e in events if e["event"] == "note"]
+    assert "180.0-225.0s (0:03:00.0-0:03:45.0)" in message
+    assert "180 s, 90 s, 45 s" in message
+    notes = [
+        e["data"]["message"] for e in events
+        if e["event"] == "note" and "re-decoding" in e["data"]["message"]
+    ]
     assert len(notes) == 2
     response = qwen_client.get(f"/v1/jobs/{job_id}/artifacts/transcript.json", headers=auth)
     assert response.status_code == 404
     assert [line["op"] for line in lines(sent["asr"])][0] == "load"
 
 
-def test_the_mac_runs_mlx_audio_one_piece_at_a_time_with_the_same_document(
+def test_the_mac_runs_qwen_asr_one_piece_at_a_time_with_the_same_document(
     make_client: Callable[..., TestClient], home: Path, monkeypatch: pytest.MonkeyPatch,
     auth: dict[str, str], sent: dict[str, Path],
 ) -> None:
@@ -569,10 +577,10 @@ def test_the_mac_runs_mlx_audio_one_piece_at_a_time_with_the_same_document(
         job_id, events = run_job(client, auth)
         assert events[-1]["event"] == "done", events[-1]
         document = transcript(client, auth, job_id)
-    assert document["engine"] == "mlx-audio"
+    assert document["engine"] == "qwen-asr"
     assert [s["start"] for s in document["segments"]] == [0.0, 180.0, 360.0]
     load = lines(sent["asr"])[0]
-    assert load["engine"] == "mlx-audio"
+    assert load["engine"] == "qwen-asr"
     assert load["max_batch"] == 1
     assert load["max_model_len"] is None
     assert load["kv_cache_memory_bytes"] is None

@@ -65,9 +65,10 @@ def streaming_server(
         fake_narrator_engine.install(monkeypatch)
         if fake_options:
             fake_narrator_engine.steer(monkeypatch, **fake_options)
+        app = make_app(enable_tts=True, enable_echo=False)
         fake_weights(VOICE)
         fake_weights(OTHER_VOICE)
-        with serve(make_app(enable_tts=True, enable_echo=False)) as base:
+        with serve(app) as base:
             run_job(base, auth, type="load-voice", model=VOICE)
             yield base
 
@@ -538,8 +539,8 @@ def test_a_session_opened_during_a_clearance_waits_it_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_narrator_engine.install(monkeypatch)
-    fake_weights(VOICE)
     app = make_app(enable_tts=True, enable_echo=False)
+    fake_weights(VOICE)
     residency = app.state.residency
     with serve(app) as base:
         run_job(base, auth, type="load-voice", model=VOICE)

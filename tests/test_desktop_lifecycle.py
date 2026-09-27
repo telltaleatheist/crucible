@@ -6,7 +6,7 @@ from urllib.error import URLError
 
 import pytest
 
-from crucible import desktop, local, sharing
+from crucible import desktop, local, processlock, sharing
 from crucible.processlock import ProcessLock
 
 
@@ -27,7 +27,6 @@ def test_installation_record_preserves_venv_interpreter_symlink(monkeypatch, tmp
 
 
 def test_close_tray_waits_for_process_after_pid_file_removed(monkeypatch, tmp_path):
-    from crucible.host import app
     pid = tmp_path / "tray.pid"
     pid.write_text("12345")
     monkeypatch.setattr(desktop, "crucible_home", lambda: tmp_path)
@@ -36,7 +35,7 @@ def test_close_tray_waits_for_process_after_pid_file_removed(monkeypatch, tmp_pa
         assert value == 12345
         checks.append(value)
         return len(checks) < 4
-    monkeypatch.setattr(app, "_alive", alive)
+    monkeypatch.setattr(processlock, "alive", alive)
     waits = []
     def wait(seconds):
         waits.append(seconds)
@@ -48,13 +47,12 @@ def test_close_tray_waits_for_process_after_pid_file_removed(monkeypatch, tmp_pa
 
 
 def test_close_tray_refuses_swap_if_process_lingers_after_pid_removal(monkeypatch, tmp_path):
-    from crucible.host import app
     pid = tmp_path / "tray.pid"
     pid.write_text("12345")
     monkeypatch.setattr(desktop, "crucible_home", lambda: tmp_path)
-    monkeypatch.setattr(app, "_alive", lambda value: True)
+    monkeypatch.setattr(processlock, "alive", lambda value: True)
     times = iter([0, 0, 16])
-    monkeypatch.setattr(desktop.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(desktop.time, "monotonic", lambda: next(times, 16))
     monkeypatch.setattr(desktop.time, "sleep", lambda seconds: pid.unlink())
     with pytest.raises(local.LocalError, match="tray_close_failed"):
         desktop.close_tray()
@@ -117,7 +115,6 @@ def test_start_does_not_spawn_over_http_error(monkeypatch, tmp_path, existing_pa
 @pytest.mark.parametrize("owner", ["child", "wsl-unit", "found"])
 @pytest.mark.parametrize("release,contract", [("0.6.99", 1), ("0.6.99", 2)])
 def test_upgrade_uses_authenticated_supported_contract(monkeypatch, tmp_path, owner, release, contract):
-    from crucible.host import app
     monkeypatch.setattr(local.sys, "platform", "win32")
     monkeypatch.setattr(local, "crucible_home", lambda: tmp_path)
     monkeypatch.setattr(desktop, "close_tray", lambda: None)
@@ -141,7 +138,7 @@ def test_upgrade_uses_authenticated_supported_contract(monkeypatch, tmp_path, ow
             raise URLError(ConnectionRefusedError())
         return {"crucible": True, "role": "orchestrator"}
     monkeypatch.setattr(local, "request", request)
-    monkeypatch.setattr(app, "_alive", lambda pid: not stopped)
+    monkeypatch.setattr(processlock, "alive", lambda pid: not stopped)
     local_calls = []
     monkeypatch.setattr(local, "act", lambda action: local_calls.append(action))
     if contract != 1:
@@ -211,7 +208,7 @@ def test_sharing_menu_error_survives_health_refresh(monkeypatch, tmp_path):
     monkeypatch.setattr(desktop.sys, "platform", "linux")
     monkeypatch.setattr(tray, "icon_image", lambda color: None)
     monkeypatch.setattr(sharing, "read", lambda home: None)
-    monkeypatch.setattr(sharing, "Engine", lambda home: object())
+    monkeypatch.setattr(sharing, "PairedEngine", lambda home: object())
     def fail(*a, **kw):
         raise sharing.SharingError("sharing_unowned: matching forward already exists")
     monkeypatch.setattr(sharing, "enable", fail)
@@ -254,13 +251,12 @@ def test_sharing_menu_error_survives_health_refresh(monkeypatch, tmp_path):
 def test_an_engine_outliving_its_controller_is_only_a_fault_when_native(
     monkeypatch, tmp_path, backend, raises
 ):
-    from crucible.host import app
 
     monkeypatch.setattr(local.sys, "platform", "win32")
     monkeypatch.setattr(local, "crucible_home", lambda: tmp_path)
     monkeypatch.setattr(desktop, "close_tray", lambda: None)
     monkeypatch.setattr(local, "connection", lambda home: ("http://127.0.0.1:7100", "test", "secret"))
-    monkeypatch.setattr(app, "_alive", lambda pid: False)
+    monkeypatch.setattr(processlock, "alive", lambda pid: False)
 
     def request(url, **kw):
         if ":7101/" in url:
@@ -288,7 +284,6 @@ def test_an_engine_outliving_its_controller_is_only_a_fault_when_native(
 def test_a_controller_that_quit_is_gone_however_the_socket_ended(
     monkeypatch, tmp_path, gone_as
 ):
-    from crucible.host import app
 
     monkeypatch.setattr(local.sys, "platform", "win32")
     monkeypatch.setattr(local, "crucible_home", lambda: tmp_path)
@@ -309,7 +304,7 @@ def test_a_controller_that_quit_is_gone_however_the_socket_ended(
         return {"crucible": True, "role": "orchestrator"}
 
     monkeypatch.setattr(local, "request", request)
-    monkeypatch.setattr(app, "_alive", lambda pid: not stopped)
+    monkeypatch.setattr(processlock, "alive", lambda pid: not stopped)
     monkeypatch.setattr(local, "act", lambda action: None)
 
     local.shutdown()

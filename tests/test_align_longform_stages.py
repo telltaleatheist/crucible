@@ -6,17 +6,13 @@ from crucible.jobs.alignlongform import stages
 from crucible.jobs.asr import OVERLAP_SECONDS, WINDOW_SECONDS
 
 
-class FakeOutcome:
-    def __init__(self, results):
-        self.results = results
-
-
 def window(words):
     return {"segments": [{"words": [{"word": w, "start": t, "end": t + 0.2} for w, t in words]}]}
 
 
 def run(monkeypatch, results):
-    monkeypatch.setattr(stages.workers, "run_worker", lambda **_: FakeOutcome(results))
+    outcome = stages.workers.WorkerOutcome(ready={}, results=tuple(results))
+    monkeypatch.setattr(stages.workers, "run_worker", lambda **_: outcome)
     monkeypatch.setattr(
         stages.workers, "worker_environment", lambda *_args, **_kw: {}
     )

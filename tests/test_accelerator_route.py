@@ -12,7 +12,7 @@ from crucible.accelerator import GIB, ComputeApp, ProbeError
 from crucible import residency as residency_module
 from crucible.manifests import load_manifest
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
+from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse, write_env_stamp
 from .fake_engine import FakeEngine
 
 MODEL = "qwen3.5-9b"
@@ -33,17 +33,7 @@ def llm_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = jobenv.env_dir(home, spec)
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "backend": FAKE_BACKEND.kind,
-                "recipe": f"{FAKE_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.llm_env(FAKE_BACKEND.kind), FAKE_BACKEND.kind)
     pins = jobenv.recipe_pins(jobenv.recipe_for(spec))
     monkeypatch.setattr(jobenv, "installed_packages", lambda _home, _spec: dict(pins))
     return directory

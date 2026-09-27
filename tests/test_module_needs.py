@@ -50,6 +50,7 @@ def row(
         selected=selected,
         reason=reason or f"{capability}: whatever this card decided",
         shortfall_bytes=shortfall,
+        summary=f"{capability}: {'on' if enabled else 'off'}",
     )
 
 

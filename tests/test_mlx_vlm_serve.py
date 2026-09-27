@@ -78,9 +78,12 @@ def post(engine: MlxVlmEngine, body: dict) -> tuple[int, dict]:
 def test_the_command_is_the_shipped_script_from_the_env_python(tmp_path: Path) -> None:
     engine = MlxVlmEngine(Path("/env/bin/python"), tmp_path / "x.log")
     command = engine.command(Path("/w/dots"), "/w/dots", 4321, ["--width", "2"])
-    assert command[:2] == ["/env/bin/python", str(SERVE_SCRIPT)]
+    assert command[:2] == [str(Path("/env/bin/python")), str(SERVE_SCRIPT)]
     assert SERVE_SCRIPT.is_file(), "the server ships inside the package"
-    assert command[2:] == ["--model", "/w/dots", "--host", "127.0.0.1", "--port", "4321", "--width", "2"]
+    assert command[2:] == [
+        "--model", str(Path("/w/dots")), "--host", "127.0.0.1", "--port", "4321",
+        "--width", "2",
+    ]
 
 
 def test_a_manifest_that_forgot_the_width_is_refused_before_a_spawn(tmp_path: Path) -> None:
@@ -175,7 +178,7 @@ def test_the_wrong_model_is_a_404(served) -> None:
     status, document = post(engine, page_body("some-other-model"))
     assert status == 404
     assert document["error"]["code"] == "model_not_found"
-    assert name in document["error"]["message"]
+    assert repr(name) in document["error"]["message"]
 
 
 def test_two_images_or_no_text_is_refused(served) -> None:

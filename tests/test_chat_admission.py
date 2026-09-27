@@ -208,7 +208,7 @@ def test_a_server_that_has_completed_nothing_states_no_wait() -> None:
 
 def test_the_wait_is_the_median_of_recent_completions_not_the_mean() -> None:
     flight = InFlight()
-    for seconds in [2.0, 2.0, 2.0, 2.0, 600.0]:
+    for seconds in [1.5, 1.5, 1.5, 1.5, 600.0]:
         entry = flight.open(act=None, model="q", client=None)
         object.__setattr__(entry, "started", entry.started - seconds)
         flight.close(entry)

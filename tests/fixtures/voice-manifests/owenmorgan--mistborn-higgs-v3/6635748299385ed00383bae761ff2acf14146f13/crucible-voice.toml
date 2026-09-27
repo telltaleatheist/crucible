@@ -1,0 +1,40 @@
+# Mistborn — exported from this build's mistborn.toml by `crucible voices export`.
+#
+# The MACHINE facts that file carried are not here: they belong to the
+# box that serves the voice, in its config.toml `[tts.<engine>]` table
+# (PHASE21 section 2.3). The repo and revision are not here either —
+# this file IS the revision, and the local side pins it.
+
+schema = 1
+
+[voice]
+display         = "Mistborn"
+kind            = "checkpoint"
+narrator_engine = "higgs-v3"
+language        = "en"
+sample_rate     = 24000
+
+[voice.pace]
+basis              = "measured"
+pace_chars_per_sec = 13.56
+max_chars_per_sec  = 17.63
+min_chars_per_sec  = 10.43
+measured_from      = "mb_v16 ckpt-3375 length ladder: median of 99 clean in-band (300-800) renders, 2026-09-26"
+safe_min_chars     = 300
+safe_max_chars     = 800
+
+[voice.arms.cuda-linux]
+max_chars       = 800
+max_chars_basis = "measured"
+sampling        = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+[voice.arms.mlx-darwin]
+max_chars       = 800
+max_chars_basis = "measured"
+sampling        = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+[[voice.takes]]
+
+[[voice.takes]]
+temperature = 0.7
+reason = """measured 2026-09-11 over the same 88 chunks: 0.8 gave 4 guard fires / 3 holes / 0 drops, 0.7 gave 8 / 7 / 0. Not a better setting — a DIFFERENT one, which is what a retake of a chunk that failed at 0.8 needs (Owen's ruling 2026-09-14: a retake must not reuse the settings that produced the problem)."""

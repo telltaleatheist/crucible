@@ -1,0 +1,40 @@
+# Deathstalker — exported from this build's deathstalker.toml by `crucible voices export`.
+#
+# The MACHINE facts that file carried are not here: they belong to the
+# box that serves the voice, in its config.toml `[tts.<engine>]` table
+# (PHASE21 section 2.3). The repo and revision are not here either —
+# this file IS the revision, and the local side pins it.
+
+schema = 1
+
+[voice]
+display         = "Deathstalker"
+kind            = "checkpoint"
+narrator_engine = "higgs-v3"
+language        = "en"
+sample_rate     = 24000
+
+[voice.pace]
+basis              = "measured"
+pace_chars_per_sec = 16.14
+max_chars_per_sec  = 20.98
+min_chars_per_sec  = 12.42
+measured_from      = """ds_v14 ckpt-3510 (the shipped weights) length ladder: median of 84 clean in-band (400-700) renders, p05 14.85 / p95 17.56, 2026-09-27. Band 400-700 from its own ladder on cuda-linux (0/128 in band); the mlx-darwin ladder was clean to 600 with 1 coverage miss of 32 at 700"""
+safe_min_chars     = 400
+safe_max_chars     = 700
+
+[voice.arms.cuda-linux]
+max_chars       = 800
+max_chars_basis = "placeholder"
+sampling        = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+[voice.arms.mlx-darwin]
+max_chars       = 800
+max_chars_basis = "placeholder"
+sampling        = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+[[voice.takes]]
+
+[[voice.takes]]
+temperature = 0.7
+reason = """measured 2026-09-11 over the same 88 chunks: 0.8 gave 4 guard fires / 3 holes / 0 drops, 0.7 gave 8 / 7 / 0. Not a better setting — a DIFFERENT one, which is what a retake of a chunk that failed at 0.8 needs (Owen's ruling 2026-09-14: a retake must not reuse the settings that produced the problem)."""

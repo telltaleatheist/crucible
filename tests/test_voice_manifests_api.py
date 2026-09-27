@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -200,10 +201,12 @@ def test_a_resident_voice_cannot_be_rewritten_underneath_itself(
     residency = tts_client.app.state.residency
     loaded = type("R", (), {"id": CUSTOM, "kind": KIND_TTS})()
     residency._resident = loaded
-
-    answer = tts_client.put(
-        f"/v1/voices/{CUSTOM}", json=a_voice(revision=OTHER_SHA), headers=auth
-    )
+    try:
+        answer = tts_client.put(
+            f"/v1/voices/{CUSTOM}", json=a_voice(revision=OTHER_SHA), headers=auth
+        )
+    finally:
+        residency._resident = None
     assert answer.status_code == 409
     assert answer.json()["error"]["code"] == "voice_in_use"
 
@@ -527,7 +530,11 @@ def test_a_voices_settings_read_back_as_a_document_that_saves_as_the_same_voice(
     body = read.json()
     assert body["id"] == voice_id
     assert body["manifest"] == before.manifest_source
-    assert body["not_carried"] == []
+    if before.manifest_source == "repo":
+        assert body["not_carried"][0] == f"pace_basis = {before.pace_basis!r}"
+        assert any("max_chars_basis" in line for line in body["not_carried"])
+    else:
+        assert body["not_carried"] == []
 
     saved = tts_client.put(f"/v1/voices/{voice_id}", json=body["document"], headers=auth)
     assert saved.status_code == 200, saved.text
@@ -538,7 +545,11 @@ def test_a_voices_settings_read_back_as_a_document_that_saves_as_the_same_voice(
     for field in ("display", "kind", "narrator_engine", "language", "sample_rate",
                   "pace", "serving", "takes", "weights_of"):
         assert getattr(after, field) == getattr(before, field), field
-    assert after.backends == before.backends
+    assert after.backends.keys() == before.backends.keys()
+    for arm, spec in before.backends.items():
+        assert replace(after.backends[arm], max_chars_basis=None) == replace(
+            spec, max_chars_basis=None
+        ), arm
 
 
 def test_an_unknown_voice_has_no_manifest_to_read(

@@ -10,6 +10,7 @@ from crucible.voicerepo import (
     REPO_MANIFEST_NAME,
     Pin,
     load_pins,
+    packaged_pins_path,
     parse_repo_manifest,
     remove_home_pin,
     write_home_pin,
@@ -319,16 +320,18 @@ def test_an_unknown_max_chars_basis_is_refused() -> None:
 def test_the_existing_pace_rules_apply_verbatim(host: Path) -> None:
     a_pin(host)
     a_cached_manifest(host, swap("min_chars_per_sec  = 10.58", "min_chars_per_sec = 13.31"))
+    assert PINNED_ID not in load_all_voices()
     with pytest.raises(VoiceError) as caught:
-        load_all_voices()
+        load_voice(PINNED_ID)
     assert "not symmetric" in str(caught.value)
 
 
 def test_a_band_above_the_arms_cap_is_refused_verbatim(host: Path) -> None:
     a_pin(host)
     a_cached_manifest(host, swap("safe_max_chars     = 800", "safe_max_chars = 900"))
+    assert PINNED_ID not in load_all_voices()
     with pytest.raises(VoiceError) as caught:
-        load_all_voices()
+        load_voice(PINNED_ID)
     assert "may never exceed the arm's cap" in str(caught.value)
 
 
@@ -343,8 +346,9 @@ def test_a_deviating_sampling_still_owes_a_reason(host: Path) -> None:
             "sampling = { temperature = 0.6, top_p = 0.95, top_k = 50 }",
         ),
     )
+    assert PINNED_ID not in load_all_voices()
     with pytest.raises(VoiceError) as caught:
-        load_all_voices()
+        load_voice(PINNED_ID)
     assert "carries no sampling_reason" in str(caught.value)
 
 
@@ -387,8 +391,9 @@ def test_a_box_with_no_footprint_refuses_the_voice_by_name(
     (tmp_path / "config.toml").write_text("[server]\nname = 'x'\n", encoding="utf-8")
     a_pin(tmp_path)
     a_cached_manifest(tmp_path)
+    assert PINNED_ID not in load_all_voices()
     with pytest.raises(VoiceError) as caught:
-        load_all_voices()
+        load_voice(PINNED_ID)
     message = str(caught.value)
     assert "engine_footprint_unset" in message
     assert "[tts.higgs-v3]" in message
@@ -407,8 +412,9 @@ def test_a_revision_with_no_manifest_is_refused_by_name_and_not_served(
         raise EntryNotFoundError("404")
 
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", missing)
+    assert PINNED_ID not in load_all_voices()
     with pytest.raises(VoiceError) as caught:
-        load_all_voices()
+        load_voice(PINNED_ID)
     message = str(caught.value)
     assert "voice_manifest_missing" in message
     assert "not read from any other source" in message
@@ -425,8 +431,9 @@ def test_a_hub_that_is_down_is_not_reported_as_a_missing_manifest(
         raise TimeoutError("the hub did not answer")
 
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", broken)
+    assert PINNED_ID not in load_all_voices()
     with pytest.raises(VoiceError) as caught:
-        load_all_voices()
+        load_voice(PINNED_ID)
     message = str(caught.value)
     assert "voice_manifest_unreadable" in message
     assert "voice_manifest_missing" not in message
@@ -449,9 +456,11 @@ def test_the_manifest_is_fetched_alone_so_an_uninstalled_voice_still_lists(
     a_pin(host)
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
     assert load_all_voices()[PINNED_ID].display == "Mistborn"
-    assert asked == [(REPO, REPO_MANIFEST_NAME, SHA)]
+    for_this_pin = [question for question in asked if question[2] == SHA]
+    assert for_this_pin == [(REPO, REPO_MANIFEST_NAME, SHA)]
+    before = len(asked)
     assert load_all_voices()[PINNED_ID].display == "Mistborn"
-    assert len(asked) == 1
+    assert len(asked) == before
 
 
 def test_the_pulled_snapshot_answers_before_the_cache(host: Path) -> None:
@@ -492,14 +501,16 @@ def test_pulled_weights_with_no_manifest_beside_them_are_refused(host: Path) -> 
     )
     a_pin(host)
     a_cached_manifest(host)
+    assert PINNED_ID not in load_all_voices()
     with pytest.raises(VoiceError) as caught:
-        load_all_voices()
+        load_voice(PINNED_ID)
     assert "voice_manifest_missing" in str(caught.value)
 
 
 def test_a_home_pin_wins_over_the_packaged_one(host: Path) -> None:
     packaged = load_pins()
-    assert packaged == {}, "the packaged pins file ships empty until section 8.3"
+    assert packaged["mistborn"].path == packaged_pins_path()
+    assert packaged["mistborn"].revision != SHA
     write_home_pin("mistborn", REPO, SHA)
     assert load_pins()["mistborn"].revision == SHA
     assert load_pins()["mistborn"].path == host / "voices" / "pins.toml"
@@ -540,7 +551,7 @@ def test_removing_a_home_pin_says_whether_one_went(host: Path) -> None:
     assert remove_home_pin("mistborn") is False
     write_home_pin("mistborn", REPO, SHA)
     assert remove_home_pin("mistborn") is True
-    assert load_pins() == {}
+    assert load_pins()["mistborn"].path == packaged_pins_path()
 
 
 def test_pins_toml_is_not_read_as_a_voice_called_pins(host: Path) -> None:
@@ -550,11 +561,11 @@ def test_pins_toml_is_not_read_as_a_voice_called_pins(host: Path) -> None:
 
 
 CATALOG: dict[str, tuple[str, int, tuple[int, int] | None]] = {
-    "deathstalker": ("checkpoint", 800, (500, 800)),
-    "mistborn": ("checkpoint", 800, (400, 700)),
+    "deathstalker": ("checkpoint", 800, (400, 700)),
+    "mistborn": ("checkpoint", 800, (300, 800)),
     "owen": ("checkpoint", 800, (600, 800)),
     "thirdreich": ("checkpoint", 1000, (500, 700)),
-    "sigma": ("checkpoint", 1100, (500, 1100)),
+    "sigma": ("checkpoint", 1000, (400, 800)),
 }
 
 
@@ -771,7 +782,7 @@ def test_a_backend_that_serves_no_narrator_engine_writes_no_table() -> None:
 
 
 @pytest.mark.parametrize("voice_id", sorted(CATALOG))
-def test_a_packaged_manifest_converted_and_merged_is_the_same_voice(
+def test_a_served_voice_exported_and_merged_is_the_same_voice(
     host: Path, voice_id: str
 ) -> None:
     from crucible.voicecard import export_manifest
@@ -820,11 +831,10 @@ def test_a_packaged_manifest_converted_and_merged_is_the_same_voice(
         assert merged.spec(arm).estimate_note == footprint.estimate_note
     assert any("config.toml [tts.higgs-v3]" in line for line in dropped)
 
-    assert packaged.manifest_source == "override"
+    assert packaged.manifest_source == "repo"
     assert merged.manifest_source == "repo"
-    assert packaged.pace_basis is None and merged.pace_basis == "measured"
+    assert merged.pace_basis == "measured"
     for arm in merged.backends:
-        assert packaged.spec(arm).max_chars_basis is None
         assert merged.spec(arm).max_chars_basis == "measured"
 
 

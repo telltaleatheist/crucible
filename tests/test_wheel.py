@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 REQUIRED_TREES: tuple[tuple[str, str], ...] = (
     ("crucible/models", "qwen3.5-9b.toml"),
-    ("crucible/voices", "mistborn.toml"),
+    ("crucible/voices", "pins.toml"),
     ("crucible/engines/higgs-v3", "base.toml"),
     ("crucible/denoise", "denoise-roformer.toml"),
     ("crucible/rvc", "sigma.toml"),

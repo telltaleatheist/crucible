@@ -8,7 +8,7 @@ import pytest
 from crucible import cli, jobenv
 from crucible.config import load_config
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
+from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, configure_box
 
 RVC_MODELS = [
     "deathstalker-rvc-v1",
@@ -86,7 +86,7 @@ def test_every_worker_type_has_a_mac_recipe_now(mac: None) -> None:
         assert jobenv.recipe_pins(recipe), job_type
     with pytest.raises(jobenv.EnvError) as caught:
         jobenv.recipe_for(jobenv.worker_env("align", "llama-windows"))
-    assert "no align env recipe for backend 'llama-windows'" in str(caught.value)
+    assert "no 'align' env on 'llama-windows'" in str(caught.value)
 
 
 def test_the_aligner_joins_the_one_namespace_of_model_ids(
@@ -134,5 +134,6 @@ def test_an_rvc_id_and_a_voice_id_may_be_the_same_word(
     from crucible.rvcmodels import load_rvc_manifest
     from crucible.voices import load_voice
 
+    configure_box(home)
     assert load_rvc_manifest("sigma").weights_family == "rvc"
     assert load_voice("sigma").weights_family == "voices"

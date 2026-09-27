@@ -19,6 +19,22 @@ def test_it_exists(script):
     assert script.is_file(), f'{script.relative_to(REPO)} is gone'
 
 
+def _git_reads_this_checkout():
+    try:
+        return subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=REPO,
+                              capture_output=True, check=False).returncode == 0
+    except OSError:
+        return False
+
+
+needs_git_here = pytest.mark.skipif(
+    not _git_reads_this_checkout(),
+    reason='git on this platform cannot read this checkout (a worktree made by '
+           'the other side of WSL), so the index modes cannot be asked',
+)
+
+
+@needs_git_here
 @pytest.mark.parametrize('script', [SHIP, TESTS, DEPLOY])
 def test_it_is_executable(script):
     relative = script.relative_to(REPO).as_posix()
@@ -336,6 +352,7 @@ def test_release_and_ci_check_generated_files_through_that_one_script(caller):
         assert f'{generator} --check' not in text, f'{caller} runs {generator} --check itself'
 
 
+@needs_git_here
 def test_check_generated_is_executable():
     listed = subprocess.check_output(['git', 'ls-files', '-s', '--', 'scripts/check-generated.sh'],
                                      cwd=REPO, text=True).strip()

@@ -122,7 +122,7 @@ def test_the_argv_is_narrator_serve_and_nothing_else() -> None:
         mlx_total_bytes=None,
     )
     assert built.command(Path("/weights"), "owen", 7100, []) == [
-        "/opt/env/bin/python",
+        str(Path("/opt/env/bin/python")),
         "-m",
         MODULE,
     ]

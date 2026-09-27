@@ -8,9 +8,10 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import capability, upstreams
-from crucible.config import load_config
+from crucible import capability, ladder, upstreams
+from crucible.config import config_path, crucible_home, load_config
 
+from .conftest import FAKE_BACKEND, configure_box
 from .fake_upstream import ANTHROPIC_MODELS, OLLAMA_MODELS, FakeUpstream
 
 ANTHROPIC_KEY = "sk-ant-zzzTESTKEYzzz-9f2k3A9"
@@ -18,6 +19,9 @@ OPENAI_KEY = "sk-proj-zzzOPENAIzzz-77bQ4z1"
 
 
 def decided(total: int = 26 * 1024 ** 3, allowance: int = 3 * 1024 ** 3) -> Any:
+    home = crucible_home()
+    if not config_path(home).is_file():
+        configure_box(home)
     return capability.record(
         "cuda-linux",
         total_bytes=total,
@@ -28,6 +32,7 @@ def decided(total: int = 26 * 1024 ** 3, allowance: int = 3 * 1024 ** 3) -> Any:
             desktop_allowance_bytes=allowance,
             gpu_vendor="nvidia",
             chosen={},
+            card=ladder.card_for(home, FAKE_BACKEND.gpu),
         ),
         routes={},
     )

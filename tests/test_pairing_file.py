@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 
@@ -35,6 +36,10 @@ def test_the_line_is_the_loopback_one_whatever_the_bind_is(tmp_path: Path) -> No
     assert "127.0.0.1" in path.read_text(encoding="utf-8")
 
 
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="a file mode is the filesystem's answer, and NTFS reports 0o666 for every file",
+)
 def test_the_file_is_user_only(tmp_path: Path) -> None:
     home = tmp_path / "home"
     path = write_pairing_file(home, name="crucible@pc", port=7100, token="tok3n")
@@ -48,7 +53,7 @@ def test_init_writes_it_and_force_rewrites_it_with_the_new_token(
     home = tmp_path / "home"
     monkeypatch.setenv("CRUCIBLE_HOME", str(home))
     monkeypatch.setattr(
-        cli, "detect_backend", lambda: __import__(
+        cli.common, "detect_backend", lambda: __import__(
             "tests.conftest", fromlist=["FAKE_BACKEND"]
         ).FAKE_BACKEND
     )
@@ -70,7 +75,7 @@ def test_token_url_prints_the_same_line_the_file_holds(
     home = tmp_path / "home"
     monkeypatch.setenv("CRUCIBLE_HOME", str(home))
     monkeypatch.setattr(
-        cli, "detect_backend", lambda: __import__(
+        cli.common, "detect_backend", lambda: __import__(
             "tests.conftest", fromlist=["FAKE_BACKEND"]
         ).FAKE_BACKEND
     )
@@ -112,7 +117,7 @@ def _synced(home: Path, **overrides) -> str | None:
 def _init(home: Path, monkeypatch: pytest.MonkeyPatch, token: str) -> None:
     monkeypatch.setenv("CRUCIBLE_HOME", str(home))
     monkeypatch.setattr(
-        cli, "detect_backend", lambda: __import__(
+        cli.common, "detect_backend", lambda: __import__(
             "tests.conftest", fromlist=["FAKE_BACKEND"]
         ).FAKE_BACKEND
     )

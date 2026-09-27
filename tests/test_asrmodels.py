@@ -15,8 +15,11 @@ from crucible.asrmodels import (
 )
 
 WHISPER_MODELS = ["whisper-large-v3-turbo", "whisper-tiny"]
-QWEN_MODELS = ["qwen3-asr-1.7b"]
-MODELS = sorted(WHISPER_MODELS + QWEN_MODELS)
+QWEN_MODELS = ["qwen3-asr-0.6b", "qwen3-asr-1.7b"]
+MLX_PORTS = ["qwen3-asr-0.6b-mlx", "qwen3-asr-1.7b-mlx"]
+MODELS = sorted(WHISPER_MODELS + QWEN_MODELS + MLX_PORTS)
+
+DOC = Path(__file__).resolve().parents[1] / "docs" / "internals" / "asr-and-align.md"
 
 GOOD = """
 [model]
@@ -45,7 +48,7 @@ def parse(text: str, model_id: str = "whisper-tiny"):
     return parse_asr_manifest(text, Path(f"{model_id}.toml"), model_id)
 
 
-def test_this_build_ships_exactly_the_three_owen_ruled() -> None:
+def test_this_build_ships_exactly_the_lineup_owen_ruled() -> None:
     assert sorted(load_all_asr_manifests()) == MODELS
     assert set(MODELS) == ASR_LINEUP
 
@@ -61,7 +64,7 @@ def test_every_shipped_pin_is_a_full_commit_sha() -> None:
 def test_every_model_is_one_id_on_both_backends_with_each_backends_engine() -> None:
     assert ASR_BACKEND_ENGINES == {
         "cuda-linux": frozenset({"faster-whisper", "vllm"}),
-        "mlx-darwin": frozenset({"mlx-whisper", "mlx-audio"}),
+        "mlx-darwin": frozenset({"mlx-whisper", "mlx-audio", "qwen-asr"}),
     }
     for model_id in WHISPER_MODELS:
         manifest = load_asr_manifest(model_id)
@@ -69,10 +72,15 @@ def test_every_model_is_one_id_on_both_backends_with_each_backends_engine() -> N
         assert sorted(manifest.backends) == ["cuda-linux", "mlx-darwin"]
         assert manifest.spec("cuda-linux").engine == "faster-whisper"
         assert manifest.spec("mlx-darwin").engine == "mlx-whisper"
-    qwen = load_asr_manifest("qwen3-asr-1.7b")
-    assert sorted(qwen.backends) == ["cuda-linux", "mlx-darwin"]
-    assert qwen.spec("cuda-linux").engine == "vllm"
-    assert qwen.spec("mlx-darwin").engine == "mlx-audio"
+    for model_id in QWEN_MODELS:
+        qwen = load_asr_manifest(model_id)
+        assert sorted(qwen.backends) == ["cuda-linux", "mlx-darwin"]
+        assert qwen.spec("cuda-linux").engine == "vllm"
+        assert qwen.spec("mlx-darwin").engine == "qwen-asr"
+    for model_id in MLX_PORTS:
+        port = load_asr_manifest(model_id)
+        assert sorted(port.backends) == ["mlx-darwin"]
+        assert port.spec("mlx-darwin").engine == "mlx-audio"
 
 
 def test_the_merged_whispers_kept_every_pin_they_had() -> None:
@@ -114,9 +122,10 @@ def test_the_mac_estimates_are_measured_and_none_is_the_cuda_arithmetic() -> Non
         assert manifest.spec("mlx-darwin").memory_bytes_estimate == peak
         assert peak % runtime != 0
         assert peak > repo_bytes[model_id]
-        text = manifest.path.read_text(encoding="utf-8")
-        assert "MEASURED, on the machine it is for" in text
-        assert "mx.get_peak_memory()" in text
+        assert f"{peak:,}" in DOC.read_text(encoding="utf-8")
+    assert "mlx-whisper blocks are MEASURED `mx.get_peak_memory()`" in " ".join(
+        DOC.read_text(encoding="utf-8").split()
+    )
 
 
 def test_every_cuda_whisper_estimate_is_the_weights_plus_the_allowance() -> None:
@@ -243,7 +252,7 @@ def test_the_wrong_engine_for_the_backend_is_refused() -> None:
     with pytest.raises(AsrManifestError) as caught:
         parse(GOOD.replace('engine = "faster-whisper"', 'engine = "mlx-whisper"'))
     assert "does not run asr on cuda-linux" in str(caught.value)
-    assert "not two recipes for one thing" in str(caught.value)
+    assert "MLX, which has no CUDA one" in str(caught.value)
 
 
 def test_a_model_with_no_backend_block_is_not_a_model() -> None:

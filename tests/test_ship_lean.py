@@ -45,6 +45,8 @@ def fake_repo(tmp_path: Path) -> Path:
     (work / "scripts/bump.py").write_text(
         "import pathlib, sys\n"
         "here = pathlib.Path(__file__).resolve().parents[1] / 'crucible/__init__.py'\n"
+        "if sys.argv[1] == '--check':\n"
+        "    print(here.read_text().split(chr(34))[1]); sys.exit(0)\n"
         "major, minor, patch = (int(p) for p in "
         "here.read_text().split('\"')[1].split('.'))\n"
         "assert sys.argv[1] == 'patch', sys.argv\n"

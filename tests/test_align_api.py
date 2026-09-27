@@ -23,6 +23,7 @@ from .conftest import (
     end_process_tree,
     holding_the_card,
     parse_sse,
+    write_env_stamp,
 )
 
 MODEL = "qwen3-aligner"
@@ -46,18 +47,7 @@ def align_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = home / "envs" / "align"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "job_type": "align",
-                "backend": FAKE_BACKEND.kind,
-                "recipe": f"{FAKE_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.worker_env("align", FAKE_BACKEND.kind), FAKE_BACKEND.kind)
     pins = jobenv.recipe_pins(jobenv.recipe_for(jobenv.worker_env("align", FAKE_BACKEND.kind)))
     monkeypatch.setattr(
         jobenv, "installed_packages", lambda _home, _type: dict(pins)
@@ -95,18 +85,7 @@ def _mac_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = home / "envs" / "align"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "job_type": "align",
-                "backend": FAKE_MAC_BACKEND.kind,
-                "recipe": f"{FAKE_MAC_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.worker_env("align", FAKE_MAC_BACKEND.kind), FAKE_MAC_BACKEND.kind)
     pins = jobenv.recipe_pins(
         jobenv.recipe_for(jobenv.worker_env("align", FAKE_MAC_BACKEND.kind))
     )
@@ -516,6 +495,9 @@ def test_the_server_and_not_the_client_chooses_how_it_runs(
                          / FAKE_BACKEND.kind),
         "device": "cuda",
         "dtype": "bfloat16",
+        "memory_cap_bytes": load_align_manifest(MODEL)
+        .spec(FAKE_BACKEND.kind)
+        .memory_bytes_estimate,
     }
     assert align["max_audio_s"] == 300.0
     assert align["ffmpeg"] == ffmpeg

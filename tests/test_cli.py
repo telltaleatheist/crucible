@@ -35,7 +35,10 @@ def test_init_writes_a_0600_config_with_a_token(
     assert config.backend_kind == "cuda-linux"
     assert config.enable_echo is True
     assert len(config.token) >= 40
-    assert config.token in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert config.token not in out, "init names the pairing file, it never prints the token"
+    assert config.token in pairing.read_pairing_file(home)
+    assert "crucible token --show" in out
 
 
 def test_init_refuses_to_clobber_an_existing_config(home: Path, viable: None) -> None:
@@ -86,6 +89,7 @@ def test_doctor_json_is_healthy_after_init(
         "ready": True,
         "detail": "enabled; copies inputs to artifacts, uses no accelerator",
         "models": [],
+        "awaiting_weights": False,
     }
 
 
@@ -402,7 +406,8 @@ def test_init_takes_a_token_the_caller_minted(
     assert cli.main(["init", "--token", given, "--enable-echo"]) == 0
     assert load_config(home).token == given
     out = capsys.readouterr().out
-    assert f"#{given}" in out, "the given token rides in the pairing line"
+    assert f"#{given}" in pairing.read_pairing_file(home), "the given token rides in the pairing line"
+    assert given not in out
     assert "token:    as given" in out
 
 

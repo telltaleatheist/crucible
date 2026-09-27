@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,8 @@ from crucible.voices import (
     parse_voice,
     voices_dir,
 )
+
+from .conftest import configure_box
 
 GOOD = """
 [voice]
@@ -43,6 +46,11 @@ estimate_basis = "measured"
 max_chars = 800
 sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
 """
+
+
+@pytest.fixture(autouse=True)
+def a_configured_box() -> None:
+    configure_box(Path(os.environ["CRUCIBLE_HOME"]))
 
 
 def parse(text: str, voice_id: str = "probe"):
@@ -776,7 +784,7 @@ SHIPPED = {
     "mistborn": ("checkpoint", 800),
     "owen": ("checkpoint", 800),
     "thirdreich": ("checkpoint", 1000),
-    "sigma": ("checkpoint", 1100),
+    "sigma": ("checkpoint", 1000),
     "higgs-default": ("token", 600),
     "zeroshot": ("zeroshot", 600),
 }
@@ -876,8 +884,7 @@ def a_voice_file(into: Path, voice_id: str, display: str | None = None) -> Path:
     import re
 
     into.mkdir(parents=True, exist_ok=True)
-    raw = (voices_dir() / "mistborn.toml").read_text(encoding="utf-8")
-    raw = raw.replace('id = "mistborn"', f'id = "{voice_id}"', 1)
+    raw = GOOD.replace('id = "probe"', f'id = "{voice_id}"', 1)
     if display is not None:
         raw = re.sub(r'display\s*=\s*"[^"]*"', f'display = "{display}"', raw, count=1)
     path = into / f"{voice_id}.toml"
@@ -888,6 +895,7 @@ def a_voice_file(into: Path, voice_id: str, display: str | None = None) -> Path:
 def test_a_voice_dropped_into_the_home_is_served(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
     monkeypatch.delenv(VOICES_DIR_ENV, raising=False)
+    configure_box(tmp_path)
     a_voice_file(tmp_path / "voices", "tonights-finetune")
     assert "tonights-finetune" in load_all_voices()
     assert load_voice("tonights-finetune").id == "tonights-finetune"
@@ -896,6 +904,7 @@ def test_a_voice_dropped_into_the_home_is_served(tmp_path, monkeypatch) -> None:
 def test_the_shipped_voices_are_still_there_beside_it(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
     monkeypatch.delenv(VOICES_DIR_ENV, raising=False)
+    configure_box(tmp_path)
     a_voice_file(tmp_path / "voices", "tonights-finetune")
     served = load_all_voices()
     for shipped in ("deathstalker", "mistborn", "owen", "zeroshot"):
@@ -906,6 +915,7 @@ def test_the_shipped_voices_are_still_there_beside_it(tmp_path, monkeypatch) -> 
 def test_a_home_manifest_overrides_a_shipped_id(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
     monkeypatch.delenv(VOICES_DIR_ENV, raising=False)
+    configure_box(tmp_path)
     path = a_voice_file(tmp_path / "voices", "mistborn", display="Mistborn (tonight)")
     assert load_all_voices()["mistborn"].display == "Mistborn (tonight)"
     assert load_voice("mistborn").display == "Mistborn (tonight)"
@@ -915,6 +925,7 @@ def test_a_home_manifest_overrides_a_shipped_id(tmp_path, monkeypatch) -> None:
 
 def test_the_full_override_still_replaces_everything(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path / "home"))
+    configure_box(tmp_path / "home")
     only = tmp_path / "only"
     a_voice_file(only, "just-this-one")
     a_voice_file(tmp_path / "home" / "voices", "ignored-because-overridden")

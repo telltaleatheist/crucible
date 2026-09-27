@@ -31,6 +31,7 @@ from .test_llm_api import llm_client, run_job
 
 PAGE_MODEL = "dots-ocr"
 TEXT_MODEL = "qwen3.5-9b"
+CUDA_ONLY_VISION_MODEL = "qwen3.5-9b-vl"
 
 PAGE_WIDTH, PAGE_HEIGHT = 1300, 2112
 
@@ -148,7 +149,7 @@ def test_modalities_is_not_null_on_a_host_that_cannot_serve_the_model(
 ) -> None:
     with make_client(enable_llm=True, backend=FAKE_MAC_BACKEND) as client:
         rows = {row["id"]: row for row in client.get("/v1/models", headers=auth).json()}
-    row = rows[PAGE_MODEL]
+    row = rows[CUDA_ONLY_VISION_MODEL]
     assert row["backend_supported"] is False
     assert row["revision"] is None
     assert row["memory_bytes_estimate"] is None
@@ -249,10 +250,10 @@ def test_the_page_manifest_pins_a_revision_and_not_a_branch() -> None:
     assert spec.revision == "c0111ce6bc07803dbc267932ffef0ae3a51dc951"
 
 
-def test_the_page_manifest_serves_two_backends_and_no_mac_block() -> None:
+def test_the_page_manifest_serves_every_backend_and_the_mac_on_mlx_vlm() -> None:
     manifest = load_manifest(PAGE_MODEL)
-    assert sorted(manifest.backends) == ["cuda-linux", "llama-windows"]
-    assert "mlx-darwin" not in manifest.backends
+    assert sorted(manifest.backends) == ["cuda-linux", "llama-windows", "mlx-darwin"]
+    assert manifest.spec("mlx-darwin").engine == "mlx-vlm"
 
 
 def test_the_page_model_fits_a_24_gib_card() -> None:

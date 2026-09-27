@@ -34,7 +34,7 @@ def guest_http(*, reject_info=False):
             elif self.path == '/v1/info':
                 body = {'server': {'name': 'guest', 'api_version': 1}, 'host': {'backend': 'cuda-linux'}}
             elif self.path == '/v1/catalog':
-                body = {'subjects': [{'kind': 'model', 'id': 'a', 'installed': True}]}
+                body = {'rows': [{'kind': 'model', 'id': 'a', 'installed': True}]}
             else:
                 status, body = 404, {}
             encoded = json.dumps(body).encode()
@@ -149,7 +149,7 @@ def test_restart_journal_retires_missing_stamp_via_owner_not_guest_http(tmp_path
     residue.write_bytes(b'fixture native weights after stamp was deleted')
     config = SimpleNamespace(backend_kind='llama-windows', home=tmp_path)
     backend = SimpleNamespace(kind='llama-windows')
-    manifest = SimpleNamespace(weights_family='models', id='a')
+    manifest = SimpleNamespace(weights_family='models', id='a', weights_of=None, aliases=lambda: ())
     spec = SimpleNamespace(backend='llama-windows')
     row = SimpleNamespace(kind='model', id='a', name='a', installed=lambda: None,
                           remove=lambda: weights.remove(config, manifest, spec))

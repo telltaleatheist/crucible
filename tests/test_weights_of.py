@@ -227,13 +227,24 @@ def test_what_the_alias_serves_is_its_own(catalog_dir: Path) -> None:
     assert alias.spec(CUDA_LINUX).memory != base.spec(CUDA_LINUX).memory
 
 
+def _tables(text: str) -> list[list[str]]:
+    tables: list[list[str]] = []
+    for line in text.splitlines(keepends=True):
+        if line.startswith("[") or not tables:
+            tables.append([])
+        tables[-1].append(line)
+    return tables
+
+
 def test_a_backend_the_base_does_not_declare_is_weights_of_backend_missing(
     catalog_dir: Path,
 ) -> None:
     base = catalog_dir / f"{BASE}.toml"
-    text = base.read_text(encoding="utf-8")
-    cut = text.index("# ---------------------------------------------------------------------------\n# PHASE15-HOST.md sections 0 and 3.10")
-    base.write_text(text[:cut], encoding="utf-8")
+    kept = [
+        table for table in _tables(base.read_text(encoding="utf-8"))
+        if not table[0].startswith("[backends.llama-windows")
+    ]
+    base.write_text("".join("".join(table) for table in kept), encoding="utf-8")
     assert "llama-windows" not in load_manifest(BASE, catalog_dir).backends
     _write_alias(catalog_dir, _alias_text())
     message = _refusal(catalog_dir)

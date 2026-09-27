@@ -43,7 +43,7 @@ def test_the_shipped_manifest_pins_a_commit_and_a_dtype() -> None:
     assert spec.hf_repo == "Qwen/Qwen3-ForcedAligner-0.6B"
     assert len(spec.revision) == 40
     assert spec.dtype == "bfloat16"
-    assert spec.memory_bytes_estimate == 1_835_544_544 + 1_610_612_736
+    assert spec.memory_bytes_estimate == 5_905_580_032
 
 
 def test_the_aligner_pulls_into_the_models_tree() -> None:
@@ -60,16 +60,19 @@ def test_both_backends_run_the_same_engine_on_the_same_weights() -> None:
     assert mac.dtype == cuda.dtype == "bfloat16"
 
 
-def test_the_mac_estimate_is_measured_and_not_the_cuda_one() -> None:
+def test_each_estimate_is_the_one_measured_on_its_own_machine() -> None:
     manifest = load_align_manifest("qwen3-aligner")
     mac = manifest.spec(MLX_DARWIN).memory_bytes_estimate
     cuda = manifest.spec(CUDA_LINUX).memory_bytes_estimate
     assert mac == 5_885_296_640
     assert mac != cuda
-    assert mac > cuda
-    text = manifest.path.read_text(encoding="utf-8")
-    assert "MEASURED, on the machine it is for" in text
-    assert "driver_allocated_memory" in text
+    doc = " ".join(
+        (
+            Path(__file__).resolve().parents[1] / "docs" / "internals" / "asr-and-align.md"
+        ).read_text(encoding="utf-8").split()
+    )
+    assert f"cuda-linux {cuda:,} B MEASURED" in doc
+    assert f"mlx-darwin {mac:,} B is MPS **driver**-allocated memory" in doc
 
 
 def test_the_mac_recipe_is_there_and_its_note_says_what_is_still_owed() -> None:

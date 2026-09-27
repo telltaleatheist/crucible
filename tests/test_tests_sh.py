@@ -156,10 +156,16 @@ def test_the_listing_gives_one_reason_per_selected_file(work: Path) -> None:
 
 
 def test_all_is_still_there_and_says_what_it_is_for() -> None:
-    text = TESTS_SH.read_text(encoding="utf-8")
-    header = text[: text.index("set -uo pipefail")]
-    assert "--all" in header
-    assert "debugging" in header, "the header no longer says what --all is for"
+    shown = subprocess.run(
+        ["bash", str(TESTS_SH), "--help"],
+        cwd=str(REPO),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert shown.returncode == 0, shown.stderr
+    lines = [line for line in shown.stdout.splitlines() if "--all" in line]
+    assert any("everything" in line for line in lines), shown.stdout
 
 
 def test_the_wide_list_is_gone() -> None:

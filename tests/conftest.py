@@ -55,57 +55,62 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+def configure_box(
+    home: Path,
+    *,
+    enable_echo: bool = True,
+    enable_llm: bool = False,
+    enable_asr: bool = False,
+    enable_tts: bool = False,
+    enable_align: bool = False,
+    enable_rvc: bool = False,
+    enable_denoise: bool = False,
+    token: str = TOKEN,
+    backend: Backend = FAKE_BACKEND,
+    desktop_allowance_bytes: int | None = None,
+    capability: Any = None,
+    open_pairing: bool = DEFAULT_OPEN_PAIRING,
+    tts_engines: Any = None,
+) -> None:
+    if desktop_allowance_bytes is None:
+        desktop_allowance_bytes = (
+            3 * 1024 ** 3
+            if capability is None
+            else capability.desktop_allowance_bytes
+        )
+    write_config(
+        home,
+        name="crucible@test",
+        host="127.0.0.1",
+        port=7100,
+        token=token,
+        backend_kind=backend.kind,
+        enable_echo=enable_echo,
+        enable_llm=enable_llm,
+        enable_asr=enable_asr,
+        enable_tts=enable_tts,
+        enable_align=enable_align,
+        enable_rvc=enable_rvc,
+        enable_denoise=enable_denoise,
+        desktop_allowance_bytes=desktop_allowance_bytes,
+        retention_days=7,
+        desktop_allowance_basis="stated",
+        desktop_allowance_note="",
+        capability=capability,
+        open_pairing=open_pairing,
+        tts_engines=(
+            declared_tts_footprints(backend.kind)
+            if tts_engines is None
+            else tts_engines
+        ),
+    )
+
+
 @pytest.fixture
 def make_app(home: Path) -> Callable[..., FastAPI]:
 
-    def factory(
-        *,
-        enable_echo: bool = True,
-        enable_llm: bool = False,
-        enable_asr: bool = False,
-        enable_tts: bool = False,
-        enable_align: bool = False,
-        enable_rvc: bool = False,
-        enable_denoise: bool = False,
-        token: str = TOKEN,
-        backend: Backend = FAKE_BACKEND,
-        desktop_allowance_bytes: int | None = None,
-        capability: Any = None,
-        open_pairing: bool = DEFAULT_OPEN_PAIRING,
-        tts_engines: Any = None,
-    ) -> FastAPI:
-        if desktop_allowance_bytes is None:
-            desktop_allowance_bytes = (
-                3 * 1024 ** 3
-                if capability is None
-                else capability.desktop_allowance_bytes
-            )
-        write_config(
-            home,
-            name="crucible@test",
-            host="127.0.0.1",
-            port=7100,
-            token=token,
-            backend_kind=backend.kind,
-            enable_echo=enable_echo,
-            enable_llm=enable_llm,
-            enable_asr=enable_asr,
-            enable_tts=enable_tts,
-            enable_align=enable_align,
-            enable_rvc=enable_rvc,
-            enable_denoise=enable_denoise,
-            desktop_allowance_bytes=desktop_allowance_bytes,
-            retention_days=7,
-            desktop_allowance_basis="stated",
-            desktop_allowance_note="",
-            capability=capability,
-            open_pairing=open_pairing,
-            tts_engines=(
-                declared_tts_footprints(backend.kind)
-                if tts_engines is None
-                else tts_engines
-            ),
-        )
+    def factory(*, backend: Backend = FAKE_BACKEND, **options: Any) -> FastAPI:
+        configure_box(home, backend=backend, **options)
         return create_app(load_config(home), backend)
 
     return factory
@@ -133,26 +138,75 @@ def auth() -> dict[str, str]:
     }
 
 
-@pytest.fixture
-def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    spec = jobenv.llm_env(FAKE_BACKEND.kind)
-    directory = jobenv.env_dir(home, spec)
-    (directory / "bin").mkdir(parents=True)
-    (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
-    (directory / "crucible-env.json").write_text(
+def write_env_stamp(
+    home: Path,
+    spec: jobenv.EnvSpec,
+    backend_kind: str,
+    *,
+    python_version: str = "3.11.16",
+    seconds: float = 1.0,
+) -> Path:
+    recipe = jobenv.recipe_for(spec)
+    stamp = jobenv.stamp_path(home, spec)
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(
         json.dumps(
             {
-                "backend": FAKE_BACKEND.kind,
-                "recipe": f"{FAKE_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
+                "backend": backend_kind,
+                "recipe": recipe.name,
+                "environment_sha256": jobenv.environment_sha256(recipe),
+                "direct_references": jobenv.recipe_direct_references(recipe),
+                "recipe_text": jobenv.recipe_text(recipe),
+                "python_version": python_version,
+                "seconds": seconds,
             }
         ),
         encoding="utf-8",
     )
-    pins = jobenv.recipe_pins(jobenv.recipe_for(spec))
-    monkeypatch.setattr(jobenv, "installed_packages", lambda _home, _spec: dict(pins))
-    return directory
+    return stamp
+
+
+def installed_as_the_recipe_says(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        jobenv,
+        "installed_packages",
+        lambda _home, spec: jobenv.recipe_pins(jobenv.recipe_for(spec)),
+    )
+    monkeypatch.setattr(
+        jobenv,
+        "installed_direct_references",
+        lambda _home, spec: jobenv.recipe_direct_references(jobenv.recipe_for(spec)),
+    )
+
+
+def stamp_env(
+    home: Path,
+    spec: jobenv.EnvSpec,
+    backend_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    python: Path | None = None,
+    python_version: str = "3.11.16",
+    seconds: float = 1.0,
+) -> Path:
+    interpreter = jobenv.env_python(home, spec)
+    interpreter.parent.mkdir(parents=True, exist_ok=True)
+    if python is None:
+        interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    else:
+        interpreter.symlink_to(python)
+    write_env_stamp(
+        home, spec, backend_kind, python_version=python_version, seconds=seconds
+    )
+    installed_as_the_recipe_says(monkeypatch)
+    return jobenv.env_dir(home, spec)
+
+
+@pytest.fixture
+def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    return stamp_env(
+        home, jobenv.llm_env(FAKE_BACKEND.kind), FAKE_BACKEND.kind, monkeypatch
+    )
 
 
 @pytest.fixture
@@ -274,13 +328,23 @@ __all__ = [
     "FAKE_BACKEND",
     "FAKE_MAC_BACKEND",
     "TOKEN",
+    "configure_box",
     "end_process_tree",
     "holding_the_card",
+    "installed_as_the_recipe_says",
     "parse_sse",
     "mint_token",
+    "stamp_env",
     "wav_base64",
     "wav_bytes",
+    "write_env_stamp",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _never_the_real_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path / "unconfigured-home"))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -359,3 +423,50 @@ def _no_child_outlives_its_test(monkeypatch: pytest.MonkeyPatch) -> Iterator[Non
         + "\n  ".join(named),
         pytrace=False,
     )
+
+
+class HubUnreachableInTests(RuntimeError):
+    pass
+
+
+PINNED_VOICE_MANIFESTS = Path(__file__).resolve().parent / "fixtures" / "voice-manifests"
+
+
+def _hub_is_offline(*args: Any, **kwargs: Any) -> Any:
+    raise HubUnreachableInTests(
+        "the test suite never reaches huggingface.co; fake the fetch with "
+        "tests/fake_hub.py or monkeypatch huggingface_hub in this test"
+    )
+
+
+def _pinned_manifest_or_offline(
+    repo_id: str,
+    filename: str,
+    *,
+    revision: str | None = None,
+    local_dir: str | None = None,
+    **kwargs: Any,
+) -> str:
+    source = (
+        PINNED_VOICE_MANIFESTS / repo_id.replace("/", "--") / str(revision) / filename
+    )
+    if local_dir is None or not source.is_file():
+        raise HubUnreachableInTests(
+            f"the test suite never reaches huggingface.co; {repo_id}@{revision} "
+            f"{filename} is not in {PINNED_VOICE_MANIFESTS}. A pin moved: copy that "
+            "revision's manifest there, or fake the fetch in this test"
+        )
+    target = Path(local_dir) / filename
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(source.read_bytes())
+    return str(target)
+
+
+@pytest.fixture(autouse=True)
+def _no_test_reaches_the_hub(monkeypatch: pytest.MonkeyPatch) -> None:
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _pinned_manifest_or_offline)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", _hub_is_offline)
+    monkeypatch.setattr(huggingface_hub.HfApi, "model_info", _hub_is_offline)
+    monkeypatch.setattr(huggingface_hub.HfApi, "list_repo_files", _hub_is_offline)

@@ -11,10 +11,10 @@ from fastapi.testclient import TestClient
 
 from crucible import accelerator, hosttools, jobenv, tasks
 from crucible.accelerator import GIB, ComputeApp
-from crucible.asrmodels import load_asr_manifest
+from crucible.asrmodels import ASR_LINEUP, load_asr_manifest
 from crucible.jobs import asr as asr_job
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
+from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse, write_env_stamp
 
 MODEL = "whisper-tiny"
 BIG_MODEL = "whisper-large-v3-turbo"
@@ -22,7 +22,7 @@ FAKE_WORKER = Path(__file__).resolve().parent / "fake_asr_worker.py"
 FAKE_MLX_WORKER = Path(__file__).resolve().parent / "fake_mlx_asr_worker.py"
 MAC_MODEL = "whisper-tiny"
 
-ALL_MODELS = ["qwen3-asr-1.7b", "whisper-large-v3-turbo", "whisper-tiny"]
+ALL_MODELS = sorted(ASR_LINEUP)
 
 PARAMS = {"language": "en", "vad_filter": True, "word_timestamps": True}
 
@@ -34,18 +34,7 @@ def asr_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = home / "envs" / "asr"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "job_type": "asr",
-                "backend": FAKE_BACKEND.kind,
-                "recipe": f"{FAKE_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.worker_env("asr", FAKE_BACKEND.kind), FAKE_BACKEND.kind)
     pins = jobenv.recipe_pins(jobenv.recipe_for(jobenv.worker_env("asr", FAKE_BACKEND.kind)))
     monkeypatch.setattr(
         jobenv, "installed_packages", lambda _home, _type: dict(pins)
@@ -106,18 +95,7 @@ def _mac_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = home / "envs" / "asr"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "job_type": "asr",
-                "backend": FAKE_MAC_BACKEND.kind,
-                "recipe": f"{FAKE_MAC_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.worker_env("asr", FAKE_MAC_BACKEND.kind), FAKE_MAC_BACKEND.kind)
     pins = jobenv.recipe_pins(
         jobenv.recipe_for(jobenv.worker_env("asr", FAKE_MAC_BACKEND.kind))
     )
@@ -224,7 +202,7 @@ def test_a_job_that_names_no_model_is_refused(
     assert response.json()["error"]["code"] == "model_required"
 
 
-def test_an_unknown_model_names_the_three(
+def test_an_unknown_model_names_the_lineup(
     asr_client: TestClient, auth: dict[str, str]
 ) -> None:
     response = submit(asr_client, auth, model="whisper-huge")
