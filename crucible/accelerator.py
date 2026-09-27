@@ -8,7 +8,7 @@ import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .backend import (
     BACKEND_KINDS,
@@ -18,11 +18,11 @@ from .backend import (
     nvidia_smi_path,
     physical_memory_figures,
 )
-from .capability import available_bytes
-from .engines.vllm import card_needs
+from .enginespec import card_needs
 from .errors import ApiError, CrucibleError, NoViableBackend
+from .memorybudget import GIB, MIB, available_bytes, gib_text
 
-GIB = 1024 ** 3
+PROC = Path("/proc")
 
 FOREIGN_PROCESS_FLOOR_BYTES = 1 * GIB
 
@@ -49,7 +49,7 @@ class ComputeApp:
     def describe(self) -> str:
         if self.used_bytes is None:
             return f"pid {self.pid} ({self.name}, memory not reported)"
-        return f"pid {self.pid} ({self.name}, {self.used_bytes / GIB:.1f} GiB)"
+        return f"pid {self.pid} ({self.name}, {gib_text(self.used_bytes)})"
 
 
 @dataclass(frozen=True)
@@ -119,28 +119,31 @@ def probe_compute_apps() -> list[ComputeApp]:
         except ValueError:
             raise ProbeError(f"could not parse a compute-apps pid: {line!r}") from None
         try:
-            used: int | None = int(used_text) * 1024 * 1024
+            used: int | None = int(used_text) * MIB
         except ValueError:
             used = None
         apps.append(ComputeApp(pid=pid, name=name, used_bytes=used))
     return apps
 
 
+def proc_entries() -> Iterator[tuple[int, Path]]:
+    if not PROC.is_dir():
+        return
+    for entry in PROC.iterdir():
+        if entry.name.isdigit():
+            yield int(entry.name), entry
+
+
 def probe_process_table() -> dict[int, tuple[int, int]]:
     table: dict[int, tuple[int, int]] = {}
-    proc = Path("/proc")
-    if not proc.is_dir():
-        return table
-    for entry in proc.iterdir():
-        if not entry.name.isdigit():
-            continue
+    for pid, entry in proc_entries():
         try:
             stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         try:
             fields = stat[stat.rindex(")") + 2 :].split()
-            table[int(entry.name)] = (int(fields[2]), int(fields[3]))
+            table[pid] = (int(fields[2]), int(fields[3]))
         except (ValueError, IndexError):
             raise ProbeError(f"could not parse {entry / 'stat'}: {stat!r}") from None
     return table
@@ -230,7 +233,7 @@ def _windows_process(pid: int) -> tuple[bool, ProcessIdentity | None]:
 
 
 def _proc_identity(pid: int) -> ProcessIdentity | None:
-    entry = Path("/proc") / str(pid)
+    entry = PROC / str(pid)
     try:
         stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
         raw = (entry / "cmdline").read_bytes()
@@ -277,7 +280,7 @@ def process_identity(pid: int) -> ProcessIdentity | None:
         return None
     if sys.platform == "win32":
         return _windows_process(pid)[1]
-    if Path("/proc").is_dir():
+    if PROC.is_dir():
         return _proc_identity(pid)
     if not _posix_alive(pid):
         return None
@@ -291,7 +294,7 @@ def process_alive(pid: int) -> bool:
         return False
     if sys.platform == "win32":
         return _windows_process(pid)[0]
-    if Path("/proc").is_dir():
+    if PROC.is_dir():
         return _proc_identity(pid) is not None
     return _posix_alive(pid)
 
@@ -391,7 +394,7 @@ def probe_vram() -> tuple[int, int]:
         free_mib, total_mib = int(parts[0]), int(parts[1])
     except ValueError:
         raise ProbeError(f"could not parse the memory figures: {lines[0]!r}") from None
-    return free_mib * 1024 * 1024, total_mib * 1024 * 1024
+    return free_mib * MIB, total_mib * MIB
 
 
 def probe_unified_memory() -> tuple[int, int]:
@@ -456,50 +459,42 @@ def probe_system_memory() -> tuple[int, int]:
         raise ProbeError(str(exc)) from exc
 
 
-def read_windows_state(desktop_allowance_bytes: int) -> AcceleratorState:
-    if nvidia_smi_path() is None:
-        available, total = probe_system_memory()
-        return AcceleratorState(
-            backend=LLAMA_WINDOWS,
-            total_bytes=total,
-            free_bytes=available,
-            compute_apps=(),
-            detail=(
-                f"{available / GIB:.1f} GiB of {total / GIB:.1f} GiB system "
-                "memory available; no NVIDIA driver on this host, so the pool "
-                "is RAM and llama.cpp runs on the CPU"
-            ),
-        )
+def _nvidia_state(backend: str, desktop_allowance_bytes: int) -> AcceleratorState:
     apps = tuple(probe_compute_apps())
     free, total = probe_vram()
     return AcceleratorState(
-        backend=LLAMA_WINDOWS,
+        backend=backend,
         total_bytes=total,
         free_bytes=free,
         compute_apps=apps,
         detail=(
-            f"{free / GIB:.1f} GiB free of {total / GIB:.1f} GiB, "
+            f"{gib_text(free)} free of {gib_text(total)}, "
             f"{len(apps)} compute app(s), desktop allowance "
-            f"{desktop_allowance_bytes / GIB:.1f} GiB"
+            f"{gib_text(desktop_allowance_bytes)}"
+        ),
+    )
+
+
+def read_windows_state(desktop_allowance_bytes: int) -> AcceleratorState:
+    if nvidia_smi_path() is not None:
+        return _nvidia_state(LLAMA_WINDOWS, desktop_allowance_bytes)
+    available, total = probe_system_memory()
+    return AcceleratorState(
+        backend=LLAMA_WINDOWS,
+        total_bytes=total,
+        free_bytes=available,
+        compute_apps=(),
+        detail=(
+            f"{gib_text(available)} of {gib_text(total)} system "
+            "memory available; no NVIDIA driver on this host, so the pool "
+            "is RAM and llama.cpp runs on the CPU"
         ),
     )
 
 
 def read_state(backend_kind: str, desktop_allowance_bytes: int) -> AcceleratorState:
     if backend_kind == CUDA_LINUX:
-        apps = tuple(probe_compute_apps())
-        free, total = probe_vram()
-        return AcceleratorState(
-            backend=backend_kind,
-            total_bytes=total,
-            free_bytes=free,
-            compute_apps=apps,
-            detail=(
-                f"{free / GIB:.1f} GiB free of {total / GIB:.1f} GiB, "
-                f"{len(apps)} compute app(s), desktop allowance "
-                f"{desktop_allowance_bytes / GIB:.1f} GiB"
-            ),
-        )
+        return _nvidia_state(backend_kind, desktop_allowance_bytes)
     if backend_kind == MLX_DARWIN:
         available, total = probe_unified_memory()
         return AcceleratorState(
@@ -508,7 +503,7 @@ def read_state(backend_kind: str, desktop_allowance_bytes: int) -> AcceleratorSt
             free_bytes=available,
             compute_apps=(),
             detail=(
-                f"{available / GIB:.1f} GiB of {total / GIB:.1f} GiB unified memory "
+                f"{gib_text(available)} of {gib_text(total)} unified memory "
                 "available (free + inactive + speculative + purgeable)"
             ),
         )
@@ -542,8 +537,8 @@ def refuse_if_larger_than_host(
         409,
         "insufficient_memory",
         f"cannot load {model_id!r} on this host, ever: it needs "
-        f"{need_bytes / GIB:.1f} GiB and {host_name} has "
-        f"{host_total_bytes / GIB:.1f} GiB in total",
+        f"{gib_text(need_bytes)} and {host_name} has "
+        f"{gib_text(host_total_bytes)} in total",
         {
             "model": model_id,
             "needed_bytes": need_bytes,
@@ -579,38 +574,40 @@ def refuse_if_card_lacks(*, model_id: str, spec: Any, card: Any) -> None:
     )
 
 
-def guard(
-    backend_kind: str,
-    *,
-    model_id: str,
-    need_bytes: int,
-    owned_pids: frozenset[int] = frozenset(),
-    desktop_allowance_bytes: int = 0,
-    reclaimable_bytes: int = 0,
-) -> AcceleratorState:
-    try:
-        state = read_state(backend_kind, desktop_allowance_bytes)
-    except ProbeError as exc:
-        raise ApiError(
-            409,
-            "accelerator_unreadable",
-            f"cannot load {model_id!r}: {exc}",
-        ) from None
+def _unreadable(model_id: str, exc: ProbeError) -> ApiError:
+    return ApiError(
+        409,
+        "accelerator_unreadable",
+        f"cannot load {model_id!r}: {exc}",
+    )
 
+
+def _process_rows(apps: "list[ComputeApp]") -> list[dict[str, Any]]:
+    return [
+        {"pid": app.pid, "name": app.name, "used_bytes": app.used_bytes}
+        for app in apps
+    ]
+
+
+def _not_ours(
+    backend_kind: str,
+    model_id: str,
+    state: AcceleratorState,
+    owned_pids: frozenset[int],
+) -> list[ComputeApp]:
     if backend_kind == CUDA_LINUX and any(
         app.pid not in owned_pids for app in state.compute_apps
     ):
         try:
             owned_pids = expand_owned_pids(owned_pids, probe_process_table())
         except ProbeError as exc:
-            raise ApiError(
-                409,
-                "accelerator_unreadable",
-                f"cannot load {model_id!r}: {exc}",
-            ) from None
+            raise _unreadable(model_id, exc) from None
+    return [app for app in state.compute_apps if app.pid not in owned_pids]
 
-    not_ours = [app for app in state.compute_apps if app.pid not in owned_pids]
 
+def _refuse_holders(
+    backend_kind: str, model_id: str, not_ours: list[ComputeApp]
+) -> None:
     if backend_kind == LLAMA_WINDOWS:
         holders = [app for app in not_ours if is_llama_server(app.name)]
         opening = (
@@ -629,92 +626,130 @@ def guard(
         ]
         opening = f"cannot load {model_id!r}: the accelerator is held by "
         closing = ". Crucible never evicts another process."
-
-    if holders:
-        raise ApiError(
-            409,
-            "accelerator_busy",
-            *_left_behind(
-                opening + "; ".join(app.describe() for app in holders) + closing,
-                {
-                    "model": model_id,
-                    "processes": [
-                        {"pid": app.pid, "name": app.name, "used_bytes": app.used_bytes}
-                        for app in holders
-                    ],
-                },
-            ),
-        )
-
-    stray = (
-        unattributed_bytes(state, desktop_allowance_bytes, reclaimable_bytes)
-        if backend_kind == CUDA_LINUX
-        else 0
+    if not holders:
+        return
+    raise ApiError(
+        409,
+        "accelerator_busy",
+        *_left_behind(
+            opening + "; ".join(app.describe() for app in holders) + closing,
+            {"model": model_id, "processes": _process_rows(holders)},
+        ),
     )
-    if stray > FOREIGN_PROCESS_FLOOR_BYTES:
-        raise ApiError(
-            409,
-            "accelerator_busy",
-            *_left_behind(
-                f"cannot load {model_id!r}: {stray / GIB:.1f} GiB of the "
-                f"{state.total_bytes / GIB:.1f} GiB card is in use by a process "
-                "this host's driver will not name (under WSL2 the compute-app "
-                "list is empty even for processes inside the same VM). Crucible "
-                "never evicts another process.",
-                {
-                    "model": model_id,
-                    "unattributed_bytes": stray,
-                    "used_bytes": state.used_bytes,
-                    "desktop_allowance_bytes": desktop_allowance_bytes,
-                },
-            ),
-        )
 
-    if backend_kind == MLX_DARWIN:
-        room = available_bytes(state.total_bytes, desktop_allowance_bytes)
-        if need_bytes > room:
-            raise ApiError(
-                409,
-                "insufficient_memory",
-                f"cannot load {model_id!r}: it needs {need_bytes / GIB:.1f} GiB and "
-                f"this Mac gives a model {room / GIB:.1f} GiB "
-                f"({state.total_bytes / GIB:.1f} GiB unified memory less the "
-                f"{desktop_allowance_bytes / GIB:.1f} GiB desktop allowance)",
-                {
-                    "model": model_id,
-                    "needed_bytes": need_bytes,
-                    "room_bytes": room,
-                    "free_bytes": state.free_bytes,
-                    "total_bytes": state.total_bytes,
-                    "desktop_allowance_bytes": desktop_allowance_bytes,
-                },
-            )
-        return state
 
-    effective_free = state.free_bytes + reclaimable_bytes
-    if effective_free < need_bytes:
-        reclaim = (
-            f" (plus {reclaimable_bytes / GIB:.1f} GiB Crucible's own resident "
-            "engine would give back)"
-            if reclaimable_bytes
-            else ""
-        )
-        raise ApiError(
-            409,
-            "insufficient_memory",
-            f"cannot load {model_id!r}: it needs {need_bytes / GIB:.1f} GiB and "
-            f"this host has {state.free_bytes / GIB:.1f} GiB free of "
-            f"{state.total_bytes / GIB:.1f} GiB{reclaim}",
+def _refuse_stray(
+    backend_kind: str,
+    model_id: str,
+    state: AcceleratorState,
+    desktop_allowance_bytes: int,
+    reclaimable_bytes: int,
+) -> None:
+    if backend_kind != CUDA_LINUX:
+        return
+    stray = unattributed_bytes(state, desktop_allowance_bytes, reclaimable_bytes)
+    if stray <= FOREIGN_PROCESS_FLOOR_BYTES:
+        return
+    raise ApiError(
+        409,
+        "accelerator_busy",
+        *_left_behind(
+            f"cannot load {model_id!r}: {gib_text(stray)} of the "
+            f"{gib_text(state.total_bytes)} card is in use by a process "
+            "this host's driver will not name (under WSL2 the compute-app "
+            "list is empty even for processes inside the same VM). Crucible "
+            "never evicts another process.",
             {
                 "model": model_id,
-                "needed_bytes": need_bytes,
-                "free_bytes": state.free_bytes,
-                "reclaimable_bytes": reclaimable_bytes,
-                "total_bytes": state.total_bytes,
-                "processes": [
-                    {"pid": app.pid, "name": app.name, "used_bytes": app.used_bytes}
-                    for app in not_ours
-                ],
+                "unattributed_bytes": stray,
+                "used_bytes": state.used_bytes,
+                "desktop_allowance_bytes": desktop_allowance_bytes,
             },
+        ),
+    )
+
+
+def _refuse_unless_the_mac_has_room(
+    model_id: str,
+    need_bytes: int,
+    state: AcceleratorState,
+    desktop_allowance_bytes: int,
+) -> None:
+    room = available_bytes(state.total_bytes, desktop_allowance_bytes)
+    if need_bytes <= room:
+        return
+    raise ApiError(
+        409,
+        "insufficient_memory",
+        f"cannot load {model_id!r}: it needs {gib_text(need_bytes)} and "
+        f"this Mac gives a model {gib_text(room)} "
+        f"({gib_text(state.total_bytes)} unified memory less the "
+        f"{gib_text(desktop_allowance_bytes)} desktop allowance)",
+        {
+            "model": model_id,
+            "needed_bytes": need_bytes,
+            "room_bytes": room,
+            "free_bytes": state.free_bytes,
+            "total_bytes": state.total_bytes,
+            "desktop_allowance_bytes": desktop_allowance_bytes,
+        },
+    )
+
+
+def _refuse_unless_free(
+    model_id: str,
+    need_bytes: int,
+    state: AcceleratorState,
+    reclaimable_bytes: int,
+    not_ours: list[ComputeApp],
+) -> None:
+    if state.free_bytes + reclaimable_bytes >= need_bytes:
+        return
+    reclaim = (
+        f" (plus {gib_text(reclaimable_bytes)} Crucible's own resident "
+        "engine would give back)"
+        if reclaimable_bytes
+        else ""
+    )
+    raise ApiError(
+        409,
+        "insufficient_memory",
+        f"cannot load {model_id!r}: it needs {gib_text(need_bytes)} and "
+        f"this host has {gib_text(state.free_bytes)} free of "
+        f"{gib_text(state.total_bytes)}{reclaim}",
+        {
+            "model": model_id,
+            "needed_bytes": need_bytes,
+            "free_bytes": state.free_bytes,
+            "reclaimable_bytes": reclaimable_bytes,
+            "total_bytes": state.total_bytes,
+            "processes": _process_rows(not_ours),
+        },
+    )
+
+
+def guard(
+    backend_kind: str,
+    *,
+    model_id: str,
+    need_bytes: int,
+    owned_pids: frozenset[int] = frozenset(),
+    desktop_allowance_bytes: int = 0,
+    reclaimable_bytes: int = 0,
+) -> AcceleratorState:
+    try:
+        state = read_state(backend_kind, desktop_allowance_bytes)
+    except ProbeError as exc:
+        raise _unreadable(model_id, exc) from None
+    not_ours = _not_ours(backend_kind, model_id, state, owned_pids)
+    _refuse_holders(backend_kind, model_id, not_ours)
+    _refuse_stray(
+        backend_kind, model_id, state, desktop_allowance_bytes, reclaimable_bytes
+    )
+    if backend_kind == MLX_DARWIN:
+        _refuse_unless_the_mac_has_room(
+            model_id, need_bytes, state, desktop_allowance_bytes
         )
+    else:
+        _refuse_unless_free(model_id, need_bytes, state, reclaimable_bytes, not_ours)
     return state

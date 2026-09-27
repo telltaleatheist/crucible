@@ -1,8 +1,10 @@
 # Engines, capability and the card
 
 How Crucible decides what a host can run, what it puts on the card, and how each
-engine is started and stopped. Modules: `backend`, `capability`, `precision`,
-`ttsplan`, `accelerator`, `vram`, `ladder`, `residency`, `engines/*`, `decide`,
+engine is started and stopped. Modules: `backend`, `capability` (and the
+modules it re-exports, listed under "Where each part lives"), `memorybudget`,
+`precision`, `servingplan`, `ttsplan`, `asrplan`, `accelerator`, `vram`,
+`ladder`, `residency`, `engines/*`, `decide`,
 `sampling`, `pages`, `llamacpp`, `ollamastore`, `interpreter`, `lineup`.
 
 ## Backends
@@ -92,7 +94,7 @@ therefore the model family. Crucible picks the quantization.
 - A stated bf16 on a card without bf16 runs as **fp16**
   (`enginespec.bf16_fallback` / `card_args` add `--dtype float16`). It uses
   the same bytes, keeps the same place in the walk, and the verdict names the
-  precision (`_precision_note`). vLLM itself picks fp16 for `auto` on such a card.
+  precision (`capabilitywords.precision_note`). vLLM itself picks fp16 for `auto` on such a card.
 - The stated dtype is `enginespec.declared_dtype`, the one rule `capability`,
   `precision` and `engines.vllm` share; `enginespec` imports only `backend`, so
   neither `capability` nor `precision` loads an engine adapter.
@@ -190,6 +192,32 @@ too-long request. `MIN_LOAD_CONTEXT` is a stated floor, not a measured one.
 
 Figures in capability messages are GiB so they match the guard's refusals.
 
+### Where each part lives
+
+`capability` is a re-export shim; each concern has one module.
+
+| module | owns |
+|---|---|
+| `memorybudget` | `GIB`, `MIB`, `gib_text`, `available_bytes` (total less the allowance) and `engine_budget_bytes` (that, capped by free memory). Capability, the guard, `vram` and `ttsplan` all subtract the allowance here. |
+| `fit` | `WorkingContext`, `Candidate`, `ContextCeiling`, `CatalogCandidates` and the manifest cache |
+| `capabilityclasses` | the class table `CLASSES`, `BY_NAME`, and which models a class serves |
+| `capabilitywords` | the phrases a verdict is written in (needs, too old, serving width, card description) |
+| `verdict` | `Decision`, `decide_capabilities`, `decide_all`, `record`, `pool_name`. `decide_capabilities` is one small function per outcome, and every `Decision` is built by `_decision`. `capability.decide` is an alias, kept apart in name from the decision door (`crucible/decide.py`). |
+| `contextceiling` | `context_ceilings`, `check_ceiling`, `check_load_context` and the `context_over_limit` refusal |
+| `capabilityquery` | the `GET /v1/capability` query: `?class=`, `?context_tokens=`, `?concurrency=` and their 400/503 refusals |
+| `installplan` | the install and download confirmation text (`/v1/capability/plan`) |
+| `servingplan` | `ServingVariant`, the one row type of both serving ladders (`ttsplan`, `asrplan`) |
+
+**Manifest cache.** A `CatalogCandidates` whose loader has a known directory
+(models, asr, align, rvc, denoise) parses that directory once and answers from
+memory until any `*.toml` in it changes. The key is the directory's resolved
+path and mtime, plus each file's name, mtime and size. So an edited, added or
+removed manifest is read on the next call, and nothing has to be restarted.
+Voices are not cached. `load_all_voices` merges pins, the engine's own voices
+and several directories, and no single directory stands for them. On a Windows
+dev box, a sized `GET /v1/capability?class=generate` went from about 35 ms
+(every model TOML parsed) to about 4 ms (only the files are stat'ed).
+
 ## The desktop reserve
 
 `[accelerator] desktop_allowance_bytes` is what the host keeps for itself.
@@ -240,7 +268,11 @@ Crucible refuses by name and never evicts anybody else's process.
   Leaders only: engines and workers start with `start_new_session=True`, so
   expanding through a non-leader would claim siblings such as a trainer started
   from the same shell. A `/proc` that cannot be parsed refuses, as an
-  unreadable driver does.
+  unreadable driver does. `accelerator.proc_entries` is the one `/proc` walker;
+  narrator's `processes_launched_by` reads `environ` through it.
+- The guard runs four checks in order: foreign holders, unattributed bytes
+  (`cuda-linux` only), then room (Mac: total less the allowance; everywhere
+  else: free plus what Crucible's own resident engine would give back).
 - `mlx-darwin`: a unified pool is **sized, not sampled** (Owen, 2026-09-22: *"it
   shouldnt put a gate on like that. theres actually plenty of memory
   available"*). The check uses total minus the allowance, the same as
@@ -273,7 +305,9 @@ the next night.
 - Budget = **min(nvidia-smi free + reclaimable, total − allowance)**. There is
   no third term. The pool is capped at
   `kv_bytes_per_token × context × max_num_seqs`, because bytes beyond that
-  cannot be used.
+  cannot be used. `max_num_seqs` reads the flag with `enginespec.flag_value`,
+  so the last one given wins, as it does in vLLM. A value that is not a whole
+  number is a `ManifestError` that names the model and its manifest file.
 - `fits` is vLLM's own one-full-context-request check, asked before the engine
   starts.
 - Not planned: `dots-ocr` on cuda-linux (its 0.5× estimate is a deliberate

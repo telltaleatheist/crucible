@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from .ttsplan import ServingVariant
+from .backend import CUDA_LINUX
+from .enginespec import VLLM_ENGINE
+from .servingplan import ServingVariant
 
-LADDER_BACKEND = "cuda-linux"
-LADDER_ENGINE = "vllm"
+LADDER_BACKEND = CUDA_LINUX
+LADDER_ENGINE = VLLM_ENGINE
 LADDER_FAMILY = "qwen3-asr"
 
 UNIT = "piece"

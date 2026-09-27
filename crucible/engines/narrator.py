@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .. import procgroup
+from ..accelerator import proc_entries
 from ..errors import JobCancelled
 from ..narratorengines import HIGGS_V3, VoicesDocumentView
 from .base import LOG_TAIL_LINES, EngineError, SubprocessEngine, find_free_port
@@ -42,20 +43,15 @@ LAUNCHED_SERVER_POLL_SECONDS = 1.0
 
 
 def processes_launched_by(owner_pid: int) -> frozenset[int]:
-    proc = Path("/proc")
-    if not proc.is_dir():
-        return frozenset()
     marker = f"{OWNER_MARKER_VARIABLE}={owner_pid}".encode()
     found = set()
-    for entry in proc.iterdir():
-        if not entry.name.isdigit():
-            continue
+    for pid, entry in proc_entries():
         try:
             environ = (entry / "environ").read_bytes()
         except OSError:
             continue
         if marker in environ.split(b"\0"):
-            found.add(int(entry.name))
+            found.add(pid)
     return frozenset(found)
 
 
