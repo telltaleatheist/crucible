@@ -215,6 +215,22 @@ def systemctl_argv(scope: str, *verbs: str) -> list[str]:
 WSL_DISTRO_ENV = "WSL_DISTRO_NAME"
 
 
+def _passwordless_sudo() -> bool:
+    """Whether `sudo -n` runs a command as root here without asking for anything."""
+    try:
+        return (
+            subprocess.run(
+                ["sudo", "-n", "true"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=10,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def root_prefix(environ: Mapping[str, str] | None = None) -> list[str]:
     """The argv prefix that runs a command as root, or `[]` when already root.
 
@@ -239,6 +255,17 @@ def root_prefix(environ: Mapping[str, str] | None = None) -> list[str]:
         )
     if os.geteuid() == 0:
         return []
+    # PASSWORDLESS SUDO FIRST, WHERE THE MACHINE HAS IT (2026-09-26, kylies-pc).
+    # Crucible's own distro grants the `crucible` user NOPASSWD sudo
+    # (`finishImportScript`), and sudo needs nothing from Windows. The
+    # `wsl.exe -u root` door below needs WSL's interop, and on kylies-pc a guest
+    # started by the tray's recovery recipe had it unregistered (systemd's binfmt
+    # handling): `crucible service install` died with "[Errno 8] Exec format
+    # error: 'wsl.exe'", and the carry to 1.0.48 stopped halfway. Asked with
+    # `-n`, so it never prompts: a stock Ubuntu answers "a password is required"
+    # and the interop door is taken, as before.
+    if _passwordless_sudo():
+        return ["sudo", "-n"]
     distro = (os.environ if environ is None else environ).get(WSL_DISTRO_ENV)
     if not distro:
         raise ServiceError(

@@ -347,3 +347,36 @@ Timeline, local time:
   the Windows token back in. No config was edited by hand.
 - **Still owed:** a door or installer that finds the engine token rotated should say so and name
   the recovery; and the abandoned /root/.crucible should be reported or removed.
+
+## The 1.0.48 upgrade: the token held; the guest carry failed at service-install (fixed in 1.0.49)
+
+The recovery carried the Windows token into the guest (both hashes 9a735f51374a) and the 1.0.48 host
+upgrade ran cleanly (55 s; the old orchestrator stopped and quit this time). Then the tray's guest
+carry failed 3 s in.
+
+### 33. `init` prints the full pairing line, token included, to stdout
+Anything that logs an install captures the secret. The move already redacts `crucible://` lines in
+its own stream; `init`'s own output should not print the token at all.
+
+### 34. PowerShell noise
+The installer prints bare `System.Management.Automation.RemoteException` lines (a native program's
+stderr under PS 5.1).
+
+### 35. The upgrade takes the engine down for about 50 s, then a recovery recipe brings it back
+The old tray released its hold on the distro, WSL idled it, and the new tray found nothing on :7100
+for 30 s before its recovery recipe started the unit. An upgrade should hand the hold across.
+
+### 36. The carry's error kept curl's progress meter and cut the real error at `{"err`
+`RunResult.said()` kept the FIRST 400 characters of stderr. **Fixed (1.0.49):** it keeps the tail.
+
+### 37. `service install` gets root through `wsl.exe -u root`, and interop was unregistered in the guest
+- **What:** rerun by hand, the carry's install.sh died at `service-install` with
+  `OSError: [Errno 8] Exec format error: 'wsl.exe'`. In the guest, `/proc/sys/fs/binfmt_misc/` held
+  only `register` and `status`, with no WSLInterop entry, after the recovery recipe had started the
+  distro (systemd's binfmt handling is known to drop it). The same step passed at 22:05 on a boot
+  where interop worked.
+- **Fixed (1.0.49):** `service.root_prefix` takes `sudo -n` when it works (Crucible's distro grants
+  `crucible` passwordless sudo; confirmed on kylies-pc) and the `wsl.exe -u root` door only
+  otherwise, as on a foreign distro without it. Root no longer depends on Windows interop.
+- **Still owed:** why interop is unregistered after some boots and not others, since other paths
+  still use it.

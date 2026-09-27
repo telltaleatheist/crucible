@@ -50,9 +50,13 @@ class RunResult:
 
     def said(self) -> str:
         """The most useful line to put in a log or a refusal."""
+        # THE TAIL, NOT THE HEAD (2026-09-26, kylies-pc). A failing install.sh
+        # writes curl's progress meter FIRST and its `{"error": ...}` LAST, and
+        # the first 400 characters kept the meter and cut the error off at
+        # `{"err`. The end of a failing process's output is where it says why.
         for candidate in (self.stderr.strip(), self.stdout.strip(), self.failure):
             if candidate:
-                return candidate[:400]
+                return candidate if len(candidate) <= 400 else "..." + candidate[-400:]
         return f"exit {self.code}"
 
 
