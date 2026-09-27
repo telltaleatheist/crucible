@@ -1,79 +1,3 @@
-"""Voice manifests — `voices/<id>.toml` (PHASE3-TTS.md section 2).
-
-A voice is to `tts` what a model is to `llm`, and this module is `manifests.py`
-with the same strictness for the same reason: one file per Crucible voice id, the
-id stable across backends, one `[voice.backends.<kind>]` block per backend the
-voice can be served on, and an unknown key refused rather than warned about.
-
-The numbers here are not this repo's inventions. They are a translation of
-BookForge's `electron/data/higgs-models.json`, which is where the caps, the pace
-bands and the sampling live today and where every one of them was measured. Each
-manifest cites its provenance in prose the way the model manifests do, and where
-a value does not exist over there this build does not make one up — it refuses.
-
-Three things in this schema are not in PHASE3-TTS.md as written, and each is here
-because the file as specified could not be filled in truthfully.
-
-`max_chars`, not `cap_tokens`
------------------------------
-Section 2 calls the per-backend cap certificate `cap_tokens` and gives it the
-catalog's 600 / 800 / 1000 / 1100. **Those numbers are CHARACTERS.** In BookForge
-they are `backends.<arm>.maxChars`, the length of text a voice may be handed; the
-token cap is a different quantity that narrator derives per chunk from the text it
-is actually given (`HiggsBudget.cap_frames`: `int(len(text) / 15.0 * 25 * 1.8) +
-100`, then clamped against the stack's context window by `sgl_served.frame_cap`).
-Writing 800 into a field named `cap_tokens` would hand the engine a frame ceiling
-eight times too small and cut every chunk mid-sentence while the request reported
-success. So the field carries the catalog's name and the catalog's meaning, and
-the token budget stays where it is computed.
-
-`estimate_basis`
-----------------
-Section 2 says a voice with no measured `memory_bytes_estimate` carries no block
-for that backend. Correct in principle and unusable tonight: neither of Owen's
-accelerators is free, so no voice could carry a measured number and the whole job
-type would be untestable. Every block therefore states where its number came
-from — `"measured"` (somebody watched the card) or `"declared"` (the engine's own
-configured reservation, e.g. SGLang's `--mem-fraction-static 0.6`), the latter
-owing an `estimate_note` — and the basis rides on the `/v1/voices` row so nothing
-downstream can mistake one for the other. The model manifests have exactly the
-same problem and do **not** have this field: `models/qwen3.5-9b.toml` carries the
-word MEASURED in a comment no protocol reads. That asymmetry is deliberate for
-now — those numbers really were measured, and changing the model schema is not
-this change — but it is the reason a reader finds provenance in two shapes.
-
-`sampling_reason`
------------------
-Owen's standing rule (`higgs-sampling-default-no-deviation`): 0.8 / 0.95 / 50 is
-*the boson default*, one engine-level number for every Higgs voice on both arms,
-and a per-voice deviation needs a written reason. BookForge enforces this in
-`higgsVoiceCapsForModel`; so does this loader. A backend block whose `sampling`
-differs from its narrator engine's default and does not say why is refused.
-
-Where the voices live
----------------------
-`crucible/voices/` holds only this build's `pins.toml` — Crucible ships no
-voices — and `$CRUCIBLE_VOICES_DIR` replaces it so a test can point at a
-fixture directory.
-
-`load_all_voices()` reads THREE sources, and this file is the owner of what a
-voice MEANS in all three (PHASE21-VOICES-FROM-HF.md): a PIN, whose
-`crucible-voice.toml` comes out of the weights' own repo at the pinned revision
-(`crucible/voicerepo.py`, which translates it into this module's document and
-hands it to the same `_parse`); the ENGINE's own base rows
-(`crucible/engines/<engine>/base.toml`, section 2.6); and this machine's
-overlay. `load_all_voices` documents the precedence and is its one owner.
-
-One consequence for the two blocks below. For a voice that comes out of a REPO
-manifest, `memory_bytes_estimate`, `estimate_basis`, `estimate_note` and
-`[voice.serving]` are not in the file at all — a manifest cannot make a claim
-about a box it has never run on, and the repo schema refuses each of them by
-name. They come from that server's `config.toml` `[tts.<engine>]` table
-(section 2.3), and `voicerepo.merge` fills them in before `_parse` ever sees
-them. The fields, the rules and the refusals here are unchanged; what moved is
-who states the numbers.
-"""
-
 from __future__ import annotations
 
 import os
@@ -92,85 +16,28 @@ from .weights import LOCAL, PINNED
 
 VOICES_DIR_ENV = "CRUCIBLE_VOICES_DIR"
 
-#: The narrator engines a voice may name, and the sampling each one renders at
-#: when a voice says nothing. A deviation from these values owes a
-#: `sampling_reason` — see the module docstring.
-#:
-#: THIS IS THE ONE LIST. `NARRATOR_ENGINES`, the `--narrator-engine` choices,
-#: `/v1/capability`'s `narrator_engines` row and the task door's refusal all
-#: read it, so an engine that is not here cannot be named anywhere.
-#:
-#: A TABLE OF ONE, ON PURPOSE. Owen's ruling of 2026-09-14: "orpheus is
-#: deprecated too but hasn't been removed yet. higgs is the frontier" — "I
-#: guess we can remove it now." Crucible had listed `orpheus` as a servable
-#: narrator engine since PHASE3-TTS.md and would never serve it, which is the
-#: same defect as any other fact with two owners: an operator page drew an
-#: engine picker from this table and offered a choice with no future. It is
-#: still a TABLE and not a constant because a second engine WILL come, and the
-#: shape a new one has to fill is: a row here (its own sampling defaults), a
-#: row in `ttsstream.STREAM_BATCH_WIDTH` (a MEASURED streaming width, never a
-#: guess), a recipe per backend under `envs/tts/`, a row in
-#: `jobenv.CUDA_LINUX_SERVING_STACK` if it starts a server underneath narrator,
-#: and membership of `narratorvoices.DOCUMENT_READERS` if it resolves a voice
-#: by name in a document. `tests/test_narrator_engine.py`'s drift guard
-#: asserts the first three agree.
-#:
-#: higgs-v3: Owen's ruling of 2026-09-12, "Let's set temp to 0.8 across the board
-#: for Higgs in Bookforge. Streaming and rendering both." Recorded with its A/B
-#: in `higgs-models.json`'s `_samplingNote`.
 NARRATOR_ENGINE_SAMPLING: dict[str, dict[str, float]] = {
     "higgs-v3": {"temperature": 0.8, "top_p": 0.95, "top_k": 50},
 }
 
-#: What a voice can BE. `checkpoint` is a merged fine-tune the engine is started
-#: on and prompted text-only; `zeroshot` is base weights conditioned on reference
-#: clips; `token` is a built-in speaker the engine already holds. The three are
-#: not interchangeable and the wire never guesses between them.
 VOICE_KINDS = frozenset({"checkpoint", "zeroshot", "token"})
 
-#: The backends a voice may declare a block for. Unlike a model, a voice does not
-#: name an engine per backend: `narrator_engine` is a property of the VOICE (a
-#: Higgs checkpoint is a Higgs checkpoint on either card), and which stack serves
-#: it on this host — SGLang-Omni or mlx-audio — is narrator's business, not the
-#: manifest's.
 VOICE_BACKENDS = frozenset({CUDA_LINUX, MLX_DARWIN})
 
-#: A `clips` value meaning "this voice id exists so an operator can hand over a
-#: clip that is not published yet; the job must carry them in its `inputs`".
-#: PHASE3-TTS.md section 2's one named exception to clips belonging to the voice.
 CLIPS_FROM_REQUEST = "from-request"
 
 ESTIMATE_BASES = frozenset({"measured", "declared"})
 
-#: How much a backend block's `identity` is worth, and it rides on the
-#: `/v1/voices` row for `estimate_basis`'s reason: a reader must not be able to
-#: mistake one for the other (PHASE18-UNCERTIFIED.md section 3.1). `PINNED` and
-#: `LOCAL` — where the bytes come from — live in `crucible/weights.py`, which is
-#: the module that acts on the difference.
 VERIFIED = "verified"
 ASSERTED = "asserted"
 
-#: WHICH KIND OF FILE A VOICE CAME OUT OF — the `manifest` column on the
-#: `/v1/voices` row (PHASE21-VOICES-FROM-HF.md sections 2.4 and 2.6).
-#:
-#: Every fine-tune is a pin, the base rows are the engine's, and a person's own
-#: file is an override.
 MANIFEST_REPO = "repo"
 MANIFEST_OVERRIDE = "override"
 MANIFEST_ENGINE = "engine"
 
-#: HOW A `[voice.pace]` BAND WAS GOT, and how a `max_chars` was. Both are
-#: certificates the manifest states about its own numbers, both are REQUIRED by
-#: the repo schema, and both ride on the `/v1/voices` row — see
-#: `VoiceManifest.pace_basis` and `VoiceBackendSpec.max_chars_basis` for why
-#: the states they name are real rather than pedantic.
 PACE_BASES = frozenset({"measured", "inherited"})
 MAX_CHARS_BASES = frozenset({"measured", "placeholder"})
 
-#: `pins.toml` IS NOT A VOICE, and it lives in the directory voices are read
-#: from (PHASE21 section 2.2), so the glob that finds `<id>.toml` would find it
-#: and try to load a voice called `pins`. Reserved here, in the module that owns
-#: what a voice id is, rather than filtered at each of the two globs.
 PINS_FILE = "pins.toml"
 RESERVED_VOICE_IDS = frozenset({"pins"})
 
@@ -180,185 +47,38 @@ _VOICE_REQUIRED: dict[str, type] = {
     "kind": str,
     "narrator_engine": str,
     "language": str,
-    # Not in section 2's example, and required here because the `/v1/voices` row
-    # carries it and a client writing FLACs cannot be handed a null sample rate.
-    # It is 24000 for every voice in the catalog, which is exactly the kind of
-    # coincidence that turns into a hard-coded constant if it is not written down
-    # per voice.
     "sample_rate": int,
 }
 
-#: The three rates are a property of the VOICE, measured per voice by BookForge
-#: from clean renders, and they travel as ONE statement: all three or none.
-#: That is narrator's own rule in `engine/higgs/config.py`'s `_length_band`,
-#: which refuses a partial triple by name, and this is the same rule rather
-#: than a second copy of it — the band is a measured pace and the two edges
-#: derived from it, so a subset is a band nobody finished writing.
-#:
-#: OPTIONAL AS A GROUP SINCE 2026-09-18, and the reason is the point of the
-#: block. They were required, and the two voices in this build that are the
-#: BASE WEIGHTS rather than a fine-tune — `higgs-default` and `zeroshot`, which
-#: no ladder has ever been run on — met the requirement by copying narrator's
-#: Higgs v3 defaults out of its source: `HiggsDefaults.CHARS_PER_SEC` 15.0 as
-#: the pace, with `HiggsV3Defaults.MAX_CHARS_PER_SEC` 20.0 and
-#: `MIN_CHARS_PER_SEC` 14.5 as the edges. That is not one fact: 15.0 is the
-#: DIVISOR `cap_frames()` sizes the frame cap against and nothing was ever
-#: measured speaking at it, while the edges were written around a real book
-#: pace nearer 17.2. narrator keeps a band's RATIOS and re-centres them on the
-#: book's running median, and those ratios are 1.333 on the short side against
-#: 1.034 on the long — so after warm-up healthy chunks fell under
-#: `median x 0.967`, were judged run-ons, and went re-roll -> split -> re-roll
-#: to MAX_DEPTH. A manifest states what was measured; with nothing stated
-#: narrator uses its own default band and derives the centre as the geometric
-#: mean of the edges (`truncation.tracker_for`), and that derivation keeps its
-#: one owner. Crucible does not compute a centre.
-#:
-#: `object` rather than `float` because TOML's 16 is an int and its 16.0 is a
-#: float, and a pace that happens to land on a whole number is still a pace.
-#: `_number()` does the real check and refuses a bool, which `isinstance` would
-#: not.
 _PACE_RATES: dict[str, type] = {
     "pace_chars_per_sec": object,
     "max_chars_per_sec": object,
     "min_chars_per_sec": object,
 }
-#: How the client packs to this voice, when the voice has something tighter to
-#: say than its backend's `max_chars`. The catalog has both shapes and never
-#: mixes them: a fine-tune declares a safe band — its training corpus's
-#: interquartile range, measured 2026-09-09 — and packs between its two edges,
-#: while a zero-shot voice declares a single `targetChars` the packer packs to.
-#: A voice declaring neither packs to the arm's `max_chars`, which is what
-#: BookForge does today and is why these are optional: section 2 lists all four
-#: as required, and not one voice in the catalog declares all four.
 _PACE_OPTIONAL: dict[str, type] = {
     "target_chars": int,
     "safe_min_chars": int,
     "safe_max_chars": int,
 }
-#: HOW THE TWO EDGES WERE GOT, stated only when it is not the usual way.
-#:
-#: Every ladder run in this build wrote `max = pace x 1.3` and `min = pace /
-#: 1.3`, so a triple whose two ratios disagree is edges that were not derived
-#: from that pace — the defect of 2026-09-18, where narrator's `CHARS_PER_SEC`
-#: 15.0 sat between `HiggsV3Defaults`' 20.0/14.5 and gave 1.333 long against
-#: 1.034 short. `_check_pace` therefore refuses a lopsided triple by default,
-#: and this key is the manifest saying the lopsidedness is real: a band read
-#: off a distribution's percentiles is lopsided because the distribution is.
-#:
-#: It does NOT reach the wire. Nothing downstream branches on how the edges
-#: were got — narrator keeps the RATIOS whatever produced them — so this is a
-#: statement to this loader and stays here, rather than a seventh `Pace` field
-#: every client must learn to ignore.
 _PACE_EDGES = "edges"
-#: The one word `edges` takes. A closed set, so a typo is refused rather than
-#: read as "not percentile, therefore check the symmetry".
 _PACE_EDGES_WORDS = ("percentile",)
-#: HALF THE LAST PLACE OF A MANIFEST NUMBER. Every rate in this catalog is
-#: written to two decimals (`deathstalker.toml` 15.91 / 20.68 / 12.24), so a
-#: stated rate stands for a real one up to 0.005 either side, and the two
-#: ratios computed from three such numbers cannot be compared for exact
-#: equality. The tolerance in `_check_pace` is this propagated through the two
-#: divisions rather than a round number chosen to make the catalog pass.
 _PACE_HALF_ULP = 0.005
 
-#: `[voice.serving]` — WHAT THE SERVER narrator STARTS IS CONFIGURED WITH.
-#:
-#: REQUIRED of every voice in this build, because every voice in this build
-#: names `higgs-v3` and narrator reads it on that path: `HIGGS_MAX_NUM_SEQS` is
-#: `v3_served.serve_concurrency()`, which refuses BY NAME when it is unset and
-#: is BOTH stage 0's admission width and the width of narrator's own batch.
-#: (It was REFUSED on an `orpheus` voice until 2026-09-14, when that engine
-#: left `NARRATOR_ENGINE_SAMPLING` — see the ruling there. A second engine that
-#: reads no `HIGGS_*` variable brings that refusal back with it, rather than
-#: inheriting a required table it configures nothing with.)
-#:
-#: The NOTE is required with the number for the reason `estimate_note` is: 16
-#: is not an obvious value and it is CONTESTED — the deathstalker cap
-#: certificate was measured at width 64 — so the next person to touch it has to
-#: be able to find out where it came from without a git archaeology session.
-#: (The number itself stays OFF `/v1/voices`: it is engine tuning, the server's
-#: business, and a client has no decision to make with it — see
-#: `crucible/jobs/tts/common.py`'s `voice_rows`.)
-#:
-#: WHO WRITES IT DEPENDS ON WHERE THE VOICE CAME FROM (PHASE21 section 2.3). A
-#: `PUT` override states it itself. A voice that comes out of its own repo does NOT — the repo
-#: schema refuses `[voice.serving]` by name, because the width sizes the server
-#: narrator starts on a particular box — and `voicerepo.merge` fills this table
-#: from that machine's `config.toml` `[tts.<engine>]` before `_parse` runs. The
-#: rules below are the same either way.
 _SERVING_REQUIRED: dict[str, type] = {
     "max_num_seqs": int,
     "max_num_seqs_note": str,
 }
-#: TWO MORE LEVERS ON THE SERVER narrator STARTS, both OPTIONAL and both owing a
-#: note when stated (Owen's ruling of 2026-09-19, PHASE18-UNCERTIFIED.md
-#: section 11, which this decides). Optional because every manifest this build
-#: ships and every Phase 21 repo manifest written so far states neither, and
-#: they must keep loading; absent means what narrator's own launcher already
-#: does, which is a STATED default in a file rather than a number invented here.
-#:
-#: `mem_fraction` -> `HIGGS_SGL_MEM_FRACTION`, SGLang's `--mem-fraction-static`.
-#: narrator's `engine/higgs/launch/serve_higgs_sgl.sh:59` defaults it to 0.60
-#: and its own comment measures that at "~19 GB of a 24.5 GB card at 16 in
-#: flight". The fraction is preallocated as KV ON TOP of 7.7 GiB of weights
-#: whatever the width is, so NARROWING THE BATCH DOES NOT LOWER THIS FLOOR —
-#: which is exactly why it is a field of its own beside the width. Measured by
-#: the ladder's author, 2026-09-19: 0.55 sat at 24.0-24.1 GB on a 24 GB card and
-#: WDDM then pages to host RAM 4-10x slower with NO ERROR; Crucible's own sigma
-#: serve sat at 23,561 MiB of 24,564 at the unset default the same day. 0.48
-#: with width 4 is ~20 GB.
-#:
-#: `context_length` -> `HIGGS_CONTEXT_LENGTH`. SGLang-Omni's
-#: `models/higgs_tts/engine_builder.py` carries `class HiggsTtsEngineBuilder:
-#: context_length = 4096` as a CLASS ATTRIBUTE, which narrator records at
-#: `engine/higgs/sgl_served.py:217-221` with the note that it has "no CLI flag
-#: and no config path". 4096 tokens holds roughly 2,000 characters of prompt
-#: plus its frames, and the ladder's Third Reich bank tops out at 2,008 — so at
-#: the default the longest rungs truncate because the CONTEXT ran out, and a
-#: screen would record that as the VOICE's length wall. Plausible, wrong, and
-#: silent, which is the class of defect this repo keeps finding. A screening
-#: voice states 8192.
-#:
-#: BOTH ARMS, NOT `cuda-linux` ONLY (Owen, 2026-09-19: *"we're going to want to
-#: configure darwin to work the same way. context limits and such."*). So they
-#: are not refused on a voice that declares an `mlx-darwin` block and they are
-#: emitted at every engine start; whether narrator's MLX backend has a knob for
-#: each is NARRATOR's to answer, by name, at load — never by ignoring one.
 _SERVING_OPTIONAL: dict[str, type] = {
-    # `object` for `_PACE_RATES`' reason: TOML's `0.5` is a float and its `1` is
-    # an int, and `_number` is what refuses a bool.
     "mem_fraction": object,
     "mem_fraction_note": str,
     "context_length": int,
     "context_length_note": str,
 }
 
-#: THE SOURCE KEYS, and a block declares EXACTLY ONE of the two shapes
-#: (PHASE18-UNCERTIFIED.md section 3). They are optional here and checked as a
-#: pair below, because "one of these two groups" is not a thing `check_table`
-#: can say.
-#:
-#:     hf_repo + revision    a PIN. Crucible fetches it, stamps it, and the
-#:                           catalog owns the bytes.
-#:     path + identity       a DIRECTORY somebody else put there. Crucible
-#:                           never fetches it, never stamps it, never deletes
-#:                           it, and tolerates it vanishing between jobs.
-#:
-#: The second shape is why a voice can exist at all while Owen's HuggingFace
-#: private storage is full (HIGGS_FIELD_NOTES.md 4n.74 open item (a)) and is
-#: what a screening checkpoint uses, its 8 GiB merge being scratch that is
-#: deleted minutes later.
 _SOURCE_KEYS: dict[str, type] = {
     "hf_repo": str,
     "revision": str,
     "path": str,
-    # WHAT A LOCAL BLOCK CLAIMS TO BE, and the reason it is required of one.
-    # A pin's identity is VERIFIED — the sha is what was fetched — and a
-    # directory's cannot be, so this is the registrant's ASSERTION and the
-    # `/v1/voices` row says so. It is what `fingerprint()` records in place of
-    # a revision, so two screened checkpoints can be told apart in a client's
-    # own output; without it every merge at a reused path would render as the
-    # same voice.
     "identity": str,
 }
 
@@ -371,39 +91,13 @@ _BACKEND_OPTIONAL: dict[str, type] = {
     **_SOURCE_KEYS,
     "estimate_note": str,
     "sampling_reason": str,
-    # The cap certificate for (voice, backend), in CHARACTERS. Per backend and it
-    # must stay per backend: every voice's two blocks carry identical numbers
-    # today, and that is a coincidence of the current catalog rather than a
-    # property of the world — a cap is produced by RENDERING, and the two arms
-    # sample through different implementations of top-k/top-p over different
-    # runtimes.
-    #
-    # OPTIONAL SINCE 2026-09-19, and for `_PACE_RATES`' reason exactly
-    # (PHASE18-UNCERTIFIED.md section 4). A cap is a RESULT — the longest chunk
-    # a sweep on these weights on this arm came back whole from — so a
-    # checkpoint that is being screened has none, and not having one is the
-    # reason it is on the card. Requiring it made a screening voice
-    # inexpressible, which is the circularity section 1 of that document is
-    # about.
-    #
-    # ABSENCE PROPAGATES AS ABSENCE. The `/v1/voices` row reports `max_chars:
-    # null` meaning NOT MEASURED — never the other arm's number, never a
-    # sibling's, never the engine's — `narratorvoices.voice_entry` omits
-    # `maxChars` rather than inventing one, and the render door does not
-    # refuse a chunk by length at all. `max_chars_basis` still governs a cap that IS stated.
     "max_chars": int,
-    # A list of clip tables, or the literal CLIPS_FROM_REQUEST. Required of a
-    # zeroshot voice and refused on any other kind — a checkpoint's voice is in
-    # its weights, and a token voice's is in the engine.
     "clips": object,
 }
 
 _CLIP_REQUIRED: dict[str, type] = {
     "file": str,
     "transcript": str,
-    # `object` for the same reason the pace rates are: a clip that is exactly 15
-    # seconds is written `15` in TOML and is still a duration. `_number()` checks
-    # it, and refuses a bool.
     "seconds": object,
 }
 
@@ -415,16 +109,11 @@ _HF_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 
 
 class VoiceError(CrucibleError):
-    """A voice manifest is missing, unreadable, or does not say what it must say."""
-
-
-# ------------------------------------------------------------------ the shapes
+    ...
 
 
 @dataclass(frozen=True)
 class ReferenceClip:
-    """One reference recording and the book-exact text spoken in it."""
-
     file: str
     transcript: str
     seconds: float
@@ -439,22 +128,6 @@ class ReferenceClip:
 
 @dataclass(frozen=True)
 class Pace:
-    """The band a client packs to, advertised so it can (section 2).
-
-    The server states the shape; the client does the packing. At most one of
-    `target_chars` and the `safe_*` pair is set; with neither, the client packs
-    to the backend's `max_chars` when the manifest states one — see
-    `_PACE_OPTIONAL` and `_BACKEND_OPTIONAL`. With neither of those either, the
-    voice is uncertified and the client packs to its own judgement: the server
-    stopped refusing a chunk by length on 2026-09-19.
-
-    THE THREE RATES ARE ALL THREE OR ALL NONE (`_PACE_RATES`). `None` is a
-    voice nobody measured, and it means exactly that rather than a default
-    standing in for one: a client reading it derives nothing here, and narrator
-    reaches for its engine's own band. A caller may test any one of the three
-    to know which it has.
-    """
-
     pace_chars_per_sec: float | None
     max_chars_per_sec: float | None
     min_chars_per_sec: float | None
@@ -475,39 +148,18 @@ class Pace:
 
 @dataclass(frozen=True)
 class VoiceBackendSpec:
-    """One `[voice.backends.<kind>]` block."""
-
     backend: str
-    #: Set together, and None on a local block. See `_SOURCE_KEYS`.
     hf_repo: str | None
     revision: str | None
-    #: Set together, and None on a pinned block.
     path: str | None
     identity: str | None
     memory_bytes_estimate: int
     estimate_basis: str
     estimate_note: str | None
-    #: The per-chunk cap in CHARACTERS, or None because nobody measured one —
-    #: see `_BACKEND_OPTIONAL`. Never stood in for: the render door does not
-    #: refuse by length (PHASE18-UNCERTIFIED.md section 4), and every reader
-    #: downstream omits the number rather than choosing one.
     max_chars: int | None
     sampling: dict[str, float]
     sampling_reason: str | None
-    #: The clips this voice is conditioned on, `CLIPS_FROM_REQUEST`, or None for
-    #: a voice that carries none.
     clips: tuple[ReferenceClip, ...] | str | None
-    #: HOW `max_chars` WAS GOT — `"measured"` (a sweep was run on these weights
-    #: on this arm) or `"placeholder"` (a number somebody wrote down so the arm
-    #: could be served at all). PHASE21 section 2.1.
-    #:
-    #: `None` means THIS MANIFEST'S SCHEMA CANNOT SAY, which is a different
-    #: statement from either word and is what every manifest written before the
-    #: repo schema reports: `voices/*.toml` has no such key, so a value here
-    #: would be this loader deciding which of the two a number was. It rides on
-    #: the `/v1/voices` row for `estimate_basis`'s reason — thirdreich shipped
-    #: `higgs_max_chars_mlx: 900`, a placeholder nobody measured, and a schema
-    #: that cannot say so ships it as a measured fact.
     max_chars_basis: str | None = None
 
     @property
@@ -516,64 +168,22 @@ class VoiceBackendSpec:
 
     @property
     def source(self) -> str:
-        """`"pinned"` or `"local"`. `_parse` has already refused everything else."""
         return PINNED if self.hf_repo is not None else LOCAL
 
     @property
     def identity_basis(self) -> str:
-        """How much the `identity` on the row is worth.
-
-        `"verified"` for a pin — the sha is what `snapshot_download` fetched and
-        what the stamp records. `"asserted"` for a path — the registrant said so
-        and nothing checked. The distinction rides on the row for
-        `estimate_basis`'s reason: a reader must not be able to mistake one for
-        the other, and asserted identity is the honest shape for a directory
-        whose bytes this server did not fetch.
-        """
         return VERIFIED if self.hf_repo is not None else ASSERTED
 
     @property
     def weights_identity(self) -> str:
-        """WHAT THIS BLOCK SAYS ITS WEIGHTS ARE — the pin's sha, or the local
-        block's asserted `identity`.
-
-        One reader for one fact. Four places want it — `fingerprint()`, the
-        `/v1/voices` row, the render's provenance sidecar and the resident
-        record `residency.ResidentVoice` — and a copy of `revision if revision
-        is not None else identity` in each is four chances to leave one of them
-        reporting `None` for a voice whose identity was stated. Two of the four
-        were left reading `spec.revision` when the source axis first landed, and
-        both published a `fingerprint` naming a checkpoint beside a `revision`
-        of null: one record, two answers, which is the failure `identity_basis`
-        exists to make impossible.
-
-        Never None: `_check_source` has already refused a block that sets
-        neither.
-        """
         return self.revision if self.revision is not None else self.identity
 
     @property
     def local_path(self) -> Path | None:
-        """The directory this block names, or None for a pin.
-
-        `crucible/weights.py` asks every spec this through `getattr`, because
-        only a VOICE can be local today: a model is a catalog subject with a
-        download, an installer and a host migration behind it, and none of
-        those have been designed for bytes Crucible does not own.
-        """
         return None if self.path is None else Path(self.path)
 
     @property
     def files(self) -> tuple[str, ...]:
-        """Empty: this backend fetches the WHOLE repo.
-
-        `crucible/weights.py`'s `WeightsSource` asks every spec this, and the
-        empty tuple is a real answer and not a gap — it is what "there is no
-        file to choose, the repository IS the weights" reads as. Only
-        `llama-windows` names files (one GGUF, and a projector beside it for a
-        vision model), because a GGUF repo holds twenty quantizations and
-        pulling all of them is hundreds of gigabytes.
-        """
         return ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -603,33 +213,14 @@ class VoiceBackendSpec:
 
 @dataclass(frozen=True)
 class Serving:
-    """`[voice.serving]` — the one number the SERVER under narrator is sized by.
-
-    Not `[voice.pace]`'s neighbour by accident, and not its twin either: pace
-    is what a CLIENT packs to and is published on `/v1/voices`; this is what
-    the ENGINE admits and is never published. It is per VOICE rather than per
-    backend because the value is a property of the stack narrator starts for
-    Higgs v3 and the card it starts it on, and every Higgs voice on a given
-    host shares both.
-    """
-
     max_num_seqs: int
     max_num_seqs_note: str
-    #: SGLang's `--mem-fraction-static`, or None meaning the launcher's own
-    #: default (0.60, `serve_higgs_sgl.sh:59`). See `_SERVING_OPTIONAL`.
     mem_fraction: float | None = None
     mem_fraction_note: str | None = None
-    #: The engine's context in TOKENS, or None meaning the Higgs builder's
-    #: hard-coded 4096. See `_SERVING_OPTIONAL`.
     context_length: int | None = None
     context_length_note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        # EVERY KEY ALWAYS, `null` for a lever nobody set. An absent key on this
-        # row would mean "this build does not have the field", which is a
-        # different statement from "this voice takes the launcher's default",
-        # and an operator comparing two servers needs to be able to tell them
-        # apart.
         return {
             "max_num_seqs": self.max_num_seqs,
             "max_num_seqs_note": self.max_num_seqs_note,
@@ -642,16 +233,7 @@ class Serving:
 
 @dataclass(frozen=True)
 class Take:
-    """One rung of the retake ladder: what take N means for this voice.
-
-    A job carries `take: N` and nothing else about sampling. The client decides
-    *that* a row needs another take; the server decides what take N *is*
-    (PHASE3-TTS.md section 3).
-    """
-
     index: int
-    #: Sampling keys this take overrides. Empty for take 0, the no-deviation
-    #: default.
     overrides: dict[str, float]
     reason: str | None
 
@@ -672,70 +254,25 @@ class VoiceManifest:
     language: str
     sample_rate: int
     pace: Pace
-    #: `[voice.serving]`, or None for a voice whose engine reads no `HIGGS_*`
-    #: variable. Required of every `higgs-v3` voice — see `_SERVING_REQUIRED`.
-    #: `higgs-v3` is the only engine in this build, so None is what the next
-    #: engine will need rather than a shape any manifest has today.
     serving: Serving | None
     backends: dict[str, VoiceBackendSpec]
     takes: tuple[Take, ...]
     path: Path
-    #: WHICH KIND OF FILE THIS VOICE CAME OUT OF (PHASE21 section 2.4), on the
-    #: `/v1/voices` row as `manifest`. `MANIFEST_REPO` is a `crucible-voice.toml`
-    #: in the weights' own repo at the pinned revision — the shape Phase 21
-    #: exists to make ordinary; `MANIFEST_OVERRIDE` is a whole manifest written
-    #: to this machine through `PUT /v1/voices/{id}`; `MANIFEST_ENGINE` is the
-    #: engine's own base behaviour, which is not a voice anybody trains
-    #: (section 2.6).
     manifest_source: str = MANIFEST_OVERRIDE
-    #: HOW THE PACE BAND WAS GOT — `"measured"` or `"inherited"` — or None
-    #: because this manifest's schema cannot say (`voices/*.toml` has no such
-    #: key) or because there is no band. deathstalker's 16.64 survived onto
-    #: weights that measured 15.91 precisely because an inherited pace is
-    #: indistinguishable from a measured one at the point of use; this is the
-    #: field that tells them apart, and it rides on the row.
     pace_basis: str | None = None
-    #: WHERE AN INHERITED PACE CAME FROM, in prose — the run and checkpoint the
-    #: number was measured on, and why it was not measured on these weights. None
-    #: unless `pace_basis` is `"inherited"`.
-    #:
-    #: RULED 2026-09-19, and it mirrors `estimate_basis` exactly: a `declared`
-    #: estimate REQUIRES its note and a `measured` one refuses it, because each
-    #: basis owes its own sentence and no other. The reason it matters here is
-    #: that "inherited" covers two situations a reader must be able to tell
-    #: apart. An inherited pace from a SIBLING checkpoint of the same corpus is
-    #: near enough — mistborn measured 13.29, 13.33 and 13.76 across three
-    #: retrains. An inherited pace from a DIFFERENT corpus two versions back is
-    #: the deathstalker defect: 16.64 carried from `ds_v5_prod` onto weights
-    #: that measured 15.91, 4.4% fast, enough to mis-size narrator's duration
-    #: guard from the first chunk. The word alone cannot separate them; the
-    #: sentence can, so the sentence is required and rides on the row.
     inherited_from: str | None = None
-    #: `[voice] weights_of`: the voice whose download these weights ARE, or None
-    #: for a voice that owns its own. Added 2026-09-24 (Owen: "lets reduce it to
-    #: a single copy of everything"): `zeroshot` and `higgs-default` both sit on
-    #: the Higgs base checkpoint at one pin and had each pulled 9.3 GB of it.
-    #: `crucible/weights.py` stores an alias in its base's folder (`_store_id`).
     weights_of: str | None = None
-    #: The base voice, attached by `load_all_voices`. None exactly where
-    #: `weights_of` is.
     weights_base: "VoiceManifest | None" = field(default=None, compare=False, repr=False)
 
-    #: Which subtree of `~/.crucible/` this thing's weights live under. A voice id
-    #: and a model id are separate namespaces and must not be able to collide on
-    #: disk — see `crucible/weights.py`.
     weights_family = "voices"
 
     def extra_files(self, backend_kind: str) -> tuple[str, ...]:
-        """What an alias owns beyond its base's folder: nothing. A voice's block
-        is a whole-repo download, so an alias shares the base's folder whole."""
         return ()
 
     def supports(self, backend_kind: str) -> bool:
         return backend_kind in self.backends
 
     def spec(self, backend_kind: str) -> VoiceBackendSpec:
-        """The block for `backend_kind`, or a named refusal."""
         found = self.backends.get(backend_kind)
         if found is None:
             raise VoiceError(
@@ -745,30 +282,6 @@ class VoiceManifest:
         return found
 
     def take(self, index: int) -> Take:
-        """What take `index` MEANS for this voice: the declared rung, or none.
-
-        **Within the declared ladder** the answer is that rung, as it always
-        was. **At or past its end** the answer is a rung with no overrides —
-        take 0's sampling, in take `index`'s own seed lane. That is not a
-        clamp and the distinction is the whole of the 2026-09-19 ruling
-        (PHASE18-UNCERTIFIED.md section 5): a clamp would render take 2's
-        NUMBERS and call them take 4, which is the silent substitution this
-        door exists to prevent; this renders the voice's own sampling in a lane
-        nothing else draws in, because narrator seeds
-        `base + index + REROLL_SEED_STRIDE * (TAKE_REROLL_LANES * take +
-        attempt)` and the `take` on every item is the one asked for.
-
-        It is NOT the last rung's override, and the difference is the ladder.
-        A screening sweep names takes 0..N on a voice that declares no
-        `[[voice.takes]]` at all and needs all N+1 to be the same sampling —
-        the matched-cell property its Wilson-bound comparison rests on — so
-        "past the end" must mean the voice's own numbers. BookForge's retake
-        ladder climbs DECLARED rungs and stops where they stop; past that it is
-        asking for another draw, which is what it gets.
-
-        A NEGATIVE index is refused — it is not a lane, it is a bug in the
-        caller — and no door can reach it: both carry `Field(ge=0)`.
-        """
         if index < 0:
             raise VoiceError(
                 f"voice {self.id!r}: take {index} is below take 0. A take names "
@@ -779,46 +292,9 @@ class VoiceManifest:
         return self.takes[index]
 
     def applied_sampling(self, backend_kind: str, take: int) -> dict[str, float]:
-        """THE FULL TRIPLE a render at `take` actually samples with.
-
-        The backend block's own `sampling` — which is take 0, and which
-        `narratorvoices.voice_entry` sends on the load as the engine's override
-        — with this take's rung laid over it key by key, the same way narrator's
-        `item_sampling` lays the per-item keys over the loaded numbers. So this
-        is a statement about what the ENGINE will do, assembled from the two
-        halves Crucible sends it, rather than a restatement of either.
-
-        **Whole, never the override alone.** `take_sampling` deliberately
-        returns only the keys a rung declares, because sending the other two
-        back at take 0's values would be Crucible restating numbers it was not
-        asked about. That is right for the WIRE and wrong for a RECORD: a run
-        that logged `{temperature: 0.7}` says nothing about the top-p and top-k
-        it ran at, and those are exactly what a ladder's comparison rests on.
-
-        The reason it exists at all (2026-09-19): sampling lives on the
-        manifest, so a manifest edited between two runs produces two
-        incomparable records that both claim "take 0" and both look right. Every
-        Higgs measurement before 2026-09-06 was rendered at temperature 1.0 and
-        is comparable to nothing since; the prior ladder record had to be marked
-        "at the wrong temperature" once already when the default moved. A job's
-        result that names its own numbers makes the next such move visible.
-
-        Manifest spelling (`top_p`, `top_k`), not narrator's — this is a fact
-        about the voice, and `narratorvoices` owns the translation to the wire.
-        """
         return {**self.spec(backend_kind).sampling, **self.take(take).overrides}
 
     def fingerprint(self, backend_kind: str) -> str:
-        """`<id>@<identity>` — what a render records as the voice it used.
-
-        The identity is the PIN's sha for a pinned block and the block's own
-        asserted `identity` for a local one. Same shape either way, and
-        deliberately: a client comparing two renders is asking "were these the
-        same weights", and that question has an answer in both cases. How much
-        the answer is worth is `identity_basis` on the row, not a second
-        spelling here — two fingerprint formats would make every consumer
-        parse before it could compare.
-        """
         return f"{self.id}@{self.spec(backend_kind).weights_identity}"
 
     def to_dict(self) -> dict[str, Any]:
@@ -839,38 +315,18 @@ class VoiceManifest:
         }
 
 
-# ------------------------------------------------------------------ locating
-
-
 def home_voices_dir() -> Path:
-    """`<CRUCIBLE_HOME>/voices` — this machine's own voices. May not exist."""
     from .config import crucible_home
 
     return crucible_home() / "voices"
 
 
 def voices_dir_is_overridden() -> bool:
-    """Is `$CRUCIBLE_VOICES_DIR` set, i.e. does it REPLACE the whole catalog?
-
-    Asked by three readers now rather than one, so it is stated once. The
-    variable's meaning has always been *"run this exact set and nothing else"*,
-    and PHASE21 gives a host two more sources of a voice — the pins and the
-    engine's base rows — that "nothing else" has to cover, or the escape hatch
-    would quietly stop being one.
-    """
     override = os.environ.get(VOICES_DIR_ENV)
     return override is not None and override != ""
 
 
 def voice_dirs() -> tuple[Path, ...]:
-    """Every directory voice manifests are read from.
-
-    `<CRUCIBLE_HOME>/voices/*.toml` — drop a file in, restart the engine, and it
-    serves, with no release, no pack, no version. Owen, 2026-09-16: *"i train
-    models all the time. nearly every night."*
-
-    `CRUCIBLE_VOICES_DIR` REPLACES it: "run this exact set and nothing else".
-    """
     override = os.environ.get(VOICES_DIR_ENV)
     if override is not None and override != "":
         return (voices_dir(),)
@@ -879,41 +335,20 @@ def voice_dirs() -> tuple[Path, ...]:
 
 
 def engine_voices_dir() -> Path:
-    """`crucible/engines/` — where an ENGINE's own base rows live.
-
-    ONE PLACE, ON PURPOSE (PHASE21 section 2.6, ruling 1 still Owen's).
-    `higgs-default` and `zeroshot` sit on `bosonai/higgs-tts-3-4b`, which is not
-    ours and cannot carry a `crucible-voice.toml`; they are not voices anybody
-    trains but the engine's own base behaviour — the token default narrator
-    renders with on the mlx arm, and "clips from the request". So they stay
-    packaged, and they stay packaged HERE rather than among the voices, so that
-    "Crucible ships no voices" is exactly true of voices.
-
-    If Owen takes the alternative — a manifest-only repo of ours pointing at
-    Boson's weights — this function and `engine_voices_path` are the whole of
-    what moves.
-    """
     return Path(__file__).resolve().parent / "engines"
 
 
 def engine_voices_path(narrator_engine: str) -> Path:
-    """The `base.toml` for one narrator engine. May not exist."""
     return engine_voices_dir() / narrator_engine / "base.toml"
 
 
 def voices_dir() -> Path:
-    """Where this build's `pins.toml` lives. Refuses if absent.
-
-    `CRUCIBLE_VOICES_DIR` replaces it wholesale. For the voice manifests
-    themselves, callers want `voice_dirs()`.
-    """
     override = os.environ.get(VOICES_DIR_ENV)
     if override is not None and override != "":
         path = Path(override).expanduser()
         if not path.is_dir():
             raise VoiceError(f"{VOICES_DIR_ENV}={override!r} is not a directory")
         return path
-    # voices/ sits beside the crucible package in the checkout.
     path = Path(__file__).resolve().parent / "voices"
     if not path.is_dir():
         raise VoiceError(
@@ -923,11 +358,7 @@ def voices_dir() -> Path:
     return path
 
 
-# ------------------------------------------------------------------ checking
-
-
 def _number(where: str, key: str, value: Any) -> float:
-    """A TOML int or float as a float. A bool is not a number."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise VoiceError(
             f"{where}: {key} must be a number, got {type(value).__name__}"
@@ -951,9 +382,6 @@ def _check_pace(where: str, table: dict[str, Any]) -> Pace:
             "got, and a word this loader does not know would silently read as "
             "'derived from the pace'"
         )
-    # ALL THREE OR NONE, refused by name on the subset — narrator's `_length_band`
-    # refuses the same subset with the same sentence, and a manifest that got past
-    # this door would only be refused later, at the engine, on somebody's book.
     stated = set(_PACE_RATES) & set(table)
     if stated and stated != set(_PACE_RATES):
         raise VoiceError(
@@ -967,12 +395,6 @@ def _check_pace(where: str, table: dict[str, Any]) -> Pace:
         for key, value in rates.items():
             if value <= 0:
                 raise VoiceError(f"{where}: {key} must be positive, got {value}")
-        # min < pace < max, narrator's own rule (`engine/higgs/config.py`
-        # `_length_band`): the band is the measured pace and the two edges DERIVED
-        # from it, so a pace outside its own edges is a band nobody finished
-        # writing. narrator keeps only the band's RATIOS and re-centres them on the
-        # running median of the book's own shipped takes, which it cannot do
-        # without knowing what the edges were centred on.
         if not (
             rates["min_chars_per_sec"]
             < rates["pace_chars_per_sec"]
@@ -985,22 +407,6 @@ def _check_pace(where: str, table: dict[str, Any]) -> Pace:
                 "the band is min < pace < max"
             )
 
-        # THE TWO EDGES ARE DERIVED FROM THE PACE, so the band is symmetric in
-        # ratio — every ladder run in this build wrote `max = pace x 1.3` and
-        # `min = pace / 1.3`, and the five fine-tunes here all measure 1.30 on
-        # both sides. A triple whose ratios disagree is edges that came from
-        # somewhere else: the 15.0 / 20.0 / 14.5 that shipped until 2026-09-18
-        # passed `min < pace < max` and was still a splice of two different
-        # centres, 1.333 long against 1.034 short. narrator keeps only the
-        # RATIOS (`engine/higgs/truncation.PaceTracker`), so a lopsided pair
-        # re-centred on the book's running median judged healthy chunks run-ons
-        # and re-rolled them to MAX_DEPTH — a band nobody can read as a band.
-        #
-        # The tolerance is the rounding, not a fudge: each rate is written to
-        # two decimals, so it stands for a real number within `_PACE_HALF_ULP`,
-        # and that uncertainty propagates through each division as
-        # `half_ulp x (1 + ratio) / divisor` — the divisor's own rounding
-        # scaled by the ratio, plus the numerator's. Nothing wider.
         long_side = rates["max_chars_per_sec"] / rates["pace_chars_per_sec"]
         short_side = rates["pace_chars_per_sec"] / rates["min_chars_per_sec"]
         rounding = _PACE_HALF_ULP * (1 + long_side) / rates[
@@ -1017,9 +423,6 @@ def _check_pace(where: str, table: dict[str, Any]) -> Pace:
                 f'instead says so with {_PACE_EDGES} = "percentile"'
             )
     elif edges is not None:
-        # An `edges` with no edges to describe. It is the leftover of a triple
-        # somebody deleted, and left alone it reads as a band this loader
-        # checked and passed.
         raise VoiceError(
             f"{where}: states {_PACE_EDGES} = {edges!r} but states no rate "
             "band for it to describe; the key says how max_chars_per_sec and "
@@ -1066,9 +469,6 @@ def _check_pace(where: str, table: dict[str, Any]) -> Pace:
 
 @dataclass(frozen=True)
 class _Source:
-    """The four source fields after `_check_source` has settled which shape a
-    block is. Exactly one pair is set."""
-
     hf_repo: str | None
     revision: str | None
     path: str | None
@@ -1076,39 +476,14 @@ class _Source:
 
 
 def _blank(value: Any) -> bool:
-    """True for a key that is absent or is whitespace.
-
-    An EMPTY STRING IS NOT A DECLARATION. `path = ""` reads as "this block
-    declares a path" to `in`, and would then be refused for not being
-    absolute — a confusing second-order message about a block that really
-    declared no source at all. Treated as absent so the refusal names the
-    actual problem.
-    """
     return value is None or (isinstance(value, str) and value.strip() == "")
 
 
 def _is_absolute(value: str) -> bool:
-    """Absolute in EITHER flavour, and that is deliberate.
-
-    A `cuda-linux` block names a POSIX path and an `mlx-darwin` block names
-    one too, but the loader that reads them may be running on Windows — a
-    test, `crucible voices show`, or an operator checking a manifest before
-    sending it to the machine that will serve it. `Path('/home/x')
-    .is_absolute()` is FALSE on Windows (no drive letter), so asking the host
-    would refuse a perfectly good Linux manifest for being on the wrong
-    machine.
-    """
     return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
 
 
 def _check_source(where: str, block: dict[str, Any]) -> _Source:
-    """Which of `_SOURCE_KEYS`' two shapes this block is, or a named refusal.
-
-    EXACTLY ONE, and both halves of the refusal are named rather than sharing
-    a "bad source" message: a block with both has two answers to "where are
-    these weights" and a block with neither has none, and they are different
-    mistakes to have made.
-    """
     pinned = not _blank(block.get("hf_repo"))
     local = not _blank(block.get("path"))
 
@@ -1191,15 +566,8 @@ def _check_source(where: str, block: dict[str, Any]) -> _Source:
 def _check_sampling(
     where: str, block: dict[str, Any], narrator_engine: str
 ) -> tuple[dict[str, float], str | None]:
-    """The block's sampling, and its reason when it deviates from the engine's."""
     default = NARRATOR_ENGINE_SAMPLING[narrator_engine]
     table = block["sampling"]
-    # `sampling` REPLACES the engine's table rather than merging into it: narrator
-    # warns about exactly this, because a block stating only `repetition_penalty`
-    # would otherwise leave the rest to be filled in by something, and on SGLang
-    # an unfilled top_k samples the untruncated 1026-way codebook tail (measured:
-    # one chunk running to the cap with 80 s of silence). So every key the engine
-    # takes must be present, and no key it does not take may be.
     check_table(
         f"{where} sampling",
         table,
@@ -1276,12 +644,6 @@ def _check_clips(where: str, block: dict[str, Any], kind: str) -> Any:
                 "dies after the server has already spent five minutes coming up"
             )
         if entry["transcript"].strip() == "":
-            # narrator refuses this at construction too
-            # (`narrator/engine/protocol.py`, ReferenceClip), and for the reason
-            # written there: the transcript is the BOOK-EXACT text the clip was cut
-            # from and never an ASR guess, because a zero-shot clone conditioned on
-            # a wrong or absent transcript is a whole book in a subtly wrong voice,
-            # reported as success.
             raise VoiceError(
                 f"{at}: has no transcript. A reference clip is only usable with the "
                 "book-exact text spoken in it — the corpus row, or the narration "
@@ -1299,21 +661,6 @@ def _check_clips(where: str, block: dict[str, Any], kind: str) -> Any:
 def _check_serving(
     path: Path, voice: dict[str, Any], narrator_engine: str
 ) -> Serving | None:
-    """`[voice.serving]`: required for `higgs-v3`, refused for any other engine.
-
-    THE NUMBER narrator REFUSES TO RENDER WITHOUT. `HIGGS_MAX_NUM_SEQS` is
-    stage 0's `max_num_seqs` on the vllm-omni stack AND the width of narrator's
-    own batch (`v3_served.serve_concurrency()`, which raises by name when it is
-    unset — "a guessed width is either a server idling at 1 or a queue the
-    render never asked for"). Crucible states it from here.
-
-    REFUSED ON AN ENGINE THAT READS NO `HIGGS_*` VARIABLE rather than ignored,
-    because a number in that manifest would be a lever that reports success —
-    the exact shape of the defect the whole BookForge serving block was until
-    2026-09-05, when it declared a configuration nothing applied. `higgs-v3` is
-    the only engine `NARRATOR_ENGINE_SAMPLING` names today, so this refusal is
-    the rule a second engine arrives into rather than one any manifest trips.
-    """
     where = f"{path.name} [voice.serving]"
     block = voice.get("serving")
     if narrator_engine != "higgs-v3":
@@ -1388,15 +735,6 @@ def _check_serving(
 def _check_serving_extra(
     where: str, block: dict[str, Any], key: str, why: str
 ) -> Any:
-    """One optional serving lever and its note, or None because neither is there.
-
-    `max_num_seqs`'s rule, applied to the two levers added on 2026-09-19: a
-    number here reconfigures the server narrator starts, and a reader of a
-    `/v1/voices` row has to be able to find out where it came from. A note with
-    no number is refused as the leftover it is — the same sentence
-    `_check_pace` gives its `edges` key, and `voicerepo._check_arm_cap` gives
-    `max_chars_basis`.
-    """
     note_key = f"{key}_note"
     value = block.get(key)
     note = block.get(note_key)
@@ -1420,7 +758,6 @@ def _check_serving_extra(
 def _check_takes(
     path: Path, document: dict[str, Any], narrator_engine: str
 ) -> tuple[Take, ...]:
-    """The retake ladder. Take 0 exists whether or not the file declares it."""
     declared = document.get("takes")
     default = NARRATOR_ENGINE_SAMPLING[narrator_engine]
     if declared is None:
@@ -1452,27 +789,6 @@ def _check_takes(
                 "draw every render starts from; a ladder whose first rung is "
                 "already a deviation has no baseline to climb from"
             )
-        # A NUMBERLESS RUNG ABOVE 0 IS LEGAL SINCE 2026-09-19, and the rule it
-        # replaces was true when it was written (PHASE18-UNCERTIFIED.md
-        # section 5). It read: "take N changes nothing. A rung that is the same
-        # sampling as the one below it is a different DRAW, which is what a
-        # re-roll is for" — and that was correct while a take could not move
-        # the seed. Since 2026-09-15 it can: narrator draws
-        # `base + index + REROLL_SEED_STRIDE * (TAKE_REROLL_LANES * take +
-        # attempt)` (`engine/higgs/truncation.py`), so take 1 with no numbers at
-        # all is a DIFFERENT draw at IDENTICAL sampling. narrator's own
-        # `item_sampling.py` says so and hands the decision over verbatim:
-        # "whether to allow it is Crucible's ruling, not narrator's."
-        #
-        # And the screening ladder needs exactly this rung and no other. Its
-        # takes must be PURE seed lanes — every band in the record, back to
-        # thirdreich's 500-800, was measured at 0.8/0.95/50 — so a sweep whose
-        # take 1 carried a declared deviation would measure four sampling
-        # points rather than four draws of one.
-        #
-        # The two rules that survive are the ones about what a rung SAYS, not
-        # about whether it differs: take 0 may not deviate, and a deviation
-        # owes its reason.
         if overrides and (reason is None or reason.strip() == ""):
             raise VoiceError(
                 f"{at}: deviates from the {narrator_engine} default "
@@ -1539,19 +855,6 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
             f"{voice['sample_rate']}"
         )
 
-    # THE TABLE ITSELF IS OMISSIBLE SINCE 2026-09-19, and an absent
-    # `[voice.pace]` means exactly what an empty one means: this voice states
-    # no band and no packing hint (PHASE18-UNCERTIFIED.md section 4.1). It used
-    # to be refused — "missing the [voice.pace] table" — which, with the three
-    # rates optional as a group since 2026-09-18, was the last thing making a
-    # screening checkpoint inexpressible: the only way past it was an empty
-    # table written to satisfy a door, which is a manifest saying something to
-    # a parser rather than about a voice.
-    #
-    # An absent table is NOT a band of zeros and NOT an inherited one. A pace
-    # is the median chars/s over a run's clean renders, so a checkpoint that
-    # has never been rendered has none, and deathstalker's 16.64 — carried onto
-    # weights that measured 15.91 — is what inheriting one costs.
     if "pace" in voice and not isinstance(voice["pace"], dict):
         raise VoiceError(f"{path.name}: [voice.pace] must be a table")
     pace = _check_pace(f"{path.name} [voice.pace]", voice.get("pace", {}))
@@ -1611,8 +914,6 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
                 "number owes, and a row carrying one for a measured number would "
                 "read as an excuse"
             )
-        # A CAP THAT IS STATED IS CHECKED EXACTLY AS IT ALWAYS WAS; a cap that
-        # is absent has nothing to check, and nothing here substitutes one.
         max_chars = block.get("max_chars")
         if max_chars is not None:
             if max_chars <= 0:
@@ -1671,21 +972,6 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
 
 
 def voice_document(manifest: VoiceManifest) -> tuple[dict[str, Any], list[str]]:
-    """The LOCAL manifest document that parses back to `manifest`, and what it cannot say.
-
-    `_parse`'s exact inverse, so whatever a voice's settings came out of (a
-    repo's `crucible-voice.toml` at a pin, this machine's override, an engine
-    base row) they can be read, edited and written back as an override through
-    `PUT /v1/voices/{id}` with a `voice` body. The operator console's Voices
-    panel is its reason (Owen, 2026-09-26: *"it should be possible to do
-    directly by the user"*).
-
-    THE SECOND VALUE IS NEVER DROPPED SILENTLY: the facts a repo manifest
-    carries that the local schema has no key for (`pace_basis`,
-    `inherited_from`, per-arm `max_chars_basis`), each named with its value, so
-    a person turning a pinned voice into an override is told what the override
-    will no longer say. `voicecard.export_manifest`'s rule, the other way round.
-    """
     voice: dict[str, Any] = {
         "id": manifest.id,
         "display": manifest.display,
@@ -1735,8 +1021,6 @@ def voice_document(manifest: VoiceManifest) -> tuple[dict[str, Any], list[str]]:
         backends[kind] = block
     voice["backends"] = backends
 
-    # Take 0 alone is what an absent ladder means (`_check_takes`), so it is
-    # written as absent: a file that states it would parse the same and say more.
     if manifest.takes != (Take(index=0, overrides={}, reason=None),):
         rungs = []
         for take in manifest.takes:
@@ -1757,17 +1041,7 @@ def voice_document(manifest: VoiceManifest) -> tuple[dict[str, Any], list[str]]:
     return {"voice": voice}, not_carried
 
 
-# ------------------------------------------------------------------- loading
-
-
 def _resolve_weights_of(voices: dict[str, VoiceManifest]) -> dict[str, VoiceManifest]:
-    """Every alias with its base attached, or a refusal naming the broken rule.
-
-    AFTER the merge of every source, because a voice's base may come from another
-    source than the voice itself. The rules are `crucible/manifests.py`'s
-    `resolve_weights_of`: the base is served here, is not itself an alias, and
-    pins the same repo and revision on every backend the alias declares.
-    """
     resolved: dict[str, VoiceManifest] = {}
     for voice_id, voice in voices.items():
         if voice.weights_of is None:
@@ -1801,14 +1075,12 @@ def _resolve_weights_of(voices: dict[str, VoiceManifest]) -> dict[str, VoiceMani
 
 
 def voice_aliases_of(base: VoiceManifest) -> tuple[VoiceManifest, ...]:
-    """Every served voice whose `weights_of` names this one."""
     if base.weights_of is not None:
         return ()
     return tuple(v for v in load_all_voices().values() if v.weights_of == base.id)
 
 
 def parse_voice(text: str, path: Path, expected_id: str) -> VoiceManifest:
-    """Parse and validate one voice manifest's text. Raises VoiceError by name."""
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -1817,12 +1089,6 @@ def parse_voice(text: str, path: Path, expected_id: str) -> VoiceManifest:
 
 
 def unserved_pins() -> dict[str, tuple[str, str]]:
-    """Pinned voices this host cannot serve and nothing else describes.
-
-    `{id: (revision, why)}`: the pin's own refusal, by name, for a voice whose id
-    no other source (engine, this machine's override) serves either.
-    A refused pin shadowed by an override is not listed: that voice serves.
-    """
     from . import voicerepo
 
     _, refused = voicerepo.load_pinned()
@@ -1835,19 +1101,6 @@ def unserved_pins() -> dict[str, tuple[str, str]]:
 
 
 def load_voice(voice_id: str, directory: Path | None = None) -> VoiceManifest:
-    """The manifest for `voice_id`, from whichever source this host has for it.
-
-    ONE PRECEDENCE, ONE OWNER. With no `directory` this is a lookup in
-    `load_all_voices()` rather than a second search of its own: the two used to
-    walk `voice_dirs()` from opposite ends and agreed only because there were
-    two directories, and PHASE21 makes three sources of a voice (a pin, the
-    engine's base rows, this machine's overlay). A second hand-written order
-    over three sources is two answers to "which manifest is
-    this voice", which is the whole of ARCHITECTURE.md section 1.
-
-    `directory` still reads exactly that directory and nothing else, because
-    that is what `_voices_in` and `--voices-dir` mean.
-    """
     if directory is not None:
         found = _load_voice_file(directory / f"{voice_id}.toml", voice_id)
         if found.weights_of is None:
@@ -1858,8 +1111,6 @@ def load_voice(voice_id: str, directory: Path | None = None) -> VoiceManifest:
     if found is None:
         unserved = unserved_pins().get(voice_id)
         if unserved is not None:
-            # Its own refusal, not "no manifest": the voice IS pinned here and
-            # the reason it cannot be served is the one a person must act on.
             raise VoiceError(unserved[1])
         where = ", ".join(str(r) for r in voice_dirs()) or str(home_voices_dir())
         raise VoiceError(
@@ -1870,7 +1121,6 @@ def load_voice(voice_id: str, directory: Path | None = None) -> VoiceManifest:
 
 
 def _load_voice_file(path: Path, voice_id: str) -> VoiceManifest:
-    """One `<id>.toml` off the disk, refused by name if it is not there."""
     if not path.is_file():
         known = (
             sorted(p.stem for p in path.parent.glob("*.toml"))
@@ -1889,25 +1139,6 @@ def _load_voice_file(path: Path, voice_id: str) -> VoiceManifest:
 
 
 def load_all_voices(directory: Path | None = None) -> dict[str, VoiceManifest]:
-    """Every voice this host serves, by id, in id order.
-
-    THREE SOURCES, LOWEST PRECEDENCE FIRST:
-
-        1. the PINS (`crucible/voices/pins.toml` + `<home>/voices/pins.toml`,
-           home winning per id) -- each one a `crucible-voice.toml` read out of
-           the weights' own repo at the pinned revision;
-        2. the ENGINE's own base rows (`crucible/engines/<engine>/base.toml`,
-           section 2.6);
-        3. this machine's OVERLAY (`<CRUCIBLE_HOME>/voices/*.toml`), which is
-           what `PUT /v1/voices/{id}` with a `voice` body writes.
-
-    THE PINS ARE LOADED EVEN WHERE THEY ARE SHADOWED. Skipping a shadowed pin
-    would save a file read and hide a broken one until the day the overlay
-    went away.
-
-    Passing `directory` reads exactly that one -- no pins, no engine rows --
-    which is what the tests and `--voices-dir` mean by it.
-    """
     if directory is not None:
         return _resolve_weights_of(dict(sorted(_voices_in(directory).items())))
     from . import voicerepo
@@ -1915,30 +1146,13 @@ def load_all_voices(directory: Path | None = None) -> dict[str, VoiceManifest]:
     voices: dict[str, VoiceManifest] = {}
     voices.update(voicerepo.pinned_voices())
     if not voices_dir_is_overridden():
-        # THE ENGINE'S BASE ROWS ARE PART OF THE INSTALL, so `CRUCIBLE_VOICES_DIR`
-        # replaces them along with everything else: the variable means "run this
-        # exact set", and a catalog that still carried two rows the caller did not
-        # put in that directory would not be that set.
         voices.update(_engine_voices())
     for root in voice_dirs():
         voices.update(_voices_in(root))
-    # Re-sorted because the merge is by SOURCE and the ORDER is by id: a home
-    # voice inserted in the middle of the pinned set must list in the middle,
-    # not at the end. `/v1/voices` lists in this order and it is documented.
     return _resolve_weights_of({vid: voices[vid] for vid in sorted(voices)})
 
 
 def _engine_voices() -> dict[str, VoiceManifest]:
-    """The base rows every narrator engine in this build declares.
-
-    Keyed by id out of `crucible/engines/<engine>/base.toml`'s `[voices.<id>]`
-    tables, each of which is exactly the `[voice]` table a `voices/*.toml`
-    holds -- the SAME `_parse`, so the base rows are held to every rule a voice
-    is and cannot drift into a schema of their own.
-
-    An engine with no such file contributes nothing and is not an error: a
-    second narrator engine will arrive before its base rows do.
-    """
     found: dict[str, VoiceManifest] = {}
     for engine in sorted(NARRATOR_ENGINE_SAMPLING):
         path = engine_voices_path(engine)
@@ -1976,20 +1190,10 @@ def _engine_voices() -> dict[str, VoiceManifest]:
     return found
 
 
-#: The id a caller may write. Same shape a file stem has to have, checked here
-#: because a request is not a filename until this says so: an id with a slash or
-#: a `..` in it is a path, and a path is how a write to `voices/` becomes a write
-#: to anywhere.
 _VOICE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
 def home_voice_path(voice_id: str) -> Path:
-    """Where a voice this machine owns is written. NOT where one is read from.
-
-    Reading searches both directories (`voice_dirs`); writing has exactly one
-    destination, because "which of the two did that land in" is not a question
-    anybody should have to ask about their own machine.
-    """
     if not _VOICE_ID.match(voice_id):
         raise VoiceError(
             f"voice id {voice_id!r} is not usable as a manifest name: lower-case "
@@ -2007,35 +1211,6 @@ def home_voice_path(voice_id: str) -> Path:
 
 
 def write_home_voice(voice_id: str, document: dict[str, Any]) -> VoiceManifest:
-    """Validate a voice document and store it in this machine's own overlay.
-
-    ── Why this is here and not in the API layer ───────────────────────────────
-
-    `voices/*.toml` has one owner, and it is this module: `_parse` decides what a
-    manifest means and refuses by name, and now `tomli_w` writes back the same
-    shape. An HTTP handler building TOML with an f-string would be a second
-    author of the format, and the two would disagree the first time a field grew
-    a type — silently, because the file would still parse.
-
-    ── VALIDATED BEFORE IT IS WRITTEN, AND VALIDATED AS A FILE ────────────────
-
-    The document is parsed by the SAME `_parse` every overlay manifest goes
-    through, at the path it is about to occupy, so a caller is refused by the
-    reader's own sentence rather than by a second opinion invented for the wire.
-    Then it is round-tripped: serialise, re-parse, and compare what comes back.
-    That catches the one class of bug a pre-write check cannot — a value this
-    validator accepts and `tomli_w` cannot represent — and it catches it before
-    anything reaches the disk rather than at the next render.
-
-    ── AND WRITTEN ATOMICALLY ────────────────────────────────────────────────
-
-    To a temporary file in the same directory, then replaced. A half-written
-    manifest is not a broken voice; it is a broken SERVER, because
-    `load_all_voices` reads the whole directory and one unparseable file raises
-    for every caller of it.
-
-    Returns the manifest as it will be read back.
-    """
     path = home_voice_path(voice_id)
     manifest = _parse(document, path, voice_id)
 
@@ -2046,8 +1221,6 @@ def write_home_voice(voice_id: str, document: dict[str, Any]) -> VoiceManifest:
             f"{path.name}: this manifest cannot be written as TOML ({exc}). "
             "Every value must be a string, number, boolean, array or table"
         ) from exc
-    # The round trip, for the reason above: what a reader will see, compared with
-    # what this call meant.
     written = parse_voice(text, path, voice_id)
     if written != manifest:
         raise VoiceError(
@@ -2068,11 +1241,6 @@ def write_home_voice(voice_id: str, document: dict[str, Any]) -> VoiceManifest:
 
 
 def remove_home_voice(voice_id: str) -> bool:
-    """Delete this machine's own manifest for `voice_id`. True if one went.
-
-    Removing an overlay that SHADOWED a pinned or engine voice brings that one
-    back, which is exactly what makes overriding it safe to try.
-    """
     path = home_voice_path(voice_id)
     if not path.is_file():
         return False
@@ -2084,7 +1252,6 @@ def remove_home_voice(voice_id: str) -> bool:
 
 
 def is_home_voice(voice_id: str) -> bool:
-    """Does this machine's own overlay hold a manifest for this id?"""
     try:
         return home_voice_path(voice_id).is_file()
     except VoiceError:
@@ -2092,20 +1259,7 @@ def is_home_voice(voice_id: str) -> bool:
 
 
 def _voices_in(root: Path) -> dict[str, VoiceManifest]:
-    """The manifests in one directory, by id.
-
-    `pins.toml` IS SKIPPED. It lives here by section 2.2's design -- a machine's
-    pins belong beside that machine's voices -- and it is not one, so the glob
-    that finds `<id>.toml` would otherwise try to load a voice called `pins` and
-    refuse the whole directory over a file that is doing its job.
-    """
     voices: dict[str, VoiceManifest] = {}
-    # By id -- `path.stem` -- and not by path, for the reason `load_all_manifests`
-    # gives: the two orders differ whenever one id is a prefix of another, because
-    # the extension gets in the way ('-' is 0x2D, '.' is 0x2E). Here that is not
-    # hypothetical -- `zeroshot` and `zeroshot-deathstalker` are exactly that pair.
-    # This function's order is what `/v1/voices` lists in, so it is the documented
-    # one.
     for path in sorted(root.glob("*.toml"), key=lambda p: p.stem):
         if path.name == PINS_FILE:
             continue

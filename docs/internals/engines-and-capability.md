@@ -1,0 +1,497 @@
+# Engines, capability and the card
+
+How Crucible decides what a host can run, what it puts on the card, and how each
+engine is started and stopped. Modules: `backend`, `capability`, `precision`,
+`ttsplan`, `accelerator`, `vram`, `ladder`, `residency`, `engines/*`, `decide`,
+`sampling`, `pages`, `llamacpp`, `ollamastore`, `interpreter`, `lineup`.
+
+## Backends
+
+| backend | host | engines |
+|---|---|---|
+| `cuda-linux` | Linux with an NVIDIA card (on Windows: the server inside WSL2) | vLLM for text and pages |
+| `mlx-darwin` | Apple Silicon | `mlx-lm` for text, Crucible's own `mlx_vlm_serve` for pages |
+| `llama-windows` | Windows, natively | `llama-server` (llama.cpp) on GGUF |
+
+- One engine per (backend, class family); `manifests.BACKEND_ENGINES` owns the
+  pairing, `engines.build_engine` only maps a name to a class and refuses unknown
+  names.
+- `llama-windows` is a full backend, not a relay (Owen, 2026-09-14: *"the windows
+  side should still host GPU jobs even if WSL isnt present/workable"*). The WSL
+  engine is still better where it runs: batching, parallel page reading, and the
+  five Python job types (narrator, whisper, aligner, urvc, separator) that never
+  run natively on Windows.
+- `backend.detect_windows` never refuses (Owen: *"a crucible server will run on
+  absolutely anything"*): no NVIDIA driver means the llama.cpp CPU build and a
+  pool of system RAM, and the capability row says "slow" instead of disabling
+  the class. The accelerator guard is stricter: a driver that is present but
+  will not answer is `accelerator_unreadable`, never "use the RAM".
+- vLLM and SGLang have no win32 build, so a `cuda-linux` config found on a
+  Windows host is refused.
+- WSL2's `nvidia-smi` lives at `/usr/lib/wsl/lib/nvidia-smi` and is not always
+  on PATH in a non-login shell.
+- On Apple Silicon the "card" is unified memory: `vram_bytes` is the machine's RAM.
+- `physical_memory_figures` (Windows, `GlobalMemoryStatusEx`) returns total and
+  available from one call: capability sizes against total, the guard against
+  available.
+
+## What a card can do
+
+`backend.CardFacts` has two halves. DECLARED facts come from the compute
+capability. MEASURED facts come from the ladder's record. A fact nobody knows
+is `None` (unknown), never `False`, and **unknown refuses nothing**.
+
+Floors, read from the pinned engine source (vLLM 0.29.0, torch 2.13.0+cu130):
+
+| feature | floor | source |
+|---|---|---|
+| bf16 | sm_80 | vLLM `platforms/cuda.py` `supported_dtypes` / `check_if_supports_dtype`; torch emulates below 8.0 |
+| FlashAttention 2 | sm_80 | vLLM `flash_attn.py` |
+| fp8 | sm_89 | vLLM `supports_fp8` |
+
+- FA2 and fp8 are reported but nothing in the catalog needs them (vLLM falls
+  back to Triton attention on any capability).
+- Tensor cores arrive at sm_70, **except the Turing GTX 16 family**
+  (TU116/TU117: GTX 1650/1660/1660 SUPER/1660 Ti), which is sm_75 without
+  tensor cores. It is detected by the `GTX 16` name prefix. Tensor cores are
+  reported and never required.
+- `probe_compute_capability` sends its own `nvidia-smi` query. A driver that
+  predates `compute_cap` rejects the whole query, and that must read as
+  "unknown generation", not "no backend".
+- Measured by the ladder: `cuda_graphs` (False means vLLM starts
+  `--enforce-eager`, which is slower but still runs) and `vllm` (False refuses
+  every vLLM block on this card and quotes the first error line).
+
+## Capability selection
+
+Ruling (Owen, 2026-09-13): *"it uses what is available on the system. the user
+doesnt set those. crucible does."* The client picks the capability class and
+therefore the model family. Crucible picks the quantization.
+
+1. **Best first by declared size.** Candidates are ordered by
+   `memory_bytes_estimate` descending, then by id, and the first that fits
+   wins. Within one family on one backend a bigger estimate means less
+   quantization, so no `precision` key exists. Crucible never takes the
+   smallest model that fits.
+2. **The bar is total memory minus the desktop allowance, not free memory.**
+   A capability describes the host, and free VRAM only describes this second.
+   "Is there room right now" belongs to the accelerator guard at load time.
+3. **There is no margin term.** The desktop allowance is the margin. Owen,
+   2026-09-13: *"I've been using this system the way it is for months and it
+   works fine. Use the current settings for each."*
+4. **Known-good checks** (in `tests/test_capability.py`): a 3090 Ti (24 GiB,
+   3 GiB reserve) runs translate on `qwen3.8-27b-4bit`. A 64 GiB Studio (25%
+   reserve) runs translate on the 4-bit model and refuses bf16 (51.7 GiB
+   against 48.0).
+5. **Generation before memory** (fresh-install #48). First, the precision
+   the card can run the candidate at. Second, whether it can start the
+   candidate at all.
+
+### Precision (`precision`, Owen 2026-09-26: *"we can quantize if we need to. no less than 4."*)
+
+- A stated bf16 on a card without bf16 runs as **fp16**
+  (`engines.vllm.bf16_fallback` / `card_args` add `--dtype float16`). It uses
+  the same bytes, keeps the same place in the walk, and the verdict names the
+  precision (`_precision_note`). vLLM itself picks fp16 for `auto` on such a card.
+- **Floor: 4 bits** (`precision.MIN_WEIGHT_BITS`). Nothing below it is ever
+  a candidate, and a GGUF that names one is refused at load
+  (`manifests._gguf_name`).
+- Bits are derived from what the engine loads, never from a manifest key: the
+  GGUF file's quant tag, then a quantization in the repo name (`-4bit`, `AWQ`,
+  `INT4`, ...), then a stated dtype. A block that states none (faster-whisper,
+  RVC, separator) is unknown and is not refused.
+- Only a measured fact can bar a candidate at every precision: today that is
+  `vllm` false (`engines.vllm.card_needs`). A class left with only barred
+  candidates is refused with that fact (`Decision.lacking_features`).
+- **No quality check on quantization.** A lower precision is chosen from
+  memory and card facts alone. Crucible never measures whether the result
+  sounds or reads acceptably. For Higgs a person listens to a quantized
+  checkpoint before one exists to be offered.
+
+### Width before bits (`ttsplan`, Owen 2026-09-26)
+
+*"no less than 4 covers higgs as well"*, *"we should drop batches to 1 at a time
+before we quantize. id rather it go slow than sound worse"*. **Precision beats
+parallelism.** A Higgs v3 voice on `cuda-linux` is offered, in order:
+
+1. bf16 at the voice's declared width (`max_num_seqs`, 16),
+2. bf16 at narrower widths down to one passage at a time,
+3. 8-bit, one at a time,
+4. 4-bit, one at a time.
+
+All figures are declared, not measured. Width 16 uses the voice's own
+estimate (SGLang-Omni's `--mem-fraction-static 0.60` reservation on the
+3090 Ti). One passage at bf16 is ~10 GB, 8-bit ~5.8 GB, 4-bit ~4.2 GB. Each
+extra passage is ~2,000 tokens × 147,456 B/token (Qwen3-4B backbone:
+36 layers × 8 KV heads × 128 × 2 × 2 B). The quantized rows are `pending`
+because no quantized Higgs exists. Capability says one would fit but never
+offers it for pulling. A narrower width reaches narrator as
+`HIGGS_MAX_NUM_SEQS`. SGLang's memory fraction is **not** rescaled, so a
+narrow plan on a card smaller than the 3090 Ti is a declared fit that still
+needs a load test. The mlx arm sizes its batch from `MLX_TIERS` and keeps a
+single estimate. Qwen3-ASR uses the same order (Owen: *"yes, fewer at once
+before quantizing for asr too"*): fewer pieces at once at full precision
+first, then a smaller model.
+
+### Classes
+
+- `llm` is split into several classes because the ruling is about the work, not
+  the job type. A 12 GB card that cleans but cannot translate has to be able to
+  say so. `simplify` and `analysis` stay separate from `translate` (Owen,
+  2026-09-13: *"they can't lie to the user and say a translate job is running
+  when it's actually a simplify job"*).
+- **9B floor** for clean/translate/simplify/analysis (Owen, 2026-09-16: *"they cant
+  pick smaller than 9b"*), compared against `[model] params_b` and stated
+  explicitly in `min_params_b`. It must not be implied by whatever models
+  happen to ship. `decide` has no floor, because a 0.8B can answer it.
+- `generate` is the one client-sized class (Owen, 2026-09-23: *"make it one
+  class and give it the ability to set the context limit"*). The default is
+  8192 tokens. A larger request is checked against the host ceiling and refused
+  with `context_over_limit`. Crucible never clamps it. Other classes refuse
+  `?context_tokens=` by name.
+- Routable classes are declared (`routable`), never derived from job type.
+  `pages` is not routable (it sends page images) and neither is `decide`
+  (no upstream returns logprobs).
+- Aliases (`[model] weights_of`) are always the dearer served form, so they
+  are skipped unless the class wants that form (`decide` may carry images).
+  An asr alias is a different engine, so it stays a candidate.
+- `pages` concurrency comes from `pages.PAGE_CONCURRENCY` (12). Both apps
+  send twelve, and `models/dots-ocr.toml`'s KV note is sized against that
+  number.
+- asr order is Qwen3-ASR, whisper turbo, whisper tiny. This is also the
+  catalog's size order on both machines, and `tests/test_asr_lineup.py`
+  holds it.
+- `denoise` is its own class. It shares the rvc env, but a 913 MB separator and a
+  2.5 GiB urvc stack are different arithmetic.
+- An app's model choice (`chosen`) is honoured or refused with numbers. It is
+  never silently replaced. `decide_all` requires `chosen`, `decide` requires
+  `gpu_vendor`, and `record` requires `routes`, all without defaults, so a
+  caller that forgets one cannot silently un-choose, mis-size or un-route.
+- `Decision.reason` is written for the operator (backend and block names).
+  `Decision.summary` is a subjectless verb phrase for anyone, and the caller
+  supplies the subject.
+- A request-sized `GET /v1/capability` row is decided live for that caller
+  and never written back to the record.
+
+### Context ceilings
+
+`engine_total = weights + overhead + kv_bytes_per_token × context × concurrency`.
+The context and concurrency belong to the class's work, not to the model's
+`context_default`. `Candidate.context_ceiling` is the single ceiling function:
+the smaller of *served* (the block's `max_context`) and *memory* (what
+`available_bytes` affords). An `overhead_bytes` taken from a measured peak must
+have that peak's KV subtracted, or the KV is counted twice (this held
+`qwen3.8-27b-8bit` near 64k until 2026-09-23). A host that cannot hold the
+weights at all is a disabled class or an `insufficient_memory` load, never a
+too-long request. `MIN_LOAD_CONTEXT` is a stated floor, not a measured one.
+
+Figures in capability messages are GiB so they match the guard's refusals.
+
+## The desktop reserve
+
+`[accelerator] desktop_allowance_bytes` is what the host keeps for itself.
+Every capability fit and every vLLM budget subtracts it.
+
+- **Measured** (`ladder.measure_desktop_reserve`, NVIDIA only): `memory.used`
+  is sampled once a second for `DESKTOP_SAMPLES` (5) seconds with nothing of
+  Crucible's loaded, and then
+  `allowance = min(peak + max(peak, 1 GiB), 3 GiB)`.
+  The headroom covers a desktop somebody is using, not the idle one that was
+  sampled. The 1 GiB is `accelerator.FOREIGN_PROCESS_FLOOR_BYTES`, the existing
+  line between "desktop" and "somebody's job", so the reserve leaves room for
+  one more such process. Doubling scales with screen size. 3 GiB is what
+  owens-pc (a streaming multi-monitor desktop) has always used, and it caps
+  what a bad sample can cost. Example: a GTX 1660 SUPER holding 0.3 GiB gets
+  1.3 GiB.
+- The sample is device-wide `memory.used`, so it counts desktop memory even
+  where the driver names no processes (Windows `[N/A]`; WSL2 lists none). A
+  sample inside WSL2 sees the Windows desktop (Windows' and WSL's nvidia-smi
+  agree, 2026-09-18) but cannot tell whose memory it is. The 3 GiB ceiling
+  bounds that error.
+- Sampling is refused, by name, when a Crucible server holds something (or
+  answers but cannot be asked), when a `llama-server` is on the card, or when
+  any compute app holds 1 GiB or more.
+- **Basis** (`[accelerator] desktop_allowance_basis`): `measured` (sampled, with
+  a note saying what and when), `declared` (Crucible's default: 3 GiB on an
+  NVIDIA card it could not sample, 25% of unified memory on a Mac, which is the
+  complement of Metal's ~75% `recommendedMaxWorkingSetSize`), or `stated` (a
+  person set it). **Nothing ever changes a stated reserve on its own** (Owen,
+  2026-09-26). Only `crucible capability --measure-desktop` replaces one, and it
+  prints the old and new values. The reserve is always shown together with its
+  basis (`config.desktop_reserve_words`).
+
+## The accelerator guard (`accelerator`)
+
+Crucible refuses by name and never evicts anybody else's process.
+
+- `cuda-linux`: a foreign compute app over 1 GiB is `accelerator_busy`. Free
+  memory below the estimate is `insufficient_memory`, and the message names both
+  numbers. Under WSL2 the compute-app list is **empty** even while a process in
+  the VM holds 17 GB (measured 2026-09-12), but `memory.free` is accurate. So
+  `unattributed_bytes` counts VRAM in use that no listed app accounts for,
+  beyond the allowance, and refuses it. It is clamped at zero, and Crucible's
+  own resident engine counts as reclaimable.
+- The child of Crucible's child is still Crucible's. narrator's launcher starts
+  a serving child. On native Linux the owned set is expanded through `/proc` to
+  every process whose **session or process-group leader** is an owned pid.
+  Leaders only: engines and workers start with `start_new_session=True`, so
+  expanding through a non-leader would claim siblings such as a trainer started
+  from the same shell. A `/proc` that cannot be parsed refuses, as an
+  unreadable driver does.
+- `mlx-darwin`: a unified pool is **sized, not sampled** (Owen, 2026-09-22: *"it
+  shouldnt put a gate on like that. theres actually plenty of memory
+  available"*). The check uses total minus the allowance, the same as
+  capability. The `vm_stat` free figure is reported only, because macOS pages
+  apps out for Metal.
+- `llama-windows`: the card is shared by design. dwm, explorer and the browser
+  appear as compute apps, so the rule is **room, not solitude**. Foreign apps are
+  listed in `details.processes` but never cause a refusal. One exception is a
+  `llama-server` Crucible did not start (a crashed run's orphan), which is found
+  **by image name** because its pid cannot be known. No unattributed-bytes
+  check runs here, because the desktop always holds memory that belongs to no
+  compute app.
+- `refuse_if_larger_than_host` and `refuse_if_card_lacks` run **before** the
+  env and weights checks. Nobody should be told to download 55 GB for a model
+  that can never start on the card.
+- A probe that cannot answer raises `ProbeError`, which never means "free".
+
+## vLLM memory planning (`vram`)
+
+Inside WSL2, **CUDA cannot see the Windows desktop**: `torch.cuda.mem_get_info`
+reports a constant while nvidia-smi's free figure moves. vLLM sizes everything
+from `mem_get_info` and profiles a whole-card delta, so desktop growth during a
+long load (for example a cold `torch.compile`) is charged to the KV pool. On
+2026-09-17 this failed a load at `-0.19 GiB` with the same fraction that worked
+the next night.
+
+- Crucible passes `--kv-cache-memory-bytes`, which bypasses the utilisation
+  fraction and the profiling window, and derives `--gpu-memory-utilization`
+  only as vLLM's startup gate.
+- Budget = **min(nvidia-smi free + reclaimable, total − allowance)**. There is
+  no third term. The pool is capped at
+  `kv_bytes_per_token × context × max_num_seqs`, because bytes beyond that
+  cannot be used.
+- `fits` is vLLM's own one-full-context-request check, asked before the engine
+  starts.
+- Not planned: `dots-ocr` on cuda-linux (its 0.5× estimate is a deliberate
+  budget) and every `llama-windows` block.
+- Capability must never use this module. It works from free memory, and
+  capability works from total memory.
+
+## The ladder (`ladder`, `crucible ladder`, `<home>/ladder/card.json`)
+
+Rungs in order: `card` (nvidia-smi only: memory, desktop, disk, driver, declared
+features), `env` (torch initialises in each installed env, and the matmul speed
+of each dtype; bf16 below 8.0 is emulated), `cuda_graphs` (capture and replay in
+the llm env), `vllm` (the smallest installed model starts and answers once,
+started exactly as `load-model` would).
+
+- A failed rung is a measurement and records its first error line. A rung
+  that could not run cleanly is `waiting` (the guard preflight said busy or
+  short) or `interrupted` (a foreign compute app appeared while `Watch`
+  sampled at 1 Hz). Neither is ever read as a failure.
+- Consumed: `cuda_graphs` and `vllm`. Recorded only: speed (it never refuses) and
+  memory (declared estimates still decide fit).
+- The record is keyed on card name, compute capability, total memory and
+  Crucible version. A different key means no record: nothing measured,
+  nothing refused, and `doctor` reports it as stale. The file is rewritten
+  whole and atomically after each rung. A file that will not parse also counts
+  as no record.
+- `ladder.card_for` is the one card every decision reads.
+
+## Residency (`residency`)
+
+- **At most one resident thing of any kind** (`llm`, `tts`, `align`,
+  `denoise`). A card holding a Higgs checkpoint has no room for a 9B. Aligner
+  and separator are `workers.WorkerSession`s held open, not engines, and have
+  their own slots.
+- Only the exclusive job lane mutates residency. An engine is published only
+  after it proves it is up, and unpublished before it is signalled.
+- **Claims.** A streaming session holds narrator's single stdin/stdout, so
+  the card has a named owner: `claim(may_mutate=...)`. A render claims with
+  `may_mutate=True` (it loads its own voice). A stream claims with `False`.
+  Mutators refuse `engine_in_use` while somebody else holds the claim. Claims
+  never block.
+- `refuse_if_claimed` is asked by load/unload-model, load/unload-voice,
+  unload-aligner, `tts` and `align`. `asr` and `rvc` deliberately do not
+  ask: they contend for memory, which the guard answers, not for narrator's
+  wire. `echo` needs no accelerator.
+- **The dying slot.** `unload` moves the handle to `DyingResident` (with a pid
+  snapshot) before signalling. The slot clears only when the stop returns.
+  Until then `owned_pids` still counts the process, and every load, claim and
+  stream refuses `engine_still_stopping`. Crucible never SIGKILLs, so a human
+  ends this state. `shutdown` retries the stop once.
+- **Clearances.** A settlement that is clearing the card is not a foreign
+  holder. Every door waits a clearance out (`settled_for`, with a budget of
+  `CLEARANCE_TIMEOUT_SECONDS = STOP_TIMEOUT_SECONDS + 30`) and then records
+  its hold **under `_claim_lock`**. The settlement checks and claims under the
+  same lock (`claim_to_clear`), so no door can record a hold the settlement
+  missed. An unload of the subject being cleared counts as the same intent and
+  reports `done`. A clearance that outlives the budget is raised as a wedge.
+- `_start` tears down a half-started engine on **any** `BaseException`. An
+  orphan there sits in no slot, so the guard would call it foreign.
+- A voice load is not finished at `ready`. narrator's `load`/`loaded` exchange
+  is part of it, and the sample rate on `loaded` must match the manifest.
+  Crucible refuses a mismatch and never resamples.
+- `load` requires `context` and `plan` (no defaults): an unsized pool on a
+  shared card is the 2026-09-17 failure. Reloading the same id is a full restart.
+- `_engine_args` order: the manifest's args, then `card_args`, then the KV
+  plan's flags. argparse uses the last spelling, so later flags override.
+  `--max-model-len` goes to vLLM only (mlx-lm has no such flag, and its
+  `max_model_len` is admission). Crucible composes `-m`, `--mmproj` and `-c`
+  for `llama-server`, because only the server knows where the weights are.
+
+## Engines
+
+### Common (`engines/base`)
+
+- Engines bind 127.0.0.1 on a free port. stop is SIGTERM to the process
+  group and **never SIGKILL**, because a killed CUDA process wedges WSL2 until
+  Windows reboots. On win32 stop sends `CTRL_BREAK_EVENT` and then terminates
+  (`procgroup`). Each engine gets its own process group or session.
+- Logs are `~/.crucible/logs/engine-<id>.log`, **appended** and never truncated
+  or rotated. A reload used to erase the log of the hang being investigated.
+  `log_tail` reads only the current run (up to its header), so a dead run's
+  fatal line cannot refuse a new start.
+- Chat admission is **the engine's own concurrency + 1**. The +1 is the next
+  request, ready when a slot frees. An engine that states no concurrency is
+  not bounded. A serial engine with an unbounded queue starved a request past
+  its deadline (Foundry on mlx-lm, 2026-09-20).
+- A decision needs top logprobs, which is a fact read from the pinned engine
+  source and required together with its basis (`decide_reading`).
+
+### vLLM
+
+- Environment: `VLLM_NO_USAGE_STATS`, `DO_NOT_TRACK`,
+  `VLLM_WSL2_ENABLE_PIN_MEMORY=1` (the V2 runner needs a UVA buffer; without it
+  no model loads under WSL2, and pinning measured fine there),
+  `VLLM_USE_FLASHINFER_SAMPLER=0` (the llm env has no nvcc and FlashInfer
+  JIT-builds its sampler during warm-up). Remove the last one only if the recipe
+  gains a CUDA compiler.
+- Always set: `--served-model-name <id>`, `--max-model-len`, and for
+  decisions `--max-logprobs 32`, `--logprobs-mode raw_logprobs` (distribution
+  before temperature) and `--enable-prompt-tokens-details`.
+- `start` refuses an argv without `--max-num-seqs`, because the chat door reads
+  its admission from that flag.
+
+### mlx-lm (`mlx-darwin` text)
+
+- `/v1/models` reports the **resolved** weights directory, so the proxy
+  rewrites `model` after checking the Crucible id. A request's `model` would
+  otherwise be loaded, and the 409 gate prevents that.
+- `/v1/models` answers before the weights load, so `confirm()` sends a
+  one-token completion.
+- Blocks must state `--decode-concurrency`, `--prompt-concurrency` and
+  `--prompt-cache-size` (`REQUIRED_FLAGS`). mlx-lm 0.31.3 batches continuously
+  up to `--decode-concurrency`, and the door admits that + 1.
+- A closed socket does not stop a non-streamed request. Cancelling stops
+  further sends, and the settlement's SIGTERM stops the rest.
+- Top logprobs are capped at 11 upstream. `patch_mlx_lm_top_logprobs` raises
+  that to 40, and `start` refuses an unpatched env (`llm_env_unpatched`).
+  Logprobs are computed after logits processors, so a decision sends its own
+  sampling and applies no manifest defaults.
+
+### mlx-vlm page server (`mlx_vlm.py`, `mlx_vlm_serve.py`)
+
+- `python -m mlx_vlm server` never put the image in the prompt for dots.ocr
+  (216 prompt tokens against 3,464; measured 2026-09-14). Crucible runs the
+  in-process path behind `/v1/models` and `/v1/chat/completions`. The file is
+  standalone (the env has no `crucible`), and it removes its own directory from
+  `sys.path` so `import mlx_vlm` finds the library.
+- Only **static micro-batches** are used: every row is inserted before the
+  first `next()`, matching `_generate_batch`. Continuous insertion produced
+  garbage. Rows are keyed on the processor's `image_grid_thw` (equal grid means
+  equal prompt length). Mixed lengths in one batch produce garbage, and so does
+  `prefill_batch_size` below the row count.
+- The vision tower runs **one image at a time**. Twelve 200-dpi pages in one
+  call trip the macOS Metal watchdog. The cost is ~15% on small pages.
+- The server loads before it binds, so a 200 from `/v1/models` means ready.
+  Images are converted to RGB. `--width` comes from the manifest and is
+  required.
+- It refuses temperature ≠ 0, top_p ≠ 1, n ≠ 1, streaming, unknown fields, any
+  message shape other than one image plus one text part, and a wrong model.
+  Private upstream names are checked at start (`_check_upstream`). They are
+  safe only because the mlx-vlm version is pinned exactly.
+- It serves no decisions (a logprobs path there would need Owen's ruling).
+
+### llama-server (`llama-windows`)
+
+- `--alias <id>` makes the served name equal the Crucible id, so the proxy
+  forwards `model` verbatim.
+- Nothing is ever adopted. A taken port is `port_in_use`, and the fix is to retry.
+- Stop sends 30 s of graceful `CTRL_BREAK_EVENT` and then terminates. This
+  deliberately departs from never-SIGKILL, which applies only inside WSL2.
+- Fatal log lines (CUDA OOM, missing CUDA runtime DLL, unreadable GGUF) end
+  the readiness wait immediately as `pages_engine_failed`.
+- Every block runs `--parallel 1`, so the chat door admits 2
+  (`tests/test_chat_admission.py` enforces the flag). Decisions are served with
+  no small logprob cap (pre-sampling probabilities, b10970).
+- The binary is a pinned **engine subject** (`llamacpp`): `LLAMA_CPP_RELEASE`
+  is never read from a listing. The CUDA build is two zips (the build plus
+  `cudart`) unpacked into one directory. Every digest is checked before
+  anything is placed, and a zip member that escapes the target is refused.
+- `ollamastore` lets `llama-windows` serve GGUFs already in Ollama's store
+  (`OLLAMA_MODELS` is honoured). These are different bytes from the manifest's
+  pin, so they carry their own provenance, `ollama:<tag>@sha256:<digest>`,
+  and are never filed under the manifest fingerprint. The checks are: a model
+  layer exists, the blob exists, and the blob size matches. Blobs are not
+  hashed (up to 19 GB on the load path).
+
+## The decision door (`decide`)
+
+- Labels are bare capitals `A`–`Z` (one token everywhere, and the same string in
+  decoded and raw-BPE form). Limits: 26 options, 10 score levels, 8 images,
+  and a margin of 4 extra logprobs.
+- The state goes in the **system** message and the question in the user turn.
+  mlx-lm reuses a hybrid model's cache only from an exact prefix saved at a
+  segment end, llama-server checkpoints at the last user message, and vLLM
+  caches a plain prefix. Images open the user turn, because templates refuse
+  images in system messages.
+- The prime's user text is fixed and non-empty; mlx-lm finds the system
+  segment end by diffing against an empty user turn.
+- Every sampling knob is stated and no manifest `[defaults]` apply, since a
+  repetition penalty would move the letters.
+- base64 is strict (llama-server silently truncates at the first bad character).
+- The wrap serializer has **no return annotation**. An annotation replaces the
+  answer schema in OpenAPI with `{}`.
+- Refuse mode carries no `missing_labels` key. Report mode nulls a missing
+  label and never invents a number.
+
+## Chat defaults (`sampling`)
+
+The request wins. A key the request omits is filled from the manifest. If
+neither states it, nothing is sent. A key present in the request counts as
+stated even when it is `null`. Every response carries `X-Crucible-Sampling`
+naming the source of each key. It is a header because the proxy passes bodies
+through verbatim. `thinking` travels in `chat_template_kwargs`, and Crucible
+owns only that one key there.
+
+## Page requests (`pages`)
+
+`GET /v1/info` `pages_engine.request` is the single definition. The engine
+must not be detectable from the answer. dpi 200, `max_pixels` 11,289,600,
+`max_tokens` 8192 as a ceiling (the longest accepted page over 18,202 pages
+was 7,677), temperature 0 (measured as good as 0.1 over 516 pages, and
+deterministic), the model-card prompt byte for byte, image first then prompt,
+PNG data URI only, concurrency 12. A page that returns
+`finish_reason: "length"` must be re-read at the full ceiling.
+
+## Interpreters (`interpreter`)
+
+CPython comes from astral-sh python-build-standalone `install_only` at a pinned
+release, verified against that release's `SHA256SUMS` digest, and stamped so it
+is fetched only once. It never comes from PATH. The Windows tree has no `bin/`
+(`interpreter_python`). The `-shared` infix is retired upstream. The 3.12 row
+exists for the Higgs recipe (sglang-omni 0.1.4). The server runs 3.11.
+Downloads are unpacked beside the destination and moved last, so a failure
+leaves the machine unchanged. The install progress line is a declared JSON
+wire, not a log scrape.
+
+## Foundry lineup (`lineup`)
+
+`foundry-lineup.json` is read from the manifests (`[model]`, `[local]`) and
+`capability.classes_for_model`. Rows without `[local]` are omitted. `floors`
+is derived from `minimum_for`, and two rows flooring one class is a refusal.
+The catalog owns every floor it names, and a consumer must not average in a
+smaller one of its own. `--check` ignores `generated_from`, which always
+trails by one commit.

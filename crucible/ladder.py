@@ -1,58 +1,3 @@
-"""The measurement ladder: what THIS card can do, found out by running it.
-
-docs/PROPOSAL-GPU-LADDER.md is the design; this is the build. Owen, 2026-09-26:
-
-> *"we can quantize if we need to. no less than 4. ... our measurement tool
-> should determine how much space is available, whether tensors are available,
-> cuda graphs, vllm, etc. and install the best the user can use"*
-
-The declared half (`backend.CardFacts` off the compute capability) answers
-what a spec sheet can: bf16, FlashAttention 2, fp8, tensor cores. The ladder
-answers what only a run can, and records it where capability reads it:
-
-    rung          touches the GPU?   answers
-    card          no (nvidia-smi)    total / free / desktop memory, disk space,
-                                     driver, the declared features
-    env           yes                each installed env's torch initialises on
-                                     this card, and how fast each dtype's
-                                     matmul is (bf16 is EMULATED below 8.0)
-    cuda_graphs   yes                a CUDA graph captures and replays in the
-                                     llm env -> `backend.CUDA_GRAPHS`
-    vllm          yes                vLLM starts the smallest installed model
-                                     and answers one request -> `VLLM_STARTS`
-
-A rung that fails is a MEASUREMENT (MEASUREMENTS.md: "Failures are
-measurements"), recorded with its first error line. A rung that could not run
-cleanly — the card was in use, somebody else's work appeared mid-run — is
-`waiting` or `interrupted`, and is never read as a failure.
-
-ON A CARD SOMEBODY IS USING. Every GPU rung is preceded by the accelerator
-guard's own test (`accelerator.guard`: a foreign compute app over the floor, or
-unattributed VRAM past the desktop allowance under WSL2) and does not start if
-it fails. While a rung runs, `Watch` samples nvidia-smi at 1 Hz, as
-`scripts/calibrate-kv.sh` does, and a foreign compute app appearing makes the
-rung `interrupted`. Crucible never evicts anything, and a measurement is no
-exception. A job that reaches the server while a rung holds the card is
-refused `accelerator_busy` by the server's own guard for those seconds — the
-same answer it gives for any other tenant.
-
-WHAT IS CONSUMED, AND WHAT IS ONLY RECORDED (the proposal's calls 3 and 4,
-settled by the ruling above; docs/PROPOSAL-GPU-LADDER.md section 7):
-
-* `cuda_graphs` false -> vLLM is started `--enforce-eager` (slower; it runs).
-* `vllm` false -> every vLLM candidate is refused here, quoting the run.
-* speed is REPORTED and never refuses: "install the best the user can use" is
-  the best that runs, and a slow card still runs it.
-* memory is RECORDED, not consumed for fit: PHASE9's ruling that declared
-  estimates decide fit stands until Owen reverses it. The desktop the card
-  rung sees is reported by `crucible doctor` beside the allowance.
-
-THE RECORD is `<home>/ladder/card.json`, keyed on the card (name, compute
-capability, total memory) and this Crucible's version. A different key reads
-as no record — nothing measured, nothing refused — and `doctor` says it is
-stale. Rewritten whole, atomically, after every rung.
-"""
-
 from __future__ import annotations
 
 import json
@@ -87,15 +32,11 @@ from .errors import ApiError, CrucibleError
 LADDER_SCHEMA = 1
 RECORD_NAME = "card.json"
 
-#: The rungs, in the order they run. Each needs the one before it to have
-#: passed where it builds on it (`cuda_graphs` and `vllm` need the llm env's
-#: torch to have initialised in `env`).
 CARD = "card"
 ENV = "env"
 GRAPHS = "cuda_graphs"
 VLLM = "vllm"
 RUNGS: tuple[str, ...] = (CARD, ENV, GRAPHS, VLLM)
-#: The rungs that put work on the GPU. Everything else reads nvidia-smi.
 GPU_RUNGS: frozenset[str] = frozenset({ENV, GRAPHS, VLLM})
 
 PASSED = "passed"
@@ -104,37 +45,22 @@ INTERRUPTED = "interrupted"
 WAITING = "waiting"
 SKIPPED = "skipped"
 
-#: How many one-second samples of `memory.used` the card rung takes to see the
-#: desktop's size. A sampling window, not a threshold: long enough to see a
-#: compositor breathe, short enough that install does not stall on it.
 DESKTOP_SAMPLES = 5
 
-#: What a torch smoke rung asks the guard for. The aligner's measurement of
-#: 2026-09-26 put the CUDA context and cuBLAS workspaces at 0.95 GiB
-#: (align/qwen3-aligner.toml); the smoke's own tensors are a few MiB.
 SMOKE_NEED_BYTES = 1024 ** 3
 
-#: The longest a torch smoke subprocess may take, cold import included. A
-#: ceiling on a stuck process, not an estimate of how long it takes.
 SMOKE_TIMEOUT_SECONDS = 300.0
 
-#: The matmul the env rung times: n x n, ten times, per dtype.
 SMOKE_MATMUL_N = 2048
 SMOKE_MATMUL_REPEATS = 10
 
-#: The prefix the smoke scripts print their one JSON line after, so a library
-#: that prints to stdout cannot be mistaken for the result.
 RESULT_PREFIX = "LADDER "
 
-#: What the guard is told the ladder is called, in its refusals.
 LADDER_SUBJECT = "the measurement ladder"
 
 
 class LadderError(CrucibleError):
-    """The ladder could not do what it was asked (not a rung that failed)."""
-
-
-# ------------------------------------------------------------------ the record
+    ...
 
 
 @dataclass
@@ -142,12 +68,8 @@ class RungResult:
     rung: str
     outcome: str
     measured_at: str
-    #: What the rung found, as data (bytes, seconds, booleans).
     facts: dict[str, Any] = field(default_factory=dict)
-    #: One sentence: why it failed, waited or was skipped, or what it saw.
     detail: str = ""
-    #: What else was on the card while it ran (`Watch.summary`), or None for a
-    #: rung that put nothing on the GPU.
     contention: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -171,8 +93,6 @@ def record_path(home: Path) -> Path:
 
 
 def card_key(gpu: Gpu) -> dict[str, Any]:
-    """What a record is TRUE OF. Another card, or another Crucible, is another
-    record: the envs a release pins are part of what vLLM starting means."""
     return {
         "name": gpu.name,
         "compute_capability": gpu.compute_capability,
@@ -182,9 +102,6 @@ def card_key(gpu: Gpu) -> dict[str, Any]:
 
 
 def load_record(home: Path) -> dict[str, Any] | None:
-    """The record on disk, or None. A file that will not parse is None too:
-    a measurement nobody can read is no measurement, and refusing work on it
-    would be refusing on a guess."""
     path = record_path(home)
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -196,8 +113,6 @@ def load_record(home: Path) -> dict[str, Any] | None:
 
 
 def stale_reason(home: Path, gpu: Gpu) -> str | None:
-    """Why the record on disk does not describe this card, or None if it does
-    (or there is none — absence is not staleness)."""
     document = load_record(home)
     if document is None:
         return None
@@ -246,19 +161,10 @@ def _results_from(document: dict[str, Any] | None) -> dict[str, RungResult]:
     return found
 
 
-#: Which rung answers which measured feature.
 _FEATURE_OF_RUNG: dict[str, str] = {GRAPHS: CUDA_GRAPHS, VLLM: VLLM_STARTS}
 
 
 def card_for(home: Path, gpu: Gpu) -> CardFacts:
-    """THE card every decision reads: declared facts, plus the ladder's measured
-    ones when its record is of THIS card and THIS Crucible.
-
-    One function, so `crucible capability`, the install step, the API's
-    capability rows, the settings recompute and the engine's argv all ask the
-    same thing. A stale or missing record gives the declared card alone, whose
-    measured facts are unknown — and unknown refuses nothing.
-    """
     declared = declared_card(gpu)
     if stale_reason(home, gpu) is not None:
         return declared
@@ -285,7 +191,6 @@ def card_for(home: Path, gpu: Gpu) -> CardFacts:
 
 
 def summary(home: Path, gpu: Gpu) -> dict[str, Any]:
-    """What `crucible doctor` and `crucible ladder --json` print of the record."""
     document = load_record(home)
     return {
         "path": str(record_path(home)),
@@ -298,23 +203,7 @@ def summary(home: Path, gpu: Gpu) -> dict[str, Any]:
     }
 
 
-# ------------------------------------------------------------------ the watch
-
-
 class Watch:
-    """nvidia-smi at 1 Hz while a GPU rung runs: what else was on the card.
-
-    `owned` is the set of pids the rung itself started, read live because an
-    engine's pids are only known once it has spawned. A compute app outside it
-    holding more than the guard's floor makes the rung `interrupted`.
-
-    UNDER WSL2 THE COMPUTE-APP LIST IS EMPTY even for processes inside the VM
-    (accelerator.py's measured limitation), so there `foreign` can never be
-    set and the samples of `memory.used` and `utilization.gpu` are the record
-    of contention: a number taken while they moved is marked `contended` by
-    the reader, not trusted as clean.
-    """
-
     def __init__(self, owned: Callable[[], frozenset[int]]) -> None:
         self._owned = owned
         self._stop = threading.Event()
@@ -352,7 +241,7 @@ class Watch:
                         self.foreign[app.pid] = app.describe()
                 self.samples += 1
             except (accelerator.ProbeError, ValueError):
-                pass  # a missed sample is a gap in the record, not a verdict
+                pass
             self._stop.wait(1.0)
 
     def summary(self) -> dict[str, Any]:
@@ -365,9 +254,6 @@ class Watch:
         }
 
 
-# ------------------------------------------------------------------ rung 0
-
-
 def _query(fields: str) -> list[str]:
     lines = accelerator._nvidia_smi(f"--query-gpu={fields}", "the card rung")
     return [part.strip() for part in lines[0].split(",")]
@@ -375,40 +261,14 @@ def _query(fields: str) -> list[str]:
 
 @dataclass(frozen=True)
 class DesktopSample:
-    """`memory.used` over `DESKTOP_SAMPLES` seconds: what the desktop held.
-
-    Device-wide, on purpose. `memory.used` is the whole card's, so it counts
-    the desktop's graphics memory whether or not the driver lists the processes
-    holding it. That matters twice: on Windows the desktop's processes show as
-    compute apps with no memory figure (`[N/A]`, accelerator.py's module
-    docstring), and under WSL2 the guest's driver shim lists no compute apps at
-    all. What the code already assumes of WSL2 — `unattributed_bytes` subtracts
-    the allowance from the guest's `memory.used`, and accelerator.py says
-    *"`memory.free` under WSL2 is accurate for the whole card"* — was measured
-    on 2026-09-18 (MEASUREMENTS.md, Finding 1): *"Windows' own nvidia-smi agrees
-    with WSL's nvidia-smi (3_286 vs 3_319 MiB used)"*. So a sample taken inside
-    the guest sees the Windows desktop. What it cannot see is WHOSE the memory
-    is: a Windows-side job running at that moment is counted as desktop, which
-    `desktop_allowance_from`'s ceiling bounds.
-    """
-
     least_bytes: int
     peak_bytes: int
     total_bytes: int
     samples: int
-    #: The UTC date the samples were taken, for the config's note.
     on: str
 
 
 def sample_desktop() -> DesktopSample:
-    """Sample the card's used memory once a second for `DESKTOP_SAMPLES` seconds.
-
-    THE ONE PLACE THE DESKTOP IS SAMPLED (ARCHITECTURE.md R1): the card rung
-    reports it, and `measure_desktop_reserve` sizes the reserve from it, so the
-    two can never disagree about how the desktop was seen. Raises
-    `accelerator.ProbeError` (or `ValueError` on an unparseable answer) rather
-    than returning a number nobody read.
-    """
     total = int(_query("memory.total")[0]) * 1024 * 1024
     used: list[int] = []
     for sample in range(DESKTOP_SAMPLES):
@@ -425,49 +285,12 @@ def sample_desktop() -> DesktopSample:
 
 
 def desktop_allowance_from(peak_bytes: int) -> int:
-    """The reserve a measured desktop gets: its peak, doubled, and at least one
-    desktop-scale process more — never above `DEFAULT_DESKTOP_ALLOWANCE_BYTES`.
-
-        allowance = min(peak + max(peak, FOREIGN_PROCESS_FLOOR_BYTES), 3 GiB)
-
-    WHY HEADROOM AT ALL. The sample is five seconds of a desktop as it was
-    then. A desktop grows when somebody opens a browser or plays a video, and
-    the reserve has to cover the desktop somebody is USING, not the one that
-    sat idle while `crucible init` ran — a job sized to the idle figure would
-    be refused, or would squeeze Kylie's browser, the first time she watched
-    something.
-
-    WHY `FOREIGN_PROCESS_FLOOR_BYTES` (1 GiB) AS THE FLOOR. That constant is
-    already Crucible's ruled boundary between "the desktop" and "somebody's job"
-    (PHASE2-LLM.md section 4: *"a compositor or a video decoder, not somebody's
-    job"*). A browser playing a video is exactly one such process, so the
-    reserve leaves room for one more of them than was open when it was sampled
-    — the same line the guard draws, not a second number for the same idea.
-
-    WHY DOUBLE THE PEAK when it is larger than that floor. What a new window
-    costs scales with what the desktop is already drawing: its framebuffers
-    are per monitor and per pixel, and a desktop sampled at 1.5 GiB is driving
-    more or bigger screens than one at 0.3 GiB, so its next browser costs more
-    too. Doubling lets the desktop grow by its own size again.
-
-    WHY THE CEILING. 3 GiB is what owens-pc — a streaming, multi-monitor
-    desktop on a 24 GB card — has lived with since phase 2; no desktop Crucible
-    has met needs more. It also bounds what a sample can get wrong: a busy
-    moment, or (under WSL2, where the guest cannot see whose memory it is) a
-    Windows-side job, can at worst give a card the reserve it had before this
-    rule existed.
-
-    A GTX 1660 SUPER whose single low-resolution monitor holds 0.3 GiB gets
-    0.3 + 1.0 = 1.3 GiB, and a job gets 4.7 GiB of its 6 GiB instead of 3.0.
-    """
     headroom = max(peak_bytes, accelerator.FOREIGN_PROCESS_FLOOR_BYTES)
     return min(peak_bytes + headroom, DEFAULT_DESKTOP_ALLOWANCE_BYTES)
 
 
 @dataclass(frozen=True)
 class DesktopReserve:
-    """A measured reserve: the allowance, and the note the config keeps with it."""
-
     allowance_bytes: int
     sample: DesktopSample
 
@@ -485,15 +308,6 @@ class DesktopReserve:
 
 
 def _server_blocker(url: str, token: str | None) -> str | None:
-    """What a Crucible server at `url` holds that rules a sample out, or None.
-
-    With a token, `GET /v1/accelerator` is asked and its `resident` and
-    Crucible-owned holders are the answer. Without one (a fresh init, which
-    has no token for a server another config started), `GET /v1/ping`
-    answering at all is the answer: something of Crucible's is running here
-    and cannot be asked what it holds. A refused connection is the one "no
-    server"; a slow or odd answer is not read as nothing.
-    """
     from . import local
 
     path = "/v1/accelerator" if token is not None else "/v1/ping"
@@ -507,7 +321,7 @@ def _server_blocker(url: str, token: str | None) -> str | None:
     except (urllib.error.URLError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
         if isinstance(reason, ConnectionRefusedError):
-            return None  # nothing listening: nothing loaded by it
+            return None
         return (
             f"a Crucible server at {url} did not answer what it holds "
             f"({reason}), so it cannot be ruled out"
@@ -538,27 +352,7 @@ def _server_blocker(url: str, token: str | None) -> str | None:
 def desktop_blocker(
     config: Any | None, backend: Backend, *, port: int | None = None
 ) -> str | None:
-    """Why the desktop cannot be measured right now, or None when it can.
-
-    A sample is only the desktop when nothing else is on the card, so this
-    refuses — by name, never silently — when:
-
-    * the Crucible server this config describes (or, with no config, whatever
-      answers on `port` of this machine) is up and holds something, or cannot
-      be asked (`_server_blocker`);
-    * the driver names a `llama-server` (an engine of ours, maybe a crashed
-      run's orphan: accelerator.py finds those by image), or any compute app
-      holding `FOREIGN_PROCESS_FLOOR_BYTES` or more — somebody's job, which a
-      sample would count as desktop.
-
-    Under WSL2 the compute-app list is empty by the driver shim's design, so
-    the second check is blind there; the server check and
-    `desktop_allowance_from`'s ceiling are what remain.
-    """
     if config is not None:
-        # The server THIS config describes, on loopback, with its own token —
-        # read off the config rather than `local.connection`, which on win32
-        # answers for the host's fixed door and not for the config in hand.
         host = config.host
         if host in ("0.0.0.0", "::", ""):
             host = "127.0.0.1"
@@ -592,14 +386,6 @@ def desktop_blocker(
 def measure_desktop_reserve(
     config: Any | None, backend: Backend, *, port: int | None = None
 ) -> tuple[DesktopReserve | None, str]:
-    """Measure this card's desktop and size its reserve: (reserve, "") or
-    (None, why not).
-
-    NVIDIA cards only — `cuda-linux`, and `llama-windows` on a card nvidia-smi
-    answers for (its config is what the Windows-to-WSL move carries into the
-    guest). A Mac's reserve is a share of unified memory, not a desktop on a
-    card, and is untouched (`config.default_desktop_allowance_bytes`).
-    """
     if backend.kind == MLX_DARWIN or backend.gpu.vendor != "nvidia":
         return None, f"{backend.kind} on {backend.gpu.name} has no card desktop to sample"
     if nvidia_smi_path() is None:
@@ -615,13 +401,6 @@ def measure_desktop_reserve(
 
 
 def rung_card(home: Path, backend: Backend, desktop_allowance_bytes: int) -> RungResult:
-    """Rung 0: the card, the desktop on it, and the disk. nvidia-smi only.
-
-    "how much space is available" is both halves, so both are here: the
-    card's total and free memory, what the desktop holds of it (the least
-    `memory.used` over `DESKTOP_SAMPLES` seconds with nothing of ours loaded),
-    and the free disk under Crucible's home, where every weight goes.
-    """
     started = _now()
     facts: dict[str, Any] = {}
     try:
@@ -647,7 +426,6 @@ def rung_card(home: Path, backend: Backend, desktop_allowance_bytes: int) -> Run
         name, driver, uuid, total, free, cap = _query(
             "name,driver_version,uuid,memory.total,memory.free,compute_cap"
         )
-        # The same sampler `measure_desktop_reserve` sizes the reserve from.
         desktop = sample_desktop()
         used = [desktop.least_bytes, desktop.peak_bytes]
     except (accelerator.ProbeError, ValueError) as exc:
@@ -679,10 +457,6 @@ def rung_card(home: Path, backend: Backend, desktop_allowance_bytes: int) -> Run
     return RungResult(CARD, PASSED, started, facts, detail=detail)
 
 
-# ------------------------------------------------------------------ GPU rungs
-
-
-#: Rung 1's script, run with each env's own python. Prints one JSON line.
 ENV_SMOKE = f"""
 import json, time
 out = {{"ok": False}}
@@ -727,8 +501,6 @@ except Exception as exc:
 print({RESULT_PREFIX!r} + json.dumps(out), flush=True)
 """
 
-#: The CUDA-graph rung's script, run with the llm env's python: capture one
-#: matmul, replay it on new input, compare with eager.
 GRAPHS_SMOKE = f"""
 import json
 out = {{"ok": False}}
@@ -761,11 +533,6 @@ print({RESULT_PREFIX!r} + json.dumps(out), flush=True)
 def _preflight(
     backend: Backend, desktop_allowance_bytes: int, need_bytes: int
 ) -> tuple[str, str] | None:
-    """The guard's own answer before a GPU rung: `(outcome, why)`, or None to go.
-
-    Busy or short of room is `waiting` — the card is somebody else's right
-    now, and that says nothing about what it can do.
-    """
     if backend.kind != CUDA_LINUX:
         return (
             SKIPPED,
@@ -785,7 +552,6 @@ def _preflight(
 
 
 def _run_script(python: Path, script: str) -> tuple[dict[str, Any] | None, str, Watch]:
-    """One smoke script under a watch: `(result or None, stderr tail, watch)`."""
     process = subprocess.Popen(
         [str(python), "-c", script],
         stdout=subprocess.PIPE,
@@ -814,10 +580,6 @@ def _run_script(python: Path, script: str) -> tuple[dict[str, Any] | None, str, 
 
 
 def installed_env_pythons(home: Path, backend_kind: str) -> dict[str, Path]:
-    """Every env this host has built that runs torch on the card, by name.
-
-    Empty off `cuda-linux`: the GPU rungs measure the Linux engines' envs, and
-    no other backend has an llm env of that kind to ask for."""
     from . import jobenv
 
     found: dict[str, Path] = {}
@@ -834,9 +596,6 @@ def installed_env_pythons(home: Path, backend_kind: str) -> dict[str, Path]:
 
 
 def rung_env(home: Path, backend: Backend, desktop_allowance_bytes: int) -> RungResult:
-    """Rung 1: torch initialises on this card in each installed env, and how
-    fast each dtype's matmul is. The bf16 figure below compute capability 8.0
-    is the emulation penalty the aligner pays; it is reported, not refused."""
     started = _now()
     waiting = _preflight(backend, desktop_allowance_bytes, SMOKE_NEED_BYTES)
     if waiting is not None:
@@ -872,7 +631,6 @@ def rung_env(home: Path, backend: Backend, desktop_allowance_bytes: int) -> Rung
 
 
 def rung_graphs(home: Path, backend: Backend, desktop_allowance_bytes: int) -> RungResult:
-    """Rung 2: a CUDA graph captures and replays in the llm env."""
     started = _now()
     waiting = _preflight(backend, desktop_allowance_bytes, SMOKE_NEED_BYTES)
     if waiting is not None:
@@ -903,9 +661,6 @@ def rung_graphs(home: Path, backend: Backend, desktop_allowance_bytes: int) -> R
 
 
 def _smallest_vllm_model(config: Any) -> tuple[Any, Any, Any] | None:
-    """The smallest model with a vLLM block whose weights are on this server:
-    `(manifest, spec, installed)`, or None. The rung asks whether vLLM starts
-    at all, so the cheapest thing that answers it is the right thing to load."""
     from . import weights
     from .manifests import load_all_manifests
     from .precision import below_floor, weight_bits
@@ -931,17 +686,6 @@ def _smallest_vllm_model(config: Any) -> tuple[Any, Any, Any] | None:
 def rung_vllm(
     config: Any, backend: Backend, card: CardFacts
 ) -> RungResult:
-    """Rung 3: vLLM starts the smallest installed model here and answers once.
-
-    Started exactly as a `load-model` would start it — the same argv composer
-    (`Residency._engine_args`), the same KV plan sized against the card this
-    second (`vram.plan_vllm_memory`, which states the pool in bytes and so
-    removes vLLM's profiling window, MEASUREMENTS 2026-09-18 Finding 4), and
-    this card's own args (`engines.vllm.card_args`: fp16 without bf16,
-    `--enforce-eager` without CUDA graphs) — at the smallest context a load
-    may ask for. A plan that does not fit is `waiting`, never a failure: room
-    is the card's state, not what it can do.
-    """
     from . import vram
     from .capability import MIN_LOAD_CONTEXT
     from .engines import EngineError, build_engine, engine_model_name, find_free_port, logs_dir
@@ -1026,9 +770,6 @@ def rung_vllm(
     return RungResult(VLLM, outcome, started, facts, detail, watch.summary())
 
 
-# ------------------------------------------------------------------ the run
-
-
 def run(
     config: Any,
     backend: Backend,
@@ -1037,13 +778,6 @@ def run(
     gpu: bool = True,
     on_line: Callable[[str], None] | None = None,
 ) -> dict[str, RungResult]:
-    """Run `rungs` in order, write the record after each, return every result.
-
-    `gpu=False` runs the nvidia-smi rung alone and leaves the others as they
-    were recorded: the door for "tell me what you know without touching the
-    card". A rung that builds on one that did not pass is skipped, saying
-    which.
-    """
     unknown = [name for name in rungs if name not in RUNGS]
     if unknown:
         raise LadderError(f"{unknown} are not rungs; the rungs are {list(RUNGS)}")
@@ -1073,8 +807,6 @@ def run(
         elif name == GRAPHS:
             result = rung_graphs(home, backend, config.desktop_allowance_bytes)
         else:
-            # Read back through `card_for`, so the CUDA-graph answer this run
-            # just wrote decides `--enforce-eager` exactly as a load would.
             result = rung_vllm(config, backend, card_for(home, backend.gpu))
         results[name] = result
         _write_record(home, backend.gpu, results)
