@@ -16,7 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from ... import accelerator, jobenv, weights
+from ... import accelerator, jobenv, ttsplan, weights
 from ...config import Config
 from ...errors import ApiError
 from ...residency import KIND_TTS, Residency
@@ -484,9 +484,13 @@ def require_loadable(
              "declared": sorted(manifest.backends)},
         )
     spec = manifest.spec(backend_kind)
+    # "NEVER ON THIS HOST" IS THE LEAST THIS VOICE CAN BE SERVED IN, not its
+    # full width: Owen, 2026-09-26, "we should drop batches to 1 at a time
+    # before we quantize" (`ttsplan`). A card that holds one passage at a time
+    # is a card this voice runs on.
     accelerator.refuse_if_larger_than_host(
         model_id=voice_id,
-        need_bytes=spec.memory_bytes_estimate,
+        need_bytes=voice_load_plan(config, backend, manifest, spec).floor_bytes,
         host_total_bytes=backend.gpu.vram_bytes,
         host_name=backend.gpu.name,
     )
@@ -566,3 +570,19 @@ def voice_provenance(backend_kind: str, voice_id: str | None) -> dict[str, Any] 
         "identity_basis": spec.identity_basis,
         "fingerprint": manifest.fingerprint(backend_kind),
     }
+
+
+def voice_load_plan(
+    config: Config, backend: Any, manifest: VoiceManifest, spec: VoiceBackendSpec
+) -> "ttsplan.LoadPlan":
+    """What loading this voice asks of THIS card, and the width narrator starts
+    at (`ttsplan.load_plan`): the capability walk's own choice, made again from
+    the same budget so the verdict and the load agree. Every guard and every
+    `load_voice` in this job type asks here."""
+    return ttsplan.load_plan(
+        manifest,
+        spec,
+        backend.kind,
+        total_bytes=backend.gpu.vram_bytes,
+        desktop_allowance_bytes=config.desktop_allowance_bytes,
+    )

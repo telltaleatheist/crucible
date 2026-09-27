@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..backend import BF16
+from ..backend import BF16, CUDA_GRAPHS, VLLM_STARTS, CardFacts
 from .base import EngineError, SubprocessEngine, int_flag
 
 MODULE = "vllm.entrypoints.openai.api_server"
@@ -132,46 +132,94 @@ def dtype_of(engine_args: "tuple[str, ...] | list[str]") -> str:
     return AUTO_DTYPE
 
 
-def card_needs(spec: object) -> tuple[str, ...]:
-    """What a backend block needs from the CARD for vLLM to start it at all.
+def stated_dtype(spec: object) -> str:
+    """The dtype a block tells vLLM to run in: an asr block's `dtype`, a model
+    block's `--dtype`, or `auto` where it states none."""
+    stated = getattr(spec, "dtype", None)
+    if stated is not None:
+        return stated
+    return dtype_of(getattr(spec, "engine_args", ()))
 
-    Fresh-install #48, 2026-09-26. Read in vLLM 0.29.0, the llm env's pin, not
-    recalled:
 
-    * **A STATED `bfloat16` IS A HARD REFUSAL BELOW 8.0.** `v1/worker/
-      gpu_worker.py` L414 calls `check_if_supports_dtype` in `init_device`,
-      and `platforms/cuda.py` L622-640 raises *"Bfloat16 is only supported on
-      GPUs with compute capability of at least 8.0"* — after the process has
-      started, before a weight is read. The qwen3.5 blocks state
-      `--dtype bfloat16` in their `engine_args`, and the Qwen3-ASR blocks'
-      `dtype = "bfloat16"` reaches `LLM(dtype=...)` the same way
-      (`jobs/asr/qwen_worker.py`, `load_vllm`), so on a Turing card every one
-      of them is a job that fails at its first line.
-    * **`auto` is not.** `config/model.py` L2268-2309 (`_resolve_auto_dtype`)
-      falls back from a bfloat16 checkpoint to float16 with a warning — the
-      same two bytes a parameter, so the memory arithmetic is unchanged — and
-      `dots-ocr` and the 27B-4bit state no `--dtype`. Whether a bf16-trained
-      checkpoint reads pages or translates as well in float16 has not been
-      measured; that is a quality question for the ladder
-      (docs/PROPOSAL-GPU-LADDER.md), not a refusal this function may invent.
-    * **FlashAttention 2 is not needed.** Below 8.0 vLLM selects its Triton
-      attention (`v1/attention/backends/triton_attn.py` L373-374 allows every
-      capability; FlashInfer is floored at 8.0 in `flashinfer.py` L506-510).
+#: What a stated bfloat16 is run in on a card without bf16. Owen, 2026-09-26:
+#: *"we can quantize if we need to. no less than 4."* float16 is the SAME two
+#: bytes a parameter, so every memory figure in the manifest still holds, and
+#: it is what vLLM itself picks for a bf16 checkpoint left on `auto` on such a
+#: card (`config/model.py` L2268-2309, `_resolve_auto_dtype`).
+BF16_FALLBACK_DTYPE = "float16"
 
-    The feature names are `backend.FEATURE_FLOORS`', so the need and the card's
-    answer are compared by one vocabulary. Every other engine answers `()`:
-    nothing this build runs elsewhere refuses a card by its generation (the
-    torch workers emulate bf16 below 8.0 — `torch.cuda.is_bf16_supported`,
-    `including_emulation` — which is slower and not a refusal).
 
-    `spec` is any catalog's backend block: a model block carries its dtype in
-    `engine_args`, an asr block in `dtype`.
+def bf16_fallback(spec: object) -> str | None:
+    """The dtype this block drops to on a card without bf16, or None.
+
+    Only a vLLM block that STATES bfloat16 has one. Fresh-install #48, read in
+    vLLM 0.29.0: a stated `bfloat16` is refused below compute capability 8.0 at
+    `v1/worker/gpu_worker.py` L414 -> `platforms/cuda.py` L622-640 ("Bfloat16 is
+    only supported on GPUs with compute capability of at least 8.0"), after the
+    process starts and before a weight is read. Package G turned that into a
+    refusal; Owen's ruling of 2026-09-26 turns it into a lower precision the
+    card CAN run. `auto` needs no fallback (vLLM makes it itself), and the
+    torch workers (the aligner) emulate bf16 below 8.0 rather than refusing
+    (`torch.cuda.is_bf16_supported`, `including_emulation`).
+    """
+    if getattr(spec, "engine", None) != ENGINE_NAME:
+        return None
+    return BF16_FALLBACK_DTYPE if stated_dtype(spec) == "bfloat16" else None
+
+
+def run_dtype(spec: object, card: "CardFacts | None") -> str:
+    """The dtype vLLM is STARTED in for this block on this card.
+
+    The stated dtype, except a stated bfloat16 on a card known to lack bf16,
+    which runs in `BF16_FALLBACK_DTYPE`. An unknown card keeps the stated
+    dtype: it is not known to lack anything, and if it does, vLLM says so.
+    """
+    fallback = bf16_fallback(spec)
+    if fallback is not None and card is not None and card.has(BF16) is False:
+        return fallback
+    return stated_dtype(spec)
+
+
+def card_args(spec: object, card: "CardFacts | None") -> tuple[str, ...]:
+    """What `Residency` appends to a vLLM block's argv on THIS card.
+
+    Appended after the manifest's own args, so argparse's last-spelling-wins
+    makes them override (the same mechanism the KV plan's flags use):
+
+    * `--dtype float16` where the block states bfloat16 and the card has none
+      (`run_dtype`).
+    * `--enforce-eager` where the ladder MEASURED that this card cannot capture
+      CUDA graphs in the llm env (`backend.CUDA_GRAPHS` False). vLLM then runs
+      without graphs: slower per token, and it runs. Unmeasured, nothing is
+      added: vLLM captures graphs by default and that is what every card
+      Crucible has run on did.
     """
     if getattr(spec, "engine", None) != ENGINE_NAME:
         return ()
-    stated = getattr(spec, "dtype", None)
-    dtype = stated if stated is not None else dtype_of(getattr(spec, "engine_args", ()))
-    return (BF16,) if dtype == "bfloat16" else ()
+    args: list[str] = []
+    dtype = run_dtype(spec, card)
+    if dtype != stated_dtype(spec):
+        args += ["--dtype", dtype]
+    if card is not None and card.has(CUDA_GRAPHS) is False:
+        args.append("--enforce-eager")
+    return tuple(args)
+
+
+def card_needs(spec: object) -> tuple[str, ...]:
+    """What a block needs from the card with NO lower precision to fall back to.
+
+    Package G answered `("bf16",)` for a stated bfloat16. Owen's ruling of
+    2026-09-26 (*"we can quantize if we need to. no less than 4"*) makes that a
+    fallback (`bf16_fallback`), not a need. What is left is the one fact no
+    precision works around: that vLLM starts at all on this card in this env
+    (`backend.VLLM_STARTS`), which only the ladder can measure. Unmeasured is
+    unknown and refuses nothing (`capability.Candidate.lacks`).
+
+    `spec` is any catalog's backend block. Every engine but vLLM answers `()`.
+    """
+    if getattr(spec, "engine", None) != ENGINE_NAME:
+        return ()
+    return (VLLM_STARTS,)
 
 
 class VllmEngine(SubprocessEngine):

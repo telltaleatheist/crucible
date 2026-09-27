@@ -42,6 +42,7 @@ from typing import Any, Mapping
 
 from . import capability as capability_classes
 from . import upstreams as upstream_module
+from .backend import CardFacts
 from .config import (
     CapabilityRecord,
     Config,
@@ -591,7 +592,7 @@ def recomputed_capability(
     resolved: Resolved,
     *,
     gpu_vendor: str,
-    compute_capability: str | None,
+    card: "CardFacts | None",
 ) -> CapabilityRecord | None:
     """`[capability]`, decided again with the new routes and allowance applied.
 
@@ -627,11 +628,12 @@ def recomputed_capability(
         # when the detected backend and the recorded one disagree, so the two
         # cannot drift apart under a running server.
         gpu_vendor=gpu_vendor,
-        # THE CARD'S GENERATION, live for the vendor's reason, and REQUIRED
+        # THE CARD (its generation and the ladder's measured facts,
+        # `ladder.card_for`), live for the vendor's reason, and REQUIRED
         # here: a settings write that re-decided without it would quietly
-        # re-enable a class the card cannot start (a bf16 model on a Turing
-        # card, fresh-install #48) the next time somebody pasted a key.
-        compute_capability=compute_capability,
+        # re-decide a class as if the card had bf16 or vLLM it lacks (a bf16
+        # model on a Turing card, fresh-install #48) when somebody pasted a key.
+        card=card,
         # The selections as this patch leaves them, not as the config had
         # them: a write that changes a choice must be decided on the NEW one,
         # or the record would describe the model the app just replaced.
@@ -651,7 +653,7 @@ def apply(
     resolved: Resolved,
     *,
     gpu_vendor: str,
-    compute_capability: str | None,
+    card: "CardFacts | None",
 ) -> None:
     """Write the file and adopt it into the Config this process holds.
 
@@ -698,7 +700,7 @@ def apply(
             config,
             resolved,
             gpu_vendor=gpu_vendor,
-            compute_capability=compute_capability,
+            card=card,
         ),
         routes=routes,
         upstreams=upstreams,

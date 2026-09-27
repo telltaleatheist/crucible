@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
+from .precision import MIN_WEIGHT_BITS, below_floor, gguf_bits
 from .errors import CrucibleError
 
 MODELS_DIR_ENV = "CRUCIBLE_MODELS_DIR"
@@ -993,6 +994,17 @@ def _gguf_name(where: str, key: str, value: str) -> str:
             f"{where}: {key} {value!r} does not end in {_GGUF_FILE!r}; llama-server "
             "reads nothing else, and a name without the extension is usually a "
             "repo id or a directory rather than the file"
+        )
+    # OWEN'S FLOOR, 2026-09-26: *"we can quantize if we need to. no less than
+    # 4."* A GGUF is the one kind of block that names its quantization in a
+    # file the loader reads, so a Q3/Q2/IQ2 is refused here, by name, rather
+    # than shipped and then quietly skipped by the capability walk.
+    bits = gguf_bits(value)
+    if below_floor(bits):
+        raise ManifestError(
+            f"{where}: {key} {value!r} is a {bits}-bit quantization, and nothing "
+            f"under {MIN_WEIGHT_BITS} bits is ever offered (Owen, 2026-09-26: "
+            "\"no less than 4\")"
         )
     return value
 

@@ -17,7 +17,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .errors import NoViableBackend
@@ -171,6 +171,116 @@ class Gpu:
 
     def features(self) -> dict[str, bool] | None:
         return card_features(self.compute_capability)
+
+
+#: TENSOR CORES, which the compute capability alone does NOT answer. Volta
+#: (7.0) is where they arrive, and every NVIDIA part at or above it has them
+#: EXCEPT the Turing GTX 16 family (TU116/TU117: GTX 1650, 1660, 1660 SUPER,
+#: 1660 Ti), which NVIDIA shipped at sm_75 with the tensor cores removed and
+#: dedicated FP16 units in their place. kylies-pc's card is exactly that part,
+#: so "sm_70 and up" would have said yes about the one card #48 is about.
+#: Reported, never required: nothing in this build refuses a card for lacking
+#: them; they are the difference between fp16 matmuls that are fast and ones
+#: that merely work.
+TENSOR_CORES = "tensor_cores"
+TENSOR_CORE_FLOOR = (7, 0)
+#: The marketing prefix NVIDIA gives the TU116/TU117 parts, as nvidia-smi
+#: prints the name (`NVIDIA GeForce GTX 1660 SUPER`).
+NO_TENSOR_CORE_PARTS: tuple[str, ...] = ("GTX 16",)
+
+
+def has_tensor_cores(compute_capability: str | None, name: str) -> bool | None:
+    """True, False, or None where the generation is unknown."""
+    if compute_capability is None:
+        return None
+    parsed = parse_compute_capability(compute_capability)
+    if parsed is None:
+        return None
+    if parsed < TENSOR_CORE_FLOOR:
+        return False
+    return not any(part in name for part in NO_TENSOR_CORE_PARTS)
+
+
+#: FACTS THE LADDER MEASURES (docs/PROPOSAL-GPU-LADDER.md, built 2026-09-26):
+#: what no spec sheet answers and only a run on this card, in this env, can.
+#: Owen, 2026-09-26: *"our measurement tool should determine how much space is
+#: available, whether tensors are available, cuda graphs, vllm, etc. and
+#: install the best the user can use"*.
+#:
+#:   cuda_graphs   a CUDA graph captured and replayed in the llm env's torch.
+#:                 False means vLLM is started `--enforce-eager` (slower, and
+#:                 it runs), never that vLLM is refused.
+#:   vllm          vLLM started a model in the llm env on this card and
+#:                 answered one request. False REFUSES every vLLM block here,
+#:                 with the measured first error line.
+CUDA_GRAPHS = "cuda_graphs"
+VLLM_STARTS = "vllm"
+MEASURED_FEATURES: tuple[str, ...] = (CUDA_GRAPHS, VLLM_STARTS)
+
+
+@dataclass(frozen=True)
+class CardFacts:
+    """Everything capability and the engines may ask about THIS card.
+
+    Two sources, one answer. DECLARED facts come off the compute capability
+    (`FEATURE_FLOORS`, `has_tensor_cores`) and need nobody to run anything;
+    MEASURED facts come off the ladder's record (`crucible/ladder.py`) and
+    exist only once it has run. A fact nobody knows is None — "unknown" — and
+    never False: an unmeasured card is not a card that failed.
+    """
+
+    name: str
+    compute_capability: str | None
+    #: `{feature: passed}` for each `MEASURED_FEATURES` entry the ladder has
+    #: an answer for on this card; absent means not measured.
+    measured: dict[str, bool] = field(default_factory=dict)
+    #: The measured facts' own sentences — the first error line of a failed
+    #: rung — so a refusal built on one can quote it.
+    measured_detail: dict[str, str] = field(default_factory=dict)
+    #: When the ladder's record was taken, or None when there is none.
+    measured_at: str | None = None
+
+    def has(self, feature: str) -> bool | None:
+        """True, False, or None (unknown) for one feature."""
+        if feature in MEASURED_FEATURES:
+            return self.measured.get(feature)
+        if feature == TENSOR_CORES:
+            return has_tensor_cores(self.compute_capability, self.name)
+        declared = card_features(self.compute_capability)
+        if declared is None:
+            return None
+        if feature not in declared:
+            raise KeyError(
+                f"{feature!r} is not a card feature this build knows; it knows "
+                f"{[n for n, _f, _w in FEATURE_FLOORS]}, {TENSOR_CORES!r} and "
+                f"{list(MEASURED_FEATURES)}"
+            )
+        return declared[feature]
+
+    def features(self) -> dict[str, bool | None]:
+        """Every feature this build knows, in report order, None where unknown."""
+        names = [n for n, _f, _w in FEATURE_FLOORS] + [TENSOR_CORES, *MEASURED_FEATURES]
+        return {name: self.has(name) for name in names}
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "compute_capability": self.compute_capability,
+            "sm": (
+                None
+                if self.compute_capability is None
+                else sm_name(self.compute_capability)
+            ),
+            "features": self.features(),
+            "floors": {n: feature_floor(n) for n, _f, _w in FEATURE_FLOORS},
+            "measured_at": self.measured_at,
+            "measured_detail": dict(self.measured_detail),
+        }
+
+
+def declared_card(gpu: Gpu) -> CardFacts:
+    """The card as the probe alone describes it: no ladder record consulted."""
+    return CardFacts(name=gpu.name, compute_capability=gpu.compute_capability)
 
 
 @dataclass(frozen=True)

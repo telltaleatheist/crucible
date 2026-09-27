@@ -48,6 +48,7 @@ from . import (
     hosttools,
     interpreter,
     jobenv,
+    ladder,
     llamacpp,
     narratorpatches,
     pairing,
@@ -66,15 +67,12 @@ from .asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
 from .backend import (
     BACKEND_KINDS,
     CUDA_LINUX,
-    FEATURE_FLOORS,
     LLAMA_WINDOWS,
     MLX_DARWIN,
     WINDOWS_REFUSAL,
     Backend,
     backend_not_here,
     detect_backend,
-    feature_floor,
-    sm_name,
 )
 from .config import (
     CAPABILITY_FLAGS,
@@ -730,33 +728,27 @@ def _decide_here(config: Config, backend: Backend) -> tuple[capability.Decision,
         # would write a record naming a different model than the settings
         # document reports, and nothing would be comparing the two.
         chosen={entry.capability: entry.model for entry in config.local_models},
-        # WHAT GENERATION THIS CARD IS, beside how big (fresh-install #48): a
-        # 6 GB Turing card and a 6 GB Ampere one hold the same bytes and do
-        # not start the same engines.
-        compute_capability=backend.gpu.compute_capability,
+        # WHAT THIS CARD IS, beside how big (fresh-install #48): its
+        # generation and the ladder's measured facts. A 6 GB Turing card and a
+        # 6 GB Ampere one hold the same bytes and run different precisions.
+        card=ladder.card_for(config.home, backend.gpu),
     )
 
 
-def _card_facts(backend: Backend) -> dict[str, Any]:
+def _card_facts(home: Path, backend: Backend) -> dict[str, Any]:
     """What this card IS, beside how much it holds: `crucible capability` and
-    `crucible doctor` print the same facts from this one function.
+    `crucible doctor` print the same facts from this one function, which is
+    `ladder.card_for`'s card (declared facts plus measured ones).
 
-    `features` is null where the generation is unknown — no NVIDIA card, or a
-    driver that would not report `compute_cap` — and never all-false, which
-    would read as a card that can do nothing.
+    A feature is null where it is unknown — no NVIDIA card, a driver that
+    would not report `compute_cap`, or a fact the ladder has not measured —
+    and never false for that reason, which would read as a card that failed.
     """
-    capability_text = backend.gpu.compute_capability
-    return {
-        "name": backend.gpu.name,
-        "compute_capability": capability_text,
-        "sm": None if capability_text is None else sm_name(capability_text),
-        "features": backend.gpu.features(),
-        "floors": {name: feature_floor(name) for name, _floor, _what in FEATURE_FLOORS},
-    }
+    return ladder.card_for(home, backend.gpu).to_dict()
 
 
 def _card_line(facts: dict[str, Any]) -> str:
-    """One line a person can read: `sm_75 (7.5): bf16 no (needs 8.0), ...`."""
+    """One line a person can read: `sm_75 (7.5): bf16 NO (needs 8.0), ...`."""
     if facts["compute_capability"] is None:
         return (
             "compute capability not reported (no NVIDIA card, or a driver too "
@@ -764,12 +756,25 @@ def _card_line(facts: dict[str, Any]) -> str:
             "unknown"
         )
     features = facts["features"] or {}
-    said = ", ".join(
-        f"{name} {'yes' if features.get(name) else 'NO'} "
-        f"(needs {facts['floors'][name]})"
-        for name in facts["floors"]
+
+    def said(name: str) -> str:
+        value = features.get(name)
+        word = "yes" if value else "NO"
+        floor = facts["floors"].get(name)
+        return f"{name} {word}" + (f" (needs {floor})" if floor else "")
+
+    # A fact nobody has measured is left off the line rather than printed as
+    # "unknown" on every host: the ladder's GPU rungs only exist for the Linux
+    # engines, and a line that nags where they cannot run is noise.
+    known = [name for name in features if features[name] is not None]
+    measured = (
+        f"; measured {facts['measured_at']}" if facts.get("measured_at") else ""
     )
-    return f"{facts['sm']} ({facts['compute_capability']}): {said}"
+    return (
+        f"{facts['sm']} ({facts['compute_capability']}): "
+        + ", ".join(said(name) for name in known)
+        + measured
+    )
 
 
 def _write_capability(
@@ -842,7 +847,7 @@ def _print_decisions(
     if backend.kind != MLX_DARWIN and backend.gpu.vendor != capability.CPU_VENDOR:
         # A Mac and a cardless Windows box have no compute capability to
         # report, and a line saying "unknown" there would read as a fault.
-        print(f"card:     {_card_line(_card_facts(backend))}")
+        print(f"card:     {_card_line(_card_facts(config.home, backend))}")
     print(
         f"pool:     {backend.gpu.vram_bytes / gib:.1f} GiB "
         f"{capability.POOL_NAME[backend.kind]}"
@@ -905,7 +910,7 @@ def cmd_capability(args: argparse.Namespace) -> int:
             json.dumps(
                 {
                     "backend": backend.kind,
-                    "card": _card_facts(backend),
+                    "card": _card_facts(config.home, backend),
                     "total_bytes": backend.gpu.vram_bytes,
                     "desktop_allowance_bytes": config.desktop_allowance_bytes,
                     "available_bytes": capability.available_bytes(
@@ -1121,6 +1126,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     refusal = _ensure_tools(config, args)
     if refusal is not None:
         return _fail(refusal)
+    _measure_step(config, backend, gpu=not args.no_gpu_measure)
     return _capability_step(config, backend, args.job_type)
 
 
@@ -1195,6 +1201,7 @@ def _install_llama_windows(
         f"installed in {time.monotonic() - started:.0f}s: {found.path} "
         f"({found.bytes / 1e9:.2f} GB)"
     )
+    _measure_step(config, backend, gpu=not args.no_gpu_measure)
     return _capability_step(config, backend, args.job_type)
 
 
@@ -1253,9 +1260,75 @@ def _install_worker_env(
     # audio-separator, which is `denoise` — and the flag for each of them is
     # decided here, because this is the door that has just built the thing they
     # share.
+    _measure_step(config, backend, gpu=not args.no_gpu_measure)
     return _capability_step(
         config, backend, *workerenv.JOB_TYPES_SERVED_BY_ENV[args.job_type]
     )
+
+
+def _measure_step(config: Config, backend: Backend, *, gpu: bool) -> None:
+    """The measurement ladder, run by install before it decides (crucible/ladder.py).
+
+    Owen, 2026-09-26: *"our measurement tool should determine how much space is
+    available, whether tensors are available, cuda graphs, vllm, etc. and
+    install the best the user can use"*. So install measures FIRST and then
+    decides: `_decide_here` reads the record this writes (`ladder.card_for`),
+    and "the best the user can use" is the best-first walk over what this card
+    measured it can start, at the precision it can run.
+
+    Never a refusal of the install. A GPU rung that finds the card in use waits
+    (`waiting`, nothing recorded as failed) and the install goes on with what
+    is known; unknown refuses nothing. `gpu=False` is `--no-gpu-measure`.
+    """
+    print("measuring this card:")
+    try:
+        ladder.run(
+            config,
+            backend,
+            gpu=gpu,
+            on_line=lambda line: print(f"  {line}"),
+        )
+    except (ladder.LadderError, OSError) as exc:
+        print(f"  the measurement did not complete ({exc}); deciding on what is known")
+
+
+def cmd_ladder(args: argparse.Namespace) -> int:
+    """`crucible ladder` — measure what this card can do, on demand.
+
+    The install's own step (`_measure_step`), for a card that was in use then,
+    a driver or card changed since (`crucible doctor` says the record is
+    stale), or a person who wants to know. `--no-gpu` puts nothing on the card.
+    It records; `crucible capability --write` (or the next install) decides
+    from what it recorded.
+    """
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        return _fail(str(exc))
+    try:
+        backend = detect_backend()
+    except NoViableBackend as exc:
+        return _fail(f"no viable backend: {exc.reason}")
+    rungs = tuple(args.rung) if args.rung else ladder.RUNGS
+    say = None if args.json else (lambda line: print(line))
+    try:
+        ladder.run(config, backend, rungs, gpu=not args.no_gpu, on_line=say)
+    except ladder.LadderError as exc:
+        return _fail(str(exc))
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "card": _card_facts(config.home, backend),
+                    "record": ladder.summary(config.home, backend.gpu),
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"card: {_card_line(_card_facts(config.home, backend))}")
+        print(f"recorded in {ladder.record_path(config.home)}")
+    return EXIT_OK
 
 
 def _capability_step(config: Config, backend: Backend, *job_types: str) -> int:
@@ -1301,6 +1374,22 @@ def _capability_step(config: Config, backend: Backend, *job_types: str) -> int:
             )
     written = _write_capability(config, backend, decisions, flags)
     print(f"recorded in {written}")
+    # THE SAME WORDS THE UI's CONFIRMATION SHOWS (`capability.install_plan`),
+    # so a person installing from a console reads what one installing from
+    # the operator page was asked to accept.
+    card = ladder.card_for(config.home, backend.gpu)
+    pool = capability.pool_name(backend.kind, backend.gpu.vendor)
+    for job_type in job_types:
+        plan = capability.install_plan(
+            job_type,
+            decisions,
+            card=card,
+            total_bytes=backend.gpu.vram_bytes,
+            pool=pool,
+        )
+        print(f"your card ({plan['card_words']}), for {job_type}:")
+        for row in plan["classes"]:
+            print(f"  {row['line']}")
     if disabled:
         return _fail(
             "the env is installed, but "
@@ -2447,6 +2536,7 @@ def _doctor_report() -> dict[str, Any]:
         "config": None,
         "backend": None,
         "card": None,
+        "ladder": None,
         "job_types": [],
         "llm_env": None,
         "worker_envs": [],
@@ -2490,7 +2580,11 @@ def _doctor_report() -> dict[str, Any]:
         # generation it is and what that lets it run. A report, never a
         # problem: an old card is not an unhealthy server, and the classes it
         # cannot start already say so on their own capability rows.
-        report["card"] = _card_facts(backend)
+        report["card"] = _card_facts(home, backend)
+        # WHAT THE LADDER MEASURED, and whether it still describes this card.
+        # Reported, never a problem: an unmeasured card refuses nothing, and a
+        # stale record is read as no record until `crucible ladder` runs.
+        report["ladder"] = ladder.summary(home, backend.gpu)
     except NoViableBackend as exc:
         report["problems"].append(f"no_viable_backend: {exc.reason}")
         backend = None
@@ -2752,6 +2846,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 and gpu["vendor"] != capability.CPU_VENDOR
             ):
                 print(f"card:    {_card_line(report['card'])}")
+            measured = report.get("ladder")
+            if measured is not None:
+                if measured["stale"]:
+                    print(f"note:    {measured['stale']}")
+                for name, row in measured["rungs"].items():
+                    print(f"ladder {name}: {row['outcome']} — {row['detail']}")
         path_entry = report["path"]
         if path_entry is not None:
             print(f"PATH (this shell):   {path_entry['shell'] or '(empty)'}")
@@ -3341,7 +3441,34 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument(
         "--verbose", action="store_true", help="echo pip's output line by line"
     )
+    install.add_argument(
+        "--no-gpu-measure",
+        action="store_true",
+        help=(
+            "measure the card with nvidia-smi only, and leave the GPU rungs "
+            "(torch, CUDA graphs, vLLM) for `crucible ladder` later"
+        ),
+    )
     install.set_defaults(func=cmd_install)
+
+    ladder_parser = subparsers.add_parser(
+        "ladder",
+        help="measure what this card can do (the install's measurement ladder)",
+    )
+    ladder_parser.add_argument(
+        "--rung",
+        action="append",
+        choices=list(ladder.RUNGS),
+        default=None,
+        help="run only this rung (repeatable); every rung by default",
+    )
+    ladder_parser.add_argument(
+        "--no-gpu",
+        action="store_true",
+        help="the nvidia-smi rung only; nothing is put on the card",
+    )
+    ladder_parser.add_argument("--json", action="store_true", help="machine-readable")
+    ladder_parser.set_defaults(func=cmd_ladder)
 
     capability_parser = subparsers.add_parser(
         "capability",

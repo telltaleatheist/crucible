@@ -1323,12 +1323,16 @@
         class: 'button primary',
         type: 'button',
         disabled: state.running !== null,
-        onclick: function () {
+        onclick: async function () {
           var request = { type: 'install', job_type: entry.job_type };
           if (wants) {
             request.narrator_engine = state.engineChoice[entry.job_type];
           }
-          submit(request, 'install:' + entry.job_type);
+          var where = 'install:' + entry.job_type;
+          if (!(await confirmPlan('job_type=' + encodeURIComponent(entry.job_type), where))) {
+            return;
+          }
+          submit(request, where);
         }
       }, ['Install'])
     );
@@ -2348,11 +2352,12 @@
           class: 'button primary',
           type: 'button',
           disabled: state.running !== null,
-          onclick: function () {
-            submit(
-              { type: 'pull', kind: row.kind, id: row.id },
-              'pull:' + row.kind + ':' + row.id
-            );
+          onclick: async function () {
+            var where = 'pull:' + row.kind + ':' + row.id;
+            if (!(await confirmPlan('subject=' + encodeURIComponent(row.id), where))) {
+              return;
+            }
+            submit({ type: 'pull', kind: row.kind, id: row.id }, where);
           }
         }, ['Pull'])
       );
@@ -2691,6 +2696,32 @@
   }
 
   // ------------------------------------------------------------- the doors
+
+  // WHAT THIS CARD WILL GET, ASKED BEFORE AN INSTALL OR A PULL. Owen,
+  // 2026-09-26: *"that can be in a modal or something that pops up when the
+  // user tries to install a pakcage from the crucible ui"*. The words are the
+  // SERVER'S (`GET /v1/capability/plan`, decided by the same walk the install
+  // records), so this page only shows them: which model, at what precision,
+  // and why not the best one. `confirm`, for the reason Remove uses it — the
+  // browser's own dialog, no framework. A 404 — a server that predates the
+  // door, or a subject no capability class runs (the llama.cpp engine) — has
+  // nothing to say about the card, and the act goes ahead as it always did;
+  // any other refusal is shown where the act's own would be, and nothing is
+  // submitted.
+  async function confirmPlan(query, where) {
+    var plan;
+    try {
+      plan = await call(`/v1/capability/plan?${query}`);
+    } catch (refusal) {
+      if (refusal && refusal.status === 404) {
+        return true;
+      }
+      setRefusal(where, refusal);
+      render();
+      return false;
+    }
+    return window.confirm(plan.confirm);
+  }
 
   async function submit(request, where) {
     setRefusal(where, null);

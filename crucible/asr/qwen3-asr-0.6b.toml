@@ -37,6 +37,8 @@ parameters_m = 600
 engine = "vllm"
 hf_repo = "Qwen/Qwen3-ASR-0.6B"
 revision = "5eb144179a02acc5e5ba31e748d22b0cf3e303b0"
+# bf16, and float16 on a card without it (Owen, 2026-09-26: "we can quantize
+# if we need to. no less than 4"); see qwen3-asr-1.7b.toml.
 dtype = "bfloat16"
 aligner = "qwen3-aligner"
 max_batch = 8

@@ -1,6 +1,15 @@
 # Proposal: a measurement ladder that finds out what a card can do
 
-**STATUS: PROPOSAL, 2026-09-26. Nothing here is built.** Owen decides before any of it is.
+**STATUS: BUILT 2026-09-26, GPU rungs written and NOT YET RUN.** Owen ruled the same night:
+
+> *"we can quantize if we need to. no less than 4. that can be in a modal or something that
+> pops up when the user tries to install a pakcage from the crucible ui. our measurement tool
+> should determine how much space is available, whether tensors are available, cuda graphs,
+> vllm, etc. and install the best the user can use"*
+
+Section 8 below is what was built and how it differs from the proposal; sections 1-7 are the
+proposal as written. The rungs that put work on a GPU (`env`, `cuda_graphs`, `vllm`) have
+never been run: the card was busy all night. Their first run is on a real install.
 
 Fresh-install #48. kylies-pc's GTX 1660 SUPER is a 6 GB Turing card (sm_75). Owen:
 
@@ -166,3 +175,60 @@ it is an existing rule of this repo applied to one more caller.
 6. **Quality under fallback**: rung 2 checks that output is well-formed, not that it is good. Does
    the ladder compare output against a reference (a known transcript, a known page) so that a
    bf16 checkpoint running in float16 can be caught reading worse, or is that out of scope?
+
+## 8. As built (2026-09-26)
+
+| piece | where |
+|---|---|
+| the card's facts, declared and measured | `crucible/backend.py`: `CardFacts`, `FEATURE_FLOORS`, `has_tensor_cores`, `MEASURED_FEATURES` |
+| the rungs, the watch, the record | `crucible/ladder.py`: `card`, `env`, `cuda_graphs`, `vllm`; `<home>/ladder/card.json` |
+| what every decision reads | `ladder.card_for(home, gpu)`: declared facts plus the record's measured ones, when the record is of this card and this Crucible |
+| what an engine needs, and falls back to | `crucible/engines/vllm.py`: `card_needs`, `bf16_fallback`, `run_dtype`, `card_args` |
+| the precision floor | `crucible/precision.py`: `MIN_WEIGHT_BITS = 4`, bits derived from what each block states |
+| Higgs: width before precision | `crucible/ttsplan.py` (Owen: *"we should drop batches to 1 at a time before we quantize"*) |
+| install measures, then decides | `cli._measure_step` before `_capability_step`; `--no-gpu-measure` skips the GPU rungs |
+| on demand | `crucible ladder [--rung R] [--no-gpu] [--json]`; `crucible doctor` prints the record and says when it is stale |
+| the modal | `GET /v1/capability/plan?job_type=` / `?subject=` → `confirm`; the operator page's Install and Pull buttons show it with `window.confirm` before acting |
+
+**Differences from the proposal:**
+
+- **Tensor cores are not "sm_70 and up".** The GTX 16 family (TU116/TU117: 1650, 1660,
+  1660 SUPER, 1660 Ti) is sm_75 with the tensor cores removed, and kylies-pc's card is one.
+  `has_tensor_cores` answers no for it by name. Reported, never required.
+- **The ladder is not a job in the server's queue yet.** It runs from `crucible install` and
+  `crucible ladder`, behind the accelerator guard's own test. A job that reaches the server
+  while a GPU rung holds the card is refused `accelerator_busy` for those seconds, the answer
+  it gives for any tenant. Making it a lowest-priority queued job is still owed.
+- **Speed and quality are not measured yet.** Rung 2 of the proposal ("one real job per
+  installed type") is not built; the `vllm` rung starts the smallest installed model and asks
+  one token. The env rung times fp32/fp16/bf16 matmuls, which is the emulated-bf16 penalty.
+- **The rung inputs ship with nothing**: no clip, page or paragraph was needed for what is
+  built (call 5 is open).
+- **One record, `<home>/ladder/card.json`, keyed on name, compute capability, total memory
+  and Crucible version** — what `Gpu` carries — not on uuid, driver and env provenance. A
+  new release therefore reads the old record as stale (nothing measured, nothing refused)
+  until the next install or `crucible ladder`. uuid and driver are recorded in the card rung's
+  facts.
+
+**The calls, settled by the ruling (Owen may reverse any):**
+
+1. *When*: at install, before the capability step, every rung, each GPU rung behind the
+   guard; a busy card is `waiting`, not failed, and install goes on. `crucible ladder` later.
+2. *Budget*: each torch smoke has a 300 s ceiling (`SMOKE_TIMEOUT_SECONDS`, a stuck-process
+   limit, not an estimate); the vLLM rung uses a load's own 900 s ready timeout.
+3. *Speed floors*: **reported, never a refusal.** "Install the best the user can use" is the
+   best that runs; a slow card still runs it.
+4. *Memory*: **recorded, not consumed for fit.** PHASE9's ruling that declared estimates
+   decide fit stands. The desktop the card rung sees is printed beside the allowance.
+5. *Inputs*: open; nothing built needs them yet.
+6. *Quality under fallback*: open. fp16 on a bf16-trained checkpoint is unmeasured for every
+   model; the verdict says fp16 in words so a person knows what they are getting.
+
+**What the measured facts do:**
+
+| fact | measured false means |
+|---|---|
+| `cuda_graphs` | vLLM is started `--enforce-eager` (slower; it runs) |
+| `vllm` | every vLLM candidate is refused on this card, quoting the run (`card_lacks_feature` at load) |
+
+Unknown refuses nothing, everywhere.

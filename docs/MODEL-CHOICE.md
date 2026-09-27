@@ -245,3 +245,37 @@ to `capability.NINE_B_FLOOR` (9) on `clean`, `translate`, `simplify` and `analys
 candidate lists did not move; `tests/test_decide_lineup.py` asserts them exactly, per
 backend. The new `decide` class has **no floor** — a decision is the one text act a 0.8B
 does well enough to offer (PHASE22-DECIDE.md sections 8a and 2.9) — so it lists every tier.
+
+## Addendum, 2026-09-26: the precision floor, and width before precision
+
+Fresh-install #48 (kylies-pc, a GTX 1660 SUPER: 6 GB, sm_75, no bf16). Three rulings of
+Owen's, the same day:
+
+> *"we can quantize if we need to. no less than 4."*
+>
+> *"no less than 4 covers higgs as well"* — superseding 2026-09-13's *"higgs is tied to a
+> certain size. we cant (or wont) quantize that"*.
+>
+> *"we should drop batches to 1 at a time before we quantize. id rather it go slow than
+> sound worse"*.
+
+What they do in the walk (`crucible/capability.py`, `precision.py`, `ttsplan.py`):
+
+- **Nothing under 4 bits is ever a candidate** (`precision.MIN_WEIGHT_BITS`). A GGUF that
+  names a Q3/Q2/IQ2 quantization is refused at load; every other catalog is filtered by the
+  bits its block already states (file name, repo name, `--dtype`, `dtype`).
+- **A card without bf16 runs a bf16 block in float16** rather than refusing it
+  (`engines/vllm.py`: `bf16_fallback`, `run_dtype`, `card_args`). Same bytes, same place in
+  the best-first walk, and the verdict says so: *"On this card qwen3.5-9b runs in fp16, not
+  bf16"*. Quality in float16 is unmeasured.
+- **Higgs narrows before it quantizes**: bf16 at the voice's width (16), then narrower down
+  to one passage at a time, then 8-bit, then 4-bit, one at a time. No quantized Higgs exists
+  yet, so the 8-bit and 4-bit rows are declared and PENDING: a card that only they would fit
+  is told so and refused, never offered a download. Every figure is declared (`ttsplan.py`).
+- **The install shows it first.** The operator page's Install and Pull buttons ask
+  `GET /v1/capability/plan` and show its `confirm` text before acting; `crucible install`
+  prints the same lines.
+
+The width-before-precision order is Higgs's alone. Whether it should also order `asr` (a
+smaller `max_batch` for Qwen3-ASR before a quantized one) is a call for Owen and is not
+applied.

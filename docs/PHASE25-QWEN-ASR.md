@@ -12,6 +12,16 @@ aligning. it seems flawless. 1.7b - the biggest one"*. Then: *"the 41 gb memory 
 wont be a problem since we'll be using vllm or sglang instead"*. Then, on precision:
 full precision (bf16, unquantised) on both machines, and not the 8-bit MLX build.
 
+> **AMENDED 2026-09-26 (fresh-install #48).** Owen: *"we can quantize if we need to.
+> no less than 4."* Full precision is still what every card that can run it gets.
+> On a card without bf16 (compute capability below 8.0: a GTX 16xx or RTX 20xx is
+> 7.5), vLLM refuses bfloat16 outright, so Crucible starts the cuda-linux block in
+> **float16** instead (`engines/vllm.py` `run_dtype`): the same two bytes a
+> parameter, so the memory figures hold, and the job's result records the dtype it
+> ran in. A quantized Qwen3-ASR would come after that if one existed and a card
+> needed it; none is pinned. Whether float16 transcribes as well as bf16 on this
+> model has not been measured.
+
 The evidence is ContentStudio's live test on the Mac Studio that day (M1 Ultra, MPS,
 bf16, `qwen-asr` 0.0.6, transformers 4.57.6, torch 2.14):
 

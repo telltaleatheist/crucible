@@ -118,7 +118,7 @@ from pydantic import (
     model_validator,
 )
 
-from ... import accelerator, hosttools, jobenv, weights, workerenv, workers
+from ... import accelerator, hosttools, jobenv, ladder, weights, workerenv, workers
 from ...asrmodels import (
     QWEN_ASR_ENGINES,
     QWEN_CONTEXT_MAX_TOKENS,
@@ -824,10 +824,13 @@ class AsrJobType:
             host_total_bytes=self._backend.gpu.vram_bytes,
             host_name=self._backend.gpu.name,
         )
-        # Qwen3-ASR's vLLM block runs bfloat16 by Owen's ruling, and vLLM
-        # refuses bfloat16 below compute capability 8.0 (fresh-install #48).
+        # What no precision works around: vLLM measured not starting on this
+        # card (fresh-install #48). A card merely without bf16 runs Qwen3-ASR
+        # in fp16 instead (`qwen.py`, `engines.vllm.run_dtype`).
         accelerator.refuse_if_card_lacks(
-            model_id=model_id, spec=spec, gpu=self._backend.gpu
+            model_id=model_id,
+            spec=spec,
+            card=ladder.card_for(self._config.home, self._backend.gpu),
         )
         python = _python_for(self._config, spec.engine, backend_kind, model_id)
         try:
