@@ -33,8 +33,7 @@ shutdown/deregistration fails.
 > IS an orchestrator, and Phase 17 gives that relation a name, a `role` on `/v1/info`,
 > a claim (`POST /v1/peer/claim`) and a second task (`engine-restart`). Nothing below is
 > withdrawn — one server per machine, control is Windows's and data is the card's, the
-> apps keep one address — and `crucible host` keeps working as an alias for
-> `crucible orchestrator`. Read PHASE17 before touching section 4.
+> apps keep one address — and the verb is `crucible orchestrator`. Read PHASE17 before touching section 4.
 
 > **AMENDED 2026-09-14, later that evening — Owen:** *"the windows side should still host GPU
 > jobs even if WSL isnt present/workable. if the user cant or wont install WSL, we can still
@@ -74,7 +73,7 @@ way.
 **Windows gets a presence.** WSL has no boot: nothing starts a distro at login, so today the
 engine is down after every reboot until an app happens to poke it, and when a clean stop left
 it down at 16:10 nothing noticed. The only process that can own "the engine is running" is one
-that is itself running on Windows. That is `crucible host` (section 4): a tray icon, a login
+that is itself running on Windows. That is `crucible orchestrator` (section 4): a tray icon, a login
 task, a watcher, and the installer/guide the wsl-states table (PHASE14 4c) was written for.
 
 **The apps have no provider code.** Ollama, Claude, OpenAI, "does the 27B fit", cloud key rows,
@@ -108,7 +107,7 @@ servers is per app). The pairing line. Coordinate-on-connect (PHASE14 4a).
 | **upstream** | an HTTP chat-completions service the server forwards to on the operator's account: `anthropic`, `openai`, `ollama`. Exactly these three names. An upstream is configured (has what it needs to be called) or not. |
 | **upstream model** | a model id of the form `<upstream>/<model>`, e.g. `anthropic/claude-sonnet-5`, `openai/gpt-5`, `ollama/qwen3.5:9b`. The slash is what tells a chat request apart from a local model id; a local model id never contains `/` (checked at manifest load — `manifest_model_id_slash`). |
 | **host mode** | a Crucible server running natively on Windows, `backend_kind = "llama-windows"`: the llm classes and `pages` served by `llama-server` children from GGUF weights (3.10), plus `echo`, the settings door and the upstream routes. The Python job types (`tts asr align rvc denoise`) need WSL2 and say so. |
-| **the host** | `crucible host`, the Windows tray process (section 4). Not a server. |
+| **the host** | `crucible orchestrator`, the Windows tray process (section 4). Not a server. |
 | **pairing file** | the pairing line (PHASE13 2.1) written to a user-only file on the machine the server runs on, so an app on the same machine connects without anyone typing (section 3.6). |
 
 ## 2. Config: what `config.toml` gains
@@ -128,7 +127,7 @@ url = "http://192.168.68.20:11434"   # no key; ollama is reached by address
 ```
 
 - `backend_kind` gains the value `"llama-windows"` (host mode). `crucible init --backend
-  llama-windows` is legal only on win32 and is what `crucible host` runs; on linux/darwin it is
+  llama-windows` is legal only on win32 and is what `crucible orchestrator` runs; on linux/darwin it is
   refused (`backend_not_here`), and `cuda-linux`/`mlx-darwin` on win32 are refused the same way.
 - A route's value is an upstream model id. `route = "local"` and an absent key mean the same
   thing; `"local"` is never written.
@@ -621,7 +620,7 @@ other — the first is an override the operator set and the second is the only d
 2. Otherwise, per platform:
    - **win32:** `%LOCALAPPDATA%\Crucible\pairing`. NOT `~/.crucible`: on Windows the server is
      the WSL guest's or the host-mode child's, and in both cases the thing that writes a
-     WINDOWS-side pairing file is `crucible host` (4.3), whose own per-machine root is already
+     WINDOWS-side pairing file is `crucible orchestrator` (4.3), whose own per-machine root is already
      `%LOCALAPPDATA%\Crucible\` — `wsl\`, `downloads\` (`sdk/bootstrap/src/distro.ts`) and
      `host\` (4.4) are all under it, so the pairing file is its fourth member and the host runs
      with `CRUCIBLE_HOME` set to that directory. `LOCALAPPDATA` is read from the environment and
@@ -777,8 +776,8 @@ same way from the 9B GGUF or an upstream. Then `page-reader.ts` and every
 > **Renamed 2026-09-15 by `docs/PHASE17-ORCHESTRATOR.md`.** Everything this section
 > describes is the orchestrator half of the relation Phase 17 names: it manages exactly
 > one engine, serves ZERO job types, and never carries a byte of anybody's data. The
-> verb is `crucible orchestrator`, with **`crucible host` kept as an alias** (PHASE17
-> section 7 says why, and why the Python package stays `crucible/host/`). The word
+> verb is `crucible orchestrator` (PHASE17 section 7 says why the Python package stays
+> `crucible/host/`). The word
 > "host" below should be read as "orchestrator" throughout; PHASE17 adds the claim
 > (2.1), the `role`/`engine` fields on its door's `/v1/info` (3.2) and the
 > `engine-restart` task (4.2) to what is written here.
@@ -792,7 +791,7 @@ the notification area. It is the front door Owen asked for. It owns exactly four
   Crucible distro exists → the WSL server; otherwise → the host-mode server, run as a child of
   the host process. Never both, and the host says which on its menu.
 - **Start at login.** A shortcut in the user's Startup folder
-  (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Crucible.lnk` → `crucible host`).
+  (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Crucible.lnk` → `crucible orchestrator`).
   No admin, no Task Scheduler, no service: a per-user login item is what a tray program is.
 - **Boot the guest.** With the distro present, the host runs `wsl -d crucible --exec true` at
   start (that boots the distro; systemd + linger then start the enabled unit), waits for
@@ -863,8 +862,8 @@ most once per down-edge. In host mode there is one: `host-mode-respawn`, which s
 stops that process and knows nothing about what it runs). `BOOT_WAIT_SECONDS = 30` and `WATCH_SECONDS = 15` are the
 two numbers 4.1 states, and they are constants with those names.
 
-**The Startup verbs.** `crucible host --install-startup` writes the shortcut and prints its
-path; `crucible host --remove-startup` deletes it and says whether there was one. Both exit
+**The Startup verbs.** `crucible orchestrator --install-startup` writes the shortcut and prints its
+path; `crucible orchestrator --remove-startup` deletes it and says whether there was one. Both exit
 without starting a tray, and both are the ONE owner of that file — `install.ps1` calls the
 first rather than writing a `.lnk` of its own. The shortcut is written by
 `crucible/host/startup.py` through a PowerShell `WScript.Shell` one-liner (no pywin32, no new
@@ -1061,7 +1060,7 @@ failure. (2) `@crucible/bootstrap`'s `install()`, directly, on a machine that ha
 all yet — the very first install, before there is a page to open. The shape is the same for
 both, because there is one sequence.
 
-**The 4c table crosses into Python by GENERATION, not by a second copy.** `crucible host` is
+**The 4c table crosses into Python by GENERATION, not by a second copy.** `crucible orchestrator` is
 Python and the table is `sdk/bootstrap/src/wsl-states.ts`, so its DATA — the code, the probe
 argv, the sentence, the action — is EMITTED into `crucible/host/wsl_states.py` by the same
 `scripts/gen-install-scripts.ts` that writes `install.ps1`, and `npm run gen:install --
@@ -1110,7 +1109,7 @@ initialised, not to the one being left. A file without `auth.token` is refused
   Crucible ever ships, and since section 0's amendment it carries BOTH halves of what runs on
   Windows: the tray, and the `llama-windows` server the tray starts.
 - `install.ps1` (generated, PHASE14 7b.2) becomes: download the host pack for this version,
-  verify, unpack, write the Startup shortcut, start `crucible host`, and STOP — the host takes
+  verify, unpack, write the Startup shortcut, start `crucible orchestrator`, and STOP — the host takes
   it from there (4.3) and shows the WSL steps in its own window. `install.sh` is unchanged
   (linux/darwin have no host).
 - The release gains the host pack in `envpacks.json` (backend `llama-windows`) and CI gains the
@@ -2211,7 +2210,7 @@ there are NUMBERS (`424242 GiB` and a `df` reply) rather than strings.
 ### 7b.3 `install.ps1` no longer walks the table
 
 It downloads the host pack for this release, verifies it, unpacks it to
-`%LOCALAPPDATA%\Crucible\host\`, asks `crucible host --install-startup` for the login item,
+`%LOCALAPPDATA%\Crucible\host\`, asks `crucible orchestrator --install-startup` for the login item,
 starts the tray with `pythonw`, and stops. It needs no admin. Three things it does that the
 old one did not:
 
@@ -2570,7 +2569,7 @@ run: Git for Windows ships GNU tar 1.32, which names no libzstd and would shell
 out to a `zstd.exe` Windows does not have, while System32's bsdtar 3.8.1 carries
 libzstd 1.5.5. Hit for real on 2026-09-15 from a Git Bash shell) and `install.ps1`'s steps 5–7 were then performed verbatim against it: join the parts,
 verify the sha against the manifest the build wrote, unpack beside, prove `crucible.cmd`
-runs, move into place, stamp, `crucible host --install-startup`, `Start-Process -WindowStyle
+runs, move into place, stamp, `crucible orchestrator --install-startup`, `Start-Process -WindowStyle
 Hidden pythonw.exe -m crucible.cli host`. **7b.6's owed item is unchanged and is now the
 blocking one: a `windows-latest` run and a published asset.**
 
@@ -2578,7 +2577,7 @@ blocking one: a `windows-latest` run and a published asset.**
 
 ```
 crucible host 0.6.0 starting; CRUCIBLE_HOME=C:\Users\tellt\AppData\Local\Crucible
-startup: …\Startup\Crucible.lnk now starts `crucible host` at login, with no console window
+startup: …\Startup\Crucible.lnk now starts `crucible orchestrator` at login, with no console window
 presence: wsl -l -v lists Ubuntu and no "crucible"
 find-engine: the engine on http://127.0.0.1:7100 is the "Ubuntu" distro's, and this host did not start it
 presence: absent/running/found — the engine on http://127.0.0.1:7100 is the "Ubuntu" distro's and this host did not start it

@@ -3,7 +3,7 @@
 # and src/wsl-states.ts, so a hand install and an app-driven install cannot
 # differ (PHASE14-ENVPACKS.md 4a). Regenerate: npm run gen:install
 #
-# The WSL state table of PHASE14-ENVPACKS.md 4c, as DATA, for `crucible host`
+# The WSL state table of PHASE14-ENVPACKS.md 4c, as DATA, for `crucible orchestrator`
 # (PHASE15-HOST.md 4.3). The ORDER is the order they are tried: deepest cause
 # first, so "virtualization is off in the firmware" is never reported as "WSL
 # is not installed".

@@ -61,13 +61,7 @@ export const PARTIAL_SUFFIX = '.partial';
 /**
  * `<CRUCIBLE_HOME>/server/.crucible` — three `key=value` lines saying what this
  * tree IS: which interpreter digest, which python version, which release.
- *
- * It was `.pack`, and the rename is not tidying: the file's SUBJECT changed.
- * `.pack` recorded the sha256 of an archive of the whole tree, which no longer
- * exists; this records the digest of the INTERPRETER inside it, which is the
- * only thing a re-download could replace. A tree carrying the old file is read
- * as having no interpreter digest at all, so the first install after this
- * fetches 30 MB once and stamps the new shape — loud, cheap and correct.
+ * A tree whose stamp names no release is reinstalled whole.
  */
 export const STAMP_NAME = '.crucible';
 
@@ -140,7 +134,7 @@ const PROBE_TIMEOUT_MS = 60_000;
 export interface GuestFacts {
   /** `$CRUCIBLE_HOME`, or `$HOME/.crucible`, as the guest resolved it. */
   home: string;
-  /** The guest user — `loginctl enable-linger` is about this one, not the Windows one. */
+  /** The guest user, not the Windows one. */
   user: string;
   /** Free bytes on the filesystem `home` is (or would be) on. */
   freeBytes: number;
@@ -328,10 +322,6 @@ export async function installRuntime(
   // it is how one app's set-up button silently took another app's engine back a
   // version. Checked BEFORE any guest command, so a refused downgrade downloads
   // nothing and leaves nothing half-written.
-  //
-  // An unstamped runtime is not read as "older": `installed.release` is null on
-  // a tree that predates the stamp, and a version nobody recorded cannot be
-  // compared, so there is nothing here to refuse.
   if (options.installed !== null && options.installed.release !== null
     && compareReleases(options.installed.release, options.release) > 0) {
     if (options.rollbackTo === null) {
@@ -371,7 +361,8 @@ export async function installRuntime(
     return said;
   };
 
-  const interpreterSkipped = options.installed !== null && options.installed.pythonSha256 === pin.sha256;
+  const interpreterSkipped = options.installed !== null && options.installed.release !== null
+    && options.installed.pythonSha256 === pin.sha256;
   if (!interpreterSkipped) {
     await run(
       'fetch-python',

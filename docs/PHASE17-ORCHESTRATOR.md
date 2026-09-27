@@ -40,7 +40,7 @@ process which is NOT that thing has a role of its own, with a door of its own, o
 |---|---|
 | **role** | `engine` or `orchestrator`. A property of a **process**, never of an install: on a Windows machine with no WSL, one install runs both, as two processes. |
 | **engine** | a Crucible process that serves job types on a backend (`cuda-linux`, `mlx-darwin`, `llama-windows`). Everything that exists today is one. It answers `:7100`. |
-| **orchestrator** | a Crucible process with backend kind `orchestrator`, **zero job types**, which manages **exactly one** engine. Today that is `crucible orchestrator` (the Windows tray, formerly and still `crucible host`), answering its loopback door on `:7101`. |
+| **orchestrator** | a Crucible process with backend kind `orchestrator`, **zero job types**, which manages **exactly one** engine. Today that is `crucible orchestrator` (the Windows tray, formerly `crucible host`), answering its loopback door on `:7101`. |
 | **claim** | the act by which an orchestrator tells an engine it manages it. `POST /v1/peer/claim`. |
 | **`managed_by`** | on an ENGINE: which orchestrator claimed it, or `null`. |
 | **owner** | PHASE15 4.1a's word for *how* the orchestrator holds its engine: `wsl-unit`, `child`, `found`. It decides what the orchestrator may DO to it. A distro Crucible did not import can reach `wsl-unit` only by CONSENT (2.5) plus a unit that answers. |
@@ -575,12 +575,8 @@ makes the switch invisible to an app that connected before it.
 
 ## 7. What `crucible host` is now
 
-`crucible orchestrator`, with **`host` kept as an alias**. Both spellings run the same verb
-tonight, and `host` is **deprecated in this doc** rather than in code: the Startup shortcut
-installed on Owen's PC on 2026-09-15 has `-m crucible.cli host` baked into it, and
-`--install-startup` still writes exactly that string, so a pack rebuilt after tonight starts
-the tray the shortcut already points at. The alias is removed only when a release changes the
-shortcut, and that is not tonight.
+`crucible orchestrator`. The `host` alias has been removed; `install.ps1` starts
+`crucible orchestrator`.
 
 **The Python package is still `crucible/host/`**, and it is not renamed. It is imported by
 `cli.py`, `api.py`, `tasks.py`, `uninstall.py`, `envpack`, `install.ps1`'s expectations and

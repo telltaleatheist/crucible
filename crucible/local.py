@@ -555,9 +555,7 @@ def shutdown() -> None:
             raise LocalError("controller_upgrade_unsupported: authenticated controller identity is incompatible")
         release = server.get("version")
         lifecycle = info.get("local_lifecycle_version")
-        supported = type(lifecycle) is int and lifecycle == 1
-        legacy = lifecycle is None and release == "0.6.0"
-        if not supported and not legacy:
+        if type(lifecycle) is not int or lifecycle != 1:
             raise LocalError(f"controller_upgrade_unsupported: no supported shutdown contract "
                              f"for {release!r} (lifecycle {lifecycle!r})")
         engine = info.get("engine")
@@ -579,38 +577,20 @@ def shutdown() -> None:
         if not raw.isdigit():
             raise LocalError("controller_shutdown_unknown: the controller has no valid process record")
         controller_pid = int(raw)
-        # 0.6.0 has authenticated /info and /quit, but no /local/stop. Its
-        # documented quit stops its native child and releases its guest hold.
-        # A guest unit uses a different runtime and survives the Windows swap.
-        #
-        # SO A GUEST ENGINE IS NOT STOPPED HERE ANY MORE (fresh-install #35,
-        # 2026-09-26). `act("stop")` ran for every owner, and for a `wsl-unit`
-        # that is `systemctl stop` on an engine whose files this upgrade does
-        # not touch: the guest is carried separately, by the new tray, with its
+        # A GUEST ENGINE IS NOT STOPPED HERE (fresh-install #35, 2026-09-26).
+        # `act("stop")` ran for every owner, and for a `wsl-unit` that is
+        # `systemctl stop` on an engine whose files this upgrade does not
+        # touch: the guest is carried separately, by the new tray, with its
         # own shutdown. On kylies-pc the 1.0.48 upgrade left nothing on :7100
         # for about 50 s. Only a `child` engine, whose runtime IS being
         # replaced, is stopped; the guest keeps serving through the swap.
-        if supported and owner not in ("wsl-unit", "found"):
+        if owner not in ("wsl-unit", "found"):
             act("stop")
-        try:
-            # THE HANDOVER HEADER (#35): the old tray leaves a bounded hold on
-            # the distro behind it, so WSL does not idle the guest away in the
-            # seconds before the new tray takes its own. An orchestrator older
-            # than this ignores the header and quits as it always did.
-            request("http://127.0.0.1:7101/quit", token=token, method="POST",
-                    headers={HANDOVER_HEADER: "1"})
-        except urllib.error.HTTPError as exc:
-            if exc.code != 404:
-                raise
-            # THE COMMENT ABOVE WAS WRONG ABOUT 0.6.0. It says that release has
-            # `/quit`; the 0.6.0 installed on owens-pc answered 404 to it
-            # (measured 2026-09-16, and it is what stopped the upgrade). An
-            # assumption about what an OLD version serves cannot be checked by
-            # reading this file, so it is asked instead. `close_tray` above has
-            # already signalled the process to go; the wait below is what
-            # decides whether it did, and says `controller_shutdown_failed` by
-            # name if not — which beats an unhandled HTTP 404 either way.
-            pass
+        # THE HANDOVER HEADER (#35): the old tray leaves a bounded hold on the
+        # distro behind it, so WSL does not idle the guest away in the seconds
+        # before the new tray takes its own.
+        request("http://127.0.0.1:7101/quit", token=token, method="POST",
+                headers={HANDOVER_HEADER: "1"})
         deadline = time.monotonic() + 15
         while True:
             closed = False

@@ -112,8 +112,8 @@ class Outcome:
     attempts: int
     #: How many restarts this move has asked for in a row (FRESH-INSTALL #19,
     #: 2026-09-26). Beside 2.2's shape rather than in `attempts`, which counts
-    #: consecutive FAILURES; a file written before it exists reads as 0.
-    restarts: int = 0
+    #: consecutive FAILURES.
+    restarts: int
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -214,7 +214,7 @@ def read(home: Path) -> Outcome | None:
         raise HostError("wsl_outcome_invalid", f"{file} says code={code!r}.")
     if sentence is not None and not isinstance(sentence, str):
         raise HostError("wsl_outcome_invalid", f"{file} says sentence={sentence!r}.")
-    restarts = raw.get("restarts", 0)
+    restarts = raw.get("restarts")
     if not isinstance(restarts, int) or isinstance(restarts, bool) or restarts < 0:
         raise HostError("wsl_outcome_invalid", f"{file} says restarts={restarts!r}.")
     return Outcome(

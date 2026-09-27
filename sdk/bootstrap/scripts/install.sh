@@ -295,7 +295,7 @@ if [ -z "$FROM_SOURCE" ]; then
   got_sha="$($SHA_TOOL "$downloads/$wheel" | awk '{print $1}')"
   if [ "$got_sha" != "$want_sha" ]; then rm -f "$downloads/$wheel"; die "runtime_sha_mismatch: $wheel hashes $got_sha, the release says $want_sha. The download was deleted"; fi
 fi
-if [ "$stamp_python_sha" = "$py_sha" ] && [ -x "$dest/bin/python3" ]; then
+if [ -n "$stamp_release" ] && [ "$stamp_python_sha" = "$py_sha" ] && [ -x "$dest/bin/python3" ]; then
   say "server: python $py_version is already at $dest"
 else
   say "server: python $py_version from python-build-standalone"
@@ -417,7 +417,7 @@ say "local-install-desktop"
 # --- linger --------------------------------------------------------------
 # make the service survive a logout
 say "linger"
-if [ "$MECHANISM" = systemd ]; then
+if [ "$MECHANISM" = systemd ] && ! grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
   if loginctl show-user "$GUEST_USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
     say "linger: already on for $GUEST_USER"
   elif [ "$(id -u)" = 0 ] && loginctl enable-linger "$GUEST_USER"; then

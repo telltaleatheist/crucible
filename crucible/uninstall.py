@@ -821,7 +821,7 @@ def _stop_step(
                 refused=Refusal(
                     code="engine_not_running",
                     message=(
-                        f"no live `crucible host` is recorded in {home / 'host.pid'}; "
+                        f"no live `crucible orchestrator` is recorded in {home / 'host.pid'}; "
                         "there is nothing to stop"
                     ),
                     fatal=False,
@@ -882,7 +882,7 @@ def _service_step(
         except CrucibleError as exc:
             return Step(
                 name="remove-service",
-                what="the Startup shortcut that runs `crucible host` at login",
+                what="the Startup shortcut that runs `crucible orchestrator` at login",
                 action=REMOVE,
                 target="(unknown)",
                 refused=Refusal(
@@ -893,7 +893,7 @@ def _service_step(
             )
         return Step(
             name="remove-service",
-            what="the Startup shortcut that runs `crucible host` at login (4.1)",
+            what="the Startup shortcut that runs `crucible orchestrator` at login (4.1)",
             action=REMOVE,
             target=str(lnk),
             act=lambda: _remove_startup(env),
@@ -927,7 +927,7 @@ def _service_step(
 
 
 def _remove_startup(env: Mapping[str, str]) -> list[str]:
-    """`crucible host --remove-startup`, through the module that owns that file."""
+    """`crucible orchestrator --remove-startup`, through the module that owns that file."""
     from .host import startup as host_startup
     from .host.runner import ProcessRunner
 

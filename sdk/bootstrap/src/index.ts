@@ -125,8 +125,6 @@ export type { Evidence, ProbeKey, WslAction, WslState, WslStateDef, WslStateInpu
 export { installSteps, renderArgv, renderSh, SHELL_VARIABLE } from './steps.js';
 export type { RefName, StepDef, StepPlan, Word } from './steps.js';
 
-export { ensureLinger, lingerCommand, parseLinger } from './linger.js';
-export type { LingerOutcome } from './linger.js';
 
 export { ensureRunning, parseServiceStatus } from './service.js';
 export type { EnsureRunningOptions, RunningService, ServiceStatus } from './service.js';

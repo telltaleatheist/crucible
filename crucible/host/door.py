@@ -139,6 +139,9 @@ class OrchestratorPort(Protocol):
 #: What the body may contain. 4.7: the reverse move is not in this phase.
 TARGETS = (ENGINE_TARGET_WSL,)
 
+#: Every field `POST /install` takes.
+INSTALL_FIELDS = frozenset({"target", "release", "job_types", "home", "bind"})
+
 CONTENT_TYPE = "application/x-ndjson"
 
 #: A body bigger than this is refused before it is read: the request is
@@ -610,17 +613,20 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
                     "phase (4.7) and is refused rather than half-done.",
                 )
                 return
-            # EVERY OTHER FIELD IS ACCEPTED AND NOT VALIDATED HERE.
-            # `@crucible/bootstrap` sends `release`, `job_types`, and
+            # `@crucible/bootstrap` also sends `release`, `job_types`, and
             # optionally `home` and `bind`, because on the first install of a
             # machine there is no server and therefore no coordinate record to
             # read the job types out of (4.7's "the coordinate records say
-            # which" is about the PAGE-driven caller). Refusing an unknown
-            # field would make the older of the two clients fail against the
-            # newer door for carrying something it was told to carry;
-            # `engine_target_unknown` is reserved for a `target` that is not
-            # `wsl`, which is the one field whose wrong value would DO the
-            # wrong thing.
+            # which" is about the PAGE-driven caller). Anything else is refused.
+            unknown = sorted(set(request) - INSTALL_FIELDS)
+            if unknown:
+                self._refuse(
+                    400,
+                    "engine_target_unknown",
+                    f"the body of {INSTALL_PATH} carries {unknown}, which this "
+                    f"door does not take; its fields are {sorted(INSTALL_FIELDS)}.",
+                )
+                return
             if not door.claim():
                 self._refuse(
                     409,

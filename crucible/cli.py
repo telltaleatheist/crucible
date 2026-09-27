@@ -6,7 +6,6 @@
     crucible serve      run the API in the foreground
     crucible service    install/start/stop the machine service that runs `serve`
     crucible orchestrator  win32 only: the tray that manages this machine's engine
-                        (`crucible host` is the same verb, deprecated)
     crucible models     list and pull model weights
     crucible voices     list and pull voice weights
     crucible doctor     probe the host and every job type; exit 0 only when healthy
@@ -164,14 +163,6 @@ def cmd_guest(args: argparse.Namespace) -> int:
 
 def cmd_orchestrator(args: argparse.Namespace) -> int:
     """`crucible orchestrator` — PHASE15 section 4, PHASE17. Windows only.
-
-    **`crucible host` is the same verb**, kept as an argparse alias and
-    deprecated in PHASE17-ORCHESTRATOR.md section 7 rather than in code: the
-    Startup shortcut installed on Owen's PC on 2026-09-15 has
-    `-m crucible.cli host` baked into it, and `--install-startup` still writes
-    exactly that string, so a pack rebuilt after tonight starts the tray the
-    shortcut already points at. The alias goes when a release changes the
-    shortcut, and that is not tonight.
 
     The verb is refused `host_windows_only` everywhere else, and that is not a
     platform check standing in for a feature check: on Linux and macOS the
@@ -425,7 +416,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     # `--backend` STATES what the caller expects this host to be, and is
     # checked against what it is. Section 2: *"`crucible init --backend
     # llama-windows` is legal only on win32 … `cuda-linux`/`mlx-darwin` on
-    # win32 are refused the same way"*. `crucible host` passes it (4.3) so a
+    # win32 are refused the same way"*. `crucible orchestrator` passes it (4.3) so a
     # host that somehow ran on the wrong machine says so here instead of
     # writing a config the server would refuse to start from.
     if args.backend is not None and args.backend != backend.kind:
@@ -3461,7 +3452,7 @@ def build_parser() -> argparse.ArgumentParser:
             "the backend this host is EXPECTED to be, checked against what it "
             "detects. A backend runs where its engine runs and nowhere else "
             "(PHASE15-HOST.md 3.5), so this never chooses one — it refuses "
-            "backend_not_here when the two disagree. `crucible host` passes "
+            "backend_not_here when the two disagree. `crucible orchestrator` passes "
             "--backend llama-windows"
         ),
     )
@@ -3815,10 +3806,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     host_parser = subparsers.add_parser(
         "orchestrator",
-        # `host` KEPT, and it is the spelling the installed Startup shortcut
-        # uses (PHASE17-ORCHESTRATOR.md section 7). Deprecated in the doc, not
-        # in code, so tonight's tray survives a pack rebuild.
-        aliases=["host"],
         help="win32 only: the tray that manages this machine's engine",
         description=(
             "The Windows ORCHESTRATOR (PHASE15-HOST.md section 4, PHASE17): a "
@@ -3827,8 +3814,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Windows engine to WSL2 when the operator page asks. It serves zero "
             "job types and carries no data — control is Windows's, data is the "
             "card's. Refused `host_windows_only` on Linux and macOS, where the "
-            "service manager already supervises the server. `crucible host` is "
-            "the same verb and is deprecated."
+            "service manager already supervises the server."
         ),
     )
     host_parser.add_argument(
@@ -4035,7 +4021,7 @@ def main(argv: list[str] | None = None) -> int:
     both kinds. A platform test standing in for a backend test was the shape
     R1 forbids: two owners for "can this machine do it".
 
-    `crucible host` still refuses off win32, by its own name
+    `crucible orchestrator` still refuses off win32, by its own name
     (`host_windows_only`), because a tray on a machine whose service manager
     already supervises the server is a second owner of presence — a feature
     check, not a platform one wearing a feature's clothes.

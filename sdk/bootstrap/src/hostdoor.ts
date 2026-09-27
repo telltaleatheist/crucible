@@ -4,7 +4,7 @@
  *
  * **Why there is a door at all.** The install sequence (PHASE14 section 4) used
  * to be walked twice on Windows: once by `install.ps1` and once by this package
- * through `wsl.exe`. PHASE15 gives the sequence ONE owner — `crucible host`,
+ * through `wsl.exe`. PHASE15 gives the sequence ONE owner — `crucible orchestrator`,
  * the Windows-native tray process — and makes `@crucible/bootstrap` its client.
  * On win32 `install()` no longer walks `installSteps()`; it asks the host and
  * relays what the host says. Linux and macOS are untouched: there is no host
@@ -401,7 +401,7 @@ export async function requestHostInstall(
     throw new BootstrapRefusal(
       'host_unreachable',
       `the Crucible host is installed on this machine and ${url} did not answer (${(err as Error).message}). `
-        + 'Start it from the Startup item, or run `crucible host` from the host runtime.',
+        + 'Start it from the Startup item, or run `crucible orchestrator` from the host runtime.',
       { command: `${hostRuntimeDir(runner)}\\${HOST_ENTRY_POINT} host`, cause: err },
     );
   }
@@ -895,7 +895,7 @@ async function doorGet(
     throw new BootstrapRefusal(
       'host_unreachable',
       `the Crucible host is installed on this machine and ${url} did not answer (${(err as Error).message}). `
-        + 'Start it from the Startup item, or run `crucible host` from the host runtime.',
+        + 'Start it from the Startup item, or run `crucible orchestrator` from the host runtime.',
       { command: `${hostRuntimeDir(runner)}\\${HOST_ENTRY_POINT} host`, cause: err },
     );
   }

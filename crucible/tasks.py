@@ -460,7 +460,7 @@ def _validate_engine(backend: Backend, target: str) -> str:
         raise ApiError(
             409,
             "engine_move_needs_host",
-            "this server was not started by `crucible host`, so there is "
+            "this server was not started by `crucible orchestrator`, so there is "
             f"nothing to hand the move to (${HOST_DOOR_ENV} is not set). Only "
             "the host can run wsl.exe, prompt for administrator and survive "
             "the reboot the move may need — a server doing it itself would "
@@ -1272,7 +1272,7 @@ class TaskStore:
                 f"the orchestrator's door at {door}{path} did not answer: "
                 f"{type(exc).__name__}: {exc}. A host started this server "
                 f"(${HOST_DOOR_ENV} is set) and its door is not answering "
-                "now. Start it from the Startup item, or run `crucible host` "
+                "now. Start it from the Startup item, or run `crucible orchestrator` "
                 "from the host runtime, and press it again",
                 {"door": door},
             ) from None
