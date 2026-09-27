@@ -75,15 +75,20 @@ def parse_catalog(document: Any, where: str) -> list[Subject]:
     and the difference here decides whether a weights file is deleted on
     Windows before the guest has its own.
     """
-    rows = document.get("subjects") if isinstance(document, dict) else None
-    if rows is None and isinstance(document, list):
-        rows = document
+    # `rows`, THE SERVER'S KEY (`GET /v1/catalog` in crucible/api.py). This read
+    # `subjects`, a key the route no longer answers with, so on kylies-pc
+    # (2026-09-26, the first move run against a current server) every 200 from
+    # the restarted guest raised here, and the move reported it as "did not
+    # accept the migrated token". The host and the guest are always the same
+    # release, so there is one shape to read and no older one to fall back to.
+    rows = document.get("rows") if isinstance(document, dict) else None
     if not isinstance(rows, list):
         raise HostError(
             "catalog_unreadable",
-            f"{where} did not answer a catalog: expected an object with "
-            f"`subjects`, got {type(document).__name__}. Nothing is migrated off "
-            "a document this step cannot read.",
+            f"{where} did not answer a catalog: expected an object with `rows`, "
+            f"got {type(document).__name__}"
+            + (f" with keys {sorted(document)}" if isinstance(document, dict) else "")
+            + ". Nothing is migrated off a document this step cannot read.",
         )
     subjects: list[Subject] = []
     for row in rows:

@@ -168,6 +168,12 @@ REBOOT_AGAIN_SENTENCE = (
 )
 
 
+#: How long the move waits for the restarted guest to answer. A first boot of
+#: Canonical's image with cloud-init still on took about 40 s on kylies-pc, so
+#: 30 s was a failure by design.
+GUEST_RESTART_BUDGET_SECONDS = 180.0
+
+
 @dataclass
 class Event:
     """One line of the door's ndjson, shaped like `crucible/tasks.py`'s events.
@@ -894,14 +900,30 @@ class EngineInstall:
             raise self._fail("guest_restart_failed", restarted.said())
         if self._guest is not None:
             # A guest catalog request proves the migrated token is actually live.
-            deadline = self._monotonic() + 30
+            # A FIRST BOOT'S BUDGET, AND THE ERROR THAT HAPPENED (2026-09-26,
+            # kylies-pc). This was 30 s and one fixed sentence blaming the token
+            # for EVERY failure: a guest still booting (Canonical's image spent
+            # 39 s in cloud-init before `crucible.service` could start), a
+            # catalog this host misread, a refused bearer. The last error is now
+            # what the move reports, by its own code.
+            deadline = self._monotonic() + GUEST_RESTART_BUDGET_SECONDS
             while True:
                 try:
                     self._guest.installed_subjects()
                     break
-                except HostError:
+                except HostError as exc:
                     if self._monotonic() >= deadline:
-                        raise self._fail("guest_authentication_failed", "The restarted guest did not accept the migrated token")
+                        code = (
+                            "guest_authentication_failed"
+                            if exc.code == "unauthorized"  # the server's 401 (api.py)
+                            else "guest_not_answering"
+                        )
+                        raise self._fail(
+                            code,
+                            f"The restarted guest engine did not answer its catalog "
+                            f"within {GUEST_RESTART_BUDGET_SECONDS:.0f} s. The last "
+                            f"answer was {exc.code}: {exc.message}",
+                        )
                     self._sleep(0.5)
         self._finish("migrate-config", "the Windows token, routes and upstreams are the guest's now")
 

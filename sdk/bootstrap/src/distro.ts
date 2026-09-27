@@ -416,6 +416,14 @@ export function finishImportScript(): string {
     'passwd --delete crucible >/dev/null',
     "printf 'crucible ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/crucible",
     'chmod 0440 /etc/sudoers.d/crucible',
+    // NO CLOUD-INIT (2026-09-26, kylies-pc). Canonical's WSL image runs
+    // cloud-init on every boot, and `cloud-init-local.service` spent 39 s there
+    // looking for a cloud datasource a WSL guest never has. systemd sat at
+    // "initializing" behind it, and `crucible.service` (after
+    // network-online.target) with it, so the move's post-restart check timed out
+    // on a server that hadn't started yet. The marker file is cloud-init's own
+    // off switch.
+    'mkdir -p /etc/cloud && touch /etc/cloud/cloud-init.disabled',
     `cat > /etc/wsl.conf <<'EOF'\n${WSL_CONF_TEXT}EOF`,
   ].join('\n');
 }

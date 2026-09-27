@@ -209,3 +209,63 @@ Timeline, local time:
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` (the registry WSL itself uses, not
   wsl.exe's localised prose), and any other failure is still `wsl_read_failed`. kylies-pc-1 did
   NOT work around it (no throwaway distro), so the machine stayed a clean test.
+
+## The 1.0.45 retry: the move fails at migrate-config (A CRUCIBLE BUG, fixed in 1.0.46)
+
+Timeline, local time:
+- 21:48:30 to 21:48:58: upgrading to 1.0.45 (28 s).
+- 21:49:10: the retry started, and step 2 passed (#20's fix confirmed).
+- 21:49:10 to 21:49:18: the Canonical rootfs downloaded, 357 MB in 8 s.
+- 21:49:18 to 21:49:46: 28 s with no progress line while the distro imported.
+- 21:49:51 to 21:50:01: install.sh ran in the guest.
+- 21:50:03: migrate-config restarted the guest engine.
+- 21:50:34: `guest_authentication_failed`.
+
+### 21. The host misreads its own server's catalog, and blames the token
+- **What:** the check after the guest restart polls `GET /v1/catalog`. The guest answered **200**
+  every 2 s from 21:50:06 (its journal shows each one), but the host's `parse_catalog` read the key
+  `subjects` and the server answers `rows`. So every 200 raised `catalog_unreadable`, and the
+  step's single fixed message blamed the token. The tokens were identical (hash 9A735F51374A on both
+  sides). kylies-pc-1 first suspected the Windows engine still holding 127.0.0.1:7100; the guest's
+  journal shows the checks reached the guest, so that wasn't it here, but the next step, switching
+  the pairing, deserves a look for the same reason.
+- **Fixed (1.0.46):** the host reads `rows`; the check allows 180 s instead of 30; and it reports the
+  last error by its own code: `guest_not_answering` with the real message, and
+  `guest_authentication_failed` only for the server's `unauthorized`.
+
+### 22. Canonical's WSL image runs cloud-init on every boot: 39 s before anything starts
+- **What:** `systemd-analyze blame` in the guest: `cloud-init-local.service` 38.95 s. systemd sits
+  at "initializing", and `crucible.service` (after network-online.target) waits behind it on every
+  boot of the distro.
+- **Fixed (1.0.46), for new imports:** the finish script writes `/etc/cloud/cloud-init.disabled`.
+  kylies-pc's distro was imported before the fix and keeps cloud-init; the 180 s budget covers it.
+
+### 23. The distro stops when idle
+- **What:** after the failed move, the `crucible` distro was Stopped; each probe booted it, and WSL
+  stopped it again about 25 s after the last session ended (the journal: started 21:58:35, stopped
+  21:59:00). A guest engine only serves while something keeps the distro running.
+- **To check once the move completes:** that the orchestrator holds it up.
+
+### 24. The engine runs as root in the guest
+- **What:** install.sh ran as root: `/root/.crucible`, a system unit with `User=root`, linger
+  "granted to root". The distro's default user `crucible` has an empty home. Is that intended?
+  PHASE19's vocabulary says the finish step creates a `crucible` user; nothing then uses it.
+
+### 25. ffmpeg: not in the guest, and the rvc env's comes from a third party
+- **What:** install.sh's prerequisites said "NO ffmpeg on PATH ... tts, asr, align, rvc and denoise
+  will refuse until it is there". A fresh Ubuntu has none, and nobody would know to `apt install` it.
+  The rvc env pins `static_ffmpeg==3.0`, a pip package that (to confirm) fetches ffmpeg binaries
+  from its author's GitHub on first use; the other jobs look on the system PATH.
+- **Owen's ruling, 2026-09-26:** *"that should be part of the rvc environment if we need it ... the
+  environment is stored on gh releases right? ... downloading from gh releases is probably the most
+  trustworthy/correct way."* So: one pinned static ffmpeg build, hosted as an asset on Crucible's
+  own GitHub release with a digest, placed by `crucible install` into `~/.crucible/tools/`, and found
+  by `hosttools` for every job type. No system package and no third-party download at run time.
+
+### 26. Smaller things from the same run
+- The installer's final console line still printed the raw "no installed distributions" wsl text
+  in 1.0.45.
+- 28 s with no progress line during the distro import.
+- "954 GiB free at /root/.crucible" is the ext4.vhdx virtual maximum; C: has about 283 GB.
+- The upgrade logged `claim: release did not land: peer_unreachable` against an engine it had just
+  stopped itself (harmless, noisy).
