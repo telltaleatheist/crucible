@@ -121,6 +121,8 @@ crucible api job submit --type <t> [--model <m>] [--params <json|@file>]
 crucible api job get <job-id>
 crucible api job events <job-id> [--since <event-id>]
 crucible api job cancel <job-id>
+crucible api job hold <job-id>                 keep its artifacts for a later job's inputs
+crucible api job release <job-id>              the chain is done; remove the job now
 crucible api job artifact <job-id> <name> [--out PATH|-]
 crucible api upload <path>                     → {"blob_id", "bytes", "sha256"}
 ```

@@ -519,6 +519,7 @@ def merge(repo: RepoManifest, pin: Pin, footprint: EngineFootprint) -> VoiceMani
         backends=backends,
         manifest_source=MANIFEST_REPO,
         pace_basis=repo.pace_basis,
+        measured_from=repo.measured_from,
         inherited_from=repo.inherited_from,
     )
 

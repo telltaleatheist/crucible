@@ -260,6 +260,7 @@ class VoiceManifest:
     path: Path
     manifest_source: str = MANIFEST_OVERRIDE
     pace_basis: str | None = None
+    measured_from: str | None = None
     inherited_from: str | None = None
     weights_of: str | None = None
     weights_base: "VoiceManifest | None" = field(default=None, compare=False, repr=False)
@@ -321,6 +322,7 @@ class VoiceManifest:
             "takes": [take.to_dict() for take in self.takes],
             "manifest": self.manifest_source,
             "pace_basis": self.pace_basis,
+            "measured_from": self.measured_from,
             "inherited_from": self.inherited_from,
         }
 
@@ -1119,6 +1121,8 @@ def _not_carried(manifest: VoiceManifest) -> list[str]:
     not_carried: list[str] = []
     if manifest.pace_basis is not None:
         not_carried.append(f"pace_basis = {manifest.pace_basis!r}")
+    if manifest.measured_from is not None:
+        not_carried.append(f"measured_from = {manifest.measured_from!r}")
     if manifest.inherited_from is not None:
         not_carried.append(f"inherited_from = {manifest.inherited_from!r}")
     for kind, spec in manifest.backends.items():

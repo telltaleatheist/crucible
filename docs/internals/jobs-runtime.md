@@ -257,6 +257,15 @@ ladder or the CLI:
 - An interrupted job's `finished` is its `interrupted_at` (when the restart noticed it), and the
   coerced record is written back at once. Without a `finished` stamp the reaper cannot age the
   job, and without the write-back every restart would restart its retention clock.
+- A clean stop ends the running job the same way, before anything else stops.
+  `JobStore.stop()` shuts the lane to new work, sets the running job's cancel flag (the path
+  a `DELETE /v1/jobs/{id}` takes, so the plugin asks its worker to stop cooperatively), and
+  waits for the job to finish for up to `procgroup.stop_budget_seconds(STOP_TIMEOUT_SECONDS)`.
+  Only then is the lane task cancelled, and the lifespan stops tasks, the job store, streams and
+  residency in that order. The job ends **`interrupted`** (the client did not cancel it), with
+  a note saying so. Before this, cancelling the lane task left the job's thread running: after
+  `residency.shutdown()` it could start a worker nothing stopped, a CUDA process outliving the
+  server. A job past the budget is named on stderr and the server stops anyway; never SIGKILL.
 - `client_ref` is the client's own name for the work, echoed back and never read. BookForge puts
   its queue step id there so it can match interrupted jobs after both sides restart.
 

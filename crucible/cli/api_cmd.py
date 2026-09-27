@@ -184,6 +184,7 @@ def cmd_emit(method: str, template: str) -> Handler:
 
 cmd_job_get = cmd_emit("GET", "/v1/jobs/{job_id}")
 cmd_job_cancel = cmd_emit("DELETE", "/v1/jobs/{job_id}")
+cmd_job_hold = cmd_emit("POST", "/v1/jobs/{job_id}/hold")
 cmd_resumable_get = cmd_emit("GET", "/v1/resumable/{resume_id}")
 cmd_resumable_discard = cmd_emit("DELETE", "/v1/resumable/{resume_id}")
 cmd_task_get = cmd_emit("GET", "/v1/tasks/{task_id}")
@@ -664,6 +665,12 @@ def cmd_lease_open(connection: Connection, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_job_release(connection: Connection, args: argparse.Namespace) -> int:
+    call(connection, "DELETE", f"/v1/jobs/{args.job_id}/hold")
+    emit({"released": args.job_id})
+    return EXIT_OK
+
+
 def cmd_lease_release(connection: Connection, args: argparse.Namespace) -> int:
     call(connection, "DELETE", f"/v1/leases/{args.lease_id}")
     emit({"released": args.lease_id})
@@ -808,6 +815,14 @@ JOB_VERBS = (
         ),
     )),
     Verb("cancel", "DELETE /v1/jobs/{id}", cmd_job_cancel, (arg("job_id"),)),
+    Verb(
+        "hold", "POST /v1/jobs/{id}/hold — keep its artifacts for a later job's inputs",
+        cmd_job_hold, (arg("job_id"),),
+    ),
+    Verb(
+        "release", "DELETE /v1/jobs/{id}/hold — the chain is done; remove the job now",
+        cmd_job_release, (arg("job_id"),),
+    ),
     Verb("artifact", "GET one artifact's bytes", cmd_job_artifact, (
         arg("job_id"),
         arg("name"),

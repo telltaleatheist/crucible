@@ -54,6 +54,11 @@ for the flags and `OneOf` for a required either/or. `add_parser` is a loop over 
 new verb is a row and a handler. `--help` for every screen is byte-identical to the
 hand-written parser it replaced.
 
+Every route the server publishes has a verb or a stated reason not to (`tests/test_api_client.py`,
+`COVERED` and `EXCLUDED`). `job hold` and `job release` are `POST` and `DELETE /v1/jobs/{id}/hold`,
+the SDK's `holdJob` and `releaseHold`; `release` answers `{"released": <job-id>}` as `lease release`
+does, since the route answers 204.
+
 `crucible/apiclient.py` is a forwarding module kept for one release: every read,
 write and delete of an attribute on it lands on `cli/api_cmd.py`, so
 `monkeypatch.setattr(apiclient, "call", ...)` still reaches the verbs, and a module

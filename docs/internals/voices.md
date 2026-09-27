@@ -223,7 +223,9 @@ A job sends `take: N`. The server decides what take N means.
 `write_home_voice` parses the document with `parse_document` at its target path,
 round-trips it through `tomli_w`, and writes it atomically. `voice_document` is
 `parse_document`'s inverse and names what an override cannot carry (`pace_basis`,
-`inherited_from`, per-arm `max_chars_basis`). Voice ids must match
+`measured_from`, `inherited_from`, per-arm `max_chars_basis`). `voicerepo.merge` keeps
+`measured_from` on the manifest for exactly this: it is a provenance fact, and a repo voice
+saved back as a home voice once lost it with no line in `not_carried`. Voice ids must match
 `^[a-z0-9][a-z0-9._-]{0,63}$`, so a request id can never become a path.
 
 ## Engine base rows (`engines/higgs-v3/base.toml`)

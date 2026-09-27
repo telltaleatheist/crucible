@@ -443,6 +443,12 @@ own line. Every "did not start" message in `retry.py` and `local.py` names `<hom
 every "reinstall" names `paths.INSTALL_ONE_LINER`, the same `irm ... install.ps1 | iex` line
 the README documents (a test holds them equal).
 
+The door's key comes from `controller_client.bearer`. When `config.toml` exists but cannot be
+read (bad TOML, or a `ConfigError` from the bearer), the console says so once, names
+`crucible init --force` as the way to write it again and prints the file's path on its own
+line, then keeps waiting on the outcome record, which needs no key. Before, a `ConfigError`
+escaped `_token` and ended the window with a traceback.
+
 ### One `alive` (`processlock.alive`)
 
 `OpenProcess` failing with `ERROR_ACCESS_DENIED` means the pid exists and belongs to somebody
