@@ -34,10 +34,19 @@
 # repo, which is not ours and cannot carry a manifest, and they are the ENGINE's
 # own base behaviour rather than voices anybody trains — see
 # `crucible/engines/higgs-v3/base.toml` and section 2.6.
+#
+# ── deathstalker v14, 2026-09-27 ────────────────────────────────────────────
+#
+# ckpt-3510 of the v14 run, deployed on Owen's "Deploy" (training-pc-1). Pace
+# 16.29 -> 16.14 (max 20.98, min 12.42) and band 500-800 -> 400-700; caps,
+# sampling and takes unchanged. The repo was squashed again, so c111af71 (v13)
+# no longer exists on the Hub; Owen asked for the old deathstalker to be gone
+# everywhere. Both machines were repinned and pulled the same night, and the
+# weights' sha256 matched across the Hub, the PC and the Mac.
 
 [deathstalker]
 hf_repo = "owenmorgan/deathstalker-higgs-v3"
-revision = "c111af710109031316ae7111e099f17b4522fd28"
+revision = "28f6c4d3733be9746bb26ddd7b09c9d2a4950198"
 
 [mistborn]
 hf_repo = "owenmorgan/mistborn-higgs-v3"
