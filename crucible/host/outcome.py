@@ -86,6 +86,14 @@ REBOOT_CODES: frozenset[str] = frozenset({REBOOT_CODE, REBOOT_AGAIN_CODE})
 #: and stays put until a person presses Try again.
 TRANSIENT_CANNOT_CODES: frozenset[str] = frozenset({"wsl_reboot_again"})
 
+#: VIRTUALIZATION OFF IN THE FIRMWARE, RE-CHECKED TOO (Owen's go, 2026-09-26).
+#: Only a person can fix it, in the BIOS, and the one thing they are sure to do
+#: afterwards is restart. So the tray checks again at every start, and the move
+#: resumes the moment Windows reports a hypervisor, with no Try again to find.
+#: Kept apart from `TRANSIENT_CANNOT_CODES` because the question asked is
+#: different: not "is WSL live" but "is virtualization on now".
+FIRMWARE_CANNOT_CODES: frozenset[str] = frozenset({"virtualization_disabled"})
+
 
 def _utc_now() -> str:
     """ISO-8601, UTC, to the second. The `at` of 2.2's shape."""

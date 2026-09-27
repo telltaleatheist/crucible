@@ -839,6 +839,25 @@ class Host:
             if live.live:
                 return self._move("resumed: WSL is live now")
             return outcome.CANNOT
+        if (
+            previous is not None
+            and previous.state == outcome.CANNOT
+            and previous.code in outcome.FIRMWARE_CANNOT_CODES
+        ):
+            # Virtualization was off in the firmware. After somebody turns it
+            # on and restarts, the move goes on by itself (outcome.py says why).
+            try:
+                live = wslstate.probe_live(self._c.runner)
+            except Exception as exc:  # noqa: BLE001 - never raise out of the thread
+                self._c.log.write(f"engine: the virtualization re-check crashed: {type(exc).__name__}: {exc}")
+                return outcome.CANNOT
+            self._c.log.write(
+                f"engine: {previous.code} was recorded {previous.at}; checked again "
+                f"at this start: {live.line()}"
+            )
+            if live.answer.kind != "no_hypervisor":
+                return self._move("resumed: virtualization is on now")
+            return outcome.CANNOT
         if previous is not None and previous.state == outcome.CANNOT:
             self._c.log.write(
                 f"engine: this machine cannot run the Linux engine "
