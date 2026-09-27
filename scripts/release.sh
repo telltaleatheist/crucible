@@ -58,46 +58,14 @@ REMOTE_SHA="$(git rev-parse "origin/$BRANCH")"
 [ "$HEAD_SHA" = "$REMOTE_SHA" ] \
   || fail "HEAD ($(git rev-parse --short HEAD)) is not origin/$BRANCH ($(git rev-parse --short "origin/$BRANCH")); push first"
 
-PY_VERSION="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' crucible/__init__.py)"
-SDK_VERSION="$(node -p "require('./sdk/ts/package.json').version")"
-UA_VERSION="$(sed -n "s/^export const SDK_VERSION = '\(.*\)';$/\1/p" sdk/ts/src/version.ts)"
-TOML_VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)"
-BOOT_VERSION="$(node -p "require('./sdk/bootstrap/package.json').version")"
-BOOT_PEER="$(node -p "require('./sdk/bootstrap/package.json').peerDependencies['@crucible/client']")"
-BOOT_LITERAL="$(sed -n "s/^export const BOOTSTRAP_VERSION = '\(.*\)';$/\1/p" sdk/bootstrap/src/version.ts)"
-
-[ -n "$PY_VERSION" ]   || fail "could not read VERSION from crucible/__init__.py"
-[ -n "$SDK_VERSION" ]  || fail "could not read version from sdk/ts/package.json"
-[ -n "$UA_VERSION" ]   || fail "could not read SDK_VERSION from sdk/ts/src/version.ts"
-[ -n "$TOML_VERSION" ] || fail "could not read version from pyproject.toml"
-[ -n "$BOOT_VERSION" ] || fail "could not read version from sdk/bootstrap/package.json"
-[ -n "$BOOT_PEER" ] && [ "$BOOT_PEER" != "undefined" ] \
-  || fail "could not read the @crucible/client peer pin from sdk/bootstrap/package.json"
-[ -n "$BOOT_LITERAL" ] || fail "could not read BOOTSTRAP_VERSION from sdk/bootstrap/src/version.ts"
-
-[ "$PY_VERSION" = "$TOML_VERSION" ] \
-  || fail "crucible/__init__.py says $PY_VERSION but pyproject.toml says $TOML_VERSION; the wheel would carry the wrong version (this is what nearly shipped 0.1.0 bytes as v0.2.0)"
-
-[ "$PY_VERSION" = "$SDK_VERSION" ] \
-  || fail "crucible/__init__.py says $PY_VERSION but sdk/ts/package.json says $SDK_VERSION; one release, one version"
-[ "$PY_VERSION" = "$UA_VERSION" ] \
-  || fail "crucible/__init__.py says $PY_VERSION but sdk/ts/src/version.ts says $UA_VERSION; the SDK would report the wrong version in User-Agent"
-[ "$PY_VERSION" = "$BOOT_VERSION" ] \
-  || fail "crucible/__init__.py says $PY_VERSION but sdk/bootstrap/package.json says $BOOT_VERSION; the bootstrapper ships at the server's version"
-[ "$PY_VERSION" = "$BOOT_PEER" ] \
-  || fail "sdk/bootstrap/package.json pins @crucible/client $BOOT_PEER, not $PY_VERSION; the bootstrapper must peer-depend on the client cut beside it"
-[ "$PY_VERSION" = "$BOOT_LITERAL" ] \
-  || fail "crucible/__init__.py says $PY_VERSION but sdk/bootstrap/src/version.ts says $BOOT_LITERAL; the bootstrapper would name itself wrongly"
-
-VERSION="$PY_VERSION"
+VERSION="$(python scripts/bump.py --check)" \
+  || fail "the version places are not one version (bump.py said why, above); if they disagree, run 'python scripts/bump.py --align', commit, push, and cut again"
 TAG="v$VERSION"
 echo "release: $TAG from $BRANCH ($(git rev-parse --short HEAD))"
 
-echo "release: the generated app modules match the manifests"
-python scripts/gen-modules.py --check >/dev/null   || fail "modules/*.module.json are stale; run 'python scripts/gen-modules.py' and commit them (this is what shipped stale in v0.6.3)"
-
-echo "release: the API reference matches the app"
-python scripts/gen-api-docs.py --check >/dev/null   || fail "docs/API.md is stale; run 'python scripts/gen-api-docs.py' and commit it"
+echo "release: every generated file is current"
+./scripts/check-generated.sh >/dev/null \
+  || fail "a generated file is stale (named above); run './scripts/check-generated.sh --fix', commit, push, and cut again"
 
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   fail "tag $TAG already exists locally; a version is cut once"
@@ -150,8 +118,12 @@ else
 fi
 [ -s "$WHEEL_SHA" ] || fail "could not write $WHEEL_SHA"
 
+ASSETS=("$SDIST" "$WHEEL" "$WHEEL_SHA" "$TGZ" "$BOOT" "$INSTALL_SH" "$INSTALL_PS1")
+ASSET_LIST="$OUT/$(python scripts/promote_release.py --write-asset-list "$OUT" "${ASSETS[@]}")" \
+  || fail "could not write the asset list into $OUT"
+
 echo "release: built"
-for asset in "$SDIST" "$WHEEL" "$WHEEL_SHA" "$TGZ" "$BOOT"; do
+for asset in "${ASSETS[@]}" "$ASSET_LIST"; do
   echo "  $(basename "$asset")"
 done
 
@@ -193,10 +165,11 @@ gh release create "$TAG" \
   --prerelease --latest=false \
   --generate-notes \
   --notes "$NOTES_HEADER" \
-  "$SDIST" "$WHEEL" "$WHEEL_SHA" "$TGZ" "$BOOT" \
-  "$INSTALL_SH" "$INSTALL_PS1"
+  "${ASSETS[@]}" "$ASSET_LIST"
 
 echo "release: $TAG candidate created (prerelease, not latest)"
-echo "release: test a fresh install, then run python scripts/promote_release.py --tag $TAG --publish --confirmed-install-smoke"
+echo "release: put it on every machine and test it there: ./scripts/deploy.sh --release $VERSION"
+echo "release: then promote it:"
+echo "  $(python scripts/promote_release.py --tag "$TAG" --print-command)"
 gh release view "$TAG" --repo "$REPO_SLUG" --json tagName,url,assets \
   --jq '.tagName + "  " + .url, (.assets[] | "  asset: " + .name + " (" + (.size|tostring) + " bytes)")'
