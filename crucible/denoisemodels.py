@@ -1,41 +1,3 @@
-"""Denoise model manifests — `denoise/<id>.toml` (PHASE4-AUDIO.md section 4.2).
-
-One file per separator model. The shape is `crucible/rvcmodels.py`'s rather than
-`crucible/manifests.py`': what a separator needs is **two named files in one
-directory**, not a repo snapshot, so a block names the repo, the revision, and
-the path of each file inside it, with a digest for each.
-
-Why the filenames are declared and not derived
-----------------------------------------------
-audio-separator resolves a model by **filename** inside its `model_file_dir`,
-against a registry it fetches from GitHub, and it expects the checkpoint and its
-YAML config under exactly the names that registry lists:
-
-    denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt
-    denoise_mel_band_roformer_aufr33_sdr_27.9959_config.yaml
-
-The HuggingFace mirror this manifest points at stores the same two files under
-*different* paths and, for the config, a different name. So the manifest carries
-both halves — where the bytes come from (`model_path`, `config_path`) and what
-they must be called when they land (`model_filename`, `config_filename`) — and
-nothing in the code invents either. A wrong name here is a model audio-separator
-would try to download over the top of.
-
-Validation is strict for `crucible/asrmodels.py`'s reason. A separator run with
-the wrong checkpoint produces audio that sounds nearly right, and the manifest is
-the only place that says which weights were used.
-
-Why this is a third manifest loader
------------------------------------
-It should not be. This is now the fourth file in this repo that reads a strict
-TOML manifest with a `[model]` table and `[backends.<kind>]` blocks
-(`manifests.py`, `asrmodels.py`, `alignmodels.py`, `rvcmodels.py` — and this),
-and every one of them says the same thing in its own docstring: merging them
-into one loader parameterised by (directory, required keys, permitted engines)
-is a mechanical follow-up that nobody should do while other builders are in the
-tree. The duplication is deliberate and it is getting expensive.
-"""
-
 from __future__ import annotations
 
 import os
@@ -52,21 +14,10 @@ from .errors import CrucibleError
 
 DENOISE_DIR_ENV = "CRUCIBLE_DENOISE_DIR"
 
-#: audio-separator's `model_file_dir` under a Crucible home, as one name.
-#: **The one owner of that layout** (ARCHITECTURE.md R1): `crucible denoise
-#: pull` writes into this tree and `crucible/jobs/denoise/__init__.py` reads
-#: from it, and the two agreeing today is two constants that can disagree
-#: tomorrow — which is exactly the bug `rvcbase.targets` was written to end.
 DENOISE_MODELS_DIRNAME = "denoise-models"
 
-#: What fetches a separator's two files, spelled once so the job's refusal, the
-#: doctor line and the CLI all send a reader to the same command.
 PULL_COMMAND = "crucible denoise pull"
 
-#: Both backends run the same engine: audio-separator is torch, torch has an MPS
-#: backend, and a separator checkpoint is not quantised per platform. The one
-#: thing that differs is `use_autocast`, which is CUDA-only and is read off the
-#: backend in `crucible/jobs/denoise/__init__.py` rather than declared here.
 DENOISE_BACKEND_ENGINES: dict[str, str] = {
     CUDA_LINUX: "audio-separator",
     MLX_DARWIN: "audio-separator",
@@ -97,27 +48,15 @@ _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _HF_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
-#: A filename, not a path. These are written into one flat directory that
-#: audio-separator reads by name, so a separator would happily be handed
-#: `../../etc/passwd` by a manifest nobody checked.
 _FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._()+-]*$")
 
 
 class DenoiseManifestError(CrucibleError):
-    """A denoise manifest is missing, unreadable, or does not say what it must."""
+    ...
 
 
 @dataclass(frozen=True)
 class DenoiseBackendSpec:
-    """One `[backends.<kind>]` block.
-
-    `backend`, `hf_repo` and `revision` are named the way
-    `crucible/weights.py`'s protocols name them, so whatever eventually pulls
-    these two files goes through the one weights module rather than a second
-    downloader (see `crucible/jobs/denoise/__init__.py` on what does not exist
-    yet).
-    """
-
     backend: str
     engine: str
     hf_repo: str
@@ -132,7 +71,6 @@ class DenoiseBackendSpec:
 
     @property
     def total_bytes(self) -> int:
-        """What `crucible denoise pull` fetches, both files."""
         return self.model_bytes + self.config_bytes
 
     def to_dict(self) -> dict[str, Any]:
@@ -153,24 +91,13 @@ class DenoiseBackendSpec:
 
 @dataclass(frozen=True)
 class DenoiseManifest:
-    #: Its own subtree of `~/.crucible/`, for `rvcmodels.py`'s reason: these are
-    #: named files in a flat directory that an engine reads by name, not a repo
-    #: snapshot, and the ids are their own namespace.
     weights_family = "denoise"
 
     id: str
     display: str
-    #: What audio-separator must find in `model_file_dir`. See the module
-    #: docstring: the names it resolves by are not the paths they come from.
     model_filename: str
     config_filename: str
-    #: The stem this model exists to produce — `dry` for the denoiser, which is
-    #: "the signal minus the noise". The job refuses a run that did not produce
-    #: exactly one output naming it.
     primary_stem: str
-    #: The rate the model was trained at and the ONLY rate it may be fed. Its
-    #: librosa front-end crashes on others, and a stem that came back at a
-    #: different rate has invalidated every offset the client sliced by.
     sample_rate: int
     backends: dict[str, DenoiseBackendSpec]
     path: Path
@@ -199,11 +126,7 @@ class DenoiseManifest:
         }
 
 
-# ------------------------------------------------------------------ locating
-
-
 def denoise_manifests_dir() -> Path:
-    """Where `denoise/*.toml` live on this host. Refuses by name if absent."""
     override = os.environ.get(DENOISE_DIR_ENV)
     if override is not None and override != "":
         path = Path(override).expanduser()
@@ -219,9 +142,6 @@ def denoise_manifests_dir() -> Path:
             f"install has lost them, or ${DENOISE_DIR_ENV} must point at them"
         )
     return path
-
-
-# ------------------------------------------------------------------ checking
 
 
 def _check_table(where: str, table: dict[str, Any], required: dict[str, type]) -> None:
@@ -378,13 +298,9 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> DenoiseMan
     )
 
 
-# ------------------------------------------------------------------- loading
-
-
 def parse_denoise_manifest(
     text: str, path: Path, expected_id: str
 ) -> DenoiseManifest:
-    """Parse and validate one denoise manifest. Raises by name."""
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -395,7 +311,6 @@ def parse_denoise_manifest(
 def load_denoise_manifest(
     model_id: str, directory: Path | None = None
 ) -> DenoiseManifest:
-    """Load `denoise/<model_id>.toml`. Raises if it is not there."""
     root = directory if directory is not None else denoise_manifests_dir()
     path = root / f"{model_id}.toml"
     if not path.is_file():
@@ -414,7 +329,6 @@ def load_denoise_manifest(
 def load_all_denoise_manifests(
     directory: Path | None = None,
 ) -> dict[str, DenoiseManifest]:
-    """Every denoise manifest this build ships, by id, in id order."""
     root = directory if directory is not None else denoise_manifests_dir()
     manifests: dict[str, DenoiseManifest] = {}
     for path in sorted(root.glob("*.toml"), key=lambda p: p.stem):
@@ -422,21 +336,8 @@ def load_all_denoise_manifests(
     return manifests
 
 
-# ------------------------------------------------------------- on this host
-
-
 @dataclass(frozen=True)
 class DenoiseFile:
-    """One of a separator's two files, on its way from the mirror to the tree.
-
-    The field names are `crucible.weights.FileSource`'s, so `pull_files` takes
-    these directly and there is one downloader rather than a second one written
-    for this job type. `source` is the path inside the HuggingFace repo and
-    `target` is the name audio-separator resolves by; the module docstring says
-    at length why those are two different strings and why neither is derived
-    from the other.
-    """
-
     source: str
     target: str
     sha256: str
@@ -454,43 +355,16 @@ class DenoiseFile:
 
 
 def denoise_models_root(home: Path) -> Path:
-    """audio-separator's `model_file_dir` under a Crucible home.
-
-    A FLAT directory holding each separator's checkpoint and its YAML config
-    under the names the library resolves by — its own tree rather than
-    `~/.crucible/models/`, because these are not a repo snapshot and the ids are
-    a separate namespace (`crucible/rvcmodels.py`'s argument, one job type
-    along).
-
-    Takes the home and not the `Config`, so a caller that has only a path can
-    name the directory without standing one up.
-    """
     return home / DENOISE_MODELS_DIRNAME
 
 
 def stamp_name(manifest: DenoiseManifest) -> str:
-    """This model's pull stamp, which is NOT `weights.STAMP_NAME`.
-
-    One flat directory, one set of files per model: a single
-    `crucible-pull.json` at the root would be overwritten by the second model's
-    pull and would then report the first as never installed. The id is in the
-    name because the id is what the set belongs to.
-    """
     return f"crucible-pull-{manifest.id}.json"
 
 
 def model_files(
     manifest: DenoiseManifest, spec: DenoiseBackendSpec
 ) -> tuple[DenoiseFile, ...]:
-    """The two files this model needs, in the order they are fetched.
-
-    **The one owner of "which files a separator needs"** — `pull` fetches
-    exactly this list and `missing` checks exactly this list, so the set that is
-    placed and the set that is looked for cannot drift (ARCHITECTURE.md R1).
-    That is the drift `rvcbase` was already bitten by, where the job's list was
-    one file shorter than the puller's and the difference only showed up inside
-    transformers, hours later.
-    """
     return (
         DenoiseFile(
             source=spec.model_path,
@@ -513,13 +387,6 @@ def model_files(
 
 
 def missing(home: Path, manifest: DenoiseManifest) -> list[str]:
-    """Which of this model's files are not on this host, in declared order.
-
-    Presence, not digest, for `rvcbase.missing`'s reason: a file Crucible placed
-    was verified when it was placed, re-hashing 913 MB on every `crucible
-    doctor` would cost seconds nobody agreed to spend, and a file somebody else
-    put there is one Crucible has nothing to compare against anyway.
-    """
     root = denoise_models_root(home)
     return [
         name
@@ -531,7 +398,6 @@ def missing(home: Path, manifest: DenoiseManifest) -> list[str]:
 def installed(
     home: Path, manifest: DenoiseManifest, spec: DenoiseBackendSpec
 ) -> weights.InstalledWeights | None:
-    """The pulled set at this pin, or None. A stamp at another pin is not this."""
     return weights.files_installed(
         denoise_models_root(home),
         spec.hf_repo,
@@ -549,13 +415,6 @@ def pull(
     on_line: Callable[[str], None] | None = None,
     on_progress: weights.ProgressHook | None = None,
 ) -> weights.InstalledWeights:
-    """Fetch both files at the pinned revision, verify both, and place both.
-
-    Every digest is checked before either file is placed — `weights.pull_files`'
-    rule, and the one that matters most here: a checkpoint beside somebody
-    else's config is a separator that loads and produces audio which is subtly
-    wrong and says so nowhere.
-    """
     return weights.pull_files(
         config,
         hf_repo=spec.hf_repo,

@@ -1,43 +1,3 @@
-"""RVC voice-model manifests — `rvc/<id>.toml` (PHASE4-AUDIO.md section 4).
-
-**Model identity becomes a manifest**, which is the whole point of this file.
-Today an RVC model is a *folder name* under
-`<userData>/runtime/rvc-models/rvc/voice_models/<Name>`, discovered by looking for
-a `.pth`, with `forceIndexRate0` derived from the **absence** of a `.index`
-(`electron/rvc-models.ts:9`). That is a filesystem convention standing in for an
-identity: it cannot be sent over a wire, it cannot be checked, and it does not
-survive the trip to another machine.
-
-Three things this schema has that no other manifest in the repo does, each
-because of something that is true about how these models are actually published:
-
-- **`archive`.** PHASE4-AUDIO.md section 4 says `owenmorgan/deathstalker_rvc_v1`
-  is already published, and that turned out not to be the shape it is published
-  in. There is no per-model repo. Every RVC model Owen has published is a
-  `.tar.gz` under `rvc/` in ONE repo, `owenmorgan/owen-morgan-bookforge`
-  (`electron/data/rvc-voice-assets.json`), alongside the XTTS weights. So a
-  manifest names the repo, the revision AND the file, and `weights.pull_archive`
-  fetches that one file rather than snapshot-downloading seven tarballs to get at
-  one. The tarballs unpack to `rvc/voice_models/<name>/`, which is a whole
-  `URVC_MODELS_DIR` root — convenient, and recorded here so the next reader knows
-  it was checked rather than assumed.
-- **`archive_sha256`.** A snapshot download is verified by the hub client against
-  the revision; a single file fetched by path deserves the same assurance, and
-  the app's catalog already carries the digest for every one of these, so it is a
-  translation rather than an invention.
-- **`has_index`.** This is `forceIndexRate0` said out loud. A model with no
-  `.index` cannot do feature retrieval at all, so an `index_rate` above zero on
-  one is not a preference the engine will ignore — it is a request for something
-  that does not exist, and `jobs/rvc` refuses it by name.
-
-Why this is not `crucible/manifests.py`
----------------------------------------
-The same answer `asrmodels.py` and `alignmodels.py` give: these four loaders are
-one loader parameterised by (directory, required keys, permitted engines), they
-share about two hundred identical lines, and the merge is a follow-up rather than
-something to do while three builders are in the tree.
-"""
-
 from __future__ import annotations
 
 import os
@@ -52,10 +12,6 @@ from .errors import CrucibleError
 
 RVC_DIR_ENV = "CRUCIBLE_RVC_DIR"
 
-#: Which engine each backend is allowed to name. Both, and the same one: unlike
-#: `asr`, ultimate-rvc is torch, torch has an MPS backend, and the app runs this
-#: on Owen's Mac today — the 96-file recycle in `jobs/rvc` exists *because* of
-#: what a 64 GB Mac did without it.
 RVC_BACKEND_ENGINES: dict[str, str] = {
     CUDA_LINUX: "ultimate-rvc",
     MLX_DARWIN: "ultimate-rvc",
@@ -64,13 +20,7 @@ RVC_BACKEND_ENGINES: dict[str, str] = {
 _MODEL_REQUIRED: dict[str, type] = {
     "id": str,
     "display": str,
-    #: The folder name inside the archive, which is the name urvc is given on the
-    #: command line. It is NOT derivable from the id: the id is Crucible's
-    #: (lower-case, hyphenated) and the folder is whatever it was trained as
-    #: ("Sigma Male Narrator", "US_Female_1", "deathstalker_rvc_v1").
     "model_name": str,
-    #: `forceIndexRate0`, said as a fact about the model rather than inferred
-    #: from a missing file. See the module docstring.
     "has_index": bool,
 }
 _BACKEND_REQUIRED: dict[str, type] = {
@@ -87,27 +37,15 @@ _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _HF_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
-#: A repo-relative path ending in `.tar.gz`. Anchored and traversal-free because
-#: it becomes a path on this host's disk: `hf_hub_download` writes it under the
-#: target, and `..` in a manifest must not be able to write outside it.
 _ARCHIVE = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/-]+\.tar\.gz$")
 
 
 class RvcManifestError(CrucibleError):
-    """An RVC manifest is missing, unreadable, or does not say what it must."""
+    ...
 
 
 @dataclass(frozen=True)
 class RvcBackendSpec:
-    """One `[backends.<kind>]` block.
-
-    `backend`, `hf_repo` and `revision` are named exactly as
-    `crucible.manifests.BackendSpec` names them, so `weights.installed` and
-    `weights.require_installed` read this without a branch for the job type. The
-    archive keys are what `weights.pull_archive` needs on top, and they are the
-    reason this cannot go through plain `weights.pull`.
-    """
-
     backend: str
     engine: str
     hf_repo: str
@@ -119,15 +57,6 @@ class RvcBackendSpec:
 
     @property
     def files(self) -> tuple[str, ...]:
-        """Empty, and NOT `(self.archive,)`.
-
-        `crucible/weights.py`'s `WeightsSource` asks every spec which files a
-        pull fetches and an `installed` requires, and this one is fetched by
-        `pull_archive`: the archive is downloaded, verified, UNPACKED and
-        removed, so naming it here would make `installed` look for a tarball
-        that is correctly gone. What proves this subject complete is
-        `pull_archive`'s own stamp, as it always was.
-        """
         return ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -145,12 +74,6 @@ class RvcBackendSpec:
 
 @dataclass(frozen=True)
 class RvcManifest:
-    #: Its own subtree under `~/.crucible/`. Not `models` and not `voices`: an
-    #: RVC model shares a namespace with neither, and `voices` in particular
-    #: holds narrator checkpoints, which are a different thing with a confusingly
-    #: similar name. `crucible/weights.py` explains why one directory holding two
-    #: kinds is a way to overwrite 19 GB with 80 MB and leave a stamp that reads
-    #: as installed to both.
     weights_family = "rvc"
 
     id: str
@@ -182,11 +105,7 @@ class RvcManifest:
         }
 
 
-# ------------------------------------------------------------------ locating
-
-
 def rvc_manifests_dir() -> Path:
-    """Where `rvc/*.toml` live on this host. Refuses by name if absent."""
     override = os.environ.get(RVC_DIR_ENV)
     if override is not None and override != "":
         path = Path(override).expanduser()
@@ -202,11 +121,7 @@ def rvc_manifests_dir() -> Path:
     return path
 
 
-# ------------------------------------------------------------------ checking
-
-
 def _check_table(where: str, table: dict[str, Any], required: dict[str, type]) -> None:
-    """Every required key present and correctly typed; no key that is not listed."""
     unknown = sorted(set(table) - set(required))
     if unknown:
         raise RvcManifestError(
@@ -219,7 +134,6 @@ def _check_table(where: str, table: dict[str, Any], required: dict[str, type]) -
     for key, kind in required.items():
         value = table[key]
         wrong = not isinstance(value, kind)
-        # bool is a subclass of int; a bool where an int is wanted is still wrong.
         if kind is int and isinstance(value, bool):
             wrong = True
         if wrong:
@@ -342,11 +256,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> RvcManifes
     )
 
 
-# ------------------------------------------------------------------- loading
-
-
 def parse_rvc_manifest(text: str, path: Path, expected_id: str) -> RvcManifest:
-    """Parse and validate one RVC manifest's text. Raises by name."""
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -355,7 +265,6 @@ def parse_rvc_manifest(text: str, path: Path, expected_id: str) -> RvcManifest:
 
 
 def load_rvc_manifest(model_id: str, directory: Path | None = None) -> RvcManifest:
-    """Load `rvc/<model_id>.toml`. Raises RvcManifestError if it is not there."""
     root = directory if directory is not None else rvc_manifests_dir()
     path = root / f"{model_id}.toml"
     if not path.is_file():
@@ -371,7 +280,6 @@ def load_rvc_manifest(model_id: str, directory: Path | None = None) -> RvcManife
 
 
 def load_all_rvc_manifests(directory: Path | None = None) -> dict[str, RvcManifest]:
-    """Every RVC manifest this build ships, by id, in id order."""
     root = directory if directory is not None else rvc_manifests_dir()
     manifests: dict[str, RvcManifest] = {}
     for path in sorted(root.glob("*.toml"), key=lambda p: p.stem):

@@ -1,24 +1,3 @@
-"""The `llm` job type: `load-model` and `unload-model`.
-
-PHASE2-LLM.md section 5. Chat does not come through here — it is proxied straight
-to the resident engine at `/v1/openai/chat/completions`, so vLLM's and mlx-lm's
-own continuous batching does the work. What runs on the exclusive lane is the
-*lifecycle*: putting a model on the accelerator and taking it off. That is why a
-chat request can never race a load.
-
-Every refusal in section 5 happens **before the job is queued**, in `preflight()`,
-so the client gets an HTTP error naming the thing rather than a job that fails a
-minute later:
-
-    unknown_model        no manifest with that id (raised by jobs.resolve_model)
-    backend_unsupported  the manifest has no block for this host's backend
-    env_missing          ~/.crucible/envs/llm is not installed
-    model_not_installed  no weights at the manifest's pinned revision
-    accelerator_busy     somebody else's process is on the card
-    insufficient_memory  free memory is below the manifest's estimate
-    model_not_resident   (unload) that model is not the one that is loaded
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -66,34 +45,14 @@ __all__ = [
 ]
 
 
-# --------------------------------------------- what serves a model, per backend
-#
-# THREE BACKENDS, TWO ANSWERS. On `cuda-linux` and `mlx-darwin` the thing that
-# serves a model is a Python env `crucible install llm` builds, and the engine
-# is a module inside it. On `llama-windows` it is `llama-server.exe` — a zip
-# from a pinned llama.cpp release, the `engine` SUBJECT (PHASE15-HOST.md 3.10,
-# fact 1) — and there is no env at all: this build ships no
-# `envs/llm/llama-windows.txt` and there is nothing for one to contain.
-#
-# Both answers are the same THREE facts — is it here, what do we say about it,
-# and what does the residency spawn — so they are one function returning them,
-# rather than a `backend_kind ==` at each of the four places that used to ask
-# `jobenv` directly.
-
-
 class LlmEngineStatus:
-    """Is this host's llm engine installed, what to say, and what to spawn."""
-
     def __init__(self, installed: bool, detail: str, executable: "Any | None") -> None:
         self.installed = installed
         self.detail = detail
-        #: The interpreter (a Python env) or the binary (`llama-server.exe`)
-        #: `Residency.load` starts. `None` when nothing is installed.
         self.executable = executable
 
 
 def llm_engine_status(config: Config, backend: Any) -> LlmEngineStatus:
-    """The one reader of "can this host start a model at all"."""
     if backend.kind == LLAMA_WINDOWS:
         build = llamacpp.build_for(backend.gpu.vendor)
         found = llamacpp.installed(config, build)
@@ -124,26 +83,6 @@ def llm_engine_status(config: Config, backend: Any) -> LlmEngineStatus:
 
 
 class LeaseOnLoad(BaseModel):
-    """`params.lease` — hold what this load makes resident, from the instant it exists.
-
-    `settle.py`'s "half that is still open", closed 2026-09-20. A load that
-    succeeds is exempt from settling, so between its `done` and its client's
-    `POST /v1/models/{id}/lease` the card is held by NOTHING — and a client that
-    dies in that window strands it for ever, because a quiet hold has no end.
-    That is exactly how a 21 GB model sat on the PC on 2026-09-20.
-
-    The earlier ruling against this said *"a lease is another holder"* that would
-    hold the card for its whole ttl and refuse everybody. True of a HUMAN typing
-    `crucible load` and walking away — and backwards for a programmatic client,
-    because a quiet hold never expires and a lease does. The two cases separate
-    without anyone guessing which is which: **by whether the request asks for
-    one.** An operator asks for nothing and keeps today's behaviour.
-
-    Same `act` vocabulary and same ttl bounds as `POST /v1/models/{id}/lease`,
-    validated by that door's own functions — a second spelling of "what is a
-    valid lease" would be a second owner of it.
-    """
-
     model_config = ConfigDict(extra="forbid")
 
     act: str
@@ -151,30 +90,15 @@ class LeaseOnLoad(BaseModel):
 
 
 class LoadParams(BaseModel):
-    """`params` for a load-model job. Unknown keys are refused, not ignored."""
-
     model_config = ConfigDict(extra="forbid")
 
     timeout_s: float = Field(default=DEFAULT_READY_TIMEOUT_SECONDS, ge=30, le=7200)
-    #: Absent means today's behaviour exactly: loaded, and held by nothing.
     lease: LeaseOnLoad | None = None
-    #: THE CONTEXT TO START THE ENGINE WITH (2026-09-23). Absent means the
-    #: manifest's `context_default` for this backend, exactly as before. Present,
-    #: it must be at least `MIN_LOAD_CONTEXT` (refused here, `invalid_params`)
-    #: and at most this host's ceiling for the model — the SAME ceiling
-    #: `GET /v1/capability` publishes (`capability.check_load_context`),
-    #: refused `400 context_over_limit` before anything is evicted or started.
-    #: It becomes vLLM's `--max-model-len` / llama-server's `-c`, sizes the KV
-    #: plan, and is the resident row's `max_model_len`. Strict: a string, a
-    #: float or a bool is refused rather than coerced.
     context: int | None = Field(default=None, ge=MIN_LOAD_CONTEXT, strict=True)
 
 
 class UnloadParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-# ------------------------------------------------------------------ helpers
 
 
 def _manifests() -> dict[str, ModelManifest]:
@@ -189,7 +113,6 @@ def _manifests() -> dict[str, ModelManifest]:
 
 
 def _params(model: type[BaseModel], params: dict[str, Any], job_type: str) -> Any:
-    """Validate `params` up front, as a named 400 rather than a 500."""
     try:
         return model.model_validate(params)
     except ValidationError as exc:
@@ -206,7 +129,6 @@ def _params(model: type[BaseModel], params: dict[str, Any], job_type: str) -> An
 
 
 def _known(model_id: str) -> ModelManifest:
-    """The manifest for this id, or `unknown_model` by name."""
     manifests = _manifests()
     manifest = manifests.get(model_id)
     if manifest is None:
@@ -222,7 +144,6 @@ def _known(model_id: str) -> ModelManifest:
 def _descriptors(
     config: Config, backend_kind: str, residency: Residency
 ) -> list[ModelDescriptor]:
-    """`/v1/info` capabilities rows — DESIGN.md section 4's shape."""
     rows: list[ModelDescriptor] = []
     for manifest in _manifests().values():
         if manifest.supports(backend_kind):
@@ -230,11 +151,8 @@ def _descriptors(
             revision = spec.revision
             source = spec.hf_repo
             estimate = spec.memory_bytes_estimate
-            # The same predicate `model_rows` and `_require_loadable` read: the
-            # puller's stamp, at the revision this host's block pins.
             installed = weights.installed(config, manifest, spec) is not None
         else:
-            # A backend this manifest has no block for has nothing to install.
             revision, source, estimate, installed = "", "", 0, False
         rows.append(
             ModelDescriptor(
@@ -250,26 +168,13 @@ def _descriptors(
 
 
 def _in_the_ollama_store(manifest: Any, backend_kind: str) -> dict[str, Any] | None:
-    """The copy of this model Ollama already holds, or None.
-
-    None for six different reasons and that is deliberate here, unlike in
-    `ollamastore.resident` which raises and names each one: this runs on a
-    listing route for every model on every read, and a store that is absent or a
-    tag that was never pulled is the ORDINARY case, not an error. A caller that
-    wants the reason asks `ollamastore` directly.
-    """
     if backend_kind != LLAMA_WINDOWS:
         return None
-    # BASE-ONLY (PHASE22 section 2.9): an alias has no `[local]` — the loader
-    # refuses one (`weights_of_local`) — so it can never read as holding
-    # Ollama's blob, which is the base's text GGUF with no projector in it.
     local = manifest.local
     if local is None or getattr(local, "tag", None) is None:
         return None
     root = ollamastore.store_root()
     try:
-        # What THIS backend serves (PHASE22 section 2.9): the copy is only
-        # worth reporting if it is complete for the engine that would run it.
         found = ollamastore.resident(
             root, local.tag, wants_projector="image" in manifest.serves(backend_kind)
         )
@@ -280,11 +185,6 @@ def _in_the_ollama_store(manifest: Any, backend_kind: str) -> dict[str, Any] | N
         "bytes": found.bytes,
         "provenance": found.provenance,
         "path": str(found.model.path),
-        # SAY THAT IT IS NOT THE SAME FILE, on the row itself, because the id
-        # beside it is the same id. Ollama's `qwen3.5:9b-bf16` and this block's
-        # `unsloth/Qwen3.5-9B-GGUF` `Q8_0` are two quantizations of one model by
-        # two different people, and a reader who assumes otherwise builds a cache
-        # key that answers for weights that never ran.
         "same_file_as_the_pin": False,
     }
 
@@ -292,24 +192,8 @@ def _in_the_ollama_store(manifest: Any, backend_kind: str) -> dict[str, Any] | N
 def model_rows(
     config: Config, backend: Any, residency: Residency
 ) -> list[dict[str, Any]]:
-    """`GET /v1/models` — PHASE2-LLM.md section 5.
-
-    These same rows are the `llm` capability's rows in `GET /v1/info`: one shape,
-    one producer, so a client that has called `info()` never has to ask twice or
-    reconcile two descriptions of the same model.
-
-    `loadable` answers "is everything this host needs in place", which is a fact
-    about the disk. It deliberately does **not** run nvidia-smi: the accelerator's
-    state changes between a listing and a request, so the guard runs at load time
-    and refuses there. A row that says `loadable: true` can still be refused with
-    `accelerator_busy`.
-    """
     backend_kind = backend.kind
     env = llm_engine_status(config, backend)
-    # `resident_model`, not `resident`: one card holds one thing and that thing
-    # may be a voice (PHASE3-TTS.md section 5). A voice on the card means no
-    # model is resident, which is exactly what these rows should say — reading
-    # `resident` here would ask a `ResidentVoice` for a `model_id`.
     resident = residency.resident_model
     rows: list[dict[str, Any]] = []
     for manifest in _manifests().values():
@@ -333,44 +217,14 @@ def model_rows(
             revision = spec.revision
             terms = spec.memory
             if terms is not None:
-                # THE CEILING, run backwards out of the same terms that decide
-                # whether the model fits at all (docs/FITS-AND-THE-CARD.md
-                # section 6.3). At one request in flight, because that is the
-                # number a client sizing ONE request needs; a client batching
-                # four divides by four, and the class about to run already
-                # declares its own concurrency.
-                #
-                # Against the card's FREE budget, not its total: vLLM's
-                # `--gpu-memory-utilization` is a fraction of the total and the
-                # Windows desktop is spent on top of it, which is the measured
-                # defect this whole design started from (section 0a).
-                # THE SAME CEILING THE LOAD DOOR AND `GET /v1/capability` USE
-                # (2026-09-23): `Candidate.context_ceiling`, at one in flight,
-                # because this row answers "how long can ONE request be" and
-                # a load's `params.context` is refused above exactly this.
-                # Before `max_context` existed this row computed its own
-                # min(card, weights) — a second owner that would now advertise
-                # 262144 on a Mac whose load door refuses anything past
-                # 131072.
                 ceiling_here = Candidate.of(manifest, backend_kind).context_ceiling(
                     available_bytes(
                         backend.gpu.vram_bytes, config.desktop_allowance_bytes
                     ),
                     1,
                 )
-                if ceiling_here is None:  # pragma: no cover - models are token-shaped
+                if ceiling_here is None:
                     raise ValueError(f"{manifest.id} has no context ceiling")
-                # BOTH WALLS, AND THE LOWER OF THEM, rather than one number with
-                # the reasoning swallowed. The card and the manifest's maximum
-                # each impose a limit and they are limits of different kinds:
-                # more VRAM raises the first and nothing a client does raises
-                # the second. A client reads `tokens`; a person reading a
-                # refusal wants to know WHICH wall they hit.
-                #
-                # `weights_allow` stays published: it is the wall behind
-                # `max_context` (the parser holds max_context <= it), and the
-                # field that caught a 64 GB Mac affording 1_389_135 tokens of a
-                # checkpoint trained at 262_144.
                 ceiling = {
                     "tokens": ceiling_here.tokens,
                     "card_affords": ceiling_here.memory_context,
@@ -382,12 +236,6 @@ def model_rows(
                     "concurrency": 1,
                     "basis": terms.basis,
                 }
-            # For the model that is up, the number the engine was actually
-            # started with, read off the engine's own record; for everything else
-            # the number this host would start it with. A manifest edited under a
-            # resident engine is the case that makes the distinction real, and it
-            # is the resident engine that wins, because that is the context a
-            # request sent right now will be measured against.
             max_model_len = (
                 resident.max_model_len
                 if resident is not None and resident.model_id == manifest.id
@@ -396,8 +244,6 @@ def model_rows(
             is_installed = weights.installed(config, manifest, spec) is not None
             already_here = _in_the_ollama_store(manifest, backend_kind)
             if estimate > backend.gpu.vram_bytes:
-                # Not loadable here at all, so say so instead of asking for a
-                # 55 GB download first.
                 reason = (
                     f"needs {estimate / 1024 ** 3:.1f} GiB and "
                     f"{backend.gpu.name} has {backend.gpu.vram_bytes / 1024 ** 3:.1f}"
@@ -407,10 +253,6 @@ def model_rows(
                 reason = f"the llm env is not ready: {env.detail}"
             elif not is_installed:
                 if manifest.weights_of is not None:
-                    # WHICH HALF (PHASE22 section 2.9): the shared download, or
-                    # the alias's own files beside it. The store's refusal says
-                    # it in one sentence, so the row borrows it rather than
-                    # composing a second one.
                     try:
                         weights.require_installed(config, manifest, spec)
                     except weights.WeightsError as exc:
@@ -425,124 +267,26 @@ def model_rows(
             "id": manifest.id,
             "family": manifest.family,
             "params_b": manifest.params_b,
-            # The revision this host would serve: the pin in *this* backend's
-            # block, not the model's "version". A model with no block for this
-            # backend has no revision here at all, and says so with null rather
-            # than with an empty string that would read as a real pin.
             "revision": revision,
-            # `id` and `revision` joined — exactly those two fields of this same
-            # row, so it can never disagree with them, and null wherever
-            # `revision` is. It is spelled out rather than left to the client to
-            # assemble because it is a *record*: Foundry hashes it into the
-            # cleanup cache key and BookForge stamps it into a book's OPF
-            # (CLIENT-SURFACES.md section 6.5), and two clients each inventing
-            # their own way of writing it down is two ways for the same weights
-            # to be filed under different names.
             "fingerprint": (
                 None if revision is None else fingerprint(manifest.id, revision)
             ),
-            # What a client may put in a chat request's content parts. Unlike
-            # `revision` and `memory_bytes_estimate` this is not a per-host fact
-            # and is never null: it says what the model is offered FOR, which is
-            # the same answer on a host that cannot serve it at all. A page
-            # reader picks an image-capable model from this rather than knowing
-            # one by name (PHASE3-VLM.md section 2).
             "modalities": list(manifest.modalities),
-            # WHAT THIS HOST SERVES IT FOR (PHASE22 section 2.9), which may be
-            # less than `modalities`: a small Qwen3.5 accepts images and is
-            # served text-only on the Mac, whose text engine cannot see. Null
-            # where there is no block here, exactly as `revision` is. A client
-            # asking "may I send THIS server a picture for this model" reads
-            # this; `modalities` stays what the weights accept.
             "serves": (
                 list(manifest.serves(backend_kind)) if supported else None
             ),
             "backend_supported": supported,
             "installed": is_installed,
-            # ONE COPY ON DISK, TWO FIT ROWS (PHASE22 section 2.9). The model
-            # whose download this row's weights are, or null for a model that
-            # owns its own — never null-for-unknown: it is a fact of the
-            # manifest, the same on every host. An app shows "shares
-            # qwen3.5-9b's weights" from it, and knows that switching between
-            # the two ids is a full engine reload over the same files.
             "weights_of": manifest.weights_of,
-            # ----------------------------------- a copy this machine already has
-            #
-            # Owen, 2026-09-16: *"if its possible to use the ollama copies that
-            # already exist on disk then we should do that. i dont want to have
-            # 16 copies of giant models sitting around."* A settings page cannot
-            # act on that unless it can SEE the copy, and offering a 19 GB
-            # download beside a file the machine already holds is the whole of
-            # the complaint.
-            #
-            # `llama-windows` ONLY, and the null on every other backend is a fact
-            # rather than an omission: Ollama stores GGUF (measured — the largest
-            # blob in Owen's 64 GB store begins with the bytes `GGUF`), llama.cpp
-            # reads GGUF, and vLLM and mlx-lm want safetensors. A cuda-linux host
-            # saves nothing by having Ollama installed and must not be shown a
-            # row suggesting otherwise.
-            #
-            # NOTHING LOADS FROM HERE YET. This says the bytes exist and what
-            # they would be called in a record; the load path is a separate
-            # change, because serving them means serving a DIFFERENT
-            # quantization from the one this block pins and that has to travel
-            # into provenance rather than be swapped in quietly.
             "ollama_copy": already_here,
             "resident": residency.is_resident(KIND_LLM, manifest.id),
             "loadable": reason is None,
             "memory_bytes_estimate": estimate,
-            # The manifest's INTENT: the context THIS host would serve, the same
-            # way `revision` and `memory_bytes_estimate` above are this host's. A
-            # backend may carry its own; where it does not, this is the model's
-            # own number, so a host with no block for this model still reports
-            # something true.
             "context_default": manifest.context_for(backend_kind),
-            # What is being served RIGHT NOW, which is a different question and
-            # is why it is a different field. A client sizes a request against
-            # this one: Foundry's `capFor` is
-            # `max_model_len − (⌈chars/2.5⌉ + 256)` and has **no clamp at all**
-            # when the server does not report the field, so the request goes out
-            # unclamped and comes back a 400 (CLIENT-SURFACES.md section 6.1).
-            # Null when `backend_supported` is false, for the same reason
-            # `revision` and `memory_bytes_estimate` are: the number lives in a
-            # backend block this manifest does not have.
             "max_model_len": max_model_len,
-            # What the WEIGHTS support, which is neither of the two contexts
-            # above: `context_default` is what this host chose and
-            # `max_model_len` is what the engine was started with, and both are
-            # decisions. This one is a property of the checkpoint and is the same
-            # on every machine, which is why it is not null for an unsupported
-            # backend the way `revision` is.
             "trained_context": manifest.trained_context,
-            # --------------------------------------------------- the ceiling
-            #
-            # HOW FAR THE WALL COULD MOVE, as against `max_model_len`, which is
-            # where the wall IS. A request longer than `max_model_len` is refused
-            # right now; a request longer than `max_context.tokens` cannot be
-            # served by this machine at all, whatever it is restarted with. The
-            # gap between the two is exactly what a `load-model` may ask for as
-            # `params.context`, and the load door refuses past `tokens` with
-            # the same function (`capability.check_load_context`).
-            #
-            # Owen's Mac-versus-PC case is this field: same model, same act, two
-            # numbers, and an app that reads it never has to discover the
-            # difference as a 400. Null where this backend block has not been
-            # taken apart into terms — null rather than a guess, because a
-            # ceiling stated without arithmetic behind it is the thing Ollama
-            # does (section 6.1: it clamps a million to 262144 and tells nobody).
             "max_context": ceiling,
-            # The terms the ceiling came out of, so a client can show the working
-            # rather than take a figure on trust — and so the `basis` travels:
-            # `measured` was watched on a card, `computed` came from config.json
-            # and is a FLOOR, `declared` is an allowance nobody has checked.
             "memory_terms": None if terms is None else terms.to_dict(),
-            # What a chat request that states nothing will be answered with
-            # (PHASE2-LLM.md section 9). For the resident model this is the
-            # record the proxy is ACTUALLY applying, read off the engine's own
-            # row, for `max_model_len`'s reason directly above: a manifest
-            # edited under a running engine must not make this row promise a
-            # temperature nothing is sending. Every key is present and `null`
-            # means "this model states none, so the engine's own default".
             "defaults": (
                 resident.defaults.to_dict()
                 if resident is not None and resident.model_id == manifest.id
@@ -556,26 +300,11 @@ def model_rows(
 
 
 def _model_provenance(backend_kind: str, model: str | None) -> dict[str, Any] | None:
-    """The `model` block of a provenance sidecar (DESIGN.md section 7).
-
-    `revision` is the sha this host's backend block pins, and that is a statement
-    about bytes and not merely about a file: a load refuses weights pulled at any
-    other revision (`weights.require_installed`), so the pin the manifest names is
-    the pin the engine read.
-
-    `fingerprint` is the two joined, because that is the string a client writes
-    down. A finished audiobook says which server rendered it; it now also says
-    which weights, which is what makes two renders at two precisions tellable
-    apart in their records.
-    """
     if model is None:
         return None
     manifest = _known(model)
     spec = manifest.backends.get(backend_kind)
     if spec is None:
-        # Unreachable through the API — `preflight` refuses `backend_unsupported`
-        # long before a job exists — but a sidecar has to say something true even
-        # if it is reached some other way, and inventing a revision is not it.
         return {"id": model, "revision": None, "fingerprint": None}
     return {
         "id": model,
@@ -587,28 +316,14 @@ def _model_provenance(backend_kind: str, model: str | None) -> dict[str, Any] | 
 def _require_loadable(
     config: Config, backend: Any, model_id: str
 ) -> tuple[ModelManifest, Any, Any]:
-    """Manifest, backend spec and installed weights, or the named refusal.
-
-    The order is deliberate: what can never be fixed, then what an install or a
-    pull would fix, then what the live accelerator says. So a 27B on a 24 GB card
-    is refused for being a 27B on a 24 GB card, not for needing a 55 GB download
-    first.
-    """
     backend_kind = backend.kind
     manifest = _known(model_id)
     spec = worker_type.require_block(manifest, model_id, backend_kind, "model")
     worker_type.refuse_if_larger_than_host(backend, model_id, spec.memory_bytes_estimate)
-    # And what no amount of room fixes either: an engine the ladder measured
-    # not starting on this card (fresh-install #48). A card merely without
-    # bf16 is not refused: the load runs it in fp16 (`engines.vllm.card_args`).
     accelerator.refuse_if_card_lacks(
         model_id=model_id, spec=spec, card=ladder.card_for(config.home, backend.gpu)
     )
     if backend_kind == LLAMA_WINDOWS:
-        # NO ENV. The engine is `llama-server.exe` from the pinned llama.cpp
-        # release, and `env_missing` is still the right NAME for "this host
-        # cannot start anything yet" — one refusal for one fact, whichever
-        # form the engine takes on this backend.
         engine = llm_engine_status(config, backend)
         if not engine.installed:
             raise ApiError(
@@ -652,15 +367,6 @@ def _require_loadable(
 def _load_context(
     config: Config, backend: Any, manifest: ModelManifest, params: "LoadParams"
 ) -> int:
-    """The context this load starts the engine with, or `context_over_limit`.
-
-    Absent: `context_for` — the block's default, unchanged, and not checked
-    against the ceiling because it is the number the ceiling starts from.
-    Present: checked by `capability.check_load_context` against this host's
-    budget (the card's total less the desktop allowance, the budget every
-    capability fit uses), which is one function shared with
-    `GET /v1/capability`.
-    """
     if params.context is None:
         return manifest.context_for(backend.kind)
     check_load_context(
@@ -674,12 +380,7 @@ def _load_context(
     return params.context
 
 
-# ----------------------------------------------------------------- load job
-
-
 class LoadModelJobType:
-    """`POST /v1/jobs {"type": "load-model", "model": "<id>"}`."""
-
     name = "load-model"
 
     def __init__(
@@ -692,11 +393,6 @@ class LoadModelJobType:
         self._config = config
         self._backend = backend
         self._residency = residency
-        #: The server's one lease register, or None where there is no server —
-        #: `crucible doctor` builds a registry with neither. A `lease` param
-        #: against a build that has none is REFUSED by name rather than
-        #: quietly ignored: a client that asked to hold the card and was told
-        #: nothing would believe it holds it.
         self._leases = leases
 
     @property
@@ -707,19 +403,6 @@ class LoadModelJobType:
         return _descriptors(self._config, self._config.backend_kind, self._residency)
 
     def _reclaimable(self) -> int:
-        """What the eviction this load always makes gives back.
-
-        `Residency.load` evicts WHATEVER is resident before it starts —
-        including the very model it is loading, so loading the resident model
-        again (at a new `params.context`, or the same one) is a full restart.
-        This used to pass `reclaimable_bytes(excluding=model)`, which answered
-        0 for that case: the guard then demanded the model's whole estimate
-        free while the model itself still held it, and a same-model reload on a
-        24 GB card was refused `insufficient_memory` for memory the load was
-        about to free. The exclusion is right for the doors that REUSE what
-        they name (`tts`, `align`, `denoise`); this one never does
-        (`leases.CARD_EFFECTS["load-model"]`).
-        """
         return self._residency.reclaimable_bytes()
 
     def vram_estimate(self, model: str | None) -> int:
@@ -750,17 +433,11 @@ class LoadModelJobType:
         return JobTypeStatus(ready=True, detail=f"{env.detail}; loadable: {ready}")
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
-        if model is None:  # unreachable: resolve_model requires one
+        if model is None:
             raise ApiError(400, "model_required", f"{self.name} needs a model")
         loading = _params(LoadParams, params, self.name)
-        # One card, one resident engine, and now one more thing that can hold it:
-        # a `tts` streaming session is not a job and does not queue behind this
-        # lane, so loading a model over it would end somebody's sentence
-        # (PHASE3-TTS.md section 7).
         self._residency.refuse_if_claimed(f"loading {model!r}")
         manifest, spec, _ = _require_loadable(self._config, self._backend, model)
-        # The stated context, refused above this host's ceiling BEFORE the guard
-        # reads the card and long before anything is evicted.
         context = _load_context(self._config, self._backend, manifest, loading)
         state = accelerator.guard(
             self._config.backend_kind,
@@ -770,13 +447,6 @@ class LoadModelJobType:
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
             reclaimable_bytes=self._reclaimable(),
         )
-        # AND THEN THE SECOND QUESTION, which the guard above does not ask.
-        # The guard asks whether the model FITS — estimate against free. This
-        # asks whether what is left after the weights can hold a single request
-        # at the context this server serves, which is a different number and the
-        # one that actually refused on 2026-09-17 (crucible/vram.py). Asked here
-        # as well as in the lane so a client is refused at submit rather than
-        # watching a job fail two minutes into a load.
         plan = vram.plan_vllm_memory(
             model_id=model,
             spec=spec,
@@ -791,11 +461,8 @@ class LoadModelJobType:
     def run(self, job: Job, ctx: JobContext) -> None:
         params = LoadParams.model_validate(job.params)
         model = job.model
-        if model is None:  # unreachable: resolve_model requires one
+        if model is None:
             raise JobError("model_required", f"{self.name} needs a model")
-        # `/v1/health` says `warming` for the whole job, not only while the
-        # engine's readiness is being polled: from the client's side this server
-        # is warming a model from the moment the lane picks the job up.
         self._residency.begin_warming(model)
         try:
             self._load(ctx, model, params, job.client)
@@ -809,10 +476,6 @@ class LoadModelJobType:
         params: LoadParams,
         client: str | None,
     ) -> None:
-        """`client` is `job.client`, carried in because a lease records who
-        holds it and this helper is the only place with the resident thing in
-        hand. Threaded rather than read off a second source: `Job.client` is
-        what every other holder is recorded under."""
         try:
             manifest, spec, (python, installed) = _require_loadable(
                 self._config, self._backend, model
@@ -826,8 +489,6 @@ class LoadModelJobType:
 
         ctx.warming(f"checking the accelerator for {model}")
         try:
-            # The card can change between the queue and the lane, so the guard
-            # runs again here, against the same rules.
             state = accelerator.guard(
                 self._config.backend_kind,
                 model_id=model,
@@ -840,9 +501,6 @@ class LoadModelJobType:
             raise JobError(exc.code, exc.message) from None
         ctx.warming(state.detail)
 
-        # The card moved between the queue and the lane for the guard above, and
-        # it moved for the KV pool too. Sized here from the state just read, so
-        # the bytes handed to the engine are the bytes the card had a moment ago.
         plan = vram.plan_vllm_memory(
             model_id=model,
             spec=spec,
@@ -856,13 +514,6 @@ class LoadModelJobType:
                 raise JobError("insufficient_kv_cache", plan.sentence())
             ctx.warming(plan.detail())
 
-        # THE CANCEL IS READ ON BOTH SIDES OF THE LOAD, and it has to be, because
-        # the load itself cannot be interrupted: `WorkerSession.start` and an
-        # engine's `ready()` have no cancel hook on purpose (crucible/workers.py
-        # says why — a half-loaded model is a process holding VRAM that nothing
-        # is tracking). This side refuses to start an engine nobody wants any
-        # more; the far side is where a DELETE that landed during the two
-        # minutes of a 21 GB load arrives.
         ctx.raise_if_cancelled()
         ctx.progress(0.0, f"loading {model}")
         try:
@@ -875,32 +526,14 @@ class LoadModelJobType:
                 context=context,
                 timeout=params.timeout_s,
                 on_progress=ctx.warming,
-                # WHAT THIS CARD NEEDS ON THE ARGV (fresh-install #48, Owen
-                # 2026-09-26: "we can quantize if we need to. no less than
-                # 4"): fp16 for a stated bf16 on a card without bf16, and
-                # --enforce-eager where the ladder measured no CUDA graphs.
                 card_args=vllm_engine.card_args(
                     spec, ladder.card_for(self._config.home, self._backend.gpu)
                 ),
             )
         except EngineError as exc:
             raise JobError("engine_failed", str(exc)) from None
-        # NO TEARDOWN OF ITS OWN. The card is left to the settlement, which
-        # since 2026-09-18 exempts a load only when it ended `done`
-        # (crucible/settle.py): a client told `cancelled` never sends an
-        # unload, so a job that does not settle strands what it just loaded.
-        # AFTER THE LAST CANCEL CHECK, and that order is the whole of its
-        # safety. A lease opened before it would be held by a job about to raise
-        # `JobCancelled` — and the settlement, finding a lease, would leave the
-        # card exactly as stranded as before, only now behind our own hold until
-        # its ttl ran out. Cancelled here means no lease, which means the
-        # cancelled load settles as it has since 2026-09-18.
         ctx.raise_if_cancelled()
         extra: dict[str, Any] = {"resident": resident.model_id}
-        # STATED EVEN WHEN THERE IS NONE. `null` here is "this load was not
-        # asked to hold anything"; an ABSENT key would mean "this server does
-        # not speak leases on a load", and a client cannot tell those apart
-        # from a hole. The SDK's own rule, applied on the server side of it.
         extra["lease_id"] = None
         if params.lease is not None:
             extra["lease_id"] = _open_lease_for_load(
@@ -922,18 +555,6 @@ def _open_lease_for_load(
     request: LeaseOnLoad,
     client: str | None,
 ) -> str:
-    """Hold what this load just made resident. Returns the lease id.
-
-    Validated through `crucible/leases.py`'s OWN functions — `require_act_name`
-    and `require_ttl` — rather than through a second spelling here, so a load's
-    lease and a `POST /v1/models/{id}/lease` cannot come to disagree about what
-    a valid act or a valid ttl is.
-
-    `kind` and `subject` are read off the thing that is NOW resident, never off
-    the request: the card holds one thing, the load just put it there, and a
-    client naming its own subject would be a second owner of a fact this
-    function is standing next to.
-    """
     if leases is None:
         raise JobError(
             "leases_unavailable",
@@ -951,19 +572,11 @@ def _open_lease_for_load(
             kind=kind, subject=subject, act=act, client=client, ttl_seconds=ttl
         )
     except ApiError as exc:
-        # Somebody else's lease. The load itself succeeded and the card is
-        # theirs to keep; what failed is the hold, and saying so by name beats
-        # reporting a load that worked as a failure with no reason attached.
         raise JobError(exc.code, exc.message) from None
     return lease.id
 
 
-# --------------------------------------------------------------- unload job
-
-
 class UnloadModelJobType:
-    """`POST /v1/jobs {"type": "unload-model", "model": "<id>"}`."""
-
     name = "unload-model"
 
     def __init__(
@@ -996,16 +609,10 @@ class UnloadModelJobType:
         )
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
-        if model is None:  # unreachable: resolve_model requires one
+        if model is None:
             raise ApiError(400, "model_required", f"{self.name} needs a model")
         _params(UnloadParams, params, self.name)
         if self._residency.being_cleared(model):
-            # THE SAME INTENT, ALREADY UNDER WAY (T6, 2026-09-15). The
-            # settlement began clearing this very model the instant the last
-            # chat finished, and this request is that chat's own client tidying
-            # up after itself. Admitted: `run` waits the clearance out and
-            # reports the empty card it asked for. Only a holder that is USING
-            # the card is a conflict, and the line below still says so.
             return
         self._residency.refuse_if_claimed(f"unloading {model!r}")
         if not self._residency.is_resident(KIND_LLM, model):
@@ -1020,21 +627,14 @@ class UnloadModelJobType:
     def run(self, job: Job, ctx: JobContext) -> None:
         UnloadParams.model_validate(job.params)
         model = job.model
-        if model is None:  # unreachable: resolve_model requires one
+        if model is None:
             raise JobError("model_required", f"{self.name} needs a model")
         ctx.progress(0.0, f"unloading {model}")
         if self._residency.await_clearance(model):
-            # The settlement got there first. That is the card this job asked
-            # for, so it is `done` in the same shape an unload it did itself
-            # would be — a client that loads, uses and unloads is never told
-            # its own tidying up failed.
             ctx.progress(1.0, f"{model} is unloaded — the card was cleared of it")
             ctx.done_extra(resident=self._residency.resident_id)
             return
         if not self._residency.is_resident(KIND_LLM, model):
-            # Checked before `unload()` rather than caught from it: the holder
-            # unloads by id alone, and a voice sharing a model's id would be
-            # taken off the card by `unload-model`.
             raise JobError(
                 "model_not_resident",
                 f"{model!r} is not resident on this server; "
@@ -1042,7 +642,7 @@ class UnloadModelJobType:
             )
         try:
             self._residency.unload(model)
-        except KeyError:  # pragma: no cover - is_resident just said it is
+        except KeyError:
             raise JobError(
                 "model_not_resident",
                 f"{model!r} is not resident on this server; "

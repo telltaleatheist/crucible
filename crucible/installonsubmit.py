@@ -1,65 +1,3 @@
-"""Install on submit: a job whose environment or model is missing gets it installed.
-
-OWEN'S RULINGS. 2026-09-26: *"yes, we need to install a missing environment when
-a job is submitted"*, under his standing rule that Crucible must be idiot proof:
-assume the caller has no idea an "environment" exists. 2026-09-27, on the model
-behind an installed env: *"Yes, it should try to pull the model"*; on a server
-that never decided its card: *"Yes, it should automatically be checked"*; and on
-what happens to the job meanwhile: *"Crucible isn't responsible for queuing. The
-apps that use it are. It grants and releases leases. That's it"*.
-
-Fresh-install snag #2 (`docs/FRESH-INSTALL-KYLIES-2026-09-26.md`): kylies-pc's
-rvc env, its base assets and its model were three commands typed inside the
-guest (`docs/PROPOSAL-INSTALL-ON-SUBMIT.md`).
-
-WHAT A CLIENT SEES. `POST /v1/jobs` for a type this card can run and has not
-installed, or for a declared model/voice (and `rvc`'s base assets) this card can
-run and has not pulled, starts the install the operator page's Install and Pull
-buttons start, as one `module` task, and is REFUSED `409 installing`:
-
-    installing the rvc environment (about 3.3 GB), then pulling its base
-    assets (about 900 MB) and the RVC voice 'sigma' (about 55 MB); submit this
-    job again after it. Task 1f2e... is doing it: GET /v1/tasks/1f2e...
-
-`details` carry the task id, the steps, the step it is on, its byte progress and
-last line, and `plan`, the install modal's sentences for this card
-(`GET /v1/capability/plan`): the UI asks before installing; an API caller has no
-modal, so it reads them here. Submitting again while it runs answers the same
-refusal with the same task and the progress so far; submitting after it ends is
-an ordinary submit. The task's own record carries the sentence too
-(`GET /v1/tasks/{id}` `message`).
-
-WHY A REFUSAL AND NOT A HELD JOB. The first build accepted the job and held it
-until the install landed, then put it on the lane behind whatever was there,
-which made the lane a queue of two and Crucible the owner of an order. Owen's
-2026-09-27 answer rules that out: the server answers "is there room now" and
-grants or refuses (ARCHITECTURE.md section 3, `JobStore.refuse_if_busy`), and
-the app's queue decides what to send next. The other reading, holding the job
-and giving it ONE normal admission when the install lands, still makes the
-server the thing that remembers a job the app asked for minutes ago and decides
-when to run it, and turns "the lane was busy at that moment" into a failure the
-app did not cause. So nothing is held: the refusal names the work under way and
-the moment to come back, which is the `server_busy` shape an app already
-retries on.
-
-ONE INSTALL PER ENV. There is one task lane and one task at a time. A submit
-that arrives while an install it needs is running is pointed at that task,
-never given a second; one that arrives while an unrelated task runs is told to
-come back after it. An install that failed is reported ONCE, with the
-install's own one-line reason (`jobenv.failure_message`'s head, `Task.reason`),
-to the next submit that needed it; the submit after that tries again. A job is
-never answered by a loop of the same failing install.
-
-WHAT IS STILL REFUSED AT ONCE: a type this card cannot serve (`cannot_hold`, or
-a live install plan that says nothing it offers runs here), a model the card
-cannot run, a type with no installer (`echo`), `unload-*` of an uninstalled
-type, an env already on disk with its flag off, a missing or undeclared model
-for a type whose models are all in the catalog. A server with NO capability
-record decides one first (`crucible/api.py`, `decide_here`) and is then
-answered as above. `[jobs] install_on_submit = false` puts the plain refusal
-back.
-"""
-
 from __future__ import annotations
 
 import time
@@ -75,20 +13,12 @@ from .jobs import ALL_JOB_TYPES
 from .tasks import CANCELLED, FAILED, TERMINAL_STATES, Task, TaskStore, env_installed
 from .voices import NARRATOR_ENGINE_SAMPLING, load_all_voices
 
-#: The refusal every missing install is answered with. 409, the `server_busy`
-#: family: a fact about this server right now that the app's queue retries.
 INSTALLING = "installing"
 
-#: The weights a type cannot run AT ALL without, whatever the job names, by
-#: capability. `rvc`'s base assets are the engine's (hubert, rmvpe), shared by
-#: every voice.
 BASE_SUBJECTS: dict[str, tuple[tuple[str, str], ...]] = {
     "rvc": (("rvc-base", catalog.RVC_BASE_ID),),
 }
 
-#: `preflight`'s refusals that mean "the weights are not on this disk". Only on
-#: one of these is a pull considered, so a job whose weights are here costs
-#: nothing extra.
 PULLABLE_REFUSALS = frozenset(
     {
         "model_not_installed",
@@ -98,15 +28,8 @@ PULLABLE_REFUSALS = frozenset(
     }
 )
 
-#: Capabilities whose every servable model is a catalog subject, so a model
-#: the catalog does not have is a typo and is refused BEFORE anything installs.
-#: `llm` and `tts` are not here: a model may be an upstream route, a voice a
-#: local directory, and those are the plugin's to judge once it exists.
 CATALOG_IS_COMPLETE = frozenset({"rvc", "denoise", "asr", "align"})
 
-#: A download's pace is not stated until it has run this long: the first
-#: seconds of a pull are connection setup, and a remaining time computed from
-#: them is a number that moves by minutes.
 PACE_AFTER_SECONDS = 3.0
 
 _NOT_A_MODEL = ("rvc-base", "engine")
@@ -114,32 +37,23 @@ _NOT_A_MODEL = ("rvc-base", "engine")
 
 @dataclass(frozen=True)
 class Pull:
-    """One subject a job needs pulled."""
-
     kind: str
     id: str
-    #: The subject in a person's words: "its base assets", "the RVC voice 'sigma'".
     words: str
     expected_bytes: int | None
 
     @property
     def step(self) -> str:
-        """The module step's name (`TaskStore._run_module`)."""
         return f"pull {self.kind} {self.id}"
 
 
 @dataclass(frozen=True)
 class Need:
-    """What one job needs installed before it can be admitted."""
-
     job_type: str
-    #: The install that builds its env (`INSTALLER_FOR`), or None when the env
-    #: is here and only weights are missing; for `tts`, which narrator engine.
     installer: str | None
     narrator_engine: str | None
     env_bytes: int | None
     pulls: tuple[Pull, ...]
-    #: The install modal's sentences for this card, or None.
     plan: str | None
 
     @property
@@ -156,41 +70,25 @@ class Need:
 
 
 class InstallOnSubmit:
-    """Decides what a job needs installed, starts it once, and says so."""
-
     def __init__(self, config: Config, backend: Backend, tasks: TaskStore) -> None:
         self._config = config
         self._backend = backend
         self._tasks = tasks
-        #: What each install-on-submit task was started for, by task id: its
-        #: sentence, and which later submits it serves.
         self._task_needs: dict[str, Need] = {}
-        #: Failed tasks whose failure a submit has already been told.
         self._reported: set[str] = set()
-        #: (task id, step name) -> (monotonic, bytes) at first sight, for a pace.
         self._pace: dict[tuple[str, str], tuple[float, int]] = {}
 
-    # --------------------------------------------------------------- planning
 
     @staticmethod
     def installable(job_type: str) -> bool:
-        """Could installing ever make this type servable here?"""
-        from .cli import INSTALLABLE_JOB_TYPES, INSTALLER_FOR  # cli imports api
+        from .cli import INSTALLABLE_JOB_TYPES, INSTALLER_FOR
 
         capability = ALL_JOB_TYPES.get(job_type)
         if capability is None or job_type.startswith("unload-"):
-            # Nothing of an uninstalled type is on the card to unload, and
-            # gigabytes of install to find that out is not a service.
             return False
         return INSTALLER_FOR.get(capability) in INSTALLABLE_JOB_TYPES
 
     def plan(self, job_type: str, model: str | None, refusal: ApiError) -> Need:
-        """What installing for this job means, or the refusal it should get instead.
-
-        `refusal` is `disabled_error`'s answer for this type. Only its
-        `not_installed` case is installed for; every other case is re-raised as
-        it is, because it already says the true thing.
-        """
         details = refusal.details or {}
         install = details.get("install")
         if (
@@ -211,12 +109,7 @@ class InstallOnSubmit:
                 installer,
                 engine,
             ):
-                # Built, and the task that built it has not reached its
-                # take-up yet (its pulls come first). That task, not a stale
-                # "not installed".
                 return earlier
-            # On disk, flag off: an install would find nothing to do and the
-            # type would stay off. The refusal says what is true.
             raise refusal
 
         decisions, card, pool = live_decisions(self._config, self._backend)
@@ -251,8 +144,6 @@ class InstallOnSubmit:
         if model is None and job_type == capability and capability in CATALOG_IS_COMPLETE:
             offered = _offered(subjects, capability)
             if offered:
-                # `resolve_model`'s refusal, made before the install rather
-                # than after it: a request that names no model cannot run.
                 raise ApiError(
                     400,
                     "model_required",
@@ -270,13 +161,6 @@ class InstallOnSubmit:
         )
 
     def pulls_for(self, job_type: str, model: str | None, refusal: ApiError) -> Need | None:
-        """The weights an installed type's job is missing, or None to refuse as before.
-
-        Owen, 2026-09-27: *"Yes, it should try to pull the model"*. Asked only
-        when `preflight` refused for missing weights (`PULLABLE_REFUSALS`).
-        None when nothing declared and pullable is missing, so the plugin's own
-        refusal stands.
-        """
         if refusal.code not in PULLABLE_REFUSALS:
             return None
         capability = ALL_JOB_TYPES.get(job_type)
@@ -286,10 +170,6 @@ class InstallOnSubmit:
         subjects = catalog.subjects(self._config, self._backend)
         pulls, lines = self._pulls(job_type, capability, model, subjects, decisions, card, pool)
         if not pulls:
-            # Nothing missing NOW, though `preflight` said so a moment ago: a
-            # task pulling it finished its download in between and is still
-            # finishing. Pointed at that task, not refused with a stale
-            # "not installed".
             running = self._tasks.running
             earlier = None if running is None else self._task_needs.get(running.id)
             base = set(BASE_SUBJECTS.get(capability, ()))
@@ -323,9 +203,6 @@ class InstallOnSubmit:
         card: Any,
         pool: str,
     ) -> tuple[list[Pull], list[str]]:
-        """The base weights and the named subject that are missing, and the
-        pull modal's lines for the named one. Refuses a model the card cannot
-        run or the catalog does not declare, before anything is fetched."""
         pulls: list[Pull] = []
         lines: list[str] = []
         for kind, subject_id in BASE_SUBJECTS.get(capability, ()):
@@ -369,28 +246,20 @@ class InstallOnSubmit:
         return pulls, lines
 
     def _narrator_engine(self, installer: str, model: str | None) -> str | None:
-        """Which tts env: the voice's own engine, or the only one there is."""
         if installer != "tts":
             return None
         if model is not None:
             try:
                 voice = load_all_voices().get(model)
-            except Exception:  # noqa: BLE001 - an unreadable voice decides nothing
+            except Exception:
                 voice = None
             if voice is not None:
                 return voice.narrator_engine
         engines = sorted(NARRATOR_ENGINE_SAMPLING)
         return engines[0] if len(engines) == 1 else None
 
-    # ---------------------------------------------------------------- the act
 
     def start(self, need: Need) -> ApiError:
-        """Start (or find) the install `need` waits on; the refusal to answer with.
-
-        **Event loop only**, and synchronous from the lane check to the task's
-        start, so two submits a millisecond apart cannot both start one:
-        `TaskStore.submit`'s own atomicity.
-        """
         failed = self._unreported_failure(need)
         if failed is not None:
             return failed
@@ -423,7 +292,6 @@ class InstallOnSubmit:
         return self._installing(need, task)
 
     def describe(self, task: Task) -> str | None:
-        """The sentence a task started for a job carries on its own record."""
         need = self._task_needs.get(task.id)
         if need is None or task.state in TERMINAL_STATES:
             return None
@@ -442,9 +310,6 @@ class InstallOnSubmit:
             {
                 "job_type": need.job_type,
                 "task_id": task.id,
-                # `installing`: that task is this job's install. `task_busy`:
-                # another task has the one lane; this job's install starts on
-                # the first submit after it.
                 "reason": "installing" if serves else "task_busy",
                 "message": doing,
                 "plan": need.plan,
@@ -456,7 +321,6 @@ class InstallOnSubmit:
         )
 
     def _unreported_failure(self, need: Need) -> ApiError | None:
-        """The last install this job needed, if it failed and nobody was told."""
         wanted = set(need.steps())
         for task in self._tasks.recent():
             earlier = self._task_needs.get(task.id)
@@ -484,10 +348,8 @@ class InstallOnSubmit:
             )
         return None
 
-    # ---------------------------------------------------------------- reading
 
     def _serves(self, task: Task, need: Need) -> bool:
-        """Is `task` doing (part of) what this job needs?"""
         earlier = self._task_needs.get(task.id)
         if earlier is not None:
             return bool(set(earlier.steps()) & set(need.steps()))
@@ -504,7 +366,6 @@ class InstallOnSubmit:
         return False
 
     def _doing(self, need: Need, task: Task, *, serves: bool) -> str:
-        """What is happening for this job, in words."""
         phrases = self._phrases(need)
         if not serves:
             return (
@@ -524,7 +385,6 @@ class InstallOnSubmit:
         return _then(list(phrases.values()))
 
     def _phrases(self, need: Need) -> dict[str, str]:
-        """Step name -> what it is, in words, for the steps still to do."""
         phrases: dict[str, str] = {}
         if need.installer is not None and not env_installed(
             self._config, self._backend, need.installer, need.narrator_engine
@@ -543,7 +403,6 @@ class InstallOnSubmit:
     def _progress(
         self, task: Task, step: dict[str, Any] | None
     ) -> tuple[float | None, str | None, str]:
-        """The step's fraction, its last line, and a pace phrase, from its events."""
         fraction: float | None = None
         line: str | None = None
         pace = ""
@@ -580,15 +439,7 @@ class InstallOnSubmit:
         return f", about {minutes} minute{'s' if minutes != 1 else ''} left"
 
 
-# ------------------------------------------------------------------ helpers
-
-
 def live_decisions(config: Config, backend: Backend) -> tuple[Any, Any, str]:
-    """This card's decisions, decided now: what `crucible install` would record.
-
-    The walk `GET /v1/capability/plan` makes for the install modal, so the
-    sentences a refusal carries and the ones the modal shows are one answer.
-    """
     card = ladder.card_for(config.home, backend.gpu)
     decisions = capability_classes.decide_all(
         backend.kind,
@@ -610,7 +461,6 @@ def _offered(subjects: list[catalog.Subject], capability: str) -> list[str]:
 def _subject_runs(
     subject_id: str, decisions: Any, card: Any, total: int, pool: str
 ) -> dict[str, Any] | None:
-    """The pull modal's verdict on one model, or None when no class offers it."""
     try:
         return capability_classes.subject_plan(
             subject_id, decisions, card=card, total_bytes=total, pool=pool
@@ -635,7 +485,6 @@ def _pull_of(subject: catalog.Subject) -> Pull:
 
 
 def _env_bytes(installer: str, engine: str | None, backend_kind: str) -> int | None:
-    """The recipe's own `# archive-bytes:` floor, or None when it has none."""
     try:
         if installer in jobenv.WORKER_JOB_TYPES:
             recipe = jobenv.recipe_for(jobenv.worker_env(installer, backend_kind))
@@ -644,7 +493,7 @@ def _env_bytes(installer: str, engine: str | None, backend_kind: str) -> int | N
         else:
             return None
         return jobenv.recipe_archive_bytes(recipe)
-    except Exception:  # noqa: BLE001 - a size is a courtesy, never a refusal
+    except Exception:
         return None
 
 
@@ -665,7 +514,6 @@ def _joined(phrases: list[str]) -> str:
 
 
 def _then(phrases: list[str]) -> str:
-    """The first thing, then the rest."""
     if len(phrases) < 2:
         return _joined(phrases)
     return f"{phrases[0]}, then {_joined(phrases[1:])}"
