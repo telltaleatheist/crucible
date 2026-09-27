@@ -1,4 +1,4 @@
-# archive-bytes: 900000000  PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's "~0.9 GB mlx", measured 2026-09-18
+# archive-bytes: 900000000  docs/internals/config-envs-weights.md "Archive sizes", the mlx total, measured 2026-09-18
 
 narrator[narrator-mlx] @ git+https://github.com/telltaleatheist/bookforge@72069b5b9d8b175b384a61b368393da396eab7c7#subdirectory=python
 

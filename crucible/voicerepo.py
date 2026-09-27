@@ -52,7 +52,7 @@ _REFUSED_IN_REPO: dict[str, str] = {
     "hf_repo": "the file IS the revision — the pin names the repo",
     "revision": "the file IS the revision",
     "path": (
-        "a repo manifest describes published weights; the PHASE18 path arm is "
+        "a repo manifest describes published weights; the local `path` arm is "
         "a local override and lives in `PUT /v1/voices/{id}`'s `voice` body"
     ),
     "identity": "a pinned revision's identity is the sha it was fetched at",
@@ -605,7 +605,7 @@ def _download(home: Path, pin: Pin, cached: Path) -> None:
         raise VoiceError(
             f"voice_manifest_missing: {pin.hf_repo}@{pin.revision[:12]} carries no "
             f"{REPO_MANIFEST_NAME}. A voice's facts travel with its weights in the "
-            "same commit (PHASE21 section 2.1); a pinned repo whose manifest is "
+            "same commit (docs/internals/voices.md, \"The repo manifest\"); a pinned repo whose manifest is "
             "missing is not served, and its band, caps and sampling are not read "
             f"from any other source. Pin a revision that carries one, or run "
             f"`crucible voices card` and commit the manifest — see {pin.path}: {exc}"
@@ -680,7 +680,7 @@ def voice_for_pin(pin: Pin) -> VoiceManifest:
             f"and this server's config states no [tts.{engine}] table, so there "
             "is no memory estimate and no serving width for it. A voice's facts "
             "travel with its weights and a BOX's facts stay with the box "
-            f"(PHASE21 section 2.3) — nothing here is defaulted. "
+            f"(docs/internals/voices.md, \"The repo manifest\") — nothing here is defaulted. "
             f"{footprint_unset(engine)}"
         )
     return merge(repo, pin, footprint)

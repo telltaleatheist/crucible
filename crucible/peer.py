@@ -84,10 +84,6 @@ class PeerState:
     def __init__(self) -> None:
         self._claim: Claim | None = None
 
-    @property
-    def claim_held(self) -> Claim | None:
-        return self._claim
-
     def managed_by(self) -> dict[str, str] | None:
         return None if self._claim is None else self._claim.managed_by()
 

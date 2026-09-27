@@ -102,7 +102,7 @@ def require_peer_auth(request: Request) -> None:
             "the orchestrator already holds: it reads it from the guest's "
             "pairing line, or it is the token in the config it wrote itself. "
             "There is no second credential for the relation "
-            "(PHASE17-ORCHESTRATOR.md 2.1)",
+            "(docs/internals/host-and-platform.md, \"Orchestrator/engine relation\")",
         )
 
 

@@ -5,8 +5,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from urllib.parse import quote, unquote, urlsplit
 
 from .errors import CrucibleError

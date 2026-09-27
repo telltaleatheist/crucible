@@ -225,7 +225,7 @@ def cmd_voices_check(args: argparse.Namespace) -> int:
           f"{voice.language}, {voice.sample_rate} Hz)")
     pace = voice.pace
     if pace.pace_chars_per_sec is None:
-        print("pace:     not measured — an uncertified voice (PHASE18 4.1)")
+        print("pace:     not measured — an uncertified voice (docs/internals/voices.md, \"The voice schema\")")
     else:
         print(
             f"pace:     {pace.pace_chars_per_sec} chars/s ({voice.pace_basis}), "
@@ -389,7 +389,7 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     voices_pull.set_defaults(func=cmd_voices_pull)
 
     voices_pin = voice_commands.add_parser(
-        "pin", help="point a voice id at a repo and commit (PHASE21 section 2.4)"
+        "pin", help="point a voice id at a repo and commit (docs/internals/voices.md, \"Pins\")"
     )
     voices_pin.add_argument("voice", help="the Crucible voice id, e.g. mistborn")
     voices_pin.add_argument(

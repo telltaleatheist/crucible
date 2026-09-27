@@ -1208,16 +1208,17 @@
     return group;
   }
 
-  var UPSTREAM_LABELS = {
-    anthropic: 'Anthropic',
-    openai: 'OpenAI',
-    ollama: 'Ollama'
-  };
+  function upstreamNames() {
+    return Object.keys(state.settings.upstreams);
+  }
 
-  var UPSTREAM_ORDER = ['anthropic', 'openai', 'ollama'];
+  function upstreamLabel(name) {
+    var labels = state.settings.upstream_labels || {};
+    return labels[name] || name;
+  }
 
   function upstreamField(name) {
-    return name === 'ollama' ? 'url' : 'key';
+    return 'url' in state.settings.upstreams[name] ? 'url' : 'key';
   }
 
   async function putSettings(patch, where) {
@@ -1283,8 +1284,9 @@
 
   function testedModels() {
     var found = [];
-    for (var index = 0; index < UPSTREAM_ORDER.length; index += 1) {
-      var name = UPSTREAM_ORDER[index];
+    var names = upstreamNames();
+    for (var index = 0; index < names.length; index += 1) {
+      var name = names[index];
       if (!state.settings.upstreams[name].configured) {
         continue;
       }
@@ -1418,8 +1420,9 @@
           'characters, which is enough to recognise which one is there.'
       ])
     ]);
-    for (var index = 0; index < UPSTREAM_ORDER.length; index += 1) {
-      block.appendChild(upstreamCard(UPSTREAM_ORDER[index]));
+    var names = upstreamNames();
+    for (var index = 0; index < names.length; index += 1) {
+      block.appendChild(upstreamCard(names[index]));
     }
     return block;
   }
@@ -1435,7 +1438,7 @@
       spellcheck: 'false',
       autocomplete: 'off',
       placeholder: field === 'key' ? 'paste a key' : 'http://host:11434',
-      'aria-label': UPSTREAM_LABELS[name] + ' ' + field,
+      'aria-label': upstreamLabel(name) + ' ' + field,
       oninput: function (event) {
         state.upstreamDraft[name] = event.target.value;
       }
@@ -1510,7 +1513,7 @@
     }
 
     var head = [
-      el('span', { class: 'setting-name', text: UPSTREAM_LABELS[name] })
+      el('span', { class: 'setting-name', text: upstreamLabel(name) })
     ];
     if (entry.configured) {
       head.push(chip('configured', 'ok'));
@@ -1529,8 +1532,8 @@
       card.appendChild(
         el('p', { class: 'note' }, [
           listed.length === 0
-            ? UPSTREAM_LABELS[name] + ' answered, and lists no models.'
-            : UPSTREAM_LABELS[name] +
+            ? upstreamLabel(name) + ' answered, and lists no models.'
+            : upstreamLabel(name) +
               ' lists: ' +
               listed.join(', ') +
               '. Pick one in a row above.'

@@ -23,13 +23,13 @@ host projection of dialable HTTP authorities, separate from operator-authored
 `server.advertise`. `/v1/setup` combines both; neither changes the listener bind
 or promises remote reachability. The host owns its Tailscale forward and
 `sharing.json`; publication uses the authenticated settings API even for a WSL
-engine. See `INSTALL-NETWORK-AUDIT-2026-09-16.md` for ownership, recovery, and
+engine. See `docs/history/INSTALL-NETWORK-AUDIT-2026-09-16.md` for ownership, recovery, and
 remaining release validation. Uninstall retains jobs/uploads and stops if service
 shutdown/deregistration fails.
 
 ## 0. What is decided, and what it corrects
 
-> **SUPERSEDED IN PART, 2026-09-15 — `docs/PHASE17-ORCHESTRATOR.md`.** Section 4's host
+> **SUPERSEDED IN PART, 2026-09-15 — `docs/history/PHASE17-ORCHESTRATOR.md`.** Section 4's host
 > IS an orchestrator, and Phase 17 gives that relation a name, a `role` on `/v1/info`,
 > a claim (`POST /v1/peer/claim`) and a second task (`engine-restart`). Nothing below is
 > withdrawn — one server per machine, control is Windows's and data is the card's, the
@@ -773,7 +773,7 @@ same way from the 9B GGUF or an upstream. Then `page-reader.ts` and every
 
 ## 4. The host is the ORCHESTRATOR (PHASE17) — `crucible orchestrator` on Windows
 
-> **Renamed 2026-09-15 by `docs/PHASE17-ORCHESTRATOR.md`.** Everything this section
+> **Renamed 2026-09-15 by `docs/history/PHASE17-ORCHESTRATOR.md`.** Everything this section
 > describes is the orchestrator half of the relation Phase 17 names: it manages exactly
 > one engine, serves ZERO job types, and never carries a byte of anybody's data. The
 > verb is `crucible orchestrator` (PHASE17 section 7 says why the Python package stays
@@ -1201,7 +1201,7 @@ everything we have configured for mac bookforge."*
 The Mac needs no host: `mlx-darwin` is a native backend, launchd supervises it, `install.sh`
 installs it, the pairing file (3.6) connects a local app. What "out of the box" is measured
 against is the Mac Studio as read on 2026-09-14 (crucible 0.6.0, M1 Ultra 64 GB, macOS
-26.3.1) and the read-only audit that followed (`docs/MAC-PARITY-AUDIT-2026-09-14.md`):
+26.3.1) and the read-only audit that followed (`docs/history/MAC-PARITY-AUDIT-2026-09-14.md`):
 
 - **Served today, healthy:** `tts` (Higgs via mlx-audio 0.4.8, all seven voices renderable),
   `llm` (9B and 27B fit), `rvc`, `denoise`. The `job_type_not_ready: tts: no ffmpeg` line in
@@ -1649,7 +1649,7 @@ a 24 GB card with a 3 GiB allowance, nothing configured):
   leaseless job**. The linger ruling is owed, and 138–145 s against 3.9 s is what it costs.
 
   The banner under the unit reads **`vLLM server version 0.28.0`**, which is the version
-  PHASE3-TTS.md §4's recipe pins. **There never was a 0.29.0 Higgs env**; any line that
+  docs/history/PHASE3-TTS.md §4's recipe pins. **There never was a 0.29.0 Higgs env**; any line that
   says otherwise is wrong.
 
 - **Still unmeasured after that window**, each for a reason rather than by oversight:
@@ -1922,7 +1922,7 @@ The new projector's header, read over a range request on 2026-09-15 (GGUF v3,
 3136`, `clip.vision.image_max_pixels = 11289600`, and no
 `clip.vision.spatial_merge_size` — the same fact from the other side.
 
-**It is also Foundry's pair, which is the point.** PHASE9-CAPABILITY.md 7.4's
+**It is also Foundry's pair, which is the point.** docs/history/PHASE9-CAPABILITY.md 7.4's
 "Found 2" was this disagreement written down before it cost anything: the
 constants Wave 61 package E deleted from `app/electron/page-reader.ts` (foundry
 @ `06efb83`) were `ggml-org/dots.ocr-GGUF` / `dots.ocr-Q8_0.gguf` /
@@ -1935,7 +1935,7 @@ projector reads worse, THAT measurement moves the line to the f16 file at the
 same revision. Nothing selects between them at runtime.
 
 `foundry-lineup.json` regenerated (`scripts/gen-foundry-lineup.py`), and
-`docs/PHASE9-CAPABILITY.md` 7.4's table and Found 2 say the pair is settled.
+`docs/history/PHASE9-CAPABILITY.md` 7.4's table and Found 2 say the pair is settled.
 
 Tests updated for the pin: `test_manifests.py`, `test_lineup.py`,
 `test_llama_windows.py`, `test_llama_engine.py` — the filenames and sizes were
@@ -2097,7 +2097,7 @@ engine_failed: … Higgs v3 sentinel proof: … holds no records
 ```
 
 pip had reinstalled **`vllm` 0.28.0 and `vllm-omni` 0.28.0 pristine**, and pristine is
-the defect. The two patches in PHASE3-TTS.md §4's table live in site-packages —
+the defect. The two patches in docs/history/PHASE3-TTS.md §4's table live in site-packages —
 **`higgs-sentinel-filter`** (without it every chunk ends in ~240 ms of audible garbage)
 and **`vllm-negative-token-id`** (without it every voice-clone request is HTTP 400) —
 and **nothing re-applied them after the pip run**. `doctor` CHECKED them, which is why
@@ -2702,7 +2702,7 @@ refuses a manifest whose id does not name its engine.
 > below are now the `[backends.mlx-darwin]` blocks of `asr/whisper-large-v3-turbo.toml`
 > and `asr/whisper-tiny.toml` at the same pins and figures; the other five rows are
 > retired. `ASR_ENGINE_ID_PREFIX` is gone — engines are bound to a family, and a
-> transcript's sidecar names the engine and repo (docs/PHASE25-QWEN-ASR.md
+> transcript's sidecar names the engine and repo (docs/history/PHASE25-QWEN-ASR.md
 > section 10). The table stays as the measurement record it is.
 
 Every revision below was verified twice against the hub API on 2026-09-14 (main
@@ -2820,7 +2820,7 @@ the branch is merged, on Owen's word, and not before** — every step writes
 something on that machine. **(It was run on 2026-09-15 and T9 followed it; the
 record is at the end of this section.)**
 
-**One correction to carry into it, and it changes the method.** `docs/PLAN.md`
+**One correction to carry into it, and it changes the method.** `docs/history/PLAN.md`
 records "no pack has been built on the Mac — there is no Crucible checkout on
 it". There is one: `/Volumes/Callisto/Projects/crucible`, on branch
 `feat/phase6-remote-render` at `22eccf0`, clean, with `origin` =

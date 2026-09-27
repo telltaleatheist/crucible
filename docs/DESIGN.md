@@ -1,16 +1,14 @@
 # Crucible — design
 
-Status: v1 API. **Every job type in section 3 is built, tested and merged** (2026-09-13).
-`llm` and page reading are verified live on real cards with measured numbers in their
-manifests; `tts`, `asr`, `align` and `rvc` were built against fake engines and their
-manifests say so (`estimate_basis = "declared"`). `docs/PLAN.md`'s top block is the list
-of what a free card and Owen's rulings still have to settle.
+Status: v1 API. **Every job type in section 3 is built.** Each manifest states whether its
+memory figure was measured on a card or declared (`estimate_basis`).
 
-This file is the shape of the whole thing. Each job type's exact wire contract lives in its
-own file and **wins over this one where they disagree**, because this one was written before
-any of them had met an accelerator: `PHASE2-LLM.md`, `PHASE3-TTS.md`, `PHASE3-VLM.md`,
-`PHASE4-AUDIO.md`. `CLIENT-SURFACES.md` is the audit of every model call the client apps
-actually make, and is what all four were written from. Decided with Owen 2026-09-12.
+This file is the shape of the whole thing. The rules the code keeps are in
+`docs/internals/*.md`, and the wire is `docs/API.md` (generated from the app); both **win
+over this one where they disagree**. The phase plans this was built from
+(`history/PHASE2-LLM.md`, `history/PHASE3-TTS.md`, `history/PHASE3-VLM.md`,
+`history/PHASE4-AUDIO.md`, and `history/CLIENT-SURFACES.md`, the audit of every model call the
+client apps make) are history and are not maintained. Decided with Owen 2026-09-12.
 
 ## 1. What it is
 
@@ -23,7 +21,7 @@ Three roles, kept distinct even when they ship together:
 | Role | Lives in | Knows about |
 |---|---|---|
 | **Client SDK** | each app (`@crucible/client`, TypeScript) | servers, jobs, artifacts. Zero GPU or platform code. |
-| **Bootstrapper** | THIS REPO (`@crucible/bootstrap`, TypeScript), consumed by each app's settings UI | detect the host, install a local server, ensure the SERVICE is running, report health. Owen ruled 2026-09-13 that a local Crucible is a service and not an app's child process, and that one bootstrapper ships with the server rather than one per app — PHASE5-APPS.md section 6.0. |
+| **Bootstrapper** | THIS REPO (`@crucible/bootstrap`, TypeScript), consumed by each app's settings UI | detect the host, install a local server, ensure the SERVICE is running, report health. Owen ruled 2026-09-13 that a local Crucible is a service and not an app's child process, and that one bootstrapper ships with the server rather than one per app — history/PHASE5-APPS.md section 6.0. |
 | **Server** | this repo (`crucible`, Python) | backends, envs, models, VRAM, the queue. |
 
 The client speaks HTTP to the server **even when it just spawned that server on
@@ -37,37 +35,41 @@ and short:
 
 | Backend | Host | Engines |
 |---|---|---|
-| `cuda-linux` | Linux with an NVIDIA card. On Windows this is the Linux server inside WSL2 (later: Docker Desktop). | vLLM, SGLang, torch/CUDA |
+| `cuda-linux` | Linux with an NVIDIA card. On Windows this is the Linux server inside WSL2. | vLLM, SGLang, torch/CUDA |
 | `mlx-darwin` | Apple Silicon Mac | MLX, mlx-lm, mlx-audio |
+| `llama-windows` | Windows, natively | `llama-server` (llama.cpp) on GGUF, for the text classes and pages |
 
-**Windows native is never a backend.** SGLang and vLLM do not run there. Crucible has no
-Windows code path at all; the bootstrapper on a Windows client drives `wsl.exe -d <distro>
---exec bash -c ...` (never the implicit shell, which pre-expands `$var`).
-
-The server detects its backend at startup. If nothing is viable it refuses to serve and
-says why. There is no CPU fallback.
+SGLang and vLLM do not run on Windows, so the Python job types (`tts`, `asr`, `align`,
+`rvc`, `denoise`) need the WSL2 engine; `llama-windows` refuses them by name. A backend
+runs where its engine runs and nowhere else (`docs/internals/engines-and-capability.md`,
+"Backends"). With no NVIDIA driver, `llama-windows` runs the llama.cpp CPU build and says
+it is slow rather than refusing.
 
 ## 3. Job types
 
 The vocabulary the server offers. Each is a plugin module under `crucible/jobs/<type>/`
 declaring: the env it needs, the models it can serve, a VRAM estimate per model, and a
-`run(job, ctx)`.
+`run(job, ctx)`. The one list of postable job types and the capability each belongs to is
+`ALL_JOB_TYPES` in `crucible/jobs/__init__.py`; the table below describes the capabilities
+and is not a second copy of that list.
 
 | Type | In | Out | Notes |
 |---|---|---|---|
-| `llm` | chat messages, model id, sampling | text | OpenAI-compatible endpoint (`/v1/openai/...`), so vLLM / SGLang / mlx-lm batching comes for free. Phase 2, `PHASE2-LLM.md`. |
-| `decide` | state (text or JSON, optional images) + questions with fixed answer sets | a probability distribution per question, with `label_mass` and the weights' provenance | One forward pass at the resident model, no decoding: snap's decision model as a door (`POST /v1/decide`), not a job — it takes no lane and makes no job row, and walks the chat door's admission and settlement. The prompt is Crucible's, the questions are the client's. Phase 22, `PHASE22-DECIDE.md`. |
-| `tts` | text chunks, voice id, take, and three optional decisions (`retake`, `band`, `width`) | audio (FLAC per chunk) + measurements, and a result naming the sampling and the weights that ran | Higgs v3 through narrator (the one narrator engine Crucible names — PLAN.md, the ruling of 2026-09-14). Two doors: a render job and a streaming connection. Voices are the server's, and so is every knob that tunes an engine to one. Phase 3b, `PHASE3-TTS.md`. |
-| `align` | audio + text | timestamped items | Qwen3-ForcedAligner-0.6B, resident across a whole book. Phase 4, `PHASE4-AUDIO.md`. |
-| `asr` | one audio file | transcript with word timestamps | faster-whisper, six sizes, no default. Phase 4, `PHASE4-AUDIO.md`. |
-| `rvc` | audio + model id + params | audio | ultimate-rvc. Phase 4, `PHASE4-AUDIO.md`. |
+| `llm` | chat messages, model id, sampling | text | OpenAI-compatible endpoint (`/v1/openai/...`), so vLLM / SGLang / mlx-lm batching comes for free. Phase 2, `history/PHASE2-LLM.md`. |
+| `decide` | state (text or JSON, optional images) + questions with fixed answer sets | a probability distribution per question, with `label_mass` and the weights' provenance | One forward pass at the resident model, no decoding: snap's decision model as a door (`POST /v1/decide`), not a job — it takes no lane and makes no job row, and walks the chat door's admission and settlement. The prompt is Crucible's, the questions are the client's. Phase 22, `history/PHASE22-DECIDE.md`. |
+| `tts` | text chunks, voice id, take, and three optional decisions (`retake`, `band`, `width`) | audio (FLAC per chunk) + measurements, and a result naming the sampling and the weights that ran | Higgs v3 through narrator (the one narrator engine Crucible names, ruled 2026-09-14). Two doors: a render job and a streaming connection. Voices are the server's, and so is every knob that tunes an engine to one. `docs/internals/voices.md`. |
+| `align` | audio + text | timestamped items | Qwen3-ForcedAligner-0.6B, resident across a whole book. `docs/internals/asr-and-align.md`. |
+| `align-longform` | a whole audiobook + the book's sentences | a VTT and a report | A rough whisper pass, a coarse alignment, the Qwen3 aligner over the planned spans, then the cues: four stages in one job and one slot (`crucible/jobs/alignlongform/`). `docs/internals/asr-and-align.md`, "Align-longform". |
+| `asr` | one audio file | transcript with word timestamps | Six manifests, no default: four Qwen3-ASR (0.6B and 1.7B, each with an MLX conversion) and two whisper (`whisper-large-v3-turbo`, `whisper-tiny`), in `crucible/asr/*.toml`. `docs/internals/asr-and-align.md`. |
+| `rvc` | audio + model id + params | audio | ultimate-rvc. `docs/internals/jobs-runtime.md` 10.3. |
+| `denoise` | one block of audio | the separated stems | audio-separator in the `rvc` env, resident across a book; the client sends the book in blocks. `docs/internals/jobs-runtime.md` 10.4. |
 | `echo` | any blob | the same blob, with progress events | Test-only, enabled by config flag. Proves the stream and artifact path. Phase 1. |
 
 There is **no `vlm-pages` type**, and the reason is the one piece of this table that research
 overturned. Both apps rasterise locally at a pinned 200 dpi and send an ordinary chat
 completion whose first content part is a data-URI PNG, so a server receives pictures and
 never PDFs, and page reading is the `llm` proxy plus a model whose manifest says it takes
-images. `PHASE3-VLM.md` has the whole argument. Sending the PDF and rasterising server-side
+images. `history/PHASE3-VLM.md` has the whole argument. Sending the PDF and rasterising server-side
 is a real and larger job type; it is simply not the one either app needs, and building it
 would have been a second residency and a second proxy for a chat completion.
 
@@ -89,8 +91,8 @@ genuinely needs to steer a knob (a temperature the operator set, a cap override)
 job contract names that knob explicitly, one at a time, with a reason. The default is
 that it does not cross the seam.
 
-**Three knobs are named that way, ruled 2026-09-19** (PHASE18-UNCERTIFIED.md sections 4,
-6 and 8), and the reason each earned its name is the same: it is a DECISION about this
+**Three knobs are named that way, ruled 2026-09-19** (`history/PHASE18-UNCERTIFIED.md`
+sections 4, 6 and 8), and the reason each earned its name is the same: it is a DECISION about this
 job rather than a fact about the voice.
 
 - `retake` — whether narrator's guarded driver judges and re-rolls this batch, or whether
@@ -109,7 +111,7 @@ Still NOT on the wire, and deliberately: sampling. The client asks for a take; t
 says what that take means. What the wire gained instead is the RESULT saying which triple
 was applied, so two runs against an edited manifest cannot both claim "take 0".
 
-This is the reading of `docs/CLIENT-SURFACES.md` section 10, tier 3: those rows describe
+This is the reading of `docs/history/CLIENT-SURFACES.md` section 10, tier 3: those rows describe
 what the *server* must implement, not what the *client* must send.
 
 ## 4. API v1
@@ -131,9 +133,9 @@ build version.
 | `GET /jobs/{id}/artifacts/{name}` | yes | bytes. `.../{name}.provenance.json` always exists (see section 7). |
 | `DELETE /jobs/{id}` | yes | cancel: 200 `{status: "cancelling"}` on a running job (cooperative), 200 `{status: "cancelled"}` on a queued one, 409 `job_not_cancellable` on a terminal one. |
 | `/openai/*` | yes | OpenAI-compatible passthrough for `llm` (phase 2). |
-| `POST /decide` | yes | `{model, state, images?, questions}` → `{model: {id, revision, fingerprint}, engine, answers, timing_ms, tokens}` — a distribution over each question's fixed answers from one forward pass at the resident model (PHASE22-DECIDE.md). Synchronous, like a chat: `409 model_not_resident` (never a load), `503 chat_queue_full` at the engine's admission, `400 invalid_request` / `too_many_options` / `too_many_images` / `model_text_only` / `decide_needs_logprobs`, `503 decide_not_served`, `502 engine_error` / `label_not_in_probs`. |
+| `POST /decide` | yes | `{model, state, images?, questions}` → `{model: {id, revision, fingerprint}, engine, answers, timing_ms, tokens}` — a distribution over each question's fixed answers from one forward pass at the resident model (history/PHASE22-DECIDE.md). Synchronous, like a chat: `409 model_not_resident` (never a load), `503 chat_queue_full` at the engine's admission, `400 invalid_request` / `too_many_options` / `too_many_images` / `model_text_only` / `decide_needs_logprobs`, `503 decide_not_served`, `502 engine_error` / `label_not_in_probs`. |
 | `GET /setup` | yes | **The operator door** (PHASE13-OPERATOR.md section 3.1). `{name, version, backend, bind, urls, token, pairing, job_types, config_path}` — everything an app needs to be pointed here, in one read. `urls` is the bind address made reachable (a wildcard bind becomes one entry per non-loopback IPv4 interface, read from `getifaddrs(3)`; never a hostname lookup), and `pairing` is one `crucible://<name>@<host>:<port>/#<token>` line per url. It returns the token and reveals nothing: only a caller who already has it can reach the route. |
-| `GET /catalog` | yes | `{rows: [{kind, id, name, job_type, installed, installed_bytes, expected_bytes, shares_weights_of, missing_files, floors, license, source, resident}]}` — every pullable subject this BACKEND can hold, installed or not. `kind ∈ model, voice, rvc, rvc-base, denoise`. Every field is derived from something the server already owns; a subject with no block for this backend is absent rather than listed as unsupported. `shares_weights_of` names the base whose download an alias model's weights are (PHASE22-DECIDE.md section 2.9) and `missing_files` which of the alias's own files are absent; both null on every other row, and the download's bytes are counted once, on the base. |
+| `GET /catalog` | yes | `{rows: [{kind, id, name, job_type, installed, installed_bytes, expected_bytes, shares_weights_of, missing_files, floors, license, source, resident}]}` — every pullable subject this BACKEND can hold, installed or not. `kind` is one of `catalog.KINDS` (`crucible/catalog.py`), which today includes `engine`, the pinned llama.cpp build on `llama-windows`. Every field is derived from something the server already owns; a subject with no block for this backend is absent rather than listed as unsupported. `shares_weights_of` names the base whose download an alias model's weights are (history/PHASE22-DECIDE.md section 2.9) and `missing_files` which of the alias's own files are absent; both null on every other row, and the download's bytes are counted once, on the base. |
 | `POST /tasks` | yes | One operator operation on the server itself: `{type: "pull", kind, id}`, `{type: "install", job_type, narrator_engine?}` or `{type: "module", module}` → `{task_id}` (202). **One task at a time** (`409 task_busy`); an `install` additionally waits for the card (`409 server_busy`, whose `details.fact` names which of the four holders it is). Refusals by name at POST: `unknown_subject`, `already_installed`, `unknown_job_type`, `job_type_installed`, `narrator_engine_required`, `narrator_engine_refused`, `invalid_module`. |
 | `GET /tasks` | yes | `{tasks: [...]}` — the last 50, newest first, in memory. A restart forgets them. |
 | `GET /tasks/{id}` | yes | `{task_id, type, request, state: running / done / failed / cancelled, error, created, started, finished}`. There is no `queued`: a task is admitted and running in the same act. |
@@ -216,7 +218,7 @@ Two servers, one client: **one job, one server**. A book is never split across b
 Every artifact has a sibling `<name>.provenance.json`:
 `{server: {name, version}, backend, job_type, model: {id, revision, fingerprint} or null for a model-less type, params, started, finished}`. Keys stay snake_case in every client; the sidecar is persisted verbatim.
 Clients must persist it with the output. A finished audiobook says which server rendered it —
-and, since `fingerprint` (`<id>@<revision>`, PHASE2-LLM.md section 5), which weights.
+and, since `fingerprint` (`<id>@<revision>`, docs/history/PHASE2-LLM.md section 5), which weights.
 
 ## 8. Versioning and updates
 

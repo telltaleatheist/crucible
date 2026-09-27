@@ -19,23 +19,20 @@ no model data itself. On Windows the controller (`crucible orchestrator`, former
 `crucible host`) manages the native engine or the optional WSL2 guest; the tray is its
 independent desktop control. A Mac or a rented box is an engine with
 no orchestrator. Apps always hold ONE address per machine and it is the engine's. See
-`docs/PHASE17-ORCHESTRATOR.md`.
+`docs/internals/host-and-platform.md`.
 
-See `docs/DESIGN.md` for the architecture and `docs/PLAN.md` for the build order.
-An app that wants a Crucible on *this* machine uses `sdk/bootstrap/` (`@crucible/bootstrap`, `docs/PHASE12-BOOTSTRAP.md`): detect the host, install the server, make sure its service is running, read its config, ask its health — never a child process.
+See `docs/DESIGN.md` for the architecture and `docs/internals/` for the rules each part of
+the code keeps; the phase plans that built it are in `docs/history/` and are not maintained.
+An app that wants a Crucible on *this* machine uses `sdk/bootstrap/` (`@crucible/bootstrap`, `docs/internals/bootstrap.md`): detect the host, install the server, make sure its service is running, read its config, ask its health — never a child process.
 
-**Status: every job type is built. Four of them have never met a GPU.**
+**Status: every job type is built.** Every model, voice and aligner manifest says, per
+backend block, whether its memory figure was **measured** on a real card or **declared**
+(an engine's own configured reservation, or the weights plus a stated overhead), and the
+two are never blurred. Most text and page figures, the aligner and the Mac's ASR are
+measured; the CUDA ASR engines and the narrator voices are declared
+(`docs/internals/asr-and-align.md`, "Manifest figures"; `docs/internals/voices.md`).
 
-`llm` and page reading are verified live on both backends — real models, loaded on real
-cards, with the measured VRAM written into the manifests it belongs to. `tts`, `asr`,
-`align` and `rvc` are built, tested and documented, but against **fake engines**: they
-were written on a night when both of Owen's cards were busy, so not one voice, aligner or
-whisper manifest carries a measured memory figure. Every one says
-`estimate_basis = "declared"` — the number came from an engine's own configured
-reservation, or from a file size, rather than from watching a card.
-
-The manifests keep that distinction rather than blurring it, and
-`scripts/keeper-tts-live.sh` is what discharges it for `tts`: one command on a machine
+`scripts/keeper-tts-live.sh` measures `tts`: one command on a machine
 with a free card, which renders a chapter and prints the measured lines to paste back.
 
 What exists: config, token, backend detection, API v1, the queue, provenance sidecars,
@@ -96,7 +93,7 @@ plan for an app. Weights are KEPT unless `--purge-weights`, and the bearer token
 `crucible install <type>` builds that job type's environment from its recipe
 (`crucible/envs/<type>/<recipe>.txt`) with pip, into
 `~/.crucible/envs/<type>/`, from PyPI and the indexes the recipe pins
-(`docs/PHASE20-CODE-NOT-ENVIRONMENTS.md`):
+(`docs/internals/config-envs-weights.md`, "Code, not environments"):
 
 ```bash
 crucible install asr            # ~2.9 GB on disk, from the mirrors
@@ -152,7 +149,7 @@ crucible orchestrator           # win32: the tray that manages this machine's en
 crucible doctor --json          # the same report, machine-readable
 crucible token --show           # print the bearer token
 crucible serve                  # foreground; 127.0.0.1:7100 by default
-crucible service install        # …or run it as this machine's service (PHASE11-SERVICE.md);
+crucible service install        # …or run it as this machine's service (docs/internals/host-and-platform.md);
                                 #   also start|stop|status|uninstall, all idempotent
 crucible install llm            # build the llm env from envs/llm/<backend>.txt
 crucible install tts --narrator-engine higgs-v3   # ...and a tts env, one per engine
@@ -198,7 +195,7 @@ viable, naming the reason.
 `crucible install <type>` does not only build an env. When the env is in place it
 compares this host's accelerator against the models that type needs, writes the
 `[jobs] enable_<type>` flag from the answer, and records the **reason** in a
-`[capability]` table beside it (PHASE9-CAPABILITY.md). A type turned off records the
+`[capability]` table beside it (`docs/internals/engines-and-capability.md`). A type turned off records the
 number that turned it off, so the refusal a client gets names it:
 
 ```
@@ -266,12 +263,12 @@ rvc/<id>/<backend>/     the same for RVC models — a third namespace, because
                         `sigma` is both a voice id and an RVC model id
 rvc-base/          urvc's shared embedder and pitch predictors — the engine's
                    rather than any model's, placed by `crucible rvc pull-base`
-                   (PHASE4-AUDIO.md section 4.1)
+                   (docs/internals/jobs-runtime.md 10.3)
 denoise-models/    audio-separator's model_file_dir: the separator checkpoint
                    and its YAML config, under the names the library resolves by,
                    placed by `crucible denoise pull` — a FLAT directory, so the
                    stamp is `crucible-pull-<id>.json`, one per model
-                   (PHASE4-AUDIO.md section 4.2)
+                   (docs/internals/jobs-runtime.md 10.4)
 logs/engine-<id>.log    one engine's stdout and stderr, command line first
 logs/<type>-<job id>.log  one worker's stderr, for `asr` and `rvc` — one file per
                         job, because their workers live and die with one. The
@@ -311,7 +308,7 @@ request with neither is answered 401.
 | `GET /voices` | yes | every voice manifest and where it stands here |
 | `GET /openai/models` | yes | the resident model in OpenAI's list shape |
 | `POST /openai/chat/completions` | yes | proxied to the resident engine, streaming or not; **never loads one** |
-| `POST /decide` | yes | a probability distribution over each question's fixed answers, from one forward pass at the resident model; **never loads one** (`docs/PHASE22-DECIDE.md`) |
+| `POST /decide` | yes | a probability distribution over each question's fixed answers, from one forward pass at the resident model; **never loads one** (`docs/internals/engines-and-capability.md`, "The decision door") |
 | `GET /accelerator` | yes | what is on the card right now, who is holding it, and which of them are Crucible's. It **reports and never evicts** |
 | `POST /uploads` | yes | multipart `file=@...` → `{blob_id, bytes, sha256}` |
 | `POST /jobs` | yes | `{type, model?, params, inputs}` → 202 `{job_id}`, or **409 `server_busy`** naming who has the card — one job at a time, and the server does not queue |
@@ -531,69 +528,15 @@ watching a job fail a minute later.
 > On Apple Silicon that rule does not apply: "used" unified memory is the OS and the
 > user's apps, so the free figure is the whole check.
 
-#### cuda-linux, verified 2026-09-12
+#### Measured on the cards
 
-**Both halves of PHASE2-LLM.md section 8 have now been run.** The `cuda-linux` half went
-on Owen's RTX 3090 Ti, from inside WSL2, driven from Windows through the BookForge CLI:
-`qwen3.5-9b` and `qwen3.8-27b-4bit` each loaded, answered, were measured and were
-unloaded, and `./scripts/keeper-llm-live.sh` passed against that server in remote mode —
-**12 passed, 0 failed**. `pytest`: 155 passed.
-
-| | `qwen3.5-9b` | `qwen3.8-27b-4bit` |
-|---|---|---|
-| context served here | 12288 | **16384** (the model's own is 98304) |
-| weights on the card | 17.66 GiB | 17.68 GiB |
-| non-KV demand | 19.02 GiB | 19.12 GiB |
-| `--gpu-memory-utilization` | 0.84 | 0.86 |
-| KV pool | 1.09 GiB, 27,443 tokens | 1.51 GiB, 18,811 tokens |
-| card at rest | 20,986 MiB | 21,502 MiB |
-| card peak, full-context | 21,172 MiB | 21,819 MiB |
-| free at that peak | 3,140 MiB | 2,493 MiB |
-| engine's share (the estimate) | 19.52 GiB | 20.15 GiB |
-| load, warm compile cache | 78 s | 89 s |
-
-Three things stood between the first `load-model` and a resident model, none of them
-visible without the card. All three are fixed in `crucible/engines/vllm.py` and the
-manifests, each with the measurement that justifies it:
-
-1. **`RuntimeError: UVA is not available`** — vLLM 0.29's V2 model runner needs page-locked
-   host memory, and under WSL it asks `VLLM_WSL2_ENABLE_PIN_MEMORY`, which defaults to 0.
-   Pinned memory works fine on this kernel; the engine now says so.
-2. **`Could not find nvcc`** — FlashInfer JIT-builds its top-k/top-p sampler on first use
-   and the llm env ships no CUDA compiler, so a load died *after* allocating its KV cache.
-   The engine now asks for the sampler that needs no compiler.
-3. **`--gpu-memory-utilization 0.85` filled the card.** The flag is a fraction of the
-   card's TOTAL, it is a budget rather than a demand, vLLM spends whatever is left of it
-   on KV, and it does not subtract the Windows desktop. At 0.85 with vLLM's default
-   `--max-num-seqs` the card reached 24,173 MiB of 24,564 with 139 MiB free and CUDA-graph
-   capture paged at 87 s for one of 51 graphs. Both manifests now carry a utilisation that
-   leaves the card 2.4-3.1 GiB, plus `--max-num-seqs 16` (9 graphs in 5 s) and
-   `--skip-mm-profiling` (worth 1.90 GiB of budget on these multimodal checkpoints, which
-   the `llm` lane never sends an image to).
-
-Two numbers that were arithmetic are now measurements, and both were light: the 9B's
-estimate by 6.3%, and the 27B-4bit's KV-per-token by 24% — vLLM pads the attention page up
-to the hybrid model's recurrent state, so counting only the full-attention layers
-understates it. `qwen3.8-27b` (bf16) is still refused here, by name and before queueing:
-`insufficient_memory`, 52.5 GiB against 24.0 GiB.
-
-`qwen3.8-27b-4bit` at its own 98304 was refused the same way — *needs 23.3 GiB and this
-host has 22.6 GiB free of 24.0 GiB* — which is why its `cuda-linux` block carries
-`context_default = 16384` of its own. 32768 would fit only by filling the card and was not
-taken; the manifest shows that arithmetic.
-
-The one thing **not** measured on this host is `./scripts/measure-llm-memory.sh` end to
-end: the figures above were read from `nvidia-smi` sampled every 2 s around loads driven
-through the CLI, because the script's own load is what needed diagnosing first.
-
-The `mlx-darwin` half is verified — locally on the Mac Studio, and **from a Windows
-client over the tailnet**, which is the shape the apps actually use:
-
-```bash
-export CRUCIBLE_URL=http://owens-mac-studio.hs.owenmorgan.com:7100
-export CRUCIBLE_TOKEN=...          # the Mac's `crucible token --show`
-./scripts/keeper-llm-live.sh       # 11 passed, 0 failed
-```
+Each text and page model's backend blocks in `crucible/models/<id>.toml` carry its memory
+figure with its basis (`measured` on a real card, with the run it came from, or `declared`); `docs/MEASUREMENTS.md` says how each figure was
+taken. The engine settings those runs forced (vLLM's pinned-memory and sampler variables,
+a `--gpu-memory-utilization` that leaves the desktop its share, `--max-num-seqs`,
+`--skip-mm-profiling` on text-only blocks) are in `docs/internals/engines-and-capability.md`,
+"vLLM", and in each manifest's own notes. `./scripts/keeper-llm-live.sh` is the live check
+on either backend, locally or over the tailnet (`CRUCIBLE_URL`, `CRUCIBLE_TOKEN`).
 
 #### Logs
 
@@ -609,7 +552,7 @@ within 180 s, the refusal says so and names the log rather than escalating.
 
 ### `tts`
 
-Narration (PHASE3-TTS.md). The largest job type, and the only one where the thing that
+Narration (`docs/internals/jobs-runtime.md` section 10, `docs/internals/voices.md`). The largest job type, and the only one where the thing that
 produces the bytes is not called a model: **`model` is the voice id**, because for Higgs
 that is not a pun — a v3 voice *is* the merged checkpoint the engine was started on.
 
@@ -628,8 +571,8 @@ chunk {index, seconds, chars, chars_per_sec, tokens, capped, take, guard}
 ```
 
 The division it draws is the point of the design: **the model judges, the server forwards,
-the client orders** (Owen's ruling of 2026-09-13, `docs/PHASE6-REMOTE-RENDER.md`; it amends
-PHASE3-TTS.md, which said "the server measures and the client judges"). Crucible measures
+the client orders** (Owen's ruling of 2026-09-13; it amends the first TTS design, which
+said "the server measures and the client judges"). Crucible measures
 the first seven and still decides nothing about a chunk — no retake, no re-split, no
 substitution. `guard` is the verdict narrator's own retake ladder reached, forwarded
 verbatim and `null` when narrator sent none; Crucible does not read inside it.
@@ -716,7 +659,7 @@ aborts the batch, and resubmits the survivors — and a resubmitted row would ot
 its first seconds concatenated twice with nothing saying so. On `higgs-v3` this costs
 nothing, because its measured batch width is 1 and the in-flight row *is* the batch; on an
 engine with a width of N, up to N-1 other rows regenerate. `higgs-v3` is the only narrator
-engine this build names (see `docs/PLAN.md`, the ruling of 2026-09-14).
+engine this build names (the ruling of 2026-09-14).
 
 **One session at a time** (`stream_session_open`), and a render job and a session cannot both
 hold the card (`engine_in_use`). That is not tidiness: narrator has one stdin, and two
@@ -724,7 +667,7 @@ conversations on it do not fail loudly — they read each other's replies.
 
 ### `asr`
 
-Transcription (PHASE4-AUDIO.md section 3, PHASE25-QWEN-ASR.md). One audio file in, one
+Transcription (`docs/internals/asr-and-align.md`). One audio file in, one
 `transcript.json` out, on the same exclusive lane as everything else.
 
 ```bash
@@ -758,7 +701,7 @@ optional (`null` or absent means none): a string whisper is primed with — a ti
 proper nouns in it — applied to **every** 900-second window, because each window is its own
 whisper call and whisper's own conditioning does not cross one. It is recorded in
 `transcript.json`; a blank one is refused, and one longer than the 223 tokens whisper keeps
-fails the job by name (docs/PHASE4-AUDIO.md section 3).
+fails the job by name (`docs/internals/asr-and-align.md`, "Whisper runs").
 
 Everything about *how* it runs is the server's and is nowhere on the wire: `float16` (there
 is no CPU backend, and the app's one-shot CPU fallback deliberately does not come across —
@@ -790,7 +733,7 @@ to work **by position** and carry no index, for the same reason from the same in
 
 ### `align`
 
-Forced alignment with Qwen3-ForcedAligner-0.6B (PHASE4-AUDIO.md section 2). Chunks of audio
+Forced alignment with Qwen3-ForcedAligner-0.6B (`docs/internals/asr-and-align.md`, "Align"). Chunks of audio
 and the text they speak go in; one timestamped item per the model's own token comes out.
 
 ```bash
@@ -837,7 +780,7 @@ because **nobody has measured it**. `envs/align/mlx-darwin.md` says what would s
 
 ### `rvc`
 
-Voice conversion with ultimate-rvc (PHASE4-AUDIO.md section 4). A directory of sentence
+Voice conversion with ultimate-rvc (`docs/internals/jobs-runtime.md` 10.3). A directory of sentence
 audio in, the same sentences in another voice out, one artifact per input under the same
 name.
 
@@ -899,7 +842,7 @@ still refused by name — the refusal names this command.
 
 ### `denoise`
 
-Stem separation with audio-separator (PHASE4-AUDIO.md section 4.2). One audio file in,
+Stem separation with audio-separator (`docs/internals/jobs-runtime.md` 10.4). One audio file in,
 the model's primary stem out, and `done` names every stem it produced. Two separators
 ship, and the id is the only thing that differs on the wire:
 
@@ -982,7 +925,7 @@ also usable alone, which is what to reach for when one of them is what went wron
 **There is no CI to wait for.** `scripts/tests.sh` is still how a branch is
 tested, on the branch, before it is merged; a deploy runs none, because by then
 what is being shipped is meant to be known-good
-(`docs/PHASE20-CODE-NOT-ENVIRONMENTS.md` section 7). A code patch is about three
+(`docs/internals/config-envs-weights.md`, "Code, not environments"). A code patch is about three
 minutes end to end.
 
 **A release carries CODE.** `v<ver>` carries the Python source archive
@@ -993,7 +936,7 @@ generated installers. Nothing else, ever: everything a Crucible also needs comes
 from whoever publishes it, pinned by version and digest where it is used —
 CPython from python-build-standalone, each job environment from PyPI and the
 pinned indexes through its own recipe, the WSL image from Canonical,
-`llama-server` from ggml-org, the weights from Hugging Face. Before PHASE20 a tag
+`llama-server` from ggml-org, the weights from Hugging Face. Before 2026-09-18 a tag
 uploaded about 190 MB of other people's bytes for a 1 MB change of ours, and
 every environment archive was rebuilt whether or not its recipe had moved.
 
@@ -1035,7 +978,8 @@ pytest                       # in-process, FastAPI TestClient, temp CRUCIBLE_HOM
 runs only those. A changed file that no test names is reported by name and runs
 nothing; `--all` is the proof when that is a surprise (`--all -- <pytest args>`
 passes arguments on, e.g. `--all -- --ignore=tests/test_x.py`). It widens to the
-whole suite only when it cannot fetch the tags that say what "changed" means.
+whole suite only when it cannot fetch the tags that say what "changed" means, or finds
+no tag at all.
 `--list` shows what it would run and why, without running it.
 
 Both exit non-zero on any failure — trust the exit code, not the log. The pytest suite
@@ -1065,6 +1009,6 @@ The e2e needs `CRUCIBLE_URL` and `CRUCIBLE_TOKEN` and **fails by name** if eithe
 missing — it never skips. Both scripts set them up around a throwaway server on a free
 port and stop it with SIGTERM.
 
-Run the Python suites on Linux or macOS. On Windows the CLI refuses by design, so they
-must run inside WSL2 — which is exactly what `scripts/e2e-from-windows.sh` arranges,
-with the client staying native so the Windows -> WSL2 seam is what gets tested.
+The Python suite is maintained on Linux and macOS; on Windows `scripts/tests.sh` runs
+pytest inside WSL2, and `scripts/e2e-from-windows.sh` keeps the client native so the
+Windows -> WSL2 seam is what gets tested.

@@ -2,7 +2,7 @@
 
 Contract for the three remaining audio job types and the one server feature that retires
 most of BookForge's GPU plumbing. Extends DESIGN.md. Written 2026-09-13 from
-`docs/CLIENT-SURFACES.md` sections 4 and 10 (tier 4).
+`docs/history/CLIENT-SURFACES.md` sections 4 and 10 (tier 4).
 
 **All three are built.** `asr` landed first and established the worker envelope; `align` and
 `rvc` followed and are what sections 0.2, 2 and 4 now describe. Everywhere this document
@@ -128,7 +128,7 @@ type exactly like `asr`, and `align` is the only session.
 ## 1. One rule decides three designs: no shared mount, ever
 
 `tts` batch, `rvc` and whole-m4b `align` all read and write the same thing today — a
-session's per-sentence FLACs on a filesystem both halves can see. CLIENT-SURFACES.md row 17
+session's per-sentence FLACs on a filesystem both halves can see. docs/history/CLIENT-SURFACES.md row 17
 calls this "the design decision phase 3 has to make first", and phase 3b made it: **bytes
 cross the wire, the SDK writes the files.**
 
@@ -267,7 +267,7 @@ this reason; here it is the manifest's engine and there is nothing to fall back 
 > `context`, and refuses `initial_prompt`, `vad_filter: true` and `language: auto`
 > by name. Owen: *"we're fully switching over to qwen for transcribing and
 > aligning"*. The whisper models below stay until apps have switched. The contract
-> is **docs/PHASE25-QWEN-ASR.md**.
+> is **docs/history/PHASE25-QWEN-ASR.md**.
 >
 > **2026-09-24, later: THREE MODELS, ONE ID EACH.** Owen: the asr job offers
 > *exactly* `whisper-large-v3-turbo`, `qwen3-asr-1.7b` and `whisper-tiny`, and the
@@ -280,7 +280,7 @@ this reason; here it is the manifest's engine and there is nothing to fall back 
 > machine it is talking to. The old ids are NOT aliases: a request naming one is
 > `unknown_model`, with the replacement named in the sentence. The table and the
 > "no mlx-darwin block" paragraph below are this section's history — the pins in
-> the two surviving rows are unchanged, and PHASE25-QWEN-ASR.md section 10 has the
+> the two surviving rows are unchanged, and docs/history/PHASE25-QWEN-ASR.md section 10 has the
 > lineup, the new manifest rules, the capability order and what happens to weights
 > already on disk.
 
@@ -538,7 +538,7 @@ version and says nothing about the commit, so checking it there would compare a 
 `0.5.11` and call every correctly built env broken. `crucible doctor` names the commit, not
 the version, for the same reason.
 
-**The base assets are pulled from the engine's own repo — PLAN.md's owed ruling 3, now
+**The base assets are pulled from the engine's own repo — docs/history/PLAN.md's owed ruling 3, now
 discharged.** urvc needs a contentvec embedder and a pitch predictor before it can convert
 anything; they are the engine's rather than any model's, and this section used to say
 Crucible could not fetch them, because the only source written down anywhere was a 388 MB
@@ -857,7 +857,7 @@ route retires the lock file, the 44-second reload trade, the flat-utilisation re
 and most of `wsl-lifecycle.ts`'s GPU-teardown ladder.
 
 **No eviction, ever.** The probe reports; it never asks anyone to leave. That rule is already
-in PHASE2-LLM.md section 4 and it does not soften because more job types now depend on it.
+in docs/history/PHASE2-LLM.md section 4 and it does not soften because more job types now depend on it.
 
 ## 6. One operational request from the audit, worth honouring everywhere
 

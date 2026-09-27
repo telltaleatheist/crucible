@@ -111,10 +111,6 @@ class StreamSession:
     def detach(self, reader: Reader) -> None:
         self._log.detach(reader)
 
-    @property
-    def ever_attached(self) -> bool:
-        return self._log.ever_attached
-
     def grace_expired(self, now: float) -> bool:
         return self._log.grace_expired(now)
 

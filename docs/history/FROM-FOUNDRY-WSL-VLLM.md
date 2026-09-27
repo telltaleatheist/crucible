@@ -127,7 +127,7 @@ These are Windows-side facts about driving the guest, and they are exactly the m
 - **`streamInDistro` forwards pip's stdout AND stderr line by line, splitting on `\r`** as
   well, because pip repaints its bar.
 
-## 3. Rulings Owen owes (already listed in PLAN.md; restated with Foundry's evidence)
+## 3. Rulings Owen owes (already listed in docs/history/PLAN.md; restated with Foundry's evidence)
 
 - **Drain, not between jobs.** Foundry kept the server up while the queue had work and
   brought it down when the queue DRAINED, with an optional keep-warm window

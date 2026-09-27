@@ -25,7 +25,7 @@ holds the engine.
 
 ## 1. The install sequence, once, for every machine that is not Windows
 
-`install.sh` is GENERATED from `sdk/bootstrap/src/steps.ts` (PHASE14-ENVPACKS.md 4a: a hand
+`install.sh` is GENERATED from `sdk/bootstrap/src/steps.ts` (history/PHASE14-ENVPACKS.md 4a: a hand
 install and an app-driven install "cannot differ"), so this list is the same one
 `@crucible/bootstrap`'s `install()` walks:
 
@@ -105,7 +105,7 @@ home              rmdir <home>, only if it is then empty
 Three rules the order comes from:
 
 1. **Stop before you delete.** `service.py`'s unit is `Restart=always` with `RestartSec=2`
-   (PHASE15-HOST.md 4.1's ruling), so a unit whose `ExecStart` has been removed is a unit
+   (history/PHASE15-HOST.md 4.1's ruling), so a unit whose `ExecStart` has been removed is a unit
    that crash-loops every two seconds.
 2. **The guest before the tray's service, and after the tray itself.** The tray BOOTS and
    WATCHES the guest (4.1). Remove the guest's unit while the tray is alive and its two
@@ -122,7 +122,7 @@ Three rules the order comes from:
 > that was never uninstalled (there `init` is skipped and the token is kept). If the point of
 > the exercise is to move a server rather than remove one, copy `config.toml` out first and
 > `crucible init --config-from` it back — that is the same flag the Windows→WSL migration uses
-> (PHASE15-HOST.md 4.3), and it carries the token, `[routes]` and `[upstreams]` and nothing
+> (history/PHASE15-HOST.md 4.3), and it carries the token, `[routes]` and `[upstreams]` and nothing
 > else.
 
 And two things it deliberately does not do:
@@ -163,7 +163,7 @@ Uninstall, weights kept:
 curl -fsSL .../install.sh | sh -s -- --uninstall
 ```
 
-This is `docs/MAC-PARITY-AUDIT-2026-09-14.md` §3's upgrade checklist reversed, and its
+This is `docs/history/MAC-PARITY-AUDIT-2026-09-14.md` §3's upgrade checklist reversed, and its
 warning still applies in this direction: the Mac's job envs were venvs PARENTED on a conda
 env. If that conda env still exists on the machine, removing it before `crucible uninstall`
 kills `<home>/envs` out from under the step that would have reported them.

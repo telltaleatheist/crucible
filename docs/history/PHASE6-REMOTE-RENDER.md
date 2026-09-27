@@ -6,7 +6,7 @@ saved somewhere else. Getting the chunks back to Bookforge, though - that'll be 
 harder. Because this should be designed to work on another computer. But it'll have to
 transfer back to the main system. Which means we'll be changing up how narrator works."*
 
-This document is that ruling worked out, and it **amends PHASE3-TTS.md** in three places
+This document is that ruling worked out, and it **amends docs/history/PHASE3-TTS.md** in three places
 (section 1, section 3, section 6). Where the two disagree, this one is current.
 
 ---
@@ -46,7 +46,7 @@ Orpheus and false for both Higgs implementations.** It is the sentence that let 
 sit unnoticed.
 
 So the honest statement of where we are is not "`capped` is missing from the wire". It
-is: **the render door has no guard at all.** PHASE3-TTS.md section 6's promise that
+is: **the render door has no guard at all.** docs/history/PHASE3-TTS.md section 6's promise that
 "Crucible never retakes — BookForge's PaceTracker reads those numbers and decides" was
 only ever half-true, because the numbers it forwards describe an unguarded single take,
 and BookForge's PaceTracker is not in that path either — the bridge reads guard events by
@@ -58,7 +58,7 @@ left out of a path that uses the model.
 
 ---
 
-## 1. What the ruling changes in PHASE3-TTS.md
+## 1. What the ruling changes in docs/history/PHASE3-TTS.md
 
 **Section 1 said: "the server measures, the client judges."** It now reads: **the model
 judges, the server forwards, the client orders.** The client still decides *what to
@@ -69,14 +69,14 @@ the pace of the takes already shipped) and those never leave the engine.
 **Section 3 said: "the ladder's steps are server config; the client asks for take N."**
 The ladder's steps are now **engine config**, and the client does not ask for a take at
 all. `take` leaves the wire as a request parameter. One request = one **accepted** chunk,
-with its take history attached. This closes PLAN.md's owed ruling 5, which is the one
+with its take history attached. This closes docs/history/PLAN.md's owed ruling 5, which is the one
 place the division of knowledge had a genuinely arguable alternative — Owen has now
 ruled, and this is the answer.
 
 **Section 6's `chunk` event** keeps every field it has and gains `guard`. `capped`
 survives as a field but stops being the thing the guard depends on: the cap-hit is now
 one input to a verdict the engine has already reached, not a number the client has to
-reason from. This dissolves PLAN.md's owed item 2 rather than discharging it — nobody has
+reason from. This dissolves docs/history/PLAN.md's owed item 2 rather than discharging it — nobody has
 to get `capped` onto narrator's wire, because the wire carries the conclusion.
 
 ---
@@ -294,7 +294,7 @@ markers, the library. Those are the client's business and the ruling does not to
    Higgs batch through the driver; `guard` on `batch_item`. Tested against
    `serve/fake_engine.py`, which already speaks the protocol.
 2. **Crucible N2** — forward `guard`; `pace` in and out; drop `take` from the wire; amend
-   PHASE3-TTS.md sections 1, 3 and 6 to point here.
+   docs/history/PHASE3-TTS.md sections 1, 3 and 6 to point here.
 3. **BookForge B** — the fetcher, the sha'd resume, the second analytics source. Behind
    the existing `crucible` provider, so nothing moves for a local render until Owen
    switches it.
@@ -314,7 +314,7 @@ Steps 1-3 are CPU-side and testable without a card. Step 4 is the gate.
 - **It does not change a single guard decision.** Same `GuardPlan`, same `PaceTracker`,
   same bands, same `MIN_GUARD_CHARS`, same depth-first order. If a measured render
   disagrees with the Mistborn baseline, that is a bug in this work, not a new policy.
-- **It does not extract narrator into its own repo.** Still PLAN.md's owed ruling 1, still
+- **It does not extract narrator into its own repo.** Still docs/history/PLAN.md's owed ruling 1, still
   Owen's call, still the thing blocking `crucible install tts`. This work makes the case
   stronger — narrator now has a real wire protocol and not just a private pipe — but it
   does not depend on the answer.

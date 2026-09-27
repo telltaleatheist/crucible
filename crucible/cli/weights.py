@@ -394,7 +394,7 @@ def cmd_denoise_pull(args: argparse.Namespace) -> int:
 def add_model_parsers(subparsers: argparse._SubParsersAction) -> None:
     remove = subparsers.add_parser(
         "remove",
-        help="delete an installed subject's files (PHASE15-HOST.md 3.5a)",
+        help="delete an installed subject's files (docs/internals/cli.md, \"Weights verbs\")",
     )
     remove.add_argument(
         "kind",

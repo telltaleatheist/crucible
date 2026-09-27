@@ -311,7 +311,7 @@ class NarratorEngine(SubprocessEngine):
         raise EngineError(
             f"{self.name} has no base url: its wire is newline-delimited JSON "
             "over stdin and stdout, not HTTP. Talk to it through this engine "
-            "object (PHASE3-TTS.md section 4)"
+            "object (docs/internals/voices.md, \"The narrator engine\")"
         )
 
     def command(

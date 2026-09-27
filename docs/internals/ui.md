@@ -3,7 +3,8 @@
 The operator console is `crucible/ui/index.html`, `app.css` and `app.js`: vanilla,
 one file each, no build step, no framework, no CDN and no external font. The Mac
 may sit on a LAN with no route out, and a page that needs a network to be legible
-is sometimes blank. Design reference: PHASE13-OPERATOR.md section 4.
+is sometimes blank. The original design is `docs/history/PHASE13-OPERATOR.md` section 4
+(history, not maintained).
 
 ## Sections and the read that owns each
 
@@ -12,8 +13,8 @@ is sometimes blank. Design reference: PHASE13-OPERATOR.md section 4.
 | Status    | `GET /v1/setup`, `GET /v1/activity`, the card from `/v1/info` |
 | Tasks     | `GET /v1/tasks` and the running task's event stream |
 | Job types | `GET /v1/capability` and the capabilities `/v1/info` reports |
-| Settings  | `GET/PUT /v1/settings` (PHASE15-HOST.md 3.7) |
-| Voices    | `GET/PUT/DELETE /v1/voices/{id}` (PHASE21) |
+| Settings  | `GET/PUT /v1/settings` |
+| Voices    | `GET/PUT/DELETE /v1/voices/{id}` (`voices.md`) |
 | Catalog   | `GET /v1/catalog` |
 | Connect   | `GET /v1/setup` |
 | Service   | `GET /v1/info`, `GET /v1/setup` |
@@ -31,8 +32,10 @@ is sometimes blank. Design reference: PHASE13-OPERATOR.md section 4.
   refused) on the control that earned it. A non-Crucible error (proxy, gateway)
   is named as what it is, not dressed up as a Crucible refusal.
 - **No second copy of a server-side table.** Job types, narrator engines, subject
-  kinds, catalog order and what installs what all arrive on the wire; the page
-  has no list of them and must never grow one. Catalog rows are grouped by kind in
+  kinds, catalog order, what installs what and the upstreams (their names, order,
+  which field each takes, and `upstream_labels` for display) all arrive on the wire;
+  the page has no list of them and must never grow one. An upstream's field is
+  whichever of `url` or `key_hint` its settings entry carries. Catalog rows are grouped by kind in
   the order the route gives.
 - **Which read says a capability is served.** `setup.job_types` and
   `info.job_types` are POSTable job types (`load-model`, `tts`, `echo`, ...). The
@@ -82,7 +85,7 @@ and the whole console is redrawn from `state`. Therefore:
 
 ## Specific controls
 
-- **Engine (Windows only, PHASE15-HOST.md 4.7).** On Linux and macOS the backend
+- **Engine (Windows only; `host-and-platform.md`, "The Windows to WSL move").** On Linux and macOS the backend
   is the engine and there is nothing to move. Whether a `cuda-linux` server is a
   WSL guest cannot be told by the server (`host.platform` is `linux` either way),
   so the page asks the browser, which runs on the Windows side. The server does

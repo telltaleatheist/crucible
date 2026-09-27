@@ -273,7 +273,7 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "the backend this host is EXPECTED to be, checked against what it "
             "detects. A backend runs where its engine runs and nowhere else "
-            "(PHASE15-HOST.md 3.5), so this never chooses one — it refuses "
+            "(docs/internals/engines-and-capability.md, \"Backends\"), so this never chooses one — it refuses "
             "backend_not_here when the two disagree. `crucible orchestrator` passes "
             "--backend llama-windows"
         ),
@@ -355,7 +355,7 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "take the token, [routes], [upstreams] and the [accelerator] desktop "
             "reserve (with its basis) out of this TOML file "
-            "instead of minting a token (PHASE15-HOST.md 4.3). The host writes "
+            "instead of minting a token (docs/internals/cli.md, \"init\"). The host writes "
             "it at 0600 when it moves a Windows Crucible into the WSL guest and "
             "deletes it after, so every app that paired stays paired"
         ),
