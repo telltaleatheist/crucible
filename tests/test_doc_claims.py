@@ -9,6 +9,7 @@ CLIENT_TS = ROOT / "sdk" / "ts" / "src" / "client.ts"
 PHASE15 = ROOT / "docs" / "PHASE15-HOST.md"
 MODEL_CHOICE = ROOT / "docs" / "MODEL-CHOICE.md"
 CAPABILITY = ROOT / "crucible" / "capability.py"
+CAPABILITY_CLASSES = ROOT / "crucible" / "capabilityclasses.py"
 ENVPACKS_DOC = ROOT / "docs" / "PHASE14-ENVPACKS.md"
 
 
@@ -63,7 +64,7 @@ def test_no_live_prose_still_says_translation_needs_a_27b() -> None:
 
 def test_the_reversal_is_written_down_where_a_reader_will_look() -> None:
     assert "cant pick smaller than 9b" in flowed(MODEL_CHOICE)
-    assert "docs/MODEL-CHOICE.md" in text(CAPABILITY)
+    assert "docs/MODEL-CHOICE.md" in text(CAPABILITY_CLASSES)
 
 
 def test_spell_out_names_the_total_and_each_of_its_three_terms() -> None:

@@ -14,7 +14,7 @@ import pytest
 from crucible.host import app as app_module
 from crucible.host import catalog as catalog_module
 from crucible.host import door as door_module
-from crucible.host import installer, landoor, log, outcome, paths, presence, startup, wslstate
+from crucible.host import installer, landoor, log, move_policy, outcome, paths, presence, startup, wslstate
 from crucible.host.catalog import CatalogRefusal, Subject
 from crucible.host.errors import HOST_ERROR_CODES, HostError
 from crucible.host.menu import Distro, Engine, Owner
@@ -1879,13 +1879,13 @@ def test_controller_resumes_cleanup_and_keeps_journal_on_failure(tmp_path, monke
     monkeypatch.setattr(host, "stopped_windows_catalog", lambda: windows)
     monkeypatch.setattr(app_module, "engine_token", lambda _: "fixture-token")
     monkeypatch.setattr(app_module, "HttpCatalog", lambda *a, **kw: guest)
-    host._cleanup_running = True
+    host._cleanup.running = True
     guest.unreachable = True
-    host._resume_model_cleanup()
+    host.resume_model_cleanup()
     assert (tmp_path / installer.CLEANUP_RECORD).exists()
-    assert windows.subjects and not host._cleanup_running
+    assert windows.subjects and not host._cleanup.running
     guest.unreachable = False
-    host._resume_model_cleanup()
+    host.resume_model_cleanup()
     assert not (tmp_path / installer.CLEANUP_RECORD).exists()
     assert windows.subjects == [] and guest.subjects
 
@@ -1915,11 +1915,12 @@ def test_retry_after_guest_activation_never_rebuilds_native_http_source(tmp_path
     def resumed(*, raise_errors):
         assert raise_errors is True
         calls.append("resume native cleanup")
-    monkeypatch.setattr(host, "_resume_model_cleanup", resumed)
-    monkeypatch.setattr(installer.EngineInstall, "_complete", lambda self: calls.append("complete"))
+    monkeypatch.setattr(host, "resume_model_cleanup", resumed)
+    monkeypatch.setattr(installer.EngineInstall, "complete", lambda self: calls.append("complete"))
     def wrong_source(*args, **kwargs):
         raise AssertionError("The active guest cannot be constructed as a native source")
     monkeypatch.setattr(app_module, "HttpCatalog", wrong_source)
+    monkeypatch.setattr(move_policy, "HttpCatalog", wrong_source)
     app_module._sequence(context, host)(lambda event: None)
     assert calls == ["resume native cleanup", "complete"]
 
@@ -3925,7 +3926,7 @@ def test_a_missing_console_cmd_names_the_install_one_liner_and_a_silent_child_na
     runner = Scripted(env=env)
     context = app_module.HostContext(
         runner=runner, log=host_log, home=tmp_path,
-        watcher=SimpleNamespace(respawn_host_mode=lambda argv, env: None, _wait_for_ping=lambda seconds: False),
+        watcher=SimpleNamespace(respawn_host_mode=lambda argv, env: None, wait_for_ping=lambda seconds: False),
         presence=presence.Presence(Distro.ABSENT, Engine.STARTING, "starting", Owner.NONE),
     )
     host = app_module.Host(context)

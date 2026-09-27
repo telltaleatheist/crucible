@@ -74,6 +74,7 @@ class _Job:
     progress = 0.25
     message = "rendering 118 of 280"
 
+    busy = Job.busy
     busy_details = Job.busy_details
 
 
