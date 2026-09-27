@@ -7,7 +7,7 @@
 #
 # PHASE15-HOST.md 4.4. This script used to walk the WSL states itself and
 # then run install.sh inside an imported distribution. It no longer does,
-# and that is the point of the phase: `crucible host` owns that sequence
+# and that is the point of the phase: `crucible orchestrator` owns that sequence
 # (4.3), it can carry a reboot across because it starts at login, and the
 # page drives it as a task (4.7)  -  an app that asks for an install talks
 # to the SAME implementation through the host loopback door. Two walks of
@@ -329,7 +329,7 @@ foreach ($action in @("register", "install-cli", "install-desktop")) {
 # pythonw, not the .cmd: a tray program has no console window (4.1).
 Say "starting the tray"
 $Began = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
-Start-Process -WindowStyle Hidden -FilePath $Pythonw -ArgumentList "-m","crucible.cli","host"
+Start-Process -WindowStyle Hidden -FilePath $Pythonw -ArgumentList "-m","crucible.cli","orchestrator"
 $said = @(Native { & $Cmd local start })
 if ($LASTEXITCODE -ne 0) { $said | Show; Die "Crucible is installed, but its engine did not start. Run this installer again; it carries on from where it stopped." }
 

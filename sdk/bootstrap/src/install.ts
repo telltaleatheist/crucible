@@ -14,8 +14,6 @@
  *                    SKIPPED when a config already exists (its token is kept)
  *   install-<type>   <server>/bin/crucible install <type>
  *   service-install  <server>/bin/crucible service install
- *   linger           WSL only: `loginctl enable-linger <guest user>` as root —
- *                    which since PHASE15 means the HOST runs it, never this file
  *   capability-write <server>/bin/crucible capability --write
  *
  * **There is no conda step.** A fresh machine has no Python at all and does not
@@ -39,7 +37,7 @@
  * disk and stays there (ARCHITECTURE.md R6).
  *
  * **ON WINDOWS NONE OF THAT HAPPENS HERE** (PHASE15-HOST.md section 4.3). The
- * sequence has ONE implementation and it is the host's: `crucible host`, the
+ * sequence has ONE implementation and it is the host's: `crucible orchestrator`, the
  * Windows-native tray process, walks the state table and the step list and
  * raises the UAC prompts a WSL install needs. (It has no window of its own —
  * 4.7: its UI is the tray menu and the operator page.) So on win32 this
@@ -80,7 +78,6 @@ import {
   type InstallStatus,
 } from './hostdoor.js';
 import { releaseAssetUrl } from './release.js';
-import { ensureLinger } from './linger.js';
 import { installRuntime, probeGuest, refuseMissingTools, SERVER_SUBDIR } from './runtime.js';
 import { processRunner, type OutputStream, type Runner } from './runner.js';
 import { installSteps, renderArgv, type RefName, type StepPlan } from './steps.js';
@@ -259,7 +256,7 @@ export function planJobTypes(requests: readonly JobTypeRequest[]): Plan {
  * win32: PHASE15 4.3's two branches, and nothing else.
  *
  * There is no third branch that walks the steps here. A Windows machine
- * installs its Crucible exactly one way — through `crucible host` — so that
+ * installs its Crucible exactly one way — through `crucible orchestrator` — so that
  * `install.ps1`, the operator page's engine switch (4.7) and an app's
  * `install()` cannot describe three different installs (PHASE14 4a, "cannot
  * differ").
@@ -447,7 +444,7 @@ export async function install(options: InstallOptions, runner: Runner = processR
   const bind: string[] = [];
   if (options.bind?.host !== undefined) bind.push('--host', options.bind.host);
   if (options.bind?.port !== undefined) bind.push('--port', String(options.bind.port));
-  const plan: StepPlan = { enableFlags: jobs.enableFlags, installs: jobs.installs, bind, linger: target.kind === 'wsl' };
+  const plan: StepPlan = { enableFlags: jobs.enableFlags, installs: jobs.installs, bind, linger: false };
 
   const report = (step: InstallStep): InstallStep => {
     steps.push(step);
@@ -550,14 +547,6 @@ export async function install(options: InstallOptions, runner: Runner = processR
         const argv = renderArgv(step.words, { ...values, token });
         const redacted = renderArgv(step.words, { ...values, token: '<redacted>' });
         await runStep('init', argv, timeouts[step.timeout], redacted);
-        break;
-      }
-      case 'linger': {
-        const linger = await ensureLinger(runner, target, env);
-        if (linger !== null) {
-          report({ name: 'linger', argv: linger.argv, status: linger.granted ? 'ok' : 'skipped', detail: linger.detail });
-          if (linger.granted) done.push('linger');
-        }
         break;
       }
       default: {

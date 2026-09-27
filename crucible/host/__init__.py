@@ -1,4 +1,4 @@
-"""`crucible host` — the Windows presence, PHASE15-HOST.md section 4.
+"""`crucible orchestrator` — the Windows presence, PHASE15-HOST.md section 4.
 
 **This package is not a server.** It is the one process that runs ON Windows and
 can therefore own the sentence "the engine is running" — which nothing could,
@@ -27,7 +27,7 @@ tray cannot be tested and the decisions it draws must be:
     startup.py     the Startup shortcut, and the two verbs that own it
     window.py      the tkinter window the install shows (no console)
     tray.py        pystray, which is the only module that cannot be tested
-    app.py         the wiring, and what `crucible host` runs
+    app.py         the wiring, and what `crucible orchestrator` runs
 
 **IMPORTING THIS PACKAGE MUST NOT NEED pystray OR tkinter.** pytest runs in
 WSL, in an env that has neither, and a test suite that cannot import its subject

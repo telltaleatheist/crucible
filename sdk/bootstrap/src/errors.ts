@@ -117,23 +117,12 @@ export type BootstrapRefusalCode =
   /** The server speaks a different major API version than the SDK this was built with. */
   | 'version_mismatch'
   /**
-   * win32 only. The guest would not say whether its user lingers — no root
-   * through `wsl.exe -u root` (WSL1, or a distro with root disabled), or a
-   * `loginctl` that answered something else. The one hand-over that remains:
-   * "off" would grant something nobody asked for and "on" would promise a
-   * server that dies with the next logout, so neither is guessed.
-   */
-  | 'linger_unreadable'
-  /**
-   * win32 only, and a WSL STATE rather than a linger answer. The distribution
+   * win32 only, and a WSL STATE. The distribution
    * would not let Crucible in as root through `wsl.exe -u root` (WSL1, or a
    * distro whose root account is disabled). Since 2026-09-16 the guest's server
-   * is a SYSTEM unit, so root is what lets it be installed at all — not merely
-   * what makes it survive a logout, which is what `linger_unreadable` is about.
+   * is a SYSTEM unit, so root is what lets it be installed at all.
    */
   | 'guest_root_unreachable'
-  /** win32 only. `loginctl enable-linger` ran as root and failed. */
-  | 'linger_failed'
   /**
    * win32 only. There is no `%LOCALAPPDATA%\Crucible\host\crucible.cmd` on this
    * machine, so the process that owns the install sequence (PHASE15 4.3) is not

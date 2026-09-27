@@ -91,7 +91,7 @@ export interface StepPlan {
    * strings, which is what an app has.
    */
   bind: readonly Word[];
-  /** Whether the linger step is part of this install (systemd hosts only). */
+  /** Whether the linger step is part of this install (install.sh's native-Linux user unit). */
   linger: boolean;
 }
 
@@ -145,9 +145,8 @@ export function hostFactsSh(): string {
     + `free_kib="$(printf '%s\\n' "$probe_out" | sed -n 's/^free_kib=//p')"\n`
     + `stamp_python_sha="$(printf '%s\\n' "$probe_out" | sed -n 's/^python_sha256=//p')"\n`
     // WHAT IS ALREADY ON THIS DISK, which is what the never-older gate compares
-    // against (INSTALL-UNINSTALL.md 6.5.4). Empty on a tree that predates the
-    // stamp, and an empty one is not read as "older": a version nobody recorded
-    // cannot be compared with one.
+    // against (INSTALL-UNINSTALL.md 6.5.4). Empty means unstamped, and an
+    // unstamped tree is reinstalled whole.
     + `stamp_release="$(printf '%s\\n' "$probe_out" | sed -n 's/^release=//p')"\n`
     + `missing="$(printf '%s\\n' "$probe_out" | sed -n 's/^missing=//p' | tr '\\n' ' ')"\n`
     + `if [ -n "$missing" ]; then die "guest_missing_tool: this machine has no $missing; the interpreter is fetched with curl and unpacked with tar"; fi\n`;
@@ -309,7 +308,7 @@ export function quiesceSh(): string {
 
 /** The interpreter half: fetch, verify, unpack, swap. Only when the pin moved. */
 export function interpreterSh(): string {
-  return `if [ "$stamp_python_sha" = "$py_sha" ] && [ -x "$dest/bin/python3" ]; then\n`
+  return `if [ -n "$stamp_release" ] && [ "$stamp_python_sha" = "$py_sha" ] && [ -x "$dest/bin/python3" ]; then\n`
     + `  say "server: python $py_version is already at $dest"\n`
     + `else\n`
     + `  say "server: python $py_version from python-build-standalone"\n`
@@ -373,12 +372,13 @@ export function wheelInstallSh(): string {
 
 /**
  * Linger, sh side. A systemd USER unit dies with the last session without it.
- * We are usually not root in a hand install, so: try as ourselves, then
- * `sudo -n` (which never prompts), and if that is refused print the one line
- * a person must run — the single hand-over PHASE14 4c leaves standing.
+ * Native Linux only: inside WSL the server is a SYSTEM unit, which has no
+ * linger question. We are usually not root in a hand install, so: try as
+ * ourselves, then `sudo -n` (which never prompts), and if that is refused
+ * print the one line a person must run.
  */
 export function lingerSh(): string {
-  return `if [ "$MECHANISM" = systemd ]; then\n`
+  return `if [ "$MECHANISM" = systemd ] && ! grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then\n`
     + `  if loginctl show-user "$GUEST_USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then\n`
     + `    say "linger: already on for $GUEST_USER"\n`
     + `  elif [ "$(id -u)" = 0 ] && loginctl enable-linger "$GUEST_USER"; then\n`
@@ -484,7 +484,7 @@ export function uninstallSh(): string {
  *     install-<type>   <server>/bin/crucible install <type>   (none in the standalone installer)
  *     env-patch-llm    <server>/bin/crucible env patch llm
  *     service-install  <server>/bin/crucible service install
- *     linger           systemd hosts
+ *     linger           native-Linux systemd hosts
  *     capability-write <server>/bin/crucible capability --write
  */
 export function installSteps(plan: StepPlan): StepDef[] {

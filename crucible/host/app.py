@@ -1,4 +1,4 @@
-"""`crucible host` — the wiring. PHASE15-HOST.md section 4.
+"""`crucible orchestrator` — the wiring. PHASE15-HOST.md section 4.
 
 Everything this file does is decided somewhere else: `presence.py` decides what
 state the machine is in, `menu.py` decides what the menu says, `installer.py`
@@ -74,14 +74,15 @@ DEFAULT_RELEASE = VERSION
 #:
 #: Composed from the watch's own numbers rather than chosen, because the thing
 #: being waited for is one watch tick: the first one is `WATCH_SECONDS` away,
-#: and it may spend every recovery recipe (`RECIPE_TIMEOUT_SECONDS` each) and
-#: the wait for the engine to answer one (`BOOT_WAIT_SECONDS`) before it
-#: returns a presence. Past that the presence is not going to settle, and a
+#: and it may spend the recovery (`RECIPE_TIMEOUT_SECONDS`) and the wait for
+#: the engine to answer (`BOOT_WAIT_SECONDS`) before it returns a presence. Past that the presence is not going to settle, and a
 #: thread that waited forever would be a carry nobody can tell from a carry
 #: that decided nothing.
-PRESENCE_SETTLE_CEILING_SECONDS = presence_module.WATCH_SECONDS + len(
-    presence_module.RECIPES
-) * (presence_module.RECIPE_TIMEOUT_SECONDS + presence_module.BOOT_WAIT_SECONDS)
+PRESENCE_SETTLE_CEILING_SECONDS = (
+    presence_module.WATCH_SECONDS
+    + presence_module.RECIPE_TIMEOUT_SECONDS
+    + presence_module.BOOT_WAIT_SECONDS
+)
 
 INSTALL_SH_URL = (
     "https://github.com/telltaleatheist/crucible/releases/download/"
@@ -728,25 +729,6 @@ class Host:
         else:
             self._c.log.write(f"guest release: carried the guest to {carried}")
             self._refresh()
-        # WHAT THE #27 RELOCATION LEFT BEHIND, put right by the product
-        # (fresh-install #27/#32, 2026-09-26): a guest token that is not the one
-        # this PC's apps paired with, and an abandoned /root/.crucible. Once the
-        # guest is on this release, so the repair runs the new code. A token
-        # carried back changes the guest's pairing line, so the Windows copy
-        # and the claim follow it at once rather than at the next login.
-        try:
-            recarried = walk.repair_relocation()
-        except HostError as exc:
-            self._c.log.write(f"guest repair: {exc.code}: {exc.message}")
-            return
-        except Exception as exc:  # noqa: BLE001 - a thread that dies silently is worse
-            self._c.log.write(f"guest repair: could not be run: {exc}")
-            return
-        if recarried:
-            _write_pairing(self._c)
-            self._claimed = False
-            self.claim()
-            self._refresh()
 
     # -------------------------------------------- PHASE19 2.3 the decision
 
@@ -1332,7 +1314,7 @@ class Host:
 
         The menu already disables both verbs (4.2's model), and this is the
         second half of the same rule: a disabled item is a drawing, and the
-        thing that must not happen is the ACT. `systemctl --user stop
+        thing that must not happen is the ACT. `systemctl stop
         crucible` sent into somebody's own distro because a click arrived
         anyway is exactly the class of surprise this host exists to avoid.
         """
@@ -1346,53 +1328,13 @@ class Host:
 
     def _stop_engine(self) -> None:
         if self._c.presence.distro is Distro.PRESENT:
-            # STOP THROUGH THE DOOR THE UNIT WAS FOUND BEHIND. `probe_unit`
-            # and `recover` have branched on the guest's scope since 0.6.4;
-            # this went on saying `systemctl --user stop` to every guest. The
-            # moment 0.6.9 retired owens-pc's legacy user unit and gave it the
-            # system unit a stock WSL2 is supposed to have, Windows could no
-            # longer stop its own engine: `HTTP Error 409` out of the door,
-            # `upgrade_stop_failed` on the console, and the host stranded on
-            # 0.6.5 while the guest and the Mac both reached 0.6.9. Measured
-            # 2026-09-17, and it is the same shape as the guest-side bug that
-            # created it - a stop that cannot be made is an upgrade that can
-            # never run.
             probe = self._c.watcher.probe_unit()
-            if probe.scope == presence_module.SCOPE_SYSTEM:
-                result = self._c.runner.run(
-                    presence_module.system_systemctl_argv(
-                        self._c.watcher.distro,
-                        "stop",
-                    ),
-                    timeout_s=60.0,
-                )
-                self._c.log.write(f"stop: {'ok' if result.ok else result.said()}")
-                if not result.ok:
-                    raise HostError("engine_stop_failed", result.said())
-                self._mark_stopped()
-                return
-
-            # `systemctl --user stop`, which `Restart=always` respects: the
-            # unit is STOPPED, not exited (the ruling in crucible/service.py).
-            #
-            # Through the SAME builder as the recipes and the probe, because
-            # it had the same defect and would have failed the same silent
-            # way: a `wsl.exe --exec` session gets no XDG_RUNTIME_DIR, so
-            # `systemctl --user` cannot find the bus (measured 2026-09-15).
-            # Found while fixing the probe; a Stop that reports `ok` having
-            # stopped nothing is worse than a Stop that refuses.
-            uid = self._c.watcher.guest_uid()
-            if uid is None:
-                self._c.log.write(
-                    "stop: NOT RUN — `systemctl --user stop` needs "
-                    "XDG_RUNTIME_DIR=/run/user/<uid> and the uid could not "
-                    "be read; the engine is untouched"
-                )
-                raise HostError("engine_stop_failed", "The guest uid could not be read; engine was not stopped")
+            if not probe.readable:
+                self._c.log.write(f"stop: NOT RUN — {probe.detail}")
+                raise HostError("engine_stop_failed", probe.detail)
             result = self._c.runner.run(
-                presence_module.user_systemctl_argv(
+                presence_module.system_systemctl_argv(
                     self._c.watcher.distro,
-                    uid,
                     "stop",
                 ),
                 timeout_s=60.0,
@@ -1537,7 +1479,7 @@ class Host:
 
 
 def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
-    """`crucible host`. Returns an exit code; never raises past here."""
+    """`crucible orchestrator`. Returns an exit code; never raises past here."""
     env = os.environ
     from ..config import crucible_home
     home = crucible_home()
@@ -1546,7 +1488,7 @@ def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
     # inside the installation — see ProcessRunner. A wsl.exe that inherits the
     # latter holds a handle on `Crucible\host` and blocks the next upgrade.
     runner = ProcessRunner(sys.platform, env, cwd=str(home))
-    log.write(f"crucible host {VERSION} starting; CRUCIBLE_HOME={home}")
+    log.write(f"crucible orchestrator {VERSION} starting; CRUCIBLE_HOME={home}")
     acquire(home)
 
     # The Startup item, if absent. 4.1 makes these verbs its ONE owner, and a
@@ -1749,7 +1691,7 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
             restarts = 0
             rebooted = True
             if previous is not None and previous.state == outcome.REBOOT_PENDING:
-                restarts = max(previous.restarts, 1)
+                restarts = previous.restarts
                 rebooted = _booted_since(previous)
             walks: list[installer.EngineInstall] = []
             recorded = False

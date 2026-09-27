@@ -116,7 +116,7 @@ def test_start_does_not_spawn_over_http_error(monkeypatch, tmp_path, existing_pa
 
 
 @pytest.mark.parametrize("owner", ["child", "wsl-unit", "found"])
-@pytest.mark.parametrize("release,contract", [("0.6.0", None), ("0.6.99", 1), ("0.6.99", 2)])
+@pytest.mark.parametrize("release,contract", [("0.6.99", 1), ("0.6.99", 2)])
 def test_upgrade_uses_authenticated_supported_contract(monkeypatch, tmp_path, owner, release, contract):
     from crucible.host import app
     monkeypatch.setattr(local.sys, "platform", "win32")
@@ -145,7 +145,7 @@ def test_upgrade_uses_authenticated_supported_contract(monkeypatch, tmp_path, ow
     monkeypatch.setattr(app, "_alive", lambda pid: not stopped)
     local_calls = []
     monkeypatch.setattr(local, "act", lambda action: local_calls.append(action))
-    if contract == 2:
+    if contract != 1:
         with pytest.raises(local.LocalError, match="controller_upgrade_unsupported"):
             local.shutdown()
         assert not stopped and not local_calls
@@ -153,7 +153,7 @@ def test_upgrade_uses_authenticated_supported_contract(monkeypatch, tmp_path, ow
     local.shutdown()
     # #35 (2026-09-26): only a native child is stopped; a guest serves on
     # through the Windows swap.
-    assert local_calls == (["stop"] if contract == 1 and owner == "child" else [])
+    assert local_calls == (["stop"] if owner == "child" else [])
     assert stopped == [True]
     assert not any("/local/" in url for url in calls)
 
@@ -246,45 +246,6 @@ def test_sharing_menu_error_survives_health_refresh(monkeypatch, tmp_path):
             assert self.title == "Crucible — running"
     monkeypatch.setitem(sys.modules, "pystray", SimpleNamespace(Icon=Icon, Menu=lambda *a: a, MenuItem=Item))
     desktop._run_tray(tmp_path)
-
-
-def test_a_controller_without_quit_still_shuts_down(monkeypatch, tmp_path):
-    """0.6.0 was assumed to serve /quit. The one on owens-pc answered 404.
-
-    Measured 2026-09-16: the legacy path POSTs /quit on the strength of a
-    comment saying that release has it, and the installed 0.6.0 did not — which
-    is what stopped the upgrade, with an unhandled HTTP error naming nothing.
-    close_tray has already asked the process to go; whether it went is decided
-    by the wait, not by an assumption about an old version.
-    """
-    from urllib.error import HTTPError
-
-    from crucible.host import app
-
-    monkeypatch.setattr(local.sys, "platform", "win32")
-    monkeypatch.setattr(local, "crucible_home", lambda: tmp_path)
-    monkeypatch.setattr(desktop, "close_tray", lambda: None)
-    monkeypatch.setattr(local, "connection", lambda home: ("http://127.0.0.1:7100", "test", "secret"))
-    (tmp_path / "host.pid").write_text("12345")
-    gone = []
-
-    def request(url, **kw):
-        if url.endswith("/v1/info"):
-            return {"role": "orchestrator", "server": {"version": "0.6.0", "api_version": 1},
-                    "engine": {"owner": "wsl-unit"}, "local_lifecycle_version": None}
-        if url.endswith("/quit"):
-            gone.append(True)   # the tray signal is what actually stops it
-            raise HTTPError(url, 404, "Not Found", {}, None)
-        if gone:
-            raise URLError(ConnectionRefusedError())
-        return {"crucible": True, "role": "orchestrator"}
-
-    monkeypatch.setattr(local, "request", request)
-    monkeypatch.setattr(app, "_alive", lambda pid: not gone)
-    monkeypatch.setattr(local, "act", lambda action: None)
-
-    local.shutdown()          # a 404 must not be the end of the upgrade
-    assert gone == [True]
 
 
 @pytest.mark.parametrize("backend,raises", [

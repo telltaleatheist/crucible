@@ -60,14 +60,11 @@ export function wslArgv(distro: string, argv: readonly string[]): string[] {
  *
  * NOT an escalation. `-u root` is which user wsl.exe starts the guest as, so
  * there is no password, no sudo and no elevation prompt; measured on Owen's PC
- * on 2026-09-14 (`wsl.exe -d Ubuntu -u root --exec id -u` prints `0`). That is
- * the whole reason `crucible/../linger.ts` grants linger on win32 instead of
- * handing a person a sudo line for a command that needs no sudo.
+ * on 2026-09-14 (`wsl.exe -d Ubuntu -u root --exec id -u` prints `0`).
  *
  * It is a separate function rather than an option on {@link wslArgv}, because
- * running as root is a decision with exactly two call sites and both are about
- * linger. A boolean parameter would make every other call site's `false` look
- * like a choice somebody weighed.
+ * a boolean parameter would make every other call site's `false` look like a
+ * choice somebody weighed.
  */
 export function wslRootArgv(distro: string, argv: readonly string[]): string[] {
   if (argv.length === 0) throw new Error('wslRootArgv: nothing to exec');

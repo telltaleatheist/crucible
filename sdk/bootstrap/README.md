@@ -52,7 +52,7 @@ release into `<CRUCIBLE_HOME>/server`, and every verb runs
 | `install({distro?, exact?, jobTypes, home?, release?, onLine, onStep?, bind?})` | host-facts → server-pack → `crucible init --token …` → `crucible install <type>`… → `crucible service install` → (win32) `loginctl enable-linger` as root → `crucible capability --write` | every `detectHost` refusal, `bad_job_type`, `two_local_crucibles`, the pack refusals (`pack_manifest_unreadable`, `pack_not_published`, `pack_download_failed`, `pack_sha_mismatch`, `pack_disk`, `pack_unpack_failed`), `config_unreadable`, `config_missing_key`, and `step_failed` (a `BootstrapStepFailed` with the step, exit code, tail and the steps that finished) |
 | `ensureDistro({release, installDir?, downloadDir?, rootfsUrl?, onLine?})` | win32: the `crucible` distro exists, runs systemd and came from our rootfs — idempotent | `distro_unmarked`, `distro_import_failed`, `pack_download_failed`, `pack_sha_mismatch`, `wsl1_only`, `unsupported_platform` |
 | `detectWslState({release, appDistro?, requiredBytes?, checkNetwork?, guestUser?})` | win32: the first row of PHASE14 4c that matches, with the sentence and the action | nothing — every state IS an answer, `wsl_ready` included |
-| `ensureRunning({distro?, exact?, home?})` | `{running: true, pid, mechanism, definition, linger, enableLinger, lingerStep, started}` — a no-op when it already is, except that linger is asked (and on win32 granted) either way | `no_server_pack`, `service_not_installed`, `service_failed` (with the status output and where the logs are), `no_local_config`, `linger_unreadable`, `linger_failed` |
+| `ensureRunning({distro?, exact?, home?})` | `{running: true, pid, mechanism, definition, linger, enableLinger, started}` — a no-op when it already is | `no_server_pack`, `service_not_installed`, `service_failed` (with the status output and where the logs are), `no_local_config` |
 | `readLocalConfig({distro?, exact?, home?})` | `{name, url, token, configPath, via}` from the server's own `config.toml` | `no_local_config`, `no_wsl_distro`, `two_local_crucibles`, `wsl_read_failed`, `config_unreadable`, `config_missing_key` |
 | `health({distro?, exact?, home?, clientName?})` | the SDK's `Activity` from `GET /v1/activity` | `unreachable`, `wrong_token`, `not_a_crucible`, `version_mismatch`, plus everything `readLocalConfig` refuses |
 
@@ -118,23 +118,14 @@ await install({
 
 ### `ensureRunning()`
 
-Starting is `systemctl --user start` on cuda-linux and `launchctl kickstart` on
-mlx-darwin — reached through `crucible service start`, because the unit name and the
-launchd label are facts `crucible/service.py` owns. Nothing is ever spawned as a child.
-**Linger is GRANTED on win32 and reported everywhere else.** A systemd user unit dies
-with the user's last session without it, so `running: true` about a non-lingering server
-is a promise that expires at the next logout. Inside WSL there is no elevation to hand
-over — `wsl.exe -u root` is how the guest is entered, not an escalation performed in it
-(measured 2026-09-14) — so this package reads linger as root and turns it on when it is
-off, reported as `lingerStep` with the exact argv. On native Linux `sudo` really is
-elevation and the host app really is the one that can obtain it, so there the fact is
-still reported and `enableLinger` is the line for the app to show. On macOS launchd has
-no linger question at all, and `lingerStep` is null.
-
-A guest that will not give root — WSL1, or a distro with the root account disabled — is
-the one hand-over that remains: `linger_unreadable`, with the command. Neither answer is
-guessed, because "off" would grant something nobody asked for and "on" would promise a
-server that dies with the next logout.
+Starting is `systemctl start` (a user unit on native Linux, a system unit inside WSL)
+and `launchctl kickstart` on mlx-darwin — reached through `crucible service start`,
+because the unit name and the launchd label are facts `crucible/service.py` owns. Nothing
+is ever spawned as a child. **Linger is reported on native Linux only.** A systemd user
+unit dies with the user's last session without it, so `enableLinger` is the line for the
+app to show when it is off; `sudo` there is real elevation and the host app is the one
+that can obtain it. Inside WSL the server is a system unit and on macOS launchd has no
+linger question, so `linger` is null there.
 
 ### `readLocalConfig()`
 

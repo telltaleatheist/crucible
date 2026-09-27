@@ -2,8 +2,8 @@
  * `ensureRunning()` — the service is up; a no-op when it already is.
  *
  * Nothing is spawned as a child that should be a service (PHASE5-APPS.md
- * section 6.0). Starting is `systemctl --user start crucible.service` on
- * cuda-linux and `launchctl kickstart` on mlx-darwin — and both are reached
+ * section 6.0). Starting is `systemctl start crucible.service` (a user unit on
+ * native Linux, a system unit inside WSL) and `launchctl kickstart` on mlx-darwin — and both are reached
  * through `crucible service start`, because the unit name, the launchd label
  * and the domain are facts `crucible/service.py` owns (ARCHITECTURE.md R1) and
  * a second spelling of them here would be the drift this package exists to
@@ -16,19 +16,14 @@
  * A host with no pack is `no_server_pack`: there is no interpreter to go
  * looking for, because the interpreter arrives in the pack.
  *
- * LINGER IS GRANTED ON WIN32 AND REPORTED EVERYWHERE ELSE, and this is where it
- * matters most: without it a systemd user unit dies with the user's last
- * session, so `ensureRunning()` would answer `running: true` about a server
- * that is about to disappear. Inside WSL there is no elevation to hand over —
- * `wsl.exe -u root` is how the guest is entered, measured 2026-09-14 — so the
- * sudo line this used to return is replaced by the command itself, run
- * idempotently (`linger.ts`). On native Linux `sudo` really is elevation and
- * the host app really is the one that can obtain it, so there the fact is
- * still reported with the command and nothing is attempted.
+ * LINGER IS A NATIVE-LINUX FACT. Without it a systemd user unit dies with the
+ * user's last session, so `ensureRunning()` reports it with the command that
+ * grants it; `sudo` there is real elevation and the host app is the one that
+ * can obtain it, so nothing is attempted. Inside WSL the server is a SYSTEM
+ * unit and has no linger question.
  */
 import { resolveDistro } from './distro.js';
 import { BootstrapRefusal } from './errors.js';
-import { ensureLinger, type LingerOutcome } from './linger.js';
 import { probeGuest, requireRuntime } from './runtime.js';
 import { processRunner, type Runner } from './runner.js';
 import { describeTarget, resolveTarget, runOn, type Target } from './target.js';
@@ -53,26 +48,13 @@ export interface RunningService {
   /** The unit or the plist. */
   definition: string;
   /**
-   * systemd only. `true`/`false` when loginctl answered; `null` when it could
-   * not be asked, or on launchd where the question does not exist.
-   *
-   * **On win32 this is `true` or the call threw.** There is nothing to report:
-   * linger was granted if it was off, and a guest that would not say is a
-   * named refusal rather than a `false` beside a cheerful `running: true`.
+   * Native-Linux systemd only. `true`/`false` when loginctl answered; `null`
+   * when it could not be asked, on launchd, and inside WSL, where the question
+   * does not exist.
    */
   linger: boolean | null;
-  /**
-   * The command that grants linger, when it is off and this package may not
-   * run it. **Always null on win32** — there the command was run. On native
-   * Linux `sudo` is real elevation and this is the line for the host app.
-   */
+  /** The command that grants linger, when it is off on native Linux. */
   enableLinger: string | null;
-  /**
-   * win32 only: what the linger step did, or null on macOS and native Linux
-   * where this package does not touch it. `granted: false` with
-   * `linger: true` means it was already on.
-   */
-  lingerStep: LingerOutcome | null;
   /** Whether this call started it, or found it already up. */
   started: boolean;
 }
@@ -139,10 +121,7 @@ export async function ensureRunning(options: EnsureRunningOptions = {}, runner: 
       { command: `${crucible} service install`, detail: before.detail },
     );
   }
-  // ASKED EVEN WHEN IT IS ALREADY UP, because "running" and "will still be
-  // running after this person logs out" are different facts and only the
-  // second is what `ensureRunning` is for.
-  if (before.running) return running(before, false, await ensureLinger(runner, target, env));
+  if (before.running) return running(before, false, target);
 
   const start = await runOn(runner, target, [crucible, 'service', 'start'], { timeoutMs: START_TIMEOUT_MS, ...(env === undefined ? {} : { env }) });
   if (start.failure !== null || start.code !== 0) {
@@ -161,7 +140,7 @@ export async function ensureRunning(options: EnsureRunningOptions = {}, runner: 
       { command: logsCommand(after), detail: after.detail },
     );
   }
-  return running(after, true, await ensureLinger(runner, target, env));
+  return running(after, true, target);
 }
 
 async function readStatus(
@@ -191,22 +170,17 @@ async function readStatus(
 function running(
   status: ServiceStatus,
   started: boolean,
-  linger: LingerOutcome | null,
+  target: Target,
 ): RunningService {
-  // `linger !== null` is exactly "this is win32/WSL", because `ensureLinger`
-  // answers null for every other target. Where it ran, its answer wins over
-  // the status read — the status was taken before the grant.
-  const handOver = linger === null
-    && status.mechanism === 'systemd'
-    && status.linger === false;
+  const linger = target.kind === 'wsl' ? null : status.linger;
+  const handOver = status.mechanism === 'systemd' && linger === false;
   return {
     running: true,
     pid: status.pid,
     mechanism: status.mechanism,
     definition: status.definition,
-    linger: linger === null ? status.linger : linger.linger,
+    linger,
     enableLinger: handOver ? 'sudo loginctl enable-linger "$USER"' : null,
-    lingerStep: linger,
     started,
   };
 }
